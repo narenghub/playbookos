@@ -77,7 +77,7 @@ async function runClaudeAnalysis(prompt) {
       body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 1500, messages: [{ role: 'user', content: prompt }] })
     });
     const data = await res.json();
-    return data.content?.[0]?.text || 'No response from Claude.';
+    const claudeText = data.content?.[0]?.text; console.error("Claude raw response:", JSON.stringify(data)); return claudeText || "Claude error: " + JSON.stringify(data?.error);
   } catch(e) { return 'Claude API error: ' + e.message; }
 }
 
