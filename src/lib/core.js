@@ -19,11 +19,11 @@ function getDb() {
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
 function signToken(user) {
-  return jwt.sign({ id: user.id, email: user.email, role: user.role }, process.env.JWT_SECRET || "abiozen2026playbookos10millionrevenuenaresh", { expiresIn: '7d' });
+  return jwt.sign({ id: user.id, email: user.email, role: user.role }, 'abiozen2026playbookos10millionrevenuenaresh', { expiresIn: '7d' });
 }
 
 function verifyToken(token) {
-  try { return jwt.verify(token, process.env.JWT_SECRET || "abiozen2026playbookos10millionrevenuenaresh"); }
+  try { return jwt.verify(token, 'abiozen2026playbookos10millionrevenuenaresh'); }
   catch { return null; }
 }
 
