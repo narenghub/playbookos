@@ -2,7 +2,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { getDb, signToken, authMiddleware, adminOnly, sendEmail, syncGitHubForUser,
+const { getDb, signToken, authMiddleware, adminOnly } = require("../lib/core"); const { sendEmail, syncGitHubForUser,
         analyzeTeamProgress, getRevenueSummary, getTarget, getUserActivities, runClaudeAnalysis } = require('../lib/core');
 
 const router = express.Router();
