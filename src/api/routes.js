@@ -262,3 +262,77 @@ router.post('/triggers/check', async (req, res) => {
 });
 
 module.exports = router;
+
+router.get('/decision-rules', authMiddleware, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM decision_rules ORDER BY created_at');
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/decision-rules/evaluate', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const crypto = require('crypto');
+    const yearRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date::text LIKE '2026%'`)).rows[0].v);
+    const thisMonth = new Date().toISOString().slice(0,7);
+    const monthRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date::text LIKE $1`, [thisMonth+'%'])).rows[0].v);
+    const monthTarget = parseFloat((await query(`SELECT COALESCE(target_value,1200000) as v FROM targets WHERE period_type='monthly' AND period_key=$1 AND metric='revenue'`, [thisMonth])).rows[0]?.v || 1200000);
+    const monthPct = monthTarget > 0 ? (monthRev / monthTarget) * 100 : 0;
+    const metrics = { monthly_revenue_pct: monthPct, monthly_revenue: monthRev, cumulative_revenue: yearRev, daily_emails_sent: 0, weekly_prs_merged: 0, weekly_skus_priced: 0, invoice_overdue_days: 0, top10_sku_revenue_pct: 0 };
+    const rules = (await query('SELECT * FROM decision_rules WHERE is_active=1')).rows;
+    const fired = [];
+    for (const rule of rules) {
+      const val = metrics[rule.condition_metric] || 0;
+      let triggered = false;
+      if (rule.condition_operator === '<' && val < rule.condition_value) triggered = true;
+      if (rule.condition_operator === '>=' && val >= rule.condition_value) triggered = true;
+      if (triggered) {
+        fired.push({ rule: rule.name, action: rule.action_type, message: rule.action_message });
+        await query(`UPDATE decision_rules SET last_fired=$1, fire_count=fire_count+1 WHERE id=$2`, [new Date().toISOString(), rule.id]);
+      }
+    }
+    res.json({ evaluated: rules.length, fired: fired.length, triggers: fired, metrics });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/skus', authMiddleware, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM skus WHERE is_active=1 ORDER BY revenue_total DESC');
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/skus', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { name, category, cost_price, sale_price, units_in_stock, lead_time_days, supplier, is_gmp } = req.body;
+    const crypto = require('crypto');
+    const margin = sale_price > 0 ? ((sale_price - cost_price) / sale_price) * 100 : 0;
+    const id = crypto.randomUUID();
+    await query(`INSERT INTO skus (id,name,category,cost_price,sale_price,gross_margin,units_in_stock,lead_time_days,supplier,is_gmp) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [id, name, category||null, cost_price||0, sale_price||0, margin, units_in_stock||0, lead_time_days||14, supplier||null, is_gmp||0]);
+    res.json({ success: true, id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/execution-steps', authMiddleware, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM execution_steps ORDER BY step_order');
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/execution-steps/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { completion_pct, status } = req.body;
+    await query(`UPDATE execution_steps SET completion_pct=COALESCE($1,completion_pct), status=COALESCE($2,status), updated_at=$3 WHERE id=$4`,
+      [completion_pct, status||null, new Date().toISOString(), req.params.id]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/integrations', authMiddleware, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM integrations ORDER BY status DESC, name');
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
