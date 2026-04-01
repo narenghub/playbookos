@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Abiozen PlaybookOS</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,sans-serif;background:#f0f2f5;color:#1a1a2e;font-size:14px}
+:root{--navy:#1B3A6B;--teal:#0D7377;--light:#E8F4F8;--white:#fff;--border:#e0e0e0;--gray:#666;--success:#1D9E75;--warn:#BA7517;--danger:#E24B4A}
+
+/* ── Layout ── */
+#app{display:flex;min-height:100vh}
+#sidebar{width:220px;background:var(--navy);color:#fff;flex-shrink:0;display:flex;flex-direction:column}
+#sidebar .logo{padding:20px 16px 12px;border-bottom:1px solid rgba(255,255,255,.12)}
+#sidebar .logo h1{font-size:16px;font-weight:700;color:#fff}
+#sidebar .logo p{font-size:11px;color:#9FE1CB;margin-top:2px}
+#sidebar nav{flex:1;padding:12px 0}
+#sidebar nav a{display:block;padding:10px 16px;color:rgba(255,255,255,.75);text-decoration:none;font-size:13px;border-left:3px solid transparent;transition:all .15s}
+#sidebar nav a:hover,#sidebar nav a.active{background:rgba(255,255,255,.08);color:#fff;border-left-color:#9FE1CB}
+#sidebar .user-info{padding:12px 16px;border-top:1px solid rgba(255,255,255,.12);font-size:12px;color:rgba(255,255,255,.7)}
+#main{flex:1;overflow:auto}
+#topbar{background:#fff;border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;justify-content:space-between}
+#topbar h2{font-size:16px;font-weight:600;color:var(--navy)}
+#content{padding:24px;max-width:1300px}
+
+/* ── Cards & Metrics ── */
+.card{background:#fff;border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px}
+.card-title{font-size:14px;font-weight:600;color:var(--navy);margin-bottom:14px}
+.metric-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+.metric{background:#f8f9fa;border-radius:8px;padding:14px;border:1px solid var(--border)}
+.metric .label{font-size:11px;color:var(--gray);margin-bottom:4px}
+.metric .value{font-size:22px;font-weight:700;color:var(--navy)}
+.metric .sub{font-size:11px;color:var(--teal);margin-top:2px}
+.metric.green .value{color:var(--success)}
+.metric.amber .value{color:var(--warn)}
+.metric.red .value{color:var(--danger)}
+
+/* ── Tables ── */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:var(--navy);color:#fff;padding:10px 12px;text-align:left;font-weight:600;font-size:12px}
+td{padding:9px 12px;border-bottom:1px solid var(--border)}
+tr:hover td{background:#f8f9fa}
+tr:last-child td{border-bottom:none}
+
+/* ── Badges ── */
+.badge{display:inline-block;padding:3px 8px;border-radius:12px;font-size:11px;font-weight:600}
+.badge-green{background:#d4edda;color:#155724}
+.badge-amber{background:#fff3cd;color:#856404}
+.badge-red{background:#f8d7da;color:#721c24}
+.badge-blue{background:#d1ecf1;color:#0c5460}
+.badge-gray{background:#e9ecef;color:#495057}
+
+/* ── Forms ── */
+.form-group{margin-bottom:14px}
+.form-group label{display:block;font-size:12px;font-weight:600;color:var(--navy);margin-bottom:4px}
+input,select,textarea{width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:Arial}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--teal)}
+.btn{padding:9px 18px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:600;transition:all .15s}
+.btn-primary{background:var(--navy);color:#fff}.btn-primary:hover{background:#142d55}
+.btn-teal{background:var(--teal);color:#fff}.btn-teal:hover{background:#0a5c60}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--navy)}.btn-outline:hover{background:#f5f5f5}
+.btn-sm{padding:5px 12px;font-size:12px}
+.btn-danger{background:var(--danger);color:#fff}
+
+/* ── Progress bar ── */
+.progress-wrap{background:#e9ecef;border-radius:4px;height:8px;overflow:hidden}
+.progress-fill{height:8px;border-radius:4px;transition:width .4s}
+.progress-green{background:var(--success)}.progress-amber{background:var(--warn)}.progress-red{background:var(--danger)}
+
+/* ── Auth page ── */
+#auth-page{display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--navy)}
+.auth-card{background:#fff;border-radius:12px;padding:36px;width:380px;box-shadow:0 8px 32px rgba(0,0,0,.25)}
+.auth-card h1{color:var(--navy);font-size:22px;margin-bottom:4px}
+.auth-card p{color:var(--gray);font-size:13px;margin-bottom:24px}
+.error-msg{background:#f8d7da;color:#721c24;padding:10px;border-radius:6px;font-size:13px;margin-bottom:12px}
+.success-msg{background:#d4edda;color:#155724;padding:10px;border-radius:6px;font-size:13px;margin-bottom:12px}
+
+/* ── Activity form ── */
+.activity-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.ai-box{background:linear-gradient(135deg,#E8F4F8,#fff);border:1px solid var(--teal);border-radius:10px;padding:20px}
+.ai-box .ai-label{font-size:11px;font-weight:700;color:var(--teal);letter-spacing:.5px;margin-bottom:8px}
+.ai-box p{font-size:13px;line-height:1.7;color:#333}
+
+/* Responsive */
+@media(max-width:768px){#sidebar{display:none}#content{padding:12px}}
+</style>
+</head>
+<body>
+
+<!-- AUTH PAGE -->
+<div id="auth-page" style="display:none">
+  <div class="auth-card">
+    <h1>Abiozen PlaybookOS</h1>
+    <p id="auth-subtitle">Sign in to your dashboard</p>
+    <div id="auth-error" class="error-msg" style="display:none"></div>
+    <div id="auth-success" class="success-msg" style="display:none"></div>
+    <div id="login-form">
+      <div class="form-group"><label>Email</label><input id="login-email" type="email" placeholder="you@abiozen.com"></div>
+      <div class="form-group"><label>Password</label><input id="login-pass" type="password" placeholder="••••••••"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Sign in</button>
+    </div>
+    <div id="invite-form" style="display:none">
+      <div class="form-group"><label>Your full name</label><input id="inv-name" type="text" placeholder="Jane Smith"></div>
+      <div class="form-group"><label>Set password</label><input id="inv-pass" type="password" placeholder="Choose a strong password"></div>
+      <button class="btn btn-teal" style="width:100%" onclick="doAcceptInvite()">Activate account</button>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app" style="display:none">
+  <div id="sidebar">
+    <div class="logo"><h1>PlaybookOS</h1><p>Abiozen LLC</p></div>
+    <nav id="nav-links"></nav>
+    <div class="user-info" id="user-info-box"></div>
+  </div>
+  <div id="main">
+    <div id="topbar">
+      <h2 id="page-title">Dashboard</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span id="ontrack-badge"></span>
+        <button class="btn btn-outline btn-sm" onclick="logout()">Sign out</button>
+      </div>
+    </div>
+    <div id="content"></div>
+  </div>
+</div>
+
+<script>
+// ── STATE ─────────────────────────────────────────────────────────────────────
+let token = localStorage.getItem('pbo_token');
+let currentUser = null;
+let currentPage = 'dashboard';
+
+const API = (path, opts={}) => {
+  const headers = {'Content-Type':'application/json'};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return fetch('/api' + path, {...opts, headers: {...headers, ...(opts.headers||{})}}).then(r=>r.json());
+};
+
+const fmt = v => '$' + Math.round(v).toLocaleString();
+const pct = (v,t) => t>0 ? Math.round((v/t)*100) : 0;
+const today = () => new Date().toISOString().slice(0,10);
+const thisMonth = () => new Date().toISOString().slice(0,7);
+
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+window.addEventListener('load', () => {
+  const hash = window.location.hash;
+  if (hash.includes('accept-invite')) {
+    const t = new URLSearchParams(hash.split('?')[1]).get('token');
+    showInviteForm(t);
+    return;
+  }
+  if (token) checkAuth();
+  else showAuth();
+});
+
+async function checkAuth() {
+  const me = await API('/auth/me');
+  if (me.error) { token = null; localStorage.removeItem('pbo_token'); showAuth(); return; }
+  currentUser = me;
+  showApp();
+}
+
+function showAuth() {
+  document.getElementById('auth-page').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+}
+
+function showInviteForm(t) {
+  document.getElementById('auth-page').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('auth-subtitle').textContent = 'Set your password to activate your account';
+  document.getElementById('login-form').style.display = 'none';
+  document.getElementById('invite-form').style.display = 'block';
+  window._inviteToken = t;
+}
+
+async function doLogin() {
+  const email = document.getElementById('login-email').value;
+  const password = document.getElementById('login-pass').value;
+  const res = await API('/auth/login', {method:'POST',body:JSON.stringify({email,password})});
+  if (res.error) { showError(res.error); return; }
+  token = res.token;
+  currentUser = res.user;
+  localStorage.setItem('pbo_token', token);
+  document.getElementById('auth-page').style.display = 'none';
+  showApp();
+}
+
+async function doAcceptInvite() {
+  const name = document.getElementById('inv-name').value;
+  const password = document.getElementById('inv-pass').value;
+  const res = await API('/auth/accept-invite', {method:'POST',body:JSON.stringify({token:window._inviteToken,name,password})});
+  if (res.error) { showError(res.error); return; }
+  token = res.token;
+  currentUser = res.user;
+  localStorage.setItem('pbo_token', token);
+  window.location.hash = '';
+  document.getElementById('auth-page').style.display = 'none';
+  showApp();
+}
+
+function showError(msg) {
+  const el = document.getElementById('auth-error');
+  el.textContent = msg; el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 4000);
+}
+
+function logout() {
+  token = null; currentUser = null;
+  localStorage.removeItem('pbo_token');
+  showAuth();
+}
+
+// ── APP SHELL ─────────────────────────────────────────────────────────────────
+function showApp() {
+  document.getElementById('app').style.display = 'flex';
+  buildNav();
+  document.getElementById('user-info-box').innerHTML = `<div>${currentUser.name}</div><div style="color:rgba(255,255,255,.5);font-size:11px">${currentUser.role}</div>`;
+  navigate('dashboard');
+}
+
+function buildNav() {
+  const isAdmin = currentUser.role === 'admin';
+  const links = [
+    {id:'dashboard',label:'Dashboard',roles:['admin','dev','procurement','sales','marketing','qc']},
+    {id:'my-activity',label:'My Activity',roles:['dev','procurement','sales','marketing','qc']},
+    {id:'playbook',label:'Playbook',roles:['admin','dev','procurement','sales','marketing','qc']},
+    {id:'team',label:'Team',roles:['admin']},
+    {id:'revenue',label:'Revenue & Orders',roles:['admin']},
+    {id:'github',label:'GitHub Stats',roles:['admin','dev']},
+    {id:'milestones',label:'Milestones',roles:['admin','dev','procurement','sales','marketing','qc']},
+    {id:'ai-insights',label:'AI Insights',roles:['admin']},
+    {id:'settings',label:'Settings',roles:['admin']},
+  ].filter(l => l.roles.includes(currentUser.role));
+
+  document.getElementById('nav-links').innerHTML = links.map(l =>
+    `<a href="#" onclick="navigate('${l.id}');return false" id="nav-${l.id}">${l.label}</a>`
+  ).join('');
+}
+
+function navigate(page) {
+  currentPage = page;
+  document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
+  const el = document.getElementById('nav-'+page);
+  if (el) el.classList.add('active');
+  const titles = {dashboard:'Dashboard','my-activity':'My Activity',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
+  document.getElementById('page-title').textContent = titles[page] || page;
+  const content = document.getElementById('content');
+  content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
+  pages[page]();
+}
+
+// ── PAGES ─────────────────────────────────────────────────────────────────────
+const pages = {
+
+// ── DASHBOARD ─────────────────────────────────────────────────────────────────
+async dashboard() {
+  const data = await API('/dashboard/summary');
+  const rev = data.revenue;
+  const p = pct(rev.month, rev.monthTarget);
+  const yp = pct(rev.year, rev.annualTarget);
+  const pColor = p >= 80 ? 'green' : p >= 50 ? 'amber' : 'red';
+
+  document.getElementById('ontrack-badge').innerHTML = data.onTrack
+    ? '<span class="badge badge-green">On Track</span>'
+    : '<span class="badge badge-red">Behind Target</span>';
+
+  const html = `
+    <div class="metric-grid">
+      <div class="metric ${pColor}"><div class="label">This month revenue</div><div class="value">${fmt(rev.month)}</div><div class="sub">target ${fmt(rev.monthTarget)} · ${p}%</div></div>
+      <div class="metric"><div class="label">Year-to-date revenue</div><div class="value">${fmt(rev.year)}</div><div class="sub">${yp}% of $10M target</div></div>
+      <div class="metric"><div class="label">Projected year-end</div><div class="value" style="color:${rev.projectedTotal >= rev.annualTarget ? 'var(--success)' : 'var(--danger)'}">${fmt(rev.projectedTotal)}</div><div class="sub">at current run rate</div></div>
+      <div class="metric"><div class="label">Daily run rate</div><div class="value">${fmt(rev.dailyRunRate)}</div><div class="sub">need $33K+/day for target</div></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="card">
+        <div class="card-title">Annual progress</div>
+        <div style="margin-bottom:6px;font-size:12px;color:var(--gray)">${fmt(rev.year)} of ${fmt(rev.annualTarget)}</div>
+        <div class="progress-wrap"><div class="progress-fill progress-${yp >= 80 ? 'green' : yp >= 50 ? 'amber' : 'red'}" style="width:${Math.min(yp,100)}%"></div></div>
+        <div style="margin-top:16px;position:relative;height:180px"><canvas id="rev-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Recent orders</div>
+        <table>
+          <tr><th>Date</th><th>Amount</th><th>Type</th><th>Category</th></tr>
+          ${(data.recentOrders||[]).map(o=>`<tr><td>${o.order_date}</td><td>${fmt(o.amount)}</td><td><span class="badge badge-blue">${o.buyer_type||'—'}</span></td><td>${o.product_category||'—'}</td></tr>`).join('')||'<tr><td colspan="4" style="color:#888;text-align:center">No orders yet</td></tr>'}
+        </table>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="card">
+        <div class="card-title">Team activity this week</div>
+        <table>
+          <tr><th>Member</th><th>Role</th><th>Metric</th><th>Total</th></tr>
+          ${(data.teamActivity||[]).map(r=>`<tr><td>${r.name}</td><td><span class="badge badge-gray">${r.role}</span></td><td>${r.metric}</td><td><strong>${Math.round(r.total)}</strong></td></tr>`).join('')||'<tr><td colspan="4" style="color:#888;text-align:center">No activity logged yet</td></tr>'}
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-title">Milestones</div>
+        ${(data.milestones||[]).slice(0,6).map(m=>{
+          const st = {pending:'badge-gray',in_progress:'badge-blue',complete:'badge-green',at_risk:'badge-red'}[m.status]||'badge-gray';
+          return `<div style="padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+            <div><div style="font-size:13px;font-weight:600">${m.name.substring(0,40)}${m.name.length>40?'...':''}</div><div style="font-size:11px;color:var(--gray)">${m.target_date}</div></div>
+            <span class="badge ${st}">${m.status.replace('_',' ')}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>
+  `;
+  document.getElementById('content').innerHTML = html;
+
+  // Revenue chart
+  const months = ['May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const targets = [300000,600000,900000,1200000,1500000,1800000,2000000,1700000];
+  new Chart(document.getElementById('rev-chart'), {
+    type:'bar',
+    data:{labels:months,datasets:[
+      {label:'Target',data:targets,backgroundColor:'rgba(27,58,107,.2)',borderColor:'#1B3A6B',borderWidth:1},
+      {label:'Actual',data:targets.map((_,i)=>i===0?rev.month:0),backgroundColor:'rgba(13,115,119,.6)',borderColor:'#0D7377',borderWidth:1}
+    ]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{ticks:{callback:v=>'$'+(v/1000)+'K'}}}}
+  });
+},
+
+// ── MY ACTIVITY ───────────────────────────────────────────────────────────────
+async 'my-activity'() {
+  const role = currentUser.role;
+  const metrics = {
+    dev: ['prs_merged','commits','features_deployed','bugs_fixed'],
+    procurement: ['skus_priced','coas_collected','suppliers_contacted','vendors_onboarded'],
+    sales: ['outreach_emails','calls_made','demos_completed','orders_closed','revenue_closed'],
+    marketing: ['campaigns_sent','leads_generated','content_published','conferences_attended'],
+    qc: ['coas_issued','tests_completed','reports_generated','samples_processed'],
+    admin: ['orders_entered','revenue_closed','team_reviews']
+  };
+  const myMetrics = metrics[role] || metrics.admin;
+  const recent = await API('/activity/my?from=' + new Date(Date.now()-7*86400000).toISOString().slice(0,10));
+
+  const summary = {};
+  (recent||[]).forEach(a => { summary[a.metric] = (summary[a.metric]||0) + a.value; });
+
+  document.getElementById('content').innerHTML = `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      <div class="card">
+        <div class="card-title">Log today's activity — ${today()}</div>
+        <div id="activity-msg"></div>
+        <div class="form-group"><label>Metric</label>
+          <select id="act-metric">${myMetrics.map(m=>`<option value="${m}">${m.replace(/_/g,' ')}</option>`).join('')}</select>
+        </div>
+        <div class="form-group"><label>Value</label><input id="act-value" type="number" min="0" step="0.01" placeholder="e.g. 3"></div>
+        <div class="form-group"><label>Notes (optional)</label><input id="act-notes" placeholder="What did you accomplish?"></div>
+        <div class="form-group"><label>Date</label><input id="act-date" type="date" value="${today()}"></div>
+        <button class="btn btn-teal" onclick="logActivity()">Save activity</button>
+      </div>
+      <div class="card">
+        <div class="card-title">This week summary</div>
+        ${myMetrics.map(m=>`
+          <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)">
+            <span style="color:#444">${m.replace(/_/g,' ')}</span>
+            <strong style="color:var(--navy)">${Math.round(summary[m]||0)}</strong>
+          </div>`).join('')}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Activity log (last 7 days)</div>
+      <table>
+        <tr><th>Date</th><th>Metric</th><th>Value</th><th>Source</th><th>Notes</th></tr>
+        ${(recent||[]).map(a=>`<tr><td>${a.log_date}</td><td>${a.metric.replace(/_/g,' ')}</td><td><strong>${a.value}</strong></td><td><span class="badge badge-${a.source==='github'?'blue':'gray'}">${a.source}</span></td><td style="color:#666">${a.notes||''}</td></tr>`).join('')||'<tr><td colspan="5" style="color:#888;text-align:center">No activity yet. Log your first entry above.</td></tr>'}
+      </table>
+    </div>
+  `;
+},
+
+// ── PLAYBOOK ──────────────────────────────────────────────────────────────────
+async playbook() {
+  const phases = [
+    {title:'Phase 1 — Pre-launch',period:'May 2026',color:'#1B3A6B',target:'$300K',desc:'Platform go-live. 500+ SKUs, Stripe, FedEx, COA delivery.',
+     weeks:[
+       {w:'May 1–7',dev:'Feature freeze, QA sprint, Stripe final test',proc:'500 SKUs priced, 100 COAs, India fulfillment confirm',sales:'Apollo 2K list, HubSpot setup',mktg:'GLP-1 pages, SEO metadata, social profiles'},
+       {w:'May 8–14',dev:'Staging deploy, load test',proc:'MolPort upload, eMolecules submit',sales:'Templates loaded, 5 warm intros',mktg:'LinkedIn live, 2 blog posts'},
+       {w:'May 15–21',dev:'Prod rehearsal, monitoring',proc:'Supplier COA final batch, 2K SKUs',sales:'10 warm calls, 3 demos',mktg:'Cold email campaign 1 — 500 contacts'},
+       {w:'May 22–31',dev:'GO-LIVE · Monitor · R2 opens',proc:'Orders live, India fulfillment active',sales:'Apollo launch, first orders',mktg:'Launch PR, 2K email blast'},
+     ]},
+    {title:'Phase 2 — Revenue ramp',period:'Jun–Jul 2026',color:'#0D7377',target:'$1.5M',desc:'Compounding pharmacies, research labs, CRO pipeline. Hire Account Manager.',
+     weeks:[
+       {w:'Jun 1–7',dev:'R2 architecture, GMP data model',proc:'1,500 SKUs, GMP supplier shortlist',sales:'Acct mgr hiring starts, 15 pharmacy demos',mktg:'Campaign 2: CRO list'},
+       {w:'Jun 8–14',dev:'GMP DB schema, COA gen v2',proc:'5 GMP suppliers signed, 2K SKUs',sales:'Candidate interviews, 20 calls/day',mktg:'SEO 10 keywords, conf. attend'},
+       {w:'Jun 15–21',dev:'GMP upload portal MVP',proc:'GMP certs uploaded, 100 GMP SKUs',sales:'ACCOUNT MGR HIRED',mktg:'Press 2 placements, newsletter'},
+       {w:'Jun 22–30',dev:'R1 hotfixes, search opt.',proc:'2,500 SKUs, India 50 molecules',sales:'$600K Jun target close',mktg:'A/B email test, referral program'},
+       {w:'Jul 1–7',dev:'R2 GMP portal build',proc:'Procurement specialist hire',sales:'GLP-1 top 50 targets, CDMO outreach',mktg:'Q3 plan, BIO meetings'},
+       {w:'Jul 8–14',dev:'GMP QC engine alpha',proc:'PROC SPEC HIRED, 3K SKUs',sales:'CDMO pipeline 5 accts, $900K Jul',mktg:'White paper 2, LinkedIn 1K'},
+       {w:'Jul 15–21',dev:'R2 QC report beta',proc:'250 GMP SKUs staged',sales:'Chase Bank meeting, Loan 1 app',mktg:'Investor deck update'},
+       {w:'Jul 22–31',dev:'R2 QA sprint, prod prep',proc:'3,500 SKUs, India 100 molecules',sales:'Jul close $900K',mktg:'Q3 content calendar'},
+     ]},
+    {title:'Phase 3 — GMP acceleration',period:'Aug–Sep 2026',color:'#712B13',target:'$2.7M',desc:'Release 2 live. Unlock generic manufacturers and CDMOs.',
+     weeks:[
+       {w:'Aug 1–7',dev:'R2 GO-LIVE: GMP APIs',proc:'300+ GMP SKUs active',sales:'SALES REP HIRED, 500 manuf. contacts',mktg:'MKTG MGR HIRED, R2 launch campaign'},
+       {w:'Aug 8–14',dev:'R2 performance, GMP search',proc:'GMP reorder rules, India GMP',sales:'CDMO 10 demos, RFQ 5 quotes',mktg:'GMP content 5 pages, trade pubs'},
+       {w:'Aug 15–21',dev:'R3 architecture spec',proc:'4K SKUs, GMP 500 ready',sales:'Univ. portal pitch, HubSpot $3M',mktg:'Webinar: GLP-1 APIs — 100 reg.'},
+       {w:'Aug 22–31',dev:'CRO intake form v1',proc:'Aug close, India 150 molecules',sales:'Aug close $1.2M',mktg:'Aug review, 2,500 email list'},
+       {w:'Sep 1–7',dev:'R3 CRO portal build',proc:'5K SKUs target, Sep restock',sales:'CRO services pitch, 3 biotech demos',mktg:'CRO content, white paper 3'},
+       {w:'Sep 8–14',dev:'RFQ engine build',proc:'Custom synth. intake, 200 molecules',sales:'RFQ live 3 quotes, $20K CRO close',mktg:'Trade pub, podcast guest 1'},
+       {w:'Sep 15–21',dev:'RFQ engine beta, PO/invoice',proc:'5,000 SKUs LIVE!',sales:'Investor data pull, CDMO 2',mktg:'Q4 plan, investor deck v3'},
+       {w:'Sep 22–30',dev:'R3 QA sprint, security audit',proc:'Sep close, India 250 molecules',sales:'Sep close $1.5M',mktg:'Q3 results, partnership 3'},
+     ]},
+    {title:'Phase 4 — Full-scale push',period:'Oct–Dec 2026',color:'#26215C',target:'$5.5M',desc:'Release 3 live. All segments active. Close year at $10M.',
+     weeks:[
+       {w:'Oct 1–7',dev:'R3 GO-LIVE: RFQ+CRO',proc:'CRO catalog, 5K+ SKUs',sales:'CRO launch, 10 biotech demos',mktg:'R3 launch campaign, PR 3 placements'},
+       {w:'Oct 8–14',dev:'RFQ opt., <2hr quote',proc:'1K GMP SKUs, 300 molecules',sales:'CDMO annual contract, $5M pipeline',mktg:'BIO follow-ups, 3,500 email list'},
+       {w:'Oct 15–21',dev:'2027 tech roadmap',proc:'Q4 procurement plan',sales:'Investor data pack, CRO 3 engag.',mktg:'Investor meeting 1, white paper 4'},
+       {w:'Oct 22–31',dev:'Bug bash, backup/DR test',proc:'Oct close, Nov forecast',sales:'Oct close $1.8M',mktg:'Oct review, holiday campaign plan'},
+       {w:'Nov 1–7',dev:'2027 EDC planning',proc:'GLP-1 extra stock, 1,200 GMP',sales:'Year-end deal push, 10 enterprise',mktg:'Year-end email 5K, testimonials'},
+       {w:'Nov 8–14',dev:'Performance sprint',proc:'Supplier year review, 400 molecules',sales:'$8M cumulative?',mktg:'Investor update 2, newsletter 2K'},
+       {w:'Nov 15–21',dev:'2027 roadmap finalize',proc:'2027 SKU roadmap, 10K plan',sales:'Nov run rate, Q1 2027 pipeline',mktg:'Q4 conf., BIO 2027 register'},
+       {w:'Nov 22–30',dev:'Nov release, team retro',proc:'Nov close, Dec restock',sales:'Nov close $2.0M, $9.5M cumul.',mktg:'Year-in-review draft, awards'},
+       {w:'Dec 1–14',dev:'Minimal changes, 2027 plan',proc:'Holiday stock, fast delivery SLA',sales:'Dec sprint close, all deals push',mktg:'Year-end push, $10M press story'},
+       {w:'Dec 15–31',dev:'2027 backlog, holiday cover',proc:'2027 catalog live, annual report',sales:'CLOSE: $10M TARGET',mktg:'$10M announcement, 2027 teaser'},
+     ]},
+  ];
+
+  document.getElementById('content').innerHTML = `
+    ${phases.map(ph=>`
+      <div style="background:${ph.color};color:#fff;padding:14px 18px;border-radius:8px 8px 0 0;margin-top:20px;display:flex;justify-content:space-between;align-items:center">
+        <div><strong>${ph.title}</strong> &nbsp;·&nbsp; ${ph.period}</div>
+        <span style="background:rgba(255,255,255,.2);padding:3px 12px;border-radius:12px;font-size:12px">${ph.target}</span>
+      </div>
+      <div style="background:#fff;border:1px solid var(--border);border-top:none;border-radius:0 0 8px 8px;overflow:hidden;margin-bottom:4px">
+        <div style="padding:10px 18px;font-size:12px;color:#666;border-bottom:1px solid var(--border)">${ph.desc}</div>
+        <div style="overflow-x:auto">
+          <table style="min-width:700px">
+            <tr>
+              <th style="width:90px;background:${ph.color}">Week</th>
+              <th style="background:${ph.color}">Dev & platform</th>
+              <th style="background:${ph.color}">Procurement</th>
+              <th style="background:${ph.color}">Sales & accounts</th>
+              <th style="background:${ph.color}">Marketing</th>
+            </tr>
+            ${ph.weeks.map((w,i)=>`<tr style="background:${i%2===0?'#f9f9f9':'#fff'}">
+              <td style="font-weight:600;color:${ph.color};white-space:nowrap;font-size:12px">${w.w}</td>
+              <td style="font-size:12px">${w.dev}</td>
+              <td style="font-size:12px">${w.proc}</td>
+              <td style="font-size:12px">${w.sales}</td>
+              <td style="font-size:12px">${w.mktg}</td>
+            </tr>`).join('')}
+          </table>
+        </div>
+      </div>
+    `).join('')}
+  `;
+},
+
+// ── TEAM MANAGEMENT ───────────────────────────────────────────────────────────
+async team() {
+  const users = await API('/users');
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div class="card-title" style="margin:0">Team members</div>
+        <button class="btn btn-teal btn-sm" onclick="showInviteModal()">+ Invite member</button>
+      </div>
+      <table>
+        <tr><th>Name</th><th>Email</th><th>Role</th><th>GitHub</th><th>Status</th></tr>
+        ${users.map(u=>`<tr>
+          <td><strong>${u.name}</strong></td>
+          <td>${u.email}</td>
+          <td><span class="badge badge-blue">${u.role}</span></td>
+          <td>${u.github_username ? `<a href="https://github.com/${u.github_username}" target="_blank" style="color:var(--teal)">@${u.github_username}</a>` : '<span style="color:#ccc">—</span>'}</td>
+          <td><span class="badge ${u.joined_at ? 'badge-green' : 'badge-amber'}">${u.joined_at ? 'Active' : 'Invited'}</span></td>
+        </tr>`).join('')}
+      </table>
+    </div>
+    <div id="invite-modal" style="display:none">
+      <div class="card" style="border-color:var(--teal)">
+        <div class="card-title">Invite new team member</div>
+        <div id="invite-msg"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="form-group"><label>Email address</label><input id="inv-email" type="email" placeholder="jane@abiozen.com"></div>
+          <div class="form-group"><label>Role</label>
+            <select id="inv-role">
+              <option value="dev">Developer</option>
+              <option value="procurement">Procurement</option>
+              <option value="sales">Sales</option>
+              <option value="marketing">Marketing</option>
+              <option value="qc">QC / Lab</option>
+              <option value="admin">Admin</option>
+            </select>
+          </div>
+          <div class="form-group"><label>GitHub username (optional — for devs)</label><input id="inv-gh" placeholder="github-username"></div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-teal" onclick="sendInvite()">Send invite email</button>
+          <button class="btn btn-outline" onclick="document.getElementById('invite-modal').style.display='none'">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `;
+},
+
+// ── REVENUE ───────────────────────────────────────────────────────────────────
+async revenue() {
+  const orders = await API('/orders');
+  const total = (orders||[]).reduce((s,o)=>s+o.amount,0);
+  document.getElementById('content').innerHTML = `
+    <div class="metric-grid">
+      <div class="metric"><div class="label">Total logged revenue</div><div class="value">${fmt(total)}</div></div>
+      <div class="metric"><div class="label">Total orders</div><div class="value">${(orders||[]).length}</div></div>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div class="card-title" style="margin:0">Add order / revenue entry</div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+        <div class="form-group"><label>Date</label><input id="ord-date" type="date" value="${today()}"></div>
+        <div class="form-group"><label>Amount ($)</label><input id="ord-amount" type="number" placeholder="10000"></div>
+        <div class="form-group"><label>Buyer type</label>
+          <select id="ord-buyer">
+            <option value="compounding_pharmacy">Compounding pharmacy</option>
+            <option value="research_lab">Research lab</option>
+            <option value="cro">CRO / CDMO</option>
+            <option value="generic_manufacturer">Generic manufacturer</option>
+            <option value="biotech">Biotech startup</option>
+          </select>
+        </div>
+        <div class="form-group"><label>Product category</label>
+          <select id="ord-cat">
+            <option value="research_molecule">Research molecule</option>
+            <option value="gmp_api">GMP API</option>
+            <option value="qc_service">QC service</option>
+            <option value="cro_service">CRO service</option>
+          </select>
+        </div>
+        <div class="form-group"><label>Notes</label><input id="ord-notes" placeholder="Optional notes"></div>
+      </div>
+      <button class="btn btn-teal" onclick="addOrder()">Add order</button>
+      <div id="ord-msg" style="margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Order history</div>
+      <table>
+        <tr><th>Date</th><th>Amount</th><th>Buyer</th><th>Category</th><th>Notes</th></tr>
+        ${(orders||[]).map(o=>`<tr><td>${o.order_date}</td><td><strong>${fmt(o.amount)}</strong></td><td><span class="badge badge-blue">${o.buyer_type||'—'}</span></td><td>${o.product_category||'—'}</td><td style="color:#666">${o.notes||''}</td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:#888">No orders yet</td></tr>'}
+      </table>
+    </div>
+  `;
+},
+
+// ── GITHUB ────────────────────────────────────────────────────────────────────
+async github() {
+  const data = await API('/dashboard/summary');
+  const stats = data.githubStats || [];
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <div class="card-title" style="margin:0">GitHub activity (last 7 days)</div>
+        <button class="btn btn-outline btn-sm" onclick="syncGH()">Sync GitHub now</button>
+      </div>
+      <div id="gh-msg"></div>
+      <table>
+        <tr><th>Developer</th><th>Date</th><th>Commits</th><th>PRs opened</th><th>PRs merged</th></tr>
+        ${stats.map(s=>`<tr><td><strong>${s.name}</strong><br><span style="font-size:11px;color:#888">@${s.github_username}</span></td><td>${s.stat_date}</td><td>${s.commits}</td><td>${s.prs_opened}</td><td><strong style="color:var(--success)">${s.prs_merged}</strong></td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:#888">No GitHub data yet. Add GitHub usernames to dev team members, then sync.</td></tr>'}
+      </table>
+    </div>
+    <div class="card" style="background:#f8f9fa">
+      <div class="card-title">Setup instructions</div>
+      <ol style="padding-left:20px;line-height:2;font-size:13px;color:#444">
+        <li>Go to <strong>Settings → Team</strong>, edit each developer and add their GitHub username</li>
+        <li>Make sure your <code>.env</code> file has a valid <code>GITHUB_TOKEN</code> (read:org, repo scopes)</li>
+        <li>Click "Sync GitHub now" — stats populate for yesterday and today</li>
+        <li>Automatic daily sync runs at 8 AM every morning</li>
+      </ol>
+    </div>
+  `;
+},
+
+// ── MILESTONES ────────────────────────────────────────────────────────────────
+async milestones() {
+  const ms = await API('/milestones');
+  const statusColors = {pending:'badge-gray',in_progress:'badge-blue',complete:'badge-green',at_risk:'badge-red'};
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <div class="card-title">Abiozen milestones — May to December 2026</div>
+      <table>
+        <tr><th>Milestone</th><th>Target date</th><th>Actual date</th><th>Status</th>${currentUser.role==='admin'?'<th>Update</th>':''}</tr>
+        ${ms.map(m=>`<tr>
+          <td><strong>${m.name}</strong><br><span style="font-size:11px;color:#888">${m.description||''}</span></td>
+          <td>${m.target_date}</td>
+          <td>${m.actual_date||'—'}</td>
+          <td><span class="badge ${statusColors[m.status]||'badge-gray'}">${m.status.replace('_',' ')}</span></td>
+          ${currentUser.role==='admin'?`<td>
+            <select onchange="updateMilestone('${m.id}',this.value)" style="width:auto;font-size:12px;padding:4px 6px">
+              <option value="pending" ${m.status==='pending'?'selected':''}>Pending</option>
+              <option value="in_progress" ${m.status==='in_progress'?'selected':''}>In progress</option>
+              <option value="complete" ${m.status==='complete'?'selected':''}>Complete</option>
+              <option value="at_risk" ${m.status==='at_risk'?'selected':''}>At risk</option>
+            </select>
+          </td>`:''}
+        </tr>`).join('')}
+      </table>
+    </div>
+  `;
+},
+
+// ── AI INSIGHTS ───────────────────────────────────────────────────────────────
+async 'ai-insights'() {
+  const latest = await API('/ai/latest');
+  document.getElementById('content').innerHTML = `
+    <div class="ai-box" style="margin-bottom:16px">
+      <div class="ai-label">LATEST AI ANALYSIS</div>
+      <p>${(latest.content||'No analysis yet.').replace(/\n/g,'<br>')}</p>
+      ${latest.created_at?`<div style="font-size:11px;color:#888;margin-top:8px">Generated: ${latest.created_at}</div>`:''}
+    </div>
+    <button class="btn btn-teal" onclick="runAnalysis()" style="margin-bottom:16px">Run AI analysis now</button>
+    <div id="ai-result"></div>
+    <div class="card">
+      <div class="card-title">About AI insights</div>
+      <p style="font-size:13px;line-height:1.8;color:#444">
+        PlaybookOS uses Claude (Anthropic) to analyze your team's weekly activity, compare it against revenue targets, and generate concrete recommendations.<br><br>
+        <strong>What it analyzes:</strong> Revenue vs. target, team activity logs, GitHub commits and PRs, milestone status, hiring triggers.<br><br>
+        <strong>Auto-schedule:</strong> Full analysis runs every Monday at 9 AM and is emailed to the admin account.<br><br>
+        <strong>Trigger alerts:</strong> When revenue crosses $100K, $500K/month, or $1M/month thresholds, email triggers fire automatically with specific action items.
+      </p>
+    </div>
+  `;
+},
+
+// ── SETTINGS ──────────────────────────────────────────────────────────────────
+async settings() {
+  document.getElementById('content').innerHTML = `
+    <div class="card">
+      <div class="card-title">Deployment & configuration guide</div>
+      <div style="font-size:13px;line-height:2;color:#444">
+        <p style="margin-bottom:12px">PlaybookOS runs as a Node.js server. Here are your deployment options:</p>
+        <div style="background:#f5f5f5;border-radius:8px;padding:16px;margin-bottom:12px">
+          <strong>Option A — Local (your laptop/desktop)</strong><br>
+          Requires Node.js 18+. Access from your own browser only.
+          <pre style="background:#1a1a2e;color:#9FE1CB;padding:12px;border-radius:6px;margin-top:8px;font-size:12px;overflow-x:auto">cd playbookos
+npm install
+cp .env.example .env
+# Edit .env with your API keys
+node scripts/setup-db.js
+node server.js</pre>
+        </div>
+        <div style="background:#f5f5f5;border-radius:8px;padding:16px;margin-bottom:12px">
+          <strong>Option B — Railway (recommended for team access, free tier)</strong><br>
+          Deploy in 3 minutes. Your team accesses it from any browser.
+          <pre style="background:#1a1a2e;color:#9FE1CB;padding:12px;border-radius:6px;margin-top:8px;font-size:12px;overflow-x:auto">1. Push code to GitHub
+2. Go to railway.app → New Project → Deploy from GitHub
+3. Add environment variables from .env.example
+4. Set PORT=3000
+5. Railway gives you a URL like: https://playbookos.railway.app</pre>
+        </div>
+        <div style="background:#f5f5f5;border-radius:8px;padding:16px">
+          <strong>Option C — Your own VPS (DigitalOcean, Vultr, Linode)</strong><br>
+          $6/month droplet. Full control.
+          <pre style="background:#1a1a2e;color:#9FE1CB;padding:12px;border-radius:6px;margin-top:8px;font-size:12px;overflow-x:auto">apt install nodejs npm
+git clone your-repo
+npm install && node scripts/setup-db.js
+# Use PM2 to keep it running:
+npm install -g pm2
+pm2 start server.js --name playbookos
+pm2 startup</pre>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Environment variables checklist</div>
+      <table>
+        <tr><th>Variable</th><th>Purpose</th><th>Where to get it</th></tr>
+        <tr><td><code>ANTHROPIC_API_KEY</code></td><td>AI analysis (Claude)</td><td>console.anthropic.com</td></tr>
+        <tr><td><code>GITHUB_TOKEN</code></td><td>GitHub activity sync</td><td>github.com/settings/tokens</td></tr>
+        <tr><td><code>SMTP_HOST / SMTP_PASS</code></td><td>Email invites & alerts</td><td>Gmail App Password</td></tr>
+        <tr><td><code>JWT_SECRET</code></td><td>Login security</td><td>Generate: openssl rand -hex 32</td></tr>
+        <tr><td><code>ADMIN_EMAIL</code></td><td>Your admin login</td><td>naresh@abiozen.com</td></tr>
+        <tr><td><code>BASE_URL</code></td><td>Invite links in emails</td><td>Your deployed URL</td></tr>
+      </table>
+    </div>
+  `;
+}
+};
+
+// ── ACTIONS ───────────────────────────────────────────────────────────────────
+async function logActivity() {
+  const metric = document.getElementById('act-metric').value;
+  const value = parseFloat(document.getElementById('act-value').value);
+  const notes = document.getElementById('act-notes').value;
+  const log_date = document.getElementById('act-date').value;
+  if (!value || isNaN(value)) { document.getElementById('activity-msg').innerHTML = '<div class="error-msg">Enter a valid number</div>'; return; }
+  const res = await API('/activity', {method:'POST',body:JSON.stringify({log_date,metric,value,notes})});
+  if (res.success) {
+    document.getElementById('activity-msg').innerHTML = '<div class="success-msg">Saved!</div>';
+    document.getElementById('act-value').value = '';
+    document.getElementById('act-notes').value = '';
+    setTimeout(()=>{ document.getElementById('activity-msg').innerHTML=''; pages['my-activity'](); }, 1200);
+  }
+}
+
+async function addOrder() {
+  const order_date = document.getElementById('ord-date').value;
+  const amount = parseFloat(document.getElementById('ord-amount').value);
+  const buyer_type = document.getElementById('ord-buyer').value;
+  const product_category = document.getElementById('ord-cat').value;
+  const notes = document.getElementById('ord-notes').value;
+  if (!amount || isNaN(amount)) { document.getElementById('ord-msg').innerHTML = '<div class="error-msg">Enter a valid amount</div>'; return; }
+  const res = await API('/orders',{method:'POST',body:JSON.stringify({order_date,amount,buyer_type,product_category,notes})});
+  if (res.success) {
+    document.getElementById('ord-msg').innerHTML = '<div class="success-msg">Order added!</div>';
+    setTimeout(()=>pages.revenue(), 1200);
+  }
+}
+
+async function sendInvite() {
+  const email = document.getElementById('inv-email').value;
+  const role = document.getElementById('inv-role').value;
+  const github_username = document.getElementById('inv-gh').value || null;
+  document.getElementById('invite-msg').innerHTML = '<div style="color:#888;font-size:13px">Sending...</div>';
+  const res = await API('/users/invite',{method:'POST',body:JSON.stringify({email,role,github_username})});
+  if (res.success) {
+    document.getElementById('invite-msg').innerHTML = `<div class="success-msg">${res.message}</div>`;
+    setTimeout(()=>pages.team(), 2000);
+  } else {
+    document.getElementById('invite-msg').innerHTML = `<div class="error-msg">${res.error}</div>`;
+  }
+}
+
+function showInviteModal() {
+  const m = document.getElementById('invite-modal');
+  m.style.display = m.style.display === 'none' ? 'block' : 'none';
+}
+
+async function syncGH() {
+  document.getElementById('gh-msg').innerHTML = '<div style="color:#888">Syncing...</div>';
+  const res = await API('/github/sync',{method:'POST',body:JSON.stringify({date:today()})});
+  document.getElementById('gh-msg').innerHTML = `<div class="success-msg">Synced ${res.synced} developers for ${res.date}</div>`;
+  setTimeout(()=>pages.github(), 2000);
+}
+
+async function runAnalysis() {
+  document.getElementById('ai-result').innerHTML = '<div style="color:#888;padding:20px">Claude is analyzing your team data...</div>';
+  const res = await API('/ai/analyze',{method:'POST'});
+  document.getElementById('ai-result').innerHTML = `
+    <div class="ai-box">
+      <div class="ai-label">FRESH ANALYSIS — ${res.period||''} · Revenue: ${fmt(res.revenue||0)} of ${fmt(res.target||0)}</div>
+      <p>${(res.analysis||'').replace(/\n/g,'<br>')}</p>
+    </div>`;
+}
+
+async function updateMilestone(id, status) {
+  await API('/milestones/'+id,{method:'PUT',body:JSON.stringify({status})});
+}
+</script>
+</body>
+</html>
