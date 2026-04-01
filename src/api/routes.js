@@ -1,343 +1,264 @@
-// src/api/routes.js — all REST endpoints
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { getDb, signToken, authMiddleware, adminOnly } = require("../lib/core"); const { sendEmail, syncGitHubForUser,
-        analyzeTeamProgress, getRevenueSummary, getTarget, getUserActivities, runClaudeAnalysis } = require('../lib/core');
+const { signToken, authMiddleware, adminOnly, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
+const { query } = require('../lib/db');
+const { sendEmail } = require('../lib/mailer');
 
 const router = express.Router();
 
-// ── AUTH ──────────────────────────────────────────────────────────────────────
-router.post('/auth/login', (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
-  const db = getDb();
-  const user = db.prepare('SELECT * FROM users WHERE email=? AND is_active=1').get(email.toLowerCase().trim());
-  if (!user || !user.password_hash) return res.status(401).json({ error: 'Invalid credentials' });
-  if (!bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Invalid credentials' });
-  res.json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, github_username: user.github_username } });
+router.post('/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    const result = await query('SELECT * FROM users WHERE email=$1 AND is_active=1', [email.toLowerCase().trim()]);
+    const user = result.rows[0];
+    if (!user || !user.password_hash) return res.status(401).json({ error: 'Invalid credentials' });
+    if (!bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Invalid credentials' });
+    res.json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, github_username: user.github_username } });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/auth/accept-invite', (req, res) => {
-  const { token, password, name } = req.body;
-  if (!token || !password || !name) return res.status(400).json({ error: 'Token, name, and password required' });
-  const db = getDb();
-  const user = db.prepare('SELECT * FROM users WHERE invite_token=?').get(token);
-  if (!user) return res.status(400).json({ error: 'Invalid or expired invite token' });
-  const hash = bcrypt.hashSync(password, 10);
-  db.prepare('UPDATE users SET password_hash=?, name=?, invite_token=NULL, joined_at=datetime("now") WHERE id=?').run(hash, name, user.id);
-  const updated = db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
-  res.json({ token: signToken(updated), user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role } });
+router.post('/auth/accept-invite', async (req, res) => {
+  try {
+    const { token, password, name } = req.body;
+    if (!token || !password || !name) return res.status(400).json({ error: 'Token, name, and password required' });
+    const result = await query('SELECT * FROM users WHERE invite_token=$1', [token]);
+    const user = result.rows[0];
+    if (!user) return res.status(400).json({ error: 'Invalid or expired invite token' });
+    const hash = bcrypt.hashSync(password, 10);
+    await query('UPDATE users SET password_hash=$1, name=$2, invite_token=NULL, joined_at=$3 WHERE id=$4', [hash, name, new Date().toISOString(), user.id]);
+    const updated = (await query('SELECT * FROM users WHERE id=$1', [user.id])).rows[0];
+    res.json({ token: signToken(updated), user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role } });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/auth/me', authMiddleware, (req, res) => {
-  const db = getDb();
-  const user = db.prepare('SELECT id,name,email,role,github_username FROM users WHERE id=?').get(req.user.id);
-  res.json(user);
+router.get('/auth/me', authMiddleware, async (req, res) => {
+  try {
+    const result = await query('SELECT id,name,email,role,github_username FROM users WHERE id=$1', [req.user.id]);
+    res.json(result.rows[0]);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── USERS / TEAM ──────────────────────────────────────────────────────────────
-router.get('/users', authMiddleware, (req, res) => {
-  const db = getDb();
-  const users = db.prepare('SELECT id,name,email,role,github_username,joined_at,is_active FROM users ORDER BY role,name').all();
-  res.json(users);
+router.get('/users', authMiddleware, async (req, res) => {
+  try {
+    const result = await query('SELECT id,name,email,role,github_username,joined_at,is_active FROM users ORDER BY role,name');
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/users/invite', authMiddleware, adminOnly, async (req, res) => {
-  const { email, role, github_username } = req.body;
-  if (!email || !role) return res.status(400).json({ error: 'Email and role required' });
-  const db = getDb();
-  const existing = db.prepare('SELECT id FROM users WHERE email=?').get(email.toLowerCase());
-  if (existing) return res.status(400).json({ error: 'User already exists' });
-
-  const inviteToken = crypto.randomBytes(32).toString('hex');
-  const id = crypto.randomUUID();
-  db.prepare('INSERT INTO users (id,email,name,role,github_username,invite_token,invited_at) VALUES (?,?,?,?,?,?,datetime("now"))')
-    .run(id, email.toLowerCase(), email.split('@')[0], role, github_username || null, inviteToken);
-
-  const baseUrl = process.env.BASE_URL || `http://localhost:${process.env.PORT || 3000}`;
-  const inviteUrl = `${baseUrl}/#/accept-invite?token=${inviteToken}`;
-
-  await sendEmail({
-    to: email,
-    subject: `You've been invited to Abiozen PlaybookOS`,
-    triggerType: 'invite',
-    html: `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-        <div style="background:#1B3A6B;padding:24px;border-radius:8px 8px 0 0">
-          <h1 style="color:#fff;margin:0;font-size:22px">Abiozen PlaybookOS</h1>
-          <p style="color:#9FE1CB;margin:4px 0 0">Team Performance Platform</p>
-        </div>
-        <div style="padding:24px;border:1px solid #eee;border-radius:0 0 8px 8px">
-          <p style="font-size:16px">You've been invited to join Abiozen's PlaybookOS as <strong>${role}</strong>.</p>
-          <p>Click below to set your password and access your personal dashboard:</p>
-          <a href="${inviteUrl}" style="display:inline-block;background:#0D7377;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;margin:16px 0">Accept Invite & Set Password</a>
-          <p style="color:#666;font-size:13px">Or copy this link: ${inviteUrl}</p>
-          <hr style="border:none;border-top:1px solid #eee;margin:20px 0">
-          <p style="color:#888;font-size:12px">Abiozen LLC · 1333 Barclay Blvd, Buffalo Grove, IL 60089</p>
-        </div>
-      </div>
-    `
-  });
-
-  res.json({ success: true, message: `Invite sent to ${email}` });
+  try {
+    const { email, role, github_username } = req.body;
+    if (!email || !role) return res.status(400).json({ error: 'Email and role required' });
+    const existing = await query('SELECT id FROM users WHERE email=$1', [email.toLowerCase()]);
+    if (existing.rows[0]) return res.status(400).json({ error: 'User already exists' });
+    const inviteToken = crypto.randomBytes(32).toString('hex');
+    const id = crypto.randomUUID();
+    await query('INSERT INTO users (id,email,name,role,github_username,invite_token,invited_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+      [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, inviteToken, new Date().toISOString()]);
+    const baseUrl = process.env.BASE_URL || 'https://playbookos-production.up.railway.app';
+    const inviteUrl = `${baseUrl}/#/accept-invite?token=${inviteToken}`;
+    await sendEmail({ to: email, subject: `You've been invited to Abiozen PlaybookOS`, triggerType: 'invite',
+      html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#1B3A6B">Abiozen PlaybookOS</h2><p>You've been invited as <strong>${role}</strong>.</p><a href="${inviteUrl}" style="background:#0D7377;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;margin:16px 0">Accept Invite</a><p style="color:#666;font-size:13px">Or copy: ${inviteUrl}</p></div>` });
+    res.json({ success: true, message: `Invite sent to ${email}`, inviteUrl });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/users/:id', authMiddleware, (req, res) => {
-  const { id } = req.params;
-  if (req.user.id !== id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-  const { github_username, name } = req.body;
-  const db = getDb();
-  db.prepare('UPDATE users SET github_username=COALESCE(?,github_username), name=COALESCE(?,name) WHERE id=?')
-    .run(github_username || null, name || null, id);
-  res.json({ success: true });
+router.put('/users/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (req.user.id !== id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const { github_username, name } = req.body;
+    await query('UPDATE users SET github_username=COALESCE($1,github_username), name=COALESCE($2,name) WHERE id=$3', [github_username || null, name || null, id]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── ACTIVITY LOGS ─────────────────────────────────────────────────────────────
-router.post('/activity', authMiddleware, (req, res) => {
-  const { log_date, metric, value, notes } = req.body;
-  if (!log_date || !metric || value === undefined) return res.status(400).json({ error: 'log_date, metric, value required' });
-  const db = getDb();
-  // Upsert: replace existing manual entry for same user/date/metric
-  const existing = db.prepare(`SELECT id FROM activity_logs WHERE user_id=? AND log_date=? AND metric=? AND source='manual'`).get(req.user.id, log_date, metric);
-  if (existing) {
-    db.prepare(`UPDATE activity_logs SET value=?, notes=? WHERE id=?`).run(value, notes || null, existing.id);
-  } else {
-    db.prepare(`INSERT INTO activity_logs (id,user_id,log_date,metric,value,notes,source) VALUES (?,?,?,?,?,?,'manual')`)
-      .run(crypto.randomUUID(), req.user.id, log_date, metric, value, notes || null);
-  }
-  res.json({ success: true });
-});
-
-router.get('/activity/my', authMiddleware, (req, res) => {
-  const { from, to } = req.query;
-  const dateFrom = from || new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-  const dateTo = to || new Date().toISOString().slice(0, 10);
-  const activities = getUserActivities(req.user.id, dateFrom, dateTo);
-  res.json(activities);
-});
-
-router.get('/activity/team', authMiddleware, adminOnly, (req, res) => {
-  const { from, to, user_id } = req.query;
-  const dateFrom = from || new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-  const dateTo = to || new Date().toISOString().slice(0, 10);
-  const db = getDb();
-  const where = user_id ? 'AND a.user_id=?' : '';
-  const args = user_id ? [dateFrom, dateTo, user_id] : [dateFrom, dateTo];
-  const rows = db.prepare(`
-    SELECT a.*, u.name, u.role, u.email FROM activity_logs a
-    JOIN users u ON u.id=a.user_id
-    WHERE a.log_date BETWEEN ? AND ? ${where}
-    ORDER BY a.log_date DESC, u.role
-  `).all(...args);
-  res.json(rows);
-});
-
-// ── ORDERS / REVENUE ──────────────────────────────────────────────────────────
-router.post('/orders', authMiddleware, adminOnly, (req, res) => {
-  const { order_date, amount, buyer_type, product_category, notes } = req.body;
-  if (!order_date || !amount) return res.status(400).json({ error: 'order_date and amount required' });
-  const db = getDb();
-  const id = crypto.randomUUID();
-  db.prepare('INSERT INTO orders (id,order_date,amount,buyer_type,product_category,notes) VALUES (?,?,?,?,?,?)')
-    .run(id, order_date, amount, buyer_type || null, product_category || null, notes || null);
-  res.json({ success: true, id });
-});
-
-router.get('/orders', authMiddleware, (req, res) => {
-  const { from, to } = req.query;
-  const db = getDb();
-  let query = 'SELECT * FROM orders';
-  const args = [];
-  if (from && to) { query += ' WHERE order_date BETWEEN ? AND ?'; args.push(from, to); }
-  query += ' ORDER BY order_date DESC LIMIT 200';
-  res.json(db.prepare(query).all(...args));
-});
-
-// ── DASHBOARD DATA ────────────────────────────────────────────────────────────
-router.get('/dashboard/summary', authMiddleware, (req, res) => {
-  const db = getDb();
-  const today = new Date().toISOString().slice(0, 10);
-  const thisMonth = today.slice(0, 7);
-  const thisYear = today.slice(0, 4);
-
-  const monthRevenue = db.prepare(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE ?`).get(thisMonth + '%').v;
-  const yearRevenue = db.prepare(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE ?`).get(thisYear + '%').v;
-  const monthTarget = getTarget('monthly', thisMonth, 'revenue') || 0;
-  const annualTarget = getTarget('annual', thisYear, 'revenue') || 10000000;
-
-  const recentOrders = db.prepare(`SELECT * FROM orders ORDER BY order_date DESC LIMIT 5`).all();
-  const teamActivity = db.prepare(`
-    SELECT u.name, u.role, a.metric, SUM(a.value) as total
-    FROM activity_logs a JOIN users u ON u.id=a.user_id
-    WHERE a.log_date BETWEEN date('now','-7 days') AND date('now')
-    GROUP BY u.id, a.metric ORDER BY u.role
-  `).all();
-
-  const milestones = db.prepare(`SELECT * FROM milestones ORDER BY target_date`).all();
-  const githubStats = db.prepare(`
-    SELECT g.*, u.name FROM github_stats g
-    JOIN users u ON u.github_username=g.github_username
-    WHERE g.stat_date BETWEEN date('now','-7 days') AND date('now')
-    ORDER BY g.stat_date DESC
-  `).all();
-
-  // Pacing: if we stay on current run rate, will we hit $10M?
-  const dayOfYear = Math.ceil((new Date() - new Date(thisYear + '-01-01')) / 86400000);
-  const launchDay = Math.ceil((new Date() - new Date('2026-05-01')) / 86400000);
-  const activeDays = Math.max(1, launchDay);
-  const dailyRunRate = yearRevenue / activeDays;
-  const remainingDays = Math.ceil((new Date('2026-12-31') - new Date()) / 86400000);
-  const projectedTotal = yearRevenue + (dailyRunRate * remainingDays);
-
-  res.json({
-    revenue: { month: monthRevenue, year: yearRevenue, monthTarget, annualTarget, projectedTotal, dailyRunRate },
-    recentOrders,
-    teamActivity,
-    milestones,
-    githubStats,
-    onTrack: projectedTotal >= annualTarget
-  });
-});
-
-router.get('/dashboard/my', authMiddleware, (req, res) => {
-  const db = getDb();
-  const today = new Date().toISOString().slice(0, 10);
-  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
-
-  const myActivity = db.prepare(`
-    SELECT metric, SUM(value) as total, MAX(log_date) as last_logged
-    FROM activity_logs WHERE user_id=? AND log_date BETWEEN ? AND ?
-    GROUP BY metric
-  `).all(req.user.id, weekAgo, today);
-
-  const githubStats = db.prepare(`
-    SELECT * FROM github_stats WHERE github_username=(
-      SELECT github_username FROM users WHERE id=?
-    ) AND stat_date BETWEEN ? AND ? ORDER BY stat_date DESC
-  `).all(req.user.id, weekAgo, today);
-
-  const myTargets = db.prepare(`SELECT * FROM targets WHERE user_id=?`).all(req.user.id);
-
-  res.json({ activity: myActivity, github: githubStats, targets: myTargets });
-});
-
-// ── GITHUB SYNC ───────────────────────────────────────────────────────────────
-router.post('/github/sync', authMiddleware, async (req, res) => {
-  const db = getDb();
-  const { date } = req.body;
-  const syncDate = date || new Date().toISOString().slice(0, 10);
-
-  // If admin: sync all devs. Otherwise: sync self only.
-  let users;
-  if (req.user.role === 'admin') {
-    users = db.prepare(`SELECT * FROM users WHERE github_username IS NOT NULL AND is_active=1`).all();
-  } else {
-    users = db.prepare(`SELECT * FROM users WHERE id=? AND github_username IS NOT NULL`).all(req.user.id);
-  }
-
-  for (const u of users) {
-    await syncGitHubForUser(u, syncDate);
-  }
-  res.json({ success: true, synced: users.length, date: syncDate });
-});
-
-// ── MILESTONES ────────────────────────────────────────────────────────────────
-router.get('/milestones', authMiddleware, (req, res) => {
-  res.json(getDb().prepare('SELECT * FROM milestones ORDER BY target_date').all());
-});
-
-router.put('/milestones/:id', authMiddleware, adminOnly, (req, res) => {
-  const { status, actual_date } = req.body;
-  getDb().prepare('UPDATE milestones SET status=COALESCE(?,status), actual_date=COALESCE(?,actual_date) WHERE id=?')
-    .run(status || null, actual_date || null, req.params.id);
-  res.json({ success: true });
-});
-
-// ── AI ANALYSIS ───────────────────────────────────────────────────────────────
-router.post('/ai/analyze', authMiddleware, adminOnly, async (req, res) => {
-  const db = getDb();
-  const thisMonth = new Date().toISOString().slice(0, 7);
-  const monthRevenue = db.prepare(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE ?`).get(thisMonth + '%').v;
-  const monthTarget = getTarget('monthly', thisMonth, 'revenue') || 1200000;
-
-  const teamRows = db.prepare(`
-    SELECT u.name, u.role, a.metric, SUM(a.value) as total
-    FROM activity_logs a JOIN users u ON u.id=a.user_id
-    WHERE a.log_date BETWEEN date('now','-7 days') AND date('now')
-    GROUP BY u.id, a.metric ORDER BY u.role
-  `).all();
-
-  const teamText = teamRows.map(r => `${r.name} (${r.role}): ${r.metric} = ${r.total}`).join('\n') || 'No activity logged this week.';
-
-  const behind = [];
-  if (monthRevenue < monthTarget * 0.8) behind.push(`Revenue ${Math.round((monthRevenue / monthTarget) * 100)}% of monthly target`);
-
-  const analysis = await analyzeTeamProgress({
-    period: thisMonth,
-    revenue: monthRevenue,
-    revenueTarget: monthTarget,
-    teamActivity: teamText,
-    behindMetrics: behind.join(', ')
-  });
-
-  // Cache
-  db.prepare(`INSERT INTO ai_analyses (id,analysis_type,period_key,content) VALUES (?,?,?,?)`)
-    .run(crypto.randomUUID(), 'weekly_review', thisMonth, analysis);
-
-  res.json({ analysis, period: thisMonth, revenue: monthRevenue, target: monthTarget });
-});
-
-router.get('/ai/latest', authMiddleware, (req, res) => {
-  const row = getDb().prepare(`SELECT * FROM ai_analyses ORDER BY created_at DESC LIMIT 1`).get();
-  res.json(row || { content: 'No analysis yet. Click "Run AI Analysis" on the admin dashboard.' });
-});
-
-// ── TARGETS CRUD ──────────────────────────────────────────────────────────────
-router.get('/targets', authMiddleware, (req, res) => {
-  const db = getDb();
-  const rows = db.prepare(`SELECT * FROM targets ORDER BY period_type, period_key`).all();
-  res.json(rows);
-});
-
-router.post('/targets', authMiddleware, adminOnly, (req, res) => {
-  const { period_type, period_key, user_id, team, metric, target_value } = req.body;
-  if (!period_type || !period_key || !metric || target_value === undefined) return res.status(400).json({ error: 'Missing fields' });
-  const db = getDb();
-  const existing = db.prepare(`SELECT id FROM targets WHERE period_type=? AND period_key=? AND metric=? AND user_id IS ?`).get(period_type, period_key, metric, user_id || null);
-  if (existing) {
-    db.prepare(`UPDATE targets SET target_value=? WHERE id=?`).run(target_value, existing.id);
-  } else {
-    db.prepare(`INSERT INTO targets (id,period_type,period_key,user_id,team,metric,target_value) VALUES (?,?,?,?,?,?,?)`)
-      .run(crypto.randomUUID(), period_type, period_key, user_id || null, team || null, metric, target_value);
-  }
-  res.json({ success: true });
-});
-
-// ── EMAIL TRIGGERS ────────────────────────────────────────────────────────────
-router.post('/triggers/check', authMiddleware, adminOnly, async (req, res) => {
-  const db = getDb();
-  const yearRevenue = db.prepare(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE '2026%'`).get().v;
-  const triggered = [];
-
-  // Trigger: $100K
-  if (yearRevenue >= 100000) {
-    const acctMgrHire = db.prepare(`SELECT * FROM milestones WHERE name LIKE '%Account Manager%'`).get();
-    if (acctMgrHire && acctMgrHire.status === 'pending') {
-      db.prepare(`UPDATE milestones SET status='in_progress' WHERE id=?`).run(acctMgrHire.id);
-      const adminUser = db.prepare(`SELECT * FROM users WHERE role='admin' LIMIT 1`).get();
-      if (adminUser) {
-        await sendEmail({
-          to: adminUser.email, triggerType: 'milestone_trigger',
-          subject: '🎯 Trigger fired: $100K revenue reached — Hire Account Manager now',
-          html: `<div style="font-family:Arial;padding:24px"><h2 style="color:#1B3A6B">Milestone Trigger Fired</h2><p>Abiozen has reached <strong>$${yearRevenue.toLocaleString()}</strong> in revenue — the $100K trigger threshold.</p><h3>Action required:</h3><ul><li>Begin account manager hiring immediately (30-day timeline)</li><li>Submit Chase Bank Loan 1 application ($175K)</li><li>Double Hyderabad inventory for top 30 SKUs</li></ul></div>`
-        });
-      }
-      triggered.push('$100K milestone — Account Manager hire trigger fired');
+router.post('/activity', authMiddleware, async (req, res) => {
+  try {
+    const { log_date, metric, value, notes } = req.body;
+    if (!log_date || !metric || value === undefined) return res.status(400).json({ error: 'log_date, metric, value required' });
+    const existing = await query(`SELECT id FROM activity_logs WHERE user_id=$1 AND log_date=$2 AND metric=$3 AND source='manual'`, [req.user.id, log_date, metric]);
+    if (existing.rows[0]) {
+      await query('UPDATE activity_logs SET value=$1, notes=$2 WHERE id=$3', [value, notes || null, existing.rows[0].id]);
+    } else {
+      await query(`INSERT INTO activity_logs (id,user_id,log_date,metric,value,notes,source) VALUES ($1,$2,$3,$4,$5,$6,'manual')`,
+        [crypto.randomUUID(), req.user.id, log_date, metric, value, notes || null]);
     }
-  }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
-  res.json({ yearRevenue, triggered, checked: true });
+router.get('/activity/my', authMiddleware, async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const dateFrom = from || new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const dateTo = to || new Date().toISOString().slice(0, 10);
+    const result = await query('SELECT * FROM activity_logs WHERE user_id=$1 AND log_date BETWEEN $2 AND $3 ORDER BY log_date DESC', [req.user.id, dateFrom, dateTo]);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/activity/team', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { from, to, user_id } = req.query;
+    const dateFrom = from || new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const dateTo = to || new Date().toISOString().slice(0, 10);
+    let q = 'SELECT a.*, u.name, u.role, u.email FROM activity_logs a JOIN users u ON u.id=a.user_id WHERE a.log_date BETWEEN $1 AND $2';
+    const params = [dateFrom, dateTo];
+    if (user_id) { q += ' AND a.user_id=$3'; params.push(user_id); }
+    q += ' ORDER BY a.log_date DESC, u.role';
+    const result = await query(q, params);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/orders', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { order_date, amount, buyer_type, product_category, notes } = req.body;
+    if (!order_date || !amount) return res.status(400).json({ error: 'order_date and amount required' });
+    const id = crypto.randomUUID();
+    await query('INSERT INTO orders (id,order_date,amount,buyer_type,product_category,notes) VALUES ($1,$2,$3,$4,$5,$6)',
+      [id, order_date, amount, buyer_type || null, product_category || null, notes || null]);
+    res.json({ success: true, id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/orders', authMiddleware, async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    let q = 'SELECT * FROM orders';
+    const params = [];
+    if (from && to) { q += ' WHERE order_date BETWEEN $1 AND $2'; params.push(from, to); }
+    q += ' ORDER BY order_date DESC LIMIT 200';
+    const result = await query(q, params);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/dashboard/summary', authMiddleware, async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const thisMonth = today.slice(0, 7);
+    const thisYear = today.slice(0, 4);
+    const monthRev = (await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE $1`, [thisMonth + '%'])).rows[0].v;
+    const yearRev = (await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE $1`, [thisYear + '%'])).rows[0].v;
+    const monthTargetR = await query(`SELECT target_value FROM targets WHERE period_type='monthly' AND period_key=$1 AND metric='revenue'`, [thisMonth]);
+    const monthTarget = monthTargetR.rows[0]?.target_value || 0;
+    const annualTarget = 10000000;
+    const recentOrders = (await query('SELECT * FROM orders ORDER BY order_date DESC LIMIT 5')).rows;
+    const teamActivity = (await query(`SELECT u.name, u.role, a.metric, SUM(a.value) as total FROM activity_logs a JOIN users u ON u.id=a.user_id WHERE a.log_date >= NOW() - INTERVAL '7 days' GROUP BY u.id, u.name, u.role, a.metric ORDER BY u.role`)).rows;
+    const milestones = (await query('SELECT * FROM milestones ORDER BY target_date')).rows;
+    const launchDate = new Date('2026-05-01');
+    const now = new Date();
+    const activeDays = Math.max(1, Math.ceil((now - launchDate) / 86400000));
+    const remainingDays = Math.ceil((new Date('2026-12-31') - now) / 86400000);
+    const dailyRunRate = parseFloat(yearRev) / activeDays;
+    const projectedTotal = parseFloat(yearRev) + (dailyRunRate * remainingDays);
+    res.json({ revenue: { month: parseFloat(monthRev), year: parseFloat(yearRev), monthTarget, annualTarget, projectedTotal, dailyRunRate }, recentOrders, teamActivity, milestones, onTrack: projectedTotal >= annualTarget });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/dashboard/my', authMiddleware, async (req, res) => {
+  try {
+    const activity = (await query(`SELECT metric, SUM(value) as total, MAX(log_date) as last_logged FROM activity_logs WHERE user_id=$1 AND log_date >= NOW() - INTERVAL '7 days' GROUP BY metric`, [req.user.id])).rows;
+    const userR = await query('SELECT github_username FROM users WHERE id=$1', [req.user.id]);
+    const gh = userR.rows[0]?.github_username;
+    const github = gh ? (await query(`SELECT * FROM github_stats WHERE github_username=$1 AND stat_date >= NOW() - INTERVAL '7 days' ORDER BY stat_date DESC`, [gh])).rows : [];
+    const targets = (await query('SELECT * FROM targets WHERE user_id=$1', [req.user.id])).rows;
+    res.json({ activity, github, targets });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/github/sync', authMiddleware, async (req, res) => {
+  try {
+    const { date } = req.body;
+    const syncDate = date || new Date().toISOString().slice(0, 10);
+    let users;
+    if (req.user.role === 'admin') {
+      users = (await query(`SELECT * FROM users WHERE github_username IS NOT NULL AND is_active=1`)).rows;
+    } else {
+      users = (await query(`SELECT * FROM users WHERE id=$1 AND github_username IS NOT NULL`, [req.user.id])).rows;
+    }
+    for (const u of users) { await syncGitHubForUser(u, syncDate); }
+    res.json({ success: true, synced: users.length, date: syncDate });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/milestones', authMiddleware, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM milestones ORDER BY target_date');
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/milestones/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { status, actual_date } = req.body;
+    await query('UPDATE milestones SET status=COALESCE($1,status), actual_date=COALESCE($2,actual_date) WHERE id=$3', [status || null, actual_date || null, req.params.id]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/ai/analyze', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const thisMonth = new Date().toISOString().slice(0, 7);
+    const monthRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE $1`, [thisMonth + '%'])).rows[0].v);
+    const monthTarget = parseFloat((await query(`SELECT target_value FROM targets WHERE period_type='monthly' AND period_key=$1 AND metric='revenue'`, [thisMonth])).rows[0]?.target_value || 1200000);
+    const teamRows = (await query(`SELECT u.name, u.role, a.metric, SUM(a.value) as total FROM activity_logs a JOIN users u ON u.id=a.user_id WHERE a.log_date >= NOW() - INTERVAL '7 days' GROUP BY u.id, u.name, u.role, a.metric`)).rows;
+    const teamText = teamRows.map(r => `${r.name} (${r.role}): ${r.metric} = ${r.total}`).join('\n') || 'No activity logged this week.';
+    const behind = monthRev < monthTarget * 0.8 ? `Revenue ${Math.round((monthRev / monthTarget) * 100)}% of monthly target` : '';
+    const analysis = await analyzeTeamProgress({ period: thisMonth, revenue: monthRev, revenueTarget: monthTarget, teamActivity: teamText, behindMetrics: behind });
+    await query('INSERT INTO ai_analyses (id,analysis_type,period_key,content) VALUES ($1,$2,$3,$4)', [crypto.randomUUID(), 'weekly_review', thisMonth, analysis]);
+    res.json({ analysis, period: thisMonth, revenue: monthRev, target: monthTarget });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/ai/latest', authMiddleware, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM ai_analyses ORDER BY created_at DESC LIMIT 1');
+    res.json(result.rows[0] || { content: 'No analysis yet. Click "Run AI Analysis" on the admin dashboard.' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/targets', authMiddleware, async (req, res) => {
+  try {
+    const result = await query('SELECT * FROM targets ORDER BY period_type, period_key');
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/targets', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { period_type, period_key, user_id, team, metric, target_value } = req.body;
+    if (!period_type || !period_key || !metric || target_value === undefined) return res.status(400).json({ error: 'Missing fields' });
+    const existing = await query(`SELECT id FROM targets WHERE period_type=$1 AND period_key=$2 AND metric=$3 AND user_id IS NOT DISTINCT FROM $4`, [period_type, period_key, metric, user_id || null]);
+    if (existing.rows[0]) {
+      await query('UPDATE targets SET target_value=$1 WHERE id=$2', [target_value, existing.rows[0].id]);
+    } else {
+      await query('INSERT INTO targets (id,period_type,period_key,user_id,team,metric,target_value) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [crypto.randomUUID(), period_type, period_key, user_id || null, team || null, metric, target_value]);
+    }
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/triggers/check', async (req, res) => {
+  try {
+    const yearRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE '2026%'`)).rows[0].v);
+    const triggered = [];
+    if (yearRev >= 100000) {
+      const ms = (await query(`SELECT * FROM milestones WHERE name LIKE '%Account Manager%'`)).rows[0];
+      if (ms && ms.status === 'pending') {
+        await query(`UPDATE milestones SET status='in_progress' WHERE id=$1`, [ms.id]);
+        const admin = (await query(`SELECT * FROM users WHERE role='admin' LIMIT 1`)).rows[0];
+        if (admin) await sendEmail({ to: admin.email, triggerType: 'milestone_trigger', subject: 'Trigger: $100K revenue — Hire Account Manager now', html: `<div style="font-family:Arial;padding:24px"><h2>Milestone Trigger</h2><p>Revenue: $${yearRev.toLocaleString()}</p><p>Action: Begin account manager hiring immediately.</p></div>` });
+        triggered.push('$100K milestone triggered');
+      }
+    }
+    res.json({ yearRev, triggered, checked: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;
