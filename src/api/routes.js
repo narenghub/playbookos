@@ -148,7 +148,7 @@ router.get('/dashboard/summary', authMiddleware, async (req, res) => {
     const monthTarget = monthTargetR.rows[0]?.target_value || 0;
     const annualTarget = 10000000;
     const recentOrders = (await query('SELECT * FROM orders ORDER BY order_date DESC LIMIT 5')).rows;
-    const teamActivity = (await query(`SELECT u.name, u.role, a.metric, SUM(a.value) as total FROM activity_logs a JOIN users u ON u.id=a.user_id WHERE a.log_date >= NOW() - INTERVAL '7 days' GROUP BY u.id, u.name, u.role, a.metric ORDER BY u.role`)).rows;
+    const teamActivity = (await query(`SELECT u.name, u.role, a.metric, SUM(a.value) as total FROM activity_logs a JOIN users u ON u.id=a.user_id WHERE a.log_date >= (NOW() - INTERVAL '7 days')::date::text GROUP BY u.id, u.name, u.role, a.metric ORDER BY u.role`)).rows;
     const milestones = (await query('SELECT * FROM milestones ORDER BY target_date')).rows;
     const launchDate = new Date('2026-05-01');
     const now = new Date();
@@ -162,10 +162,10 @@ router.get('/dashboard/summary', authMiddleware, async (req, res) => {
 
 router.get('/dashboard/my', authMiddleware, async (req, res) => {
   try {
-    const activity = (await query(`SELECT metric, SUM(value) as total, MAX(log_date) as last_logged FROM activity_logs WHERE user_id=$1 AND log_date >= NOW() - INTERVAL '7 days' GROUP BY metric`, [req.user.id])).rows;
+    const activity = (await query(`SELECT metric, SUM(value) as total, MAX(log_date) as last_logged FROM activity_logs WHERE user_id=$1 AND log_date >= (NOW() - INTERVAL '7 days')::date::text GROUP BY metric`, [req.user.id])).rows;
     const userR = await query('SELECT github_username FROM users WHERE id=$1', [req.user.id]);
     const gh = userR.rows[0]?.github_username;
-    const github = gh ? (await query(`SELECT * FROM github_stats WHERE github_username=$1 AND stat_date >= NOW() - INTERVAL '7 days' ORDER BY stat_date DESC`, [gh])).rows : [];
+    const github = gh ? (await query(`SELECT * FROM github_stats WHERE github_username=$1 AND stat_date >= (NOW() - INTERVAL '7 days')::date::text ORDER BY stat_date DESC`, [gh])).rows : [];
     const targets = (await query('SELECT * FROM targets WHERE user_id=$1', [req.user.id])).rows;
     res.json({ activity, github, targets });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -206,7 +206,7 @@ router.post('/ai/analyze', authMiddleware, adminOnly, async (req, res) => {
     const thisMonth = new Date().toISOString().slice(0, 7);
     const monthRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date::text LIKE $1`, [thisMonth + '%'])).rows[0].v);
     const monthTarget = parseFloat((await query(`SELECT target_value FROM targets WHERE period_type='monthly' AND period_key=$1 AND metric='revenue'`, [thisMonth])).rows[0]?.target_value || 1200000);
-    const teamRows = (await query(`SELECT u.name, u.role, a.metric, SUM(a.value) as total FROM activity_logs a JOIN users u ON u.id=a.user_id WHERE a.log_date >= NOW() - INTERVAL '7 days' GROUP BY u.id, u.name, u.role, a.metric`)).rows;
+    const teamRows = (await query(`SELECT u.name, u.role, a.metric, SUM(a.value) as total FROM activity_logs a JOIN users u ON u.id=a.user_id WHERE a.log_date >= (NOW() - INTERVAL '7 days')::date::text GROUP BY u.id, u.name, u.role, a.metric`)).rows;
     const teamText = teamRows.map(r => `${r.name} (${r.role}): ${r.metric} = ${r.total}`).join('\n') || 'No activity logged this week.';
     const behind = monthRev < monthTarget * 0.8 ? `Revenue ${Math.round((monthRev / monthTarget) * 100)}% of monthly target` : '';
     const analysis = await analyzeTeamProgress({ period: thisMonth, revenue: monthRev, revenueTarget: monthTarget, teamActivity: teamText, behindMetrics: behind });
