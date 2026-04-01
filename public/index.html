@@ -219,7 +219,7 @@ function logout() {
 function showApp() {
   document.getElementById('app').style.display = 'flex';
   buildNav();
-  document.getElementById('user-info-box').innerHTML = `<div>${currentUser.name}</div><div style="color:rgba(255,255,255,.5);font-size:11px">${currentUser.role}</div>`;
+  document.getElementById("user-info-box").innerHTML = "<div>" + (currentUser.name||"Admin") + "</div><div style=\"color:rgba(255,255,255,.5);font-size:11px\">" + (currentUser.role||"") + "</div>";
   navigate('dashboard');
 }
 
