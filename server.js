@@ -1,5 +1,6 @@
 // server.js — PlaybookOS main server
 require('dotenv').config();
+try { require('./scripts/setup-db'); } catch(e) { console.log('DB init skipped:', e.message); }
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
