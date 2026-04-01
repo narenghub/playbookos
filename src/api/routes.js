@@ -336,3 +336,10 @@ router.get('/integrations', authMiddleware, async (req, res) => {
     res.json(result.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+router.delete('/milestones/duplicates', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    await query(`DELETE FROM milestones WHERE id NOT IN (SELECT MIN(id) FROM milestones GROUP BY name)`);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
