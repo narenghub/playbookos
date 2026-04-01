@@ -958,3 +958,28 @@ p2observer.observe(document.body, {childList:true, subtree:true});
 <div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:16px">
 <div style="font-size:14px;font-weight:700;color:#e2e8f0;margin-bottom:14px">Integration status board</div>
 <div id="integrations-list"></div></div></div>
+<script>
+// Phase 2 — wire pages into navigate system
+Object.assign(pages, {
+  'decision-engine': function() {
+    document.getElementById('page-title').textContent = 'AI Decision Engine';
+    const el = document.getElementById('section-decision-engine');
+    if (el) { document.getElementById('content').innerHTML = ''; el.style.display='block'; document.getElementById('content').appendChild(el); loadDecisionRules(); }
+  },
+  'sku-economics': function() {
+    document.getElementById('page-title').textContent = 'SKU Economics';
+    const el = document.getElementById('section-sku-economics');
+    if (el) { document.getElementById('content').innerHTML = ''; el.style.display='block'; document.getElementById('content').appendChild(el); loadSKUs(); }
+  },
+  'execution-graph': function() {
+    document.getElementById('page-title').textContent = 'Execution Graph';
+    const el = document.getElementById('section-execution-graph');
+    if (el) { document.getElementById('content').innerHTML = ''; el.style.display='block'; document.getElementById('content').appendChild(el); loadExecutionSteps(); }
+  },
+  'data-pipeline': function() {
+    document.getElementById('page-title').textContent = 'Data Pipeline';
+    const el = document.getElementById('section-data-pipeline');
+    if (el) { document.getElementById('content').innerHTML = ''; el.style.display='block'; document.getElementById('content').appendChild(el); loadIntegrations(); }
+  }
+});
+</script>
