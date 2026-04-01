@@ -1,5 +1,5 @@
 // src/lib/core.js — shared utilities
-const Database = require('better-sqlite3');
+
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
@@ -7,7 +7,8 @@ const crypto = require('crypto');
 const path = require('path');
 
 // ── Database ─────────────────────────────────────────────────────────────────
-let _db;
+
+// getDb removed - using PostgreSQL
 function getDb() {
   if (!_db) {
     _db = new Database(path.join(__dirname, '../../playbookos.db'));
