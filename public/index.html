@@ -880,3 +880,81 @@ const p2observer = new MutationObserver(() => {
 });
 p2observer.observe(document.body, {childList:true, subtree:true});
 </script>
+<div id="section-decision-engine" class="section" style="display:none">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+<div><h2 style="color:#e2e8f0;font-size:20px;font-weight:700;margin:0">Layer 4 — AI Decision Engine</h2>
+<div style="color:#8899aa;font-size:13px;margin-top:4px">Claude monitors all metrics and fires actions automatically</div></div>
+<button id="eval-rules-btn" onclick="evaluateRules()" style="background:#0D7377;color:#fff;border:none;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">Run AI decision engine</button>
+</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Active rules</div><div style="font-size:28px;font-weight:700;color:#1D9E75">8</div><div style="font-size:11px;color:#4a5568">Monitoring 24/7</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Rules fired today</div><div style="font-size:28px;font-weight:700;color:#EF9F27">0</div><div style="font-size:11px;color:#4a5568">Pre-launch status</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Next trigger</div><div style="font-size:18px;font-weight:700;color:#378ADD">$100K</div><div style="font-size:11px;color:#4a5568">Hire Account Manager</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Auto-schedule</div><div style="font-size:18px;font-weight:700;color:#9FE1CB">8 AM</div><div style="font-size:11px;color:#4a5568">Daily evaluation</div></div>
+</div>
+<div id="eval-result"></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:16px;margin-bottom:16px">
+<div style="font-size:14px;font-weight:700;color:#e2e8f0;margin-bottom:14px">Decision rules — firing automatically when triggered</div>
+<table style="width:100%;border-collapse:collapse;font-size:12px">
+<tr style="background:#0f1a2e"><th style="padding:10px;text-align:left;color:#8899aa;font-size:11px">Rule name</th><th style="padding:10px;text-align:left;color:#8899aa;font-size:11px">Condition</th><th style="padding:10px;text-align:left;color:#8899aa;font-size:11px">Action</th><th style="padding:10px;text-align:left;color:#8899aa;font-size:11px">Last fired</th><th style="padding:10px;text-align:left;color:#8899aa;font-size:11px">Status</th></tr>
+<tbody id="decision-rules-table"></tbody></table></div>
+<div style="background:#0a1628;border:1px solid #0D7377;border-radius:8px;padding:16px">
+<div style="font-size:11px;font-weight:700;color:#0D7377;letter-spacing:.8px;text-transform:uppercase;margin-bottom:10px">Claude — how the decision engine works</div>
+<div style="font-size:13px;color:#9FE1CB;line-height:1.8">Every morning at 8 AM, Claude evaluates all 8 rules against live data. If revenue drops 20% below target, Claude immediately sends an action email. Hire triggers fire once and are permanently logged. No human needs to check dashboards — Claude does it and acts.</div>
+</div></div>
+
+<div id="section-sku-economics" class="section" style="display:none">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+<div><h2 style="color:#e2e8f0;font-size:20px;font-weight:700;margin:0">SKU economics</h2>
+<div style="color:#8899aa;font-size:13px;margin-top:4px">Cost · margin · demand · lead time per molecule</div></div>
+</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Active SKUs</div><div style="font-size:28px;font-weight:700;color:#e2e8f0" id="sku-total-count">0</div><div style="font-size:11px;color:#4a5568">Target: 500 at launch</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Avg gross margin</div><div style="font-size:28px;font-weight:700;color:#1D9E75">—</div><div style="font-size:11px;color:#4a5568">Target: 65%+</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">GLP-1 molecules</div><div style="font-size:28px;font-weight:700;color:#0D7377">0</div><div style="font-size:11px;color:#4a5568">Semaglutide, Tirzepatide</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Top SKU revenue</div><div style="font-size:28px;font-weight:700;color:#EF9F27">$0</div><div style="font-size:11px;color:#4a5568">No orders yet</div></div>
+</div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:16px;margin-bottom:16px">
+<div style="font-size:14px;font-weight:700;color:#e2e8f0;margin-bottom:14px">Add new SKU</div>
+<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:10px;align-items:end">
+<div><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Molecule name</div><input id="sku-name" placeholder="e.g. Semaglutide 99%" style="width:100%;background:#0f1a2e;border:1px solid #1e2d45;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-size:13px"></div>
+<div><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Cost price ($)</div><input id="sku-cost" type="number" placeholder="0.00" style="width:100%;background:#0f1a2e;border:1px solid #1e2d45;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-size:13px"></div>
+<div><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Sale price ($)</div><input id="sku-price" type="number" placeholder="0.00" style="width:100%;background:#0f1a2e;border:1px solid #1e2d45;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-size:13px"></div>
+<div><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Supplier</div><input id="sku-supplier" placeholder="Supplier name" style="width:100%;background:#0f1a2e;border:1px solid #1e2d45;border-radius:6px;padding:8px 10px;color:#e2e8f0;font-size:13px"></div>
+<div style="display:flex;flex-direction:column;gap:6px"><label style="font-size:11px;color:#8899aa;display:flex;align-items:center;gap:4px"><input id="sku-gmp" type="checkbox"> GMP</label>
+<button onclick="addSKU()" style="background:#0D7377;color:#fff;border:none;padding:9px 16px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer">+ Add</button></div>
+</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:16px">
+<div style="font-size:14px;font-weight:700;color:#e2e8f0;margin-bottom:14px">SKU catalog</div>
+<div id="skus-list"><div style="padding:20px;text-align:center;color:#4a5568;font-size:12px">No SKUs yet. Add your first product above.</div></div>
+</div></div>
+
+<div id="section-execution-graph" class="section" style="display:none">
+<div style="margin-bottom:20px"><h2 style="color:#e2e8f0;font-size:20px;font-weight:700;margin:0">Layer 2 — Execution graph</h2>
+<div style="color:#8899aa;font-size:13px;margin-top:4px">Target → SKU → Sales → Procurement → QC → Delivery → Invoice</div></div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Overall completion</div><div style="font-size:28px;font-weight:700;color:#EF9F27">47%</div><div style="font-size:11px;color:#4a5568">4 of 7 steps started</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Steps complete</div><div style="font-size:28px;font-weight:700;color:#1D9E75">1</div><div style="font-size:11px;color:#4a5568">Target set</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">At risk</div><div style="font-size:28px;font-weight:700;color:#E24B4A">1</div><div style="font-size:11px;color:#4a5568">India fulfillment</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Go-live date</div><div style="font-size:18px;font-weight:700;color:#378ADD">May 31</div><div style="font-size:11px;color:#4a5568">30 days away</div></div>
+</div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:16px;margin-bottom:16px">
+<div style="font-size:14px;font-weight:700;color:#e2e8f0;margin-bottom:16px">Execution chain — live progress</div>
+<div id="execution-steps-list"></div></div>
+<div style="background:#0a1628;border:1px solid #0D7377;border-radius:8px;padding:16px">
+<div style="font-size:11px;font-weight:700;color:#0D7377;letter-spacing:.8px;text-transform:uppercase;margin-bottom:10px">Claude — execution risk</div>
+<div style="font-size:13px;color:#9FE1CB;line-height:1.8">India fulfillment is your critical path blocker. Without a confirmed chemist in Hyderabad by May 15, Release 1 cannot ship. Escalate today.</div>
+</div></div>
+
+<div id="section-data-pipeline" class="section" style="display:none">
+<div style="margin-bottom:20px"><h2 style="color:#e2e8f0;font-size:20px;font-weight:700;margin:0">Layer 5 — Data pipeline</h2>
+<div style="color:#8899aa;font-size:13px;margin-top:4px">All integrations — connected vs planned</div></div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Connected</div><div style="font-size:28px;font-weight:700;color:#1D9E75">5</div><div style="font-size:11px;color:#4a5568">Live and syncing</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Phase 2 — June</div><div style="font-size:28px;font-weight:700;color:#EF9F27">5</div><div style="font-size:11px;color:#4a5568">Apollo, HubSpot, GSC</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Phase 3 — 2027</div><div style="font-size:28px;font-weight:700;color:#378ADD">5</div><div style="font-size:11px;color:#4a5568">FDA, DMF, ZoomInfo</div></div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px"><div style="font-size:11px;color:#8899aa;margin-bottom:4px">Data freshness</div><div style="font-size:18px;font-weight:700;color:#9FE1CB">Real-time</div><div style="font-size:11px;color:#4a5568">PostgreSQL live</div></div>
+</div>
+<div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:16px">
+<div style="font-size:14px;font-weight:700;color:#e2e8f0;margin-bottom:14px">Integration status board</div>
+<div id="integrations-list"></div></div></div>
