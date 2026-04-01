@@ -260,7 +260,7 @@ const pages = {
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
 async dashboard() {
   const data = await API('/dashboard/summary');
-  const rev = data.revenue;
+  const rev = data.revenue || {month:0,year:0,monthTarget:0,annualTarget:10000000,projectedTotal:0,dailyRunRate:0};
   const p = pct(rev.month, rev.monthTarget);
   const yp = pct(rev.year, rev.annualTarget);
   const pColor = p >= 80 ? 'green' : p >= 50 ? 'amber' : 'red';
