@@ -142,8 +142,8 @@ router.get('/dashboard/summary', authMiddleware, async (req, res) => {
     const today = new Date().toISOString().slice(0, 10);
     const thisMonth = today.slice(0, 7);
     const thisYear = today.slice(0, 4);
-    const monthRev = (await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE $1`, [thisMonth + '%'])).rows[0].v;
-    const yearRev = (await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE $1`, [thisYear + '%'])).rows[0].v;
+    const monthRev = (await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date::text LIKE $1`, [thisMonth + '%'])).rows[0].v;
+    const yearRev = (await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date::text LIKE $1`, [thisYear + '%'])).rows[0].v;
     const monthTargetR = await query(`SELECT target_value FROM targets WHERE period_type='monthly' AND period_key=$1 AND metric='revenue'`, [thisMonth]);
     const monthTarget = monthTargetR.rows[0]?.target_value || 0;
     const annualTarget = 10000000;
@@ -204,7 +204,7 @@ router.put('/milestones/:id', authMiddleware, adminOnly, async (req, res) => {
 router.post('/ai/analyze', authMiddleware, adminOnly, async (req, res) => {
   try {
     const thisMonth = new Date().toISOString().slice(0, 7);
-    const monthRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE $1`, [thisMonth + '%'])).rows[0].v);
+    const monthRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date::text LIKE $1`, [thisMonth + '%'])).rows[0].v);
     const monthTarget = parseFloat((await query(`SELECT target_value FROM targets WHERE period_type='monthly' AND period_key=$1 AND metric='revenue'`, [thisMonth])).rows[0]?.target_value || 1200000);
     const teamRows = (await query(`SELECT u.name, u.role, a.metric, SUM(a.value) as total FROM activity_logs a JOIN users u ON u.id=a.user_id WHERE a.log_date >= NOW() - INTERVAL '7 days' GROUP BY u.id, u.name, u.role, a.metric`)).rows;
     const teamText = teamRows.map(r => `${r.name} (${r.role}): ${r.metric} = ${r.total}`).join('\n') || 'No activity logged this week.';
