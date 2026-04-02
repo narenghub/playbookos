@@ -234,7 +234,7 @@ function buildNav() {
     {id:'github',label:'GitHub Stats',roles:['admin','dev']},
     {id:'milestones',label:'Milestones',roles:['admin','dev','procurement','sales','marketing','qc']},
     {id:'ai-insights',label:'AI Insights',roles:['admin']},
-    {id:'market-intelligence',label:'Market Intelligence',roles:['admin']},{id:'apollo-outreach',label:'Apollo Outreach',roles:['admin']},{id:'s2-sequence',label:'S2 · Research Lab',roles:['admin']},{id:'s3-sequence',label:'S3 · Generic Mfg',roles:['admin']},{id:'s4-sequence',label:'S4 · University',roles:['admin']},{id:'decision-engine',label:'AI Decision Engine',roles:['admin']},{id:'sku-economics',label:'SKU Economics',roles:['admin']},{id:'execution-graph',label:'Execution Graph',roles:['admin']},{id:'data-pipeline',label:'Data Pipeline',roles:['admin']},{id:'settings',label:'Settings',roles:['admin']},
+    {id:'market-intelligence',label:'Market Intelligence',roles:['admin']},{id:'apollo-outreach',label:'Apollo Outreach',roles:['admin']},{id:'decision-engine',label:'AI Decision Engine',roles:['admin']},{id:'sku-economics',label:'SKU Economics',roles:['admin']},{id:'execution-graph',label:'Execution Graph',roles:['admin']},{id:'data-pipeline',label:'Data Pipeline',roles:['admin']},{id:'settings',label:'Settings',roles:['admin']},
   ].filter(l => l.roles.includes(currentUser.role));
 
   document.getElementById('nav-links').innerHTML = links.map(l =>
@@ -1242,62 +1242,120 @@ if(typeof pages !== 'undefined') {
 </div>
 </div>
 <script>
+const localSequences = [
+  {id:'s1',name:'S1 · Compounding Pharmacy',color:'#1D9E75',priority:'1',contacts:465,segment:'Compounding Pharmacy · GLP-1 Priority'},
+  {id:'s2',name:'S2 · Research Lab / Biotech',color:'#378ADD',priority:'2',contacts:500,segment:'Research Lab · Biotech · Life Sciences'},
+  {id:'s3',name:'S3 · Generic Manufacturer',color:'#EF9F27',priority:'3',contacts:500,segment:'Generic Manufacturer · API Sourcing'},
+  {id:'s4',name:'S4 · University / Research Institute',color:'#9F7AEA',priority:'4',contacts:500,segment:'University · Academic Research'}
+];
+
 async function loadApolloStats() {
   const el = document.getElementById('apollo-sequence-stats');
   if (!el) return;
-  el.innerHTML = '<div style="color:#718096;font-size:13px;padding:20px">Loading Apollo sequences...</div>';
+  el.innerHTML = '<div style="color:#8899aa;font-size:13px;padding:20px;text-align:center">Connecting to Apollo...</div>';
+  let apolloStats = [];
   try {
     const r = await fetch('/api/apollo/stats', {headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token')}});
     const data = await r.json();
-    if (data.error) { el.innerHTML = `<div style="color:#e53e3e;font-size:13px;padding:20px">${data.error}</div>`; return; }
-    const stats = data.stats || [];
-    const segmentColors = {'S1':'#1D9E75','S2':'#378ADD','S3':'#EF9F27','S4':'#9F7AEA'};
-    el.innerHTML = `
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
-        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center">
-          <div style="font-size:24px;font-weight:700;color:#1B3A6B">${stats.length}</div>
-          <div style="font-size:11px;color:#718096">Active sequences</div>
-        </div>
-        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center">
-          <div style="font-size:24px;font-weight:700;color:#1D9E75">${data.total_contacts||0}</div>
-          <div style="font-size:11px;color:#718096">Total contacts</div>
-        </div>
-        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center">
-          <div style="font-size:24px;font-weight:700;color:#0D7377">${data.total_sent||0}</div>
-          <div style="font-size:11px;color:#718096">Emails sent</div>
-        </div>
-        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center">
-          <div style="font-size:24px;font-weight:700;color:#EF9F27">May 31</div>
-          <div style="font-size:11px;color:#718096">Go-live date</div>
-        </div>
+    apolloStats = data.stats || [];
+  } catch(e) {}
+
+  const totalContacts = localSequences.reduce((a,b)=>a+b.contacts,0);
+  const totalSent = apolloStats.reduce((a,b)=>a+b.emails_sent,0);
+  const totalReplies = apolloStats.reduce((a,b)=>a+b.replies,0);
+  const activeCount = apolloStats.filter(s=>s.status==='active').length || 0;
+
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:20px">
+      <div style="background:#0f1a2e;border:1px solid #1e2d45;border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:#1D9E75">${activeCount}</div>
+        <div style="font-size:11px;color:#8899aa;margin-top:2px">Active sequences</div>
       </div>
-      <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <tr style="background:#1B3A6B;color:#fff">
-          <th style="padding:10px;text-align:left">Sequence</th>
-          <th style="padding:10px;text-align:center">Status</th>
-          <th style="padding:10px;text-align:center">Contacts</th>
-          <th style="padding:10px;text-align:center">Sent</th>
-          <th style="padding:10px;text-align:center">Opens</th>
-          <th style="padding:10px;text-align:center">Replies</th>
-          <th style="padding:10px;text-align:center">Open rate</th>
-          <th style="padding:10px;text-align:center">Reply rate</th>
-        </tr>
-        ${stats.map((s,i) => `<tr style="background:${i%2===0?'#f8fafc':'#fff'};border-bottom:1px solid #e2e8f0">
-          <td style="padding:10px;font-weight:600;color:#1B3A6B">${s.name}</td>
-          <td style="padding:10px;text-align:center"><span style="background:${s.status==='active'?'#dcfce7':'#fef3c7'};color:${s.status==='active'?'#166534':'#92400e'};padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700">${s.status||'draft'}</span></td>
-          <td style="padding:10px;text-align:center;font-weight:700">${s.contacts}</td>
-          <td style="padding:10px;text-align:center">${s.emails_sent}</td>
-          <td style="padding:10px;text-align:center">${s.opens}</td>
-          <td style="padding:10px;text-align:center;color:#1D9E75;font-weight:700">${s.replies}</td>
-          <td style="padding:10px;text-align:center">${s.open_rate}%</td>
-          <td style="padding:10px;text-align:center;font-weight:700;color:${s.reply_rate>=5?'#1D9E75':s.reply_rate>=2?'#EF9F27':'#718096'}">${s.reply_rate}%</td>
-        </tr>`).join('')}
-        ${stats.length===0?'<tr><td colspan="8" style="padding:20px;text-align:center;color:#a0aec0">No sequences found. Build sequences in Apollo then refresh.</td></tr>':''}
-      </table>
-      <div style="margin-top:12px;text-align:right">
-        <button onclick="loadApolloStats()" style="background:#1B3A6B;color:#fff;border:none;padding:8px 16px;border-radius:6px;font-size:12px;cursor:pointer">Refresh from Apollo</button>
-      </div>`;
-  } catch(e) { el.innerHTML = `<div style="color:#e53e3e;padding:20px;font-size:13px">Error: ${e.message}</div>`; }
+      <div style="background:#0f1a2e;border:1px solid #1e2d45;border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:#e2e8f0">${totalContacts.toLocaleString()}</div>
+        <div style="font-size:11px;color:#8899aa;margin-top:2px">Total contacts</div>
+      </div>
+      <div style="background:#0f1a2e;border:1px solid #1e2d45;border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:#0D7377">${totalSent.toLocaleString()}</div>
+        <div style="font-size:11px;color:#8899aa;margin-top:2px">Emails sent</div>
+      </div>
+      <div style="background:#0f1a2e;border:1px solid #1e2d45;border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:22px;font-weight:700;color:#EF9F27">${totalReplies}</div>
+        <div style="font-size:11px;color:#8899aa;margin-top:2px">Total replies</div>
+      </div>
+      <div style="background:#0f1a2e;border:1px solid #1e2d45;border-radius:8px;padding:12px;text-align:center">
+        <div style="font-size:18px;font-weight:700;color:#9FE1CB">May 31</div>
+        <div style="font-size:11px;color:#8899aa;margin-top:2px">Go-live date</div>
+      </div>
+    </div>
+
+    ${localSequences.map(seq => {
+      const live = apolloStats.find(s=>s.name && s.name.toLowerCase().includes(seq.id)) || {};
+      const sent = live.emails_sent||0;
+      const opens = live.opens||0;
+      const replies = live.replies||0;
+      const openRate = sent>0?Math.round((opens/sent)*100):0;
+      const replyRate = sent>0?Math.round((replies/sent)*100):0;
+      const status = live.status||'draft';
+      return `
+        <div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;margin-bottom:12px;overflow:hidden">
+          <div style="background:#0f1a2e;padding:12px 16px;border-bottom:1px solid #1e2d45;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <div style="width:4px;height:36px;background:${seq.color};border-radius:2px"></div>
+              <div>
+                <div style="font-size:14px;font-weight:700;color:#e2e8f0">${seq.name}</div>
+                <div style="font-size:11px;color:#8899aa;margin-top:1px">${seq.segment}</div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="background:${status==='active'?'#064e3b':'#1e2d45'};color:${status==='active'?'#6ee7b7':'#8899aa'};padding:3px 12px;border-radius:10px;font-size:11px;font-weight:700;text-transform:uppercase">${status}</span>
+              <button onclick="loadApolloStats()" style="background:#0D7377;color:#fff;border:none;padding:5px 12px;border-radius:6px;font-size:11px;cursor:pointer;font-weight:600">Refresh</button>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:0">
+            ${[
+              ['Contacts',seq.contacts,'#e2e8f0'],
+              ['Sent',sent,'#e2e8f0'],
+              ['Opens',opens,'#0D7377'],
+              ['Replies',replies,'#1D9E75'],
+              ['Open rate',openRate+'%',openRate>=30?'#1D9E75':openRate>=15?'#EF9F27':'#718096'],
+              ['Reply rate',replyRate+'%',replyRate>=5?'#1D9E75':replyRate>=2?'#EF9F27':'#718096'],
+              ['Go-live','May 31','#EF9F27']
+            ].map(([label,val,color])=>`
+              <div style="padding:12px 8px;text-align:center;border-right:1px solid #1e2d45">
+                <div style="font-size:16px;font-weight:700;color:${color}">${val}</div>
+                <div style="font-size:10px;color:#4a5568;margin-top:2px;text-transform:uppercase;letter-spacing:.3px">${label}</div>
+              </div>
+            `).join('')}
+          </div>
+          <div style="padding:10px 16px;border-top:1px solid #1e2d45;display:flex;align-items:center;justify-content:space-between">
+            <button onclick="toggleSeqEmails('${seq.id}')" style="background:transparent;color:#0D7377;border:1px solid #0D7377;padding:5px 14px;border-radius:6px;font-size:12px;cursor:pointer;font-weight:600">View email templates</button>
+            <a href="https://app.apollo.io/#/sequences" target="_blank" style="color:#EF9F27;font-size:12px;font-weight:600;text-decoration:none">Open in Apollo →</a>
+          </div>
+          <div id="seq-emails-${seq.id}" style="display:none;padding:14px;border-top:1px solid #1e2d45;background:#0a1628">
+            <div style="font-size:11px;color:#0D7377;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px">Email templates — click to expand</div>
+            ${(sequenceTemplates[seq.id]||{emails:[]}).emails.map((email,i)=>`
+              <div style="background:#1a2540;border:1px solid #1e2d45;border-radius:6px;margin-bottom:8px">
+                <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
+                  <span style="background:#1B3A6B;color:#fff;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">Day ${email.day}</span>
+                  <div style="flex:1;font-size:12px;font-weight:700;color:#e2e8f0">${email.subject}</div>
+                  <span style="font-size:14px;color:#8899aa">+</span>
+                </div>
+                <div style="display:none;padding:12px 14px;border-top:1px solid #1e2d45">
+                  <pre style="font-size:12px;color:#9FE1CB;line-height:1.7;white-space:pre-wrap;font-family:Georgia,serif;background:#0f1a2e;border:1px solid #0D7377;border-radius:6px;padding:12px;margin:0">${email.body}</pre>
+                  <button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)})" style="margin-top:8px;background:#0D7377;color:#fff;border:none;padding:5px 14px;border-radius:5px;font-size:11px;cursor:pointer;font-weight:700">Copy</button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>`;
+    }).join('')}`;
+}
+
+function toggleSeqEmails(seqId) {
+  const el = document.getElementById('seq-emails-'+seqId);
+  if(!el) return;
+  el.style.display = el.style.display==='none'?'block':'none';
 }
 
 if(typeof pages !== 'undefined') {
