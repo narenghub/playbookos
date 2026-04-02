@@ -1,20 +1,15 @@
-async function sendEmail({ to, subject, html, triggerType }) {
+async function sendEmail({ to, subject, html }) {
   const key = process.env.RESEND_API_KEY;
-  if (!key || key.includes('REPLACE')) {
-    console.log('Email skipped - no RESEND_API_KEY configured');
-    return false;
-  }
+  if (!key) { console.log('No RESEND_API_KEY'); return false; }
   try {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: process.env.RESEND_FROM || 'PlaybookOS <naren@abiozen.com>', to, subject, html })
+      body: JSON.stringify({ from: 'PlaybookOS <naren@abiozen.com>', to, subject, html })
     });
-    console.log('Email sent to:', to);
-    return true;
-  } catch(e) {
-    console.error('Email error:', e.message);
-    return false;
-  }
+    const data = await res.json();
+    console.log('Email result:', JSON.stringify(data));
+    return data.id ? true : false;
+  } catch(e) { console.error('Email error:', e.message); return false; }
 }
 module.exports = { sendEmail };
