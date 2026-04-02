@@ -8,7 +8,7 @@ async function sendEmail({ to, subject, html, triggerType }) {
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: 'PlaybookOS <onboarding@resend.dev>', to, subject, html })
+      body: JSON.stringify({ from: process.env.RESEND_FROM || 'PlaybookOS <naren@abiozen.com>', to, subject, html })
     });
     console.log('Email sent to:', to);
     return true;
