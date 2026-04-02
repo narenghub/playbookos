@@ -489,3 +489,38 @@ router.get('/apollo/stats', authMiddleware, adminOnly, async (req, res) => {
     res.json({ stats, total_contacts: stats.reduce((a,b) => a + b.contacts, 0), total_sent: stats.reduce((a,b) => a + b.emails_sent, 0) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+router.get('/sequences/templates', authMiddleware, async (req, res) => {
+  res.json({ sequences: [
+    {
+      id: 's2', name: 'S2 · Abiozen Research Lab Biotech', priority: 2,
+      segment: 'Research Lab / Biotech', target_contacts: 500,
+      apollo_filters: { titles: ['Lab Director','Director of Research','Principal Scientist','Research Procurement Manager','Head of Biology'], industry: ['Biotechnology','Life Sciences'], location: 'United States', company_size: '10-500' },
+      emails: [
+        { day: 1, subject: 'Research-grade APIs — 5,000+ molecules, 24hr quote', type: 'intro' },
+        { day: 6, subject: 'Sample COA available — which molecule does your lab need?', type: 'followup' },
+        { day: 15, subject: 'Re: Research molecule supply — final note', type: 'breakup' }
+      ]
+    },
+    {
+      id: 's3', name: 'S3 · Abiozen Generic Manufacturer API', priority: 3,
+      segment: 'Generic Manufacturer', target_contacts: 500,
+      apollo_filters: { titles: ['VP Procurement','API Sourcing Manager','Director Supply Chain','Head of Purchasing'], industry: ['Pharmaceutical Manufacturing','Generic Drugs'], location: 'United States', company_size: '50-5000' },
+      emails: [
+        { day: 1, subject: 'API supply partnership — Abiozen LLC · GMP certified', type: 'intro' },
+        { day: 7, subject: 'USDMF molecules available — 40+ APIs for {{company_name}}', type: 'followup' },
+        { day: 18, subject: 'Approved vendor dossier — Abiozen LLC', type: 'breakup' }
+      ]
+    },
+    {
+      id: 's4', name: 'S4 · Abiozen University Research Institute', priority: 4,
+      segment: 'University / Research Institute', target_contacts: 500,
+      apollo_filters: { titles: ['Principal Investigator','Research Director','Department Head','Lab Manager','Professor of Pharmacology'], industry: ['Higher Education','Academic Research'], keywords: 'pharmaceutical research', location: 'United States', company_size: '1000+' },
+      emails: [
+        { day: 1, subject: 'Research molecule supply — {{company_name}} · Academic pricing', type: 'intro' },
+        { day: 6, subject: 'Academic pricing sheet — peptide and GLP-1 research molecules', type: 'followup' },
+        { day: 15, subject: 'Re: Research molecule supply — {{company_name}}', type: 'breakup' }
+      ]
+    }
+  ]});
+});
