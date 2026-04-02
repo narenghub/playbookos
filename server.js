@@ -1,6 +1,6 @@
 // server.js — PlaybookOS main server
 require('dotenv').config();
-const { initDB, initPhase2 } = require('./src/lib/db'); initDB().then(() => initPhase2()).catch(e => console.error("DB init error:", e.message));
+const { initDB, initPhase2, migrateSKUColumns } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSKUColumns()).catch(e => console.error("DB init error:", e.message));
 const express = require('express');
 const cors = require('cors');
 const path = require('path');

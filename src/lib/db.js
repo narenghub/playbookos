@@ -185,3 +185,31 @@ async function initPhase2() {
 }
 
 module.exports = { query, initDB, initPhase2 };
+
+async function migrateSKUColumns() {
+  try {
+    await query(`
+      ALTER TABLE skus ADD COLUMN IF NOT EXISTS cas_number TEXT;
+      ALTER TABLE skus ADD COLUMN IF NOT EXISTS purity TEXT;
+      ALTER TABLE skus ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'USD';
+      ALTER TABLE skus ADD COLUMN IF NOT EXISTS sds_link TEXT;
+      ALTER TABLE skus ADD COLUMN IF NOT EXISTS sds_status TEXT DEFAULT 'pending';
+      ALTER TABLE skus ADD COLUMN IF NOT EXISTS coa_link TEXT;
+      ALTER TABLE skus ADD COLUMN IF NOT EXISTS coa_status TEXT DEFAULT 'pending';
+      CREATE TABLE IF NOT EXISTS buyer_contacts (
+        id TEXT PRIMARY KEY, name TEXT, email TEXT UNIQUE, title TEXT,
+        company TEXT, phone TEXT, segment TEXT, source TEXT DEFAULT 'apollo',
+        status TEXT DEFAULT 'prospect', last_contacted TEXT, created_at TEXT DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS apollo_sequences (
+        id TEXT PRIMARY KEY, molecule_name TEXT, sku_id TEXT, buyer_segment TEXT,
+        emails_sent INTEGER DEFAULT 0, replies INTEGER DEFAULT 0,
+        orders_generated INTEGER DEFAULT 0, discount_pct INTEGER,
+        status TEXT DEFAULT 'active', created_at TEXT DEFAULT NOW()
+      );
+    `);
+    console.log('✅ SKU columns and Apollo tables migrated');
+  } catch(e) { console.error('Migration error:', e.message); }
+}
+
+module.exports = { query, initDB, initPhase2, migrateSKUColumns };

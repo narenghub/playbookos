@@ -343,3 +343,111 @@ router.delete('/milestones/duplicates', authMiddleware, adminOnly, async (req, r
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+// ============================================================
+// MARKET INTELLIGENCE ENGINE
+// ============================================================
+router.post('/market/analyze', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const crypto = require('crypto');
+    const prompt = `You are a pharmaceutical market intelligence analyst for Abiozen LLC, a US-based API distribution company. Analyze the current US pharmaceutical market and identify the TOP 20 fast-moving molecules. Focus on: GLP-1 peptides (Semaglutide, Tirzepatide), hormone therapy APIs, shortage list molecules, high-demand research chemicals, and generic APIs with growing demand. For each molecule return ONLY a JSON array: [{"name":"","cas":"","category":"","demand":"Critical/High/Medium","monthly_demand_kg":0,"buyer_segment":"","price_min":0,"price_max":0,"priority":0,"reason":""}]`;
+    const key = process.env.ANTHROPIC_API_KEY;
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 4000, messages: [{ role: 'user', content: prompt }] })
+    });
+    const data = await response.json();
+    const text = data.content?.[0]?.text || '[]';
+    let molecules = [];
+    try { const m = text.match(/\[[\s\S]*\]/); if (m) molecules = JSON.parse(m[0]); } catch(e) {}
+    const analysisId = crypto.randomUUID();
+    await query(`INSERT INTO ai_analyses (id,analysis_type,period_key,content) VALUES ($1,'market_intelligence',$2,$3)`,
+      [analysisId, new Date().toISOString().slice(0,10), JSON.stringify(molecules)]);
+    const procTeam = (await query(`SELECT * FROM users WHERE role='procurement' AND is_active=1`)).rows;
+    if (procTeam.length > 0) {
+      const { sendEmail } = require('../lib/mailer');
+      const rows = molecules.slice(0,20).map((m,i) => `<tr style="background:${i%2===0?'#f8fafc':'#fff'}"><td style="padding:8px;border:1px solid #e2e8f0">${i+1}</td><td style="padding:8px;border:1px solid #e2e8f0"><strong>${m.name}</strong></td><td style="padding:8px;border:1px solid #e2e8f0">${m.cas||'—'}</td><td style="padding:8px;border:1px solid #e2e8f0">${m.category}</td><td style="padding:8px;border:1px solid #e2e8f0;color:${m.demand==='Critical'?'#dc2626':m.demand==='High'?'#d97706':'#059669'}">${m.demand}</td><td style="padding:8px;border:1px solid #e2e8f0">$${m.price_min}-$${m.price_max}/kg</td><td style="padding:8px;border:1px solid #e2e8f0;font-weight:700;color:#1B3A6B">${m.priority}/100</td></tr>`).join('');
+      for (const member of procTeam) {
+        sendEmail({ to: member.email, subject: `🎯 This Week Top 20 Fast-Moving Molecules — Source These First`, html: `<div style="font-family:Arial;max-width:700px"><div style="background:#1B3A6B;padding:20px;border-radius:8px 8px 0 0"><h2 style="color:#fff;margin:0">Abiozen Market Intelligence</h2><p style="color:#9FE1CB;margin:4px 0 0">Weekly procurement list — ${new Date().toLocaleDateString()}</p></div><div style="padding:20px;border:1px solid #e2e8f0"><p>Hi ${member.name}, source suppliers for these molecules this week — sorted by priority.</p><table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="background:#1B3A6B;color:#fff"><th style="padding:8px">Rank</th><th>Molecule</th><th>CAS</th><th>Category</th><th>Demand</th><th>Price Range</th><th>Priority</th></tr>${rows}</table><div style="margin-top:16px;padding:12px;background:#0D7377;border-radius:6px;color:#fff;font-size:13px"><strong>Action:</strong> Source top 10 by Friday. Upload COAs to PlaybookOS SKU Economics.</div></div></div>` });
+      }
+    }
+    res.json({ success: true, molecules, assigned_to: procTeam.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/market/latest', authMiddleware, async (req, res) => {
+  try {
+    const result = await query(`SELECT * FROM ai_analyses WHERE analysis_type='market_intelligence' ORDER BY created_at DESC LIMIT 1`);
+    if (!result.rows[0]) return res.json({ molecules: [] });
+    res.json({ molecules: JSON.parse(result.rows[0].content), created_at: result.rows[0].created_at });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ============================================================
+// ENTERPRISE SKU BULK UPLOAD — E-commerce format
+// ============================================================
+router.post('/skus/bulk-upload', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const crypto = require('crypto');
+    const { products } = req.body;
+    if (!products?.length) return res.status(400).json({ error: 'No products provided' });
+    let uploaded = 0, skipped = 0, errors = [];
+    for (const p of products) {
+      try {
+        const existing = await query(`SELECT id FROM skus WHERE name=$1`, [p.product_name]);
+        if (existing.rows[0]) { skipped++; continue; }
+        const salePrice = parseFloat(p.supplier_1kg_price) || 0;
+        const costPrice = salePrice * 0.35;
+        const margin = salePrice > 0 ? ((salePrice - costPrice) / salePrice) * 100 : 0;
+        await query(`INSERT INTO skus (id,name,category,cost_price,sale_price,gross_margin,supplier,is_gmp,is_active,cas_number,purity,currency,sds_link,sds_status,coa_link,coa_status,lead_time_days) VALUES ($1,$2,'API',$3,$4,$5,$6,1,1,$7,$8,$9,$10,$11,$12,$13,14)`,
+          [crypto.randomUUID(), p.product_name, costPrice, salePrice, margin, p.supplier||null, p.CAS_number||null, p.purity||null, p.supplier_currency||'USD', p.SDS_link||null, p.SDS_status||'pending', p.COA_link||null, p.COA_status||'pending']);
+        uploaded++;
+      } catch(e) { errors.push({ product: p.product_name, error: e.message }); }
+    }
+    res.json({ success: true, uploaded, skipped, errors, total: products.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/skus/export', authMiddleware, async (req, res) => {
+  try {
+    const result = await query(`SELECT name as product_name, cas_number, purity, supplier, currency, sale_price as supplier_1kg_price, sds_link, sds_status, coa_link, coa_status, gross_margin, is_gmp, units_in_stock FROM skus WHERE is_active=1 ORDER BY revenue_total DESC`);
+    res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Apollo find buyers
+router.post('/apollo/find-buyers', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { molecule_name, buyer_segment } = req.body;
+    const apolloKey = process.env.APOLLO_API_KEY;
+    if (!apolloKey) return res.status(400).json({ error: 'APOLLO_API_KEY not configured in Railway Variables' });
+    const titles = { compounding_pharmacy: ['Chief Pharmacist','Purchasing Manager','Pharmacy Director'], research_lab: ['Lab Director','Research Scientist','Procurement Manager'], generic_manufacturer: ['VP Procurement','API Sourcing Manager'] };
+    const response = await fetch('https://api.apollo.io/v1/mixed_people/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
+      body: JSON.stringify({ q_keywords: buyer_segment?.replace('_',' ') || 'compounding pharmacy', person_titles: titles[buyer_segment] || titles.compounding_pharmacy, person_locations: ['United States'], per_page: 25 })
+    });
+    const data = await response.json();
+    const contacts = (data.people||[]).map(p => ({ name: p.name, email: p.email, title: p.title, company: p.organization?.name, phone: p.phone_numbers?.[0]?.raw_number })).filter(c => c.email);
+    res.json({ contacts, total: contacts.length, molecule: molecule_name });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/apollo/send-outreach', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { contacts, molecule_name, discount_pct, price_per_kg, purity } = req.body;
+    const { sendEmail } = require('../lib/mailer');
+    const crypto = require('crypto');
+    let sent = 0;
+    for (const contact of (contacts||[]).slice(0,50)) {
+      if (!contact.email) continue;
+      sendEmail({ to: contact.email, subject: `${discount_pct}% off ${molecule_name} — Limited offer from Abiozen LLC`,
+        html: `<div style="font-family:Arial;max-width:600px"><div style="background:#1B3A6B;padding:20px;border-radius:8px 8px 0 0"><h2 style="color:#fff;margin:0">Abiozen LLC</h2><p style="color:#9FE1CB;margin:4px 0 0">Premium Pharmaceutical APIs & Research Molecules</p></div><div style="padding:24px;border:1px solid #e2e8f0;border-radius:0 0 8px 8px"><p>Dear ${contact.name||'Purchasing Manager'},</p><p>We have <strong>${molecule_name}</strong> available at <strong>${discount_pct}% below market rate</strong> for a limited time.</p><div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:16px;margin:16px 0"><div style="font-size:20px;font-weight:700;color:#166534">${discount_pct}% Discount — This Week Only</div><div style="color:#15803d;margin-top:4px">$${price_per_kg}/kg · ${purity||'99%+'} purity · COA & SDS available</div></div><ul><li>Certificate of Analysis from accredited lab</li><li>Safety Data Sheet included</li><li>GMP-grade documentation</li><li>Fast US delivery 7-14 days</li><li>Minimum order: 1kg</li></ul><a href="https://abiozen.com" style="background:#0D7377;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block">Request Quote Now</a><p style="color:#666;font-size:11px;margin-top:16px">Abiozen LLC · 1333 Barclay Blvd Suite 1333, Buffalo Grove IL 60089 · To unsubscribe reply STOP</p></div></div>` });
+      await query(`INSERT INTO activity_logs (id,user_id,log_date,metric,value,notes,source) VALUES ($1,$2,$3,'emails_sent',1,$4,'apollo')`,
+        [crypto.randomUUID(), req.user.id, new Date().toISOString().slice(0,10), `Apollo outreach: ${contact.email} — ${molecule_name}`]);
+      sent++;
+    }
+    res.json({ success: true, sent, molecule: molecule_name });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
