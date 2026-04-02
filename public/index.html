@@ -872,12 +872,6 @@ async function addSKU() {
   } catch(e) { console.error('Add SKU error:', e); }
 }
 
-// Auto-load Phase 2 data when pages become visible
-  if (document.getElementById('decision-rules-table')) loadDecisionRules();
-  if (document.getElementById('execution-steps-list')) loadExecutionSteps();
-  if (document.getElementById('integrations-list')) loadIntegrations();
-  if (document.getElementById('skus-list')) loadSKUs();
-});
 </script>
 <div id="section-decision-engine" class="section" style="display:none">
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
@@ -980,33 +974,5 @@ Object.assign(pages, {
     const el = document.getElementById('section-data-pipeline');
     if (el) { document.getElementById('content').innerHTML = ''; el.style.display='block'; document.getElementById('content').appendChild(el); loadIntegrations(); }
   }
-});
-</script>
-<script>
-// Fix Phase 2 pages - load data when page is shown
-const _origNavigate = navigate;
-navigate = function(page) {
-  _origNavigate(page);
-  setTimeout(() => {
-    if (page === 'decision-engine') { loadDecisionRules(); }
-    if (page === 'sku-economics') { loadSKUs(); }
-    if (page === 'execution-graph') { loadExecutionSteps(); }
-    if (page === 'data-pipeline') { loadIntegrations(); }
-  }, 300);
-};
-</script>
-<script>
-// Direct fix - override Phase 2 page functions to load data
-window.addEventListener('load', function() {
-  const orig = window.pages;
-  if (!orig) return;
-  const de = orig['decision-engine'];
-  const se = orig['sku-economics'];
-  const eg = orig['execution-graph'];
-  const dp = orig['data-pipeline'];
-  orig['decision-engine'] = function() { if(de) de(); setTimeout(loadDecisionRules, 500); };
-  orig['sku-economics'] = function() { if(se) se(); setTimeout(loadSKUs, 500); };
-  orig['execution-graph'] = function() { if(eg) eg(); setTimeout(loadExecutionSteps, 500); };
-  orig['data-pipeline'] = function() { if(dp) dp(); setTimeout(loadIntegrations, 500); };
 });
 </script>
