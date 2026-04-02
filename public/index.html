@@ -995,3 +995,18 @@ navigate = function(page) {
   }, 300);
 };
 </script>
+<script>
+// Direct fix - override Phase 2 page functions to load data
+window.addEventListener('load', function() {
+  const orig = window.pages;
+  if (!orig) return;
+  const de = orig['decision-engine'];
+  const se = orig['sku-economics'];
+  const eg = orig['execution-graph'];
+  const dp = orig['data-pipeline'];
+  orig['decision-engine'] = function() { if(de) de(); setTimeout(loadDecisionRules, 500); };
+  orig['sku-economics'] = function() { if(se) se(); setTimeout(loadSKUs, 500); };
+  orig['execution-graph'] = function() { if(eg) eg(); setTimeout(loadExecutionSteps, 500); };
+  orig['data-pipeline'] = function() { if(dp) dp(); setTimeout(loadIntegrations, 500); };
+});
+</script>
