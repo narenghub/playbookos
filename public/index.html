@@ -1198,6 +1198,78 @@ if(typeof pages !== 'undefined') {
 </div>
 </div>
 <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px">
+<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-bottom:16px"><div style="font-size:14px;font-weight:700;color:#1a202c;margin-bottom:14px">Live Apollo sequence performance</div><div id="apollo-sequence-stats"></div></div>
 <div id="buyer-contacts-list"><div style="padding:40px;text-align:center;color:#a0aec0;font-size:13px">Find buyers above to see contact list here.</div></div>
 </div>
+</div>
+<script>
+async function loadApolloStats() {
+  const el = document.getElementById('apollo-sequence-stats');
+  if (!el) return;
+  el.innerHTML = '<div style="color:#718096;font-size:13px;padding:20px">Loading Apollo sequences...</div>';
+  try {
+    const r = await fetch('/api/apollo/stats', {headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token')}});
+    const data = await r.json();
+    if (data.error) { el.innerHTML = `<div style="color:#e53e3e;font-size:13px;padding:20px">${data.error}</div>`; return; }
+    const stats = data.stats || [];
+    const segmentColors = {'S1':'#1D9E75','S2':'#378ADD','S3':'#EF9F27','S4':'#9F7AEA'};
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:24px;font-weight:700;color:#1B3A6B">${stats.length}</div>
+          <div style="font-size:11px;color:#718096">Active sequences</div>
+        </div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:24px;font-weight:700;color:#1D9E75">${data.total_contacts||0}</div>
+          <div style="font-size:11px;color:#718096">Total contacts</div>
+        </div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:24px;font-weight:700;color:#0D7377">${data.total_sent||0}</div>
+          <div style="font-size:11px;color:#718096">Emails sent</div>
+        </div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;text-align:center">
+          <div style="font-size:24px;font-weight:700;color:#EF9F27">May 31</div>
+          <div style="font-size:11px;color:#718096">Go-live date</div>
+        </div>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#1B3A6B;color:#fff">
+          <th style="padding:10px;text-align:left">Sequence</th>
+          <th style="padding:10px;text-align:center">Status</th>
+          <th style="padding:10px;text-align:center">Contacts</th>
+          <th style="padding:10px;text-align:center">Sent</th>
+          <th style="padding:10px;text-align:center">Opens</th>
+          <th style="padding:10px;text-align:center">Replies</th>
+          <th style="padding:10px;text-align:center">Open rate</th>
+          <th style="padding:10px;text-align:center">Reply rate</th>
+        </tr>
+        ${stats.map((s,i) => `<tr style="background:${i%2===0?'#f8fafc':'#fff'};border-bottom:1px solid #e2e8f0">
+          <td style="padding:10px;font-weight:600;color:#1B3A6B">${s.name}</td>
+          <td style="padding:10px;text-align:center"><span style="background:${s.status==='active'?'#dcfce7':'#fef3c7'};color:${s.status==='active'?'#166534':'#92400e'};padding:2px 10px;border-radius:10px;font-size:11px;font-weight:700">${s.status||'draft'}</span></td>
+          <td style="padding:10px;text-align:center;font-weight:700">${s.contacts}</td>
+          <td style="padding:10px;text-align:center">${s.emails_sent}</td>
+          <td style="padding:10px;text-align:center">${s.opens}</td>
+          <td style="padding:10px;text-align:center;color:#1D9E75;font-weight:700">${s.replies}</td>
+          <td style="padding:10px;text-align:center">${s.open_rate}%</td>
+          <td style="padding:10px;text-align:center;font-weight:700;color:${s.reply_rate>=5?'#1D9E75':s.reply_rate>=2?'#EF9F27':'#718096'}">${s.reply_rate}%</td>
+        </tr>`).join('')}
+        ${stats.length===0?'<tr><td colspan="8" style="padding:20px;text-align:center;color:#a0aec0">No sequences found. Build sequences in Apollo then refresh.</td></tr>':''}
+      </table>
+      <div style="margin-top:12px;text-align:right">
+        <button onclick="loadApolloStats()" style="background:#1B3A6B;color:#fff;border:none;padding:8px 16px;border-radius:6px;font-size:12px;cursor:pointer">Refresh from Apollo</button>
+      </div>`;
+  } catch(e) { el.innerHTML = `<div style="color:#e53e3e;padding:20px;font-size:13px">Error: ${e.message}</div>`; }
+}
+
+if(typeof pages !== 'undefined') {
+  const _origApollo = pages['apollo-outreach'];
+  pages['apollo-outreach'] = function() {
+    if(_origApollo) _origApollo();
+    setTimeout(loadApolloStats, 400);
+  };
+}
+</script>
+
+<div id="section-apollo-sequence-dashboard" style="display:none">
+  <div id="apollo-sequence-stats"></div>
 </div>
