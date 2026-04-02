@@ -976,3 +976,228 @@ Object.assign(pages, {
   }
 });
 </script>
+<script>
+// Market Intelligence + Apollo Engine
+async function runMarketAnalysis() {
+  const btn = document.getElementById('market-analyze-btn');
+  if(btn) { btn.textContent = 'Claude analyzing market...'; btn.disabled = true; }
+  try {
+    const r = await fetch('/api/market/analyze', {method:'POST', headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token'),'Content-Type':'application/json'}});
+    const data = await r.json();
+    if(data.molecules) renderMarketResults(data.molecules, data.assigned_to);
+    if(btn) { btn.textContent = 'Run market analysis'; btn.disabled = false; }
+  } catch(e) { if(btn) { btn.textContent = 'Run market analysis'; btn.disabled = false; } }
+}
+
+async function loadMarketLatest() {
+  try {
+    const r = await fetch('/api/market/latest', {headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token')}});
+    const data = await r.json();
+    if(data.molecules?.length) renderMarketResults(data.molecules, 0, data.created_at);
+  } catch(e) {}
+}
+
+function renderMarketResults(molecules, assigned, date) {
+  const el = document.getElementById('market-results');
+  if(!el) return;
+  const demandColor = d => d==='Critical'?'#dc2626':d==='High'?'#d97706':'#059669';
+  const demandBg = d => d==='Critical'?'#fef2f2':d==='High'?'#fffbeb':'#f0fdf4';
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <div style="font-size:13px;color:#718096">${date?'Last analyzed: '+new Date(date).toLocaleString():'Fresh analysis'} · ${molecules.length} molecules identified · Assigned to procurement team</div>
+      <div style="font-size:13px;font-weight:700;color:#1D9E75">${assigned>0?assigned+' procurement members notified':''}</div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <tr style="background:#1B3A6B;color:#fff">
+        <th style="padding:10px;text-align:left">Rank</th>
+        <th style="padding:10px;text-align:left">Molecule</th>
+        <th style="padding:10px;text-align:left">CAS Number</th>
+        <th style="padding:10px;text-align:left">Category</th>
+        <th style="padding:10px;text-align:left">Demand</th>
+        <th style="padding:10px;text-align:left">Price Range</th>
+        <th style="padding:10px;text-align:left">Buyer Segment</th>
+        <th style="padding:10px;text-align:left">Priority</th>
+        <th style="padding:10px;text-align:left">Action</th>
+      </tr>
+      ${molecules.map((m,i) => `<tr style="background:${i%2===0?'#f8fafc':'#fff'};border-bottom:1px solid #e2e8f0">
+        <td style="padding:10px;font-weight:700;color:#1B3A6B">${i+1}</td>
+        <td style="padding:10px"><div style="font-weight:600;color:#1a202c">${m.name}</div><div style="font-size:11px;color:#718096">${m.reason?.slice(0,60)||''}</div></td>
+        <td style="padding:10px;font-family:monospace;font-size:12px;color:#4a5568">${m.cas||'—'}</td>
+        <td style="padding:10px"><span style="background:#e2e8f0;padding:2px 8px;border-radius:10px;font-size:11px">${m.category||'API'}</span></td>
+        <td style="padding:10px"><span style="background:${demandBg(m.demand)};color:${demandColor(m.demand)};padding:3px 10px;border-radius:10px;font-size:11px;font-weight:700">${m.demand}</span></td>
+        <td style="padding:10px;font-weight:600;color:#1B3A6B">$${m.price_min||0}–$${m.price_max||0}/kg</td>
+        <td style="padding:10px;font-size:11px;color:#4a5568">${m.buyer_segment||'—'}</td>
+        <td style="padding:10px"><div style="background:#1B3A6B;color:#fff;border-radius:4px;padding:3px 8px;text-align:center;font-weight:700;font-size:12px">${m.priority||0}</div></td>
+        <td style="padding:10px"><button onclick="assignToProcurement('${m.name}','${m.cas||''}')" style="background:#0D7377;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Assign</button></td>
+      </tr>`).join('')}
+    </table>`;
+}
+
+async function assignToProcurement(name, cas) {
+  const token = localStorage.getItem('pbo_token');
+  try {
+    await fetch('/api/activity', {method:'POST', headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+      body: JSON.stringify({log_date: new Date().toISOString().slice(0,10), metric:'molecules_assigned', value:1, notes:`Assigned: ${name} (${cas})`})});
+    alert(`✅ ${name} assigned to procurement team`);
+  } catch(e) {}
+}
+
+async function findBuyers() {
+  const molecule = document.getElementById('apollo-molecule')?.value;
+  const segment = document.getElementById('apollo-segment')?.value;
+  if(!molecule) { alert('Enter molecule name first'); return; }
+  const btn = document.getElementById('find-buyers-btn');
+  if(btn) { btn.textContent = 'Searching Apollo...'; btn.disabled=true; }
+  try {
+    const r = await fetch('/api/apollo/find-buyers', {method:'POST',
+      headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token'),'Content-Type':'application/json'},
+      body: JSON.stringify({molecule_name: molecule, buyer_segment: segment})});
+    const data = await r.json();
+    if(data.error) { alert('Apollo error: '+data.error); return; }
+    renderBuyerContacts(data.contacts, molecule);
+    if(btn) { btn.textContent = 'Find buyers'; btn.disabled=false; }
+  } catch(e) { if(btn) { btn.textContent='Find buyers'; btn.disabled=false; } alert('Error: '+e.message); }
+}
+
+function renderBuyerContacts(contacts, molecule) {
+  const el = document.getElementById('buyer-contacts-list');
+  if(!el) return;
+  window._currentContacts = contacts;
+  window._currentMolecule = molecule;
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;color:#1a202c">${contacts.length} buyers found for ${molecule}</div>
+      <button onclick="sendOutreach()" style="background:#1D9E75;color:#fff;border:none;padding:8px 16px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer">Send outreach to all ${contacts.length}</button>
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <tr style="background:#1B3A6B;color:#fff"><th style="padding:8px">Name</th><th>Title</th><th>Company</th><th>Email</th><th>Phone</th></tr>
+      ${contacts.map((c,i) => `<tr style="background:${i%2===0?'#f8fafc':'#fff'};border-bottom:1px solid #e2e8f0">
+        <td style="padding:8px;font-weight:600">${c.name||'—'}</td>
+        <td style="padding:8px;font-size:11px;color:#718096">${c.title||'—'}</td>
+        <td style="padding:8px">${c.company||'—'}</td>
+        <td style="padding:8px;color:#0D7377">${c.email||'—'}</td>
+        <td style="padding:8px;font-size:11px">${c.phone||'—'}</td>
+      </tr>`).join('')}
+    </table>`;
+}
+
+async function sendOutreach() {
+  const discount = document.getElementById('apollo-discount')?.value || 30;
+  const price = document.getElementById('apollo-price')?.value || 0;
+  const purity = document.getElementById('apollo-purity')?.value || '99%+';
+  if(!window._currentContacts?.length) { alert('Find buyers first'); return; }
+  const btn = document.querySelector('[onclick="sendOutreach()"]');
+  if(btn) { btn.textContent = 'Sending...'; btn.disabled=true; }
+  try {
+    const r = await fetch('/api/apollo/send-outreach', {method:'POST',
+      headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token'),'Content-Type':'application/json'},
+      body: JSON.stringify({contacts: window._currentContacts, molecule_name: window._currentMolecule, discount_pct: parseInt(discount), price_per_kg: parseFloat(price), purity})});
+    const data = await r.json();
+    alert(`✅ ${data.sent} outreach emails sent for ${data.molecule}`);
+    if(btn) { btn.textContent='Send outreach'; btn.disabled=false; }
+  } catch(e) { alert('Error: '+e.message); if(btn) { btn.textContent='Send outreach'; btn.disabled=false; } }
+}
+
+async function handleBulkUpload(event) {
+  const file = event.target.files[0];
+  if(!file) return;
+  const text = await file.text();
+  const lines = text.split('\n').filter(l => l.trim());
+  const headers = lines[0].split(',').map(h => h.trim().replace(/"/g,''));
+  const products = lines.slice(1).map(line => {
+    const vals = line.split(',').map(v => v.trim().replace(/"/g,''));
+    const obj = {};
+    headers.forEach((h,i) => obj[h] = vals[i] || '');
+    return obj;
+  }).filter(p => p.product_name);
+  
+  document.getElementById('upload-status').textContent = `Processing ${products.length} products...`;
+  try {
+    const r = await fetch('/api/skus/bulk-upload', {method:'POST',
+      headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token'),'Content-Type':'application/json'},
+      body: JSON.stringify({products})});
+    const data = await r.json();
+    document.getElementById('upload-status').innerHTML = `<span style="color:#1D9E75;font-weight:700">✅ Uploaded: ${data.uploaded} · Skipped: ${data.skipped} · Errors: ${data.errors?.length||0}</span>`;
+    loadSKUs();
+  } catch(e) { document.getElementById('upload-status').textContent = 'Error: '+e.message; }
+}
+
+// Wire into pages
+if(typeof pages !== 'undefined') {
+  pages['market-intelligence'] = function() {
+    document.getElementById('page-title').textContent = 'Market Intelligence';
+    const el = document.getElementById('section-market-intelligence');
+    if(el) { document.getElementById('content').innerHTML=''; el.style.display='block'; document.getElementById('content').appendChild(el); loadMarketLatest(); }
+  };
+  pages['apollo-outreach'] = function() {
+    document.getElementById('page-title').textContent = 'Apollo Outreach';
+    const el = document.getElementById('section-apollo-outreach');
+    if(el) { document.getElementById('content').innerHTML=''; el.style.display='block'; document.getElementById('content').appendChild(el); }
+  };
+}
+</script>
+
+<!-- MARKET INTELLIGENCE PAGE -->
+<div id="section-market-intelligence" class="section" style="display:none">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+<div><h2 style="color:#1a202c;font-size:20px;font-weight:700;margin:0">Market Intelligence Engine</h2>
+<div style="color:#718096;font-size:13px;margin-top:4px">Claude identifies top fast-moving molecules · Auto-assigns to procurement · Weekly Monday 8 AM</div></div>
+<button id="market-analyze-btn" onclick="runMarketAnalysis()" style="background:#1B3A6B;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">Run market analysis now</button>
+</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Analysis frequency</div><div style="font-size:20px;font-weight:700;color:#1B3A6B">Weekly</div><div style="font-size:11px;color:#a0aec0">Every Monday 8 AM</div></div>
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Molecules tracked</div><div style="font-size:20px;font-weight:700;color:#0D7377">20</div><div style="font-size:11px;color:#a0aec0">Per weekly analysis</div></div>
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Auto-assigned to</div><div style="font-size:20px;font-weight:700;color:#1D9E75">Palash</div><div style="font-size:11px;color:#a0aec0">Procurement lead</div></div>
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Priority focus</div><div style="font-size:20px;font-weight:700;color:#d97706">GLP-1</div><div style="font-size:11px;color:#a0aec0">Semaglutide, Tirzepatide</div></div>
+</div>
+<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-bottom:16px">
+<div style="font-size:14px;font-weight:700;color:#1a202c;margin-bottom:14px">Top fast-moving molecules — US market</div>
+<div id="market-results"><div style="padding:40px;text-align:center;color:#a0aec0;font-size:13px">Click "Run market analysis now" — Claude will identify top 20 molecules and email Palash automatically.</div></div>
+</div>
+</div>
+
+<!-- APOLLO OUTREACH PAGE -->
+<div id="section-apollo-outreach" class="section" style="display:none">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+<div><h2 style="color:#1a202c;font-size:20px;font-weight:700;margin:0">Apollo Outreach Engine</h2>
+<div style="color:#718096;font-size:13px;margin-top:4px">Find buyers · Send cold emails · Track responses · Generate orders</div></div>
+<span style="background:#fef3c7;color:#92400e;padding:6px 14px;border-radius:20px;font-size:12px;font-weight:700">Requires APOLLO_API_KEY in Railway Variables</span>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px">
+<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px">
+<div style="font-size:14px;font-weight:700;color:#1a202c;margin-bottom:14px">Find buyers for molecule</div>
+<div style="margin-bottom:10px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Molecule name</div>
+<input id="apollo-molecule" placeholder="e.g. Semaglutide" style="width:100%;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;font-size:13px;color:#1a202c"></div>
+<div style="margin-bottom:10px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Buyer segment</div>
+<select id="apollo-segment" style="width:100%;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;font-size:13px;color:#1a202c">
+<option value="compounding_pharmacy">Compounding Pharmacy</option>
+<option value="research_lab">Research Lab</option>
+<option value="generic_manufacturer">Generic Manufacturer</option>
+<option value="cro">CRO / Biotech</option>
+</select></div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+<div><div style="font-size:11px;color:#718096;margin-bottom:4px">Discount %</div>
+<input id="apollo-discount" type="number" value="30" style="width:100%;border:1px solid #e2e8f0;border-radius:6px;padding:8px;font-size:13px;color:#1a202c"></div>
+<div><div style="font-size:11px;color:#718096;margin-bottom:4px">Price/kg ($)</div>
+<input id="apollo-price" type="number" placeholder="0.00" style="width:100%;border:1px solid #e2e8f0;border-radius:6px;padding:8px;font-size:13px;color:#1a202c"></div>
+<div><div style="font-size:11px;color:#718096;margin-bottom:4px">Purity</div>
+<input id="apollo-purity" value="99%+" style="width:100%;border:1px solid #e2e8f0;border-radius:6px;padding:8px;font-size:13px;color:#1a202c"></div>
+</div>
+<button id="find-buyers-btn" onclick="findBuyers()" style="width:100%;background:#1B3A6B;color:#fff;border:none;padding:10px;border-radius:6px;font-size:13px;font-weight:700;cursor:pointer">Find buyers in Apollo</button>
+</div>
+<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px">
+<div style="font-size:14px;font-weight:700;color:#1a202c;margin-bottom:14px">Bulk SKU upload — E-commerce format</div>
+<div style="background:#f0fdf4;border:1px solid #86efac;border-radius:6px;padding:12px;margin-bottom:12px;font-size:12px;color:#166534">
+<strong>Required CSV columns:</strong><br>product_name · CAS_number · purity · supplier · supplier_currency · supplier_1kg_price · SDS_link · SDS_status · COA_link · COA_status
+</div>
+<input type="file" accept=".csv" onchange="handleBulkUpload(event)" style="margin-bottom:10px;font-size:13px">
+<div id="upload-status" style="font-size:13px;color:#718096;margin-top:8px"></div>
+<div style="margin-top:12px;border-top:1px solid #e2e8f0;padding-top:12px">
+<a href="/api/skus/export" style="font-size:12px;color:#0D7377;text-decoration:none;font-weight:600">↓ Export current SKU catalog as JSON</a>
+</div>
+</div>
+</div>
+<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px">
+<div id="buyer-contacts-list"><div style="padding:40px;text-align:center;color:#a0aec0;font-size:13px">Find buyers above to see contact list here.</div></div>
+</div>
+</div>
