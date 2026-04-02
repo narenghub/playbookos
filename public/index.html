@@ -719,7 +719,8 @@ async function sendInvite() {
   const role = document.getElementById('inv-role').value;
   const github_username = document.getElementById('inv-gh').value || null;
   document.getElementById('invite-msg').innerHTML = '<div style="color:#888;font-size:13px">Sending...</div>';
-  const res = await API('/users/invite',{method:'POST',body:JSON.stringify({email,role,github_username})});
+  const res = await Promise.race([API("/users/invite",{method:"POST",body:JSON.stringify({email,role,github_username})}), new Promise((_,r)=>setTimeout(()=>r(new Error("timeout")),10000))]).catch(e=>({error:e.message}));
+  // replaced: const res = await API("/users/invite',{method:'POST',body:JSON.stringify({email,role,github_username})});
   if (res.success) {
     document.getElementById('invite-msg').innerHTML = `<div class="success-msg">${res.message}</div>`;
     setTimeout(()=>pages.team(), 2000);

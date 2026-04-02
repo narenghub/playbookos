@@ -59,7 +59,7 @@ router.post('/users/invite', authMiddleware, adminOnly, async (req, res) => {
       [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, inviteToken, new Date().toISOString()]);
     const baseUrl = process.env.BASE_URL || 'https://playbookos-production.up.railway.app';
     const inviteUrl = `${baseUrl}/#/accept-invite?token=${inviteToken}`;
-    await sendEmail({ to: email, subject: `You've been invited to Abiozen PlaybookOS`, triggerType: 'invite',
+    sendEmail({ to: email, subject: `You've been invited to Abiozen PlaybookOS`, triggerType: 'invite',
       html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#1B3A6B">Abiozen PlaybookOS</h2><p>You've been invited as <strong>${role}</strong>.</p><a href="${inviteUrl}" style="background:#0D7377;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;margin:16px 0">Accept Invite</a><p style="color:#666;font-size:13px">Or copy: ${inviteUrl}</p></div>` });
     res.json({ success: true, message: `Invite sent to ${email}`, inviteUrl });
   } catch(e) { res.status(500).json({ error: e.message }); }
