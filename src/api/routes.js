@@ -451,3 +451,41 @@ router.post('/apollo/send-outreach', authMiddleware, adminOnly, async (req, res)
     res.json({ success: true, sent, molecule: molecule_name });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+
+router.get('/apollo/sequences', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const apolloKey = process.env.APOLLO_API_KEY;
+    if (!apolloKey) return res.status(400).json({ error: 'APOLLO_API_KEY not configured' });
+    const response = await fetch('https://api.apollo.io/v1/emailer_campaigns/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
+      body: JSON.stringify({ per_page: 25 })
+    });
+    const data = await response.json();
+    res.json({ sequences: data.emailer_campaigns || [], total: data.pagination?.total_entries || 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/apollo/stats', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const apolloKey = process.env.APOLLO_API_KEY;
+    if (!apolloKey) return res.status(400).json({ error: 'APOLLO_API_KEY not configured' });
+    const response = await fetch('https://api.apollo.io/v1/emailer_campaigns/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
+      body: JSON.stringify({ per_page: 25 })
+    });
+    const data = await response.json();
+    const sequences = data.emailer_campaigns || [];
+    const stats = sequences.map(s => ({
+      id: s.id, name: s.name, status: s.status,
+      contacts: s.num_prospects || 0,
+      emails_sent: s.num_sent_emails || 0,
+      opens: s.num_opened_emails || 0,
+      replies: s.num_replied_emails || 0,
+      open_rate: s.num_sent_emails > 0 ? Math.round((s.num_opened_emails / s.num_sent_emails) * 100) : 0,
+      reply_rate: s.num_sent_emails > 0 ? Math.round((s.num_replied_emails / s.num_sent_emails) * 100) : 0
+    }));
+    res.json({ stats, total_contacts: stats.reduce((a,b) => a + b.contacts, 0), total_sent: stats.reduce((a,b) => a + b.emails_sent, 0) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
