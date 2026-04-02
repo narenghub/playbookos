@@ -234,7 +234,7 @@ function buildNav() {
     {id:'github',label:'GitHub Stats',roles:['admin','dev']},
     {id:'milestones',label:'Milestones',roles:['admin','dev','procurement','sales','marketing','qc']},
     {id:'ai-insights',label:'AI Insights',roles:['admin']},
-    {id:'market-intelligence',label:'Market Intelligence',roles:['admin']},{id:'apollo-outreach',label:'Apollo Outreach',roles:['admin']},{id:'decision-engine',label:'AI Decision Engine',roles:['admin']},{id:'sku-economics',label:'SKU Economics',roles:['admin']},{id:'execution-graph',label:'Execution Graph',roles:['admin']},{id:'data-pipeline',label:'Data Pipeline',roles:['admin']},{id:'settings',label:'Settings',roles:['admin']},
+    {id:'market-intelligence',label:'Market Intelligence',roles:['admin']},{id:'apollo-outreach',label:'Apollo Outreach',roles:['admin']},{id:'s2-sequence',label:'S2 · Research Lab',roles:['admin']},{id:'s3-sequence',label:'S3 · Generic Mfg',roles:['admin']},{id:'s4-sequence',label:'S4 · University',roles:['admin']},roles:['admin']},{id:'decision-engine',label:'AI Decision Engine',roles:['admin']},{id:'sku-economics',label:'SKU Economics',roles:['admin']},{id:'execution-graph',label:'Execution Graph',roles:['admin']},{id:'data-pipeline',label:'Data Pipeline',roles:['admin']},{id:'settings',label:'Settings',roles:['admin']},
   ].filter(l => l.roles.includes(currentUser.role));
 
   document.getElementById('nav-links').innerHTML = links.map(l =>
@@ -1273,3 +1273,293 @@ if(typeof pages !== 'undefined') {
 <div id="section-apollo-sequence-dashboard" style="display:none">
   <div id="apollo-sequence-stats"></div>
 </div>
+<script>
+const sequenceTemplates = {
+  s2: {
+    name: 'S2 · Research Lab / Biotech',
+    color: '#378ADD',
+    segment: 'Research Lab / Biotech',
+    contacts: 500,
+    days: 15,
+    filters: ['Lab Director', 'Principal Scientist', 'Research Procurement Manager', 'Head of Biology', 'Biotechnology', 'Life Sciences', 'United States', '10-500 employees'],
+    emails: [
+      {
+        day: 1, type: 'Intro',
+        subject: 'Research-grade APIs — 5,000+ molecules, 24hr quote',
+        body: `Hi {{first_name}},
+
+Abiozen LLC supplies research-grade APIs and specialty molecules to biotech companies and life science labs across the US.
+
+We have 5,000+ molecules in stock with full documentation — COA, SDS, purity certificates. We specialize in hard-to-source molecules with fast turnaround (3-5 days from order).
+
+Key details:
+· 99%+ purity · COA from accredited lab
+· SDS included · Non-GMP and GMP documentation
+· 3-5 day US delivery
+· Flexible quantities: 5mg to 1kg (above 1kg RFQ)
+· 30% below current market rate
+
+Are there any molecules your lab is currently struggling to source? I can check availability and pricing within 24 hours.
+
+Best regards,
+Naren B
+CEO, Abiozen LLC
+155 N Michigan Ave, Suite 334, Chicago, IL 60601
+naren@abiozen.com · abiozen.com
++1 (773) 964-5150`
+      },
+      {
+        day: 6, type: 'Follow-up',
+        subject: 'Sample COA available — which molecule does your lab need?',
+        body: `Hi {{first_name}},
+
+Quick follow-up. I'd like to send over a sample COA for any molecule in our catalog — no commitment needed, just a way to evaluate our quality before ordering.
+
+Our most requested molecules for biotech research this quarter:
+· GLP-1 peptides (Semaglutide, Tirzepatide, Retatrutide)
+· Growth peptides (BPC-157, TB-500, IGF-1)
+· Research APIs and specialty compounds
+· Generic APIs with full regulatory documentation
+
+Just reply with the molecule name and I'll have the COA to you within 2 hours.
+
+Best,
+Naren B · Abiozen LLC
+naren@abiozen.com · +1 (773) 964-5150`
+      },
+      {
+        day: 15, type: 'Final',
+        subject: 'Re: Research molecule supply — final note',
+        body: `Hi {{first_name}},
+
+Last note from me on this.
+
+If budget or project timing isn't right now, I completely understand. I'll follow up next quarter.
+
+If you'd like to be notified when we add new molecules or run a pricing promotion, just reply "catalog" and I'll add {{company_name}} to our monthly update list.
+
+Thank you for your time.
+
+Naren B · CEO, Abiozen LLC
+naren@abiozen.com · abiozen.com · +1 (773) 964-5150`
+      }
+    ]
+  },
+  s3: {
+    name: 'S3 · Generic Manufacturer / API Sourcing',
+    color: '#EF9F27',
+    segment: 'Generic Manufacturer',
+    contacts: 500,
+    days: 18,
+    filters: ['VP Procurement', 'API Sourcing Manager', 'Director Supply Chain', 'Head of Purchasing', 'Pharmaceutical Manufacturing', 'Generic Drugs', 'United States', '50-5000 employees'],
+    emails: [
+      {
+        day: 1, type: 'Intro',
+        subject: 'API supply partnership — Abiozen LLC · GMP certified',
+        body: `Hi {{first_name}},
+
+Abiozen LLC is a Chicago-based pharmaceutical distributor specializing in API supply for generic manufacturers.
+
+We source directly from GMP-certified facilities in India and China with active USDMF filings for key molecules. Our value to your sourcing team:
+
+· Competitive pricing — 15-25% below current market
+· Reliable supply chain — no single-source dependency
+· Full regulatory package: USDMF, GMP cert, COA, ICH stability data
+· US-based distribution with 3-5 day lead time
+· Dedicated account manager for approved vendors
+
+Are you currently evaluating new API suppliers for 2026? I'd welcome a 20-minute conversation.
+
+Best regards,
+Naren B · CEO, Abiozen LLC
+155 N Michigan Ave, Suite 334, Chicago, IL 60601
+naren@abiozen.com · abiozen.com · +1 (773) 964-5150`
+      },
+      {
+        day: 7, type: 'Follow-up',
+        subject: 'USDMF molecules available — 40+ APIs for {{company_name}}',
+        body: `Hi {{first_name}},
+
+Following up on my previous note. Our current USDMF-filed molecule list includes:
+
+High-volume generics: Atorvastatin · Metformin · Amlodipine
+Cardiovascular: Lisinopril · Losartan · Rosuvastatin
+Specialty: Apixaban · Rivaroxaban · Sitagliptin
+GLP-1: Semaglutide · Tirzepatide (USDMF filing in progress)
+
+If you'd like our full catalog with pricing and regulatory status, I can send it over today.
+
+Would it be helpful to schedule a call with our regulatory team?
+
+Naren B · Abiozen LLC
+naren@abiozen.com · +1 (773) 964-5150`
+      },
+      {
+        day: 18, type: 'Final',
+        subject: 'Approved vendor dossier — Abiozen LLC',
+        body: `Hi {{first_name}},
+
+Final note. If Abiozen is ever a fit for {{company_name}}'s API sourcing needs, I'd welcome the opportunity to be on your approved vendor list.
+
+Our complete vendor dossier is ready to share on request:
+· GMP certificates from all manufacturing partners
+· USDMF filing documentation
+· Quality agreement template
+· Insurance certificate ($5M liability coverage)
+
+No commitment needed — many of our best relationships started with simply being on the approved list.
+
+Thank you for your time, {{first_name}}.
+
+Naren B · CEO, Abiozen LLC
+naren@abiozen.com · abiozen.com · +1 (773) 964-5150`
+      }
+    ]
+  },
+  s4: {
+    name: 'S4 · University / Research Institute',
+    color: '#9F7AEA',
+    segment: 'University / Research Institute',
+    contacts: 500,
+    days: 15,
+    filters: ['Principal Investigator', 'Research Director', 'Department Head', 'Lab Manager', 'Professor of Pharmacology', 'Higher Education', 'Academic Research', 'United States', '1000+ employees'],
+    emails: [
+      {
+        day: 1, type: 'Intro',
+        subject: 'Research molecule supply — {{company_name}} · Academic pricing',
+        body: `Hi {{first_name}},
+
+Abiozen LLC supplies research-grade molecules and APIs to university labs and academic research institutes across the US.
+
+We understand academic procurement and have built our offering specifically for it:
+
+· Flexible MOQ from 5mg for initial evaluation
+· NET-30 payment terms for approved institutions
+· PO-based ordering — no credit card required
+· 20-35% below standard catalog pricing
+· Same-day COA and SDS on all orders
+· 3-5 day US delivery
+
+Are there any molecules your department is currently sourcing that we could quote on?
+
+Best regards,
+Naren B · CEO, Abiozen LLC
+155 N Michigan Ave, Suite 334, Chicago, IL 60601
+naren@abiozen.com · abiozen.com · +1 (773) 964-5150`
+      },
+      {
+        day: 6, type: 'Follow-up',
+        subject: 'Academic pricing — peptide and GLP-1 research molecules',
+        body: `Hi {{first_name}},
+
+Following up. For academic institutions we offer special pricing on our peptide and research catalog.
+
+Top molecules requested by university labs this quarter:
+· GLP-1 peptides · Growth factors · Metabolic APIs
+· Cardiovascular molecules · CNS research compounds
+· Specialty APIs with full documentation
+
+Full documentation included: COA · SDS · Purity certificate · NMR data where available
+
+Would a catalog PDF with academic pricing be useful for your procurement process?
+
+Naren B · Abiozen LLC
+naren@abiozen.com · +1 (773) 964-5150`
+      },
+      {
+        day: 15, type: 'Final',
+        subject: 'Re: Research molecules — {{company_name}}',
+        body: `Hi {{first_name}},
+
+Last note. If the budget cycle or project timing isn't right, I completely understand — academic procurement moves on its own schedule.
+
+I'll follow up next quarter. If you'd like to be notified when we add new molecules or run academic pricing promotions, just reply "catalog" and I'll add you to our research institution update list.
+
+We send this quarterly — no spam, just new molecules and pricing updates.
+
+Thank you for your time and your research work.
+
+Naren B · CEO, Abiozen LLC
+naren@abiozen.com · abiozen.com · +1 (773) 964-5150`
+      }
+    ]
+  }
+};
+
+function renderSequencePage(seqId) {
+  const seq = sequenceTemplates[seqId];
+  if (!seq) return;
+  const el = document.getElementById('content');
+  if (!el) return;
+  document.getElementById('page-title').textContent = seq.name;
+
+  const typeColors = {'Intro':'#dcfce7','Follow-up':'#fef3c7','Final':'#fee2e2'};
+  const typeText = {'Intro':'#166534','Follow-up':'#92400e','Final':'#991b1b'};
+
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px">
+      <div>
+        <h2 style="font-size:20px;font-weight:700;color:#1a202c;margin:0">${seq.name}</h2>
+        <div style="color:#718096;font-size:13px;margin-top:4px">${seq.segment} · ${seq.contacts} target contacts · ${seq.days} days · 3 emails</div>
+      </div>
+      <div style="display:flex;gap:10px">
+        <a href="https://app.apollo.io/#/sequences" target="_blank" style="background:#f59e0b;color:#fff;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:700;text-decoration:none">Build in Apollo</a>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:${seq.color}">${seq.contacts}</div>
+        <div style="font-size:11px;color:#718096">Target contacts</div>
+      </div>
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:#1B3A6B">3</div>
+        <div style="font-size:11px;color:#718096">Email steps</div>
+      </div>
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:#0D7377">${seq.days}</div>
+        <div style="font-size:11px;color:#718096">Days duration</div>
+      </div>
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:18px;font-weight:700;color:#EF9F27">May 31</div>
+        <div style="font-size:11px;color:#718096">Go-live date</div>
+      </div>
+    </div>
+
+    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:14px;margin-bottom:16px">
+      <div style="font-size:12px;font-weight:700;color:#0c4a6e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Apollo search filters — use exactly these</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        ${seq.filters.map(f => `<span style="background:#e0f2fe;color:#0c4a6e;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600">${f}</span>`).join('')}
+      </div>
+    </div>
+
+    ${seq.emails.map((email, i) => `
+      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:12px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;background:#f8fafc;border-bottom:1px solid #e2e8f0">
+          <span style="background:#1B3A6B;color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700">Day ${email.day}</span>
+          <div style="flex:1;font-size:13px;font-weight:700;color:#1a202c">${email.subject}</div>
+          <span style="background:${typeColors[email.type]};color:${typeText[email.type]};padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600">${email.type}</span>
+          ${i < seq.emails.length-1 ? '' : ''}
+        </div>
+        <div style="padding:16px">
+          <div style="font-size:12px;color:#718096;margin-bottom:8px;font-weight:600">SUBJECT: ${email.subject}</div>
+          <pre style="font-size:13px;color:#374151;line-height:1.8;white-space:pre-wrap;font-family:Georgia,serif;background:#fafafa;border:1px solid #f3f4f6;border-radius:6px;padding:14px;margin:0">${email.body}</pre>
+          <button onclick="navigator.clipboard.writeText(document.querySelectorAll('pre')[${i}].textContent).then(()=>alert('Copied!'))" style="margin-top:8px;background:#1B3A6B;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer">Copy email body</button>
+        </div>
+      </div>
+      ${i < seq.emails.length-1 ? `<div style="display:flex;align-items:center;gap:8px;padding:4px 16px;margin-bottom:12px"><div style="flex:1;height:1px;background:#e2e8f0"></div><span style="font-size:11px;color:#9ca3af;background:#fff;padding:2px 10px;border:1px solid #e2e8f0;border-radius:10px">${seq.emails[i+1].day - email.day} days later · if no reply</span><div style="flex:1;height:1px;background:#e2e8f0"></div></div>` : ''}
+    `).join('')}
+
+    <div style="background:#1B3A6B;border-radius:8px;padding:16px;margin-top:8px">
+      <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:8px">Next step — build this in Apollo</div>
+      <div style="font-size:13px;color:#9FE1CB;line-height:1.8">Go to app.apollo.io → Sequences → Create sequence → name it "${seq.name}" → add 3 emails using the templates above → use the filters shown to find ${seq.contacts} contacts → load contacts → activate May 31.</div>
+      <a href="https://app.apollo.io/#/sequences" target="_blank" style="display:inline-block;margin-top:12px;background:#f59e0b;color:#fff;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:700;text-decoration:none">Open Apollo → Build sequence</a>
+    </div>`;
+}
+
+if(typeof pages !== 'undefined') {
+  pages['s2-sequence'] = function() { renderSequencePage('s2'); };
+  pages['s3-sequence'] = function() { renderSequencePage('s3'); };
+  pages['s4-sequence'] = function() { renderSequencePage('s4'); };
+}
+</script>
