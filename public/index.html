@@ -234,7 +234,7 @@ function buildNav() {
     {id:'github',label:'GitHub Stats',roles:['admin','dev']},
     {id:'milestones',label:'Milestones',roles:['admin','dev','procurement','sales','marketing','qc']},
     {id:'ai-insights',label:'AI Insights',roles:['admin']},
-    {id:'decision-engine',label:'AI Decision Engine',roles:['admin']},{id:'sku-economics',label:'SKU Economics',roles:['admin']},{id:'execution-graph',label:'Execution Graph',roles:['admin']},{id:'data-pipeline',label:'Data Pipeline',roles:['admin']},{id:'settings',label:'Settings',roles:['admin']},
+    {id:'market-intelligence',label:'Market Intelligence',roles:['admin']},{id:'apollo-outreach',label:'Apollo Outreach',roles:['admin']},{id:'decision-engine',label:'AI Decision Engine',roles:['admin']},{id:'sku-economics',label:'SKU Economics',roles:['admin']},{id:'execution-graph',label:'Execution Graph',roles:['admin']},{id:'data-pipeline',label:'Data Pipeline',roles:['admin']},{id:'settings',label:'Settings',roles:['admin']},
   ].filter(l => l.roles.includes(currentUser.role));
 
   document.getElementById('nav-links').innerHTML = links.map(l =>
