@@ -873,13 +873,11 @@ async function addSKU() {
 }
 
 // Auto-load Phase 2 data when pages become visible
-const p2observer = new MutationObserver(() => {
   if (document.getElementById('decision-rules-table')) loadDecisionRules();
   if (document.getElementById('execution-steps-list')) loadExecutionSteps();
   if (document.getElementById('integrations-list')) loadIntegrations();
   if (document.getElementById('skus-list')) loadSKUs();
 });
-p2observer.observe(document.body, {childList:true, subtree:true});
 </script>
 <div id="section-decision-engine" class="section" style="display:none">
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
