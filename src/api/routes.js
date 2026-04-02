@@ -524,3 +524,16 @@ router.get('/sequences/templates', authMiddleware, async (req, res) => {
     }
   ]});
 });
+
+router.get('/apollo/debug', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const apolloKey = process.env.APOLLO_API_KEY;
+    const response = await fetch('https://api.apollo.io/v1/emailer_campaigns/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
+      body: JSON.stringify({ per_page: 5 })
+    });
+    const data = await response.json();
+    res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
