@@ -1491,68 +1491,72 @@ function renderSequencePage(seqId) {
   const el = document.getElementById('content');
   if (!el) return;
   document.getElementById('page-title').textContent = seq.name;
-
-  const typeColors = {'Intro':'#dcfce7','Follow-up':'#fef3c7','Final':'#fee2e2'};
-  const typeText = {'Intro':'#166534','Follow-up':'#92400e','Final':'#991b1b'};
+  const typeColors = {'Intro':'#064e3b','Follow-up':'#451a03','Final':'#450a0a'};
+  const typeText = {'Intro':'#6ee7b7','Follow-up':'#fcd34d','Final':'#fca5a5'};
+  const priorityColors = {'1':'#1D9E75','2':'#378ADD','3':'#EF9F27','4':'#9F7AEA'};
+  const priority = seqId.replace('s','');
 
   el.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:12px">
+    <div style="background:#1B3A6B;padding:16px 20px;border-radius:8px;margin-bottom:20px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
       <div>
-        <h2 style="font-size:20px;font-weight:700;color:#1a202c;margin:0">${seq.name}</h2>
-        <div style="color:#718096;font-size:13px;margin-top:4px">${seq.segment} · ${seq.contacts} target contacts · ${seq.days} days · 3 emails</div>
+        <div style="font-size:18px;font-weight:700;color:#fff;margin:0">${seq.name}</div>
+        <div style="color:#9FE1CB;font-size:13px;margin-top:4px">${seq.segment} · ${seq.contacts} target contacts · ${seq.days} days · 3 emails · Go-live May 31</div>
       </div>
-      <div style="display:flex;gap:10px">
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="background:${priorityColors[priority]};color:#fff;padding:4px 14px;border-radius:20px;font-size:12px;font-weight:700">Priority ${priority}</span>
         <a href="https://app.apollo.io/#/sequences" target="_blank" style="background:#f59e0b;color:#fff;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:700;text-decoration:none">Build in Apollo</a>
       </div>
     </div>
 
     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
-      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center">
-        <div style="font-size:24px;font-weight:700;color:${seq.color}">${seq.contacts}</div>
-        <div style="font-size:11px;color:#718096">Target contacts</div>
+      <div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:${priorityColors[priority]}">${seq.contacts}</div>
+        <div style="font-size:11px;color:#8899aa;margin-top:2px">Target contacts</div>
       </div>
-      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center">
-        <div style="font-size:24px;font-weight:700;color:#1B3A6B">3</div>
-        <div style="font-size:11px;color:#718096">Email steps</div>
+      <div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:#e2e8f0">3</div>
+        <div style="font-size:11px;color:#8899aa;margin-top:2px">Email steps</div>
       </div>
-      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center">
+      <div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px;text-align:center">
         <div style="font-size:24px;font-weight:700;color:#0D7377">${seq.days}</div>
-        <div style="font-size:11px;color:#718096">Days duration</div>
+        <div style="font-size:11px;color:#8899aa;margin-top:2px">Days duration</div>
       </div>
-      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center">
+      <div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;padding:14px;text-align:center">
         <div style="font-size:18px;font-weight:700;color:#EF9F27">May 31</div>
-        <div style="font-size:11px;color:#718096">Go-live date</div>
+        <div style="font-size:11px;color:#8899aa;margin-top:2px">Go-live date</div>
       </div>
     </div>
 
-    <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:14px;margin-bottom:16px">
-      <div style="font-size:12px;font-weight:700;color:#0c4a6e;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Apollo search filters — use exactly these</div>
+    <div style="background:#0a1628;border:1px solid #0D7377;border-radius:8px;padding:14px;margin-bottom:16px">
+      <div style="font-size:11px;font-weight:700;color:#0D7377;letter-spacing:.8px;text-transform:uppercase;margin-bottom:8px">Apollo search filters — use exactly these</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">
-        ${seq.filters.map(f => `<span style="background:#e0f2fe;color:#0c4a6e;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600">${f}</span>`).join('')}
+        ${seq.filters.map(f => `<span style="background:#042f2e;color:#5eead4;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600">${f}</span>`).join('')}
       </div>
     </div>
 
-    ${seq.emails.map((email, i) => `
-      <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:12px;overflow:hidden">
-        <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;background:#f8fafc;border-bottom:1px solid #e2e8f0">
-          <span style="background:#1B3A6B;color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700">Day ${email.day}</span>
-          <div style="flex:1;font-size:13px;font-weight:700;color:#1a202c">${email.subject}</div>
-          <span style="background:${typeColors[email.type]};color:${typeText[email.type]};padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600">${email.type}</span>
-          ${i < seq.emails.length-1 ? '' : ''}
+    <div style="margin-bottom:16px">
+      ${seq.emails.map((email, i) => `
+        <div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;margin-bottom:4px;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 16px;background:#0f1a2e;border-bottom:1px solid #1e2d45;cursor:pointer" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'">
+            <span style="background:#1B3A6B;color:#fff;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;white-space:nowrap">Day ${email.day}</span>
+            <div style="flex:1;font-size:13px;font-weight:700;color:#e2e8f0">${email.subject}</div>
+            <span style="background:${typeColors[email.type]};color:${typeText[email.type]};padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600">${email.type}</span>
+            <span style="color:#8899aa;font-size:16px">+</span>
+          </div>
+          <div style="display:none;padding:16px">
+            <div style="font-size:11px;color:#0D7377;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">Subject: ${email.subject}</div>
+            <pre style="font-size:13px;color:#9FE1CB;line-height:1.8;white-space:pre-wrap;font-family:Georgia,serif;background:#0a1628;border:1px solid #0D7377;border-radius:6px;padding:14px;margin:0">${email.body}</pre>
+            <button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy email body',2000)})" style="margin-top:10px;background:#0D7377;color:#fff;border:none;padding:7px 16px;border-radius:6px;font-size:12px;cursor:pointer;font-weight:700">Copy email body</button>
+          </div>
         </div>
-        <div style="padding:16px">
-          <div style="font-size:12px;color:#718096;margin-bottom:8px;font-weight:600">SUBJECT: ${email.subject}</div>
-          <pre style="font-size:13px;color:#374151;line-height:1.8;white-space:pre-wrap;font-family:Georgia,serif;background:#fafafa;border:1px solid #f3f4f6;border-radius:6px;padding:14px;margin:0">${email.body}</pre>
-          <button onclick="navigator.clipboard.writeText(document.querySelectorAll('pre')[${i}].textContent).then(()=>alert('Copied!'))" style="margin-top:8px;background:#1B3A6B;color:#fff;border:none;padding:6px 14px;border-radius:6px;font-size:12px;cursor:pointer">Copy email body</button>
-        </div>
-      </div>
-      ${i < seq.emails.length-1 ? `<div style="display:flex;align-items:center;gap:8px;padding:4px 16px;margin-bottom:12px"><div style="flex:1;height:1px;background:#e2e8f0"></div><span style="font-size:11px;color:#9ca3af;background:#fff;padding:2px 10px;border:1px solid #e2e8f0;border-radius:10px">${seq.emails[i+1].day - email.day} days later · if no reply</span><div style="flex:1;height:1px;background:#e2e8f0"></div></div>` : ''}
-    `).join('')}
+        ${i < seq.emails.length-1 ? `<div style="display:flex;align-items:center;gap:8px;padding:6px 16px;margin-bottom:4px"><div style="flex:1;height:1px;background:#1e2d45"></div><span style="font-size:11px;color:#4a5568;background:#0f1623;padding:2px 10px;border:1px solid #1e2d45;border-radius:10px">${seq.emails[i+1].day - email.day} days later · if no reply</span><div style="flex:1;height:1px;background:#1e2d45"></div></div>` : ''}
+      `).join('')}
+    </div>
 
-    <div style="background:#1B3A6B;border-radius:8px;padding:16px;margin-top:8px">
-      <div style="font-size:13px;font-weight:700;color:#fff;margin-bottom:8px">Next step — build this in Apollo</div>
-      <div style="font-size:13px;color:#9FE1CB;line-height:1.8">Go to app.apollo.io → Sequences → Create sequence → name it "${seq.name}" → add 3 emails using the templates above → use the filters shown to find ${seq.contacts} contacts → load contacts → activate May 31.</div>
-      <a href="https://app.apollo.io/#/sequences" target="_blank" style="display:inline-block;margin-top:12px;background:#f59e0b;color:#fff;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:700;text-decoration:none">Open Apollo → Build sequence</a>
+    <div style="background:#0a1628;border:1px solid #1D9E75;border-radius:8px;padding:16px">
+      <div style="font-size:13px;font-weight:700;color:#1D9E75;margin-bottom:8px">Next step — build this sequence in Apollo tonight</div>
+      <div style="font-size:13px;color:#9FE1CB;line-height:1.8">Go to Apollo → Sequences → Create sequence → name it "${seq.name}" → add 3 emails using templates above (click to expand, copy button to copy) → apply the teal filters above → load ${seq.contacts} contacts → set go-live May 31.</div>
+      <a href="https://app.apollo.io/#/sequences" target="_blank" style="display:inline-block;margin-top:12px;background:#1D9E75;color:#fff;padding:10px 24px;border-radius:6px;font-size:13px;font-weight:700;text-decoration:none">Open Apollo and build now</a>
     </div>`;
 }
 
