@@ -1340,6 +1340,85 @@ if(typeof pages !== 'undefined') {
 </div>
 <script>
 const sequenceTemplates = {
+  s1: {
+    name: 'S1 · Compounding Pharmacy',
+    color: '#1D9E75',
+    segment: 'Compounding Pharmacy · GLP-1 Priority',
+    contacts: 465,
+    days: 12,
+    filters: ['Chief Pharmacist', 'Purchasing Manager', 'Pharmacy Director', 'Director of Pharmacy Operations', 'Compounding Pharmacist', 'Pharmaceuticals', 'Life Sciences', 'United States', '1-200 employees', 'compounding pharmacy'],
+    emails: [
+      {
+        day: 1, type: 'Intro',
+        subject: 'Premium research molecules & APIs — US stock, 30% below market',
+        body: `Hi {{first_name}},
+
+I'm Naren from Abiozen LLC — we supply premium research molecules and generic APIs to compounding pharmacies across the US.
+
+We have 5,000+ molecules in stock including top niche research compounds and upcoming generic APIs, with same-batch COA available for immediate shipment.
+
+Key details:
+· 99%+ purity · COA from accredited lab
+· SDS included
+· Non-GMP and GMP-grade documentation available
+· 3-5 day US delivery
+· Flexible quantities: 5mg to 1kg (above 1kg RFQ)
+· 30% below current market rate
+
+Would a 15-minute call this week work to discuss your sourcing needs?
+
+Best regards,
+Naren B
+CEO, Abiozen LLC
+155 N Michigan Ave, Suite 334, Chicago, IL 60601
+naren@abiozen.com · abiozen.com
++1 (773) 964-5150`
+      },
+      {
+        day: 5, type: 'Follow-up',
+        subject: 'Re: Research molecules — do you have a backup supplier?',
+        body: `Hi {{first_name}},
+
+Following up on my previous note. One quick question — are you currently sourcing research molecules from a single supplier or do you have a backup source?
+
+We work with several compounding pharmacies as a secondary supplier — price leverage and supply security without changing your primary vendor.
+
+Having a second verified source is becoming standard practice given current market volatility.
+
+We can have a sample COA for any molecule to you within 2 hours — no commitment needed.
+
+Would it make sense to connect briefly this week?
+
+Best,
+Naren B
+CEO, Abiozen LLC
+naren@abiozen.com · +1 (773) 964-5150`
+      },
+      {
+        day: 12, type: 'Final',
+        subject: 'Re: Abiozen molecule catalog — final note',
+        body: `Hi {{first_name}},
+
+Last note from me — I don't want to take up more of your time if the timing isn't right.
+
+If you'd like to place a trial order:
+· Minimum order: 5mg (research quantities available)
+· Payment: Credit card, ACH, or NET-30 for approved accounts
+· Documentation: COA, SDS, purity certificate included
+· Delivery: 3-5 business days to any US address
+· Pricing: 30% below current market rate guaranteed
+
+To get started, reply with the molecule name and quantity needed.
+
+If timing isn't right today, I'll follow up in 90 days.
+
+Thank you for your time, {{first_name}}.
+
+Naren B · CEO, Abiozen LLC
+naren@abiozen.com · abiozen.com · +1 (773) 964-5150`
+      }
+    ]
+  },
   s2: {
     name: 'S2 · Research Lab / Biotech',
     color: '#378ADD',
