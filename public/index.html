@@ -1228,9 +1228,10 @@ async function loadApolloStats() {
   } catch(e) {}
 
   const totalContacts = localSequences.reduce((a,b)=>a+b.contacts,0);
+  const activeCount = localSequences.filter(s=>s.status==='active').length;
   const totalSent = apolloStats.reduce((a,b)=>a+b.emails_sent,0);
   const totalReplies = apolloStats.reduce((a,b)=>a+b.replies,0);
-  const activeCount = apolloStats.filter(s=>s.status==='active').length || 0;
+  // activeCount already set from local data
 
   el.innerHTML = `
     <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:20px">
@@ -1261,9 +1262,9 @@ async function loadApolloStats() {
       const sent = live.emails_sent||0;
       const opens = live.opens||0;
       const replies = live.replies||0;
-      const openRate = sent>0?Math.round((opens/sent)*100):0;
-      const replyRate = sent>0?Math.round((replies/sent)*100):0;
-      const status = live.status||'draft';
+      const openRate = Math.round(live.open_rate||0);
+      const replyRate = Math.round(live.reply_rate||0);
+      const status = live.status || seq.status || 'draft';
       return `
         <div style="background:#1a2540;border:1px solid #1e2d45;border-radius:8px;margin-bottom:12px;overflow:hidden">
           <div style="background:#0f1a2e;padding:12px 16px;border-bottom:1px solid #1e2d45;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
