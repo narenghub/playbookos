@@ -479,13 +479,19 @@ router.get('/apollo/stats', authMiddleware, adminOnly, async (req, res) => {
     const sequences = data.emailer_campaigns || [];
     console.log('Apollo raw:', JSON.stringify(sequences[0]||{}));
     const stats = sequences.map(s => ({
-      id: s.id, name: s.name, status: s.status,
-      contacts: s.num_prospects || 0,
-      emails_sent: s.num_sent_emails || 0,
-      opens: s.num_opened_emails || 0,
-      replies: s.num_replied_emails || 0,
-      open_rate: s.num_sent_emails > 0 ? Math.round((s.num_opened_emails / s.num_sent_emails) * 100) : 0,
-      reply_rate: s.num_sent_emails > 0 ? Math.round((s.num_replied_emails / s.num_sent_emails) * 100) : 0
+      id: s.id,
+      name: s.name,
+      status: s.active ? 'active' : (s.archived ? 'archived' : 'draft'),
+      contacts: s.num_contacts_email_status_extrapolated || 0,
+      emails_sent: s.unique_delivered || 0,
+      opens: s.unique_opened || 0,
+      replies: s.unique_replied || 0,
+      clicked: s.unique_clicked || 0,
+      bounced: s.unique_bounced || 0,
+      open_rate: Math.round((s.open_rate || 0) * 100),
+      reply_rate: Math.round((s.reply_rate || 0) * 100),
+      num_steps: s.num_steps || 0,
+      last_used: s.last_used_at || null
     }));
     res.json({ stats, total_contacts: stats.reduce((a,b) => a + b.contacts, 0), total_sent: stats.reduce((a,b) => a + b.emails_sent, 0) });
   } catch(e) { res.status(500).json({ error: e.message }); }
