@@ -477,6 +477,7 @@ router.get('/apollo/stats', authMiddleware, adminOnly, async (req, res) => {
     });
     const data = await response.json();
     const sequences = data.emailer_campaigns || [];
+    console.log('Apollo raw:', JSON.stringify(sequences[0]||{}));
     const stats = sequences.map(s => ({
       id: s.id, name: s.name, status: s.status,
       contacts: s.num_prospects || 0,
