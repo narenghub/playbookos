@@ -465,12 +465,13 @@ async team() {
         <button class="btn btn-teal btn-sm" onclick="showInviteModal()">+ Invite member</button>
       </div>
       <table>
-        <tr><th>Name</th><th>Email</th><th>Role</th><th>GitHub</th><th>Status</th></tr>
+        <tr><th>Name</th><th>Email</th><th>Role</th><th>GitHub</th><th>Status</th><th>Actions</th></tr>
         ${users.map(u=>`<tr>
           <td><strong>${u.name}</strong></td>
           <td>${u.email}</td>
           <td><span class="badge badge-blue">${u.role}</span></td>
           <td>${u.github_username ? `<a href="https://github.com/${u.github_username}" target="_blank" style="color:var(--teal)">@${u.github_username}</a>` : '<span style="color:#ccc">—</span>'}</td>
+          <td><button onclick="editGitHub('${u.id}','${u.name}','${u.github_username||''}')" style="background:#0D7377;color:#fff;border:none;padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer">Edit</button></td>
           <td><span class="badge ${u.joined_at ? 'badge-green' : 'badge-amber'}">${u.joined_at ? 'Active' : 'Invited'}</span></td>
         </tr>`).join('')}
       </table>
@@ -1709,5 +1710,22 @@ if(typeof pages !== 'undefined') {
   pages['s2-sequence'] = function() { renderSequencePage('s2'); };
   pages['s3-sequence'] = function() { renderSequencePage('s3'); };
   pages['s4-sequence'] = function() { renderSequencePage('s4'); };
+}
+</script>
+<script>
+async function editGitHub(userId, userName, currentGH) {
+  const newGH = prompt(`Enter GitHub username for ${userName}:`, currentGH || '');
+  if (newGH === null) return;
+  try {
+    const res = await fetch('/api/users/profile', {
+      method: 'PUT',
+      headers: {'Authorization':'Bearer '+localStorage.getItem('pbo_token'), 'Content-Type':'application/json'},
+      body: JSON.stringify({github_username: newGH, user_id: userId})
+    });
+    const data = await res.json();
+    if (data.error) { alert('Error: '+data.error); return; }
+    alert(`✅ GitHub username updated for ${userName}: @${newGH}`);
+    loadTeam();
+  } catch(e) { alert('Error: '+e.message); }
 }
 </script>

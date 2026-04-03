@@ -69,8 +69,9 @@ router.put('/users/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     if (req.user.id !== id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-    const { github_username, name } = req.body;
-    await query('UPDATE users SET github_username=COALESCE($1,github_username), name=COALESCE($2,name) WHERE id=$3', [github_username || null, name || null, id]);
+    const { github_username, name, user_id } = req.body;
+    const targetId = (req.user.role === 'admin' && user_id) ? user_id : id;
+    await query('UPDATE users SET github_username=COALESCE($1,github_username), name=COALESCE($2,name) WHERE id=$3', [github_username || null, name || null, targetId]);
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
