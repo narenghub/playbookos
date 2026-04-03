@@ -1288,7 +1288,7 @@ async function loadApolloStats() {
               ['Replies',replies,'#1D9E75'],
               ['Open rate',openRate+'%',openRate>=30?'#1D9E75':openRate>=15?'#EF9F27':'#718096'],
               ['Reply rate',replyRate+'%',replyRate>=5?'#1D9E75':replyRate>=2?'#EF9F27':'#718096'],
-              ['Go-live','May 31','#EF9F27']
+              ['Go-live',seq.golive||'TBD','#EF9F27']
             ].map(([label,val,color])=>`
               <div style="padding:12px 8px;text-align:center;border-right:1px solid #1e2d45">
                 <div style="font-size:16px;font-weight:700;color:${color}">${val}</div>
