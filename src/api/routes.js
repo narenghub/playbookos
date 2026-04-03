@@ -478,11 +478,12 @@ router.get('/apollo/stats', authMiddleware, adminOnly, async (req, res) => {
     const data = await response.json();
     const sequences = data.emailer_campaigns || [];
     console.log('Apollo raw:', JSON.stringify(sequences[0]||{}));
+    console.log('Apollo fields:', Object.keys(sequences[0]||{}).filter(k=>k.includes('num')||k.includes('contact')||k.includes('active')||k.includes('paused')));
     const stats = sequences.map(s => ({
       id: s.id,
       name: s.name,
       status: s.active ? 'active' : (s.archived ? 'archived' : 'draft'),
-      contacts: s.num_contacts_email_status_extrapolated || 0,
+      contacts: (s.num_active_in_sequence || 0) + (s.num_paused_in_sequence || 0) + (s.unique_delivered || 0),
       emails_sent: s.unique_delivered || 0,
       opens: s.unique_opened || 0,
       replies: s.unique_replied || 0,
