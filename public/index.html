@@ -1725,7 +1725,7 @@ async function editGitHub(userId, userName, currentGH) {
     const data = await res.json();
     if (data.error) { alert('Error: '+data.error); return; }
     alert(`✅ GitHub username updated for ${userName}: @${newGH}`);
-    loadTeam();
+    navigate('team');
   } catch(e) { alert('Error: '+e.message); }
 }
 </script>
