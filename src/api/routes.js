@@ -256,6 +256,9 @@ router.post('/targets', authMiddleware, adminOnly, async (req, res) => {
 
 router.post('/triggers/check', async (req, res) => {
   try {
+    const secret = process.env.TRIGGERS_SECRET;
+    const provided = (req.headers.authorization || '').replace('Bearer ', '');
+    if (!secret || provided !== secret) return res.status(401).json({ error: 'Unauthorized' });
     const yearRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE '2026%'`)).rows[0].v);
     const triggered = [];
     if (yearRev >= 100000) {

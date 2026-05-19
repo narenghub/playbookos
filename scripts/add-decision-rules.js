@@ -98,7 +98,7 @@ async function addTables() {
 
   const integrations = [
     ['GitHub API', 'dev', 'connected'],
-    ['Stripe', 'payments', 'connected'],
+    ['Stripe', 'payments', 'pending'],
     ['Claude (Anthropic)', 'ai', 'connected'],
     ['Resend Email', 'email', 'connected'],
     ['PostgreSQL', 'database', 'connected'],

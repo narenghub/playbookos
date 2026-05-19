@@ -101,8 +101,6 @@ async function initDB() {
   console.log('✅ PostgreSQL database ready. Admin:', adminEmail);
 }
 
-module.exports = { query, initDB };
-
 async function initPhase2() {
   const crypto = require('crypto');
   try {
@@ -165,7 +163,7 @@ async function initPhase2() {
 
     const integrations = [
       ['GitHub API','dev','connected'],
-      ['Stripe','payments','connected'],
+      ['Stripe','payments','pending'],
       ['Claude (Anthropic)','ai','connected'],
       ['Resend Email','email','connected'],
       ['PostgreSQL','database','connected'],
@@ -181,12 +179,11 @@ async function initPhase2() {
     }
 
     await query(`UPDATE integrations SET status='connected' WHERE name='Apollo.io'`);
+    await query(`UPDATE integrations SET status='pending' WHERE name='Stripe'`);
 
     console.log('✅ Phase 2 tables ready');
   } catch(e) { console.error('Phase 2 init error:', e.message); }
 }
-
-module.exports = { query, initDB, initPhase2 };
 
 async function migrateSKUColumns() {
   try {

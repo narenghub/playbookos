@@ -96,10 +96,12 @@ cron.schedule('0 9 * * 1', async () => {
 
 // Daily 6 PM: check milestone triggers
 cron.schedule('0 18 * * *', async () => {
+  const secret = process.env.TRIGGERS_SECRET;
+  if (!secret) { console.warn('[CRON] TRIGGERS_SECRET not set, skipping milestone check'); return; }
   try {
-    const res = await fetch(`http://localhost:${PORT}/api/triggers/check`, {
+    await fetch(`http://localhost:${PORT}/api/triggers/check`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer system` }
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` }
     });
   } catch {}
 });
