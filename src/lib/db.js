@@ -169,7 +169,7 @@ async function initPhase2() {
       ['Claude (Anthropic)','ai','connected'],
       ['Resend Email','email','connected'],
       ['PostgreSQL','database','connected'],
-      ['Apollo.io','sales','pending'],
+      ['Apollo.io','sales','connected'],
       ['HubSpot CRM','crm','pending'],
       ['Google Search Console','seo','pending'],
       ['FedEx API','fulfillment','pending'],
@@ -179,6 +179,8 @@ async function initPhase2() {
     for (const i of integrations) {
       await query(`INSERT INTO integrations (id,name,type,status) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING`, [crypto.randomUUID(),...i]);
     }
+
+    await query(`UPDATE integrations SET status='connected' WHERE name='Apollo.io'`);
 
     console.log('✅ Phase 2 tables ready');
   } catch(e) { console.error('Phase 2 init error:', e.message); }

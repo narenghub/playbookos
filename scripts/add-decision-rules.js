@@ -102,7 +102,7 @@ async function addTables() {
     ['Claude (Anthropic)', 'ai', 'connected'],
     ['Resend Email', 'email', 'connected'],
     ['PostgreSQL', 'database', 'connected'],
-    ['Apollo.io', 'sales', 'pending'],
+    ['Apollo.io', 'sales', 'connected'],
     ['HubSpot CRM', 'crm', 'pending'],
     ['Google Search Console', 'seo', 'pending'],
     ['FedEx API', 'fulfillment', 'pending'],

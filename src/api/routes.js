@@ -65,6 +65,15 @@ router.post('/users/invite', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+router.put('/users/profile', authMiddleware, async (req, res) => {
+  try {
+    const { github_username, name, user_id } = req.body;
+    const targetId = (req.user.role === 'admin' && user_id) ? user_id : req.user.id;
+    await query('UPDATE users SET github_username=COALESCE($1,github_username), name=COALESCE($2,name) WHERE id=$3', [github_username || null, name || null, targetId]);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.put('/users/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;

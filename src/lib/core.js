@@ -1,10 +1,13 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
 const crypto = require('crypto');
 const { query } = require('./db');
+const { sendEmail } = require('./mailer');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'abiozen2026playbookos10millionrevenuenaresh';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET environment variable is required. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+}
 
 function signToken(user) {
   return jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
@@ -27,19 +30,6 @@ function authMiddleware(req, res, next) {
 function adminOnly(req, res, next) {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   next();
-}
-
-async function sendEmail({ to, subject, html, triggerType }) {
-  try {
-    const key = process.env.RESEND_API_KEY;
-    if (!key || key.includes('REPLACE')) { console.log('Email skipped - no key'); return false; }
-    await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: 'PlaybookOS <onboarding@resend.dev>', to, subject, html })
-    });
-    return true;
-  } catch(e) { console.error('Email error:', e.message); return false; }
 }
 
 async function fetchGitHubStats(username, dateStr) {
