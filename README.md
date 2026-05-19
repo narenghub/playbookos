@@ -1,143 +1,138 @@
-# Abiozen PlaybookOS
+# PlaybookOS
 
-AI-driven team performance and target tracking platform. Connect your team, GitHub, and revenue data. Claude analyzes progress and sends weekly reports.
+Internal operations and performance dashboard for Abiozen LLC. Tracks team activity, revenue against monthly and annual targets, GitHub developer velocity, Apollo outreach, SKU economics, and runs scheduled Claude-generated assessments toward a $10M FY26 revenue target.
 
----
+## Stack
 
-## Quick Start (5 minutes)
+- Node.js 18+ · Express 4
+- PostgreSQL (`pg`)
+- Vanilla JS single-page app (`public/index.html`)
+- Resend (transactional email)
+- node-cron (scheduled jobs)
+- Anthropic Claude (analysis), Apollo.io (sales outreach), GitHub API (developer metrics)
 
-### Prerequisites
-- Node.js 18+ (download from nodejs.org)
-- An Anthropic API key (console.anthropic.com)
-- A GitHub Personal Access Token (github.com/settings/tokens)
-- Gmail account for email alerts (optional but recommended)
+## Run locally
 
-### 1. Install dependencies
+Requires Node 18+ and a reachable Postgres instance.
+
 ```bash
+git clone https://github.com/narenghub/playbookos.git
 cd playbookos
 npm install
-```
-
-### 2. Configure environment
-```bash
 cp .env.example .env
-```
-Open `.env` and fill in:
-- `JWT_SECRET` — run `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` to generate
-- `ADMIN_EMAIL` — your email (naresh@abiozen.com)
-- `ADMIN_PASSWORD` — your login password
-- `ANTHROPIC_API_KEY` — from console.anthropic.com
-- `GITHUB_TOKEN` — from github.com/settings/tokens (scopes: repo, read:org, read:user)
-- `SMTP_*` — Gmail credentials for email alerts
-
-### 3. Initialize database
-```bash
-node scripts/setup-db.js
-```
-
-### 4. Start server
-```bash
+# Edit .env with real values (see Environment variables below)
 node server.js
 ```
 
-Open: http://localhost:3000
+The server initializes its schema on first boot (`initDB → initPhase2 → migrateSchemas`) and seeds an admin user from `ADMIN_EMAIL` / `ADMIN_PASSWORD` plus milestones, monthly targets, decision rules, execution steps, and integrations.
 
-Login with your ADMIN_EMAIL and ADMIN_PASSWORD from .env
+Open http://localhost:3000 and log in with the admin credentials from `.env`.
 
----
+Sanity check:
 
-## Deployment Options
-
-### Option A: Railway (recommended — free, accessible by your whole team)
-1. Push this folder to a GitHub repository
-2. Go to railway.app → New Project → Deploy from GitHub repo
-3. Add all variables from .env.example in the Railway dashboard
-4. Railway auto-deploys. You get a URL like: https://playbookos-production.railway.app
-5. Set `BASE_URL` in Railway env vars to that URL
-
-### Option B: Your laptop (local only)
-Just run `node server.js`. Access at http://localhost:3000 from your own browser.
-
-### Option C: DigitalOcean/VPS ($6/month)
 ```bash
-apt update && apt install nodejs npm git
-git clone <your-repo> playbookos && cd playbookos
-npm install && cp .env.example .env && nano .env
-node scripts/setup-db.js
-npm install -g pm2
-pm2 start server.js --name playbookos
-pm2 startup && pm2 save
+curl http://localhost:3000/health
+# {"status":"ok","uptime":...,"timestamp":"...","db":"connected"}
 ```
-Add nginx reverse proxy for HTTPS.
 
----
+## Environment variables
 
-## How to Use
+| Variable | Required | Purpose |
+|---|---|---|
+| `DATABASE_URL` | yes | Postgres connection string. On Railway, set as a reference to `${{Postgres.DATABASE_URL}}` so it autoinjects. |
+| `JWT_SECRET` | yes | Signs auth tokens. Server refuses to start without it. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. |
+| `TRIGGERS_SECRET` | yes (for milestone cron) | Bearer token gating `POST /api/triggers/check`. The 6pm cron skips with a warning if unset. Same generation method as `JWT_SECRET`. |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | yes (first boot) | Bootstrap admin user during the initial DB seed. Ignored on subsequent boots. |
+| `ANTHROPIC_API_KEY` | yes | Claude API key for AI analysis and market intelligence. |
+| `RESEND_API_KEY` | yes | Resend API key for outbound email (invites, weekly reports, milestone triggers, Apollo outreach). |
+| `APOLLO_API_KEY` | yes (for Apollo features) | Apollo.io API key. Required for every `/api/apollo/*` endpoint. |
+| `GITHUB_TOKEN` | yes (for GitHub sync) | Personal access token with `repo`, `read:org`, `read:user` scopes. Used by the 8am sync cron and the manual "Sync GitHub now" button. |
+| `GITHUB_ORG` | no | Default org for GitHub queries. |
+| `PORT` | no | HTTP listen port. Defaults to 3000. |
+| `BASE_URL` | no | Public URL of the deployed app — referenced in email links (invite acceptance, weekly report footer). |
 
-### 1. Invite your team
-- Login as admin → Team → Invite member
-- Enter their email, select their role, add GitHub username (for devs)
-- They receive an email with a link to set their password
+## API endpoints
 
-### 2. Each team member logs daily activity
-- Devs: PRs merged, commits, features deployed
-- Procurement: SKUs priced, COAs collected, suppliers contacted
-- Sales: outreach emails, calls, demos, revenue closed
-- Marketing: campaigns sent, leads, content published
+All routes are mounted under `/api` and require `Authorization: Bearer <token>` unless noted.
 
-### 3. GitHub auto-sync
-- Runs daily at 8 AM automatically
-- Or click "Sync GitHub now" in the GitHub Stats page
-- Shows commits, PRs opened, PRs merged per developer per day
+**Auth** — `POST /auth/login` (rate-limited 10/min/IP), `POST /auth/accept-invite` (rate-limited 10/min/IP), `GET /auth/me`
 
-### 4. Log revenue
-- Admin → Revenue & Orders → Add order
-- Enter amount, buyer type, product category
-- Revenue tracks against monthly and annual targets
+**Users / team** — `GET /users`, `POST /users/invite` (admin), `PUT /users/profile`, `PUT /users/:id`
 
-### 5. AI analysis
-- Admin → AI Insights → Run AI analysis now
-- Claude reviews all team activity, revenue vs target, and gives 3-4 sentence assessment
-- Auto-runs every Monday morning and emails the admin
+**Activity** — `POST /activity`, `GET /activity/my`, `GET /activity/team` (admin)
 
-### 6. Milestone triggers
-- When revenue hits $100K: email fires to admin to hire Account Manager
-- When $500K/month: trigger to hire Sales Rep + Marketing Manager
-- All 8 milestones tracked with status updates
+**Revenue / orders** — `POST /orders` (admin), `GET /orders`
 
----
+**Dashboard** — `GET /dashboard/summary`, `GET /dashboard/my`
 
-## Team Roles & What They See
+**GitHub** — `POST /github/sync`
 
-| Role | Dashboard | Activity log | Playbook | GitHub | Revenue | AI Insights | Team admin |
-|------|-----------|--------------|----------|--------|---------|-------------|------------|
-| Admin (Naresh) | ✅ Full | ✅ | ✅ | ✅ | ✅ Enter + view | ✅ | ✅ |
-| Dev | ✅ Own | ✅ | ✅ | ✅ | View only | ❌ | ❌ |
-| Procurement | ✅ Own | ✅ | ✅ | ❌ | View only | ❌ | ❌ |
-| Sales | ✅ Own | ✅ | ✅ | ❌ | View own | ❌ | ❌ |
-| Marketing | ✅ Own | ✅ | ✅ | ❌ | View only | ❌ | ❌ |
+**Milestones** — `GET /milestones`, `PUT /milestones/:id` (admin), `DELETE /milestones/duplicates` (admin)
 
----
+**AI / triggers** — `POST /ai/analyze` (admin), `GET /ai/latest`, `POST /triggers/check` (requires `TRIGGERS_SECRET` in `Authorization: Bearer …` header)
 
-## Files
+**Targets** — `GET /targets`, `POST /targets` (admin)
+
+**Decision engine** — `GET /decision-rules`, `POST /decision-rules/evaluate` (admin)
+
+**SKUs** — `GET /skus`, `POST /skus` (admin), `POST /skus/bulk-upload` (admin), `GET /skus/export`
+
+**Execution / integrations** — `GET /execution-steps`, `PUT /execution-steps/:id` (admin), `GET /integrations`
+
+**Market intelligence** — `POST /market/analyze` (admin), `GET /market/latest`
+
+**Apollo.io** — `POST /apollo/find-buyers`, `POST /apollo/send-outreach`, `GET /apollo/sequences`, `GET /apollo/stats`, `GET /apollo/debug`, `GET /sequences/templates` (all admin)
+
+**Health** — `GET /health` (unauthenticated). Returns `{status, uptime, timestamp, db}`; 503 if the DB probe fails.
+
+## Cron jobs
+
+Defined in `server.js`, implementations in `src/lib/jobs.js`.
+
+| Schedule | Job | Function |
+|---|---|---|
+| `0 8 * * *` (daily 8am) | GitHub sync for all active devs | `syncGitHubAllDevs()` |
+| `0 9 * * 1` (Monday 9am) | Claude weekly analysis + emailed report | `runWeeklyAnalysis()` |
+| `0 18 * * *` (daily 6pm) | Milestone trigger check | `checkMilestoneTriggers()` via HTTP to self with `TRIGGERS_SECRET` |
+
+All three accept `{ dryRun: true }` for safe manual testing. Use the test harness:
+
+```bash
+DATABASE_URL=... node scripts/test-crons.js          # dry-run, no side effects
+DATABASE_URL=... node scripts/test-crons.js --live   # real run (sends email, inserts ai_analyses, etc.)
+```
+
+## Deploy to Railway
+
+Production lives in Railway project `meticulous-laughter`, service `playbookos`, linked to a `Postgres` service. `DATABASE_URL` autoinjects via reference variable.
+
+**Initial setup (already done for prod):**
+1. Railway → new project → provision PostgreSQL
+2. Add a second service → "Deploy from GitHub repo" → `narenghub/playbookos` → branch `main`
+3. In playbookos service Variables: paste everything from `.env.example` with real values. Set `DATABASE_URL=${{Postgres.DATABASE_URL}}` so it tracks the Postgres instance.
+4. Optional: set Health Check Path to `/health` so Railway gates new deploys on a healthy startup and rolls back on failure.
+
+**Subsequent deploys:** push to `main`. Railway auto-deploys within ~60 seconds.
+
+**If autodeploy stops working:**
+- Service Settings → Source → verify the GitHub connection is healthy; reconnect if not
+- Or trigger a manual deploy: `railway link --service playbookos`, then `railway up`
+
+## Project layout
+
 ```
 playbookos/
-├── server.js              # Main server + cron jobs
-├── package.json           # Dependencies
-├── .env.example           # Config template → copy to .env
-├── playbookos.db          # SQLite database (auto-created)
-├── scripts/
-│   └── setup-db.js        # One-time database initialization
+├── server.js                Express server, /health endpoint, cron schedules
+├── public/index.html        single-file SPA (admin + per-role views)
 ├── src/
-│   ├── lib/
-│   │   └── core.js        # DB, auth, GitHub, email, Claude helpers
-│   └── api/
-│       └── routes.js      # All REST API endpoints
-└── public/
-    └── index.html         # Complete frontend (single file)
+│   ├── api/routes.js        every /api/* endpoint + auth rate limiting
+│   └── lib/
+│       ├── core.js          auth, JWT, GitHub fetch, Claude wrapper
+│       ├── db.js            pg pool, schema init, seeds, migrations
+│       ├── jobs.js          cron job functions (testable, dry-runnable)
+│       └── mailer.js        Resend wrapper + email_log persistence
+└── scripts/
+    ├── test-crons.js        manually invoke each cron
+    ├── seed-real-data.js    one-off seed for SKUs + test order (gitignored)
+    └── add-decision-rules.js  legacy seed (covered by initPhase2 now)
 ```
-
----
-
-## Support
-Built by Claude (Anthropic) for Abiozen LLC. Questions? Ask Claude in your next conversation — reference "PlaybookOS" and paste any error messages.
