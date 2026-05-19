@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { signToken, authMiddleware, adminOnly, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
 const { query } = require('../lib/db');
 const { sendEmail } = require('../lib/mailer');
+const { checkMilestoneTriggers } = require('../lib/jobs');
 
 const router = express.Router();
 
@@ -277,18 +278,8 @@ router.post('/triggers/check', async (req, res) => {
     const secret = process.env.TRIGGERS_SECRET;
     const provided = (req.headers.authorization || '').replace('Bearer ', '');
     if (!secret || provided !== secret) return res.status(401).json({ error: 'Unauthorized' });
-    const yearRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date LIKE '2026%'`)).rows[0].v);
-    const triggered = [];
-    if (yearRev >= 100000) {
-      const ms = (await query(`SELECT * FROM milestones WHERE name LIKE '%Account Manager%'`)).rows[0];
-      if (ms && ms.status === 'pending') {
-        await query(`UPDATE milestones SET status='in_progress' WHERE id=$1`, [ms.id]);
-        const admin = (await query(`SELECT * FROM users WHERE role='admin' LIMIT 1`)).rows[0];
-        if (admin) await sendEmail({ to: admin.email, triggerType: 'milestone_trigger', subject: 'Trigger: $100K revenue — Hire Account Manager now', html: `<div style="font-family:Arial;padding:24px"><h2>Milestone Trigger</h2><p>Revenue: $${yearRev.toLocaleString()}</p><p>Action: Begin account manager hiring immediately.</p></div>` });
-        triggered.push('$100K milestone triggered');
-      }
-    }
-    res.json({ yearRev, triggered, checked: true });
+    const result = await checkMilestoneTriggers();
+    res.json({ ...result, checked: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

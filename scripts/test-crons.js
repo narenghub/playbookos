@@ -1,0 +1,49 @@
+// scripts/test-crons.js — manually invoke each cron job to verify it runs without errors
+// Usage: railway run --service playbookos sh -c 'DATABASE_URL=$DATABASE_PUBLIC_URL_FROM_PG node scripts/test-crons.js'
+// All jobs default to dryRun mode (skips outbound email + ai_analyses insert + milestone update).
+// Pass --live as first arg to run for real.
+if (require('fs').existsSync(require('path').join(__dirname, '..', '.env'))) {
+  try { require('dotenv').config(); } catch {}
+}
+
+const live = process.argv.includes('--live');
+const opts = { dryRun: !live };
+
+const { syncGitHubAllDevs, runWeeklyAnalysis, checkMilestoneTriggers } = require('../src/lib/jobs');
+
+async function step(name, fn) {
+  process.stdout.write(`\n▶ ${name} ... `);
+  const t0 = Date.now();
+  try {
+    const result = await fn();
+    const ms = Date.now() - t0;
+    console.log(`OK (${ms}ms)`);
+    console.log('   result:', JSON.stringify(result));
+    return { ok: true, result, ms };
+  } catch (e) {
+    const ms = Date.now() - t0;
+    console.log(`FAIL (${ms}ms)`);
+    console.log('   error:', e.message);
+    console.log('   stack:', e.stack?.split('\n').slice(0, 4).join('\n          '));
+    return { ok: false, error: e.message, ms };
+  }
+}
+
+async function main() {
+  console.log(`Mode: ${live ? 'LIVE (real sends, real writes)' : 'DRY RUN (safe — no email, no inserts)'}`);
+  if (!process.env.DATABASE_URL) {
+    console.error('ERROR: DATABASE_URL not set');
+    process.exit(1);
+  }
+  console.log(`DB: ${process.env.DATABASE_URL.replace(/:\/\/[^@]+@/, '://[REDACTED]@')}`);
+
+  const r1 = await step('syncGitHubAllDevs (8am cron)',     () => syncGitHubAllDevs());
+  const r2 = await step('runWeeklyAnalysis (9am Mon cron)', () => runWeeklyAnalysis(opts));
+  const r3 = await step('checkMilestoneTriggers (6pm cron)', () => checkMilestoneTriggers(opts));
+
+  const failures = [r1, r2, r3].filter(r => !r.ok);
+  console.log(`\n${failures.length === 0 ? '✅ All 3 cron jobs ran successfully' : `❌ ${failures.length} failure(s)`}`);
+  process.exit(failures.length === 0 ? 0 : 1);
+}
+
+main().catch(e => { console.error('Test harness error:', e); process.exit(1); });
