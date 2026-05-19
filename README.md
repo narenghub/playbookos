@@ -42,6 +42,7 @@ curl http://localhost:3000/health
 | `DATABASE_URL` | yes | Postgres connection string. On Railway, set as a reference to `${{Postgres.DATABASE_URL}}` so it autoinjects. |
 | `JWT_SECRET` | yes | Signs auth tokens. Server refuses to start without it. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. |
 | `TRIGGERS_SECRET` | yes (for milestone cron) | Bearer token gating `POST /api/triggers/check`. The 6pm cron skips with a warning if unset. Same generation method as `JWT_SECRET`. |
+| `PLAYBOOKOS_WEBHOOK_SECRET` | yes (for marketplace integration) | Shared secret validated against the `X-PlaybookOS-Secret` header on `POST /api/orders/webhook`. The endpoint returns 503 if unset. Same generation method as `JWT_SECRET`. |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | yes (first boot) | Bootstrap admin user during the initial DB seed. Ignored on subsequent boots. |
 | `ANTHROPIC_API_KEY` | yes | Claude API key for AI analysis and market intelligence. |
 | `RESEND_API_KEY` | yes | Resend API key for outbound email (invites, weekly reports, milestone triggers, Apollo outreach). |
@@ -61,9 +62,9 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Activity** — `POST /activity`, `GET /activity/my`, `GET /activity/team` (admin)
 
-**Revenue / orders** — `POST /orders` (admin), `GET /orders`
+**Revenue / orders** — `POST /orders` (admin), `GET /orders`, `POST /orders/webhook` (header-auth, see below)
 
-**Dashboard** — `GET /dashboard/summary`, `GET /dashboard/my`
+**Dashboard** — `GET /dashboard/summary`, `GET /dashboard/my`, `GET /dashboard/export` (CSV download of current month orders + summary stats; intended for board reports)
 
 **GitHub** — `POST /github/sync`
 
@@ -84,6 +85,32 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 **Apollo.io** — `POST /apollo/find-buyers`, `POST /apollo/send-outreach`, `GET /apollo/sequences`, `GET /apollo/stats`, `GET /apollo/debug`, `GET /sequences/templates` (all admin)
 
 **Health** — `GET /health` (unauthenticated). Returns `{status, uptime, timestamp, db}`; 503 if the DB probe fails.
+
+## Marketplace integration — POST /api/orders/webhook
+
+The Abiozen storefront posts each confirmed order to PlaybookOS so revenue dashboards and the weekly Claude report stay in sync without manual re-entry.
+
+- Auth: shared secret in the `X-PlaybookOS-Secret` header, validated against `PLAYBOOKOS_WEBHOOK_SECRET`
+- Idempotent: re-posting the same `order_id` is a no-op (`ON CONFLICT DO NOTHING`)
+- Audited: every accepted call writes a row to `email_log` with `trigger_type='webhook'`
+
+Body:
+
+```json
+{
+  "order_id": "abz_ord_7f4e...",
+  "amount": 8500.00,
+  "buyer_email": "purchasing@example-pharmacy.com",
+  "buyer_type": "compounding_pharmacy",
+  "product_category": "GLP-1",
+  "product_name": "Semaglutide 99% 5g",
+  "order_date": "2026-05-19"
+}
+```
+
+Response: `{ "received": true, "order_id": "abz_ord_7f4e..." }`
+
+Required fields: `order_id`, `amount` (number, non-negative), `order_date` (YYYY-MM-DD). Other fields are stored in `notes` if present.
 
 ## Cron jobs
 
