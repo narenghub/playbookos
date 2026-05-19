@@ -6,6 +6,7 @@ const cors = require('cors');
 const path = require('path');
 const cron = require('node-cron');
 const { syncGitHubAllDevs, runWeeklyAnalysis, scoreAllAndCoach } = require('./src/lib/jobs');
+const { analyzeRevenueTrends, getProcurementPriorities } = require('./src/lib/agents/revenue-agent');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -55,6 +56,25 @@ cron.schedule('0 9 * * 1', async () => {
     console.log(`[CRON] Weekly analysis done — ${result.thisMonth}, $${result.monthRevenue.toLocaleString()} of $${result.monthTarget.toLocaleString()} (${result.pct}%), emailed=${result.emailed}`);
   } catch (e) {
     console.error('[CRON] Weekly analysis error:', e.message);
+  }
+});
+
+// Monday 9 AM: revenue intelligence + procurement priorities (chained, alongside the weekly analysis)
+cron.schedule('0 9 * * 1', async () => {
+  console.log('[CRON] Revenue intelligence starting...');
+  try {
+    const rev = await analyzeRevenueTrends();
+    console.log(`[CRON] Revenue intelligence done — ${rev.period.this_month}, trend=${rev.velocity.trend}, ${rev.monthly.pct}% of target`);
+  } catch (e) {
+    console.error('[CRON] Revenue intelligence error:', e.message);
+    return;
+  }
+  try {
+    const proc = await getProcurementPriorities();
+    if (proc.skipped) console.log(`[CRON] Procurement priorities skipped — ${proc.reason}`);
+    else console.log(`[CRON] Procurement priorities done — ${proc.items.length} SKUs, emailed ${proc.emailed} of ${proc.recipients.length} procurement users`);
+  } catch (e) {
+    console.error('[CRON] Procurement priorities error:', e.message);
   }
 });
 

@@ -82,6 +82,8 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Performance scoring** — `GET /performance/scores` (admin, last 30 days for everyone), `GET /performance/my` (logged-in user, last 30 days)
 
+**Revenue intelligence** — `GET /revenue/intelligence` (admin) returns the most recent Monday-morning revenue report: category/buyer-segment breakdowns, weekly trend, velocity delta, monthly target progress, top molecules parsed from order notes, and Claude's 5 actionable recommendations
+
 **Market intelligence** — `POST /market/analyze` (admin), `GET /market/latest`
 
 **Apollo.io** — `POST /apollo/find-buyers`, `POST /apollo/send-outreach`, `GET /apollo/sequences`, `GET /apollo/stats`, `GET /apollo/debug`, `GET /sequences/templates` (all admin)
@@ -122,10 +124,21 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 |---|---|---|
 | `0 8 * * *` (daily 8am) | GitHub sync for all active devs | `syncGitHubAllDevs()` |
 | `0 9 * * 1` (Monday 9am) | Claude weekly analysis + emailed report | `runWeeklyAnalysis()` |
+| `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
 | `0 18 * * *` (daily 6pm) | Milestone trigger check | `checkMilestoneTriggers()` via HTTP to self with `TRIGGERS_SECRET` |
 | `0 18 * * *` (daily 6pm) | AI performance scoring + per-user coaching email | `scoreAllAndCoach()` |
 
 All accept `{ dryRun: true }` for safe manual testing.
+
+### Revenue Intelligence agent
+
+Lives in `src/lib/agents/revenue-agent.js`. Two functions, chained on the Monday 9am cron:
+
+**`analyzeRevenueTrends({dryRun})`**: pulls the last 30 days of `orders` and aggregates by product_category, buyer_type, and week. Computes velocity (last 7 days vs prior 7 days) and progress against the monthly revenue target from `targets`. Extracts top-3 molecules best-effort from order `notes` (the marketplace webhook writes `product: NAME` into notes). Passes everything to Claude haiku and asks for exactly 5 numbered recommendations covering segment focus, procurement scale-up, biggest risk, acceleration move, and a weekly experiment. Persists the full structured result + recommendation text into `ai_analyses` with `analysis_type='revenue_intelligence'`, and emails Naresh the HTML report.
+
+**`getProcurementPriorities({dryRun})`**: reads the latest revenue_intelligence row, takes the top-5 categories and top-5 molecules, and cross-references against `skus` where `is_active=1 AND units_in_stock < 10`. SKUs are scored by `sale_price * (10 - units_in_stock)` so high-margin near-empty items rank first. Top 10 go to every user with role `procurement` in an email titled "This week — source these N molecules first". If no SKU matches the revenue signal, falls back to all low-stock active SKUs and flags `used_fallback=true` in the response.
+
+Caveat: `orders` has no FK to `skus`, only a free-text `product_category`. The agent works with what's there — category-level signals when SKU categories overlap, plus the notes-parsing fallback for molecule names. If you want true SKU-level revenue attribution, the orders table needs a `sku_id` column and the webhook needs to send it.
 
 ### AI performance scoring
 
