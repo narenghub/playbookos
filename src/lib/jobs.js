@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const { query } = require('./db');
-const { syncGitHubForUser, analyzeTeamProgress } = require('./core');
+const { syncGitHubForUser, analyzeTeamProgress, scoreTeamMember } = require('./core');
 const { sendEmail } = require('./mailer');
 
 async function syncGitHubAllDevs() {
@@ -110,4 +110,45 @@ async function checkMilestoneTriggers({ dryRun = false } = {}) {
   return { yearRev, triggered, dryRun };
 }
 
-module.exports = { syncGitHubAllDevs, runWeeklyAnalysis, checkMilestoneTriggers };
+async function scoreAllAndCoach({ dryRun = false, date = null } = {}) {
+  const scoreDate = date || new Date().toISOString().slice(0, 10);
+  const users = (await query(
+    `SELECT id, name, email, role FROM users WHERE is_active=1 AND role <> 'admin' AND email IS NOT NULL`
+  )).rows;
+
+  if (dryRun) {
+    return { totalUsers: users.length, dryRun: true, users: users.map(u => ({ email: u.email, role: u.role })) };
+  }
+
+  const results = [];
+  for (const user of users) {
+    try {
+      const row = await scoreTeamMember(user.id, scoreDate);
+      if (row.skipped) { results.push({ user: user.email, skipped: row.reason }); continue; }
+      const emailed = await sendEmail({
+        to: user.email,
+        subject: `Your day at Abiozen — ${scoreDate} (score ${row.score}/100)`,
+        html: `<div style="font-family:Arial;max-width:600px;line-height:1.7;color:#333">
+  <div style="background:#1B3A6B;padding:14px 20px;border-radius:8px 8px 0 0;color:#fff">
+    <div style="font-size:12px;opacity:.8">Today's score</div>
+    <div style="font-size:28px;font-weight:700">${row.score} <span style="font-size:14px;opacity:.7">/ 100</span></div>
+  </div>
+  <div style="padding:20px;border:1px solid #eee;border-top:none;border-radius:0 0 8px 8px">
+    <p style="white-space:pre-wrap;margin:0 0 12px 0">${row.note}</p>
+    ${row.blockers && row.blockers.length ? `<p style="font-size:12px;color:#888;margin:0">Blockers detected: ${row.blockers.join('; ')}</p>` : ''}
+    <hr style="border:none;border-top:1px solid #eee;margin:16px 0">
+    <p style="font-size:11px;color:#888;margin:0">View dashboard: ${process.env.BASE_URL || 'http://localhost:3000'}</p>
+  </div>
+</div>`
+      });
+      results.push({ user: user.email, score: row.score, escalated: row.escalated, emailed });
+    } catch (e) {
+      results.push({ user: user.email, error: e.message });
+    }
+  }
+  const sent = results.filter(r => r.emailed).length;
+  const escalations = results.filter(r => r.escalated).length;
+  return { totalUsers: users.length, sent, escalations, results };
+}
+
+module.exports = { syncGitHubAllDevs, runWeeklyAnalysis, checkMilestoneTriggers, scoreAllAndCoach };

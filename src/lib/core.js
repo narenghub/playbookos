@@ -86,4 +86,121 @@ In 3-4 sentences, give a direct assessment of: 1) Whether on track for $10M, 2) 
   return runClaudeAnalysis(prompt);
 }
 
-module.exports = { signToken, verifyToken, authMiddleware, adminOnly, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, crypto };
+// ── Performance scoring ────────────────────────────────────────────────────
+
+const ROLE_BASELINES = {
+  dev: 8,
+  procurement: 50,
+  sales: 20,
+  marketing: 5,
+  qc: 10,
+  admin: 3,
+};
+
+function sumActivity(map) {
+  return Object.values(map).reduce((s, v) => s + (Number(v) || 0), 0);
+}
+
+function computeScoreForRole(role, activityMap, github) {
+  const blockers = [];
+  const activitySum = sumActivity(activityMap);
+  const effort = role === 'dev'
+    ? activitySum + (github.commits || 0) + (github.prsMerged || 0) * 5
+    : activitySum;
+  const baseline = ROLE_BASELINES[role] || ROLE_BASELINES.admin;
+
+  // 70 at baseline, 100 at ~1.43x baseline, capped
+  let score = Math.round((effort / baseline) * 70);
+  if (score > 100) score = 100;
+  if (score < 0) score = 0;
+
+  if (effort === 0) blockers.push('No activity logged today');
+  if (role === 'dev') {
+    if ((github.commits || 0) === 0) blockers.push('Zero GitHub commits');
+    if ((github.prsMerged || 0) === 0 && (github.prsOpened || 0) === 0) blockers.push('No PR activity');
+  }
+  if (effort > 0 && effort < baseline * 0.5) blockers.push(`Activity at ${Math.round((effort / baseline) * 100)}% of daily baseline`);
+
+  return { score, blockers, effort, baseline };
+}
+
+async function getCoachingNote(user, metrics, blockers, score) {
+  const firstName = user.name?.split(' ')[0] || 'team';
+  const guidance = score >= 70
+    ? 'reinforce one positive habit they showed today'
+    : score >= 40
+    ? 'suggest one concrete action for tomorrow'
+    : 'ask what support they need';
+  const prompt = `You are a supportive performance coach for ${firstName}, a ${user.role} at Abiozen LLC.
+
+Their score today is ${score}/100.
+
+Metrics:
+${JSON.stringify(metrics, null, 2)}
+
+Identified blockers:
+${blockers.length ? blockers.join('; ') : 'none specific'}
+
+Write EXACTLY 3 sentences:
+- Sentence 1: acknowledge what they did today, referencing actual numbers.
+- Sentence 2: ${guidance}.
+- Sentence 3: one short word of encouragement to sign off.
+
+No criticism. No bullet points. No headers. Plain prose. Return ONLY the 3 sentences.`;
+  return runClaudeAnalysis(prompt);
+}
+
+async function scoreTeamMember(userId, date) {
+  const userRow = (await query('SELECT id, name, email, role, github_username, is_active FROM users WHERE id=$1', [userId])).rows[0];
+  if (!userRow || !userRow.is_active) return { skipped: true, reason: 'user inactive or not found', user_id: userId };
+
+  const activityRows = (await query(
+    'SELECT metric, SUM(value) as total FROM activity_logs WHERE user_id=$1 AND log_date=$2 GROUP BY metric',
+    [userId, date]
+  )).rows;
+  const activityMap = Object.fromEntries(activityRows.map(a => [a.metric, parseFloat(a.total)]));
+
+  const ghRow = userRow.github_username
+    ? (await query('SELECT commits, prs_opened, prs_merged FROM github_stats WHERE github_username=$1 AND stat_date=$2', [userRow.github_username, date])).rows[0]
+    : null;
+  const github = {
+    commits: ghRow ? parseInt(ghRow.commits) : 0,
+    prsOpened: ghRow ? parseInt(ghRow.prs_opened) : 0,
+    prsMerged: ghRow ? parseInt(ghRow.prs_merged) : 0,
+  };
+
+  const { score, blockers, effort, baseline } = computeScoreForRole(userRow.role, activityMap, github);
+  const metrics = { activity: activityMap, github, effort, baseline };
+  const note = await getCoachingNote(userRow, metrics, blockers, score);
+
+  let escalated = false;
+  if (score < 60) {
+    const prev = (await query(
+      `SELECT score_0_to_100 FROM performance_scores WHERE user_id=$1 AND score_date < $2 ORDER BY score_date DESC LIMIT 2`,
+      [userId, date]
+    )).rows;
+    if (prev.length >= 2 && prev[0].score_0_to_100 < 60 && prev[1].score_0_to_100 < 60) {
+      escalated = true;
+      const admin = (await query("SELECT email FROM users WHERE role='admin' LIMIT 1")).rows[0];
+      if (admin?.email) {
+        await sendEmail({
+          to: admin.email,
+          subject: `Performance escalation: ${userRow.name} — 3 days below 60`,
+          html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#1B3A6B">Performance escalation</h2><p><strong>${userRow.name}</strong> (${userRow.role}) has scored below 60 for 3 consecutive days. Today: <strong>${score}/100</strong>.</p><p><strong>Blockers identified today:</strong></p><ul>${blockers.map(b => `<li>${b}</li>`).join('') || '<li>none specific</li>'}</ul><p><strong>Coaching note sent to them:</strong></p><blockquote style="border-left:3px solid #0D7377;padding-left:12px;margin:8px 0;color:#444">${note}</blockquote><p style="margin-top:16px">Recommended action: schedule a 1-on-1 check-in.</p></div>`
+        });
+      }
+    }
+  }
+
+  await query(
+    `INSERT INTO performance_scores (id, user_id, score_date, score_0_to_100, metrics_json, blockers_json, claude_coaching_note, escalated_to_admin)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     ON CONFLICT (user_id, score_date) DO UPDATE
+     SET score_0_to_100=$4, metrics_json=$5, blockers_json=$6, claude_coaching_note=$7, escalated_to_admin=$8`,
+    [crypto.randomUUID(), userId, date, score, JSON.stringify(metrics), JSON.stringify(blockers), note, escalated ? 1 : 0]
+  );
+
+  return { user_id: userId, email: userRow.email, name: userRow.name, role: userRow.role, date, score, blockers, escalated, note };
+}
+
+module.exports = { signToken, verifyToken, authMiddleware, adminOnly, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, scoreTeamMember, computeScoreForRole, crypto };

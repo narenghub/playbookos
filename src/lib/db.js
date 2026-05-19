@@ -197,6 +197,18 @@ async function migrateSchemas() {
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS coa_status TEXT DEFAULT 'pending';
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS status TEXT;
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS error_message TEXT;
+      CREATE TABLE IF NOT EXISTS performance_scores (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        score_date TEXT NOT NULL,
+        score_0_to_100 INTEGER NOT NULL,
+        metrics_json TEXT,
+        blockers_json TEXT,
+        claude_coaching_note TEXT,
+        escalated_to_admin INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT NOW(),
+        UNIQUE(user_id, score_date)
+      );
       CREATE TABLE IF NOT EXISTS buyer_contacts (
         id TEXT PRIMARY KEY, name TEXT, email TEXT UNIQUE, title TEXT,
         company TEXT, phone TEXT, segment TEXT, source TEXT DEFAULT 'apollo',

@@ -5,7 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const cron = require('node-cron');
-const { syncGitHubAllDevs, runWeeklyAnalysis } = require('./src/lib/jobs');
+const { syncGitHubAllDevs, runWeeklyAnalysis, scoreAllAndCoach } = require('./src/lib/jobs');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -68,6 +68,17 @@ cron.schedule('0 18 * * *', async () => {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` }
     });
   } catch {}
+});
+
+// Daily 6 PM: AI performance scoring + per-user coaching email
+cron.schedule('0 18 * * *', async () => {
+  console.log('[CRON] Performance scoring starting...');
+  try {
+    const result = await scoreAllAndCoach();
+    console.log(`[CRON] Performance scoring done — scored ${result.totalUsers}, emailed ${result.sent}, escalations ${result.escalations}`);
+  } catch (e) {
+    console.error('[CRON] Performance scoring error:', e.message);
+  }
 });
 
 app.listen(PORT, () => {

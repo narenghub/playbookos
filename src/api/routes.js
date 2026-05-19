@@ -431,6 +431,52 @@ router.get('/integrations', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+function formatScoreRow(r) {
+  return {
+    id: r.id,
+    user_id: r.user_id,
+    name: r.name,
+    role: r.role,
+    score_date: r.score_date,
+    score: r.score_0_to_100,
+    metrics: r.metrics_json ? JSON.parse(r.metrics_json) : null,
+    blockers: r.blockers_json ? JSON.parse(r.blockers_json) : null,
+    coaching_note: r.claude_coaching_note,
+    escalated_to_admin: !!r.escalated_to_admin,
+    created_at: r.created_at,
+  };
+}
+
+router.get('/performance/scores', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const rows = (await query(
+      `SELECT p.*, u.name, u.role
+       FROM performance_scores p
+       JOIN users u ON u.id = p.user_id
+       WHERE p.score_date >= $1
+       ORDER BY u.role, u.name, p.score_date DESC`,
+      [thirtyDaysAgo]
+    )).rows;
+    res.json(rows.map(formatScoreRow));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/performance/my', authMiddleware, async (req, res) => {
+  try {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const rows = (await query(
+      `SELECT p.*, u.name, u.role
+       FROM performance_scores p
+       JOIN users u ON u.id = p.user_id
+       WHERE p.user_id=$1 AND p.score_date >= $2
+       ORDER BY p.score_date DESC`,
+      [req.user.id, thirtyDaysAgo]
+    )).rows;
+    res.json(rows.map(formatScoreRow));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.delete('/milestones/duplicates', authMiddleware, adminOnly, async (req, res) => {
   try {
     await query(`DELETE FROM milestones WHERE id NOT IN (SELECT MIN(id) FROM milestones GROUP BY name)`);

@@ -80,6 +80,8 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Execution / integrations** — `GET /execution-steps`, `PUT /execution-steps/:id` (admin), `GET /integrations`
 
+**Performance scoring** — `GET /performance/scores` (admin, last 30 days for everyone), `GET /performance/my` (logged-in user, last 30 days)
+
 **Market intelligence** — `POST /market/analyze` (admin), `GET /market/latest`
 
 **Apollo.io** — `POST /apollo/find-buyers`, `POST /apollo/send-outreach`, `GET /apollo/sequences`, `GET /apollo/stats`, `GET /apollo/debug`, `GET /sequences/templates` (all admin)
@@ -121,8 +123,26 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 8 * * *` (daily 8am) | GitHub sync for all active devs | `syncGitHubAllDevs()` |
 | `0 9 * * 1` (Monday 9am) | Claude weekly analysis + emailed report | `runWeeklyAnalysis()` |
 | `0 18 * * *` (daily 6pm) | Milestone trigger check | `checkMilestoneTriggers()` via HTTP to self with `TRIGGERS_SECRET` |
+| `0 18 * * *` (daily 6pm) | AI performance scoring + per-user coaching email | `scoreAllAndCoach()` |
 
-All three accept `{ dryRun: true }` for safe manual testing. Use the test harness:
+All accept `{ dryRun: true }` for safe manual testing.
+
+### AI performance scoring
+
+Every evening at 6pm, `scoreAllAndCoach` runs `scoreTeamMember(userId, today)` for each active non-admin user. The score (0-100) is derived from their role's daily baseline applied to that day's `activity_logs` totals plus, for devs, `github_stats`. Each user gets a 3-sentence Claude-written coaching email; their score, metrics, blockers, and the coaching note are persisted to `performance_scores`. If a user scores below 60 for three consecutive days, `escalated_to_admin` flips to true on the row and Naresh gets an escalation email with the blockers and the coaching note.
+
+Per-role daily baselines (in `src/lib/core.js` `ROLE_BASELINES`):
+
+| Role | Baseline (reaching it ≈ 70/100) |
+|---|---|
+| dev | 8 (commits + 5*PRs_merged + activity sum) |
+| procurement | 50 (activity sum, e.g. skus_priced) |
+| sales | 20 (outreach_emails, calls, demos, etc.) |
+| marketing | 5 |
+| qc | 10 |
+| admin | 3 |
+
+Override targets live in the `targets` table (per-user, per-period, per-metric) but the score function currently uses the role baselines as the primary signal. Use `POST /api/targets` to seed custom targets if you want per-individual goals. Use the test harness:
 
 ```bash
 DATABASE_URL=... node scripts/test-crons.js          # dry-run, no side effects
