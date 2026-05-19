@@ -146,11 +146,52 @@ router.get('/activity/team', authMiddleware, adminOnly, async (req, res) => {
 router.post('/orders', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { order_date, amount, buyer_type, product_category, notes } = req.body;
-    if (!order_date || !amount) return res.status(400).json({ error: 'order_date and amount required' });
+    if (!order_date) return res.status(400).json({ error: 'order_date is required (format: YYYY-MM-DD)' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(order_date)) return res.status(400).json({ error: 'order_date must be in YYYY-MM-DD format' });
+    if (amount === undefined || amount === null) return res.status(400).json({ error: 'amount is required' });
+    if (typeof amount !== 'number' || isNaN(amount)) return res.status(400).json({ error: 'amount must be a valid number' });
+    if (amount < 0) return res.status(400).json({ error: 'amount cannot be negative' });
     const id = crypto.randomUUID();
     await query('INSERT INTO orders (id,order_date,amount,buyer_type,product_category,notes) VALUES ($1,$2,$3,$4,$5,$6)',
       [id, order_date, amount, buyer_type || null, product_category || null, notes || null]);
     res.json({ success: true, id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/orders/webhook', async (req, res) => {
+  try {
+    const secret = process.env.PLAYBOOKOS_WEBHOOK_SECRET;
+    const provided = req.headers['x-playbookos-secret'];
+    if (!secret) return res.status(503).json({ error: 'PLAYBOOKOS_WEBHOOK_SECRET not configured on server' });
+    if (!provided || provided !== secret) return res.status(401).json({ error: 'Invalid or missing X-PlaybookOS-Secret header' });
+
+    const { order_id, amount, buyer_email, buyer_type, product_category, product_name, order_date } = req.body || {};
+    if (!order_id) return res.status(400).json({ error: 'order_id is required' });
+    if (!order_date) return res.status(400).json({ error: 'order_date is required (format: YYYY-MM-DD)' });
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(order_date)) return res.status(400).json({ error: 'order_date must be in YYYY-MM-DD format' });
+    const amt = typeof amount === 'string' ? parseFloat(amount) : amount;
+    if (amt === undefined || amt === null || typeof amt !== 'number' || isNaN(amt)) return res.status(400).json({ error: 'amount is required and must be a number' });
+    if (amt < 0) return res.status(400).json({ error: 'amount cannot be negative' });
+
+    const noteParts = [];
+    if (buyer_email) noteParts.push(`buyer: ${buyer_email}`);
+    if (product_name) noteParts.push(`product: ${product_name}`);
+    noteParts.push('source: abiozen-webhook');
+    const notes = noteParts.join(' · ');
+
+    await query(
+      `INSERT INTO orders (id, order_date, amount, buyer_type, product_category, notes)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [order_id, order_date, amt, buyer_type || null, product_category || null, notes]
+    );
+
+    await query(
+      `INSERT INTO email_log (id, to_email, subject, trigger_type, status) VALUES ($1, $2, $3, 'webhook', 'received')`,
+      [crypto.randomUUID(), buyer_email || 'webhook', `Order webhook: $${amt} ${product_category || ''} from ${buyer_type || 'unknown'}`.trim()]
+    );
+
+    res.json({ received: true, order_id });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -186,6 +227,37 @@ router.get('/dashboard/summary', authMiddleware, async (req, res) => {
     const dailyRunRate = parseFloat(yearRev) / activeDays;
     const projectedTotal = parseFloat(yearRev) + (dailyRunRate * remainingDays);
     res.json({ revenue: { month: parseFloat(monthRev), year: parseFloat(yearRev), monthTarget, annualTarget, projectedTotal, dailyRunRate }, recentOrders, teamActivity, milestones, onTrack: projectedTotal >= annualTarget });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/dashboard/export', authMiddleware, async (req, res) => {
+  try {
+    const thisMonth = new Date().toISOString().slice(0, 7);
+    const orders = (await query(
+      `SELECT order_date, amount, buyer_type, product_category FROM orders WHERE order_date::text LIKE $1 ORDER BY order_date`,
+      [thisMonth + '%']
+    )).rows;
+
+    const total = orders.reduce((s, o) => s + parseFloat(o.amount || 0), 0);
+    const count = orders.length;
+    const avg = count > 0 ? total / count : 0;
+
+    const escape = v => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const lines = ['Order Date,Amount,Buyer Type,Product Category'];
+    for (const o of orders) {
+      const date = typeof o.order_date === 'string' ? o.order_date : new Date(o.order_date).toISOString().slice(0, 10);
+      lines.push([escape(date), parseFloat(o.amount).toFixed(2), escape(o.buyer_type), escape(o.product_category)].join(','));
+    }
+    lines.push('', 'Summary', `Total Revenue,${total.toFixed(2)}`, `Order Count,${count}`, `Average Order Value,${avg.toFixed(2)}`);
+
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="orders-${thisMonth}.csv"`);
+    res.send(lines.join('\n') + '\n');
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
