@@ -1,6 +1,6 @@
 // server.js — PlaybookOS main server
 require('dotenv').config();
-const { initDB, initPhase2, migrateSKUColumns } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSKUColumns()).catch(e => console.error("DB init error:", e.message));
+const { initDB, initPhase2, migrateSchemas, query } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSchemas()).catch(e => console.error("DB init error:", e.message));
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -11,9 +11,19 @@ const routes = require('./src/api/routes');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true }));
+
+app.get('/health', async (req, res) => {
+  try {
+    await query('SELECT 1');
+    res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString(), db: 'connected' });
+  } catch (e) {
+    res.status(503).json({ status: 'error', uptime: process.uptime(), timestamp: new Date().toISOString(), db: 'error', error: e.message });
+  }
+});
 
 // API routes
 app.use('/api', routes);

@@ -7,7 +7,25 @@ const { sendEmail } = require('../lib/mailer');
 
 const router = express.Router();
 
-router.post('/auth/login', async (req, res) => {
+const rateLimitStore = new Map();
+function rateLimit(maxRequests, windowMs) {
+  return (req, res, next) => {
+    const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+    const now = Date.now();
+    const recent = (rateLimitStore.get(ip) || []).filter(t => now - t < windowMs);
+    if (recent.length >= maxRequests) {
+      const retryAfter = Math.ceil((windowMs - (now - recent[0])) / 1000);
+      res.set('Retry-After', String(retryAfter));
+      return res.status(429).json({ error: `Too many requests. Try again in ${retryAfter}s.` });
+    }
+    recent.push(now);
+    rateLimitStore.set(ip, recent);
+    next();
+  };
+}
+const authLimiter = rateLimit(10, 60 * 1000);
+
+router.post('/auth/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
@@ -19,7 +37,7 @@ router.post('/auth/login', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/auth/accept-invite', async (req, res) => {
+router.post('/auth/accept-invite', authLimiter, async (req, res) => {
   try {
     const { token, password, name } = req.body;
     if (!token || !password || !name) return res.status(400).json({ error: 'Token, name, and password required' });

@@ -185,7 +185,7 @@ async function initPhase2() {
   } catch(e) { console.error('Phase 2 init error:', e.message); }
 }
 
-async function migrateSKUColumns() {
+async function migrateSchemas() {
   try {
     await query(`
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS cas_number TEXT;
@@ -195,6 +195,8 @@ async function migrateSKUColumns() {
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS sds_status TEXT DEFAULT 'pending';
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS coa_link TEXT;
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS coa_status TEXT DEFAULT 'pending';
+      ALTER TABLE email_log ADD COLUMN IF NOT EXISTS status TEXT;
+      ALTER TABLE email_log ADD COLUMN IF NOT EXISTS error_message TEXT;
       CREATE TABLE IF NOT EXISTS buyer_contacts (
         id TEXT PRIMARY KEY, name TEXT, email TEXT UNIQUE, title TEXT,
         company TEXT, phone TEXT, segment TEXT, source TEXT DEFAULT 'apollo',
@@ -207,8 +209,8 @@ async function migrateSKUColumns() {
         status TEXT DEFAULT 'active', created_at TEXT DEFAULT NOW()
       );
     `);
-    console.log('✅ SKU columns and Apollo tables migrated');
+    console.log('✅ Schema migrations applied');
   } catch(e) { console.error('Migration error:', e.message); }
 }
 
-module.exports = { query, initDB, initPhase2, migrateSKUColumns };
+module.exports = { query, initDB, initPhase2, migrateSchemas };
