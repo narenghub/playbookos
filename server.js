@@ -9,7 +9,7 @@ const { syncGitHubAllDevs, runWeeklyAnalysis, scoreAllAndCoach } = require('./sr
 const { analyzeRevenueTrends, getProcurementPriorities } = require('./src/lib/agents/revenue-agent');
 const { generateDailyBriefing } = require('./src/lib/agents/briefing-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('./src/lib/agents/growth-agent');
-const { cascadeGoals, assignWeeklyKPIsForAll } = require('./src/lib/agents/goal-engine');
+const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/lib/agents/goal-engine');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -148,6 +148,18 @@ cron.schedule('0 18 * * *', async () => {
     console.log(`[CRON] Performance scoring done — scored ${result.totalUsers}, emailed ${result.sent}, escalations ${result.escalations}`);
   } catch (e) {
     console.error('[CRON] Performance scoring error:', e.message);
+  }
+});
+
+// Daily 6 PM: Goal Engine — 15% divergence check, auto-recalc if exceeded
+cron.schedule('0 18 * * *', async () => {
+  console.log('[CRON] Goal divergence check starting...');
+  try {
+    const result = await checkAndRecalc();
+    if (result.skipped) console.log(`[CRON] Divergence check skipped — ${result.reason}`);
+    else console.log(`[CRON] Divergence check fired — ${result.month} ${result.direction} by ${result.divergence_pct.toFixed(1)}%, recalc triggered`);
+  } catch (e) {
+    console.error('[CRON] Goal divergence check error:', e.message);
   }
 });
 

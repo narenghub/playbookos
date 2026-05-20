@@ -6,6 +6,7 @@ const { query } = require('../lib/db');
 const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
 const { cascadeGoals, assignWeeklyKPIs, mondayOf } = require('../lib/agents/goal-engine');
+const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
 
 const router = express.Router();
 
@@ -447,6 +448,34 @@ function formatScoreRow(r) {
     created_at: r.created_at,
   };
 }
+
+router.get('/customers/warm-leads', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const leads = await getWarmLeads({ limit: parseInt(req.query.limit) || 10 });
+    res.json({ count: leads.length, leads });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/customers/outreach-today', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const row = (await query(
+      `SELECT id, period_key, content, created_at FROM ai_analyses
+       WHERE analysis_type='outreach_recommendations' AND period_key=$1
+       ORDER BY created_at DESC LIMIT 1`,
+      [today]
+    )).rows[0];
+    if (row) {
+      let content;
+      try { content = JSON.parse(row.content); }
+      catch { content = { raw_response: row.content, _parse_warning: 'content was not valid JSON' }; }
+      return res.json({ available: true, fresh: false, id: row.id, generated_at: row.created_at, ...content });
+    }
+    // No today recommendations yet — generate fresh on demand
+    const result = await generateOutreachRecommendations();
+    res.json({ available: !result.skipped, fresh: true, ...result });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 router.post('/goals/cascade', authMiddleware, adminOnly, async (req, res) => {
   try {

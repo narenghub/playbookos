@@ -262,7 +262,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 1 | `goal_cascades` and `weekly_kpis` tables | Built | `src/lib/db.js` migrateSchemas |
 | 1 | Claude-driven cascade to quarterly / weekly / daily | Built | `src/lib/agents/goal-engine.js` `cascadeGoals`, Monday 8am cron, `POST /api/goals/cascade` |
 | 1 | Per-user role-conditioned target derivation | Built | `assignWeeklyKPIs` + `assignWeeklyKPIsForAll`, `GET /api/goals/my-week`, `GET /api/goals/team-week` |
-| 1 | 15%-divergence-triggered recalc | Spec | not yet implemented |
+| 1 | 15%-divergence-triggered recalc | Built | `checkAndRecalc` in goal-engine.js; 6pm cron; logs `analysis_type='goal_recalc'`; 7-day floor + 24h cooldown |
 | 2A | Revenue Agent — `analyzeRevenueTrends` | Built | `src/lib/agents/revenue-agent.js`, `GET /api/revenue/intelligence` |
 | 2A | Monday 9am cron | Built | `server.js` |
 | 2B | Procurement Agent — `getProcurementPriorities` | Built | `src/lib/agents/revenue-agent.js` |
@@ -273,7 +273,8 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 2C | LinkedIn / marketplace event-stream signal | Spec | not yet implemented |
 | 2D | Performance Agent — daily 6pm scoring + coaching | Built | `src/lib/core.js` `scoreTeamMember`, `src/lib/jobs.js` `scoreAllAndCoach`, `GET /api/performance/*` |
 | 2D | 3-day below-60 escalation to admin | Built | `scoreTeamMember` |
-| 2E | Customer Agent — warmest leads, generated openers | Partial | Apollo find-buyers + send-outreach + sequence-templates endpoints exist; no warmth scoring, no auto-generated openers, no warm-leads endpoint |
+| 2E | Customer Agent — warmth scoring + outreach recommendations | Built | `src/lib/agents/customer-agent.js`, `buyer_engagement` table, `GET /api/customers/warm-leads`, `GET /api/customers/outreach-today` |
+| 2E | `buyer_engagement` event ingestion (Apollo webhook) | Spec | table exists; no webhook endpoint or poller wired yet, so warmth scores are 0 until populated |
 | 3 | Algolia search analytics integration | Built | `syncAlgoliaSearchData` in `src/lib/agents/growth-agent.js` |
 | 3 | Bloomreach personalization integration | Spec | not yet implemented |
 | 3 | Google Search Console integration | Partial | `fetchGSCData` — accepts a bearer token; needs OAuth refresh in production |

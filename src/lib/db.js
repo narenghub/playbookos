@@ -197,6 +197,16 @@ async function migrateSchemas() {
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS coa_status TEXT DEFAULT 'pending';
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS status TEXT;
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS error_message TEXT;
+      CREATE TABLE IF NOT EXISTS buyer_engagement (
+        id TEXT PRIMARY KEY,
+        contact_email TEXT NOT NULL,
+        event_type TEXT NOT NULL CHECK (event_type IN ('sent','opened','clicked','replied','bounced')),
+        event_at TEXT NOT NULL,
+        sequence_id TEXT,
+        metadata_json TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_buyer_engagement_email ON buyer_engagement (contact_email, event_at DESC);
       CREATE TABLE IF NOT EXISTS goal_cascades (
         id TEXT PRIMARY KEY,
         parent_goal_id TEXT,

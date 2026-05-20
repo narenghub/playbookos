@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
+const { getWarmLeads } = require('./customer-agent');
 
 const DAY_MS = 86400000;
 const fmt = n => '$' + (Number(n) || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -103,7 +104,12 @@ async function gatherBriefingData() {
     ORDER BY target_date`
   )).rows;
 
+  const warmLeads = (await getWarmLeads({ limit: 3 })).map(l => ({
+    name: l.name, company: l.company, segment: l.segment, score: l.score, signals: l.signals,
+  }));
+
   return {
+    warm_leads: warmLeads,
     snapshot: {
       date: todayISO,
       orders_24h: newOrders.length,
@@ -143,6 +149,9 @@ function buildPrompt(data) {
   const milestones = data.upcoming_milestones.length
     ? data.upcoming_milestones.map(m => `  - ${m.name} due ${m.target_date}`).join('\n')
     : '  (none in next 7 days)';
+  const warmLeadsText = (data.warm_leads || []).length
+    ? data.warm_leads.map(l => `  - ${l.name || '(unknown)'} at ${l.company || ''} (${l.segment || 'unknown'}): warmth ${l.score}/100, ${l.signals.join(', ') || 'no signals'}`).join('\n')
+    : '  (no warm leads — buyer_engagement empty)';
   const apolloLine = s.apollo_replies_total === null
     ? 'not available'
     : `${s.apollo_replies_total} cumulative` + (s.apollo_replies_delta !== null ? ` (delta since last briefing: ${s.apollo_replies_delta >= 0 ? '+' : ''}${s.apollo_replies_delta})` : ' (first briefing; no delta yet)');
@@ -167,6 +176,9 @@ ${flagged}
 
 Pending milestones due within 7 days:
 ${milestones}
+
+Top 3 warm leads from outreach (highest engagement warmth):
+${warmLeadsText}
 
 Write the briefing in EXACTLY this format. No greetings, no headers, no sign-off:
 
@@ -233,6 +245,14 @@ function renderBriefingEmail(data, briefingText) {
       </tr>
     </table>
     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:18px;line-height:1.7;font-size:13px;white-space:pre-wrap;font-family:Georgia,serif">${briefingText}</div>
+    ${(data.warm_leads || []).length ? `
+    <div style="margin-top:20px">
+      <div style="font-size:13px;font-weight:700;color:#0D7377;margin-bottom:8px">Top 3 warm leads — sales call list</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tr style="background:#1B3A6B;color:#fff"><th style="padding:6px 8px;text-align:left">Name</th><th style="padding:6px 8px;text-align:left">Company</th><th style="padding:6px 8px;text-align:left">Segment</th><th style="padding:6px 8px;text-align:right">Warmth</th></tr>
+        ${data.warm_leads.map((l, i) => `<tr style="background:${i % 2 ? '#fff' : '#f8fafc'}"><td style="padding:6px 8px">${l.name || '(unknown)'}</td><td style="padding:6px 8px">${l.company || '—'}</td><td style="padding:6px 8px;color:#666">${l.segment || '—'}</td><td style="padding:6px 8px;text-align:right;font-weight:700;color:${l.score >= 70 ? '#1D9E75' : l.score >= 40 ? '#EF9F27' : '#666'}">${l.score}/100</td></tr>`).join('')}
+      </table>
+    </div>` : ''}
     <hr style="border:none;border-top:1px solid #eee;margin:20px 0">
     <p style="font-size:11px;color:#888;margin:0">View full dashboard: ${process.env.BASE_URL || 'http://localhost:3000'}</p>
   </div>

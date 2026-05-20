@@ -79,6 +79,8 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Goals (Goal Engine — Layer 1)** — `POST /goals/cascade` (admin, triggers full cascade from annual targets), `GET /goals/my-week` (current week KPIs for the logged-in user; auto-instantiates from cascade if missing), `GET /goals/team-week` (admin, current week KPIs for everyone)
 
+**Customer Agent (Layer 2E)** — `GET /customers/warm-leads` (admin, top 10 by warmth score), `GET /customers/outreach-today` (admin, today's Claude-generated call list with talking points per lead; serves cached row if generated today, otherwise generates fresh)
+
 **Decision engine** — `GET /decision-rules`, `POST /decision-rules/evaluate` (admin)
 
 **SKUs** — `GET /skus`, `POST /skus` (admin), `POST /skus/bulk-upload` (admin), `GET /skus/export`
@@ -139,6 +141,7 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
 | `0 18 * * *` (daily 6pm) | Milestone trigger check | `checkMilestoneTriggers()` via HTTP to self with `TRIGGERS_SECRET` |
 | `0 18 * * *` (daily 6pm) | AI performance scoring + per-user coaching email | `scoreAllAndCoach()` |
+| `0 18 * * *` (daily 6pm) | Layer 1 — 15% divergence check, auto-recalc if exceeded | `checkAndRecalc()` |
 
 All accept `{ dryRun: true }` for safe manual testing.
 
@@ -151,6 +154,22 @@ Gathers a 24-hour snapshot covering new orders, today/yesterday revenue against 
 Claude is prompted for a strict three-section briefing — "What's going well", "What's at risk", "Actions for today" — three numbered items each, every line referencing an actual number from the snapshot, every action carrying an owner and a measurable success criterion. Output is stored as JSON in `ai_analyses` with `analysis_type='daily_briefing'` and emailed to the admin user (falls back to `naren@abiozen.com` if no admin row exists).
 
 Caveat on the Apollo number: Apollo's API only exposes per-sequence cumulative `unique_replied`, not a time-windowed count. The briefing reports both the cumulative total and the delta since the prior briefing's stored value. First-day briefings show only the total.
+
+### Customer Agent (Layer 2E)
+
+`src/lib/agents/customer-agent.js`. Three exports plus a new `buyer_engagement` event table.
+
+`scoreLeadWarmth(contactEmail)` reads from `buyer_engagement` and computes a 0-100 score: `+20` for any opens, `+30` for any clicks, `+50` for any replies, `+10` bonus for 3+ opens, `+20` bonus for a reply within 24 hours of the latest send. Caps at 100. Returns score plus a list of human-readable signal strings.
+
+`getWarmLeads({limit})` joins `buyer_contacts` with `buyer_engagement`, scores every contact that has at least one event, returns the top N by score (default 10).
+
+`generateOutreachRecommendations({dryRun})` pulls the top 10 warm leads plus the last 30 days of best-selling product categories from `orders`, asks Claude haiku for a JSON array of per-lead recommendations (priority, molecule to lead with, talking points, channel — call/email/linkedin based on warmth band). Stores in `ai_analyses` with `analysis_type='outreach_recommendations'`, `period_key=YYYY-MM-DD` so each day's recommendations are findable.
+
+`GET /api/customers/outreach-today` serves the most recent row for today; if none exists, it generates a fresh one on demand. `GET /api/customers/warm-leads` is the raw scored list without Claude.
+
+The 7am daily briefing now includes top 3 warm leads — as a section in the Claude prompt and as a small table in the email — so Naresh sees the day's call list at the same time as his briefing.
+
+**Data caveat for buyer_engagement**: this table is empty until something populates it. Apollo's REST API only exposes sequence-level aggregate stats, not per-contact opens/clicks/replies. To get per-contact data you need either an Apollo webhook delivering events to PlaybookOS (not yet built; would need a `POST /api/customers/engagement-event` endpoint with a shared secret), or a separate polling job that hits Apollo's per-contact analytics. Until then, `getWarmLeads` returns an empty array, `generateOutreachRecommendations` skips with a reason, and the briefing's warm-leads section shows `(no warm leads — buyer_engagement empty)`.
 
 ### Goal Engine (Layer 1)
 
@@ -172,6 +191,8 @@ The Monday 8am cron runs `cascadeGoals()` then `assignWeeklyKPIsForAll()`. `POST
 The math is split deterministically vs. Claude-driven:
 - Deterministic: monthly from seed, quarterly sum-of-months when seeds cover the quarter, daily = weekly / 5 business days.
 - Claude: quarterly fallback when seeds don't cover, per-role weekly KPI allocation (the part requiring judgment).
+
+`checkAndRecalc({dryRun})` is wired to the daily 6pm cron. It compares this-month MTD revenue against a pro-rata target (`monthly_target * days_elapsed / days_in_month`). If the absolute divergence exceeds 15%, it calls `cascadeGoals()` and logs the event in `ai_analyses` as `analysis_type='goal_recalc'`. Safeguards: skips during the first 7 days of the month (too noisy), and enforces a 24-hour cooldown so a sustained slump doesn't trigger a Claude call every evening.
 
 ### Growth Intelligence agent
 

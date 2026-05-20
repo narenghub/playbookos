@@ -279,4 +279,98 @@ async function assignWeeklyKPIsForAll({ dryRun = false } = {}) {
   return { week_start: weekStart, total: users.length, results };
 }
 
-module.exports = { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf, ROLE_METRICS };
+// Daily 6pm hook: if month-to-date revenue has diverged from the pro-rata
+// target by more than 15% (either direction), trigger a fresh cascadeGoals
+// run so weekly KPIs reflect the new reality. Skip in the first week of the
+// month (too noisy) and skip if we recalced in the last 24h (avoid daily
+// recalc storms during a sustained slump).
+async function checkAndRecalc({ dryRun = false } = {}) {
+  const today = new Date();
+  const todayISO = isoDate(today);
+  const thisMonth = todayISO.slice(0, 7);
+  const daysElapsed = today.getUTCDate();
+  const daysInMonth = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 0)).getUTCDate();
+
+  if (daysElapsed < 7) {
+    return { skipped: true, reason: 'less than 7 days into month — too early to assess divergence', month: thisMonth, days_elapsed: daysElapsed };
+  }
+
+  const target = parseFloat((await query(
+    `SELECT target_value FROM targets WHERE period_type='monthly' AND period_key=$1 AND metric='revenue'`,
+    [thisMonth]
+  )).rows[0]?.target_value || 0);
+  if (target <= 0) {
+    return { skipped: true, reason: `no monthly revenue target for ${thisMonth}`, month: thisMonth };
+  }
+
+  const actual = parseFloat((await query(
+    `SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date::text LIKE $1`,
+    [thisMonth + '%']
+  )).rows[0].v);
+
+  const proRataExpected = target * (daysElapsed / daysInMonth);
+  const divergencePct = proRataExpected > 0 ? ((actual - proRataExpected) / proRataExpected) * 100 : 0;
+
+  if (Math.abs(divergencePct) <= 15) {
+    return {
+      skipped: true,
+      reason: 'within 15% tolerance',
+      month: thisMonth,
+      actual,
+      pro_rata_expected: proRataExpected,
+      divergence_pct: divergencePct,
+      days_elapsed: daysElapsed,
+      days_in_month: daysInMonth,
+    };
+  }
+
+  const recent = (await query(
+    `SELECT created_at FROM ai_analyses WHERE analysis_type='goal_recalc' AND created_at >= NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 1`
+  )).rows[0];
+  if (recent) {
+    return {
+      skipped: true,
+      reason: '24h cooldown — already recalced',
+      last_recalc: recent.created_at,
+      divergence_pct: divergencePct,
+      actual,
+      pro_rata_expected: proRataExpected,
+    };
+  }
+
+  let cascadeResult = null;
+  if (!dryRun) {
+    cascadeResult = await cascadeGoals();
+    await query(
+      `INSERT INTO ai_analyses (id, analysis_type, period_key, content) VALUES ($1, 'goal_recalc', $2, $3)`,
+      [
+        crypto.randomUUID(),
+        thisMonth,
+        JSON.stringify({
+          triggered_at: new Date().toISOString(),
+          month: thisMonth,
+          actual,
+          pro_rata_expected: proRataExpected,
+          divergence_pct: divergencePct,
+          days_elapsed: daysElapsed,
+          days_in_month: daysInMonth,
+          direction: divergencePct > 0 ? 'ahead' : 'behind',
+          cascade_result: cascadeResult,
+        }),
+      ]
+    );
+  }
+
+  return {
+    recalc_triggered: !dryRun,
+    month: thisMonth,
+    actual,
+    pro_rata_expected: proRataExpected,
+    divergence_pct: divergencePct,
+    direction: divergencePct > 0 ? 'ahead' : 'behind',
+    cascade_result: cascadeResult,
+    dryRun,
+  };
+}
+
+module.exports = { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, checkAndRecalc, mondayOf, ROLE_METRICS };
