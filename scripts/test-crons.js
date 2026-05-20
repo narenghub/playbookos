@@ -16,6 +16,7 @@ const { syncAlgoliaSearchData, generateSEORecommendations } = require('../src/li
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('../src/lib/agents/goal-engine');
 const { getWarmLeads, generateOutreachRecommendations } = require('../src/lib/agents/customer-agent');
 const { takeMetricsSnapshot, detectAnomalies } = require('../src/lib/agents/metrics-snapshot');
+const { trackKeywordRankings, identifyContentGaps, generateSEOTasksForTeam, trackAlgoliaNoResults } = require('../src/lib/agents/seo-agent');
 
 async function step(name, fn) {
   process.stdout.write(`\n▶ ${name} ... `);
@@ -59,9 +60,13 @@ async function main() {
   const r14 = await step('generateOutreachRecommendations',       () => generateOutreachRecommendations(opts));
   const r15 = await step('takeMetricsSnapshot (midnight)',        () => takeMetricsSnapshot(opts));
   const r16 = await step('detectAnomalies (briefing input)',      () => detectAnomalies());
+  const r17 = await step('trackKeywordRankings (SEO 8am Mon)',    () => trackKeywordRankings(opts));
+  const r18 = await step('identifyContentGaps (SEO helper)',      () => identifyContentGaps());
+  const r19 = await step('generateSEOTasksForTeam (SEO 8am Mon)', () => generateSEOTasksForTeam(opts));
+  const r20 = await step('trackAlgoliaNoResults (SEO helper)',    () => trackAlgoliaNoResults());
 
-  const failures = [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16].filter(r => !r.ok);
-  console.log(`\n${failures.length === 0 ? '✅ All 16 cron jobs ran successfully' : `❌ ${failures.length} failure(s)`}`);
+  const failures = [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20].filter(r => !r.ok);
+  console.log(`\n${failures.length === 0 ? '✅ All 20 cron jobs ran successfully' : `❌ ${failures.length} failure(s)`}`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

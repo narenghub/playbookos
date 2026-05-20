@@ -101,6 +101,8 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Growth intelligence** — `GET /growth/intelligence` (admin) returns the most recent Monday-morning Growth Agent output: aggregated demand signals from Algolia internal search + GSC, and Claude's top-10 list of molecules buyers want but the catalog doesn't carry
 
+**SEO intelligence** — `GET /seo/rankings` (admin/seo_specialist) — 30-day keyword time series with computed trend (improving / declining / flat / new); `GET /seo/gaps` — current content-gap opportunities (high impressions, low rank, low CTR); `GET /seo/no-results` — Algolia zero-result searches that don't match any active SKU
+
 **Market intelligence** — `POST /market/analyze` (admin), `GET /market/latest`
 
 **Apollo.io** — `POST /apollo/find-buyers`, `POST /apollo/send-outreach`, `GET /apollo/sequences`, `GET /apollo/stats`, `GET /apollo/debug`, `GET /sequences/templates` (all admin)
@@ -143,6 +145,7 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 7 * * *` (daily 7am) | Layer 6 — Command Center daily briefing emailed to admin | `generateDailyBriefing()` |
 | `0 8 * * 1` (Monday 8am) | Layer 1 — Goal Engine: cascade annual targets then assign weekly KPIs to every active user | `cascadeGoals()` → `assignWeeklyKPIsForAll()` |
 | `0 8 * * 1` (Monday 8am) | Layer 2C — Growth Agent: Algolia search sync then SEO recommendations | `syncAlgoliaSearchData()` → `generateSEORecommendations()` |
+| `0 8 * * 1` (Monday 8am) | SEO Agent — keyword ranking persistence, content-gap tasks for seo_specialist, missing-from-catalog rollup | `trackKeywordRankings()` → `generateSEOTasksForTeam()` → `trackAlgoliaNoResults()` |
 | `0 8 * * *` (daily 8am) | GitHub sync for all active devs | `syncGitHubAllDevs()` |
 | `0 9 * * 1` (Monday 9am) | Claude weekly analysis + emailed report | `runWeeklyAnalysis()` |
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
@@ -254,6 +257,20 @@ The math is split deterministically vs. Claude-driven:
 - Claude: quarterly fallback when seeds don't cover, per-role weekly KPI allocation (the part requiring judgment).
 
 `checkAndRecalc({dryRun})` is wired to the daily 6pm cron. It compares this-month MTD revenue against a pro-rata target (`monthly_target * days_elapsed / days_in_month`). If the absolute divergence exceeds 15%, it calls `cascadeGoals()` and logs the event in `ai_analyses` as `analysis_type='goal_recalc'`. Safeguards: skips during the first 7 days of the month (too noisy), and enforces a 24-hour cooldown so a sustained slump doesn't trigger a Claude call every evening.
+
+### SEO Agent
+
+`src/lib/agents/seo-agent.js`. Four exports plus a new `seo_rankings` table. Distinct from but overlapping the Growth Agent: Growth Agent focuses on "catalog expansion" (molecules buyers want that we don't carry); SEO Agent focuses on "page optimization" (molecules we DO carry but rank poorly for on Google). Both consume the same Algolia + GSC low-level fetchers from `growth-agent.js`.
+
+`trackKeywordRankings({dryRun})` pulls the top-50 GSC queries via `fetchGSCData()` and persists one row per query in `seo_rankings` keyed on `(query, recorded_date)`. The Monday cron creates a weekly time series; over time the table accumulates a per-query history that the `/seo/rankings` endpoint reads to compute trend.
+
+`identifyContentGaps()` filters the live GSC data to queries with `impressions >= 100 AND position > 10 AND ctr < 0.02`, ranks them by `impressions / position`, returns top 10. These are queries where Abiozen already shows up in Google but doesn't convert — fixable by improving existing pages rather than building new ones.
+
+`generateSEOTasksForTeam({dryRun})` takes those gaps, matches them against the current `skus` catalog, and asks Claude haiku to convert each catalog-matched gap into a specific writing task (e.g. "Write product description for Semaglutide targeting query 'buy semaglutide API USA'"). Tasks include `page_type` (product_description / category_page / blog_post / landing_page) and priority. Stored in `ai_analyses` (`analysis_type='seo_tasks'`) and emailed to every user with `role='seo_specialist'`.
+
+`trackAlgoliaNoResults()` pulls Algolia's no-result queries and filters out anything that fuzzy-matches a current active SKU. The remainder is what the catalog is missing — closely related to the Growth Agent / Procurement Agent inputs but exposed as its own endpoint for the SEO Intelligence dashboard.
+
+Caveat: `seo_rankings` data quality depends on GSC working. With `GOOGLE_SEARCH_CONSOLE_KEY` unset or expired (it's a bearer token, not an API key), `trackKeywordRankings` skips cleanly and the `/seo/rankings` endpoint returns an empty array. The SEO Intelligence dashboard tells the admin exactly which fixture is missing.
 
 ### Growth Intelligence agent
 

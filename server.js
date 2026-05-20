@@ -9,6 +9,7 @@ const { syncGitHubAllDevs, runWeeklyAnalysis, scoreAllAndCoach } = require('./sr
 const { analyzeRevenueTrends, getProcurementPriorities } = require('./src/lib/agents/revenue-agent');
 const { generateDailyBriefing } = require('./src/lib/agents/briefing-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('./src/lib/agents/growth-agent');
+const { trackKeywordRankings, generateSEOTasksForTeam, trackAlgoliaNoResults } = require('./src/lib/agents/seo-agent');
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/lib/agents/goal-engine');
 const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
 const routes = require('./src/api/routes');
@@ -96,6 +97,32 @@ cron.schedule('0 8 * * 1', async () => {
     console.log(`[CRON] SEO recommendations done — ${rec.top_molecules?.length || 0} molecules identified`);
   } catch (e) {
     console.error('[CRON] SEO recommendations error:', e.message);
+  }
+});
+
+// Monday 8 AM: SEO Agent — rank tracking, content-gap tasks for seo_specialist, missing-from-catalog Algolia rollup
+cron.schedule('0 8 * * 1', async () => {
+  console.log('[CRON] SEO Agent starting...');
+  try {
+    const ranks = await trackKeywordRankings();
+    if (ranks.skipped) console.log(`[CRON] SEO rank tracking skipped — ${ranks.reason}`);
+    else console.log(`[CRON] SEO rank tracking done — ${ranks.persisted} of ${ranks.tracked} queries persisted at ${ranks.recorded_date}`);
+  } catch (e) {
+    console.error('[CRON] SEO rank tracking error:', e.message);
+  }
+  try {
+    const tasks = await generateSEOTasksForTeam();
+    if (tasks.skipped) console.log(`[CRON] SEO task generation skipped — ${tasks.reason}`);
+    else console.log(`[CRON] SEO tasks generated — ${tasks.tasks?.length || 0} tasks, emailed ${tasks.emailed_to?.length || 0} seo_specialist users`);
+  } catch (e) {
+    console.error('[CRON] SEO task generation error:', e.message);
+  }
+  try {
+    const noResults = await trackAlgoliaNoResults();
+    if (noResults.skipped) console.log(`[CRON] Algolia no-results check skipped — ${noResults.reason}`);
+    else console.log(`[CRON] Algolia no-results — ${noResults.missing_count} unique searched-but-missing molecules`);
+  } catch (e) {
+    console.error('[CRON] Algolia no-results error:', e.message);
   }
 });
 

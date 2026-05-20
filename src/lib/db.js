@@ -197,6 +197,19 @@ async function migrateSchemas() {
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS coa_status TEXT DEFAULT 'pending';
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS status TEXT;
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS error_message TEXT;
+      CREATE TABLE IF NOT EXISTS seo_rankings (
+        id TEXT PRIMARY KEY,
+        query TEXT NOT NULL,
+        page TEXT,
+        impressions INTEGER DEFAULT 0,
+        clicks INTEGER DEFAULT 0,
+        position REAL DEFAULT 0,
+        ctr REAL DEFAULT 0,
+        recorded_date TEXT NOT NULL,
+        created_at TEXT DEFAULT NOW(),
+        UNIQUE(query, recorded_date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_seo_rankings_query ON seo_rankings (query, recorded_date DESC);
       CREATE TABLE IF NOT EXISTS custom_roles (
         id TEXT PRIMARY KEY,
         role_name TEXT NOT NULL UNIQUE,

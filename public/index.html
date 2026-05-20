@@ -228,6 +228,7 @@ function buildNav() {
   const links = [
     {id:'dashboard',label:'Dashboard',roles:'*'},
     {id:'command-center',label:'Command Center',roles:['admin']},
+    {id:'seo-intelligence',label:'SEO Intelligence',roles:['admin','seo_specialist']},
     {id:'my-activity',label:'My Activity',roles:'contributors'},
     {id:'playbook',label:'Playbook',roles:'*'},
     {id:'team',label:'Team',roles:['admin']},
@@ -252,7 +253,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','my-activity':'My Activity',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','seo-intelligence':'SEO Intelligence','my-activity':'My Activity',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -429,6 +430,69 @@ async 'command-center'() {
     ${metricsBlock}
     ${kpisBlock}
   `;
+},
+
+// ── SEO INTELLIGENCE (admin + seo_specialist) ─────────────────────────────────
+async 'seo-intelligence'() {
+  document.getElementById('content').innerHTML = '<p style="color:#888;padding:20px">Loading SEO Intelligence…</p>';
+  const [rankings, gaps, noResults] = await Promise.all([
+    API('/seo/rankings').catch(e => ({error:e.message, rankings:[]})),
+    API('/seo/gaps').catch(e => ({error:e.message, gaps:[]})),
+    API('/seo/no-results').catch(e => ({error:e.message, missing:[]}))
+  ]);
+  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const trendBadge = t => {
+    if (t === 'improving') return '<span class="badge badge-green">↑ improving</span>';
+    if (t === 'declining') return '<span class="badge badge-red">↓ declining</span>';
+    if (t === 'new') return '<span class="badge badge-blue">new</span>';
+    return '<span class="badge badge-gray">flat</span>';
+  };
+  const rankingsBlock = `
+    <div class="card">
+      <div class="card-title">Keyword rankings — last 30 days (top ${rankings.rankings?.length || 0} by peak impressions)</div>
+      ${rankings.rankings?.length ? `
+      <table style="font-size:12px">
+        <tr><th>Query</th><th style="text-align:right">Impressions</th><th style="text-align:right">Clicks</th><th style="text-align:right">CTR</th><th style="text-align:right">Position</th><th style="text-align:right">Δ vs 30d</th><th>Trend</th></tr>
+        ${rankings.rankings.map(r => `<tr>
+          <td>${esc(r.query)}</td>
+          <td style="text-align:right">${r.current_impressions}</td>
+          <td style="text-align:right">${r.current_clicks}</td>
+          <td style="text-align:right">${r.current_ctr_pct}%</td>
+          <td style="text-align:right;font-weight:600">${r.current_position}</td>
+          <td style="text-align:right;color:${r.delta < 0 ? 'var(--success)' : r.delta > 0 ? 'var(--danger)' : 'var(--gray)'}">${r.delta > 0 ? '+' : ''}${r.delta}</td>
+          <td>${trendBadge(r.trend)}</td>
+        </tr>`).join('')}
+      </table>` : `<div style="color:var(--gray);font-size:13px">No ranking data yet. The Monday 8am SEO Agent cron persists GSC data into <code>seo_rankings</code> — run <code>POST /api/seo/rankings</code> manually or wait for next Monday.${rankings.error ? '<br>Error: ' + esc(rankings.error) : ''}</div>`}
+    </div>`;
+  const gapsBlock = `
+    <div class="card">
+      <div class="card-title">Content gap opportunities</div>
+      ${gaps.gaps?.length ? `
+      <div style="font-size:12px;color:var(--gray);margin-bottom:8px">High impressions + position past page 1 + low CTR. Map to existing SKUs and improve those pages.</div>
+      <table style="font-size:12px">
+        <tr><th>Query</th><th style="text-align:right">Impressions</th><th style="text-align:right">Position</th><th style="text-align:right">CTR</th><th style="text-align:right">Opportunity</th></tr>
+        ${gaps.gaps.map(g => `<tr>
+          <td>${esc(g.query)}</td>
+          <td style="text-align:right">${g.impressions}</td>
+          <td style="text-align:right">${g.position}</td>
+          <td style="text-align:right">${g.ctr_pct}%</td>
+          <td style="text-align:right;font-weight:700;color:var(--navy)">${g.opportunity_score}</td>
+        </tr>`).join('')}
+      </table>` : `<div style="color:var(--gray);font-size:13px">${gaps.skipped ? 'Skipped: ' + esc(gaps.reason) : 'No content gaps in current GSC window.'}</div>`}
+    </div>`;
+  const noResultsBlock = `
+    <div class="card">
+      <div class="card-title">Algolia zero-result searches (missing from catalog)</div>
+      ${noResults.missing?.length ? `
+      <div style="font-size:12px;color:var(--gray);margin-bottom:8px">Buyers searched on the marketplace and got no results. After filtering out anything that fuzzy-matches a current SKU.</div>
+      <table style="font-size:12px">
+        <tr><th>Query</th><th style="text-align:right">No-result count</th></tr>
+        ${noResults.missing.map(m => `<tr><td>${esc(m.query)}</td><td style="text-align:right;font-weight:600">${m.no_result_count}</td></tr>`).join('')}
+      </table>
+      <div style="margin-top:8px;padding:8px;background:#f0fdf4;border:1px solid #86efac;border-radius:4px;font-size:11px;color:#15803d">These are procurement-expansion candidates — buyers want them but the catalog doesn't carry them.</div>
+      ` : `<div style="color:var(--gray);font-size:13px">${noResults.skipped ? 'Skipped: ' + esc(noResults.reason) : 'No unmatched zero-result searches in current window.'}</div>`}
+    </div>`;
+  document.getElementById('content').innerHTML = rankingsBlock + gapsBlock + noResultsBlock;
 },
 
 // ── MY ACTIVITY ───────────────────────────────────────────────────────────────

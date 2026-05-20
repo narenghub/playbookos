@@ -94,6 +94,21 @@ async function gatherRevenueData() {
     [d7]
   )).rows[0];
 
+  // SEO snapshot — pulled from persisted state (seo_rankings + latest seo_tasks),
+  // not a live API call. By the time this Monday 9am cron fires, the Monday 8am
+  // SEO Agent run has already written today's data.
+  const seoRankingsCount = parseInt((await query(
+    `SELECT COUNT(DISTINCT query)::int as v FROM seo_rankings WHERE recorded_date >= $1`,
+    [d7]
+  )).rows[0].v);
+  const seoTasksRow = (await query(
+    `SELECT content FROM ai_analyses WHERE analysis_type='seo_tasks' ORDER BY created_at DESC LIMIT 1`
+  )).rows[0];
+  let seoTasks = [];
+  if (seoTasksRow) {
+    try { seoTasks = (JSON.parse(seoTasksRow.content).tasks) || []; } catch {}
+  }
+
   return {
     period: { from: d30, to: today, this_month: thisMonth },
     by_category: byCategory,
@@ -103,6 +118,7 @@ async function gatherRevenueData() {
     velocity: { last7, prev7, delta_pct: deltaPct, trend: classifyVelocity(deltaPct) },
     monthly: { target: monthlyTarget, actual: monthlyActual, pct: monthlyTarget > 0 ? Math.round(monthlyActual / monthlyTarget * 100) : 0 },
     linkedin: linkedinStats,
+    seo: { rankings_count: seoRankingsCount, tasks: seoTasks, task_count: seoTasks.length },
   };
 }
 
@@ -129,7 +145,7 @@ ${data.by_week.length ? data.by_week.map(w => `  Week of ${w.week_start}: ${fmtM
 Velocity: last 7 days ${fmtMoney(data.velocity.last7)} vs prior 7 days ${fmtMoney(data.velocity.prev7)} → ${data.velocity.delta_pct >= 0 ? '+' : ''}${data.velocity.delta_pct.toFixed(1)}% (${data.velocity.trend})
 
 This month: ${fmtMoney(data.monthly.actual)} of ${fmtMoney(data.monthly.target)} target (${data.monthly.pct}%)
-${(data.linkedin?.total_outreach || 0) > 0 ? `\nLinkedIn pipeline (last 7 days): ${data.linkedin.sent_week} sent, ${data.linkedin.connected_week} connected, ${data.linkedin.replied_week} replied (total roster: ${data.linkedin.total_outreach})` : ''}
+${(data.linkedin?.total_outreach || 0) > 0 ? `\nLinkedIn pipeline (last 7 days): ${data.linkedin.sent_week} sent, ${data.linkedin.connected_week} connected, ${data.linkedin.replied_week} replied (total roster: ${data.linkedin.total_outreach})` : ''}${(data.seo?.rankings_count || 0) > 0 || (data.seo?.task_count || 0) > 0 ? `\nSEO: ${data.seo.rankings_count} queries tracked this week, ${data.seo.task_count} content tasks queued${data.seo.tasks?.[0]?.molecule ? ` (top focus: ${data.seo.tasks[0].molecule})` : ''}` : ''}
 
 Write EXACTLY 5 numbered actionable recommendations covering:
 1. Which buyer segment to double down on this week (be specific to the data above).
@@ -195,6 +211,12 @@ function renderRevenueReport(data, recommendations) {
     <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
       <div style="font-weight:700;color:#166534;margin-bottom:4px">LinkedIn pipeline (last 7 days)</div>
       <div style="color:#15803d">${data.linkedin.sent_week || 0} sent · ${data.linkedin.connected_week || 0} connected · ${data.linkedin.replied_week || 0} replied · ${data.linkedin.total_outreach} total contacts in roster</div>
+    </div>` : ''}
+
+    ${((data.seo?.rankings_count || 0) > 0 || (data.seo?.task_count || 0) > 0) ? `
+    <div style="background:#fef9c3;border:1px solid #fde047;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
+      <div style="font-weight:700;color:#854d0e;margin-bottom:4px">SEO Intelligence</div>
+      <div style="color:#713f12">${data.seo.rankings_count} unique queries tracked this week · ${data.seo.task_count} content tasks queued for SEO team${data.seo.tasks?.[0] ? ` (top focus: <strong>${data.seo.tasks[0].molecule || data.seo.tasks[0].query || '—'}</strong>)` : ''}</div>
     </div>` : ''}
 
     <h3 style="margin:20px 0 8px;font-size:14px;color:#0D7377">5 actionable recommendations (Claude)</h3>

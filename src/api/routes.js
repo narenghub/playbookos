@@ -9,6 +9,12 @@ const { cascadeGoals, assignWeeklyKPIs, mondayOf } = require('../lib/agents/goal
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn } = require('../lib/roles');
+const { identifyContentGaps, trackAlgoliaNoResults } = require('../lib/agents/seo-agent');
+
+function adminOrSEO(req, res, next) {
+  if (req.user.role !== 'admin' && req.user.role !== 'seo_specialist') return res.status(403).json({ error: 'Admin or seo_specialist only' });
+  next();
+}
 
 const router = express.Router();
 
@@ -636,6 +642,65 @@ router.get('/goals/team-week', authMiddleware, adminOnly, async (req, res) => {
       [weekStart]
     )).rows;
     res.json({ week_start: weekStart, kpis: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/seo/rankings', authMiddleware, adminOrSEO, async (req, res) => {
+  try {
+    // Aggregate per query: most-recent vs oldest position in the trailing 30 days
+    const rows = (await query(`
+      SELECT query,
+             (array_agg(position ORDER BY recorded_date DESC))[1] as current_position,
+             (array_agg(position ORDER BY recorded_date ASC))[1]  as oldest_position,
+             (array_agg(impressions ORDER BY recorded_date DESC))[1] as current_impressions,
+             (array_agg(clicks ORDER BY recorded_date DESC))[1] as current_clicks,
+             (array_agg(ctr ORDER BY recorded_date DESC))[1] as current_ctr,
+             (array_agg(recorded_date ORDER BY recorded_date DESC))[1] as latest_date,
+             COUNT(*)::int as snapshots,
+             MAX(impressions)::int as peak_impressions
+      FROM seo_rankings
+      WHERE recorded_date >= (NOW() - INTERVAL '30 days')::date::text
+      GROUP BY query
+      ORDER BY peak_impressions DESC
+      LIMIT 50
+    `)).rows;
+
+    const formatted = rows.map(r => {
+      const current = parseFloat(r.current_position);
+      const oldest = parseFloat(r.oldest_position);
+      const delta = current - oldest;
+      let trend = 'flat';
+      if (r.snapshots < 2) trend = 'new';
+      else if (delta <= -2) trend = 'improving';
+      else if (delta >= 2) trend = 'declining';
+      return {
+        query: r.query,
+        current_position: parseFloat(current.toFixed(1)),
+        position_30d_ago: parseFloat(oldest.toFixed(1)),
+        delta: parseFloat(delta.toFixed(1)),
+        trend,
+        current_impressions: parseInt(r.current_impressions),
+        current_clicks: parseInt(r.current_clicks),
+        current_ctr_pct: parseFloat((parseFloat(r.current_ctr) * 100).toFixed(2)),
+        latest_date: r.latest_date,
+        snapshots: r.snapshots,
+      };
+    });
+    res.json({ count: formatted.length, rankings: formatted });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/seo/gaps', authMiddleware, adminOrSEO, async (req, res) => {
+  try {
+    const result = await identifyContentGaps();
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/seo/no-results', authMiddleware, adminOrSEO, async (req, res) => {
+  try {
+    const result = await trackAlgoliaNoResults();
+    res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

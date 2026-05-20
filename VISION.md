@@ -273,6 +273,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 2C | Algolia signal integration | Built | `syncAlgoliaSearchData` in growth-agent |
 | 2C | GSC signal integration | Partial | `fetchGSCData` is a bearer-token stub; production needs OAuth refresh / service account |
 | 2C | LinkedIn / marketplace event-stream signal | Spec | not yet implemented |
+| 2C | SEO Agent module (sibling to Growth Agent) | Built | `src/lib/agents/seo-agent.js`, `seo_rankings` table, `GET /api/seo/{rankings,gaps,no-results}`, Monday 8am cron, SEO Intelligence SPA page |
 | 2D | Performance Agent — daily 6pm scoring + coaching | Built | `src/lib/core.js` `scoreTeamMember`, `src/lib/jobs.js` `scoreAllAndCoach`, `GET /api/performance/*` |
 | 2D | 3-day below-60 escalation to admin | Built | `scoreTeamMember` |
 | 2E | Customer Agent — warmth scoring + outreach recommendations | Built | `src/lib/agents/customer-agent.js`, `buyer_engagement` table, `GET /api/customers/warm-leads`, `GET /api/customers/outreach-today` |
