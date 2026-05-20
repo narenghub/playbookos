@@ -84,6 +84,8 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Revenue intelligence** — `GET /revenue/intelligence` (admin) returns the most recent Monday-morning revenue report: category/buyer-segment breakdowns, weekly trend, velocity delta, monthly target progress, top molecules parsed from order notes, and Claude's 5 actionable recommendations
 
+**Command Center daily briefing** — `GET /briefing/latest` (admin) returns the most recent 7am briefing: 24-hour snapshot, recent orders, flagged team members, upcoming milestones, and the structured "What's going well / At risk / Actions for today" briefing from Claude
+
 **Market intelligence** — `POST /market/analyze` (admin), `GET /market/latest`
 
 **Apollo.io** — `POST /apollo/find-buyers`, `POST /apollo/send-outreach`, `GET /apollo/sequences`, `GET /apollo/stats`, `GET /apollo/debug`, `GET /sequences/templates` (all admin)
@@ -122,6 +124,7 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 
 | Schedule | Job | Function |
 |---|---|---|
+| `0 7 * * *` (daily 7am) | Layer 6 — Command Center daily briefing emailed to admin | `generateDailyBriefing()` |
 | `0 8 * * *` (daily 8am) | GitHub sync for all active devs | `syncGitHubAllDevs()` |
 | `0 9 * * 1` (Monday 9am) | Claude weekly analysis + emailed report | `runWeeklyAnalysis()` |
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
@@ -129,6 +132,16 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 18 * * *` (daily 6pm) | AI performance scoring + per-user coaching email | `scoreAllAndCoach()` |
 
 All accept `{ dryRun: true }` for safe manual testing.
+
+### Command Center daily briefing
+
+`src/lib/agents/briefing-agent.js`. Single function `generateDailyBriefing({dryRun})`, fired by the 7am cron.
+
+Gathers a 24-hour snapshot covering new orders, today/yesterday revenue against the per-day target derived from the current month target, performance scores from yesterday's `performance_scores` rows, Apollo cumulative replies with a delta against the prior briefing's stored cumulative (so day-1 shows total only, day-2+ shows delta), new SKUs added in the last 24 hours, GitHub commits and PRs merged from yesterday, and any milestones whose `target_date` is within 7 days and still `pending`.
+
+Claude is prompted for a strict three-section briefing — "What's going well", "What's at risk", "Actions for today" — three numbered items each, every line referencing an actual number from the snapshot, every action carrying an owner and a measurable success criterion. Output is stored as JSON in `ai_analyses` with `analysis_type='daily_briefing'` and emailed to the admin user (falls back to `naren@abiozen.com` if no admin row exists).
+
+Caveat on the Apollo number: Apollo's API only exposes per-sequence cumulative `unique_replied`, not a time-windowed count. The briefing reports both the cumulative total and the delta since the prior briefing's stored value. First-day briefings show only the total.
 
 ### Revenue Intelligence agent
 

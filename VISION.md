@@ -282,9 +282,9 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 5 | Unified `metrics_snapshot` table | Spec | not yet implemented |
 | 5 | `/api/analytics/overview` | Spec | not yet implemented |
 | 5 | Anomaly detection | Spec | not yet implemented |
-| 6 | Daily 7am Command Center email | Spec | not yet implemented |
-| 6 | "3 going well / 3 at risk / 3 actions" structure | Spec | not yet implemented |
-| 6 | `GET /api/briefing/today` | Spec | not yet implemented |
+| 6 | Daily 7am Command Center email | Built | `src/lib/agents/briefing-agent.js` `generateDailyBriefing`, `server.js` 7am cron |
+| 6 | "3 going well / 3 at risk / 3 actions" structure | Built | Claude prompt in `briefing-agent.js` enforces this exact structure |
+| 6 | `GET /api/briefing/latest` | Built | `src/api/routes.js` |
 
 ## Appendix B — Cross-layer dependencies
 
@@ -299,7 +299,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 
 | Cron | Trigger | Owner |
 |---|---|---|
-| `0 7 * * *` | Daily 7am Command Center briefing | Layer 6 (spec) |
+| `0 7 * * *` | Daily 7am Command Center briefing | Layer 6 (built) |
 | `0 8 * * *` | GitHub developer sync | Layer 5 input (built) |
 | `0 9 * * 1` | Monday weekly AI analysis | Layer 5 (built) |
 | `0 9 * * 1` | Monday Revenue Agent → Procurement Agent chain | Layer 2A → 2B (built) |

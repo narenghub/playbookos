@@ -11,6 +11,7 @@ const opts = { dryRun: !live };
 
 const { syncGitHubAllDevs, runWeeklyAnalysis, checkMilestoneTriggers, scoreAllAndCoach } = require('../src/lib/jobs');
 const { analyzeRevenueTrends, getProcurementPriorities } = require('../src/lib/agents/revenue-agent');
+const { generateDailyBriefing } = require('../src/lib/agents/briefing-agent');
 
 async function step(name, fn) {
   process.stdout.write(`\n▶ ${name} ... `);
@@ -38,15 +39,16 @@ async function main() {
   }
   console.log(`DB: ${process.env.DATABASE_URL.replace(/:\/\/[^@]+@/, '://[REDACTED]@')}`);
 
-  const r1 = await step('syncGitHubAllDevs (8am cron)',         () => syncGitHubAllDevs());
-  const r2 = await step('runWeeklyAnalysis (9am Mon cron)',     () => runWeeklyAnalysis(opts));
-  const r3 = await step('checkMilestoneTriggers (6pm cron)',    () => checkMilestoneTriggers(opts));
-  const r4 = await step('scoreAllAndCoach (6pm cron)',          () => scoreAllAndCoach(opts));
-  const r5 = await step('analyzeRevenueTrends (9am Mon cron)',  () => analyzeRevenueTrends(opts));
-  const r6 = await step('getProcurementPriorities (9am Mon)',   () => getProcurementPriorities(opts));
+  const r1 = await step('syncGitHubAllDevs (8am cron)',           () => syncGitHubAllDevs());
+  const r2 = await step('runWeeklyAnalysis (9am Mon cron)',       () => runWeeklyAnalysis(opts));
+  const r3 = await step('checkMilestoneTriggers (6pm cron)',      () => checkMilestoneTriggers(opts));
+  const r4 = await step('scoreAllAndCoach (6pm cron)',            () => scoreAllAndCoach(opts));
+  const r5 = await step('analyzeRevenueTrends (9am Mon cron)',    () => analyzeRevenueTrends(opts));
+  const r6 = await step('getProcurementPriorities (9am Mon)',     () => getProcurementPriorities(opts));
+  const r7 = await step('generateDailyBriefing (7am cron)',       () => generateDailyBriefing(opts));
 
-  const failures = [r1, r2, r3, r4, r5, r6].filter(r => !r.ok);
-  console.log(`\n${failures.length === 0 ? '✅ All 6 cron jobs ran successfully' : `❌ ${failures.length} failure(s)`}`);
+  const failures = [r1, r2, r3, r4, r5, r6, r7].filter(r => !r.ok);
+  console.log(`\n${failures.length === 0 ? '✅ All 7 cron jobs ran successfully' : `❌ ${failures.length} failure(s)`}`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

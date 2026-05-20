@@ -7,6 +7,7 @@ const path = require('path');
 const cron = require('node-cron');
 const { syncGitHubAllDevs, runWeeklyAnalysis, scoreAllAndCoach } = require('./src/lib/jobs');
 const { analyzeRevenueTrends, getProcurementPriorities } = require('./src/lib/agents/revenue-agent');
+const { generateDailyBriefing } = require('./src/lib/agents/briefing-agent');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -36,6 +37,17 @@ app.get('*', (req, res) => {
 });
 
 // ── CRON JOBS ─────────────────────────────────────────────────────────────────
+
+// Daily 7 AM: Command Center briefing to admin
+cron.schedule('0 7 * * *', async () => {
+  console.log('[CRON] Daily briefing starting...');
+  try {
+    const result = await generateDailyBriefing();
+    console.log(`[CRON] Daily briefing done — date=${result.snapshot.date}, emailed=${result.emailed} to ${result.emailed_to}`);
+  } catch (e) {
+    console.error('[CRON] Daily briefing error:', e.message);
+  }
+});
 
 // Daily 8 AM: sync GitHub for all dev users
 cron.schedule('0 8 * * *', async () => {
