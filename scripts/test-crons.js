@@ -13,6 +13,7 @@ const { syncGitHubAllDevs, runWeeklyAnalysis, checkMilestoneTriggers, scoreAllAn
 const { analyzeRevenueTrends, getProcurementPriorities } = require('../src/lib/agents/revenue-agent');
 const { generateDailyBriefing } = require('../src/lib/agents/briefing-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../src/lib/agents/growth-agent');
+const { cascadeGoals, assignWeeklyKPIsForAll } = require('../src/lib/agents/goal-engine');
 
 async function step(name, fn) {
   process.stdout.write(`\n▶ ${name} ... `);
@@ -49,9 +50,11 @@ async function main() {
   const r7 = await step('generateDailyBriefing (7am cron)',       () => generateDailyBriefing(opts));
   const r8 = await step('syncAlgoliaSearchData (8am Mon)',        () => syncAlgoliaSearchData());
   const r9 = await step('generateSEORecommendations (8am Mon)',   () => generateSEORecommendations(opts));
+  const r10 = await step('cascadeGoals (8am Mon)',                () => cascadeGoals(opts));
+  const r11 = await step('assignWeeklyKPIsForAll (8am Mon)',      () => assignWeeklyKPIsForAll(opts));
 
-  const failures = [r1, r2, r3, r4, r5, r6, r7, r8, r9].filter(r => !r.ok);
-  console.log(`\n${failures.length === 0 ? '✅ All 9 cron jobs ran successfully' : `❌ ${failures.length} failure(s)`}`);
+  const failures = [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11].filter(r => !r.ok);
+  console.log(`\n${failures.length === 0 ? '✅ All 11 cron jobs ran successfully' : `❌ ${failures.length} failure(s)`}`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
 

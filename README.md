@@ -77,6 +77,8 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Targets** — `GET /targets`, `POST /targets` (admin)
 
+**Goals (Goal Engine — Layer 1)** — `POST /goals/cascade` (admin, triggers full cascade from annual targets), `GET /goals/my-week` (current week KPIs for the logged-in user; auto-instantiates from cascade if missing), `GET /goals/team-week` (admin, current week KPIs for everyone)
+
 **Decision engine** — `GET /decision-rules`, `POST /decision-rules/evaluate` (admin)
 
 **SKUs** — `GET /skus`, `POST /skus` (admin), `POST /skus/bulk-upload` (admin), `GET /skus/export`
@@ -130,6 +132,7 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | Schedule | Job | Function |
 |---|---|---|
 | `0 7 * * *` (daily 7am) | Layer 6 — Command Center daily briefing emailed to admin | `generateDailyBriefing()` |
+| `0 8 * * 1` (Monday 8am) | Layer 1 — Goal Engine: cascade annual targets then assign weekly KPIs to every active user | `cascadeGoals()` → `assignWeeklyKPIsForAll()` |
 | `0 8 * * 1` (Monday 8am) | Layer 2C — Growth Agent: Algolia search sync then SEO recommendations | `syncAlgoliaSearchData()` → `generateSEORecommendations()` |
 | `0 8 * * *` (daily 8am) | GitHub sync for all active devs | `syncGitHubAllDevs()` |
 | `0 9 * * 1` (Monday 9am) | Claude weekly analysis + emailed report | `runWeeklyAnalysis()` |
@@ -148,6 +151,27 @@ Gathers a 24-hour snapshot covering new orders, today/yesterday revenue against 
 Claude is prompted for a strict three-section briefing — "What's going well", "What's at risk", "Actions for today" — three numbered items each, every line referencing an actual number from the snapshot, every action carrying an owner and a measurable success criterion. Output is stored as JSON in `ai_analyses` with `analysis_type='daily_briefing'` and emailed to the admin user (falls back to `naren@abiozen.com` if no admin row exists).
 
 Caveat on the Apollo number: Apollo's API only exposes per-sequence cumulative `unique_replied`, not a time-windowed count. The briefing reports both the cumulative total and the delta since the prior briefing's stored value. First-day briefings show only the total.
+
+### Goal Engine (Layer 1)
+
+`src/lib/agents/goal-engine.js`. Cascades the annual targets in the `targets` table into a tree of quarterly, monthly, weekly, and daily rows in `goal_cascades`, then instantiates per-user weekly KPIs in `weekly_kpis`.
+
+`cascadeGoals({dryRun})` runs the whole tree:
+- Loads annual targets from `targets` for the current year.
+- Loads existing monthly targets (the seeded `2026-05`…`2026-12` rows) and uses them verbatim — they take precedence over anything Claude would generate.
+- Calls Claude ONCE with the annual targets, team roster grouped by role, existing monthly seeds, and per-role metric vocabularies (from `public/index.html` my-activity page). Claude returns quarterly target_values plus per-role weekly KPIs in a single JSON object.
+- Deletes existing `auto_generated=1` rows with `period_end >= today` so re-running is idempotent for future periods. Manual overrides (`auto_generated=0`) and historical rows are preserved.
+- Inserts: annual rows (one per metric), quarterly rows from Claude, monthly rows from the seed (linked to their quarter), weekly per-role rows for the current week + next 12 weeks from Claude (one row per role × metric × week), daily rows for the current week only (Mon-Fri, weekly target / 5).
+
+`assignWeeklyKPIs(userId, weekStart)` reads the weekly cascade rows for the user's role and the given Monday, and upserts a row per KPI into `weekly_kpis` (unique on `(user_id, week_start, kpi_name)`).
+
+`assignWeeklyKPIsForAll({dryRun})` iterates all active users with a role and calls `assignWeeklyKPIs` for each, scoped to the current week.
+
+The Monday 8am cron runs `cascadeGoals()` then `assignWeeklyKPIsForAll()`. `POST /api/goals/cascade` lets an admin trigger the full cascade on demand (e.g., after editing annual targets). `GET /api/goals/my-week` auto-instantiates KPIs from the cascade if the user hits it before that Monday's cron has run.
+
+The math is split deterministically vs. Claude-driven:
+- Deterministic: monthly from seed, quarterly sum-of-months when seeds cover the quarter, daily = weekly / 5 business days.
+- Claude: quarterly fallback when seeds don't cover, per-role weekly KPI allocation (the part requiring judgment).
 
 ### Growth Intelligence agent
 

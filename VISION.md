@@ -259,8 +259,9 @@ Status of each component as of the date of this commit. Refresh as features ship
 |---|---|---|---|
 | 1 | `targets` table + manual CRUD | Built | `src/api/routes.js` (`/targets`), `src/lib/db.js` initDB |
 | 1 | Annual + monthly revenue seeds for FY26 | Built | `src/lib/db.js` initDB seed block |
-| 1 | Claude-driven cascade to quarterly / weekly / daily | Spec | not yet implemented |
-| 1 | Per-user role-conditioned target derivation | Spec | not yet implemented |
+| 1 | `goal_cascades` and `weekly_kpis` tables | Built | `src/lib/db.js` migrateSchemas |
+| 1 | Claude-driven cascade to quarterly / weekly / daily | Built | `src/lib/agents/goal-engine.js` `cascadeGoals`, Monday 8am cron, `POST /api/goals/cascade` |
+| 1 | Per-user role-conditioned target derivation | Built | `assignWeeklyKPIs` + `assignWeeklyKPIsForAll`, `GET /api/goals/my-week`, `GET /api/goals/team-week` |
 | 1 | 15%-divergence-triggered recalc | Spec | not yet implemented |
 | 2A | Revenue Agent — `analyzeRevenueTrends` | Built | `src/lib/agents/revenue-agent.js`, `GET /api/revenue/intelligence` |
 | 2A | Monday 9am cron | Built | `server.js` |

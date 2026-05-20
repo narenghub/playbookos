@@ -5,6 +5,7 @@ const { signToken, authMiddleware, adminOnly, syncGitHubForUser, analyzeTeamProg
 const { query } = require('../lib/db');
 const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
+const { cascadeGoals, assignWeeklyKPIs, mondayOf } = require('../lib/agents/goal-engine');
 
 const router = express.Router();
 
@@ -446,6 +447,48 @@ function formatScoreRow(r) {
     created_at: r.created_at,
   };
 }
+
+router.post('/goals/cascade', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await cascadeGoals();
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/goals/my-week', authMiddleware, async (req, res) => {
+  try {
+    const weekStart = mondayOf(new Date()).toISOString().slice(0, 10);
+    let kpis = (await query(
+      `SELECT * FROM weekly_kpis WHERE user_id=$1 AND week_start=$2 ORDER BY kpi_name`,
+      [req.user.id, weekStart]
+    )).rows;
+    // If no KPIs exist yet for this week, assign them on demand from the cascade
+    if (kpis.length === 0) {
+      const assigned = await assignWeeklyKPIs(req.user.id, weekStart);
+      if (!assigned.skipped) {
+        kpis = (await query(
+          `SELECT * FROM weekly_kpis WHERE user_id=$1 AND week_start=$2 ORDER BY kpi_name`,
+          [req.user.id, weekStart]
+        )).rows;
+      }
+    }
+    res.json({ week_start: weekStart, kpis });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/goals/team-week', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const weekStart = mondayOf(new Date()).toISOString().slice(0, 10);
+    const rows = (await query(
+      `SELECT k.*, u.name, u.role
+       FROM weekly_kpis k JOIN users u ON u.id = k.user_id
+       WHERE k.week_start=$1
+       ORDER BY u.role, u.name, k.kpi_name`,
+      [weekStart]
+    )).rows;
+    res.json({ week_start: weekStart, kpis: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 router.get('/growth/intelligence', authMiddleware, adminOnly, async (req, res) => {
   try {

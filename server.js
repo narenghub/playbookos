@@ -9,6 +9,7 @@ const { syncGitHubAllDevs, runWeeklyAnalysis, scoreAllAndCoach } = require('./sr
 const { analyzeRevenueTrends, getProcurementPriorities } = require('./src/lib/agents/revenue-agent');
 const { generateDailyBriefing } = require('./src/lib/agents/briefing-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('./src/lib/agents/growth-agent');
+const { cascadeGoals, assignWeeklyKPIsForAll } = require('./src/lib/agents/goal-engine');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -47,6 +48,24 @@ cron.schedule('0 7 * * *', async () => {
     console.log(`[CRON] Daily briefing done — date=${result.snapshot.date}, emailed=${result.emailed} to ${result.emailed_to}`);
   } catch (e) {
     console.error('[CRON] Daily briefing error:', e.message);
+  }
+});
+
+// Monday 8 AM: Goal Engine — cascade goals then assign weekly KPIs for all active users
+cron.schedule('0 8 * * 1', async () => {
+  console.log('[CRON] Goal Engine starting...');
+  try {
+    const cascade = await cascadeGoals();
+    if (cascade.skipped) console.log(`[CRON] Goal cascade skipped — ${cascade.reason}`);
+    else console.log(`[CRON] Goal cascade done — annual=${cascade.counts.annual}, quarterly=${cascade.counts.quarterly}, monthly=${cascade.counts.monthly}, weekly=${cascade.counts.weekly}, daily=${cascade.counts.daily}`);
+  } catch (e) {
+    console.error('[CRON] Goal cascade error:', e.message);
+  }
+  try {
+    const assigned = await assignWeeklyKPIsForAll();
+    console.log(`[CRON] Weekly KPI assignment done — ${assigned.total} users for week ${assigned.week_start}`);
+  } catch (e) {
+    console.error('[CRON] Weekly KPI assignment error:', e.message);
   }
 });
 

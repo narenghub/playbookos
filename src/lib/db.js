@@ -197,6 +197,33 @@ async function migrateSchemas() {
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS coa_status TEXT DEFAULT 'pending';
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS status TEXT;
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS error_message TEXT;
+      CREATE TABLE IF NOT EXISTS goal_cascades (
+        id TEXT PRIMARY KEY,
+        parent_goal_id TEXT,
+        level TEXT NOT NULL CHECK (level IN ('annual','quarterly','monthly','weekly','daily')),
+        metric TEXT NOT NULL,
+        target_value REAL NOT NULL,
+        period_start TEXT NOT NULL,
+        period_end TEXT NOT NULL,
+        assigned_to_role TEXT,
+        assigned_to_user_id TEXT,
+        auto_generated INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_goal_cascades_period ON goal_cascades (level, period_start);
+      CREATE INDEX IF NOT EXISTS idx_goal_cascades_role ON goal_cascades (assigned_to_role, level, period_start);
+      CREATE TABLE IF NOT EXISTS weekly_kpis (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        week_start TEXT NOT NULL,
+        kpi_name TEXT NOT NULL,
+        kpi_target REAL NOT NULL,
+        kpi_actual REAL DEFAULT 0,
+        kpi_unit TEXT,
+        status TEXT DEFAULT 'in_progress' CHECK (status IN ('in_progress','met','missed')),
+        created_at TEXT DEFAULT NOW(),
+        UNIQUE (user_id, week_start, kpi_name)
+      );
       CREATE TABLE IF NOT EXISTS performance_scores (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
