@@ -3,6 +3,7 @@ const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
 const { getWarmLeads } = require('./customer-agent');
+const { detectAnomalies } = require('./metrics-snapshot');
 
 const DAY_MS = 86400000;
 const fmt = n => '$' + (Number(n) || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -108,8 +109,12 @@ async function gatherBriefingData() {
     name: l.name, company: l.company, segment: l.segment, score: l.score, signals: l.signals,
   }));
 
+  const anomalyResult = await detectAnomalies({ thresholdPct: 30 });
+
   return {
     warm_leads: warmLeads,
+    anomalies: anomalyResult.anomalies,
+    anomaly_meta: { baseline_size: anomalyResult.baseline_size, note: anomalyResult.note || null },
     snapshot: {
       date: todayISO,
       orders_24h: newOrders.length,
@@ -152,6 +157,9 @@ function buildPrompt(data) {
   const warmLeadsText = (data.warm_leads || []).length
     ? data.warm_leads.map(l => `  - ${l.name || '(unknown)'} at ${l.company || ''} (${l.segment || 'unknown'}): warmth ${l.score}/100, ${l.signals.join(', ') || 'no signals'}`).join('\n')
     : '  (no warm leads — buyer_engagement empty)';
+  const anomalyText = (data.anomalies || []).length
+    ? data.anomalies.map(a => `  - ${a.label}: today ${a.today}, baseline ${a.baseline_avg}, ${a.direction} ${Math.abs(a.delta_pct).toFixed(1)}%`).join('\n')
+    : `  (none — all tracked metrics within 30% of 7-day baseline${data.anomaly_meta?.note ? '; ' + data.anomaly_meta.note : ''})`;
   const apolloLine = s.apollo_replies_total === null
     ? 'not available'
     : `${s.apollo_replies_total} cumulative` + (s.apollo_replies_delta !== null ? ` (delta since last briefing: ${s.apollo_replies_delta >= 0 ? '+' : ''}${s.apollo_replies_delta})` : ' (first briefing; no delta yet)');
@@ -179,6 +187,11 @@ ${milestones}
 
 Top 3 warm leads from outreach (highest engagement warmth):
 ${warmLeadsText}
+
+ANOMALIES vs 7-day baseline (>30% change either direction):
+${anomalyText}
+
+If anomalies exist, surface them prominently in the "WHAT'S AT RISK" or "WHAT'S GOING WELL" sections — they are the most actionable signal in this briefing.
 
 Write the briefing in EXACTLY this format. No greetings, no headers, no sign-off:
 
@@ -244,6 +257,11 @@ function renderBriefingEmail(data, briefingText) {
         </td>
       </tr>
     </table>
+    ${(data.anomalies || []).length ? `
+    <div style="background:#fef2f2;border:2px solid #dc2626;border-radius:6px;padding:14px;margin-bottom:16px">
+      <div style="font-size:13px;font-weight:700;color:#dc2626;margin-bottom:8px">⚠️ ANOMALIES DETECTED (${data.anomalies.length})</div>
+      ${data.anomalies.map(a => `<div style="font-size:12px;color:#7f1d1d;margin:4px 0">⚠️ <strong>${a.label}</strong> ${a.direction === 'up' ? 'rose' : 'dropped'} ${Math.abs(a.delta_pct).toFixed(1)}% vs 7-day baseline — today ${a.today}, baseline avg ${a.baseline_avg}</div>`).join('')}
+    </div>` : ''}
     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:18px;line-height:1.7;font-size:13px;white-space:pre-wrap;font-family:Georgia,serif">${briefingText}</div>
     ${(data.warm_leads || []).length ? `
     <div style="margin-top:20px">

@@ -79,7 +79,11 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Goals (Goal Engine — Layer 1)** — `POST /goals/cascade` (admin, triggers full cascade from annual targets), `GET /goals/my-week` (current week KPIs for the logged-in user; auto-instantiates from cascade if missing), `GET /goals/team-week` (admin, current week KPIs for everyone)
 
-**Customer Agent (Layer 2E)** — `GET /customers/warm-leads` (admin, top 10 by warmth score), `GET /customers/outreach-today` (admin, today's Claude-generated call list with talking points per lead; serves cached row if generated today, otherwise generates fresh)
+**Customer Agent (Layer 2E)** — `GET /customers/warm-leads` (admin, top 10 by warmth score), `GET /customers/outreach-today` (admin, today's Claude-generated call list with talking points per lead; serves cached row if generated today, otherwise generates fresh), `POST /customers/engagement-event` (shared-secret gated; ingests opens/clicks/replies/bounces from Apollo or any source)
+
+**LinkedIn outreach (Layer 4)** — `POST /linkedin/log` (admin, manually log an outreach attempt), `GET /linkedin/pipeline` (admin, aggregate stats by stage, by segment, plus 20 most recent rows)
+
+**Operational metrics (Layer 5)** — `GET /metrics/today` (admin, latest snapshot row), `GET /metrics/history?days=90` (admin, time series for trend charts)
 
 **Decision engine** — `GET /decision-rules`, `POST /decision-rules/evaluate` (admin)
 
@@ -133,6 +137,7 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 
 | Schedule | Job | Function |
 |---|---|---|
+| `0 0 * * *` (daily 00:00 UTC) | Layer 5 — write daily metrics_snapshots row (yesterday's day-of-record) | `takeMetricsSnapshot()` |
 | `0 7 * * *` (daily 7am) | Layer 6 — Command Center daily briefing emailed to admin | `generateDailyBriefing()` |
 | `0 8 * * 1` (Monday 8am) | Layer 1 — Goal Engine: cascade annual targets then assign weekly KPIs to every active user | `cascadeGoals()` → `assignWeeklyKPIsForAll()` |
 | `0 8 * * 1` (Monday 8am) | Layer 2C — Growth Agent: Algolia search sync then SEO recommendations | `syncAlgoliaSearchData()` → `generateSEORecommendations()` |
@@ -154,6 +159,28 @@ Gathers a 24-hour snapshot covering new orders, today/yesterday revenue against 
 Claude is prompted for a strict three-section briefing — "What's going well", "What's at risk", "Actions for today" — three numbered items each, every line referencing an actual number from the snapshot, every action carrying an owner and a measurable success criterion. Output is stored as JSON in `ai_analyses` with `analysis_type='daily_briefing'` and emailed to the admin user (falls back to `naren@abiozen.com` if no admin row exists).
 
 Caveat on the Apollo number: Apollo's API only exposes per-sequence cumulative `unique_replied`, not a time-windowed count. The briefing reports both the cumulative total and the delta since the prior briefing's stored value. First-day briefings show only the total.
+
+### Operational metrics snapshot (Layer 5)
+
+`src/lib/agents/metrics-snapshot.js`. Two exports.
+
+`takeMetricsSnapshot({dryRun, dateOverride})` runs at midnight UTC and writes one row to `metrics_snapshots` representing the day that just ended. Aggregates pulled in one function:
+- `revenue_actual` and `revenue_target` (pro-rata from monthly target) for that day, plus `revenue_pct`.
+- `team_avg_score` from `performance_scores` for the same date.
+- `top_sku` parsed best-effort from order notes over the trailing 7 days. Caveat: orders have no FK to `skus`, so this is a string match against `product:` lines written by the marketplace webhook.
+- `top_buyer_segment` by revenue over trailing 7 days.
+- `apollo_emails_sent` for the day; `apollo_reply_rate` over trailing 7 days.
+- `linkedin_pipeline_count` (total roster in `linkedin_outreach`).
+- `warm_leads_count` — distinct contacts with a clicked or replied event in trailing 7 days.
+- `skus_added_this_week`, `github_commits_this_week`.
+
+`detectAnomalies({thresholdPct})` reads the last 8 snapshots, treats the most recent as "today" and the prior 7 as baseline, and flags every numeric metric whose absolute delta vs the baseline mean exceeds `thresholdPct` (default 30). Returns an array sorted by delta magnitude. If fewer than 4 snapshots exist, returns `{anomalies: [], note: 'insufficient baseline'}` so the briefing doesn't surface noise during the first week of deployment.
+
+The 7am briefing now calls `detectAnomalies()` and renders a red anomaly banner above the briefing prose if any are present. The Claude prompt is also told that anomalies are the most actionable signal, so they get prioritized into the "WHAT'S AT RISK" / "WHAT'S GOING WELL" sections.
+
+### LinkedIn outreach (Layer 4)
+
+New `linkedin_outreach` table; rows are populated manually via `POST /api/linkedin/log` (no integration yet — see VISION.md for the LinkedIn automation gap). `GET /api/linkedin/pipeline` returns aggregate counts (total / connected / replied, plus this-week variants), segment breakdown, and the 20 most recent rows. The Monday 9am Revenue Intelligence report includes a LinkedIn pipeline line in the prompt and a green pipeline card in the email.
 
 ### Customer Agent (Layer 2E)
 

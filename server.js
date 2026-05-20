@@ -10,6 +10,7 @@ const { analyzeRevenueTrends, getProcurementPriorities } = require('./src/lib/ag
 const { generateDailyBriefing } = require('./src/lib/agents/briefing-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('./src/lib/agents/growth-agent');
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/lib/agents/goal-engine');
+const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -39,6 +40,17 @@ app.get('*', (req, res) => {
 });
 
 // ── CRON JOBS ─────────────────────────────────────────────────────────────────
+
+// Daily 00:00 UTC: Layer 5 — write a metrics_snapshots row for the day that just ended
+cron.schedule('0 0 * * *', async () => {
+  console.log('[CRON] Metrics snapshot starting...');
+  try {
+    const snap = await takeMetricsSnapshot();
+    console.log(`[CRON] Metrics snapshot done — ${snap.snapshot_date}: rev=$${snap.revenue_actual} (${snap.revenue_pct}% of daily target), team=${snap.team_avg_score}, anomaly_seed_written`);
+  } catch (e) {
+    console.error('[CRON] Metrics snapshot error:', e.message);
+  }
+});
 
 // Daily 7 AM: Command Center briefing to admin
 cron.schedule('0 7 * * *', async () => {

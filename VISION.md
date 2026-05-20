@@ -274,19 +274,21 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 2D | Performance Agent — daily 6pm scoring + coaching | Built | `src/lib/core.js` `scoreTeamMember`, `src/lib/jobs.js` `scoreAllAndCoach`, `GET /api/performance/*` |
 | 2D | 3-day below-60 escalation to admin | Built | `scoreTeamMember` |
 | 2E | Customer Agent — warmth scoring + outreach recommendations | Built | `src/lib/agents/customer-agent.js`, `buyer_engagement` table, `GET /api/customers/warm-leads`, `GET /api/customers/outreach-today` |
-| 2E | `buyer_engagement` event ingestion (Apollo webhook) | Spec | table exists; no webhook endpoint or poller wired yet, so warmth scores are 0 until populated |
+| 2E | `buyer_engagement` event ingestion (shared-secret webhook) | Built | `POST /api/customers/engagement-event`, `ENGAGEMENT_SECRET` env var; molecule_interest column added |
 | 3 | Algolia search analytics integration | Built | `syncAlgoliaSearchData` in `src/lib/agents/growth-agent.js` |
 | 3 | Bloomreach personalization integration | Spec | not yet implemented |
 | 3 | Google Search Console integration | Partial | `fetchGSCData` — accepts a bearer token; needs OAuth refresh in production |
 | 3 | Demand-signal feed into Procurement Agent | Spec | not yet wired (Growth Agent stores recommendations but Procurement Agent doesn't read them yet) |
 | 4 | Apollo segment sequences (templates) | Built | `GET /api/sequences/templates`, S1–S4 in `public/index.html` |
 | 4 | Apollo find-buyers + send-outreach | Built | `POST /api/apollo/find-buyers`, `POST /api/apollo/send-outreach` |
-| 4 | LinkedIn outreach automation | Spec | no integration |
+| 4 | LinkedIn outreach tracking — manual log + pipeline view | Built | `linkedin_outreach` table, `POST /api/linkedin/log`, `GET /api/linkedin/pipeline`; Monday revenue report includes 7-day pipeline summary |
+| 4 | LinkedIn outreach automation (sending) | Spec | manual logging only; no LinkedIn API integration yet |
 | 4 | Reply-pattern-driven message adaptation | Spec | not yet implemented |
 | 4 | `customer_acquisition_funnel` table + first-order attribution | Spec | order webhook exists but no funnel-stage tracking |
-| 5 | Unified `metrics_snapshot` table | Spec | not yet implemented |
-| 5 | `/api/analytics/overview` | Spec | not yet implemented |
-| 5 | Anomaly detection | Spec | not yet implemented |
+| 5 | Unified `metrics_snapshots` table + daily aggregator | Built | `src/lib/agents/metrics-snapshot.js` `takeMetricsSnapshot`, midnight cron, `metrics_snapshots` schema with 13 fields |
+| 5 | `GET /api/metrics/today` and `GET /api/metrics/history` | Built | `src/api/routes.js` |
+| 5 | Anomaly detection (30% vs 7-day baseline) | Built | `detectAnomalies` in metrics-snapshot.js; wired into 7am briefing prompt + email banner |
+| 5 | Causal-covariance Claude explainer | Spec | anomalies are flagged but not yet explained by Claude beyond what the briefing prompt produces |
 | 6 | Daily 7am Command Center email | Built | `src/lib/agents/briefing-agent.js` `generateDailyBriefing`, `server.js` 7am cron |
 | 6 | "3 going well / 3 at risk / 3 actions" structure | Built | Claude prompt in `briefing-agent.js` enforces this exact structure |
 | 6 | `GET /api/briefing/latest` | Built | `src/api/routes.js` |

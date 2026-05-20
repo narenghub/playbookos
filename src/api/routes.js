@@ -7,6 +7,7 @@ const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
 const { cascadeGoals, assignWeeklyKPIs, mondayOf } = require('../lib/agents/goal-engine');
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
+const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 
 const router = express.Router();
 
@@ -448,6 +449,86 @@ function formatScoreRow(r) {
     created_at: r.created_at,
   };
 }
+
+router.post('/customers/engagement-event', async (req, res) => {
+  try {
+    const secret = process.env.ENGAGEMENT_SECRET;
+    const provided = req.headers['x-engagement-secret'];
+    if (!secret) return res.status(503).json({ error: 'ENGAGEMENT_SECRET not configured on server' });
+    if (!provided || provided !== secret) return res.status(401).json({ error: 'Invalid or missing X-Engagement-Secret header' });
+    const { contact_email, event_type, molecule_interest, sequence_id, event_at } = req.body || {};
+    if (!contact_email) return res.status(400).json({ error: 'contact_email is required' });
+    const valid = ['sent', 'opened', 'clicked', 'replied', 'bounced'];
+    if (!valid.includes(event_type)) return res.status(400).json({ error: `event_type must be one of ${valid.join(', ')}` });
+    await query(
+      `INSERT INTO buyer_engagement (id, contact_email, event_type, event_at, sequence_id, molecule_interest)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [crypto.randomUUID(), contact_email, event_type, event_at || new Date().toISOString(), sequence_id || null, molecule_interest || null]
+    );
+    res.json({ received: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/linkedin/log', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { contact_name, contact_title, company, linkedin_url, message_sent, sent_at, connection_accepted, replied, reply_content, buyer_segment, molecule_interest } = req.body || {};
+    if (!contact_name) return res.status(400).json({ error: 'contact_name is required' });
+    const id = crypto.randomUUID();
+    await query(
+      `INSERT INTO linkedin_outreach (id, contact_name, contact_title, company, linkedin_url, message_sent, sent_at, connection_accepted, replied, reply_content, buyer_segment, molecule_interest)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [id, contact_name, contact_title || null, company || null, linkedin_url || null, message_sent || null, sent_at || new Date().toISOString(), connection_accepted ? 1 : 0, replied ? 1 : 0, reply_content || null, buyer_segment || null, molecule_interest || null]
+    );
+    res.json({ success: true, id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/linkedin/pipeline', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const stats = (await query(`
+      SELECT
+        COUNT(*)::int as total,
+        COUNT(*) FILTER (WHERE connection_accepted = 1)::int as connected,
+        COUNT(*) FILTER (WHERE replied = 1)::int as replied,
+        COUNT(*) FILTER (WHERE sent_at >= (NOW() - INTERVAL '7 days')::text)::int as sent_this_week,
+        COUNT(*) FILTER (WHERE connection_accepted = 1 AND sent_at >= (NOW() - INTERVAL '7 days')::text)::int as connected_this_week,
+        COUNT(*) FILTER (WHERE replied = 1 AND sent_at >= (NOW() - INTERVAL '7 days')::text)::int as replied_this_week
+      FROM linkedin_outreach
+    `)).rows[0];
+    const bySegment = (await query(`
+      SELECT buyer_segment,
+             COUNT(*)::int as total,
+             COUNT(*) FILTER (WHERE connection_accepted = 1)::int as connected,
+             COUNT(*) FILTER (WHERE replied = 1)::int as replied
+      FROM linkedin_outreach GROUP BY buyer_segment ORDER BY total DESC
+    `)).rows;
+    const recent = (await query(`
+      SELECT id, contact_name, contact_title, company, linkedin_url, sent_at, connection_accepted, replied, buyer_segment, molecule_interest
+      FROM linkedin_outreach ORDER BY sent_at DESC NULLS LAST LIMIT 20
+    `)).rows;
+    res.json({ stats, by_segment: bySegment, recent });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/metrics/today', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const row = (await query(
+      `SELECT * FROM metrics_snapshots ORDER BY snapshot_date DESC LIMIT 1`
+    )).rows[0];
+    if (!row) return res.json({ available: false, note: 'no snapshots yet — the midnight cron writes the first row' });
+    res.json({ available: true, snapshot: row });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/metrics/history', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const days = Math.min(parseInt(req.query.days) || 90, 365);
+    const rows = (await query(
+      `SELECT * FROM metrics_snapshots WHERE snapshot_date >= (NOW() - INTERVAL '${days} days')::date::text ORDER BY snapshot_date ASC`
+    )).rows;
+    res.json({ days, count: rows.length, snapshots: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
 
 router.get('/customers/warm-leads', authMiddleware, adminOnly, async (req, res) => {
   try {

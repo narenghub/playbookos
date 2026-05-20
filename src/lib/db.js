@@ -206,7 +206,41 @@ async function migrateSchemas() {
         metadata_json TEXT,
         created_at TEXT DEFAULT NOW()
       );
+      ALTER TABLE buyer_engagement ADD COLUMN IF NOT EXISTS molecule_interest TEXT;
       CREATE INDEX IF NOT EXISTS idx_buyer_engagement_email ON buyer_engagement (contact_email, event_at DESC);
+      CREATE TABLE IF NOT EXISTS linkedin_outreach (
+        id TEXT PRIMARY KEY,
+        contact_name TEXT NOT NULL,
+        contact_title TEXT,
+        company TEXT,
+        linkedin_url TEXT,
+        message_sent TEXT,
+        sent_at TEXT,
+        connection_accepted INTEGER DEFAULT 0,
+        replied INTEGER DEFAULT 0,
+        reply_content TEXT,
+        buyer_segment TEXT,
+        molecule_interest TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_linkedin_outreach_sent_at ON linkedin_outreach (sent_at DESC);
+      CREATE TABLE IF NOT EXISTS metrics_snapshots (
+        id TEXT PRIMARY KEY,
+        snapshot_date TEXT NOT NULL UNIQUE,
+        revenue_actual REAL DEFAULT 0,
+        revenue_target REAL DEFAULT 0,
+        revenue_pct INTEGER DEFAULT 0,
+        team_avg_score INTEGER DEFAULT 0,
+        top_sku TEXT,
+        top_buyer_segment TEXT,
+        apollo_emails_sent INTEGER DEFAULT 0,
+        apollo_reply_rate REAL DEFAULT 0,
+        linkedin_pipeline_count INTEGER DEFAULT 0,
+        warm_leads_count INTEGER DEFAULT 0,
+        skus_added_this_week INTEGER DEFAULT 0,
+        github_commits_this_week INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT NOW()
+      );
       CREATE TABLE IF NOT EXISTS goal_cascades (
         id TEXT PRIMARY KEY,
         parent_goal_id TEXT,

@@ -15,6 +15,7 @@ const { generateDailyBriefing } = require('../src/lib/agents/briefing-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../src/lib/agents/growth-agent');
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('../src/lib/agents/goal-engine');
 const { getWarmLeads, generateOutreachRecommendations } = require('../src/lib/agents/customer-agent');
+const { takeMetricsSnapshot, detectAnomalies } = require('../src/lib/agents/metrics-snapshot');
 
 async function step(name, fn) {
   process.stdout.write(`\n▶ ${name} ... `);
@@ -56,9 +57,11 @@ async function main() {
   const r12 = await step('checkAndRecalc (6pm divergence)',       () => checkAndRecalc(opts));
   const r13 = await step('getWarmLeads (helper)',                 () => getWarmLeads());
   const r14 = await step('generateOutreachRecommendations',       () => generateOutreachRecommendations(opts));
+  const r15 = await step('takeMetricsSnapshot (midnight)',        () => takeMetricsSnapshot(opts));
+  const r16 = await step('detectAnomalies (briefing input)',      () => detectAnomalies());
 
-  const failures = [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14].filter(r => !r.ok);
-  console.log(`\n${failures.length === 0 ? '✅ All 14 cron jobs ran successfully' : `❌ ${failures.length} failure(s)`}`);
+  const failures = [r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16].filter(r => !r.ok);
+  console.log(`\n${failures.length === 0 ? '✅ All 16 cron jobs ran successfully' : `❌ ${failures.length} failure(s)`}`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
 
