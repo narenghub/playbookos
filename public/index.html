@@ -227,6 +227,7 @@ function buildNav() {
   const isAdmin = currentUser.role === 'admin';
   const links = [
     {id:'dashboard',label:'Dashboard',roles:['admin','dev','procurement','sales','marketing','qc']},
+    {id:'command-center',label:'Command Center',roles:['admin']},
     {id:'my-activity',label:'My Activity',roles:['dev','procurement','sales','marketing','qc']},
     {id:'playbook',label:'Playbook',roles:['admin','dev','procurement','sales','marketing','qc']},
     {id:'team',label:'Team',roles:['admin']},
@@ -247,7 +248,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','my-activity':'My Activity',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','my-activity':'My Activity',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -270,6 +271,17 @@ async dashboard() {
     : '<span class="badge badge-red">Behind Target</span>';
 
   const html = `
+    ${currentUser.role === 'admin' ? `
+    <div class="card" style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div style="font-size:14px;font-weight:600;color:var(--navy)">AI Goal Cascade</div>
+        <div style="font-size:12px;color:var(--gray);margin-top:4px">Recalculate quarterly → monthly → weekly KPIs for every active team member from current annual targets.</div>
+      </div>
+      <div style="text-align:right">
+        <button class="btn btn-teal" onclick="runGoalCascade()">Run AI Goal Cascade</button>
+        <div id="cascade-result" style="margin-top:6px;font-size:11px;color:var(--gray);max-width:320px"></div>
+      </div>
+    </div>` : ''}
     <div class="metric-grid">
       <div class="metric ${pColor}"><div class="label">This month revenue</div><div class="value">${fmt(rev.month)}</div><div class="sub">target ${fmt(rev.monthTarget)} · ${p}%</div></div>
       <div class="metric"><div class="label">Year-to-date revenue</div><div class="value">${fmt(rev.year)}</div><div class="sub">${yp}% of $10M target</div></div>
@@ -326,6 +338,93 @@ async dashboard() {
     ]},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{ticks:{callback:v=>'$'+(v/1000)+'K'}}}}
   });
+},
+
+// ── COMMAND CENTER (admin) ────────────────────────────────────────────────────
+async 'command-center'() {
+  document.getElementById('content').innerHTML = '<p style="color:#888;padding:20px">Loading Command Center…</p>';
+  const [briefing, kpis, warm, outreach, metrics] = await Promise.all([
+    API('/briefing/latest').catch(e => ({error:e.message})),
+    API('/goals/team-week').catch(e => ({error:e.message})),
+    API('/customers/warm-leads').catch(e => ({error:e.message})),
+    API('/customers/outreach-today').catch(e => ({error:e.message})),
+    API('/metrics/today').catch(e => ({error:e.message}))
+  ]);
+
+  const anomalies = (briefing && briefing.available && briefing.anomalies) || [];
+  const escapeHtml = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  const anomalyBlock = anomalies.length ? `
+    <div class="card" style="background:#fef2f2;border:2px solid #dc2626;margin-bottom:16px">
+      <div style="font-size:14px;font-weight:700;color:#dc2626;margin-bottom:8px">⚠️ ANOMALIES DETECTED (${anomalies.length})</div>
+      ${anomalies.map(a => `<div style="font-size:12px;color:#7f1d1d;margin:4px 0">⚠️ <strong>${escapeHtml(a.label)}</strong> ${a.direction==='up'?'rose':'dropped'} ${Math.abs(a.delta_pct).toFixed(1)}% vs 7-day baseline — today ${a.today}, baseline ${a.baseline_avg}</div>`).join('')}
+    </div>` : '';
+
+  const briefingBlock = `
+    <div class="card">
+      <div class="card-title">Today's briefing (7am Command Center)</div>
+      ${briefing && briefing.available
+        ? `<div style="font-size:11px;color:var(--gray);margin-bottom:8px">Generated ${new Date(briefing.generated_at).toLocaleString()}</div>
+           <div style="white-space:pre-wrap;font-family:Georgia,serif;line-height:1.7;color:#333;font-size:13px">${escapeHtml(briefing.briefing_text || '(empty)')}</div>`
+        : `<div style="color:var(--gray);font-size:13px">No briefing generated yet — fires daily at 7am UTC.${briefing && briefing.error ? ' Error: ' + briefing.error : ''}</div>`}
+    </div>`;
+
+  const warmLeadsBlock = `
+    <div class="card">
+      <div class="card-title">Top warm leads</div>
+      ${warm && warm.leads && warm.leads.length
+        ? `<table><tr><th>Name</th><th>Company</th><th>Segment</th><th style="text-align:right">Warmth</th></tr>
+           ${warm.leads.slice(0,3).map(l => `<tr><td>${escapeHtml(l.name)||'-'}</td><td>${escapeHtml(l.company)||'-'}</td><td><span class="badge badge-gray">${escapeHtml(l.segment)||'unknown'}</span></td><td style="text-align:right;font-weight:700;color:${l.score>=70?'var(--success)':l.score>=40?'var(--warn)':'var(--gray)'}">${l.score}/100</td></tr>`).join('')}</table>`
+        : '<div style="color:var(--gray);font-size:13px">No warm leads — buyer_engagement empty. Wire Apollo webhook to <code>POST /api/customers/engagement-event</code>.</div>'}
+    </div>`;
+
+  const outreachBlock = `
+    <div class="card">
+      <div class="card-title">Today's outreach recommendations</div>
+      ${outreach && outreach.available && outreach.recommendations && outreach.recommendations.length
+        ? `<ol style="margin:0;padding-left:20px;font-size:13px;line-height:1.8">
+           ${outreach.recommendations.slice(0,5).map(r => `<li><strong>${escapeHtml(r.name)}</strong> at ${escapeHtml(r.company)||'-'} — lead with <em>${escapeHtml(r.molecule_focus)||'-'}</em> via ${escapeHtml(r.channel)||'-'} <span class="badge badge-${r.priority==='high'?'red':r.priority==='medium'?'blue':'gray'}">${escapeHtml(r.priority)}</span></li>`).join('')}</ol>`
+        : `<div style="color:var(--gray);font-size:13px">No recommendations available${outreach && outreach.skipped ? ' — ' + outreach.reason : ''}.</div>`}
+    </div>`;
+
+  const ms = metrics && metrics.available ? metrics.snapshot : null;
+  const metricsBlock = `
+    <div class="card">
+      <div class="card-title">Latest metrics snapshot</div>
+      ${ms ? `
+        <div style="font-size:11px;color:var(--gray);margin-bottom:10px">snapshot_date ${ms.snapshot_date}</div>
+        <table>
+          <tr><td>Revenue (day)</td><td><strong>${fmt(ms.revenue_actual||0)}</strong></td><td style="color:var(--gray)">${ms.revenue_pct}% of daily target</td></tr>
+          <tr><td>Team avg score</td><td><strong>${ms.team_avg_score}/100</strong></td><td></td></tr>
+          <tr><td>Top SKU (7d)</td><td>${escapeHtml(ms.top_sku)||'<span style="color:var(--gray)">—</span>'}</td><td></td></tr>
+          <tr><td>Top buyer segment (7d)</td><td>${escapeHtml(ms.top_buyer_segment)||'<span style="color:var(--gray)">—</span>'}</td><td></td></tr>
+          <tr><td>Apollo emails sent</td><td>${ms.apollo_emails_sent}</td><td style="color:var(--gray)">reply rate ${ms.apollo_reply_rate}%</td></tr>
+          <tr><td>LinkedIn pipeline</td><td>${ms.linkedin_pipeline_count}</td><td></td></tr>
+          <tr><td>Warm leads (7d)</td><td>${ms.warm_leads_count}</td><td></td></tr>
+          <tr><td>SKUs added (7d)</td><td>${ms.skus_added_this_week}</td><td></td></tr>
+          <tr><td>GitHub commits (7d)</td><td>${ms.github_commits_this_week}</td><td></td></tr>
+        </table>`
+        : `<div style="color:var(--gray);font-size:13px">No snapshot yet — midnight UTC cron writes the first row.${metrics && metrics.note ? ' ' + metrics.note : ''}</div>`}
+    </div>`;
+
+  const kpisBlock = `
+    <div class="card">
+      <div class="card-title">Current week team KPIs${kpis && kpis.week_start ? ' (week of ' + kpis.week_start + ')' : ''}</div>
+      ${kpis && kpis.kpis && kpis.kpis.length
+        ? `<table>
+            <tr><th>Member</th><th>Role</th><th>KPI</th><th style="text-align:right">Target</th><th style="text-align:right">Actual</th><th>Status</th></tr>
+            ${kpis.kpis.map(k => `<tr><td>${escapeHtml(k.name)}</td><td><span class="badge badge-gray">${escapeHtml(k.role)}</span></td><td>${escapeHtml(k.kpi_name)}</td><td style="text-align:right">${k.kpi_target}${k.kpi_unit?' '+escapeHtml(k.kpi_unit):''}</td><td style="text-align:right">${k.kpi_actual||0}</td><td><span class="badge badge-${k.status==='met'?'green':k.status==='missed'?'red':'blue'}">${escapeHtml(k.status)}</span></td></tr>`).join('')}
+           </table>`
+        : '<div style="color:var(--gray);font-size:13px">No KPIs assigned for this week — Monday 8am cron creates these, or hit <code>POST /api/goals/cascade</code> manually from the Dashboard.</div>'}
+    </div>`;
+
+  document.getElementById('content').innerHTML = `
+    ${anomalyBlock}
+    ${briefingBlock}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">${warmLeadsBlock}${outreachBlock}</div>
+    ${metricsBlock}
+    ${kpisBlock}
+  `;
 },
 
 // ── MY ACTIVITY ───────────────────────────────────────────────────────────────
@@ -686,6 +785,28 @@ pm2 startup</pre>
 };
 
 // ── ACTIONS ───────────────────────────────────────────────────────────────────
+async function runGoalCascade() {
+  const out = document.getElementById('cascade-result');
+  const btn = event && event.target;
+  if (out) out.innerHTML = '<span style="color:#888">Running cascade (calling Claude — may take 15–30s)…</span>';
+  if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+  try {
+    const res = await API('/goals/cascade', {method:'POST'});
+    if (res.skipped) {
+      if (out) out.innerHTML = '<span style="color:#BA7517">Skipped: ' + (res.reason || 'unknown') + '</span>';
+    } else if (res.error) {
+      if (out) out.innerHTML = '<span style="color:#E24B4A">Error: ' + res.error + '</span>';
+    } else {
+      const c = res.counts || {};
+      if (out) out.innerHTML = '<span style="color:#1D9E75">Cascade complete — ' + (c.annual||0) + ' annual, ' + (c.quarterly||0) + ' quarterly, ' + (c.monthly||0) + ' monthly, ' + (c.weekly||0) + ' weekly, ' + (c.daily||0) + ' daily rows inserted.</span>';
+    }
+  } catch (e) {
+    if (out) out.innerHTML = '<span style="color:#E24B4A">Error: ' + e.message + '</span>';
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Run AI Goal Cascade'; }
+  }
+}
+
 async function logActivity() {
   const metric = document.getElementById('act-metric').value;
   const value = parseFloat(document.getElementById('act-value').value);

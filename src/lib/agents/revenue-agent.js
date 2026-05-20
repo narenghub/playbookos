@@ -129,8 +129,7 @@ ${data.by_week.length ? data.by_week.map(w => `  Week of ${w.week_start}: ${fmtM
 Velocity: last 7 days ${fmtMoney(data.velocity.last7)} vs prior 7 days ${fmtMoney(data.velocity.prev7)} → ${data.velocity.delta_pct >= 0 ? '+' : ''}${data.velocity.delta_pct.toFixed(1)}% (${data.velocity.trend})
 
 This month: ${fmtMoney(data.monthly.actual)} of ${fmtMoney(data.monthly.target)} target (${data.monthly.pct}%)
-
-LinkedIn pipeline (last 7 days): ${data.linkedin?.sent_week || 0} sent, ${data.linkedin?.connected_week || 0} connected, ${data.linkedin?.replied_week || 0} replied (total roster: ${data.linkedin?.total_outreach || 0})
+${(data.linkedin?.total_outreach || 0) > 0 ? `\nLinkedIn pipeline (last 7 days): ${data.linkedin.sent_week} sent, ${data.linkedin.connected_week} connected, ${data.linkedin.replied_week} replied (total roster: ${data.linkedin.total_outreach})` : ''}
 
 Write EXACTLY 5 numbered actionable recommendations covering:
 1. Which buyer segment to double down on this week (be specific to the data above).
@@ -192,10 +191,11 @@ function renderRevenueReport(data, recommendations) {
       ${data.top_skus.map((s, i) => `<tr style="background:${i % 2 ? '#fff' : '#f8fafc'}"><td style="padding:6px 8px;font-weight:700;color:#1B3A6B">${i + 1}</td><td style="padding:6px 8px">${s.name}</td><td style="padding:6px 8px;text-align:right;font-weight:600">${fmtMoney(s.revenue)}</td></tr>`).join('')}
     </table>` : ''}
 
+    ${(data.linkedin?.total_outreach || 0) > 0 ? `
     <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:6px;padding:12px;margin-bottom:16px;font-size:13px">
       <div style="font-weight:700;color:#166534;margin-bottom:4px">LinkedIn pipeline (last 7 days)</div>
-      <div style="color:#15803d">${data.linkedin?.sent_week || 0} sent · ${data.linkedin?.connected_week || 0} connected · ${data.linkedin?.replied_week || 0} replied · ${data.linkedin?.total_outreach || 0} total contacts in roster</div>
-    </div>
+      <div style="color:#15803d">${data.linkedin.sent_week || 0} sent · ${data.linkedin.connected_week || 0} connected · ${data.linkedin.replied_week || 0} replied · ${data.linkedin.total_outreach} total contacts in roster</div>
+    </div>` : ''}
 
     <h3 style="margin:20px 0 8px;font-size:14px;color:#0D7377">5 actionable recommendations (Claude)</h3>
     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:16px;line-height:1.7;font-size:13px;white-space:pre-wrap">${recHtml}</div>

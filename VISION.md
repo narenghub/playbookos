@@ -263,6 +263,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 1 | Claude-driven cascade to quarterly / weekly / daily | Built | `src/lib/agents/goal-engine.js` `cascadeGoals`, Monday 8am cron, `POST /api/goals/cascade` |
 | 1 | Per-user role-conditioned target derivation | Built | `assignWeeklyKPIs` + `assignWeeklyKPIsForAll`, `GET /api/goals/my-week`, `GET /api/goals/team-week` |
 | 1 | 15%-divergence-triggered recalc | Built | `checkAndRecalc` in goal-engine.js; 6pm cron; logs `analysis_type='goal_recalc'`; 7-day floor + 24h cooldown |
+| 1 | "Run AI Goal Cascade" button on Dashboard | Built | admin-only card in `public/index.html` dashboard page; calls `POST /api/goals/cascade` with progress + result feedback |
 | 2A | Revenue Agent — `analyzeRevenueTrends` | Built | `src/lib/agents/revenue-agent.js`, `GET /api/revenue/intelligence` |
 | 2A | Monday 9am cron | Built | `server.js` |
 | 2B | Procurement Agent — `getProcurementPriorities` | Built | `src/lib/agents/revenue-agent.js` |
@@ -292,6 +293,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 6 | Daily 7am Command Center email | Built | `src/lib/agents/briefing-agent.js` `generateDailyBriefing`, `server.js` 7am cron |
 | 6 | "3 going well / 3 at risk / 3 actions" structure | Built | Claude prompt in `briefing-agent.js` enforces this exact structure |
 | 6 | `GET /api/briefing/latest` | Built | `src/api/routes.js` |
+| 6 | Command Center page in admin SPA | Built | `public/index.html` `pages['command-center']`; one-screen view of anomalies, briefing, warm leads, outreach recs, metrics snapshot, weekly KPIs |
 
 ## Appendix B — Cross-layer dependencies
 
