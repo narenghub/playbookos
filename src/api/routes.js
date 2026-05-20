@@ -8,6 +8,7 @@ const { checkMilestoneTriggers } = require('../lib/jobs');
 const { cascadeGoals, assignWeeklyKPIs, mondayOf } = require('../lib/agents/goal-engine');
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
+const { getAllRoles, isBuiltIn } = require('../lib/roles');
 
 const router = express.Router();
 
@@ -62,6 +63,40 @@ router.get('/auth/me', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+router.get('/roles', authMiddleware, async (req, res) => {
+  try {
+    const catalog = await getAllRoles();
+    const list = Object.entries(catalog).map(([role_name, def]) => ({
+      role_name,
+      display_name: def.display_name,
+      metrics: def.metrics,
+      baseline: def.baseline,
+      built_in: !!def.built_in,
+      custom: !!def.custom,
+    }));
+    res.json({ count: list.length, roles: list });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/roles', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { role_name, display_name, metrics } = req.body || {};
+    if (!role_name) return res.status(400).json({ error: 'role_name is required (snake_case identifier)' });
+    if (!/^[a-z][a-z0-9_]*$/.test(role_name)) return res.status(400).json({ error: 'role_name must be snake_case starting with a letter' });
+    if (isBuiltIn(role_name)) return res.status(400).json({ error: `role_name "${role_name}" is a built-in role; pick a different identifier or modify in src/lib/roles.js` });
+    if (!display_name) return res.status(400).json({ error: 'display_name is required' });
+    if (!Array.isArray(metrics) || metrics.length === 0) return res.status(400).json({ error: 'metrics must be a non-empty array of metric names' });
+    if (metrics.some(m => typeof m !== 'string' || !/^[a-z][a-z0-9_]*$/.test(m))) return res.status(400).json({ error: 'each metric must be a snake_case string' });
+    const id = crypto.randomUUID();
+    await query(
+      `INSERT INTO custom_roles (id, role_name, display_name, metrics_json) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (role_name) DO UPDATE SET display_name=$3, metrics_json=$4`,
+      [id, role_name, display_name, JSON.stringify(metrics)]
+    );
+    res.json({ success: true, role_name, display_name, metrics });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/users', authMiddleware, async (req, res) => {
   try {
     const result = await query('SELECT id,name,email,role,github_username,joined_at,is_active FROM users ORDER BY role,name');
@@ -73,6 +108,10 @@ router.post('/users/invite', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { email, role, github_username } = req.body;
     if (!email || !role) return res.status(400).json({ error: 'Email and role required' });
+    const catalog = await getAllRoles();
+    if (!catalog[role]) {
+      return res.status(400).json({ error: `Unknown role "${role}". Valid roles: ${Object.keys(catalog).join(', ')}` });
+    }
     const existing = await query('SELECT id FROM users WHERE email=$1', [email.toLowerCase()]);
     if (existing.rows[0]) return res.status(400).json({ error: 'User already exists' });
     const inviteToken = crypto.randomBytes(32).toString('hex');

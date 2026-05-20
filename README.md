@@ -61,7 +61,9 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Auth** — `POST /auth/login` (rate-limited 10/min/IP), `POST /auth/accept-invite` (rate-limited 10/min/IP), `GET /auth/me`
 
-**Users / team** — `GET /users`, `POST /users/invite` (admin), `PUT /users/profile`, `PUT /users/:id`
+**Users / team** — `GET /users`, `POST /users/invite` (admin; validates role against catalog), `PUT /users/profile`, `PUT /users/:id`
+
+**Roles** — `GET /roles` (authenticated; returns built-in + custom roles with metrics + baselines), `POST /roles` (admin; create a custom role with snake_case `role_name`, `display_name`, and a `metrics` array)
 
 **Activity** — `POST /activity`, `GET /activity/my`, `GET /activity/team` (admin)
 
@@ -159,6 +161,38 @@ Gathers a 24-hour snapshot covering new orders, today/yesterday revenue against 
 Claude is prompted for a strict three-section briefing — "What's going well", "What's at risk", "Actions for today" — three numbered items each, every line referencing an actual number from the snapshot, every action carrying an owner and a measurable success criterion. Output is stored as JSON in `ai_analyses` with `analysis_type='daily_briefing'` and emailed to the admin user (falls back to `naren@abiozen.com` if no admin row exists).
 
 Caveat on the Apollo number: Apollo's API only exposes per-sequence cumulative `unique_replied`, not a time-windowed count. The briefing reports both the cumulative total and the delta since the prior briefing's stored value. First-day briefings show only the total.
+
+### Role taxonomy
+
+Single source of truth lives in `src/lib/roles.js` (built-in) and the `custom_roles` table (admin-added at runtime). Both are merged by `getAllRoles()` and served by `GET /api/roles`.
+
+Built-in roles (and their daily activity baselines used by performance scoring):
+
+| `role_name` | Display | Metrics | Baseline |
+|---|---|---|---|
+| `admin` | Admin | orders_entered, revenue_closed, team_reviews | 3 |
+| `dev` | Developer | prs_merged, commits, features_deployed, bugs_fixed | 8 |
+| `procurement_lead` | Procurement Lead | molecules_sourced, suppliers_contacted, coas_collected, rfqs_sent, purchase_orders_placed | 15 |
+| `customer_engagement` | Customer Engagement | quotes_sent, accounts_created, leads_followed_up, orders_closed, response_time_hrs | 20 |
+| `lead_chemist` | Lead Chemist | orders_repacked, labels_printed, shipments_dispatched, qc_checks_completed | 12 |
+| `logistics` | Logistics | pickups_completed, transfers_completed, inbound_receipts_logged | 8 |
+| `recruitment` | Recruitment | candidates_screened, interviews_scheduled, offers_made, hires_completed | 5 |
+| `hr_accounts` | HR & Accounts | payroll_processed, employee_issues_resolved, invoices_processed | 4 |
+| `seo_specialist` | SEO Specialist | keywords_optimized, pages_indexed, backlinks_built, ranking_improvements, content_published | 10 |
+| `platform_ops` | Platform Ops | issues_resolved, deployments_completed, uptime_pct, tickets_closed | 6 |
+
+To add a custom role at runtime:
+
+```
+curl -X POST $URL/api/roles \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"role_name":"finance_analyst","display_name":"Finance Analyst","metrics":["models_built","reports_published","forecasts_updated"]}'
+```
+
+Once created, the role appears in the my-activity dropdown for users assigned to it, in the team invite dropdown, and gets a row in every Monday's goal cascade with role-appropriate weekly KPIs from Claude. Custom roles inherit a default baseline of 5; tune by editing `getAllRoles` in `src/lib/roles.js`.
+
+**Legacy role values:** the prior taxonomy (`procurement`, `sales`, `marketing`, `qc`) is no longer in the built-in catalog. Existing users with those values still work but won't appear in nav lists that gate on role, won't get weekly KPI cascades for their (now unknown) role, and will score against the admin baseline. Migrate them via the admin Team page or directly with `PUT /api/users/:id` setting the new `role`.
 
 ### Operational metrics snapshot (Layer 5)
 

@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
+const { getAllRoles, BUILT_IN_ROLES } = require('../roles');
 
 const DAY_MS = 86400000;
 const isoDate = d => d.toISOString().slice(0, 10);
@@ -14,15 +15,11 @@ function mondayOf(date) {
   return m;
 }
 
-// Per-role metric vocabularies match public/index.html my-activity page.
-const ROLE_METRICS = {
-  dev:         ['prs_merged', 'commits', 'features_deployed', 'bugs_fixed'],
-  procurement: ['skus_priced', 'coas_collected', 'suppliers_contacted', 'vendors_onboarded'],
-  sales:       ['outreach_emails', 'calls_made', 'demos_completed', 'orders_closed', 'revenue_closed'],
-  marketing:   ['campaigns_sent', 'leads_generated', 'content_published', 'conferences_attended'],
-  qc:          ['coas_issued', 'tests_completed', 'reports_generated', 'samples_processed'],
-  admin:       ['orders_entered', 'revenue_closed', 'team_reviews'],
-};
+// Legacy export — kept for any external code that imported it. Real source of
+// truth is src/lib/roles.js (BUILT_IN_ROLES) + the custom_roles table.
+const ROLE_METRICS = Object.fromEntries(
+  Object.entries(BUILT_IN_ROLES).map(([k, v]) => [k, v.metrics])
+);
 
 function inferUnit(metric) {
   if (metric === 'revenue' || metric === 'revenue_closed') return '$';
@@ -65,17 +62,24 @@ async function cascadeGoals({ dryRun = false } = {}) {
     [year + '-%']
   )).rows;
 
+  // Full role catalog (built-in + custom). Cascade only generates rows for
+  // roles that actually have at least one user assigned.
+  const roleCatalog = await getAllRoles();
+
   // Build Claude prompt
   const annualText = annualTargets.map(t => `- ${t.metric}: $${parseFloat(t.target_value).toLocaleString()}`).join('\n');
   const teamText = Object.entries(teamByRole)
-    .map(([role, users]) => `- ${role}: ${users.length} (${users.map(u => u.name).join(', ')})`)
+    .map(([role, users]) => {
+      const display = roleCatalog[role]?.display_name || role;
+      return `- ${role} (${display}): ${users.length} (${users.map(u => u.name).join(', ')})`;
+    })
     .join('\n');
   const monthlyText = existingMonthly.length
     ? existingMonthly.map(t => `- ${t.period_key}: ${t.metric} = $${parseFloat(t.target_value).toLocaleString()}`).join('\n')
     : '(none seeded — generate monthly distribution yourself)';
-  const metricsText = Object.entries(ROLE_METRICS)
+  const metricsText = Object.entries(roleCatalog)
     .filter(([role]) => teamByRole[role])
-    .map(([role, metrics]) => `- ${role}: ${metrics.join(', ')}`)
+    .map(([role, def]) => `- ${role}: ${def.metrics.join(', ')}`)
     .join('\n');
 
   const prompt = `You are the Goal Engine for Abiozen LLC, a US-based pharmaceutical API distribution company targeting $10M revenue by Dec 31, 2026. Cascade the annual targets into quarterly summaries and per-role weekly KPIs that collectively ladder up to the revenue target.
@@ -196,7 +200,7 @@ Return ONLY the JSON object.`;
 
       for (const w of cascade.weekly_per_role || []) {
         if (!teamByRole[w.role]) continue;
-        if (!ROLE_METRICS[w.role]?.includes(w.metric)) continue; // strict: must be valid role+metric
+        if (!roleCatalog[w.role]?.metrics?.includes(w.metric)) continue; // strict: must be valid role+metric
         const id = crypto.randomUUID();
         await query(
           `INSERT INTO goal_cascades (id, parent_goal_id, level, metric, target_value, period_start, period_end, assigned_to_role, assigned_to_user_id, auto_generated)

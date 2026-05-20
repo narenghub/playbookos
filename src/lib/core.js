@@ -88,26 +88,19 @@ In 3-4 sentences, give a direct assessment of: 1) Whether on track for $10M, 2) 
 
 // ── Performance scoring ────────────────────────────────────────────────────
 
-const ROLE_BASELINES = {
-  dev: 8,
-  procurement: 50,
-  sales: 20,
-  marketing: 5,
-  qc: 10,
-  admin: 3,
-};
+const { getBaselineSync } = require('./roles');
 
 function sumActivity(map) {
   return Object.values(map).reduce((s, v) => s + (Number(v) || 0), 0);
 }
 
-function computeScoreForRole(role, activityMap, github) {
+function computeScoreForRole(role, activityMap, github, roleDef = null) {
   const blockers = [];
   const activitySum = sumActivity(activityMap);
   const effort = role === 'dev'
     ? activitySum + (github.commits || 0) + (github.prsMerged || 0) * 5
     : activitySum;
-  const baseline = ROLE_BASELINES[role] || ROLE_BASELINES.admin;
+  const baseline = roleDef?.baseline ?? getBaselineSync(role);
 
   // 70 at baseline, 100 at ~1.43x baseline, capped
   let score = Math.round((effort / baseline) * 70);

@@ -197,6 +197,13 @@ async function migrateSchemas() {
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS coa_status TEXT DEFAULT 'pending';
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS status TEXT;
       ALTER TABLE email_log ADD COLUMN IF NOT EXISTS error_message TEXT;
+      CREATE TABLE IF NOT EXISTS custom_roles (
+        id TEXT PRIMARY KEY,
+        role_name TEXT NOT NULL UNIQUE,
+        display_name TEXT NOT NULL,
+        metrics_json TEXT NOT NULL,
+        created_at TEXT DEFAULT NOW()
+      );
       CREATE TABLE IF NOT EXISTS buyer_engagement (
         id TEXT PRIMARY KEY,
         contact_email TEXT NOT NULL,

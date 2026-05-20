@@ -264,6 +264,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 1 | Per-user role-conditioned target derivation | Built | `assignWeeklyKPIs` + `assignWeeklyKPIsForAll`, `GET /api/goals/my-week`, `GET /api/goals/team-week` |
 | 1 | 15%-divergence-triggered recalc | Built | `checkAndRecalc` in goal-engine.js; 6pm cron; logs `analysis_type='goal_recalc'`; 7-day floor + 24h cooldown |
 | 1 | "Run AI Goal Cascade" button on Dashboard | Built | admin-only card in `public/index.html` dashboard page; calls `POST /api/goals/cascade` with progress + result feedback |
+| 1 | Expanded role taxonomy + runtime custom roles | Built | `src/lib/roles.js` BUILT_IN_ROLES (10 roles), `custom_roles` table, `GET /api/roles`, `POST /api/roles` (admin), validation on `/users/invite`; SPA my-activity + invite dropdowns fetch live |
 | 2A | Revenue Agent — `analyzeRevenueTrends` | Built | `src/lib/agents/revenue-agent.js`, `GET /api/revenue/intelligence` |
 | 2A | Monday 9am cron | Built | `server.js` |
 | 2B | Procurement Agent — `getProcurementPriorities` | Built | `src/lib/agents/revenue-agent.js` |

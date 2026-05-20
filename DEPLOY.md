@@ -153,6 +153,8 @@ These are integrations that PlaybookOS needs to receive data from, not just expo
 
 - [ ] **Reconnect GitHub autodeploy.** Railway dashboard → playbookos service → Settings → Source → confirm the GitHub connection is healthy. If "Last deployment" predates this push, click **Disconnect**, then **Connect Repo**, select `narenghub/playbookos` and branch `main`. Toggle **Automatic Deployments** on. Set **Health Check Path** to `/health` so failed deploys auto-rollback. (See VISION.md / earlier session notes — autodeploy was broken since April 3.)
 
+- [ ] **Migrate any users with legacy roles.** This release replaces the old role taxonomy (`procurement`, `sales`, `marketing`, `qc`) with a 10-role catalog (procurement_lead, customer_engagement, lead_chemist, logistics, recruitment, hr_accounts, seo_specialist, platform_ops, admin, dev). Users with old role values still work but won't be cascaded or scored against role-specific baselines. From the admin UI Team page (or directly via `PUT /api/users/:id` with the new `role` value), update each legacy user. Suggested mapping: `procurement → procurement_lead`, `sales → customer_engagement`, `marketing → seo_specialist`, `qc → lead_chemist`. Custom roles can be added at runtime via `POST /api/roles`.
+
 ---
 
 ## 6. First-week expected behavior
