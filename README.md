@@ -49,6 +49,9 @@ curl http://localhost:3000/health
 | `APOLLO_API_KEY` | yes (for Apollo features) | Apollo.io API key. Required for every `/api/apollo/*` endpoint. |
 | `GITHUB_TOKEN` | yes (for GitHub sync) | Personal access token with `repo`, `read:org`, `read:user` scopes. Used by the 8am sync cron and the manual "Sync GitHub now" button. |
 | `GITHUB_ORG` | no | Default org for GitHub queries. |
+| `ALGOLIA_APP_ID` / `ALGOLIA_API_KEY` / `ALGOLIA_INDEX_NAME` | yes (for Growth Agent) | Algolia Analytics API credentials. The Growth Agent queries no-result searches, top queries, CTR, and conversion rate against the named index. |
+| `GOOGLE_SEARCH_CONSOLE_KEY` | no (Growth Agent enhances if set) | Bearer token for GSC `searchAnalytics/query`. Note: GSC requires OAuth — this is a short-lived token (default 1h). Leave empty to run growth-agent with Algolia signal alone. |
+| `GSC_SITE_URL` | no | Override the GSC site URL. Default `sc-domain:abiozen.com`. |
 | `PORT` | no | HTTP listen port. Defaults to 3000. |
 | `BASE_URL` | no | Public URL of the deployed app — referenced in email links (invite acceptance, weekly report footer). |
 
@@ -85,6 +88,8 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 **Revenue intelligence** — `GET /revenue/intelligence` (admin) returns the most recent Monday-morning revenue report: category/buyer-segment breakdowns, weekly trend, velocity delta, monthly target progress, top molecules parsed from order notes, and Claude's 5 actionable recommendations
 
 **Command Center daily briefing** — `GET /briefing/latest` (admin) returns the most recent 7am briefing: 24-hour snapshot, recent orders, flagged team members, upcoming milestones, and the structured "What's going well / At risk / Actions for today" briefing from Claude
+
+**Growth intelligence** — `GET /growth/intelligence` (admin) returns the most recent Monday-morning Growth Agent output: aggregated demand signals from Algolia internal search + GSC, and Claude's top-10 list of molecules buyers want but the catalog doesn't carry
 
 **Market intelligence** — `POST /market/analyze` (admin), `GET /market/latest`
 
@@ -125,6 +130,7 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | Schedule | Job | Function |
 |---|---|---|
 | `0 7 * * *` (daily 7am) | Layer 6 — Command Center daily briefing emailed to admin | `generateDailyBriefing()` |
+| `0 8 * * 1` (Monday 8am) | Layer 2C — Growth Agent: Algolia search sync then SEO recommendations | `syncAlgoliaSearchData()` → `generateSEORecommendations()` |
 | `0 8 * * *` (daily 8am) | GitHub sync for all active devs | `syncGitHubAllDevs()` |
 | `0 9 * * 1` (Monday 9am) | Claude weekly analysis + emailed report | `runWeeklyAnalysis()` |
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
@@ -142,6 +148,16 @@ Gathers a 24-hour snapshot covering new orders, today/yesterday revenue against 
 Claude is prompted for a strict three-section briefing — "What's going well", "What's at risk", "Actions for today" — three numbered items each, every line referencing an actual number from the snapshot, every action carrying an owner and a measurable success criterion. Output is stored as JSON in `ai_analyses` with `analysis_type='daily_briefing'` and emailed to the admin user (falls back to `naren@abiozen.com` if no admin row exists).
 
 Caveat on the Apollo number: Apollo's API only exposes per-sequence cumulative `unique_replied`, not a time-windowed count. The briefing reports both the cumulative total and the delta since the prior briefing's stored value. First-day briefings show only the total.
+
+### Growth Intelligence agent
+
+`src/lib/agents/growth-agent.js`. Two functions, chained on the Monday 8am cron.
+
+`syncAlgoliaSearchData({days})` calls the Algolia Analytics API for the named index across the trailing N days (default 7): `searches/noResults` (zero-hit queries), `searches` (top queries), `conversions/conversionRate`, `clicks/clickThroughRate`. Returns a structured object including per-call errors so partial failures don't kill the whole sync.
+
+`generateSEORecommendations({dryRun})` aggregates the Algolia output with GSC data from `fetchGSCData()` (best-effort — GSC needs a fresh OAuth bearer token to actually return rows), filters out queries that already match a SKU in the active catalog, ranks the remainder by composite score (`algolia_no_result_count * 10 + gsc_impressions`), and asks Claude haiku to identify the top 10 real pharmaceutical molecules in that list. Claude is required to return strictly JSON; if parsing fails the raw text is preserved alongside an empty `top_molecules` array. The full structured result is stored in `ai_analyses` with `analysis_type='growth_intelligence'`.
+
+Caveat on GSC: the env var `GOOGLE_SEARCH_CONSOLE_KEY` is a bearer token, not an API key. GSC requires OAuth; the token expires (default 1 hour). For production, replace the simple-bearer path in `fetchGSCData` with a proper refresh flow or service-account-issued token. With the variable unset, the agent runs on Algolia signal alone.
 
 ### Revenue Intelligence agent
 

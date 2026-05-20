@@ -266,14 +266,17 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 2A | Monday 9am cron | Built | `server.js` |
 | 2B | Procurement Agent — `getProcurementPriorities` | Built | `src/lib/agents/revenue-agent.js` |
 | 2B | Supplier-quote auto-collection | Spec | not yet implemented |
-| 2C | Growth Agent | Spec | no module, no integrations |
+| 2C | Growth Agent module | Built | `src/lib/agents/growth-agent.js`, `GET /api/growth/intelligence`, Monday 8am cron |
+| 2C | Algolia signal integration | Built | `syncAlgoliaSearchData` in growth-agent |
+| 2C | GSC signal integration | Partial | `fetchGSCData` is a bearer-token stub; production needs OAuth refresh / service account |
+| 2C | LinkedIn / marketplace event-stream signal | Spec | not yet implemented |
 | 2D | Performance Agent — daily 6pm scoring + coaching | Built | `src/lib/core.js` `scoreTeamMember`, `src/lib/jobs.js` `scoreAllAndCoach`, `GET /api/performance/*` |
 | 2D | 3-day below-60 escalation to admin | Built | `scoreTeamMember` |
 | 2E | Customer Agent — warmest leads, generated openers | Partial | Apollo find-buyers + send-outreach + sequence-templates endpoints exist; no warmth scoring, no auto-generated openers, no warm-leads endpoint |
-| 3 | Algolia search analytics integration | Spec | not yet implemented |
+| 3 | Algolia search analytics integration | Built | `syncAlgoliaSearchData` in `src/lib/agents/growth-agent.js` |
 | 3 | Bloomreach personalization integration | Spec | not yet implemented |
-| 3 | Google Search Console integration | Spec | not yet implemented |
-| 3 | Demand-signal feed into Procurement Agent | Spec | not yet implemented |
+| 3 | Google Search Console integration | Partial | `fetchGSCData` — accepts a bearer token; needs OAuth refresh in production |
+| 3 | Demand-signal feed into Procurement Agent | Spec | not yet wired (Growth Agent stores recommendations but Procurement Agent doesn't read them yet) |
 | 4 | Apollo segment sequences (templates) | Built | `GET /api/sequences/templates`, S1–S4 in `public/index.html` |
 | 4 | Apollo find-buyers + send-outreach | Built | `POST /api/apollo/find-buyers`, `POST /api/apollo/send-outreach` |
 | 4 | LinkedIn outreach automation | Spec | no integration |
@@ -303,7 +306,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 | `0 8 * * *` | GitHub developer sync | Layer 5 input (built) |
 | `0 9 * * 1` | Monday weekly AI analysis | Layer 5 (built) |
 | `0 9 * * 1` | Monday Revenue Agent → Procurement Agent chain | Layer 2A → 2B (built) |
-| `0 9 * * 1` | Monday Growth Agent weekly synthesis | Layer 2C (spec) |
+| `0 8 * * 1` | Monday Growth Agent weekly synthesis (Algolia + GSC → Claude) | Layer 2C (built) |
 | `0 18 * * *` | Daily 6pm milestone trigger check | Layer 5 input (built) |
 | `0 18 * * *` | Daily 6pm Performance Agent scoring + coaching | Layer 2D (built) |
 | continuous | Layer 3 marketplace-intelligence ingestion | Layer 3 (spec) |

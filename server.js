@@ -8,6 +8,7 @@ const cron = require('node-cron');
 const { syncGitHubAllDevs, runWeeklyAnalysis, scoreAllAndCoach } = require('./src/lib/jobs');
 const { analyzeRevenueTrends, getProcurementPriorities } = require('./src/lib/agents/revenue-agent');
 const { generateDailyBriefing } = require('./src/lib/agents/briefing-agent');
+const { syncAlgoliaSearchData, generateSEORecommendations } = require('./src/lib/agents/growth-agent');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -46,6 +47,24 @@ cron.schedule('0 7 * * *', async () => {
     console.log(`[CRON] Daily briefing done — date=${result.snapshot.date}, emailed=${result.emailed} to ${result.emailed_to}`);
   } catch (e) {
     console.error('[CRON] Daily briefing error:', e.message);
+  }
+});
+
+// Monday 8 AM: Growth Agent — Algolia search sync then SEO recommendations
+cron.schedule('0 8 * * 1', async () => {
+  console.log('[CRON] Growth agent starting...');
+  try {
+    const sync = await syncAlgoliaSearchData();
+    if (sync.skipped) console.log(`[CRON] Algolia sync skipped — ${sync.reason}`);
+    else console.log(`[CRON] Algolia sync done — ${sync.no_result.length} no-result queries, ${sync.top_queries.length} top queries`);
+  } catch (e) {
+    console.error('[CRON] Algolia sync error:', e.message);
+  }
+  try {
+    const rec = await generateSEORecommendations();
+    console.log(`[CRON] SEO recommendations done — ${rec.top_molecules?.length || 0} molecules identified`);
+  } catch (e) {
+    console.error('[CRON] SEO recommendations error:', e.message);
   }
 });
 

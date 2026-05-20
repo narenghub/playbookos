@@ -447,6 +447,19 @@ function formatScoreRow(r) {
   };
 }
 
+router.get('/growth/intelligence', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const row = (await query(
+      `SELECT id, period_key, content, created_at FROM ai_analyses WHERE analysis_type='growth_intelligence' ORDER BY created_at DESC LIMIT 1`
+    )).rows[0];
+    if (!row) return res.json({ available: false });
+    let content;
+    try { content = JSON.parse(row.content); }
+    catch { content = { raw_recommendations: row.content, _parse_warning: 'content was not valid JSON' }; }
+    res.json({ available: true, id: row.id, period_key: row.period_key, generated_at: row.created_at, ...content });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/briefing/latest', authMiddleware, adminOnly, async (req, res) => {
   try {
     const row = (await query(
