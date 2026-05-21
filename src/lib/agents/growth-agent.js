@@ -16,9 +16,10 @@ function algoliaHeaders(appId, apiKey) {
 async function syncAlgoliaSearchData({ days = 7 } = {}) {
   const appId = process.env.ALGOLIA_APP_ID;
   const apiKey = process.env.ALGOLIA_API_KEY;
-  const indexName = process.env.ALGOLIA_INDEX_NAME;
-  if (!appId || !apiKey || !indexName) {
-    return { skipped: true, reason: 'Algolia env vars not set (ALGOLIA_APP_ID, ALGOLIA_API_KEY, ALGOLIA_INDEX_NAME)' };
+  // Unified catalog index — defaults to abiozen_products if the env var is unset.
+  const indexName = process.env.ALGOLIA_INDEX_NAME || 'abiozen_products';
+  if (!appId || !apiKey) {
+    return { skipped: true, reason: 'Algolia env vars not set (ALGOLIA_APP_ID, ALGOLIA_API_KEY)' };
   }
 
   const endDate = isoDate(new Date());

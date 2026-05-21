@@ -45,7 +45,7 @@ In the Railway dashboard, on the **playbookos** service → **Variables** tab, s
 | `GITHUB_ORG` | optional | `abiozen` | Default org for GitHub queries. |
 | `ALGOLIA_APP_ID` | Monday 8am Growth Agent | Algolia dashboard → Settings → API Keys | Growth Agent skips with a clean reason if any of the three Algolia vars is missing. |
 | `ALGOLIA_API_KEY` | Monday 8am Growth Agent | Algolia API key with analytics read access | |
-| `ALGOLIA_INDEX_NAME` | Monday 8am Growth Agent | e.g. `abiozen_products` | Whatever index the marketplace uses. |
+| `ALGOLIA_INDEX_NAME` | Monday 8am Growth Agent + Algolia sync | `abiozen_products` | The unified catalog index. Code falls back to `abiozen_products` if unset, so this is effectively fixed. |
 | `GOOGLE_SEARCH_CONSOLE_KEY` | optional Growth Agent enhancement | OAuth bearer token | GSC needs OAuth, not a static API key. Set only if you have a refresh mechanism. Growth Agent falls back to Algolia-only if missing or expired. |
 | `GSC_SITE_URL` | optional | `sc-domain:abiozen.com` | Default value. Override if your GSC property uses a different identifier. |
 | `BASE_URL` | optional | `https://playbookos-production.up.railway.app` | Already set in current deploy. Used in invite emails, daily briefing footer, and the weekly report footer. |
