@@ -641,13 +641,29 @@ async team() {
         <button class="btn btn-teal btn-sm" onclick="showInviteModal()">+ Invite member</button>
       </div>
       <table>
-        <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr>
-        ${users.map(u=>`<tr>
+        <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr>
+        ${users.map(u=>{
+          const isSelf = u.id === currentUser.id;
+          const isSuper = u.role === 'super_admin';
+          const invited = !u.joined_at;
+          const statusBadge = invited
+            ? '<span class="badge badge-amber">Invited</span>'
+            : (u.is_active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Inactive</span>');
+          let action = '<span style="color:#ccc;font-size:11px">—</span>';
+          if (!isSelf && !isSuper) {
+            const btn = (label, color, fn) => `<button onclick="${fn}('${u.id}','${(u.name||'').replace(/'/g,'')}')" style="background:${color};color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">${label}</button>`;
+            if (invited) action = btn('Remove', '#9ca3af', 'removeUser');
+            else if (u.is_active) action = btn('Deactivate', '#E24B4A', 'toggleUserStatus');
+            else action = btn('Activate', '#1D9E75', 'toggleUserStatus');
+          }
+          return `<tr>
           <td><strong>${u.name}</strong></td>
           <td>${u.email}</td>
           <td><span class="badge badge-blue">${u.role}</span></td>
-          <td><span class="badge ${u.joined_at ? 'badge-green' : 'badge-amber'}">${u.joined_at ? 'Active' : 'Invited'}</span></td>
-        </tr>`).join('')}
+          <td>${statusBadge}</td>
+          <td>${action}</td>
+        </tr>`;
+        }).join('')}
       </table>
     </div>
     <div id="invite-modal" style="display:none">
@@ -901,6 +917,20 @@ async function addOrder() {
     document.getElementById('ord-msg').innerHTML = '<div class="success-msg">Order added!</div>';
     setTimeout(()=>pages.revenue(), 1200);
   }
+}
+
+async function toggleUserStatus(id, name) {
+  if (!confirm('Toggle active status for ' + name + '?')) return;
+  const res = await API('/users/' + id + '/toggle-status', { method: 'PUT' });
+  if (res.error) { alert('Error: ' + res.error); return; }
+  pages.team();
+}
+
+async function removeUser(id, name) {
+  if (!confirm('Remove ' + name + '? Their account is deactivated (the row is kept).')) return;
+  const res = await API('/users/' + id, { method: 'DELETE' });
+  if (res.error) { alert('Error: ' + res.error); return; }
+  pages.team();
 }
 
 async function sendInvite() {

@@ -167,6 +167,32 @@ router.put('/users/:id', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Soft delete — sets is_active=0, never removes the row.
+router.delete('/users/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (id === req.user.id) return res.status(400).json({ error: 'You cannot remove your own account' });
+    const target = (await query('SELECT id, role FROM users WHERE id=$1', [id])).rows[0];
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (target.role === 'super_admin') return res.status(403).json({ error: 'A super_admin account cannot be removed' });
+    await query('UPDATE users SET is_active=0 WHERE id=$1', [id]);
+    res.json({ success: true, id, is_active: 0 });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/users/:id/toggle-status', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (id === req.user.id) return res.status(400).json({ error: 'You cannot change your own status' });
+    const target = (await query('SELECT id, role, is_active FROM users WHERE id=$1', [id])).rows[0];
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (target.role === 'super_admin') return res.status(403).json({ error: 'A super_admin account status cannot be changed' });
+    const newStatus = target.is_active ? 0 : 1;
+    await query('UPDATE users SET is_active=$1 WHERE id=$2', [newStatus, id]);
+    res.json({ success: true, id, is_active: newStatus, status: newStatus ? 'active' : 'inactive' });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/activity', authMiddleware, async (req, res) => {
   try {
     const { log_date, metric, value, notes } = req.body;
