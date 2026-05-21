@@ -21,6 +21,20 @@ const ROLE_METRICS = Object.fromEntries(
   Object.entries(BUILT_IN_ROLES).map(([k, v]) => [k, v.metrics])
 );
 
+// Deterministic weekly KPIs per role. A role listed here gets this exact set
+// every cascade run regardless of what Claude returns — the Claude-driven
+// weekly_per_role allocation is fragile (it can omit a role or rename a
+// metric so it fails the strict role+metric validation). Roles NOT listed
+// here still fall back to Claude's allocation.
+const DEFAULT_WEEKLY_KPIS = {
+  procurement_lead: [
+    { metric: 'molecules_sourced', weekly_target: 10 },
+    { metric: 'suppliers_contacted', weekly_target: 15 },
+    { metric: 'coas_collected', weekly_target: 8 },
+    { metric: 'rfqs_sent', weekly_target: 20 },
+  ],
+};
+
 function inferUnit(metric) {
   if (metric === 'revenue' || metric === 'revenue_closed') return '$';
   if (metric.includes('emails')) return 'emails';
@@ -187,7 +201,20 @@ Return ONLY the JSON object.`;
       counts.monthly++;
     }
 
-    // Weekly rows per role from Claude — emit for current week + next 12 weeks
+    // Effective weekly KPIs: deterministic defaults for roles in
+    // DEFAULT_WEEKLY_KPIS (these always get their fixed set), Claude's
+    // weekly_per_role allocation for every other role.
+    const rolesWithDefaults = new Set(Object.keys(DEFAULT_WEEKLY_KPIS));
+    const effectiveWeekly = [];
+    for (const [role, kpis] of Object.entries(DEFAULT_WEEKLY_KPIS)) {
+      for (const k of kpis) effectiveWeekly.push({ role, metric: k.metric, weekly_target: k.weekly_target });
+    }
+    for (const w of cascade.weekly_per_role || []) {
+      if (rolesWithDefaults.has(w.role)) continue; // a default-driven role — Claude's entry is ignored
+      effectiveWeekly.push(w);
+    }
+
+    // Weekly rows per role — emit for current week + next 12 weeks
     const startMonday = mondayOf(today);
     const weeklyKeysForCurrentWeek = [];
     for (let i = 0; i < 13; i++) {
@@ -198,7 +225,7 @@ Return ONLY the JSON object.`;
       const monthKey = weekStartISO.slice(0, 7);
       const monthRow = monthlyIdByKey[monthKey];
 
-      for (const w of cascade.weekly_per_role || []) {
+      for (const w of effectiveWeekly) {
         if (!teamByRole[w.role]) continue;
         if (!roleCatalog[w.role]?.metrics?.includes(w.metric)) continue; // strict: must be valid role+metric
         const id = crypto.randomUUID();
