@@ -167,7 +167,8 @@ router.put('/users/:id', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Soft delete — sets is_active=0, never removes the row.
+// DELETE /users/:id — default is a soft delete (is_active=0). With
+// ?permanent=true it hard-deletes the row (the "Delete Permanently" action).
 router.delete('/users/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { id } = req.params;
@@ -175,11 +176,17 @@ router.delete('/users/:id', authMiddleware, adminOnly, async (req, res) => {
     const target = (await query('SELECT id, role FROM users WHERE id=$1', [id])).rows[0];
     if (!target) return res.status(404).json({ error: 'User not found' });
     if (target.role === 'super_admin') return res.status(403).json({ error: 'A super_admin account cannot be removed' });
+    if (req.query.permanent === 'true') {
+      await query('DELETE FROM users WHERE id=$1', [id]);
+      return res.json({ success: true, id, deleted: 'permanent' });
+    }
     await query('UPDATE users SET is_active=0 WHERE id=$1', [id]);
-    res.json({ success: true, id, is_active: 0 });
+    res.json({ success: true, id, is_active: 0, deleted: 'soft' });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// PUT /users/:id/toggle-status — if the body carries is_active (0|1) the
+// status is set explicitly; otherwise the current value is flipped.
 router.put('/users/:id/toggle-status', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { id } = req.params;
@@ -187,7 +194,8 @@ router.put('/users/:id/toggle-status', authMiddleware, adminOnly, async (req, re
     const target = (await query('SELECT id, role, is_active FROM users WHERE id=$1', [id])).rows[0];
     if (!target) return res.status(404).json({ error: 'User not found' });
     if (target.role === 'super_admin') return res.status(403).json({ error: 'A super_admin account status cannot be changed' });
-    const newStatus = target.is_active ? 0 : 1;
+    const desired = req.body && (req.body.is_active === 0 || req.body.is_active === 1) ? req.body.is_active : null;
+    const newStatus = desired !== null ? desired : (target.is_active ? 0 : 1);
     await query('UPDATE users SET is_active=$1 WHERE id=$2', [newStatus, id]);
     res.json({ success: true, id, is_active: newStatus, status: newStatus ? 'active' : 'inactive' });
   } catch(e) { res.status(500).json({ error: e.message }); }

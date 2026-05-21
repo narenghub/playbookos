@@ -134,6 +134,11 @@ let token = localStorage.getItem('pbo_token');
 let currentUser = null;
 let currentPage = 'dashboard';
 
+// Close any open Team-page action dropdown when clicking outside it.
+document.addEventListener('click', () => {
+  document.querySelectorAll('.actions-menu').forEach(m => { m.style.display = 'none'; });
+});
+
 const API = (path, opts={}) => {
   const headers = {'Content-Type':'application/json'};
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -646,15 +651,22 @@ async team() {
           const isSelf = u.id === currentUser.id;
           const isSuper = u.role === 'super_admin';
           const invited = !u.joined_at;
+          const nm = (u.name||'').replace(/'/g,'');
           const statusBadge = invited
             ? '<span class="badge badge-amber">Invited</span>'
             : (u.is_active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Inactive</span>');
           let action = '<span style="color:#ccc;font-size:11px">—</span>';
           if (!isSelf && !isSuper) {
-            const btn = (label, color, fn) => `<button onclick="${fn}('${u.id}','${(u.name||'').replace(/'/g,'')}')" style="background:${color};color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">${label}</button>`;
-            if (invited) action = btn('Remove', '#9ca3af', 'removeUser');
-            else if (u.is_active) action = btn('Deactivate', '#E24B4A', 'toggleUserStatus');
-            else action = btn('Activate', '#1D9E75', 'toggleUserStatus');
+            const item = (label, color, fn, border) => `<div onclick="${fn}('${u.id}','${nm}')" style="padding:8px 14px;font-size:12px;cursor:pointer;color:${color};font-weight:600;${border?'border-top:1px solid #eee;':''}" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='#fff'">${label}</div>`;
+            action = `<div style="position:relative;display:inline-block">
+              <button onclick="toggleActionsMenu(event,'${u.id}')" style="background:#9ca3af;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">Actions ▼</button>
+              <div id="actions-menu-${u.id}" class="actions-menu" style="display:none;position:absolute;right:0;top:28px;background:#fff;border:1px solid #ddd;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:100;min-width:170px;overflow:hidden">
+                ${item('Set Active', '#1D9E75', 'setUserActive')}
+                ${item('Set Inactive', '#BA7517', 'setUserInactive')}
+                ${invited ? item('Remove', '#E24B4A', 'removeUser', true) : ''}
+                ${item('Delete Permanently', '#E24B4A', 'deleteUserPermanently', true)}
+              </div>
+            </div>`;
           }
           return `<tr>
           <td><strong>${u.name}</strong></td>
@@ -919,16 +931,36 @@ async function addOrder() {
   }
 }
 
-async function toggleUserStatus(id, name) {
-  if (!confirm('Toggle active status for ' + name + '?')) return;
-  const res = await API('/users/' + id + '/toggle-status', { method: 'PUT' });
+function toggleActionsMenu(event, id) {
+  event.stopPropagation();
+  const menu = document.getElementById('actions-menu-' + id);
+  const wasOpen = menu && menu.style.display === 'block';
+  document.querySelectorAll('.actions-menu').forEach(m => m.style.display = 'none');
+  if (menu && !wasOpen) menu.style.display = 'block';
+}
+
+async function setUserActive(id, name) {
+  const res = await API('/users/' + id + '/toggle-status', { method: 'PUT', body: JSON.stringify({ is_active: 1 }) });
+  if (res.error) { alert('Error: ' + res.error); return; }
+  pages.team();
+}
+
+async function setUserInactive(id, name) {
+  const res = await API('/users/' + id + '/toggle-status', { method: 'PUT', body: JSON.stringify({ is_active: 0 }) });
   if (res.error) { alert('Error: ' + res.error); return; }
   pages.team();
 }
 
 async function removeUser(id, name) {
-  if (!confirm('Remove ' + name + '? Their account is deactivated (the row is kept).')) return;
+  if (!confirm('Remove invited user ' + name + '? Their account is deactivated (the row is kept).')) return;
   const res = await API('/users/' + id, { method: 'DELETE' });
+  if (res.error) { alert('Error: ' + res.error); return; }
+  pages.team();
+}
+
+async function deleteUserPermanently(id, name) {
+  if (!confirm('PERMANENTLY delete ' + name + '?\nThis removes the row from the database and cannot be undone.')) return;
+  const res = await API('/users/' + id + '?permanent=true', { method: 'DELETE' });
   if (res.error) { alert('Error: ' + res.error); return; }
   pages.team();
 }
