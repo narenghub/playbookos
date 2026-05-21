@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
-const { getAppId, getAnalyticsKey } = require('../algolia-keys');
+const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
 
 const DAY_MS = 86400000;
 const isoDate = d => d.toISOString().slice(0, 10);
@@ -16,20 +16,27 @@ function algoliaHeaders(appId, apiKey) {
 
 async function syncAlgoliaSearchData({ days = 7 } = {}) {
   const appId = getAppId();
-  const apiKey = getAnalyticsKey(); // analytics op — ALGOLIA_ANALYTICS_KEY (analytics ACL)
+  // Search-term endpoints (/2/searches*) use the search key; the click and
+  // conversion endpoints use the analytics key. Note: every analytics.algolia.com
+  // /2 endpoint — including /searches — requires the `analytics` ACL, so a key
+  // supplied as ALGOLIA_SEARCH_KEY still needs that ACL (or leave it unset to
+  // fall back to ALGOLIA_API_KEY).
+  const searchKey = getSearchKey();
+  const analyticsKey = getAnalyticsKey();
   // Unified catalog index — defaults to abiozen_products if the env var is unset.
   const indexName = process.env.ALGOLIA_INDEX_NAME || 'abiozen_products';
-  if (!appId || !apiKey) {
-    return { skipped: true, reason: 'Algolia env vars not set (ALGOLIA_APP_ID, and ALGOLIA_ANALYTICS_KEY or ALGOLIA_API_KEY)' };
+  if (!appId || (!searchKey && !analyticsKey)) {
+    return { skipped: true, reason: 'Algolia env vars not set (ALGOLIA_APP_ID and ALGOLIA_SEARCH_KEY / ALGOLIA_ANALYTICS_KEY / ALGOLIA_API_KEY)' };
   }
 
   const endDate = isoDate(new Date());
   const startDate = isoDate(new Date(Date.now() - days * DAY_MS));
   const dateQuery = `startDate=${startDate}&endDate=${endDate}`;
   const base = 'https://analytics.algolia.com/2';
-  const headers = algoliaHeaders(appId, apiKey);
+  const searchHeaders = algoliaHeaders(appId, searchKey);
+  const analyticsHeaders = algoliaHeaders(appId, analyticsKey);
 
-  async function safeFetch(path, fallback) {
+  async function safeFetch(path, headers, fallback) {
     try {
       const res = await fetch(`${base}${path}`, { headers });
       if (!res.ok) {
@@ -44,10 +51,10 @@ async function syncAlgoliaSearchData({ days = 7 } = {}) {
 
   const idx = encodeURIComponent(indexName);
   const [noResultsRaw, topQueriesRaw, conversionRaw, clickRaw] = await Promise.all([
-    safeFetch(`/searches/noResults?index=${idx}&limit=20&${dateQuery}`, { searches: [] }),
-    safeFetch(`/searches?index=${idx}&limit=20&${dateQuery}`, { searches: [] }),
-    safeFetch(`/conversions/conversionRate?index=${idx}&${dateQuery}`, {}),
-    safeFetch(`/clicks/clickThroughRate?index=${idx}&${dateQuery}`, {}),
+    safeFetch(`/searches/noResults?index=${idx}&limit=20&${dateQuery}`, searchHeaders, { searches: [] }),
+    safeFetch(`/searches?index=${idx}&limit=20&${dateQuery}`, searchHeaders, { searches: [] }),
+    safeFetch(`/conversions/conversionRate?index=${idx}&${dateQuery}`, analyticsHeaders, {}),
+    safeFetch(`/clicks/clickThroughRate?index=${idx}&${dateQuery}`, analyticsHeaders, {}),
   ]);
 
   return {
