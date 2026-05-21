@@ -311,8 +311,20 @@ async function migrateSchemas() {
         orders_generated INTEGER DEFAULT 0, discount_pct INTEGER,
         status TEXT DEFAULT 'active', created_at TEXT DEFAULT NOW()
       );
+      -- Row-level ownership for the enterprise role system. 'own'-scoped roles
+      -- (sales_team, procurement_team) see only rows where owner_user_id = them.
+      ALTER TABLE buyer_contacts   ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
+      ALTER TABLE linkedin_outreach ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
+      ALTER TABLE apollo_sequences ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
+      ALTER TABLE skus             ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
+      -- Legacy role migration — remap the pre-enterprise taxonomy onto the new
+      -- roles. Idempotent: after the first run no rows match the old names.
+      UPDATE users SET role='dev_team'        WHERE role='dev';
+      UPDATE users SET role='procurement_team' WHERE role='procurement' OR role='procurement_lead';
+      UPDATE users SET role='sales_team'      WHERE role='sales';
+      UPDATE users SET role='support_team'    WHERE role='qc' OR role='marketing';
     `);
-    console.log('✅ Schema migrations applied');
+    console.log('✅ Schema migrations applied (owner columns + legacy role remap)');
   } catch(e) { console.error('Migration error:', e.message); }
 }
 

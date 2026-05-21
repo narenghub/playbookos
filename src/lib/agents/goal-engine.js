@@ -35,45 +35,49 @@ const DEFAULT_WEEKLY_KPIS = {
     { metric: 'team_reviews', weekly_target: 5 },
     { metric: 'orders_entered', weekly_target: 10 },
   ],
-  dev: [
-    { metric: 'prs_merged', weekly_target: 8 },
-    { metric: 'commits', weekly_target: 40 },
-    { metric: 'features_deployed', weekly_target: 3 },
-    { metric: 'bugs_fixed', weekly_target: 6 },
+  sales_director: [
+    { metric: 'team_reviews', weekly_target: 5 },
+    { metric: 'deals_reviewed', weekly_target: 30 },
+    { metric: 'forecast_updates', weekly_target: 2 },
   ],
-  procurement_lead: [
-    { metric: 'molecules_sourced', weekly_target: 10 },
-    { metric: 'suppliers_contacted', weekly_target: 15 },
-    { metric: 'coas_collected', weekly_target: 8 },
-    { metric: 'rfqs_sent', weekly_target: 20 },
+  recruitment_director: [
+    { metric: 'team_reviews', weekly_target: 5 },
+    { metric: 'offers_approved', weekly_target: 4 },
+    { metric: 'pipeline_reviews', weekly_target: 3 },
   ],
-  customer_engagement: [
-    { metric: 'quotes_sent', weekly_target: 25 },
-    { metric: 'accounts_created', weekly_target: 8 },
-    { metric: 'leads_followed_up', weekly_target: 40 },
+  procurement_director: [
+    { metric: 'team_reviews', weekly_target: 5 },
+    { metric: 'suppliers_approved', weekly_target: 8 },
+    { metric: 'market_analyses', weekly_target: 2 },
+  ],
+  account_manager: [
+    { metric: 'accounts_managed', weekly_target: 25 },
+    { metric: 'quotes_sent', weekly_target: 20 },
+    { metric: 'orders_processed', weekly_target: 15 },
+  ],
+  sales_team: [
+    { metric: 'outreach_emails', weekly_target: 100 },
+    { metric: 'calls_made', weekly_target: 40 },
+    { metric: 'demos_completed', weekly_target: 10 },
     { metric: 'orders_closed', weekly_target: 5 },
   ],
-  lead_chemist: [
-    { metric: 'orders_repacked', weekly_target: 30 },
-    { metric: 'labels_printed', weekly_target: 30 },
-    { metric: 'shipments_dispatched', weekly_target: 30 },
-    { metric: 'qc_checks_completed', weekly_target: 20 },
-  ],
-  logistics: [
-    { metric: 'pickups_completed', weekly_target: 15 },
-    { metric: 'transfers_completed', weekly_target: 12 },
-    { metric: 'inbound_receipts_logged', weekly_target: 20 },
-  ],
-  recruitment: [
+  recruitment_team: [
     { metric: 'candidates_screened', weekly_target: 20 },
     { metric: 'interviews_scheduled', weekly_target: 8 },
     { metric: 'offers_made', weekly_target: 2 },
     { metric: 'hires_completed', weekly_target: 1 },
   ],
-  hr_accounts: [
-    { metric: 'invoices_processed', weekly_target: 30 },
-    { metric: 'employee_issues_resolved', weekly_target: 5 },
-    { metric: 'payroll_processed', weekly_target: 1 },
+  procurement_team: [
+    { metric: 'molecules_sourced', weekly_target: 10 },
+    { metric: 'suppliers_contacted', weekly_target: 15 },
+    { metric: 'coas_collected', weekly_target: 8 },
+    { metric: 'rfqs_sent', weekly_target: 20 },
+  ],
+  dev_team: [
+    { metric: 'prs_merged', weekly_target: 8 },
+    { metric: 'commits', weekly_target: 40 },
+    { metric: 'features_deployed', weekly_target: 3 },
+    { metric: 'bugs_fixed', weekly_target: 6 },
   ],
   seo_specialist: [
     { metric: 'keywords_optimized', weekly_target: 15 },
@@ -81,11 +85,12 @@ const DEFAULT_WEEKLY_KPIS = {
     { metric: 'backlinks_built', weekly_target: 12 },
     { metric: 'content_published', weekly_target: 3 },
   ],
-  platform_ops: [
-    { metric: 'issues_resolved', weekly_target: 12 },
-    { metric: 'deployments_completed', weekly_target: 5 },
-    { metric: 'tickets_closed', weekly_target: 20 },
+  support_team: [
+    { metric: 'customers_assisted', weekly_target: 60 },
+    { metric: 'issues_resolved', weekly_target: 25 },
+    { metric: 'orders_reviewed', weekly_target: 40 },
   ],
+  // super_admin is an oversight role — no tracked metrics, no weekly KPIs.
 };
 
 function inferUnit(metric) {

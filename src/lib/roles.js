@@ -1,60 +1,119 @@
 const { query } = require('./db');
 
-// Source of truth for role taxonomy across the codebase.
-// Add a role here and it shows up in: the my-activity metric dropdown,
-// the invite dropdown, the goal-cascade Claude prompt, the performance
-// score baseline, and GET /api/roles. Custom roles added via POST
-// /api/roles extend (not replace) this set.
+// Enterprise role taxonomy — single source of truth. Each role carries:
+//   level       1 = highest authority, ascending = lower
+//   domain      groups directors with their teams
+//   data_scope  all | team | own | own+revenue | readonly
+//   pages       sidebar pages visible ('*' = all)
+//   tiers       API permission tiers → access ('rw'|'r'|'w'|'own')
+//   metrics     activity-log metrics this role tracks
+//   baseline    daily effort baseline for performance scoring
+//
+// API tiers: self, sales, procurement, revenue, technical, intelligence, goals, admin.
+// Custom roles (POST /api/roles) extend this set but get no tiers (self-only).
+const ALL_PAGES = [
+  'dashboard', 'command-center', 'seo-intelligence', 'my-activity', 'playbook',
+  'team', 'revenue', 'github', 'milestones', 'ai-insights', 'market-intelligence',
+  'apollo-outreach', 'decision-engine', 'sku-economics', 'execution-graph',
+  'data-pipeline', 'settings',
+];
+
 const BUILT_IN_ROLES = {
-  admin: {
-    display_name: 'Admin',
-    metrics: ['orders_entered', 'revenue_closed', 'team_reviews'],
+  super_admin: {
+    display_name: 'Super Admin',
+    level: 1, domain: 'global', data_scope: 'all',
+    pages: '*',
+    tiers: { self: 'rw', sales: 'rw', procurement: 'rw', revenue: 'rw', technical: 'rw', intelligence: 'rw', goals: 'rw', admin: 'rw' },
+    metrics: [],
     baseline: 3,
   },
-  dev: {
-    display_name: 'Developer',
-    metrics: ['prs_merged', 'commits', 'features_deployed', 'bugs_fixed'],
-    baseline: 8,
+  admin: {
+    display_name: 'Admin',
+    level: 2, domain: 'global', data_scope: 'all',
+    pages: '*',
+    tiers: { self: 'rw', sales: 'rw', procurement: 'rw', revenue: 'rw', technical: 'rw', intelligence: 'rw', goals: 'rw', admin: 'rw' },
+    metrics: ['team_reviews', 'orders_entered'],
+    baseline: 3,
   },
-  procurement_lead: {
-    display_name: 'Procurement Lead',
-    metrics: ['molecules_sourced', 'suppliers_contacted', 'coas_collected', 'rfqs_sent', 'purchase_orders_placed'],
-    baseline: 15,
+  sales_director: {
+    display_name: 'Sales Director',
+    level: 3, domain: 'sales', data_scope: 'team',
+    pages: ['dashboard', 'command-center', 'my-activity', 'playbook', 'milestones', 'revenue', 'apollo-outreach', 'ai-insights', 'team'],
+    tiers: { self: 'rw', sales: 'rw', revenue: 'r', intelligence: 'r', goals: 'r' },
+    metrics: ['team_reviews', 'deals_reviewed', 'forecast_updates'],
+    baseline: 7,
   },
-  customer_engagement: {
-    display_name: 'Customer Engagement',
-    metrics: ['quotes_sent', 'accounts_created', 'leads_followed_up', 'orders_closed', 'response_time_hrs'],
-    baseline: 20,
+  recruitment_director: {
+    display_name: 'Recruitment Director',
+    level: 3, domain: 'recruitment', data_scope: 'team',
+    pages: ['dashboard', 'my-activity', 'playbook', 'milestones', 'team'],
+    tiers: { self: 'rw', intelligence: 'r', goals: 'r' },
+    metrics: ['team_reviews', 'offers_approved', 'pipeline_reviews'],
+    baseline: 3,
   },
-  lead_chemist: {
-    display_name: 'Lead Chemist',
-    metrics: ['orders_repacked', 'labels_printed', 'shipments_dispatched', 'qc_checks_completed'],
+  procurement_director: {
+    display_name: 'Procurement Director',
+    level: 3, domain: 'procurement', data_scope: 'team',
+    pages: ['dashboard', 'command-center', 'my-activity', 'playbook', 'milestones', 'sku-economics', 'market-intelligence', 'ai-insights', 'team'],
+    tiers: { self: 'rw', procurement: 'rw', revenue: 'r', intelligence: 'r', goals: 'r' },
+    metrics: ['team_reviews', 'suppliers_approved', 'market_analyses'],
+    baseline: 3,
+  },
+  account_manager: {
+    display_name: 'Account Manager',
+    level: 4, domain: 'sales', data_scope: 'own+revenue',
+    pages: ['dashboard', 'my-activity', 'playbook', 'milestones', 'revenue'],
+    tiers: { self: 'rw', sales: 'r', revenue: 'rw' },
+    metrics: ['accounts_managed', 'quotes_sent', 'orders_processed'],
     baseline: 12,
   },
-  logistics: {
-    display_name: 'Logistics',
-    metrics: ['pickups_completed', 'transfers_completed', 'inbound_receipts_logged'],
-    baseline: 8,
+  sales_team: {
+    display_name: 'Sales Team',
+    level: 5, domain: 'sales', data_scope: 'own',
+    pages: ['dashboard', 'my-activity', 'playbook', 'milestones', 'apollo-outreach'],
+    tiers: { self: 'rw', sales: 'own' },
+    metrics: ['outreach_emails', 'calls_made', 'demos_completed', 'orders_closed'],
+    baseline: 31,
   },
-  recruitment: {
-    display_name: 'Recruitment',
+  recruitment_team: {
+    display_name: 'Recruitment Team',
+    level: 5, domain: 'recruitment', data_scope: 'own',
+    pages: ['dashboard', 'my-activity', 'playbook', 'milestones'],
+    tiers: { self: 'rw' },
     metrics: ['candidates_screened', 'interviews_scheduled', 'offers_made', 'hires_completed'],
-    baseline: 5,
+    baseline: 6,
   },
-  hr_accounts: {
-    display_name: 'HR & Accounts',
-    metrics: ['payroll_processed', 'employee_issues_resolved', 'invoices_processed'],
-    baseline: 4,
+  procurement_team: {
+    display_name: 'Procurement Team',
+    level: 5, domain: 'procurement', data_scope: 'own',
+    pages: ['dashboard', 'my-activity', 'playbook', 'milestones', 'sku-economics'],
+    tiers: { self: 'rw', procurement: 'own' },
+    metrics: ['molecules_sourced', 'suppliers_contacted', 'coas_collected', 'rfqs_sent'],
+    baseline: 11,
+  },
+  dev_team: {
+    display_name: 'Dev Team',
+    level: 5, domain: 'engineering', data_scope: 'own+technical',
+    pages: ['dashboard', 'my-activity', 'playbook', 'milestones', 'github', 'data-pipeline', 'execution-graph'],
+    tiers: { self: 'rw', technical: 'rw' },
+    metrics: ['prs_merged', 'commits', 'features_deployed', 'bugs_fixed'],
+    baseline: 11,
   },
   seo_specialist: {
     display_name: 'SEO Specialist',
-    metrics: ['keywords_optimized', 'pages_indexed', 'backlinks_built', 'ranking_improvements', 'content_published'],
-    baseline: 10,
+    level: 5, domain: 'marketing', data_scope: 'own',
+    pages: ['dashboard', 'my-activity', 'playbook', 'milestones', 'seo-intelligence'],
+    tiers: { self: 'rw', intelligence: 'r' },
+    metrics: ['keywords_optimized', 'pages_indexed', 'backlinks_built', 'content_published'],
+    baseline: 8,
   },
-  platform_ops: {
-    display_name: 'Platform Ops',
-    metrics: ['issues_resolved', 'deployments_completed', 'uptime_pct', 'tickets_closed'],
-    baseline: 6,
+  support_team: {
+    display_name: 'Support Team',
+    level: 6, domain: 'support', data_scope: 'readonly',
+    pages: ['dashboard', 'my-activity', 'playbook', 'milestones', 'revenue'],
+    tiers: { self: 'rw', sales: 'r', revenue: 'r' },
+    metrics: ['customers_assisted', 'issues_resolved', 'orders_reviewed'],
+    baseline: 25,
   },
 };
 
@@ -70,8 +129,17 @@ function isBuiltIn(roleKey) {
   return !!BUILT_IN_ROLES[roleKey];
 }
 
-// Returns the full role catalog including any custom_roles rows.
-// Custom rows that share a key with a built-in extend (override) the built-in.
+// API tier access for a role: 'rw' | 'r' | 'w' | 'own' | null.
+function getRoleTier(roleKey, tier) {
+  return BUILT_IN_ROLES[roleKey]?.tiers?.[tier] || null;
+}
+
+// Sidebar pages a role can see: '*' or an array.
+function getRolePages(roleKey) {
+  return BUILT_IN_ROLES[roleKey]?.pages || ['dashboard', 'my-activity', 'playbook', 'milestones'];
+}
+
+// Full catalog including custom_roles rows. Custom rows get no tiers/pages.
 async function getAllRoles() {
   const out = {};
   for (const [k, v] of Object.entries(BUILT_IN_ROLES)) {
@@ -86,8 +154,11 @@ async function getAllRoles() {
       try { metrics = JSON.parse(r.metrics_json) || []; } catch {}
       out[r.role_name] = {
         display_name: r.display_name || r.role_name,
+        level: 5, domain: 'custom', data_scope: 'own',
+        pages: ['dashboard', 'my-activity', 'playbook', 'milestones'],
+        tiers: { self: 'rw' },
         metrics,
-        baseline: out[r.role_name]?.baseline || 5,
+        baseline: 5,
         built_in: !!BUILT_IN_ROLES[r.role_name],
         custom: true,
       };
@@ -98,4 +169,4 @@ async function getAllRoles() {
   return out;
 }
 
-module.exports = { BUILT_IN_ROLES, getAllRoles, getMetricsSync, getBaselineSync, isBuiltIn };
+module.exports = { BUILT_IN_ROLES, ALL_PAGES, getAllRoles, getMetricsSync, getBaselineSync, isBuiltIn, getRoleTier, getRolePages };

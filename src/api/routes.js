@@ -1,21 +1,16 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { signToken, authMiddleware, adminOnly, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
+const { signToken, authMiddleware, adminOnly, requireTier, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
 const { query } = require('../lib/db');
 const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
 const { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf } = require('../lib/agents/goal-engine');
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
-const { getAllRoles, isBuiltIn } = require('../lib/roles');
+const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults } = require('../lib/agents/seo-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
-
-function adminOrSEO(req, res, next) {
-  if (req.user.role !== 'admin' && req.user.role !== 'seo_specialist') return res.status(403).json({ error: 'Admin or seo_specialist only' });
-  next();
-}
 
 const router = express.Router();
 
@@ -76,6 +71,11 @@ router.get('/roles', authMiddleware, async (req, res) => {
     const list = Object.entries(catalog).map(([role_name, def]) => ({
       role_name,
       display_name: def.display_name,
+      level: def.level,
+      domain: def.domain,
+      data_scope: def.data_scope,
+      pages: def.pages,
+      tiers: def.tiers,
       metrics: def.metrics,
       baseline: def.baseline,
       built_in: !!def.built_in,
@@ -206,7 +206,7 @@ router.get('/activity/team', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/orders', authMiddleware, adminOnly, async (req, res) => {
+router.post('/orders', authMiddleware, requireTier('revenue'), async (req, res) => {
   try {
     const { order_date, amount, buyer_type, product_category, notes } = req.body;
     if (!order_date) return res.status(400).json({ error: 'order_date is required (format: YYYY-MM-DD)' });
@@ -258,7 +258,7 @@ router.post('/orders/webhook', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/orders', authMiddleware, async (req, res) => {
+router.get('/orders', authMiddleware, requireTier('revenue'), async (req, res) => {
   try {
     const { from, to } = req.query;
     let q = 'SELECT * FROM orders';
@@ -293,7 +293,7 @@ router.get('/dashboard/summary', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/dashboard/export', authMiddleware, async (req, res) => {
+router.get('/dashboard/export', authMiddleware, requireTier('revenue'), async (req, res) => {
   try {
     const thisMonth = new Date().toISOString().slice(0, 7);
     const orders = (await query(
@@ -335,7 +335,7 @@ router.get('/dashboard/my', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/github/sync', authMiddleware, async (req, res) => {
+router.post('/github/sync', authMiddleware, requireTier('technical'), async (req, res) => {
   try {
     const { date } = req.body;
     const syncDate = date || new Date().toISOString().slice(0, 10);
@@ -365,7 +365,7 @@ router.put('/milestones/:id', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/ai/analyze', authMiddleware, adminOnly, async (req, res) => {
+router.post('/ai/analyze', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const thisMonth = new Date().toISOString().slice(0, 7);
     const monthRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date::text LIKE $1`, [thisMonth + '%'])).rows[0].v);
@@ -379,7 +379,7 @@ router.post('/ai/analyze', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/ai/latest', authMiddleware, async (req, res) => {
+router.get('/ai/latest', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const result = await query('SELECT * FROM ai_analyses ORDER BY created_at DESC LIMIT 1');
     res.json(result.rows[0] || { content: 'No analysis yet. Click "Run AI Analysis" on the admin dashboard.' });
@@ -420,14 +420,14 @@ router.post('/triggers/check', async (req, res) => {
 
 module.exports = router;
 
-router.get('/decision-rules', authMiddleware, async (req, res) => {
+router.get('/decision-rules', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const result = await query('SELECT * FROM decision_rules ORDER BY created_at');
     res.json(result.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/decision-rules/evaluate', authMiddleware, adminOnly, async (req, res) => {
+router.post('/decision-rules/evaluate', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const crypto = require('crypto');
     const yearRev = parseFloat((await query(`SELECT COALESCE(SUM(amount),0) as v FROM orders WHERE order_date::text LIKE '2026%'`)).rows[0].v);
@@ -452,14 +452,17 @@ router.post('/decision-rules/evaluate', authMiddleware, adminOnly, async (req, r
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/skus', authMiddleware, async (req, res) => {
+router.get('/skus', authMiddleware, requireTier('procurement'), async (req, res) => {
   try {
-    const result = await query('SELECT * FROM skus WHERE is_active=1 ORDER BY revenue_total DESC');
+    // 'own'-scoped roles (procurement_team) see only SKUs they own.
+    const result = req.tierAccess === 'own'
+      ? await query('SELECT * FROM skus WHERE is_active=1 AND owner_user_id=$1 ORDER BY revenue_total DESC', [req.user.id])
+      : await query('SELECT * FROM skus WHERE is_active=1 ORDER BY revenue_total DESC');
     res.json(result.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/skus', authMiddleware, adminOnly, async (req, res) => {
+router.post('/skus', authMiddleware, requireTier('procurement'), async (req, res) => {
   try {
     const { name, category, cost_price, sale_price, units_in_stock, lead_time_days, supplier, is_gmp } = req.body;
     const crypto = require('crypto');
@@ -471,14 +474,14 @@ router.post('/skus', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/execution-steps', authMiddleware, async (req, res) => {
+router.get('/execution-steps', authMiddleware, requireTier('technical'), async (req, res) => {
   try {
     const result = await query('SELECT * FROM execution_steps ORDER BY step_order');
     res.json(result.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/execution-steps/:id', authMiddleware, adminOnly, async (req, res) => {
+router.put('/execution-steps/:id', authMiddleware, requireTier('technical'), async (req, res) => {
   try {
     const { completion_pct, status } = req.body;
     await query(`UPDATE execution_steps SET completion_pct=COALESCE($1,completion_pct), status=COALESCE($2,status), updated_at=$3 WHERE id=$4`,
@@ -487,7 +490,7 @@ router.put('/execution-steps/:id', authMiddleware, adminOnly, async (req, res) =
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/integrations', authMiddleware, async (req, res) => {
+router.get('/integrations', authMiddleware, requireTier('technical'), async (req, res) => {
   try {
     const result = await query('SELECT * FROM integrations ORDER BY status DESC, name');
     res.json(result.rows);
@@ -529,7 +532,7 @@ router.post('/customers/engagement-event', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/linkedin/log', authMiddleware, adminOnly, async (req, res) => {
+router.post('/linkedin/log', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
     const { contact_name, contact_title, company, linkedin_url, message_sent, sent_at, connection_accepted, replied, reply_content, buyer_segment, molecule_interest } = req.body || {};
     if (!contact_name) return res.status(400).json({ error: 'contact_name is required' });
@@ -543,8 +546,11 @@ router.post('/linkedin/log', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/linkedin/pipeline', authMiddleware, adminOnly, async (req, res) => {
+router.get('/linkedin/pipeline', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
+    // 'own'-scoped roles (sales_team) see only their own outreach rows.
+    const ownClause = req.tierAccess === 'own' ? ' AND owner_user_id = $1' : '';
+    const params = req.tierAccess === 'own' ? [req.user.id] : [];
     const stats = (await query(`
       SELECT
         COUNT(*)::int as total,
@@ -553,24 +559,24 @@ router.get('/linkedin/pipeline', authMiddleware, adminOnly, async (req, res) => 
         COUNT(*) FILTER (WHERE sent_at >= (NOW() - INTERVAL '7 days')::text)::int as sent_this_week,
         COUNT(*) FILTER (WHERE connection_accepted = 1 AND sent_at >= (NOW() - INTERVAL '7 days')::text)::int as connected_this_week,
         COUNT(*) FILTER (WHERE replied = 1 AND sent_at >= (NOW() - INTERVAL '7 days')::text)::int as replied_this_week
-      FROM linkedin_outreach
-    `)).rows[0];
+      FROM linkedin_outreach WHERE 1=1${ownClause}
+    `, params)).rows[0];
     const bySegment = (await query(`
       SELECT buyer_segment,
              COUNT(*)::int as total,
              COUNT(*) FILTER (WHERE connection_accepted = 1)::int as connected,
              COUNT(*) FILTER (WHERE replied = 1)::int as replied
-      FROM linkedin_outreach GROUP BY buyer_segment ORDER BY total DESC
-    `)).rows;
+      FROM linkedin_outreach WHERE 1=1${ownClause} GROUP BY buyer_segment ORDER BY total DESC
+    `, params)).rows;
     const recent = (await query(`
       SELECT id, contact_name, contact_title, company, linkedin_url, sent_at, connection_accepted, replied, buyer_segment, molecule_interest
-      FROM linkedin_outreach ORDER BY sent_at DESC NULLS LAST LIMIT 20
-    `)).rows;
+      FROM linkedin_outreach WHERE 1=1${ownClause} ORDER BY sent_at DESC NULLS LAST LIMIT 20
+    `, params)).rows;
     res.json({ stats, by_segment: bySegment, recent });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/metrics/today', authMiddleware, adminOnly, async (req, res) => {
+router.get('/metrics/today', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const row = (await query(
       `SELECT * FROM metrics_snapshots ORDER BY snapshot_date DESC LIMIT 1`
@@ -580,7 +586,7 @@ router.get('/metrics/today', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/metrics/history', authMiddleware, adminOnly, async (req, res) => {
+router.get('/metrics/history', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const days = Math.min(parseInt(req.query.days) || 90, 365);
     const rows = (await query(
@@ -590,14 +596,17 @@ router.get('/metrics/history', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/customers/warm-leads', authMiddleware, adminOnly, async (req, res) => {
+router.get('/customers/warm-leads', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
-    const leads = await getWarmLeads({ limit: parseInt(req.query.limit) || 10 });
+    const leads = await getWarmLeads({
+      limit: parseInt(req.query.limit) || 10,
+      ownerUserId: req.tierAccess === 'own' ? req.user.id : null,
+    });
     res.json({ count: leads.length, leads });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/customers/outreach-today', authMiddleware, adminOnly, async (req, res) => {
+router.get('/customers/outreach-today', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
     const row = (await query(
@@ -618,7 +627,7 @@ router.get('/customers/outreach-today', authMiddleware, adminOnly, async (req, r
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/goals/cascade', authMiddleware, adminOnly, async (req, res) => {
+router.post('/goals/cascade', authMiddleware, requireTier('goals'), async (req, res) => {
   try {
     const cascade = await cascadeGoals();
     // A cascade that skipped (e.g. no annual targets) has nothing to assign from.
@@ -632,7 +641,7 @@ router.post('/goals/cascade', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/goals/assign-kpis', authMiddleware, adminOnly, async (req, res) => {
+router.post('/goals/assign-kpis', authMiddleware, requireTier('goals'), async (req, res) => {
   try {
     const result = await assignWeeklyKPIsForAll();
     res.json(result);
@@ -660,7 +669,7 @@ router.get('/goals/my-week', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/goals/team-week', authMiddleware, adminOnly, async (req, res) => {
+router.get('/goals/team-week', authMiddleware, requireTier('goals'), async (req, res) => {
   try {
     const weekStart = mondayOf(new Date()).toISOString().slice(0, 10);
     const rows = (await query(
@@ -674,7 +683,7 @@ router.get('/goals/team-week', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/seo/rankings', authMiddleware, adminOrSEO, async (req, res) => {
+router.get('/seo/rankings', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     // Aggregate per query: most-recent vs oldest position in the trailing 30 days
     const rows = (await query(`
@@ -719,21 +728,21 @@ router.get('/seo/rankings', authMiddleware, adminOrSEO, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/seo/gaps', authMiddleware, adminOrSEO, async (req, res) => {
+router.get('/seo/gaps', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const result = await identifyContentGaps();
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/seo/no-results', authMiddleware, adminOrSEO, async (req, res) => {
+router.get('/seo/no-results', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const result = await trackAlgoliaNoResults();
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/growth/intelligence', authMiddleware, adminOnly, async (req, res) => {
+router.get('/growth/intelligence', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const row = (await query(
       `SELECT id, period_key, content, created_at FROM ai_analyses WHERE analysis_type='growth_intelligence' ORDER BY created_at DESC LIMIT 1`
@@ -746,7 +755,7 @@ router.get('/growth/intelligence', authMiddleware, adminOnly, async (req, res) =
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/briefing/latest', authMiddleware, adminOnly, async (req, res) => {
+router.get('/briefing/latest', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
     const row = (await query(
       `SELECT id, period_key, content, created_at FROM ai_analyses WHERE analysis_type='daily_briefing' ORDER BY created_at DESC LIMIT 1`
@@ -759,7 +768,7 @@ router.get('/briefing/latest', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/revenue/intelligence', authMiddleware, adminOnly, async (req, res) => {
+router.get('/revenue/intelligence', authMiddleware, requireTier('revenue'), async (req, res) => {
   try {
     const row = (await query(
       `SELECT id, period_key, content, created_at FROM ai_analyses WHERE analysis_type='revenue_intelligence' ORDER BY created_at DESC LIMIT 1`
@@ -812,7 +821,7 @@ router.delete('/milestones/duplicates', authMiddleware, adminOnly, async (req, r
 // ============================================================
 // MARKET INTELLIGENCE ENGINE
 // ============================================================
-router.post('/market/analyze', authMiddleware, adminOnly, async (req, res) => {
+router.post('/market/analyze', authMiddleware, requireTier('procurement'), async (req, res) => {
   try {
     const crypto = require('crypto');
     const prompt = `You are a pharmaceutical market intelligence analyst for Abiozen LLC, a US-based API distribution company. Analyze the current US pharmaceutical market and identify the TOP 20 fast-moving molecules. Focus on: GLP-1 peptides (Semaglutide, Tirzepatide), hormone therapy APIs, shortage list molecules, high-demand research chemicals, and generic APIs with growing demand. For each molecule return ONLY a JSON array: [{"name":"","cas":"","category":"","demand":"Critical/High/Medium","monthly_demand_kg":0,"buyer_segment":"","price_min":0,"price_max":0,"priority":0,"reason":""}]`;
@@ -841,7 +850,7 @@ router.post('/market/analyze', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/market/latest', authMiddleware, async (req, res) => {
+router.get('/market/latest', authMiddleware, requireTier('procurement'), async (req, res) => {
   try {
     const result = await query(`SELECT * FROM ai_analyses WHERE analysis_type='market_intelligence' ORDER BY created_at DESC LIMIT 1`);
     if (!result.rows[0]) return res.json({ molecules: [] });
@@ -852,7 +861,7 @@ router.get('/market/latest', authMiddleware, async (req, res) => {
 // ============================================================
 // ENTERPRISE SKU BULK UPLOAD — E-commerce format
 // ============================================================
-router.post('/skus/bulk-upload', authMiddleware, adminOnly, async (req, res) => {
+router.post('/skus/bulk-upload', authMiddleware, requireTier('procurement'), async (req, res) => {
   try {
     const crypto = require('crypto');
     const { products } = req.body;
@@ -888,7 +897,7 @@ router.post('/algolia/sync-abiozen', authMiddleware, adminOnly, async (req, res)
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/skus/export', authMiddleware, async (req, res) => {
+router.get('/skus/export', authMiddleware, requireTier('procurement'), async (req, res) => {
   try {
     const result = await query(`SELECT name as product_name, cas_number, purity, supplier, currency, sale_price as supplier_1kg_price, sds_link, sds_status, coa_link, coa_status, gross_margin, is_gmp, units_in_stock FROM skus WHERE is_active=1 ORDER BY revenue_total DESC`);
     res.json(result.rows);
@@ -896,7 +905,7 @@ router.get('/skus/export', authMiddleware, async (req, res) => {
 });
 
 // Apollo find buyers
-router.post('/apollo/find-buyers', authMiddleware, adminOnly, async (req, res) => {
+router.post('/apollo/find-buyers', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
     const { molecule_name, buyer_segment } = req.body;
     const apolloKey = process.env.APOLLO_API_KEY;
@@ -913,7 +922,7 @@ router.post('/apollo/find-buyers', authMiddleware, adminOnly, async (req, res) =
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/apollo/send-outreach', authMiddleware, adminOnly, async (req, res) => {
+router.post('/apollo/send-outreach', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
     const { contacts, molecule_name, discount_pct, price_per_kg, purity } = req.body;
     const { sendEmail } = require('../lib/mailer');
@@ -931,7 +940,7 @@ router.post('/apollo/send-outreach', authMiddleware, adminOnly, async (req, res)
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/apollo/sequences', authMiddleware, adminOnly, async (req, res) => {
+router.get('/apollo/sequences', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
     const apolloKey = process.env.APOLLO_API_KEY;
     if (!apolloKey) return res.status(400).json({ error: 'APOLLO_API_KEY not configured' });
@@ -945,7 +954,7 @@ router.get('/apollo/sequences', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/apollo/stats', authMiddleware, adminOnly, async (req, res) => {
+router.get('/apollo/stats', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
     const apolloKey = process.env.APOLLO_API_KEY;
     if (!apolloKey) return res.status(400).json({ error: 'APOLLO_API_KEY not configured' });
@@ -1012,7 +1021,7 @@ router.get('/sequences/templates', authMiddleware, async (req, res) => {
   ]});
 });
 
-router.get('/apollo/debug', authMiddleware, adminOnly, async (req, res) => {
+router.get('/apollo/debug', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
     const apolloKey = process.env.APOLLO_API_KEY;
     const response = await fetch('https://api.apollo.io/v1/emailer_campaigns/search', {

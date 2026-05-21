@@ -49,12 +49,15 @@ async function scoreLeadWarmth(contactEmail) {
   };
 }
 
-async function getWarmLeads({ limit = 10 } = {}) {
-  const contacts = (await query(`
-    SELECT DISTINCT bc.email, bc.name, bc.title, bc.company, bc.segment, bc.phone, bc.last_contacted
-    FROM buyer_contacts bc
-    JOIN buyer_engagement be ON be.contact_email = bc.email
-  `)).rows;
+async function getWarmLeads({ limit = 10, ownerUserId = null } = {}) {
+  // ownerUserId set => 'own'-scoped caller (sales_team): only their leads.
+  const contacts = (await query(
+    `SELECT DISTINCT bc.email, bc.name, bc.title, bc.company, bc.segment, bc.phone, bc.last_contacted
+     FROM buyer_contacts bc
+     JOIN buyer_engagement be ON be.contact_email = bc.email
+     ${ownerUserId ? 'WHERE bc.owner_user_id = $1' : ''}`,
+    ownerUserId ? [ownerUserId] : []
+  )).rows;
 
   if (contacts.length === 0) return [];
 
