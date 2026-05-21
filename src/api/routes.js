@@ -146,9 +146,23 @@ router.put('/users/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     if (req.user.id !== id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-    const { github_username, name, user_id } = req.body;
+    const { github_username, name, role, user_id } = req.body;
     const targetId = (req.user.role === 'admin' && user_id) ? user_id : id;
-    await query('UPDATE users SET github_username=COALESCE($1,github_username), name=COALESCE($2,name) WHERE id=$3', [github_username || null, name || null, targetId]);
+
+    // role changes are admin-only and validated against the catalog —
+    // a non-admin editing their own profile must not be able to self-escalate.
+    let validatedRole = null;
+    if (role !== undefined && role !== null && role !== '') {
+      if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only an admin can change a user role' });
+      const catalog = await getAllRoles();
+      if (!catalog[role]) return res.status(400).json({ error: `Unknown role "${role}". Valid roles: ${Object.keys(catalog).join(', ')}` });
+      validatedRole = role;
+    }
+
+    await query(
+      'UPDATE users SET github_username=COALESCE($1,github_username), name=COALESCE($2,name), role=COALESCE($3,role) WHERE id=$4',
+      [github_username || null, name || null, validatedRole, targetId]
+    );
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
