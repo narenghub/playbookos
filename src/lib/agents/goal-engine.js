@@ -21,17 +21,70 @@ const ROLE_METRICS = Object.fromEntries(
   Object.entries(BUILT_IN_ROLES).map(([k, v]) => [k, v.metrics])
 );
 
-// Deterministic weekly KPIs per role. A role listed here gets this exact set
-// every cascade run regardless of what Claude returns — the Claude-driven
-// weekly_per_role allocation is fragile (it can omit a role or rename a
-// metric so it fails the strict role+metric validation). Roles NOT listed
-// here still fall back to Claude's allocation.
+// Deterministic weekly KPIs per role. Every built-in role is listed here so the
+// cascade no longer depends on Claude returning a complete weekly_per_role set
+// (it was unreliable — Claude would return only the common roles like
+// admin/dev/procurement and silently drop the pharma-specific ones, or rename a
+// metric so it failed the strict role+metric validation). Custom roles added via
+// POST /api/roles are NOT listed here and still fall back to Claude's allocation.
+// All metrics below are verified members of their role's vocabulary in roles.js.
+// Time/percentage metrics (response_time_hrs, uptime_pct) are intentionally
+// omitted — they don't divide sensibly into the weekly/5 daily breakdown.
 const DEFAULT_WEEKLY_KPIS = {
+  admin: [
+    { metric: 'team_reviews', weekly_target: 5 },
+    { metric: 'orders_entered', weekly_target: 10 },
+  ],
+  dev: [
+    { metric: 'prs_merged', weekly_target: 8 },
+    { metric: 'commits', weekly_target: 40 },
+    { metric: 'features_deployed', weekly_target: 3 },
+    { metric: 'bugs_fixed', weekly_target: 6 },
+  ],
   procurement_lead: [
     { metric: 'molecules_sourced', weekly_target: 10 },
     { metric: 'suppliers_contacted', weekly_target: 15 },
     { metric: 'coas_collected', weekly_target: 8 },
     { metric: 'rfqs_sent', weekly_target: 20 },
+  ],
+  customer_engagement: [
+    { metric: 'quotes_sent', weekly_target: 25 },
+    { metric: 'accounts_created', weekly_target: 8 },
+    { metric: 'leads_followed_up', weekly_target: 40 },
+    { metric: 'orders_closed', weekly_target: 5 },
+  ],
+  lead_chemist: [
+    { metric: 'orders_repacked', weekly_target: 30 },
+    { metric: 'labels_printed', weekly_target: 30 },
+    { metric: 'shipments_dispatched', weekly_target: 30 },
+    { metric: 'qc_checks_completed', weekly_target: 20 },
+  ],
+  logistics: [
+    { metric: 'pickups_completed', weekly_target: 15 },
+    { metric: 'transfers_completed', weekly_target: 12 },
+    { metric: 'inbound_receipts_logged', weekly_target: 20 },
+  ],
+  recruitment: [
+    { metric: 'candidates_screened', weekly_target: 20 },
+    { metric: 'interviews_scheduled', weekly_target: 8 },
+    { metric: 'offers_made', weekly_target: 2 },
+    { metric: 'hires_completed', weekly_target: 1 },
+  ],
+  hr_accounts: [
+    { metric: 'invoices_processed', weekly_target: 30 },
+    { metric: 'employee_issues_resolved', weekly_target: 5 },
+    { metric: 'payroll_processed', weekly_target: 1 },
+  ],
+  seo_specialist: [
+    { metric: 'keywords_optimized', weekly_target: 15 },
+    { metric: 'pages_indexed', weekly_target: 10 },
+    { metric: 'backlinks_built', weekly_target: 12 },
+    { metric: 'content_published', weekly_target: 3 },
+  ],
+  platform_ops: [
+    { metric: 'issues_resolved', weekly_target: 12 },
+    { metric: 'deployments_completed', weekly_target: 5 },
+    { metric: 'tickets_closed', weekly_target: 20 },
   ],
 };
 
@@ -149,6 +202,7 @@ Return ONLY the JSON object.`;
   }
 
   const counts = { annual: 0, quarterly: 0, monthly: 0, weekly: 0, daily: 0 };
+  const diagnostics = { team_roles: [], claude_weekly_roles: [], default_roles: [], effective_weekly_roles: [] };
 
   if (!dryRun) {
     // Delete future auto-generated rows (preserve history + manual overrides)
@@ -214,6 +268,21 @@ Return ONLY the JSON object.`;
       effectiveWeekly.push(w);
     }
 
+    // Diagnostic — surface what Claude returned vs what the cascade will
+    // actually process, so a missing role is visible in the logs.
+    diagnostics.team_roles = Object.keys(teamByRole);
+    diagnostics.claude_weekly_roles = [...new Set((cascade.weekly_per_role || []).map(w => w.role))];
+    diagnostics.default_roles = [...rolesWithDefaults];
+    diagnostics.effective_weekly_roles = [...new Set(
+      effectiveWeekly
+        .filter(w => teamByRole[w.role] && roleCatalog[w.role]?.metrics?.includes(w.metric))
+        .map(w => w.role)
+    )];
+    console.log(`[GoalEngine] team roles with users: ${diagnostics.team_roles.join(', ') || '(none)'}`);
+    console.log(`[GoalEngine] Claude weekly_per_role returned: ${diagnostics.claude_weekly_roles.join(', ') || '(none)'}`);
+    console.log(`[GoalEngine] deterministic-default roles: ${diagnostics.default_roles.join(', ')}`);
+    console.log(`[GoalEngine] weekly KPIs generating for: ${diagnostics.effective_weekly_roles.join(', ') || '(none — no matching users)'}`);
+
     // Weekly rows per role — emit for current week + next 12 weeks
     const startMonday = mondayOf(today);
     const weeklyKeysForCurrentWeek = [];
@@ -262,6 +331,7 @@ Return ONLY the JSON object.`;
     team_by_role: Object.fromEntries(Object.entries(teamByRole).map(([r, us]) => [r, us.length])),
     quarterly_provided: (cascade.quarterly || []).length,
     weekly_per_role_provided: (cascade.weekly_per_role || []).length,
+    diagnostics,
     dryRun,
   };
 }
