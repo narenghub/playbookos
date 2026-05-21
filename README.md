@@ -351,3 +351,4 @@ playbookos/
     └── add-decision-rules.js  legacy seed (covered by initPhase2 now)
 ```
 # Thu May 21 15:06:46 CDT 2026
+# Thu May 21 16:12:11 CDT 2026
