@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
 const { query } = require('./db');
+const { getAppId, getWriteKey, getRecommendationKey } = require('./algolia-keys');
 
 // Unified marketplace catalog index. ALGOLIA_INDEX_NAME overrides; the
 // hardcoded fallback is the canonical index so a missing env var still
@@ -10,8 +11,8 @@ const indexName = () => process.env.ALGOLIA_INDEX_NAME || FALLBACK_INDEX;
 const asBool = v => v === true || v === 't' || v === 'true' || v === 1 || v === '1';
 
 async function pushToAlgolia(records) {
-  const appId = process.env.ALGOLIA_APP_ID;
-  const apiKey = process.env.ALGOLIA_API_KEY;
+  const appId = getAppId();
+  const apiKey = getWriteKey(); // write op — ALGOLIA_API_KEY (addObject ACL)
   if (!appId || !apiKey) throw new Error('ALGOLIA_APP_ID and ALGOLIA_API_KEY must be set');
   const index = indexName();
   const url = `https://${appId}-dsn.algolia.net/1/indexes/${encodeURIComponent(index)}/batch`;
@@ -127,4 +128,17 @@ async function syncAbiozenProducts() {
   return { source: 'abiozen_products', fetched: products.length, ...pushed };
 }
 
-module.exports = { syncPlaybookOSSkus, syncAbiozenProducts };
+// Algolia Recommend API — stub. ALGOLIA_RECOMMENDATION_KEY is resolved so the
+// key wiring is in place; wire the actual /1/indexes/{index}/recommendations
+// call when the related-products / frequently-bought-together feature ships.
+async function getRecommendations(/* objectID, model */) {
+  const key = getRecommendationKey();
+  return {
+    skipped: true,
+    reason: key
+      ? 'Algolia Recommend API not yet implemented (stub)'
+      : 'ALGOLIA_RECOMMENDATION_KEY not set',
+  };
+}
+
+module.exports = { syncPlaybookOSSkus, syncAbiozenProducts, getRecommendations };

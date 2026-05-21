@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
+const { getAppId, getAnalyticsKey } = require('../algolia-keys');
 
 const DAY_MS = 86400000;
 const isoDate = d => d.toISOString().slice(0, 10);
@@ -14,12 +15,12 @@ function algoliaHeaders(appId, apiKey) {
 }
 
 async function syncAlgoliaSearchData({ days = 7 } = {}) {
-  const appId = process.env.ALGOLIA_APP_ID;
-  const apiKey = process.env.ALGOLIA_API_KEY;
+  const appId = getAppId();
+  const apiKey = getAnalyticsKey(); // analytics op — ALGOLIA_ANALYTICS_KEY (analytics ACL)
   // Unified catalog index — defaults to abiozen_products if the env var is unset.
   const indexName = process.env.ALGOLIA_INDEX_NAME || 'abiozen_products';
   if (!appId || !apiKey) {
-    return { skipped: true, reason: 'Algolia env vars not set (ALGOLIA_APP_ID, ALGOLIA_API_KEY)' };
+    return { skipped: true, reason: 'Algolia env vars not set (ALGOLIA_APP_ID, and ALGOLIA_ANALYTICS_KEY or ALGOLIA_API_KEY)' };
   }
 
   const endDate = isoDate(new Date());
