@@ -5,7 +5,7 @@ const { signToken, authMiddleware, adminOnly, syncGitHubForUser, analyzeTeamProg
 const { query } = require('../lib/db');
 const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
-const { cascadeGoals, assignWeeklyKPIs, mondayOf } = require('../lib/agents/goal-engine');
+const { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf } = require('../lib/agents/goal-engine');
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn } = require('../lib/roles');
@@ -606,7 +606,21 @@ router.get('/customers/outreach-today', authMiddleware, adminOnly, async (req, r
 
 router.post('/goals/cascade', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const result = await cascadeGoals();
+    const cascade = await cascadeGoals();
+    // A cascade that skipped (e.g. no annual targets) has nothing to assign from.
+    if (cascade.skipped) {
+      return res.json({ ...cascade, kpi_assignment: { skipped: true, reason: 'cascade was skipped — no KPIs assigned' } });
+    }
+    // Chain weekly KPI assignment so a manual cascade leaves users with KPIs,
+    // matching what the Monday 8am cron already does.
+    const kpi_assignment = await assignWeeklyKPIsForAll();
+    res.json({ ...cascade, kpi_assignment });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/goals/assign-kpis', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await assignWeeklyKPIsForAll();
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

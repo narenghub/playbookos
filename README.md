@@ -79,7 +79,7 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **Targets** — `GET /targets`, `POST /targets` (admin)
 
-**Goals (Goal Engine — Layer 1)** — `POST /goals/cascade` (admin, triggers full cascade from annual targets), `GET /goals/my-week` (current week KPIs for the logged-in user; auto-instantiates from cascade if missing), `GET /goals/team-week` (admin, current week KPIs for everyone)
+**Goals (Goal Engine — Layer 1)** — `POST /goals/cascade` (admin; runs the full cascade from annual targets, then chains `assignWeeklyKPIsForAll()` so every active user gets this week's KPIs), `POST /goals/assign-kpis` (admin; runs only the weekly KPI assignment against the existing cascade — no Claude call), `GET /goals/my-week` (current week KPIs for the logged-in user; auto-instantiates from cascade if missing), `GET /goals/team-week` (admin, current week KPIs for everyone)
 
 **Customer Agent (Layer 2E)** — `GET /customers/warm-leads` (admin, top 10 by warmth score), `GET /customers/outreach-today` (admin, today's Claude-generated call list with talking points per lead; serves cached row if generated today, otherwise generates fresh), `POST /customers/engagement-event` (shared-secret gated; ingests opens/clicks/replies/bounces from Apollo or any source)
 
