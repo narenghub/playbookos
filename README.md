@@ -350,3 +350,4 @@ playbookos/
     ├── seed-real-data.js    one-off seed for SKUs + test order (gitignored)
     └── add-decision-rules.js  legacy seed (covered by initPhase2 now)
 ```
+# Thu May 21 15:06:46 CDT 2026
