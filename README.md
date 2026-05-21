@@ -91,6 +91,8 @@ All routes are mounted under `/api` and require `Authorization: Bearer <token>` 
 
 **SKUs** — `GET /skus`, `POST /skus` (admin), `POST /skus/bulk-upload` (admin), `GET /skus/export`
 
+**Algolia sync** — `POST /algolia/sync` (admin; pushes active PlaybookOS SKUs to the unified `abiozen_products` index), `POST /algolia/sync-abiozen` (admin; pushes active Abiozen marketplace products — requires `ABIOZEN_DATABASE_URL`). Shared logic in `src/lib/algolia-sync.js`; CLI equivalent at `scripts/sync-algolia.js`.
+
 **Execution / integrations** — `GET /execution-steps`, `PUT /execution-steps/:id` (admin), `GET /integrations`
 
 **Performance scoring** — `GET /performance/scores` (admin, last 30 days for everyone), `GET /performance/my` (logged-in user, last 30 days)

@@ -10,6 +10,7 @@ const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults } = require('../lib/agents/seo-agent');
+const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
 function adminOrSEO(req, res, next) {
   if (req.user.role !== 'admin' && req.user.role !== 'seo_specialist') return res.status(403).json({ error: 'Admin or seo_specialist only' });
@@ -842,6 +843,20 @@ router.post('/skus/bulk-upload', authMiddleware, adminOnly, async (req, res) => 
       } catch(e) { errors.push({ product: p.product_name, error: e.message }); }
     }
     res.json({ success: true, uploaded, skipped, errors, total: products.length });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/algolia/sync', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await syncPlaybookOSSkus();
+    res.json({ success: true, ...result });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/algolia/sync-abiozen', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await syncAbiozenProducts();
+    res.json({ success: true, ...result });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

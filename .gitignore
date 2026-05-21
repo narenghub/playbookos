@@ -4,3 +4,4 @@ node_modules/
 *.db-wal
 .env
 scripts/seed-real-data.js
+scripts/sync-abiozen-products.js
