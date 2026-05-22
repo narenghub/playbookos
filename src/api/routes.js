@@ -1401,7 +1401,7 @@ router.get('/agent/overview', authMiddleware, adminOnly, async (req, res) => {
     const pendingApprovals = parseInt((await query(
       `SELECT COUNT(*) c FROM approval_queue WHERE status='pending'`)).rows[0].c, 10);
     const runRate7d = parseFloat((await query(
-      `SELECT COALESCE(SUM(amount),0)/7.0 v FROM orders WHERE order_date >= (NOW() - INTERVAL '7 days')::date`
+      `SELECT COALESCE(SUM(amount),0)/7.0 v FROM orders WHERE order_date::date >= (NOW() - INTERVAL '7 days')::date`
     )).rows[0].v);
 
     const end = new Date('2026-12-31T23:59:59Z');

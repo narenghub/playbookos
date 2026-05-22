@@ -141,15 +141,20 @@ async function getBottlenecks({ limit = 5 } = {}) {
 // Map the procurement -> sales -> marketplace -> SEO chain and flag blockers
 // where one team's lag is constraining the next.
 async function getCrossTeamDependencies() {
+  // created_at is declared TEXT DEFAULT NOW() in the schema, so a bare
+  // `created_at >= NOW() - INTERVAL ...` comparison errors with
+  // "operator does not exist: text >= timestamp with time zone". Cast on the
+  // left so this works whether the column is TEXT (ISO timestamp strings) or
+  // already TIMESTAMPTZ (an older migration's column type).
   const since7 = `NOW() - INTERVAL '7 days'`;
   const skusAdded7d = parseInt((await query(
-    `SELECT COUNT(*) c FROM skus WHERE created_at >= ${since7}`)).rows[0].c, 10);
+    `SELECT COUNT(*) c FROM skus WHERE created_at::timestamptz >= ${since7}`)).rows[0].c, 10);
   const pendingCoa = parseInt((await query(
     `SELECT COUNT(*) c FROM skus WHERE is_active=1 AND COALESCE(coa_status,'pending') <> 'approved'`)).rows[0].c, 10);
   const activeSkus = parseInt((await query(
     `SELECT COUNT(*) c FROM skus WHERE is_active=1`)).rows[0].c, 10);
   const orders7d = parseInt((await query(
-    `SELECT COUNT(*) c FROM orders WHERE created_at >= ${since7}`)).rows[0].c, 10);
+    `SELECT COUNT(*) c FROM orders WHERE created_at::timestamptz >= ${since7}`)).rows[0].c, 10);
   let seoContent = 0;
   try {
     seoContent = parseInt((await query(`SELECT COUNT(*) c FROM seo_content`)).rows[0].c, 10);
