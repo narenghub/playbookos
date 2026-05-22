@@ -1,5 +1,4 @@
 const crypto = require('crypto');
-const jwt = require('jsonwebtoken');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
@@ -69,40 +68,16 @@ async function syncAlgoliaSearchData({ days = 7 } = {}) {
   };
 }
 
-// Mint a short-lived Google OAuth access token from the service-account JSON
-// using the JWT-bearer grant. GOOGLE_SERVICE_ACCOUNT_JSON must hold the full
-// service-account JSON, and that service account must be granted access to the
-// abiozen.com property in Search Console for the query to succeed.
+// Exchange the long-lived OAuth refresh token for a short-lived access token.
+// The refresh token is minted once via a browser consent flow (see
+// .env.example) using a Google account that already has access to the
+// abiozen.com Search Console property, and does not expire under normal use.
 async function getGSCAccessToken() {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!raw) return { error: 'GOOGLE_SERVICE_ACCOUNT_JSON not set' };
-
-  let sa;
-  try {
-    sa = JSON.parse(raw);
-  } catch (e) {
-    return { error: 'GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON' };
-  }
-  if (!sa.client_email || !sa.private_key) {
-    return { error: 'service account JSON is missing client_email or private_key' };
-  }
-
-  const now = Math.floor(Date.now() / 1000);
-  let assertion;
-  try {
-    assertion = jwt.sign(
-      {
-        iss: sa.client_email,
-        scope: 'https://www.googleapis.com/auth/webmasters.readonly',
-        aud: 'https://oauth2.googleapis.com/token',
-        iat: now,
-        exp: now + 3600,
-      },
-      sa.private_key,
-      { algorithm: 'RS256' }
-    );
-  } catch (e) {
-    return { error: `failed to sign service-account JWT: ${e.message}` };
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) {
+    return { error: 'GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN must all be set' };
   }
 
   try {
@@ -110,8 +85,10 @@ async function getGSCAccessToken() {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion,
+        client_id: clientId,
+        client_secret: clientSecret,
+        refresh_token: refreshToken,
+        grant_type: 'refresh_token',
       }).toString(),
     });
     if (!res.ok) {
@@ -127,13 +104,13 @@ async function getGSCAccessToken() {
 }
 
 async function fetchGSCData({ siteUrl, days = 30 } = {}) {
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    return { skipped: true, reason: 'GOOGLE_SERVICE_ACCOUNT_JSON not set' };
+  if (!process.env.GOOGLE_REFRESH_TOKEN) {
+    return { skipped: true, reason: 'GOOGLE_REFRESH_TOKEN not set' };
   }
 
   const token = await getGSCAccessToken();
   if (token.error) {
-    return { skipped: true, reason: `GSC service-account auth failed: ${token.error}` };
+    return { skipped: true, reason: `GSC OAuth failed: ${token.error}` };
   }
 
   const target = siteUrl || process.env.GSC_SITE_URL || 'sc-domain:abiozen.com';
