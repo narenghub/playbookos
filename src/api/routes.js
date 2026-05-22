@@ -9,7 +9,7 @@ const { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf } = req
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
-const { identifyContentGaps, trackAlgoliaNoResults } = require('../lib/agents/seo-agent');
+const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
@@ -760,6 +760,15 @@ router.get('/seo/rankings', authMiddleware, requireTier('intelligence'), async (
       };
     });
     res.json({ count: formatted.length, rankings: formatted });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual trigger — pulls GSC keyword data, persists it into seo_rankings
+// (trackKeywordRankings stores non-dry runs itself), and returns the result.
+router.post('/seo/rankings', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await trackKeywordRankings();
+    res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
