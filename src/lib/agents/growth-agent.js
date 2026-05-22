@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
@@ -68,26 +69,87 @@ async function syncAlgoliaSearchData({ days = 7 } = {}) {
   };
 }
 
-async function fetchGSCData({ siteUrl, days = 7 } = {}) {
-  const key = process.env.GOOGLE_SEARCH_CONSOLE_KEY;
-  if (!key) return { skipped: true, reason: 'GOOGLE_SEARCH_CONSOLE_KEY not set' };
+// Mint a short-lived Google OAuth access token from the service-account JSON
+// using the JWT-bearer grant. GOOGLE_SERVICE_ACCOUNT_JSON must hold the full
+// service-account JSON, and that service account must be granted access to the
+// abiozen.com property in Search Console for the query to succeed.
+async function getGSCAccessToken() {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) return { error: 'GOOGLE_SERVICE_ACCOUNT_JSON not set' };
 
-  // GSC searchanalytics requires an OAuth access token, not an API key.
-  // We treat the env var as a bearer token here. If you set it to a static
-  // service-account-issued token, you'll need to refresh it before it expires
-  // (default 1 hour). Long-term, replace this with a proper OAuth refresh flow
-  // or a service-account JSON path read on demand.
+  let sa;
+  try {
+    sa = JSON.parse(raw);
+  } catch (e) {
+    return { error: 'GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON' };
+  }
+  if (!sa.client_email || !sa.private_key) {
+    return { error: 'service account JSON is missing client_email or private_key' };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  let assertion;
+  try {
+    assertion = jwt.sign(
+      {
+        iss: sa.client_email,
+        scope: 'https://www.googleapis.com/auth/webmasters.readonly',
+        aud: 'https://oauth2.googleapis.com/token',
+        iat: now,
+        exp: now + 3600,
+      },
+      sa.private_key,
+      { algorithm: 'RS256' }
+    );
+  } catch (e) {
+    return { error: `failed to sign service-account JWT: ${e.message}` };
+  }
+
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion,
+      }).toString(),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { error: `OAuth token endpoint ${res.status}: ${body.slice(0, 200)}` };
+    }
+    const data = await res.json();
+    if (!data.access_token) return { error: 'OAuth token response had no access_token' };
+    return { access_token: data.access_token };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
+async function fetchGSCData({ siteUrl, days = 30 } = {}) {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+    return { skipped: true, reason: 'GOOGLE_SERVICE_ACCOUNT_JSON not set' };
+  }
+
+  const token = await getGSCAccessToken();
+  if (token.error) {
+    return { skipped: true, reason: `GSC service-account auth failed: ${token.error}` };
+  }
+
   const target = siteUrl || process.env.GSC_SITE_URL || 'sc-domain:abiozen.com';
+  // The searchAnalytics API requires ISO YYYY-MM-DD dates — it does not accept
+  // relative strings like "30 days ago" — so the trailing 30-day window is
+  // computed here.
   const endDate = isoDate(new Date());
   const startDate = isoDate(new Date(Date.now() - days * DAY_MS));
 
   try {
     const res = await fetch(
-      `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(target)}/searchAnalytics/query`,
+      `https://searchconsole.googleapis.com/webmasters/v3/sites/${encodeURIComponent(target)}/searchAnalytics/query`,
       {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ startDate, endDate, dimensions: ['query'], rowLimit: 50 }),
+        headers: { 'Authorization': `Bearer ${token.access_token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startDate, endDate, dimensions: ['query', 'page'], rowLimit: 50 }),
       }
     );
     if (!res.ok) {
@@ -100,6 +162,7 @@ async function fetchGSCData({ siteUrl, days = 7 } = {}) {
       period: { start: startDate, end: endDate, days },
       rows: (data.rows || []).map(r => ({
         query: r.keys?.[0] || '',
+        page: r.keys?.[1] || '',
         clicks: r.clicks || 0,
         impressions: r.impressions || 0,
         ctr: r.ctr || 0,
