@@ -12,10 +12,10 @@ const { query } = require('./db');
 // API tiers: self, sales, procurement, revenue, technical, intelligence, goals, admin.
 // Custom roles (POST /api/roles) extend this set but get no tiers (self-only).
 const ALL_PAGES = [
-  'dashboard', 'command-center', 'seo-intelligence', 'my-activity', 'playbook',
-  'team', 'revenue', 'github', 'milestones', 'ai-insights', 'market-intelligence',
-  'apollo-outreach', 'decision-engine', 'sku-economics', 'execution-graph',
-  'data-pipeline', 'settings',
+  'dashboard', 'command-center', 'seo-intelligence', 'seo-content', 'my-activity',
+  'playbook', 'team', 'revenue', 'github', 'milestones', 'ai-insights',
+  'market-intelligence', 'apollo-outreach', 'decision-engine', 'sku-economics',
+  'execution-graph', 'data-pipeline', 'settings',
 ];
 
 const BUILT_IN_ROLES = {
@@ -102,7 +102,7 @@ const BUILT_IN_ROLES = {
   seo_specialist: {
     display_name: 'SEO Specialist',
     level: 5, domain: 'marketing', data_scope: 'own',
-    pages: ['dashboard', 'my-activity', 'playbook', 'milestones', 'seo-intelligence'],
+    pages: ['dashboard', 'my-activity', 'playbook', 'milestones', 'seo-intelligence', 'seo-content'],
     tiers: { self: 'rw', intelligence: 'r' },
     metrics: ['keywords_optimized', 'pages_indexed', 'backlinks_built', 'content_published'],
     baseline: 8,

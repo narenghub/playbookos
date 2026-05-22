@@ -210,6 +210,18 @@ async function migrateSchemas() {
         UNIQUE(query, recorded_date)
       );
       CREATE INDEX IF NOT EXISTS idx_seo_rankings_query ON seo_rankings (query, recorded_date DESC);
+      CREATE TABLE IF NOT EXISTS seo_content (
+        id TEXT PRIMARY KEY,
+        molecule_name TEXT NOT NULL,
+        cas_number TEXT NOT NULL DEFAULT '',
+        title TEXT,
+        meta_desc TEXT,
+        content_html TEXT,
+        schema_json TEXT,
+        generated_at TEXT DEFAULT NOW(),
+        UNIQUE(molecule_name, cas_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_seo_content_generated ON seo_content (generated_at DESC);
       CREATE TABLE IF NOT EXISTS custom_roles (
         id TEXT PRIMARY KEY,
         role_name TEXT NOT NULL UNIQUE,

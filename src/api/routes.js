@@ -10,6 +10,7 @@ const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults } = require('../lib/agents/seo-agent');
+const { syncAlgoliaSearchData } = require('../lib/agents/growth-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
 const router = express.Router();
@@ -774,6 +775,136 @@ router.get('/seo/no-results', authMiddleware, requireTier('intelligence'), async
     const result = await trackAlgoliaNoResults();
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// AI SEO content generator — produces a full publish-ready product page for a
+// molecule via Claude, stored in seo_content. Admin-only per spec.
+router.post('/seo/generate-content', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const molecule_name = (req.body?.molecule_name || '').trim();
+    const cas_number = (req.body?.cas_number || '').trim();
+    const purity = (req.body?.purity || '99').toString().trim();
+    if (!molecule_name) return res.status(400).json({ error: 'molecule_name is required' });
+    if (!cas_number) return res.status(400).json({ error: 'cas_number is required' });
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(503).json({ error: 'ANTHROPIC_API_KEY is not configured' });
+
+    const prompt = `You are an SEO content writer for Abiozen LLC, a US-based pharmaceutical API distribution company. Generate a complete, SEO-optimized product page for the molecule below.
+
+Molecule: ${molecule_name}
+CAS number: ${cas_number}
+Purity grade: ${purity}%
+
+Return EXACTLY one JSON object and nothing else (no markdown fences, no commentary):
+{
+  "title": "Buy ${molecule_name} API | ${purity}% Pure | US Stock | Abiozen",
+  "meta_desc": "compelling meta description, 160 characters MAXIMUM, includes the molecule name and a buyer hook",
+  "content_html": "valid HTML string for the page body",
+  "schema_json": { schema.org Product JSON-LD object }
+}
+
+Requirements:
+- "title": use exactly the format shown above (Buy ... API | ...% Pure | US Stock | Abiozen).
+- "meta_desc": 160 characters maximum — count carefully.
+- "content_html": one <h1> with the molecule name, then a logical <h2>/<h3> heading structure, a product description of roughly 500 words targeting buyer-intent keywords (buy, supplier, bulk, US stock, COA, SDS, GMP, research grade, lead time). End with an FAQ section: an <h2>Frequently Asked Questions</h2> followed by EXACTLY 5 <h3> questions buyers actually ask (pricing, minimum order quantity, shipping/lead time, documentation/COA/SDS, purity/grade), each followed by a <p> answer. Return the whole thing as a single HTML string.
+- "schema_json": a valid schema.org "Product" JSON-LD object — "@context", "@type":"Product", name, description, an identifier using the CAS number, brand "Abiozen LLC", and an "offers" object.
+- Do NOT invent specific prices, lot numbers, or regulatory/medical claims. Keep language factual and conservative.
+- Return ONLY the JSON object.`;
+
+    const ares = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 4000,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!ares.ok) {
+      const body = await ares.text().catch(() => '');
+      return res.status(502).json({ error: `Claude API ${ares.status}: ${body.slice(0, 200)}` });
+    }
+    const adata = await ares.json();
+    const raw = (adata.content?.[0]?.text || '').trim();
+    let content;
+    try {
+      const match = raw.match(/\{[\s\S]*\}/);
+      content = JSON.parse(match ? match[0] : raw);
+    } catch (e) {
+      return res.status(502).json({ error: 'Claude returned unparseable content', raw: raw.slice(0, 500) });
+    }
+    if (!content.title || !content.content_html) {
+      return res.status(502).json({ error: 'Claude response missing required fields (title / content_html)', raw: raw.slice(0, 500) });
+    }
+
+    const schemaStr = content.schema_json != null
+      ? (typeof content.schema_json === 'string' ? content.schema_json : JSON.stringify(content.schema_json))
+      : null;
+
+    await query(
+      `INSERT INTO seo_content (id, molecule_name, cas_number, title, meta_desc, content_html, schema_json, generated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+       ON CONFLICT (molecule_name, cas_number) DO UPDATE
+         SET title=EXCLUDED.title, meta_desc=EXCLUDED.meta_desc,
+             content_html=EXCLUDED.content_html, schema_json=EXCLUDED.schema_json,
+             generated_at=NOW()`,
+      [crypto.randomUUID(), molecule_name, cas_number, content.title || null,
+       content.meta_desc || null, content.content_html || null, schemaStr]
+    );
+
+    res.json({
+      success: true,
+      molecule_name, cas_number, purity,
+      title: content.title,
+      meta_desc: content.meta_desc,
+      content_html: content.content_html,
+      schema_json: content.schema_json ?? null,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Generated SEO content, prioritized by Algolia search volume (highest buyer
+// demand first). Falls back to recency ordering when Algolia is unconfigured.
+router.get('/seo/content-queue', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const rows = (await query(
+      `SELECT id, molecule_name, cas_number, title, meta_desc, content_html, schema_json, generated_at
+       FROM seo_content`
+    )).rows;
+
+    const volumes = {};
+    try {
+      const algolia = await syncAlgoliaSearchData();
+      if (!algolia.skipped) {
+        for (const q of [...(algolia.top_queries || []), ...(algolia.no_result || [])]) {
+          const k = (q.query || '').toLowerCase().trim();
+          if (k) volumes[k] = Math.max(volumes[k] || 0, q.count || 0);
+        }
+      }
+    } catch (e) { /* leave volumes empty — queue still returns, ordered by recency */ }
+
+    const volumeFor = name => {
+      const n = (name || '').toLowerCase().trim();
+      if (volumes[n] != null) return volumes[n];
+      let best = 0;
+      for (const [q, c] of Object.entries(volumes)) {
+        if (q && (q.includes(n) || n.includes(q))) best = Math.max(best, c);
+      }
+      return best;
+    };
+
+    const queue = rows
+      .map(r => ({ ...r, search_volume: volumeFor(r.molecule_name) }))
+      .sort((a, b) => b.search_volume - a.search_volume ||
+        String(b.generated_at).localeCompare(String(a.generated_at)));
+
+    res.json({ count: queue.length, algolia_priority: Object.keys(volumes).length > 0, queue });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/growth/intelligence', authMiddleware, requireTier('intelligence'), async (req, res) => {

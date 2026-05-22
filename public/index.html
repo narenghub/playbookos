@@ -235,6 +235,7 @@ const NAV_LINKS = [
   {id:'dashboard',label:'Dashboard'},
   {id:'command-center',label:'Command Center'},
   {id:'seo-intelligence',label:'SEO Intelligence'},
+  {id:'seo-content',label:'SEO Content'},
   {id:'my-activity',label:'My Activity'},
   {id:'playbook',label:'Playbook'},
   {id:'team',label:'Team'},
@@ -271,7 +272,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','seo-intelligence':'SEO Intelligence','my-activity':'My Activity',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','my-activity':'My Activity',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -1259,6 +1260,7 @@ async function loadMarketLatest() {
 function renderMarketResults(molecules, assigned, date) {
   const el = document.getElementById('market-results');
   if(!el) return;
+  const canSeo = ['admin','super_admin'].includes(currentUser?.role);
   const demandColor = d => d==='Critical'?'#dc2626':d==='High'?'#d97706':'#059669';
   const demandBg = d => d==='Critical'?'#fef2f2':d==='High'?'#fffbeb':'#f0fdf4';
   el.innerHTML = `
@@ -1287,7 +1289,7 @@ function renderMarketResults(molecules, assigned, date) {
         <td style="padding:10px;font-weight:600;color:#1B3A6B">$${m.price_min||0}–$${m.price_max||0}/kg</td>
         <td style="padding:10px;font-size:11px;color:#4a5568">${m.buyer_segment||'—'}</td>
         <td style="padding:10px"><div style="background:#1B3A6B;color:#fff;border-radius:4px;padding:3px 8px;text-align:center;font-weight:700;font-size:12px">${m.priority||0}</div></td>
-        <td style="padding:10px"><button onclick="assignToProcurement('${m.name}','${m.cas||''}')" style="background:#0D7377;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Assign</button></td>
+        <td style="padding:10px;white-space:nowrap"><button onclick="assignToProcurement('${m.name}','${m.cas||''}')" style="background:#0D7377;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Assign</button>${canSeo?`<button onclick="generateSeoContent('${m.name}','${m.cas||''}',this)" style="background:#1B3A6B;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer;margin-left:4px">Gen SEO</button>`:''}</td>
       </tr>`).join('')}
     </table>`;
 }
@@ -1299,6 +1301,29 @@ async function assignToProcurement(name, cas) {
       body: JSON.stringify({log_date: new Date().toISOString().slice(0,10), metric:'molecules_assigned', value:1, notes:`Assigned: ${name} (${cas})`})});
     alert(`✅ ${name} assigned to procurement team`);
   } catch(e) {}
+}
+
+async function generateSeoContent(name, cas, btn) {
+  if (!cas) {
+    cas = (prompt(`CAS number for ${name}? (required for the SEO page)`) || '').trim();
+    if (!cas) return;
+  }
+  if (!confirm(`Generate a full SEO product page for "${name}"?\n\nThis calls Claude and takes ~15–30 seconds.`)) return;
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const res = await API('/seo/generate-content', {method:'POST', body: JSON.stringify({molecule_name:name, cas_number:cas})});
+    if (res && res.success) {
+      alert(`✅ SEO content generated for ${name}.\n\nTitle: ${res.title}\n\nOpen the SEO Content page to review and publish it.`);
+      if (btn) { btn.textContent = '✓ Done'; btn.style.background = '#1D9E75'; }
+    } else {
+      alert('Error: ' + ((res && res.error) || 'unknown error'));
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
+    }
+  } catch(e) {
+    alert('Error: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
 }
 
 async function findBuyers() {
@@ -1387,6 +1412,45 @@ if(typeof pages !== 'undefined') {
     document.getElementById('page-title').textContent = 'Market Intelligence';
     const el = document.getElementById('section-market-intelligence');
     if(el) { document.getElementById('content').innerHTML=''; el.style.display='block'; document.getElementById('content').appendChild(el); loadMarketLatest(); }
+  };
+  pages['seo-content'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading SEO content queue…</p>';
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let data;
+    try { data = await API('/seo/content-queue'); }
+    catch(e) { c.innerHTML = `<div class="card"><div class="card-title">SEO Content</div><p style="color:#dc2626">Failed to load: ${esc(e.message)}</p></div>`; return; }
+    if (data && data.error) { c.innerHTML = `<div class="card"><div class="card-title">SEO Content</div><p style="color:#dc2626">${esc(data.error)}</p></div>`; return; }
+    const q = (data && data.queue) || [];
+    const head = `<div class="card">
+      <div class="card-title">SEO Content Queue — ${q.length} generated page${q.length===1?'':'s'}</div>
+      <div style="font-size:13px;color:#718096">${data.algolia_priority ? 'Sorted by Algolia search volume — highest buyer demand first.' : 'Algolia search volume unavailable — sorted by most recently generated.'} Generate new pages from the Market Intelligence page.</div>
+    </div>`;
+    if (!q.length) {
+      c.innerHTML = head + '<div class="card"><p style="color:#718096">No SEO content generated yet. Open Market Intelligence and click "Gen SEO" on a molecule.</p></div>';
+      return;
+    }
+    const cards = q.map((it,i) => `
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+          <div>
+            <div style="font-size:15px;font-weight:700;color:#1a202c">${i+1}. ${esc(it.molecule_name)} <span style="font-family:monospace;font-size:12px;color:#718096;font-weight:400">CAS ${esc(it.cas_number)||'—'}</span></div>
+            <div style="font-size:12px;color:#718096;margin-top:2px">Generated ${it.generated_at ? new Date(it.generated_at).toLocaleString() : '—'}</div>
+          </div>
+          <span class="badge badge-${it.search_volume>0?'green':'gray'}">search vol: ${it.search_volume}</span>
+        </div>
+        <div style="margin-top:10px"><div style="font-size:11px;color:#718096;text-transform:uppercase;letter-spacing:.04em">Title tag</div><div style="font-size:13px;color:#1a202c;font-weight:600">${esc(it.title)}</div></div>
+        <div style="margin-top:8px"><div style="font-size:11px;color:#718096;text-transform:uppercase;letter-spacing:.04em">Meta description (${(it.meta_desc||'').length} chars)</div><div style="font-size:13px;color:#4a5568">${esc(it.meta_desc)}</div></div>
+        <details style="margin-top:10px">
+          <summary style="cursor:pointer;font-size:12px;color:#0D7377;font-weight:600">Preview page content</summary>
+          <div style="border:1px solid #e2e8f0;border-radius:6px;padding:14px;margin-top:8px;background:#fff;color:#1a202c;line-height:1.55">${it.content_html||'<em>No content</em>'}</div>
+        </details>
+        <details style="margin-top:8px">
+          <summary style="cursor:pointer;font-size:12px;color:#0D7377;font-weight:600">Schema JSON-LD</summary>
+          <pre style="background:#0f172a;color:#a5f3fc;font-size:11px;padding:12px;border-radius:6px;overflow:auto;margin-top:8px;white-space:pre-wrap">${esc(it.schema_json)||'<em>No schema</em>'}</pre>
+        </details>
+      </div>`).join('');
+    c.innerHTML = head + cards;
   };
   pages['apollo-outreach'] = function() {
     document.getElementById('page-title').textContent = 'Apollo Outreach';
