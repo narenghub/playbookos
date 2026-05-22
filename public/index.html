@@ -86,6 +86,42 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--teal)}
 
 /* Responsive */
 @media(max-width:768px){#sidebar{display:none}#content{padding:12px}}
+
+/* ── Enterprise UI redesign ─────────────────────────────────────────────────── */
+:root{--text-strong:#1a202c;--text-body:#4a5568;--text-muted:#718096}
+#topbar{border-top:3px solid var(--navy);padding:14px 28px}
+.text-page-title{font-size:20px;font-weight:700;color:var(--text-strong);margin:0}
+.text-section{font-size:14px;font-weight:700;color:var(--text-strong)}
+.text-body{font-size:13px;color:var(--text-body)}
+.text-label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);font-weight:600}
+
+/* Sidebar branding */
+#sidebar .brand{padding:18px 16px 14px;border-bottom:1px solid rgba(255,255,255,.12)}
+#sidebar .brand-logo{font-size:20px;font-weight:800;color:#fff;letter-spacing:1.5px}
+#sidebar .brand-sub{font-size:11px;color:#9FE1CB;margin-top:3px;letter-spacing:.3px}
+#sidebar .brand-user{margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,.08)}
+#sidebar .brand-user .uname{font-size:13px;font-weight:600;color:#fff}
+#sidebar .brand-user .urole{display:inline-block;font-size:10px;color:#9FE1CB;background:rgba(159,225,203,.12);padding:2px 8px;border-radius:10px;margin-top:4px;text-transform:uppercase;letter-spacing:.4px;font-weight:600}
+#sidebar .powered-by{padding:10px 16px;font-size:10px;color:rgba(255,255,255,.35);text-align:center;border-top:1px solid rgba(255,255,255,.08);letter-spacing:.6px}
+
+/* Sidebar nav sections */
+#sidebar nav{padding:6px 0;overflow-y:auto;flex:1}
+#sidebar nav .nav-section-title{padding:14px 16px 6px;font-size:10px;font-weight:700;color:rgba(255,255,255,.42);letter-spacing:1.2px;text-transform:uppercase}
+#sidebar nav a{display:flex;align-items:center;gap:10px;padding:9px 16px;color:rgba(255,255,255,.78);text-decoration:none;font-size:13px;border-left:3px solid transparent;transition:background .12s,border-color .12s,color .12s}
+#sidebar nav a .nav-icon{display:inline-block;width:18px;font-size:14px;text-align:center;flex-shrink:0}
+#sidebar nav a:hover{background:rgba(255,255,255,.06);color:#fff;border-left-color:rgba(159,225,203,.45)}
+#sidebar nav a.active{background:rgba(255,255,255,.10);color:#fff;border-left-color:#9FE1CB;font-weight:600}
+
+/* Button hierarchy — consistent radius + padding */
+.btn-secondary{background:var(--teal);color:#fff;padding:8px 16px;border:none;border-radius:6px;font-weight:600;font-size:13px;cursor:pointer;transition:background .12s}
+.btn-secondary:hover{background:#0a5c60}
+.btn-success{background:var(--success);color:#fff;padding:8px 16px;border:none;border-radius:6px;font-weight:600;font-size:13px;cursor:pointer;transition:background .12s}
+.btn-success:hover{background:#178a64}
+
+/* Topbar revenue status indicator */
+#revenue-status .rs-wrap{display:inline-flex;align-items:center;gap:10px;font-size:12px;color:var(--text-body)}
+#revenue-status .rs-bar{width:140px;height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden}
+#revenue-status .rs-fill{height:6px;border-radius:3px;background:var(--navy);transition:width .4s}
 </style>
 </head>
 <body>
@@ -113,15 +149,19 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--teal)}
 <!-- MAIN APP -->
 <div id="app" style="display:none">
   <div id="sidebar">
-    <div class="logo"><h1>PlaybookOS</h1><p>Abiozen LLC</p></div>
+    <div class="brand">
+      <div class="brand-logo">ABIOZEN</div>
+      <div class="brand-sub">PlaybookOS</div>
+      <div class="brand-user" id="user-info-box"></div>
+    </div>
     <nav id="nav-links"></nav>
-    <div class="user-info" id="user-info-box"></div>
+    <div class="powered-by">Powered by PlaybookOS</div>
   </div>
   <div id="main">
     <div id="topbar">
-      <h2 id="page-title">Dashboard</h2>
-      <div style="display:flex;gap:8px;align-items:center">
-        <span id="ontrack-badge"></span>
+      <h2 id="page-title" class="text-page-title">Dashboard</h2>
+      <div style="display:flex;gap:14px;align-items:center">
+        <span id="revenue-status"></span>
         <button class="btn btn-outline btn-sm" onclick="logout()">Sign out</button>
       </div>
     </div>
@@ -225,49 +265,68 @@ function logout() {
 async function showApp() {
   document.getElementById('app').style.display = 'flex';
   await buildNav();
-  document.getElementById("user-info-box").innerHTML = "<div>" + (currentUser.name||"Admin") + "</div><div style=\"color:rgba(255,255,255,.5);font-size:11px\">" + (currentUser.role||"") + "</div>";
+  document.getElementById("user-info-box").innerHTML = '<div class="uname">' + (currentUser.name||"Admin") + '</div><div class="urole">' + (currentUser.role||"") + '</div>';
   navigate('dashboard');
 }
 
 // Sidebar visibility is driven by the role's `pages` list from GET /api/roles
 // ('*' = all). The full link set is fixed; what each role sees comes from roles.js.
-const NAV_LINKS = [
-  {id:'dashboard',label:'Dashboard'},
-  {id:'command-center',label:'Command Center'},
-  {id:'agent-control',label:'Agent Control'},
-  {id:'seo-intelligence',label:'SEO Intelligence'},
-  {id:'seo-content',label:'SEO Content'},
-  {id:'my-activity',label:'My Activity'},
-  {id:'my-kpis',label:'My KPIs'},
-  {id:'my-tasks',label:'My Tasks'},
-  {id:'playbook',label:'Playbook'},
-  {id:'team',label:'Team'},
-  {id:'revenue',label:'Revenue & Orders'},
-  {id:'github',label:'GitHub Stats'},
-  {id:'milestones',label:'Milestones'},
-  {id:'ai-insights',label:'AI Insights'},
-  {id:'market-intelligence',label:'Market Intelligence'},
-  {id:'apollo-outreach',label:'Apollo Outreach'},
-  {id:'decision-engine',label:'AI Decision Engine'},
-  {id:'sku-economics',label:'SKU Economics'},
-  {id:'execution-graph',label:'Execution Graph'},
-  {id:'data-pipeline',label:'Data Pipeline'},
-  {id:'settings',label:'Settings'},
+// Sidebar nav — grouped sections with icons. Each item shows only if it's in
+// the user's role pages list (or the user has pages '*' for admin/super_admin).
+const NAV_SECTIONS = [
+  {title:'EXECUTIVE', items:[
+    {id:'command-center', label:'Command Center', icon:'🎯'},
+    {id:'dashboard', label:'Dashboard', icon:'📊'},
+    {id:'ai-insights', label:'AI Insights', icon:'🤖'},
+  ]},
+  {title:'OPERATIONS', items:[
+    {id:'my-tasks', label:'My Tasks', icon:'✓'},
+    {id:'my-kpis', label:'My KPIs', icon:'📈'},
+    {id:'my-activity', label:'My Activity', icon:'📝'},
+    {id:'playbook', label:'Playbook', icon:'📋'},
+    {id:'milestones', label:'Milestones', icon:'🏁'},
+  ]},
+  {title:'REVENUE', items:[
+    {id:'revenue', label:'Revenue & Orders', icon:'💰'},
+    {id:'apollo-outreach', label:'Apollo Outreach', icon:'📧'},
+  ]},
+  {title:'INTELLIGENCE', items:[
+    {id:'market-intelligence', label:'Market Intelligence', icon:'🔬'},
+    {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
+    {id:'seo-content', label:'SEO Content', icon:'✍️'},
+  ]},
+  {title:'TEAM', items:[
+    {id:'team', label:'Team Management', icon:'👥'},
+    {id:'agent-control', label:'Agent Control', icon:'⚡'},
+    {id:'decision-engine', label:'Automation Rules', icon:'🧠'},
+  ]},
+  {title:'PLATFORM', items:[
+    {id:'sku-economics', label:'SKU Economics', icon:'📦'},
+    {id:'data-pipeline', label:'Data Pipeline', icon:'🔗'},
+    {id:'execution-graph', label:'Execution Graph', icon:'⚡'},
+    {id:'settings', label:'Settings', icon:'⚙️'},
+  ]},
 ];
 
 async function buildNav() {
-  // Safe default if the role catalog can't be fetched.
-  let pages = ['dashboard', 'my-activity', 'playbook', 'milestones'];
+  // Safe default for non-admin roles before the role catalog loads.
+  let pages = ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones'];
   try {
     const rolesResp = await API('/roles');
     window._roleCatalog = rolesResp.roles || [];
     const myRole = window._roleCatalog.find(r => r.role_name === currentUser.role);
     if (myRole && myRole.pages) pages = myRole.pages;
   } catch (e) {}
-  const visible = pages === '*' ? NAV_LINKS : NAV_LINKS.filter(l => pages.includes(l.id));
-  document.getElementById('nav-links').innerHTML = visible.map(l =>
-    `<a href="#" onclick="navigate('${l.id}');return false" id="nav-${l.id}">${l.label}</a>`
-  ).join('');
+  const isAll = pages === '*';
+  const html = NAV_SECTIONS.map(section => {
+    const visible = section.items.filter(it => isAll || pages.includes(it.id));
+    if (!visible.length) return '';
+    return `<div class="nav-section-title">${section.title}</div>` +
+      visible.map(it =>
+        `<a href="#" onclick="navigate('${it.id}');return false" id="nav-${it.id}"><span class="nav-icon">${it.icon}</span><span>${it.label}</span></a>`
+      ).join('');
+  }).join('');
+  document.getElementById('nav-links').innerHTML = html;
 }
 
 function navigate(page) {
@@ -275,7 +334,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','my-activity':'My Activity','my-kpis':'My KPIs','my-tasks':'My Tasks',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','my-tasks':'My Tasks','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence',team:'Team Management','decision-engine':'Automation Rules','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -287,84 +346,85 @@ const pages = {
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
 async dashboard() {
-  const data = await API('/dashboard/summary');
-  const rev = data.revenue || {month:0,year:0,monthTarget:0,annualTarget:10000000,projectedTotal:0,dailyRunRate:0};
+  document.getElementById('content').innerHTML = '<p style="color:#888;padding:20px">Loading dashboard…</p>';
+  const [summary, overview, myTasks, teamTasks] = await Promise.all([
+    API('/dashboard/summary').catch(e => ({error:e.message, revenue:{}, recentOrders:[], milestones:[]})),
+    API('/agent/overview').catch(e => ({team:[]})),
+    API('/agent/tasks/my').catch(e => ({tasks:[]})),
+    API('/agent/tasks/team').catch(e => ({tasks:[]})),
+  ]);
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const rev = (summary && summary.revenue) || {month:0,year:0,monthTarget:0,annualTarget:10000000,projectedTotal:0,dailyRunRate:0};
   const p = pct(rev.month, rev.monthTarget);
   const yp = pct(rev.year, rev.annualTarget);
-  const pColor = p >= 80 ? 'green' : p >= 50 ? 'amber' : 'red';
 
-  document.getElementById('ontrack-badge').innerHTML = data.onTrack
-    ? '<span class="badge badge-green">On Track</span>'
-    : '<span class="badge badge-red">Behind Target</span>';
+  // Top-bar revenue indicator (replaces the old On Track / Behind Target badge).
+  const rsColor = p >= 80 ? '#1D9E75' : p >= 50 ? '#EF9F27' : '#dc2626';
+  const rsEl = document.getElementById('revenue-status');
+  if (rsEl) rsEl.innerHTML =
+    '<span class="rs-wrap"><span style="font-weight:600;color:var(--text-strong)">' + fmt(rev.month) + '</span>' +
+    '<span class="rs-bar"><span class="rs-fill" style="width:' + Math.min(100, p) + '%;background:' + rsColor + '"></span></span>' +
+    '<span>' + p + '% of month</span></span>';
 
-  const html = `
-    ${currentUser.role === 'admin' ? `
-    <div class="card" style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
-      <div>
-        <div style="font-size:14px;font-weight:600;color:var(--navy)">AI Goal Cascade</div>
-        <div style="font-size:12px;color:var(--gray);margin-top:4px">Recalculate quarterly → monthly → weekly KPIs for every active team member from current annual targets.</div>
-      </div>
-      <div style="text-align:right">
-        <button class="btn btn-teal" onclick="runGoalCascade()">Run AI Goal Cascade</button>
-        <div id="cascade-result" style="margin-top:6px;font-size:11px;color:var(--gray);max-width:320px"></div>
-      </div>
-    </div>` : ''}
-    <div class="metric-grid">
-      <div class="metric ${pColor}"><div class="label">This month revenue</div><div class="value">${fmt(rev.month)}</div><div class="sub">target ${fmt(rev.monthTarget)} · ${p}%</div></div>
-      <div class="metric"><div class="label">Year-to-date revenue</div><div class="value">${fmt(rev.year)}</div><div class="sub">${yp}% of $10M target</div></div>
-      <div class="metric"><div class="label">Projected year-end</div><div class="value" style="color:${rev.projectedTotal >= rev.annualTarget ? 'var(--success)' : 'var(--danger)'}">${fmt(rev.projectedTotal)}</div><div class="sub">at current run rate</div></div>
-      <div class="metric"><div class="label">Daily run rate</div><div class="value">${fmt(rev.dailyRunRate)}</div><div class="sub">need $33K+/day for target</div></div>
+  const teamArr = (overview && overview.team) || [];
+  const teamScore = teamArr.length ? Math.round(teamArr.reduce((s,m)=>s+(m.score||0),0)/teamArr.length) : 0;
+  const teamSub = teamScore >= 75 ? 'on track' : teamScore >= 60 ? 'needs attention' : teamScore > 0 ? 'critical' : 'no scores yet';
+  const teamColor = teamScore >= 75 ? '#1D9E75' : teamScore >= 60 ? '#EF9F27' : teamScore > 0 ? '#dc2626' : null;
+  const openTaskCount = (teamTasks && teamTasks.tasks ? teamTasks.tasks.filter(t => t.status !== 'completed').length : 0);
+  const priority = (myTasks && myTasks.tasks ? myTasks.tasks.filter(t => t.status !== 'completed') : []).slice(0, 5);
+  const activeSeq = (summary && summary.activeSequences != null) ? summary.activeSequences : '—';
+
+  const metric = (label, value, sub, accent) =>
+    '<div class="metric"' + (accent ? ' style="border-left:3px solid ' + accent + '"' : '') + '>' +
+      '<div class="label text-label">' + label + '</div>' +
+      '<div class="value">' + value + '</div>' +
+      '<div class="sub">' + (sub || '') + '</div>' +
+    '</div>';
+  const priBadge = pr => pr === 'HIGH' ? '<span class="badge badge-red">HIGH</span>'
+    : pr === 'LOW' ? '<span class="badge badge-gray">LOW</span>'
+    : '<span class="badge badge-blue">MEDIUM</span>';
+
+  document.getElementById('content').innerHTML = `
+    <div class="metric-grid" style="grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:14px">
+      ${metric('This Month Revenue', fmt(rev.month), 'target ' + fmt(rev.monthTarget) + ' · ' + p + '%', rsColor)}
+      ${metric('Year-to-Date', fmt(rev.year), yp + '% of $10M annual target')}
+      ${metric('Daily Run Rate', fmt(rev.dailyRunRate), 'recent average')}
     </div>
-
+    <div class="metric-grid" style="grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:20px">
+      ${metric('Team Score', teamScore || '—', teamSub, teamColor)}
+      ${metric('Active Sequences', activeSeq, 'Apollo cadences')}
+      ${metric('Open Tasks', openTaskCount, 'across the team today')}
+    </div>
+    <div class="card">
+      <div class="card-title text-section">Today's Priority Actions</div>
+      ${priority.length ? priority.map(t => `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border);gap:12px">
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:600;color:var(--text-strong)">${esc(t.task_title)}</div>
+          ${t.source_kpi ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">KPI: ${esc(t.source_kpi)}${t.agent_name ? ' · ' + esc(t.agent_name) : ''}</div>` : ''}
+        </div>
+        ${priBadge(t.priority)}
+      </div>`).join('') : '<div style="font-size:13px;color:var(--text-muted)">No open tasks for today — visit My Tasks for the full list, or have an admin trigger task generation from Agent Control.</div>'}
+    </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
       <div class="card">
-        <div class="card-title">Annual progress</div>
-        <div style="margin-bottom:6px;font-size:12px;color:var(--gray)">${fmt(rev.year)} of ${fmt(rev.annualTarget)}</div>
-        <div class="progress-wrap"><div class="progress-fill progress-${yp >= 80 ? 'green' : yp >= 50 ? 'amber' : 'red'}" style="width:${Math.min(yp,100)}%"></div></div>
-        <div style="margin-top:16px;position:relative;height:180px"><canvas id="rev-chart"></canvas></div>
-      </div>
-      <div class="card">
-        <div class="card-title">Recent orders</div>
+        <div class="card-title text-section">Recent orders</div>
         <table>
           <tr><th>Date</th><th>Amount</th><th>Type</th><th>Category</th></tr>
-          ${(data.recentOrders||[]).map(o=>`<tr><td>${o.order_date}</td><td>${fmt(o.amount)}</td><td><span class="badge badge-blue">${o.buyer_type||'—'}</span></td><td>${o.product_category||'—'}</td></tr>`).join('')||'<tr><td colspan="4" style="color:#888;text-align:center">No orders yet</td></tr>'}
-        </table>
-      </div>
-    </div>
-
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-      <div class="card">
-        <div class="card-title">Team activity this week</div>
-        <table>
-          <tr><th>Member</th><th>Role</th><th>Metric</th><th>Total</th></tr>
-          ${(data.teamActivity||[]).map(r=>`<tr><td>${r.name}</td><td><span class="badge badge-gray">${r.role}</span></td><td>${r.metric}</td><td><strong>${Math.round(r.total)}</strong></td></tr>`).join('')||'<tr><td colspan="4" style="color:#888;text-align:center">No activity logged yet</td></tr>'}
+          ${(summary.recentOrders || []).map(o => `<tr><td>${o.order_date}</td><td>${fmt(o.amount)}</td><td><span class="badge badge-blue">${o.buyer_type || '—'}</span></td><td>${o.product_category || '—'}</td></tr>`).join('') || '<tr><td colspan="4" style="color:#888;text-align:center">No orders yet</td></tr>'}
         </table>
       </div>
       <div class="card">
-        <div class="card-title">Milestones</div>
-        ${(data.milestones||[]).slice(0,6).map(m=>{
-          const st = {pending:'badge-gray',in_progress:'badge-blue',complete:'badge-green',at_risk:'badge-red'}[m.status]||'badge-gray';
+        <div class="card-title text-section">Milestones</div>
+        ${(summary.milestones || []).slice(0, 6).map(m => {
+          const st = {pending:'badge-gray',in_progress:'badge-blue',complete:'badge-green',at_risk:'badge-red'}[m.status] || 'badge-gray';
           return `<div style="padding:8px 0;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-            <div><div style="font-size:13px;font-weight:600">${m.name.substring(0,40)}${m.name.length>40?'...':''}</div><div style="font-size:11px;color:var(--gray)">${m.target_date}</div></div>
-            <span class="badge ${st}">${m.status.replace('_',' ')}</span>
+            <div><div style="font-size:13px;font-weight:600">${esc(m.name.substring(0, 40))}${m.name.length > 40 ? '…' : ''}</div><div style="font-size:11px;color:var(--text-muted)">${m.target_date}</div></div>
+            <span class="badge ${st}">${m.status.replace('_', ' ')}</span>
           </div>`;
-        }).join('')}
+        }).join('') || '<div style="font-size:13px;color:var(--text-muted)">No milestones.</div>'}
       </div>
     </div>
   `;
-  document.getElementById('content').innerHTML = html;
-
-  // Revenue chart
-  const months = ['May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const targets = [300000,600000,900000,1200000,1500000,1800000,2000000,1700000];
-  new Chart(document.getElementById('rev-chart'), {
-    type:'bar',
-    data:{labels:months,datasets:[
-      {label:'Target',data:targets,backgroundColor:'rgba(27,58,107,.2)',borderColor:'#1B3A6B',borderWidth:1},
-      {label:'Actual',data:targets.map((_,i)=>i===0?rev.month:0),backgroundColor:'rgba(13,115,119,.6)',borderColor:'#0D7377',borderWidth:1}
-    ]},
-    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{ticks:{callback:v=>'$'+(v/1000)+'K'}}}}
-  });
 },
 
 // ── COMMAND CENTER (admin) ────────────────────────────────────────────────────
@@ -429,7 +489,6 @@ async 'command-center'() {
           <tr><td>LinkedIn pipeline</td><td>${ms.linkedin_pipeline_count}</td><td></td></tr>
           <tr><td>Warm leads (7d)</td><td>${ms.warm_leads_count}</td><td></td></tr>
           <tr><td>SKUs added (7d)</td><td>${ms.skus_added_this_week}</td><td></td></tr>
-          <tr><td>GitHub commits (7d)</td><td>${ms.github_commits_this_week}</td><td></td></tr>
         </table>`
         : `<div style="color:var(--gray);font-size:13px">No snapshot yet — midnight UTC cron writes the first row.${metrics && metrics.note ? ' ' + metrics.note : ''}</div>`}
     </div>`;
@@ -750,34 +809,6 @@ async revenue() {
   `;
 },
 
-// ── GITHUB ────────────────────────────────────────────────────────────────────
-async github() {
-  const data = await API('/dashboard/summary');
-  const stats = data.githubStats || [];
-  document.getElementById('content').innerHTML = `
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-        <div class="card-title" style="margin:0">GitHub activity (last 7 days)</div>
-        <button class="btn btn-outline btn-sm" onclick="syncGH()">Sync GitHub now</button>
-      </div>
-      <div id="gh-msg"></div>
-      <table>
-        <tr><th>Developer</th><th>Date</th><th>Commits</th><th>PRs opened</th><th>PRs merged</th></tr>
-        ${stats.map(s=>`<tr><td><strong>${s.name}</strong><br><span style="font-size:11px;color:#888">@${s.github_username}</span></td><td>${s.stat_date}</td><td>${s.commits}</td><td>${s.prs_opened}</td><td><strong style="color:var(--success)">${s.prs_merged}</strong></td></tr>`).join('')||'<tr><td colspan="5" style="text-align:center;color:#888">No GitHub data yet. Add GitHub usernames to dev team members, then sync.</td></tr>'}
-      </table>
-    </div>
-    <div class="card" style="background:#f8f9fa">
-      <div class="card-title">Setup instructions</div>
-      <ol style="padding-left:20px;line-height:2;font-size:13px;color:#444">
-        <li>Go to <strong>Settings → Team</strong>, edit each developer and add their GitHub username</li>
-        <li>Make sure your <code>.env</code> file has a valid <code>GITHUB_TOKEN</code> (read:org, repo scopes)</li>
-        <li>Click "Sync GitHub now" — stats populate for yesterday and today</li>
-        <li>Automatic daily sync runs at 8 AM every morning</li>
-      </ol>
-    </div>
-  `;
-},
-
 // ── MILESTONES ────────────────────────────────────────────────────────────────
 async milestones() {
   const ms = await API('/milestones');
@@ -821,7 +852,7 @@ async 'ai-insights'() {
       <div class="card-title">About AI insights</div>
       <p style="font-size:13px;line-height:1.8;color:#444">
         PlaybookOS uses Claude (Anthropic) to analyze your team's weekly activity, compare it against revenue targets, and generate concrete recommendations.<br><br>
-        <strong>What it analyzes:</strong> Revenue vs. target, team activity logs, GitHub commits and PRs, milestone status, hiring triggers.<br><br>
+        <strong>What it analyzes:</strong> Revenue vs. target, team activity logs, milestone status, hiring triggers.<br><br>
         <strong>Auto-schedule:</strong> Full analysis runs every Monday at 9 AM and is emailed to the admin account.<br><br>
         <strong>Trigger alerts:</strong> When revenue crosses $100K, $500K/month, or $1M/month thresholds, email triggers fire automatically with specific action items.
       </p>
@@ -873,7 +904,6 @@ pm2 startup</pre>
       <table>
         <tr><th>Variable</th><th>Purpose</th><th>Where to get it</th></tr>
         <tr><td><code>ANTHROPIC_API_KEY</code></td><td>AI analysis (Claude)</td><td>console.anthropic.com</td></tr>
-        <tr><td><code>GITHUB_TOKEN</code></td><td>GitHub activity sync</td><td>github.com/settings/tokens</td></tr>
         <tr><td><code>SMTP_HOST / SMTP_PASS</code></td><td>Email invites & alerts</td><td>Gmail App Password</td></tr>
         <tr><td><code>JWT_SECRET</code></td><td>Login security</td><td>Generate: openssl rand -hex 32</td></tr>
         <tr><td><code>ADMIN_EMAIL</code></td><td>Your admin login</td><td>naresh@abiozen.com</td></tr>
@@ -995,13 +1025,6 @@ function showInviteModal() {
       .map(r => `<option value="${r.role_name}">${r.display_name}${r.custom ? ' (custom)' : ''}</option>`)
       .join('');
   }
-}
-
-async function syncGH() {
-  document.getElementById('gh-msg').innerHTML = '<div style="color:#888">Syncing...</div>';
-  const res = await API('/github/sync',{method:'POST',body:JSON.stringify({date:today()})});
-  document.getElementById('gh-msg').innerHTML = `<div class="success-msg">Synced ${res.synced} developers for ${res.date}</div>`;
-  setTimeout(()=>pages.github(), 2000);
 }
 
 async function runAnalysis() {
@@ -1218,7 +1241,7 @@ async function addSKU() {
 // Phase 2 — wire pages into navigate system
 Object.assign(pages, {
   'decision-engine': function() {
-    document.getElementById('page-title').textContent = 'AI Decision Engine';
+    document.getElementById('page-title').textContent = 'Automation Rules';
     const el = document.getElementById('section-decision-engine');
     if (el) { document.getElementById('content').innerHTML = ''; el.style.display='block'; document.getElementById('content').appendChild(el); loadDecisionRules(); }
   },
@@ -1647,7 +1670,11 @@ if(typeof pages !== 'undefined') {
     const approvals = (appr && appr.approvals) || [];
     const sec3 = `<div class="card">
       <div class="card-title">Approval Queue — ${approvals.length} pending</div>
-      <div style="margin-bottom:8px"><button onclick="agentGenerate()" style="background:#1B3A6B;color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer">Run agent task generation</button></div>
+      <div style="margin-bottom:6px;display:flex;gap:8px;flex-wrap:wrap">
+        <button onclick="agentGenerate()" class="btn-primary" style="padding:6px 14px;font-size:12px">Run agent task generation</button>
+        <button onclick="runGoalCascade()" class="btn-secondary" style="padding:6px 14px;font-size:12px">Run AI Goal Cascade</button>
+      </div>
+      <div id="cascade-result" style="font-size:11px;color:var(--text-muted);margin-bottom:8px;max-width:520px"></div>
       ${approvals.length ? approvals.map(a=>{
         const p = a.action_payload || {};
         return `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin:6px 0">
@@ -2274,22 +2301,5 @@ if(typeof pages !== 'undefined') {
   pages['s2-sequence'] = function() { renderSequencePage('s2'); };
   pages['s3-sequence'] = function() { renderSequencePage('s3'); };
   pages['s4-sequence'] = function() { renderSequencePage('s4'); };
-}
-</script>
-<script>
-async function editGitHub(userId, userName, currentGH) {
-  const newGH = prompt(`Enter GitHub username for ${userName}:`, currentGH || '');
-  if (newGH === null) return;
-  try {
-    const res = await fetch('/api/users/profile', {
-      method: 'PUT',
-      headers: {'Authorization':'Bearer '+localStorage.getItem('pbo_token'), 'Content-Type':'application/json'},
-      body: JSON.stringify({github_username: newGH, user_id: userId})
-    });
-    const data = await res.json();
-    if (data.error) { alert('Error: '+data.error); return; }
-    alert(`✅ GitHub username updated for ${userName}: @${newGH}`);
-    navigate('team');
-  } catch(e) { alert('Error: '+e.message); }
 }
 </script>
