@@ -10,7 +10,7 @@ const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults } = require('../lib/agents/seo-agent');
-const { syncAlgoliaSearchData } = require('../lib/agents/growth-agent');
+const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
 const router = express.Router();
@@ -770,7 +770,23 @@ router.get('/seo/gaps', authMiddleware, requireTier('intelligence'), async (req,
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Manual trigger — runs the content-gap analysis on demand and returns it.
+router.post('/seo/gaps', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await identifyContentGaps();
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/seo/no-results', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const result = await trackAlgoliaNoResults();
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual trigger — runs the Algolia no-result-search analysis on demand.
+router.post('/seo/no-results', authMiddleware, adminOnly, async (req, res) => {
   try {
     const result = await trackAlgoliaNoResults();
     res.json(result);
@@ -905,6 +921,16 @@ router.get('/seo/content-queue', authMiddleware, requireTier('intelligence'), as
 
     res.json({ count: queue.length, algolia_priority: Object.keys(volumes).length > 0, queue });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manual trigger — runs the full growth-agent analysis (Algolia search data +
+// GSC + Claude recommendations), stores it, and returns the result. May take
+// 10-30s because of the Claude call.
+router.post('/growth/analyze', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await generateSEORecommendations();
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/growth/intelligence', authMiddleware, requireTier('intelligence'), async (req, res) => {
