@@ -237,6 +237,7 @@ const NAV_LINKS = [
   {id:'seo-intelligence',label:'SEO Intelligence'},
   {id:'seo-content',label:'SEO Content'},
   {id:'my-activity',label:'My Activity'},
+  {id:'my-kpis',label:'My KPIs'},
   {id:'playbook',label:'Playbook'},
   {id:'team',label:'Team'},
   {id:'revenue',label:'Revenue & Orders'},
@@ -272,7 +273,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','my-activity':'My Activity',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','my-activity':'My Activity','my-kpis':'My KPIs',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -1451,6 +1452,57 @@ if(typeof pages !== 'undefined') {
         </details>
       </div>`).join('');
     c.innerHTML = head + cards;
+  };
+  pages['my-kpis'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading your KPIs…</p>';
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let data;
+    try { data = await API('/goals/my-week'); }
+    catch(e) { c.innerHTML = `<div class="card"><div class="card-title">My KPIs</div><p style="color:#dc2626">Failed to load: ${esc(e.message)}</p></div>`; return; }
+    if (data && data.error) { c.innerHTML = `<div class="card"><div class="card-title">My KPIs</div><p style="color:#dc2626">${esc(data.error)}</p></div>`; return; }
+    const kpis = (data && data.kpis) || [];
+    const statusBadge = s => s==='met' ? '<span class="badge badge-green">met</span>'
+      : s==='missed' ? '<span class="badge badge-red">missed</span>'
+      : '<span class="badge badge-blue">in progress</span>';
+    const head = `<div class="card">
+      <div class="card-title">My KPIs — week of ${esc(data.week_start)||'—'}</div>
+      <div style="font-size:13px;color:#718096">Your current-week targets from the goal cascade. ${kpis.length} KPI${kpis.length===1?'':'s'} assigned.</div>
+    </div>`;
+    if (!kpis.length) {
+      c.innerHTML = head + '<div class="card"><p style="color:#718096">No KPIs assigned for this week yet. They are generated from the goal cascade — check back once an admin has run it.</p></div>';
+      return;
+    }
+    const rows = kpis.map(k => {
+      const target = Number(k.kpi_target) || 0;
+      const actual = Number(k.kpi_actual) || 0;
+      const pctv = target > 0 ? Math.min(100, Math.round((actual/target)*100)) : 0;
+      const unit = k.kpi_unit ? ' ' + esc(k.kpi_unit) : '';
+      return `<tr style="border-bottom:1px solid #e2e8f0">
+        <td style="padding:8px">${esc(k.kpi_name)}</td>
+        <td style="padding:8px;text-align:right;font-weight:600">${actual}${unit}</td>
+        <td style="padding:8px;text-align:right">${target}${unit}</td>
+        <td style="padding:8px;min-width:140px">
+          <div style="background:#e2e8f0;border-radius:6px;height:8px;overflow:hidden">
+            <div style="background:${pctv>=100?'#1D9E75':pctv>=50?'#0D7377':'#d97706'};height:8px;width:${pctv}%"></div>
+          </div>
+          <div style="font-size:11px;color:#718096;margin-top:2px">${pctv}%</div>
+        </td>
+        <td style="padding:8px">${statusBadge(k.status)}</td>
+      </tr>`;
+    }).join('');
+    c.innerHTML = head + `<div class="card">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="text-align:left;color:#718096;font-size:11px;text-transform:uppercase;letter-spacing:.04em">
+          <th style="padding:8px">KPI</th>
+          <th style="padding:8px;text-align:right">Actual</th>
+          <th style="padding:8px;text-align:right">Target</th>
+          <th style="padding:8px">Progress</th>
+          <th style="padding:8px">Status</th>
+        </tr>
+        ${rows}
+      </table>
+    </div>`;
   };
   pages['apollo-outreach'] = function() {
     document.getElementById('page-title').textContent = 'Apollo Outreach';
