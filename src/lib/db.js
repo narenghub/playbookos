@@ -329,6 +329,79 @@ async function migrateSchemas() {
       ALTER TABLE linkedin_outreach ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
       ALTER TABLE apollo_sequences ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
       ALTER TABLE skus             ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
+      -- AI Agent System — Layer 1 foundation + Layer 3 task/message tables.
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'America/Chicago';
+      CREATE TABLE IF NOT EXISTS kpi_hierarchy (
+        id TEXT PRIMARY KEY,
+        level TEXT NOT NULL,
+        parent_id TEXT,
+        name TEXT NOT NULL,
+        metric TEXT,
+        target_value REAL DEFAULT 0,
+        current_value REAL DEFAULT 0,
+        owner_role TEXT,
+        period TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS agent_activity_log (
+        id TEXT PRIMARY KEY,
+        agent_name TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        user_id TEXT,
+        reasoning TEXT,
+        source_kpi TEXT,
+        confidence_score INTEGER,
+        output_summary TEXT,
+        requires_approval INTEGER DEFAULT 0,
+        approved_by TEXT,
+        approved_at TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_agent_activity_created ON agent_activity_log (created_at DESC);
+      CREATE TABLE IF NOT EXISTS approval_queue (
+        id TEXT PRIMARY KEY,
+        agent_name TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        action_payload TEXT,
+        requested_for_user_id TEXT,
+        status TEXT DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected')),
+        priority TEXT DEFAULT 'MEDIUM',
+        created_at TEXT DEFAULT NOW(),
+        reviewed_by TEXT,
+        reviewed_at TEXT,
+        notes TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_approval_queue_status ON approval_queue (status, created_at DESC);
+      CREATE TABLE IF NOT EXISTS daily_tasks (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        task_date TEXT NOT NULL,
+        task_title TEXT NOT NULL,
+        task_description TEXT,
+        priority TEXT DEFAULT 'MEDIUM' CHECK (priority IN ('HIGH','MEDIUM','LOW')),
+        status TEXT DEFAULT 'pending' CHECK (status IN ('pending','in_progress','completed')),
+        source_kpi TEXT,
+        agent_name TEXT,
+        reasoning TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_daily_tasks_user_date ON daily_tasks (user_id, task_date);
+      CREATE TABLE IF NOT EXISTS agent_messages (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        message_type TEXT,
+        content TEXT,
+        channel TEXT DEFAULT 'email',
+        sent_at TEXT DEFAULT NOW(),
+        opened_at TEXT
+      );
+      INSERT INTO kpi_hierarchy (id, level, parent_id, name, metric, target_value, owner_role, period) VALUES
+        ('kpi-vision','vision',NULL,'$10M Revenue by Dec 31, 2026','revenue',10000000,'super_admin','2026'),
+        ('kpi-sg-sales','strategic','kpi-vision','Sales — close $10M in confirmed orders','revenue',10000000,'sales_director','2026'),
+        ('kpi-sg-procurement','strategic','kpi-vision','Procurement — 3,500 active SKUs sourced','skus_sourced',3500,'procurement_director','2026'),
+        ('kpi-sg-marketing','strategic','kpi-vision','Marketing & SEO — organic demand engine','organic_sessions',50000,'seo_specialist','2026'),
+        ('kpi-sg-product','strategic','kpi-vision','Product — marketplace & RFQ platform','features_deployed',40,'dev_team','2026')
+      ON CONFLICT (id) DO NOTHING;
       -- Legacy role migration — remap the pre-enterprise taxonomy onto the new
       -- roles. Idempotent: after the first run no rows match the old names.
       UPDATE users SET role='dev_team'        WHERE role='dev';

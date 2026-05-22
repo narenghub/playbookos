@@ -12,6 +12,7 @@ const { syncAlgoliaSearchData, generateSEORecommendations } = require('./src/lib
 const { trackKeywordRankings, generateSEOTasksForTeam, trackAlgoliaNoResults } = require('./src/lib/agents/seo-agent');
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/lib/agents/goal-engine');
 const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
+const { runMorningBriefing } = require('./src/lib/agents/orchestrator');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -201,6 +202,47 @@ cron.schedule('0 18 * * *', async () => {
     console.error('[CRON] Goal divergence check error:', e.message);
   }
 });
+
+// ── AI Agent System crons (timezone: America/Chicago / CST) ───────────────────
+// The orchestrator routes each segment to its specialized agents at the local
+// time that matches that team's morning.
+const CST = { timezone: 'America/Chicago' };
+
+// 10:30pm CST — procurement team morning briefing (9am IST next day)
+cron.schedule('30 22 * * *', async () => {
+  console.log('[CRON] Procurement IST briefing starting...');
+  try {
+    const r = await runMorningBriefing({ segment: 'procurement_ist' });
+    console.log(`[CRON] Procurement IST briefing done — ran: ${r.ran.join(', ') || 'none'}`);
+  } catch (e) { console.error('[CRON] Procurement IST briefing error:', e.message); }
+}, CST);
+
+// 1:30am CST — dev + SEO team morning briefing (1pm IST)
+cron.schedule('30 1 * * *', async () => {
+  console.log('[CRON] Dev/SEO IST briefing starting...');
+  try {
+    const r = await runMorningBriefing({ segment: 'dev_seo_ist' });
+    console.log(`[CRON] Dev/SEO IST briefing done — ran: ${r.ran.join(', ') || 'none'}`);
+  } catch (e) { console.error('[CRON] Dev/SEO IST briefing error:', e.message); }
+}, CST);
+
+// 7:00am CST — CEO briefing (CEO only)
+cron.schedule('0 7 * * *', async () => {
+  console.log('[CRON] CEO briefing starting...');
+  try {
+    const r = await runMorningBriefing({ segment: 'ceo' });
+    console.log(`[CRON] CEO briefing done — ran: ${r.ran.join(', ') || 'none'}`);
+  } catch (e) { console.error('[CRON] CEO briefing error:', e.message); }
+}, CST);
+
+// 8:00am CST — US team briefing + agent task assignment (HR review on Mondays)
+cron.schedule('0 8 * * *', async () => {
+  console.log('[CRON] US team briefing starting...');
+  try {
+    const r = await runMorningBriefing({ segment: 'us_team' });
+    console.log(`[CRON] US team briefing done — ran: ${r.ran.join(', ') || 'none'}`);
+  } catch (e) { console.error('[CRON] US team briefing error:', e.message); }
+}, CST);
 
 app.listen(PORT, () => {
   console.log(`

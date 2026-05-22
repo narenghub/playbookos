@@ -316,6 +316,48 @@ DATABASE_URL=... node scripts/test-crons.js          # dry-run, no side effects
 DATABASE_URL=... node scripts/test-crons.js --live   # real run (sends email, inserts ai_analyses, etc.)
 ```
 
+## AI Agent System
+
+A three-layer agent architecture that decomposes the $10M vision into daily tasks,
+runs specialized agents, and keeps a human in the loop for high-impact actions.
+
+**Layer 1 — Foundation.** `src/lib/kpi-engine.js` decomposes Vision → Strategic
+Goals → Team KPIs → Daily Tasks (`getKPIHierarchy`), scores users 0–100
+(`calculateKPIScore`), finds the most-behind KPIs (`getBottlenecks`), and maps the
+procurement → sales → marketplace → SEO chain (`getCrossTeamDependencies`).
+`src/lib/agent-core.js` provides shared helpers: every agent action is written to
+`agent_activity_log` (with reasoning, source KPI, and a 0–100 confidence score)
+before it executes, and high-impact actions — procurement spend over $1,000,
+outreach to a new segment, hiring/escalation — are routed to `approval_queue`
+instead of auto-executing.
+
+**Layer 2 — Specialized agents.**
+
+| Agent | File | Schedule | Output |
+|---|---|---|---|
+| CEO | `agents/ceo-agent.js` | 7:00am CST | Executive summary + 5 revenue-ranked actions |
+| Procurement | `agents/procurement-agent.js` | 10:30pm CST | 5 sourcing tasks → approval queue |
+| Sales | `agents/sales-agent.js` | 8:00am CST | Call list + follow-up tasks for sales reps |
+| HR | `agents/hr-agent.js` | Monday 8am CST | Weekly team-health report + recommendations |
+
+`agents/orchestrator.js` `runMorningBriefing({ segment })` routes each segment to
+its agents at the local time matching that team's morning, using the new
+`users.timezone` column. Segments: `ceo`, `procurement_ist`, `dev_seo_ist`,
+`us_team`, or `all`.
+
+**Layer 3 — Command Center.** An admin-only **Agent Control** page (CEO mission
+control, agent activity feed, approval queue, team health, cross-team
+dependencies) and a **My Tasks** page on every role showing today's AI-assigned
+tasks with the source KPI behind each.
+
+**Endpoints:** `GET /api/agent/tasks/my`, `PUT /api/agent/tasks/:id`,
+`GET /api/agent/tasks/team`, `POST /api/agent/tasks/generate`,
+`GET /api/agent/approvals`, `PUT /api/agent/approvals/:id`,
+`GET /api/agent/activity`, `GET /api/agent/dependencies`, `GET /api/agent/overview`.
+
+The agents reuse `ANTHROPIC_API_KEY` (reasoning) and `RESEND_API_KEY` (briefing
+emails) — no new environment variables are required.
+
 ## Deploy to Railway
 
 Production lives in Railway project `meticulous-laughter`, service `playbookos`, linked to a `Postgres` service. `DATABASE_URL` autoinjects via reference variable.

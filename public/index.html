@@ -234,10 +234,12 @@ async function showApp() {
 const NAV_LINKS = [
   {id:'dashboard',label:'Dashboard'},
   {id:'command-center',label:'Command Center'},
+  {id:'agent-control',label:'Agent Control'},
   {id:'seo-intelligence',label:'SEO Intelligence'},
   {id:'seo-content',label:'SEO Content'},
   {id:'my-activity',label:'My Activity'},
   {id:'my-kpis',label:'My KPIs'},
+  {id:'my-tasks',label:'My Tasks'},
   {id:'playbook',label:'Playbook'},
   {id:'team',label:'Team'},
   {id:'revenue',label:'Revenue & Orders'},
@@ -273,7 +275,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','my-activity':'My Activity','my-kpis':'My KPIs',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','my-activity':'My Activity','my-kpis':'My KPIs','my-tasks':'My Tasks',playbook:'Playbook',team:'Team Management',revenue:'Revenue & Orders',github:'GitHub Stats',milestones:'Milestones','ai-insights':'AI Insights',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -1327,6 +1329,49 @@ async function generateSeoContent(name, cas, btn) {
   }
 }
 
+async function updateMyTask(id, status) {
+  try {
+    const res = await API('/agent/tasks/' + id, {method:'PUT', body: JSON.stringify({status})});
+    if (res && res.success) pages['my-tasks']();
+    else alert('Error: ' + ((res && res.error) || 'unknown'));
+  } catch(e) { alert('Error: ' + e.message); }
+}
+function renderAgentFeed() {
+  const el = document.getElementById('agent-feed');
+  if (!el) return;
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const filter = (document.getElementById('agent-filter') || {}).value || '';
+  const today = new Date().toISOString().slice(0,10);
+  let items = (window._agentActivity || []).filter(a => String(a.created_at||'').slice(0,10) === today);
+  if (filter) items = items.filter(a => a.agent_name === filter);
+  if (!items.length) { el.innerHTML = '<div style="font-size:12px;color:#718096;margin-top:8px">No agent activity recorded today.</div>'; return; }
+  el.innerHTML = items.slice(0,60).map(a => `<div style="border-top:1px solid #e2e8f0;padding:7px 0">
+    <div style="display:flex;justify-content:space-between">
+      <div style="font-size:12px;font-weight:700">${esc(a.agent_name)} <span style="font-weight:400;color:#718096">· ${esc(a.action_type)}</span></div>
+      ${a.confidence_score!=null?`<span class="badge badge-${a.confidence_score>=75?'green':a.confidence_score>=50?'blue':'gray'}">${a.confidence_score}%</span>`:''}
+    </div>
+    <div style="font-size:11px;color:#4a5568;margin-top:2px">${esc(a.reasoning||a.output_summary||'')}</div>
+    ${a.source_kpi?`<div style="font-size:10px;color:#a0aec0">KPI: ${esc(a.source_kpi)}${a.requires_approval?' · requires approval':''}</div>`:''}
+  </div>`).join('');
+}
+async function agentApprove(id, decision) {
+  if (decision === 'rejected' && !confirm('Reject this agent action?')) return;
+  try {
+    const res = await API('/agent/approvals/' + id, {method:'PUT', body: JSON.stringify({decision})});
+    if (res && res.success) pages['agent-control']();
+    else alert('Error: ' + ((res && res.error) || 'unknown'));
+  } catch(e) { alert('Error: ' + e.message); }
+}
+async function agentGenerate() {
+  if (!confirm('Run agent task generation now? This calls Claude and may take 30-60 seconds.')) return;
+  try {
+    const res = await API('/agent/tasks/generate', {method:'POST', body: JSON.stringify({segment:'all'})});
+    if (res && res.error) { alert('Error: ' + res.error); return; }
+    alert('Agent task generation complete. Ran: ' + ((res.ran||[]).join(', ') || 'nothing'));
+    pages['agent-control']();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
 async function findBuyers() {
   const molecule = document.getElementById('apollo-molecule')?.value;
   const segment = document.getElementById('apollo-segment')?.value;
@@ -1503,6 +1548,151 @@ if(typeof pages !== 'undefined') {
         ${rows}
       </table>
     </div>`;
+  };
+  pages['my-tasks'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading your tasks…</p>';
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let data;
+    try { data = await API('/agent/tasks/my'); }
+    catch(e) { c.innerHTML = `<div class="card"><div class="card-title">My Tasks</div><p style="color:#dc2626">Failed to load: ${esc(e.message)}</p></div>`; return; }
+    if (data && data.error) { c.innerHTML = `<div class="card"><div class="card-title">My Tasks</div><p style="color:#dc2626">${esc(data.error)}</p></div>`; return; }
+    const tasks = (data && data.tasks) || [];
+    const done = data.completed || 0, total = data.total || 0;
+    const pctv = total > 0 ? Math.round(done / total * 100) : 0;
+    const priBadge = p => p==='HIGH' ? '<span class="badge badge-red">HIGH</span>'
+      : p==='LOW' ? '<span class="badge badge-gray">LOW</span>'
+      : '<span class="badge badge-blue">MEDIUM</span>';
+    const head = `<div class="card">
+      <div class="card-title">My Tasks — ${esc(data.date)}</div>
+      <div style="background:#e2e8f0;border-radius:6px;height:10px;overflow:hidden;margin:8px 0">
+        <div style="background:#1D9E75;height:10px;width:${pctv}%"></div></div>
+      <div style="font-size:13px;color:#718096">${done} of ${total} task${total===1?'':'s'} completed today (${pctv}%)</div>
+    </div>`;
+    if (!tasks.length) {
+      c.innerHTML = head + '<div class="card"><p style="color:#718096">No tasks assigned for today yet. The AI agents assign tasks each morning — an admin can also trigger generation from Agent Control.</p></div>';
+      return;
+    }
+    const cards = tasks.map(t => {
+      const sc = t.status==='completed' ? '#1D9E75' : t.status==='in_progress' ? '#0D7377' : '#a0aec0';
+      return `<div class="card" style="border-left:4px solid ${sc}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+          <div>
+            <div style="font-size:14px;font-weight:700;color:#1a202c">${esc(t.task_title)}</div>
+            ${t.task_description ? `<div style="font-size:12px;color:#4a5568;margin-top:3px">${esc(t.task_description)}</div>` : ''}
+          </div>
+          ${priBadge(t.priority)}
+        </div>
+        ${t.source_kpi ? `<div style="font-size:11px;color:#718096;margin-top:6px">Why this task → KPI: <strong>${esc(t.source_kpi)}</strong>${t.agent_name ? ' · assigned by ' + esc(t.agent_name) : ''}</div>` : ''}
+        ${t.reasoning ? `<div style="font-size:11px;color:#a0aec0;margin-top:2px;font-style:italic">${esc(t.reasoning)}</div>` : ''}
+        <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+          <button onclick="updateMyTask('${t.id}','in_progress')" ${t.status==='in_progress'?'disabled':''} style="background:#0D7377;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">In progress</button>
+          <button onclick="updateMyTask('${t.id}','completed')" ${t.status==='completed'?'disabled':''} style="background:#1D9E75;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Mark complete</button>
+          <span style="font-size:11px;color:${sc};text-transform:uppercase">${esc(t.status)}</span>
+        </div>
+      </div>`;
+    }).join('');
+    c.innerHTML = head + cards;
+  };
+  pages['agent-control'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading Agent Control…</p>';
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const fmt = n => '$' + Math.round(Number(n)||0).toLocaleString();
+    const [ov, act, appr, deps] = await Promise.all([
+      API('/agent/overview').catch(e=>({error:e.message})),
+      API('/agent/activity?limit=100').catch(e=>({error:e.message, activity:[]})),
+      API('/agent/approvals').catch(e=>({error:e.message, approvals:[]})),
+      API('/agent/dependencies').catch(e=>({error:e.message, chain:[], blockers:[]})),
+    ]);
+    if (ov && ov.error) {
+      c.innerHTML = `<div class="card"><div class="card-title">Agent Control</div><p style="color:#dc2626">${esc(ov.error)}</p><p style="font-size:12px;color:#718096">This page requires admin access.</p></div>`;
+      return;
+    }
+    window._agentActivity = (act && act.activity) || [];
+    const v = (ov && ov.vision) || {current:0,target:10000000,pct:0};
+    const risks = (ov && ov.risks) || [];
+    const sec1 = `<div class="card">
+      <div class="card-title">CEO Mission Control</div>
+      <div style="background:#e2e8f0;border-radius:6px;height:18px;overflow:hidden;margin:6px 0">
+        <div style="background:#1B3A6B;height:18px;width:${Math.min(100,v.pct)}%"></div></div>
+      <div style="font-size:15px;font-weight:700;color:#1B3A6B">${fmt(v.current)} of ${fmt(v.target)} <span style="color:#718096;font-weight:400">(${v.pct}% to vision)</span></div>
+      <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;flex:1;min-width:120px">
+          <div style="font-size:11px;color:#718096">Days to Dec 31</div>
+          <div style="font-size:22px;font-weight:700;color:#1a202c">${ov.days_remaining}</div></div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;flex:1;min-width:120px">
+          <div style="font-size:11px;color:#718096">Daily run rate needed</div>
+          <div style="font-size:22px;font-weight:700;color:#1a202c">${fmt(ov.daily_run_rate_needed)}</div></div>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px;flex:1;min-width:120px">
+          <div style="font-size:11px;color:#718096">Daily run rate actual (7d)</div>
+          <div style="font-size:22px;font-weight:700;color:${ov.daily_run_rate_actual>=ov.daily_run_rate_needed?'#1D9E75':'#E24B4A'}">${fmt(ov.daily_run_rate_actual)}</div></div>
+      </div>
+      <div style="font-size:12px;font-weight:700;color:#E24B4A;margin-top:14px">TOP 3 RISKS</div>
+      ${risks.length ? risks.map(r=>`<div style="font-size:12px;margin:4px 0">
+        <span class="badge badge-${r.pct<25?'red':r.pct<60?'blue':'gray'}">${r.pct}%</span>
+        ${esc(r.kpi)} — ${r.actual}/${r.target}</div>`).join('') : '<div style="font-size:12px;color:#1D9E75">No KPIs critically behind.</div>'}
+    </div>`;
+    const agents = [...new Set(window._agentActivity.map(a=>a.agent_name))];
+    const sec2 = `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div class="card-title" style="margin:0">Agent Activity Feed</div>
+        <select id="agent-filter" onchange="renderAgentFeed()" style="font-size:12px;padding:4px 8px;border:1px solid #e2e8f0;border-radius:6px">
+          <option value="">All agents</option>
+          ${agents.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('')}
+        </select>
+      </div>
+      <div id="agent-feed"></div>
+    </div>`;
+    const approvals = (appr && appr.approvals) || [];
+    const sec3 = `<div class="card">
+      <div class="card-title">Approval Queue — ${approvals.length} pending</div>
+      <div style="margin-bottom:8px"><button onclick="agentGenerate()" style="background:#1B3A6B;color:#fff;border:none;padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer">Run agent task generation</button></div>
+      ${approvals.length ? approvals.map(a=>{
+        const p = a.action_payload || {};
+        return `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin:6px 0">
+          <div style="display:flex;justify-content:space-between">
+            <div style="font-size:13px;font-weight:700">${esc(a.action_type)} <span style="font-weight:400;color:#718096">· ${esc(a.agent_name)}</span></div>
+            <span class="badge badge-${a.priority==='HIGH'?'red':a.priority==='LOW'?'gray':'blue'}">${esc(a.priority)}</span>
+          </div>
+          <div style="font-size:12px;color:#4a5568;margin-top:4px">${esc(p.task||p.molecule||p.summary||p.user||'')}</div>
+          ${(p.rationale||p.reasoning)?`<div style="font-size:11px;color:#718096;margin-top:2px">Why: ${esc(p.rationale||p.reasoning)}</div>`:''}
+          ${p.estimated_value?`<div style="font-size:11px;color:#718096">Est. spend: ${fmt(p.estimated_value)}</div>`:''}
+          <div style="margin-top:6px;display:flex;gap:6px">
+            <button onclick="agentApprove('${a.id}','approved')" style="background:#1D9E75;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Approve</button>
+            <button onclick="agentApprove('${a.id}','rejected')" style="background:#E24B4A;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Reject</button>
+          </div>
+        </div>`;
+      }).join('') : '<div style="font-size:12px;color:#718096">No pending approvals.</div>'}
+    </div>`;
+    const team = (ov && ov.team) || [];
+    const dot = s => `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${s==='green'?'#1D9E75':s==='amber'?'#EF9F27':'#E24B4A'}"></span>`;
+    const sec4 = `<div class="card">
+      <div class="card-title">Team Health — ${team.length} member${team.length===1?'':'s'}</div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tr style="text-align:left;color:#718096"><th style="padding:6px">Status</th><th style="padding:6px">Member</th><th style="padding:6px">Role</th><th style="padding:6px;text-align:right">Score</th><th style="padding:6px;text-align:right">Tasks done</th></tr>
+        ${team.map(m=>`<tr style="border-top:1px solid #e2e8f0">
+          <td style="padding:6px">${dot(m.status)}</td>
+          <td style="padding:6px">${esc(m.name)}</td>
+          <td style="padding:6px;color:#718096">${esc(m.role)}</td>
+          <td style="padding:6px;text-align:right;font-weight:700">${m.score}</td>
+          <td style="padding:6px;text-align:right">${m.tasks_completed}/${m.tasks_total}</td></tr>`).join('') || '<tr><td colspan="5" style="padding:6px;color:#718096">No active team members.</td></tr>'}
+      </table>
+    </div>`;
+    const chain = (deps && deps.chain) || [];
+    const blockers = (deps && deps.blockers) || [];
+    const sec5 = `<div class="card">
+      <div class="card-title">Cross-Team Dependencies</div>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        ${chain.map((s,i)=>`${i>0?'<span style="color:#a0aec0">→</span>':''}<span style="background:${s.status==='green'?'#dcfce7':s.status==='amber'?'#fef9c3':'#fee2e2'};color:#1a202c;padding:4px 10px;border-radius:14px;font-size:12px;font-weight:600" title="${esc(s.detail)}">${esc(s.stage)}</span>`).join('')}
+      </div>
+      ${blockers.length ? blockers.map(b=>`<div style="border-left:4px solid ${b.severity==='high'?'#E24B4A':'#EF9F27'};background:#fef2f2;padding:8px 10px;margin:6px 0;border-radius:4px">
+        <div style="font-size:12px;font-weight:700;color:#1a202c">${esc(b.summary)}</div>
+        <div style="font-size:11px;color:#718096">${esc(b.detail)}</div></div>`).join('')
+        : '<div style="font-size:12px;color:#1D9E75">No cross-team blockers detected — the chain is healthy.</div>'}
+    </div>`;
+    c.innerHTML = sec1 + sec2 + sec3 + sec4 + sec5;
+    renderAgentFeed();
   };
   pages['apollo-outreach'] = function() {
     document.getElementById('page-title').textContent = 'Apollo Outreach';

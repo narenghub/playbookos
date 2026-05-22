@@ -280,7 +280,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 2E | `buyer_engagement` event ingestion (shared-secret webhook) | Built | `POST /api/customers/engagement-event`, `ENGAGEMENT_SECRET` env var; molecule_interest column added |
 | 3 | Algolia search analytics integration | Built | `syncAlgoliaSearchData` in `src/lib/agents/growth-agent.js` |
 | 3 | Bloomreach personalization integration | Spec | not yet implemented |
-| 3 | Google Search Console integration | Partial | `fetchGSCData` — accepts a bearer token; needs OAuth refresh in production |
+| 3 | Google Search Console integration | Built | `fetchGSCData` — OAuth 2.0 refresh-token flow (`getGSCAccessToken`); needs `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN` |
 | 3 | Demand-signal feed into Procurement Agent | Spec | not yet wired (Growth Agent stores recommendations but Procurement Agent doesn't read them yet) |
 | 4 | Apollo segment sequences (templates) | Built | `GET /api/sequences/templates`, S1–S4 in `public/index.html` |
 | 4 | Apollo find-buyers + send-outreach | Built | `POST /api/apollo/find-buyers`, `POST /api/apollo/send-outreach` |
@@ -296,6 +296,16 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 6 | "3 going well / 3 at risk / 3 actions" structure | Built | Claude prompt in `briefing-agent.js` enforces this exact structure |
 | 6 | `GET /api/briefing/latest` | Built | `src/api/routes.js` |
 | 6 | Command Center page in admin SPA | Built | `public/index.html` `pages['command-center']`; one-screen view of anomalies, briefing, warm leads, outreach recs, metrics snapshot, weekly KPIs |
+| 7 | KPI Engine — hierarchy, scoring, bottlenecks, cross-team dependencies | Built | `src/lib/kpi-engine.js`; `kpi_hierarchy` table seeded with the $10M vision and strategic goals |
+| 7 | Agent activity log — every action recorded before execution | Built | `agent_activity_log` table, `logAgentActivity` in `src/lib/agent-core.js`, `GET /api/agent/activity` |
+| 7 | Human approval queue for high-impact actions | Built | `approval_queue` table, `enqueueApproval` / `isHighImpact` in `agent-core.js`, `GET` + `PUT /api/agent/approvals` |
+| 7 | CEO Agent — daily executive briefing + 5 revenue-ranked actions | Built | `src/lib/agents/ceo-agent.js`, 7am CST cron |
+| 7 | Procurement Agent — daily sourcing tasks routed to approval queue | Built | `src/lib/agents/procurement-agent.js`, 10:30pm CST cron |
+| 7 | Sales Agent — call list + follow-up task assignment | Built | `src/lib/agents/sales-agent.js`, 8am CST cron |
+| 7 | HR Agent — weekly team-health review + recommendations | Built | `src/lib/agents/hr-agent.js`, Monday 8am CST |
+| 7 | Orchestrator — timezone-routed morning briefing | Built | `src/lib/agents/orchestrator.js` `runMorningBriefing`, 4 CST crons |
+| 7 | `daily_tasks` table + My Tasks page (all roles) | Built | `GET /api/agent/tasks/my`, `PUT /api/agent/tasks/:id`, `GET /api/agent/tasks/team`, `pages['my-tasks']` |
+| 7 | Agent Control command center page (admin) | Built | `public/index.html` `pages['agent-control']`; `GET /api/agent/overview`, `/agent/dependencies` |
 
 ## Appendix B — Cross-layer dependencies
 
@@ -317,5 +327,9 @@ Status of each component as of the date of this commit. Refresh as features ship
 | `0 8 * * 1` | Monday Growth Agent weekly synthesis (Algolia + GSC → Claude) | Layer 2C (built) |
 | `0 18 * * *` | Daily 6pm milestone trigger check | Layer 5 input (built) |
 | `0 18 * * *` | Daily 6pm Performance Agent scoring + coaching | Layer 2D (built) |
+| `30 22 * * *` CST | Procurement team IST briefing | Layer 7 (built) |
+| `30 1 * * *` CST | Dev + SEO team IST briefing | Layer 7 (built) |
+| `0 7 * * *` CST | CEO briefing | Layer 7 (built) |
+| `0 8 * * *` CST | US team briefing + agent task assignment | Layer 7 (built) |
 | continuous | Layer 3 marketplace-intelligence ingestion | Layer 3 (spec) |
 | continuous | Layer 4 outbound sequence orchestration | Layer 4 (partial) |

@@ -11,6 +11,8 @@ const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
+const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
+const { runMorningBriefing } = require('../lib/agents/orchestrator');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
 const router = express.Router();
@@ -1231,5 +1233,191 @@ router.get('/apollo/debug', authMiddleware, requireTier('sales'), async (req, re
     });
     const data = await response.json();
     res.json(data);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── AI Agent System ──────────────────────────────────────────────────────────
+
+// Today's AI-assigned tasks for the logged-in user.
+router.get('/agent/tasks/my', authMiddleware, async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const tasks = (await query(
+      `SELECT * FROM daily_tasks WHERE user_id=$1 AND task_date=$2
+       ORDER BY CASE priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END, created_at`,
+      [req.user.id, date]
+    )).rows;
+    const completed = tasks.filter(t => t.status === 'completed').length;
+    res.json({ date, total: tasks.length, completed, tasks });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update a task's status. Users may only update their own tasks; admins any.
+router.put('/agent/tasks/:id', authMiddleware, async (req, res) => {
+  try {
+    const status = req.body?.status;
+    if (!['pending', 'in_progress', 'completed'].includes(status)) {
+      return res.status(400).json({ error: 'status must be pending, in_progress or completed' });
+    }
+    const task = (await query(`SELECT * FROM daily_tasks WHERE id=$1`, [req.params.id])).rows[0];
+    if (!task) return res.status(404).json({ error: 'task not found' });
+    const isAdmin = ['super_admin', 'admin'].includes(req.user.role);
+    if (task.user_id !== req.user.id && !isAdmin) {
+      return res.status(403).json({ error: 'not your task' });
+    }
+    await query(`UPDATE daily_tasks SET status=$1 WHERE id=$2`, [status, req.params.id]);
+    res.json({ success: true, id: req.params.id, status });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// All team tasks for a date (admin).
+router.get('/agent/tasks/team', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const rows = (await query(
+      `SELECT d.*, u.name AS user_name, u.role AS user_role
+       FROM daily_tasks d JOIN users u ON u.id=d.user_id
+       WHERE d.task_date=$1
+       ORDER BY u.name, CASE d.priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END`,
+      [date]
+    )).rows;
+    res.json({ date, total: rows.length, tasks: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manually trigger agent task generation for a segment (admin).
+router.post('/agent/tasks/generate', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const segment = req.body?.segment || 'all';
+    const result = await runMorningBriefing({ segment });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Approval queue — pending (or filtered by ?status=) actions awaiting review.
+router.get('/agent/approvals', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const status = req.query.status || 'pending';
+    const rows = (await query(
+      `SELECT * FROM approval_queue WHERE status=$1
+       ORDER BY CASE priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END, created_at DESC`,
+      [status]
+    )).rows.map(r => {
+      let payload = {};
+      try { payload = JSON.parse(r.action_payload || '{}'); } catch {}
+      return { ...r, action_payload: payload };
+    });
+    res.json({ status, count: rows.length, approvals: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Approve or reject a queued action. Approving materializes it as a daily task.
+router.put('/agent/approvals/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const decision = req.body?.decision;
+    if (!['approved', 'rejected'].includes(decision)) {
+      return res.status(400).json({ error: "decision must be 'approved' or 'rejected'" });
+    }
+    const appr = (await query(`SELECT * FROM approval_queue WHERE id=$1`, [req.params.id])).rows[0];
+    if (!appr) return res.status(404).json({ error: 'approval not found' });
+    if (appr.status !== 'pending') return res.status(409).json({ error: `already ${appr.status}` });
+
+    await query(
+      `UPDATE approval_queue SET status=$1, reviewed_by=$2, reviewed_at=NOW(), notes=$3 WHERE id=$4`,
+      [decision, req.user.id, req.body?.notes || null, req.params.id]
+    );
+
+    let task_id = null;
+    if (decision === 'approved') {
+      let payload = {};
+      try { payload = JSON.parse(appr.action_payload || '{}'); } catch {}
+      const target = appr.requested_for_user_id || req.user.id;
+      const owner = (await query(`SELECT id FROM users WHERE id=$1`, [target])).rows[0];
+      task_id = crypto.randomUUID();
+      await query(
+        `INSERT INTO daily_tasks
+           (id, user_id, task_date, task_title, task_description, priority, status,
+            source_kpi, agent_name, reasoning, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$8,$9,NOW())`,
+        [task_id, owner ? owner.id : req.user.id, new Date().toISOString().slice(0, 10),
+         payload.task || payload.molecule || appr.action_type,
+         payload.rationale || payload.reasoning || '',
+         appr.priority || 'MEDIUM', appr.action_type, appr.agent_name,
+         'Approved from the agent approval queue.']
+      );
+    }
+    res.json({ success: true, id: req.params.id, decision, task_id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Agent activity log — every recorded agent action (admin).
+router.get('/agent/activity', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    const params = [];
+    let where = '';
+    if (req.query.agent) { params.push(req.query.agent); where = 'WHERE agent_name=$1'; }
+    params.push(limit);
+    const rows = (await query(
+      `SELECT * FROM agent_activity_log ${where} ORDER BY created_at DESC LIMIT $${params.length}`,
+      params
+    )).rows;
+    res.json({ count: rows.length, activity: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Cross-team dependency map (procurement -> sales -> marketplace -> SEO).
+router.get('/agent/dependencies', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    res.json(await getCrossTeamDependencies());
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Mission Control overview — powers the Agent Control page sections 1 & 4.
+router.get('/agent/overview', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const hierarchy = await getKPIHierarchy();
+    const bottlenecks = await getBottlenecks({ limit: 3 });
+    const vision = hierarchy.vision || { current_value: 0, target_value: 10000000, pct: 0 };
+
+    const members = (await query(
+      `SELECT id, name, role FROM users WHERE is_active=1 ORDER BY name`
+    )).rows;
+    const team = [];
+    for (const m of members) {
+      const sc = await calculateKPIScore(m.id, today);
+      const tc = (await query(
+        `SELECT COUNT(*) FILTER (WHERE status='completed')::int done, COUNT(*)::int total
+         FROM daily_tasks WHERE user_id=$1 AND task_date=$2`, [m.id, today]
+      )).rows[0];
+      team.push({
+        id: m.id, name: m.name, role: m.role, score: sc.score,
+        status: sc.score >= 75 ? 'green' : sc.score >= 60 ? 'amber' : 'red',
+        tasks_completed: tc.done, tasks_total: tc.total,
+      });
+    }
+
+    const pendingApprovals = parseInt((await query(
+      `SELECT COUNT(*) c FROM approval_queue WHERE status='pending'`)).rows[0].c, 10);
+    const runRate7d = parseFloat((await query(
+      `SELECT COALESCE(SUM(amount),0)/7.0 v FROM orders WHERE order_date >= (NOW() - INTERVAL '7 days')::date`
+    )).rows[0].v);
+
+    const end = new Date('2026-12-31T23:59:59Z');
+    const daysRemaining = Math.max(0, Math.ceil((end - new Date()) / 86400000));
+    const remaining = Math.max(0, vision.target_value - vision.current_value);
+
+    res.json({
+      generated_at: new Date().toISOString(),
+      vision: { current: vision.current_value, target: vision.target_value, pct: vision.pct },
+      days_remaining: daysRemaining,
+      daily_run_rate_needed: daysRemaining > 0 ? Math.round(remaining / daysRemaining) : remaining,
+      daily_run_rate_actual: Math.round(runRate7d),
+      risks: bottlenecks.bottlenecks,
+      strategic_goals: hierarchy.strategic_goals,
+      team,
+      pending_approvals: pendingApprovals,
+    });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
