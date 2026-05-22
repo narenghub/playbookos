@@ -156,10 +156,15 @@ async function generateSEORecommendations({ dryRun = false } = {}) {
   let claudeText = '[dry-run] Claude SEO recommendations skipped';
   let topMolecules = [];
 
-  if (!dryRun && candidateList.length > 0) {
-    const sample = candidateList.map((c, i) =>
-      `${i + 1}. "${c.query}" — Algolia no-result count: ${c.algolia_no_result_count || 0}, GSC impressions: ${c.gsc_impressions || 0}, GSC clicks: ${c.gsc_clicks || 0}, position: ${(c.gsc_position || 0).toFixed(1)}`
-    ).join('\n');
+  // Run Claude on every real (non-dry) invocation — including when no demand
+  // candidates were captured — so a manual POST /api/growth/analyze always
+  // returns a real Claude response rather than the dry-run placeholder.
+  if (!dryRun) {
+    const sample = candidateList.length
+      ? candidateList.map((c, i) =>
+          `${i + 1}. "${c.query}" — Algolia no-result count: ${c.algolia_no_result_count || 0}, GSC impressions: ${c.gsc_impressions || 0}, GSC clicks: ${c.gsc_clicks || 0}, position: ${(c.gsc_position || 0).toFixed(1)}`
+        ).join('\n')
+      : '(No internal-search or Google Search Console demand signals were captured for this period.)';
     const catalog = skus.slice(0, 30).map(s => s.name).join(', ');
 
     const prompt = `You are the Growth Intelligence agent for Abiozen LLC, a US-based pharmaceutical API distribution company targeting $10M revenue by Dec 31, 2026.
