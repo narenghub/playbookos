@@ -214,8 +214,7 @@ async function generatePostImage(molecule_name, post_type) {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'dall-e-3', prompt, n: 1, size: '1024x1024',
-        quality: 'standard', response_format: 'url',
+        model: 'dall-e-3', prompt, n: 1, size: '1024x1024', quality: 'standard',
       }),
     });
     if (!res.ok) {
