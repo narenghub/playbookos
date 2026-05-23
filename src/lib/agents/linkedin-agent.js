@@ -266,17 +266,34 @@ async function getMemberURN(token) {
 }
 
 // Push a queued post to LinkedIn. The row must be approved.
-// Posts as the authenticated member (urn:li:person:<sub>) for now, since the
-// w_organization_social scope required for company-page posts is not yet
-// granted. LINKEDIN_PERSON_ID overrides the userinfo lookup when set.
+// Author URN switches on LINKEDIN_POST_AS_ORG:
+//   true  -> urn:li:organization:<LINKEDIN_ORGANIZATION_ID> (needs the
+//            w_organization_social scope; flip this once the LinkedIn
+//            Community Management API approval lands)
+//   false -> urn:li:person:<sub> via getMemberURN (needs w_member_social;
+//            this is the default until org scope is available)
 async function publishPost(queueRow) {
   const token = process.env.LINKEDIN_ACCESS_TOKEN;
   if (!token) {
     return { skipped: true, reason: 'LINKEDIN_ACCESS_TOKEN is not set' };
   }
-  const member = await getMemberURN(token);
-  if (member.error) return { error: member.error };
-  const author = member.urn;
+  let author;
+  if (String(process.env.LINKEDIN_POST_AS_ORG).toLowerCase() === 'true') {
+    const DEFAULT_ORG = '106395356';
+    const orgRaw = (process.env.LINKEDIN_ORGANIZATION_ID || '').trim();
+    let orgId;
+    if (!orgRaw) orgId = DEFAULT_ORG;
+    else if (/^urn:li:organization:/.test(orgRaw)) orgId = orgRaw.replace(/^urn:li:organization:/, '');
+    else if (/^urn:li:[^:]+:/.test(orgRaw)) {
+      console.warn('[linkedin-agent] LINKEDIN_ORGANIZATION_ID is a non-organization URN (' + orgRaw + '); falling back to ' + DEFAULT_ORG);
+      orgId = DEFAULT_ORG;
+    } else orgId = orgRaw;
+    author = `urn:li:organization:${orgId}`;
+  } else {
+    const member = await getMemberURN(token);
+    if (member.error) return { error: member.error };
+    author = member.urn;
+  }
   const text = clampPost(queueRow.full_post || '');
   const body = {
     author,
