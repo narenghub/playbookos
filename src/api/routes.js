@@ -13,7 +13,7 @@ const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = req
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing } = require('../lib/agents/orchestrator');
-const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
+const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
 const router = express.Router();
@@ -1548,6 +1548,31 @@ router.post('/linkedin/generate-weekly', authMiddleware, adminOnly, async (req, 
   try {
     const result = await scheduleLinkedInContent({ dryRun: !!req.body?.dryRun });
     res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// PubChem 2D structure URL for a CAS number or chemical name — no external
+// API key required (PubChem PUG REST is public). Intelligence-tier read.
+router.post('/linkedin/get-structure/:cas_number', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  const url = getMoleculeStructureImage(req.params.cas_number);
+  if (!url) return res.status(400).json({ error: 'cas_number is required' });
+  res.json({ cas_number: req.params.cas_number, structure_image_url: url });
+});
+
+// Regenerate the DALL-E background image for a queued post. Admin-only because
+// it costs ~$0.04 per call against the OpenAI account.
+router.post('/linkedin/regenerate-image/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const row = (await query(`SELECT * FROM linkedin_content_queue WHERE id=$1`, [req.params.id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'post not found' });
+    const result = await generatePostImage(row.source_molecule, row.post_type);
+    if (result.skipped) return res.status(503).json({ error: result.reason });
+    if (result.error) return res.status(502).json({ error: result.error });
+    await query(
+      `UPDATE linkedin_content_queue SET generated_image_url=$1 WHERE id=$2`,
+      [result.url, req.params.id]
+    );
+    res.json({ success: true, id: req.params.id, generated_image_url: result.url, prompt: result.prompt });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

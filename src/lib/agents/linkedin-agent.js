@@ -189,6 +189,58 @@ function generateImagePrompt(post_type, molecule_name) {
   return `Professional biotech laboratory aesthetic, clean and modern composition, no text`;
 }
 
+// Construct a PubChem 2D-structure PNG URL for a CAS number or chemical name.
+// PubChem's PUG REST /compound/name/{lookup}/PNG accepts both. No fetch is
+// performed — the URL is direct and the browser loads the image.
+function getMoleculeStructureImage(casOrName) {
+  if (!casOrName) return null;
+  const encoded = encodeURIComponent(String(casOrName).trim());
+  return `https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/${encoded}/PNG`;
+}
+
+// Generate a 1024x1024 background image for a post via OpenAI DALL-E 3, then
+// download it to public/linkedin-images/ (OpenAI URLs expire ~1h). Returns
+// { url, prompt } on success, { skipped|error, reason } on failure.
+async function generatePostImage(molecule_name, post_type) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return { skipped: true, reason: 'OPENAI_API_KEY is not set' };
+
+  const prompt = (post_type === 'product' && molecule_name)
+    ? `Professional pharmaceutical laboratory, clean white and blue aesthetic, molecular structure visualization of ${molecule_name}, modern biotech facility, scientific precision, enterprise-grade photography style, no text`
+    : generateImagePrompt(post_type, molecule_name);
+
+  try {
+    const res = await fetch('https://api.openai.com/v1/images/generations', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'dall-e-3', prompt, n: 1, size: '1024x1024',
+        quality: 'standard', response_format: 'url',
+      }),
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      return { error: `OpenAI ${res.status}: ${t.slice(0, 300)}` };
+    }
+    const data = await res.json();
+    const openaiUrl = data.data?.[0]?.url;
+    if (!openaiUrl) return { error: 'OpenAI response had no image URL' };
+
+    const imageRes = await fetch(openaiUrl);
+    if (!imageRes.ok) return { error: `image download failed: ${imageRes.status}` };
+    const buffer = Buffer.from(await imageRes.arrayBuffer());
+    const fs = require('fs');
+    const pathMod = require('path');
+    const dir = pathMod.join(process.cwd(), 'public', 'linkedin-images');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const filename = crypto.randomUUID() + '.png';
+    fs.writeFileSync(pathMod.join(dir, filename), buffer);
+    return { url: '/linkedin-images/' + filename, prompt };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 // Push a queued post to LinkedIn. The row must be approved.
 // The author URN MUST be urn:li:organization:<numeric id> for org page posts —
 // urn:li:person:* and urn:li:member:* will both return 403 against the
@@ -262,9 +314,11 @@ async function insertDraft(post, scheduledFor) {
   const id = crypto.randomUUID();
   await query(
     `INSERT INTO linkedin_content_queue
-       (id, post_type, headline, body, hashtags, full_post, status, scheduled_for, source_molecule, image_prompt, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,NOW())`,
-    [id, post.post_type, post.headline, post.body, post.hashtags, post.full_post, scheduledFor, post.source_molecule, post.image_prompt || null]
+       (id, post_type, headline, body, hashtags, full_post, status, scheduled_for, source_molecule, image_prompt, structure_image_url, generated_image_url, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,$10,$11,NOW())`,
+    [id, post.post_type, post.headline, post.body, post.hashtags, post.full_post,
+     scheduledFor, post.source_molecule, post.image_prompt || null,
+     post.structure_image_url || null, post.generated_image_url || null]
   );
   return id;
 }
@@ -391,8 +445,18 @@ async function runWeeklyLinkedInCampaign({ dryRun = false } = {}) {
         const profile = await generateChemicalProfile({ name: post.source_molecule, cas: top.cas });
         if (profile) post.full_post = clampPost(post.full_post + '\n\n🔬 Chemical profile: ' + profile);
       }
-      // Part 4 — image prompt
+      // Part 4 — text image prompt for DALL-E / Midjourney
       post.image_prompt = generateImagePrompt(post.post_type, post.source_molecule);
+      // Part 1 — PubChem 2D structure for molecule-specific posts (free, no key)
+      if (post.source_molecule) {
+        post.structure_image_url = getMoleculeStructureImage(top.cas || post.source_molecule);
+      }
+      // Part 2 / 6 — note: DALL-E auto-generation is wired but commented out
+      // by default. Each campaign run would cost ~$0.12 in DALL-E credits.
+      // Uncomment to enable, or use POST /api/linkedin/regenerate-image/:id
+      // from the LinkedIn Content page to generate on-demand.
+      // const img = await generatePostImage(post.source_molecule, post.post_type);
+      // if (img.url) post.generated_image_url = img.url;
       // Step 5 — persist
       const id = dryRun ? null : await insertDraft(post, slot);
       drafts.push({ id, slot_label: label, scheduled_for: slot, ...post });
@@ -445,6 +509,8 @@ module.exports = {
   generateCapabilityPost,
   generateChemicalProfile,
   generateImagePrompt,
+  getMoleculeStructureImage,
+  generatePostImage,
   getCombinedDemandMolecules,
   enrichWithCatalog,
   runWeeklyLinkedInCampaign,

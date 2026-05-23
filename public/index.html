@@ -1405,8 +1405,21 @@ function renderLinkedInPreview(q, esc, statusBadge) {
     buttons.push(`<button onclick="linkedinPublish('${q.id}')" class="btn-primary" style="padding:5px 10px;font-size:11px">Publish to LinkedIn</button>`);
     buttons.push(`<button onclick="linkedinAction('${q.id}','reject')" class="btn-danger" style="padding:5px 10px;font-size:11px">Reject</button>`);
   }
+  // Regenerate-image is available on any unrejected post (costs ~$0.04 in DALL-E)
+  if (q.status !== 'rejected') {
+    buttons.push(`<button onclick="linkedinRegenerate('${q.id}')" class="btn-outline btn-sm" style="font-size:11px">🎨 Regenerate image</button>`);
+  }
   const eng = (q.engagement_clicks||q.engagement_likes||q.engagement_comments)
     ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:11px;color:var(--text-muted);display:flex;gap:14px"><span>👍 ${q.engagement_likes||0} likes</span><span>💬 ${q.engagement_comments||0} comments</span><span>🔗 ${q.engagement_clicks||0} clicks</span></div>`
+    : '';
+  const generatedImgBlock = q.generated_image_url
+    ? `<img src="${esc(q.generated_image_url)}" alt="Generated background" style="display:block;width:100%;height:auto;border-top:1px solid #f0f2f5">`
+    : '';
+  const structureBlock = q.structure_image_url
+    ? `<div style="display:flex;gap:10px;align-items:center;padding:10px 14px;border-top:1px solid #f0f2f5;background:#fafafa">
+         <img src="${esc(q.structure_image_url)}" alt="2D structure" style="width:96px;height:96px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;object-fit:contain" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.color='#dc2626'">
+         <div style="font-size:11px;color:var(--text-muted)">Chemical structure from PubChem${q.source_molecule ? ' — <strong>' + esc(q.source_molecule) + '</strong>' : ''}</div>
+       </div>`
     : '';
   return `<div class="card" id="li-card-${q.id}" style="border-left:4px solid ${accent}">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
@@ -1415,7 +1428,7 @@ function renderLinkedInPreview(q, esc, statusBadge) {
       </div>
       ${statusBadge(q.status)}
     </div>
-    <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;margin-top:10px;font-family:-apple-system,Segoe UI,Helvetica,sans-serif;max-width:560px">
+    <div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;margin-top:10px;font-family:-apple-system,Segoe UI,Helvetica,sans-serif;max-width:560px;overflow:hidden">
       <div style="display:flex;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid #f0f2f5">
         <div style="width:42px;height:42px;border-radius:50%;background:#1B3A6B;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;letter-spacing:.5px">AZ</div>
         <div>
@@ -1424,6 +1437,8 @@ function renderLinkedInPreview(q, esc, statusBadge) {
         </div>
       </div>
       <div style="padding:12px 14px;font-size:13px;color:#000;white-space:pre-wrap;line-height:1.55">${esc(q.full_post||'')}</div>
+      ${generatedImgBlock}
+      ${structureBlock}
       <div style="display:flex;gap:18px;padding:8px 14px;border-top:1px solid #f0f2f5;color:#666;font-size:12px">
         <span>👍 Like</span><span>💬 Comment</span><span>↗ Share</span>
       </div>
@@ -1478,6 +1493,21 @@ async function linkedinRunCampaign() {
     msg.remove();
     if (res && res.error) { alert('Error: ' + res.error); return; }
     alert('✅ Campaign complete. ' + (res.drafts_created || 0) + ' drafts created for week of ' + (res.week && res.week.monday || 'this week') + '.');
+    pages['linkedin-content']();
+  } catch(e) { msg.remove(); alert('Error: ' + e.message); }
+}
+
+async function linkedinRegenerate(id) {
+  if (!confirm('Regenerate the DALL-E image for this post? Calls OpenAI (~$0.04) and takes 10-20 seconds.')) return;
+  const card = document.getElementById('li-card-' + id);
+  const msg = document.createElement('div');
+  msg.style.cssText = 'position:fixed;top:20px;right:20px;background:#1B3A6B;color:#fff;padding:10px 16px;border-radius:6px;font-size:12px;z-index:9999';
+  msg.textContent = 'Generating image via DALL-E 3…';
+  document.body.appendChild(msg);
+  try {
+    const res = await API('/linkedin/regenerate-image/' + id, {method:'POST'});
+    msg.remove();
+    if (res && res.error) { alert('Error: ' + res.error); return; }
     pages['linkedin-content']();
   } catch(e) { msg.remove(); alert('Error: ' + e.message); }
 }

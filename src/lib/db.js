@@ -416,6 +416,8 @@ async function migrateSchemas() {
       );
       CREATE INDEX IF NOT EXISTS idx_linkedin_queue_status ON linkedin_content_queue (status, scheduled_for);
       ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS image_prompt TEXT;
+      ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS structure_image_url TEXT;
+      ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS generated_image_url TEXT;
       INSERT INTO kpi_hierarchy (id, level, parent_id, name, metric, target_value, owner_role, period) VALUES
         ('kpi-vision','vision',NULL,'$10M Revenue by Dec 31, 2026','revenue',10000000,'super_admin','2026'),
         ('kpi-sg-sales','strategic','kpi-vision','Sales — close $10M in confirmed orders','revenue',10000000,'sales_director','2026'),
