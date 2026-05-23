@@ -13,7 +13,7 @@ const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = req
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing } = require('../lib/agents/orchestrator');
-const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, scheduleLinkedInContent, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
+const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, getCombinedDemandMolecules, enrichWithCatalog, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
 const router = express.Router();
@@ -1481,6 +1481,16 @@ router.put('/linkedin/content-queue/:id', authMiddleware, adminOnly, async (req,
         `UPDATE linkedin_content_queue SET status='approved', reviewed_by=$1, reviewed_at=NOW() WHERE id=$2`,
         [req.user.id, req.params.id]
       );
+      // Auto-publish to LinkedIn on approve (Part 2 step 7). On skip/error the
+      // row stays at 'approved' and can be retried via POST /linkedin/publish/:id.
+      const approved = (await query(`SELECT * FROM linkedin_content_queue WHERE id=$1`, [req.params.id])).rows[0];
+      const pub = await publishLinkedInPost(approved);
+      if (pub && pub.success) {
+        await query(
+          `UPDATE linkedin_content_queue SET status='published', published_at=NOW(), linkedin_post_id=$1 WHERE id=$2`,
+          [pub.post_id || null, req.params.id]
+        );
+      }
     } else if (action === 'reject') {
       await query(
         `UPDATE linkedin_content_queue SET status='rejected', reviewed_by=$1, reviewed_at=NOW() WHERE id=$2`,
@@ -1521,6 +1531,24 @@ router.post('/linkedin/publish/:id', authMiddleware, adminOnly, async (req, res)
       [result.post_id || null, req.params.id]
     );
     res.json({ success: true, id: req.params.id, linkedin_post_id: result.post_id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manually trigger the weekly LinkedIn campaign — Steps 1-6 of the Monday flow.
+router.post('/linkedin/run-campaign', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await runWeeklyLinkedInCampaign({ dryRun: !!req.body?.dryRun });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Combined demand intelligence — market analysis + GSC + Algolia, deduped and
+// catalog-enriched. Powers the demand panel on the LinkedIn Content page.
+router.get('/linkedin/demand-molecules', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const demand = await getCombinedDemandMolecules();
+    const enriched = await enrichWithCatalog(demand);
+    res.json({ count: enriched.length, molecules: enriched });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

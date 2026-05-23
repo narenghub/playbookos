@@ -1,6 +1,8 @@
 // LinkedIn AI Content Engine — generates pharma/biotech posts for the Abiozen
-// company page. Drafts go into linkedin_content_queue and require admin approval
-// before publishPost() pushes them to the LinkedIn UGC API.
+// company page. Weekly campaign pulls combined demand signals (market analysis +
+// GSC + Algolia), enriches against the catalog, and drafts 3 posts (Mon product /
+// Wed trend / Fri capability). Drafts go into linkedin_content_queue; approval
+// auto-publishes via the LinkedIn UGC API.
 const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
@@ -9,7 +11,7 @@ const { logAgentActivity, getCEOUser, parseClaudeJSON } = require('../agent-core
 
 const AGENT = 'linkedin-agent';
 const MAX_POST_CHARS = 1300;
-const REQUIRED_HASHTAGS = ['#Pharmaceuticals', '#API', '#ResearchChemicals', '#Biotech', '#DrugDiscovery'];
+const DEFAULT_HASHTAGS = '#Pharmaceuticals #API #Biotech #DrugDiscovery #ResearchChemicals';
 
 const isoDay = d => new Date(d).toISOString().slice(0, 10);
 
@@ -18,168 +20,173 @@ function clampPost(text) {
   return text.length <= MAX_POST_CHARS ? text : text.slice(0, MAX_POST_CHARS - 1).replace(/\s+\S*$/, '') + '…';
 }
 
-function assemblePost({ headline, body, hashtags }) {
-  const tagList = Array.isArray(hashtags) ? hashtags : String(hashtags || '').split(/\s+/).filter(Boolean);
-  // Always include the core hashtags from the spec (deduplicated, case-insensitive)
-  const seen = new Set();
-  const allTags = [...tagList, ...REQUIRED_HASHTAGS].filter(t => {
-    const k = t.toLowerCase();
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
-  const tagLine = allTags.map(t => t.startsWith('#') ? t : '#' + t).join(' ');
-  const full = [headline, body, tagLine].filter(Boolean).join('\n\n');
-  return { full_post: clampPost(full), hashtags: tagLine };
+// Shared assembler: pulls headline/body/hashtags/full_post out of Claude's JSON,
+// builds full_post if Claude omitted it, and clamps to LinkedIn's 1300-char limit.
+function composePost(post_type, parsed, source_molecule) {
+  const headline = parsed.headline || parsed.title || parsed.hook || '';
+  const body = parsed.body || parsed.text || parsed.post || '';
+  const hashtags = typeof parsed.hashtags === 'string'
+    ? parsed.hashtags
+    : Array.isArray(parsed.hashtags)
+      ? parsed.hashtags.map(h => h.startsWith('#') ? h : '#' + h).join(' ')
+      : DEFAULT_HASHTAGS;
+  let full_post = parsed.full_post || [headline, body, hashtags].filter(Boolean).join('\n\n');
+  full_post = clampPost(full_post);
+  return { post_type, headline, body, hashtags, full_post, source_molecule: source_molecule || null };
 }
 
-async function callClaudeForPost(prompt) {
-  const raw = await runClaudeAnalysis(prompt);
-  if (!raw || raw.startsWith('Claude API error') || raw.startsWith('Claude error') || raw === 'Claude API key not configured.') {
-    console.error('[linkedin-agent] runClaudeAnalysis returned an error string:', String(raw).slice(0, 300));
-    return null;
-  }
-  const j = parseClaudeJSON(raw);
-  if (!j || Array.isArray(j) || typeof j !== 'object') {
-    console.error('[linkedin-agent] Claude did not return a JSON object. Raw (first 500 chars):',
-      String(raw).slice(0, 500));
-    return null;
-  }
-  // Accept common alternate field names defensively
-  const headline = j.headline || j.title || j.hook || '';
-  const body = j.body || j.text || j.post || '';
-  if (!headline && !body) {
-    console.error('[linkedin-agent] Parsed object had neither headline nor body. Keys:',
-      Object.keys(j).join(', '), '— raw (first 300 chars):', String(raw).slice(0, 300));
-  }
-  return {
-    headline,
-    body,
-    hashtags: Array.isArray(j.hashtags) ? j.hashtags : [],
-  };
-}
-
-// 1) Single-molecule product post.
+// 1) Product post — uses the user's exact prompt structure.
 async function generateProductPost(molecule) {
   const m = typeof molecule === 'string' ? { name: molecule } : (molecule || {});
-  const name = (m.name || '').trim();
-  const cas = (m.cas || m.cas_number || '').trim();
-  const purity = (m.purity || '99').toString().trim();
-  if (!name) throw new Error('generateProductPost requires a molecule name');
+  const molecule_name = (m.name || '').trim();
+  const cas_number = (m.cas || m.cas_number || '').trim();
+  const purity = (m.purity || '99%').toString().trim();
+  if (!molecule_name) throw new Error('generateProductPost requires a molecule name');
 
-  const prompt = `You are the LinkedIn content writer for Abiozen LLC, a US pharmaceutical API distribution company. Write one LinkedIn post announcing availability of the molecule below.
+  const prompt = `You are a LinkedIn content writer for Abiozen LLC, a US-based pharmaceutical API distributor.
 
-Molecule: ${name}
-CAS number: ${cas || '(not provided)'}
-Purity: ${purity}%
+Generate a professional LinkedIn post about ${molecule_name} (CAS: ${cas_number || 'not provided'}, Purity: ${purity}).
 
-Tone: professional pharma/biotech industry, factual, confident, no fluff. Highlight: availability now in US stock, purity, COA available, fast delivery to research and procurement teams. Do NOT invent specific prices, lot numbers, or regulatory claims.
+The post must:
+- Be written for biotech/pharma procurement managers, lab directors, and researchers
+- Highlight: availability, ${purity} purity, COA available, 3-5 day US delivery
+- Include market relevance and why this molecule matters now
+- End with CTA: "Available now at abiozen.com | Request quote: naren@abiozen.com"
+- Be under 1300 characters total
+- Sound authoritative and professional, not salesy
 
-Return EXACTLY a JSON object, no other text:
-{"headline":"one-line opener (<=120 chars)","body":"2-4 short paragraphs separated by \\n\\n; total under 900 chars","hashtags":["#Pharma","#API"]}
+Return ONLY valid JSON in this exact format:
+{
+  "headline": "compelling 10-word headline",
+  "body": "the full post body text",
+  "hashtags": "#Pharmaceuticals #API #Biotech #DrugDiscovery #ResearchChemicals",
+  "full_post": "headline + body + hashtags combined"
+}`;
 
-The full post (headline + body + hashtags) must fit in 1300 characters. Choose 3-5 hashtags that fit the molecule and industry (procurement/research/biotech).`;
-
-  const parsed = await callClaudeForPost(prompt);
-  if (!parsed) throw new Error('Claude returned an unparseable LinkedIn post');
-  const { full_post, hashtags } = assemblePost(parsed);
-  return {
-    post_type: 'product',
-    headline: parsed.headline,
-    body: parsed.body,
-    hashtags,
-    full_post,
-    source_molecule: name,
-  };
+  const raw = await runClaudeAnalysis(prompt);
+  console.log('[linkedin-agent] generateProductPost raw response (first 600 chars):', String(raw || '').slice(0, 600));
+  const parsed = parseClaudeJSON(raw);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+    console.error('[linkedin-agent] generateProductPost: failed to parse Claude JSON. Raw:', String(raw || '').slice(0, 500));
+    throw new Error('Claude returned an unparseable LinkedIn product post');
+  }
+  return composePost('product', parsed, molecule_name);
 }
 
-// 2) Weekly market-intelligence post — uses the latest growth-intelligence output
-// if no analysisData is passed in.
+// 2) Wednesday market-trend post — uses combined demand signals.
+async function generateMarketTrendPost(molecules = []) {
+  const top = molecules.slice(0, 5);
+  const list = top.length
+    ? top.map((m, i) => `${i + 1}. ${m.name}${m.in_catalog ? ' (in stock)' : ''} — demand score ${m.demand_score || '?'}`).join('\n')
+    : '(no signals available — write a generic 2026 pharma trend post)';
+
+  const prompt = `You are a LinkedIn content writer for Abiozen LLC, a US-based pharmaceutical API distributor.
+
+Generate a professional LinkedIn post about THIS WEEK'S MARKET TREND in pharmaceutical APIs, using the demand signals below:
+
+${list}
+
+The post must:
+- Open with a hook about why pharma buying patterns are shifting in 2026
+- Reference 2-3 of the molecules above as examples
+- Position Abiozen as a market-intelligence source for procurement managers and lab directors
+- Be authoritative and analytical, not salesy
+- End with CTA: "Track demand trends with us | naren@abiozen.com"
+- Be under 1300 characters total
+
+Return ONLY valid JSON in this exact format:
+{
+  "headline": "compelling 10-word headline about a 2026 pharma trend",
+  "body": "the full post body referencing the molecules above",
+  "hashtags": "#Pharmaceuticals #PharmaIntel #DrugDiscovery #Biotech #API",
+  "full_post": "headline + body + hashtags combined"
+}`;
+
+  const raw = await runClaudeAnalysis(prompt);
+  console.log('[linkedin-agent] generateMarketTrendPost raw (first 600 chars):', String(raw || '').slice(0, 600));
+  const parsed = parseClaudeJSON(raw);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+    console.error('[linkedin-agent] generateMarketTrendPost: failed to parse Claude JSON. Raw:', String(raw || '').slice(0, 500));
+    throw new Error('Claude returned an unparseable market-trend post');
+  }
+  return composePost('market_intelligence', parsed, null);
+}
+
+// 3) Friday capability post — Abiozen QC + sourcing highlight.
+async function generateCapabilityPost() {
+  const prompt = `You are a LinkedIn content writer for Abiozen LLC, a US-based pharmaceutical API distributor.
+
+Generate a professional LinkedIn post highlighting Abiozen's CAPABILITIES — specifically QC testing services and API sourcing services for biotech labs and pharma manufacturers.
+
+The post must:
+- Highlight: GMP-grade QC testing, COA generation, full SDS documentation, US-based logistics, 3-5 day delivery
+- Speak directly to procurement managers, lab directors, and R&D leads
+- Include CTA: "Available now at abiozen.com | Request quote: naren@abiozen.com"
+- Sound professional and confident, not promotional
+- Be under 1300 characters total
+
+Return ONLY valid JSON in this exact format:
+{
+  "headline": "compelling 10-word headline about Abiozen capabilities",
+  "body": "the full post body",
+  "hashtags": "#Pharmaceuticals #API #QC #GMP #Biotech",
+  "full_post": "headline + body + hashtags combined"
+}`;
+
+  const raw = await runClaudeAnalysis(prompt);
+  console.log('[linkedin-agent] generateCapabilityPost raw (first 600 chars):', String(raw || '').slice(0, 600));
+  const parsed = parseClaudeJSON(raw);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
+    console.error('[linkedin-agent] generateCapabilityPost: failed to parse Claude JSON. Raw:', String(raw || '').slice(0, 500));
+    throw new Error('Claude returned an unparseable capability post');
+  }
+  return composePost('company_update', parsed, null);
+}
+
+// Legacy alias — keep existing market_intelligence / company_update generators
+// callable from the POST /linkedin/generate-post endpoint.
 async function generateMarketIntelligencePost(analysisData) {
-  let data = analysisData;
-  if (!data) {
-    const row = (await query(
-      `SELECT content FROM ai_analyses WHERE analysis_type='growth_intelligence' ORDER BY created_at DESC LIMIT 1`
-    )).rows[0];
-    if (row) { try { data = JSON.parse(row.content); } catch {} }
+  let molecules = [];
+  if (analysisData && Array.isArray(analysisData.top_molecules)) {
+    molecules = analysisData.top_molecules.map(m => ({ name: m.molecule || m.name, demand_score: m.demand_signal === 'high' ? 90 : 50 }));
+  } else {
+    molecules = await getCombinedDemandMolecules();
   }
-  const topMolecules = ((data && data.top_molecules) || []).slice(0, 5);
-  const candidatesCount = (data && data.candidates) ? data.candidates.length : 0;
-
-  const summary = topMolecules.length
-    ? topMolecules.map((m, i) => `${i + 1}. ${m.molecule || m.name || '?'} — demand ${m.demand_signal || m.demand || '?'}`).join('\n')
-    : '(no top-molecule data — using a generic market post)';
-
-  const prompt = `You are the LinkedIn content writer for Abiozen LLC. Write this week's market-intelligence LinkedIn post — a confident, industry-credible "what we're seeing in the US pharma market" update from a distributor with visibility into buyer demand.
-
-THIS WEEK'S TOP FAST-MOVING MOLECULES IN US PHARMA (from our internal demand signals across ${candidatesCount} candidate queries):
-${summary}
-
-Tone: professional industry analyst voice. Position Abiozen as a market-intelligence leader. The post should drive inbound from procurement managers and lab directors. Do not invent specific prices, regulatory claims, or molecules not listed above.
-
-Return EXACTLY a JSON object, no other text:
-{"headline":"one-line opener (<=120 chars)","body":"3-4 short paragraphs separated by \\n\\n; mention 2-3 of the molecules above; total under 900 chars","hashtags":["#Pharma","#API"]}
-
-Full post must fit in 1300 characters.`;
-
-  const parsed = await callClaudeForPost(prompt);
-  if (!parsed) throw new Error('Claude returned an unparseable LinkedIn post');
-  const { full_post, hashtags } = assemblePost(parsed);
-  return {
-    post_type: 'market_intelligence',
-    headline: parsed.headline,
-    body: parsed.body,
-    hashtags,
-    full_post,
-    source_molecule: null,
-  };
+  return generateMarketTrendPost(molecules);
+}
+async function generateCompanyUpdate(/* metrics */) {
+  return generateCapabilityPost();
 }
 
-// 3) Monthly company-update post.
-async function generateCompanyUpdate(metrics) {
-  let m = metrics;
-  if (!m) {
-    const skusAdded = parseInt((await query(
-      `SELECT COUNT(*) c FROM skus WHERE created_at::timestamptz >= NOW() - INTERVAL '30 days'`
-    )).rows[0].c, 10);
-    const activeSkus = parseInt((await query(
-      `SELECT COUNT(*) c FROM skus WHERE is_active=1`
-    )).rows[0].c, 10);
-    const coaApproved = parseInt((await query(
-      `SELECT COUNT(*) c FROM skus WHERE is_active=1 AND coa_status='approved'`
-    )).rows[0].c, 10);
-    const newHires = parseInt((await query(
-      `SELECT COUNT(*) c FROM users WHERE created_at::timestamptz >= NOW() - INTERVAL '30 days'`
-    )).rows[0].c, 10);
-    m = { skus_added_30d: skusAdded, active_skus: activeSkus, coa_approved: coaApproved, new_hires_30d: newHires };
+// Short factual chemical profile — appended to the post body as a footer.
+async function generateChemicalProfile({ name, cas }) {
+  if (!name) return '';
+  const prompt = `Provide a concise 2-3 sentence chemical profile of ${name}${cas ? ' (CAS ' + cas + ')' : ''} covering: molecular class or formula, primary mechanism or biological action, and why researchers or labs need it. Plain text only — no markdown, no JSON, no preamble. Under 280 characters total.`;
+  try {
+    const raw = await runClaudeAnalysis(prompt);
+    if (!raw || raw.startsWith('Claude API') || raw.startsWith('Claude error')) return '';
+    // Strip leading conversational tokens until the first capital letter
+    const text = String(raw).replace(/^[^A-Z]*/, '').trim();
+    return text.slice(0, 350);
+  } catch (e) {
+    console.error('[linkedin-agent] chemical profile generation failed:', e.message);
+    return '';
   }
+}
 
-  const prompt = `You are the LinkedIn content writer for Abiozen LLC. Write this month's company-update LinkedIn post.
-
-METRICS (last 30 days):
-- New molecules added to catalog: ${m.skus_added_30d ?? 0}
-- Active SKUs in catalog: ${m.active_skus ?? 0}
-- SKUs with approved COA: ${m.coa_approved ?? 0}
-- New team members: ${m.new_hires_30d ?? 0}
-
-Tone: confident, milestone-celebrating but professional. Highlight catalog growth, delivery speed, quality certifications (COA), and team growth as available. Do not invent metrics not listed above.
-
-Return EXACTLY a JSON object, no other text:
-{"headline":"one-line opener (<=120 chars)","body":"3-4 short paragraphs separated by \\n\\n; cite the metrics above; total under 900 chars","hashtags":["#Pharma","#API"]}
-
-Full post must fit in 1300 characters.`;
-
-  const parsed = await callClaudeForPost(prompt);
-  if (!parsed) throw new Error('Claude returned an unparseable LinkedIn post');
-  const { full_post, hashtags } = assemblePost(parsed);
-  return {
-    post_type: 'company_update',
-    headline: parsed.headline,
-    body: parsed.body,
-    hashtags,
-    full_post,
-    source_molecule: null,
-  };
+// Image prompt for DALL-E / Midjourney — templated by post type for reliability.
+function generateImagePrompt(post_type, molecule_name) {
+  const m = (molecule_name || 'pharmaceutical molecule').trim();
+  if (post_type === 'product') {
+    return `Professional pharmaceutical laboratory with molecular structure of ${m} floating in soft blue light, clean modern design, biotech aesthetic, sharp focus, no text`;
+  }
+  if (post_type === 'market_intelligence') {
+    return `Modern data visualization of pharmaceutical market trends, holographic molecular structures hovering over a US map, blue and teal palette, biotech executive aesthetic, no text`;
+  }
+  if (post_type === 'company_update') {
+    return `Sleek pharmaceutical distribution operations, glass laboratory vials in soft warehouse lighting, modern logistics, professional biotech corporate aesthetic, no text`;
+  }
+  return `Professional biotech laboratory aesthetic, clean and modern composition, no text`;
 }
 
 // Push a queued post to LinkedIn. The row must be approved.
@@ -200,9 +207,7 @@ async function publishPost(queueRow) {
         shareMediaCategory: 'NONE',
       },
     },
-    visibility: {
-      'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC',
-    },
+    visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' },
   };
   try {
     const res = await fetch('https://api.linkedin.com/v2/ugcPosts', {
@@ -227,7 +232,6 @@ async function publishPost(queueRow) {
 }
 
 function nextWeekdayDates() {
-  // Return the next Mon, Wed, Fri (today inclusive) as YYYY-MM-DD strings.
   const out = {};
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
@@ -246,97 +250,192 @@ async function insertDraft(post, scheduledFor) {
   const id = crypto.randomUUID();
   await query(
     `INSERT INTO linkedin_content_queue
-       (id, post_type, headline, body, hashtags, full_post, status, scheduled_for, source_molecule, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,'draft',$7,$8,NOW())`,
-    [id, post.post_type, post.headline, post.body, post.hashtags, post.full_post, scheduledFor, post.source_molecule]
+       (id, post_type, headline, body, hashtags, full_post, status, scheduled_for, source_molecule, image_prompt, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,NOW())`,
+    [id, post.post_type, post.headline, post.body, post.hashtags, post.full_post, scheduledFor, post.source_molecule, post.image_prompt || null]
   );
   return id;
+}
+
+// Step 1: combined demand signals from market intelligence + GSC + Algolia.
+async function getCombinedDemandMolecules() {
+  const byName = {};
+  const add = (name, cas, weight, source) => {
+    const k = (name || '').toLowerCase().trim();
+    if (!k) return;
+    if (!byName[k]) byName[k] = { name: name.trim(), cas: cas || '', score: 0, sources: new Set() };
+    byName[k].score += weight;
+    byName[k].sources.add(source);
+    if (!byName[k].cas && cas) byName[k].cas = cas;
+  };
+
+  // Source 1: latest market-intelligence / growth-intelligence
+  const mi = (await query(
+    `SELECT content FROM ai_analyses
+     WHERE analysis_type IN ('growth_intelligence','market_analysis')
+     ORDER BY created_at DESC LIMIT 1`
+  )).rows[0];
+  if (mi) {
+    try {
+      const c = JSON.parse(mi.content);
+      const list = c.top_molecules || c.molecules || [];
+      list.slice(0, 5).forEach((x, i) => {
+        const w = x.demand_signal === 'high' ? 30 : x.demand_signal === 'medium' ? 20 : 15;
+        add(x.molecule || x.name, x.cas || '', w - i, 'market_intelligence');
+      });
+    } catch {}
+  }
+
+  // Source 2: GSC top impressions (seo_rankings table, last 30 days)
+  try {
+    const gsc = (await query(
+      `SELECT query, MAX(impressions) AS imp FROM seo_rankings
+       WHERE recorded_date >= (NOW() - INTERVAL '30 days')::date::text
+       GROUP BY query ORDER BY imp DESC LIMIT 10`
+    )).rows;
+    gsc.forEach(r => add(r.query, '', 5 + Math.min(10, Math.log10(Math.max(1, Number(r.imp) || 1)) * 5), 'gsc'));
+  } catch (e) { /* seo_rankings may be empty or absent */ }
+
+  // Source 3: Algolia top searches
+  try {
+    const { syncAlgoliaSearchData } = require('./growth-agent');
+    const a = await syncAlgoliaSearchData();
+    if (!a.skipped) {
+      (a.top_queries || []).slice(0, 10).forEach(q =>
+        add(q.query, '', 5 + Math.min(10, Math.log10(Math.max(1, q.count || 1)) * 5), 'algolia'));
+    }
+  } catch (e) { /* algolia may be unconfigured */ }
+
+  return Object.values(byName)
+    .map(m => ({ ...m, sources: Array.from(m.sources), demand_score: Math.round(m.score * 5) }))
+    .sort((a, b) => b.demand_score - a.demand_score)
+    .slice(0, 10);
+}
+
+// Step 2: check each demand molecule against the Abiozen catalog.
+async function enrichWithCatalog(molecules) {
+  const out = [];
+  for (const m of molecules) {
+    let sku = null;
+    try {
+      sku = (await query(
+        `SELECT id, name, cas_number, purity, coa_status, sds_status, is_active
+         FROM skus
+         WHERE LOWER(name) = LOWER($1) OR ($2 <> '' AND cas_number = $2)
+         LIMIT 1`,
+        [m.name, m.cas || '']
+      )).rows[0];
+    } catch {}
+    out.push({
+      ...m,
+      in_catalog: !!sku,
+      sku_active: sku ? !!sku.is_active : false,
+      purity: sku?.purity || null,
+      coa_status: sku?.coa_status || null,
+      sds_status: sku?.sds_status || null,
+      cas: sku?.cas_number || m.cas || '',
+    });
+  }
+  return out;
 }
 
 function renderApprovalEmail(date, drafts) {
   const rows = drafts.map(d =>
     `<div style="border:1px solid #e0e0e0;border-radius:8px;padding:12px;margin:8px 0;background:#fff">
-       <div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.4px">${d.post_type.replace('_', ' ')} · scheduled ${d.scheduled_for}</div>
+       <div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.4px">${d.post_type.replace('_', ' ')} · scheduled ${d.scheduled_for}${d.source_molecule ? ' · ' + d.source_molecule : ''}</div>
        <div style="font-size:13px;font-weight:600;color:#1a1a2e;margin-top:4px">${(d.headline || '').replace(/</g, '&lt;')}</div>
        <pre style="font-family:Arial,sans-serif;white-space:pre-wrap;font-size:12px;color:#333;margin:6px 0 0;line-height:1.5">${(d.full_post || '').replace(/</g, '&lt;')}</pre>
+       ${d.image_prompt ? `<div style="font-size:11px;color:#0D7377;margin-top:6px"><strong>Image prompt:</strong> ${d.image_prompt.replace(/</g, '&lt;')}</div>` : ''}
      </div>`).join('');
   return `<div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;color:#1a1a2e">
     <div style="background:#1B3A6B;padding:18px;border-radius:8px 8px 0 0;color:#fff">
       <h2 style="margin:0;font-size:18px">LinkedIn content queue — week of ${date}</h2>
-      <p style="margin:6px 0 0;color:#9FE1CB;font-size:12px">${drafts.length} drafts awaiting approval</p>
+      <p style="margin:6px 0 0;color:#9FE1CB;font-size:12px">${drafts.length} drafts awaiting approval — approve in PlaybookOS to auto-publish</p>
     </div>
-    <div style="border:1px solid #e0e0e0;border-top:none;padding:16px;background:#f8f9fa">${rows}
-      <p style="font-size:11px;color:#666;margin-top:12px">Approve / reject / edit each post on the LinkedIn Content page in PlaybookOS.</p>
-    </div>
+    <div style="border:1px solid #e0e0e0;border-top:none;padding:16px;background:#f8f9fa">${rows}</div>
   </div>`;
 }
 
-// Monday 10am cron: generates the week's product / market-intel / company-update
-// posts, stores them as drafts, and emails the CEO for review.
-async function scheduleLinkedInContent({ dryRun = false } = {}) {
+// Main weekly campaign — Steps 1-6. Step 7 (auto-publish on approval) lives in
+// the routes.js PUT /linkedin/content-queue/:id approve handler.
+async function runWeeklyLinkedInCampaign({ dryRun = false } = {}) {
   const week = nextWeekdayDates();
   const ceo = await getCEOUser();
 
-  // Pick a molecule for the product post — top growth-intelligence molecule, else
-  // the most recently added active SKU.
-  let molecule = null;
-  const gi = (await query(
-    `SELECT content FROM ai_analyses WHERE analysis_type='growth_intelligence' ORDER BY created_at DESC LIMIT 1`
-  )).rows[0];
-  if (gi) {
-    try {
-      const parsed = JSON.parse(gi.content);
-      const top = (parsed.top_molecules || [])[0];
-      if (top) molecule = { name: top.molecule || top.name, cas: top.cas || '' };
-    } catch {}
-  }
-  if (!molecule) {
-    const sku = (await query(
-      `SELECT name, cas_number, purity FROM skus WHERE is_active=1 ORDER BY created_at DESC LIMIT 1`
-    )).rows[0];
-    if (sku) molecule = { name: sku.name, cas: sku.cas_number, purity: sku.purity };
-  }
-  if (!molecule) molecule = { name: 'Semaglutide', cas: '910463-68-2', purity: '99' };
+  // Step 1 + 2
+  const demand = await getCombinedDemandMolecules();
+  const enriched = await enrichWithCatalog(demand);
 
+  // Pick top: prefer an in-stock catalog molecule, else top overall.
+  const top = enriched.find(m => m.in_catalog && m.sku_active) || enriched[0] || { name: 'Semaglutide', cas: '910463-68-2', purity: '99%' };
+
+  // Step 3 + 4 + 5
   const drafts = [];
-  const safe = async (label, fn, slot) => {
+  const safe = async (label, generator, slot) => {
     try {
-      const post = await fn();
+      const post = await generator();
+      // Step 4 — chemical profile (only useful for molecule-specific posts)
+      if (post.source_molecule) {
+        const profile = await generateChemicalProfile({ name: post.source_molecule, cas: top.cas });
+        if (profile) post.full_post = clampPost(post.full_post + '\n\n🔬 Chemical profile: ' + profile);
+      }
+      // Part 4 — image prompt
+      post.image_prompt = generateImagePrompt(post.post_type, post.source_molecule);
+      // Step 5 — persist
       const id = dryRun ? null : await insertDraft(post, slot);
       drafts.push({ id, slot_label: label, scheduled_for: slot, ...post });
     } catch (e) {
+      console.error(`[linkedin-agent] ${label} failed:`, e.message);
       drafts.push({ slot_label: label, scheduled_for: slot, error: e.message });
     }
   };
 
-  await safe('Monday — product post', () => generateProductPost(molecule), week.monday);
-  await safe('Wednesday — market intelligence', () => generateMarketIntelligencePost(), week.wednesday);
-  await safe('Friday — company update', () => generateCompanyUpdate(), week.friday);
+  await safe('Monday — product post', () => generateProductPost({
+    name: top.name, cas: top.cas || '', purity: top.purity || '99%',
+  }), week.monday);
+  await safe('Wednesday — market trend', () => generateMarketTrendPost(enriched), week.wednesday);
+  await safe('Friday — capability highlight', () => generateCapabilityPost(), week.friday);
 
+  // Step 6 — log + email Naresh
   if (!dryRun) {
     await logAgentActivity({
-      agent_name: AGENT, action_type: 'linkedin_weekly_schedule',
+      agent_name: AGENT, action_type: 'linkedin_weekly_campaign',
       user_id: ceo ? ceo.id : null,
-      reasoning: `Drafted ${drafts.filter(d => d.id).length} LinkedIn posts for week of ${week.monday}; awaiting approval.`,
-      source_kpi: 'kpi-sg-marketing', confidence_score: 75,
-      output_summary: drafts.map(d => `${d.slot_label}: ${d.error ? 'ERROR ' + d.error : (d.headline || 'draft created')}`).join(' | '),
+      reasoning: `Drafted ${drafts.filter(d => d.id).length} weekly LinkedIn posts (top molecule: ${top.name}, demand score ${top.demand_score || '?'}).`,
+      source_kpi: 'kpi-sg-marketing', confidence_score: 78,
+      output_summary: drafts.map(d => `${d.slot_label}: ${d.error ? 'ERROR ' + d.error : (d.headline || 'draft')}`).join(' | '),
     });
     if (ceo?.email) {
-      await sendEmail({
-        to: ceo.email,
-        subject: `LinkedIn content drafts — week of ${week.monday}`,
-        html: renderApprovalEmail(week.monday, drafts.filter(d => d.id)),
-      });
+      try {
+        await sendEmail({
+          to: ceo.email,
+          subject: `LinkedIn campaign drafts — week of ${week.monday}`,
+          html: renderApprovalEmail(week.monday, drafts.filter(d => d.id)),
+        });
+      } catch (e) { console.error('[linkedin-agent] approval email failed:', e.message); }
     }
   }
 
-  return { week, drafts_created: drafts.filter(d => d.id).length, drafts };
+  return {
+    week, top_molecule: top, demand_intel: enriched,
+    drafts_created: drafts.filter(d => d.id).length, drafts,
+  };
 }
+
+// Back-compat alias for the existing cron and any importer using the old name.
+async function scheduleLinkedInContent(opts) { return runWeeklyLinkedInCampaign(opts); }
 
 module.exports = {
   generateProductPost,
   generateMarketIntelligencePost,
   generateCompanyUpdate,
+  generateMarketTrendPost,
+  generateCapabilityPost,
+  generateChemicalProfile,
+  generateImagePrompt,
+  getCombinedDemandMolecules,
+  enrichWithCatalog,
+  runWeeklyLinkedInCampaign,
   scheduleLinkedInContent,
   publishPost,
   MAX_POST_CHARS,
