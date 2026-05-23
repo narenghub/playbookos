@@ -241,26 +241,43 @@ async function generatePostImage(molecule_name, post_type) {
   }
 }
 
+// Resolve the LinkedIn member URN for the authenticated user. Uses
+// LINKEDIN_PERSON_ID when set (skips the API roundtrip), otherwise calls the
+// OIDC /v2/userinfo endpoint and uses the returned `sub` field.
+async function getMemberURN(token) {
+  const envId = (process.env.LINKEDIN_PERSON_ID || '').trim();
+  if (envId) {
+    const id = envId.replace(/^urn:li:[^:]+:/, '');
+    return { urn: `urn:li:person:${id}`, source: 'env' };
+  }
+  try {
+    const res = await fetch('https://api.linkedin.com/v2/userinfo', {
+      headers: { 'Authorization': 'Bearer ' + token },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { error: `userinfo ${res.status}: ${body.slice(0, 200)}` };
+    }
+    const data = await res.json();
+    if (!data.sub) return { error: 'userinfo response had no sub field' };
+    return { urn: `urn:li:person:${data.sub}`, source: 'userinfo' };
+  } catch (e) {
+    return { error: 'userinfo fetch failed: ' + e.message };
+  }
+}
+
 // Push a queued post to LinkedIn. The row must be approved.
-// The author URN MUST be urn:li:organization:<numeric id> for org page posts —
-// urn:li:person:* and urn:li:member:* will both return 403 against the
-// organization-scope access token, so we strip any other prefix and force the
-// organization URN. Default org ID is Abiozen's (106395356).
+// Posts as the authenticated member (urn:li:person:<sub>) for now, since the
+// w_organization_social scope required for company-page posts is not yet
+// granted. LINKEDIN_PERSON_ID overrides the userinfo lookup when set.
 async function publishPost(queueRow) {
   const token = process.env.LINKEDIN_ACCESS_TOKEN;
   if (!token) {
     return { skipped: true, reason: 'LINKEDIN_ACCESS_TOKEN is not set' };
   }
-  const DEFAULT_ORG = '106395356';
-  const orgRaw = (process.env.LINKEDIN_ORGANIZATION_ID || '').trim();
-  let orgId;
-  if (!orgRaw) orgId = DEFAULT_ORG;
-  else if (/^urn:li:organization:/.test(orgRaw)) orgId = orgRaw.replace(/^urn:li:organization:/, '');
-  else if (/^urn:li:[^:]+:/.test(orgRaw)) {
-    console.warn('[linkedin-agent] LINKEDIN_ORGANIZATION_ID is a non-organization URN (' + orgRaw + '); falling back to ' + DEFAULT_ORG);
-    orgId = DEFAULT_ORG;
-  } else orgId = orgRaw;
-  const author = `urn:li:organization:${orgId}`;
+  const member = await getMemberURN(token);
+  if (member.error) return { error: member.error };
+  const author = member.urn;
   const text = clampPost(queueRow.full_post || '');
   const body = {
     author,
