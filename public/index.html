@@ -84,8 +84,74 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--teal)}
 .ai-box .ai-label{font-size:11px;font-weight:700;color:var(--teal);letter-spacing:.5px;margin-bottom:8px}
 .ai-box p{font-size:13px;line-height:1.7;color:#333}
 
-/* Responsive */
-@media(max-width:768px){#sidebar{display:none}#content{padding:12px}}
+/* ── Responsive breakpoints ─────────────────────────────────────────────── */
+/* Desktop default — hide mobile-only UI */
+#mobile-topbar{display:none}
+#sidebar-overlay{display:none}
+
+/* Tablet (769-1024px) — collapse sidebar to icons only */
+@media (min-width:769px) and (max-width:1024px) {
+  #sidebar{width:64px}
+  #sidebar .brand{padding:14px 8px 10px}
+  #sidebar .brand-logo,#sidebar .brand-sub,#sidebar .brand-user{display:none}
+  #sidebar nav .nav-section-title{display:none}
+  #sidebar nav a{padding:11px 0;justify-content:center;gap:0}
+  #sidebar nav a span:not(.nav-icon){display:none}
+  #sidebar nav a .nav-icon{margin:0;font-size:17px}
+  #content{padding:18px}
+}
+
+/* Mobile (<=768px) — hide sidebar offscreen, show hamburger top bar */
+@media (max-width:768px) {
+  #app{flex-direction:column}
+  #sidebar{
+    position:fixed;top:0;left:0;height:100vh;width:260px;z-index:1000;
+    transform:translateX(-100%);transition:transform .25s ease;
+    box-shadow:2px 0 18px rgba(0,0,0,.25);overflow-y:auto;
+  }
+  #sidebar.open{transform:translateX(0)}
+  #sidebar-overlay{
+    display:block;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;
+    opacity:0;pointer-events:none;transition:opacity .25s ease;
+  }
+  #sidebar-overlay.show{opacity:1;pointer-events:auto}
+  #mobile-topbar{
+    display:flex;align-items:center;justify-content:space-between;
+    background:var(--navy);color:#fff;padding:8px 12px;
+    position:sticky;top:0;z-index:998;
+    border-bottom:2px solid rgba(159,225,203,.4);
+  }
+  #mobile-topbar .mobile-brand{font-weight:800;letter-spacing:1.5px;font-size:15px;color:#fff}
+  #mobile-hamburger{
+    background:transparent;color:#fff;border:none;font-size:22px;
+    cursor:pointer;padding:8px 12px;min-width:44px;min-height:44px;
+  }
+  #main{width:100%}
+  #topbar{padding:10px 14px}
+  #topbar h2.text-page-title{font-size:17px}
+  #topbar #revenue-status{display:none}
+  #content{padding:12px;max-width:100%}
+  .card{padding:14px;margin-bottom:12px}
+  .card-title{font-size:13px}
+  table{font-size:12px}
+  th,td{padding:6px 8px}
+  /* Stack metric grids and 2/3-column inline grids into one column */
+  .metric-grid{grid-template-columns:1fr !important;gap:10px}
+  div[style*="grid-template-columns:1fr 1fr"]{grid-template-columns:1fr !important}
+  div[style*="grid-template-columns:repeat(3,1fr)"]{grid-template-columns:1fr !important}
+  div[style*="grid-template-columns:repeat(2,1fr)"]{grid-template-columns:1fr !important}
+  /* Generous tap targets */
+  button,.btn,.btn-primary,.btn-secondary,.btn-success,.btn-danger,.btn-outline,.btn-teal{
+    min-height:44px;
+  }
+  input,select,textarea{font-size:16px;min-height:44px;padding:10px 12px}
+  #topbar .btn.btn-outline.btn-sm{min-height:34px;padding:6px 12px;font-size:12px}
+  /* Toast slides in from bottom, near-full-width */
+  #toast-container{left:12px;right:12px;bottom:12px}
+  .toast{max-width:100%;min-width:0;width:100%}
+  /* Auth card fits viewport */
+  .auth-card{width:calc(100% - 24px);margin:0 12px;padding:24px}
+}
 
 /* ── Enterprise UI redesign ─────────────────────────────────────────────────── */
 :root{--text-strong:#1a202c;--text-body:#4a5568;--text-muted:#718096}
@@ -163,7 +229,13 @@ button:disabled{opacity:.6;cursor:not-allowed}
     <div style="border-top:1px solid rgba(255,255,255,0.1);margin:12px 0 8px"></div>
     <nav id="nav-links"></nav>
   </div>
+  <div id="sidebar-overlay" onclick="closeMobileSidebar()"></div>
   <div id="main">
+    <div id="mobile-topbar">
+      <button id="mobile-hamburger" onclick="toggleMobileSidebar()" aria-label="Open menu">☰</button>
+      <div class="mobile-brand">ABIOZEN</div>
+      <div style="width:44px"></div>
+    </div>
     <div id="topbar">
       <h2 id="page-title" class="text-page-title">Dashboard</h2>
       <div style="display:flex;gap:14px;align-items:center">
@@ -358,7 +430,22 @@ async function buildNav() {
   document.getElementById('nav-links').innerHTML = html;
 }
 
+function toggleMobileSidebar() {
+  const sb = document.getElementById('sidebar');
+  const ov = document.getElementById('sidebar-overlay');
+  if (!sb) return;
+  const open = sb.classList.toggle('open');
+  if (ov) ov.classList.toggle('show', open);
+}
+function closeMobileSidebar() {
+  const sb = document.getElementById('sidebar');
+  const ov = document.getElementById('sidebar-overlay');
+  if (sb) sb.classList.remove('open');
+  if (ov) ov.classList.remove('show');
+}
+
 function navigate(page) {
+  closeMobileSidebar();
   currentPage = page;
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
