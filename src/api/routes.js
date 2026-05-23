@@ -13,6 +13,7 @@ const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = req
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
+const { sendWhatsApp } = require('../lib/whatsapp');
 const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
@@ -117,7 +118,7 @@ router.get('/users', authMiddleware, async (req, res) => {
 
 router.post('/users/invite', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const { email, role, github_username } = req.body;
+    const { email, role, github_username, whatsapp_number } = req.body;
     if (!email || !role) return res.status(400).json({ error: 'Email and role required' });
     const catalog = await getAllRoles();
     if (!catalog[role]) {
@@ -127,21 +128,44 @@ router.post('/users/invite', authMiddleware, adminOnly, async (req, res) => {
     if (existing.rows[0]) return res.status(400).json({ error: 'User already exists' });
     const inviteToken = crypto.randomBytes(32).toString('hex');
     const id = crypto.randomUUID();
-    await query('INSERT INTO users (id,email,name,role,github_username,invite_token,invited_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-      [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, inviteToken, new Date().toISOString()]);
+    const wa = whatsapp_number ? String(whatsapp_number).trim() : null;
+    await query('INSERT INTO users (id,email,name,role,github_username,whatsapp_number,invite_token,invited_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, wa, inviteToken, new Date().toISOString()]);
     const baseUrl = process.env.BASE_URL || 'https://playbookos-production.up.railway.app';
     const inviteUrl = `${baseUrl}/#/accept-invite?token=${inviteToken}`;
     sendEmail({ to: email, subject: `You've been invited to Abiozen PlaybookOS`, triggerType: 'invite',
       html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#1B3A6B">Abiozen PlaybookOS</h2><p>You've been invited as <strong>${role}</strong>.</p><a href="${inviteUrl}" style="background:#0D7377;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;margin:16px 0">Accept Invite</a><p style="color:#666;font-size:13px">Or copy: ${inviteUrl}</p></div>` });
-    res.json({ success: true, message: `Invite sent to ${email}`, inviteUrl });
+
+    // Fire-and-forget WhatsApp welcome if a number was provided. Skips
+    // gracefully when Twilio env vars are unset (sendWhatsApp returns
+    // { skipped, reason }). Failures must not break the invite response.
+    let whatsapp_status = null;
+    if (wa) {
+      const welcome = `Welcome to Abiozen PlaybookOS! 🚀 You've been invited as ${role}. Login at ${baseUrl} with your email. You'll receive daily task assignments and KPI updates here on WhatsApp.`;
+      try {
+        const r = await sendWhatsApp(wa, welcome, { user_id: id, message_type: 'welcome' });
+        whatsapp_status = r.success ? 'sent' : (r.skipped ? 'skipped:' + r.reason : 'error:' + r.error);
+      } catch(e) { whatsapp_status = 'error:' + e.message; }
+    }
+
+    res.json({ success: true, message: `Invite sent to ${email}`, inviteUrl, whatsapp_status });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 router.put('/users/profile', authMiddleware, async (req, res) => {
   try {
-    const { github_username, name, user_id } = req.body;
-    const targetId = (req.user.role === 'admin' && user_id) ? user_id : req.user.id;
-    await query('UPDATE users SET github_username=COALESCE($1,github_username), name=COALESCE($2,name) WHERE id=$3', [github_username || null, name || null, targetId]);
+    const { github_username, name, whatsapp_number, user_id } = req.body;
+    const isAdmin = ['super_admin', 'admin'].includes(req.user.role);
+    const targetId = (isAdmin && user_id) ? user_id : req.user.id;
+    const wa = whatsapp_number === undefined ? null : String(whatsapp_number || '').trim();
+    await query(
+      `UPDATE users SET
+         github_username = COALESCE($1, github_username),
+         name = COALESCE($2, name),
+         whatsapp_number = COALESCE($3, whatsapp_number)
+       WHERE id = $4`,
+      [github_username || null, name || null, wa || null, targetId]
+    );
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

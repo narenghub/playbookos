@@ -291,7 +291,7 @@ function logout() {
 async function showApp() {
   document.getElementById('app').style.display = 'flex';
   await buildNav();
-  document.getElementById("user-info-box").innerHTML = '<div class="uname">' + (currentUser.name||"Admin") + '</div><div class="urole">' + (currentUser.role||"") + '</div>';
+  document.getElementById("user-info-box").innerHTML = '<div class="uname">' + (currentUser.name||"Admin") + '</div><div class="urole">' + (currentUser.role||"") + '</div><div style="margin-top:6px"><a href="#" onclick="editMyWhatsApp();return false" style="font-size:10px;color:#9FE1CB;text-decoration:none">📱 Set WhatsApp</a></div>';
   navigate('dashboard');
 }
 
@@ -754,6 +754,7 @@ async team() {
             action = `<div style="position:relative;display:inline-block">
               <button onclick="toggleActionsMenu(event,'${u.id}')" style="background:#9ca3af;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">Actions ▼</button>
               <div id="actions-menu-${u.id}" class="actions-menu" style="display:none;position:absolute;right:0;top:28px;background:#fff;border:1px solid #ddd;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:100;min-width:170px;overflow:hidden">
+                ${item('Set WhatsApp', '#0D7377', 'setUserWhatsApp')}
                 ${item('Set Active', '#1D9E75', 'setUserActive')}
                 ${item('Set Inactive', '#BA7517', 'setUserInactive')}
                 ${invited ? item('Remove', '#E24B4A', 'removeUser', true) : ''}
@@ -780,6 +781,10 @@ async team() {
           <div class="form-group"><label>Role</label>
             <select id="inv-role"><option value="">Loading roles…</option></select>
           </div>
+        </div>
+        <div class="form-group">
+          <label>WhatsApp number <span style="font-weight:400;color:#666;font-size:11px">(optional, with country code — e.g. +14155551234)</span></label>
+          <input id="inv-whatsapp" type="tel" placeholder="+14155551234">
         </div>
         <div style="display:flex;gap:8px">
           <button class="btn btn-teal" onclick="sendInvite()">Send invite email</button>
@@ -995,6 +1000,45 @@ async function addOrder() {
   }
 }
 
+async function editMyWhatsApp() {
+  const cur = (currentUser && currentUser.whatsapp_number) || '';
+  const num = prompt('Your WhatsApp number (with country code, e.g. +14155551234):', cur);
+  if (num === null) return;
+  const trimmed = String(num).trim();
+  try {
+    const res = await API('/users/profile', {method:'PUT', body: JSON.stringify({whatsapp_number: trimmed})});
+    if (res && res.success) {
+      if (currentUser) currentUser.whatsapp_number = trimmed;
+      if (typeof showToast === 'function') showToast(trimmed ? 'WhatsApp number saved' : 'WhatsApp number cleared', 'success');
+      else alert('Saved.');
+    } else {
+      if (typeof showToast === 'function') showToast('Error: ' + ((res && res.error) || 'unknown'), 'error', 5000);
+      else alert('Error: ' + ((res && res.error) || 'unknown'));
+    }
+  } catch(e) {
+    if (typeof showToast === 'function') showToast('Error: ' + e.message, 'error', 5000);
+    else alert('Error: ' + e.message);
+  }
+}
+async function setUserWhatsApp(userId, userName) {
+  const num = prompt('WhatsApp number for ' + userName + ' (with country code, e.g. +14155551234):', '');
+  if (num === null) return;
+  try {
+    const res = await API('/users/profile', {method:'PUT', body: JSON.stringify({user_id: userId, whatsapp_number: String(num).trim()})});
+    if (res && res.success) {
+      if (typeof showToast === 'function') showToast('WhatsApp number saved for ' + userName, 'success');
+      else alert('Saved for ' + userName);
+      if (typeof pages !== 'undefined' && pages.team) pages.team();
+    } else {
+      if (typeof showToast === 'function') showToast('Error: ' + ((res && res.error) || 'unknown'), 'error', 5000);
+      else alert('Error: ' + ((res && res.error) || 'unknown'));
+    }
+  } catch(e) {
+    if (typeof showToast === 'function') showToast('Error: ' + e.message, 'error', 5000);
+    else alert('Error: ' + e.message);
+  }
+}
+
 function toggleActionsMenu(event, id) {
   event.stopPropagation();
   const menu = document.getElementById('actions-menu-' + id);
@@ -1032,11 +1076,19 @@ async function deleteUserPermanently(id, name) {
 async function sendInvite() {
   const email = document.getElementById('inv-email').value;
   const role = document.getElementById('inv-role').value;
+  const whatsapp_number = (document.getElementById('inv-whatsapp') || {}).value || '';
   if (!role) { document.getElementById('invite-msg').innerHTML = '<div class="error-msg">Pick a role</div>'; return; }
-  document.getElementById('invite-msg').innerHTML = '<div style="color:#888;font-size:13px">Sending...</div>';
-  const res = await Promise.race([API("/users/invite",{method:"POST",body:JSON.stringify({email,role})}), new Promise((_,r)=>setTimeout(()=>r(new Error("timeout")),10000))]).catch(e=>({error:e.message}));
+  document.getElementById('invite-msg').innerHTML = '<div style="color:#888;font-size:13px">Sending invite + WhatsApp welcome…</div>';
+  const res = await Promise.race([
+    API("/users/invite",{method:"POST",body:JSON.stringify({email, role, whatsapp_number: whatsapp_number.trim()})}),
+    new Promise((_,r)=>setTimeout(()=>r(new Error("timeout")),15000))
+  ]).catch(e=>({error:e.message}));
   if (res.success) {
-    document.getElementById('invite-msg').innerHTML = `<div class="success-msg">${res.message}</div>`;
+    let waNote = '';
+    if (res.whatsapp_status === 'sent') waNote = ' — WhatsApp welcome sent.';
+    else if (res.whatsapp_status && res.whatsapp_status.startsWith('skipped')) waNote = ' — WhatsApp skipped (Twilio not configured).';
+    else if (res.whatsapp_status && res.whatsapp_status.startsWith('error')) waNote = ' — WhatsApp error: ' + res.whatsapp_status.slice(6);
+    document.getElementById('invite-msg').innerHTML = `<div class="success-msg">${res.message}${waNote}</div>`;
     setTimeout(()=>pages.team(), 2000);
   } else {
     document.getElementById('invite-msg').innerHTML = `<div class="error-msg">${res.error}</div>`;
