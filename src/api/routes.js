@@ -13,7 +13,7 @@ const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = req
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing } = require('../lib/agents/orchestrator');
-const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, getCombinedDemandMolecules, enrichWithCatalog, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
+const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
 const router = express.Router();
@@ -1538,6 +1538,15 @@ router.post('/linkedin/publish/:id', authMiddleware, adminOnly, async (req, res)
 router.post('/linkedin/run-campaign', authMiddleware, adminOnly, async (req, res) => {
   try {
     const result = await runWeeklyLinkedInCampaign({ dryRun: !!req.body?.dryRun });
+    res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Alias — calls scheduleLinkedInContent (back-compat name for the same flow)
+// so external integrations can hit either /run-campaign or /generate-weekly.
+router.post('/linkedin/generate-weekly', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const result = await scheduleLinkedInContent({ dryRun: !!req.body?.dryRun });
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

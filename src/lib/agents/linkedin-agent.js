@@ -190,13 +190,25 @@ function generateImagePrompt(post_type, molecule_name) {
 }
 
 // Push a queued post to LinkedIn. The row must be approved.
+// The author URN MUST be urn:li:organization:<numeric id> for org page posts —
+// urn:li:person:* and urn:li:member:* will both return 403 against the
+// organization-scope access token, so we strip any other prefix and force the
+// organization URN. Default org ID is Abiozen's (106395356).
 async function publishPost(queueRow) {
   const token = process.env.LINKEDIN_ACCESS_TOKEN;
-  const orgId = process.env.LINKEDIN_ORGANIZATION_ID;
-  if (!token || !orgId) {
-    return { skipped: true, reason: 'LINKEDIN_ACCESS_TOKEN and LINKEDIN_ORGANIZATION_ID must both be set' };
+  if (!token) {
+    return { skipped: true, reason: 'LINKEDIN_ACCESS_TOKEN is not set' };
   }
-  const author = orgId.startsWith('urn:') ? orgId : `urn:li:organization:${orgId}`;
+  const DEFAULT_ORG = '106395356';
+  const orgRaw = (process.env.LINKEDIN_ORGANIZATION_ID || '').trim();
+  let orgId;
+  if (!orgRaw) orgId = DEFAULT_ORG;
+  else if (/^urn:li:organization:/.test(orgRaw)) orgId = orgRaw.replace(/^urn:li:organization:/, '');
+  else if (/^urn:li:[^:]+:/.test(orgRaw)) {
+    console.warn('[linkedin-agent] LINKEDIN_ORGANIZATION_ID is a non-organization URN (' + orgRaw + '); falling back to ' + DEFAULT_ORG);
+    orgId = DEFAULT_ORG;
+  } else orgId = orgRaw;
+  const author = `urn:li:organization:${orgId}`;
   const text = clampPost(queueRow.full_post || '');
   const body = {
     author,
