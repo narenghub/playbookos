@@ -13,7 +13,7 @@ const { trackKeywordRankings, generateSEOTasksForTeam, trackAlgoliaNoResults } =
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/lib/agents/goal-engine');
 const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
 const { runMorningBriefing } = require('./src/lib/agents/orchestrator');
-const { scheduleLinkedInContent } = require('./src/lib/agents/linkedin-agent');
+const { runWeeklyLinkedInCampaign } = require('./src/lib/agents/linkedin-agent');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -241,7 +241,7 @@ cron.schedule('0 7 * * *', async () => {
 cron.schedule('0 10 * * 1', async () => {
   console.log('[CRON] LinkedIn content scheduler starting...');
   try {
-    const r = await scheduleLinkedInContent();
+    const r = await runWeeklyLinkedInCampaign();
     console.log(`[CRON] LinkedIn content scheduler done — ${r.drafts_created} drafts for week of ${r.week.monday}`);
   } catch (e) { console.error('[CRON] LinkedIn content scheduler error:', e.message); }
 }, CST);

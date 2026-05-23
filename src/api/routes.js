@@ -1542,11 +1542,12 @@ router.post('/linkedin/run-campaign', authMiddleware, adminOnly, async (req, res
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// Alias — calls scheduleLinkedInContent (back-compat name for the same flow)
-// so external integrations can hit either /run-campaign or /generate-weekly.
+// /generate-weekly — calls runWeeklyLinkedInCampaign directly (Steps 1-6 of
+// the Monday flow). Sits alongside /run-campaign so external integrations can
+// hit either route.
 router.post('/linkedin/generate-weekly', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const result = await scheduleLinkedInContent({ dryRun: !!req.body?.dryRun });
+    const result = await runWeeklyLinkedInCampaign({ dryRun: !!req.body?.dryRun });
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
