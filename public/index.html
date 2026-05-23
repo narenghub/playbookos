@@ -121,6 +121,14 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--teal)}
 #revenue-status .rs-wrap{display:inline-flex;align-items:center;gap:10px;font-size:12px;color:var(--text-body)}
 #revenue-status .rs-bar{width:140px;height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden}
 #revenue-status .rs-fill{height:6px;border-radius:3px;background:var(--navy);transition:width .4s}
+/* ── Toast notifications ── */
+#toast-container{position:fixed;bottom:20px;right:20px;z-index:10000;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.toast{background:#1B3A6B;color:#fff;padding:10px 14px;border-radius:6px;font-size:13px;min-width:220px;max-width:360px;box-shadow:0 4px 12px rgba(0,0,0,.18);opacity:0;transform:translateX(20px);transition:opacity .2s ease,transform .2s ease;pointer-events:auto;line-height:1.4}
+.toast.show{opacity:1;transform:translateX(0)}
+.toast.success{background:#1D9E75}.toast.error{background:#dc2626}.toast.info{background:#1B3A6B}
+.btn-spinner{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+button:disabled{opacity:.6;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -185,6 +193,26 @@ const API = (path, opts={}) => {
 };
 
 const fmt = v => '$' + Math.round(v).toLocaleString();
+
+function showToast(message, type, duration) {
+  type = type || 'info';
+  duration = duration == null ? 3000 : duration;
+  let container = document.getElementById('toast-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toast-container';
+    document.body.appendChild(container);
+  }
+  const t = document.createElement('div');
+  t.className = 'toast ' + type;
+  t.textContent = message;
+  container.appendChild(t);
+  requestAnimationFrame(() => t.classList.add('show'));
+  if (duration > 0) {
+    setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 250); }, duration);
+  }
+  return t;
+}
 const pct = (v,t) => t>0 ? Math.round((v/t)*100) : 0;
 const today = () => new Date().toISOString().slice(0,10);
 const thisMonth = () => new Date().toISOString().slice(0,7);
@@ -1398,16 +1426,18 @@ function renderLinkedInPreview(q, esc, statusBadge) {
   const accent = q.status==='published'?'#1D9E75':q.status==='approved'?'#EF9F27':q.status==='rejected'?'#dc2626':'#1B3A6B';
   const buttons = [];
   if (q.status === 'draft') {
-    buttons.push(`<button onclick="linkedinAction('${q.id}','approve')" class="btn-success" style="padding:5px 10px;font-size:11px">Approve &amp; publish</button>`);
+    buttons.push(`<button id="btn-publish-${q.id}" onclick="linkedinApproveAndPublish('${q.id}', this)" class="btn-success" style="padding:5px 10px;font-size:11px">Approve &amp; publish</button>`);
     buttons.push(`<button onclick="linkedinEdit('${q.id}')" class="btn-secondary" style="padding:5px 10px;font-size:11px">Edit</button>`);
-    buttons.push(`<button onclick="linkedinAction('${q.id}','reject')" class="btn-danger" style="padding:5px 10px;font-size:11px">Reject</button>`);
+    buttons.push(`<button onclick="linkedinAction('${q.id}','reject', this)" class="btn-danger" style="padding:5px 10px;font-size:11px">Reject</button>`);
   } else if (q.status === 'approved') {
-    buttons.push(`<button onclick="linkedinPublish('${q.id}')" class="btn-primary" style="padding:5px 10px;font-size:11px">Publish to LinkedIn</button>`);
-    buttons.push(`<button onclick="linkedinAction('${q.id}','reject')" class="btn-danger" style="padding:5px 10px;font-size:11px">Reject</button>`);
+    buttons.push(`<button onclick="linkedinPublish('${q.id}', this)" class="btn-primary" style="padding:5px 10px;font-size:11px">Publish to LinkedIn</button>`);
+    buttons.push(`<button onclick="linkedinAction('${q.id}','reject', this)" class="btn-danger" style="padding:5px 10px;font-size:11px">Reject</button>`);
+  } else if (q.status === 'published') {
+    buttons.push(`<button disabled class="btn-success" style="padding:5px 10px;font-size:11px">✓ Published</button>`);
   }
   // Regenerate-image is available on any unrejected post (costs ~$0.04 in DALL-E)
   if (q.status !== 'rejected') {
-    buttons.push(`<button onclick="linkedinRegenerate('${q.id}')" class="btn-outline btn-sm" style="font-size:11px">🎨 Regenerate image</button>`);
+    buttons.push(`<button onclick="linkedinRegenerate('${q.id}', this)" class="btn-outline btn-sm" style="font-size:11px">🎨 Regenerate image</button>`);
   }
   const eng = (q.engagement_clicks||q.engagement_likes||q.engagement_comments)
     ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:11px;color:var(--text-muted);display:flex;gap:14px"><span>👍 ${q.engagement_likes||0} likes</span><span>💬 ${q.engagement_comments||0} comments</span><span>🔗 ${q.engagement_clicks||0} clicks</span></div>`
@@ -1478,9 +1508,13 @@ async function linkedinSaveEdit(id) {
   const full_post = document.getElementById('ed-full-' + id).value;
   try {
     const res = await API('/linkedin/content-queue/' + id, {method:'PUT', body: JSON.stringify({action:'edit', headline, body, full_post})});
-    if (res && res.success) pages['linkedin-content']();
-    else alert('Error: ' + ((res && res.error) || 'unknown'));
-  } catch(e) { alert('Error: ' + e.message); }
+    if (res && res.success) {
+      showToast('Changes saved', 'success');
+      await refreshLinkedInCard(id);
+    } else {
+      showToast('Error: ' + ((res && res.error) || 'unknown'), 'error', 5000);
+    }
+  } catch(e) { showToast('Error: ' + e.message, 'error', 5000); }
 }
 async function linkedinRunCampaign() {
   if (!confirm('Run the weekly LinkedIn campaign now? Generates Mon / Wed / Fri drafts (≈45-60 seconds).')) return;
@@ -1497,19 +1531,73 @@ async function linkedinRunCampaign() {
   } catch(e) { msg.remove(); alert('Error: ' + e.message); }
 }
 
-async function linkedinRegenerate(id) {
+// ── LinkedIn partial-update helpers ─────────────────────────────────────────
+async function refreshLinkedInCard(id) {
+  try {
+    const res = await API('/linkedin/content-queue');
+    if (!res || !res.queue) return null;
+    window._linkedinQueue = res.queue;
+    const row = res.queue.find(q => q.id === id);
+    if (!row) return null;
+    const card = document.getElementById('li-card-' + id);
+    if (!card) return row;
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const statusCls = s => ({draft:'badge-blue',approved:'badge-amber',published:'badge-green',rejected:'badge-red'}[s] || 'badge-gray');
+    const statusBadge = s => '<span class="badge ' + statusCls(s) + '">' + esc(s) + '</span>';
+    const tmp = document.createElement('div');
+    tmp.innerHTML = renderLinkedInPreview(row, esc, statusBadge);
+    const replacement = tmp.firstElementChild;
+    if (replacement) card.replaceWith(replacement);
+    return row;
+  } catch(e) { return null; }
+}
+
+async function linkedinApproveAndPublish(id, btn) {
+  if (btn && btn.dataset.busy === '1') return;
+  const origHTML = btn ? btn.innerHTML : null;
+  if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>Publishing…'; }
+  try {
+    const ap = await API('/linkedin/content-queue/' + id, {method:'PUT', body: JSON.stringify({action:'approve'})});
+    if (!ap || ap.error || !ap.success) {
+      showToast('Approve failed: ' + ((ap && ap.error) || 'unknown error'), 'error', 5000);
+      if (btn) { btn.disabled = false; btn.innerHTML = origHTML; btn.dataset.busy = ''; }
+      return;
+    }
+    const apStatus = ap.post && ap.post.status;
+    if (apStatus !== 'published') {
+      const pub = await API('/linkedin/publish/' + id, {method:'POST'});
+      if (!pub || pub.error || !pub.success) {
+        showToast('Approved, but publish failed: ' + ((pub && pub.error) || 'unknown'), 'error', 6000);
+        await refreshLinkedInCard(id);
+        return;
+      }
+    }
+    showToast('Posted to LinkedIn successfully', 'success');
+    await refreshLinkedInCard(id);
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error', 5000);
+    if (btn) { btn.disabled = false; btn.innerHTML = origHTML; btn.dataset.busy = ''; }
+  }
+}
+
+async function linkedinRegenerate(id, btn) {
+  if (btn && btn.dataset.busy === '1') return;
   if (!confirm('Regenerate the DALL-E image for this post? Calls OpenAI (~$0.04) and takes 10-20 seconds.')) return;
-  const card = document.getElementById('li-card-' + id);
-  const msg = document.createElement('div');
-  msg.style.cssText = 'position:fixed;top:20px;right:20px;background:#1B3A6B;color:#fff;padding:10px 16px;border-radius:6px;font-size:12px;z-index:9999';
-  msg.textContent = 'Generating image via DALL-E 3…';
-  document.body.appendChild(msg);
+  const origHTML = btn ? btn.innerHTML : null;
+  if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>Generating…'; }
   try {
     const res = await API('/linkedin/regenerate-image/' + id, {method:'POST'});
-    msg.remove();
-    if (res && res.error) { alert('Error: ' + res.error); return; }
-    pages['linkedin-content']();
-  } catch(e) { msg.remove(); alert('Error: ' + e.message); }
+    if (!res || res.error) {
+      showToast('Error: ' + ((res && res.error) || 'unknown'), 'error', 5000);
+      if (btn) { btn.disabled = false; btn.innerHTML = origHTML; btn.dataset.busy = ''; }
+      return;
+    }
+    showToast('New image generated', 'success');
+    await refreshLinkedInCard(id);
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error', 5000);
+    if (btn) { btn.disabled = false; btn.innerHTML = origHTML; btn.dataset.busy = ''; }
+  }
 }
 
 async function linkedinGenerate() {
@@ -1527,21 +1615,43 @@ async function linkedinGenerate() {
     else msg.innerHTML = '<span style="color:#dc2626">Error: ' + ((res && res.error) || 'unknown') + '</span>';
   } catch(e) { msg.innerHTML = '<span style="color:#dc2626">Error: ' + e.message + '</span>'; }
 }
-async function linkedinAction(id, action) {
+async function linkedinAction(id, action, btn) {
+  if (btn && btn.dataset.busy === '1') return;
   if (action === 'reject' && !confirm('Reject this post?')) return;
+  const origHTML = btn ? btn.innerHTML : null;
+  if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>…'; }
   try {
     const res = await API('/linkedin/content-queue/' + id, {method:'PUT', body: JSON.stringify({action})});
-    if (res && res.success) pages['linkedin-content']();
-    else alert('Error: ' + ((res && res.error) || 'unknown'));
-  } catch(e) { alert('Error: ' + e.message); }
+    if (res && res.success) {
+      showToast(action === 'approve' ? 'Approved' : 'Rejected', 'success');
+      await refreshLinkedInCard(id);
+    } else {
+      showToast('Error: ' + ((res && res.error) || 'unknown'), 'error', 5000);
+      if (btn) { btn.disabled = false; btn.innerHTML = origHTML; btn.dataset.busy = ''; }
+    }
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error', 5000);
+    if (btn) { btn.disabled = false; btn.innerHTML = origHTML; btn.dataset.busy = ''; }
+  }
 }
-async function linkedinPublish(id) {
-  if (!confirm('Publish to LinkedIn now? This goes live on the company page.')) return;
+async function linkedinPublish(id, btn) {
+  if (btn && btn.dataset.busy === '1') return;
+  if (!confirm('Publish to LinkedIn now? This goes live.')) return;
+  const origHTML = btn ? btn.innerHTML : null;
+  if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>Publishing…'; }
   try {
     const res = await API('/linkedin/publish/' + id, {method:'POST'});
-    if (res && res.success) { alert('Published. LinkedIn ID: ' + (res.linkedin_post_id || '(unknown)')); pages['linkedin-content'](); }
-    else alert('Error: ' + ((res && res.error) || 'unknown'));
-  } catch(e) { alert('Error: ' + e.message); }
+    if (res && res.success) {
+      showToast('Posted to LinkedIn successfully', 'success');
+      await refreshLinkedInCard(id);
+    } else {
+      showToast('Error: ' + ((res && res.error) || 'unknown'), 'error', 5000);
+      if (btn) { btn.disabled = false; btn.innerHTML = origHTML; btn.dataset.busy = ''; }
+    }
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error', 5000);
+    if (btn) { btn.disabled = false; btn.innerHTML = origHTML; btn.dataset.busy = ''; }
+  }
 }
 
 async function findBuyers() {
