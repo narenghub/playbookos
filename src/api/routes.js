@@ -12,7 +12,7 @@ const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
-const { runMorningBriefing } = require('../lib/agents/orchestrator');
+const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
@@ -999,18 +999,161 @@ router.get('/performance/scores', authMiddleware, adminOnly, async (req, res) =>
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Performance Accountability System ────────────────────────────────────────
+
+// Team leaderboard — latest daily score per active user with 7d trend.
+// Admin + directors only (directors see their team plus self).
+router.get('/performance/team', authMiddleware, async (req, res) => {
+  try {
+    const isAdmin = ['super_admin', 'admin'].includes(req.user.role);
+    const isDirector = ['sales_director', 'procurement_director', 'recruitment_director'].includes(req.user.role);
+    if (!isAdmin && !isDirector) return res.status(403).json({ error: 'admin or director only' });
+
+    const today = new Date().toISOString().slice(0, 10);
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const rows = (await query(`
+      SELECT u.id user_id, u.name, u.role, u.email,
+             latest.total_score, latest.score_date,
+             latest.consecutive_days_below_60, latest.consecutive_days_above_80,
+             latest.tasks_assigned, latest.tasks_completed, latest.weekly_kpi_pct,
+             prior.total_score AS prior_score
+      FROM users u
+      LEFT JOIN LATERAL (
+        SELECT * FROM performance_scores
+        WHERE user_id=u.id AND COALESCE(is_weekly_summary,0)=0
+        ORDER BY score_date DESC LIMIT 1
+      ) latest ON true
+      LEFT JOIN LATERAL (
+        SELECT total_score FROM performance_scores
+        WHERE user_id=u.id AND COALESCE(is_weekly_summary,0)=0 AND score_date < latest.score_date
+        ORDER BY score_date DESC LIMIT 1
+      ) prior ON true
+      WHERE u.is_active=1
+      ORDER BY COALESCE(latest.total_score, -1) DESC
+    `)).rows.map(r => {
+      const score = r.total_score == null ? null : Number(r.total_score);
+      const ps = r.prior_score == null ? null : Number(r.prior_score);
+      let trend = 'flat';
+      if (score == null) trend = 'new';
+      else if (ps != null && score > ps + 5) trend = 'up';
+      else if (ps != null && score < ps - 5) trend = 'down';
+      const bucket = score == null ? 'gray' : score > 80 ? 'green' : score >= 60 ? 'amber' : 'red';
+      return {
+        user_id: r.user_id, name: r.name, role: r.role,
+        score, trend, bucket,
+        score_date: r.score_date,
+        streak_below_60: Number(r.consecutive_days_below_60) || 0,
+        streak_above_80: Number(r.consecutive_days_above_80) || 0,
+        tasks_assigned: Number(r.tasks_assigned) || 0,
+        tasks_completed: Number(r.tasks_completed) || 0,
+        weekly_kpi_pct: Number(r.weekly_kpi_pct) || 0,
+      };
+    });
+    res.json({ as_of: today, count: rows.length, leaderboard: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// My performance — overrides the older /performance/my with the richer
+// 4-component breakdown + rank + 7-day trend + motivational note.
 router.get('/performance/my', authMiddleware, async (req, res) => {
   try {
+    const today = new Date().toISOString().slice(0, 10);
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+    const todayRow = (await query(
+      `SELECT * FROM performance_scores WHERE user_id=$1 AND score_date=$2 AND COALESCE(is_weekly_summary,0)=0`,
+      [req.user.id, today]
+    )).rows[0];
+    const trend = (await query(
+      `SELECT score_date, total_score FROM performance_scores
+       WHERE user_id=$1 AND score_date >= $2 AND COALESCE(is_weekly_summary,0)=0
+       ORDER BY score_date`,
+      [req.user.id, sevenDaysAgo]
+    )).rows.map(r => ({ date: r.score_date, score: Number(r.total_score) || 0 }));
+
+    // Rank — count active users with a higher total_score today
+    let rank = null, team_size = 0;
+    if (todayRow) {
+      const allToday = (await query(`
+        SELECT u.id, p.total_score FROM users u
+        LEFT JOIN performance_scores p ON p.user_id=u.id AND p.score_date=$1 AND COALESCE(p.is_weekly_summary,0)=0
+        WHERE u.is_active=1
+      `, [today])).rows;
+      team_size = allToday.length;
+      const myScore = Number(todayRow.total_score);
+      rank = 1 + allToday.filter(r => r.id !== req.user.id && Number(r.total_score || -1) > myScore).length;
+    }
+
+    const score = todayRow ? Number(todayRow.total_score) : null;
+    let note = '';
+    if (score == null) note = 'No score yet today — finish tasks and log activity to get scored at 6pm.';
+    else if (score >= 90) note = 'Outstanding day. Keep this rhythm and the team follows your lead.';
+    else if (score >= 75) note = 'Strong day. Push one more task before EOD to crack 90.';
+    else if (score >= 60) note = 'Solid effort. Focus on the KPI gap to lift the score tomorrow.';
+    else note = 'Tough day. Pick the single highest-leverage task and finish it before EOD.';
+
+    res.json({
+      as_of: today, score,
+      breakdown: todayRow ? {
+        task_completion: Number(todayRow.task_completion_score) || 0,
+        kpi_progress: Number(todayRow.kpi_progress_score) || 0,
+        activity: Number(todayRow.activity_score) || 0,
+        response: Number(todayRow.response_score) || 0,
+      } : null,
+      tasks_assigned: todayRow ? Number(todayRow.tasks_assigned) : 0,
+      tasks_completed: todayRow ? Number(todayRow.tasks_completed) : 0,
+      weekly_kpi_pct: todayRow ? Number(todayRow.weekly_kpi_pct) : 0,
+      streak_below_60: todayRow ? Number(todayRow.consecutive_days_below_60) : 0,
+      streak_above_80: todayRow ? Number(todayRow.consecutive_days_above_80) : 0,
+      rank, team_size, trend, note,
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Current escalations / alerts — anyone below 60 for 2+ days or above 90 consistently.
+router.get('/performance/alerts', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = (await query(`
+      SELECT p.user_id, u.name, u.role, p.total_score, p.consecutive_days_below_60, p.consecutive_days_above_80
+      FROM performance_scores p JOIN users u ON u.id=p.user_id
+      WHERE p.score_date=$1 AND COALESCE(p.is_weekly_summary,0)=0 AND u.is_active=1
+    `, [today])).rows;
+    const red = [], amber = [], green = [];
+    for (const r of rows) {
+      const score = Number(r.total_score) || 0;
+      const below = Number(r.consecutive_days_below_60) || 0;
+      const above = Number(r.consecutive_days_above_80) || 0;
+      if (score < 60 && below >= 3) red.push({ ...r, score, days: below, severity: 'red' });
+      else if (score < 60 && below >= 2) amber.push({ ...r, score, days: below, severity: 'amber' });
+      if (above >= 5 && score >= 90) green.push({ ...r, score, days: above, severity: 'green' });
+    }
+    res.json({ as_of: today, red, amber, green });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 30-day score history for a specific user (admin).
+router.get('/performance/history/:userId', authMiddleware, adminOnly, async (req, res) => {
+  try {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const u = (await query(`SELECT id, name, role FROM users WHERE id=$1`, [req.params.userId])).rows[0];
+    if (!u) return res.status(404).json({ error: 'user not found' });
     const rows = (await query(
-      `SELECT p.*, u.name, u.role
-       FROM performance_scores p
-       JOIN users u ON u.id = p.user_id
-       WHERE p.user_id=$1 AND p.score_date >= $2
-       ORDER BY p.score_date DESC`,
-      [req.user.id, thirtyDaysAgo]
+      `SELECT score_date, total_score, task_completion_score, kpi_progress_score, activity_score, response_score,
+              tasks_assigned, tasks_completed, weekly_kpi_pct,
+              consecutive_days_below_60, consecutive_days_above_80, is_weekly_summary
+       FROM performance_scores WHERE user_id=$1 AND score_date >= $2 ORDER BY score_date`,
+      [req.params.userId, thirtyDaysAgo]
     )).rows;
-    res.json(rows.map(formatScoreRow));
+    res.json({ user: u, count: rows.length, history: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manually trigger scoring + escalation now (admin) — useful for demos.
+router.post('/performance/calculate', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const score = await runPerformanceCheck();
+    const esc = await runEscalationCheck();
+    res.json({ scored: score.count, escalations: esc.count, score, esc });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

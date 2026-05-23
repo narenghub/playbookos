@@ -418,6 +418,32 @@ async function migrateSchemas() {
       ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS image_prompt TEXT;
       ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS structure_image_url TEXT;
       ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS generated_image_url TEXT;
+      -- Performance Accountability System — adds 4-component scoring, streak
+      -- counters, weekly-summary flag. score_0_to_100 stays for backward compat
+      -- (runPerformanceCheck sets it = total_score).
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS task_completion_score INTEGER DEFAULT 0;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS kpi_progress_score INTEGER DEFAULT 0;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS activity_score INTEGER DEFAULT 0;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS response_score INTEGER DEFAULT 0;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS total_score INTEGER;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS tasks_assigned INTEGER DEFAULT 0;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS tasks_completed INTEGER DEFAULT 0;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS weekly_kpi_pct INTEGER DEFAULT 0;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS consecutive_days_below_60 INTEGER DEFAULT 0;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS consecutive_days_above_80 INTEGER DEFAULT 0;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS notes TEXT;
+      ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS is_weekly_summary INTEGER DEFAULT 0;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS whatsapp_number TEXT;
+      CREATE TABLE IF NOT EXISTS whatsapp_log (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        to_number TEXT NOT NULL,
+        message_type TEXT,
+        message TEXT,
+        status TEXT,
+        sent_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_whatsapp_log_sent ON whatsapp_log (sent_at DESC);
       INSERT INTO kpi_hierarchy (id, level, parent_id, name, metric, target_value, owner_role, period) VALUES
         ('kpi-vision','vision',NULL,'$10M Revenue by Dec 31, 2026','revenue',10000000,'super_admin','2026'),
         ('kpi-sg-sales','strategic','kpi-vision','Sales — close $10M in confirmed orders','revenue',10000000,'sales_director','2026'),

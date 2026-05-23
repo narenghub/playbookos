@@ -12,8 +12,8 @@ const { query } = require('./db');
 // API tiers: self, sales, procurement, revenue, technical, intelligence, goals, admin.
 // Custom roles (POST /api/roles) extend this set but get no tiers (self-only).
 const ALL_PAGES = [
-  'dashboard', 'command-center', 'ai-insights', 'agent-control', 'decision-engine',
-  'my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones',
+  'dashboard', 'command-center', 'ai-insights', 'agent-control', 'decision-engine', 'performance',
+  'my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones',
   'revenue', 'apollo-outreach',
   'market-intelligence', 'seo-intelligence', 'seo-content', 'linkedin-content',
   'team', 'sku-economics', 'data-pipeline', 'execution-graph', 'settings',
@@ -39,7 +39,7 @@ const BUILT_IN_ROLES = {
   sales_director: {
     display_name: 'Sales Director',
     level: 3, domain: 'sales', data_scope: 'team',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'revenue', 'apollo-outreach', 'linkedin-content', 'team'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'revenue', 'apollo-outreach', 'linkedin-content', 'team', 'performance'],
     tiers: { self: 'rw', sales: 'rw', revenue: 'r', intelligence: 'r', goals: 'r' },
     metrics: ['team_reviews', 'deals_reviewed', 'forecast_updates'],
     baseline: 7,
@@ -47,7 +47,7 @@ const BUILT_IN_ROLES = {
   recruitment_director: {
     display_name: 'Recruitment Director',
     level: 3, domain: 'recruitment', data_scope: 'team',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'team'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'team', 'performance'],
     tiers: { self: 'rw', intelligence: 'r', goals: 'r' },
     metrics: ['team_reviews', 'offers_approved', 'pipeline_reviews'],
     baseline: 3,
@@ -55,7 +55,7 @@ const BUILT_IN_ROLES = {
   procurement_director: {
     display_name: 'Procurement Director',
     level: 3, domain: 'procurement', data_scope: 'team',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'market-intelligence', 'sku-economics', 'team'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'market-intelligence', 'sku-economics', 'team', 'performance'],
     tiers: { self: 'rw', procurement: 'rw', revenue: 'r', intelligence: 'r', goals: 'r' },
     metrics: ['team_reviews', 'suppliers_approved', 'market_analyses'],
     baseline: 3,
@@ -63,7 +63,7 @@ const BUILT_IN_ROLES = {
   account_manager: {
     display_name: 'Account Manager',
     level: 4, domain: 'sales', data_scope: 'own+revenue',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'revenue'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'revenue'],
     tiers: { self: 'rw', sales: 'r', revenue: 'rw' },
     metrics: ['accounts_managed', 'quotes_sent', 'orders_processed'],
     baseline: 12,
@@ -71,7 +71,7 @@ const BUILT_IN_ROLES = {
   sales_team: {
     display_name: 'Sales Team',
     level: 5, domain: 'sales', data_scope: 'own',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'apollo-outreach'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'apollo-outreach'],
     tiers: { self: 'rw', sales: 'own' },
     metrics: ['outreach_emails', 'calls_made', 'demos_completed', 'orders_closed'],
     baseline: 31,
@@ -79,7 +79,7 @@ const BUILT_IN_ROLES = {
   recruitment_team: {
     display_name: 'Recruitment Team',
     level: 5, domain: 'recruitment', data_scope: 'own',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones'],
     tiers: { self: 'rw' },
     metrics: ['candidates_screened', 'interviews_scheduled', 'offers_made', 'hires_completed'],
     baseline: 6,
@@ -87,7 +87,7 @@ const BUILT_IN_ROLES = {
   procurement_team: {
     display_name: 'Procurement Team',
     level: 5, domain: 'procurement', data_scope: 'own',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'sku-economics', 'market-intelligence'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'sku-economics', 'market-intelligence'],
     tiers: { self: 'rw', procurement: 'own' },
     metrics: ['molecules_sourced', 'suppliers_contacted', 'coas_collected', 'rfqs_sent'],
     baseline: 11,
@@ -95,7 +95,7 @@ const BUILT_IN_ROLES = {
   dev_team: {
     display_name: 'Dev Team',
     level: 5, domain: 'engineering', data_scope: 'own+technical',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'data-pipeline', 'execution-graph'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'data-pipeline', 'execution-graph'],
     tiers: { self: 'rw', technical: 'rw' },
     metrics: ['prs_merged', 'commits', 'features_deployed', 'bugs_fixed'],
     baseline: 11,
@@ -103,7 +103,7 @@ const BUILT_IN_ROLES = {
   seo_specialist: {
     display_name: 'SEO Specialist',
     level: 5, domain: 'marketing', data_scope: 'own',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'seo-intelligence', 'seo-content', 'market-intelligence'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'seo-intelligence', 'seo-content', 'market-intelligence'],
     tiers: { self: 'rw', intelligence: 'r' },
     metrics: ['keywords_optimized', 'pages_indexed', 'backlinks_built', 'content_published'],
     baseline: 8,
@@ -111,7 +111,7 @@ const BUILT_IN_ROLES = {
   support_team: {
     display_name: 'Support Team',
     level: 6, domain: 'support', data_scope: 'readonly',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'revenue'],
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'revenue'],
     tiers: { self: 'rw', sales: 'r', revenue: 'r' },
     metrics: ['customers_assisted', 'issues_resolved', 'orders_reviewed'],
     baseline: 25,
@@ -137,7 +137,7 @@ function getRoleTier(roleKey, tier) {
 
 // Sidebar pages a role can see: '*' or an array.
 function getRolePages(roleKey) {
-  return BUILT_IN_ROLES[roleKey]?.pages || ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones'];
+  return BUILT_IN_ROLES[roleKey]?.pages || ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones'];
 }
 
 // Full catalog including custom_roles rows. Custom rows get no tiers/pages.
@@ -156,7 +156,7 @@ async function getAllRoles() {
       out[r.role_name] = {
         display_name: r.display_name || r.role_name,
         level: 5, domain: 'custom', data_scope: 'own',
-        pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones'],
+        pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones'],
         tiers: { self: 'rw' },
         metrics,
         baseline: 5,

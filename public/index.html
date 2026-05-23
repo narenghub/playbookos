@@ -304,6 +304,7 @@ const NAV_SECTIONS = [
     {id:'command-center', label:'Command Center', icon:'🎯'},
     {id:'dashboard', label:'Dashboard', icon:'📊'},
     {id:'ai-insights', label:'AI Insights', icon:'🤖'},
+    {id:'performance', label:'Performance', icon:'🏆'},
   ]},
   {title:'OPERATIONS', items:[
     {id:'my-tasks', label:'My Tasks', icon:'✓'},
@@ -311,6 +312,7 @@ const NAV_SECTIONS = [
     {id:'my-activity', label:'My Activity', icon:'📝'},
     {id:'playbook', label:'Playbook', icon:'📋'},
     {id:'milestones', label:'Milestones', icon:'🏁'},
+    {id:'my-performance', label:'My Performance', icon:'🥇'},
   ]},
   {title:'REVENUE', items:[
     {id:'revenue', label:'Revenue & Orders', icon:'💰'},
@@ -361,7 +363,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence',team:'Team Management','decision-engine':'Automation Rules','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence',team:'Team Management','decision-engine':'Automation Rules','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -1829,6 +1831,109 @@ if(typeof pages !== 'undefined') {
         </tr>
         ${rows}
       </table>
+    </div>`;
+  };
+  pages['performance'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading performance data…</p>';
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const [team, alerts] = await Promise.all([
+      API('/performance/team').catch(e => ({error:e.message, leaderboard:[]})),
+      API('/performance/alerts').catch(e => ({error:e.message, red:[], amber:[], green:[]})),
+    ]);
+    if (team && team.error && /unauth|forbidden/i.test(team.error)) {
+      c.innerHTML = '<div class="card"><div class="card-title">Performance</div><p style="color:#dc2626">' + esc(team.error) + '</p></div>';
+      return;
+    }
+    const board = (team && team.leaderboard) || [];
+    const a = alerts || {red:[],amber:[],green:[]};
+    const alertCard = (a.red.length || a.amber.length || a.green.length)
+      ? `<div class="card">
+          <div class="card-title text-section">Performance Alerts</div>
+          ${a.red.length ? '<div style="font-size:12px;color:#dc2626;margin-top:6px"><strong>🚨 Red</strong> — ' + a.red.length + ' member' + (a.red.length===1?'':'s') + ' below 60 for 3+ days: ' + a.red.map(x => esc(x.name) + ' (' + x.score + ', day ' + x.days + ')').join(', ') + '</div>' : ''}
+          ${a.amber.length ? '<div style="font-size:12px;color:#d97706;margin-top:4px"><strong>⚠️ Amber</strong> — ' + a.amber.length + ' below 60 for 2 days: ' + a.amber.map(x => esc(x.name) + ' (' + x.score + ')').join(', ') + '</div>' : ''}
+          ${a.green.length ? '<div style="font-size:12px;color:#1D9E75;margin-top:4px"><strong>🏆 Top performers</strong> — ' + a.green.length + ' above 90 for 5+ days: ' + a.green.map(x => esc(x.name)).join(', ') + '</div>' : ''}
+        </div>`
+      : '<div class="card"><div class="card-title text-section">Performance Alerts</div><div style="font-size:13px;color:#1D9E75">No active alerts — team performance is healthy.</div></div>';
+    const trendIcon = t => t==='up'?'↑':t==='down'?'↓':t==='new'?'•':'→';
+    const trendColor = t => t==='up'?'#1D9E75':t==='down'?'#dc2626':'#a0aec0';
+    const rows = board.map((r,i) => {
+      const bucket = r.bucket;
+      const bg = bucket==='green'?'#dcfce7':bucket==='amber'?'#fef9c3':bucket==='red'?'#fee2e2':'#f8f9fa';
+      return `<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px;font-weight:700;color:#1B3A6B">${i+1}</td>
+        <td style="padding:8px"><strong>${esc(r.name)}</strong></td>
+        <td style="padding:8px;color:var(--text-muted);font-size:11px">${esc(r.role)}</td>
+        <td style="padding:8px;text-align:right;background:${bg};font-weight:700">${r.score == null ? '—' : r.score}</td>
+        <td style="padding:8px;text-align:center;color:${trendColor(r.trend)};font-weight:700">${trendIcon(r.trend)}</td>
+        <td style="padding:8px;text-align:right;font-size:11px;color:var(--text-muted)">${r.streak_below_60 ? r.streak_below_60 + 'd ↓' : r.streak_above_80 ? r.streak_above_80 + 'd ↑' : ''}</td>
+      </tr>`;
+    }).join('');
+    c.innerHTML = alertCard + `<div class="card">
+      <div class="card-title text-section">Team Leaderboard — ${board.length} members</div>
+      <table style="width:100%;font-size:13px;border-collapse:collapse">
+        <tr style="background:#f5f5f5;text-align:left"><th style="padding:8px">#</th><th style="padding:8px">Member</th><th style="padding:8px">Role</th><th style="padding:8px;text-align:right">Score</th><th style="padding:8px;text-align:center">Trend</th><th style="padding:8px;text-align:right">Streak</th></tr>
+        ${rows || '<tr><td colspan="6" style="padding:14px;color:var(--text-muted);text-align:center">No scores yet — trigger via POST /api/performance/calculate (admin) or wait for the 6pm cron.</td></tr>'}
+      </table>
+    </div>`;
+  };
+  pages['my-performance'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading your performance…</p>';
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const d = await API('/performance/my').catch(e => ({error:e.message}));
+    if (d.error) {
+      c.innerHTML = '<div class="card"><div class="card-title">My Performance</div><p style="color:#dc2626">' + esc(d.error) + '</p></div>';
+      return;
+    }
+    const score = d.score, b = d.breakdown || {};
+    const scoreColor = score == null ? '#a0aec0' : score >= 80 ? '#1D9E75' : score >= 60 ? '#EF9F27' : '#dc2626';
+    const trend = d.trend || [];
+    const maxScore = Math.max(100, ...trend.map(t => t.score));
+    const spark = trend.length
+      ? trend.map(t => '<div style="display:inline-block;width:18px;height:' + Math.max(4, Math.round(t.score/maxScore*40)) + 'px;background:' + (t.score>=80?'#1D9E75':t.score>=60?'#EF9F27':'#dc2626') + ';margin:0 1px;vertical-align:bottom" title="' + t.date + ': ' + t.score + '"></div>').join('')
+      : '<span style="color:var(--text-muted);font-size:12px">no history yet</span>';
+    const bar = (label, value, max, color) => '<div style="margin:8px 0">'
+      + '<div style="display:flex;justify-content:space-between;font-size:12px;color:var(--text-body)"><span>' + label + '</span><span>' + value + ' / ' + max + '</span></div>'
+      + '<div style="background:#e2e8f0;border-radius:4px;height:8px;margin-top:2px;overflow:hidden"><div style="background:' + color + ';height:8px;width:' + (max>0?Math.round(value/max*100):0) + '%"></div></div>'
+      + '</div>';
+    c.innerHTML = `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <div class="text-label">Today's score</div>
+          <div style="font-size:48px;font-weight:800;color:${scoreColor};line-height:1.1">${score == null ? '—' : score}<span style="font-size:18px;color:var(--text-muted);font-weight:400">/100</span></div>
+          <div style="font-size:13px;color:var(--text-body);margin-top:4px">${esc(d.note)}</div>
+        </div>
+        <div style="flex:1;min-width:220px">
+          ${d.rank ? '<div class="text-label">Rank</div><div style="font-size:24px;font-weight:700;color:#1B3A6B">You are #' + d.rank + ' of ' + d.team_size + '</div>' : ''}
+          ${d.streak_below_60 ? '<div style="font-size:12px;color:#dc2626;margin-top:6px">⚠️ ' + d.streak_below_60 + ' day' + (d.streak_below_60===1?'':'s') + ' below 60</div>' : ''}
+          ${d.streak_above_80 ? '<div style="font-size:12px;color:#1D9E75;margin-top:6px">🔥 ' + d.streak_above_80 + ' day' + (d.streak_above_80===1?'':'s') + ' above 80</div>' : ''}
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title text-section">Today's score breakdown</div>
+      ${d.breakdown
+        ? bar('Task completion', b.task_completion, 40, '#1B3A6B')
+          + bar('KPI progress (this week)', b.kpi_progress, 30, '#0D7377')
+          + bar('Activity logged today', b.activity, 20, '#1D9E75')
+          + bar('Response (any task done)', b.response, 10, '#EF9F27')
+        : '<div style="color:var(--text-muted);font-size:13px">No score yet today — comes in at the 6pm scoring run.</div>'}
+      <div style="display:flex;gap:14px;margin-top:14px;flex-wrap:wrap">
+        <div style="flex:1;background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:10px;min-width:140px">
+          <div class="text-label">Tasks today</div>
+          <div style="font-size:20px;font-weight:700;color:#1a202c">${d.tasks_completed} / ${d.tasks_assigned}</div>
+        </div>
+        <div style="flex:1;background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:10px;min-width:140px">
+          <div class="text-label">Weekly KPI progress</div>
+          <div style="font-size:20px;font-weight:700;color:#1a202c">${d.weekly_kpi_pct}%</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title text-section">7-day score trend</div>
+      <div style="display:flex;align-items:flex-end;height:50px;border-bottom:1px solid var(--border);padding-bottom:4px">${spark}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Hover bars for the daily score.</div>
     </div>`;
   };
   pages['my-tasks'] = async function() {

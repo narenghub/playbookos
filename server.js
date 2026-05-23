@@ -12,7 +12,7 @@ const { syncAlgoliaSearchData, generateSEORecommendations } = require('./src/lib
 const { trackKeywordRankings, generateSEOTasksForTeam, trackAlgoliaNoResults } = require('./src/lib/agents/seo-agent');
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/lib/agents/goal-engine');
 const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
-const { runMorningBriefing } = require('./src/lib/agents/orchestrator');
+const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('./src/lib/agents/orchestrator');
 const { runWeeklyLinkedInCampaign } = require('./src/lib/agents/linkedin-agent');
 const routes = require('./src/api/routes');
 
@@ -181,7 +181,7 @@ cron.schedule('0 18 * * *', async () => {
   } catch {}
 });
 
-// Daily 6 PM: AI performance scoring + per-user coaching email
+// Daily 6 PM: AI performance scoring + per-user coaching email (legacy single-score system)
 cron.schedule('0 18 * * *', async () => {
   console.log('[CRON] Performance scoring starting...');
   try {
@@ -189,6 +189,15 @@ cron.schedule('0 18 * * *', async () => {
     console.log(`[CRON] Performance scoring done — scored ${result.totalUsers}, emailed ${result.sent}, escalations ${result.escalations}`);
   } catch (e) {
     console.error('[CRON] Performance scoring error:', e.message);
+  }
+  // New 4-component scoring + 4-level escalation workflow (Performance Accountability)
+  try {
+    const score = await runPerformanceCheck();
+    console.log(`[CRON] runPerformanceCheck done — ${score.count} users scored`);
+    const esc = await runEscalationCheck();
+    console.log(`[CRON] runEscalationCheck done — ${esc.count} escalation(s) fired`);
+  } catch (e) {
+    console.error('[CRON] Performance Accountability error:', e.message);
   }
 });
 

@@ -1,9 +1,12 @@
 // Orchestrator — routes the morning briefing to specialized agents based on
 // team segment and user timezone. Each cron fires one segment at the local
 // time that matches that team's morning.
+const crypto = require('crypto');
 const { query } = require('../db');
 const { mondayOf } = require('./goal-engine');
-const { createDailyTask, logAgentActivity } = require('../agent-core');
+const { createDailyTask, logAgentActivity, enqueueApproval, getCEOUser } = require('../agent-core');
+const { sendEmail } = require('../mailer');
+const { sendWhatsApp } = require('../whatsapp');
 const { runCEOBriefing } = require('./ceo-agent');
 const { runProcurementBriefing } = require('./procurement-agent');
 const { runSalesBriefing } = require('./sales-agent');
@@ -87,4 +90,228 @@ async function runMorningBriefing({ segment = 'all' } = {}) {
   return out;
 }
 
-module.exports = { runMorningBriefing, generateKpiTasks };
+// ── Performance Accountability System ────────────────────────────────────────
+
+// Map a non-director role to the role of the director who manages them. Returns
+// null when there is no director (e.g. dev_team has no dev_director — those
+// users escalate to admin/CEO).
+function getDirectorRole(roleKey) {
+  if (['sales_team', 'account_manager'].includes(roleKey)) return 'sales_director';
+  if (roleKey === 'procurement_team') return 'procurement_director';
+  if (roleKey === 'recruitment_team') return 'recruitment_director';
+  return null;
+}
+
+// Daily 4-component performance score per user. 100 points total:
+//   40 — task_completion_score: completed/assigned x 40
+//   30 — kpi_progress_score: weekly KPI actual/target x 30
+//   20 — activity_score: did they log any activity today?
+//   10 — response_score: did they complete any task today?
+// Streak counters update from the previous day's row.
+async function runPerformanceCheck({ dryRun = false, date } = {}) {
+  const today = date || new Date().toISOString().slice(0, 10);
+  const weekStart = mondayOf(new Date(today)).toISOString().slice(0, 10);
+  const users = (await query(
+    `SELECT id, name, role FROM users WHERE is_active=1 ORDER BY name`
+  )).rows;
+
+  const scored = [];
+  for (const u of users) {
+    // Component 1 — task completion
+    const t = (await query(
+      `SELECT COUNT(*) FILTER (WHERE status='completed')::int done,
+              COUNT(*)::int total
+       FROM daily_tasks WHERE user_id=$1 AND task_date=$2`, [u.id, today]
+    )).rows[0];
+    const tasks_assigned = t.total, tasks_completed = t.done;
+    const task_completion_score = tasks_assigned > 0
+      ? Math.round((tasks_completed / tasks_assigned) * 40)
+      : 0;
+
+    // Component 2 — KPI progress this week
+    const k = (await query(
+      `SELECT COALESCE(SUM(kpi_target),0) tgt, COALESCE(SUM(kpi_actual),0) act
+       FROM weekly_kpis WHERE user_id=$1 AND week_start=$2`, [u.id, weekStart]
+    )).rows[0];
+    const weekly_kpi_pct = Number(k.tgt) > 0
+      ? Math.min(100, Math.round((Number(k.act) / Number(k.tgt)) * 100))
+      : 0;
+    const kpi_progress_score = Math.round((weekly_kpi_pct / 100) * 30);
+
+    // Component 3 — activity logging today
+    const a = parseInt((await query(
+      `SELECT COUNT(*) c FROM activity_logs WHERE user_id=$1 AND log_date=$2`, [u.id, today]
+    )).rows[0].c, 10);
+    const activity_score = a > 0 ? 20 : 0;
+
+    // Component 4 — response (any task completed today)
+    const response_score = tasks_completed > 0 ? 10 : 0;
+
+    const total_score = task_completion_score + kpi_progress_score + activity_score + response_score;
+
+    // Streaks — read the user's most recent prior row (before today)
+    const prev = (await query(
+      `SELECT total_score, consecutive_days_below_60, consecutive_days_above_80
+       FROM performance_scores
+       WHERE user_id=$1 AND score_date < $2 AND COALESCE(is_weekly_summary,0)=0
+       ORDER BY score_date DESC LIMIT 1`, [u.id, today]
+    )).rows[0];
+    const prevBelow = (prev && prev.consecutive_days_below_60) || 0;
+    const prevAbove = (prev && prev.consecutive_days_above_80) || 0;
+    const consecutive_days_below_60 = total_score < 60 ? prevBelow + 1 : 0;
+    const consecutive_days_above_80 = total_score > 80 ? prevAbove + 1 : 0;
+
+    if (!dryRun) {
+      await query(
+        `INSERT INTO performance_scores
+           (id, user_id, score_date, score_0_to_100, total_score,
+            task_completion_score, kpi_progress_score, activity_score, response_score,
+            tasks_assigned, tasks_completed, weekly_kpi_pct,
+            consecutive_days_below_60, consecutive_days_above_80,
+            is_weekly_summary, created_at)
+         VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0,NOW())
+         ON CONFLICT (user_id, score_date) DO UPDATE
+           SET score_0_to_100 = EXCLUDED.score_0_to_100,
+               total_score = EXCLUDED.total_score,
+               task_completion_score = EXCLUDED.task_completion_score,
+               kpi_progress_score = EXCLUDED.kpi_progress_score,
+               activity_score = EXCLUDED.activity_score,
+               response_score = EXCLUDED.response_score,
+               tasks_assigned = EXCLUDED.tasks_assigned,
+               tasks_completed = EXCLUDED.tasks_completed,
+               weekly_kpi_pct = EXCLUDED.weekly_kpi_pct,
+               consecutive_days_below_60 = EXCLUDED.consecutive_days_below_60,
+               consecutive_days_above_80 = EXCLUDED.consecutive_days_above_80`,
+        [crypto.randomUUID(), u.id, today, total_score,
+         task_completion_score, kpi_progress_score, activity_score, response_score,
+         tasks_assigned, tasks_completed, weekly_kpi_pct,
+         consecutive_days_below_60, consecutive_days_above_80]
+      );
+    }
+
+    scored.push({
+      user_id: u.id, name: u.name, role: u.role, total_score,
+      task_completion_score, kpi_progress_score, activity_score, response_score,
+      tasks_assigned, tasks_completed, weekly_kpi_pct,
+      consecutive_days_below_60, consecutive_days_above_80,
+    });
+  }
+
+  // Sunday weekly summary — average of the last 5 daily scores
+  if (!dryRun && new Date(today).getUTCDay() === 0) {
+    for (const u of users) {
+      const rows = (await query(
+        `SELECT total_score FROM performance_scores
+         WHERE user_id=$1 AND score_date >= $2 AND score_date <= $3 AND COALESCE(is_weekly_summary,0)=0
+         ORDER BY score_date DESC LIMIT 5`,
+        [u.id, weekStart, today]
+      )).rows;
+      if (!rows.length) continue;
+      const avg = Math.round(rows.reduce((s, r) => s + (Number(r.total_score) || 0), 0) / rows.length);
+      await query(
+        `INSERT INTO performance_scores (id, user_id, score_date, score_0_to_100, total_score, is_weekly_summary, notes, created_at)
+         VALUES ($1, $2, $3, $4, $4, 1, $5, NOW())
+         ON CONFLICT (user_id, score_date) DO UPDATE
+           SET total_score = EXCLUDED.total_score,
+               score_0_to_100 = EXCLUDED.score_0_to_100,
+               is_weekly_summary = 1, notes = EXCLUDED.notes`,
+        [crypto.randomUUID(), u.id, today, avg, 'weekly avg of ' + rows.length + ' days']
+      );
+    }
+  }
+
+  if (!dryRun) {
+    await logAgentActivity({
+      agent_name: 'orchestrator', action_type: 'performance_check',
+      reasoning: `Scored ${scored.length} users for ${today}.`,
+      source_kpi: 'kpi-vision', confidence_score: 90,
+      output_summary: `Avg ${Math.round(scored.reduce((s, x) => s + x.total_score, 0) / (scored.length || 1))} across ${scored.length} users`,
+    });
+  }
+  return { date: today, count: scored.length, scored };
+}
+
+// Escalation tiers — read each user's latest score + streak and send the
+// appropriate notifications. Idempotent: runs after runPerformanceCheck and
+// uses the freshly-written row.
+async function runEscalationCheck({ dryRun = false, date } = {}) {
+  const today = date || new Date().toISOString().slice(0, 10);
+  const ceo = await getCEOUser();
+  const rows = (await query(`
+    SELECT p.*, u.name, u.role, u.email, u.whatsapp_number
+    FROM performance_scores p JOIN users u ON u.id = p.user_id
+    WHERE p.score_date = $1 AND COALESCE(p.is_weekly_summary,0)=0 AND u.is_active=1
+  `, [today])).rows;
+
+  const actions = [];
+  for (const r of rows) {
+    const score = Number(r.total_score) || 0;
+    const days_below = Number(r.consecutive_days_below_60) || 0;
+    const tasks_phrase = `${r.tasks_assigned - r.tasks_completed} task(s) pending`;
+    let level = 0;
+
+    if (score < 50 && days_below >= 5) level = 4;
+    else if (score < 60 && days_below >= 3) level = 3;
+    else if (score < 60 && days_below >= 2) level = 2;
+    else if (score < 70 && days_below >= 1) level = 1;
+    if (level === 0) continue;
+
+    const userMsg = `Hi ${r.name} — your performance score today is ${score}/100. ${tasks_phrase}. Please review your KPIs and finish today's pending tasks.`;
+
+    if (!dryRun) {
+      if (level === 1) {
+        // Reminder to the user
+        if (r.email) await sendEmail({ to: r.email, subject: `Performance reminder — ${score}/100 today`, html: `<p>${userMsg}</p><p style="color:#666;font-size:12px">View your tasks at ${process.env.BASE_URL || 'https://playbookos-production.up.railway.app'}/#my-tasks</p>` });
+        if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, userMsg, { user_id: r.user_id, message_type: 'reminder' });
+      } else if (level === 2) {
+        // Warning to user + notify their director
+        if (r.email) await sendEmail({ to: r.email, subject: `⚠️ Performance warning — ${score}/100 for ${days_below} days`, html: `<p>${userMsg}</p><p>This is day ${days_below} below target. Your manager has been notified.</p>` });
+        if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, '⚠️ ' + userMsg, { user_id: r.user_id, message_type: 'warning' });
+        const dirRole = getDirectorRole(r.role);
+        if (dirRole) {
+          const directors = (await query(`SELECT email FROM users WHERE role=$1 AND is_active=1`, [dirRole])).rows;
+          for (const d of directors) {
+            if (d.email) await sendEmail({ to: d.email, subject: `Team alert: ${r.name} below target for ${days_below} days`, html: `<p><strong>${r.name}</strong> (${r.role}) scored ${score}/100 today — ${days_below} days below 60.</p><p>${tasks_phrase}, weekly KPI ${r.weekly_kpi_pct}%.</p>` });
+          }
+        }
+        await logAgentActivity({
+          agent_name: 'orchestrator', action_type: 'performance_warning',
+          user_id: r.user_id, reasoning: `${r.name} day ${days_below} below 60 (score ${score}).`,
+          source_kpi: 'kpi-vision', confidence_score: 90,
+          output_summary: 'Warning sent to user + director (level 2).',
+          requires_approval: true,
+        });
+      } else if (level === 3) {
+        if (ceo?.email) await sendEmail({ to: ceo.email, subject: `⚠️ Performance Alert: ${r.name} — Day ${days_below} below target`, html: `<p><strong>${r.name}</strong> (${r.role}) scored <strong>${score}/100</strong> today.</p><p>Day ${days_below} below 60 · ${tasks_phrase} · weekly KPI ${r.weekly_kpi_pct}%.</p><p>Recommended action: 1:1 conversation, identify blockers, possible reassignment review.</p>` });
+        if (r.email) await sendEmail({ to: r.email, subject: `Performance escalation — ${score}/100`, html: `<p>${userMsg}</p><p>Day ${days_below} below 60 — this has been escalated to leadership for review.</p>` });
+        if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, '🚨 Day ' + days_below + ' below target. Escalated to leadership.', { user_id: r.user_id, message_type: 'escalation' });
+        await enqueueApproval({
+          agent_name: 'orchestrator', action_type: 'performance_review',
+          action_payload: { user: r.name, user_id: r.user_id, score, days_below, weekly_kpi_pct: r.weekly_kpi_pct, reasoning: `${r.name} day ${days_below} below 60` },
+          requested_for_user_id: ceo ? ceo.id : null, priority: 'HIGH',
+        });
+      } else if (level === 4) {
+        if (ceo?.email) await sendEmail({ to: ceo.email, subject: `🚨 Critical Performance Issue: ${r.name} requires immediate review`, html: `<p><strong>CRITICAL</strong> — <strong>${r.name}</strong> (${r.role}) scored <strong>${score}/100</strong>.</p><p>Day ${days_below} below 50. Sustained underperformance. Immediate intervention recommended.</p>` });
+        await enqueueApproval({
+          agent_name: 'orchestrator', action_type: 'performance_critical',
+          action_payload: { user: r.name, user_id: r.user_id, score, days_below },
+          requested_for_user_id: ceo ? ceo.id : null, priority: 'HIGH',
+        });
+      }
+    }
+
+    actions.push({ user_id: r.user_id, name: r.name, role: r.role, score, days_below, level });
+  }
+
+  if (!dryRun && actions.length) {
+    await logAgentActivity({
+      agent_name: 'orchestrator', action_type: 'escalation_check',
+      reasoning: `Fired ${actions.length} escalation(s) for ${today}.`,
+      source_kpi: 'kpi-vision', confidence_score: 90,
+      output_summary: actions.map(a => `${a.name} L${a.level} (${a.score})`).join(' | ').slice(0, 300),
+    });
+  }
+  return { date: today, count: actions.length, actions };
+}
+
+module.exports = { runMorningBriefing, generateKpiTasks, runPerformanceCheck, runEscalationCheck, getDirectorRole };

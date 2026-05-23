@@ -307,6 +307,10 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 7 | `daily_tasks` table + My Tasks page (all roles) | Built | `GET /api/agent/tasks/my`, `PUT /api/agent/tasks/:id`, `GET /api/agent/tasks/team`, `pages['my-tasks']` |
 | 7 | Agent Control command center page (admin) | Built | `public/index.html` `pages['agent-control']`; `GET /api/agent/overview`, `/agent/dependencies` |
 | 7 | LinkedIn AI Content Engine — 4 generators + scheduler + UGC publish | Built | `src/lib/agents/linkedin-agent.js`; `linkedin_content_queue` table; `POST /api/linkedin/generate-post`, `GET /api/linkedin/content-queue`, `PUT /api/linkedin/content-queue/:id`, `POST /api/linkedin/publish/:id`, `GET /api/linkedin/analytics`; Mon 10am CST cron; LinkedIn Content SPA page |
+| 7 | Performance Accountability — 4-component daily scoring + streaks | Built | `runPerformanceCheck` in `src/lib/agents/orchestrator.js`; new columns on `performance_scores` (task_completion / kpi_progress / activity / response / total_score / streaks / is_weekly_summary); fires at the 6pm CST cron alongside the legacy scoring |
+| 7 | Escalation workflow — 4 levels (reminder / warning / escalate / critical) | Built | `runEscalationCheck` in `orchestrator.js`; email + WhatsApp; level 2 notifies the user's domain director; levels 3 & 4 escalate to the CEO and enqueue an approval_queue review item |
+| 7 | WhatsApp messaging via Twilio | Built | `src/lib/whatsapp.js` `sendWhatsApp(to, message, {user_id, message_type})`; `whatsapp_log` table; skips gracefully when TWILIO env vars are unset |
+| 7 | Performance dashboard + My Performance page | Built | `GET /api/performance/{team, my, alerts, history/:userId}`, `POST /api/performance/calculate`; `pages['performance']` (admin + directors) and `pages['my-performance']` (all roles) in `public/index.html` |
 
 ## Appendix B — Cross-layer dependencies
 
