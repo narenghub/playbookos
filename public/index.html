@@ -1887,12 +1887,24 @@ if(typeof pages !== 'undefined') {
     const queue = window._linkedinQueue;
     const totals = (analytics && analytics.totals) || {};
     const demand = (demandR && demandR.molecules) || [];
+    // Calendar week is computed fresh on every page load:
+    //   Mon-Fri  -> show this week (today is in the middle of the work week)
+    //   Sat/Sun  -> show next Mon/Wed/Fri (this week is past, upcoming is what matters)
+    // localISO uses local date components rather than toISOString().slice(0,10)
+    // (UTC), so the dates do not shift by a day for users east of UTC.
     const today = new Date(); today.setHours(0,0,0,0);
-    const dow = today.getDay();
-    const monOffset = dow === 0 ? -6 : 1 - dow;
+    const dow = today.getDay(); // 0=Sun .. 6=Sat
+    let monOffset;
+    if (dow === 0) monOffset = 1;       // Sunday   -> +1 day to next Monday
+    else if (dow === 6) monOffset = 2;  // Saturday -> +2 days to next Monday
+    else monOffset = 1 - dow;            // Mon-Fri  -> Monday of this week
     const monday = new Date(today.getTime() + monOffset*86400000);
+    const localISO = d => {
+      const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
+      return y + '-' + m + '-' + dd;
+    };
     const slots = [{label:'Mon',o:0},{label:'Wed',o:2},{label:'Fri',o:4}]
-      .map(s => ({...s, iso: new Date(monday.getTime() + s.o*86400000).toISOString().slice(0,10)}));
+      .map(s => ({...s, iso: localISO(new Date(monday.getTime() + s.o*86400000))}));
     const statusCls = s => ({draft:'badge-blue',approved:'badge-amber',published:'badge-green',rejected:'badge-red'}[s] || 'badge-gray');
     const statusBadge = s => `<span class="badge ${statusCls(s)}">${esc(s)}</span>`;
     const slotPost = iso => queue.find(q => q.scheduled_for === iso);
