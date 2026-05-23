@@ -306,6 +306,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 | 7 | Orchestrator — timezone-routed morning briefing | Built | `src/lib/agents/orchestrator.js` `runMorningBriefing`, 4 CST crons |
 | 7 | `daily_tasks` table + My Tasks page (all roles) | Built | `GET /api/agent/tasks/my`, `PUT /api/agent/tasks/:id`, `GET /api/agent/tasks/team`, `pages['my-tasks']` |
 | 7 | Agent Control command center page (admin) | Built | `public/index.html` `pages['agent-control']`; `GET /api/agent/overview`, `/agent/dependencies` |
+| 7 | LinkedIn AI Content Engine — 4 generators + scheduler + UGC publish | Built | `src/lib/agents/linkedin-agent.js`; `linkedin_content_queue` table; `POST /api/linkedin/generate-post`, `GET /api/linkedin/content-queue`, `PUT /api/linkedin/content-queue/:id`, `POST /api/linkedin/publish/:id`, `GET /api/linkedin/analytics`; Mon 10am CST cron; LinkedIn Content SPA page |
 
 ## Appendix B — Cross-layer dependencies
 
@@ -331,5 +332,6 @@ Status of each component as of the date of this commit. Refresh as features ship
 | `30 1 * * *` CST | Dev + SEO team IST briefing | Layer 7 (built) |
 | `0 7 * * *` CST | CEO briefing | Layer 7 (built) |
 | `0 8 * * *` CST | US team briefing + agent task assignment | Layer 7 (built) |
+| `0 10 * * 1` CST | Monday LinkedIn content scheduler — drafts Mon/Wed/Fri posts | Layer 7 (built) |
 | continuous | Layer 3 marketplace-intelligence ingestion | Layer 3 (spec) |
 | continuous | Layer 4 outbound sequence orchestration | Layer 4 (partial) |

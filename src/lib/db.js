@@ -395,6 +395,26 @@ async function migrateSchemas() {
         sent_at TEXT DEFAULT NOW(),
         opened_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS linkedin_content_queue (
+        id TEXT PRIMARY KEY,
+        post_type TEXT NOT NULL CHECK (post_type IN ('product','market_intelligence','company_update','custom')),
+        headline TEXT,
+        body TEXT,
+        hashtags TEXT,
+        full_post TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','approved','published','rejected')),
+        scheduled_for TEXT,
+        published_at TEXT,
+        linkedin_post_id TEXT,
+        engagement_clicks INTEGER DEFAULT 0,
+        engagement_likes INTEGER DEFAULT 0,
+        engagement_comments INTEGER DEFAULT 0,
+        source_molecule TEXT,
+        reviewed_by TEXT,
+        reviewed_at TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_linkedin_queue_status ON linkedin_content_queue (status, scheduled_for);
       INSERT INTO kpi_hierarchy (id, level, parent_id, name, metric, target_value, owner_role, period) VALUES
         ('kpi-vision','vision',NULL,'$10M Revenue by Dec 31, 2026','revenue',10000000,'super_admin','2026'),
         ('kpi-sg-sales','strategic','kpi-vision','Sales — close $10M in confirmed orders','revenue',10000000,'sales_director','2026'),

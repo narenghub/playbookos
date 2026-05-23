@@ -15,7 +15,7 @@ const ALL_PAGES = [
   'dashboard', 'command-center', 'ai-insights', 'agent-control', 'decision-engine',
   'my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones',
   'revenue', 'apollo-outreach',
-  'market-intelligence', 'seo-intelligence', 'seo-content',
+  'market-intelligence', 'seo-intelligence', 'seo-content', 'linkedin-content',
   'team', 'sku-economics', 'data-pipeline', 'execution-graph', 'settings',
 ];
 
@@ -39,7 +39,7 @@ const BUILT_IN_ROLES = {
   sales_director: {
     display_name: 'Sales Director',
     level: 3, domain: 'sales', data_scope: 'team',
-    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'revenue', 'apollo-outreach', 'team'],
+    pages: ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones', 'revenue', 'apollo-outreach', 'linkedin-content', 'team'],
     tiers: { self: 'rw', sales: 'rw', revenue: 'r', intelligence: 'r', goals: 'r' },
     metrics: ['team_reviews', 'deals_reviewed', 'forecast_updates'],
     baseline: 7,

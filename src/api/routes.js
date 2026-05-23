@@ -13,6 +13,7 @@ const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = req
 const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing } = require('../lib/agents/orchestrator');
+const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, scheduleLinkedInContent, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 
 const router = express.Router();
@@ -1419,5 +1420,128 @@ router.get('/agent/overview', authMiddleware, adminOnly, async (req, res) => {
       team,
       pending_approvals: pendingApprovals,
     });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── LinkedIn AI Content Engine ───────────────────────────────────────────────
+
+// Generate a LinkedIn post for a specific molecule or for one of the weekly
+// templates (market_intelligence / company_update). Stored as a draft.
+router.post('/linkedin/generate-post', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const type = (req.body?.post_type || 'product').toLowerCase();
+    let post;
+    if (type === 'product') {
+      const molecule = req.body?.molecule || { name: req.body?.molecule_name, cas: req.body?.cas_number, purity: req.body?.purity };
+      if (!molecule?.name) return res.status(400).json({ error: 'molecule.name (or molecule_name) is required for a product post' });
+      post = await generateProductPost(molecule);
+    } else if (type === 'market_intelligence') {
+      post = await generateMarketIntelligencePost(req.body?.analysisData);
+    } else if (type === 'company_update') {
+      post = await generateCompanyUpdate(req.body?.metrics);
+    } else {
+      return res.status(400).json({ error: "post_type must be one of: product, market_intelligence, company_update" });
+    }
+    const id = crypto.randomUUID();
+    const scheduledFor = req.body?.scheduled_for || new Date().toISOString().slice(0, 10);
+    await query(
+      `INSERT INTO linkedin_content_queue
+         (id, post_type, headline, body, hashtags, full_post, status, scheduled_for, source_molecule, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,'draft',$7,$8,NOW())`,
+      [id, post.post_type, post.headline, post.body, post.hashtags, post.full_post, scheduledFor, post.source_molecule || null]
+    );
+    res.json({ success: true, id, status: 'draft', ...post, scheduled_for: scheduledFor });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// All queued LinkedIn posts. Filter with ?status=draft|approved|published|rejected.
+router.get('/linkedin/content-queue', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const params = [];
+    let where = '';
+    if (req.query.status) { params.push(req.query.status); where = 'WHERE status=$1'; }
+    const rows = (await query(
+      `SELECT * FROM linkedin_content_queue ${where} ORDER BY scheduled_for DESC, created_at DESC`,
+      params
+    )).rows;
+    res.json({ count: rows.length, queue: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Approve / reject / edit a draft. Body: { action: 'approve'|'reject'|'edit', ...fields, notes? }
+router.put('/linkedin/content-queue/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const action = (req.body?.action || '').toLowerCase();
+    const row = (await query(`SELECT * FROM linkedin_content_queue WHERE id=$1`, [req.params.id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'post not found' });
+
+    if (action === 'approve') {
+      if (row.status !== 'draft') return res.status(409).json({ error: `already ${row.status}` });
+      await query(
+        `UPDATE linkedin_content_queue SET status='approved', reviewed_by=$1, reviewed_at=NOW() WHERE id=$2`,
+        [req.user.id, req.params.id]
+      );
+    } else if (action === 'reject') {
+      await query(
+        `UPDATE linkedin_content_queue SET status='rejected', reviewed_by=$1, reviewed_at=NOW() WHERE id=$2`,
+        [req.user.id, req.params.id]
+      );
+    } else if (action === 'edit') {
+      const fields = ['headline', 'body', 'hashtags', 'full_post', 'scheduled_for'];
+      const sets = [], vals = [];
+      for (const f of fields) {
+        if (req.body[f] !== undefined) { vals.push(req.body[f]); sets.push(`${f}=$${vals.length}`); }
+      }
+      if (!sets.length) return res.status(400).json({ error: 'no editable fields provided' });
+      vals.push(req.params.id);
+      await query(`UPDATE linkedin_content_queue SET ${sets.join(', ')} WHERE id=$${vals.length}`, vals);
+    } else {
+      return res.status(400).json({ error: "action must be 'approve', 'reject', or 'edit'" });
+    }
+    const updated = (await query(`SELECT * FROM linkedin_content_queue WHERE id=$1`, [req.params.id])).rows[0];
+    res.json({ success: true, post: updated });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Publish an approved post to LinkedIn via the UGC API.
+router.post('/linkedin/publish/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const row = (await query(`SELECT * FROM linkedin_content_queue WHERE id=$1`, [req.params.id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'post not found' });
+    if (row.status !== 'approved') return res.status(409).json({ error: `post is ${row.status}; must be 'approved' to publish` });
+
+    const result = await publishLinkedInPost(row);
+    if (result.skipped) return res.status(503).json({ error: result.reason });
+    if (result.error) return res.status(502).json({ error: result.error });
+
+    await query(
+      `UPDATE linkedin_content_queue
+         SET status='published', published_at=NOW(), linkedin_post_id=$1
+       WHERE id=$2`,
+      [result.post_id || null, req.params.id]
+    );
+    res.json({ success: true, id: req.params.id, linkedin_post_id: result.post_id });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Engagement totals + per-post breakdown for the published feed.
+router.get('/linkedin/analytics', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const totals = (await query(`
+      SELECT COUNT(*) FILTER (WHERE status='published')::int posts_published,
+             COUNT(*) FILTER (WHERE status='draft')::int drafts,
+             COUNT(*) FILTER (WHERE status='approved')::int approved,
+             COALESCE(SUM(engagement_clicks),0)::int total_clicks,
+             COALESCE(SUM(engagement_likes),0)::int total_likes,
+             COALESCE(SUM(engagement_comments),0)::int total_comments
+      FROM linkedin_content_queue
+    `)).rows[0];
+    const recent = (await query(`
+      SELECT id, post_type, headline, scheduled_for, published_at,
+             engagement_clicks, engagement_likes, engagement_comments, linkedin_post_id
+      FROM linkedin_content_queue WHERE status='published'
+      ORDER BY published_at DESC NULLS LAST LIMIT 30
+    `)).rows;
+    res.json({ totals, recent });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

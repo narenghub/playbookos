@@ -358,6 +358,34 @@ tasks with the source KPI behind each.
 The agents reuse `ANTHROPIC_API_KEY` (reasoning) and `RESEND_API_KEY` (briefing
 emails) — no new environment variables are required.
 
+### LinkedIn AI Content Engine
+
+`src/lib/agents/linkedin-agent.js` exports four generators —
+`generateProductPost(molecule)`, `generateMarketIntelligencePost(analysisData)`,
+`generateCompanyUpdate(metrics)`, and `scheduleLinkedInContent()` — each
+returning `{headline, body, hashtags, full_post}` capped at LinkedIn's 1300-char
+share-commentary limit and stamped with the spec's hashtag set.
+
+The Monday 10am CST cron runs `scheduleLinkedInContent()`, which drafts three
+posts (Mon = product, Wed = market intelligence, Fri = company update) into the
+`linkedin_content_queue` table at `status='draft'` and emails the CEO for
+review. Approval flow is two-step: `PUT /api/linkedin/content-queue/:id` with
+`{action:"approve"}`, then `POST /api/linkedin/publish/:id` to push to the
+LinkedIn UGC API.
+
+**Endpoints** — `POST /api/linkedin/generate-post`, `GET /api/linkedin/content-queue`,
+`PUT /api/linkedin/content-queue/:id` (approve/reject/edit), `POST /api/linkedin/publish/:id`,
+`GET /api/linkedin/analytics`.
+
+**Env vars** — `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`,
+`LINKEDIN_ACCESS_TOKEN`, `LINKEDIN_ORGANIZATION_ID`. Without these the
+scheduler still drafts posts; publish skips with a 503 until set.
+
+**Frontend** — LinkedIn Content page in the INTELLIGENCE section (admin and
+sales_director only). Shows the week's Mon/Wed/Fri slots, engagement totals,
+a Generate-post form, and the draft/approved/published queue with action
+buttons.
+
 ## Deploy to Railway
 
 Production lives in Railway project `meticulous-laughter`, service `playbookos`, linked to a `Postgres` service. `DATABASE_URL` autoinjects via reference variable.

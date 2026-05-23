@@ -292,6 +292,7 @@ const NAV_SECTIONS = [
     {id:'market-intelligence', label:'Market Intelligence', icon:'🔬'},
     {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
+    {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
   ]},
   {title:'TEAM', items:[
     {id:'team', label:'Team Management', icon:'👥'},
@@ -332,7 +333,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','my-tasks':'My Tasks','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence',team:'Team Management','decision-engine':'Automation Rules','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence',team:'Team Management','decision-engine':'Automation Rules','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -1393,6 +1394,38 @@ async function agentGenerate() {
   } catch(e) { alert('Error: ' + e.message); }
 }
 
+async function linkedinGenerate() {
+  const type = document.getElementById('li-type').value;
+  const molecule = document.getElementById('li-molecule').value.trim();
+  const cas = document.getElementById('li-cas').value.trim();
+  const msg = document.getElementById('li-gen-msg');
+  if (type === 'product' && !molecule) { msg.innerHTML = '<span style="color:#dc2626">Molecule name is required for a product post.</span>'; return; }
+  msg.textContent = 'Generating post via Claude…';
+  const body = { post_type: type };
+  if (type === 'product') body.molecule = { name: molecule, cas };
+  try {
+    const res = await API('/linkedin/generate-post', {method:'POST', body: JSON.stringify(body)});
+    if (res && res.success) { msg.innerHTML = '<span style="color:#1D9E75">✓ Draft created.</span>'; setTimeout(()=>pages['linkedin-content'](), 900); }
+    else msg.innerHTML = '<span style="color:#dc2626">Error: ' + ((res && res.error) || 'unknown') + '</span>';
+  } catch(e) { msg.innerHTML = '<span style="color:#dc2626">Error: ' + e.message + '</span>'; }
+}
+async function linkedinAction(id, action) {
+  if (action === 'reject' && !confirm('Reject this post?')) return;
+  try {
+    const res = await API('/linkedin/content-queue/' + id, {method:'PUT', body: JSON.stringify({action})});
+    if (res && res.success) pages['linkedin-content']();
+    else alert('Error: ' + ((res && res.error) || 'unknown'));
+  } catch(e) { alert('Error: ' + e.message); }
+}
+async function linkedinPublish(id) {
+  if (!confirm('Publish to LinkedIn now? This goes live on the company page.')) return;
+  try {
+    const res = await API('/linkedin/publish/' + id, {method:'POST'});
+    if (res && res.success) { alert('Published. LinkedIn ID: ' + (res.linkedin_post_id || '(unknown)')); pages['linkedin-content'](); }
+    else alert('Error: ' + ((res && res.error) || 'unknown'));
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
 async function findBuyers() {
   const molecule = document.getElementById('apollo-molecule')?.value;
   const segment = document.getElementById('apollo-segment')?.value;
@@ -1718,6 +1751,101 @@ if(typeof pages !== 'undefined') {
     </div>`;
     c.innerHTML = sec1 + sec2 + sec3 + sec4 + sec5;
     renderAgentFeed();
+  };
+  pages['linkedin-content'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading LinkedIn content…</p>';
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const [queueR, analytics] = await Promise.all([
+      API('/linkedin/content-queue').catch(e => ({error:e.message, queue:[]})),
+      API('/linkedin/analytics').catch(e => ({totals:{}, recent:[]})),
+    ]);
+    if (queueR && queueR.error) {
+      c.innerHTML = `<div class="card"><div class="card-title">LinkedIn Content</div><p style="color:#dc2626">${esc(queueR.error)}</p></div>`;
+      return;
+    }
+    const queue = (queueR && queueR.queue) || [];
+    const totals = (analytics && analytics.totals) || {};
+    const today = new Date(); today.setHours(0,0,0,0);
+    const dow = today.getDay();
+    const monOffset = dow === 0 ? -6 : 1 - dow;
+    const monday = new Date(today.getTime() + monOffset*86400000);
+    const slots = [0,2,4].map(o => {
+      const d = new Date(monday.getTime() + o*86400000);
+      return { label: ['Mon','Tue','Wed','Thu','Fri'][o], iso: d.toISOString().slice(0,10) };
+    });
+    const statusBadgeCls = s => ({draft:'badge-blue',approved:'badge-amber',published:'badge-green',rejected:'badge-red'}[s] || 'badge-gray');
+    const statusBadge = s => `<span class="badge ${statusBadgeCls(s)}">${esc(s)}</span>`;
+    const slotPost = iso => queue.find(q => q.scheduled_for === iso);
+    const calendar = `<div class="card">
+      <div class="card-title text-section">This week — Mon / Wed / Fri</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        ${slots.map(s => {
+          const post = slotPost(s.iso);
+          const bg = !post ? '#f8f9fa' : post.status==='published' ? '#dcfce7' : post.status==='approved' ? '#fef9c3' : post.status==='rejected' ? '#fee2e2' : '#dbeafe';
+          return `<div style="flex:1;min-width:160px;background:${bg};border:1px solid var(--border);border-radius:8px;padding:10px">
+            <div class="text-label">${s.label} · ${s.iso}</div>
+            <div style="font-size:13px;font-weight:600;color:var(--text-strong);margin-top:4px;min-height:34px">${post ? esc((post.headline||'(no headline)').slice(0,60)) : '(no draft)'}</div>
+            ${post ? `<div style="margin-top:6px">${statusBadge(post.status)}</div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+    const analyticsCard = `<div class="card">
+      <div class="card-title text-section">Engagement</div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap">
+        ${[['Published',totals.posts_published||0],['Likes',totals.total_likes||0],['Clicks',totals.total_clicks||0],['Comments',totals.total_comments||0],['Drafts',totals.drafts||0],['Approved',totals.approved||0]].map(([k,v])=>`<div style="flex:1;min-width:100px;background:#f8fafc;border:1px solid var(--border);border-radius:8px;padding:10px">
+          <div class="text-label">${k}</div>
+          <div style="font-size:20px;font-weight:700;color:var(--text-strong)">${v}</div>
+        </div>`).join('')}
+      </div>
+    </div>`;
+    const generateCard = `<div class="card">
+      <div class="card-title text-section">Generate new post</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end">
+        <div><div class="text-label">Type</div>
+          <select id="li-type" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px">
+            <option value="product">Product post</option>
+            <option value="market_intelligence">Market intelligence</option>
+            <option value="company_update">Company update</option>
+          </select></div>
+        <div><div class="text-label">Molecule name</div>
+          <input id="li-molecule" placeholder="Semaglutide" style="width:100%"></div>
+        <div><div class="text-label">CAS number</div>
+          <input id="li-cas" placeholder="910463-68-2" style="width:100%"></div>
+        <button onclick="linkedinGenerate()" class="btn-primary">Generate</button>
+      </div>
+      <div id="li-gen-msg" style="font-size:12px;color:var(--text-muted);margin-top:8px"></div>
+    </div>`;
+    const queueCards = queue.length
+      ? queue.map(q => {
+          const buttons = [];
+          if (q.status === 'draft') {
+            buttons.push(`<button onclick="linkedinAction('${q.id}','approve')" class="btn-success" style="padding:5px 10px;font-size:11px">Approve</button>`);
+            buttons.push(`<button onclick="linkedinAction('${q.id}','reject')" class="btn-danger" style="padding:5px 10px;font-size:11px">Reject</button>`);
+          } else if (q.status === 'approved') {
+            buttons.push(`<button onclick="linkedinPublish('${q.id}')" class="btn-primary" style="padding:5px 10px;font-size:11px">Publish to LinkedIn</button>`);
+            buttons.push(`<button onclick="linkedinAction('${q.id}','reject')" class="btn-danger" style="padding:5px 10px;font-size:11px">Reject</button>`);
+          }
+          const accent = q.status==='published'?'#1D9E75':q.status==='approved'?'#EF9F27':q.status==='rejected'?'#dc2626':'#1B3A6B';
+          return `<div class="card" style="border-left:4px solid ${accent}">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+              <div style="flex:1">
+                <div class="text-label">${esc(q.post_type.replace('_',' '))} · ${q.scheduled_for || 'unscheduled'}${q.source_molecule ? ' · ' + esc(q.source_molecule) : ''}</div>
+                <div style="font-size:14px;font-weight:700;color:var(--text-strong);margin-top:3px">${esc(q.headline||'(no headline)')}</div>
+              </div>
+              ${statusBadge(q.status)}
+            </div>
+            <details style="margin-top:10px">
+              <summary style="cursor:pointer;font-size:12px;color:#0D7377;font-weight:600">Preview post (${(q.full_post||'').length} chars)</summary>
+              <pre style="font-family:Arial,sans-serif;white-space:pre-wrap;font-size:12px;color:#1a202c;background:#f8fafc;padding:12px;border-radius:6px;margin-top:8px;border:1px solid var(--border);line-height:1.55">${esc(q.full_post||'')}</pre>
+            </details>
+            ${q.linkedin_post_id ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px">LinkedIn post ID: ${esc(q.linkedin_post_id)}</div>` : ''}
+            ${buttons.length ? `<div style="margin-top:8px;display:flex;gap:6px">${buttons.join('')}</div>` : ''}
+          </div>`;
+        }).join('')
+      : '<div class="card"><p style="color:var(--text-muted)">No LinkedIn posts in the queue. Use Generate above, or wait for the Monday 10am scheduler.</p></div>';
+    c.innerHTML = calendar + analyticsCard + generateCard + queueCards;
   };
   pages['apollo-outreach'] = function() {
     document.getElementById('page-title').textContent = 'Apollo Outreach';

@@ -13,6 +13,7 @@ const { trackKeywordRankings, generateSEOTasksForTeam, trackAlgoliaNoResults } =
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/lib/agents/goal-engine');
 const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
 const { runMorningBriefing } = require('./src/lib/agents/orchestrator');
+const { scheduleLinkedInContent } = require('./src/lib/agents/linkedin-agent');
 const routes = require('./src/api/routes');
 
 const app = express();
@@ -233,6 +234,16 @@ cron.schedule('0 7 * * *', async () => {
     const r = await runMorningBriefing({ segment: 'ceo' });
     console.log(`[CRON] CEO briefing done — ran: ${r.ran.join(', ') || 'none'}`);
   } catch (e) { console.error('[CRON] CEO briefing error:', e.message); }
+}, CST);
+
+// Monday 10:00am CST — drafts the week's LinkedIn content (product / market /
+// company-update posts) into linkedin_content_queue and emails the CEO.
+cron.schedule('0 10 * * 1', async () => {
+  console.log('[CRON] LinkedIn content scheduler starting...');
+  try {
+    const r = await scheduleLinkedInContent();
+    console.log(`[CRON] LinkedIn content scheduler done — ${r.drafts_created} drafts for week of ${r.week.monday}`);
+  } catch (e) { console.error('[CRON] LinkedIn content scheduler error:', e.message); }
 }, CST);
 
 // 8:00am CST — US team briefing + agent task assignment (HR review on Mondays)
