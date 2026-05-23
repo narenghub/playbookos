@@ -35,11 +35,26 @@ function assemblePost({ headline, body, hashtags }) {
 
 async function callClaudeForPost(prompt) {
   const raw = await runClaudeAnalysis(prompt);
+  if (!raw || raw.startsWith('Claude API error') || raw.startsWith('Claude error') || raw === 'Claude API key not configured.') {
+    console.error('[linkedin-agent] runClaudeAnalysis returned an error string:', String(raw).slice(0, 300));
+    return null;
+  }
   const j = parseClaudeJSON(raw);
-  if (!j || typeof j !== 'object') return null;
+  if (!j || Array.isArray(j) || typeof j !== 'object') {
+    console.error('[linkedin-agent] Claude did not return a JSON object. Raw (first 500 chars):',
+      String(raw).slice(0, 500));
+    return null;
+  }
+  // Accept common alternate field names defensively
+  const headline = j.headline || j.title || j.hook || '';
+  const body = j.body || j.text || j.post || '';
+  if (!headline && !body) {
+    console.error('[linkedin-agent] Parsed object had neither headline nor body. Keys:',
+      Object.keys(j).join(', '), '— raw (first 300 chars):', String(raw).slice(0, 300));
+  }
   return {
-    headline: j.headline || '',
-    body: j.body || '',
+    headline,
+    body,
     hashtags: Array.isArray(j.hashtags) ? j.hashtags : [],
   };
 }

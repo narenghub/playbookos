@@ -104,14 +104,28 @@ async function getCEOUser() {
   return row || null;
 }
 
-// Extract the first JSON array or object from a Claude response string.
+// Extract the outermost JSON value from a Claude response string. Picks
+// whichever bracket appears first ({ for objects, [ for arrays) so a prompt
+// that asks for an object containing arrays doesn't get its inner array
+// extracted by mistake — the previous behaviour was checking arrays first,
+// which broke every agent returning {headline, body, hashtags:[...]} or
+// {summary, wins:[], risks:[], actions:[]} shapes (CEO, sales, LinkedIn).
 function parseClaudeJSON(text) {
   if (!text) return null;
-  const arr = text.match(/\[[\s\S]*\]/);
-  const obj = text.match(/\{[\s\S]*\}/);
-  const candidate = arr ? arr[0] : obj ? obj[0] : null;
-  if (!candidate) return null;
-  try { return JSON.parse(candidate); } catch { return null; }
+  // Strip ```json ... ``` code fences if present
+  const cleaned = String(text).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+  const firstBrace = cleaned.indexOf('{');
+  const firstBracket = cleaned.indexOf('[');
+  if (firstBrace === -1 && firstBracket === -1) return null;
+  let start, closeChar;
+  if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+    start = firstBrace; closeChar = '}';
+  } else {
+    start = firstBracket; closeChar = ']';
+  }
+  const end = cleaned.lastIndexOf(closeChar);
+  if (end === -1 || end < start) return null;
+  try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { return null; }
 }
 
 module.exports = {
