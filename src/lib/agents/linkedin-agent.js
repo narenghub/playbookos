@@ -210,17 +210,18 @@ async function generatePostImage(molecule_name, post_type) {
     : generateImagePrompt(post_type, molecule_name);
 
   const url = 'https://api.openai.com/v1/images/generations';
-  const body = { model: 'dall-e-3', prompt, n: 1, size: '1024x1024' };
-  // Debug — full request being sent, with the API key masked.
   const maskedKey = apiKey ? apiKey.slice(0, 7) + '…' + apiKey.slice(-4) : '(unset)';
-  console.log('[linkedin-agent] DALL-E request:', JSON.stringify({
-    url,
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + maskedKey, 'Content-Type': 'application/json' },
-    body: { ...body, prompt: body.prompt.slice(0, 200) + (body.prompt.length > 200 ? '…' : '') },
-  }, null, 2));
 
-  try {
+  // Try dall-e-3 first (better quality). If OpenAI rejects with model_not_found
+  // (or "does not exist" / "invalid model"), fall back to dall-e-2 at 512x512
+  // — the more widely-available tier. Returns {url, raw, status} or {error,...}.
+  async function tryModel(model, size) {
+    const body = { model, prompt, n: 1, size };
+    console.log('[linkedin-agent] DALL-E request:', JSON.stringify({
+      url, method: 'POST',
+      headers: { Authorization: 'Bearer ' + maskedKey, 'Content-Type': 'application/json' },
+      body: { ...body, prompt: body.prompt.slice(0, 200) + (body.prompt.length > 200 ? '…' : '') },
+    }, null, 2));
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
@@ -228,15 +229,31 @@ async function generatePostImage(molecule_name, post_type) {
     });
     if (!res.ok) {
       const t = await res.text().catch(() => '');
-      console.error('[linkedin-agent] DALL-E error response — status', res.status, '— body:', t.slice(0, 500));
-      return { error: `OpenAI ${res.status}: ${t.slice(0, 300)}` };
+      console.error('[linkedin-agent] DALL-E ' + model + ' error — status', res.status, '— body:', t.slice(0, 500));
+      return { error: 'OpenAI ' + res.status + ': ' + t.slice(0, 300), status: res.status, raw: t };
     }
     const data = await res.json();
-    console.log('[linkedin-agent] DALL-E success — keys:', Object.keys(data || {}).join(','),
+    console.log('[linkedin-agent] DALL-E ' + model + ' success — keys:', Object.keys(data || {}).join(','),
       '— first image URL:', (data.data?.[0]?.url || '').slice(0, 80) + '…');
-    const openaiUrl = data.data?.[0]?.url;
+    return { url: data.data?.[0]?.url, data };
+  }
+
+  // Attempt 1: dall-e-3 at 1024x1024
+  let attempt = await tryModel('dall-e-3', '1024x1024');
+  let modelUsed = 'dall-e-3';
+
+  // Fallback on model availability errors only — re-try with dall-e-2 at 512x512.
+  if (attempt.error && /model_not_found|does not exist|does not have access|invalid[_ ]model|unsupported model/i.test(attempt.raw || '')) {
+    console.log('[linkedin-agent] dall-e-3 unavailable on this account — falling back to dall-e-2 / 512x512');
+    attempt = await tryModel('dall-e-2', '512x512');
+    modelUsed = 'dall-e-2';
+  }
+
+  try {
+    if (attempt.error) return { error: attempt.error };
+    const openaiUrl = attempt.url;
     if (!openaiUrl) {
-      console.error('[linkedin-agent] DALL-E response had no .data[0].url. Full response:', JSON.stringify(data).slice(0, 500));
+      console.error('[linkedin-agent] DALL-E response had no .data[0].url. Full response:', JSON.stringify(attempt.data || {}).slice(0, 500));
       return { error: 'OpenAI response had no image URL' };
     }
 
@@ -249,7 +266,7 @@ async function generatePostImage(molecule_name, post_type) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const filename = crypto.randomUUID() + '.png';
     fs.writeFileSync(pathMod.join(dir, filename), buffer);
-    return { url: '/linkedin-images/' + filename, prompt };
+    return { url: '/linkedin-images/' + filename, prompt, model: modelUsed };
   } catch (e) {
     return { error: e.message };
   }
