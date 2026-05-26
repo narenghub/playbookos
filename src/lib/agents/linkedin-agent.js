@@ -209,21 +209,36 @@ async function generatePostImage(molecule_name, post_type) {
     ? `Professional pharmaceutical laboratory, clean white and blue aesthetic, molecular structure visualization of ${molecule_name}, modern biotech facility, scientific precision, enterprise-grade photography style, no text`
     : generateImagePrompt(post_type, molecule_name);
 
+  const url = 'https://api.openai.com/v1/images/generations';
+  const body = { model: 'dall-e-3', prompt, n: 1, size: '1024x1024' };
+  // Debug — full request being sent, with the API key masked.
+  const maskedKey = apiKey ? apiKey.slice(0, 7) + '…' + apiKey.slice(-4) : '(unset)';
+  console.log('[linkedin-agent] DALL-E request:', JSON.stringify({
+    url,
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + maskedKey, 'Content-Type': 'application/json' },
+    body: { ...body, prompt: body.prompt.slice(0, 200) + (body.prompt.length > 200 ? '…' : '') },
+  }, null, 2));
+
   try {
-    const res = await fetch('https://api.openai.com/v1/images/generations', {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'dall-e-3', prompt, n: 1, size: '1024x1024', quality: 'standard',
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const t = await res.text().catch(() => '');
+      console.error('[linkedin-agent] DALL-E error response — status', res.status, '— body:', t.slice(0, 500));
       return { error: `OpenAI ${res.status}: ${t.slice(0, 300)}` };
     }
     const data = await res.json();
+    console.log('[linkedin-agent] DALL-E success — keys:', Object.keys(data || {}).join(','),
+      '— first image URL:', (data.data?.[0]?.url || '').slice(0, 80) + '…');
     const openaiUrl = data.data?.[0]?.url;
-    if (!openaiUrl) return { error: 'OpenAI response had no image URL' };
+    if (!openaiUrl) {
+      console.error('[linkedin-agent] DALL-E response had no .data[0].url. Full response:', JSON.stringify(data).slice(0, 500));
+      return { error: 'OpenAI response had no image URL' };
+    }
 
     const imageRes = await fetch(openaiUrl);
     if (!imageRes.ok) return { error: `image download failed: ${imageRes.status}` };
