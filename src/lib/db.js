@@ -119,7 +119,7 @@ async function initDB() {
   await query(`INSERT INTO targets (id,period_type,period_key,metric,target_value) VALUES ($1,'annual','2026','revenue',10000000) ON CONFLICT DO NOTHING`,
     [crypto.randomUUID()]);
 
-  console.log('✅ PostgreSQL database ready. Admin:', adminEmail);
+  console.log('✅ PostgreSQL database ready. Admin:', existing ? existing.email : process.env.ADMIN_EMAIL);
 }
 
 async function initPhase2() {
