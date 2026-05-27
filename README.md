@@ -26,6 +26,8 @@ node server.js
 
 The server initializes its schema on first boot (`initDB → initPhase2 → migrateSchemas`) and seeds an admin user from `ADMIN_EMAIL` / `ADMIN_PASSWORD` plus milestones, monthly targets, decision rules, execution steps, and integrations.
 
+**`ADMIN_EMAIL` and `ADMIN_PASSWORD` are required on the very first deploy** — there is no hardcoded fallback. If no admin user exists in the database and either env var is unset, the server logs `FATAL: No admin user exists...` and exits. Subsequent boots skip the seed once an admin row exists, so these vars can be left unset (or rotated) after the first deploy.
+
 Open http://localhost:3000 and log in with the admin credentials from `.env`.
 
 Sanity check:
@@ -43,7 +45,7 @@ curl http://localhost:3000/health
 | `JWT_SECRET` | yes | Signs auth tokens. Server refuses to start without it. Generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. |
 | `TRIGGERS_SECRET` | yes (for milestone cron) | Bearer token gating `POST /api/triggers/check`. The 6pm cron skips with a warning if unset. Same generation method as `JWT_SECRET`. |
 | `PLAYBOOKOS_WEBHOOK_SECRET` | yes (for marketplace integration) | Shared secret validated against the `X-PlaybookOS-Secret` header on `POST /api/orders/webhook`. The endpoint returns 503 if unset. Same generation method as `JWT_SECRET`. |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | yes (first boot) | Bootstrap admin user during the initial DB seed. Ignored on subsequent boots. |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | **yes (first deploy)** | Bootstrap the first admin user. No hardcoded fallback — server exits with FATAL if no admin row exists in the DB and either is unset. Ignored on subsequent boots once an admin row exists. |
 | `ANTHROPIC_API_KEY` | yes | Claude API key for AI analysis and market intelligence. |
 | `RESEND_API_KEY` | yes | Resend API key for outbound email (invites, weekly reports, milestone triggers, Apollo outreach). |
 | `APOLLO_API_KEY` | yes (for Apollo features) | Apollo.io API key. Required for every `/api/apollo/*` endpoint. |

@@ -61,14 +61,35 @@ async function initDB() {
 
   const bcrypt = require('bcryptjs');
   const crypto = require('crypto');
-  const adminEmail = process.env.ADMIN_EMAIL || 'naren@abiozen.com';
-  const adminPass = process.env.ADMIN_PASSWORD || 'Abiozen@2026';
-  const hash = bcrypt.hashSync(adminPass, 10);
-  const adminId = crypto.randomUUID();
-  const now = new Date().toISOString();
 
-  await query(`INSERT INTO users (id,email,name,role,password_hash,joined_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (email) DO NOTHING`,
-    [adminId, adminEmail, 'Naresh (Admin)', 'admin', hash, now]);
+  // Idempotent admin seed:
+  //   - If any admin/super_admin user already exists, skip the seed entirely
+  //     (no bcrypt work, no INSERT). Existing passwords are never touched.
+  //   - If NONE exists, require both ADMIN_EMAIL and ADMIN_PASSWORD and create
+  //     the first admin. No hardcoded fallback — fail loudly if env vars missing
+  //     so a fresh deploy can't ever boot with a known-default password.
+  const existing = (await query(
+    `SELECT id, email FROM users WHERE role IN ('admin','super_admin') LIMIT 1`
+  )).rows[0];
+
+  if (!existing) {
+    const adminEmail = process.env.ADMIN_EMAIL;
+    const adminPass = process.env.ADMIN_PASSWORD;
+    if (!adminEmail || !adminPass) {
+      throw new Error(
+        'FATAL: No admin user exists and ADMIN_EMAIL/ADMIN_PASSWORD env vars are not set. ' +
+        'Set them in Railway and redeploy.'
+      );
+    }
+    const hash = bcrypt.hashSync(adminPass, 10);
+    const adminId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await query(
+      `INSERT INTO users (id,email,name,role,password_hash,joined_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (email) DO NOTHING`,
+      [adminId, adminEmail, 'Admin', 'admin', hash, now]
+    );
+    console.log('[db] Seeded initial admin user:', adminEmail);
+  }
 
   const milestones = [
     ['Release 1 — Research molecules + Non-GMP QC','2026-05-31','E-commerce go-live'],
