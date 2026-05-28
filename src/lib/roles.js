@@ -95,8 +95,8 @@ const BUILT_IN_ROLES = {
   dev_team: {
     display_name: 'Dev Team',
     level: 5, domain: 'engineering', data_scope: 'own+technical',
-    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'data-pipeline', 'execution-graph'],
-    tiers: { self: 'rw', technical: 'rw' },
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'data-pipeline', 'execution-graph', 'apollo-outreach', 'linkedin-content', 'seo-intelligence', 'seo-content'],
+    tiers: { self: 'rw', technical: 'rw', sales: 'r', intelligence: 'r' },
     metrics: ['prs_merged', 'commits', 'features_deployed', 'bugs_fixed'],
     baseline: 11,
   },
