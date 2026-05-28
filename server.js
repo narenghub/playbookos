@@ -181,7 +181,11 @@ cron.schedule('0 18 * * *', async () => {
   } catch {}
 });
 
-// Daily 6 PM: AI performance scoring + per-user coaching email (legacy single-score system)
+// Daily 6 PM: AI performance scoring + per-user coaching email.
+// Legacy scoreAllAndCoach kept intentionally for daily "Your day at Abiozen" emails.
+// runPerformanceCheck (new path below) writes the 4-component score columns but
+// does NOT replicate the daily coaching email to every active non-admin user.
+// Revisit post-launch — see ADR or June 8 decision.
 cron.schedule('0 18 * * *', async () => {
   console.log('[CRON] Performance scoring starting...');
   try {
