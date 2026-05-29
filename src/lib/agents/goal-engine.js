@@ -431,7 +431,7 @@ async function checkAndRecalc({ dryRun = false } = {}) {
   }
 
   const recent = (await query(
-    `SELECT created_at FROM ai_analyses WHERE analysis_type='goal_recalc' AND created_at >= NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 1`
+    `SELECT created_at FROM ai_analyses WHERE analysis_type='goal_recalc' AND created_at::timestamptz >= NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 1`
   )).rows[0];
   if (recent) {
     return {

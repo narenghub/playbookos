@@ -78,7 +78,7 @@ async function takeMetricsSnapshot({ dryRun = false, dateOverride = null } = {})
   )).rows[0].v);
 
   const skusAddedThisWeek = parseInt((await query(
-    `SELECT COUNT(*)::int as v FROM skus WHERE created_at >= NOW() - INTERVAL '7 days'`
+    `SELECT COUNT(*)::int as v FROM skus WHERE created_at::timestamptz >= NOW() - INTERVAL '7 days'`
   )).rows[0].v);
 
   const githubCommitsThisWeek = parseInt((await query(
