@@ -1672,6 +1672,11 @@ async function linkedinRunCampaign() {
   } catch(e) { msg.remove(); alert('Error: ' + e.message); }
 }
 
+function linkedinToggleRejected() {
+  window._linkedinShowRejected = !window._linkedinShowRejected;
+  pages['linkedin-content']();
+}
+
 // ── LinkedIn partial-update helpers ─────────────────────────────────────────
 async function refreshLinkedInCard(id) {
   try {
@@ -2239,6 +2244,9 @@ if(typeof pages !== 'undefined') {
     }
     window._linkedinQueue = (queueR && queueR.queue) || [];
     const queue = window._linkedinQueue;
+    if (typeof window._linkedinShowRejected !== 'boolean') window._linkedinShowRejected = false;
+    const rejectedCount = queue.filter(q => q.status === 'rejected').length;
+    const visibleQueue = window._linkedinShowRejected ? queue : queue.filter(q => q.status !== 'rejected');
     const totals = (analytics && analytics.totals) || {};
     const demand = (demandR && demandR.molecules) || [];
     // Calendar week is computed fresh on every page load:
@@ -2261,13 +2269,16 @@ if(typeof pages !== 'undefined') {
       .map(s => ({...s, iso: localISO(new Date(monday.getTime() + s.o*86400000))}));
     const statusCls = s => ({draft:'badge-blue',approved:'badge-amber',published:'badge-green',rejected:'badge-red'}[s] || 'badge-gray');
     const statusBadge = s => `<span class="badge ${statusCls(s)}">${esc(s)}</span>`;
-    const slotPost = iso => queue.find(q => q.scheduled_for === iso);
+    const slotPost = iso => visibleQueue.find(q => q.scheduled_for === iso);
     const headerCard = `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
       <div>
         <div class="card-title text-section" style="margin:0">LinkedIn Content Engine</div>
         <div class="text-body">Drafts auto-generate every Monday 10am CST. Approving a draft auto-publishes it to the Abiozen company page.</div>
       </div>
-      <button onclick="linkedinRunCampaign()" class="btn-primary">⚡ Generate now</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        ${rejectedCount ? `<button onclick="linkedinToggleRejected()" class="btn-outline btn-sm" style="font-size:12px">${window._linkedinShowRejected ? 'Hide' : 'Show'} ${rejectedCount} rejected</button>` : ''}
+        <button onclick="linkedinRunCampaign()" class="btn-primary">⚡ Generate now</button>
+      </div>
     </div>`;
     const calendar = `<div class="card">
       <div class="card-title text-section">This week — Mon / Wed / Fri</div>
@@ -2322,8 +2333,8 @@ if(typeof pages !== 'undefined') {
       </div>
       <div id="li-gen-msg" style="font-size:12px;color:var(--text-muted);margin-top:8px"></div>
     </div>`;
-    const queueCards = queue.length
-      ? queue.map(q => renderLinkedInPreview(q, esc, statusBadge)).join('')
+    const queueCards = visibleQueue.length
+      ? visibleQueue.map(q => renderLinkedInPreview(q, esc, statusBadge)).join('')
       : '<div class="card"><p style="color:var(--text-muted)">No LinkedIn posts in the queue yet. Use Generate single post above or click "Generate now" to run the full weekly campaign.</p></div>';
     c.innerHTML = headerCard + calendar + demandCard + analyticsCard + generateCard + queueCards;
   };
