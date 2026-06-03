@@ -1585,6 +1585,181 @@ async function assignTask() {
   } catch(e) { msg.style.color = '#dc2626'; msg.textContent = 'Error: ' + e.message; }
 }
 
+// ── AI Task Command (draft → review → commit) ─────────────────────────────
+const AI_TASK_KPIS = ['kpi-vision','kpi-sg-sales','commits','prs_merged','features_deployed','suppliers_approved','market_analyses','team_reviews','candidates_screened','interviews_scheduled','offers_made'];
+
+async function aiGenerate() {
+  const instruction = document.getElementById('ai-cmd-input').value.trim();
+  const status = document.getElementById('ai-cmd-status');
+  const preview = document.getElementById('ai-cmd-preview');
+  const goBtn = document.getElementById('ai-cmd-go');
+  if (!instruction) { status.style.color = '#dc2626'; status.textContent = 'Type an instruction first'; return; }
+  status.style.color = 'var(--text-muted)';
+  status.textContent = 'Calling Claude (Sonnet 4.6)…';
+  goBtn.disabled = true;
+  preview.innerHTML = '';
+  try {
+    const res = await API('/agent/tasks/ai-generate', { method: 'POST', body: JSON.stringify({ instruction }) });
+    if (res && res.error) {
+      status.style.color = '#dc2626';
+      const detail = res.validation_errors ? ' — ' + res.validation_errors.slice(0,3).join('; ') : '';
+      status.textContent = 'Error: ' + res.error + detail;
+      return;
+    }
+    window._aiTaskDrafts = (res.tasks || []).slice();
+    window._aiInstruction = res.instruction || instruction;
+    window._aiWarnings = res.warnings || [];
+    window._aiClarifications = res.clarifications_needed || [];
+    status.style.color = '#1D9E75';
+    status.textContent = `Generated ${window._aiTaskDrafts.length} draft task(s)`;
+    renderAiPreview();
+  } catch(e) {
+    status.style.color = '#dc2626';
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    goBtn.disabled = false;
+  }
+}
+
+function renderAiPreview() {
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const preview = document.getElementById('ai-cmd-preview');
+  if (!preview) return;
+  const drafts = window._aiTaskDrafts || [];
+  const warnings = window._aiWarnings || [];
+  const clarifications = window._aiClarifications || [];
+  if (!drafts.length && !clarifications.length && !warnings.length) { preview.innerHTML = ''; return; }
+  const warnHtml = warnings.length
+    ? warnings.map(w => `<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:8px 10px;font-size:12px;color:#92400e;margin:6px 0">ⓘ ${esc(w)}</div>`).join('')
+    : '';
+  const clarHtml = clarifications.length ? `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin:10px 0;background:#f8fafc">
+    <div class="text-label" style="margin-bottom:6px">Clarification needed</div>
+    ${clarifications.map(c => `<div style="font-size:13px;margin:4px 0">
+      <div>"${esc(c.instruction_excerpt||'')}" — ${esc(c.issue||'')}</div>
+      ${(c.options||[]).length ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${(c.options||[]).map(o => esc(o.label || o)).join(' · ')}</div>` : ''}
+    </div>`).join('')}
+    <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Edit your instruction above and Generate again to disambiguate.</div>
+  </div>` : '';
+  const distinctUsers = new Set(drafts.map(t => t.user_id)).size;
+  const tasksHtml = drafts.map((t, idx) => `<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin:6px 0" id="ai-draft-${idx}">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+      <div style="flex:1">
+        <div style="font-weight:700;font-size:13px">${esc(t.task_title)}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">→ ${esc(t.user_label)} (${esc(t.user_role||'')}) · ${esc(t.task_date)} · ${esc(t.priority)}${t.source_kpi ? ' · KPI:' + esc(t.source_kpi) : ''}</div>
+        ${t.task_description ? `<div style="font-size:12px;color:#4a5568;margin-top:4px">${esc(t.task_description)}</div>` : ''}
+        ${t.rationale ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic">${esc(t.rationale)}</div>` : ''}
+      </div>
+      <div style="display:flex;gap:4px">
+        <button onclick="aiEditDraft(${idx})" class="btn-outline" style="padding:3px 8px;font-size:11px">✎ Edit</button>
+        <button onclick="aiRemoveDraft(${idx})" class="btn-danger" style="padding:3px 8px;font-size:11px">×</button>
+      </div>
+    </div>
+  </div>`).join('');
+  const commitDisabled = drafts.length === 0 || clarifications.length > 0;
+  preview.innerHTML = `${warnHtml}${clarHtml}` +
+    (drafts.length ? `<div class="text-label" style="margin-top:10px">Preview · ${drafts.length} task(s) · ${distinctUsers} user(s)</div>${tasksHtml}<div style="display:flex;gap:10px;align-items:center;margin-top:10px">
+      <button onclick="aiCommit()" id="ai-commit-btn" class="btn-primary"${commitDisabled?' disabled':''}>Commit ${drafts.length} task${drafts.length===1?'':'s'}</button>
+      <button onclick="aiCancelAll()" class="btn-outline">Cancel all</button>
+      <div id="ai-commit-status" style="font-size:12px;color:var(--text-muted);flex:1"></div>
+    </div>` : '');
+}
+
+function aiEditDraft(idx) {
+  const t = window._aiTaskDrafts && window._aiTaskDrafts[idx];
+  if (!t) return;
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const div = document.getElementById('ai-draft-' + idx);
+  if (!div) return;
+  div.innerHTML = `<div style="display:flex;flex-direction:column;gap:6px">
+    <input id="ai-edit-title-${idx}" value="${esc(t.task_title)}" style="font-weight:700;font-size:13px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;width:100%">
+    <textarea id="ai-edit-description-${idx}" rows="2" placeholder="Description (optional)" style="font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-family:inherit;resize:vertical;width:100%">${esc(t.task_description||'')}</textarea>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <select id="ai-edit-priority-${idx}" style="font-size:11px;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+        <option value="HIGH"${t.priority==='HIGH'?' selected':''}>HIGH</option>
+        <option value="MEDIUM"${t.priority==='MEDIUM'?' selected':''}>MEDIUM</option>
+        <option value="LOW"${t.priority==='LOW'?' selected':''}>LOW</option>
+      </select>
+      <input type="date" id="ai-edit-date-${idx}" value="${esc(t.task_date)}" style="font-size:11px;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+      <select id="ai-edit-kpi-${idx}" style="font-size:11px;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+        <option value="">(no KPI)</option>
+        ${AI_TASK_KPIS.map(k => `<option value="${k}"${t.source_kpi===k?' selected':''}>${k}</option>`).join('')}
+      </select>
+    </div>
+    <div style="display:flex;gap:6px">
+      <button onclick="aiSaveDraft(${idx})" class="btn-primary" style="padding:4px 10px;font-size:11px">Save</button>
+      <button onclick="renderAiPreview()" class="btn-outline" style="padding:4px 10px;font-size:11px">Cancel</button>
+    </div>
+  </div>`;
+}
+
+function aiSaveDraft(idx) {
+  const t = window._aiTaskDrafts && window._aiTaskDrafts[idx];
+  if (!t) return;
+  t.task_title = document.getElementById('ai-edit-title-'+idx).value.trim();
+  t.task_description = document.getElementById('ai-edit-description-'+idx).value.trim();
+  t.priority = document.getElementById('ai-edit-priority-'+idx).value;
+  t.task_date = document.getElementById('ai-edit-date-'+idx).value;
+  const kpi = document.getElementById('ai-edit-kpi-'+idx).value;
+  t.source_kpi = kpi || null;
+  renderAiPreview();
+}
+
+function aiRemoveDraft(idx) {
+  if (!window._aiTaskDrafts) return;
+  window._aiTaskDrafts.splice(idx, 1);
+  renderAiPreview();
+}
+
+function aiCancelAll() {
+  window._aiTaskDrafts = [];
+  window._aiWarnings = [];
+  window._aiClarifications = [];
+  renderAiPreview();
+  const s = document.getElementById('ai-cmd-status');
+  if (s) s.textContent = '';
+}
+
+async function aiCommit() {
+  const drafts = window._aiTaskDrafts || [];
+  const instruction = window._aiInstruction || '';
+  const btn = document.getElementById('ai-commit-btn');
+  const status = document.getElementById('ai-commit-status');
+  if (!drafts.length) return;
+  btn.disabled = true;
+  status.style.color = 'var(--text-muted)';
+  status.textContent = 'Committing…';
+  try {
+    const payload = { instruction, tasks: drafts.map(d => ({
+      user_id: d.user_id,
+      task_title: d.task_title,
+      task_description: d.task_description,
+      priority: d.priority,
+      task_date: d.task_date,
+      source_kpi: d.source_kpi,
+      rationale: d.rationale,
+    })) };
+    const res = await API('/agent/tasks/ai-commit', { method: 'POST', body: JSON.stringify(payload) });
+    if (res && res.error) {
+      status.style.color = '#dc2626';
+      const detail = res.errors ? ' — ' + res.errors.slice(0,3).map(e => e.message).join('; ') : '';
+      status.textContent = 'Error: ' + res.error + detail;
+      btn.disabled = false;
+      return;
+    }
+    status.style.color = '#1D9E75';
+    status.textContent = `✓ Committed ${res.committed} task(s)`;
+    window._aiTaskDrafts = [];
+    window._aiWarnings = [];
+    window._aiClarifications = [];
+    document.getElementById('ai-cmd-input').value = '';
+    setTimeout(() => pages['agent-control'](), 1500);
+  } catch(e) {
+    status.style.color = '#dc2626';
+    status.textContent = 'Error: ' + e.message;
+    btn.disabled = false;
+  }
+}
+
 function renderLinkedInPreview(q, esc, statusBadge) {
   const accent = q.status==='published'?'#1D9E75':q.status==='approved'?'#EF9F27':q.status==='rejected'?'#dc2626':'#1B3A6B';
   const buttons = [];
@@ -2167,6 +2342,16 @@ if(typeof pages !== 'undefined') {
     const users = Array.isArray(usersR) ? usersR.filter(u => u.is_active === 1 || u.is_active === true) : [];
     const todayISO = new Date().toISOString().slice(0,10);
     const userOptions = users.map(u => `<option value="${esc(u.id)}">${esc(u.name||u.email)} — ${esc(u.role)}</option>`).join('');
+    const secAi = `<div class="card">
+      <div class="card-title">AI Task Command</div>
+      <div class="text-body" style="margin-bottom:10px">Describe tasks in plain English. AI drafts them for review — nothing persists until you commit.</div>
+      <textarea id="ai-cmd-input" rows="3" placeholder="e.g. give Mohan 3 onboarding tasks for this week" style="width:100%;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
+        <button onclick="aiGenerate()" id="ai-cmd-go" class="btn-primary">Generate draft tasks</button>
+        <div id="ai-cmd-status" style="font-size:12px;color:var(--text-muted);flex:1"></div>
+      </div>
+      <div id="ai-cmd-preview"></div>
+    </div>`;
     const sec0 = `<div class="card">
       <div class="card-title">Assign task</div>
       <div class="text-body" style="margin-bottom:10px">Manually assign a one-off task to a team member. Appears in their My Tasks for the selected date.</div>
@@ -2289,7 +2474,7 @@ if(typeof pages !== 'undefined') {
         <div style="font-size:11px;color:#718096">${esc(b.detail)}</div></div>`).join('')
         : '<div style="font-size:12px;color:#1D9E75">No cross-team blockers detected — the chain is healthy.</div>'}
     </div>`;
-    c.innerHTML = sec0 + sec1 + sec2 + sec3 + sec4 + sec5;
+    c.innerHTML = secAi + sec0 + sec1 + sec2 + sec3 + sec4 + sec5;
     renderAgentFeed();
   };
   pages['linkedin-content'] = async function() {

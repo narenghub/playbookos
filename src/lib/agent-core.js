@@ -15,9 +15,10 @@ async function logAgentActivity({
   confidence_score = null,
   output_summary = '',
   requires_approval = false,
-}) {
+}, client = null) {
   const id = crypto.randomUUID();
-  await query(
+  const exec = client ? (sql, params) => client.query(sql, params) : query;
+  await exec(
     `INSERT INTO agent_activity_log
        (id, agent_name, action_type, user_id, reasoning, source_kpi,
         confidence_score, output_summary, requires_approval, created_at)
@@ -78,12 +79,13 @@ async function createDailyTask({
   source_kpi = null,
   agent_name = null,
   reasoning = '',
-}) {
+}, client = null) {
   const id = crypto.randomUUID();
   const pri = ['HIGH', 'MEDIUM', 'LOW'].includes(String(priority).toUpperCase())
     ? String(priority).toUpperCase()
     : 'MEDIUM';
-  await query(
+  const exec = client ? (sql, params) => client.query(sql, params) : query;
+  await exec(
     `INSERT INTO daily_tasks
        (id, user_id, task_date, task_title, task_description, priority, status,
         source_kpi, agent_name, reasoning, created_at)

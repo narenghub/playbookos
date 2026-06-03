@@ -15,6 +15,24 @@ async function query(text, params) {
   }
 }
 
+// Run `fn(client)` inside a BEGIN/COMMIT block on a single pooled client.
+// All queries in `fn` must use the provided client (not the module-level
+// `query`) to participate in the transaction. Rolls back on any throw.
+async function withTransaction(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 async function initDB() {
   await query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -483,4 +501,4 @@ async function migrateSchemas() {
   } catch(e) { console.error('Migration error:', e.message); }
 }
 
-module.exports = { query, initDB, initPhase2, migrateSchemas };
+module.exports = { query, withTransaction, initDB, initPhase2, migrateSchemas };

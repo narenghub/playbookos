@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { signToken, authMiddleware, adminOnly, requireTier, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
-const { query } = require('../lib/db');
+const { query, withTransaction } = require('../lib/db');
 const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
 const { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf } = require('../lib/agents/goal-engine');
@@ -16,7 +16,7 @@ const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require(
 const { sendWhatsApp } = require('../lib/whatsapp');
 const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
-const { createDailyTask, logAgentActivity } = require('../lib/agent-core');
+const { createDailyTask, logAgentActivity, parseClaudeJSON } = require('../lib/agent-core');
 
 const router = express.Router();
 
@@ -1498,6 +1498,278 @@ router.post('/agent/tasks/assign', authMiddleware, adminOnly, async (req, res) =
       output_summary: `task_id=${task_id} priority=${priority || 'MEDIUM'}`,
     });
     res.json({ success: true, task_id, assigned_to: target.id, task_date: date });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── AI task command — natural-language → draft task batch → admin-approved commit
+const AI_TASK_MAX_TASKS = 25;
+const AI_TASK_MAX_USERS = 8;
+const AI_TASK_MAX_PER_USER_PER_DATE = 5;
+const AI_TASK_VALID_KPIS = ['kpi-vision','kpi-sg-sales','commits','prs_merged','features_deployed','suppliers_approved','market_analyses','team_reviews','candidates_screened','interviews_scheduled','offers_made'];
+
+// Generate DRAFT tasks from a natural-language instruction. Read-only: does NOT
+// write to daily_tasks. Logs the generation attempt to agent_activity_log even
+// if no commit follows. Frontend reviews/edits/removes drafts in memory and
+// posts the approved set to /ai-commit for atomic persistence.
+router.post('/agent/tasks/ai-generate', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const instruction = String(req.body?.instruction || '').trim();
+    if (!instruction) return res.status(400).json({ error: 'instruction is required' });
+    if (instruction.length > 500) return res.status(400).json({ error: 'instruction must be 500 chars or fewer' });
+    const clarifications = Array.isArray(req.body?.clarifications) ? req.body.clarifications : [];
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey || apiKey.includes('REPLACE')) {
+      return res.status(503).json({ error: 'ANTHROPIC_API_KEY not configured on server' });
+    }
+
+    const users = (await query(`SELECT id, name, email, role FROM users WHERE is_active=1 ORDER BY role, name`)).rows;
+    const userById = new Map(users.map(u => [u.id, u]));
+
+    const today = new Date();
+    const todayISO = today.toISOString().slice(0, 10);
+    const dow = today.getUTCDay();
+    const monOffset = dow === 0 ? -6 : (1 - dow);
+    const monday = new Date(today.getTime() + monOffset * 86400000);
+    const friday = new Date(monday.getTime() + 4 * 86400000);
+    const nextMonday = new Date(monday.getTime() + 7 * 86400000);
+    const nextFriday = new Date(friday.getTime() + 7 * 86400000);
+    const iso = d => d.toISOString().slice(0, 10);
+
+    const userListBlock = users.map(u =>
+      `- id=${u.id} name="${(u.name || '(no name)').replace(/"/g, '\\"')}" email="${u.email}" role="${u.role}"`
+    ).join('\n');
+    const clarBlock = clarifications.length
+      ? `\n\nThe admin previously clarified: ${JSON.stringify(clarifications)}`
+      : '';
+
+    const prompt = `You are the AI task-assignment assistant for PlaybookOS at Abiozen LLC, a US-based pharmaceutical API distributor.
+
+Today's date: ${todayISO}
+Current ISO week: Mon ${iso(monday)} → Fri ${iso(friday)}
+Next ISO week: Mon ${iso(nextMonday)} → Fri ${iso(nextFriday)}
+
+## Active users (you may only assign to these IDs)
+${userListBlock}
+
+## Team aliases — map plain English to roles
+- "sales team" / "sales" / "salespeople" → roles: sales_director, account_manager
+- "procurement team" / "procurement" / "buying" → roles: procurement_director, procurement_team
+- "dev team" / "developers" / "engineering" → role: dev_team
+- "recruitment team" / "hiring" / "talent" → roles: recruitment_director, recruitment_team
+- "everyone" / "all" / "the team" → all active users
+- A bare first name → match users.name case-insensitively (substring); if multiple match, emit a clarifications_needed entry instead of guessing
+
+## Valid KPI source values (pick ONE per task that fits, or null)
+${AI_TASK_VALID_KPIS.join(', ')}
+Do NOT invent new KPI values.
+
+## Rules
+- Maximum ${AI_TASK_MAX_TASKS} tasks total per command
+- Maximum ${AI_TASK_MAX_USERS} distinct users assigned
+- Priority must be exactly HIGH, MEDIUM, or LOW
+- task_date must be today or a future date in YYYY-MM-DD format
+- task_title: imperative, action-oriented, under 80 chars
+- task_description: 1-3 sentences of context (optional but encouraged)
+- rationale: one sentence explaining why YOU generated this task from the instruction
+- If a team alias resolves to zero active users, add a warning and skip those assignments
+
+## Output format — STRICT JSON, no markdown fences, no commentary
+{
+  "tasks": [
+    {
+      "user_id": "<one of the active user UUIDs>",
+      "task_title": "...",
+      "task_description": "...",
+      "priority": "HIGH|MEDIUM|LOW",
+      "task_date": "YYYY-MM-DD",
+      "source_kpi": "<one of the valid KPIs or null>",
+      "rationale": "..."
+    }
+  ],
+  "warnings": [],
+  "clarifications_needed": []
+}
+
+## Admin instruction
+${instruction}${clarBlock}`;
+
+    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4000,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    if (!aiRes.ok) {
+      const t = await aiRes.text().catch(() => '');
+      return res.status(502).json({ error: `Claude API ${aiRes.status}: ${t.slice(0, 300)}` });
+    }
+    const aiData = await aiRes.json();
+    const claudeText = aiData.content?.[0]?.text || '';
+    const parsed = parseClaudeJSON(claudeText);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return res.status(502).json({ error: 'Claude returned unparseable JSON', raw: claudeText.slice(0, 400) });
+    }
+
+    const rawTasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+    const errors = [];
+    if (rawTasks.length > AI_TASK_MAX_TASKS) errors.push(`AI returned ${rawTasks.length} tasks, max ${AI_TASK_MAX_TASKS}`);
+
+    const tasks = [];
+    for (let i = 0; i < rawTasks.length; i++) {
+      const t = rawTasks[i] || {};
+      const fail = (msg) => errors.push(`task[${i}]: ${msg}`);
+      if (!t.user_id || !userById.has(t.user_id)) { fail('user_id is not a known active user'); continue; }
+      const title = String(t.task_title || '').trim();
+      if (!title || title.length > 200) { fail('task_title required, max 200 chars'); continue; }
+      const pri = ['HIGH','MEDIUM','LOW'].includes(String(t.priority).toUpperCase()) ? String(t.priority).toUpperCase() : null;
+      if (!pri) { fail('priority must be HIGH/MEDIUM/LOW'); continue; }
+      const date = String(t.task_date || '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { fail('task_date must be YYYY-MM-DD'); continue; }
+      if (date < todayISO) { fail('task_date cannot be in the past'); continue; }
+      const kpi = (t.source_kpi === null || t.source_kpi === undefined) ? null
+        : (AI_TASK_VALID_KPIS.includes(t.source_kpi) ? t.source_kpi : null);
+      const u = userById.get(t.user_id);
+      tasks.push({
+        draft_id: crypto.randomUUID(),
+        user_id: t.user_id,
+        user_label: u.email,
+        user_role: u.role,
+        task_title: title,
+        task_description: String(t.task_description || '').slice(0, 2000),
+        priority: pri,
+        task_date: date,
+        source_kpi: kpi,
+        rationale: String(t.rationale || '').slice(0, 500),
+      });
+    }
+
+    const distinctUsers = new Set(tasks.map(t => t.user_id));
+    if (distinctUsers.size > AI_TASK_MAX_USERS) errors.push(`${distinctUsers.size} distinct users exceeds max ${AI_TASK_MAX_USERS}`);
+
+    const warnings = Array.isArray(parsed.warnings) ? parsed.warnings.map(String) : [];
+    const perKey = {};
+    for (const t of tasks) {
+      const k = `${t.user_id}|${t.task_date}`;
+      perKey[k] = (perKey[k] || 0) + 1;
+    }
+    for (const [k, n] of Object.entries(perKey)) {
+      if (n > AI_TASK_MAX_PER_USER_PER_DATE) {
+        const [uid, d] = k.split('|');
+        warnings.push(`${userById.get(uid).email} would get ${n} tasks on ${d} (max ${AI_TASK_MAX_PER_USER_PER_DATE}); commit will be blocked`);
+      }
+    }
+
+    await logAgentActivity({
+      agent_name: 'admin',
+      action_type: 'task_ai_generate',
+      user_id: req.user.id,
+      reasoning: `${req.user.email} ran AI generation: "${instruction.slice(0, 200)}"`,
+      source_kpi: 'manual',
+      confidence_score: 100,
+      output_summary: `generated ${tasks.length} draft tasks for ${distinctUsers.size} user(s)`,
+    });
+
+    if (errors.length) {
+      return res.status(422).json({
+        error: 'AI output failed validation',
+        validation_errors: errors,
+        raw_text: claudeText.slice(0, 1000),
+      });
+    }
+
+    res.json({
+      instruction,
+      tasks,
+      warnings,
+      clarifications_needed: Array.isArray(parsed.clarifications_needed) ? parsed.clarifications_needed : [],
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Commit a reviewed batch of AI-drafted tasks. Atomic: all tasks land or none.
+// Re-validates every field server-side (defense in depth — frontend may have edited).
+router.post('/agent/tasks/ai-commit', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const instruction = String(req.body?.instruction || '').slice(0, 500);
+    const tasksIn = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
+    if (!tasksIn.length) return res.status(400).json({ error: 'no tasks to commit' });
+    if (tasksIn.length > AI_TASK_MAX_TASKS) return res.status(400).json({ error: `too many tasks (max ${AI_TASK_MAX_TASKS})` });
+
+    const todayISO = new Date().toISOString().slice(0, 10);
+    const users = (await query(`SELECT id, name, email, role FROM users WHERE is_active=1`)).rows;
+    const userById = new Map(users.map(u => [u.id, u]));
+
+    const errors = [];
+    const validated = [];
+    for (let i = 0; i < tasksIn.length; i++) {
+      const t = tasksIn[i] || {};
+      const fail = (msg) => errors.push({ index: i, message: msg });
+      if (!t.user_id || !userById.has(t.user_id)) { fail('user_id is not a known active user'); continue; }
+      const title = String(t.task_title || '').trim();
+      if (!title || title.length > 200) { fail('task_title required, max 200 chars'); continue; }
+      const pri = ['HIGH','MEDIUM','LOW'].includes(String(t.priority).toUpperCase()) ? String(t.priority).toUpperCase() : null;
+      if (!pri) { fail('priority must be HIGH/MEDIUM/LOW'); continue; }
+      const date = String(t.task_date || '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { fail('task_date must be YYYY-MM-DD'); continue; }
+      if (date < todayISO) { fail('task_date cannot be in the past'); continue; }
+      const kpi = (t.source_kpi === null || t.source_kpi === undefined) ? null
+        : (AI_TASK_VALID_KPIS.includes(t.source_kpi) ? t.source_kpi : null);
+      validated.push({
+        user_id: t.user_id,
+        user_email: userById.get(t.user_id).email,
+        task_title: title,
+        task_description: String(t.task_description || '').slice(0, 2000).trim(),
+        priority: pri,
+        task_date: date,
+        source_kpi: kpi,
+        rationale: String(t.rationale || '').slice(0, 500),
+      });
+    }
+    const distinctUsers = new Set(validated.map(t => t.user_id));
+    if (distinctUsers.size > AI_TASK_MAX_USERS) errors.push({ index: -1, message: `${distinctUsers.size} distinct users exceeds max ${AI_TASK_MAX_USERS}` });
+    const perKey = {};
+    for (const t of validated) {
+      const k = `${t.user_id}|${t.task_date}`;
+      perKey[k] = (perKey[k] || 0) + 1;
+      if (perKey[k] > AI_TASK_MAX_PER_USER_PER_DATE) {
+        errors.push({ index: -1, message: `${t.user_email} on ${t.task_date} would have ${perKey[k]} tasks (max ${AI_TASK_MAX_PER_USER_PER_DATE})` });
+        break;
+      }
+    }
+    if (errors.length) return res.status(400).json({ error: 'validation failed', errors });
+
+    const ids = await withTransaction(async (client) => {
+      const taskIds = [];
+      for (const t of validated) {
+        const taskId = await createDailyTask({
+          user_id: t.user_id,
+          task_date: t.task_date,
+          task_title: t.task_title,
+          task_description: t.task_description,
+          priority: t.priority,
+          source_kpi: t.source_kpi,
+          agent_name: null,
+          reasoning: `AI-assigned by ${req.user.email}: ${t.rationale || instruction.slice(0, 150)}`,
+        }, client);
+        taskIds.push(taskId);
+        await logAgentActivity({
+          agent_name: 'admin',
+          action_type: 'task_ai_assign',
+          user_id: t.user_id,
+          reasoning: `${req.user.email} AI-assigned "${t.task_title}" to ${t.user_email} for ${t.task_date}`,
+          source_kpi: 'manual',
+          confidence_score: 100,
+          output_summary: `task_id=${taskId} priority=${t.priority} kpi=${t.source_kpi || 'null'} from instruction="${instruction.slice(0, 100)}"`,
+        }, client);
+      }
+      return taskIds;
+    });
+
+    res.json({ success: true, committed: ids.length, task_ids: ids });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
