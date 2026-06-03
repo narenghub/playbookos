@@ -16,6 +16,7 @@ const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require(
 const { sendWhatsApp } = require('../lib/whatsapp');
 const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
+const { createDailyTask, logAgentActivity } = require('../lib/agent-core');
 
 const router = express.Router();
 
@@ -1459,6 +1460,44 @@ router.post('/agent/tasks/generate', authMiddleware, adminOnly, async (req, res)
     const segment = req.body?.segment || 'all';
     const result = await runMorningBriefing({ segment });
     res.json(result);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manually assign a single task to a specific user (admin). Reuses
+// createDailyTask so this stays in lockstep with the cron path. Logs to
+// agent_activity_log with agent_name='admin' for audit trail.
+router.post('/agent/tasks/assign', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { user_id, task_title, task_description, priority, task_date } = req.body || {};
+    if (!user_id || typeof user_id !== 'string') return res.status(400).json({ error: 'user_id is required' });
+    const title = (task_title || '').trim();
+    if (!title) return res.status(400).json({ error: 'task_title is required' });
+    if (task_date && !/^\d{4}-\d{2}-\d{2}$/.test(task_date)) {
+      return res.status(400).json({ error: 'task_date must be YYYY-MM-DD' });
+    }
+    const target = (await query(`SELECT id, email FROM users WHERE id=$1 AND is_active=1`, [user_id])).rows[0];
+    if (!target) return res.status(400).json({ error: 'user not found or inactive' });
+    const date = task_date || new Date().toISOString().slice(0, 10);
+    const task_id = await createDailyTask({
+      user_id: target.id,
+      task_date: date,
+      task_title: title,
+      task_description: (task_description || '').trim(),
+      priority,
+      source_kpi: null,
+      agent_name: null,
+      reasoning: `Manually assigned by ${req.user.email}`,
+    });
+    await logAgentActivity({
+      agent_name: 'admin',
+      action_type: 'task_manual_assign',
+      user_id: target.id,
+      reasoning: `${req.user.email} assigned "${title}" to ${target.email} for ${date}`,
+      source_kpi: 'manual',
+      confidence_score: 100,
+      output_summary: `task_id=${task_id} priority=${priority || 'MEDIUM'}`,
+    });
+    res.json({ success: true, task_id, assigned_to: target.id, task_date: date });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

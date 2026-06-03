@@ -1563,6 +1563,28 @@ async function agentGenerate() {
   } catch(e) { alert('Error: ' + e.message); }
 }
 
+async function assignTask() {
+  const user_id = document.getElementById('assign-user').value;
+  const task_title = document.getElementById('assign-title').value.trim();
+  const task_description = document.getElementById('assign-description').value.trim();
+  const priority = document.getElementById('assign-priority').value;
+  const task_date = document.getElementById('assign-date').value;
+  const msg = document.getElementById('assign-msg');
+  if (!user_id) { msg.style.color = '#dc2626'; msg.textContent = 'Pick a user'; return; }
+  if (!task_title) { msg.style.color = '#dc2626'; msg.textContent = 'Title required'; return; }
+  msg.style.color = 'var(--text-muted)';
+  msg.textContent = 'Assigning…';
+  try {
+    const res = await API('/agent/tasks/assign', { method: 'POST',
+      body: JSON.stringify({ user_id, task_title, task_description, priority, task_date }) });
+    if (res && res.error) { msg.style.color = '#dc2626'; msg.textContent = 'Error: ' + res.error; return; }
+    msg.style.color = '#1D9E75';
+    msg.textContent = '✓ Task assigned';
+    document.getElementById('assign-title').value = '';
+    document.getElementById('assign-description').value = '';
+  } catch(e) { msg.style.color = '#dc2626'; msg.textContent = 'Error: ' + e.message; }
+}
+
 function renderLinkedInPreview(q, esc, statusBadge) {
   const accent = q.status==='published'?'#1D9E75':q.status==='approved'?'#EF9F27':q.status==='rejected'?'#dc2626':'#1B3A6B';
   const buttons = [];
@@ -2130,17 +2152,58 @@ if(typeof pages !== 'undefined') {
     c.innerHTML = '<p style="color:#888;padding:20px">Loading Agent Control…</p>';
     const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const fmt = n => '$' + Math.round(Number(n)||0).toLocaleString();
-    const [ov, act, appr, deps] = await Promise.all([
+    const [ov, act, appr, deps, usersR] = await Promise.all([
       API('/agent/overview').catch(e=>({error:e.message})),
       API('/agent/activity?limit=100').catch(e=>({error:e.message, activity:[]})),
       API('/agent/approvals').catch(e=>({error:e.message, approvals:[]})),
       API('/agent/dependencies').catch(e=>({error:e.message, chain:[], blockers:[]})),
+      API('/users').catch(e=>[]),
     ]);
     if (ov && ov.error) {
       c.innerHTML = `<div class="card"><div class="card-title">Agent Control</div><p style="color:#dc2626">${esc(ov.error)}</p><p style="font-size:12px;color:#718096">This page requires admin access.</p></div>`;
       return;
     }
     window._agentActivity = (act && act.activity) || [];
+    const users = Array.isArray(usersR) ? usersR.filter(u => u.is_active === 1 || u.is_active === true) : [];
+    const todayISO = new Date().toISOString().slice(0,10);
+    const userOptions = users.map(u => `<option value="${esc(u.id)}">${esc(u.name||u.email)} — ${esc(u.role)}</option>`).join('');
+    const sec0 = `<div class="card">
+      <div class="card-title">Assign task</div>
+      <div class="text-body" style="margin-bottom:10px">Manually assign a one-off task to a team member. Appears in their My Tasks for the selected date.</div>
+      <div style="display:grid;grid-template-columns:1fr 200px;gap:10px;margin-bottom:10px">
+        <div>
+          <div class="text-label">Assign to</div>
+          <select id="assign-user" style="width:100%;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+            <option value="">— select user —</option>
+            ${userOptions}
+          </select>
+        </div>
+        <div>
+          <div class="text-label">Date</div>
+          <input id="assign-date" type="date" value="${todayISO}" style="width:100%;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+        </div>
+      </div>
+      <div style="margin-bottom:10px">
+        <div class="text-label">Title</div>
+        <input id="assign-title" placeholder="What needs doing?" style="width:100%;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+      </div>
+      <div style="margin-bottom:10px">
+        <div class="text-label">Description (optional)</div>
+        <textarea id="assign-description" rows="2" placeholder="Context, links, etc." style="width:100%;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      </div>
+      <div style="display:flex;gap:10px;align-items:end">
+        <div style="flex:0 0 140px">
+          <div class="text-label">Priority</div>
+          <select id="assign-priority" style="width:100%;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px">
+            <option value="MEDIUM" selected>Medium</option>
+            <option value="HIGH">High</option>
+            <option value="LOW">Low</option>
+          </select>
+        </div>
+        <button onclick="assignTask()" class="btn-primary">Assign</button>
+        <div id="assign-msg" style="font-size:12px;color:var(--text-muted);flex:1"></div>
+      </div>
+    </div>`;
     const v = (ov && ov.vision) || {current:0,target:10000000,pct:0};
     const risks = (ov && ov.risks) || [];
     const sec1 = `<div class="card">
@@ -2226,7 +2289,7 @@ if(typeof pages !== 'undefined') {
         <div style="font-size:11px;color:#718096">${esc(b.detail)}</div></div>`).join('')
         : '<div style="font-size:12px;color:#1D9E75">No cross-team blockers detected — the chain is healthy.</div>'}
     </div>`;
-    c.innerHTML = sec1 + sec2 + sec3 + sec4 + sec5;
+    c.innerHTML = sec0 + sec1 + sec2 + sec3 + sec4 + sec5;
     renderAgentFeed();
   };
   pages['linkedin-content'] = async function() {
