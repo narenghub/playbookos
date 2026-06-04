@@ -1720,6 +1720,117 @@ function aiCancelAll() {
   if (s) s.textContent = '';
 }
 
+// ── KPI progress updates (My KPIs page) ───────────────────────────────────
+function kpiRelTime(t) {
+  if (!t) return '';
+  const d = new Date(t);
+  const diff = (new Date() - d) / 1000;
+  if (diff < 60) return Math.round(diff) + 's ago';
+  if (diff < 3600) return Math.round(diff/60) + 'm ago';
+  if (diff < 86400) return Math.round(diff/3600) + 'h ago';
+  if (diff < 86400*7) return Math.round(diff/86400) + 'd ago';
+  return d.toISOString().slice(0,10);
+}
+
+function renderKpiRow(k, idx) {
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const statusBadge = s => s==='met' ? '<span class="badge badge-green">met</span>'
+    : s==='missed' ? '<span class="badge badge-red">missed</span>'
+    : '<span class="badge badge-blue">in progress</span>';
+  const target = Number(k.kpi_target) || 0;
+  const actual = Number(k.kpi_actual) || 0;
+  const pctv = target > 0 ? Math.min(100, Math.round((actual/target)*100)) : 0;
+  const unit = k.kpi_unit ? ' ' + esc(k.kpi_unit) : '';
+  const lastUpdateLine = k.last_updated_at
+    ? `<div style="font-size:11px;color:#718096;margin-top:4px;font-style:italic">${k.last_comment ? '"' + esc(k.last_comment) + '" — ' : 'Updated '}${kpiRelTime(k.last_updated_at)}${k.last_updated_by_name ? ' by ' + esc(k.last_updated_by_name) : ''}</div>`
+    : '';
+  return `<tr style="border-bottom:1px solid #e2e8f0" id="kpi-row-${esc(k.id)}">
+    <td style="padding:8px">${esc(k.kpi_name)}${lastUpdateLine}</td>
+    <td style="padding:8px;text-align:right;font-weight:600">${actual}${unit}</td>
+    <td style="padding:8px;text-align:right">${target}${unit}</td>
+    <td style="padding:8px;min-width:140px">
+      <div style="background:#e2e8f0;border-radius:6px;height:8px;overflow:hidden">
+        <div style="background:${pctv>=100?'#1D9E75':pctv>=50?'#0D7377':'#d97706'};height:8px;width:${pctv}%"></div>
+      </div>
+      <div style="font-size:11px;color:#718096;margin-top:2px">${pctv}%</div>
+    </td>
+    <td style="padding:8px">${statusBadge(k.status)}</td>
+    <td style="padding:8px;text-align:right"><button onclick="kpiEdit(${idx})" class="btn-outline" style="padding:3px 10px;font-size:11px">Update</button></td>
+  </tr>`;
+}
+
+function kpiEdit(idx) {
+  const k = window._myKpis && window._myKpis[idx];
+  if (!k) return;
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const unit = k.kpi_unit ? ' ' + esc(k.kpi_unit) : '';
+  const row = document.getElementById('kpi-row-' + k.id);
+  if (!row) return;
+  row.innerHTML = `<td colspan="6" style="padding:10px;background:#f8fafc">
+    <div style="display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap">
+      <div style="flex:0 0 180px">
+        <div class="text-label">Actual${unit}</div>
+        <input type="number" id="kpi-edit-actual-${esc(k.id)}" value="${k.kpi_actual}" min="0" step="any" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+      </div>
+      <div style="flex:1;min-width:280px">
+        <div class="text-label">Comment (optional, max 500)</div>
+        <textarea id="kpi-edit-comment-${esc(k.id)}" rows="2" maxlength="500" placeholder="e.g. blocked on supplier doc" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px;font-family:inherit;resize:vertical">${esc(k.last_comment||'')}</textarea>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;align-self:flex-end">
+        <button onclick="kpiSave(${idx})" class="btn-primary" style="padding:5px 14px;font-size:12px">Save</button>
+        <button onclick="kpiCancelEdit(${idx})" class="btn-outline" style="padding:5px 14px;font-size:12px">Cancel</button>
+      </div>
+      <div id="kpi-edit-msg-${esc(k.id)}" style="flex:0 0 100%;font-size:11px;color:var(--text-muted)"></div>
+    </div>
+  </td>`;
+}
+
+async function kpiSave(idx) {
+  const k = window._myKpis && window._myKpis[idx];
+  if (!k) return;
+  const actualEl = document.getElementById('kpi-edit-actual-' + k.id);
+  const commentEl = document.getElementById('kpi-edit-comment-' + k.id);
+  const msgEl = document.getElementById('kpi-edit-msg-' + k.id);
+  const actual_value = Number(actualEl.value);
+  if (!Number.isFinite(actual_value) || actual_value < 0) {
+    msgEl.style.color = '#dc2626';
+    msgEl.textContent = 'Actual must be a number ≥ 0';
+    return;
+  }
+  const comment = (commentEl.value || '').trim();
+  if (comment.length > 500) {
+    msgEl.style.color = '#dc2626';
+    msgEl.textContent = 'Comment too long (max 500 chars)';
+    return;
+  }
+  msgEl.style.color = 'var(--text-muted)';
+  msgEl.textContent = 'Saving…';
+  try {
+    const res = await API('/kpis/' + k.id + '/progress', { method:'PUT', body: JSON.stringify({ actual_value, comment }) });
+    if (res && res.error) {
+      msgEl.style.color = '#dc2626';
+      msgEl.textContent = 'Error: ' + res.error;
+      return;
+    }
+    k.kpi_actual = actual_value;
+    k.last_comment = comment || null;
+    k.last_updated_at = new Date().toISOString();
+    k.last_updated_by_name = (typeof currentUser !== 'undefined' && currentUser && currentUser.name) || 'you';
+    const row = document.getElementById('kpi-row-' + k.id);
+    if (row) row.outerHTML = renderKpiRow(k, idx);
+  } catch(e) {
+    msgEl.style.color = '#dc2626';
+    msgEl.textContent = 'Error: ' + e.message;
+  }
+}
+
+function kpiCancelEdit(idx) {
+  const k = window._myKpis && window._myKpis[idx];
+  if (!k) return;
+  const row = document.getElementById('kpi-row-' + k.id);
+  if (row) row.outerHTML = renderKpiRow(k, idx);
+}
+
 function adoptionSetWindow(w) {
   window._adoptionWindow = w;
   pages['adoption']();
@@ -2137,36 +2248,16 @@ if(typeof pages !== 'undefined') {
     try { data = await API('/goals/my-week'); }
     catch(e) { c.innerHTML = `<div class="card"><div class="card-title">My KPIs</div><p style="color:#dc2626">Failed to load: ${esc(e.message)}</p></div>`; return; }
     if (data && data.error) { c.innerHTML = `<div class="card"><div class="card-title">My KPIs</div><p style="color:#dc2626">${esc(data.error)}</p></div>`; return; }
-    const kpis = (data && data.kpis) || [];
-    const statusBadge = s => s==='met' ? '<span class="badge badge-green">met</span>'
-      : s==='missed' ? '<span class="badge badge-red">missed</span>'
-      : '<span class="badge badge-blue">in progress</span>';
+    window._myKpis = (data && data.kpis) || [];
     const head = `<div class="card">
       <div class="card-title">My KPIs — week of ${esc(data.week_start)||'—'}</div>
-      <div style="font-size:13px;color:#718096">Your current-week targets from the goal cascade. ${kpis.length} KPI${kpis.length===1?'':'s'} assigned.</div>
+      <div style="font-size:13px;color:#718096">Your current-week targets from the goal cascade. ${window._myKpis.length} KPI${window._myKpis.length===1?'':'s'} assigned.</div>
     </div>`;
-    if (!kpis.length) {
+    if (!window._myKpis.length) {
       c.innerHTML = head + '<div class="card"><p style="color:#718096">No KPIs assigned for this week yet. They are generated from the goal cascade — check back once an admin has run it.</p></div>';
       return;
     }
-    const rows = kpis.map(k => {
-      const target = Number(k.kpi_target) || 0;
-      const actual = Number(k.kpi_actual) || 0;
-      const pctv = target > 0 ? Math.min(100, Math.round((actual/target)*100)) : 0;
-      const unit = k.kpi_unit ? ' ' + esc(k.kpi_unit) : '';
-      return `<tr style="border-bottom:1px solid #e2e8f0">
-        <td style="padding:8px">${esc(k.kpi_name)}</td>
-        <td style="padding:8px;text-align:right;font-weight:600">${actual}${unit}</td>
-        <td style="padding:8px;text-align:right">${target}${unit}</td>
-        <td style="padding:8px;min-width:140px">
-          <div style="background:#e2e8f0;border-radius:6px;height:8px;overflow:hidden">
-            <div style="background:${pctv>=100?'#1D9E75':pctv>=50?'#0D7377':'#d97706'};height:8px;width:${pctv}%"></div>
-          </div>
-          <div style="font-size:11px;color:#718096;margin-top:2px">${pctv}%</div>
-        </td>
-        <td style="padding:8px">${statusBadge(k.status)}</td>
-      </tr>`;
-    }).join('');
+    const rows = window._myKpis.map((k, idx) => renderKpiRow(k, idx)).join('');
     c.innerHTML = head + `<div class="card">
       <table style="width:100%;border-collapse:collapse;font-size:13px">
         <tr style="text-align:left;color:#718096;font-size:11px;text-transform:uppercase;letter-spacing:.04em">
@@ -2175,6 +2266,7 @@ if(typeof pages !== 'undefined') {
           <th style="padding:8px;text-align:right">Target</th>
           <th style="padding:8px">Progress</th>
           <th style="padding:8px">Status</th>
+          <th style="padding:8px"></th>
         </tr>
         ${rows}
       </table>

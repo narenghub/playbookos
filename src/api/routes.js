@@ -715,7 +715,11 @@ router.get('/goals/my-week', authMiddleware, async (req, res) => {
   try {
     const weekStart = mondayOf(new Date()).toISOString().slice(0, 10);
     let kpis = (await query(
-      `SELECT * FROM weekly_kpis WHERE user_id=$1 AND week_start=$2 ORDER BY kpi_name`,
+      `SELECT k.*, u.name AS last_updated_by_name
+       FROM weekly_kpis k
+       LEFT JOIN users u ON u.id = k.last_updated_by
+       WHERE k.user_id=$1 AND k.week_start=$2
+       ORDER BY k.kpi_name`,
       [req.user.id, weekStart]
     )).rows;
     // If no KPIs exist yet for this week, assign them on demand from the cascade
@@ -723,7 +727,11 @@ router.get('/goals/my-week', authMiddleware, async (req, res) => {
       const assigned = await assignWeeklyKPIs(req.user.id, weekStart);
       if (!assigned.skipped) {
         kpis = (await query(
-          `SELECT * FROM weekly_kpis WHERE user_id=$1 AND week_start=$2 ORDER BY kpi_name`,
+          `SELECT k.*, u.name AS last_updated_by_name
+           FROM weekly_kpis k
+           LEFT JOIN users u ON u.id = k.last_updated_by
+           WHERE k.user_id=$1 AND k.week_start=$2
+           ORDER BY k.kpi_name`,
           [req.user.id, weekStart]
         )).rows;
       }
@@ -736,13 +744,54 @@ router.get('/goals/team-week', authMiddleware, requireTier('goals'), async (req,
   try {
     const weekStart = mondayOf(new Date()).toISOString().slice(0, 10);
     const rows = (await query(
-      `SELECT k.*, u.name, u.role
-       FROM weekly_kpis k JOIN users u ON u.id = k.user_id
+      `SELECT k.*, u.name, u.role, lub.name AS last_updated_by_name
+       FROM weekly_kpis k
+       JOIN users u ON u.id = k.user_id
+       LEFT JOIN users lub ON lub.id = k.last_updated_by
        WHERE k.week_start=$1
        ORDER BY u.role, u.name, k.kpi_name`,
       [weekStart]
     )).rows;
     res.json({ week_start: weekStart, kpis: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update KPI progress (actual_value + optional comment). The assignee may update
+// their own KPI; admins may update anyone's. Permission enforced inside the
+// handler (not via adminOnly middleware). Audit log uses agent_name='self' for
+// owner self-updates and 'admin' for admin overrides.
+router.put('/kpis/:id/progress', authMiddleware, async (req, res) => {
+  try {
+    const kpi = (await query(`SELECT * FROM weekly_kpis WHERE id=$1`, [req.params.id])).rows[0];
+    if (!kpi) return res.status(404).json({ error: 'KPI not found' });
+    const isAdmin = ['admin','super_admin'].includes(req.user.role);
+    const isOwner = kpi.user_id === req.user.id;
+    if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Not authorized to update this KPI' });
+    const { actual_value, comment } = req.body || {};
+    const n = Number(actual_value);
+    if (!Number.isFinite(n) || n < 0) {
+      return res.status(400).json({ error: 'actual_value must be a finite number >= 0' });
+    }
+    const c = (comment == null) ? null : String(comment).trim();
+    if (c !== null && c.length > 500) {
+      return res.status(400).json({ error: 'comment must be 500 chars or fewer' });
+    }
+    await query(
+      `UPDATE weekly_kpis
+       SET kpi_actual = $1, last_comment = $2, last_updated_at = NOW(), last_updated_by = $3
+       WHERE id = $4`,
+      [n, c, req.user.id, kpi.id]
+    );
+    await logAgentActivity({
+      agent_name: isOwner ? 'self' : 'admin',
+      action_type: 'kpi_progress_update',
+      user_id: kpi.user_id,
+      reasoning: `${req.user.email} updated ${kpi.kpi_name} (${kpi.week_start}) from ${kpi.kpi_actual} to ${n}${c ? ': ' + c.slice(0, 200) : ''}`,
+      source_kpi: kpi.kpi_name,
+      confidence_score: 100,
+      output_summary: `kpi_id=${kpi.id} actual=${n} comment_len=${c ? c.length : 0}`,
+    });
+    res.json({ success: true, kpi_id: kpi.id, kpi_actual: n, last_comment: c });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
