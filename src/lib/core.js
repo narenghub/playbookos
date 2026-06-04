@@ -25,6 +25,13 @@ function authMiddleware(req, res, next) {
   const payload = verifyToken(token);
   if (!payload) return res.status(401).json({ error: 'Unauthorized' });
   req.user = payload;
+  // Fire-and-forget last_login write-through. Throttle baked into the WHERE
+  // clause: only writes if last_login is NULL or older than 5 minutes.
+  query(
+    `UPDATE users SET last_login = NOW()
+     WHERE id = $1 AND (last_login IS NULL OR last_login < NOW() - INTERVAL '5 minutes')`,
+    [payload.id]
+  ).catch(e => console.error('[auth] last_login write failed:', e.message));
   next();
 }
 

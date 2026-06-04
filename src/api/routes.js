@@ -1773,6 +1773,39 @@ router.post('/agent/tasks/ai-commit', authMiddleware, adminOnly, async (req, res
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Adoption telemetry — per-user activity summary for the admin dashboard.
+// Window: 'today' (since 00:00 UTC), '7d' (rolling), or '30d' (rolling).
+router.get('/admin/adoption', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const w = req.query.window || '7d';
+    const windowSql = {
+      'today': "NOW()::date::timestamptz",
+      '7d':    "NOW() - INTERVAL '7 days'",
+      '30d':   "NOW() - INTERVAL '30 days'",
+    };
+    if (!windowSql[w]) return res.status(400).json({ error: 'window must be today|7d|30d' });
+    const cutoff = windowSql[w];
+    // cutoff comes from the server-controlled windowSql map, never from user
+    // input, so interpolating it directly into the SQL is safe.
+    const rows = (await query(`
+      SELECT
+        u.id, u.name, u.email, u.role, u.last_login,
+        COUNT(dt.id) FILTER (WHERE dt.status = 'completed' AND dt.task_date >= (${cutoff})::date::text)::int AS tasks_completed_in_window,
+        COUNT(dt.id) FILTER (WHERE dt.task_date >= (${cutoff})::date::text)::int AS tasks_assigned_in_window,
+        GREATEST(
+          u.last_login,
+          (SELECT MAX(al.created_at::timestamptz) FROM activity_logs al WHERE al.user_id = u.id)
+        ) AS last_activity_at
+      FROM users u
+      LEFT JOIN daily_tasks dt ON dt.user_id = u.id
+      WHERE u.is_active = 1
+      GROUP BY u.id, u.name, u.email, u.role, u.last_login
+      ORDER BY u.last_login DESC NULLS LAST, u.email
+    `)).rows;
+    res.json({ window: w, count: rows.length, users: rows });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // Approval queue — pending (or filtered by ?status=) actions awaiting review.
 router.get('/agent/approvals', authMiddleware, adminOnly, async (req, res) => {
   try {

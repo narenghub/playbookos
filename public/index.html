@@ -399,6 +399,7 @@ const NAV_SECTIONS = [
   {title:'TEAM', items:[
     {id:'team', label:'Team Management', icon:'👥'},
     {id:'agent-control', label:'Agent Control', icon:'⚡'},
+    {id:'adoption', label:'Adoption', icon:'📈'},
     {id:'decision-engine', label:'Automation Rules', icon:'🧠'},
   ]},
   {title:'PLATFORM', items:[
@@ -1719,6 +1720,11 @@ function aiCancelAll() {
   if (s) s.textContent = '';
 }
 
+function adoptionSetWindow(w) {
+  window._adoptionWindow = w;
+  pages['adoption']();
+}
+
 async function aiCommit() {
   const drafts = window._aiTaskDrafts || [];
   const instruction = window._aiInstruction || '';
@@ -2476,6 +2482,87 @@ if(typeof pages !== 'undefined') {
     </div>`;
     c.innerHTML = secAi + sec0 + sec1 + sec2 + sec3 + sec4 + sec5;
     renderAgentFeed();
+  };
+  pages['adoption'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading adoption telemetry…</p>';
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    if (!window._adoptionWindow) window._adoptionWindow = '7d';
+    let data;
+    try { data = await API('/admin/adoption?window=' + encodeURIComponent(window._adoptionWindow)); }
+    catch(e) { c.innerHTML = `<div class="card"><div class="card-title">Adoption</div><p style="color:#dc2626">${esc(e.message)}</p></div>`; return; }
+    if (data && data.error) {
+      c.innerHTML = `<div class="card"><div class="card-title">Adoption</div><p style="color:#dc2626">${esc(data.error)}</p><p style="font-size:12px;color:#718096">This page requires admin access.</p></div>`;
+      return;
+    }
+    const users = (data && data.users) || [];
+    const now = new Date();
+    const todayStart = new Date(now); todayStart.setUTCHours(0,0,0,0);
+    const sevenDaysAgo = new Date(now.getTime() - 7*86400000);
+    function activityClass(t) {
+      if (!t) return 'red';
+      const d = new Date(t);
+      if (d >= todayStart) return 'green';
+      if (d >= sevenDaysAgo) return 'yellow';
+      return 'red';
+    }
+    function dotHtml(cls) {
+      const color = cls==='green' ? '#1D9E75' : cls==='yellow' ? '#EF9F27' : '#E24B4A';
+      return `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color}"></span>`;
+    }
+    function relTime(t) {
+      if (!t) return '<span style="color:#a0aec0">never</span>';
+      const d = new Date(t);
+      const diff = (now - d) / 1000;
+      if (diff < 60) return Math.round(diff) + 's ago';
+      if (diff < 3600) return Math.round(diff/60) + 'm ago';
+      if (diff < 86400) return Math.round(diff/3600) + 'h ago';
+      if (diff < 86400*7) return Math.round(diff/86400) + 'd ago';
+      if (diff < 86400*30) return Math.round(diff/86400/7) + 'w ago';
+      return d.toISOString().slice(0,10);
+    }
+    const activeCount = users.filter(u => activityClass(u.last_activity_at) !== 'red').length;
+    const todayCount = users.filter(u => activityClass(u.last_activity_at) === 'green').length;
+    const windowBtn = (val, label) =>
+      `<button onclick="adoptionSetWindow('${val}')" style="padding:6px 14px;font-size:12px;font-weight:${window._adoptionWindow===val?'700':'400'};background:${window._adoptionWindow===val?'#1B3A6B':'#f8fafc'};color:${window._adoptionWindow===val?'#fff':'#1a202c'};border:1px solid var(--border);border-radius:6px;cursor:pointer">${label}</button>`;
+    const header = `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap">
+        <div>
+          <div class="card-title" style="margin:0">Adoption</div>
+          <div class="text-body" style="margin-top:4px">Per-user login + task activity. <strong>${activeCount}</strong> of ${users.length} users active in window · <strong>${todayCount}</strong> active today.</div>
+        </div>
+        <div style="display:flex;gap:6px">
+          ${windowBtn('today', 'Today')}
+          ${windowBtn('7d', '7 days')}
+          ${windowBtn('30d', '30 days')}
+        </div>
+      </div>
+    </div>`;
+    const table = `<div class="card">
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead>
+          <tr style="text-align:left;color:#718096;border-bottom:1px solid var(--border)">
+            <th style="padding:8px 6px;width:20px"></th>
+            <th style="padding:8px 6px">Name</th>
+            <th style="padding:8px 6px">Role</th>
+            <th style="padding:8px 6px">Last login</th>
+            <th style="padding:8px 6px;text-align:right">Tasks done / assigned</th>
+            <th style="padding:8px 6px">Last activity</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${users.map(u => `<tr style="border-top:1px solid var(--border)">
+            <td style="padding:8px 6px">${dotHtml(activityClass(u.last_activity_at))}</td>
+            <td style="padding:8px 6px;font-weight:600">${esc(u.name||u.email)}</td>
+            <td style="padding:8px 6px;color:#718096">${esc(u.role)}</td>
+            <td style="padding:8px 6px;color:#4a5568">${relTime(u.last_login)}</td>
+            <td style="padding:8px 6px;text-align:right;color:#4a5568">${u.tasks_completed_in_window} / ${u.tasks_assigned_in_window}</td>
+            <td style="padding:8px 6px;color:#4a5568">${relTime(u.last_activity_at)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+    c.innerHTML = header + table;
   };
   pages['linkedin-content'] = async function() {
     const c = document.getElementById('content');

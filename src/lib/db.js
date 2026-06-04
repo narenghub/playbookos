@@ -370,6 +370,7 @@ async function migrateSchemas() {
       ALTER TABLE skus             ADD COLUMN IF NOT EXISTS owner_user_id TEXT;
       -- AI Agent System — Layer 1 foundation + Layer 3 task/message tables.
       ALTER TABLE users ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'America/Chicago';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMPTZ;
       CREATE TABLE IF NOT EXISTS kpi_hierarchy (
         id TEXT PRIMARY KEY,
         level TEXT NOT NULL,
