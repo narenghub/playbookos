@@ -4,7 +4,7 @@
 const crypto = require('crypto');
 const { query } = require('../db');
 const { mondayOf } = require('./goal-engine');
-const { createDailyTask, logAgentActivity, enqueueApproval, getCEOUser } = require('../agent-core');
+const { createDailyTask, logAgentActivity, enqueueApproval, getCEOUser, businessToday } = require('../agent-core');
 const { sendEmail } = require('../mailer');
 const { sendWhatsApp } = require('../whatsapp');
 const { runCEOBriefing } = require('./ceo-agent');
@@ -17,7 +17,7 @@ const AGENT = 'orchestrator';
 // Create daily tasks for users in the given roles from their behind weekly KPIs.
 // Skips a user who already has tasks for today so re-runs are idempotent.
 async function generateKpiTasks(roles) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = businessToday();
   const weekStart = mondayOf(new Date()).toISOString().slice(0, 10);
   const users = (await query(
     `SELECT id, name, role FROM users WHERE is_active=1 AND role = ANY($1)`, [roles]
@@ -109,7 +109,7 @@ function getDirectorRole(roleKey) {
 //   10 — response_score: did they complete any task today?
 // Streak counters update from the previous day's row.
 async function runPerformanceCheck({ dryRun = false, date } = {}) {
-  const today = date || new Date().toISOString().slice(0, 10);
+  const today = date || businessToday();
   const weekStart = mondayOf(new Date(today)).toISOString().slice(0, 10);
   const users = (await query(
     `SELECT id, name, role FROM users WHERE is_active=1 ORDER BY name`
@@ -235,7 +235,7 @@ async function runPerformanceCheck({ dryRun = false, date } = {}) {
 // appropriate notifications. Idempotent: runs after runPerformanceCheck and
 // uses the freshly-written row.
 async function runEscalationCheck({ dryRun = false, date } = {}) {
-  const today = date || new Date().toISOString().slice(0, 10);
+  const today = date || businessToday();
   const ceo = await getCEOUser();
   const rows = (await query(`
     SELECT p.*, u.name, u.role, u.email, u.whatsapp_number

@@ -119,9 +119,15 @@ async function initDB() {
     ['Release 3 — R&D Services + RFQ Engine','2026-10-01','CRO service booking'],
     ['$10M Annual Revenue','2026-12-31','Primary target'],
   ];
-  for (const m of milestones) {
-    await query(`INSERT INTO milestones (id,name,target_date,description,status) VALUES ($1,$2,$3,$4,'pending') ON CONFLICT DO NOTHING`,
-      [crypto.randomUUID(), m[0], m[1], m[2]]);
+  // Seed only when the table is empty. These rows carry a fresh random id each
+  // boot, so ON CONFLICT (id) never fires — without this guard the seed
+  // re-inserts every milestone on every boot. (See also targets below.)
+  const msCount = (await query('SELECT COUNT(*)::int c FROM milestones')).rows[0].c;
+  if (msCount === 0) {
+    for (const m of milestones) {
+      await query(`INSERT INTO milestones (id,name,target_date,description,status) VALUES ($1,$2,$3,$4,'pending')`,
+        [crypto.randomUUID(), m[0], m[1], m[2]]);
+    }
   }
 
   const monthlyTargets = [
@@ -129,13 +135,17 @@ async function initDB() {
     ['2026-08',1200000],['2026-09',1500000],['2026-10',1800000],
     ['2026-11',2000000],['2026-12',1700000]
   ];
-  for (const t of monthlyTargets) {
-    await query(`INSERT INTO targets (id,period_type,period_key,metric,target_value) VALUES ($1,'monthly',$2,'revenue',$3) ON CONFLICT DO NOTHING`,
-      [crypto.randomUUID(), t[0], t[1]]);
+  // Same fresh-random-id problem as milestones: guard on an empty table so the
+  // monthly + annual revenue targets are seeded once, not on every boot.
+  const tgtCount = (await query('SELECT COUNT(*)::int c FROM targets')).rows[0].c;
+  if (tgtCount === 0) {
+    for (const t of monthlyTargets) {
+      await query(`INSERT INTO targets (id,period_type,period_key,metric,target_value) VALUES ($1,'monthly',$2,'revenue',$3)`,
+        [crypto.randomUUID(), t[0], t[1]]);
+    }
+    await query(`INSERT INTO targets (id,period_type,period_key,metric,target_value) VALUES ($1,'annual','2026','revenue',10000000)`,
+      [crypto.randomUUID()]);
   }
-
-  await query(`INSERT INTO targets (id,period_type,period_key,metric,target_value) VALUES ($1,'annual','2026','revenue',10000000) ON CONFLICT DO NOTHING`,
-    [crypto.randomUUID()]);
 
   console.log('✅ PostgreSQL database ready. Admin:', existing ? existing.email : process.env.ADMIN_EMAIL);
 }

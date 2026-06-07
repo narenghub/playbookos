@@ -5,12 +5,12 @@
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { getWarmLeads } = require('./customer-agent');
-const { logAgentActivity, createDailyTask, parseClaudeJSON } = require('../agent-core');
+const { logAgentActivity, createDailyTask, parseClaudeJSON, businessToday } = require('../agent-core');
 
 const AGENT = 'sales-agent';
 
 async function runSalesBriefing({ dryRun = false } = {}) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = businessToday();
 
   const sequences = (await query(
     `SELECT molecule_name, buyer_segment, emails_sent, replies, orders_generated, status

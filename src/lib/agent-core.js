@@ -4,6 +4,14 @@
 const crypto = require('crypto');
 const { query } = require('./db');
 
+// Today's date as YYYY-MM-DD in America/Chicago (the business timezone), so "today"
+// is stable for the team regardless of the server's UTC offset. en-CA → YYYY-MM-DD.
+function businessToday() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+}
+
 // Write one row to agent_activity_log. Returns the new row id. This MUST be
 // called before an agent action takes effect so the activity feed is complete.
 async function logAgentActivity({
@@ -72,7 +80,7 @@ async function enqueueApproval({
 // Create a daily_tasks row for a user. Returns the row id.
 async function createDailyTask({
   user_id,
-  task_date = new Date().toISOString().slice(0, 10),
+  task_date = businessToday(),
   task_title,
   task_description = '',
   priority = 'MEDIUM',
@@ -131,6 +139,7 @@ function parseClaudeJSON(text) {
 }
 
 module.exports = {
+  businessToday,
   logAgentActivity,
   isHighImpact,
   enqueueApproval,

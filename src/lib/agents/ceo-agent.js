@@ -5,7 +5,7 @@ const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies } = require('../kpi-engine');
-const { logAgentActivity, createDailyTask, getCEOUser, parseClaudeJSON } = require('../agent-core');
+const { logAgentActivity, createDailyTask, getCEOUser, parseClaudeJSON, businessToday } = require('../agent-core');
 
 const AGENT = 'ceo-agent';
 const fmt = n => '$' + (Number(n) || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -35,7 +35,7 @@ function renderEmail(r) {
 
 async function runCEOBriefing({ dryRun = false } = {}) {
   const ceo = await getCEOUser();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = businessToday();
   const thisMonth = today.slice(0, 7);
 
   const hierarchy = await getKPIHierarchy();

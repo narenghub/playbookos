@@ -16,7 +16,7 @@ const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require(
 const { sendWhatsApp } = require('../lib/whatsapp');
 const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
-const { createDailyTask, logAgentActivity, parseClaudeJSON } = require('../lib/agent-core');
+const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday } = require('../lib/agent-core');
 
 const router = express.Router();
 
@@ -1459,7 +1459,7 @@ router.get('/apollo/debug', authMiddleware, requireTier('sales'), async (req, re
 // Today's AI-assigned tasks for the logged-in user.
 router.get('/agent/tasks/my', authMiddleware, async (req, res) => {
   try {
-    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const date = req.query.date || businessToday();
     const tasks = (await query(
       `SELECT * FROM daily_tasks WHERE user_id=$1 AND task_date=$2
        ORDER BY CASE priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END, created_at`,
@@ -1491,7 +1491,7 @@ router.put('/agent/tasks/:id', authMiddleware, async (req, res) => {
 // All team tasks for a date (admin).
 router.get('/agent/tasks/team', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const date = req.query.date || businessToday();
     const rows = (await query(
       `SELECT d.*, u.name AS user_name, u.role AS user_role
        FROM daily_tasks d JOIN users u ON u.id=d.user_id
@@ -1937,7 +1937,7 @@ router.get('/agent/dependencies', authMiddleware, requireTier('intelligence'), a
 // Mission Control overview — powers the Agent Control page sections 1 & 4.
 router.get('/agent/overview', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = businessToday();
     const hierarchy = await getKPIHierarchy();
     const bottlenecks = await getBottlenecks({ limit: 3 });
     const vision = hierarchy.vision || { current_value: 0, target_value: 10000000, pct: 0 };
