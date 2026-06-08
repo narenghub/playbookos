@@ -384,6 +384,10 @@ async function migrateSchemas() {
       ALTER TABLE weekly_kpis ADD COLUMN IF NOT EXISTS last_comment TEXT;
       ALTER TABLE weekly_kpis ADD COLUMN IF NOT EXISTS last_updated_at TIMESTAMPTZ;
       ALTER TABLE weekly_kpis ADD COLUMN IF NOT EXISTS last_updated_by TEXT;
+      -- Task status-change audit + task-level comments (mirrors weekly_kpis above).
+      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS updated_by TEXT;
+      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS last_comment TEXT;
       CREATE TABLE IF NOT EXISTS kpi_hierarchy (
         id TEXT PRIMARY KEY,
         level TEXT NOT NULL,

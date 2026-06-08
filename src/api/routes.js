@@ -1477,13 +1477,50 @@ router.put('/agent/tasks/:id', authMiddleware, async (req, res) => {
     if (!['pending', 'in_progress', 'completed'].includes(status)) {
       return res.status(400).json({ error: 'status must be pending, in_progress or completed' });
     }
+    // Optional task-level comment. Trim; cap at 500 chars; empty/whitespace is
+    // treated as "no comment" so it preserves any existing one (COALESCE below).
+    let comment = null;
+    if (req.body?.comment != null) {
+      if (typeof req.body.comment !== 'string') {
+        return res.status(400).json({ error: 'comment must be a string' });
+      }
+      const t = req.body.comment.trim();
+      if (t.length > 500) {
+        return res.status(400).json({ error: 'comment must be 500 characters or fewer' });
+      }
+      comment = t.length ? t : null;
+    }
     const task = (await query(`SELECT * FROM daily_tasks WHERE id=$1`, [req.params.id])).rows[0];
     if (!task) return res.status(404).json({ error: 'task not found' });
     const isAdmin = ['super_admin', 'admin'].includes(req.user.role);
     if (task.user_id !== req.user.id && !isAdmin) {
       return res.status(403).json({ error: 'not your task' });
     }
-    await query(`UPDATE daily_tasks SET status=$1 WHERE id=$2`, [status, req.params.id]);
+    const oldStatus = task.status;
+    await query(
+      `UPDATE daily_tasks SET status=$1, updated_at=NOW(), updated_by=$2,
+         last_comment=COALESCE($3, last_comment) WHERE id=$4`,
+      [status, req.user.id, comment, req.params.id]
+    );
+    // Fire-and-forget audit — never blocks the response. Logged on the assignee's
+    // timeline (user_id = task owner); actor + old→new captured in the summary.
+    const statusChanged = oldStatus !== status;
+    const commentAdded = comment !== null;
+    if (statusChanged) {
+      logAgentActivity({
+        agent_name: 'user', action_type: 'task_status_change', user_id: task.user_id,
+        reasoning: `${req.user.email} changed "${task.task_title}": ${oldStatus} → ${status}`
+          + (commentAdded ? `: "${comment.slice(0, 200)}"` : ''),
+        output_summary: `task_id=${req.params.id} ${oldStatus}->${status} by=${req.user.email}`
+          + (commentAdded ? ' +comment' : ''),
+      }).catch(e => console.error('[tasks] status-change audit failed:', e.message));
+    } else if (commentAdded) {
+      logAgentActivity({
+        agent_name: 'user', action_type: 'task_comment_added', user_id: task.user_id,
+        reasoning: `${req.user.email} commented on "${task.task_title}": "${comment.slice(0, 200)}"`,
+        output_summary: `task_id=${req.params.id} comment by=${req.user.email}`,
+      }).catch(e => console.error('[tasks] comment audit failed:', e.message));
+    }
     res.json({ success: true, id: req.params.id, status });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });

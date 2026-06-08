@@ -236,14 +236,32 @@ async function runPerformanceCheck({ dryRun = false, date } = {}) {
 // uses the freshly-written row.
 async function runEscalationCheck({ dryRun = false, date } = {}) {
   const today = date || businessToday();
+
+  // Weekend skip — hold escalation noise on Sat/Sun (business day derived from
+  // `today`, already the America/Chicago date). Scores are still written by
+  // runPerformanceCheck; we just don't fire alerts.
+  const dow = new Date(today + 'T12:00:00Z').getUTCDay(); // 0=Sun ... 6=Sat
+  if (dow === 0 || dow === 6) {
+    if (!dryRun) await logAgentActivity({
+      agent_name: 'orchestrator', action_type: 'escalation_check',
+      reasoning: `Skipped — weekend (${today}).`,
+      source_kpi: 'kpi-vision', output_summary: 'weekend skip',
+    });
+    return { date: today, count: 0, actions: [], skipped: 'weekend' };
+  }
+
   const ceo = await getCEOUser();
+  // Ramp-up grace: exclude accounts younger than 7 days from all escalation
+  // levels so freshly-onboarded users aren't alerted while ramping.
   const rows = (await query(`
     SELECT p.*, u.name, u.role, u.email, u.whatsapp_number
     FROM performance_scores p JOIN users u ON u.id = p.user_id
     WHERE p.score_date = $1 AND COALESCE(p.is_weekly_summary,0)=0 AND u.is_active=1
+      AND (u.created_at IS NULL OR u.created_at::timestamptz <= NOW() - INTERVAL '7 days')
   `, [today])).rows;
 
   const actions = [];
+  const ceoDigest = []; // L3/L4 CEO-bound items → one digest email at the end
   for (const r of rows) {
     const score = Number(r.total_score) || 0;
     const days_below = Number(r.consecutive_days_below_60) || 0;
@@ -282,7 +300,7 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
           requires_approval: true,
         });
       } else if (level === 3) {
-        if (ceo?.email) await sendEmail({ to: ceo.email, subject: `⚠️ Performance Alert: ${r.name} — Day ${days_below} below target`, html: `<p><strong>${r.name}</strong> (${r.role}) scored <strong>${score}/100</strong> today.</p><p>Day ${days_below} below 60 · ${tasks_phrase} · weekly KPI ${r.weekly_kpi_pct}%.</p><p>Recommended action: 1:1 conversation, identify blockers, possible reassignment review.</p>` });
+        ceoDigest.push({ name: r.name, role: r.role, score, days_below, level: 3, weekly_kpi_pct: r.weekly_kpi_pct });
         if (r.email) await sendEmail({ to: r.email, subject: `Performance escalation — ${score}/100`, html: `<p>${userMsg}</p><p>Day ${days_below} below 60 — this has been escalated to leadership for review.</p>` });
         if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, '🚨 Day ' + days_below + ' below target. Escalated to leadership.', { user_id: r.user_id, message_type: 'escalation' });
         await enqueueApproval({
@@ -291,7 +309,7 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
           requested_for_user_id: ceo ? ceo.id : null, priority: 'HIGH',
         });
       } else if (level === 4) {
-        if (ceo?.email) await sendEmail({ to: ceo.email, subject: `🚨 Critical Performance Issue: ${r.name} requires immediate review`, html: `<p><strong>CRITICAL</strong> — <strong>${r.name}</strong> (${r.role}) scored <strong>${score}/100</strong>.</p><p>Day ${days_below} below 50. Sustained underperformance. Immediate intervention recommended.</p>` });
+        ceoDigest.push({ name: r.name, role: r.role, score, days_below, level: 4, weekly_kpi_pct: r.weekly_kpi_pct });
         await enqueueApproval({
           agent_name: 'orchestrator', action_type: 'performance_critical',
           action_payload: { user: r.name, user_id: r.user_id, score, days_below },
@@ -301,6 +319,36 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
     }
 
     actions.push({ user_id: r.user_id, name: r.name, role: r.role, score, days_below, level });
+  }
+
+  // One digest email to the CEO covering every L3/L4 item, instead of one mail
+  // per user. User-direct and director-direct emails already went out above.
+  if (!dryRun && ceo?.email && ceoDigest.length) {
+    ceoDigest.sort((a, b) => b.level - a.level || a.score - b.score); // critical first, then lowest score
+    const crit = ceoDigest.filter(d => d.level === 4).length;
+    const rowsHtml = ceoDigest.map(d =>
+      `<tr>
+         <td style="padding:4px 8px">${d.level === 4 ? '🚨 ' : ''}${d.name}</td>
+         <td style="padding:4px 8px;color:#666">${d.role}</td>
+         <td style="padding:4px 8px;font-weight:700;color:${d.score < 50 ? '#dc2626' : '#EF9F27'}">${d.score}/100</td>
+         <td style="padding:4px 8px">day ${d.days_below} below target</td>
+         <td style="padding:4px 8px">KPI ${d.weekly_kpi_pct}%</td>
+         <td style="padding:4px 8px">L${d.level}</td>
+       </tr>`).join('');
+    await sendEmail({
+      to: ceo.email,
+      subject: `PlaybookOS — ${ceoDigest.length} performance escalation${ceoDigest.length === 1 ? '' : 's'} for ${today}${crit ? ` (${crit} critical)` : ''}`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:680px;color:#1a1a2e">
+        <h2 style="font-size:18px;color:#1B3A6B;margin:0 0 4px">Performance escalations — ${today}</h2>
+        <p style="font-size:13px;color:#444;margin:0 0 12px">${ceoDigest.length} team member(s) need review.${crit ? ` <strong>${crit} critical.</strong>` : ''}</p>
+        <table style="border-collapse:collapse;font-size:13px;width:100%">
+          <thead><tr style="background:#f1f5f9;text-align:left">
+            <th style="padding:4px 8px">Name</th><th style="padding:4px 8px">Role</th><th style="padding:4px 8px">Score</th>
+            <th style="padding:4px 8px">Streak</th><th style="padding:4px 8px">Weekly KPI</th><th style="padding:4px 8px">Level</th>
+          </tr></thead><tbody>${rowsHtml}</tbody></table>
+        <p style="font-size:11px;color:#888;margin-top:12px">L3 = 3+ days below 60 · L4 = 5+ days below 50. Individual users and their directors were notified separately.</p>
+      </div>`,
+    });
   }
 
   if (!dryRun && actions.length) {
