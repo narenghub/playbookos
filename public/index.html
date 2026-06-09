@@ -1657,7 +1657,7 @@ async function taskSave(idx, newStatus) {
 }
 // ── Employee Activity timeline helpers ─────────────────────────────────────────
 function eaSetWindow(w) { window._eaWindow = w; pages['employee-activity'](window._eaTarget); }
-function eaEventCard(e) {
+function eaEventCard(e, idx) {
   const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   let m = { agent:{icon:'📋',color:'#1B3A6B'}, score:{icon:'🏆',color:'#EF9F27'}, metric:{icon:'📝',color:'#0D7377'} }[e.type] || {icon:'•',color:'#718096'};
   if (e.action === 'kpi_progress_update') m = {icon:'📈', color:'#1D9E75'};
@@ -1671,6 +1671,22 @@ function eaEventCard(e) {
   }[e.action] || e.action;
   const ts = e.ts || e.timestamp;
   const rel = (typeof taskRelTime === 'function') ? taskRelTime(ts) : '';
+  // Admin-only inline update affordance on task status/assignment events. The
+  // task_id comes from the audit summary; PUT /agent/tasks/:id already permits
+  // admins to update any user's task. Skips task_comment_added by design.
+  const me = (typeof currentUser !== 'undefined' && currentUser) || {};
+  const isAdmin = me.role === 'admin' || me.role === 'super_admin';
+  const taskActions = ['task_status_change','task_manual_assign','task_ai_assign'];
+  const tm = /task_id=([0-9a-f-]+)/.exec(e.summary || '');
+  const canUpdate = isAdmin && tm && taskActions.includes(e.action);
+  let curStatus = 'pending';
+  if (canUpdate && e.action === 'task_status_change') {
+    const sm = /->(\w+)/.exec(e.summary || '');
+    if (sm && ['pending','in_progress','completed'].includes(sm[1])) curStatus = sm[1];
+  }
+  const updateBtn = canUpdate
+    ? `<button onclick="eaTaskBeginEdit(${idx}, '${tm[1]}', '${curStatus}')" class="btn-outline" style="padding:3px 10px;font-size:11px;white-space:nowrap">Update</button>`
+    : '';
   return `<div class="card" style="border-left:4px solid ${m.color};padding:10px 12px">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
       <div style="flex:1;min-width:0">
@@ -1678,9 +1694,50 @@ function eaEventCard(e) {
         ${e.summary ? `<div style="font-size:12px;color:#4a5568;margin-top:2px;word-break:break-word">${esc(e.summary)}</div>` : ''}
         ${e.detail ? `<div style="font-size:11px;color:#718096;margin-top:2px;font-style:italic;word-break:break-word">${esc(e.detail)}</div>` : ''}
       </div>
-      <div style="font-size:11px;color:#a0aec0;white-space:nowrap" title="${esc(ts)}">${esc(rel)}</div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+        <div style="font-size:11px;color:#a0aec0;white-space:nowrap" title="${esc(ts)}">${esc(rel)}</div>
+        ${updateBtn}
+      </div>
+    </div>
+    ${canUpdate ? `<div id="ea-edit-${idx}"></div>` : ''}
+  </div>`;
+}
+// Inline task-update form on the Employee Activity timeline (admin standup tool).
+// Standalone from My Tasks' taskBeginEdit/taskSave — the timeline is event-sourced
+// and has no per-task array to mutate, so it re-fetches the page after save.
+function eaTaskBeginEdit(idx, taskId, curStatus) {
+  const box = document.getElementById('ea-edit-' + idx);
+  if (!box) return;
+  const statuses = ['pending','in_progress','completed'];
+  const cur = statuses.includes(curStatus) ? curStatus : 'pending';
+  const opts = statuses.map(s => `<option value="${s}"${s===cur?' selected':''}>${s.replace('_',' ')}</option>`).join('');
+  box.innerHTML = `<div style="margin-top:8px;border-top:1px solid var(--border,#e2e8f0);padding-top:8px;display:flex;flex-direction:column;gap:6px">
+    <div style="display:flex;gap:6px;align-items:center">
+      <span style="font-size:11px;color:#718096">Status</span>
+      <select id="ea-edit-status-${idx}" style="font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:4px">${opts}</select>
+    </div>
+    <textarea id="ea-edit-comment-${idx}" rows="2" maxlength="500" placeholder="Comment / blocker (optional)" style="width:100%;font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-family:inherit;resize:vertical"></textarea>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button onclick="eaTaskSave(${idx}, '${taskId}')" class="btn-primary" style="padding:4px 12px;font-size:11px">Save</button>
+      <button onclick="document.getElementById('ea-edit-${idx}').innerHTML=''" class="btn-outline" style="padding:4px 12px;font-size:11px">Cancel</button>
+      <span id="ea-edit-msg-${idx}" style="font-size:11px;color:#718096"></span>
     </div>
   </div>`;
+}
+async function eaTaskSave(idx, taskId) {
+  const statusEl = document.getElementById('ea-edit-status-' + idx);
+  const commentEl = document.getElementById('ea-edit-comment-' + idx);
+  const msg = document.getElementById('ea-edit-msg-' + idx);
+  if (!statusEl) return;
+  const status = statusEl.value;
+  const comment = (commentEl && commentEl.value || '').trim();
+  if (msg) { msg.style.color = '#718096'; msg.textContent = 'Saving…'; }
+  try {
+    const res = await API('/agent/tasks/' + encodeURIComponent(taskId), { method: 'PUT',
+      body: JSON.stringify({ status, comment }) });
+    if (res && res.error) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = 'Error: ' + res.error; } return; }
+    pages['employee-activity'](window._eaTarget);
+  } catch(e) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = 'Error: ' + e.message; } }
 }
 function renderAgentFeed() {
   const el = document.getElementById('agent-feed');
