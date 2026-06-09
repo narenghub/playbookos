@@ -1566,6 +1566,11 @@ function renderTaskCard(t, idx) {
   const commentHtml = t.last_comment
     ? `<div style="font-size:11px;color:#4a5568;margin-top:6px">💬 “${esc(t.last_comment)}”${t.updated_at ? ` · <span title="${esc(t.updated_at)}">${taskRelTime(t.updated_at)}</span>` : ''}</div>`
     : '';
+  // Write-once admin context set at assignment. Shown above the assignee's own
+  // status-change comment (💬) so the original instruction is never overwritten.
+  const assignHtml = t.assign_comment
+    ? `<div style="font-size:12px;color:#1a202c;background:#f0f9f6;border-left:3px solid #1D9E75;border-radius:4px;padding:6px 8px;margin-top:6px">📌 Assigned by ${esc(t.assigned_by_name || 'admin')}: “${esc(t.assign_comment)}”</div>`
+    : '';
   return `<div class="card" id="task-card-${esc(t.id)}" style="border-left:4px solid ${sc}">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
       <div>
@@ -1576,6 +1581,7 @@ function renderTaskCard(t, idx) {
     </div>
     ${t.source_kpi ? `<div style="font-size:11px;color:#718096;margin-top:6px">Why this task → KPI: <strong>${esc(t.source_kpi)}</strong>${t.agent_name ? ' · assigned by ' + esc(t.agent_name) : ''}</div>` : ''}
     ${t.reasoning ? `<div style="font-size:11px;color:#a0aec0;margin-top:2px;font-style:italic">${esc(t.reasoning)}</div>` : ''}
+    ${assignHtml}
     ${commentHtml}
     <div id="task-edit-${esc(t.id)}"></div>
     <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
@@ -1716,6 +1722,7 @@ async function assignTask() {
   const user_id = document.getElementById('assign-user').value;
   const task_title = document.getElementById('assign-title').value.trim();
   const task_description = document.getElementById('assign-description').value.trim();
+  const comment = document.getElementById('assign-comment').value.trim();
   const priority = document.getElementById('assign-priority').value;
   const task_date = document.getElementById('assign-date').value;
   const msg = document.getElementById('assign-msg');
@@ -1725,12 +1732,13 @@ async function assignTask() {
   msg.textContent = 'Assigning…';
   try {
     const res = await API('/agent/tasks/assign', { method: 'POST',
-      body: JSON.stringify({ user_id, task_title, task_description, priority, task_date }) });
+      body: JSON.stringify({ user_id, task_title, task_description, priority, task_date, comment }) });
     if (res && res.error) { msg.style.color = '#dc2626'; msg.textContent = 'Error: ' + res.error; return; }
     msg.style.color = '#1D9E75';
     msg.textContent = '✓ Task assigned';
     document.getElementById('assign-title').value = '';
     document.getElementById('assign-description').value = '';
+    document.getElementById('assign-comment').value = '';
   } catch(e) { msg.style.color = '#dc2626'; msg.textContent = 'Error: ' + e.message; }
 }
 
@@ -1796,6 +1804,7 @@ function renderAiPreview() {
         <div style="font-weight:700;font-size:13px">${esc(t.task_title)}</div>
         <div style="font-size:11px;color:var(--text-muted);margin-top:2px">→ ${esc(t.user_label)} (${esc(t.user_role||'')}) · ${esc(t.task_date)} · ${esc(t.priority)}${t.source_kpi ? ' · KPI:' + esc(t.source_kpi) : ''}</div>
         ${t.task_description ? `<div style="font-size:12px;color:#4a5568;margin-top:4px">${esc(t.task_description)}</div>` : ''}
+        ${t.comment ? `<div style="font-size:11px;color:#0D7377;margin-top:4px">📌 ${esc(t.comment)}</div>` : ''}
         ${t.rationale ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic">${esc(t.rationale)}</div>` : ''}
       </div>
       <div style="display:flex;gap:4px">
@@ -1822,6 +1831,7 @@ function aiEditDraft(idx) {
   div.innerHTML = `<div style="display:flex;flex-direction:column;gap:6px">
     <input id="ai-edit-title-${idx}" value="${esc(t.task_title)}" style="font-weight:700;font-size:13px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;width:100%">
     <textarea id="ai-edit-description-${idx}" rows="2" placeholder="Description (optional)" style="font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-family:inherit;resize:vertical;width:100%">${esc(t.task_description||'')}</textarea>
+    <textarea id="ai-edit-comment-${idx}" rows="2" maxlength="500" placeholder="Comment for assignee (optional)" style="font-size:12px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;font-family:inherit;resize:vertical;width:100%">${esc(t.comment||'')}</textarea>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <select id="ai-edit-priority-${idx}" style="font-size:11px;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
         <option value="HIGH"${t.priority==='HIGH'?' selected':''}>HIGH</option>
@@ -1846,6 +1856,7 @@ function aiSaveDraft(idx) {
   if (!t) return;
   t.task_title = document.getElementById('ai-edit-title-'+idx).value.trim();
   t.task_description = document.getElementById('ai-edit-description-'+idx).value.trim();
+  t.comment = document.getElementById('ai-edit-comment-'+idx).value.trim();
   t.priority = document.getElementById('ai-edit-priority-'+idx).value;
   t.task_date = document.getElementById('ai-edit-date-'+idx).value;
   const kpi = document.getElementById('ai-edit-kpi-'+idx).value;
@@ -2002,6 +2013,7 @@ async function aiCommit() {
       task_date: d.task_date,
       source_kpi: d.source_kpi,
       rationale: d.rationale,
+      comment: d.comment,
     })) };
     const res = await API('/agent/tasks/ai-commit', { method: 'POST', body: JSON.stringify(payload) });
     if (res && res.error) {
@@ -2659,6 +2671,10 @@ if(typeof pages !== 'undefined') {
       <div style="margin-bottom:10px">
         <div class="text-label">Description (optional)</div>
         <textarea id="assign-description" rows="2" placeholder="Context, links, etc." style="width:100%;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
+      </div>
+      <div style="margin-bottom:10px">
+        <div class="text-label">Comment for assignee (optional)</div>
+        <textarea id="assign-comment" rows="2" maxlength="500" placeholder="Context or instructions the assignee will see pinned on the task" style="width:100%;border:1px solid var(--border);border-radius:6px;padding:8px;font-size:13px;font-family:inherit;resize:vertical"></textarea>
       </div>
       <div style="display:flex;gap:10px;align-items:end">
         <div style="flex:0 0 140px">

@@ -388,6 +388,7 @@ async function migrateSchemas() {
       ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
       ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS updated_by TEXT;
       ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS last_comment TEXT;
+      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS assign_comment TEXT;
       CREATE TABLE IF NOT EXISTS kpi_hierarchy (
         id TEXT PRIMARY KEY,
         level TEXT NOT NULL,

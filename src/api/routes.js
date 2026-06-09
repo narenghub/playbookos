@@ -1540,7 +1540,7 @@ router.get('/agent/tasks/my', authMiddleware, async (req, res) => {
     const events = (await query(
       `SELECT action_type, reasoning, output_summary, created_at
          FROM agent_activity_log
-        WHERE user_id=$1 AND action_type IN ('task_status_change','task_comment_added')
+        WHERE user_id=$1 AND action_type IN ('task_status_change','task_comment_added','task_manual_assign','task_ai_assign')
         ORDER BY created_at DESC`,
       [req.user.id]
     )).rows;
@@ -1549,7 +1549,21 @@ router.get('/agent/tasks/my', authMiddleware, async (req, res) => {
       const m = /task_id=([0-9a-f-]+)/.exec(e.output_summary || '');
       if (m) (byTask[m[1]] = byTask[m[1]] || []).push(e);
     }
-    tasks.forEach(t => { t.audit_history = byTask[t.id] || []; });
+    // Resolve assigner display names so the card can show "Assigned by <name>".
+    // The assigner email lives in the assign audit's output_summary (by=…).
+    const nameByEmail = {};
+    for (const u of (await query('SELECT email, name FROM users')).rows) {
+      nameByEmail[(u.email || '').toLowerCase()] = u.name || u.email;
+    }
+    tasks.forEach(t => {
+      t.audit_history = byTask[t.id] || [];
+      const assignEv = t.audit_history.find(e =>
+        e.action_type === 'task_manual_assign' || e.action_type === 'task_ai_assign');
+      if (assignEv) {
+        const bm = /by=(\S+)/.exec(assignEv.output_summary || '');
+        if (bm) t.assigned_by_name = nameByEmail[bm[1].toLowerCase()] || bm[1];
+      }
+    });
     const completed = tasks.filter(t => t.status === 'completed').length;
     res.json({ date, total: tasks.length, completed, tasks });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1646,6 +1660,18 @@ router.post('/agent/tasks/assign', authMiddleware, adminOnly, async (req, res) =
     if (task_date && !/^\d{4}-\d{2}-\d{2}$/.test(task_date)) {
       return res.status(400).json({ error: 'task_date must be YYYY-MM-DD' });
     }
+    // Optional assignment comment for the assignee (same rules as task/KPI comments).
+    let comment = null;
+    if (req.body?.comment != null) {
+      if (typeof req.body.comment !== 'string') {
+        return res.status(400).json({ error: 'comment must be a string' });
+      }
+      const t = req.body.comment.trim();
+      if (t.length > 500) {
+        return res.status(400).json({ error: 'comment must be 500 characters or fewer' });
+      }
+      comment = t.length ? t : null;
+    }
     const target = (await query(`SELECT id, email FROM users WHERE id=$1 AND is_active=1`, [user_id])).rows[0];
     if (!target) return res.status(400).json({ error: 'user not found or inactive' });
     const date = task_date || new Date().toISOString().slice(0, 10);
@@ -1658,15 +1684,18 @@ router.post('/agent/tasks/assign', authMiddleware, adminOnly, async (req, res) =
       source_kpi: null,
       agent_name: null,
       reasoning: `Manually assigned by ${req.user.email}`,
+      comment,
     });
     await logAgentActivity({
       agent_name: 'admin',
       action_type: 'task_manual_assign',
       user_id: target.id,
-      reasoning: `${req.user.email} assigned "${title}" to ${target.email} for ${date}`,
+      reasoning: `${req.user.email} assigned "${title}" to ${target.email} for ${date}`
+        + (comment ? `: "${comment.slice(0, 200)}"` : ''),
       source_kpi: 'manual',
       confidence_score: 100,
-      output_summary: `task_id=${task_id} priority=${priority || 'MEDIUM'}`,
+      output_summary: `task_id=${task_id} priority=${priority || 'MEDIUM'} by=${req.user.email}`
+        + (comment ? ' +comment' : ''),
     });
     res.json({ success: true, task_id, assigned_to: target.id, task_date: date });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1889,6 +1918,14 @@ router.post('/agent/tasks/ai-commit', authMiddleware, adminOnly, async (req, res
       if (date < todayISO) { fail('task_date cannot be in the past'); continue; }
       const kpi = (t.source_kpi === null || t.source_kpi === undefined) ? null
         : (AI_TASK_VALID_KPIS.includes(t.source_kpi) ? t.source_kpi : null);
+      // Optional per-task assignment comment (admin-authored at review time).
+      let comment = null;
+      if (t.comment != null) {
+        if (typeof t.comment !== 'string') { fail('comment must be a string'); continue; }
+        const c = t.comment.trim();
+        if (c.length > 500) { fail('comment must be 500 characters or fewer'); continue; }
+        comment = c.length ? c : null;
+      }
       validated.push({
         user_id: t.user_id,
         user_email: userById.get(t.user_id).email,
@@ -1898,6 +1935,7 @@ router.post('/agent/tasks/ai-commit', authMiddleware, adminOnly, async (req, res
         task_date: date,
         source_kpi: kpi,
         rationale: String(t.rationale || '').slice(0, 500),
+        comment,
       });
     }
     const distinctUsers = new Set(validated.map(t => t.user_id));
@@ -1925,16 +1963,18 @@ router.post('/agent/tasks/ai-commit', authMiddleware, adminOnly, async (req, res
           source_kpi: t.source_kpi,
           agent_name: null,
           reasoning: `AI-assigned by ${req.user.email}: ${t.rationale || instruction.slice(0, 150)}`,
+          comment: t.comment,
         }, client);
         taskIds.push(taskId);
         await logAgentActivity({
           agent_name: 'admin',
           action_type: 'task_ai_assign',
           user_id: t.user_id,
-          reasoning: `${req.user.email} AI-assigned "${t.task_title}" to ${t.user_email} for ${t.task_date}`,
+          reasoning: `${req.user.email} AI-assigned "${t.task_title}" to ${t.user_email} for ${t.task_date}`
+            + (t.comment ? `: "${t.comment.slice(0, 200)}"` : ''),
           source_kpi: 'manual',
           confidence_score: 100,
-          output_summary: `task_id=${taskId} priority=${t.priority} kpi=${t.source_kpi || 'null'} from instruction="${instruction.slice(0, 100)}"`,
+          output_summary: `task_id=${taskId} priority=${t.priority} kpi=${t.source_kpi || 'null'} by=${req.user.email} from instruction="${instruction.slice(0, 100)}"`,
         }, client);
       }
       return taskIds;

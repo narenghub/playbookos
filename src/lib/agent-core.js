@@ -87,18 +87,28 @@ async function createDailyTask({
   source_kpi = null,
   agent_name = null,
   reasoning = '',
+  comment = null,
 }, client = null) {
   const id = crypto.randomUUID();
   const pri = ['HIGH', 'MEDIUM', 'LOW'].includes(String(priority).toUpperCase())
     ? String(priority).toUpperCase()
     : 'MEDIUM';
+  // Optional admin assignment comment — write-once context the assignee sees on
+  // the task. Distinct from last_comment (status-change comments). Mirrors the
+  // comment pattern: trim, whitespace-only → null, hard cap 500 (defense in depth;
+  // the endpoints already 400 on >500).
+  let assignComment = null;
+  if (comment != null) {
+    const t = String(comment).trim();
+    assignComment = t.length ? t.slice(0, 500) : null;
+  }
   const exec = client ? (sql, params) => client.query(sql, params) : query;
   await exec(
     `INSERT INTO daily_tasks
        (id, user_id, task_date, task_title, task_description, priority, status,
-        source_kpi, agent_name, reasoning, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$8,$9,NOW())`,
-    [id, user_id, task_date, task_title, task_description, pri, source_kpi, agent_name, reasoning]
+        source_kpi, agent_name, reasoning, assign_comment, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'pending',$7,$8,$9,$10,NOW())`,
+    [id, user_id, task_date, task_title, task_description, pri, source_kpi, agent_name, reasoning, assignComment]
   );
   return id;
 }
