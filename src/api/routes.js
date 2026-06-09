@@ -1465,6 +1465,21 @@ router.get('/agent/tasks/my', authMiddleware, async (req, res) => {
        ORDER BY CASE priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END, created_at`,
       [req.user.id, date]
     )).rows;
+    // Attach per-task audit history (status changes + comments) in one query,
+    // grouped by the task_id embedded in output_summary. Avoids an N+1.
+    const events = (await query(
+      `SELECT action_type, reasoning, output_summary, created_at
+         FROM agent_activity_log
+        WHERE user_id=$1 AND action_type IN ('task_status_change','task_comment_added')
+        ORDER BY created_at DESC`,
+      [req.user.id]
+    )).rows;
+    const byTask = {};
+    for (const e of events) {
+      const m = /task_id=([0-9a-f-]+)/.exec(e.output_summary || '');
+      if (m) (byTask[m[1]] = byTask[m[1]] || []).push(e);
+    }
+    tasks.forEach(t => { t.audit_history = byTask[t.id] || []; });
     const completed = tasks.filter(t => t.status === 'completed').length;
     res.json({ date, total: tasks.length, completed, tasks });
   } catch(e) { res.status(500).json({ error: e.message }); }

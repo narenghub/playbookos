@@ -1528,6 +1528,126 @@ async function updateMyTask(id, status) {
     else alert('Error: ' + ((res && res.error) || 'unknown'));
   } catch(e) { alert('Error: ' + e.message); }
 }
+// ── My Tasks history view helpers ──────────────────────────────────────────────
+function taskRelTime(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '';
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return s + 's ago';
+  const m = Math.floor(s / 60); if (m < 60) return m + 'm ago';
+  const h = Math.floor(m / 60); if (h < 24) return h + 'h ago';
+  const d = Math.floor(h / 24); if (d < 30) return d + 'd ago';
+  return new Date(iso).toISOString().slice(0, 10);
+}
+function renderTaskHistory(t, idx) {
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const hist = t.audit_history || [];
+  if (!hist.length) return '';
+  const open = !!t._histOpen;
+  const shown = open ? hist : hist.slice(0, 2);
+  const line = e => `<div style="font-size:11px;color:#718096;margin-top:2px">• <span title="${esc(e.created_at)}">${taskRelTime(e.created_at)}</span> — ${esc(e.reasoning || e.output_summary || e.action_type)}</div>`;
+  const toggle = hist.length > 2
+    ? `<div onclick="taskToggleHistory(${idx})" style="font-size:11px;color:#0D7377;cursor:pointer;margin-top:3px">${open ? '▲ Hide history' : '▾ Show full history (' + hist.length + ')'}</div>`
+    : '';
+  return `<div style="margin-top:8px;border-top:1px solid var(--border,#e2e8f0);padding-top:6px">
+    <div style="font-size:10px;text-transform:uppercase;color:#a0aec0;letter-spacing:.5px">History</div>
+    ${shown.map(line).join('')}
+    ${toggle}
+  </div>`;
+}
+function renderTaskCard(t, idx) {
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const priBadge = p => p==='HIGH' ? '<span class="badge badge-red">HIGH</span>'
+    : p==='LOW' ? '<span class="badge badge-gray">LOW</span>'
+    : '<span class="badge badge-blue">MEDIUM</span>';
+  const sc = t.status==='completed' ? '#1D9E75' : t.status==='in_progress' ? '#0D7377' : '#a0aec0';
+  const commentHtml = t.last_comment
+    ? `<div style="font-size:11px;color:#4a5568;margin-top:6px">💬 “${esc(t.last_comment)}”${t.updated_at ? ` · <span title="${esc(t.updated_at)}">${taskRelTime(t.updated_at)}</span>` : ''}</div>`
+    : '';
+  return `<div class="card" id="task-card-${esc(t.id)}" style="border-left:4px solid ${sc}">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+      <div>
+        <div style="font-size:14px;font-weight:700;color:#1a202c">${esc(t.task_title)}</div>
+        ${t.task_description ? `<div style="font-size:12px;color:#4a5568;margin-top:3px">${esc(t.task_description)}</div>` : ''}
+      </div>
+      ${priBadge(t.priority)}
+    </div>
+    ${t.source_kpi ? `<div style="font-size:11px;color:#718096;margin-top:6px">Why this task → KPI: <strong>${esc(t.source_kpi)}</strong>${t.agent_name ? ' · assigned by ' + esc(t.agent_name) : ''}</div>` : ''}
+    ${t.reasoning ? `<div style="font-size:11px;color:#a0aec0;margin-top:2px;font-style:italic">${esc(t.reasoning)}</div>` : ''}
+    ${commentHtml}
+    <div id="task-edit-${esc(t.id)}"></div>
+    <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
+      <button onclick="taskBeginEdit(${idx},'in_progress')" ${t.status==='in_progress'?'disabled':''} style="background:#0D7377;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">In progress</button>
+      <button onclick="taskBeginEdit(${idx},'completed')" ${t.status==='completed'?'disabled':''} style="background:#1D9E75;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Mark complete</button>
+      <span style="font-size:11px;color:${sc};text-transform:uppercase">${esc(t.status)}</span>
+    </div>
+    ${renderTaskHistory(t, idx)}
+  </div>`;
+}
+function taskShiftDate(delta) {
+  const base = window._myTasksDate || (document.getElementById('task-date-input') || {}).value;
+  if (!base) return;
+  const d = new Date(base + 'T12:00:00Z');
+  d.setUTCDate(d.getUTCDate() + delta);
+  pages['my-tasks'](d.toISOString().slice(0, 10));
+}
+function taskGoDate(v) { if (v) pages['my-tasks'](v); }
+function taskToday() { pages['my-tasks'](); } // no arg → backend businessToday()
+function taskToggleHistory(idx) {
+  const t = window._myTasks && window._myTasks[idx];
+  if (!t) return;
+  t._histOpen = !t._histOpen;
+  const card = document.getElementById('task-card-' + t.id);
+  if (card) card.outerHTML = renderTaskCard(t, idx);
+}
+function taskBeginEdit(idx, newStatus) {
+  const t = window._myTasks && window._myTasks[idx];
+  if (!t) return;
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const slot = document.getElementById('task-edit-' + t.id);
+  if (!slot) return;
+  const label = newStatus === 'completed' ? 'Mark complete' : 'Set in progress';
+  slot.innerHTML = `<div style="margin-top:8px;padding:10px;background:#f8fafc;border-radius:6px">
+    <div class="text-label">${label} — comment (optional, max 500)</div>
+    <textarea id="task-edit-comment-${esc(t.id)}" rows="2" maxlength="500" placeholder="e.g. finished supplier review" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px;font-family:inherit;resize:vertical">${esc(t.last_comment || '')}</textarea>
+    <div style="display:flex;gap:6px;margin-top:6px;align-items:center">
+      <button onclick="taskSave(${idx},'${newStatus}')" class="btn-primary" style="padding:5px 14px;font-size:12px">Save</button>
+      <button onclick="taskCancelEdit(${idx})" class="btn-outline" style="padding:5px 14px;font-size:12px">Cancel</button>
+      <span id="task-edit-msg-${esc(t.id)}" style="font-size:11px;color:var(--text-muted)"></span>
+    </div>
+  </div>`;
+}
+function taskCancelEdit(idx) {
+  const t = window._myTasks && window._myTasks[idx];
+  if (!t) return;
+  const slot = document.getElementById('task-edit-' + t.id);
+  if (slot) slot.innerHTML = '';
+}
+async function taskSave(idx, newStatus) {
+  const t = window._myTasks && window._myTasks[idx];
+  if (!t) return;
+  const commentEl = document.getElementById('task-edit-comment-' + t.id);
+  const msgEl = document.getElementById('task-edit-msg-' + t.id);
+  const comment = ((commentEl && commentEl.value) || '').trim();
+  if (comment.length > 500) {
+    if (msgEl) { msgEl.style.color = '#dc2626'; msgEl.textContent = 'Comment too long (max 500 chars)'; }
+    return;
+  }
+  if (msgEl) { msgEl.style.color = 'var(--text-muted)'; msgEl.textContent = 'Saving…'; }
+  try {
+    const body = { status: newStatus };
+    if (comment) body.comment = comment;
+    const res = await API('/agent/tasks/' + t.id, { method:'PUT', body: JSON.stringify(body) });
+    if (res && res.error) {
+      if (msgEl) { msgEl.style.color = '#dc2626'; msgEl.textContent = 'Error: ' + res.error; }
+      return;
+    }
+    pages['my-tasks'](window._myTasksDate); // reload current date so card + history refresh
+  } catch(e) {
+    if (msgEl) { msgEl.style.color = '#dc2626'; msgEl.textContent = 'Error: ' + e.message; }
+  }
+}
 function renderAgentFeed() {
   const el = document.getElementById('agent-feed');
   if (!el) return;
@@ -2375,50 +2495,39 @@ if(typeof pages !== 'undefined') {
       <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Hover bars for the daily score.</div>
     </div>`;
   };
-  pages['my-tasks'] = async function() {
+  pages['my-tasks'] = async function(dateOverride) {
     const c = document.getElementById('content');
     c.innerHTML = '<p style="color:#888;padding:20px">Loading your tasks…</p>';
     const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    const qs = dateOverride ? ('?date=' + encodeURIComponent(dateOverride)) : '';
     let data;
-    try { data = await API('/agent/tasks/my'); }
+    try { data = await API('/agent/tasks/my' + qs); }
     catch(e) { c.innerHTML = `<div class="card"><div class="card-title">My Tasks</div><p style="color:#dc2626">Failed to load: ${esc(e.message)}</p></div>`; return; }
     if (data && data.error) { c.innerHTML = `<div class="card"><div class="card-title">My Tasks</div><p style="color:#dc2626">${esc(data.error)}</p></div>`; return; }
     const tasks = (data && data.tasks) || [];
+    window._myTasks = tasks;
+    window._myTasksDate = data.date;
     const done = data.completed || 0, total = data.total || 0;
     const pctv = total > 0 ? Math.round(done / total * 100) : 0;
-    const priBadge = p => p==='HIGH' ? '<span class="badge badge-red">HIGH</span>'
-      : p==='LOW' ? '<span class="badge badge-gray">LOW</span>'
-      : '<span class="badge badge-blue">MEDIUM</span>';
+    const toolbar = `<div class="card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">My Tasks</div>
+      <div style="display:flex;align-items:center;gap:6px;margin-left:auto">
+        <button onclick="taskShiftDate(-1)" class="btn-outline" style="padding:4px 10px;font-size:13px" title="Previous day">◀</button>
+        <input type="date" id="task-date-input" value="${esc(data.date)}" onchange="taskGoDate(this.value)" style="padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+        <button onclick="taskShiftDate(1)" class="btn-outline" style="padding:4px 10px;font-size:13px" title="Next day">▶</button>
+        <button onclick="taskToday()" class="btn-outline" style="padding:4px 10px;font-size:13px">Today</button>
+      </div>
+    </div>`;
     const head = `<div class="card">
-      <div class="card-title">My Tasks — ${esc(data.date)}</div>
       <div style="background:#e2e8f0;border-radius:6px;height:10px;overflow:hidden;margin:8px 0">
         <div style="background:#1D9E75;height:10px;width:${pctv}%"></div></div>
-      <div style="font-size:13px;color:#718096">${done} of ${total} task${total===1?'':'s'} completed today (${pctv}%)</div>
+      <div style="font-size:13px;color:#718096">${done} of ${total} task${total===1?'':'s'} completed on ${esc(data.date)} (${pctv}%)</div>
     </div>`;
     if (!tasks.length) {
-      c.innerHTML = head + '<div class="card"><p style="color:#718096">No tasks assigned for today yet. The AI agents assign tasks each morning — an admin can also trigger generation from Agent Control.</p></div>';
+      c.innerHTML = toolbar + head + '<div class="card"><p style="color:#718096">No tasks for this date. The AI agents assign tasks each morning — an admin can also trigger generation from Agent Control.</p></div>';
       return;
     }
-    const cards = tasks.map(t => {
-      const sc = t.status==='completed' ? '#1D9E75' : t.status==='in_progress' ? '#0D7377' : '#a0aec0';
-      return `<div class="card" style="border-left:4px solid ${sc}">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
-          <div>
-            <div style="font-size:14px;font-weight:700;color:#1a202c">${esc(t.task_title)}</div>
-            ${t.task_description ? `<div style="font-size:12px;color:#4a5568;margin-top:3px">${esc(t.task_description)}</div>` : ''}
-          </div>
-          ${priBadge(t.priority)}
-        </div>
-        ${t.source_kpi ? `<div style="font-size:11px;color:#718096;margin-top:6px">Why this task → KPI: <strong>${esc(t.source_kpi)}</strong>${t.agent_name ? ' · assigned by ' + esc(t.agent_name) : ''}</div>` : ''}
-        ${t.reasoning ? `<div style="font-size:11px;color:#a0aec0;margin-top:2px;font-style:italic">${esc(t.reasoning)}</div>` : ''}
-        <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
-          <button onclick="updateMyTask('${t.id}','in_progress')" ${t.status==='in_progress'?'disabled':''} style="background:#0D7377;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">In progress</button>
-          <button onclick="updateMyTask('${t.id}','completed')" ${t.status==='completed'?'disabled':''} style="background:#1D9E75;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Mark complete</button>
-          <span style="font-size:11px;color:${sc};text-transform:uppercase">${esc(t.status)}</span>
-        </div>
-      </div>`;
-    }).join('');
-    c.innerHTML = head + cards;
+    c.innerHTML = toolbar + head + tasks.map((t, i) => renderTaskCard(t, i)).join('');
   };
   pages['agent-control'] = async function() {
     const c = document.getElementById('content');
