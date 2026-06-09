@@ -64,7 +64,7 @@ router.post('/auth/login', authLimiter, async (req, res) => {
     const user = result.rows[0];
     if (!user || !user.password_hash) return res.status(401).json({ error: 'Invalid credentials' });
     if (!bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Invalid credentials' });
-    res.json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, github_username: user.github_username } });
+    res.json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, github_username: user.github_username, can_run_standup: !!user.can_run_standup } });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -84,7 +84,7 @@ router.post('/auth/accept-invite', authLimiter, async (req, res) => {
 
 router.get('/auth/me', authMiddleware, async (req, res) => {
   try {
-    const result = await query('SELECT id,name,email,role,github_username FROM users WHERE id=$1', [req.user.id]);
+    const result = await query('SELECT id,name,email,role,github_username,can_run_standup FROM users WHERE id=$1', [req.user.id]);
     res.json(result.rows[0]);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1592,7 +1592,17 @@ router.put('/agent/tasks/:id', authMiddleware, async (req, res) => {
     const task = (await query(`SELECT * FROM daily_tasks WHERE id=$1`, [req.params.id])).rows[0];
     if (!task) return res.status(404).json({ error: 'task not found' });
     const isAdmin = ['super_admin', 'admin'].includes(req.user.role);
-    if (task.user_id !== req.user.id && !isAdmin) {
+    const isOwner = task.user_id === req.user.id;
+    // TEMPORARY capability flag (pending proper role design): can_run_standup lets a
+    // non-admin update any user's task via the standup tool. Read fresh (not from the
+    // JWT) so a grant takes effect immediately without re-login. This flag is honored
+    // ONLY here — no other endpoint consults it.
+    let canRunStandup = false;
+    if (!isAdmin && !isOwner) {
+      const r = (await query('SELECT can_run_standup FROM users WHERE id=$1', [req.user.id])).rows[0];
+      canRunStandup = !!(r && r.can_run_standup);
+    }
+    if (!isAdmin && !isOwner && !canRunStandup) {
       return res.status(403).json({ error: 'not your task' });
     }
     const oldStatus = task.status;

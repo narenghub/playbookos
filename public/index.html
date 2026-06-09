@@ -1678,7 +1678,7 @@ function eaEventCard(e, idx) {
   const isAdmin = me.role === 'admin' || me.role === 'super_admin';
   const taskActions = ['task_status_change','task_manual_assign','task_ai_assign'];
   const tm = /task_id=([0-9a-f-]+)/.exec(e.summary || '');
-  const canUpdate = isAdmin && tm && taskActions.includes(e.action);
+  const canUpdate = (isAdmin || me.can_run_standup) && tm && taskActions.includes(e.action);
   let curStatus = 'pending';
   if (canUpdate && e.action === 'task_status_change') {
     const sm = /->(\w+)/.exec(e.summary || '');

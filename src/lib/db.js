@@ -492,6 +492,10 @@ async function migrateSchemas() {
       ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS notes TEXT;
       ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS is_weekly_summary INTEGER DEFAULT 0;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS whatsapp_number TEXT;
+      -- TEMPORARY capability flag (pending proper role design): grants the standup
+      -- task-update tool (Update button on Employee Activity + PUT /agent/tasks/:id)
+      -- to a non-admin user. Set via SQL only; no admin UI grants it.
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS can_run_standup BOOLEAN DEFAULT FALSE;
       CREATE TABLE IF NOT EXISTS whatsapp_log (
         id TEXT PRIMARY KEY,
         user_id TEXT,
