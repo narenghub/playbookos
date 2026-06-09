@@ -20,6 +20,24 @@ const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday } = re
 
 const router = express.Router();
 
+// Role-based "director sees their team" map (inverse of getDirectorRole). Used by
+// the employee-activity timeline permission gate. No schema — pure role mapping.
+const DIRECTOR_TEAM = {
+  procurement_director: ['procurement_team', 'procurement_director'],
+  recruitment_director: ['recruitment_team', 'recruitment_director'],
+  sales_director:       ['sales_team', 'account_manager', 'sales_director'],
+};
+// Can `viewer` (JWT payload) see `targetId`'s activity? admin/super_admin → anyone;
+// self → always; director → only users whose role is in their team set; else false.
+async function canViewUser(viewer, targetId) {
+  if (viewer.role === 'admin' || viewer.role === 'super_admin') return true;
+  if (viewer.id === targetId) return true;
+  const team = DIRECTOR_TEAM[viewer.role];
+  if (!team) return false;
+  const tgt = (await query('SELECT role FROM users WHERE id=$1', [targetId])).rows[0];
+  return !!tgt && team.includes(tgt.role);
+}
+
 const rateLimitStore = new Map();
 function rateLimit(maxRequests, windowMs) {
   return (req, res, next) => {
@@ -252,6 +270,58 @@ router.get('/activity/my', authMiddleware, async (req, res) => {
     const dateTo = to || new Date().toISOString().slice(0, 10);
     const result = await query('SELECT * FROM activity_logs WHERE user_id=$1 AND log_date BETWEEN $2 AND $3 ORDER BY log_date DESC', [req.user.id, dateFrom, dateTo]);
     res.json(result.rows);
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Per-employee activity timeline. Permission: admin → anyone, director → their
+// team, employee → self (enforced by canViewUser; the frontend filter is UX only).
+// One UNION ALL across agent_activity_log + performance_scores + activity_logs,
+// created_at cast to timestamptz to avoid text-comparison ordering bugs.
+router.get('/employee-activity/:user_id', authMiddleware, async (req, res) => {
+  try {
+    const targetId = req.params.user_id;
+    if (!(await canViewUser(req.user, targetId))) {
+      return res.status(403).json({ error: 'Not permitted to view this user' });
+    }
+    const u = (await query('SELECT id, name, email, role FROM users WHERE id=$1', [targetId])).rows[0];
+    if (!u) return res.status(404).json({ error: 'user not found' });
+
+    const window = ['today', '7d', '30d', 'all'].includes(req.query.window) ? req.query.window : '7d';
+    let cutoff = null;
+    // Explicit CDT offset so "today" anchors to the business day, not UTC midnight.
+    // NOTE: fixed -05:00 is correct under CDT; DST-fragile — refine to Intl-based
+    // America/Chicago offset if this ever needs to survive a DST boundary.
+    if (window === 'today') cutoff = businessToday() + ' 00:00:00-05:00';
+    else if (window === '7d') cutoff = new Date(Date.now() - 7 * 86400000).toISOString();
+    else if (window === '30d') cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
+    // 'all' → cutoff stays null (no lower bound)
+
+    const cond = cutoff ? 'AND created_at::timestamptz >= $2::timestamptz' : '';
+    const params = cutoff ? [targetId, cutoff] : [targetId];
+    const sql = `
+      SELECT * FROM (
+        SELECT 'agent' AS type, action_type AS action, output_summary AS summary,
+               reasoning AS detail, created_at AS ts
+          FROM agent_activity_log
+         WHERE user_id=$1 ${cond}
+           AND action_type IN ('task_ai_assign','task_manual_assign','task_status_change','task_comment_added','kpi_progress_update')
+        UNION ALL
+        SELECT 'score' AS type, 'performance_score' AS action,
+               ('Score ' || total_score || '/100 · ' || tasks_completed || '/' || tasks_assigned
+                || ' tasks · KPI ' || weekly_kpi_pct || '%') AS summary,
+               COALESCE(claude_coaching_note, notes) AS detail, created_at AS ts
+          FROM performance_scores
+         WHERE user_id=$1 ${cond} AND COALESCE(is_weekly_summary,0)=0
+        UNION ALL
+        SELECT 'metric' AS type, 'activity_logged' AS action,
+               (metric || ' = ' || value) AS summary, notes AS detail, created_at AS ts
+          FROM activity_logs
+         WHERE user_id=$1 ${cond}
+      ) ev
+      ORDER BY ev.ts::timestamptz DESC
+      LIMIT 500`;
+    const events = (await query(sql, params)).rows;
+    res.json({ user: u, window, count: events.length, events });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

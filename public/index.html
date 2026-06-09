@@ -399,6 +399,7 @@ const NAV_SECTIONS = [
   {title:'TEAM', items:[
     {id:'team', label:'Team Management', icon:'👥'},
     {id:'agent-control', label:'Agent Control', icon:'⚡'},
+    {id:'employee-activity', label:'Employee Activity', icon:'🧭'},
     {id:'adoption', label:'Adoption', icon:'📈'},
     {id:'decision-engine', label:'Automation Rules', icon:'🧠'},
   ]},
@@ -421,7 +422,7 @@ async function buildNav() {
   } catch (e) {}
   const isAll = pages === '*';
   const html = NAV_SECTIONS.map(section => {
-    const visible = section.items.filter(it => isAll || pages.includes(it.id));
+    const visible = section.items.filter(it => isAll || pages.includes(it.id) || it.id === 'employee-activity');
     if (!visible.length) return '';
     return `<div class="nav-section-title">${section.title}</div>` +
       visible.map(it =>
@@ -451,7 +452,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence',team:'Team Management','decision-engine':'Automation Rules','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -1648,6 +1649,33 @@ async function taskSave(idx, newStatus) {
     if (msgEl) { msgEl.style.color = '#dc2626'; msgEl.textContent = 'Error: ' + e.message; }
   }
 }
+// ── Employee Activity timeline helpers ─────────────────────────────────────────
+function eaSetWindow(w) { window._eaWindow = w; pages['employee-activity'](window._eaTarget); }
+function eaEventCard(e) {
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let m = { agent:{icon:'📋',color:'#1B3A6B'}, score:{icon:'🏆',color:'#EF9F27'}, metric:{icon:'📝',color:'#0D7377'} }[e.type] || {icon:'•',color:'#718096'};
+  if (e.action === 'kpi_progress_update') m = {icon:'📈', color:'#1D9E75'};
+  else if (e.action === 'task_status_change' || e.action === 'task_comment_added') m = {icon:'✓', color:'#1B3A6B'};
+  else if (e.action === 'task_ai_assign' || e.action === 'task_manual_assign') m = {icon:'🗂️', color:'#718096'};
+  const label = {
+    task_status_change:'Task status changed', task_comment_added:'Task comment',
+    task_ai_assign:'Task assigned (AI)', task_manual_assign:'Task assigned',
+    kpi_progress_update:'KPI updated', performance_score:'Performance score',
+    activity_logged:'Activity logged',
+  }[e.action] || e.action;
+  const ts = e.ts || e.timestamp;
+  const rel = (typeof taskRelTime === 'function') ? taskRelTime(ts) : '';
+  return `<div class="card" style="border-left:4px solid ${m.color};padding:10px 12px">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600;color:#1a202c">${m.icon} ${esc(label)}</div>
+        ${e.summary ? `<div style="font-size:12px;color:#4a5568;margin-top:2px;word-break:break-word">${esc(e.summary)}</div>` : ''}
+        ${e.detail ? `<div style="font-size:11px;color:#718096;margin-top:2px;font-style:italic;word-break:break-word">${esc(e.detail)}</div>` : ''}
+      </div>
+      <div style="font-size:11px;color:#a0aec0;white-space:nowrap" title="${esc(ts)}">${esc(rel)}</div>
+    </div>
+  </div>`;
+}
 function renderAgentFeed() {
   const el = document.getElementById('agent-feed');
   if (!el) return;
@@ -2528,6 +2556,55 @@ if(typeof pages !== 'undefined') {
       return;
     }
     c.innerHTML = toolbar + head + tasks.map((t, i) => renderTaskCard(t, i)).join('');
+  };
+  pages['employee-activity'] = async function(selUserId) {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading…</p>';
+    const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    // Permitted-employee list for the selector (UX filter only; server enforces).
+    let users = [];
+    try { users = await API('/users'); } catch(e) {}
+    users = Array.isArray(users) ? users.filter(u => u.is_active === 1 || u.is_active === true) : [];
+    const me = (typeof currentUser !== 'undefined' && currentUser) || {};
+    const DIRECTOR_TEAM = {
+      procurement_director: ['procurement_team','procurement_director'],
+      recruitment_director: ['recruitment_team','recruitment_director'],
+      sales_director: ['sales_team','account_manager','sales_director'],
+    };
+    const isAdmin = me.role === 'admin' || me.role === 'super_admin';
+    const team = DIRECTOR_TEAM[me.role];
+    const canSee = u => isAdmin || u.id === me.id || (team && team.includes(u.role));
+    const visibleUsers = users.filter(canSee);
+    const target = selUserId
+      || (visibleUsers.some(u => u.id === me.id) ? me.id : (visibleUsers[0] && visibleUsers[0].id));
+    window._eaTarget = target;
+    const win = window._eaWindow || '7d';
+    const selectorHtml = visibleUsers.length > 1
+      ? `<select id="ea-user" onchange="pages['employee-activity'](this.value)" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px;max-width:240px">
+          ${visibleUsers.map(u => `<option value="${esc(u.id)}" ${u.id===target?'selected':''}>${esc(u.name||u.email)} — ${esc(u.role)}</option>`).join('')}
+        </select>`
+      : `<span style="font-size:13px;font-weight:600">${esc((visibleUsers[0]||me).name || me.email || 'You')}</span>`;
+    const windowBtns = [['today','Today'],['7d','7 days'],['30d','30 days'],['all','All']].map(([w,lbl]) =>
+      `<button onclick="eaSetWindow('${w}')" class="btn-outline" style="padding:4px 10px;font-size:12px;${w===win?'background:#1B3A6B;color:#fff':''}">${lbl}</button>`
+    ).join('');
+    const toolbar = `<div class="card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">Employee Activity</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto">
+        ${selectorHtml}
+        <div style="display:flex;gap:4px;flex-wrap:wrap">${windowBtns}</div>
+      </div>
+    </div>`;
+    if (!target) { c.innerHTML = toolbar + '<div class="card"><p style="color:#718096">No employees you can view.</p></div>'; return; }
+    c.innerHTML = toolbar + '<div class="card"><p style="color:#888">Loading timeline…</p></div>';
+    let data;
+    try { data = await API('/employee-activity/' + encodeURIComponent(target) + '?window=' + encodeURIComponent(win)); }
+    catch(e) { c.innerHTML = toolbar + `<div class="card"><p style="color:#dc2626">${esc(e.message)}</p></div>`; return; }
+    if (data && data.error) { c.innerHTML = toolbar + `<div class="card"><p style="color:#dc2626">${esc(data.error)}</p></div>`; return; }
+    const events = (data && data.events) || [];
+    const winLabel = win==='all' ? 'all time' : win==='today' ? 'today' : 'last ' + win.replace('d',' days');
+    const header = `<div class="card"><div style="font-size:13px;color:#718096">${esc(data.user.name||data.user.email)} · ${esc(data.user.role)} · ${events.length} event${events.length===1?'':'s'} · ${winLabel}</div></div>`;
+    if (!events.length) { c.innerHTML = toolbar + header + '<div class="card"><p style="color:#718096">No activity in this window.</p></div>'; return; }
+    c.innerHTML = toolbar + header + events.map(eaEventCard).join('');
   };
   pages['agent-control'] = async function() {
     const c = document.getElementById('content');
