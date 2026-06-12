@@ -846,6 +846,7 @@ async team() {
                 ${item('Set WhatsApp', '#0D7377', 'setUserWhatsApp')}
                 ${item('Set Active', '#1D9E75', 'setUserActive')}
                 ${item('Set Inactive', '#BA7517', 'setUserInactive')}
+                ${item('Reset password', '#1B3A6B', 'resetUserPassword', true)}
                 ${invited ? item('Remove', '#E24B4A', 'removeUser', true) : ''}
                 ${item('Delete Permanently', '#E24B4A', 'deleteUserPermanently', true)}
               </div>
@@ -1160,6 +1161,61 @@ async function deleteUserPermanently(id, name) {
   const res = await API('/users/' + id + '?permanent=true', { method: 'DELETE' });
   if (res.error) { alert('Error: ' + res.error); return; }
   pages.team();
+}
+
+async function resetUserPassword(id, name) {
+  if (!confirm('Reset password for ' + name + '?\nTheir tasks, KPIs, scores and history are kept — only the password changes.')) return;
+  const res = await API('/admin/users/' + id + '/reset-password', { method: 'POST' });
+  if (res.error) {
+    if (typeof showToast === 'function') showToast('Error: ' + res.error, 'error', 5000);
+    else alert('Error: ' + res.error);
+    return;
+  }
+  showTempPasswordModal(name, res.email, res.temp_password);
+}
+
+// One-time display of the generated temp password. Built dynamically (not in the
+// page template) so the cleartext lives only in this overlay and is gone once the
+// admin closes it — it is never re-fetchable from the server.
+function showTempPasswordModal(name, email, tempPassword) {
+  // name/email originate from the DB and could carry HTML (e.g. a user created
+  // with markup in their name) — escape them before innerHTML interpolation.
+  // tempPassword is from a controlled alphabet, so it needs no escaping.
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const old = document.getElementById('temp-pw-overlay');
+  if (old) old.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'temp-pw-overlay';
+  overlay.style = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML = `
+    <div class="card" style="max-width:460px;width:90%;border-color:var(--teal)">
+      <div class="card-title">Temporary password for ${esc(name)}</div>
+      <p style="font-size:13px;color:#444;margin:8px 0">Account: <strong>${esc(email)}</strong></p>
+      <div style="display:flex;gap:8px;align-items:center;margin:12px 0">
+        <code id="temp-pw-value" style="flex:1;font-size:18px;font-weight:700;letter-spacing:1px;background:#f5f5f5;padding:10px 14px;border-radius:6px;text-align:center">${tempPassword}</code>
+        <button class="btn btn-teal btn-sm" onclick="copyTempPassword()">Copy</button>
+      </div>
+      <p style="font-size:12px;color:#BA7517;background:#fff8ec;padding:8px 12px;border-radius:6px;margin:12px 0">Copy it now and share via Slack/WhatsApp. <strong>This won't be shown again.</strong></p>
+      <div style="text-align:right">
+        <button class="btn btn-outline btn-sm" onclick="document.getElementById('temp-pw-overlay').remove()">Done</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+function copyTempPassword() {
+  const el = document.getElementById('temp-pw-value');
+  if (!el) return;
+  const text = el.textContent;
+  const done = () => { if (typeof showToast === 'function') showToast('Copied to clipboard', 'success', 2000); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(()=>{});
+  } else {
+    const r = document.createRange(); r.selectNode(el);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    try { document.execCommand('copy'); done(); } catch(e) {}
+    sel.removeAllRanges();
+  }
 }
 
 async function sendInvite() {

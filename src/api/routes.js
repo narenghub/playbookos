@@ -248,6 +248,48 @@ router.put('/users/:id/toggle-status', authMiddleware, adminOnly, async (req, re
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Unambiguous alphabet for generated temp passwords — excludes 0/O/o/1/l/I so a
+// password is easy to read aloud / type when shared over Slack or WhatsApp.
+const TEMP_PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+function generateTempPassword(len = 12) {
+  const alpha = TEMP_PW_ALPHABET;
+  // Rejection-sampling ceiling: discard bytes >= max so we never introduce
+  // modulo bias toward the first (256 % alpha.length) characters.
+  const max = 256 - (256 % alpha.length);
+  let out = '';
+  while (out.length < len) {
+    for (const b of crypto.randomBytes(len * 2)) {
+      if (b < max) { out += alpha[b % alpha.length]; if (out.length === len) break; }
+    }
+  }
+  return out;
+}
+
+// POST /admin/users/:user_id/reset-password — admin-driven password reset that
+// preserves ALL of the target's data (tasks, KPIs, scores, audit history); only
+// password_hash is updated. The temp password is returned ONCE in the response
+// body and is never persisted or logged in plaintext. super_admin and self are
+// blocked, mirroring the delete / toggle-status guards above.
+router.post('/admin/users/:user_id/reset-password', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { user_id } = req.params;
+    if (user_id === req.user.id) return res.status(400).json({ error: 'You cannot reset your own password here' });
+    const target = (await query('SELECT id, email, role FROM users WHERE id=$1', [user_id])).rows[0];
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    if (target.role === 'super_admin') return res.status(403).json({ error: 'A super_admin password cannot be reset here' });
+    const tempPassword = generateTempPassword(12);
+    const hash = bcrypt.hashSync(tempPassword, 10);
+    await query('UPDATE users SET password_hash=$1 WHERE id=$2', [hash, target.id]);
+    await logAgentActivity({
+      agent_name: req.user.email,
+      action_type: 'admin_password_reset',
+      user_id: target.id,
+      reasoning: `Admin ${req.user.email} reset password for ${target.email}`,
+    });
+    res.json({ success: true, temp_password: tempPassword, email: target.email });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/activity', authMiddleware, async (req, res) => {
   try {
     const { log_date, metric, value, notes } = req.body;
