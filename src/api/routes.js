@@ -1337,9 +1337,13 @@ router.get('/performance/history/:userId', authMiddleware, adminOnly, async (req
 // Manually trigger scoring + escalation now (admin) — useful for demos.
 router.post('/performance/calculate', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const score = await runPerformanceCheck();
+    // Optional ad-hoc backfill: score a specific past day. Accept only YYYY-MM-DD;
+    // anything else falls through to the default (businessToday()).
+    const raw = req.body?.date || req.query?.date;
+    const date = (typeof raw === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(raw)) ? raw : undefined;
+    const score = await runPerformanceCheck({ date });
     const esc = await runEscalationCheck();
-    res.json({ scored: score.count, escalations: esc.count, score, esc });
+    res.json({ scored: score.count, escalations: esc.count, date: score.date, score, esc });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

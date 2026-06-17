@@ -117,15 +117,35 @@ async function runPerformanceCheck({ dryRun = false, date } = {}) {
 
   const scored = [];
   for (const u of users) {
-    // Component 1 — task completion
+    // Component 1 — task completion.
+    // Denominator (tasks_assigned): tasks assigned for this date by task_date,
+    //   including ones still pending — they keep dragging the ratio on their due day.
+    // Numerator (tasks_completed): tasks marked completed whose status change landed
+    //   on this date, judged by daily_tasks.updated_at converted to America/Chicago
+    //   (NOT task_date). So a task assigned Jun 1 but completed Jun 2 credits Jun 2,
+    //   not Jun 1. updated_at is NULL for never-touched tasks, so a pending task can
+    //   never count as done. The outer WHERE pulls the union of both sets so a task
+    //   completed late (task_date != scored date) is still visible to the numerator.
     const t = (await query(
-      `SELECT COUNT(*) FILTER (WHERE status='completed')::int done,
-              COUNT(*)::int total
-       FROM daily_tasks WHERE user_id=$1 AND task_date=$2`, [u.id, today]
+      `SELECT
+         COUNT(*) FILTER (
+           WHERE status='completed'
+             AND (updated_at AT TIME ZONE 'America/Chicago')::date = $2::date
+         )::int done,
+         COUNT(*) FILTER (WHERE task_date=$2)::int total
+       FROM daily_tasks
+       WHERE user_id=$1
+         AND (task_date=$2
+              OR (status='completed'
+                  AND (updated_at AT TIME ZONE 'America/Chicago')::date = $2::date))`,
+      [u.id, today]
     )).rows[0];
     const tasks_assigned = t.total, tasks_completed = t.done;
+    // Cap the ratio at 1.0: with the new windowing, completing leftovers from prior
+    // days can push tasks_completed above tasks_assigned for the day — credit it, but
+    // never let task_completion_score exceed its 40-point weight.
     const task_completion_score = tasks_assigned > 0
-      ? Math.round((tasks_completed / tasks_assigned) * 40)
+      ? Math.round(Math.min(1, tasks_completed / tasks_assigned) * 40)
       : 0;
 
     // Component 2 — KPI progress this week
@@ -138,11 +158,13 @@ async function runPerformanceCheck({ dryRun = false, date } = {}) {
       : 0;
     const kpi_progress_score = Math.round((weekly_kpi_pct / 100) * 30);
 
-    // Component 3 — activity logging today
+    // Component 3 — activity. A manual activity_logs entry today satisfies this,
+    // OR (Issue 2 fix) completing at least one task today now also counts as activity,
+    // so finishing assigned work no longer leaves activity at 0. Max still 20.
     const a = parseInt((await query(
       `SELECT COUNT(*) c FROM activity_logs WHERE user_id=$1 AND log_date=$2`, [u.id, today]
     )).rows[0].c, 10);
-    const activity_score = a > 0 ? 20 : 0;
+    const activity_score = (a > 0 || tasks_completed > 0) ? 20 : 0;
 
     // Component 4 — response (any task completed today)
     const response_score = tasks_completed > 0 ? 10 : 0;

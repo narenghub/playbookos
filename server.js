@@ -15,7 +15,17 @@ const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/
 const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('./src/lib/agents/orchestrator');
 const { runWeeklyLinkedInCampaign } = require('./src/lib/agents/linkedin-agent');
+const { businessToday } = require('./src/lib/agent-core');
 const routes = require('./src/api/routes');
+
+// Trailing N business days (America/Chicago), newest first, as YYYY-MM-DD strings.
+// Anchor the current Chicago date at 12:00 UTC before subtracting whole days so the
+// arithmetic never slips across a calendar boundary (including DST transitions).
+function trailingBusinessDays(n) {
+  const anchor = new Date(`${businessToday()}T12:00:00Z`);
+  return Array.from({ length: n }, (_, i) =>
+    new Date(anchor.getTime() - i * 86400000).toISOString().slice(0, 10));
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -178,10 +188,19 @@ cron.schedule('0 18 * * *', withAlerts('daily-18utc-performance-scoring', async 
     console.error('[CRON] Performance scoring error:', e.message);
     await sendCronAlert('daily-18utc-performance-scoring/legacy-coaching', e);
   }
-  // New 4-component scoring + 4-level escalation workflow (Performance Accountability)
+  // New 4-component scoring + 4-level escalation workflow (Performance Accountability).
+  // Recompute the trailing 3 days (today + 2 prior) every run so a task completed a
+  // day or two after it was assigned retroactively credits the day it was completed.
+  // The score write is idempotent (ON CONFLICT (user_id, score_date) DO UPDATE).
   try {
-    const score = await runPerformanceCheck();
-    console.log(`[CRON] runPerformanceCheck done — ${score.count} users scored`);
+    let totalScored = 0;
+    for (const d of trailingBusinessDays(3)) {
+      const score = await runPerformanceCheck({ date: d });
+      totalScored += score.count;
+      console.log(`[CRON] runPerformanceCheck ${d} done — ${score.count} users scored`);
+    }
+    console.log(`[CRON] runPerformanceCheck trailing-3 done — ${totalScored} user-days scored`);
+    // Escalation reads only the latest day's scores; run it once for today.
     const esc = await runEscalationCheck();
     console.log(`[CRON] runEscalationCheck done — ${esc.count} escalation(s) fired`);
   } catch (e) {
