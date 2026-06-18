@@ -843,6 +843,7 @@ async team() {
             action = `<div style="position:relative;display:inline-block">
               <button onclick="toggleActionsMenu(event,'${u.id}')" style="background:#9ca3af;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">Actions ▼</button>
               <div id="actions-menu-${u.id}" class="actions-menu" style="display:none;position:absolute;right:0;top:28px;background:#fff;border:1px solid #ddd;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:100;min-width:170px;overflow:hidden">
+                ${item('Edit name', '#1B3A6B', 'editUserName')}
                 ${item('Set WhatsApp', '#0D7377', 'setUserWhatsApp')}
                 ${item('Set Active', '#1D9E75', 'setUserActive')}
                 ${item('Set Inactive', '#BA7517', 'setUserInactive')}
@@ -1172,6 +1173,22 @@ async function resetUserPassword(id, name) {
     return;
   }
   showTempPasswordModal(name, res.email, res.temp_password);
+}
+
+async function editUserName(id, name) {
+  const next = prompt('Edit name for this user:', name);
+  if (next === null) return;                 // cancelled
+  const trimmed = next.trim();
+  if (!trimmed) { alert('Name cannot be empty'); return; }
+  if (trimmed.length > 100) { alert('Name must be 100 characters or fewer'); return; }
+  if (trimmed === name) return;              // no change
+  const res = await API('/admin/users/' + id + '/edit-name', { method: 'POST', body: JSON.stringify({ name: trimmed }) });
+  if (res.error) {
+    if (typeof showToast === 'function') showToast('Error: ' + res.error, 'error', 5000);
+    else alert('Error: ' + res.error);
+    return;
+  }
+  pages.team();
 }
 
 // One-time display of the generated temp password. Built dynamically (not in the

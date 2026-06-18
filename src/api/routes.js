@@ -290,6 +290,30 @@ router.post('/admin/users/:user_id/reset-password', authMiddleware, adminOnly, a
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Edit a user's display name (admin-only). Fixes invite typos without delete +
+// re-invite, so all of the user's data (tasks, KPIs, scores, history) is kept.
+// Name only — no role/email/other-field changes here.
+router.post('/admin/users/:user_id/edit-name', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { user_id } = req.params;
+    if (typeof req.body?.name !== 'string') return res.status(400).json({ error: 'name must be a string' });
+    const name = req.body.name.trim();
+    if (!name) return res.status(400).json({ error: 'name cannot be empty' });
+    if (name.length > 100) return res.status(400).json({ error: 'name must be 100 characters or fewer' });
+    const target = (await query('SELECT id, name, email, role FROM users WHERE id=$1', [user_id])).rows[0];
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    const oldName = target.name;
+    await query('UPDATE users SET name=$1 WHERE id=$2', [name, target.id]);
+    await logAgentActivity({
+      agent_name: req.user.email,
+      action_type: 'admin_user_edit',
+      user_id: target.id,
+      reasoning: `Admin ${req.user.email} renamed ${target.email}: "${oldName}" → "${name}"`,
+    });
+    res.json({ success: true, user: { id: target.id, name, email: target.email, role: target.role } });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/activity', authMiddleware, async (req, res) => {
   try {
     const { log_date, metric, value, notes } = req.body;
