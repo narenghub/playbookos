@@ -112,7 +112,9 @@ async function runPerformanceCheck({ dryRun = false, date } = {}) {
   const today = date || businessToday();
   const weekStart = mondayOf(new Date(today)).toISOString().slice(0, 10);
   const users = (await query(
-    `SELECT id, name, role FROM users WHERE is_active=1 ORDER BY name`
+    `SELECT id, name, role FROM users
+     WHERE is_active=1 AND COALESCE(excluded_from_scoring, FALSE) = FALSE
+     ORDER BY name`
   )).rows;
 
   const scored = [];
@@ -279,6 +281,7 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
     SELECT p.*, u.name, u.role, u.email, u.whatsapp_number
     FROM performance_scores p JOIN users u ON u.id = p.user_id
     WHERE p.score_date = $1 AND COALESCE(p.is_weekly_summary,0)=0 AND u.is_active=1
+      AND COALESCE(u.excluded_from_scoring, FALSE) = FALSE
       AND (u.created_at IS NULL OR u.created_at::timestamptz <= NOW() - INTERVAL '7 days')
   `, [today])).rows;
 

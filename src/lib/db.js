@@ -496,6 +496,11 @@ async function migrateSchemas() {
       -- task-update tool (Update button on Employee Activity + PUT /agent/tasks/:id)
       -- to a non-admin user. Set via SQL only; no admin UI grants it.
       ALTER TABLE users ADD COLUMN IF NOT EXISTS can_run_standup BOOLEAN DEFAULT FALSE;
+      -- excluded_from_scoring: omit a user (e.g. CEO/super_admin doing work
+      -- PlaybookOS doesn't measure) from performance scoring, the daily score
+      -- email, and the escalation digest. Other emails (briefings) still send.
+      -- Set via SQL only; no admin UI.
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS excluded_from_scoring BOOLEAN DEFAULT FALSE;
       CREATE TABLE IF NOT EXISTS whatsapp_log (
         id TEXT PRIMARY KEY,
         user_id TEXT,

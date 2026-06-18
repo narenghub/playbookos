@@ -113,7 +113,9 @@ async function checkMilestoneTriggers({ dryRun = false } = {}) {
 async function scoreAllAndCoach({ dryRun = false, date = null } = {}) {
   const scoreDate = date || new Date().toISOString().slice(0, 10);
   const users = (await query(
-    `SELECT id, name, email, role FROM users WHERE is_active=1 AND role <> 'admin' AND email IS NOT NULL`
+    `SELECT id, name, email, role FROM users
+     WHERE is_active=1 AND role <> 'admin' AND email IS NOT NULL
+       AND COALESCE(excluded_from_scoring, FALSE) = FALSE`
   )).rows;
 
   if (dryRun) {
