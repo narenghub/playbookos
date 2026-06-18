@@ -202,15 +202,11 @@ async function scoreTeamMember(userId, date) {
       [userId, date]
     )).rows;
     if (prev.length >= 2 && prev[0].score_0_to_100 < 60 && prev[1].score_0_to_100 < 60) {
+      // Flag retained so the escalated_to_admin column stays populated (briefing-agent
+      // reads it). The legacy per-user "Performance escalation: <name>" email — which
+      // had a nondeterministic admin recipient and ignored ramp-up grace — was retired
+      // in favor of the consolidated runEscalationCheck digest.
       escalated = true;
-      const admin = (await query("SELECT email FROM users WHERE role='admin' LIMIT 1")).rows[0];
-      if (admin?.email) {
-        await sendEmail({
-          to: admin.email,
-          subject: `Performance escalation: ${userRow.name} — 3 days below 60`,
-          html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#1B3A6B">Performance escalation</h2><p><strong>${userRow.name}</strong> (${userRow.role}) has scored below 60 for 3 consecutive days. Today: <strong>${score}/100</strong>.</p><p><strong>Blockers identified today:</strong></p><ul>${blockers.map(b => `<li>${b}</li>`).join('') || '<li>none specific</li>'}</ul><p><strong>Coaching note sent to them:</strong></p><blockquote style="border-left:3px solid #0D7377;padding-left:12px;margin:8px 0;color:#444">${note}</blockquote><p style="margin-top:16px">Recommended action: schedule a 1-on-1 check-in.</p></div>`
-        });
-      }
     }
   }
 
