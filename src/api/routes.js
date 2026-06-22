@@ -2372,10 +2372,10 @@ router.post('/linkedin/regenerate-image/:id', authMiddleware, adminOnly, async (
     if (result.skipped) return res.status(503).json({ error: result.reason });
     if (result.error) return res.status(502).json({ error: result.error });
     await query(
-      `UPDATE linkedin_content_queue SET generated_image_url=$1 WHERE id=$2`,
-      [result.url, req.params.id]
+      `UPDATE linkedin_content_queue SET generated_image_url=$1, linkedin_image_asset_urn=$2 WHERE id=$3`,
+      [result.url, result.asset_urn || null, req.params.id]
     );
-    res.json({ success: true, id: req.params.id, generated_image_url: result.url, prompt: result.prompt });
+    res.json({ success: true, id: req.params.id, generated_image_url: result.url, linkedin_image_asset_urn: result.asset_urn || null, prompt: result.prompt });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

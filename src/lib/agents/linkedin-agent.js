@@ -309,8 +309,20 @@ async function generatePostImage(molecule_name, post_type) {
     const dir = pathMod.join(process.cwd(), 'public', 'linkedin-images');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const filename = crypto.randomUUID() + '.png';
-    fs.writeFileSync(pathMod.join(dir, filename), buffer);
-    return { url: '/linkedin-images/' + filename, prompt, model: modelUsed };
+    const diskPath = pathMod.join(dir, filename);
+    fs.writeFileSync(diskPath, buffer);
+    // Upload to LinkedIn now (generation time), not at publish time: the local file
+    // lives on ephemeral container disk and may be gone after a redeploy. We capture
+    // the durable asset URN here. Failure is non-blocking — image still saved locally,
+    // asset_urn comes back null, and the post falls back to text-only at publish.
+    let asset_urn = null;
+    const token = process.env.LINKEDIN_ACCESS_TOKEN;
+    if (token) {
+      const a = await getAuthorUrn(token);
+      if (a.error) console.warn('[linkedin-agent] image upload skipped — author URN: ' + a.error);
+      else asset_urn = await uploadImageToLinkedIn(diskPath, a.urn);
+    }
+    return { url: '/linkedin-images/' + filename, prompt, model: modelUsed, asset_urn };
   } catch (e) {
     return { error: e.message, model: modelUsed };
   }
@@ -341,19 +353,11 @@ async function getMemberURN(token) {
   }
 }
 
-// Push a queued post to LinkedIn. The row must be approved.
-// Author URN switches on LINKEDIN_POST_AS_ORG:
-//   true  -> urn:li:organization:<LINKEDIN_ORGANIZATION_ID> (needs the
-//            w_organization_social scope; flip this once the LinkedIn
-//            Community Management API approval lands)
-//   false -> urn:li:person:<sub> via getMemberURN (needs w_member_social;
-//            this is the default until org scope is available)
-async function publishPost(queueRow) {
-  const token = process.env.LINKEDIN_ACCESS_TOKEN;
-  if (!token) {
-    return { skipped: true, reason: 'LINKEDIN_ACCESS_TOKEN is not set' };
-  }
-  let author;
+// Resolve the author URN for posts/asset uploads. Switches on LINKEDIN_POST_AS_ORG:
+//   true  -> urn:li:organization:<LINKEDIN_ORGANIZATION_ID> (needs w_organization_social)
+//   false -> urn:li:person:<sub> via getMemberURN (needs w_member_social)
+// Returns { urn } or { error }.
+async function getAuthorUrn(token) {
   if (String(process.env.LINKEDIN_POST_AS_ORG).toLowerCase() === 'true') {
     const DEFAULT_ORG = '106395356';
     const orgRaw = (process.env.LINKEDIN_ORGANIZATION_ID || '').trim();
@@ -364,22 +368,97 @@ async function publishPost(queueRow) {
       console.warn('[linkedin-agent] LINKEDIN_ORGANIZATION_ID is a non-organization URN (' + orgRaw + '); falling back to ' + DEFAULT_ORG);
       orgId = DEFAULT_ORG;
     } else orgId = orgRaw;
-    author = `urn:li:organization:${orgId}`;
-  } else {
-    const member = await getMemberURN(token);
-    if (member.error) return { error: member.error };
-    author = member.urn;
+    return { urn: `urn:li:organization:${orgId}` };
   }
+  const member = await getMemberURN(token);
+  if (member.error) return { error: member.error };
+  return { urn: member.urn };
+}
+
+// Upload a local image file to LinkedIn via the legacy 3-step /v2/assets flow
+// (registerUpload -> PUT binary). Returns the asset URN (urn:li:digitalmediaAsset:…)
+// on success, or null on ANY failure — it never throws, so a failed/blocked upload
+// degrades to a text-only post rather than breaking draft creation or publishing.
+// `owner` on the asset must match the post author URN (org or person).
+async function uploadImageToLinkedIn(localPath, authorUrn) {
+  const token = process.env.LINKEDIN_ACCESS_TOKEN;
+  if (!token || !authorUrn) return null;
+  try {
+    const fs = require('fs');
+    if (!fs.existsSync(localPath)) {
+      console.warn('[linkedin-agent] image upload skipped — file not found: ' + localPath);
+      return null;
+    }
+    // Step 1 — registerUpload to get an asset URN + a one-time upload URL.
+    const reg = await fetch('https://api.linkedin.com/v2/assets?action=registerUpload', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'X-Restli-Protocol-Version': '2.0.0' },
+      body: JSON.stringify({ registerUploadRequest: {
+        recipes: ['urn:li:digitalmediaRecipe:feedshare-image'],
+        owner: authorUrn,
+        serviceRelationships: [{ relationshipType: 'OWNER', identifier: 'urn:li:userGeneratedContent' }],
+      } }),
+    });
+    if (!reg.ok) {
+      console.warn('[linkedin-agent] registerUpload ' + reg.status + ': ' + (await reg.text().catch(() => '')).slice(0, 200));
+      return null;
+    }
+    const regData = await reg.json();
+    const asset = regData?.value?.asset;
+    const uploadUrl = regData?.value?.uploadMechanism?.['com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest']?.uploadUrl;
+    if (!asset || !uploadUrl) {
+      console.warn('[linkedin-agent] registerUpload response missing asset/uploadUrl');
+      return null;
+    }
+    // Step 2 — PUT the raw image bytes to the upload URL (LinkedIn's documented
+    // `--upload-file` semantics). Files written by generatePostImage are PNG.
+    const bytes = fs.readFileSync(localPath);
+    const put = await fetch(uploadUrl, {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'image/png' },
+      body: bytes,
+    });
+    if (!put.ok) {
+      console.warn('[linkedin-agent] image binary upload ' + put.status + ': ' + (await put.text().catch(() => '')).slice(0, 200));
+      return null;
+    }
+    console.log('[linkedin-agent] image uploaded → ' + asset);
+    return asset;
+  } catch (e) {
+    console.warn('[linkedin-agent] image upload failed: ' + e.message);
+    return null;
+  }
+}
+
+// Push a queued post to LinkedIn. The row must be approved. The author URN comes
+// from getAuthorUrn; if the row carries a linkedin_image_asset_urn (captured at
+// generation time) the post attaches that image, else it posts text-only.
+async function publishPost(queueRow) {
+  const token = process.env.LINKEDIN_ACCESS_TOKEN;
+  if (!token) {
+    return { skipped: true, reason: 'LINKEDIN_ACCESS_TOKEN is not set' };
+  }
+  const a = await getAuthorUrn(token);
+  if (a.error) return { error: a.error };
+  const author = a.urn;
   const text = clampPost(queueRow.full_post || '');
+  const assetUrn = (queueRow.linkedin_image_asset_urn || '').trim();
+  const shareContent = {
+    shareCommentary: { text },
+    shareMediaCategory: assetUrn ? 'IMAGE' : 'NONE',
+  };
+  if (assetUrn) {
+    shareContent.media = [{
+      status: 'READY',
+      media: assetUrn,
+      title: { text: (queueRow.headline || 'Abiozen').slice(0, 200) },
+      description: { text: '' },
+    }];
+  }
   const body = {
     author,
     lifecycleState: 'PUBLISHED',
-    specificContent: {
-      'com.linkedin.ugc.ShareContent': {
-        shareCommentary: { text },
-        shareMediaCategory: 'NONE',
-      },
-    },
+    specificContent: { 'com.linkedin.ugc.ShareContent': shareContent },
     visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' },
   };
   try {
@@ -423,11 +502,12 @@ async function insertDraft(post, scheduledFor) {
   const id = crypto.randomUUID();
   await query(
     `INSERT INTO linkedin_content_queue
-       (id, post_type, headline, body, hashtags, full_post, status, scheduled_for, source_molecule, image_prompt, structure_image_url, generated_image_url, created_at)
-     VALUES ($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,$10,$11,NOW())`,
+       (id, post_type, headline, body, hashtags, full_post, status, scheduled_for, source_molecule, image_prompt, structure_image_url, generated_image_url, linkedin_image_asset_urn, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,'draft',$7,$8,$9,$10,$11,$12,NOW())`,
     [id, post.post_type, post.headline, post.body, post.hashtags, post.full_post,
      scheduledFor, post.source_molecule, post.image_prompt || null,
-     post.structure_image_url || null, post.generated_image_url || null]
+     post.structure_image_url || null, post.generated_image_url || null,
+     post.linkedin_image_asset_urn || null]
   );
   return id;
 }

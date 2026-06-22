@@ -476,6 +476,10 @@ async function migrateSchemas() {
       ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS image_prompt TEXT;
       ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS structure_image_url TEXT;
       ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS generated_image_url TEXT;
+      -- LinkedIn asset URN (urn:li:digitalmediaAsset:...) from /v2/assets, captured
+      -- at image-generation time so it survives the ephemeral local file; referenced
+      -- in the UGC publish payload to attach the image to the post.
+      ALTER TABLE linkedin_content_queue ADD COLUMN IF NOT EXISTS linkedin_image_asset_urn TEXT;
       -- Performance Accountability System — adds 4-component scoring, streak
       -- counters, weekly-summary flag. score_0_to_100 stays for backward compat
       -- (runPerformanceCheck sets it = total_score).
