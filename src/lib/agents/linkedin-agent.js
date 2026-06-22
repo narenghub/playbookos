@@ -176,17 +176,26 @@ async function generateChemicalProfile({ name, cas }) {
 
 // Image prompt for DALL-E / Midjourney — templated by post type for reliability.
 function generateImagePrompt(post_type, molecule_name) {
-  const m = (molecule_name || 'pharmaceutical molecule').trim();
-  if (post_type === 'product') {
-    return `Professional pharmaceutical laboratory with molecular structure of ${m} floating in soft blue light, clean modern design, biotech aesthetic, sharp focus, no text`;
+  const m = (molecule_name || '').trim();
+  const hasMolecule = m && m.toLowerCase() !== 'pharmaceutical molecule';
+  const exclusions = 'Strictly avoid: warehouses, distribution centers, glass vials, boxes, conveyor belts, logistics imagery, stock-photo aesthetics, any text or labels.';
+
+  if (post_type === 'product' && hasMolecule) {
+    return `Premium 3D molecular structure visualization of ${m}, crystalline chemical bonds suspended in light, abstract scientific art combining chemistry and computation, gradient deep blue and purple lighting, journal-cover quality, photorealistic with cinematic depth of field. ${exclusions}`;
   }
+
   if (post_type === 'market_intelligence') {
-    return `Modern data visualization of pharmaceutical market trends, holographic molecular structures hovering over a US map, blue and teal palette, biotech executive aesthetic, no text`;
+    const moleculeRef = hasMolecule ? ` with abstract visual reference to ${m} suggested through glowing molecular bonds in the composition` : '';
+    return `Premium scientific data visualization, holographic molecular structures floating over abstract market data flows, neural-network-style connections suggesting AI-driven analysis, deep navy and teal palette with soft glowing accents, executive biotech aesthetic, journal-cover quality${moleculeRef}. ${exclusions}`;
   }
+
   if (post_type === 'company_update') {
-    return `Sleek pharmaceutical distribution operations, glass laboratory vials in soft warehouse lighting, modern logistics, professional biotech corporate aesthetic, no text`;
+    const moleculeRef = hasMolecule ? ` with abstract visual reference to ${m} suggested through glowing molecular bonds in the composition` : '';
+    return `Premium abstract scientific composition suggesting innovation at the intersection of chemistry and artificial intelligence, flowing molecular patterns and computational geometry, deep color palette with soft glowing accents, modern AI-augmented research aesthetic, journal-cover quality, photorealistic with cinematic depth of field${moleculeRef}. ${exclusions}`;
   }
-  return `Professional biotech laboratory aesthetic, clean and modern composition, no text`;
+
+  // Fallback for any unknown post_type — same as company_update with no molecule
+  return `Premium abstract scientific composition suggesting innovation at the intersection of chemistry and artificial intelligence, flowing molecular patterns and computational geometry, deep color palette with soft glowing accents, modern AI-augmented research aesthetic, journal-cover quality, photorealistic with cinematic depth of field. ${exclusions}`;
 }
 
 // Construct a PubChem 2D-structure PNG URL for a CAS number or chemical name.
@@ -205,9 +214,9 @@ async function generatePostImage(molecule_name, post_type) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return { skipped: true, reason: 'OPENAI_API_KEY is not set' };
 
-  const prompt = (post_type === 'product' && molecule_name)
-    ? `Professional pharmaceutical laboratory, clean white and blue aesthetic, molecular structure visualization of ${molecule_name}, modern biotech facility, scientific precision, enterprise-grade photography style, no text`
-    : generateImagePrompt(post_type, molecule_name);
+  // Single source of truth — the same template drives the displayed prompt (:638)
+  // and the actually-generated image, so they never diverge.
+  const prompt = generateImagePrompt(post_type, molecule_name);
 
   // OpenAI's image endpoint is the same path for every model — gpt-image-1,
   // dall-e-3, and dall-e-2 all POST to /v1/images/generations. The fallback
