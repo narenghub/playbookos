@@ -178,24 +178,24 @@ async function generateChemicalProfile({ name, cas }) {
 function generateImagePrompt(post_type, molecule_name) {
   const m = (molecule_name || '').trim();
   const hasMolecule = m && m.toLowerCase() !== 'pharmaceutical molecule';
-  const exclusions = 'Strictly avoid: warehouses, distribution centers, glass vials, boxes, conveyor belts, logistics imagery, stock-photo aesthetics, any text or labels.';
+  const exclusions = 'Strictly avoid: warehouses, distribution centers, glass vials, boxes, conveyor belts, logistics imagery, illustration aesthetics, abstract art, neon glow effects, fantasy lighting, any text or labels.';
 
   if (post_type === 'product' && hasMolecule) {
-    return `Premium 3D molecular structure visualization of ${m}, crystalline chemical bonds suspended in light, abstract scientific art combining chemistry and computation, gradient deep blue and purple lighting, journal-cover quality, photorealistic with cinematic depth of field. ${exclusions}`;
+    return `Macro photography of crystalline molecular structure resembling ${m}, shot with high-resolution scientific camera, extreme close-up of crystalline chemical bonds catching laboratory light, shallow depth of field, deep blue and amber laboratory ambient lighting, photorealistic detail like Nature journal cover photography, no illustration or 3D render aesthetic — must look like an actual photograph taken in a research laboratory. ${exclusions}`;
   }
 
   if (post_type === 'market_intelligence') {
-    const moleculeRef = hasMolecule ? ` with abstract visual reference to ${m} suggested through glowing molecular bonds in the composition` : '';
-    return `Premium scientific data visualization, holographic molecular structures floating over abstract market data flows, neural-network-style connections suggesting AI-driven analysis, deep navy and teal palette with soft glowing accents, executive biotech aesthetic, journal-cover quality${moleculeRef}. ${exclusions}`;
+    const moleculeRef = hasMolecule ? `, with subtle visual reference to ${m} crystalline structure on the workstation display` : '';
+    return `Photorealistic macro photograph of computational research workstation, real laboratory environment, molecular models on screen with research data visible softly out of focus, deep navy laboratory lighting, shot like documentary scientific photography for Science magazine, no illustration or abstract art aesthetic — must look like a real photograph${moleculeRef}. ${exclusions}`;
   }
 
   if (post_type === 'company_update') {
-    const moleculeRef = hasMolecule ? ` with abstract visual reference to ${m} suggested through glowing molecular bonds in the composition` : '';
-    return `Premium abstract scientific composition suggesting innovation at the intersection of chemistry and artificial intelligence, flowing molecular patterns and computational geometry, deep color palette with soft glowing accents, modern AI-augmented research aesthetic, journal-cover quality, photorealistic with cinematic depth of field${moleculeRef}. ${exclusions}`;
+    const moleculeRef = hasMolecule ? `, with subtle visual reference to ${m} crystalline structure visible in the composition` : '';
+    return `Photorealistic macro photograph of advanced research laboratory environment, shot like documentary photography for a scientific journal, shallow depth of field, real equipment partially visible softly out of focus, deep blue ambient laboratory lighting, photorealistic detail — must look like an actual photograph taken inside a real research facility, not illustration or 3D render${moleculeRef}. ${exclusions}`;
   }
 
   // Fallback for any unknown post_type — same as company_update with no molecule
-  return `Premium abstract scientific composition suggesting innovation at the intersection of chemistry and artificial intelligence, flowing molecular patterns and computational geometry, deep color palette with soft glowing accents, modern AI-augmented research aesthetic, journal-cover quality, photorealistic with cinematic depth of field. ${exclusions}`;
+  return `Photorealistic macro photograph of advanced research laboratory environment, shot like documentary photography for a scientific journal, shallow depth of field, real equipment partially visible softly out of focus, deep blue ambient laboratory lighting, photorealistic detail — must look like an actual photograph taken inside a real research facility, not illustration or 3D render. ${exclusions}`;
 }
 
 // Construct a PubChem 2D-structure PNG URL for a CAS number or chemical name.
