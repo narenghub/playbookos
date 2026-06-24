@@ -134,10 +134,10 @@ async function runPerformanceCheck({ dryRun = false, date } = {}) {
            WHERE status='completed'
              AND (updated_at AT TIME ZONE 'America/Chicago')::date = $2::date
          )::int done,
-         COUNT(*) FILTER (WHERE task_date=$2)::int total
+         COUNT(*) FILTER (WHERE task_date::date = $2::date)::int total
        FROM daily_tasks
        WHERE user_id=$1
-         AND (task_date=$2
+         AND (task_date::date = $2::date
               OR (status='completed'
                   AND (updated_at AT TIME ZONE 'America/Chicago')::date = $2::date))`,
       [u.id, today]
