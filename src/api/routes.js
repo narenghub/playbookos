@@ -366,7 +366,7 @@ router.post('/users/send-onboarding', authMiddleware, adminOnly, async (req, res
       <li>Finish it — click <strong>Done</strong></li>
       <li>Record what you did on the <strong>My Activity</strong> page</li>
     </ol>
-    <p style="background:#f8fafc;border-radius:6px;padding:12px 14px"><strong>How scoring works:</strong> your daily score is calculated at 6pm. Complete your tasks and log activity to score above 70.</p>
+    <p style="background:#f8fafc;border-radius:6px;padding:12px 14px"><strong>How scoring works:</strong> your daily score is calculated at 1pm CDT / 11:30pm IST. Complete your tasks and log activity before then to score above 70.</p>
     <p style="margin-top:16px"><a href="${base}/#my-tasks" style="background:#0D7377;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:700">Open My Tasks →</a></p>
     <p style="color:#666;font-size:13px;margin-top:16px">You've got this — small daily actions add up fast. 🙌</p>
   </div>
