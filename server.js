@@ -9,7 +9,7 @@ const { withAlerts, sendCronAlert } = require('./src/lib/cron-alerts');
 const { syncGitHubAllDevs, runWeeklyAnalysis, scoreAllAndCoach } = require('./src/lib/jobs');
 const { analyzeRevenueTrends, getProcurementPriorities } = require('./src/lib/agents/revenue-agent');
 const { generateDailyBriefing } = require('./src/lib/agents/briefing-agent');
-const { syncAlgoliaSearchData, generateSEORecommendations } = require('./src/lib/agents/growth-agent');
+const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('./src/lib/agents/growth-agent');
 const { trackKeywordRankings, generateSEOTasksForTeam, trackAlgoliaNoResults } = require('./src/lib/agents/seo-agent');
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/lib/agents/goal-engine');
 const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
@@ -160,6 +160,16 @@ cron.schedule('0 9 * * 1', withAlerts('weekly-mon-9utc-revenue-intel', async () 
   const proc = await getProcurementPriorities();
   if (proc.skipped) console.log(`[CRON] Procurement priorities skipped — ${proc.reason}`);
   else console.log(`[CRON] Procurement priorities done — ${proc.items.length} SKUs, emailed ${proc.emailed} of ${proc.recipients.length} procurement users`);
+}));
+
+// Monday 3 PM UTC (9 AM CST) — weekly Market Intelligence: 150 molecules
+// (100 research chemicals + 50 GMP APIs). Its own slot, not chained to the 09:00
+// UTC weekly analysis, so results land when Naresh and procurement are awake to
+// review them. ~2-5 min, 7 Claude calls; withAlerts handles error alerting.
+cron.schedule('0 15 * * 1', withAlerts('weekly-mon-15utc-market-intelligence', async () => {
+  console.log('[CRON] Market Intelligence starting...');
+  const mi = await runMarketIntelligence();
+  console.log(`[CRON] Market Intelligence done — ${mi.total} molecules (${mi.research_count} research + ${mi.gmp_count} GMP) for ${mi.week_start}, ${mi.tasks_queued || 0} tasks queued`);
 }));
 
 // Daily 6 PM: check milestone triggers

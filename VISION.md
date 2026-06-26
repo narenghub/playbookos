@@ -112,6 +112,18 @@ Layer 2 is five independent autonomous agents. Each runs on its own schedule, co
 
 **Integrations needed.** Apollo.io (existing API key, `APOLLO_API_KEY`). Resend (email). Possibly a phone integration to log calls back into `activity_logs` automatically.
 
+### 2F. Market Intelligence Agent
+
+**Purpose.** Produce a large, fresh, non-repeating weekly pipeline of molecules for procurement to source — broad coverage of both research-grade chemicals and finished generic APIs, rather than a hand-tuned top-20.
+
+**Data inputs.** Demand signals from Google Search Console (`fetchGSCData`), Algolia internal search (`syncAlgoliaSearchData`), and prior analyses; the `molecule_history` table (full table for dedup, rolling last-12-weeks names as the exclusion list); the active `skus` catalog for cross-checking.
+
+**AI actions.** `runMarketIntelligence()` asks Claude (`claude-opus-4-7`) in batches for **100 research chemicals (non-GMP)** across 10 categories + **50 GMP generic APIs** proportioned across 9 therapeutic areas. New molecules are deduped against `molecule_history` by name+CAS (best-effort) and cross-checked against the catalog (`in_catalog`). CAS numbers are AI-generated and flagged for manual verification before sourcing.
+
+**Outputs.** All 150 molecules stored in `molecule_history` (with `week_start`, `gmp_status`, `sourcing_status` pipeline, `details_json`). Top-20 research + top-10 GMP queued as `approval_queue` sourcing tasks for Palash. A weekly summary emailed to the CEO and snapshotted in `ai_analyses`. UI: the Market Intelligence page (Research / GMP / History tabs, filters, CSV export, inline sourcing-status editing). Runs Mondays at 09:00 CST (15:00 UTC) in its own cron slot, so results land when the team is awake to review them.
+
+**Integrations needed.** Anthropic (`ANTHROPIC_API_KEY`), Google Search Console OAuth, Algolia, Resend (email). No new external services.
+
 ---
 
 ## Layer 3 — Marketplace Intelligence
