@@ -61,6 +61,23 @@ function requireTier(tier) {
   };
 }
 
+// Grants access if ANY of the listed tiers provides the needed read/write access.
+// For endpoints several departments should reach (e.g. market intel readable by
+// both procurement and intelligence roles). Single-tier callers keep using requireTier.
+function requireAnyTier(...tiers) {
+  return (req, res, next) => {
+    const isWrite = req.method !== 'GET' && req.method !== 'HEAD';
+    for (const tier of tiers) {
+      const access = getRoleTier(req.user.role, tier);
+      if (!access) continue;
+      const canWrite = access === 'rw' || access === 'w' || access === 'own';
+      const canRead = access === 'rw' || access === 'r' || access === 'own';
+      if (isWrite ? canWrite : canRead) { req.tierAccess = access; return next(); }
+    }
+    return res.status(403).json({ error: `Role "${req.user.role}" lacks ${isWrite ? 'write' : 'read'} access to any of: ${tiers.join(', ')}` });
+  };
+}
+
 async function fetchGitHubStats(username, dateStr) {
   const token = process.env.GITHUB_TOKEN;
   if (!token || token.includes('REPLACE')) return null;
@@ -221,4 +238,4 @@ async function scoreTeamMember(userId, date) {
   return { user_id: userId, email: userRow.email, name: userRow.name, role: userRow.role, date, score, blockers, escalated, note };
 }
 
-module.exports = { signToken, verifyToken, authMiddleware, adminOnly, requireTier, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, scoreTeamMember, computeScoreForRole, crypto };
+module.exports = { signToken, verifyToken, authMiddleware, adminOnly, requireTier, requireAnyTier, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, scoreTeamMember, computeScoreForRole, crypto };

@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { signToken, authMiddleware, adminOnly, requireTier, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
+const { signToken, authMiddleware, adminOnly, requireTier, requireAnyTier, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
 const { query, withTransaction } = require('../lib/db');
 const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
@@ -10,7 +10,7 @@ const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = require('../lib/agents/seo-agent');
-const { syncAlgoliaSearchData, generateSEORecommendations } = require('../lib/agents/growth-agent');
+const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('../lib/agents/growth-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1381,41 +1381,154 @@ router.delete('/milestones/duplicates', authMiddleware, adminOnly, async (req, r
 // ============================================================
 // MARKET INTELLIGENCE ENGINE
 // ============================================================
+// ── Market Intelligence (150-molecule weekly engine) ─────────────────────────
+// Shared helpers for the molecule_history endpoints below.
+function mhRow(r) {
+  let details = {};
+  try { details = r.details_json ? JSON.parse(r.details_json) : {}; } catch (e) { /* keep {} */ }
+  return {
+    id: r.id, molecule_name: r.molecule_name, cas_number: r.cas_number,
+    category: r.category, gmp_status: r.gmp_status, therapeutic_area: r.therapeutic_area,
+    week_start: r.week_start, sourcing_status: r.sourcing_status,
+    supplier_found: !!r.supplier_found, supplier_name: r.supplier_name,
+    estimated_value: r.estimated_value, in_catalog: !!r.in_catalog, rank: r.rank,
+    details,
+  };
+}
+async function mhLatestWeek(reqWeek) {
+  if (typeof reqWeek === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(reqWeek)) return reqWeek;
+  const r = (await query(`SELECT MAX(week_start) AS w FROM molecule_history`)).rows[0];
+  return r && r.w ? r.w : null;
+}
+function toCsv(columns, rows) {
+  const esc = v => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const lines = [columns.map(c => esc(c.label)).join(',')];
+  for (const row of rows) lines.push(columns.map(c => esc(c.get(row))).join(','));
+  return lines.join('\n');
+}
+
+// Manually trigger the full 150-molecule analysis. Runs async (≈2-5 min, 7 Claude
+// calls) so the request returns immediately rather than holding the connection.
 router.post('/market/analyze', authMiddleware, requireTier('procurement'), async (req, res) => {
-  try {
-    const crypto = require('crypto');
-    const prompt = `You are a pharmaceutical market intelligence analyst for Abiozen LLC, a US-based API distribution company. Analyze the current US pharmaceutical market and identify the TOP 20 fast-moving molecules. Focus on: GLP-1 peptides (Semaglutide, Tirzepatide), hormone therapy APIs, shortage list molecules, high-demand research chemicals, and generic APIs with growing demand. For each molecule return ONLY a JSON array: [{"name":"","cas":"","category":"","demand":"Critical/High/Medium","monthly_demand_kg":0,"buyer_segment":"","price_min":0,"price_max":0,"priority":0,"reason":""}]`;
-    const key = process.env.ANTHROPIC_API_KEY;
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 4000, messages: [{ role: 'user', content: prompt }] })
-    });
-    const data = await response.json();
-    const text = data.content?.[0]?.text || '[]';
-    let molecules = [];
-    try { const m = text.match(/\[[\s\S]*\]/); if (m) molecules = JSON.parse(m[0]); } catch(e) {}
-    const analysisId = crypto.randomUUID();
-    await query(`INSERT INTO ai_analyses (id,analysis_type,period_key,content) VALUES ($1,'market_intelligence',$2,$3)`,
-      [analysisId, new Date().toISOString().slice(0,10), JSON.stringify(molecules)]);
-    const procTeam = (await query(`SELECT * FROM users WHERE role='procurement' AND is_active=1`)).rows;
-    if (procTeam.length > 0) {
-      const { sendEmail } = require('../lib/mailer');
-      const rows = molecules.slice(0,20).map((m,i) => `<tr style="background:${i%2===0?'#f8fafc':'#fff'}"><td style="padding:8px;border:1px solid #e2e8f0">${i+1}</td><td style="padding:8px;border:1px solid #e2e8f0"><strong>${m.name}</strong></td><td style="padding:8px;border:1px solid #e2e8f0">${m.cas||'—'}</td><td style="padding:8px;border:1px solid #e2e8f0">${m.category}</td><td style="padding:8px;border:1px solid #e2e8f0;color:${m.demand==='Critical'?'#dc2626':m.demand==='High'?'#d97706':'#059669'}">${m.demand}</td><td style="padding:8px;border:1px solid #e2e8f0">$${m.price_min}-$${m.price_max}/kg</td><td style="padding:8px;border:1px solid #e2e8f0;font-weight:700;color:#1B3A6B">${m.priority}/100</td></tr>`).join('');
-      for (const member of procTeam) {
-        sendEmail({ to: member.email, subject: `🎯 This Week Top 20 Fast-Moving Molecules — Source These First`, html: `<div style="font-family:Arial;max-width:700px"><div style="background:#1B3A6B;padding:20px;border-radius:8px 8px 0 0"><h2 style="color:#fff;margin:0">Abiozen Market Intelligence</h2><p style="color:#9FE1CB;margin:4px 0 0">Weekly procurement list — ${new Date().toLocaleDateString()}</p></div><div style="padding:20px;border:1px solid #e2e8f0"><p>Hi ${member.name}, source suppliers for these molecules this week — sorted by priority.</p><table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="background:#1B3A6B;color:#fff"><th style="padding:8px">Rank</th><th>Molecule</th><th>CAS</th><th>Category</th><th>Demand</th><th>Price Range</th><th>Priority</th></tr>${rows}</table><div style="margin-top:16px;padding:12px;background:#0D7377;border-radius:6px;color:#fff;font-size:13px"><strong>Action:</strong> Source top 10 by Friday. Upload COAs to PlaybookOS SKU Economics.</div></div></div>` });
-      }
-    }
-    res.json({ success: true, molecules, assigned_to: procTeam.length });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  const weekStart = (typeof req.body?.week_start === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.week_start))
+    ? req.body.week_start : undefined;
+  runMarketIntelligence({ weekStart })
+    .then(s => console.log(`[market] analysis done — ${s.total} molecules for ${s.week_start}`))
+    .catch(e => console.error('[market] analysis failed:', e.message));
+  res.status(202).json({ started: true, message: 'Market intelligence analysis started (~2-5 min). Refresh shortly.' });
 });
 
-router.get('/market/latest', authMiddleware, requireTier('procurement'), async (req, res) => {
+// Current (or ?week=) week's 150 molecules, split into the two tabs.
+router.get('/market/weekly', authMiddleware, requireAnyTier('procurement', 'intelligence'), async (req, res) => {
   try {
-    const result = await query(`SELECT * FROM ai_analyses WHERE analysis_type='market_intelligence' ORDER BY created_at DESC LIMIT 1`);
-    if (!result.rows[0]) return res.json({ molecules: [] });
-    res.json({ molecules: JSON.parse(result.rows[0].content), created_at: result.rows[0].created_at });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const week = await mhLatestWeek(req.query.week);
+    if (!week) return res.json({ week_start: null, research: [], gmp: [], summary: { research_count: 0, gmp_count: 0, total: 0, in_catalog: 0, new_opportunities: 0 } });
+    const rows = (await query(`SELECT * FROM molecule_history WHERE week_start=$1 ORDER BY gmp_status, rank`, [week])).rows.map(mhRow);
+    const research = rows.filter(r => r.gmp_status === 'non_gmp');
+    const gmp = rows.filter(r => r.gmp_status === 'gmp');
+    const weeksTracked = (await query(`SELECT COUNT(DISTINCT week_start) AS n FROM molecule_history`)).rows[0]?.n || 0;
+    res.json({
+      week_start: week, research, gmp,
+      summary: {
+        research_count: research.length, gmp_count: gmp.length, total: rows.length,
+        in_catalog: rows.filter(r => r.in_catalog).length,
+        new_opportunities: rows.filter(r => !r.in_catalog).length,
+        tasks_queued: Math.min(20, research.length) + Math.min(10, gmp.length),
+        weeks_tracked: Number(weeksTracked),
+      },
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// All historical molecules with sourcing status. Filters: week, gmp_status,
+// sourcing_status, category. Also returns the distinct week list for the UI.
+router.get('/market/history', authMiddleware, requireTier('procurement'), async (req, res) => {
+  try {
+    const where = [], params = [];
+    const add = (sql, val) => { params.push(val); where.push(sql.replace('?', '$' + params.length)); };
+    if (/^\d{4}-\d{2}-\d{2}$/.test(req.query.week || '')) add('week_start=?', req.query.week);
+    if (['gmp', 'non_gmp'].includes(req.query.gmp_status)) add('gmp_status=?', req.query.gmp_status);
+    if (['pending', 'in_progress', 'sourced', 'unavailable'].includes(req.query.sourcing_status)) add('sourcing_status=?', req.query.sourcing_status);
+    if (req.query.category) add('LOWER(category)=LOWER(?)', req.query.category);
+    const clause = where.length ? 'WHERE ' + where.join(' AND ') : '';
+    const rows = (await query(`SELECT * FROM molecule_history ${clause} ORDER BY week_start DESC, gmp_status, rank LIMIT 3000`, params)).rows.map(mhRow);
+    const weeks = (await query(`SELECT DISTINCT week_start FROM molecule_history ORDER BY week_start DESC`)).rows.map(r => r.week_start);
+    res.json({ molecules: rows, weeks, total: rows.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update a molecule's sourcing status (Palash's pipeline). Optionally supplier info.
+router.put('/market/molecule/:id', authMiddleware, requireTier('procurement'), async (req, res) => {
+  try {
+    const { sourcing_status, supplier_name, supplier_found } = req.body || {};
+    if (sourcing_status !== undefined && !['pending', 'in_progress', 'sourced', 'unavailable'].includes(sourcing_status)) {
+      return res.status(400).json({ error: 'sourcing_status must be pending, in_progress, sourced or unavailable' });
+    }
+    const existing = (await query(`SELECT id FROM molecule_history WHERE id=$1`, [req.params.id])).rows[0];
+    if (!existing) return res.status(404).json({ error: 'molecule not found' });
+    await query(
+      `UPDATE molecule_history SET
+         sourcing_status = COALESCE($1, sourcing_status),
+         supplier_name   = COALESCE($2, supplier_name),
+         supplier_found  = COALESCE($3, supplier_found)
+       WHERE id=$4`,
+      [sourcing_status ?? null, supplier_name ?? null,
+       supplier_found === undefined ? null : (supplier_found ? 1 : 0), req.params.id]
+    );
+    const updated = (await query(`SELECT * FROM molecule_history WHERE id=$1`, [req.params.id])).rows[0];
+    res.json({ success: true, molecule: mhRow(updated) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Molecules not in the catalog, sorted by demand (rank), newest week first — the
+// procurement gap list.
+router.get('/market/gaps', authMiddleware, requireAnyTier('procurement', 'intelligence'), async (req, res) => {
+  try {
+    const week = await mhLatestWeek(req.query.week);
+    const params = [week];
+    const clause = week ? 'WHERE in_catalog=0 AND week_start=$1' : 'WHERE in_catalog=0';
+    const rows = (await query(`SELECT * FROM molecule_history ${week ? clause : 'WHERE in_catalog=0'} ORDER BY gmp_status, rank LIMIT 500`, week ? params : [])).rows.map(mhRow);
+    res.json({ week_start: week, gaps: rows, total: rows.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// CSV export — research chemicals (latest or ?week=).
+router.get('/market/export/research', authMiddleware, requireTier('procurement'), async (req, res) => {
+  try {
+    const week = await mhLatestWeek(req.query.week);
+    const rows = week ? (await query(`SELECT * FROM molecule_history WHERE week_start=$1 AND gmp_status='non_gmp' ORDER BY rank`, [week])).rows.map(mhRow) : [];
+    const cols = [
+      { label: 'Rank', get: r => r.rank }, { label: 'Molecule', get: r => r.molecule_name },
+      { label: 'CAS', get: r => r.cas_number }, { label: 'Category', get: r => r.category },
+      { label: 'Purity', get: r => r.details.typical_purity }, { label: 'Price/kg', get: r => r.details.typical_price_per_kg },
+      { label: 'Primary use', get: r => r.details.primary_use_case }, { label: 'Buyer segment', get: r => r.details.target_buyer_segment },
+      { label: 'Demand driver', get: r => r.details.demand_driver }, { label: 'APAC availability', get: r => r.details.apac_supplier_availability },
+      { label: 'In catalog', get: r => r.in_catalog ? 'yes' : 'no' }, { label: 'Sourcing status', get: r => r.sourcing_status },
+    ];
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="research-chemicals-${week || 'none'}.csv"`);
+    res.send(toCsv(cols, rows));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// CSV export — GMP APIs (latest or ?week=).
+router.get('/market/export/gmp', authMiddleware, requireTier('procurement'), async (req, res) => {
+  try {
+    const week = await mhLatestWeek(req.query.week);
+    const rows = week ? (await query(`SELECT * FROM molecule_history WHERE week_start=$1 AND gmp_status='gmp' ORDER BY rank`, [week])).rows.map(mhRow) : [];
+    const cols = [
+      { label: 'Rank', get: r => r.rank }, { label: 'Molecule', get: r => r.molecule_name },
+      { label: 'CAS', get: r => r.cas_number }, { label: 'Therapeutic area', get: r => r.therapeutic_area },
+      { label: 'GMP grade', get: r => r.details.gmp_grade }, { label: 'Purity', get: r => r.details.typical_purity },
+      { label: 'USP/EP', get: r => r.details.usp_ep_compliant }, { label: 'Price/kg', get: r => r.details.typical_price_per_kg },
+      { label: 'Market size $M', get: r => r.details.market_size_usd_millions }, { label: 'Patent status', get: r => r.details.patent_status },
+      { label: 'Mfr region', get: r => r.details.primary_manufacturers_region }, { label: 'Compounding eligible', get: r => r.details.compounding_eligible },
+      { label: 'In catalog', get: r => r.in_catalog ? 'yes' : 'no' }, { label: 'Sourcing status', get: r => r.sourcing_status },
+    ];
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Content-Disposition', `attachment; filename="gmp-apis-${week || 'none'}.csv"`);
+    res.send(toCsv(cols, rows));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ============================================================
