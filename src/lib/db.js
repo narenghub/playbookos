@@ -298,6 +298,11 @@ async function migrateSchemas() {
         UNIQUE(molecule_name, cas_number)
       );
       CREATE INDEX IF NOT EXISTS idx_seo_content_generated ON seo_content (generated_at DESC);
+      -- Catalog landing-page fields: /store/product/<category-slug>/<molecule-slug>/
+      ALTER TABLE seo_content ADD COLUMN IF NOT EXISTS category TEXT;
+      ALTER TABLE seo_content ADD COLUMN IF NOT EXISTS slug TEXT;
+      ALTER TABLE seo_content ADD COLUMN IF NOT EXISTS url TEXT;
+      ALTER TABLE seo_content ADD COLUMN IF NOT EXISTS purity TEXT;
       CREATE TABLE IF NOT EXISTS custom_roles (
         id TEXT PRIMARY KEY,
         role_name TEXT NOT NULL UNIQUE,

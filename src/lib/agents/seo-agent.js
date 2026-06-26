@@ -3,6 +3,7 @@ const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
 const { fetchGSCData, syncAlgoliaSearchData } = require('./growth-agent');
+const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
 
 const isoDate = d => d.toISOString().slice(0, 10);
 
@@ -205,4 +206,143 @@ async function trackAlgoliaNoResults() {
   return { period: algolia.period, missing_count: missing.length, missing };
 }
 
-module.exports = { trackKeywordRankings, identifyContentGaps, generateSEOTasksForTeam, trackAlgoliaNoResults };
+// ── Catalog SEO landing-page generator ───────────────────────────────────────
+// One SEO product page per molecule in the Algolia catalog, stored in
+// seo_content. URL: /store/product/<category-slug>/<molecule-slug>/. Pages use
+// claude-haiku-4-5 (cheap, fast — fine for SEO copy).
+const SEO_MODEL = 'claude-haiku-4-5-20251001';
+
+function slugify(s) {
+  return String(s || '').toLowerCase().trim()
+    .replace(/%/g, ' percent ')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'item';
+}
+function productUrl(category, name) {
+  return `/store/product/${slugify(category || 'api')}/${slugify(name)}/`;
+}
+
+// Browse the Algolia catalog index for all product records (name + cas + purity
+// + category + is_gmp). Read-only; returns [] if Algolia isn't configured.
+async function fetchCatalogProducts() {
+  const appId = getAppId();
+  const key = getSearchKey() || getAnalyticsKey();
+  const index = process.env.ALGOLIA_INDEX_NAME || 'abiozen_products';
+  if (!appId || !key) return { products: [], error: 'Algolia env not configured' };
+  try {
+    const res = await fetch(`https://${appId}-dsn.algolia.net/1/indexes/${encodeURIComponent(index)}/query`, {
+      method: 'POST',
+      headers: { 'X-Algolia-Application-Id': appId, 'X-Algolia-API-Key': key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: '', hitsPerPage: 1000, attributesToRetrieve: ['name', 'cas_number', 'purity', 'category', 'is_gmp'] }),
+    });
+    if (!res.ok) return { products: [], error: `Algolia ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}` };
+    const data = await res.json();
+    const products = (data.hits || [])
+      .map(h => ({
+        name: (h.name || '').trim(),
+        cas_number: (h.cas_number || '').toString().trim(),
+        purity: h.purity != null ? String(h.purity) : '99',
+        category: (h.category || 'API').trim(),
+        is_gmp: !!h.is_gmp,
+      }))
+      .filter(p => p.name);
+    return { products };
+  } catch (e) { return { products: [], error: e.message }; }
+}
+
+// Generate one SEO landing page via Claude and upsert into seo_content.
+async function generateSeoPage(product) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { error: 'ANTHROPIC_API_KEY not configured' };
+  const { name, cas_number, purity, category, is_gmp } = product;
+  const grade = is_gmp ? 'GMP grade' : 'research grade';
+  const url = productUrl(category, name);
+
+  const prompt = `You are an SEO content writer for Abiozen LLC, a US-based pharmaceutical API distribution company. Generate a complete, SEO-optimized product landing page for the molecule below.
+
+Molecule: ${name}
+CAS number: ${cas_number || '(not provided — omit CAS-specific claims if blank)'}
+Purity: ${purity}%
+Grade: ${grade}
+Category: ${category}
+
+Target these Google search keywords naturally in the copy and headings:
+- "buy ${name} API USA"
+- "${name} bulk supplier"
+- "${name} GMP grade pharmaceutical"
+- "${cas_number} supplier"
+
+Return EXACTLY one JSON object and nothing else (no markdown fences, no commentary):
+{
+  "title": "Buy ${name} API | ${purity}% Pure | US Stock | Abiozen",
+  "meta_desc": "buyer-intent meta description, 160 characters MAXIMUM, includes the molecule name",
+  "content_html": "valid HTML string for the page body",
+  "schema_json": { schema.org Product JSON-LD object }
+}
+
+Requirements for "content_html":
+- One <h1> combining the molecule name with availability (e.g. "${name} — In US Stock").
+- A ~300-word description: what the molecule is, its uses/applications, and why source it from Abiozen (US stock, fast lead time, COA & SDS, ${grade}).
+- A specifications <table> with rows for: CAS Number (${cas_number || 'available on request'}), Purity (${purity}%), Grade (${grade}), Storage (a sensible default such as "Cool, dry place, away from light").
+- A clear call-to-action: a "Request Quote" button/link pointing to mailto:naren@abiozen.com (e.g. <a href="mailto:naren@abiozen.com?subject=Quote%20request%3A%20${encodeURIComponent(name)}" ...>Request Quote</a>).
+- An <h2>Frequently Asked Questions</h2> with 3-5 buyer questions (pricing, MOQ, lead time, documentation) each with a <p> answer.
+Requirements for "schema_json": valid schema.org "Product" JSON-LD — "@context", "@type":"Product", name, description, an identifier using the CAS number when present, brand "Abiozen LLC", and an "offers" object (availability InStock, priceCurrency USD; do NOT invent a specific price — use "offers" with "availability" and a "url").
+Do NOT invent specific prices, lot numbers, or medical/regulatory claims. Keep language factual and conservative. Return ONLY the JSON object.`;
+
+  let content;
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: SEO_MODEL, max_tokens: 4000, messages: [{ role: 'user', content: prompt }] }),
+    });
+    if (!res.ok) return { error: `Claude ${res.status}: ${(await res.text().catch(() => '')).slice(0, 160)}` };
+    const data = await res.json();
+    const raw = (data.content?.[0]?.text || '').trim();
+    const match = raw.match(/\{[\s\S]*\}/);
+    content = JSON.parse(match ? match[0] : raw);
+  } catch (e) { return { error: e.message }; }
+  if (!content.title || !content.content_html) return { error: 'missing title/content_html' };
+
+  const schemaStr = content.schema_json != null
+    ? (typeof content.schema_json === 'string' ? content.schema_json : JSON.stringify(content.schema_json))
+    : null;
+  await query(
+    `INSERT INTO seo_content (id, molecule_name, cas_number, title, meta_desc, content_html, schema_json, category, slug, url, purity, generated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+     ON CONFLICT (molecule_name, cas_number) DO UPDATE
+       SET title=EXCLUDED.title, meta_desc=EXCLUDED.meta_desc, content_html=EXCLUDED.content_html,
+           schema_json=EXCLUDED.schema_json, category=EXCLUDED.category, slug=EXCLUDED.slug,
+           url=EXCLUDED.url, purity=EXCLUDED.purity, generated_at=NOW()`,
+    [crypto.randomUUID(), name, cas_number || '', content.title || null, content.meta_desc || null,
+     content.content_html || null, schemaStr, category, slugify(name), url, purity]
+  );
+  return { ok: true, molecule: name, url };
+}
+
+// Generate (or refresh) SEO pages for every molecule in the catalog. Sequential
+// to stay within rate limits; skips molecules already generated unless force=true.
+async function generateCatalogSeoPages({ force = false, limit = 0 } = {}) {
+  const { products, error } = await fetchCatalogProducts();
+  if (error) return { error, total: 0, generated: 0, skipped: 0, failed: 0 };
+  const existing = new Set();
+  if (!force) {
+    for (const r of (await query(`SELECT molecule_name, cas_number FROM seo_content`)).rows) {
+      existing.add(`${(r.molecule_name || '').toLowerCase()}|${r.cas_number || ''}`);
+    }
+  }
+  const list = limit > 0 ? products.slice(0, limit) : products;
+  let generated = 0, skipped = 0, failed = 0; const errors = [];
+  for (const p of list) {
+    if (!force && existing.has(`${p.name.toLowerCase()}|${p.cas_number || ''}`)) { skipped++; continue; }
+    const r = await generateSeoPage(p);
+    if (r.ok) generated++;
+    else { failed++; errors.push(`${p.name}: ${r.error}`); }
+  }
+  return { total: products.length, attempted: list.length, generated, skipped, failed, errors: errors.slice(0, 20) };
+}
+
+module.exports = {
+  trackKeywordRankings, identifyContentGaps, generateSEOTasksForTeam, trackAlgoliaNoResults,
+  fetchCatalogProducts, generateSeoPage, generateCatalogSeoPages, slugify, productUrl,
+};

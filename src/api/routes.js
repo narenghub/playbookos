@@ -9,7 +9,7 @@ const { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf } = req
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
-const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings } = require('../lib/agents/seo-agent');
+const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings, generateCatalogSeoPages } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('../lib/agents/growth-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
@@ -1103,6 +1103,26 @@ Requirements:
       content_html: content.content_html,
       schema_json: content.schema_json ?? null,
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Bulk-generate SEO landing pages for every molecule in the Algolia catalog
+// (~114). Runs async (each page is a Claude call; the full run takes minutes) and
+// returns 202 immediately. ?force=1 regenerates pages that already exist.
+router.post('/seo/generate-catalog', authMiddleware, adminOnly, async (req, res) => {
+  const force = req.body?.force === true || req.query?.force === '1';
+  const limit = parseInt(req.body?.limit || req.query?.limit || '0', 10) || 0;
+  generateCatalogSeoPages({ force, limit })
+    .then(r => console.log(`[seo] catalog generation done — generated ${r.generated}, skipped ${r.skipped}, failed ${r.failed} of ${r.total}`))
+    .catch(e => console.error('[seo] catalog generation failed:', e.message));
+  res.status(202).json({ started: true, message: 'Catalog SEO generation started (~few minutes). Check /seo/catalog-status.' });
+});
+
+// Progress / status of catalog SEO generation.
+router.get('/seo/catalog-status', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const r = (await query(`SELECT COUNT(*)::int total, COUNT(url)::int with_url, MAX(generated_at) AS last FROM seo_content`)).rows[0];
+    res.json({ pages: r.total, with_landing_url: r.with_url, last_generated: r.last });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

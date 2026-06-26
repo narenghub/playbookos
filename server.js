@@ -44,6 +44,24 @@ app.get('/health', async (req, res) => {
   }
 });
 
+// Public sitemap for Google — lists the generated catalog landing-page URLs on
+// abiozen.com (built from seo_content). Unauthenticated so search engines can fetch it.
+app.get('/sitemap.xml', async (req, res) => {
+  try {
+    const base = process.env.STORE_BASE_URL || 'https://abiozen.com';
+    const rows = (await query(`SELECT url, generated_at FROM seo_content WHERE url IS NOT NULL ORDER BY url`)).rows;
+    const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const urls = rows.map(r => {
+      const lastmod = (r.generated_at ? String(r.generated_at) : '').slice(0, 10);
+      return `  <url><loc>${esc(base + r.url)}</loc>${lastmod ? `<lastmod>${lastmod}</lastmod>` : ''}<changefreq>weekly</changefreq></url>`;
+    }).join('\n');
+    res.set('Content-Type', 'application/xml; charset=utf-8');
+    res.send(`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`);
+  } catch (e) {
+    res.status(500).set('Content-Type', 'text/plain').send('sitemap error: ' + e.message);
+  }
+});
+
 // API routes
 app.use('/api', routes);
 
