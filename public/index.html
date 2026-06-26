@@ -1610,9 +1610,12 @@ function renderMiGmp(){
   const list = area ? rows.filter(r=>(r.therapeutic_area||'').toLowerCase()===area) : rows;
   const body = list.map(m=>{
     const d = m.details||{}; const st = miAreaStyle(m.therapeutic_area);
+    const patentExpiring = /20(25|26)/.test(String(d.patent_status||''));
+    const hiBadge = st.hi?' <span style="background:#dc2626;color:#fff;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700">HIGH PRIORITY</span>':'';
+    const patentBadge = patentExpiring?' <span style="background:#b91c1c;color:#fff;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700">⚠️ PATENT EXPIRES THIS YEAR</span>':'';
     return `<tr style="border-bottom:1px solid #eef2f7">
       <td style="padding:9px;font-weight:700;color:#1B3A6B">${m.rank||''}</td>
-      <td style="padding:9px"><div style="font-weight:600;color:#1a202c">${miEsc(m.molecule_name)}${st.hi?' <span style="background:#dc2626;color:#fff;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700">HIGH PRIORITY</span>':''}</div></td>
+      <td style="padding:9px"><div style="font-weight:600;color:#1a202c">${miEsc(m.molecule_name)}${hiBadge}${patentBadge}</div></td>
       <td style="padding:9px;font-family:monospace;color:#4a5568">${miEsc(m.cas_number||'—')}</td>
       <td style="padding:9px">${miBadge(m.therapeutic_area||'—', st.bg, st.fg)}</td>
       <td style="padding:9px">${miEsc(d.gmp_grade||'GMP')}</td>

@@ -464,33 +464,49 @@ async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
     );
   }
 
-  // 9. Procurement tasks — top 20 research + top 10 GMP → approval_queue for Palash
+  // 9. Procurement tasks — top 20 research + top 10 GMP → approval_queue for Palash.
   const palash = (await query(
     `SELECT id FROM users WHERE is_active=1 AND (LOWER(name) LIKE '%palash%' OR role='procurement')
      ORDER BY (LOWER(name) LIKE '%palash%') DESC LIMIT 1`
   )).rows[0];
   const palashId = palash ? palash.id : null;
-  let tasksQueued = 0;
+
+  // Dedup guard: collect molecules that already have a market-intelligence task
+  // queued for THIS week (from any prior/overlapping run in the last 14 days), so
+  // re-runs don't re-queue the same molecule. We add to this set as we insert, so
+  // it also dedups within this run.
+  const queuedThisWeek = new Set();
+  for (const r of (await query(
+    `SELECT action_payload FROM approval_queue
+     WHERE agent_name='market-intelligence' AND created_at::timestamptz >= NOW() - INTERVAL '14 days'`
+  )).rows) {
+    try { const p = JSON.parse(r.action_payload); if (p && p.week_start === week && p.molecule) queuedThisWeek.add(miNorm(p.molecule)); } catch (e) { /* ignore */ }
+  }
+
+  let tasksQueued = 0, tasksSkipped = 0;
+  const queueTask = async (r, actionType, priority, task) => {
+    const key = miNorm(r.molecule_name);
+    if (queuedThisWeek.has(key)) { tasksSkipped++; return; } // already queued this week — skip
+    queuedThisWeek.add(key);
+    await query(
+      `INSERT INTO approval_queue (id, agent_name, action_type, action_payload, requested_for_user_id, status, priority)
+       VALUES ($1,'market-intelligence',$2,$3,$4,'pending',$5)`,
+      [crypto.randomUUID(), actionType, JSON.stringify({ task, molecule: r.molecule_name, cas: r.cas_number, gmp_status: r.gmp_status, week_start: week }), palashId, priority]
+    );
+    tasksQueued++;
+  };
+
   for (const r of rows.filter(x => x.gmp_status === 'non_gmp').slice(0, 20)) {
     const d = r.details || {};
     const task = `Source ${r.molecule_name} (CAS: ${r.cas_number || 'VERIFY'}) — ${r.category || 'research chemical'} — Target: 25kg MOQ, 99%+ purity, COA required. APAC supplier availability: ${d.apac_supplier_availability || 'unknown'}. Estimated value: $${Math.round(r.estimated_value || 0).toLocaleString()}. Verify CAS before sourcing.`;
-    await query(
-      `INSERT INTO approval_queue (id, agent_name, action_type, action_payload, requested_for_user_id, status, priority)
-       VALUES ($1,'market-intelligence','source_molecule',$2,$3,'pending','MEDIUM')`,
-      [crypto.randomUUID(), JSON.stringify({ task, molecule: r.molecule_name, cas: r.cas_number, gmp_status: 'non_gmp', week_start: week }), palashId]
-    );
-    tasksQueued++;
+    await queueTask(r, 'source_molecule', 'MEDIUM', task);
   }
   for (const r of rows.filter(x => x.gmp_status === 'gmp').slice(0, 10)) {
     const task = `Source GMP API: ${r.molecule_name} (CAS: ${r.cas_number || 'VERIFY'}) — ${r.therapeutic_area || 'API'} — DMF/CEP required. Target: 1kg sample + bulk quote. Estimated market value: $${r.estimated_value ?? '?'}M. Verify CAS before sourcing.`;
-    await query(
-      `INSERT INTO approval_queue (id, agent_name, action_type, action_payload, requested_for_user_id, status, priority)
-       VALUES ($1,'market-intelligence','source_gmp_api',$2,$3,'pending','HIGH')`,
-      [crypto.randomUUID(), JSON.stringify({ task, molecule: r.molecule_name, cas: r.cas_number, gmp_status: 'gmp', week_start: week }), palashId]
-    );
-    tasksQueued++;
+    await queueTask(r, 'source_gmp_api', 'HIGH', task);
   }
   summary.tasks_queued = tasksQueued;
+  summary.tasks_skipped_duplicate = tasksSkipped;
 
   // 10. Snapshot summary for quick reads / weeks-tracked count
   await query(
