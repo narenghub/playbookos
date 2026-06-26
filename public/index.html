@@ -1507,60 +1507,185 @@ Object.assign(pages, {
 </script>
 <script>
 // Market Intelligence + Apollo Engine
+// Market Intelligence — 150-molecule weekly engine (Research / GMP / History tabs)
+let _miWeekly = null, _miHistory = null, _miTab = 'research';
+const miEsc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const miCanSeo = () => ['admin','super_admin'].includes(currentUser?.role);
+const miAvail = v => ({high:'#059669',medium:'#d97706',low:'#dc2626'})[String(v||'').toLowerCase()] || '#718096';
+function miBadge(text, bg, fg){ return `<span style="background:${bg};color:${fg};padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600">${miEsc(text)}</span>`; }
+function miCatalogBadge(v){ return v ? miBadge('in catalog','#e2e8f0','#4a5568') : miBadge('NEW','#dcfce7','#166534'); }
+// Therapeutic-area tint + high-priority flag for GLP-1 / Oncology
+function miAreaStyle(area){
+  const a = String(area||'').toLowerCase();
+  if (a.includes('glp')||a.includes('obesity')||a.includes('diabet')) return {bg:'#fef3c7',fg:'#92400e',hi:true};
+  if (a.includes('onco')||a.includes('cancer')) return {bg:'#fde2e2',fg:'#9b1c1c',hi:true};
+  if (a.includes('cardio')||a.includes('hyperten')) return {bg:'#e0f2fe',fg:'#075985',hi:false};
+  if (a.includes('cns')||a.includes('neuro')||a.includes('psych')) return {bg:'#ede9fe',fg:'#5b21b6',hi:false};
+  if (a.includes('hormone')||a.includes('endocr')||a.includes('hrt')) return {bg:'#fce7f3',fg:'#9d174d',hi:false};
+  if (a.includes('antibio')||a.includes('infect')) return {bg:'#dcfce7',fg:'#166534',hi:false};
+  return {bg:'#e2e8f0',fg:'#4a5568',hi:false};
+}
+
 async function runMarketAnalysis() {
   const btn = document.getElementById('market-analyze-btn');
-  if(btn) { btn.textContent = 'Claude analyzing market...'; btn.disabled = true; }
+  if (!confirm('Run the full 150-molecule analysis now?\n\nThis calls Claude several times and takes ~2-5 minutes. Results appear once it finishes — refresh the page shortly after.')) return;
+  if(btn){ btn.textContent='Analysis started…'; btn.disabled=true; }
   try {
-    const r = await fetch('/api/market/analyze', {method:'POST', headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token'),'Content-Type':'application/json'}});
-    const data = await r.json();
-    if(data.molecules) renderMarketResults(data.molecules, data.assigned_to);
-    if(btn) { btn.textContent = 'Run market analysis'; btn.disabled = false; }
-  } catch(e) { if(btn) { btn.textContent = 'Run market analysis'; btn.disabled = false; } }
+    const res = await API('/market/analyze', {method:'POST', body: JSON.stringify({})});
+    alert(res?.message || 'Analysis started. Refresh in a few minutes.');
+  } catch(e){ alert('Error: '+e.message); }
+  setTimeout(()=>{ if(btn){ btn.textContent='Run analysis now'; btn.disabled=false; } }, 3000);
 }
 
-async function loadMarketLatest() {
-  try {
-    const r = await fetch('/api/market/latest', {headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token')}});
-    const data = await r.json();
-    if(data.molecules?.length) renderMarketResults(data.molecules, 0, data.created_at);
-  } catch(e) {}
+async function loadMarketWeekly() {
+  const data = await API('/market/weekly').catch(()=>null);
+  _miWeekly = data || { research:[], gmp:[], summary:{} };
+  renderMarketSummary(_miWeekly.summary, _miWeekly.week_start);
+  renderMiResearch();
+  renderMiGmp();
 }
 
-function renderMarketResults(molecules, assigned, date) {
-  const el = document.getElementById('market-results');
-  if(!el) return;
-  const canSeo = ['admin','super_admin'].includes(currentUser?.role);
-  const demandColor = d => d==='Critical'?'#dc2626':d==='High'?'#d97706':'#059669';
-  const demandBg = d => d==='Critical'?'#fef2f2':d==='High'?'#fffbeb':'#f0fdf4';
-  el.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
-      <div style="font-size:13px;color:#718096">${date?'Last analyzed: '+new Date(date).toLocaleString():'Fresh analysis'} · ${molecules.length} molecules identified · Assigned to procurement team</div>
-      <div style="font-size:13px;font-weight:700;color:#1D9E75">${assigned>0?assigned+' procurement members notified':''}</div>
-    </div>
-    <table style="width:100%;border-collapse:collapse;font-size:12px">
-      <tr style="background:#1B3A6B;color:#fff">
-        <th style="padding:10px;text-align:left">Rank</th>
-        <th style="padding:10px;text-align:left">Molecule</th>
-        <th style="padding:10px;text-align:left">CAS Number</th>
-        <th style="padding:10px;text-align:left">Category</th>
-        <th style="padding:10px;text-align:left">Demand</th>
-        <th style="padding:10px;text-align:left">Price Range</th>
-        <th style="padding:10px;text-align:left">Buyer Segment</th>
-        <th style="padding:10px;text-align:left">Priority</th>
-        <th style="padding:10px;text-align:left">Action</th>
-      </tr>
-      ${molecules.map((m,i) => `<tr style="background:${i%2===0?'#f8fafc':'#fff'};border-bottom:1px solid #e2e8f0">
-        <td style="padding:10px;font-weight:700;color:#1B3A6B">${i+1}</td>
-        <td style="padding:10px"><div style="font-weight:600;color:#1a202c">${m.name}</div><div style="font-size:11px;color:#718096">${m.reason?.slice(0,60)||''}</div></td>
-        <td style="padding:10px;font-family:monospace;font-size:12px;color:#4a5568">${m.cas||'—'}</td>
-        <td style="padding:10px"><span style="background:#e2e8f0;padding:2px 8px;border-radius:10px;font-size:11px">${m.category||'API'}</span></td>
-        <td style="padding:10px"><span style="background:${demandBg(m.demand)};color:${demandColor(m.demand)};padding:3px 10px;border-radius:10px;font-size:11px;font-weight:700">${m.demand}</span></td>
-        <td style="padding:10px;font-weight:600;color:#1B3A6B">$${m.price_min||0}–$${m.price_max||0}/kg</td>
-        <td style="padding:10px;font-size:11px;color:#4a5568">${m.buyer_segment||'—'}</td>
-        <td style="padding:10px"><div style="background:#1B3A6B;color:#fff;border-radius:4px;padding:3px 8px;text-align:center;font-weight:700;font-size:12px">${m.priority||0}</div></td>
-        <td style="padding:10px;white-space:nowrap"><button onclick="assignToProcurement('${m.name}','${m.cas||''}')" style="background:#0D7377;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Assign</button>${canSeo?`<button onclick="generateSeoContent('${m.name}','${m.cas||''}',this)" style="background:#1B3A6B;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer;margin-left:4px">Gen SEO</button>`:''}</td>
-      </tr>`).join('')}
-    </table>`;
+function renderMarketSummary(s, week){
+  const el = document.getElementById('market-summary'); if(!el) return;
+  s = s || {};
+  const card = (label,val,sub,color) => `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">${label}</div><div style="font-size:22px;font-weight:700;color:${color}">${val}</div><div style="font-size:11px;color:#a0aec0">${sub||''}</div></div>`;
+  el.innerHTML = card('Identified this week', s.total||0, week?('Week of '+week):'no data yet', '#1B3A6B')
+    + card('Already in catalog', s.in_catalog||0, 'we have these', '#0D7377')
+    + card('New opportunities', s.new_opportunities||0, 'not in catalog', '#1D9E75')
+    + card('Procurement tasks', s.tasks_queued||0, "queued for Palash", '#d97706')
+    + card('Weeks tracked', s.weeks_tracked||0, 'history depth', '#6b46c1');
+}
+
+function miTable(headers, bodyRows){
+  return `<table style="width:100%;border-collapse:collapse;font-size:12px">
+    <tr style="background:#1B3A6B;color:#fff">${headers.map(h=>`<th style="padding:9px;text-align:left">${h}</th>`).join('')}</tr>
+    ${bodyRows || `<tr><td colspan="${headers.length}" style="padding:30px;text-align:center;color:#a0aec0">No molecules yet — click "Run analysis now".</td></tr>`}
+  </table>`;
+}
+function miActions(m){
+  const a = `<button onclick="assignToProcurement('${miEsc(m.molecule_name)}','${miEsc(m.cas_number||'')}')" style="background:#0D7377;color:#fff;border:none;padding:5px 9px;border-radius:4px;font-size:11px;cursor:pointer">Assign to Palash</button>`;
+  const s = miCanSeo() ? `<button onclick="generateSeoContent('${miEsc(m.molecule_name)}','${miEsc(m.cas_number||'')}',this)" style="background:#1B3A6B;color:#fff;border:none;padding:5px 9px;border-radius:4px;font-size:11px;cursor:pointer;margin-left:4px">Gen SEO</button>` : '';
+  return a+s;
+}
+
+function renderMiResearch(){
+  const host = document.getElementById('mi-research-table'); if(!host) return;
+  const rows = (_miWeekly?.research)||[];
+  // category filter dropdown (preserve selection)
+  const sel = document.getElementById('mi-research-cat');
+  if (sel){
+    const cur = sel.value;
+    const cats = [...new Set(rows.map(r=>r.category).filter(Boolean))].sort();
+    sel.innerHTML = '<option value="">All categories</option>'+cats.map(c=>`<option ${c===cur?'selected':''}>${miEsc(c)}</option>`).join('');
+  }
+  const cat = (sel?.value||'').toLowerCase();
+  const list = cat ? rows.filter(r=>(r.category||'').toLowerCase()===cat) : rows;
+  const body = list.map(m=>{
+    const d = m.details||{};
+    return `<tr style="border-bottom:1px solid #eef2f7">
+      <td style="padding:9px;font-weight:700;color:#1B3A6B">${m.rank||''}</td>
+      <td style="padding:9px"><div style="font-weight:600;color:#1a202c">${miEsc(m.molecule_name)}</div><div style="font-size:11px;color:#718096">${miEsc((d.primary_use_case||'').slice(0,70))}</div></td>
+      <td style="padding:9px;font-family:monospace;color:#4a5568">${miEsc(m.cas_number||'—')}</td>
+      <td style="padding:9px">${miBadge(m.category||'—','#e2e8f0','#4a5568')}</td>
+      <td style="padding:9px">${miEsc(d.typical_purity||'—')}</td>
+      <td style="padding:9px;font-weight:600;color:#1B3A6B">${miEsc(d.typical_price_per_kg||'—')}</td>
+      <td style="padding:9px">${miBadge((d.apac_supplier_availability||'?')+' supply', '#f1f5f9', miAvail(d.apac_supplier_availability))}<div style="font-size:11px;color:#718096;margin-top:2px">${miEsc((d.demand_driver||'').slice(0,40))}</div></td>
+      <td style="padding:9px">${miCatalogBadge(m.in_catalog)}</td>
+      <td style="padding:9px;white-space:nowrap">${miActions(m)}</td>
+    </tr>`;
+  }).join('');
+  host.innerHTML = miTable(['Rank','Molecule','CAS','Category','Purity','Price/kg','Demand','In catalog','Action'], body);
+}
+
+function renderMiGmp(){
+  const host = document.getElementById('mi-gmp-table'); if(!host) return;
+  const rows = (_miWeekly?.gmp)||[];
+  const sel = document.getElementById('mi-gmp-area');
+  if (sel){
+    const cur = sel.value;
+    const areas = [...new Set(rows.map(r=>r.therapeutic_area).filter(Boolean))].sort();
+    sel.innerHTML = '<option value="">All therapeutic areas</option>'+areas.map(a=>`<option ${a===cur?'selected':''}>${miEsc(a)}</option>`).join('');
+  }
+  const area = (sel?.value||'').toLowerCase();
+  const list = area ? rows.filter(r=>(r.therapeutic_area||'').toLowerCase()===area) : rows;
+  const body = list.map(m=>{
+    const d = m.details||{}; const st = miAreaStyle(m.therapeutic_area);
+    return `<tr style="border-bottom:1px solid #eef2f7">
+      <td style="padding:9px;font-weight:700;color:#1B3A6B">${m.rank||''}</td>
+      <td style="padding:9px"><div style="font-weight:600;color:#1a202c">${miEsc(m.molecule_name)}${st.hi?' <span style="background:#dc2626;color:#fff;padding:1px 6px;border-radius:8px;font-size:9px;font-weight:700">HIGH PRIORITY</span>':''}</div></td>
+      <td style="padding:9px;font-family:monospace;color:#4a5568">${miEsc(m.cas_number||'—')}</td>
+      <td style="padding:9px">${miBadge(m.therapeutic_area||'—', st.bg, st.fg)}</td>
+      <td style="padding:9px">${miEsc(d.gmp_grade||'GMP')}</td>
+      <td style="padding:9px;font-weight:600;color:#1B3A6B">$${miEsc(d.market_size_usd_millions||'?')}M</td>
+      <td style="padding:9px;font-size:11px;color:#4a5568">${miEsc(d.patent_status||'—')}</td>
+      <td style="padding:9px">${String(d.compounding_eligible||'').toLowerCase()==='yes'?miBadge('eligible','#dcfce7','#166534'):miBadge('no','#f1f5f9','#94a3b8')}</td>
+      <td style="padding:9px">${miCatalogBadge(m.in_catalog)}</td>
+      <td style="padding:9px;white-space:nowrap">${miActions(m)}</td>
+    </tr>`;
+  }).join('');
+  host.innerHTML = miTable(['Rank','Molecule','CAS','Therapeutic area','GMP','Market size','Patent status','Compounding','In catalog','Action'], body);
+}
+
+async function loadMarketHistory(){
+  const wk = document.getElementById('mi-hist-week')?.value || '';
+  const gs = document.getElementById('mi-hist-gmp')?.value || '';
+  const ss = document.getElementById('mi-hist-status')?.value || '';
+  const qs = new URLSearchParams(); if(wk) qs.set('week',wk); if(gs) qs.set('gmp_status',gs); if(ss) qs.set('sourcing_status',ss);
+  const data = await API('/market/history'+(qs.toString()?'?'+qs:'')).catch(()=>null);
+  _miHistory = data || { molecules:[], weeks:[] };
+  // populate week dropdown once
+  const wsel = document.getElementById('mi-hist-week');
+  if (wsel && wsel.dataset.filled!=='1' && (_miHistory.weeks||[]).length){
+    wsel.innerHTML = '<option value="">All weeks</option>'+_miHistory.weeks.map(w=>`<option ${w===wk?'selected':''}>${w}</option>`).join('');
+    wsel.dataset.filled='1';
+  }
+  const STATUSES = ['pending','in_progress','sourced','unavailable'];
+  const body = (_miHistory.molecules||[]).map(m=>{
+    const opts = STATUSES.map(s=>`<option value="${s}" ${m.sourcing_status===s?'selected':''}>${s}</option>`).join('');
+    return `<tr style="border-bottom:1px solid #eef2f7">
+      <td style="padding:9px;color:#718096">${m.week_start}</td>
+      <td style="padding:9px;font-weight:600">${miEsc(m.molecule_name)}</td>
+      <td style="padding:9px;font-family:monospace;color:#4a5568">${miEsc(m.cas_number||'—')}</td>
+      <td style="padding:9px">${m.gmp_status==='gmp'?miBadge('GMP','#e0f2fe','#075985'):miBadge('research','#f1f5f9','#64748b')}</td>
+      <td style="padding:9px">${miEsc(m.therapeutic_area||m.category||'—')}</td>
+      <td style="padding:9px">${miCatalogBadge(m.in_catalog)}</td>
+      <td style="padding:9px"><select onchange="updateSourcing('${m.id}', this.value)" style="font-size:11px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px">${opts}</select></td>
+    </tr>`;
+  }).join('');
+  const host = document.getElementById('mi-history-table');
+  if (host) host.innerHTML = miTable(['Week','Molecule','CAS','Type','Area / Category','In catalog','Sourcing status'], body);
+}
+
+async function updateSourcing(id, status){
+  try {
+    const res = await API('/market/molecule/'+id, {method:'PUT', body: JSON.stringify({sourcing_status:status})});
+    if (res?.error) alert('Error: '+res.error);
+  } catch(e){ alert('Error: '+e.message); }
+}
+
+async function downloadMarketCsv(kind){
+  const week = _miWeekly?.week_start;
+  const url = '/api/market/export/'+kind+(week?('?week='+encodeURIComponent(week)):'');
+  try {
+    const r = await fetch(url, {headers:{'Authorization':'Bearer '+localStorage.getItem('pbo_token')}});
+    if(!r.ok){ alert('Export failed ('+r.status+')'); return; }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (kind==='research'?'research-chemicals':'gmp-apis')+'-'+(week||'latest')+'.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(a.href);
+  } catch(e){ alert('Error: '+e.message); }
+}
+
+function switchMarketTab(tab){
+  _miTab = tab;
+  ['research','gmp','history'].forEach(t=>{
+    const pane = document.getElementById('mi-tab-'+t); if(pane) pane.style.display = t===tab?'block':'none';
+    const btn = document.querySelector('.mi-tab[data-tab="'+t+'"]');
+    if(btn){ btn.style.borderBottom = t===tab?'3px solid #1B3A6B':'3px solid transparent'; btn.style.color = t===tab?'#1B3A6B':'#718096'; btn.style.fontWeight = t===tab?'700':'500'; }
+  });
+  if (tab==='history' && !_miHistory) loadMarketHistory();
 }
 
 async function assignToProcurement(name, cas) {
@@ -2489,7 +2614,12 @@ if(typeof pages !== 'undefined') {
   pages['market-intelligence'] = function() {
     document.getElementById('page-title').textContent = 'Market Intelligence';
     const el = document.getElementById('section-market-intelligence');
-    if(el) { document.getElementById('content').innerHTML=''; el.style.display='block'; document.getElementById('content').appendChild(el); loadMarketLatest(); }
+    if(el) {
+      document.getElementById('content').innerHTML=''; el.style.display='block'; document.getElementById('content').appendChild(el);
+      _miHistory = null;                 // force history reload on next visit
+      switchMarketTab('research');
+      loadMarketWeekly();
+    }
   };
   pages['seo-content'] = async function() {
     const c = document.getElementById('content');
@@ -3107,20 +3237,38 @@ if(typeof pages !== 'undefined') {
 
 <!-- MARKET INTELLIGENCE PAGE -->
 <div id="section-market-intelligence" class="section" style="display:none">
-<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
 <div><h2 style="color:#1a202c;font-size:20px;font-weight:700;margin:0">Market Intelligence Engine</h2>
-<div style="color:#718096;font-size:13px;margin-top:4px">Claude identifies top fast-moving molecules · Auto-assigns to procurement · Weekly Monday 8 AM</div></div>
-<button id="market-analyze-btn" onclick="runMarketAnalysis()" style="background:#1B3A6B;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">Run market analysis now</button>
+<div style="color:#718096;font-size:13px;margin-top:4px">150 molecules / week — 100 research chemicals (non-GMP) + 50 GMP APIs · Weekly Monday · <span style="color:#b91c1c">CAS numbers need verification before sourcing</span></div></div>
+<button id="market-analyze-btn" onclick="runMarketAnalysis()" style="background:#1B3A6B;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer">Run analysis now</button>
 </div>
-<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
-<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Analysis frequency</div><div style="font-size:20px;font-weight:700;color:#1B3A6B">Weekly</div><div style="font-size:11px;color:#a0aec0">Every Monday 8 AM</div></div>
-<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Molecules tracked</div><div style="font-size:20px;font-weight:700;color:#0D7377">20</div><div style="font-size:11px;color:#a0aec0">Per weekly analysis</div></div>
-<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Auto-assigned to</div><div style="font-size:20px;font-weight:700;color:#1D9E75">Palash</div><div style="font-size:11px;color:#a0aec0">Procurement lead</div></div>
-<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">Priority focus</div><div style="font-size:20px;font-weight:700;color:#d97706">GLP-1</div><div style="font-size:11px;color:#a0aec0">Semaglutide, Tirzepatide</div></div>
+<div id="market-summary" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px"></div>
+<div style="display:flex;gap:6px;border-bottom:2px solid #e2e8f0;margin-bottom:16px">
+<button class="mi-tab" data-tab="research" onclick="switchMarketTab('research')" style="background:none;border:none;border-bottom:3px solid #1B3A6B;color:#1B3A6B;font-weight:700;padding:8px 14px;font-size:13px;cursor:pointer">Research Chemicals (100)</button>
+<button class="mi-tab" data-tab="gmp" onclick="switchMarketTab('gmp')" style="background:none;border:none;border-bottom:3px solid transparent;color:#718096;font-weight:500;padding:8px 14px;font-size:13px;cursor:pointer">GMP APIs (50)</button>
+<button class="mi-tab" data-tab="history" onclick="switchMarketTab('history')" style="background:none;border:none;border-bottom:3px solid transparent;color:#718096;font-weight:500;padding:8px 14px;font-size:13px;cursor:pointer">History</button>
 </div>
-<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin-bottom:16px">
-<div style="font-size:14px;font-weight:700;color:#1a202c;margin-bottom:14px">Top fast-moving molecules — US market</div>
-<div id="market-results"><div style="padding:40px;text-align:center;color:#a0aec0;font-size:13px">Click "Run market analysis now" — Claude will identify top 20 molecules and email Palash automatically.</div></div>
+<div id="mi-tab-research" class="mi-pane">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+<select id="mi-research-cat" onchange="renderMiResearch()" style="font-size:12px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px"><option value="">All categories</option></select>
+<button onclick="downloadMarketCsv('research')" style="background:#0D7377;color:#fff;border:none;padding:7px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer">Export CSV</button>
+</div>
+<div id="mi-research-table" style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden"></div>
+</div>
+<div id="mi-tab-gmp" class="mi-pane" style="display:none">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+<select id="mi-gmp-area" onchange="renderMiGmp()" style="font-size:12px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px"><option value="">All therapeutic areas</option></select>
+<button onclick="downloadMarketCsv('gmp')" style="background:#0D7377;color:#fff;border:none;padding:7px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer">Export CSV</button>
+</div>
+<div id="mi-gmp-table" style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden"></div>
+</div>
+<div id="mi-tab-history" class="mi-pane" style="display:none">
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+<select id="mi-hist-week" onchange="loadMarketHistory()" style="font-size:12px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px"><option value="">All weeks</option></select>
+<select id="mi-hist-gmp" onchange="loadMarketHistory()" style="font-size:12px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px"><option value="">All types</option><option value="non_gmp">Research</option><option value="gmp">GMP</option></select>
+<select id="mi-hist-status" onchange="loadMarketHistory()" style="font-size:12px;padding:6px 10px;border:1px solid #cbd5e1;border-radius:6px"><option value="">All sourcing statuses</option><option value="pending">Pending</option><option value="in_progress">In progress</option><option value="sourced">Sourced</option><option value="unavailable">Unavailable</option></select>
+</div>
+<div id="mi-history-table" style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden"></div>
 </div>
 </div>
 
