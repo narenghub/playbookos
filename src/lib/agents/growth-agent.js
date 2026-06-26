@@ -2,6 +2,8 @@ const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
+const { sendEmail } = require('../mailer');
+const { getCEOUser } = require('../agent-core');
 
 const DAY_MS = 86400000;
 const isoDate = d => d.toISOString().slice(0, 10);
@@ -255,4 +257,278 @@ If fewer than 10 real molecules can be identified in the candidates, return fewe
   return result;
 }
 
-module.exports = { syncAlgoliaSearchData, fetchGSCData, generateSEORecommendations };
+// ── Weekly Market Intelligence engine ────────────────────────────────────────
+// Generates 150 molecules/week — 100 non-GMP research chemicals + 50 GMP generic
+// APIs — deduped against molecule_history (best-effort, name+CAS) so nothing
+// repeats, cross-checked against the catalog, stored, with sourcing tasks queued
+// for Palash and a summary emailed to the CEO. CAS numbers are AI-generated and
+// must be verified by Palash before sourcing.
+const MI_MODEL = 'claude-opus-4-7';
+
+// Monday (UTC) of the given date's week, as YYYY-MM-DD.
+function mondayOf(date = new Date()) {
+  const d = new Date(date);
+  const dow = (d.getUTCDay() + 6) % 7; // 0 = Monday
+  d.setUTCDate(d.getUTCDate() - dow);
+  return isoDate(d);
+}
+
+// One Claude call that must return a JSON array — same raw-fetch shape as the
+// rest of the codebase (no SDK). Non-streaming with bounded max_tokens; callers
+// keep each batch small (<=~26 items) so the response stays well under the
+// timeout/size envelope. Returns { items, error } and never throws.
+async function callClaudeJsonArray(prompt, { maxTokens = 8000 } = {}) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return { items: [], error: 'ANTHROPIC_API_KEY not configured' };
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: MI_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      return { items: [], error: `Claude ${res.status}: ${body.slice(0, 200)}` };
+    }
+    const data = await res.json();
+    const text = data.content?.[0]?.text || '';
+    const match = text.match(/\[[\s\S]*\]/);
+    if (!match) return { items: [], error: 'no JSON array in Claude response' };
+    return { items: JSON.parse(match[0]) };
+  } catch (e) {
+    return { items: [], error: e.message };
+  }
+}
+
+const miNorm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+const miNormCas = s => String(s || '').replace(/[^0-9-]/g, '').trim();
+function molKey(m) {
+  const cas = miNormCas(m.cas_number);
+  return cas ? `cas:${cas}` : `name:${miNorm(m.molecule_name || m.name)}`;
+}
+function parseMoney(v) {
+  if (v == null) return null;
+  const n = parseFloat(String(v).replace(/[^0-9.]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+// 100 research chemicals = 5 batches of 20, each nudged toward a category pair so
+// the 10 target categories are covered without one oversized call.
+const RESEARCH_BATCHES = [
+  'heterocyclic intermediates, peptide building blocks',
+  'chiral auxiliaries, cross-coupling reagents',
+  'fluorinated compounds, protecting group reagents',
+  'catalysts, specialty solvents',
+  'isotope-labeled compounds, natural product derivatives',
+];
+// 50 GMP APIs split into 2 batches, preserving the spec's per-area proportions.
+const GMP_BATCHES = [
+  { n: 24, areas: 'GLP-1/Obesity/Diabetes (10 — highest demand), Oncology/Cancer (8), Cardiovascular/Hypertension (6)' },
+  { n: 26, areas: 'CNS/Neurological/Psychiatry (6), Hormones/HRT/Endocrinology (5), Antibiotics/Anti-infectives (5), Pain Management (4), Respiratory (3), Dermatology (3)' },
+];
+
+function researchPrompt(count, categories, demandSignals, excludeList) {
+  return `You are a pharmaceutical market intelligence expert. Generate exactly ${count} unique research chemicals in high demand in the US biotech/pharma market this week. These must be non-GMP research-grade chemicals used in drug discovery, synthesis, and laboratory research.
+
+Emphasize these categories this batch: ${categories}.
+
+Internal demand signals (Abiozen on-site searches + Google + prior analyses) for context:
+${demandSignals || '(no strong internal signals this week — use your market knowledge)'}
+
+Requirements:
+- Each must have a real CAS number (best effort — CAS numbers will be verified before sourcing).
+- Each must be commercially sourceable from APAC/China/India suppliers.
+- Do NOT include any molecule in this already-assigned list: ${excludeList || '(none)'}
+- Return ONLY a JSON array, exactly ${count} items, no duplicates, no prose:
+[{"name":"","cas_number":"","category":"","typical_purity":"","typical_price_per_kg":"","primary_use_case":"","target_buyer_segment":"","demand_driver":"","apac_supplier_availability":"high|medium|low"}]`;
+}
+
+function gmpPrompt(count, areas, demandSignals, excludeList) {
+  return `You are a pharmaceutical API market intelligence expert. Generate exactly ${count} unique generic pharmaceutical APIs (GMP grade) in high demand in the US market this week.
+
+Cover these therapeutic areas with the indicated counts: ${areas}.
+
+Internal demand signals for context:
+${demandSignals || '(no strong internal signals this week — use your market knowledge)'}
+
+Requirements:
+- Each must be a real generic API with expired or expiring patents.
+- Each must have a real CAS number (best effort — verified before sourcing).
+- Each must be manufacturable by qualified APAC CDMOs.
+- Do NOT include any molecule in this already-assigned list: ${excludeList || '(none)'}
+- Return ONLY a JSON array, exactly ${count} items, no duplicates, no prose:
+[{"name":"","cas_number":"","therapeutic_area":"","gmp_grade":"","typical_purity":"","usp_ep_compliant":"","typical_price_per_kg":"","market_size_usd_millions":"","patent_status":"","primary_manufacturers_region":"","demand_driver":"","compounding_eligible":"yes|no"}]`;
+}
+
+async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
+  const week = weekStart || mondayOf();
+  const errors = [];
+
+  // 1. Demand signals — GSC + Algolia + recent analyses (each independently skippable)
+  const algolia = await syncAlgoliaSearchData().catch(e => ({ skipped: true, reason: e.message }));
+  const gsc = await fetchGSCData().catch(e => ({ skipped: true, reason: e.message }));
+  const signalLines = [];
+  if (algolia && !algolia.skipped) {
+    for (const q of (algolia.no_result || []).slice(0, 15)) signalLines.push(`on-site no-result: "${q.query}" (${q.count}x)`);
+    for (const q of (algolia.top_queries || []).slice(0, 10)) signalLines.push(`on-site top search: "${q.query}" (${q.count}x)`);
+  }
+  if (gsc && !gsc.skipped) {
+    for (const r of (gsc.rows || []).slice(0, 25)) if ((r.impressions || 0) > 0) signalLines.push(`Google: "${r.query}" (${r.impressions} impr)`);
+  }
+  const demandSignals = signalLines.slice(0, 40).join('\n');
+
+  // 2. Rolling 12-week exclusion list (names only, capped to bound prompt size)
+  const twelveWeeksAgo = isoDate(new Date(Date.now() - 12 * 7 * DAY_MS));
+  const recentRows = (await query(
+    `SELECT molecule_name FROM molecule_history WHERE week_start >= $1 ORDER BY created_at DESC LIMIT 1500`,
+    [twelveWeeksAgo]
+  )).rows;
+  const excludeList = recentRows.map(r => r.molecule_name).join(', ').slice(0, 12000);
+
+  // 3. Full-history dedup set (name + CAS), built once
+  const seen = new Set();
+  for (const r of (await query(`SELECT molecule_name, cas_number FROM molecule_history`)).rows) {
+    seen.add(molKey({ molecule_name: r.molecule_name, cas_number: r.cas_number }));
+  }
+
+  // 4. Generate research chemicals (100 = 5 x 20), deduping as we go
+  const research = [];
+  for (const cats of RESEARCH_BATCHES) {
+    const { items, error } = await callClaudeJsonArray(researchPrompt(20, cats, demandSignals, excludeList), { maxTokens: 8000 });
+    if (error) errors.push(`research(${cats}): ${error}`);
+    for (const m of (items || [])) {
+      const k = molKey(m);
+      if (!m.name || seen.has(k)) continue;
+      seen.add(k);
+      research.push(m);
+    }
+  }
+
+  // 5. Generate GMP APIs (50 = 24 + 26)
+  const gmp = [];
+  for (const b of GMP_BATCHES) {
+    const { items, error } = await callClaudeJsonArray(gmpPrompt(b.n, b.areas, demandSignals, excludeList), { maxTokens: 9000 });
+    if (error) errors.push(`gmp(${b.areas.slice(0, 28)}…): ${error}`);
+    for (const m of (items || [])) {
+      const k = molKey(m);
+      if (!m.name || seen.has(k)) continue;
+      seen.add(k);
+      gmp.push(m);
+    }
+  }
+
+  // 6. Catalog cross-check
+  const skuNames = (await query(`SELECT name FROM skus WHERE is_active=1`)).rows.map(s => miNorm(s.name)).filter(Boolean);
+  const inCatalog = name => {
+    const n = miNorm(name);
+    return n && skuNames.some(s => s.includes(n) || n.includes(s)) ? 1 : 0;
+  };
+
+  // 7. Assemble rows (rank = generation order within each group; Claude returns
+  //    roughly demand-ordered, good enough for a v1 priority proxy)
+  const rows = [];
+  research.forEach((m, i) => rows.push({
+    gmp_status: 'non_gmp', rank: i + 1, molecule_name: m.name, cas_number: m.cas_number || null,
+    category: m.category || null, therapeutic_area: null,
+    estimated_value: (parseMoney(m.typical_price_per_kg) || 0) * 25, // 25kg MOQ proxy
+    in_catalog: inCatalog(m.name), details: m,
+  }));
+  gmp.forEach((m, i) => rows.push({
+    gmp_status: 'gmp', rank: i + 1, molecule_name: m.name, cas_number: m.cas_number || null,
+    category: null, therapeutic_area: m.therapeutic_area || null,
+    estimated_value: parseMoney(m.market_size_usd_millions), // $M market size
+    in_catalog: inCatalog(m.name), details: m,
+  }));
+
+  const summary = {
+    generated_at: new Date().toISOString(), week_start: week, model: MI_MODEL,
+    research_count: research.length, gmp_count: gmp.length, total: rows.length,
+    in_catalog: rows.filter(r => r.in_catalog).length,
+    new_opportunities: rows.filter(r => !r.in_catalog).length,
+    errors,
+  };
+
+  if (dryRun) {
+    return { ...summary, dryRun: true, sampleResearch: research.slice(0, 3), sampleGmp: gmp.slice(0, 3) };
+  }
+
+  // 8. Store all molecules
+  for (const r of rows) {
+    await query(
+      `INSERT INTO molecule_history
+         (id, molecule_name, cas_number, category, gmp_status, therapeutic_area, week_start,
+          sourcing_status, in_catalog, rank, estimated_value, details_json)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9,$10,$11)`,
+      [crypto.randomUUID(), r.molecule_name, r.cas_number, r.category, r.gmp_status, r.therapeutic_area, week,
+       r.in_catalog, r.rank, r.estimated_value, JSON.stringify(r.details)]
+    );
+  }
+
+  // 9. Procurement tasks — top 20 research + top 10 GMP → approval_queue for Palash
+  const palash = (await query(
+    `SELECT id FROM users WHERE is_active=1 AND (LOWER(name) LIKE '%palash%' OR role='procurement')
+     ORDER BY (LOWER(name) LIKE '%palash%') DESC LIMIT 1`
+  )).rows[0];
+  const palashId = palash ? palash.id : null;
+  let tasksQueued = 0;
+  for (const r of rows.filter(x => x.gmp_status === 'non_gmp').slice(0, 20)) {
+    const d = r.details || {};
+    const task = `Source ${r.molecule_name} (CAS: ${r.cas_number || 'VERIFY'}) — ${r.category || 'research chemical'} — Target: 25kg MOQ, 99%+ purity, COA required. APAC supplier availability: ${d.apac_supplier_availability || 'unknown'}. Estimated value: $${Math.round(r.estimated_value || 0).toLocaleString()}. Verify CAS before sourcing.`;
+    await query(
+      `INSERT INTO approval_queue (id, agent_name, action_type, action_payload, requested_for_user_id, status, priority)
+       VALUES ($1,'market-intelligence','source_molecule',$2,$3,'pending','MEDIUM')`,
+      [crypto.randomUUID(), JSON.stringify({ task, molecule: r.molecule_name, cas: r.cas_number, gmp_status: 'non_gmp', week_start: week }), palashId]
+    );
+    tasksQueued++;
+  }
+  for (const r of rows.filter(x => x.gmp_status === 'gmp').slice(0, 10)) {
+    const task = `Source GMP API: ${r.molecule_name} (CAS: ${r.cas_number || 'VERIFY'}) — ${r.therapeutic_area || 'API'} — DMF/CEP required. Target: 1kg sample + bulk quote. Estimated market value: $${r.estimated_value ?? '?'}M. Verify CAS before sourcing.`;
+    await query(
+      `INSERT INTO approval_queue (id, agent_name, action_type, action_payload, requested_for_user_id, status, priority)
+       VALUES ($1,'market-intelligence','source_gmp_api',$2,$3,'pending','HIGH')`,
+      [crypto.randomUUID(), JSON.stringify({ task, molecule: r.molecule_name, cas: r.cas_number, gmp_status: 'gmp', week_start: week }), palashId]
+    );
+    tasksQueued++;
+  }
+  summary.tasks_queued = tasksQueued;
+
+  // 10. Snapshot summary for quick reads / weeks-tracked count
+  await query(
+    `INSERT INTO ai_analyses (id, analysis_type, period_key, content) VALUES ($1, 'market_intelligence', $2, $3)`,
+    [crypto.randomUUID(), week, JSON.stringify(summary)]
+  );
+
+  // 11. Email the CEO
+  try {
+    const ceo = await getCEOUser();
+    const to = ceo?.email || process.env.CEO_EMAIL;
+    if (to) {
+      const topR = research.slice(0, 5)
+        .map((m, i) => `<li>${i + 1}. <b>${m.name}</b> (${m.cas_number || 'CAS?'}) — ${m.category || ''}${m.demand_driver ? ' · ' + m.demand_driver : ''}</li>`).join('');
+      const topG = [...gmp]
+        .sort((a, b) => (parseMoney(b.market_size_usd_millions) || 0) - (parseMoney(a.market_size_usd_millions) || 0))
+        .slice(0, 5)
+        .map((m, i) => `<li>${i + 1}. <b>${m.name}</b> (${m.therapeutic_area || ''}) — $${m.market_size_usd_millions || '?'}M market</li>`).join('');
+      const base = process.env.BASE_URL || 'https://playbook.abiozen.com';
+      await sendEmail({
+        to,
+        subject: `Market Intelligence — Week of ${week} — ${rows.length} Molecules Identified`,
+        html: `<div style="font-family:Arial;max-width:640px;line-height:1.6;color:#333">
+  <h2 style="color:#1B3A6B;margin:0 0 4px">Market Intelligence — Week of ${week}</h2>
+  <p>${research.length} research chemicals (non-GMP) + ${gmp.length} GMP APIs identified.</p>
+  <p><b>${summary.in_catalog}</b> already in catalog · <b>${summary.new_opportunities}</b> new opportunities · <b>${tasksQueued}</b> sourcing tasks queued for Palash's review.</p>
+  <h3 style="color:#0D7377;margin:16px 0 4px">Top 5 research chemicals</h3><ul>${topR || '<li>none</li>'}</ul>
+  <h3 style="color:#0D7377;margin:16px 0 4px">Top 5 GMP APIs by market size</h3><ul>${topG || '<li>none</li>'}</ul>
+  <p style="font-size:12px;color:#a00">⚠ CAS numbers are AI-generated and must be verified by Palash before sourcing.</p>
+  <p><a href="${base}/#market-intelligence">Open Market Intelligence →</a></p>
+</div>`,
+      });
+    }
+  } catch (e) {
+    errors.push(`email: ${e.message}`);
+  }
+
+  return summary;
+}
+
+module.exports = { syncAlgoliaSearchData, fetchGSCData, generateSEORecommendations, runMarketIntelligence };

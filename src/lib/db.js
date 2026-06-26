@@ -71,6 +71,33 @@ async function initDB() {
       id TEXT PRIMARY KEY, analysis_type TEXT NOT NULL, period_key TEXT NOT NULL,
       content TEXT NOT NULL, created_at TEXT DEFAULT NOW()
     );
+    -- Weekly Market Intelligence: every molecule ever identified, so the engine
+    -- never re-suggests the same one (dedup by name+CAS across the whole table;
+    -- the generator excludes the rolling last-12-weeks list). gmp_status is
+    -- 'gmp' (generic API) or 'non_gmp' (research chemical). sourcing_status is
+    -- Palash's pipeline state. details_json holds the full generated record
+    -- (purity, price, market size, patent status, etc.) for the UI / CSV export.
+    CREATE TABLE IF NOT EXISTS molecule_history (
+      id TEXT PRIMARY KEY,
+      molecule_name TEXT NOT NULL,
+      cas_number TEXT,
+      category TEXT,
+      gmp_status TEXT,
+      therapeutic_area TEXT,
+      week_start TEXT NOT NULL,
+      assigned_to_user_id TEXT,
+      sourcing_status TEXT DEFAULT 'pending' CHECK (sourcing_status IN ('pending','in_progress','sourced','unavailable')),
+      supplier_found INTEGER DEFAULT 0,
+      supplier_name TEXT,
+      estimated_value REAL,
+      in_catalog INTEGER DEFAULT 0,
+      rank INTEGER,
+      details_json TEXT,
+      created_at TEXT DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_molecule_history_week ON molecule_history (week_start);
+    CREATE INDEX IF NOT EXISTS idx_molecule_history_name ON molecule_history (LOWER(molecule_name));
+    CREATE INDEX IF NOT EXISTS idx_molecule_history_gmp ON molecule_history (gmp_status, week_start);
     CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, to_email TEXT NOT NULL, subject TEXT NOT NULL,
       trigger_type TEXT, sent_at TEXT DEFAULT NOW()
