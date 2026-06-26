@@ -314,6 +314,71 @@ router.post('/admin/users/:user_id/edit-name', authMiddleware, adminOnly, async 
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// POST /users/send-onboarding (admin) — daily-usage nudge to active users currently
+// at a 0 performance score (engagement, not activation — everyone has logged in).
+// Excludes super_admin + scoring-excluded users. ?dryRun=1 previews recipients
+// without sending. sendEmail() logs each send to email_log.
+router.post('/users/send-onboarding', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
+    const recips = (await query(`
+      SELECT u.id, u.name, u.email, u.role,
+             COALESCE(s.total_score, 0) AS score,
+             COALESCE(s.consecutive_days_below_60, 0) AS streak_below_60
+      FROM users u
+      LEFT JOIN LATERAL (
+        SELECT total_score, consecutive_days_below_60 FROM performance_scores p
+        WHERE p.user_id = u.id AND COALESCE(p.is_weekly_summary, 0) = 0
+        ORDER BY score_date DESC LIMIT 1
+      ) s ON true
+      WHERE u.is_active = 1 AND u.email IS NOT NULL
+        AND u.role <> 'super_admin'
+        AND COALESCE(u.excluded_from_scoring, false) = false
+        AND COALESCE(s.total_score, 0) = 0
+      ORDER BY u.name`)).rows;
+
+    if (dryRun) {
+      return res.json({ dryRun: true, count: recips.length,
+        recipients: recips.map(r => ({ name: r.name, email: r.email, role: r.role, score: r.score })) });
+    }
+
+    const base = process.env.BASE_URL || 'https://playbook.abiozen.com';
+    const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let sent = 0; const results = [];
+    for (const u of recips) {
+      const streakLine = u.streak_below_60 > 1
+        ? ` · below target for ${u.streak_below_60} days` : '';
+      const html = `<div style="font-family:Arial;max-width:600px;line-height:1.65;color:#333">
+  <div style="background:#1B3A6B;padding:18px 22px;border-radius:8px 8px 0 0">
+    <h2 style="color:#fff;margin:0">Hi ${esc(u.name)}, let's get your score moving 📈</h2>
+    <p style="color:#9FE1CB;margin:6px 0 0;font-size:13px">A 5-minute daily routine on PlaybookOS</p>
+  </div>
+  <div style="padding:22px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px">
+    <div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:12px 16px;margin-bottom:16px">
+      <div style="font-size:12px;color:#15803d">Your latest daily score</div>
+      <div style="font-size:24px;font-weight:700;color:#166534">${u.score}/100${streakLine}</div>
+    </div>
+    <p>You're all set up and logged in — the score just reflects daily activity, and yours has room to climb. Here's the routine:</p>
+    <ol style="padding-left:18px">
+      <li><strong>Log in every morning</strong> at <a href="${base}">${base}</a></li>
+      <li>Open <strong>My Tasks</strong> — see your AI-assigned tasks for the day</li>
+      <li>Start a task — click <strong>In Progress</strong></li>
+      <li>Finish it — click <strong>Done</strong></li>
+      <li>Record what you did on the <strong>My Activity</strong> page</li>
+    </ol>
+    <p style="background:#f8fafc;border-radius:6px;padding:12px 14px"><strong>How scoring works:</strong> your daily score is calculated at 6pm. Complete your tasks and log activity to score above 70.</p>
+    <p style="margin-top:16px"><a href="${base}/#my-tasks" style="background:#0D7377;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:700">Open My Tasks →</a></p>
+    <p style="color:#666;font-size:13px;margin-top:16px">You've got this — small daily actions add up fast. 🙌</p>
+  </div>
+</div>`;
+      const ok = await sendEmail({ to: u.email, subject: 'Your PlaybookOS daily guide — improve your score today', html });
+      if (ok) sent++;
+      results.push({ name: u.name, email: u.email, score: u.score, sent: !!ok });
+    }
+    res.json({ success: true, sent, total: recips.length, recipients: results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/activity', authMiddleware, async (req, res) => {
   try {
     const { log_date, metric, value, notes } = req.body;
