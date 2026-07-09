@@ -1883,6 +1883,25 @@ router.put('/agent/tasks/:id', authMiddleware, async (req, res) => {
     // timeline (user_id = task owner); actor + old→new captured in the summary.
     const statusChanged = oldStatus !== status;
     const commentAdded = comment !== null;
+    // KPI rollup — when a KPI-linked task's completion state changes, recompute the
+    // linked weekly KPI's actual from the count of that user's completed tasks tagged
+    // to the same KPI in the same ISO week. Recompute (not +/-1) is idempotent, so
+    // toggling status can never double-count. Best-effort: a rollup failure must never
+    // block task completion, so it's wrapped and logged like the audit below.
+    if (statusChanged && task.source_kpi) {
+      try {
+        const kpiWeek = mondayOf(new Date(task.task_date)).toISOString().slice(0, 10);
+        await query(
+          `UPDATE weekly_kpis SET kpi_actual = (
+             SELECT COUNT(*) FROM daily_tasks
+             WHERE user_id=$1 AND source_kpi=$2 AND status='completed'
+               AND date_trunc('week', task_date::date) = date_trunc('week', $3::date)
+           ), last_updated_at = NOW()
+           WHERE user_id=$1 AND kpi_name=$2 AND week_start=$4`,
+          [task.user_id, task.source_kpi, task.task_date, kpiWeek]
+        );
+      } catch (e) { console.error('[tasks] KPI rollup failed:', e.message); }
+    }
     if (statusChanged) {
       logAgentActivity({
         agent_name: 'user', action_type: 'task_status_change', user_id: task.user_id,
