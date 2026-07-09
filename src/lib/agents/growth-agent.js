@@ -4,6 +4,7 @@ const { runClaudeAnalysis } = require('../core');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
 const { sendEmail } = require('../mailer');
 const { getCEOUser } = require('../agent-core');
+const { sendCronAlert } = require('../cron-alerts');
 
 const DAY_MS = 86400000;
 const isoDate = d => d.toISOString().slice(0, 10);
@@ -385,9 +386,12 @@ async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
   )).rows;
   const excludeList = recentRows.map(r => r.molecule_name).join(', ').slice(0, 12000);
 
-  // 3. Full-history dedup set (name + CAS), built once
+  // 3. Rolling 12-week dedup set (name + CAS) — matches the exclusion window above.
+  //    Bounding to 12 weeks (rather than all history) lets molecules resurface once
+  //    they age out, so the weekly list keeps repopulating toward the 150 target
+  //    instead of starving as the catalog grows.
   const seen = new Set();
-  for (const r of (await query(`SELECT molecule_name, cas_number FROM molecule_history`)).rows) {
+  for (const r of (await query(`SELECT molecule_name, cas_number FROM molecule_history WHERE week_start >= $1`, [twelveWeeksAgo])).rows) {
     seen.add(molKey({ molecule_name: r.molecule_name, cas_number: r.cas_number }));
   }
 
@@ -542,6 +546,21 @@ async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
     }
   } catch (e) {
     errors.push(`email: ${e.message}`);
+  }
+
+  // 12. Shortfall alarm — a completed run that produced far fewer than the 150 target
+  //     usually means dedup starvation or generation trouble. Claude errors are
+  //     collected (not thrown), so without this the weekly list can quietly shrink
+  //     with no alert. Turn under-production into a visible page.
+  const SHORTFALL_FLOOR = 120;
+  if (rows.length < SHORTFALL_FLOOR) {
+    try {
+      await sendCronAlert('market-intelligence', new Error(
+        `under-produced: ${rows.length} of 150 molecules this week (${research.length} research + ${gmp.length} GMP) for week ${week}`
+      ));
+    } catch (e) {
+      errors.push(`shortfall-alert: ${e.message}`);
+    }
   }
 
   return summary;

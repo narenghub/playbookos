@@ -1546,8 +1546,10 @@ async function loadMarketWeekly() {
 }
 
 function renderMarketSummary(s, week){
-  const el = document.getElementById('market-summary'); if(!el) return;
   s = s || {};
+  const rc = document.getElementById('mi-research-count'); if (rc) rc.textContent = s.research_count ?? 0;
+  const gc = document.getElementById('mi-gmp-count'); if (gc) gc.textContent = s.gmp_count ?? 0;
+  const el = document.getElementById('market-summary'); if(!el) return;
   const card = (label,val,sub,color) => `<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px"><div style="font-size:11px;color:#718096;margin-bottom:4px">${label}</div><div style="font-size:22px;font-weight:700;color:${color}">${val}</div><div style="font-size:11px;color:#a0aec0">${sub||''}</div></div>`;
   el.innerHTML = card('Identified this week', s.total||0, week?('Week of '+week):'no data yet', '#1B3A6B')
     + card('Already in catalog', s.in_catalog||0, 'we have these', '#0D7377')
@@ -3247,8 +3249,8 @@ if(typeof pages !== 'undefined') {
 </div>
 <div id="market-summary" style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-bottom:16px"></div>
 <div style="display:flex;gap:6px;border-bottom:2px solid #e2e8f0;margin-bottom:16px">
-<button class="mi-tab" data-tab="research" onclick="switchMarketTab('research')" style="background:none;border:none;border-bottom:3px solid #1B3A6B;color:#1B3A6B;font-weight:700;padding:8px 14px;font-size:13px;cursor:pointer">Research Chemicals (100)</button>
-<button class="mi-tab" data-tab="gmp" onclick="switchMarketTab('gmp')" style="background:none;border:none;border-bottom:3px solid transparent;color:#718096;font-weight:500;padding:8px 14px;font-size:13px;cursor:pointer">GMP APIs (50)</button>
+<button class="mi-tab" data-tab="research" onclick="switchMarketTab('research')" style="background:none;border:none;border-bottom:3px solid #1B3A6B;color:#1B3A6B;font-weight:700;padding:8px 14px;font-size:13px;cursor:pointer">Research Chemicals (<span id="mi-research-count">–</span>)</button>
+<button class="mi-tab" data-tab="gmp" onclick="switchMarketTab('gmp')" style="background:none;border:none;border-bottom:3px solid transparent;color:#718096;font-weight:500;padding:8px 14px;font-size:13px;cursor:pointer">GMP APIs (<span id="mi-gmp-count">–</span>)</button>
 <button class="mi-tab" data-tab="history" onclick="switchMarketTab('history')" style="background:none;border:none;border-bottom:3px solid transparent;color:#718096;font-weight:500;padding:8px 14px;font-size:13px;cursor:pointer">History</button>
 </div>
 <div id="mi-tab-research" class="mi-pane">
