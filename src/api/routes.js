@@ -2002,7 +2002,7 @@ router.post('/agent/tasks/assign', authMiddleware, adminOnly, async (req, res) =
 const AI_TASK_MAX_TASKS = 25;
 const AI_TASK_MAX_USERS = 8;
 const AI_TASK_MAX_PER_USER_PER_DATE = 5;
-const AI_TASK_VALID_KPIS = ['kpi-vision','kpi-sg-sales','commits','prs_merged','features_deployed','suppliers_approved','market_analyses','team_reviews','candidates_screened','interviews_scheduled','offers_made'];
+const AI_TASK_VALID_KPIS = ['commits','prs_merged','features_deployed','suppliers_approved','market_analyses','team_reviews','candidates_screened','interviews_scheduled','offers_made','calls_made','demos_completed','orders_closed','outreach_emails'];
 
 // Generate DRAFT tasks from a natural-language instruction. Read-only: does NOT
 // write to daily_tasks. Logs the generation attempt to agent_activity_log even

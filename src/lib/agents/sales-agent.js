@@ -9,6 +9,21 @@ const { logAgentActivity, createDailyTask, parseClaudeJSON, businessToday } = re
 
 const AGENT = 'sales-agent';
 
+// Map a free-text sales follow-up title to the real weekly_kpis.kpi_name it
+// advances, so completing it credits the KPI component (the rollup keys on
+// source_kpi = kpi_name). sales_team KPIs: calls_made, demos_completed,
+// orders_closed, outreach_emails. Checked specific-first — the outreach set has
+// broad catch words ("contact", "reach out") that would otherwise swallow
+// call/demo/order tasks. No match → null (conservative: no credit beats a wrong one).
+function mapSalesKpi(title) {
+  const t = String(title || '').toLowerCase();
+  if (/call|phone|dial/.test(t)) return 'calls_made';
+  if (/demo|presentation|walkthrough/.test(t)) return 'demos_completed';
+  if (/close|order|deal|quote|proposal/.test(t)) return 'orders_closed';
+  if (/email|outreach|apollo|linkedin|reach out|contact/.test(t)) return 'outreach_emails';
+  return null;
+}
+
 async function runSalesBriefing({ dryRun = false } = {}) {
   const today = businessToday();
 
@@ -66,7 +81,7 @@ Provide up to 3 call_list entries (use the warm leads) and up to 5 follow_ups. E
         task_title: f.task || `Sales follow-up ${i + 1}`,
         task_description: f.reasoning || '',
         priority: f.priority || 'MEDIUM',
-        source_kpi: 'kpi-sg-sales', agent_name: AGENT,
+        source_kpi: mapSalesKpi(f.task), agent_name: AGENT,
         reasoning: f.reasoning || 'Generated from Apollo sequence performance and warm-lead signals.',
       });
       assigned.push({ task_id: id, user: owner.name, task: f.task });
