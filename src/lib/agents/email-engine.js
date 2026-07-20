@@ -143,19 +143,28 @@ async function gatherDemandSignals(week) {
     byMolecule.set(k, cur);
   };
 
+  // Both signals are scaled to a comparable 0-100 so either can win on its own
+  // merits and a molecule carrying BOTH lands on top (scores accumulate).
   let seoMatched = 0;
   const maxImp = Math.max(1, ...seoRows.map(r => Number(r.impressions) || 0));
   for (const r of seoRows) {
     const hit = vocab.find(v => containsMolecule(r.query, v.name));
     if (!hit) continue;
     seoMatched++;
-    // Normalised 0-60 so search demand can't swamp the curated molecule feed.
-    add(hit.name, hit.cas_number, ((Number(r.impressions) || 0) / maxImp) * 60, 'gsc');
+    add(hit.name, hit.cas_number, ((Number(r.impressions) || 0) / maxImp) * 100, 'gsc');
   }
-  // molecule_history is rank-ordered (1 = strongest); map rank to 40..100.
+  // molecule_history.rank is per-batch, NOT global — the market-intelligence run
+  // emits ~7 batches and each restarts at 1, so this week alone has 9 molecules
+  // at rank 1 and 8 at rank 2. Ranking on it alone leaves the top of the list a
+  // 9-way tie broken by arbitrary SQL order, and (when it was scored above GSC's
+  // ceiling) shut the search signal out of the shortlist entirely. So rank sets
+  // the band and estimated_value breaks ties within it.
+  const maxVal = Math.max(1, ...mhRows.map(r => Number(r.estimated_value) || 0));
   for (const r of mhRows) {
-    const rank = Number(r.rank) || 50;
-    add(r.molecule_name, r.cas_number, Math.max(40, 100 - rank * 2), 'market_intelligence');
+    const rank = Number(r.rank) || 15;
+    const band = Math.max(40, 100 - rank * 2);
+    const valueTiebreak = ((Number(r.estimated_value) || 0) / maxVal) * 15;
+    add(r.molecule_name, r.cas_number, band * 0.85 + valueTiebreak, 'market_intelligence');
   }
 
   const ranked = [...byMolecule.values()].sort((a, b) => b.score - a.score);
