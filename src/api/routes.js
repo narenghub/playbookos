@@ -11,7 +11,7 @@ const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings, generateCatalogSeoPages } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('../lib/agents/growth-agent');
-const { runEmailEngine, SEGMENTS, sanitizeHtml } = require('../lib/agents/email-engine');
+const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo } = require('../lib/agents/email-engine');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1660,32 +1660,40 @@ router.post('/email-engine/campaigns/:id/publish', authMiddleware, adminOnly, as
     catch { payload = null; }
     if (!payload) return res.status(500).json({ error: 'Stored Apollo payload is missing or unparseable — re-run the engine for this week' });
 
-    const r = await fetch('https://api.apollo.io/api/v1/emailer_campaigns', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
-      body: JSON.stringify(payload),
-    });
-    const text = await r.text();
-    if (!r.ok) {
+    const result = await publishSequenceToApollo(payload, apolloKey);
+
+    if (!result.ok) {
+      // If the sequence was created before the failure it exists in Apollo as a
+      // partial. Record the id anyway (status stays 'approved' so it is NOT
+      // counted as sent) — otherwise it becomes an orphan nobody can find, and a
+      // retry would create a second copy.
+      if (result.sequenceId) {
+        await query(`UPDATE email_campaigns SET apollo_sequence_id=$1 WHERE id=$2`,
+          [result.sequenceId, req.params.id]);
+      }
       return res.status(502).json({
-        error: `Apollo rejected the sequence (HTTP ${r.status})`,
-        apollo_response: text.slice(0, 500),
-        hint: 'Sequence creation needs an Apollo master API key and a plan that exposes the endpoint. The payload below can be pasted into Apollo manually.',
+        error: `Apollo publish failed at ${result.stage} (HTTP ${result.status})`,
+        apollo_response: result.detail,
+        apollo_sequence_id: result.sequenceId || null,
+        steps_created: result.stepsDone || [],
+        hint: result.sequenceId
+          ? `A partial sequence was created in Apollo (${result.sequenceId}) with steps ${JSON.stringify(result.stepsDone || [])}. Finish or delete it in Apollo before retrying — retrying here would create a duplicate.`
+          : 'Sequence creation needs an Apollo master API key and a plan that exposes the endpoint. The payload below can be recreated manually.',
         payload,
       });
     }
-    let seqId = null;
-    try { const j = JSON.parse(text); seqId = j?.emailer_campaign?.id || j?.id || null; } catch {}
+
     await query(
       `UPDATE email_campaigns SET status='sent', apollo_sequence_id=$1 WHERE id=$2`,
-      [seqId, req.params.id]
+      [result.sequenceId, req.params.id]
     );
     logAgentActivity({
       agent_name: 'email-engine', action_type: 'email_campaign_published',
-      reasoning: `${req.user.email} published "${c.molecule_name} / ${c.segment}" to Apollo as sequence ${seqId || '(id not returned)'}`,
-      output_summary: `campaign_id=${req.params.id} apollo_sequence_id=${seqId}`,
+      reasoning: `${req.user.email} published "${c.molecule_name} / ${c.segment}" to Apollo as sequence ${result.sequenceId} with ${result.stepsDone.length} steps`,
+      output_summary: `campaign_id=${req.params.id} apollo_sequence_id=${result.sequenceId} steps=${result.stepsDone.length}`,
     }).catch(e => console.error('[email-engine] publish audit failed:', e.message));
-    res.json({ success: true, id: req.params.id, apollo_sequence_id: seqId, status: 'sent' });
+    res.json({ success: true, id: req.params.id, apollo_sequence_id: result.sequenceId,
+               steps_created: result.stepsDone.length, status: 'sent' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

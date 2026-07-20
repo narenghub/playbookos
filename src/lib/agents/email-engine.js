@@ -351,4 +351,78 @@ async function runEmailEngine({ weekStart, dryRun = false, topMolecules = 5 } = 
   };
 }
 
-module.exports = { runEmailEngine, SEGMENTS, buildApolloPayload, sanitizeHtml, EMAIL_MODEL };
+// ── Apollo publishing ─────────────────────────────────────────────────────────
+// Creating a sequence with content takes THREE calls per step, not one. Posting
+// `emailer_steps` inline on the campaign create returns 200 and silently drops
+// them — the first live attempt produced a sequence with num_steps: 0, which
+// would have been marked 'sent' with nothing in it. The real flow:
+//
+//   1. POST /emailer_campaigns            -> sequence id
+//   2. POST /emailer_steps                 -> step id      (once per step)
+//   3. POST /emailer_touches               -> attaches subject + body_html
+//                                             (creates the template inline)
+//
+// `/sequences` is an alias for `/emailer_campaigns`, but `/sequences/{id}/
+// sequence_steps` and `/sequence_templates` do not exist (404) — don't reach for
+// them. Note also that GET /emailer_campaigns/{id} never expands emailer_touches,
+// even for sequences actively delivering mail, so the touch write cannot be
+// verified by read-back; the touch response carrying an emailer_template_id is
+// the confirmation.
+async function publishSequenceToApollo(payload, apolloKey) {
+  const call = async (path, body) => {
+    const r = await fetch('https://api.apollo.io/api/v1' + path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
+      body: JSON.stringify(body),
+    });
+    const text = await r.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    return { ok: r.ok, status: r.status, text, json };
+  };
+
+  const created = await call('/emailer_campaigns', {
+    name: payload.name,
+    permissions: payload.permissions || 'team_can_use',
+    active: false,
+  });
+  if (!created.ok) {
+    return { ok: false, stage: 'create', status: created.status, detail: created.text.slice(0, 400) };
+  }
+  const sequenceId = created.json?.emailer_campaign?.id || created.json?.id || null;
+  if (!sequenceId) {
+    return { ok: false, stage: 'create', status: created.status, detail: 'Apollo returned no sequence id' };
+  }
+
+  // From here the sequence EXISTS in Apollo. Every later failure must still
+  // surface sequenceId so the caller can record it — an un-recorded id is an
+  // orphan sequence nobody knows to clean up.
+  const stepsDone = [];
+  for (const step of payload.emailer_steps || []) {
+    const s = await call('/emailer_steps', {
+      emailer_campaign_id: sequenceId,
+      position: step.position,
+      type: step.type || 'auto_email',
+      wait_time: step.wait_days || 0,
+      wait_mode: 'day',
+    });
+    const stepId = s.json?.emailer_step?.id || null;
+    if (!s.ok || !stepId) {
+      return { ok: false, stage: `step ${step.position}`, status: s.status,
+               detail: s.text.slice(0, 400), sequenceId, stepsDone };
+    }
+    const t = await call('/emailer_touches', {
+      emailer_step_id: stepId,
+      type: step.type || 'auto_email',
+      emailer_template: { subject: step.subject, body_html: step.body_html },
+    });
+    if (!t.ok) {
+      return { ok: false, stage: `content for step ${step.position}`, status: t.status,
+               detail: t.text.slice(0, 400), sequenceId, stepsDone };
+    }
+    stepsDone.push(step.position);
+  }
+  return { ok: true, sequenceId, stepsDone };
+}
+
+module.exports = { runEmailEngine, SEGMENTS, buildApolloPayload, sanitizeHtml, EMAIL_MODEL, publishSequenceToApollo };
