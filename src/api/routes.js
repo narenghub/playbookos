@@ -1971,7 +1971,22 @@ router.put('/agent/tasks/:id', authMiddleware, async (req, res) => {
         output_summary: `task_id=${req.params.id} comment by=${req.user.email}`,
       }).catch(e => console.error('[tasks] comment audit failed:', e.message));
     }
-    res.json({ success: true, id: req.params.id, status });
+    // Live rescore — performance_scores is otherwise only written by the 18:00 UTC
+    // cron, so before this the score a user saw after completing a task was the
+    // previous day's stale number. Awaited (not fire-and-forget) so the score in this
+    // response is guaranteed fresh; silent:true keeps it from writing weekly-summary
+    // rows or an audit entry. Best-effort like the KPI rollup above: a scoring failure
+    // must never fail the task update, it just omits `score` from the response.
+    let score = null;
+    if (statusChanged) {
+      try {
+        const r = await runPerformanceCheck({ userId: task.user_id, silent: true });
+        const row = (r.scored || [])[0];
+        if (row) score = { total: row.total_score, tasks_completed: row.tasks_completed,
+                           tasks_assigned: row.tasks_assigned };
+      } catch (e) { console.error('[tasks] live rescore failed:', e.message); }
+    }
+    res.json({ success: true, id: req.params.id, status, score });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

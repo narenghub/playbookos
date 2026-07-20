@@ -1787,10 +1787,12 @@ function renderTaskCard(t, idx) {
     ${assignHtml}
     ${commentHtml}
     <div id="task-edit-${esc(t.id)}"></div>
-    <div style="margin-top:8px;display:flex;gap:6px;align-items:center">
-      <button onclick="taskBeginEdit(${idx},'in_progress')" ${t.status==='in_progress'?'disabled':''} style="background:#0D7377;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">In progress</button>
-      <button onclick="taskBeginEdit(${idx},'completed')" ${t.status==='completed'?'disabled':''} style="background:#1D9E75;color:#fff;border:none;padding:5px 10px;border-radius:4px;font-size:11px;cursor:pointer">Mark complete</button>
-      <span style="font-size:11px;color:${sc};text-transform:uppercase">${esc(t.status)}</span>
+    <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      ${t.status==='completed'
+        ? `<div style="background:#f0fdf4;color:#166534;border:1px solid #86efac;padding:12px 20px;border-radius:8px;font-size:15px;font-weight:700">✓ Completed</div>`
+        : `<button onclick="taskBeginEdit(${idx},'completed')" style="background:#1D9E75;color:#fff;border:none;padding:13px 26px;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 2px 6px rgba(29,158,117,.35);flex:1;min-width:190px;max-width:280px">✓ Mark Complete</button>`}
+      <button onclick="taskBeginEdit(${idx},'in_progress')" ${t.status==='in_progress'||t.status==='completed'?'disabled':''} class="btn-outline" style="padding:9px 16px;font-size:13px;cursor:pointer">In Progress</button>
+      <span style="font-size:11px;color:${sc};text-transform:uppercase;font-weight:600">${esc(t.status)}</span>
     </div>
     ${renderTaskHistory(t, idx)}
   </div>`;
@@ -1852,6 +1854,12 @@ async function taskSave(idx, newStatus) {
     if (res && res.error) {
       if (msgEl) { msgEl.style.color = '#dc2626'; msgEl.textContent = 'Error: ' + res.error; }
       return;
+    }
+    // PUT now rescores the user server-side and returns the fresh total, so show it
+    // immediately; the reload below re-reads /performance/my and repaints the header.
+    if (msgEl && res && res.score && res.score.total != null) {
+      msgEl.style.color = '#166534';
+      msgEl.textContent = `Saved — score now ${res.score.total}/100`;
     }
     pages['my-tasks'](window._myTasksDate); // reload current date so card + history refresh
   } catch(e) {
@@ -2805,8 +2813,14 @@ if(typeof pages !== 'undefined') {
     c.innerHTML = '<p style="color:#888;padding:20px">Loading your tasks…</p>';
     const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const qs = dateOverride ? ('?date=' + encodeURIComponent(dateOverride)) : '';
-    let data;
-    try { data = await API('/agent/tasks/my' + qs); }
+    let data, perf;
+    // Score is fetched alongside the tasks so it re-reads on every render — including
+    // the reload taskSave() triggers after a status change, which is what makes the
+    // score refresh automatically once a task is marked complete.
+    try { [data, perf] = await Promise.all([
+      API('/agent/tasks/my' + qs),
+      API('/performance/my').catch(() => null),
+    ]); }
     catch(e) { c.innerHTML = `<div class="card"><div class="card-title">My Tasks</div><p style="color:#dc2626">Failed to load: ${esc(e.message)}</p></div>`; return; }
     if (data && data.error) { c.innerHTML = `<div class="card"><div class="card-title">My Tasks</div><p style="color:#dc2626">${esc(data.error)}</p></div>`; return; }
     const tasks = (data && data.tasks) || [];
@@ -2823,10 +2837,37 @@ if(typeof pages !== 'undefined') {
         <button onclick="taskToday()" class="btn-outline" style="padding:4px 10px;font-size:13px">Today</button>
       </div>
     </div>`;
+    // Score preview. The 70 floor is exact, not marketing: completing every assigned
+    // task scores 40/40 task-completion + 20 activity (a completion counts as activity)
+    // + 10 response = 70 guaranteed, before any weekly-KPI points (0–30) on top. It only
+    // holds when tasks are actually assigned — with total=0 the completion component is
+    // 0 and 70 is unreachable — so the line is suppressed in that case.
+    const scoreNow = perf && perf.score != null ? perf.score : null;
+    const remaining = Math.max(0, total - done);
+    let previewHtml = '';
+    if (total > 0 && remaining > 0) {
+      previewHtml = `<div style="font-size:13px;color:#166534;background:#f0fdf4;border:1px solid #86efac;border-radius:6px;padding:8px 12px;margin-top:10px">
+        🎯 Complete all tasks to reach <strong>70+</strong> today — ${remaining} task${remaining===1?'':'s'} to go.</div>`;
+    } else if (total > 0) {
+      previewHtml = `<div style="font-size:13px;color:#166534;background:#f0fdf4;border:1px solid #86efac;border-radius:6px;padding:8px 12px;margin-top:10px">
+        ✅ All tasks complete — you've locked in <strong>70+</strong> for today. KPI progress adds up to 30 more.</div>`;
+    }
+    const scoreChip = scoreNow != null
+      ? `<div style="text-align:right"><div style="font-size:11px;color:#718096;text-transform:uppercase;letter-spacing:.5px">Today's score</div>
+           <div id="mytasks-score" style="font-size:26px;font-weight:800;color:${scoreNow>=70?'#166534':scoreNow>=50?'#B45309':'#991B1B'}">${scoreNow}<span style="font-size:13px;font-weight:600;color:#a0aec0">/100</span></div></div>`
+      : `<div style="text-align:right"><div style="font-size:11px;color:#718096;text-transform:uppercase;letter-spacing:.5px">Today's score</div>
+           <div id="mytasks-score" style="font-size:15px;font-weight:600;color:#a0aec0">Not scored yet</div></div>`;
     const head = `<div class="card">
-      <div style="background:#e2e8f0;border-radius:6px;height:10px;overflow:hidden;margin:8px 0">
-        <div style="background:#1D9E75;height:10px;width:${pctv}%"></div></div>
-      <div style="font-size:13px;color:#718096">${done} of ${total} task${total===1?'':'s'} completed on ${esc(data.date)} (${pctv}%)</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <div style="font-size:15px;font-weight:700;color:#1a202c">${done} of ${total} task${total===1?'':'s'} completed today</div>
+          <div style="background:#e2e8f0;border-radius:8px;height:16px;overflow:hidden;margin:10px 0 6px">
+            <div style="background:linear-gradient(90deg,#1D9E75,#15803d);height:16px;width:${pctv}%;transition:width .35s ease"></div></div>
+          <div style="font-size:12px;color:#718096">${pctv}% · ${esc(data.date)}</div>
+        </div>
+        ${scoreChip}
+      </div>
+      ${previewHtml}
     </div>`;
     if (!tasks.length) {
       c.innerHTML = toolbar + head + '<div class="card"><p style="color:#718096">No tasks for this date. The AI agents assign tasks each morning — an admin can also trigger generation from Agent Control.</p></div>';

@@ -108,13 +108,21 @@ function getDirectorRole(roleKey) {
 //   20 — activity_score: did they log any activity today?
 //   10 — response_score: did they complete any task today?
 // Streak counters update from the previous day's row.
-async function runPerformanceCheck({ dryRun = false, date } = {}) {
+// userId — score just that one user instead of the whole active roster. Used by the
+//   task-update route to refresh a score the instant a task is completed, rather than
+//   leaving it stale until the 18:00 UTC cron.
+// silent — suppress the two whole-run side effects that only make sense for the cron:
+//   the Sunday weekly-summary rows and the 'performance_check' audit entry. Without
+//   this an interactive per-user rescore would spam the activity log on every click
+//   and could write a weekly summary from a single user's task update.
+async function runPerformanceCheck({ dryRun = false, date, userId = null, silent = false } = {}) {
   const today = date || businessToday();
   const weekStart = mondayOf(new Date(today)).toISOString().slice(0, 10);
   const users = (await query(
     `SELECT id, name, role FROM users
      WHERE is_active=1 AND COALESCE(excluded_from_scoring, FALSE) = FALSE
-     ORDER BY name`
+       AND ($1::text IS NULL OR id = $1::text)
+     ORDER BY name`, [userId]
   )).rows;
 
   const scored = [];
@@ -222,7 +230,7 @@ async function runPerformanceCheck({ dryRun = false, date } = {}) {
   }
 
   // Sunday weekly summary — average of the last 5 daily scores
-  if (!dryRun && new Date(today).getUTCDay() === 0) {
+  if (!dryRun && !silent && new Date(today).getUTCDay() === 0) {
     for (const u of users) {
       const rows = (await query(
         `SELECT total_score FROM performance_scores
@@ -244,7 +252,7 @@ async function runPerformanceCheck({ dryRun = false, date } = {}) {
     }
   }
 
-  if (!dryRun) {
+  if (!dryRun && !silent) {
     await logAgentActivity({
       agent_name: 'orchestrator', action_type: 'performance_check',
       reasoning: `Scored ${scored.length} users for ${today}.`,
