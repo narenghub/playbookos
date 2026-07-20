@@ -11,6 +11,7 @@ const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings, generateCatalogSeoPages } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('../lib/agents/growth-agent');
+const { runEmailEngine, SEGMENTS, sanitizeHtml } = require('../lib/agents/email-engine');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1555,6 +1556,158 @@ router.post('/market/analyze', authMiddleware, requireTier('procurement'), async
     .then(s => console.log(`[market] analysis done — ${s.total} molecules for ${s.week_start}`))
     .catch(e => console.error('[market] analysis failed:', e.message));
   res.status(202).json({ started: true, message: 'Market intelligence analysis started (~2-5 min). Refresh shortly.' });
+});
+
+// ── AI Email Engine ───────────────────────────────────────────────────────────
+// Generation is 20 Claude calls (~3-6 min), so the trigger is fire-and-forget
+// like /market/analyze. ?dryRun=1 resolves the molecule list without calling
+// Claude and returns synchronously — use it to sanity-check demand signals.
+router.post('/email-engine/run', authMiddleware, adminOnly, async (req, res) => {
+  const weekStart = (typeof req.body?.week_start === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.week_start))
+    ? req.body.week_start : undefined;
+  const topMolecules = Math.min(20, Math.max(1, parseInt(req.body?.top_molecules, 10) || 5));
+  if (req.query?.dryRun === '1' || req.body?.dryRun === true) {
+    try { return res.json(await runEmailEngine({ weekStart, topMolecules, dryRun: true })); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+  runEmailEngine({ weekStart, topMolecules })
+    .then(s => console.log(`[email-engine] done — ${s.generated} campaigns for ${s.week_start}, ${s.errors.length} errors`))
+    .catch(e => console.error('[email-engine] failed:', e.message));
+  res.status(202).json({ started: true, message: `Email engine started — ${topMolecules} molecules x 4 segments (~3-6 min). Refresh shortly.` });
+});
+
+// Campaign list. HTML bodies are excluded here — 40 HTML documents would make
+// this response multi-megabyte; the preview endpoint serves one at a time.
+router.get('/email-engine/campaigns', authMiddleware, requireAnyTier('sales', 'intelligence'), async (req, res) => {
+  try {
+    const where = [], params = [];
+    if (typeof req.query.week === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.week)) {
+      params.push(req.query.week); where.push(`week_start = $${params.length}`);
+    }
+    if (typeof req.query.segment === 'string' && req.query.segment !== 'all') {
+      params.push(req.query.segment); where.push(`segment = $${params.length}`);
+    }
+    if (typeof req.query.status === 'string' && req.query.status !== 'all') {
+      params.push(req.query.status); where.push(`status = $${params.length}`);
+    }
+    const rows = (await query(
+      `SELECT id, week_start, segment, molecule_name, cas_number,
+              variant_a_subject, variant_b_subject, status, apollo_sequence_id,
+              created_at, approved_at, approved_by
+       FROM email_campaigns
+       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+       ORDER BY week_start DESC, molecule_name, segment`, params
+    )).rows;
+    const totals = (await query(
+      `SELECT COUNT(*)::int total,
+              COUNT(*) FILTER (WHERE status='draft')::int pending,
+              COUNT(*) FILTER (WHERE status='approved')::int approved,
+              COUNT(*) FILTER (WHERE status='sent')::int sent
+       FROM email_campaigns WHERE week_start = $1`,
+      [req.query.week || mondayOf(new Date()).toISOString().slice(0, 10)]
+    )).rows[0];
+    res.json({ campaigns: rows, summary: totals, segments: SEGMENTS.map(s => ({ key: s.key, label: s.label })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Approve / reject. Only a draft can transition — an already-sent campaign must
+// not be silently re-approved, and rejecting a sent campaign is meaningless.
+router.put('/email-engine/campaigns/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const status = req.body?.status;
+    if (!['approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: "status must be 'approved' or 'rejected'" });
+    }
+    const c = (await query('SELECT id, status FROM email_campaigns WHERE id=$1', [req.params.id])).rows[0];
+    if (!c) return res.status(404).json({ error: 'Campaign not found' });
+    if (c.status !== 'draft') {
+      return res.status(409).json({ error: `Campaign is already '${c.status}' — only draft campaigns can be approved or rejected` });
+    }
+    await query(
+      `UPDATE email_campaigns SET status=$1, approved_at=NOW(), approved_by=$2 WHERE id=$3`,
+      [status, req.user.email, req.params.id]
+    );
+    logAgentActivity({
+      agent_name: 'email-engine', action_type: 'email_campaign_review',
+      reasoning: `${req.user.email} ${status} campaign ${req.params.id}`,
+      output_summary: `campaign_id=${req.params.id} -> ${status}`,
+    }).catch(e => console.error('[email-engine] review audit failed:', e.message));
+    res.json({ success: true, id: req.params.id, status });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Push an approved campaign to Apollo as a sequence.
+//
+// NOTE: Apollo's sequence-creation endpoint requires a MASTER API key (the
+// read-only key used elsewhere in this file will 403), and its availability on
+// a given plan is not guaranteed. Rather than pretend the call succeeded, a
+// non-2xx from Apollo is surfaced verbatim with the stored payload attached so
+// the sequence can be created by hand from the same content.
+router.post('/email-engine/campaigns/:id/publish', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const apolloKey = process.env.APOLLO_API_KEY;
+    if (!apolloKey) return res.status(400).json({ error: 'APOLLO_API_KEY not configured' });
+    const c = (await query('SELECT * FROM email_campaigns WHERE id=$1', [req.params.id])).rows[0];
+    if (!c) return res.status(404).json({ error: 'Campaign not found' });
+    if (c.status !== 'approved') {
+      return res.status(409).json({ error: `Campaign is '${c.status}' — approve it before publishing to Apollo` });
+    }
+    if (c.apollo_sequence_id) {
+      return res.status(409).json({ error: `Already published as Apollo sequence ${c.apollo_sequence_id}` });
+    }
+    let payload;
+    try { payload = JSON.parse(c.apollo_payload || 'null'); }
+    catch { payload = null; }
+    if (!payload) return res.status(500).json({ error: 'Stored Apollo payload is missing or unparseable — re-run the engine for this week' });
+
+    const r = await fetch('https://api.apollo.io/api/v1/emailer_campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    if (!r.ok) {
+      return res.status(502).json({
+        error: `Apollo rejected the sequence (HTTP ${r.status})`,
+        apollo_response: text.slice(0, 500),
+        hint: 'Sequence creation needs an Apollo master API key and a plan that exposes the endpoint. The payload below can be pasted into Apollo manually.',
+        payload,
+      });
+    }
+    let seqId = null;
+    try { const j = JSON.parse(text); seqId = j?.emailer_campaign?.id || j?.id || null; } catch {}
+    await query(
+      `UPDATE email_campaigns SET status='sent', apollo_sequence_id=$1 WHERE id=$2`,
+      [seqId, req.params.id]
+    );
+    logAgentActivity({
+      agent_name: 'email-engine', action_type: 'email_campaign_published',
+      reasoning: `${req.user.email} published "${c.molecule_name} / ${c.segment}" to Apollo as sequence ${seqId || '(id not returned)'}`,
+      output_summary: `campaign_id=${req.params.id} apollo_sequence_id=${seqId}`,
+    }).catch(e => console.error('[email-engine] publish audit failed:', e.message));
+    res.json({ success: true, id: req.params.id, apollo_sequence_id: seqId, status: 'sent' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Preview one variant's HTML. Returns JSON (not text/html) so the caller renders
+// it inside a sandboxed iframe rather than the app's own document — this HTML is
+// model-generated and must never execute in the dashboard's origin.
+router.get('/email-engine/campaigns/:id/preview', authMiddleware, requireAnyTier('sales', 'intelligence'), async (req, res) => {
+  try {
+    const c = (await query(
+      `SELECT id, molecule_name, cas_number, segment, status,
+              variant_a_subject, variant_a_html, variant_b_subject, variant_b_html
+       FROM email_campaigns WHERE id=$1`, [req.params.id]
+    )).rows[0];
+    if (!c) return res.status(404).json({ error: 'Campaign not found' });
+    const variant = req.query.variant === 'b' ? 'b' : 'a';
+    res.json({
+      id: c.id, molecule_name: c.molecule_name, cas_number: c.cas_number,
+      segment: c.segment, status: c.status, variant,
+      subject: variant === 'b' ? c.variant_b_subject : c.variant_a_subject,
+      html: sanitizeHtml(variant === 'b' ? c.variant_b_html : c.variant_a_html),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Current (or ?week=) week's 150 molecules, split into the two tabs.

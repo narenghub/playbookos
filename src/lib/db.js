@@ -560,8 +560,32 @@ async function migrateSchemas() {
       UPDATE users SET role='procurement_team' WHERE role='procurement' OR role='procurement_lead';
       UPDATE users SET role='sales_team'      WHERE role='sales';
       UPDATE users SET role='support_team'    WHERE role='qc' OR role='marketing';
+      -- AI Email Engine — one row per (week, segment, molecule); each row holds
+      -- both A/B variants plus the Apollo sequence payload built at generation
+      -- time. UNIQUE(week_start, segment, molecule_name) makes the weekly cron
+      -- idempotent: a re-run cannot duplicate or overwrite an approved campaign.
+      CREATE TABLE IF NOT EXISTS email_campaigns (
+        id TEXT PRIMARY KEY,
+        week_start TEXT NOT NULL,
+        segment TEXT NOT NULL,
+        molecule_name TEXT NOT NULL,
+        cas_number TEXT,
+        variant_a_subject TEXT,
+        variant_a_html TEXT,
+        variant_b_subject TEXT,
+        variant_b_html TEXT,
+        status TEXT DEFAULT 'draft' CHECK (status IN ('draft','approved','rejected','sent')),
+        apollo_sequence_id TEXT,
+        apollo_payload TEXT,
+        created_at TEXT DEFAULT NOW(),
+        approved_at TEXT,
+        approved_by TEXT,
+        UNIQUE(week_start, segment, molecule_name)
+      );
+      CREATE INDEX IF NOT EXISTS idx_email_campaigns_week ON email_campaigns (week_start DESC, segment);
+      CREATE INDEX IF NOT EXISTS idx_email_campaigns_status ON email_campaigns (status, week_start DESC);
     `);
-    console.log('✅ Schema migrations applied (owner columns + legacy role remap)');
+    console.log('✅ Schema migrations applied (owner columns + legacy role remap + email_campaigns)');
   } catch(e) { console.error('Migration error:', e.message); }
 }
 

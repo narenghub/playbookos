@@ -15,6 +15,7 @@ const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/
 const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('./src/lib/agents/orchestrator');
 const { runWeeklyLinkedInCampaign } = require('./src/lib/agents/linkedin-agent');
+const { runEmailEngine } = require('./src/lib/agents/email-engine');
 const { businessToday } = require('./src/lib/agent-core');
 const routes = require('./src/api/routes');
 
@@ -188,6 +189,18 @@ cron.schedule('0 15 * * 1', withAlerts('weekly-mon-15utc-market-intelligence', a
   console.log('[CRON] Market Intelligence starting...');
   const mi = await runMarketIntelligence();
   console.log(`[CRON] Market Intelligence done — ${mi.total} molecules (${mi.research_count} research + ${mi.gmp_count} GMP) for ${mi.week_start}, ${mi.tasks_queued || 0} tasks queued`);
+}));
+
+// Monday 3:30 PM UTC (9:30 AM CST) — AI Email Engine, 30 min after Market
+// Intelligence. The offset is load-bearing, not cosmetic: the engine reads the
+// molecule_history rows that the 15:00 job writes, so starting earlier (or
+// chaining both into one slot) would generate campaigns off last week's feed.
+// 5 molecules x 4 segments = 20 campaigns / 40 variants, ~20 Claude calls.
+cron.schedule('30 15 * * 1', withAlerts('weekly-mon-1530utc-email-engine', async () => {
+  console.log('[CRON] Email Engine starting...');
+  const ee = await runEmailEngine({ topMolecules: 5 });
+  console.log(`[CRON] Email Engine done — ${ee.generated} campaigns (${ee.generated * 2} variants) for ${ee.week_start}, ${ee.skipped} skipped, ${ee.errors.length} errors`);
+  if (ee.errors.length) console.warn('[CRON] Email Engine errors:', ee.errors.slice(0, 5));
 }));
 
 // Daily 6 PM: check milestone triggers

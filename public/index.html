@@ -395,6 +395,7 @@ const NAV_SECTIONS = [
     {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
     {id:'market-intelligence', label:'Market Intelligence', icon:'🔬'},
+    {id:'email-engine', label:'Email Engine', icon:'✉️'},
   ]},
   {title:'TEAM', items:[
     {id:'team', label:'Team Management', icon:'👥'},
@@ -452,7 +453,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -3871,5 +3872,194 @@ if(typeof pages !== 'undefined') {
   pages['s2-sequence'] = function() { renderSequencePage('s2'); };
   pages['s3-sequence'] = function() { renderSequencePage('s3'); };
   pages['s4-sequence'] = function() { renderSequencePage('s4'); };
+}
+
+// ── Email Engine ──────────────────────────────────────────────────────────────
+const EE_SEG_COLORS = {
+  compounding_pharmacy: '#0D7377', research_lab: '#1B3A6B',
+  generic_manufacturer: '#8B5A00', university: '#6B21A8',
+};
+function eeEsc(s) { return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function eeSegLabel(k) {
+  const s = (window._eeSegments || []).find(x => x.key === k);
+  return s ? s.label : k;
+}
+function eeSetFilter(kind, value) {
+  window['_ee' + kind] = value;
+  pages['email-engine']();
+}
+async function eeRun() {
+  const btn = document.getElementById('ee-run-btn');
+  const msg = document.getElementById('ee-run-msg');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  try {
+    const r = await API('/email-engine/run', { method:'POST', body: JSON.stringify({ top_molecules: 5 }) });
+    if (msg) { msg.style.color = r && r.error ? '#dc2626' : '#166534'; msg.textContent = (r && (r.error || r.message)) || 'Started'; }
+  } catch(e) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = e.message; } }
+  if (btn) { btn.disabled = false; btn.textContent = 'Run Engine'; }
+}
+async function eeReview(id, status) {
+  const msg = document.getElementById('ee-msg-' + id);
+  if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = 'Saving…'; }
+  try {
+    const r = await API('/email-engine/campaigns/' + encodeURIComponent(id), {
+      method:'PUT', body: JSON.stringify({ status }) });
+    if (r && r.error) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = r.error; } return; }
+    pages['email-engine']();
+  } catch(e) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = e.message; } }
+}
+async function eePublish(id) {
+  const msg = document.getElementById('ee-msg-' + id);
+  if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = 'Pushing to Apollo…'; }
+  try {
+    const r = await API('/email-engine/campaigns/' + encodeURIComponent(id) + '/publish', { method:'POST' });
+    if (r && r.error) {
+      // Apollo failures carry a hint + the payload; surface both rather than a bare error.
+      if (msg) {
+        msg.style.color = '#dc2626';
+        msg.textContent = r.error + (r.hint ? ' — ' + r.hint : '');
+      }
+      if (r.payload) eeShowPayload(r.payload);
+      return;
+    }
+    pages['email-engine']();
+  } catch(e) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = e.message; } }
+}
+// Fallback when Apollo refuses the sequence: show the exact payload so it can be
+// recreated by hand instead of the work being lost.
+function eeShowPayload(payload) {
+  const old = document.getElementById('ee-payload-overlay'); if (old) old.remove();
+  const o = document.createElement('div');
+  o.id = 'ee-payload-overlay';
+  o.style = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px';
+  o.innerHTML = `<div class="card" style="max-width:760px;width:100%;max-height:85vh;overflow:auto">
+    <div class="card-title">Apollo sequence payload (create manually)</div>
+    <pre style="font-size:11px;background:#f8fafc;padding:12px;border-radius:6px;overflow:auto;white-space:pre-wrap">${eeEsc(JSON.stringify(payload, null, 2))}</pre>
+    <div style="text-align:right;margin-top:10px"><button class="btn-outline" style="padding:6px 14px" onclick="document.getElementById('ee-payload-overlay').remove()">Close</button></div>
+  </div>`;
+  document.body.appendChild(o);
+}
+// Preview renders the model-generated HTML inside a sandboxed iframe via srcdoc.
+// It must never go into the dashboard's own DOM — sandbox with no allow-scripts
+// means the email body cannot execute or reach this origin even if the
+// server-side sanitiser is bypassed.
+async function eePreview(id, variant) {
+  const old = document.getElementById('ee-preview-overlay'); if (old) old.remove();
+  const o = document.createElement('div');
+  o.id = 'ee-preview-overlay';
+  o.style = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px';
+  o.innerHTML = `<div class="card" style="max-width:720px;width:100%;max-height:88vh;display:flex;flex-direction:column">
+    <div class="card-title" id="ee-preview-title">Loading preview…</div>
+    <div id="ee-preview-body" style="flex:1;min-height:200px"></div>
+    <div style="text-align:right;margin-top:10px">
+      <button class="btn-outline" style="padding:6px 14px" onclick="document.getElementById('ee-preview-overlay').remove()">Close</button>
+    </div>
+  </div>`;
+  document.body.appendChild(o);
+  let d;
+  try { d = await API('/email-engine/campaigns/' + encodeURIComponent(id) + '/preview?variant=' + encodeURIComponent(variant)); }
+  catch(e) { document.getElementById('ee-preview-body').innerHTML = `<p style="color:#dc2626">${eeEsc(e.message)}</p>`; return; }
+  if (d && d.error) { document.getElementById('ee-preview-body').innerHTML = `<p style="color:#dc2626">${eeEsc(d.error)}</p>`; return; }
+  document.getElementById('ee-preview-title').textContent =
+    `${d.molecule_name} · ${eeSegLabel(d.segment)} · Variant ${String(d.variant).toUpperCase()}`;
+  const iframe = document.createElement('iframe');
+  iframe.setAttribute('sandbox', '');
+  iframe.style = 'width:100%;height:60vh;border:1px solid var(--border);border-radius:6px;background:#fff';
+  iframe.srcdoc = d.html || '<p>(empty)</p>';
+  const body = document.getElementById('ee-preview-body');
+  body.innerHTML = `<div style="font-size:12px;color:#4a5568;margin-bottom:8px"><strong>Subject:</strong> ${eeEsc(d.subject)}</div>`;
+  body.appendChild(iframe);
+}
+
+if(typeof pages !== 'undefined') {
+  pages['email-engine'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading Email Engine…</p>';
+    const segFilter = window._eeSegment || 'all';
+    const statFilter = window._eeStatus || 'all';
+    let data;
+    const qs = `?segment=${encodeURIComponent(segFilter)}&status=${encodeURIComponent(statFilter)}`;
+    try { data = await API('/email-engine/campaigns' + qs); }
+    catch(e) { c.innerHTML = `<div class="card"><div class="card-title">Email Engine</div><p style="color:#dc2626">Failed to load: ${eeEsc(e.message)}</p></div>`; return; }
+    if (data && data.error) { c.innerHTML = `<div class="card"><div class="card-title">Email Engine</div><p style="color:#dc2626">${eeEsc(data.error)}</p></div>`; return; }
+    window._eeSegments = data.segments || [];
+    const campaigns = data.campaigns || [];
+    const s = data.summary || {};
+    // "Contacts reached" is not tracked locally — Apollo owns delivery counts —
+    // so the tile reports sequences pushed rather than inventing a contact number.
+    const head = `<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">Email Engine</div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <span id="ee-run-msg" style="font-size:12px;color:var(--text-muted)"></span>
+        <button id="ee-run-btn" onclick="eeRun()" class="btn-primary" style="padding:8px 18px">Run Engine</button>
+      </div>
+    </div>
+    <div class="metric-grid">
+      <div class="metric"><div class="label">Campaigns this week</div><div class="value">${s.total||0}</div></div>
+      <div class="metric amber"><div class="label">Pending approval</div><div class="value">${s.pending||0}</div></div>
+      <div class="metric green"><div class="label">Approved</div><div class="value">${s.approved||0}</div></div>
+      <div class="metric"><div class="label">Pushed to Apollo</div><div class="value">${s.sent||0}</div><div class="sub">sequences created</div></div>
+    </div>`;
+    const segBtn = (k, label) => `<button onclick="eeSetFilter('Segment','${k}')" class="btn-outline" style="padding:4px 10px;font-size:12px;${segFilter===k?'background:#1B3A6B;color:#fff':''}">${eeEsc(label)}</button>`;
+    const statBtn = (k, label) => `<button onclick="eeSetFilter('Status','${k}')" class="btn-outline" style="padding:4px 10px;font-size:12px;${statFilter===k?'background:#1B3A6B;color:#fff':''}">${eeEsc(label)}</button>`;
+    const filters = `<div class="card" style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">
+      <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+        <span style="font-size:11px;color:#718096;text-transform:uppercase;margin-right:4px">Segment</span>
+        ${segBtn('all','All')}${(data.segments||[]).map(x => segBtn(x.key, x.label)).join('')}
+      </div>
+      <div style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">
+        <span style="font-size:11px;color:#718096;text-transform:uppercase;margin-right:4px">Status</span>
+        ${['all','draft','approved','rejected','sent'].map(k => statBtn(k, k[0].toUpperCase()+k.slice(1))).join('')}
+      </div>
+    </div>`;
+    if (!campaigns.length) {
+      c.innerHTML = head + filters + `<div class="card"><p style="color:#718096">No campaigns match this filter. The engine runs Monday 9:30 AM CST after Market Intelligence — or click <strong>Run Engine</strong> to generate now.</p></div>`;
+      return;
+    }
+    const statusBadge = st => st==='approved' ? '<span class="badge badge-green">Approved</span>'
+      : st==='sent' ? '<span class="badge badge-blue">Sent</span>'
+      : st==='rejected' ? '<span class="badge badge-red">Rejected</span>'
+      : '<span class="badge badge-amber">Draft</span>';
+    const cards = campaigns.map(t => {
+      const color = EE_SEG_COLORS[t.segment] || '#718096';
+      const actions = t.status === 'draft'
+        ? `<button onclick="eeReview('${t.id}','approved')" style="background:#1D9E75;color:#fff;border:none;padding:7px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer">Approve</button>
+           <button onclick="eeReview('${t.id}','rejected')" class="btn-outline" style="padding:7px 14px;font-size:13px">Reject</button>`
+        : t.status === 'approved'
+        ? `<button onclick="eePublish('${t.id}')" style="background:#1B3A6B;color:#fff;border:none;padding:7px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer">Push to Apollo</button>`
+        : t.status === 'sent'
+        ? `<span style="font-size:12px;color:#166534">Apollo sequence ${eeEsc(t.apollo_sequence_id || '—')}</span>`
+        : '';
+      return `<div class="card" style="border-left:4px solid ${color}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:15px;font-weight:700;color:#1a202c">${eeEsc(t.molecule_name)}</div>
+            <div style="font-size:12px;color:#718096;margin-top:2px">
+              <span style="color:${color};font-weight:600">${eeEsc(eeSegLabel(t.segment))}</span>
+              ${t.cas_number ? ' · CAS ' + eeEsc(t.cas_number) : ''} · week of ${eeEsc(t.week_start)}
+            </div>
+          </div>
+          ${statusBadge(t.status)}
+        </div>
+        <div style="margin-top:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px">
+          <div style="background:#f8fafc;border-radius:6px;padding:10px">
+            <div style="font-size:10px;text-transform:uppercase;color:#a0aec0;letter-spacing:.5px">Variant A — direct</div>
+            <div style="font-size:13px;color:#1a202c;margin-top:3px">${eeEsc(t.variant_a_subject)}</div>
+            <button onclick="eePreview('${t.id}','a')" class="btn-outline" style="padding:4px 10px;font-size:11px;margin-top:6px">Preview A</button>
+          </div>
+          <div style="background:#f8fafc;border-radius:6px;padding:10px">
+            <div style="font-size:10px;text-transform:uppercase;color:#a0aec0;letter-spacing:.5px">Variant B — insight</div>
+            <div style="font-size:13px;color:#1a202c;margin-top:3px">${eeEsc(t.variant_b_subject)}</div>
+            <button onclick="eePreview('${t.id}','b')" class="btn-outline" style="padding:4px 10px;font-size:11px;margin-top:6px">Preview B</button>
+          </div>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          ${actions}
+          <span id="ee-msg-${t.id}" style="font-size:11px;color:var(--text-muted)"></span>
+        </div>
+      </div>`;
+    }).join('');
+    c.innerHTML = head + filters + cards;
+  };
 }
 </script>

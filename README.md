@@ -153,6 +153,8 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 8 * * *` (daily 8am) | GitHub sync for all active devs | `syncGitHubAllDevs()` |
 | `0 9 * * 1` (Monday 9am) | Claude weekly analysis + emailed report | `runWeeklyAnalysis()` |
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
+| `0 15 * * 1` (Monday 15:00 UTC) | Layer 2F — Market Intelligence: weekly molecule feed | `runMarketIntelligence()` |
+| `30 15 * * 1` (Monday 15:30 UTC) | Layer 4 — AI Email Engine: 5 molecules x 4 segments = 20 campaigns / 40 variants. Offset 30 min so it reads the molecule rows Market Intelligence just wrote | `runEmailEngine()` |
 | `0 18 * * *` (daily 6pm) | Milestone trigger check | `checkMilestoneTriggers()` via HTTP to self with `TRIGGERS_SECRET` |
 | `0 18 * * *` (daily 6pm) | AI performance scoring + per-user coaching email | `scoreAllAndCoach()` |
 | `0 18 * * *` (daily 6pm) | Layer 1 — 15% divergence check, auto-recalc if exceeded | `checkAndRecalc()` |
@@ -285,6 +287,26 @@ Caveat: `seo_rankings` data quality depends on GSC working. With `GOOGLE_SEARCH_
 `generateSEORecommendations({dryRun})` aggregates the Algolia output with GSC data from `fetchGSCData()` (best-effort — GSC needs a fresh OAuth bearer token to actually return rows), filters out queries that already match a SKU in the active catalog, ranks the remainder by composite score (`algolia_no_result_count * 10 + gsc_impressions`), and asks Claude haiku to identify the top 10 real pharmaceutical molecules in that list. Claude is required to return strictly JSON; if parsing fails the raw text is preserved alongside an empty `top_molecules` array. The full structured result is stored in `ai_analyses` with `analysis_type='growth_intelligence'`.
 
 Caveat on GSC: the env var `GOOGLE_SEARCH_CONSOLE_KEY` is a bearer token, not an API key. GSC requires OAuth; the token expires (default 1 hour). For production, replace the simple-bearer path in `fetchGSCData` with a proper refresh flow or service-account-issued token. With the variable unset, the agent runs on Algolia signal alone.
+
+### AI Email Engine
+
+`src/lib/agents/email-engine.js`, page **Email Engine** (INTELLIGENCE), cron Monday 15:30 UTC / 9:30am CST.
+
+`runEmailEngine({weekStart, dryRun, topMolecules})` turns weekly demand signals into per-segment A/B email campaigns.
+
+**Demand signals.** Top 20 GSC queries by impressions over the trailing 30 days (`seo_rankings`) plus the top 10 molecules from this week's `molecule_history`. GSC rows are search *queries*, not molecules, so each query is resolved against a vocabulary built from the active catalog and the trailing 12 weeks of `molecule_history`. Matching is boundary-aware rather than plain substring: chemical names embed each other (`2-(1-aminocyclobutyl)-5-bromopyrimidine` contains `5-bromopyrimidine` but is a different compound), so hyphens count as token characters while other punctuation collapses — `4'-fluoroacetophenone` still matches `4-fluoroacetophenone` across the apostrophe. Queries resolving to nothing are counted (`seo_matched`) and dropped, never guessed at. On the current corpus 8 of 20 queries resolve.
+
+Signals are merged by molecule: GSC contributes a 0–60 impression-normalised score, `molecule_history` contributes 40–100 by rank, so curated intelligence outranks raw search volume.
+
+**Catalog validation.** Each molecule is cross-checked against `skus` (by name or CAS) and `molecule_history.in_catalog`, yielding `in_catalog`, `has_coa`, `has_sds`, `purity`, `price`, `is_gmp`. These flags are injected into the prompt as the *only* facts Claude may assert about availability — a molecule with no COA produces an email that does not promise one, and an out-of-catalog molecule produces a sourcing enquiry rather than a stock offer.
+
+**Generation.** One Claude call (`claude-opus-4-8`) per molecule × segment returns *both* variants in one JSON object — A is direct/product-focused, B is insight/market-focused. Generating them together costs half as much as two calls and lets the model differentiate them deliberately. Output HTML is stripped of `<script>`, `<iframe>`, inline `on*` handlers, and `javascript:` URLs before storage.
+
+**Storage & Apollo.** Rows land in `email_campaigns`, unique on `(week_start, segment, molecule_name)` — a cron re-run cannot duplicate or clobber an approved campaign. Each row carries a prebuilt `apollo_payload`: a 3-step sequence (Email A day 0 → Email B day 3 → a generated one-line nudge day 7).
+
+**Endpoints** — `POST /email-engine/run` (admin, 202; `?dryRun=1` returns the resolved molecule list synchronously without calling Claude), `GET /email-engine/campaigns` (filters: `week`, `segment`, `status`), `PUT /email-engine/campaigns/:id` (approve/reject; draft-only transition), `POST /email-engine/campaigns/:id/publish`, `GET /email-engine/campaigns/:id/preview?variant=a|b`.
+
+Caveat on publish: Apollo's sequence-creation endpoint needs a **master** API key and is not on every plan. A non-2xx returns 502 with Apollo's verbatim response plus the payload, which the UI shows in a copyable modal so the sequence can be built by hand. Nothing is marked `sent` unless Apollo accepts it.
 
 ### Revenue Intelligence agent
 

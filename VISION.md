@@ -193,6 +193,19 @@ Run the inbound funnel above and below the marketplace: targeted LinkedIn outrea
 - LinkedIn outreach platform (e.g. Expandi, Heyreach, or LinkedIn Sales Navigator API). No existing integration.
 - The Abiozen marketplace order webhook (existing — `POST /api/orders/webhook`) for attribution back to contacts.
 
+### 4A. AI Email Engine (built)
+
+`src/lib/agents/email-engine.js`, Monday 15:30 UTC, page **Email Engine**. Implements the "Apollo sequences created and updated programmatically per segment template" output above, replacing the static S1–S4 templates in `public/index.html` with generated, demand-driven content.
+
+Each Monday it resolves that week's demand signals (GSC queries + the Layer 2F molecule feed) to real molecules, validates each against the catalog, and generates two email variants per molecule per buyer segment via Claude — A direct/product-focused, B insight/market-focused. Campaigns land in `email_campaigns` as drafts for admin approval; approved campaigns carry a prebuilt 3-step Apollo sequence payload (day 0 / day 3 / day 7).
+
+Two deliberate limits, both load-bearing:
+
+- **Availability claims are catalog-derived, never model-derived.** COA/SDS/purity/price/GMP flags come from `skus` and are injected into the prompt as the only assertable facts. This is what stops the engine promising documentation Abiozen does not hold — a compliance exposure, not a copy-quality issue.
+- **Nothing sends itself.** Generation produces drafts only; a human approves, and only then can the campaign be pushed to Apollo. Apollo's sequence-creation endpoint additionally requires a master API key and is not on every plan, so publish can fail — in which case the payload is surfaced for manual creation and the campaign is *not* marked sent.
+
+Not yet built from the Layer 4 spec above: reply-rate-driven mid-sequence adaptation, the `customer_acquisition_funnel` table, and order attribution back to a campaign. The engine currently generates and publishes; it does not yet learn from what won.
+
 ---
 
 ## Layer 5 — Operational Analytics
@@ -350,4 +363,6 @@ Status of each component as of the date of this commit. Refresh as features ship
 | `0 8 * * *` CST | US team briefing + agent task assignment | Layer 7 (built) |
 | `0 10 * * 1` CST | Monday LinkedIn content scheduler — drafts Mon/Wed/Fri posts | Layer 7 (built) |
 | continuous | Layer 3 marketplace-intelligence ingestion | Layer 3 (spec) |
+| `0 15 * * 1` | Monday Market Intelligence molecule feed | Layer 2F (built) |
+| `30 15 * * 1` | Monday AI Email Engine — 20 campaigns / 40 variants across 4 segments | Layer 4A (built) |
 | continuous | Layer 4 outbound sequence orchestration | Layer 4 (partial) |
