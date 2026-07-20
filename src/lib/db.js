@@ -584,6 +584,9 @@ async function migrateSchemas() {
       );
       CREATE INDEX IF NOT EXISTS idx_email_campaigns_week ON email_campaigns (week_start DESC, segment);
       CREATE INDEX IF NOT EXISTS idx_email_campaigns_status ON email_campaigns (status, week_start DESC);
+      -- Which demand sources contributed this molecule (comma-joined:
+      -- gsc,market_intelligence,catalog) — drives the source badges on the UI.
+      ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS sources TEXT;
     `);
     console.log('✅ Schema migrations applied (owner columns + legacy role remap + email_campaigns)');
   } catch(e) { console.error('Migration error:', e.message); }

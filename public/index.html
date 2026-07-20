@@ -3880,6 +3880,22 @@ const EE_SEG_COLORS = {
   generic_manufacturer: '#8B5A00', university: '#6B21A8',
 };
 function eeEsc(s) { return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+// Source badges from the comma-joined `sources` column. GSC (green) = real buyer
+// search data, Market Intel (blue) = weekly molecule feed, In Catalog (teal) =
+// on abiozen.com. A molecule can carry several.
+const EE_SOURCE_BADGE = {
+  gsc: ['GSC Signal', '#166534', '#dcfce7'],
+  market_intelligence: ['Market Intel', '#1e40af', '#dbeafe'],
+  catalog: ['In Catalog', '#0D7377', '#ccfbf1'],
+};
+function eeSourceBadges(sources) {
+  const list = String(sources || '').split(',').map(s => s.trim()).filter(Boolean);
+  const order = ['gsc', 'market_intelligence', 'catalog'];
+  return order.filter(k => list.includes(k)).map(k => {
+    const [label, fg, bg] = EE_SOURCE_BADGE[k];
+    return `<span style="display:inline-block;background:${bg};color:${fg};font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;margin-right:5px">${label}</span>`;
+  }).join('') || '<span style="font-size:10px;color:#a0aec0">—</span>';
+}
 function eeSegLabel(k) {
   const s = (window._eeSegments || []).find(x => x.key === k);
   return s ? s.label : k;
@@ -4038,6 +4054,7 @@ if(typeof pages !== 'undefined') {
               <span style="color:${color};font-weight:600">${eeEsc(eeSegLabel(t.segment))}</span>
               ${t.cas_number ? ' · CAS ' + eeEsc(t.cas_number) : ''} · week of ${eeEsc(t.week_start)}
             </div>
+            <div style="margin-top:6px">${eeSourceBadges(t.sources)}</div>
           </div>
           ${statusBadge(t.status)}
         </div>

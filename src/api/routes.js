@@ -1565,7 +1565,7 @@ router.post('/market/analyze', authMiddleware, requireTier('procurement'), async
 router.post('/email-engine/run', authMiddleware, adminOnly, async (req, res) => {
   const weekStart = (typeof req.body?.week_start === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.week_start))
     ? req.body.week_start : undefined;
-  const topMolecules = Math.min(20, Math.max(1, parseInt(req.body?.top_molecules, 10) || 5));
+  const topMolecules = Math.min(20, Math.max(1, parseInt(req.body?.top_molecules, 10) || 10));
   if (req.query?.dryRun === '1' || req.body?.dryRun === true) {
     try { return res.json(await runEmailEngine({ weekStart, topMolecules, dryRun: true })); }
     catch (e) { return res.status(500).json({ error: e.message }); }
@@ -1593,7 +1593,7 @@ router.get('/email-engine/campaigns', authMiddleware, requireAnyTier('sales', 'i
     const rows = (await query(
       `SELECT id, week_start, segment, molecule_name, cas_number,
               variant_a_subject, variant_b_subject, status, apollo_sequence_id,
-              created_at, approved_at, approved_by
+              sources, created_at, approved_at, approved_by
        FROM email_campaigns
        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
        ORDER BY week_start DESC, molecule_name, segment`, params

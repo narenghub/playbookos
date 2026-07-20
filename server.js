@@ -195,11 +195,12 @@ cron.schedule('0 15 * * 1', withAlerts('weekly-mon-15utc-market-intelligence', a
 // Intelligence. The offset is load-bearing, not cosmetic: the engine reads the
 // molecule_history rows that the 15:00 job writes, so starting earlier (or
 // chaining both into one slot) would generate campaigns off last week's feed.
-// 5 molecules x 4 segments = 20 campaigns / 40 variants, ~20 Claude calls.
+// 10 molecules x 4 segments = 40 campaigns / 80 variants, ~40 Claude calls,
+// drawn from GSC + molecule_history + the Algolia marketplace catalog.
 cron.schedule('30 15 * * 1', withAlerts('weekly-mon-1530utc-email-engine', async () => {
   console.log('[CRON] Email Engine starting...');
-  const ee = await runEmailEngine({ topMolecules: 5 });
-  console.log(`[CRON] Email Engine done — ${ee.generated} campaigns (${ee.generated * 2} variants) for ${ee.week_start}, ${ee.skipped} skipped, ${ee.errors.length} errors`);
+  const ee = await runEmailEngine({ topMolecules: 10 });
+  console.log(`[CRON] Email Engine done — ${ee.generated} campaigns (${ee.generated * 2} variants) for ${ee.week_start} from ${ee.unique_molecules} molecules, ${ee.skipped} skipped, ${ee.errors.length} errors`);
   if (ee.errors.length) console.warn('[CRON] Email Engine errors:', ee.errors.slice(0, 5));
 }));
 
