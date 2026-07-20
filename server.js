@@ -13,7 +13,7 @@ const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence
 const { trackKeywordRankings, generateSEOTasksForTeam, trackAlgoliaNoResults } = require('./src/lib/agents/seo-agent');
 const { cascadeGoals, assignWeeklyKPIsForAll, checkAndRecalc } = require('./src/lib/agents/goal-engine');
 const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
-const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('./src/lib/agents/orchestrator');
+const { runMorningBriefing, runPerformanceCheck, runEscalationCheck, workdayStatus } = require('./src/lib/agents/orchestrator');
 const { runWeeklyLinkedInCampaign } = require('./src/lib/agents/linkedin-agent');
 const { runEmailEngine } = require('./src/lib/agents/email-engine');
 const { businessToday } = require('./src/lib/agent-core');
@@ -278,8 +278,15 @@ cron.schedule('30 1 * * *', withAlerts('daily-130cst-dev-seo-ist-briefing', asyn
   console.log(`[CRON] Dev/SEO IST briefing done — ran: ${r.ran.join(', ') || 'none'}`);
 }), CST);
 
-// 7:00am CST — CEO briefing (CEO only)
+// 7:00am CST — CEO briefing (CEO only), business days only.
+// Skips weekends and US federal holidays (isWorkday, evaluated in CST). The cron
+// still fires daily; the guard inside decides whether to send.
 cron.schedule('0 7 * * *', withAlerts('daily-7cst-ceo-briefing', async () => {
+  const status = workdayStatus();
+  if (!status.workday) {
+    console.log(`[CRON] CEO briefing skipped — ${status.reason} (${businessToday()})`);
+    return;
+  }
   console.log('[CRON] CEO briefing starting...');
   const r = await runMorningBriefing({ segment: 'ceo' });
   console.log(`[CRON] CEO briefing done — ran: ${r.ran.join(', ') || 'none'}`);

@@ -395,4 +395,78 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
   return { date: today, count: actions.length, actions };
 }
 
-module.exports = { runMorningBriefing, generateKpiTasks, runPerformanceCheck, runEscalationCheck, getDirectorRole };
+// ── Workday / US federal holiday calendar ─────────────────────────────────────
+// The CEO briefing should only fire on business days. A day is a workday unless
+// it is a weekend OR one of the eight US federal holidays below.
+//
+// "Today" is evaluated in America/Chicago (same convention as businessToday(), and
+// the same timezone the CEO cron runs in) so the calendar day is unambiguous — a
+// 7am CST fire time is early-afternoon UTC, so a naive UTC date would still be the
+// same day here, but pinning the zone keeps it correct year-round.
+//
+// Holidays are matched on their ACTUAL calendar date, not the federal
+// observed-when-it-falls-on-a-weekend shift (e.g. Jul 4 on a Saturday is observed
+// the Friday before). That shift never affects the briefing anyway: the actual
+// date, if it lands on a weekend, is already skipped as a weekend, and the only
+// effect of adding observance would be to ALSO skip an adjacent weekday — which is
+// not what was asked. If observed-day skipping is ever wanted, shift here.
+
+// America/Chicago calendar parts for a given instant.
+function chicagoYMD(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date);
+  const get = t => Number(parts.find(p => p.type === t).value);
+  return { y: get('year'), m: get('month'), d: get('day') }; // m is 1-indexed
+}
+
+// nth weekday of a month (weekday: 0=Sun..6=Sat). Pure calendar math on a fixed
+// year, so UTC constructors are safe — no timezone is involved.
+function nthWeekday(year, monthIdx, weekday, n) {
+  const first = new Date(Date.UTC(year, monthIdx, 1)).getUTCDay();
+  return 1 + ((weekday - first + 7) % 7) + (n - 1) * 7;
+}
+function lastWeekday(year, monthIdx, weekday) {
+  const daysInMonth = new Date(Date.UTC(year, monthIdx + 1, 0)).getUTCDate();
+  const lastDow = new Date(Date.UTC(year, monthIdx, daysInMonth)).getUTCDay();
+  return daysInMonth - ((lastDow - weekday + 7) % 7);
+}
+
+// The eight full federal holidays, as a Set of "M-D" keys (month 1-indexed) for
+// the given year. Nth-weekday holidays are computed; the rest are fixed dates.
+function federalHolidayKeys(year) {
+  return new Set([
+    '1-1',                               // New Year's Day
+    `1-${nthWeekday(year, 0, 1, 3)}`,    // Martin Luther King Jr Day — 3rd Mon Jan
+    `5-${lastWeekday(year, 4, 1)}`,      // Memorial Day — last Mon May
+    '6-19',                              // Juneteenth
+    '7-4',                               // Independence Day
+    `9-${nthWeekday(year, 8, 1, 1)}`,    // Labor Day — 1st Mon Sep
+    `11-${nthWeekday(year, 10, 4, 4)}`,  // Thanksgiving Day — 4th Thu Nov
+    '12-25',                             // Christmas Day
+  ]);
+}
+
+// True when `date` (interpreted in CST) is a federal holiday.
+function isFederalHoliday(date = new Date()) {
+  const { y, m, d } = chicagoYMD(date);
+  return federalHolidayKeys(y).has(`${m}-${d}`);
+}
+
+// A workday is a weekday (Mon–Fri, CST) that is not a federal holiday. Returns a
+// plain boolean; use workdayStatus() when you need the skip reason for logging.
+function isWorkday(date = new Date()) {
+  return workdayStatus(date).workday;
+}
+
+// Richer form for logging: { workday, reason } where reason is 'weekend' |
+// 'federal_holiday' | 'workday'.
+function workdayStatus(date = new Date()) {
+  const { y, m, d } = chicagoYMD(date);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0=Sun..6=Sat
+  if (dow === 0 || dow === 6) return { workday: false, reason: 'weekend' };
+  if (federalHolidayKeys(y).has(`${m}-${d}`)) return { workday: false, reason: 'federal_holiday' };
+  return { workday: true, reason: 'workday' };
+}
+
+module.exports = { runMorningBriefing, generateKpiTasks, runPerformanceCheck, runEscalationCheck, getDirectorRole, isWorkday, isFederalHoliday, workdayStatus };
