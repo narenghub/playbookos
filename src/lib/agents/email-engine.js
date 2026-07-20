@@ -263,10 +263,8 @@ async function validateAgainstCatalog(molecules, algoliaByKey) {
 // never go missing.
 //
 // FOOTER ADDRESS: CAN-SPAM requires a real physical postal address in commercial
-// email. No verified Abiozen address exists in the codebase, so a placeholder is
-// emitted rather than a fabricated address — replace SENDER_ADDRESS before real
-// sends, or map it to an Apollo merge field.
-const SENDER_ADDRESS = '[Abiozen LLC — add mailing address for CAN-SPAM compliance]';
+// email. Rendered on its own line in the footer under the company name.
+const SENDER_ADDRESS = '1333 Barclay Blvd, Suite 1333, Buffalo Grove, IL 60089';
 
 function badge(text, bg, fg = '#ffffff') {
   return `<span style="display:inline-block;background:${bg};color:${fg};font-size:11px;font-weight:700;letter-spacing:.3px;padding:4px 10px;border-radius:12px;margin:0 6px 6px 0">${esc(text)}</span>`;
