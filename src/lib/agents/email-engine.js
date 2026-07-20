@@ -134,14 +134,27 @@ async function gatherDemandSignals(week) {
 
   const algoliaRows = await fetchAlgoliaCatalog();
 
-  // Vocabulary for resolving free-text GSC queries → real molecule names.
+  // Vocabulary for resolving free-text GSC queries → real molecule names. This
+  // must be BROAD, not just the current sources: a buyer searching for a compound
+  // that isn't in this week's feed or the catalog should STILL get a campaign
+  // (GSC is the highest-priority signal). So the dictionary spans the trailing 12
+  // weeks of molecule_history plus every SKU and every Algolia record. A GSC hit
+  // then enters the candidate pool via add(...,'gsc') below even if no other
+  // source carries it. (Narrowing this to the current week silently zeroed GSC
+  // matching — the whole search half of the pipeline went dark.)
+  const vocabRows = (await query(
+    `SELECT DISTINCT molecule_name AS name, cas_number FROM molecule_history
+       WHERE week_start >= $1`,
+    [isoDate(new Date(Date.now() - 84 * DAY_MS))]
+  )).rows;
   const vocab = [];
   const seenVocab = new Set();
-  for (const r of [...mhRows, ...skuRows, ...algoliaRows]) {
-    const k = norm(r.molecule_name);
-    if (!k || r.molecule_name.length < 4 || seenVocab.has(k)) continue;
+  for (const r of [...vocabRows, ...skuRows, ...algoliaRows]) {
+    const nm = r.name || r.molecule_name;
+    const k = norm(nm);
+    if (!k || !nm || nm.length < 4 || seenVocab.has(k)) continue;
     seenVocab.add(k);
-    vocab.push({ name: r.molecule_name, cas_number: r.cas_number });
+    vocab.push({ name: nm, cas_number: r.cas_number });
   }
   vocab.sort((a, b) => b.name.length - a.name.length); // longest first
 
