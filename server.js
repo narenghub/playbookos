@@ -16,6 +16,7 @@ const { takeMetricsSnapshot } = require('./src/lib/agents/metrics-snapshot');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck, workdayStatus } = require('./src/lib/agents/orchestrator');
 const { runWeeklyLinkedInCampaign } = require('./src/lib/agents/linkedin-agent');
 const { runEmailEngine } = require('./src/lib/agents/email-engine');
+const { processApolloReplies } = require('./src/lib/agents/sales-agent');
 const { businessToday } = require('./src/lib/agent-core');
 const routes = require('./src/api/routes');
 
@@ -202,6 +203,17 @@ cron.schedule('30 15 * * 1', withAlerts('weekly-mon-1530utc-email-engine', async
   const ee = await runEmailEngine({ topMolecules: 10 });
   console.log(`[CRON] Email Engine done — ${ee.generated} campaigns (${ee.generated * 2} variants) for ${ee.week_start} from ${ee.unique_molecules} molecules, ${ee.skipped} skipped, ${ee.errors.length} errors`);
   if (ee.errors.length) console.warn('[CRON] Email Engine errors:', ee.errors.slice(0, 5));
+}));
+
+// Hourly (:17) — Sales Agent: pull Apollo replies, classify into leads, WhatsApp
+// Naresh on HOT, draft follow-ups on WARM. Off-minute so it doesn't pile onto the
+// top-of-hour rush; idempotent (dedups on apollo_message_id) so overlap is safe.
+cron.schedule('17 * * * *', withAlerts('hourly-17-sales-replies', async () => {
+  const r = await processApolloReplies();
+  if (r.new_leads || r.errors.length) {
+    console.log(`[CRON] Sales replies — fetched ${r.fetched}, ${r.new_leads} new leads (${r.hot} hot, ${r.warm} warm, ${r.cold} cold), ${r.follow_ups} follow-ups, ${r.errors.length} errors`);
+    if (r.errors.length) console.warn('[CRON] Sales reply errors:', r.errors.slice(0, 5));
+  }
 }));
 
 // Daily 6 PM: check milestone triggers

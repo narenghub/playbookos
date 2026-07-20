@@ -587,6 +587,40 @@ async function migrateSchemas() {
       -- Which demand sources contributed this molecule (comma-joined:
       -- gsc,market_intelligence,catalog) — drives the source badges on the UI.
       ALTER TABLE email_campaigns ADD COLUMN IF NOT EXISTS sources TEXT;
+      -- Sales Agent — classified leads from Apollo replies. apollo_message_id is
+      -- UNIQUE so the hourly reply-processing cron is idempotent (a reply already
+      -- ingested is skipped, never duplicated).
+      CREATE TABLE IF NOT EXISTS leads (
+        id TEXT PRIMARY KEY,
+        contact_name TEXT,
+        company TEXT,
+        email TEXT,
+        reply_text TEXT,
+        classification TEXT CHECK (classification IN ('HOT','WARM','COLD')),
+        source_sequence TEXT,
+        apollo_message_id TEXT UNIQUE,
+        reply_class TEXT,
+        assigned_to TEXT,
+        status TEXT DEFAULT 'new' CHECK (status IN ('new','contacted','qualified','closed')),
+        estimated_value REAL DEFAULT 0,
+        notes TEXT,
+        created_at TEXT DEFAULT NOW(),
+        updated_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_leads_status ON leads (status, classification);
+      CREATE INDEX IF NOT EXISTS idx_leads_created ON leads (created_at DESC);
+      -- Sales Agent — AI-drafted follow-up emails for WARM leads, awaiting approval.
+      CREATE TABLE IF NOT EXISTS follow_ups (
+        id TEXT PRIMARY KEY,
+        lead_id TEXT,
+        subject TEXT,
+        body TEXT,
+        status TEXT DEFAULT 'draft' CHECK (status IN ('draft','approved','sent')),
+        created_at TEXT DEFAULT NOW(),
+        approved_at TEXT,
+        sent_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_follow_ups_lead ON follow_ups (lead_id, status);
     `);
     console.log('✅ Schema migrations applied (owner columns + legacy role remap + email_campaigns)');
   } catch(e) { console.error('Migration error:', e.message); }

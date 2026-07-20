@@ -12,6 +12,7 @@ const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings, generateCatalogSeoPages } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('../lib/agents/growth-agent');
 const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo } = require('../lib/agents/email-engine');
+const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1716,6 +1717,94 @@ router.get('/email-engine/campaigns/:id/preview', authMiddleware, requireAnyTier
       html: sanitizeHtml(variant === 'b' ? c.variant_b_html : c.variant_a_html),
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Sales Pipeline (leads from Apollo replies) ────────────────────────────────
+// Read access: admin + sales_director. Mutations: admin only.
+router.get('/leads', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const where = [], params = [];
+    if (typeof req.query.status === 'string' && req.query.status !== 'all') {
+      params.push(req.query.status); where.push(`status = $${params.length}`);
+    }
+    if (typeof req.query.classification === 'string' && req.query.classification !== 'all') {
+      params.push(req.query.classification.toUpperCase()); where.push(`classification = $${params.length}`);
+    }
+    const leads = (await query(
+      `SELECT l.*, (SELECT COUNT(*)::int FROM follow_ups f WHERE f.lead_id=l.id) AS follow_up_count
+       FROM leads l ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+       ORDER BY CASE classification WHEN 'HOT' THEN 0 WHEN 'WARM' THEN 1 ELSE 2 END, updated_at DESC`,
+      params
+    )).rows;
+    res.json({ leads });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/leads/pipeline', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try { res.json(await getLeadPipeline()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update status / notes / assignee / value. Bumps updated_at (drives the
+// avg-response-time metric — the first move off 'new' is the response).
+router.put('/leads/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const lead = (await query('SELECT id, status FROM leads WHERE id=$1', [req.params.id])).rows[0];
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const sets = [], params = [];
+    if (req.body.status !== undefined) {
+      if (!['new', 'contacted', 'qualified', 'closed'].includes(req.body.status)) {
+        return res.status(400).json({ error: 'invalid status' });
+      }
+      params.push(req.body.status); sets.push(`status = $${params.length}`);
+    }
+    if (req.body.notes !== undefined) { params.push(String(req.body.notes).slice(0, 2000)); sets.push(`notes = $${params.length}`); }
+    if (req.body.assigned_to !== undefined) { params.push(req.body.assigned_to || null); sets.push(`assigned_to = $${params.length}`); }
+    if (req.body.estimated_value !== undefined) { params.push(Number(req.body.estimated_value) || 0); sets.push(`estimated_value = $${params.length}`); }
+    if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+    sets.push('updated_at = NOW()');
+    params.push(req.params.id);
+    await query(`UPDATE leads SET ${sets.join(', ')} WHERE id = $${params.length}`, params);
+    logAgentActivity({
+      agent_name: req.user.email, action_type: 'lead_updated', user_id: null,
+      reasoning: `${req.user.email} updated lead ${req.params.id}: ${sets.filter(s => !s.startsWith('updated_at')).join(', ')}`,
+      output_summary: `lead_id=${req.params.id}`,
+    }).catch(() => {});
+    const updated = (await query('SELECT * FROM leads WHERE id=$1', [req.params.id])).rows[0];
+    res.json({ success: true, lead: updated });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Follow-up drafts for a lead (for the "Send follow-up" quick action to preview).
+router.get('/leads/:id/follow-ups', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const rows = (await query('SELECT * FROM follow_ups WHERE lead_id=$1 ORDER BY created_at DESC', [req.params.id])).rows;
+    res.json({ follow_ups: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Generate (or regenerate) a follow-up draft for a lead on demand.
+router.post('/leads/:id/follow-up', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const lead = (await query('SELECT * FROM leads WHERE id=$1', [req.params.id])).rows[0];
+    if (!lead) return res.status(404).json({ error: 'Lead not found' });
+    const draft = await generateFollowUp(lead);
+    res.json({ success: true, follow_up: draft });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manually trigger Apollo reply processing (async 202; the hourly cron does this
+// automatically). ?dryRun=1 reports what would be fetched without writing.
+router.post('/leads/process-replies', authMiddleware, adminOnly, async (req, res) => {
+  const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
+  if (dryRun) {
+    try { return res.json(await processApolloReplies({ dryRun: true })); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+  processApolloReplies()
+    .then(r => console.log(`[sales] replies processed — ${r.new_leads} new leads (${r.hot} hot)`))
+    .catch(e => console.error('[sales] reply processing failed:', e.message));
+  res.status(202).json({ started: true, message: 'Apollo reply processing started. Refresh the pipeline shortly.' });
 });
 
 // Current (or ?week=) week's 150 molecules, split into the two tabs.

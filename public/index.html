@@ -388,6 +388,7 @@ const NAV_SECTIONS = [
   ]},
   {title:'REVENUE', items:[
     {id:'revenue', label:'Revenue & Orders', icon:'💰'},
+    {id:'sales-pipeline', label:'Sales Pipeline', icon:'🎯'},
   ]},
   {title:'INTELLIGENCE', items:[
     {id:'apollo-outreach', label:'Apollo Outreach', icon:'📧'},
@@ -453,7 +454,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -4077,6 +4078,133 @@ if(typeof pages !== 'undefined') {
       </div>`;
     }).join('');
     c.innerHTML = head + filters + cards;
+  };
+}
+
+// ── Sales Pipeline ────────────────────────────────────────────────────────────
+function spEsc(s) { return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+const SP_STATUSES = [
+  { key:'new', label:'New', color:'#718096' },
+  { key:'contacted', label:'Contacted', color:'#0D7377' },
+  { key:'qualified', label:'Qualified', color:'#1D9E75' },
+  { key:'closed', label:'Closed', color:'#1B3A6B' },
+];
+const SP_CLASS = { HOT:['🔥 HOT','#991B1B','#FEF2F2','#FCA5A5'], WARM:['WARM','#B45309','#FFFBEB','#FCD34D'], COLD:['COLD','#475569','#f1f5f9','#cbd5e1'] };
+function spMoney(n){ return '$' + Math.round(Number(n)||0).toLocaleString(); }
+
+async function spProcessReplies() {
+  const msg = document.getElementById('sp-proc-msg');
+  const btn = document.getElementById('sp-proc-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Processing…'; }
+  try {
+    const r = await API('/leads/process-replies', { method:'POST', body: JSON.stringify({}) });
+    if (msg) { msg.style.color = r && r.error ? '#dc2626' : '#166534'; msg.textContent = (r && (r.error || r.message)) || 'Started'; }
+    setTimeout(() => pages['sales-pipeline'](), 3000);
+  } catch(e) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = e.message; } }
+  if (btn) { btn.disabled = false; btn.textContent = 'Process Apollo Replies'; }
+}
+async function spUpdate(id, patch, label) {
+  const msg = document.getElementById('sp-msg-' + id);
+  if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = (label || 'Saving') + '…'; }
+  try {
+    const r = await API('/leads/' + encodeURIComponent(id), { method:'PUT', body: JSON.stringify(patch) });
+    if (r && r.error) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = r.error; } return; }
+    pages['sales-pipeline']();
+  } catch(e) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = e.message; } }
+}
+// Generate a follow-up draft, then show it in a modal.
+async function spFollowUp(id) {
+  const msg = document.getElementById('sp-msg-' + id);
+  if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = 'Drafting follow-up…'; }
+  try {
+    const r = await API('/leads/' + encodeURIComponent(id) + '/follow-up', { method:'POST', body: JSON.stringify({}) });
+    if (r && r.error) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = r.error; } return; }
+    if (msg) msg.textContent = '';
+    spShowFollowUp(r.follow_up);
+  } catch(e) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = e.message; } }
+}
+function spShowFollowUp(fu) {
+  const old = document.getElementById('sp-fu-overlay'); if (old) old.remove();
+  const o = document.createElement('div');
+  o.id = 'sp-fu-overlay';
+  o.style = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px';
+  o.innerHTML = `<div class="card" style="max-width:640px;width:100%;max-height:85vh;overflow:auto">
+    <div class="card-title">Follow-up draft</div>
+    <div style="font-size:12px;color:#4a5568;margin-bottom:6px"><strong>Subject:</strong> ${spEsc(fu.subject)}</div>
+    <pre style="font-size:13px;background:#f8fafc;padding:12px;border-radius:6px;white-space:pre-wrap;font-family:inherit;line-height:1.6">${spEsc(fu.body)}</pre>
+    <div style="font-size:11px;color:#718096;margin-top:8px">Saved as a draft in follow_ups. Sending on your behalf is not automated — copy into Apollo or your mail client to send.</div>
+    <div style="text-align:right;margin-top:12px"><button class="btn-outline" style="padding:6px 14px" onclick="document.getElementById('sp-fu-overlay').remove()">Close</button></div>
+  </div>`;
+  document.body.appendChild(o);
+}
+
+if(typeof pages !== 'undefined') {
+  pages['sales-pipeline'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading Sales Pipeline…</p>';
+    let pipe, data;
+    try { [pipe, data] = await Promise.all([ API('/leads/pipeline'), API('/leads') ]); }
+    catch(e) { c.innerHTML = `<div class="card"><div class="card-title">Sales Pipeline</div><p style="color:#dc2626">Failed to load: ${spEsc(e.message)}</p></div>`; return; }
+    if (pipe && pipe.error) { c.innerHTML = `<div class="card"><div class="card-title">Sales Pipeline</div><p style="color:#dc2626">${spEsc(pipe.error)}</p></div>`; return; }
+    const leads = (data && data.leads) || [];
+
+    const head = `<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">Sales Pipeline</div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <span id="sp-proc-msg" style="font-size:12px;color:var(--text-muted)"></span>
+        <button id="sp-proc-btn" onclick="spProcessReplies()" class="btn-primary" style="padding:8px 16px">Process Apollo Replies</button>
+      </div>
+    </div>
+    <div class="metric-grid">
+      <div class="metric"><div class="label">Total leads</div><div class="value">${pipe.total||0}</div><div class="sub">${pipe.hot||0} hot · ${pipe.warm||0} warm</div></div>
+      <div class="metric"><div class="label">Open pipeline (est.)</div><div class="value">${spMoney(pipe.pipeline_value_estimate)}</div><div class="sub">heuristic, not booked</div></div>
+      <div class="metric green"><div class="label">Conversion rate</div><div class="value">${pipe.conversion_rate_pct||0}%</div><div class="sub">closed / total</div></div>
+      <div class="metric"><div class="label">Avg response time</div><div class="value">${pipe.avg_response_hours!=null?pipe.avg_response_hours+'h':'—'}</div><div class="sub">to first touch</div></div>
+    </div>`;
+
+    if (!leads.length) {
+      c.innerHTML = head + `<div class="card"><p style="color:#718096">No leads yet. Leads are created automatically when Apollo prospects reply (hourly), or click <strong>Process Apollo Replies</strong> to pull now.</p></div>`;
+      return;
+    }
+
+    // Kanban columns by status.
+    const byStatus = {};
+    SP_STATUSES.forEach(s => byStatus[s.key] = []);
+    leads.forEach(l => (byStatus[l.status] || (byStatus[l.status]=[])).push(l));
+
+    const card = l => {
+      const cl = SP_CLASS[l.classification] || SP_CLASS.COLD;
+      const hot = l.classification === 'HOT';
+      const snippet = (l.reply_text || '').replace(/\s+/g,' ').slice(0, 120);
+      const nextStatus = { new:'contacted', contacted:'qualified', qualified:'closed' }[l.status];
+      const actions = [];
+      if (l.classification !== 'COLD') actions.push(`<button onclick="spFollowUp('${l.id}')" class="btn-outline" style="padding:4px 9px;font-size:11px">Send follow-up</button>`);
+      if (l.status !== 'qualified' && l.status !== 'closed') actions.push(`<button onclick="spUpdate('${l.id}',{status:'qualified'},'Qualifying')" style="background:#1D9E75;color:#fff;border:none;padding:4px 9px;border-radius:4px;font-size:11px;cursor:pointer">Mark qualified</button>`);
+      if (l.status !== 'closed') actions.push(`<button onclick="spUpdate('${l.id}',{status:'closed'},'Closing')" style="background:#1B3A6B;color:#fff;border:none;padding:4px 9px;border-radius:4px;font-size:11px;cursor:pointer">Close deal</button>`);
+      if (nextStatus && nextStatus !== 'qualified' && nextStatus !== 'closed') actions.push(`<button onclick="spUpdate('${l.id}',{status:'${nextStatus}'},'Moving')" class="btn-outline" style="padding:4px 9px;font-size:11px">→ ${nextStatus}</button>`);
+      return `<div style="background:#fff;border:1px solid ${hot?cl[3]:'#e2e8f0'};${hot?'border-left:4px solid '+cl[1]+';':''}border-radius:8px;padding:10px 12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+          <div style="font-size:13px;font-weight:700;color:#1a202c">${spEsc(l.contact_name||'(unknown)')}</div>
+          <span style="display:inline-block;background:${cl[2]};color:${cl[1]};font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px;white-space:nowrap">${cl[0]}</span>
+        </div>
+        ${l.company?`<div style="font-size:12px;color:#4a5568">${spEsc(l.company)}</div>`:''}
+        ${snippet?`<div style="font-size:11px;color:#718096;margin-top:5px;font-style:italic">"${spEsc(snippet)}${l.reply_text&&l.reply_text.length>120?'…':''}"</div>`:''}
+        ${l.notes?`<div style="font-size:11px;color:#4a5568;margin-top:4px">${spEsc(l.notes)}</div>`:''}
+        <div style="font-size:10px;color:#a0aec0;margin-top:5px">${l.source_sequence?spEsc(String(l.source_sequence).slice(0,40))+' · ':''}${l.follow_up_count?l.follow_up_count+' draft(s) · ':''}${l.estimated_value?spMoney(l.estimated_value):''}</div>
+        <div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${actions.join('')}</div>
+        <span id="sp-msg-${l.id}" style="font-size:10px;color:var(--text-muted)"></span>
+      </div>`;
+    };
+
+    const cols = SP_STATUSES.map(s => {
+      const items = byStatus[s.key] || [];
+      return `<div style="flex:1;min-width:240px">
+        <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:${s.color};padding:6px 4px;border-bottom:2px solid ${s.color}">${s.label} <span style="color:#a0aec0">(${items.length})</span></div>
+        <div style="margin-top:8px">${items.map(card).join('') || '<div style="font-size:12px;color:#cbd5e1;padding:10px 4px">—</div>'}</div>
+      </div>`;
+    }).join('');
+
+    c.innerHTML = head + `<div class="card"><div style="display:flex;gap:14px;overflow-x:auto;align-items:flex-start">${cols}</div></div>`;
   };
 }
 </script>
