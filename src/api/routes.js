@@ -379,6 +379,60 @@ router.post('/users/send-onboarding', authMiddleware, adminOnly, async (req, res
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// POST /users/send-task-nudge (admin) — follow-up to the onboarding nudge, aimed
+// at the specific gap it did not close: users work their tasks but never move them
+// out of pending, so the KPI/completion components of the score stay at 0.
+// Unlike send-onboarding this targets ALL active users, not just the 0-score ones.
+// ?dryRun=1 previews recipients without sending. sendEmail() logs to email_log.
+router.post('/users/send-task-nudge', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
+    const recips = (await query(`
+      SELECT u.id, u.name, u.email, u.role
+      FROM users u
+      WHERE u.is_active = 1 AND u.email IS NOT NULL
+        AND u.role <> 'super_admin'
+        AND COALESCE(u.excluded_from_scoring, false) = false
+      ORDER BY u.name`)).rows;
+
+    if (dryRun) {
+      return res.json({ dryRun: true, count: recips.length,
+        recipients: recips.map(r => ({ name: r.name, email: r.email, role: r.role })) });
+    }
+
+    const base = process.env.BASE_URL || 'https://playbook.abiozen.com';
+    const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    let sent = 0; const results = [];
+    for (const u of recips) {
+      const html = `<div style="font-family:Arial;max-width:600px;line-height:1.65;color:#333">
+  <div style="background:#991B1B;padding:18px 22px;border-radius:8px 8px 0 0">
+    <h2 style="color:#fff;margin:0">Action required: mark your tasks complete</h2>
+    <p style="color:#FECACA;margin:6px 0 0;font-size:13px">Hi ${esc(u.name)} — this takes under a minute per task</p>
+  </div>
+  <div style="padding:22px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px">
+    <p><strong>Your score only improves when you mark tasks complete. Every task = points toward your daily score.</strong></p>
+    <p>Doing the work isn't enough on its own — PlaybookOS scores what's marked done. Here's exactly how:</p>
+    <ol style="padding-left:18px">
+      <li>Go to <a href="${base}">${base}</a></li>
+      <li>Click <strong>My Tasks</strong> in the left sidebar</li>
+      <li>Find your assigned tasks</li>
+      <li>Click the task → click <strong>In Progress</strong> when you start</li>
+      <li>Click <strong>Done</strong> when you finish</li>
+    </ol>
+    <div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 16px;margin:16px 0">
+      <strong>Please do this today.</strong> Naresh reviews everyone's scores daily — an unmarked task reads as no work done.
+    </div>
+    <p style="margin-top:16px"><a href="${base}/#my-tasks" style="background:#991B1B;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:700">Open My Tasks →</a></p>
+  </div>
+</div>`;
+      const ok = await sendEmail({ to: u.email, subject: 'Action required: mark your tasks complete in PlaybookOS', html });
+      if (ok) sent++;
+      results.push({ name: u.name, email: u.email, sent: !!ok });
+    }
+    res.json({ success: true, sent, total: recips.length, recipients: results });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/activity', authMiddleware, async (req, res) => {
   try {
     const { log_date, metric, value, notes } = req.body;
