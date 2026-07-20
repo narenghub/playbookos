@@ -352,26 +352,34 @@ async function runEmailEngine({ weekStart, dryRun = false, topMolecules = 5 } = 
 }
 
 // ── Apollo publishing ─────────────────────────────────────────────────────────
-// Creating a sequence with content takes THREE calls per step, not one. Posting
-// `emailer_steps` inline on the campaign create returns 200 and silently drops
-// them — the first live attempt produced a sequence with num_steps: 0, which
-// would have been marked 'sent' with nothing in it. The real flow:
+// Building a sequence with content takes FOUR calls, and Apollo accepts (HTTP
+// 200) three wrong shapes that silently drop the content. Every one was tried
+// against the live API; do not "simplify" this back down:
 //
-//   1. POST /emailer_campaigns            -> sequence id
-//   2. POST /emailer_steps                 -> step id      (once per step)
-//   3. POST /emailer_touches               -> attaches subject + body_html
-//                                             (creates the template inline)
+//   1. POST /emailer_campaigns                     -> sequence id     (once)
+//   2. POST /emailer_steps                          -> step id        (per step)
+//        {emailer_campaign_id, position, type, wait_time, wait_mode:'day'}
+//   3. POST /emailer_touches {emailer_step_id, type} -> emailer_template_id
+//        Apollo mints an EMPTY template for the touch and returns its id.
+//   4. PUT  /emailer_templates/{that id} {subject, body_html}
+//        This is the only shape where content survives.
 //
-// `/sequences` is an alias for `/emailer_campaigns`, but `/sequences/{id}/
-// sequence_steps` and `/sequence_templates` do not exist (404) — don't reach for
-// them. Note also that GET /emailer_campaigns/{id} never expands emailer_touches,
-// even for sequences actively delivering mail, so the touch write cannot be
-// verified by read-back; the touch response carrying an emailer_template_id is
-// the confirmation.
+// What returns 200 and silently loses the content:
+//   - `emailer_steps` inline on the campaign create (produced num_steps: 0)
+//   - `emailer_template: {subject, body_html}` nested inside the touch
+//   - `subject` / `body_html` at the top level of the touch
+//   - linking a pre-made template via `emailer_template_id` on the touch —
+//     Apollo clones it and the clone comes back empty
+//
+// Path notes: /sequences is an alias for /emailer_campaigns, but
+// /sequences/{id}/sequence_steps and /sequence_templates both 404. And GET
+// /emailer_campaigns/{id} never expands emailer_touches even for sequences
+// actively delivering mail, so verify content by fetching the template id
+// directly — not by reading the campaign back.
 async function publishSequenceToApollo(payload, apolloKey) {
-  const call = async (path, body) => {
+  const call = async (path, body, method = 'POST') => {
     const r = await fetch('https://api.apollo.io/api/v1' + path, {
-      method: 'POST',
+      method,
       headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
       body: JSON.stringify(body),
     });
@@ -411,14 +419,22 @@ async function publishSequenceToApollo(payload, apolloKey) {
       return { ok: false, stage: `step ${step.position}`, status: s.status,
                detail: s.text.slice(0, 400), sequenceId, stepsDone };
     }
+    // Touch is created empty; Apollo returns the id of the template it minted.
     const t = await call('/emailer_touches', {
       emailer_step_id: stepId,
       type: step.type || 'auto_email',
-      emailer_template: { subject: step.subject, body_html: step.body_html },
     });
-    if (!t.ok) {
-      return { ok: false, stage: `content for step ${step.position}`, status: t.status,
+    const templateId = t.json?.emailer_touch?.emailer_template_id || null;
+    if (!t.ok || !templateId) {
+      return { ok: false, stage: `touch for step ${step.position}`, status: t.status,
                detail: t.text.slice(0, 400), sequenceId, stepsDone };
+    }
+    // Content only survives when PUT onto that minted template.
+    const tpl = await call(`/emailer_templates/${templateId}`,
+      { subject: step.subject, body_html: step.body_html }, 'PUT');
+    if (!tpl.ok) {
+      return { ok: false, stage: `content for step ${step.position}`, status: tpl.status,
+               detail: tpl.text.slice(0, 400), sequenceId, stepsDone };
     }
     stepsDone.push(step.position);
   }
