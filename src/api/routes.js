@@ -16,6 +16,7 @@ const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../
 const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/procurement-agent');
 const { runMeetAgent, analyzeAndStore } = require('../lib/agents/meet-agent');
 const { runResearchAgent } = require('../lib/agents/research-agent');
+const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1719,6 +1720,124 @@ router.get('/email-engine/campaigns/:id/preview', authMiddleware, requireAnyTier
       subject: variant === 'b' ? c.variant_b_subject : c.variant_a_subject,
       html: sanitizeHtml(variant === 'b' ? c.variant_b_html : c.variant_a_html),
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Reorder Agent ─────────────────────────────────────────────────────────────
+const jArr = v => { try { return JSON.parse(v || '[]'); } catch { return []; } };
+
+router.post('/reorder/run', authMiddleware, adminOnly, async (req, res) => {
+  const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
+  const topN = Math.min(50, Math.max(1, parseInt(req.body?.topN, 10) || 20));
+  if (dryRun) {
+    try { return res.json(await runReorderAgent({ dryRun: true, topN })); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+  runReorderAgent({ topN })
+    .then(r => console.log(`[reorder] run — ${r.candidates_found} candidates, ${r.campaigns_created} campaigns`))
+    .catch(e => console.error('[reorder] run failed:', e.message));
+  res.status(202).json({ started: true, message: 'Reorder agent started — analyzing buyers and drafting campaigns (Apollo sequences created inactive).' });
+});
+
+router.get('/reorder/dashboard', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const month = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const b = (await query(`SELECT COUNT(*) FILTER (WHERE status='active')::int active_buyers FROM buyer_accounts`)).rows[0];
+    const camp = (await query(`SELECT
+        COUNT(*) FILTER (WHERE created_at >= ($1)::text)::int campaigns_month,
+        COUNT(*) FILTER (WHERE campaign_status='ordered')::int orders,
+        COALESCE(SUM(order_value_usd) FILTER (WHERE campaign_status='ordered'),0) revenue_recovered,
+        COUNT(*) FILTER (WHERE campaign_status IN ('email_sent','replied'))::int sent
+      FROM reorder_campaigns`, [month])).rows[0];
+    let candidates = 0;
+    try { candidates = (await identifyReorderCandidates({ topN: 100 })).length; } catch {}
+    const convRate = camp.sent > 0 ? Number(((camp.orders / camp.sent) * 100).toFixed(1)) : 0;
+    res.json({ active_buyers: b.active_buyers, reorder_candidates: candidates, campaigns_month: camp.campaigns_month, revenue_recovered: Number(camp.revenue_recovered), conversion_rate_pct: convRate });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/reorder/candidates', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const topN = Math.min(100, Math.max(1, parseInt(req.query.topN, 10) || 20));
+    const c = await identifyReorderCandidates({ topN });
+    res.json({ candidates: c.map(x => ({ buyer_id: x.buyer.id, contact_name: x.buyer.contact_name, company_name: x.buyer.company_name, email: x.buyer.email, buyer_type: x.buyer.buyer_type, molecule: x.molecule, days_since: x.daysSince, score: x.score, total_orders: x.buyer.total_orders })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/reorder/buyers', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const rows = (await query(`SELECT * FROM buyer_accounts ORDER BY total_spent_usd DESC NULLS LAST, last_order_date DESC NULLS LAST LIMIT 200`)).rows;
+    res.json({ buyers: rows.map(b => ({ ...b, molecules_purchased: jArr(b.molecules_purchased), preferred_molecules: jArr(b.preferred_molecules) })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/reorder/buyers', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.email && !b.company_name) return res.status(400).json({ error: 'email or company_name required' });
+    const id = crypto.randomUUID();
+    const mols = Array.isArray(b.molecules_purchased) ? b.molecules_purchased : String(b.molecules_purchased || '').split(',').map(x => x.trim()).filter(Boolean);
+    await query(`INSERT INTO buyer_accounts (id, contact_name, company_name, email, phone, buyer_type,
+        first_order_date, last_order_date, total_orders, total_spent_usd, molecules_purchased, preferred_molecules,
+        reorder_frequency_days, status, notes, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10,$10,$11,'active',$12,NOW(),NOW())
+      ON CONFLICT (email) DO NOTHING`,
+      [id, b.contact_name || null, b.company_name || null, b.email || null, b.phone || null,
+       ['compounding_pharmacy', 'research_lab', 'university', 'generic_manufacturer'].includes(b.buyer_type) ? b.buyer_type : 'research_lab',
+       b.last_order_date || null, parseInt(b.total_orders, 10) || 1, Number(b.total_spent_usd) || 0,
+       JSON.stringify(mols), b.reorder_frequency_days ? parseInt(b.reorder_frequency_days, 10) : null, b.notes || null]);
+    res.json({ success: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/reorder/buyers/:id', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const b = req.body || {}, sets = [], params = [];
+    const push = (c, v) => { params.push(v); sets.push(`${c}=$${params.length}`); };
+    for (const f of ['contact_name', 'company_name', 'phone', 'notes', 'last_order_date']) if (b[f] !== undefined) push(f, b[f]);
+    if (b.buyer_type !== undefined && ['compounding_pharmacy', 'research_lab', 'university', 'generic_manufacturer'].includes(b.buyer_type)) push('buyer_type', b.buyer_type);
+    if (b.status !== undefined && ['active', 'inactive', 'churned'].includes(b.status)) push('status', b.status);
+    if (b.total_orders !== undefined) push('total_orders', parseInt(b.total_orders, 10) || 0);
+    if (b.total_spent_usd !== undefined) push('total_spent_usd', Number(b.total_spent_usd) || 0);
+    if (b.molecules_purchased !== undefined) push('molecules_purchased', JSON.stringify(Array.isArray(b.molecules_purchased) ? b.molecules_purchased : String(b.molecules_purchased).split(',').map(x => x.trim()).filter(Boolean)));
+    if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+    sets.push('updated_at=NOW()'); params.push(req.params.id);
+    const r = await query(`UPDATE buyer_accounts SET ${sets.join(', ')} WHERE id=$${params.length}`, params);
+    if (!r.rowCount) return res.status(404).json({ error: 'buyer not found' });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/reorder/campaigns', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const where = [], params = [];
+    if (typeof req.query.status === 'string' && req.query.status !== 'all') { params.push(req.query.status); where.push(`c.campaign_status=$${params.length}`); }
+    const rows = (await query(`SELECT c.*, b.contact_name, b.company_name, b.email, b.buyer_type
+      FROM reorder_campaigns c LEFT JOIN buyer_accounts b ON b.id=c.buyer_id
+      ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY c.reorder_probability DESC, c.created_at DESC LIMIT 200`, params)).rows;
+    res.json({ campaigns: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update a reorder campaign's status; 'ordered' records the recovered revenue.
+router.put('/reorder/campaigns/:id', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const status = req.body?.status;
+    if (!['pending', 'email_sent', 'replied', 'ordered', 'declined'].includes(status)) return res.status(400).json({ error: 'invalid status' });
+    const c = (await query('SELECT * FROM reorder_campaigns WHERE id=$1', [req.params.id])).rows[0];
+    if (!c) return res.status(404).json({ error: 'campaign not found' });
+    const sets = ['campaign_status=$1'], params = [status];
+    if (status === 'replied' && !c.replied_at) sets.push('replied_at=NOW()');
+    if (req.body?.order_value_usd !== undefined) { params.push(Number(req.body.order_value_usd) || 0); sets.push(`order_value_usd=$${params.length}`); }
+    params.push(req.params.id);
+    await query(`UPDATE reorder_campaigns SET ${sets.join(', ')} WHERE id=$${params.length}`, params);
+    // Bump the buyer's order stats when an order is recorded.
+    if (status === 'ordered' && c.buyer_id) {
+      await query(`UPDATE buyer_accounts SET total_orders=COALESCE(total_orders,0)+1,
+        total_spent_usd=COALESCE(total_spent_usd,0)+$1, last_order_date=$2, updated_at=NOW() WHERE id=$3`,
+        [Number(req.body?.order_value_usd) || c.order_value_usd || 0, new Date().toISOString().slice(0, 10), c.buyer_id]).catch(() => {});
+    }
+    res.json({ success: true, status });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

@@ -20,6 +20,7 @@ const { processApolloReplies } = require('./src/lib/agents/sales-agent');
 const { runProcurementAgent, checkNoResponse, seedSupplierDatabase } = require('./src/lib/agents/procurement-agent');
 const { runMeetAgent } = require('./src/lib/agents/meet-agent');
 const { runResearchAgent, runWeeklyDigest } = require('./src/lib/agents/research-agent');
+const { runReorderAgent } = require('./src/lib/agents/reorder-agent');
 const { businessToday } = require('./src/lib/agent-core');
 const routes = require('./src/api/routes');
 
@@ -286,6 +287,20 @@ cron.schedule('0 9 * * 2', withAlerts('weekly-tue-9cst-procurement-rfqs', async 
   const r = await runProcurementAgent();
   console.log(`[CRON] Procurement Agent done — ${r.rfqs_created} RFQs, ${r.emails_sent} supplier emails, ${r.errors.length} errors`);
   if (r.errors.length) console.warn('[CRON] Procurement errors:', r.errors.slice(0, 5));
+}), CST);
+
+// Wednesday 10am CST — Reorder Agent: mid-week reorder sweep of past buyers.
+cron.schedule('0 10 * * 3', withAlerts('weekly-wed-10cst-reorder-agent', async () => {
+  console.log('[CRON] Reorder Agent (Wed) starting...');
+  const r = await runReorderAgent({ topN: 20 });
+  console.log(`[CRON] Reorder Agent done — ${r.candidates_found} candidates, ${r.campaigns_created} campaigns, ~$${r.estimated_pipeline} pipeline`);
+}), CST);
+
+// Sunday 8pm CST — Reorder Agent: weekend prep for Monday outreach.
+cron.schedule('0 20 * * 0', withAlerts('weekly-sun-20cst-reorder-agent', async () => {
+  console.log('[CRON] Reorder Agent (Sun) starting...');
+  const r = await runReorderAgent({ topN: 20 });
+  console.log(`[CRON] Reorder Agent done — ${r.candidates_found} candidates, ${r.campaigns_created} campaigns`);
 }), CST);
 
 // Every night 11pm CST — Research Agent: scan PubMed/FDA/patents/trials/news.

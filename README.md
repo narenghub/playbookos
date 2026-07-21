@@ -155,6 +155,8 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
 | `0 15 * * 1` (Monday 15:00 UTC) | Layer 2F — Market Intelligence: weekly molecule feed | `runMarketIntelligence()` |
 | `30 15 * * 1` (Monday 15:30 UTC) | Layer 4 — AI Email Engine: 5 molecules x 4 segments = 20 campaigns / 40 variants. Offset 30 min so it reads the molecule rows Market Intelligence just wrote | `runEmailEngine()` |
+| `0 10 * * 3` (Wed 10am CST) | Reorder Agent — mid-week reorder sweep | `runReorderAgent()` |
+| `0 20 * * 0` (Sun 8pm CST) | Reorder Agent — weekend prep for Monday | `runReorderAgent()` |
 | `0 23 * * *` (nightly 11pm CST) | Research Agent — scan PubMed/FDA/patents/trials | `runResearchAgent()` |
 | `0 8 * * 1` (Mon 8am CST) | Research weekly digest to Naresh | `runWeeklyDigest()` |
 | `0 11 * * 1` (Mon 11am CST) | Meet Agent — process weekend/Monday standup recordings | `runMeetAgent()` |
@@ -330,6 +332,20 @@ Scans PubMed, OpenFDA, patent expiries, and ClinicalTrials.gov (all free APIs, r
 - `generateResearchReport()` — Claude synthesises the week's findings into a ranked executive report.
 
 Every external call degrades gracefully (returns a warning, never throws). Tables: `research_findings`, `patent_watch`. Endpoints under `/api/research/*`. Page tabs: Opportunities (score-colored), Patent Watch (EXPIRES THIS/NEXT YEAR badges), FDA Tracker (in-catalog indicator), Research Report.
+
+### Reorder Agent — recurring revenue from past buyers
+
+`src/lib/agents/reorder-agent.js`, page **Reorder Agent** (REVENUE), crons Wed 10am + Sun 8pm CST.
+
+Identifies past buyers likely ready to reorder, writes personalized reorder emails, and pushes them to Apollo as INACTIVE 3-step sequences (day 0/5/10) for Naresh to approve before they send.
+
+- `syncBuyersFromOrders()` — builds `buyer_accounts` from `leads` (real contact identities from the Sales Pipeline) + any manually-added buyers. NOTE: the `orders` table carries no buyer email, so it contributes aggregate revenue context only; the sync defensively reads an order email column if one is ever added.
+- `identifyReorderCandidates()` — scores each active buyer: 30-60d since last order = 90 (prime window), 60-90d = 70, 90-120d = 50, 120d+ = 30; +10 loyal (3+ orders), +10 molecule in Market-Intel top-10, +5 compounding pharmacy, -20 already in an active reorder campaign. Top 20.
+- `generateReorderEmail()` — Claude writes a warm, non-salesy reorder email referencing the prior purchase (no fabricated price/patent events).
+- `createReorderSequenceInApollo()` — reuses the email-engine 4-call Apollo flow; sequence created `active:false`.
+- `runReorderAgent()` — sync → score → draft → Apollo (inactive) → email Naresh a review list with estimated pipeline.
+
+Tables: `buyer_accounts`, `reorder_campaigns`. Endpoints under `/api/reorder/*`. Page tabs: Reorder Candidates (score-colored), Active Campaigns, Buyer Accounts (+ manual add), Revenue Recovered.
 
 ### Google Meet Agent — meeting → tasks
 

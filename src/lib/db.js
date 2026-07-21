@@ -763,6 +763,47 @@ async function migrateSchemas() {
         created_at TEXT DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_patent_expiry ON patent_watch (expiry_date, status);
+      -- Reorder Agent — past-buyer accounts + reorder campaigns.
+      CREATE TABLE IF NOT EXISTS buyer_accounts (
+        id TEXT PRIMARY KEY,
+        contact_name TEXT,
+        company_name TEXT,
+        email TEXT UNIQUE,
+        phone TEXT,
+        buyer_type TEXT CHECK (buyer_type IN ('compounding_pharmacy','research_lab','university','generic_manufacturer')),
+        apollo_contact_id TEXT,
+        first_order_date TEXT,
+        last_order_date TEXT,
+        total_orders INTEGER DEFAULT 0,
+        total_spent_usd REAL DEFAULT 0,
+        molecules_purchased TEXT,
+        preferred_molecules TEXT,
+        reorder_frequency_days INTEGER,
+        status TEXT DEFAULT 'active' CHECK (status IN ('active','inactive','churned')),
+        notes TEXT,
+        created_at TEXT DEFAULT NOW(),
+        updated_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_buyer_status ON buyer_accounts (status, last_order_date DESC);
+      CREATE TABLE IF NOT EXISTS reorder_campaigns (
+        id TEXT PRIMARY KEY,
+        buyer_id TEXT,
+        molecule_name TEXT,
+        cas_number TEXT,
+        last_purchase_date TEXT,
+        days_since_purchase INTEGER,
+        reorder_probability INTEGER DEFAULT 0 CHECK (reorder_probability BETWEEN 0 AND 100),
+        campaign_status TEXT DEFAULT 'pending' CHECK (campaign_status IN ('pending','email_sent','replied','ordered','declined')),
+        apollo_sequence_id TEXT,
+        email_subject TEXT,
+        email_body TEXT,
+        sent_at TEXT,
+        replied_at TEXT,
+        order_value_usd REAL,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_reorder_buyer ON reorder_campaigns (buyer_id, campaign_status);
+      CREATE INDEX IF NOT EXISTS idx_reorder_status ON reorder_campaigns (campaign_status, created_at DESC);
     `);
     console.log('✅ Schema migrations applied (owner columns + legacy role remap + email_campaigns)');
   } catch(e) { console.error('Migration error:', e.message); }

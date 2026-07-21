@@ -384,6 +384,7 @@ const NAV_SECTIONS = [
   {title:'REVENUE', access:['admin','sales'], items:[
     {id:'revenue', label:'Revenue & Orders', icon:'💰'},
     {id:'sales-pipeline', label:'Sales Pipeline', icon:'🎯'},
+    {id:'reorder-agent', label:'Reorder Agent', icon:'🔁'},
     {id:'apollo-outreach', label:'Apollo Outreach', icon:'📧'},
     {id:'email-engine', label:'Email Engine', icon:'✉️'},
   ]},
@@ -477,7 +478,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -4628,6 +4629,129 @@ if(typeof pages !== 'undefined') {
       body = r ? `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><div class="card-title text-section" style="margin:0">${raEsc(r.title)}</div><div style="font-size:11px;color:#a0aec0">${raEsc(r.generated_at)}</div></div>
         <div style="font-size:13px;line-height:1.7;white-space:pre-wrap;color:#333;margin-top:10px">${raEsc(r.text)}</div></div>`
         : `<div class="card"><p style="color:#718096">No report yet. Click <strong>Run Now</strong> to generate this week's research report.</p></div>`;
+    }
+    c.innerHTML = head + tabBar + body;
+  };
+}
+
+// ── Reorder Agent ─────────────────────────────────────────────────────────────
+function roEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function roMoney(n){ return n==null||n===''?'$0':'$'+Math.round(Number(n)).toLocaleString(); }
+window._roTab = window._roTab || 'candidates';
+const RO_STATUS = { pending:['Pending','#718096'], email_sent:['Email Sent','#0D7377'], replied:['Replied','#B45309'], ordered:['Ordered','#166534'], declined:['Declined','#991B1B'] };
+function roStatusBadge(st){ const [l,c]=RO_STATUS[st]||[st,'#718096']; return `<span style="display:inline-block;background:${c};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">${l}</span>`; }
+function roScoreColor(n){ return n>=90?'#166534':n>=70?'#B45309':'#718096'; }
+function roTab(t){ window._roTab=t; pages['reorder-agent'](); }
+async function roRun(){
+  const m=document.getElementById('ro-run-msg'), b=document.getElementById('ro-run-btn');
+  if(b){b.disabled=true;b.textContent='Running…';}
+  try{ const r=await API('/reorder/run',{method:'POST',body:JSON.stringify({topN:20})}); if(m){m.style.color=r&&r.error?'#dc2626':'#166534';m.textContent=(r&&(r.error||r.message))||'Started';} setTimeout(()=>pages['reorder-agent'](),4000); }
+  catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} }
+  if(b){b.disabled=false;b.textContent='Run Agent';}
+}
+async function roOrdered(id){
+  const v=prompt('Order value (USD)?','5000'); if(v===null) return;
+  try{ const r=await API('/reorder/campaigns/'+id,{method:'PUT',body:JSON.stringify({status:'ordered',order_value_usd:Number(v)||0})}); if(r&&r.error){alert(r.error);return;} pages['reorder-agent'](); }catch(e){ alert(e.message); }
+}
+async function roCampaignStatus(id,st){ try{ const r=await API('/reorder/campaigns/'+id,{method:'PUT',body:JSON.stringify({status:st})}); if(r&&r.error){alert(r.error);return;} pages['reorder-agent'](); }catch(e){ alert(e.message); } }
+function roShowEmail(id){
+  const e=(window._roEmails||{})[id]; if(!e) return;
+  const o=document.createElement('div'); o.id='ro-email-overlay';
+  o.style='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px';
+  o.innerHTML=`<div class="card" style="max-width:620px;width:100%;max-height:85vh;overflow:auto"><div class="card-title">${roEsc(e.subject)}</div><pre style="font-size:13px;background:#f8fafc;padding:12px;border-radius:6px;white-space:pre-wrap;font-family:inherit;line-height:1.6">${roEsc(e.body)}</pre><div style="text-align:right;margin-top:10px"><button class="btn-outline" style="padding:6px 14px" onclick="document.getElementById('ro-email-overlay').remove()">Close</button></div></div>`;
+  document.body.appendChild(o);
+}
+async function roAddBuyer(){
+  const g=k=>document.getElementById('ro-b-'+k);
+  const body={ contact_name:g('name').value, company_name:g('company').value, email:g('email').value, buyer_type:g('type').value, total_orders:g('orders').value, total_spent_usd:g('spent').value, molecules_purchased:g('mols').value, last_order_date:g('last').value };
+  if(!body.email&&!body.company_name){ alert('Email or company required'); return; }
+  try{ const r=await API('/reorder/buyers',{method:'POST',body:JSON.stringify(body)}); if(r&&r.error){alert(r.error);return;} pages['reorder-agent'](); }catch(e){ alert(e.message); }
+}
+
+if(typeof pages !== 'undefined') {
+  pages['reorder-agent'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading Reorder Agent…</p>';
+    let dash, cand, camp, buyers;
+    try { [dash, cand, camp, buyers] = await Promise.all([
+      API('/reorder/dashboard').catch(()=>({})), API('/reorder/candidates').catch(()=>({candidates:[]})),
+      API('/reorder/campaigns').catch(()=>({campaigns:[]})), API('/reorder/buyers').catch(()=>({buyers:[]})),
+    ]); } catch(e){ c.innerHTML = `<div class="card"><div class="card-title">Reorder Agent</div><p style="color:#dc2626">${roEsc(e.message)}</p></div>`; return; }
+    if (dash && dash.error) { c.innerHTML = `<div class="card"><div class="card-title">Reorder Agent</div><p style="color:#dc2626">${roEsc(dash.error)}</p></div>`; return; }
+    const candidates=(cand&&cand.candidates)||[], campaigns=(camp&&camp.campaigns)||[], buyerList=(buyers&&buyers.buyers)||[];
+
+    const head=`<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">Reorder Agent</div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px"><span id="ro-run-msg" style="font-size:12px;color:var(--text-muted)"></span>
+        <button id="ro-run-btn" onclick="roRun()" class="btn-primary" style="padding:8px 16px">Run Agent</button></div></div>
+      <div class="metric-grid">
+        <div class="metric"><div class="label">Active buyers</div><div class="value">${dash.active_buyers||0}</div></div>
+        <div class="metric amber"><div class="label">Reorder candidates</div><div class="value">${dash.reorder_candidates||0}</div></div>
+        <div class="metric"><div class="label">Campaigns this month</div><div class="value">${dash.campaigns_month||0}</div></div>
+        <div class="metric green"><div class="label">Revenue recovered</div><div class="value">${roMoney(dash.revenue_recovered)}</div><div class="sub">${dash.conversion_rate_pct||0}% conversion</div></div>
+      </div>`;
+    const tabs=[['candidates','Reorder Candidates'],['campaigns','Active Campaigns'],['buyers','Buyer Accounts'],['revenue','Revenue Recovered']];
+    const tabBar=`<div class="card" style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([k,l])=>`<button onclick="roTab('${k}')" class="btn-outline" style="padding:6px 14px;font-size:13px;${window._roTab===k?'background:#1B3A6B;color:#fff':''}">${l}</button>`).join('')}</div>`;
+
+    let body='';
+    if (window._roTab==='candidates') {
+      body = candidates.length ? candidates.map(x=>{const col=roScoreColor(x.score);return `<div class="card" style="border-left:4px solid ${col}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div><div style="font-size:15px;font-weight:700;color:#1a202c">${roEsc(x.company_name||x.contact_name||x.email)}</div>
+            <div style="font-size:12px;color:#718096;margin-top:2px">${roEsc(x.contact_name||'')}${x.molecule?' · '+roEsc(x.molecule):''} · ${x.days_since}d since purchase · ${roEsc(x.buyer_type||'')}</div></div>
+          <div style="text-align:right;min-width:70px"><div style="font-size:20px;font-weight:800;color:${col}">${x.score}</div><div style="font-size:10px;color:#a0aec0">reorder %</div></div></div></div>`;}).join('')
+        : `<div class="card"><p style="color:#718096">No reorder candidates. Buyers come from the Sales Pipeline (leads) + manual adds — add buyers under <strong>Buyer Accounts</strong>, then <strong>Run Agent</strong>.</p></div>`;
+    } else if (window._roTab==='campaigns') {
+      window._roEmails={}; campaigns.forEach(c=>{ window._roEmails[c.id]={subject:c.email_subject,body:c.email_body}; });
+      body = campaigns.length ? campaigns.map(c=>`<div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div><div style="font-size:15px;font-weight:700;color:#1a202c">${roEsc(c.company_name||c.email||'Buyer')}</div>
+            <div style="font-size:12px;color:#718096;margin-top:2px">${roEsc(c.molecule_name||'reorder')} · ${c.days_since_purchase}d · prob ${c.reorder_probability}${c.apollo_sequence_id?' · <span style="color:#0D7377">in Apollo</span>':''}</div></div>
+          ${roStatusBadge(c.campaign_status)}</div>
+        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+          <button onclick="roShowEmail('${c.id}')" class="btn-outline" style="padding:4px 10px;font-size:11px">View email</button>
+          ${c.campaign_status!=='ordered'?`<button onclick="roOrdered('${c.id}')" style="background:#166534;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">Mark as Ordered</button>`:''}
+          ${['pending','email_sent'].includes(c.campaign_status)?`<button onclick="roCampaignStatus('${c.id}','replied')" class="btn-outline" style="padding:4px 10px;font-size:11px">Replied</button> <button onclick="roCampaignStatus('${c.id}','declined')" class="btn-outline" style="padding:4px 10px;font-size:11px">Declined</button>`:''}
+        </div></div>`).join('')
+        : `<div class="card"><p style="color:#718096">No reorder campaigns yet. Run the agent to draft campaigns for top candidates.</p></div>`;
+    } else if (window._roTab==='buyers') {
+      body=`<div class="card">
+        <details style="margin-bottom:10px"><summary style="cursor:pointer;font-size:13px;font-weight:600;color:#0D7377">+ Add buyer</summary>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px">
+            <input id="ro-b-name" placeholder="Contact name" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <input id="ro-b-company" placeholder="Company" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <input id="ro-b-email" placeholder="Email" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <select id="ro-b-type" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="research_lab">research_lab</option><option value="compounding_pharmacy">compounding_pharmacy</option><option value="university">university</option><option value="generic_manufacturer">generic_manufacturer</option></select>
+            <input id="ro-b-orders" type="number" placeholder="Total orders" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <input id="ro-b-spent" type="number" placeholder="Total spent USD" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <input id="ro-b-mols" placeholder="Molecules (comma-sep)" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <input id="ro-b-last" type="date" title="Last order date" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+          </div><button onclick="roAddBuyer()" class="btn-primary" style="padding:5px 14px;font-size:12px;margin-top:6px">Add buyer</button>
+        </details>
+        <div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">
+          <tr style="background:#f8fafc"><th style="padding:7px 10px;text-align:left">Buyer</th><th style="padding:7px 10px;text-align:left">Type</th><th style="padding:7px 10px;text-align:left">Orders</th><th style="padding:7px 10px;text-align:left">Spent</th><th style="padding:7px 10px;text-align:left">Last order</th><th style="padding:7px 10px;text-align:left">Molecules</th></tr>
+          ${buyerList.map(b=>`<tr><td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-weight:600">${roEsc(b.company_name||b.contact_name||b.email)}</td>
+            <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:11px">${roEsc(b.buyer_type||'—')}</td>
+            <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${b.total_orders||0}</td>
+            <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${roMoney(b.total_spent_usd)}</td>
+            <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${roEsc(b.last_order_date||'—')}</td>
+            <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;color:#4a5568">${(b.molecules_purchased||[]).slice(0,3).map(roEsc).join(', ')}</td></tr>`).join('')||'<tr><td colspan="6" style="padding:10px;color:#888">No buyers yet.</td></tr>'}
+        </table></div></div>`;
+    } else if (window._roTab==='revenue') {
+      const ordered=campaigns.filter(c=>c.campaign_status==='ordered');
+      const byType={}; buyerList.forEach(b=>{ if(b.reorder_frequency_days){ (byType[b.buyer_type]=byType[b.buyer_type]||[]).push(b.reorder_frequency_days); } });
+      const topBuyers=[...buyerList].sort((a,b)=>(b.total_spent_usd||0)-(a.total_spent_usd||0)).slice(0,5);
+      body=`<div class="metric-grid">
+          <div class="metric green"><div class="label">Revenue recovered</div><div class="value">${roMoney(dash.revenue_recovered)}</div></div>
+          <div class="metric"><div class="label">Conversion rate</div><div class="value">${dash.conversion_rate_pct||0}%</div><div class="sub">${ordered.length} orders</div></div>
+          <div class="metric"><div class="label">Campaigns this month</div><div class="value">${dash.campaigns_month||0}</div></div>
+        </div>
+        <div class="card"><div class="card-title text-section">Top reordering customers</div>
+          ${topBuyers.map(b=>`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px"><span>${roEsc(b.company_name||b.contact_name||b.email)}</span><span style="color:#718096">${roMoney(b.total_spent_usd)} · ${b.total_orders||0} orders</span></div>`).join('')||'<div style="font-size:13px;color:#888">No buyers yet.</div>'}
+        </div>
+        <div class="card"><div class="card-title text-section">Avg days between orders (by buyer type)</div>
+          ${Object.keys(byType).length?Object.entries(byType).map(([t,arr])=>`<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:13px"><span>${roEsc(t)}</span><span style="color:#718096">${Math.round(arr.reduce((s,x)=>s+x,0)/arr.length)} days</span></div>`).join(''):'<div style="font-size:13px;color:#888">Needs buyers with 2+ orders.</div>'}
+        </div>`;
     }
     c.innerHTML = head + tabBar + body;
   };

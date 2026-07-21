@@ -366,6 +366,8 @@ Status of each component as of the date of this commit. Refresh as features ship
 | `0 10 * * 1` CST | Monday LinkedIn content scheduler — drafts Mon/Wed/Fri posts | Layer 7 (built) |
 | continuous | Layer 3 marketplace-intelligence ingestion | Layer 3 (spec) |
 | `0 15 * * 1` | Monday Market Intelligence molecule feed | Layer 2F (built) |
+| `0 10 * * 3` | Wednesday Reorder Agent — past-buyer reorder sweep | new (built) |
+| `0 20 * * 0` | Sunday Reorder Agent — weekend prep | new (built) |
 | `0 23 * * *` | Nightly Research Agent — PubMed/FDA/patents/trials scan | new (built) |
 | `0 8 * * 1` | Monday research digest to Naresh | new (built) |
 | `0 11 * * 1` | Monday Meet Agent — standup transcripts → tasks | new (built) |
