@@ -228,8 +228,12 @@ function parseApproval(payload, actionType) {
   const qtyM = task.match(/Target:?\s*([0-9]+\s*kg)/i);
   const purM = task.match(/([0-9]{2,3}(?:\.[0-9]+)?%\+?)\s*purity/i);
   const category = (task.match(/—\s*([^—]+?)\s*—/) || [])[1] || p.category || null;
+  // Strip a leading category prefix that some approval payloads embed in the name
+  // (e.g. "GMP API: Tacrolimus Monohydrate" → "Tacrolimus Monohydrate") so the RFQ
+  // subject/email names the molecule cleanly.
+  const cleanName = n => String(n || '').replace(/^\s*(GMP\s*API|Research\s*Chemical|API|Intermediate)\s*:\s*/i, '').trim();
   return {
-    molecule_name: (p.molecule_name || (nameM && nameM[1]) || '').trim() || null,
+    molecule_name: cleanName(p.molecule_name || (nameM && nameM[1]) || '') || null,
     cas_number: p.cas_number || (casM && casM[1]) || null,
     target_quantity: p.target_quantity || (qtyM && qtyM[1]) || '25kg',
     target_purity: p.target_purity || (purM && purM[1]) || '99%',
