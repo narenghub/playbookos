@@ -36,15 +36,26 @@ async function callClaude(prompt, { maxTokens = 1200, json = true } = {}) {
   } catch (e) { return { data: null, text: null, error: e.message }; }
 }
 
-// Apollo's own reply classifier (reply_class) → our HOT/WARM/COLD buckets. Used
-// as a fallback when the reply body text can't be retrieved so a lead is still
-// bucketed sensibly rather than dropped.
+// Apollo's own reply classifier (reply_class) → our HOT/WARM/COLD buckets. This is
+// now the PRIMARY classifier: Apollo does not expose the inbound reply body via the
+// API (the message's body_text is our OUTBOUND email; only reply_class carries the
+// reply signal), so classifying from reply_class is both what's available and
+// cheaper/more reliable than a Claude call on a placeholder.
+//
+// NEGATIVE patterns are checked FIRST. Bug B was that /interested/ substring-matched
+// 'not_interested' and returned HOT before the COLD rule ran — a rejection would
+// have alerted Naresh as a hot lead. Checking COLD first fixes it; the HOT rule also
+// uses a \b boundary on 'interested' as belt-and-suspenders (underscore is a \w
+// char, so \binterested\b cannot match inside 'not_interested').
 function apolloReplyClassToBucket(rc) {
-  const c = String(rc || '').toLowerCase();
-  if (/(willing_to_meet|interested|meeting|positive)/.test(c)) return 'HOT';
-  if (/(question|objection|referral|info|maybe|neutral)/.test(c)) return 'WARM';
-  if (/(not_interested|unsubscribe|wrong_person|no_longer|ooo|out_of_office|negative)/.test(c)) return 'COLD';
-  return null;
+  const c = String(rc || '').toLowerCase().trim();
+  // COLD — not interested, unsubscribed, wrong/departed person, hard bounce.
+  if (/(not_interested|unsubscrib|do_not_contact|wrong_person|no_longer|bounced|blocked)/.test(c)) return 'COLD';
+  // WARM — engaged but not a clear buy signal: out-of-office, referrals, questions.
+  if (/(out_of_office|\booo\b|referral|question|objection|circle_back|not_now|more_info|info_request)/.test(c)) return 'WARM';
+  // HOT — positive buying intent.
+  if (/(willing_to_meet|wants_to_meet|meeting|\binterested\b|positive|sample|quote)/.test(c)) return 'HOT';
+  return 'WARM'; // default: engaged enough to warrant a human look
 }
 
 // Map a free-text sales follow-up title to the real weekly_kpis.kpi_name it
@@ -148,14 +159,17 @@ Provide up to 3 call_list entries (use the warm leads) and up to 5 follow_ups. E
 
 // ── Reply ingestion & lead management ─────────────────────────────────────────
 
-// Fetch replied outbound messages from Apollo. The spec's
-// `GET /emailer_messages?label=replied` does not exist (404); the real endpoint is
-// `POST /emailer_messages/search`, which returns outbound sequence messages, so we
-// filter client-side on `replied === true`. Each carries the contact (to_name /
-// to_email), the sequence (campaign_name / emailer_campaign_id), Apollo's own
-// `reply_class`, and — where available — the reply body. Best-effort: returns []
-// on any failure so the cron never throws.
-async function fetchApolloReplies(apolloKey, { maxPages = 5 } = {}) {
+// Fetch replied messages from Apollo. The spec's `GET /emailer_messages?label=replied`
+// does not exist (404); the real endpoint is `POST /emailer_messages/search`.
+//
+// Bug A: the search MUST include `emailer_message_stats: ['replied']`. Without it,
+// the default sort returns scheduled/unsent messages first, and replied messages
+// (status 'completed') fall outside the first several pages — so a client-side
+// `replied === true` filter found ZERO of the real replies and the whole feature
+// was inert. With the server-side stats filter the endpoint returns exactly the
+// replied messages. The client-side `m.replied === true` guard below is kept as
+// belt-and-suspenders. Best-effort: returns [] on any failure so the cron never throws.
+async function fetchApolloReplies(apolloKey, { maxPages = 10 } = {}) {
   if (!apolloKey) return { replies: [], error: 'APOLLO_API_KEY not configured' };
   const replies = [];
   try {
@@ -163,7 +177,7 @@ async function fetchApolloReplies(apolloKey, { maxPages = 5 } = {}) {
       const res = await fetch('https://api.apollo.io/api/v1/emailer_messages/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
-        body: JSON.stringify({ per_page: 100, page }),
+        body: JSON.stringify({ per_page: 100, page, emailer_message_stats: ['replied'] }),
       });
       if (!res.ok) return { replies, error: `Apollo ${res.status}: ${(await res.text()).slice(0, 160)}` };
       const msgs = (await res.json()).emailer_messages || [];
@@ -174,11 +188,12 @@ async function fetchApolloReplies(apolloKey, { maxPages = 5 } = {}) {
   return { replies };
 }
 
-// Pull the reply body from whichever field Apollo populated. The account has no
-// live replies yet, so the exact field can't be confirmed against real data —
-// this checks the plausible candidates in order and falls back to a reply_class-
-// derived phrase so Claude still receives a signal. Adjust the candidate list once
-// a real reply is observed (verify with GET /emailer_messages/{id} on a replied row).
+// Reply body for the record. CONFIRMED against live replied messages: Apollo does
+// NOT expose the inbound reply body via the API — the message's body_text is our
+// own OUTBOUND email, and there is no reply-body field. So this stores an honest
+// placeholder naming the reply_class rather than mis-storing the outbound copy. The
+// candidate-field probe is retained in case a future Apollo tier/endpoint exposes
+// the body; today it always falls through to the reply_class line.
 function extractReplyText(m) {
   const cand = m.reply_body || m.reply_text || m.last_reply_body || m.latest_reply_text || m.inbound_body_text;
   if (cand && String(cand).trim()) return { text: String(cand).trim(), source: 'reply_field' };
@@ -223,29 +238,18 @@ async function processApolloReplies({ dryRun = false } = {}) {
         const exists = (await query('SELECT id FROM leads WHERE apollo_message_id=$1', [apolloId])).rows[0];
         if (exists) { out.skipped_existing++; continue; }
       }
+      const recip = (m.recipients || [])[0] || {};
       const { text: replyText } = extractReplyText(m);
-      const contactName = m.to_name || m.contact_name || '(unknown)';
-      const company = m.company_name || (m.to_email ? m.to_email.split('@')[1] : null) || null;
+      const contactName = recip.raw_name || m.to_name || m.contact_name || '(unknown)';
+      const toEmail = recip.email || m.to_email || null;
+      const company = m.company_name || (toEmail ? toEmail.split('@')[1] : null) || null;
 
-      // Classify. Prefer Claude on the reply body; fall back to Apollo's reply_class.
-      let classification = null, summary = '';
-      const cls = await callClaude(
-        `Classify this reply to a B2B pharmaceutical sourcing outreach email into exactly one bucket.\n\n`
-        + `HOT = expressed interest, asked for a quote, requested samples, wants to buy or meet.\n`
-        + `WARM = asked a question or wants more information, but no clear buying intent yet.\n`
-        + `COLD = not interested, wrong person, asked to unsubscribe, out of office, or negative.\n\n`
-        + `Reply from ${contactName}${company ? ' at ' + company : ''}:\n"""${replyText.slice(0, 2000)}"""\n\n`
-        + `Return ONLY JSON: {"classification":"HOT|WARM|COLD","summary":"one short sentence on what they said and why"}`,
-        { maxTokens: 400 }
-      );
-      if (cls.data && ['HOT', 'WARM', 'COLD'].includes(cls.data.classification)) {
-        classification = cls.data.classification;
-        summary = String(cls.data.summary || '').slice(0, 400);
-      } else {
-        classification = apolloReplyClassToBucket(m.reply_class) || 'WARM';
-        summary = `Classified from Apollo reply_class="${m.reply_class || 'unknown'}" (Claude unavailable: ${cls.error || 'no parse'}).`;
-        if (cls.error) out.errors.push(`classify ${contactName}: ${cls.error}`);
-      }
+      // Classify directly from Apollo's reply_class (design decision (a)): the reply
+      // BODY is not exposed by the Apollo API, so a Claude call would only classify a
+      // placeholder — reply_class is the real signal, and mapping it is cheaper and
+      // deterministic. Claude is still used, but only for the follow-up copy below.
+      const classification = apolloReplyClassToBucket(m.reply_class);
+      const summary = `Apollo reply_class="${m.reply_class || 'unknown'}" → ${classification}.`;
 
       const leadId = crypto.randomUUID();
       await query(
@@ -253,7 +257,7 @@ async function processApolloReplies({ dryRun = false } = {}) {
            source_sequence, apollo_message_id, reply_class, status, estimated_value, notes, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'new',$10,$11,NOW(),NOW())
          ON CONFLICT (apollo_message_id) DO NOTHING`,
-        [leadId, contactName, company, m.to_email || null, replyText, classification,
+        [leadId, contactName, company, toEmail, replyText, classification,
          m.campaign_name || m.emailer_campaign_id || null, apolloId || null, m.reply_class || null,
          LEAD_VALUE[classification] || 0, summary]
       );
@@ -263,14 +267,14 @@ async function processApolloReplies({ dryRun = false } = {}) {
         if (recipient === null) recipient = await hotLeadRecipient();
         if (recipient && recipient.whatsapp_number) {
           await sendWhatsApp(recipient.whatsapp_number,
-            `🔥 HOT LEAD\n${contactName}${company ? ' · ' + company : ''}\n${m.to_email || ''}\n\n"${replyText.slice(0, 300)}"\n\n${summary}\nReply via Sales Pipeline in PlaybookOS.`,
+            `🔥 HOT LEAD\n${contactName}${company ? ' · ' + company : ''}\n${toEmail || ''}\n\nApollo reply_class: ${m.reply_class}\nReply via Sales Pipeline in PlaybookOS.`,
             { user_id: recipient.id || null, message_type: 'hot_lead' });
         } else {
           out.errors.push('HOT lead but no WhatsApp recipient configured (set SALES_ALERT_WHATSAPP or an admin whatsapp_number)');
         }
       } else if (classification === 'WARM') {
         try {
-          await generateFollowUp({ id: leadId, contact_name: contactName, company, email: m.to_email, reply_text: replyText });
+          await generateFollowUp({ id: leadId, contact_name: contactName, company, email: toEmail, reply_text: replyText, reply_class: m.reply_class });
           out.follow_ups++;
         } catch (e) { out.errors.push(`follow-up ${contactName}: ${e.message}`); }
       }
@@ -295,11 +299,34 @@ async function processApolloReplies({ dryRun = false } = {}) {
  * as a DRAFT for Naresh to approve/send (not auto-sent — sending on the user's
  * behalf is an approval action). Returns the draft.
  */
+// What each Apollo reply_class means, so the follow-up is appropriate even though
+// the prospect's exact words aren't available from Apollo.
+const REPLY_CLASS_INTENT = {
+  person_referral: 'they replied that someone else is the right person to talk to — warmly thank them and politely ask who you should contact and how to reach them',
+  referral: 'they referred you to someone else — thank them and ask who to contact',
+  question: 'they asked a question about the product — offer to answer and provide specifics',
+  objection: 'they raised a concern — acknowledge it and keep the conversation open',
+  out_of_office: 'they are out of office — send a short, low-pressure note offering to reconnect when they are back',
+  more_info: 'they want more information — offer specifics and a clear next step',
+  interested: 'they expressed interest — move toward a quote or a quick call',
+  willing_to_meet: 'they are open to meeting — propose a concrete next step',
+};
+
 async function generateFollowUp(lead) {
-  const prompt = `You are a sales rep at Abiozen LLC, a US pharmaceutical API and specialty-chemical distributor. A prospect replied to our outreach. Write a concise, personalized email response that addresses EXACTLY what they asked or raised — do not be generic.\n\n`
+  const rc = String(lead.reply_class || '').toLowerCase();
+  const replyBody = String(lead.reply_text || '').trim();
+  const hasRealBody = replyBody && !/^\[no reply body/i.test(replyBody);
+  const intent = REPLY_CLASS_INTENT[rc] || (rc ? `Apollo classified their reply as "${rc}"` : 'they replied to our outreach');
+  // Apollo doesn't expose reply bodies, so in practice we brief Claude from the
+  // reply_class intent; if a body is ever available, use it verbatim instead.
+  const replyContext = hasRealBody
+    ? `Their exact reply:\n"""${replyBody.slice(0, 2000)}"""`
+    : `We don't have their exact words, but: ${intent}.`;
+
+  const prompt = `You are a sales rep at Abiozen LLC, a US pharmaceutical API and specialty-chemical distributor. A prospect replied to our outreach. Write a concise, personalized email response that addresses EXACTLY their situation — do not be generic.\n\n`
     + `Prospect: ${lead.contact_name || 'there'}${lead.company ? ' at ' + lead.company : ''}\n`
-    + `Their reply:\n"""${String(lead.reply_text || '').slice(0, 2000)}"""\n\n`
-    + `Guidelines: warm but professional, no fluff, one clear next step (a quote, a call, or the specific info they wanted). Do not invent prices, stock, or documentation we may not have — offer to confirm specifics. Under 150 words.\n\n`
+    + `${replyContext}\n\n`
+    + `Guidelines: warm but professional, no fluff, one clear next step. Do not invent prices, stock, or documentation we may not have — offer to confirm specifics. Do not fabricate details of what they said. Under 150 words.\n\n`
     + `Return ONLY JSON: {"subject":"...","body":"plain-text email body with line breaks as \\n"}`;
   const { data, error } = await callClaude(prompt, { maxTokens: 800 });
   const subject = (data && data.subject) ? String(data.subject).slice(0, 300) : `Re: your enquiry — Abiozen`;
