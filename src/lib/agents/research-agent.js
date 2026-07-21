@@ -281,7 +281,7 @@ async function runResearchAgent({ dryRun = false } = {}) {
 
   // This week's stored findings.
   const findings = (await query(
-    `SELECT * FROM research_findings WHERE found_at >= NOW() - INTERVAL '7 days' ORDER BY relevance_score DESC`)).rows;
+    `SELECT * FROM research_findings WHERE found_at >= (NOW() - INTERVAL '7 days')::text ORDER BY relevance_score DESC`)).rows;
   out.findings_total = findings.length;
   out.high_relevance = findings.filter(f => f.relevance_score >= 80).length;
 
@@ -385,7 +385,7 @@ async function seedPatentWatch() {
 async function runWeeklyDigest() {
   const week = new Date().toISOString().slice(0, 10);
   const findings = (await query(
-    `SELECT * FROM research_findings WHERE found_at >= NOW() - INTERVAL '7 days' AND title NOT LIKE 'Research Report%'
+    `SELECT * FROM research_findings WHERE found_at >= (NOW() - INTERVAL '7 days')::text AND title NOT LIKE 'Research Report%'
      ORDER BY relevance_score DESC`)).rows;
   const rep = (await query(`SELECT summary FROM research_findings WHERE title LIKE 'Research Report%' ORDER BY created_at DESC LIMIT 1`)).rows[0];
   const ok = await sendResearchDigest({ week, findings, report: rep ? rep.summary : 'No report generated yet.' }).catch(() => false);

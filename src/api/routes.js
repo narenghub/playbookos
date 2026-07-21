@@ -1738,9 +1738,9 @@ router.post('/research/run', authMiddleware, adminOnly, async (req, res) => {
 router.get('/research/dashboard', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
   try {
     const wk = (await query(`SELECT
-      COUNT(*) FILTER (WHERE found_at >= NOW() - INTERVAL '7 days' AND title NOT LIKE 'Research Report%')::int week_findings,
+      COUNT(*) FILTER (WHERE found_at >= (NOW() - INTERVAL '7 days')::text AND title NOT LIKE 'Research Report%')::int week_findings,
       COUNT(*) FILTER (WHERE relevance_score >= 80 AND title NOT LIKE 'Research Report%')::int high_relevance,
-      COUNT(*) FILTER (WHERE source='fda' AND found_at >= NOW() - INTERVAL '30 days')::int fda_approvals
+      COUNT(*) FILTER (WHERE source='fda' AND found_at >= (NOW() - INTERVAL '30 days')::text)::int fda_approvals
       FROM research_findings`)).rows[0];
     const pat = (await query(`SELECT COUNT(*)::int c FROM patent_watch WHERE status='expiring_soon'`)).rows[0].c;
     const top = (await query(`SELECT id, source, molecule_name, title, therapeutic_area, relevance_score FROM research_findings
