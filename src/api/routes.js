@@ -3369,6 +3369,211 @@ router.get('/agent/overview', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Mission Control — unified overview of all 9 scheduled agents ──────────────
+// `crons` are the ACTUAL cron specs wired in server.js, each with the timezone
+// it truly fires in. Agents defined below the CST block in server.js
+// (procurement/meet/research/reorder/inquiry) fire in America/Chicago; CEO,
+// market-intelligence, email-engine and sales are scheduled in the server's
+// default UTC (see the "3 PM UTC (9 AM CST)" comments there). next_run is
+// computed from these specs, so the countdown reflects reality even where the
+// human `label` reads "CST". cron dow: 0/7=Sun … 6=Sat; h:null = hourly.
+const MC_AGENTS = [
+  { key:'ceo-agent',           name:'CEO Agent',           icon:'🧭', label:'Daily · 7:00 AM CST',
+    crons:[{ m:0,  h:7,  dow:null, tz:'UTC' }] },
+  { key:'market-intelligence', name:'Market Intelligence', icon:'🛰️', label:'Monday · 9:00 AM CST',
+    crons:[{ m:0,  h:15, dow:1,    tz:'UTC' }] },
+  { key:'email-engine',        name:'Email Engine',        icon:'✉️', label:'Monday · 9:30 AM CST',
+    crons:[{ m:30, h:15, dow:1,    tz:'UTC' }] },
+  { key:'sales-agent',         name:'Sales Agent',         icon:'📈', label:'Hourly · :17',
+    crons:[{ m:17, h:null, dow:null, tz:'UTC' }] },
+  { key:'procurement-agent',   name:'Procurement Agent',   icon:'📦', label:'Tuesday · 9:00 AM CST',
+    crons:[{ m:0, h:9,  dow:2, tz:'America/Chicago' }] },
+  { key:'meet-agent',          name:'Google Meet Agent',   icon:'🎥', label:'Mon 11:00 AM + Fri 4:00 PM CST',
+    crons:[{ m:0, h:11, dow:1, tz:'America/Chicago' }, { m:0, h:16, dow:5, tz:'America/Chicago' }] },
+  { key:'research-agent',      name:'Research Agent',      icon:'🔬', label:'Nightly · 11:00 PM CST',
+    crons:[{ m:0, h:23, dow:null, tz:'America/Chicago' }] },
+  { key:'reorder-agent',       name:'Reorder Agent',       icon:'🔁', label:'Wed 10:00 AM + Sun 8:00 PM CST',
+    crons:[{ m:0, h:10, dow:3, tz:'America/Chicago' }, { m:0, h:20, dow:0, tz:'America/Chicago' }] },
+  { key:'inquiry-agent',       name:'Inquiry Agent',       icon:'📨', label:'Daily · 9:00 AM CST',
+    crons:[{ m:0, h:9, dow:null, tz:'America/Chicago' }] },
+];
+
+// Manual-trigger runners (lazy require to avoid circular deps at module load).
+const MC_RUNNERS = {
+  'ceo-agent':           () => require('../lib/agents/ceo-agent').runCEOBriefing(),
+  'market-intelligence': () => require('../lib/agents/growth-agent').runMarketIntelligence(),
+  'email-engine':        () => require('../lib/agents/email-engine').runEmailEngine({ topMolecules: 10 }),
+  'sales-agent':         () => require('../lib/agents/sales-agent').processApolloReplies(),
+  'procurement-agent':   () => require('../lib/agents/procurement-agent').runProcurementAgent(),
+  'meet-agent':          () => require('../lib/agents/meet-agent').runMeetAgent({ lookbackDays: 3 }),
+  'research-agent':      () => require('../lib/agents/research-agent').runResearchAgent(),
+  'reorder-agent':       () => require('../lib/agents/reorder-agent').runReorderAgent({ topN: 20 }),
+  'inquiry-agent':       () => require('../lib/agents/inquiry-agent').runInquiryAgent(),
+};
+const MC_RUNNING = new Set(); // keys of agents whose manual run is in-flight
+
+const MC_WD = { Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6 };
+
+// Calendar Y/M/D as seen in a tz.
+function mcYmdInTz(date, tz) {
+  const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, year:'numeric', month:'2-digit', day:'2-digit' })
+    .formatToParts(date).reduce((o, x) => (o[x.type] = x.value, o), {});
+  return { y:+p.year, mon:(+p.month) - 1, d:+p.day };
+}
+function mcWeekdayNum(date, tz) {
+  return MC_WD[new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday:'short' }).format(date)];
+}
+function mcHourFloatInTz(date, tz) {
+  const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour:'2-digit', minute:'2-digit', hour12:false })
+    .formatToParts(date).reduce((o, x) => (o[x.type] = x.value, o), {});
+  return (+p.hour % 24) + (+p.minute) / 60;
+}
+// Wall-clock (y,mon,d,hh,mm) in an IANA tz → the UTC Date instant (DST-safe via one correction pass).
+function mcZonedToUtc(y, mon, d, hh, mm, tz) {
+  if (tz === 'UTC') return new Date(Date.UTC(y, mon, d, hh, mm, 0));
+  const wall = Date.UTC(y, mon, d, hh, mm, 0);
+  const offsetAt = t => {
+    const loc = new Date(new Date(t).toLocaleString('en-US', { timeZone: tz }));
+    const utc = new Date(new Date(t).toLocaleString('en-US', { timeZone: 'UTC' }));
+    return loc - utc;
+  };
+  let inst = wall - offsetAt(wall);
+  inst = wall - offsetAt(inst);
+  return new Date(inst);
+}
+// Next fire (UTC Date) strictly after `from` for one cron spec.
+function mcNextFire(spec, from) {
+  const { m, h, dow, tz } = spec;
+  if (h === null) { // hourly at minute m
+    const cand = new Date(from); cand.setUTCSeconds(0, 0); cand.setUTCMinutes(m);
+    return cand > from ? cand : new Date(cand.getTime() + 3600000);
+  }
+  const anchor = mcYmdInTz(from, tz);
+  const base = Date.UTC(anchor.y, anchor.mon, anchor.d);
+  for (let i = 0; i < 16; i++) {
+    const { y, mon, d } = mcYmdInTz(new Date(base + i * 86400000), tz);
+    const inst = mcZonedToUtc(y, mon, d, h, m, tz);
+    if (inst <= from) continue;
+    if (dow !== null && mcWeekdayNum(inst, tz) !== (dow === 7 ? 0 : dow)) continue;
+    return inst;
+  }
+  return null;
+}
+function mcNextRun(agent, from) {
+  let best = null;
+  for (const c of agent.crons) { const n = mcNextFire(c, from); if (n && (!best || n < best)) best = n; }
+  return best;
+}
+// Fires for one agent that land inside the [dayStart,dayEnd) Chicago business day.
+function mcFiresToday(agent, dayStart, dayEnd, now) {
+  const out = [], seen = new Set();
+  for (const c of agent.crons) {
+    if (c.h === null) continue; // hourly not marked on the timeline
+    for (let i = -1; i <= 1; i++) {
+      const { y, mon, d } = mcYmdInTz(new Date(dayStart + i * 86400000), c.tz);
+      const inst = mcZonedToUtc(y, mon, d, c.h, c.m, c.tz);
+      const t = inst.getTime();
+      if (t < dayStart || t >= dayEnd) continue;
+      if (c.dow !== null && mcWeekdayNum(inst, c.tz) !== (c.dow === 7 ? 0 : c.dow)) continue;
+      const iso = inst.toISOString();
+      if (seen.has(iso)) continue; seen.add(iso);
+      out.push({ iso, hour: mcHourFloatInTz(inst, 'America/Chicago'), fired: t <= now.getTime() });
+    }
+  }
+  return out;
+}
+
+// Unified status for all agents: summary cards, per-agent state, today's timeline.
+router.get('/agent/mission-control', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const now = new Date();
+    const keys = MC_AGENTS.map(a => a.key);
+
+    const recentRows = (await query(
+      `SELECT agent_name, created_at, action_type, output_summary FROM (
+         SELECT agent_name, created_at, action_type, output_summary,
+                ROW_NUMBER() OVER (PARTITION BY agent_name ORDER BY created_at DESC) rn
+         FROM agent_activity_log WHERE agent_name = ANY($1)
+       ) t WHERE rn <= 3 ORDER BY agent_name, created_at DESC`,
+      [keys]
+    )).rows;
+    const countRows = (await query(
+      `SELECT agent_name,
+         COUNT(*) FILTER (WHERE created_at::timestamptz >= date_trunc('day', now()))::int AS actions_today,
+         COUNT(*) FILTER (WHERE created_at::timestamptz >= date_trunc('day', now())
+           AND (lower(action_type) LIKE '%error%' OR lower(action_type) LIKE '%fail%'
+             OR lower(coalesce(output_summary,'')) LIKE '%error%'))::int AS errors_today
+       FROM agent_activity_log WHERE agent_name = ANY($1) GROUP BY agent_name`,
+      [keys]
+    )).rows;
+
+    const recentBy = {}, countBy = {};
+    for (const r of recentRows) (recentBy[r.agent_name] = recentBy[r.agent_name] || []).push(r);
+    for (const r of countRows) countBy[r.agent_name] = r;
+
+    const bt = businessToday();
+    const [by, bm, bd] = bt.split('-').map(Number);
+    const dayStart = mcZonedToUtc(by, bm - 1, bd, 0, 0, 'America/Chicago').getTime();
+    const dayEnd = dayStart + 24 * 3600000;
+
+    let runningCount = 0, errorsToday = 0, actionsToday = 0;
+    const timeline = [];
+    const agents = MC_AGENTS.map(a => {
+      const recent = recentBy[a.key] || [];
+      const counts = countBy[a.key] || { actions_today: 0, errors_today: 0 };
+      actionsToday += counts.actions_today; errorsToday += counts.errors_today;
+      const lastRun = recent[0] ? recent[0].created_at : null;
+      const hourly = a.crons.some(c => c.h === null);
+      // "running": a manual trigger is in-flight, or a scheduled fire landed in the last 2 min.
+      const recentlyFired = a.crons.some(c => { const f = mcNextFire(c, new Date(now.getTime() - 120000)); return f && f <= now; });
+      const running = MC_RUNNING.has(a.key) || recentlyFired;
+      if (running) runningCount++;
+      const status = counts.errors_today > 0 ? 'red' : (lastRun ? 'green' : 'amber');
+      const nextRun = mcNextRun(a, now);
+      if (!hourly) for (const f of mcFiresToday(a, dayStart, dayEnd, now)) timeline.push({ key: a.key, name: a.name, icon: a.icon, ...f });
+      return {
+        key: a.key, name: a.name, icon: a.icon, schedule_label: a.label, hourly,
+        last_run: lastRun, last_result: recent[0] ? recent[0].output_summary : null,
+        actions_today: counts.actions_today, errors_today: counts.errors_today,
+        next_run: nextRun ? nextRun.toISOString() : null, running, status, recent,
+      };
+    });
+
+    res.json({
+      generated_at: now.toISOString(),
+      summary: { total: MC_AGENTS.length, running: runningCount, errors_today: errorsToday, actions_today: actionsToday },
+      agents,
+      timeline: timeline.sort((x, y) => x.hour - y.hour),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manually fire an agent now. Fire-and-forget: responds 202 immediately and runs
+// the agent in the background; failures are logged as a 'manual_run_error' row so
+// the card flips red.
+router.post('/agent/mission-control/:key/run', authMiddleware, adminOnly, async (req, res) => {
+  const key = req.params.key;
+  const runner = MC_RUNNERS[key];
+  if (!runner) return res.status(404).json({ error: `Unknown agent: ${key}` });
+  if (MC_RUNNING.has(key)) return res.status(409).json({ error: 'Agent is already running', key });
+  MC_RUNNING.add(key);
+  Promise.resolve()
+    .then(() => runner())
+    .then(r => { try { console.log(`[mission-control] ${key} manual run (by ${req.user.email}) done:`, JSON.stringify(r).slice(0, 200)); } catch (_) { console.log(`[mission-control] ${key} manual run done`); } })
+    .catch(async e => {
+      console.error(`[mission-control] ${key} manual run failed:`, e.message);
+      try {
+        await logAgentActivity({
+          agent_name: key, action_type: 'manual_run_error', user_id: null,
+          reasoning: String(e.message).slice(0, 500),
+          output_summary: `Manual trigger failed: ${e.message}`.slice(0, 300),
+        });
+      } catch (_) {}
+    })
+    .finally(() => MC_RUNNING.delete(key));
+  res.status(202).json({ started: true, key, started_at: new Date().toISOString(), by: req.user.email });
+});
+
 // ── LinkedIn AI Content Engine ───────────────────────────────────────────────
 
 // Generate a LinkedIn post for a specific molecule or for one of the weekly

@@ -2971,12 +2971,13 @@ if(typeof pages !== 'undefined') {
     c.innerHTML = '<p style="color:#888;padding:20px">Loading Agent Control…</p>';
     const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const fmt = n => '$' + Math.round(Number(n)||0).toLocaleString();
-    const [ov, act, appr, deps, usersR] = await Promise.all([
+    const [ov, act, appr, deps, usersR, mc] = await Promise.all([
       API('/agent/overview').catch(e=>({error:e.message})),
       API('/agent/activity?limit=100').catch(e=>({error:e.message, activity:[]})),
       API('/agent/approvals').catch(e=>({error:e.message, approvals:[]})),
       API('/agent/dependencies').catch(e=>({error:e.message, chain:[], blockers:[]})),
       API('/users').catch(e=>[]),
+      API('/agent/mission-control').catch(e=>({error:e.message, agents:[], summary:{}, timeline:[]})),
     ]);
     if (ov && ov.error) {
       c.innerHTML = `<div class="card"><div class="card-title">Agent Control</div><p style="color:#dc2626">${esc(ov.error)}</p><p style="font-size:12px;color:#718096">This page requires admin access.</p></div>`;
@@ -3122,9 +3123,173 @@ if(typeof pages !== 'undefined') {
         <div style="font-size:11px;color:#718096">${esc(b.detail)}</div></div>`).join('')
         : '<div style="font-size:12px;color:#1D9E75">No cross-team blockers detected — the chain is healthy.</div>'}
     </div>`;
-    c.innerHTML = secAi + sec0 + sec1 + sec2 + sec3 + sec4 + sec5;
-    renderAgentFeed();
+    // Reorganized into tabs. Mission Control (new) is default; the existing
+    // sections are preserved across Approvals / Activity / Overview tabs.
+    window._acSections = { secAi, sec0, sec1, sec2, sec3, sec4, sec5 };
+    window._acMc = mc;
+    if (!window._acTab) window._acTab = 'mission';
+    acRender();
   };
+
+  // ── Agent Control tabbed shell + Mission Control renderer ───────────────────
+  const acEsc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  function acParseTs(s){
+    if(!s) return null;
+    let t=String(s).trim().replace(' ','T');
+    t=t.replace(/([+-]\d{2})$/,'$1:00'); // '+00' -> '+00:00'
+    const d=new Date(t);
+    return isNaN(d.getTime()) ? new Date(s) : d;
+  }
+  function acCountdown(iso){
+    if(!iso) return '—';
+    const ms=new Date(iso)-new Date();
+    if(ms<=0) return 'due now';
+    const mins=Math.floor(ms/60000), h=Math.floor(mins/60), d=Math.floor(h/24);
+    if(d>0) return 'in '+d+'d '+(h%24)+'h';
+    if(h>0) return 'in '+h+'h '+(mins%60)+'m';
+    return 'in '+mins+'m';
+  }
+  function acAgo(s){
+    const dt=acParseTs(s); if(!dt) return '';
+    const ms=new Date()-dt;
+    if(ms<0) return 'just now';
+    const mins=Math.floor(ms/60000), h=Math.floor(mins/60), d=Math.floor(h/24);
+    if(d>0) return d+'d ago';
+    if(h>0) return h+'h ago';
+    if(mins>0) return mins+'m ago';
+    return 'just now';
+  }
+  function acClock(hf){ const hh=Math.floor(hf); let mm=Math.round((hf-hh)*60); let H=hh; if(mm===60){mm=0;H++;} return ((H%12)||12)+':'+String(mm).padStart(2,'0')+' '+(H<12||H===24?'AM':'PM'); }
+  function acChicagoHourNow(){
+    const p=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(new Date()).reduce((o,x)=>(o[x.type]=x.value,o),{});
+    return (+p.hour%24)+(+p.minute)/60;
+  }
+  function acAgentCard(a){
+    const color=a.status==='green'?'#1D9E75':a.status==='red'?'#E24B4A':'#EF9F27';
+    const statusTxt=a.status==='green'?'Healthy':a.status==='red'?'Error today':'No data yet';
+    const recent=(a.recent||[]).slice(0,3);
+    const nextTxt=a.hourly?'Hourly · :17':acCountdown(a.next_run);
+    return `<div class="card" style="margin:0;border-left:4px solid ${color};padding:14px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+        <div style="display:flex;gap:9px;align-items:center;min-width:0">
+          <span style="font-size:22px;line-height:1">${a.icon}</span>
+          <div style="min-width:0"><div style="font-weight:800;font-size:14px;color:#1a202c">${acEsc(a.name)}</div>
+            <div style="font-size:11px;color:#718096;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${acEsc(a.schedule_label)}</div></div>
+        </div>
+        <span title="${statusTxt}${a.running?' · running now':''}" style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap">
+          ${a.running?'<span style="font-size:10px;color:#1D9E75;font-weight:700">● LIVE</span>':''}
+          <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${color}"></span></span>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <div style="flex:1;background:#f8fafc;border:1px solid #edf2f7;border-radius:6px;padding:8px;min-width:0">
+          <div style="font-size:9px;color:#a0aec0;letter-spacing:.04em;text-transform:uppercase">Last run</div>
+          <div style="font-size:12px;font-weight:700;color:#1a202c" data-ago="${a.last_run||''}">${a.last_run?acAgo(a.last_run):'Never'}</div>
+          <div style="font-size:11px;color:#718096;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${acEsc(a.last_result||'')}">${a.last_result?acEsc(String(a.last_result).slice(0,70)):'—'}</div>
+        </div>
+        <div style="flex:1;background:#f8fafc;border:1px solid #edf2f7;border-radius:6px;padding:8px;min-width:0">
+          <div style="font-size:9px;color:#a0aec0;letter-spacing:.04em;text-transform:uppercase">Next run</div>
+          <div style="font-size:12px;font-weight:700;color:#1a202c" data-next="${a.next_run||''}" data-hourly="${a.hourly?1:0}">${nextTxt}</div>
+          <div style="font-size:11px;color:#718096">${a.actions_today} action${a.actions_today===1?'':'s'} today${a.errors_today?` · <span style="color:#E24B4A">${a.errors_today} err</span>`:''}</div>
+        </div>
+      </div>
+      <button onclick="mcTrigger('${a.key}',this)" class="btn-secondary" style="width:100%;padding:7px;font-size:12px;margin-top:8px;cursor:pointer">▶ Run now</button>
+      <div id="mc-msg-${a.key}" style="font-size:11px;margin-top:4px;min-height:13px;color:#718096"></div>
+      <div style="margin-top:6px;border-top:1px solid #edf2f7;padding-top:6px">
+        <div style="font-size:9px;color:#a0aec0;letter-spacing:.04em;text-transform:uppercase;margin-bottom:3px">Recent activity</div>
+        ${recent.length?recent.map(r=>`<div style="font-size:11px;color:#4a5568;display:flex;justify-content:space-between;gap:8px;margin:1px 0">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${acEsc(r.action_type)}${r.output_summary?' · '+acEsc(String(r.output_summary).slice(0,44)):''}</span>
+          <span style="color:#a0aec0;white-space:nowrap">${acAgo(r.created_at)}</span></div>`).join('')
+          :'<div style="font-size:11px;color:#a0aec0">No activity logged yet</div>'}
+      </div>
+    </div>`;
+  }
+  function acTimeline(){
+    const mc=window._acMc||{};
+    const items=(mc.timeline||[]);
+    const nowH=acChicagoHourNow();
+    const ticks=[0,3,6,9,12,15,18,21,24].map(h=>`<span style="position:absolute;left:${(h/24*100).toFixed(2)}%;transform:translateX(-50%);font-size:10px;color:#a0aec0">${h}:00</span>`).join('');
+    const marks=items.map(t=>{
+      const left=(Math.max(0,Math.min(24,t.hour))/24*100).toFixed(2);
+      return `<div title="${acEsc(t.name)} — ${acClock(t.hour)} CST${t.fired?' (already fired)':' (upcoming)'}" style="position:absolute;left:${left}%;top:2px;transform:translateX(-50%);cursor:default">
+        <div style="font-size:17px;opacity:${t.fired?0.4:1}">${t.icon}</div></div>`;
+    }).join('');
+    const nowLeft=(nowH/24*100).toFixed(2);
+    return `<div class="card">
+      <div class="card-title">Today's schedule — America/Chicago</div>
+      <div style="position:relative;height:34px;margin:6px 0 2px">
+        ${marks}
+        <div style="position:absolute;top:28px;left:0;right:0;height:3px;background:#e2e8f0;border-radius:2px"></div>
+        <div style="position:absolute;top:22px;left:${nowLeft}%;width:2px;height:15px;background:#E24B4A" title="now (${acClock(nowH)} CST)"></div>
+      </div>
+      <div style="position:relative;height:14px;margin-top:2px">${ticks}</div>
+      <div style="font-size:11px;color:#718096;margin-top:10px;line-height:1.5">Faded = already fired today · Solid = upcoming · <span style="color:#E24B4A">red line</span> = now. Sales Agent runs hourly (:17) so it isn't marked. CEO / Market Intelligence / Email Engine are scheduled in <strong>UTC</strong>, shown here at their Chicago clock time.</div>
+    </div>`;
+  }
+  function acMissionTab(){
+    const mc=window._acMc||{};
+    if(mc.error){
+      return `<div class="card"><div class="card-title">Mission Control</div><p style="color:#dc2626">${acEsc(mc.error)}</p>
+        <p style="font-size:12px;color:#718096">Could not load agent status. The approval queue and activity log tabs still work.</p></div>`;
+    }
+    const s=mc.summary||{};
+    const cards=[
+      {label:'Total agents',val:s.total==null?9:s.total,color:'#1B3A6B',sub:'scheduled'},
+      {label:'Running right now',val:s.running||0,color:(s.running?'#1D9E75':'#718096'),sub:'in-flight or fired &lt;2 min ago'},
+      {label:'Errors today',val:s.errors_today||0,color:(s.errors_today?'#E24B4A':'#718096'),sub:'from activity log'},
+      {label:'Actions taken today',val:s.actions_today||0,color:'#1B3A6B',sub:'across all agents'},
+    ];
+    const summary=`<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px">
+      ${cards.map(k=>`<div class="card" style="margin:0;padding:14px">
+        <div style="font-size:12px;color:#718096">${k.label}</div>
+        <div style="font-size:30px;font-weight:800;color:${k.color};line-height:1.15">${k.val}</div>
+        <div style="font-size:10px;color:#a0aec0">${k.sub}</div></div>`).join('')}</div>`;
+    const grid=`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-bottom:14px">
+      ${(mc.agents||[]).map(acAgentCard).join('')||'<div class="card"><p style="color:#718096">No agents.</p></div>'}</div>`;
+    return summary+grid+acTimeline();
+  }
+  function acRender(){
+    const c=document.getElementById('content');
+    if(!c||!window._acSections) return;
+    const S=window._acSections;
+    const tabs=[
+      {id:'mission',label:'🛰️ Mission Control'},
+      {id:'approvals',label:'✅ Approvals & Tasks'},
+      {id:'activity',label:'📜 Activity Log'},
+      {id:'overview',label:'🎯 Strategy'},
+    ];
+    const bar=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;border-bottom:2px solid #e2e8f0;padding-bottom:0">
+      ${tabs.map(t=>{const on=window._acTab===t.id;return `<button onclick="acTab('${t.id}')" style="background:${on?'#1B3A6B':'transparent'};color:${on?'#fff':'#4a5568'};border:none;border-bottom:${on?'2px solid #1B3A6B':'2px solid transparent'};margin-bottom:-2px;padding:8px 14px;font-size:13px;font-weight:${on?'700':'600'};border-radius:6px 6px 0 0;cursor:pointer">${t.label}</button>`;}).join('')}
+    </div>`;
+    let body='';
+    if(window._acTab==='mission') body=acMissionTab();
+    else if(window._acTab==='approvals') body=S.secAi+S.sec0+S.sec3;
+    else if(window._acTab==='activity') body=S.sec2;
+    else if(window._acTab==='overview') body=S.sec1+S.sec4+S.sec5;
+    c.innerHTML=bar+body;
+    if(window._acTab==='activity' && typeof renderAgentFeed==='function') renderAgentFeed();
+    // Live-tick countdowns only while Mission Control is visible.
+    if(window._acTicker){ clearInterval(window._acTicker); window._acTicker=null; }
+    if(window._acTab==='mission'){
+      window._acTicker=setInterval(()=>{
+        // Stop if the Mission Control DOM is gone (tab switch or navigation).
+        if(window._acTab!=='mission'||!document.querySelector('[data-next]')){clearInterval(window._acTicker);window._acTicker=null;return;}
+        document.querySelectorAll('[data-next]').forEach(el=>{ el.textContent = el.getAttribute('data-hourly')==='1'?'Hourly · :17':acCountdown(el.getAttribute('data-next')||null); });
+        document.querySelectorAll('[data-ago]').forEach(el=>{ const v=el.getAttribute('data-ago'); if(v) el.textContent=acAgo(v); });
+      },30000);
+    }
+  }
+  function acTab(name){ window._acTab=name; acRender(); }
+  async function mcTrigger(key, btn){
+    const msg=document.getElementById('mc-msg-'+key);
+    const orig=btn.textContent; btn.disabled=true; btn.textContent='Starting…';
+    if(msg){msg.style.color='#718096';msg.textContent='';}
+    try{
+      const r=await API('/agent/mission-control/'+encodeURIComponent(key)+'/run',{method:'POST'});
+      if(r&&r.error){ if(msg){msg.style.color='#dc2626';msg.textContent=r.error;} }
+      else if(msg){ msg.style.color='#1D9E75'; msg.textContent='Started — running in the background. Reload the page in a moment to see results.'; }
+    }catch(e){ if(msg){msg.style.color='#dc2626';msg.textContent=(e&&e.message)||'Failed to start';} }
+    finally{ btn.disabled=false; btn.textContent=orig; }
+  }
   pages['adoption'] = async function() {
     const c = document.getElementById('content');
     c.innerHTML = '<p style="color:#888;padding:20px">Loading adoption telemetry…</p>';
