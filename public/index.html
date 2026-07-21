@@ -391,6 +391,7 @@ const NAV_SECTIONS = [
     {id:'market-intelligence', label:'Market Intelligence', icon:'🔬'},
     {id:'procurement-agent', label:'Procurement Agent', icon:'🏭'},
     {id:'meet-agent', label:'Google Meet Agent', icon:'🎥'},
+    {id:'research-agent', label:'Research Agent', icon:'🔬'},
     {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
     {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
@@ -476,7 +477,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -4539,6 +4540,94 @@ if(typeof pages !== 'undefined') {
       body = sec('Decisions made','#1B3A6B',byType('decision'),x=>`<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)">${mgEsc(x.content)} <span style="font-size:11px;color:#a0aec0">— ${mgEsc(x.meeting_title)}</span></div>`)
         + sec('Recurring blockers (2+ meetings)','#991B1B',recurring,g=>`<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)">⚠️ ${mgEsc(g[0].content)} <span style="font-size:11px;color:#991B1B">(${g.length}×)</span></div>`)
         + sec('Opportunities flagged','#166534',byType('opportunity'),x=>`<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)">${mgEsc(x.content)} <span style="font-size:11px;color:#a0aec0">— ${mgEsc(x.meeting_title)}</span></div>`);
+    }
+    c.innerHTML = head + tabBar + body;
+  };
+}
+
+// ── Research Agent ────────────────────────────────────────────────────────────
+function raEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+window._raTab = window._raTab || 'opportunities';
+const RA_SRC = { pubmed:['PubMed','#0D7377'], fda:['FDA','#1B3A6B'], patents:['Patents','#991B1B'], clinicaltrials:['ClinicalTrials','#6B21A8'], news:['News','#B45309'] };
+function raSrcBadge(s){ const [l,c]=RA_SRC[s]||[s,'#718096']; return `<span style="display:inline-block;background:${c};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">${l}</span>`; }
+function raScoreColor(n){ return n>=80?'#166534':n>=60?'#B45309':'#718096'; }
+function raTab(t){ window._raTab=t; pages['research-agent'](); }
+async function raRun(){
+  const m=document.getElementById('ra-run-msg'), b=document.getElementById('ra-run-btn');
+  if(b){b.disabled=true;b.textContent='Scanning…';}
+  try{ const r=await API('/research/run',{method:'POST',body:JSON.stringify({})}); if(m){m.style.color=r&&r.error?'#dc2626':'#166534';m.textContent=(r&&(r.error||r.message))||'Started';} setTimeout(()=>pages['research-agent'](),4000); }
+  catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} }
+  if(b){b.disabled=false;b.textContent='Run Now';}
+}
+async function raAction(id, toProc){
+  try{ const r=await API('/research/findings/'+id,{method:'PUT',body:JSON.stringify(toProc?{to_procurement:true}:{actioned:true})}); if(r&&r.error){alert(r.error);return;} pages['research-agent'](); }catch(e){ alert(e.message); }
+}
+
+if(typeof pages !== 'undefined') {
+  pages['research-agent'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading Research Agent…</p>';
+    let dash, findData, patData;
+    try { [dash, findData, patData] = await Promise.all([ API('/research/dashboard').catch(()=>({})), API('/research/findings').catch(()=>({findings:[]})), API('/research/patents').catch(()=>({patents:[]})) ]); }
+    catch(e){ c.innerHTML = `<div class="card"><div class="card-title">Research Agent</div><p style="color:#dc2626">${raEsc(e.message)}</p></div>`; return; }
+    if (dash && dash.error) { c.innerHTML = `<div class="card"><div class="card-title">Research Agent</div><p style="color:#dc2626">${raEsc(dash.error)}</p></div>`; return; }
+    const findings=(findData&&findData.findings)||[], patents=(patData&&patData.patents)||[];
+
+    const head=`<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">Research Agent</div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px"><span id="ra-run-msg" style="font-size:12px;color:var(--text-muted)"></span>
+        <button id="ra-run-btn" onclick="raRun()" class="btn-primary" style="padding:8px 16px">Run Now</button></div></div>
+      <div class="metric-grid">
+        <div class="metric"><div class="label">Findings this week</div><div class="value">${dash.week_findings||0}</div></div>
+        <div class="metric green"><div class="label">High relevance (80+)</div><div class="value">${dash.high_relevance||0}</div></div>
+        <div class="metric amber"><div class="label">Patents expiring soon</div><div class="value">${dash.patents_expiring_soon||0}</div></div>
+        <div class="metric"><div class="label">FDA approvals (30d)</div><div class="value">${dash.fda_approvals||0}</div></div>
+      </div>`;
+    const tabs=[['opportunities','Opportunities'],['patents','Patent Watch'],['fda','FDA Tracker'],['report','Research Report']];
+    const tabBar=`<div class="card" style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([k,l])=>`<button onclick="raTab('${k}')" class="btn-outline" style="padding:6px 14px;font-size:13px;${window._raTab===k?'background:#1B3A6B;color:#fff':''}">${l}</button>`).join('')}</div>`;
+
+    let body='';
+    if (window._raTab==='opportunities') {
+      const rows=findings.filter(f=>f.relevance_score>=40).map(f=>{
+        const col=raScoreColor(f.relevance_score);
+        return `<div class="card" style="border-left:4px solid ${col}">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+            <div style="flex:1"><div style="font-size:14px;font-weight:700;color:#1a202c">${raEsc(f.molecule_name||f.title)}</div>
+              <div style="font-size:12px;color:#718096;margin-top:2px">${raSrcBadge(f.source)} ${f.therapeutic_area?'· '+raEsc(f.therapeutic_area):''}</div>
+              ${f.summary?`<div style="font-size:12px;color:#4a5568;margin-top:5px">${raEsc(f.summary)}</div>`:''}</div>
+            <div style="text-align:right;min-width:70px"><div style="font-size:20px;font-weight:800;color:${col}">${f.relevance_score}</div><div style="font-size:10px;color:#a0aec0">relevance</div></div></div>
+          <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+            ${f.url&&/^https?:/.test(f.url)?`<a href="${raEsc(f.url)}" target="_blank" class="btn-outline" style="padding:4px 10px;font-size:11px;text-decoration:none">View source</a>`:''}
+            ${f.actioned?'<span style="font-size:11px;color:#166534">✓ '+raEsc(f.action_taken||'actioned')+'</span>':`<button onclick="raAction('${f.id}',true)" style="background:#1D9E75;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">Add to Procurement</button>`}
+          </div></div>`; }).join('');
+      body = rows || `<div class="card"><p style="color:#718096">No findings yet. Click <strong>Run Now</strong> to scan PubMed, FDA, patents, and clinical trials — or wait for the nightly 11pm run.</p></div>`;
+    } else if (window._raTab==='patents') {
+      const yr=d=>d?new Date(d).getFullYear():null;
+      const rows=patents.map(p=>{const y=yr(p.expiry_date);const badge=y===2026?'<span style="background:#991B1B;color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px">EXPIRES THIS YEAR</span>':y===2027?'<span style="background:#B45309;color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:8px">EXPIRES NEXT YEAR</span>':p.status==='expired'?'<span style="color:#718096;font-size:10px">expired</span>':'';
+        return `<tr>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-weight:600">${raEsc(p.molecule_name)} ${badge}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px">${raEsc(p.patent_holder||'—')}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${raEsc(p.expiry_date||'—')}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">$${raEsc(p.market_size_usd_millions)}M</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-weight:700;color:${raScoreColor(p.generic_opportunity_score)}">${raEsc(p.generic_opportunity_score)}</td></tr>`; }).join('');
+      body=`<div class="card"><div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">
+        <tr style="background:#f8fafc"><th style="padding:7px 10px;text-align:left">Molecule</th><th style="padding:7px 10px;text-align:left">Holder</th><th style="padding:7px 10px;text-align:left">Expiry</th><th style="padding:7px 10px;text-align:left">Market</th><th style="padding:7px 10px;text-align:left">Opportunity</th></tr>
+        ${rows}</table></div></div>`;
+    } else if (window._raTab==='fda') {
+      const fda=findings.filter(f=>f.source==='fda');
+      body = fda.length ? fda.map(f=>{const notInCat=/NOT in catalog/i.test(f.summary||'');return `<div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div><div style="font-size:14px;font-weight:700;color:#1a202c">${raEsc(f.molecule_name||f.title)}</div>
+            <div style="font-size:12px;color:#4a5568;margin-top:3px">${raEsc(f.summary)}</div></div>
+          <span style="background:${notInCat?'#166534':'#718096'};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;white-space:nowrap">${notInCat?'NOT in catalog':'In catalog'}</span></div>
+        ${notInCat&&!f.actioned?`<button onclick="raAction('${f.id}',true)" style="background:#1D9E75;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer;margin-top:8px">Add to catalog (queue sourcing)</button>`:''}</div>`; }).join('')
+        : `<div class="card"><p style="color:#718096">No FDA approvals captured yet. Run the agent to scan OpenFDA.</p></div>`;
+    } else if (window._raTab==='report') {
+      let rep; try{ rep=await API('/research/report'); }catch(e){ rep={error:e.message}; }
+      const r=rep&&rep.report;
+      body = r ? `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><div class="card-title text-section" style="margin:0">${raEsc(r.title)}</div><div style="font-size:11px;color:#a0aec0">${raEsc(r.generated_at)}</div></div>
+        <div style="font-size:13px;line-height:1.7;white-space:pre-wrap;color:#333;margin-top:10px">${raEsc(r.text)}</div></div>`
+        : `<div class="card"><p style="color:#718096">No report yet. Click <strong>Run Now</strong> to generate this week's research report.</p></div>`;
     }
     c.innerHTML = head + tabBar + body;
   };

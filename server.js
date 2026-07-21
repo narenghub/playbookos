@@ -1,6 +1,6 @@
 // server.js — PlaybookOS main server
 require('dotenv').config();
-const { initDB, initPhase2, migrateSchemas, query } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSchemas()).then(() => require('./src/lib/agents/procurement-agent').seedSupplierDatabase().then(r => console.log(`[boot] supplier seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] supplier seed failed:', e.message))).catch(e => { console.error("DB init error:", e.message); process.exit(1); });
+const { initDB, initPhase2, migrateSchemas, query } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSchemas()).then(() => require('./src/lib/agents/procurement-agent').seedSupplierDatabase().then(r => console.log(`[boot] supplier seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] supplier seed failed:', e.message))).then(() => require('./src/lib/agents/research-agent').seedPatentWatch().then(r => console.log(`[boot] patent-watch seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] patent seed failed:', e.message))).catch(e => { console.error("DB init error:", e.message); process.exit(1); });
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -19,6 +19,7 @@ const { runEmailEngine } = require('./src/lib/agents/email-engine');
 const { processApolloReplies } = require('./src/lib/agents/sales-agent');
 const { runProcurementAgent, checkNoResponse, seedSupplierDatabase } = require('./src/lib/agents/procurement-agent');
 const { runMeetAgent } = require('./src/lib/agents/meet-agent');
+const { runResearchAgent, runWeeklyDigest } = require('./src/lib/agents/research-agent');
 const { businessToday } = require('./src/lib/agent-core');
 const routes = require('./src/api/routes');
 
@@ -285,6 +286,20 @@ cron.schedule('0 9 * * 2', withAlerts('weekly-tue-9cst-procurement-rfqs', async 
   const r = await runProcurementAgent();
   console.log(`[CRON] Procurement Agent done — ${r.rfqs_created} RFQs, ${r.emails_sent} supplier emails, ${r.errors.length} errors`);
   if (r.errors.length) console.warn('[CRON] Procurement errors:', r.errors.slice(0, 5));
+}), CST);
+
+// Every night 11pm CST — Research Agent: scan PubMed/FDA/patents/trials/news.
+cron.schedule('0 23 * * *', withAlerts('nightly-23cst-research-agent', async () => {
+  console.log('[CRON] Research Agent starting...');
+  const r = await runResearchAgent();
+  console.log(`[CRON] Research Agent done — ${r.findings_total} findings (${r.high_relevance} high), ${r.patents_flagged} patents flagged, ${r.errors.length} errors`);
+  if (r.errors.length) console.warn('[CRON] Research errors:', r.errors.slice(0, 5));
+}), CST);
+
+// Monday 8am CST — weekly research digest to Naresh (from stored findings).
+cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8cst-research-digest', async () => {
+  const r = await runWeeklyDigest();
+  console.log(`[CRON] Research digest — ${r.findings} findings, sent=${r.sent}`);
 }), CST);
 
 // Monday 11am CST — Meet Agent: process weekend/Monday-morning standup recordings.

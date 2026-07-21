@@ -15,12 +15,13 @@ const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo } = requ
 const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
 const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/procurement-agent');
 const { runMeetAgent, analyzeAndStore } = require('../lib/agents/meet-agent');
+const { runResearchAgent } = require('../lib/agents/research-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
 const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
-const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday } = require('../lib/agent-core');
+const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday, enqueueApproval } = require('../lib/agent-core');
 
 const router = express.Router();
 
@@ -1718,6 +1719,97 @@ router.get('/email-engine/campaigns/:id/preview', authMiddleware, requireAnyTier
       subject: variant === 'b' ? c.variant_b_subject : c.variant_a_subject,
       html: sanitizeHtml(variant === 'b' ? c.variant_b_html : c.variant_a_html),
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Research Agent ────────────────────────────────────────────────────────────
+router.post('/research/run', authMiddleware, adminOnly, async (req, res) => {
+  const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
+  if (dryRun) {
+    try { return res.json(await runResearchAgent({ dryRun: true })); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+  runResearchAgent()
+    .then(r => console.log(`[research] run — ${r.findings_total} findings, ${r.high_relevance} high`))
+    .catch(e => console.error('[research] run failed:', e.message));
+  res.status(202).json({ started: true, message: 'Research agent started — scanning PubMed/FDA/patents/trials (~1-2 min).' });
+});
+
+router.get('/research/dashboard', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const wk = (await query(`SELECT
+      COUNT(*) FILTER (WHERE found_at >= NOW() - INTERVAL '7 days' AND title NOT LIKE 'Research Report%')::int week_findings,
+      COUNT(*) FILTER (WHERE relevance_score >= 80 AND title NOT LIKE 'Research Report%')::int high_relevance,
+      COUNT(*) FILTER (WHERE source='fda' AND found_at >= NOW() - INTERVAL '30 days')::int fda_approvals
+      FROM research_findings`)).rows[0];
+    const pat = (await query(`SELECT COUNT(*)::int c FROM patent_watch WHERE status='expiring_soon'`)).rows[0].c;
+    const top = (await query(`SELECT id, source, molecule_name, title, therapeutic_area, relevance_score FROM research_findings
+      WHERE title NOT LIKE 'Research Report%' ORDER BY relevance_score DESC, found_at DESC LIMIT 5`)).rows;
+    res.json({ ...wk, patents_expiring_soon: pat, top_opportunities: top });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/research/findings', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const where = [`title NOT LIKE 'Research Report%'`], params = [];
+    for (const [q, col] of [['source', 'source'], ['type', 'finding_type']]) {
+      if (typeof req.query[q] === 'string' && req.query[q] !== 'all') { params.push(req.query[q]); where.push(`${col}=$${params.length}`); }
+    }
+    if (req.query.minScore) { params.push(parseInt(req.query.minScore, 10) || 0); where.push(`relevance_score >= $${params.length}`); }
+    if (req.query.actioned === '0') where.push('actioned=0');
+    const rows = (await query(`SELECT * FROM research_findings WHERE ${where.join(' AND ')} ORDER BY relevance_score DESC, found_at DESC LIMIT 200`, params)).rows;
+    res.json({ findings: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/research/patents', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const sort = req.query.sort === 'market' ? 'market_size_usd_millions DESC' : 'expiry_date ASC';
+    const rows = (await query(`SELECT * FROM patent_watch ORDER BY ${sort}`)).rows;
+    res.json({ patents: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/research/patents', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.molecule_name) return res.status(400).json({ error: 'molecule_name required' });
+    const id = crypto.randomUUID();
+    await query(`INSERT INTO patent_watch (id, molecule_name, cas_number, patent_number, patent_holder, expiry_date,
+        therapeutic_area, market_size_usd_millions, generic_opportunity_score, status, notes, created_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())`,
+      [id, b.molecule_name, b.cas_number || null, b.patent_number || null, b.patent_holder || null, b.expiry_date || null,
+       b.therapeutic_area || null, b.market_size_usd_millions != null ? Number(b.market_size_usd_millions) : null,
+       Math.min(100, Math.max(0, parseInt(b.generic_opportunity_score, 10) || 0)),
+       ['active', 'expiring_soon', 'expired'].includes(b.status) ? b.status : 'active', b.notes || null]);
+    res.json({ success: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Mark a finding actioned (+ optional note / send to procurement approval queue).
+router.put('/research/findings/:id', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const f = (await query('SELECT * FROM research_findings WHERE id=$1', [req.params.id])).rows[0];
+    if (!f) return res.status(404).json({ error: 'finding not found' });
+    const actioned = req.body?.actioned !== undefined ? (req.body.actioned ? 1 : 0) : f.actioned;
+    const note = req.body?.action_taken !== undefined ? String(req.body.action_taken).slice(0, 500) : f.action_taken;
+    await query('UPDATE research_findings SET actioned=$1, action_taken=$2 WHERE id=$3', [actioned, note, req.params.id]);
+    if (req.body?.to_procurement) {
+      await enqueueApproval({
+        agent_name: 'research-agent', action_type: 'source_molecule',
+        action_payload: { task: `Source ${f.molecule_name || f.title} — research finding (${f.source}, score ${f.relevance_score})`, molecule_name: f.molecule_name, cas_number: f.cas_number, source: 'research-agent' },
+        priority: f.relevance_score >= 80 ? 'HIGH' : 'MEDIUM',
+      });
+      await query(`UPDATE research_findings SET actioned=1, action_taken='queued for procurement approval' WHERE id=$1`, [req.params.id]);
+    }
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/research/report', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const r = (await query(`SELECT title, summary, created_at FROM research_findings WHERE title LIKE 'Research Report%' ORDER BY created_at DESC LIMIT 1`)).rows[0];
+    res.json({ report: r ? { title: r.title, text: r.summary, generated_at: r.created_at } : null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

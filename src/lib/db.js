@@ -728,6 +728,41 @@ async function migrateSchemas() {
         created_at TEXT DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_meeting_insights_mtg ON meeting_insights (meeting_id, insight_type);
+      -- Research Agent — nightly PubMed/FDA/patent/trials findings + patent watch.
+      CREATE TABLE IF NOT EXISTS research_findings (
+        id TEXT PRIMARY KEY,
+        source TEXT CHECK (source IN ('pubmed','fda','patents','clinicaltrials','news')),
+        finding_type TEXT CHECK (finding_type IN ('new_molecule','expiring_patent','fda_approval','clinical_trial','regulatory_change','market_opportunity')),
+        title TEXT,
+        summary TEXT,
+        url TEXT,
+        molecule_name TEXT,
+        cas_number TEXT,
+        therapeutic_area TEXT,
+        relevance_score INTEGER DEFAULT 0 CHECK (relevance_score BETWEEN 0 AND 100),
+        actioned INTEGER DEFAULT 0,
+        action_taken TEXT,
+        published_date TEXT,
+        found_at TEXT DEFAULT NOW(),
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_research_url ON research_findings (url) WHERE url IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_research_score ON research_findings (relevance_score DESC, found_at DESC);
+      CREATE TABLE IF NOT EXISTS patent_watch (
+        id TEXT PRIMARY KEY,
+        molecule_name TEXT NOT NULL,
+        cas_number TEXT,
+        patent_number TEXT,
+        patent_holder TEXT,
+        expiry_date TEXT,
+        therapeutic_area TEXT,
+        market_size_usd_millions REAL,
+        generic_opportunity_score INTEGER DEFAULT 0 CHECK (generic_opportunity_score BETWEEN 0 AND 100),
+        status TEXT DEFAULT 'active' CHECK (status IN ('active','expiring_soon','expired')),
+        notes TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_patent_expiry ON patent_watch (expiry_date, status);
     `);
     console.log('✅ Schema migrations applied (owner columns + legacy role remap + email_campaigns)');
   } catch(e) { console.error('Migration error:', e.message); }

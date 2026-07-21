@@ -155,6 +155,8 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
 | `0 15 * * 1` (Monday 15:00 UTC) | Layer 2F — Market Intelligence: weekly molecule feed | `runMarketIntelligence()` |
 | `30 15 * * 1` (Monday 15:30 UTC) | Layer 4 — AI Email Engine: 5 molecules x 4 segments = 20 campaigns / 40 variants. Offset 30 min so it reads the molecule rows Market Intelligence just wrote | `runEmailEngine()` |
+| `0 23 * * *` (nightly 11pm CST) | Research Agent — scan PubMed/FDA/patents/trials | `runResearchAgent()` |
+| `0 8 * * 1` (Mon 8am CST) | Research weekly digest to Naresh | `runWeeklyDigest()` |
 | `0 11 * * 1` (Mon 11am CST) | Meet Agent — process weekend/Monday standup recordings | `runMeetAgent()` |
 | `0 16 * * 5` (Fri 4pm CST) | Meet Agent — process the week's meeting recordings | `runMeetAgent()` |
 | `0 9 * * 2` (Tue 9am CST) | Procurement Agent — send RFQs for Monday-approved molecules | `runProcurementAgent()` |
@@ -313,6 +315,21 @@ Signals are merged by molecule: GSC contributes a 0–60 impression-normalised s
 **Endpoints** — `POST /email-engine/run` (admin, 202; `?dryRun=1` returns the resolved molecule list synchronously without calling Claude), `GET /email-engine/campaigns` (filters: `week`, `segment`, `status`), `PUT /email-engine/campaigns/:id` (approve/reject; draft-only transition), `POST /email-engine/campaigns/:id/publish`, `GET /email-engine/campaigns/:id/preview?variant=a|b`.
 
 Caveat on publish: Apollo's sequence-creation endpoint needs a **master** API key and is not on every plan. A non-2xx returns 502 with Apollo's verbatim response plus the payload, which the UI shows in a copyable modal so the sequence can be built by hand. Nothing is marked `sent` unless Apollo accepts it.
+
+### Research Agent — nightly market intelligence
+
+`src/lib/agents/research-agent.js`, page **Research Agent** (INTELLIGENCE), crons nightly 11pm CST (scan) + Monday 8am CST (digest).
+
+Scans PubMed, OpenFDA, patent expiries, and ClinicalTrials.gov (all free APIs, reachable from the server) for molecule opportunities, patent cliffs, and regulatory changes, scores each finding for relevance to Abiozen, and emails Naresh a weekly report. High-relevance findings (≥80) auto-queue to the procurement approval queue.
+
+- `scanPubMed()` — E-utilities esearch/efetch over generic-API/GLP-1/patent queries + this week's top-10 molecules; batch-scored by Claude, stores relevance ≥40.
+- `scanFDAApprovals()` — OpenFDA drugsfda submissions (last 30d); ANDA/generic approvals for molecules NOT in the Abiozen catalog score highest (new sourcing).
+- `scanExpiringPatents()` — drives off the seeded `patent_watch` (20 real high-value molecules), refreshes status (active/expiring_soon/expired), flags anything expiring within 18 months (≤6 months → score 90+), cross-referenced with `molecule_history`.
+- `scanClinicalTrials()` — ClinicalTrials.gov v2 Phase-3 studies → future generic pipeline signals.
+- `scanPharmNews()` — Claude knowledge (or NewsAPI if `NEWSAPI_KEY` set) for API-shortage / generic-approval / demand signals.
+- `generateResearchReport()` — Claude synthesises the week's findings into a ranked executive report.
+
+Every external call degrades gracefully (returns a warning, never throws). Tables: `research_findings`, `patent_watch`. Endpoints under `/api/research/*`. Page tabs: Opportunities (score-colored), Patent Watch (EXPIRES THIS/NEXT YEAR badges), FDA Tracker (in-catalog indicator), Research Report.
 
 ### Google Meet Agent — meeting → tasks
 
