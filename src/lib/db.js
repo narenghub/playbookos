@@ -621,6 +621,74 @@ async function migrateSchemas() {
         sent_at TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_follow_ups_lead ON follow_ups (lead_id, status);
+      -- Procurement Agent v2 — supplier outreach + RFQ comparison.
+      CREATE TABLE IF NOT EXISTS suppliers (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        country TEXT,
+        region TEXT CHECK (region IN ('apac','india','china','europe','us')),
+        contact_email TEXT,
+        contact_name TEXT,
+        website TEXT,
+        specialties TEXT,               -- JSON array of specialty tags
+        reliability_score INTEGER DEFAULT 50 CHECK (reliability_score BETWEEN 0 AND 100),
+        avg_response_days REAL DEFAULT 3,
+        gmp_certified INTEGER DEFAULT 0,
+        total_orders INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT NOW(),
+        updated_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_suppliers_region ON suppliers (region, gmp_certified);
+      CREATE TABLE IF NOT EXISTS rfq_requests (
+        id TEXT PRIMARY KEY,
+        molecule_name TEXT NOT NULL,
+        cas_number TEXT,
+        target_quantity TEXT,
+        target_purity TEXT,
+        gmp_required INTEGER DEFAULT 0,
+        week_start TEXT,
+        status TEXT DEFAULT 'pending' CHECK (status IN ('pending','sent','responded','compared','approved','ordered')),
+        priority TEXT DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
+        assigned_to_user_id TEXT,
+        approval_id TEXT,               -- source approval_queue row (dedup)
+        created_at TEXT DEFAULT NOW(),
+        UNIQUE(week_start, molecule_name)
+      );
+      CREATE INDEX IF NOT EXISTS idx_rfq_status ON rfq_requests (status, week_start DESC);
+      CREATE TABLE IF NOT EXISTS rfq_responses (
+        id TEXT PRIMARY KEY,
+        rfq_id TEXT NOT NULL,
+        supplier_id TEXT,
+        supplier_name TEXT,
+        price_per_kg REAL,
+        currency TEXT DEFAULT 'USD',
+        lead_time_days INTEGER,
+        available_quantity TEXT,
+        purity_offered TEXT,
+        gmp_status TEXT,
+        coa_available INTEGER DEFAULT 0,
+        sample_available INTEGER DEFAULT 0,
+        min_order_qty TEXT,
+        response_email TEXT,
+        raw_response TEXT,
+        score INTEGER,
+        recommended INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_rfq_responses_rfq ON rfq_responses (rfq_id, score DESC);
+      CREATE TABLE IF NOT EXISTS supplier_outreach_log (
+        id TEXT PRIMARY KEY,
+        rfq_id TEXT,
+        supplier_id TEXT,
+        email_sent_to TEXT,
+        email_subject TEXT,
+        email_body TEXT,
+        sent_at TEXT,
+        replied_at TEXT,
+        reply_text TEXT,
+        status TEXT DEFAULT 'sent' CHECK (status IN ('sent','replied','no_response'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_outreach_rfq ON supplier_outreach_log (rfq_id, status);
     `);
     console.log('✅ Schema migrations applied (owner columns + legacy role remap + email_campaigns)');
   } catch(e) { console.error('Migration error:', e.message); }

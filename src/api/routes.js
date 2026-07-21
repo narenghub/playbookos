@@ -13,6 +13,7 @@ const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings, genera
 const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('../lib/agents/growth-agent');
 const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo } = require('../lib/agents/email-engine');
 const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
+const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/procurement-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1716,6 +1717,175 @@ router.get('/email-engine/campaigns/:id/preview', authMiddleware, requireAnyTier
       subject: variant === 'b' ? c.variant_b_subject : c.variant_a_subject,
       html: sanitizeHtml(variant === 'b' ? c.variant_b_html : c.variant_a_html),
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Procurement Agent v2 (RFQs, suppliers, comparison) ────────────────────────
+const jsonArr = v => { try { return JSON.parse(v || '[]'); } catch { return []; } };
+
+// Trigger the full agent (generate RFQs from approvals → send supplier emails).
+// adminOnly: this sends REAL emails to external suppliers. ?dryRun=1 to preview.
+router.post('/procurement/run', authMiddleware, adminOnly, async (req, res) => {
+  const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
+  if (dryRun) {
+    try { return res.json(await runProcurementAgent({ dryRun: true })); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+  runProcurementAgent()
+    .then(r => console.log(`[procurement] run — ${r.rfqs_created} RFQs, ${r.emails_sent} emails`))
+    .catch(e => console.error('[procurement] run failed:', e.message));
+  res.status(202).json({ started: true, message: 'Procurement agent started — generating and sending RFQs.' });
+});
+
+router.get('/procurement/dashboard', authMiddleware, requireAnyTier('procurement'), async (req, res) => {
+  try {
+    const month = new Date(Date.now() - 30 * 86400000).toISOString();
+    const s = (await query(`
+      SELECT
+        COUNT(*) FILTER (WHERE status IN ('pending','sent','responded','compared'))::int active_rfqs,
+        COUNT(*) FILTER (WHERE status='sent')::int awaiting_response,
+        COUNT(*) FILTER (WHERE status IN ('responded','compared'))::int responses_in,
+        COUNT(*) FILTER (WHERE status='approved' AND created_at >= $1)::int approved_month
+      FROM rfq_requests`, [month])).rows[0];
+    const responses = (await query(`SELECT COUNT(*)::int c FROM rfq_responses`)).rows[0].c;
+    const suppliers = (await query(`SELECT COUNT(*)::int c FROM suppliers`)).rows[0].c;
+    res.json({ ...s, total_responses: responses, total_suppliers: suppliers });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/procurement/rfqs', authMiddleware, requireAnyTier('procurement'), async (req, res) => {
+  try {
+    const params = [], where = [];
+    if (typeof req.query.status === 'string' && req.query.status !== 'all') { params.push(req.query.status); where.push(`r.status=$${params.length}`); }
+    const rows = (await query(`
+      SELECT r.*,
+        (SELECT COUNT(*)::int FROM supplier_outreach_log o WHERE o.rfq_id=r.id) AS suppliers_contacted,
+        (SELECT COUNT(*)::int FROM rfq_responses rr WHERE rr.rfq_id=r.id) AS responses_received
+      FROM rfq_requests r ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY CASE r.priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, r.created_at DESC`, params)).rows;
+    res.json({ rfqs: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/procurement/rfqs/:id', authMiddleware, requireAnyTier('procurement'), async (req, res) => {
+  try {
+    const rfq = (await query('SELECT * FROM rfq_requests WHERE id=$1', [req.params.id])).rows[0];
+    if (!rfq) return res.status(404).json({ error: 'RFQ not found' });
+    const outreach = (await query('SELECT * FROM supplier_outreach_log WHERE rfq_id=$1 ORDER BY sent_at', [req.params.id])).rows;
+    const responses = (await query('SELECT * FROM rfq_responses WHERE rfq_id=$1 ORDER BY score DESC NULLS LAST', [req.params.id])).rows;
+    res.json({ rfq, outreach, responses });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Palash logs a supplier's reply. Re-scores the RFQ (no email) so the comparison
+// stays current; the response moves the RFQ to 'responded'.
+router.post('/procurement/rfqs/:id/responses', authMiddleware, requireAnyTier('procurement'), async (req, res) => {
+  try {
+    const rfq = (await query('SELECT id FROM rfq_requests WHERE id=$1', [req.params.id])).rows[0];
+    if (!rfq) return res.status(404).json({ error: 'RFQ not found' });
+    const b = req.body || {};
+    if (!b.supplier_name && !b.supplier_id) return res.status(400).json({ error: 'supplier_name or supplier_id required' });
+    let supplierName = b.supplier_name;
+    if (!supplierName && b.supplier_id) supplierName = (await query('SELECT name FROM suppliers WHERE id=$1', [b.supplier_id])).rows[0]?.name;
+    const id = crypto.randomUUID();
+    await query(`INSERT INTO rfq_responses
+      (id, rfq_id, supplier_id, supplier_name, price_per_kg, currency, lead_time_days, available_quantity,
+       purity_offered, gmp_status, coa_available, sample_available, min_order_qty, response_email, raw_response, created_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,NOW())`,
+      [id, req.params.id, b.supplier_id || null, supplierName || null,
+       b.price_per_kg != null ? Number(b.price_per_kg) : null, b.currency || 'USD',
+       b.lead_time_days != null ? parseInt(b.lead_time_days, 10) : null, b.available_quantity || null,
+       b.purity_offered || null, b.gmp_status || null, b.coa_available ? 1 : 0, b.sample_available ? 1 : 0,
+       b.min_order_qty || null, b.response_email || null, b.raw_response || null]);
+    await query(`UPDATE rfq_requests SET status='responded' WHERE id=$1 AND status='sent'`, [req.params.id]);
+    let ranking = null;
+    try { ranking = await scoreAndRankSuppliers(req.params.id, { notify: false }); } catch {}
+    res.json({ success: true, response_id: id, ranking });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Scored comparison. ?notify=1 emails Palash the comparison table (Claude summary).
+router.get('/procurement/compare/:rfqId', authMiddleware, requireAnyTier('procurement'), async (req, res) => {
+  try {
+    const notify = req.query?.notify === '1';
+    const result = await scoreAndRankSuppliers(req.params.rfqId, { notify });
+    if (result.error) return res.status(result.scored === 0 ? 200 : 404).json(result);
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Approve the winning supplier → records the decision + a PO draft, status 'approved'.
+router.post('/procurement/rfqs/:id/approve-supplier', authMiddleware, requireAnyTier('procurement'), async (req, res) => {
+  try {
+    const rfq = (await query('SELECT * FROM rfq_requests WHERE id=$1', [req.params.id])).rows[0];
+    if (!rfq) return res.status(404).json({ error: 'RFQ not found' });
+    const respId = req.body?.response_id;
+    const resp = respId
+      ? (await query('SELECT * FROM rfq_responses WHERE id=$1 AND rfq_id=$2', [respId, req.params.id])).rows[0]
+      : (await query('SELECT * FROM rfq_responses WHERE rfq_id=$1 ORDER BY score DESC NULLS LAST LIMIT 1', [req.params.id])).rows[0];
+    if (!resp) return res.status(400).json({ error: 'no supplier response to approve' });
+    await query('UPDATE rfq_responses SET recommended=0 WHERE rfq_id=$1', [req.params.id]);
+    await query('UPDATE rfq_responses SET recommended=1 WHERE id=$1', [resp.id]);
+    await query(`UPDATE rfq_requests SET status='approved' WHERE id=$1`, [req.params.id]);
+    const poDraft = {
+      molecule: rfq.molecule_name, cas_number: rfq.cas_number, supplier: resp.supplier_name,
+      price_per_kg: resp.price_per_kg, currency: resp.currency, quantity: rfq.target_quantity,
+      lead_time_days: resp.lead_time_days, approved_by: req.user.email, approved_at: new Date().toISOString(),
+    };
+    logAgentActivity({ agent_name: req.user.email, action_type: 'procurement_decision', user_id: null,
+      reasoning: `${req.user.email} approved ${resp.supplier_name} for ${rfq.molecule_name} at ${resp.currency} ${resp.price_per_kg}/kg (${rfq.target_quantity}).`,
+      source_kpi: 'kpi-sg-procurement', output_summary: `rfq=${req.params.id} supplier=${resp.supplier_name} price=${resp.price_per_kg}` }).catch(() => {});
+    res.json({ success: true, status: 'approved', po_draft: poDraft });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/procurement/suppliers', authMiddleware, requireAnyTier('procurement'), async (req, res) => {
+  try {
+    const params = [], where = [];
+    if (typeof req.query.region === 'string' && req.query.region !== 'all') { params.push(req.query.region); where.push(`region=$${params.length}`); }
+    if (req.query.gmp === '1') where.push('gmp_certified=1');
+    const rows = (await query(`SELECT * FROM suppliers ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY reliability_score DESC, name`, params)).rows;
+    res.json({ suppliers: rows.map(s => ({ ...s, specialties: jsonArr(s.specialties) })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/procurement/suppliers', authMiddleware, requireAnyTier('procurement'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.name) return res.status(400).json({ error: 'name required' });
+    const id = crypto.randomUUID();
+    await query(`INSERT INTO suppliers (id, name, country, region, contact_email, contact_name, website,
+        specialties, reliability_score, avg_response_days, gmp_certified, total_orders, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,0,NOW(),NOW())`,
+      [id, b.name, b.country || null, ['apac','india','china','europe','us'].includes(b.region) ? b.region : null,
+       b.contact_email || null, b.contact_name || null, b.website || null,
+       JSON.stringify(Array.isArray(b.specialties) ? b.specialties : String(b.specialties || '').split(',').map(x => x.trim()).filter(Boolean)),
+       Math.min(100, Math.max(0, parseInt(b.reliability_score, 10) || 50)), Number(b.avg_response_days) || 3, b.gmp_certified ? 1 : 0]);
+    res.json({ success: true, id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/procurement/suppliers/:id', authMiddleware, requireAnyTier('procurement'), async (req, res) => {
+  try {
+    const s = (await query('SELECT id FROM suppliers WHERE id=$1', [req.params.id])).rows[0];
+    if (!s) return res.status(404).json({ error: 'supplier not found' });
+    const b = req.body || {}, sets = [], params = [];
+    const push = (col, val) => { params.push(val); sets.push(`${col}=$${params.length}`); };
+    if (b.name !== undefined) push('name', b.name);
+    if (b.country !== undefined) push('country', b.country);
+    if (b.region !== undefined && ['apac','india','china','europe','us'].includes(b.region)) push('region', b.region);
+    if (b.contact_email !== undefined) push('contact_email', b.contact_email);
+    if (b.contact_name !== undefined) push('contact_name', b.contact_name);
+    if (b.website !== undefined) push('website', b.website);
+    if (b.specialties !== undefined) push('specialties', JSON.stringify(Array.isArray(b.specialties) ? b.specialties : String(b.specialties).split(',').map(x => x.trim()).filter(Boolean)));
+    if (b.reliability_score !== undefined) push('reliability_score', Math.min(100, Math.max(0, parseInt(b.reliability_score, 10) || 50)));
+    if (b.avg_response_days !== undefined) push('avg_response_days', Number(b.avg_response_days) || 3);
+    if (b.gmp_certified !== undefined) push('gmp_certified', b.gmp_certified ? 1 : 0);
+    if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+    sets.push('updated_at=NOW()');
+    params.push(req.params.id);
+    await query(`UPDATE suppliers SET ${sets.join(', ')} WHERE id=$${params.length}`, params);
+    res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

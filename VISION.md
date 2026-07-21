@@ -76,6 +76,8 @@ Layer 2 is five independent autonomous agents. Each runs on its own schedule, co
 
 **Integrations needed.** Resend (email). Future: supplier-quote APIs to auto-collect price quotes.
 
+
+**v2 — automated supplier outreach (built).** `src/lib/agents/procurement-agent.js`. Beyond proposing sourcing tasks, the agent now closes the loop: it takes CEO-approved sourcing tasks (`approval_queue`, `source_molecule`/`source_gmp_api`), matches the best 3 suppliers from a seeded database of 50 (20 India, 20 China, 10 US/EU), has Claude write per-supplier RFQ emails, sends them from Palash (`palash@abiozen.com`), and scores the responses Palash logs (price 30 / lead 20 / GMP+COA 25 / sample 10 / reliability 15) into a recommended winner + emailed comparison. Tables: `suppliers`, `rfq_requests`, `rfq_responses`, `supplier_outreach_log`. Crons: Tue 9am CST (send RFQs), Thu 9am CST (48h no-response follow-up). This is the "compare pricing and recommend the best supplier" half of Layer 2B, replacing manual supplier research. ⚠️ Sends real external emails — seeded supplier addresses are plausible formats needing verification.
 ### 2C. Growth Agent
 
 **Purpose.** Monitor marketplace search behavior and SEO performance to identify demand signals the catalog isn't capturing.

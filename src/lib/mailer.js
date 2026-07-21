@@ -10,7 +10,11 @@ async function logEmail({ to, subject, status, errorMessage }) {
   } catch(e) { console.error('email_log write failed:', e.message); }
 }
 
-async function sendEmail({ to, subject, html }) {
+// `from` / `replyTo` are optional overrides. Any @abiozen.com sender works because
+// the domain (not the individual address) is verified in Resend — so RFQ emails can
+// legitimately go out as "Palash Das <palash@abiozen.com>". Defaults preserve the
+// existing PlaybookOS sender for every current caller.
+async function sendEmail({ to, subject, html, from, replyTo }) {
   const key = process.env.RESEND_API_KEY;
   if (!key) {
     console.log('No RESEND_API_KEY');
@@ -18,10 +22,12 @@ async function sendEmail({ to, subject, html }) {
     return false;
   }
   try {
+    const body = { from: from || 'PlaybookOS <naren@abiozen.com>', to, subject, html };
+    if (replyTo) body.reply_to = replyTo;
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: 'PlaybookOS <naren@abiozen.com>', to, subject, html })
+      body: JSON.stringify(body)
     });
     const data = await res.json();
     const ok = !!data.id;

@@ -155,6 +155,8 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
 | `0 15 * * 1` (Monday 15:00 UTC) | Layer 2F — Market Intelligence: weekly molecule feed | `runMarketIntelligence()` |
 | `30 15 * * 1` (Monday 15:30 UTC) | Layer 4 — AI Email Engine: 5 molecules x 4 segments = 20 campaigns / 40 variants. Offset 30 min so it reads the molecule rows Market Intelligence just wrote | `runEmailEngine()` |
+| `0 9 * * 2` (Tue 9am CST) | Procurement Agent — send RFQs for Monday-approved molecules | `runProcurementAgent()` |
+| `0 9 * * 4` (Thu 9am CST) | Procurement — flag RFQ outreach with no response after 48h | `checkNoResponse()` |
 | `0 18 * * *` (daily 6pm) | Milestone trigger check | `checkMilestoneTriggers()` via HTTP to self with `TRIGGERS_SECRET` |
 | `0 18 * * *` (daily 6pm) | AI performance scoring + per-user coaching email | `scoreAllAndCoach()` |
 | `0 18 * * *` (daily 6pm) | Layer 1 — 15% divergence check, auto-recalc if exceeded | `checkAndRecalc()` |
@@ -309,6 +311,23 @@ Signals are merged by molecule: GSC contributes a 0–60 impression-normalised s
 **Endpoints** — `POST /email-engine/run` (admin, 202; `?dryRun=1` returns the resolved molecule list synchronously without calling Claude), `GET /email-engine/campaigns` (filters: `week`, `segment`, `status`), `PUT /email-engine/campaigns/:id` (approve/reject; draft-only transition), `POST /email-engine/campaigns/:id/publish`, `GET /email-engine/campaigns/:id/preview?variant=a|b`.
 
 Caveat on publish: Apollo's sequence-creation endpoint needs a **master** API key and is not on every plan. A non-2xx returns 502 with Apollo's verbatim response plus the payload, which the UI shows in a copyable modal so the sequence can be built by hand. Nothing is marked `sent` unless Apollo accepts it.
+
+### Procurement Agent v2 — automated supplier outreach
+
+`src/lib/agents/procurement-agent.js`, page **Procurement Agent** (INTELLIGENCE), crons Tuesday 9am CST (send RFQs) + Thursday 9am CST (no-response follow-up).
+
+Turns approved sourcing tasks into supplier RFQs and scored comparisons, eliminating manual supplier research for Palash (procurement_director).
+
+- **`seedSupplierDatabase()`** — 50 real pharma-raw-material suppliers (20 India, 20 China, 10 US/EU) with specialties, region, GMP flag, reliability score. Runs idempotently on boot. ⚠️ Seeded `contact_email` values are plausible formats, not verified RFQ addresses — verify before enabling real sends.
+- **`generateRFQsFromApprovals()`** — pulls `approval_queue` rows with `action_type IN ('source_molecule','source_gmp_api')` and `status='approved'`, parses molecule/CAS/quantity/purity from the payload, creates `rfq_requests`, and matches the best 3 suppliers (specialty overlap + GMP fit + India/China cost preference). Idempotent (unique on week+molecule, dedup on approval_id).
+- **`generateRFQEmail()`** — Claude (`claude-opus-4-8`) writes a professional RFQ email requesting price/kg, purity, GMP+DMF (if GMP), COA, lead time, MOQ, sample; signed as Palash Das.
+- **`sendRFQEmails(rfqIds, dryRun)`** — sends from `palash@abiozen.com` (Resend, verified domain), logs to `supplier_outreach_log`, moves RFQ to `sent`. Idempotent per (rfq, supplier).
+- **`scoreAndRankSuppliers(rfqId)`** — scores each logged response 0–100 (price 30 / lead 20 / GMP+COA 25 / sample 10 / reliability 15), marks the winner, and (when notifying) emails Palash a Claude comparison summary + table.
+- **`runProcurementAgent()`** — orchestration: RFQs → suppliers → emails → summary to Palash + brief to Naresh.
+
+Tables: `suppliers`, `rfq_requests`, `rfq_responses`, `supplier_outreach_log`. Endpoints under `/api/procurement/*` (run, rfqs, responses, suppliers, compare, approve-supplier, dashboard). Page has 4 tabs: Active RFQs, Supplier Comparison, Supplier Database, Analytics.
+
+⚠️ Real external sends: the Tuesday cron and `POST /procurement/run` email real supplier addresses. Keep RFQs in dryRun / verify seeded emails until you've confirmed the contact addresses.
 
 ### Revenue Intelligence agent
 

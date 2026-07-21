@@ -389,6 +389,7 @@ const NAV_SECTIONS = [
   ]},
   {title:'INTELLIGENCE', access:['admin','procurement','seo'], items:[
     {id:'market-intelligence', label:'Market Intelligence', icon:'🔬'},
+    {id:'procurement-agent', label:'Procurement Agent', icon:'🏭'},
     {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
     {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
@@ -474,7 +475,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -4240,6 +4241,185 @@ if(typeof pages !== 'undefined') {
     }).join('');
 
     c.innerHTML = head + `<div class="card"><div style="display:flex;gap:14px;overflow-x:auto;align-items:flex-start">${cols}</div></div>`;
+  };
+}
+
+// ── Procurement Agent ─────────────────────────────────────────────────────────
+function paEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function paMoney(n){ return n==null||n===''?'—':'$'+Number(n).toLocaleString(); }
+window._paTab = window._paTab || 'rfqs';
+const PA_STATUS = { pending:['Pending','#718096'], sent:['RFQ Sent','#0D7377'], responded:['Responses In','#B45309'], compared:['Compared','#6B21A8'], approved:['Approved','#166534'], ordered:['Ordered','#1B3A6B'] };
+function paStatusBadge(st){ const [l,c]=PA_STATUS[st]||[st,'#718096']; return `<span style="display:inline-block;background:${c};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">${l}</span>`; }
+
+function paTab(t){ window._paTab=t; pages['procurement-agent'](); }
+async function paRun(){
+  const m=document.getElementById('pa-run-msg'), b=document.getElementById('pa-run-btn');
+  if(b){b.disabled=true;b.textContent='Starting…';}
+  try{ const r=await API('/procurement/run',{method:'POST',body:JSON.stringify({})}); if(m){m.style.color=r&&r.error?'#dc2626':'#166534';m.textContent=(r&&(r.error||r.message))||'Started';} }
+  catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} }
+  if(b){b.disabled=false;b.textContent='Run Agent';}
+}
+async function paExpandRfq(id){
+  const box=document.getElementById('pa-rfq-'+id);
+  if(!box) return;
+  if(box.dataset.open==='1'){ box.innerHTML=''; box.dataset.open='0'; return; }
+  box.innerHTML='<div style="padding:8px;color:#888;font-size:12px">Loading…</div>'; box.dataset.open='1';
+  let d; try{ d=await API('/procurement/rfqs/'+id); }catch(e){ box.innerHTML='<div style="color:#dc2626;font-size:12px">'+paEsc(e.message)+'</div>'; return; }
+  const outreach=(d.outreach||[]).map(o=>`<div style="font-size:11px;color:#4a5568;padding:3px 0">📧 ${paEsc(o.email_sent_to)} — <span style="color:#718096">${paEsc(o.status)}</span></div>`).join('')||'<div style="font-size:11px;color:#a0aec0">No emails sent yet.</div>';
+  const resp=(d.responses||[]).map(r=>`<div style="font-size:11px;color:#1a202c;padding:3px 0">${r.recommended?'⭐ ':''}${paEsc(r.supplier_name)}: ${paMoney(r.price_per_kg)}/kg · ${paEsc(r.lead_time_days)||'?'}d · score ${paEsc(r.score)||'—'}</div>`).join('')||'<div style="font-size:11px;color:#a0aec0">No responses logged.</div>';
+  box.innerHTML=`<div style="background:#f8fafc;border-radius:6px;padding:10px;margin-top:8px">
+    <div style="font-size:10px;text-transform:uppercase;color:#a0aec0;letter-spacing:.5px">Suppliers contacted</div>${outreach}
+    <div style="font-size:10px;text-transform:uppercase;color:#a0aec0;letter-spacing:.5px;margin-top:8px">Responses</div>${resp}
+    <button onclick="paAddResponseForm('${id}')" class="btn-outline" style="padding:4px 10px;font-size:11px;margin-top:8px">+ Add Response</button>
+    <div id="pa-addresp-${id}"></div>
+  </div>`;
+}
+function paAddResponseForm(id){
+  const box=document.getElementById('pa-addresp-'+id); if(!box) return;
+  box.innerHTML=`<div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:6px">
+    <input id="pa-r-sup-${id}" placeholder="Supplier name" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+    <input id="pa-r-price-${id}" type="number" placeholder="Price/kg (USD)" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+    <input id="pa-r-lead-${id}" type="number" placeholder="Lead time (days)" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+    <input id="pa-r-purity-${id}" placeholder="Purity offered" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+    <input id="pa-r-moq-${id}" placeholder="Min order qty" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+    <input id="pa-r-gmp-${id}" placeholder="GMP status" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+    <label style="font-size:11px"><input type="checkbox" id="pa-r-coa-${id}"> COA available</label>
+    <label style="font-size:11px"><input type="checkbox" id="pa-r-sample-${id}"> Sample available</label>
+  </div>
+  <div style="margin-top:6px"><button onclick="paSaveResponse('${id}')" class="btn-primary" style="padding:5px 14px;font-size:12px">Save response</button> <span id="pa-r-msg-${id}" style="font-size:11px;color:var(--text-muted)"></span></div>`;
+}
+async function paSaveResponse(id){
+  const g=k=>document.getElementById('pa-r-'+k+'-'+id);
+  const m=g('msg'); if(m)m.textContent='Saving…';
+  const body={ supplier_name:g('sup').value, price_per_kg:g('price').value, lead_time_days:g('lead').value, purity_offered:g('purity').value, min_order_qty:g('moq').value, gmp_status:g('gmp').value, coa_available:g('coa').checked, sample_available:g('sample').checked };
+  if(!body.supplier_name){ if(m){m.style.color='#dc2626';m.textContent='Supplier name required';} return; }
+  try{ const r=await API('/procurement/rfqs/'+id+'/responses',{method:'POST',body:JSON.stringify(body)}); if(r&&r.error){if(m){m.style.color='#dc2626';m.textContent=r.error;}return;} pages['procurement-agent'](); }
+  catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} }
+}
+async function paCompare(rfqId){
+  window._paCompareRfq=rfqId; window._paTab='compare'; pages['procurement-agent']();
+}
+async function paApprove(rfqId, respId){
+  try{ const r=await API('/procurement/rfqs/'+rfqId+'/approve-supplier',{method:'POST',body:JSON.stringify(respId?{response_id:respId}:{})}); if(r&&r.error){alert(r.error);return;} pages['procurement-agent'](); }
+  catch(e){ alert(e.message); }
+}
+async function paAddSupplier(){
+  const g=k=>document.getElementById('pa-s-'+k);
+  const body={ name:g('name').value, country:g('country').value, region:g('region').value, contact_email:g('email').value, website:g('website').value, specialties:g('specialties').value, reliability_score:g('rel').value, gmp_certified:g('gmp').checked };
+  if(!body.name){ alert('Supplier name required'); return; }
+  try{ const r=await API('/procurement/suppliers',{method:'POST',body:JSON.stringify(body)}); if(r&&r.error){alert(r.error);return;} pages['procurement-agent'](); }
+  catch(e){ alert(e.message); }
+}
+
+if(typeof pages !== 'undefined') {
+  pages['procurement-agent'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading Procurement Agent…</p>';
+    let dash, rfqData, supData;
+    try { [dash, rfqData, supData] = await Promise.all([
+      API('/procurement/dashboard').catch(()=>({})),
+      API('/procurement/rfqs').catch(()=>({rfqs:[]})),
+      API('/procurement/suppliers').catch(()=>({suppliers:[]})),
+    ]); } catch(e){ c.innerHTML = `<div class="card"><div class="card-title">Procurement Agent</div><p style="color:#dc2626">Failed to load: ${paEsc(e.message)}</p></div>`; return; }
+    if (dash && dash.error) { c.innerHTML = `<div class="card"><div class="card-title">Procurement Agent</div><p style="color:#dc2626">${paEsc(dash.error)}</p></div>`; return; }
+    const rfqs=(rfqData&&rfqData.rfqs)||[], suppliers=(supData&&supData.suppliers)||[];
+
+    const head=`<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">Procurement Agent</div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <span id="pa-run-msg" style="font-size:12px;color:var(--text-muted)"></span>
+        <button id="pa-run-btn" onclick="paRun()" class="btn-primary" style="padding:8px 16px">Run Agent</button>
+      </div></div>
+      <div class="metric-grid">
+        <div class="metric"><div class="label">Active RFQs</div><div class="value">${dash.active_rfqs||0}</div></div>
+        <div class="metric amber"><div class="label">Awaiting response</div><div class="value">${dash.awaiting_response||0}</div></div>
+        <div class="metric"><div class="label">Responses received</div><div class="value">${dash.total_responses||0}</div></div>
+        <div class="metric green"><div class="label">Approved this month</div><div class="value">${dash.approved_month||0}</div></div>
+      </div>`;
+
+    const tabs=[['rfqs','Active RFQs'],['compare','Supplier Comparison'],['suppliers','Supplier Database'],['analytics','Analytics']];
+    const tabBar=`<div class="card" style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([k,l])=>`<button onclick="paTab('${k}')" class="btn-outline" style="padding:6px 14px;font-size:13px;${window._paTab===k?'background:#1B3A6B;color:#fff':''}">${l}</button>`).join('')}</div>`;
+
+    let body='';
+    if (window._paTab==='rfqs') {
+      body = rfqs.length ? rfqs.map(r=>`<div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div><div style="font-size:15px;font-weight:700;color:#1a202c">${paEsc(r.molecule_name)}</div>
+            <div style="font-size:12px;color:#718096;margin-top:2px">${r.cas_number?'CAS '+paEsc(r.cas_number)+' · ':''}${paEsc(r.target_quantity)||''} · ${r.gmp_required?'GMP':'research'} · ${r.suppliers_contacted||0} contacted · ${r.responses_received||0} responses</div></div>
+          ${paStatusBadge(r.status)}</div>
+        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+          <button onclick="paExpandRfq('${r.id}')" class="btn-outline" style="padding:4px 10px;font-size:11px">Details</button>
+          ${(r.responses_received>0)?`<button onclick="paCompare('${r.id}')" class="btn-outline" style="padding:4px 10px;font-size:11px">Compare</button>`:''}
+        </div>
+        <div id="pa-rfq-${r.id}" data-open="0"></div>
+      </div>`).join('') : `<div class="card"><p style="color:#718096">No RFQs yet. Approve sourcing tasks in Agent Control, then click <strong>Run Agent</strong> — or wait for the Tuesday 9am cron.</p></div>`;
+    } else if (window._paTab==='compare') {
+      const rfqId=window._paCompareRfq||(rfqs.find(r=>r.responses_received>0)||{}).id;
+      if(!rfqId){ body=`<div class="card"><p style="color:#718096">No RFQs with responses yet. Log supplier responses under Active RFQs first.</p></div>`; }
+      else {
+        let cmp; try{ cmp=await API('/procurement/compare/'+rfqId); }catch(e){ cmp={error:e.message}; }
+        if(cmp.error && !cmp.ranked){ body=`<div class="card"><p style="color:#718096">${paEsc(cmp.error)}</p></div>`; }
+        else {
+          const ranked=cmp.ranked||[];
+          const picker=`<select onchange="window._paCompareRfq=this.value;pages['procurement-agent']()" style="padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px;margin-bottom:10px">${rfqs.filter(r=>r.responses_received>0).map(r=>`<option value="${r.id}" ${r.id===rfqId?'selected':''}>${paEsc(r.molecule_name)}</option>`).join('')}</select>`;
+          const rows=ranked.map((r,i)=>`<tr style="background:${i===0?'#f0fdf4':'#fff'}">
+            <td style="padding:8px 10px;border:1px solid #e2e8f0;font-weight:${i===0?'700':'400'}">${i===0?'⭐ ':''}${paEsc(r.supplier_name)}</td>
+            <td style="padding:8px 10px;border:1px solid #e2e8f0">${paMoney(r.price_per_kg)}/kg</td>
+            <td style="padding:8px 10px;border:1px solid #e2e8f0">${paEsc(r.lead_time_days)||'—'}d</td>
+            <td style="padding:8px 10px;border:1px solid #e2e8f0">${paEsc(r.gmp_status)||'—'}</td>
+            <td style="padding:8px 10px;border:1px solid #e2e8f0">${r.coa_available?'✓':'—'}</td>
+            <td style="padding:8px 10px;border:1px solid #e2e8f0">${paEsc(r.min_order_qty)||'—'}</td>
+            <td style="padding:8px 10px;border:1px solid #e2e8f0;font-weight:700">${paEsc(r.score)||'—'}</td>
+            <td style="padding:8px 10px;border:1px solid #e2e8f0"><button onclick="paApprove('${rfqId}','${r.id}')" style="background:${i===0?'#1D9E75':'#fff'};color:${i===0?'#fff':'#1B3A6B'};border:1px solid #1D9E75;padding:4px 10px;border-radius:4px;font-size:11px;cursor:pointer">Approve</button></td></tr>`).join('');
+          body=`<div class="card">${picker}
+            <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:13px;width:100%">
+            <tr style="background:#1B3A6B;color:#fff"><th style="padding:8px 10px;text-align:left">Supplier</th><th style="padding:8px 10px">Price</th><th style="padding:8px 10px">Lead</th><th style="padding:8px 10px">GMP</th><th style="padding:8px 10px">COA</th><th style="padding:8px 10px">MOQ</th><th style="padding:8px 10px">Score</th><th style="padding:8px 10px"></th></tr>
+            ${rows}</table></div></div>`;
+        }
+      }
+    } else if (window._paTab==='suppliers') {
+      const rows=suppliers.map(s=>`<tr>
+        <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-weight:600">${paEsc(s.name)}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${paEsc(s.country)||'—'}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;color:#4a5568">${(s.specialties||[]).slice(0,3).map(paEsc).join(', ')}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${s.gmp_certified?'<span style="color:#166534">GMP ✓</span>':'—'}</td>
+        <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-weight:700">${paEsc(s.reliability_score)}</td></tr>`).join('');
+      body=`<div class="card">
+        <div style="font-size:12px;color:#718096;margin-bottom:8px">${suppliers.length} suppliers. ⚠️ Seeded contact emails are plausible formats — verify before enabling real sends.</div>
+        <details style="margin-bottom:10px"><summary style="cursor:pointer;font-size:13px;font-weight:600;color:#0D7377">+ Add supplier</summary>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px">
+            <input id="pa-s-name" placeholder="Company name" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <input id="pa-s-country" placeholder="Country" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <select id="pa-s-region" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px"><option value="">region…</option><option value="india">india</option><option value="china">china</option><option value="apac">apac</option><option value="europe">europe</option><option value="us">us</option></select>
+            <input id="pa-s-email" placeholder="Contact email" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <input id="pa-s-website" placeholder="Website" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <input id="pa-s-specialties" placeholder="Specialties (comma-sep)" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <input id="pa-s-rel" type="number" placeholder="Reliability 0-100" style="padding:5px;border:1px solid var(--border);border-radius:4px;font-size:12px">
+            <label style="font-size:11px"><input type="checkbox" id="pa-s-gmp"> GMP certified</label>
+          </div>
+          <button onclick="paAddSupplier()" class="btn-primary" style="padding:5px 14px;font-size:12px;margin-top:6px">Add supplier</button>
+        </details>
+        <div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">
+          <tr style="background:#f8fafc"><th style="padding:7px 10px;text-align:left">Supplier</th><th style="padding:7px 10px;text-align:left">Country</th><th style="padding:7px 10px;text-align:left">Specialties</th><th style="padding:7px 10px;text-align:left">GMP</th><th style="padding:7px 10px;text-align:left">Reliability</th></tr>
+          ${rows}</table></div></div>`;
+    } else if (window._paTab==='analytics') {
+      const monthRfqs=rfqs.filter(r=>new Date(r.created_at) > new Date(Date.now()-30*86400000)).length;
+      const responded=rfqs.filter(r=>['responded','compared','approved','ordered'].includes(r.status)).length;
+      const sent=rfqs.filter(r=>r.status!=='pending').length;
+      const respRate=sent?Math.round(responded/sent*100):0;
+      const topSup=[...suppliers].sort((a,b)=>(a.avg_response_days||99)-(b.avg_response_days||99)).slice(0,5);
+      body=`<div class="metric-grid">
+          <div class="metric"><div class="label">RFQs sent (30d)</div><div class="value">${monthRfqs}</div></div>
+          <div class="metric"><div class="label">Response rate</div><div class="value">${respRate}%</div><div class="sub">${responded}/${sent} RFQs</div></div>
+          <div class="metric"><div class="label">Suppliers in DB</div><div class="value">${suppliers.length}</div></div>
+          <div class="metric"><div class="label">Price savings</div><div class="value">—</div><div class="sub">needs market-rate data</div></div>
+        </div>
+        <div class="card"><div class="card-title text-section">Fastest-responding suppliers</div>
+          ${topSup.map(s=>`<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px"><span>${paEsc(s.name)}</span><span style="color:#718096">${paEsc(s.avg_response_days)||'?'}d avg · reliability ${paEsc(s.reliability_score)}</span></div>`).join('')}
+        </div>`;
+    }
+
+    c.innerHTML = head + tabBar + body;
   };
 }
 </script>

@@ -1,6 +1,6 @@
 // server.js — PlaybookOS main server
 require('dotenv').config();
-const { initDB, initPhase2, migrateSchemas, query } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSchemas()).catch(e => { console.error("DB init error:", e.message); process.exit(1); });
+const { initDB, initPhase2, migrateSchemas, query } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSchemas()).then(() => require('./src/lib/agents/procurement-agent').seedSupplierDatabase().then(r => console.log(`[boot] supplier seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] supplier seed failed:', e.message))).catch(e => { console.error("DB init error:", e.message); process.exit(1); });
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -17,6 +17,7 @@ const { runMorningBriefing, runPerformanceCheck, runEscalationCheck, workdayStat
 const { runWeeklyLinkedInCampaign } = require('./src/lib/agents/linkedin-agent');
 const { runEmailEngine } = require('./src/lib/agents/email-engine');
 const { processApolloReplies } = require('./src/lib/agents/sales-agent');
+const { runProcurementAgent, checkNoResponse, seedSupplierDatabase } = require('./src/lib/agents/procurement-agent');
 const { businessToday } = require('./src/lib/agent-core');
 const routes = require('./src/api/routes');
 
@@ -275,6 +276,21 @@ cron.schedule('0 18 * * *', withAlerts('daily-18utc-goal-divergence', async () =
 // The orchestrator routes each segment to its specialized agents at the local
 // time that matches that team's morning.
 const CST = { timezone: 'America/Chicago' };
+
+// Tuesday 9am CST — Procurement Agent v2: send RFQ emails for molecules approved
+// Monday. Runs after the Monday approval window so Palash's approvals are captured.
+cron.schedule('0 9 * * 2', withAlerts('weekly-tue-9cst-procurement-rfqs', async () => {
+  console.log('[CRON] Procurement Agent starting...');
+  const r = await runProcurementAgent();
+  console.log(`[CRON] Procurement Agent done — ${r.rfqs_created} RFQs, ${r.emails_sent} supplier emails, ${r.errors.length} errors`);
+  if (r.errors.length) console.warn('[CRON] Procurement errors:', r.errors.slice(0, 5));
+}), CST);
+
+// Thursday 9am CST — flag RFQ outreach with no supplier response after 48h.
+cron.schedule('0 9 * * 4', withAlerts('weekly-thu-9cst-procurement-followup', async () => {
+  const r = await checkNoResponse({ hours: 48 });
+  console.log(`[CRON] Procurement follow-up — flagged ${r.flagged_no_response} outreach as no_response`);
+}), CST);
 
 // 10:30pm CST — procurement team morning briefing (9am IST next day)
 cron.schedule('30 22 * * *', withAlerts('daily-2230cst-procurement-ist-briefing', async () => {
