@@ -689,6 +689,45 @@ async function migrateSchemas() {
         status TEXT DEFAULT 'sent' CHECK (status IN ('sent','replied','no_response'))
       );
       CREATE INDEX IF NOT EXISTS idx_outreach_rfq ON supplier_outreach_log (rfq_id, status);
+      -- Google Meet Agent — meeting transcripts, extracted tasks, insights.
+      CREATE TABLE IF NOT EXISTS meeting_recordings (
+        id TEXT PRIMARY KEY,
+        meeting_id TEXT UNIQUE,
+        meeting_title TEXT,
+        meeting_date TEXT,
+        duration_seconds INTEGER,
+        attendees TEXT,                 -- JSON array of emails
+        transcript_text TEXT,
+        summary TEXT,
+        recording_url TEXT,
+        processed INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_meeting_rec_date ON meeting_recordings (meeting_date DESC);
+      CREATE TABLE IF NOT EXISTS meeting_tasks (
+        id TEXT PRIMARY KEY,
+        meeting_id TEXT,
+        assigned_to_user_id TEXT,
+        assigned_to_name TEXT,
+        task_title TEXT,
+        task_description TEXT,
+        due_date TEXT,
+        priority TEXT DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
+        source_quote TEXT,
+        status TEXT DEFAULT 'pending' CHECK (status IN ('pending','assigned','completed')),
+        daily_task_id TEXT,             -- linked daily_tasks row (My Tasks)
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_meeting_tasks_mtg ON meeting_tasks (meeting_id, status);
+      CREATE TABLE IF NOT EXISTS meeting_insights (
+        id TEXT PRIMARY KEY,
+        meeting_id TEXT,
+        insight_type TEXT CHECK (insight_type IN ('decision','blocker','risk','opportunity')),
+        content TEXT,
+        mentioned_by TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_meeting_insights_mtg ON meeting_insights (meeting_id, insight_type);
     `);
     console.log('✅ Schema migrations applied (owner columns + legacy role remap + email_campaigns)');
   } catch(e) { console.error('Migration error:', e.message); }

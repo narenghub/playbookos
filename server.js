@@ -18,6 +18,7 @@ const { runWeeklyLinkedInCampaign } = require('./src/lib/agents/linkedin-agent')
 const { runEmailEngine } = require('./src/lib/agents/email-engine');
 const { processApolloReplies } = require('./src/lib/agents/sales-agent');
 const { runProcurementAgent, checkNoResponse, seedSupplierDatabase } = require('./src/lib/agents/procurement-agent');
+const { runMeetAgent } = require('./src/lib/agents/meet-agent');
 const { businessToday } = require('./src/lib/agent-core');
 const routes = require('./src/api/routes');
 
@@ -284,6 +285,20 @@ cron.schedule('0 9 * * 2', withAlerts('weekly-tue-9cst-procurement-rfqs', async 
   const r = await runProcurementAgent();
   console.log(`[CRON] Procurement Agent done — ${r.rfqs_created} RFQs, ${r.emails_sent} supplier emails, ${r.errors.length} errors`);
   if (r.errors.length) console.warn('[CRON] Procurement errors:', r.errors.slice(0, 5));
+}), CST);
+
+// Monday 11am CST — Meet Agent: process weekend/Monday-morning standup recordings.
+cron.schedule('0 11 * * 1', withAlerts('weekly-mon-11cst-meet-agent', async () => {
+  console.log('[CRON] Meet Agent (Mon) starting...');
+  const r = await runMeetAgent({ lookbackDays: 3 });
+  console.log(`[CRON] Meet Agent done — ${r.meetings_processed} meetings, ${r.tasks_created} tasks${r.warning ? ' | ' + r.warning : ''}`);
+}), CST);
+
+// Friday 4pm CST — Meet Agent: process the week's meeting recordings.
+cron.schedule('0 16 * * 5', withAlerts('weekly-fri-16cst-meet-agent', async () => {
+  console.log('[CRON] Meet Agent (Fri) starting...');
+  const r = await runMeetAgent({ lookbackDays: 7 });
+  console.log(`[CRON] Meet Agent done — ${r.meetings_processed} meetings, ${r.tasks_created} tasks${r.warning ? ' | ' + r.warning : ''}`);
 }), CST);
 
 // Thursday 9am CST — flag RFQ outreach with no supplier response after 48h.

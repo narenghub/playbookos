@@ -390,6 +390,7 @@ const NAV_SECTIONS = [
   {title:'INTELLIGENCE', access:['admin','procurement','seo'], items:[
     {id:'market-intelligence', label:'Market Intelligence', icon:'🔬'},
     {id:'procurement-agent', label:'Procurement Agent', icon:'🏭'},
+    {id:'meet-agent', label:'Google Meet Agent', icon:'🎥'},
     {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
     {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
@@ -475,7 +476,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -4419,6 +4420,126 @@ if(typeof pages !== 'undefined') {
         </div>`;
     }
 
+    c.innerHTML = head + tabBar + body;
+  };
+}
+
+// ── Google Meet Agent ─────────────────────────────────────────────────────────
+function mgEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+window._mgTab = window._mgTab || 'meetings';
+function mgTab(t){ window._mgTab=t; pages['meet-agent'](); }
+async function mgExpand(id){
+  const box=document.getElementById('mg-m-'+id); if(!box) return;
+  if(box.dataset.open==='1'){ box.innerHTML=''; box.dataset.open='0'; return; }
+  box.innerHTML='<div style="padding:8px;color:#888;font-size:12px">Loading…</div>'; box.dataset.open='1';
+  let d; try{ d=await API('/meetings/'+encodeURIComponent(id)); }catch(e){ box.innerHTML='<div style="color:#dc2626;font-size:12px">'+mgEsc(e.message)+'</div>'; return; }
+  const grp=(t,color)=>{ const items=(d.insights||[]).filter(x=>x.insight_type===t); return items.length?`<div style="margin-top:8px"><div style="font-size:10px;text-transform:uppercase;color:${color};font-weight:700">${t}s</div>${items.map(x=>`<div style="font-size:12px;color:#4a5568;padding:2px 0">• ${mgEsc(x.content)}</div>`).join('')}</div>`:''; };
+  const tasks=(d.tasks||[]).map(t=>`<div style="font-size:12px;color:#1a202c;padding:2px 0">✓ <strong>${mgEsc(t.assigned_to_name||'?')}</strong>: ${mgEsc(t.task_title)} <span style="color:#B45309">[${mgEsc(t.priority)}]</span>${t.due_date?' <span style="color:#888">due '+mgEsc(t.due_date)+'</span>':''}</div>`).join('')||'<div style="font-size:12px;color:#a0aec0">No tasks.</div>';
+  box.innerHTML=`<div style="background:#f8fafc;border-radius:6px;padding:10px;margin-top:8px">
+    <div style="font-size:13px;color:#1a202c;line-height:1.6">${mgEsc(d.meeting.summary)||'No summary.'}</div>
+    <div style="margin-top:8px"><div style="font-size:10px;text-transform:uppercase;color:#166534;font-weight:700">Action items</div>${tasks}</div>
+    ${grp('decision','#1B3A6B')}${grp('blocker','#991B1B')}${grp('risk','#6B21A8')}${grp('opportunity','#166534')}
+  </div>`;
+}
+async function mgAnalyze(){
+  const title=document.getElementById('mg-title').value, date=document.getElementById('mg-date').value, att=document.getElementById('mg-att').value, tx=document.getElementById('mg-transcript').value;
+  const msg=document.getElementById('mg-up-msg'), out=document.getElementById('mg-up-result');
+  if(!title||!tx){ if(msg){msg.style.color='#dc2626';msg.textContent='Title and transcript required';} return; }
+  if(msg){msg.style.color='var(--text-muted)';msg.textContent='Analyzing with Claude…';}
+  try{
+    const r=await API('/meetings/upload-transcript',{method:'POST',body:JSON.stringify({meeting_title:title,meeting_date:date,attendees:att,transcript_text:tx,dryRun:true})});
+    if(r&&r.error){ if(msg){msg.style.color='#dc2626';msg.textContent=r.error;} return; }
+    if(msg)msg.textContent='';
+    window._mgLastUpload={meeting_title:title,meeting_date:date,attendees:att,transcript_text:tx};
+    const a=r.analysis||{};
+    const items=(a.action_items||[]).map(x=>`<div style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--border)">• <strong>${mgEsc(x.assigned_to||'?')}</strong>: ${mgEsc(x.task)} <span style="color:#B45309">[${mgEsc(x.priority)}]</span>${x.due_date?' <span style="color:#888">due '+mgEsc(x.due_date)+'</span>':''}</div>`).join('')||'<div style="font-size:13px;color:#888">No action items extracted.</div>';
+    out.innerHTML=`<div class="card" style="margin-top:12px">
+      <div class="card-title text-section">Extracted (preview)</div>
+      <div style="font-size:13px;color:#4a5568;margin-bottom:8px">${mgEsc(a.summary)}</div>
+      <div style="font-size:11px;text-transform:uppercase;color:#166534;font-weight:700">Action items (${(a.action_items||[]).length})</div>${items}
+      <div style="margin-top:10px"><button onclick="mgAssign()" class="btn-primary" style="padding:8px 18px">Assign Tasks</button> <span id="mg-assign-msg" style="font-size:12px;color:var(--text-muted)"></span></div>
+    </div>`;
+  }catch(e){ if(msg){msg.style.color='#dc2626';msg.textContent=e.message;} }
+}
+async function mgAssign(){
+  const m=document.getElementById('mg-assign-msg'); if(m)m.textContent='Assigning…';
+  const u=window._mgLastUpload; if(!u){ if(m)m.textContent='Analyze first'; return; }
+  try{
+    const r=await API('/meetings/upload-transcript',{method:'POST',body:JSON.stringify({...u,dryRun:false})});
+    if(r&&r.error){ if(m){m.style.color='#dc2626';m.textContent=r.error;} return; }
+    if(m){m.style.color='#166534';m.textContent=`Created ${r.tasks_created} tasks, brief ${r.brief_sent?'emailed to Naresh':'skipped'}.`;}
+  }catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} }
+}
+async function mgComplete(id){
+  try{ const r=await API('/meetings/tasks/'+id,{method:'PUT',body:JSON.stringify({status:'completed'})}); if(r&&r.error){alert(r.error);return;} pages['meet-agent'](); }catch(e){ alert(e.message); }
+}
+
+if(typeof pages !== 'undefined') {
+  pages['meet-agent'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading Meet Agent…</p>';
+    let dash, meetData;
+    try { [dash, meetData] = await Promise.all([ API('/meetings/dashboard').catch(()=>({})), API('/meetings').catch(()=>({meetings:[]})) ]); }
+    catch(e){ c.innerHTML = `<div class="card"><div class="card-title">Google Meet Agent</div><p style="color:#dc2626">${mgEsc(e.message)}</p></div>`; return; }
+    if (dash && dash.error) { c.innerHTML = `<div class="card"><div class="card-title">Google Meet Agent</div><p style="color:#dc2626">${mgEsc(dash.error)}</p></div>`; return; }
+    const meetings=(meetData&&meetData.meetings)||[];
+
+    const head=`<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">Google Meet Agent</div>
+      <div style="margin-left:auto"><span id="mg-run-msg" style="font-size:12px;color:var(--text-muted);margin-right:8px"></span>
+        <button onclick="mgTab('upload')" class="btn-primary" style="padding:8px 16px">Upload Transcript</button></div></div>
+      <div class="metric-grid">
+        <div class="metric"><div class="label">Meetings this month</div><div class="value">${dash.meetings_month||0}</div></div>
+        <div class="metric"><div class="label">Tasks created</div><div class="value">${dash.tasks_created||0}</div><div class="sub">${dash.tasks_completed||0} completed</div></div>
+        <div class="metric"><div class="label">Decisions</div><div class="value">${dash.decisions||0}</div></div>
+        <div class="metric amber"><div class="label">Blockers</div><div class="value">${dash.blockers||0}</div></div>
+      </div>`;
+    const tabs=[['meetings','Recent Meetings'],['upload','Upload Transcript'],['tasks','Meeting Tasks'],['insights','Insights']];
+    const tabBar=`<div class="card" style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([k,l])=>`<button onclick="mgTab('${k}')" class="btn-outline" style="padding:6px 14px;font-size:13px;${window._mgTab===k?'background:#1B3A6B;color:#fff':''}">${l}</button>`).join('')}</div>`;
+
+    let body='';
+    if (window._mgTab==='meetings') {
+      body = meetings.length ? meetings.map(m=>`<div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div><div style="font-size:15px;font-weight:700;color:#1a202c">${mgEsc(m.meeting_title)}</div>
+            <div style="font-size:12px;color:#718096;margin-top:2px">${mgEsc(m.meeting_date)}${m.duration_seconds?' · '+Math.round(m.duration_seconds/60)+'min':''} · ${(m.attendees||[]).length} attendees · ${m.tasks_generated||0} tasks</div></div>
+          <span style="background:${m.processed?'#166534':'#718096'};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">${m.processed?'Processed':'Pending'}</span></div>
+        <button onclick="mgExpand('${mgEsc(m.meeting_id)}')" class="btn-outline" style="padding:4px 10px;font-size:11px;margin-top:8px">Details</button>
+        <div id="mg-m-${mgEsc(m.meeting_id)}" data-open="0"></div></div>`).join('')
+        : `<div class="card"><p style="color:#718096">No meetings processed yet. Use <strong>Upload Transcript</strong> to paste a standup transcript, or trigger the Google sync (needs Calendar/Drive scope).</p></div>`;
+    } else if (window._mgTab==='upload') {
+      body=`<div class="card">
+        <div style="font-size:12px;color:#718096;margin-bottom:10px">Paste a meeting transcript to get an AI summary, extracted action items, and auto-assigned tasks. Works without Google Calendar access.</div>
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:8px;margin-bottom:8px">
+          <input id="mg-title" placeholder="Meeting title (e.g. Monday Standup)" style="padding:7px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+          <input id="mg-date" type="date" style="padding:7px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+        </div>
+        <input id="mg-att" placeholder="Attendees (comma-separated names or emails)" style="width:100%;padding:7px;border:1px solid var(--border);border-radius:4px;font-size:13px;margin-bottom:8px;box-sizing:border-box">
+        <textarea id="mg-transcript" rows="10" placeholder="Paste the full transcript here…" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+        <div style="margin-top:8px"><button onclick="mgAnalyze()" class="btn-primary" style="padding:9px 18px">Analyze Meeting</button> <span id="mg-up-msg" style="font-size:12px;color:var(--text-muted)"></span></div>
+        <div id="mg-up-result"></div></div>`;
+    } else if (window._mgTab==='tasks') {
+      let all=[]; for(const m of meetings){ try{ const d=await API('/meetings/'+encodeURIComponent(m.meeting_id)+'/tasks'); (d.tasks||[]).forEach(t=>all.push({...t,meeting_title:m.meeting_title})); }catch{} }
+      body = all.length ? `<div class="card"><div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">
+        <tr style="background:#f8fafc"><th style="padding:7px 10px;text-align:left">Task</th><th style="padding:7px 10px;text-align:left">Assignee</th><th style="padding:7px 10px;text-align:left">Meeting</th><th style="padding:7px 10px;text-align:left">Priority</th><th style="padding:7px 10px;text-align:left">Status</th><th></th></tr>
+        ${all.map(t=>`<tr><td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${mgEsc(t.task_title)}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${mgEsc(t.assigned_to_name||'—')}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:11px;color:#718096">${mgEsc(t.meeting_title)}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${mgEsc(t.priority)}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${mgEsc(t.status)}</td>
+          <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${t.status!=='completed'?`<button onclick="mgComplete('${t.id}')" class="btn-outline" style="padding:3px 10px;font-size:11px">Complete</button>`:'✓'}</td></tr>`).join('')}
+        </table></div></div>` : `<div class="card"><p style="color:#718096">No meeting tasks yet.</p></div>`;
+    } else if (window._mgTab==='insights') {
+      let all=[]; for(const m of meetings){ try{ const d=await API('/meetings/'+encodeURIComponent(m.meeting_id)); (d.insights||[]).forEach(x=>all.push({...x,meeting_title:m.meeting_title})); }catch{} }
+      const byType=t=>all.filter(x=>x.insight_type===t);
+      // Recurring blockers: same-ish blocker text across 2+ meetings
+      const bmap={}; byType('blocker').forEach(b=>{ const k=String(b.content).toLowerCase().slice(0,40); (bmap[k]=bmap[k]||[]).push(b); });
+      const recurring=Object.values(bmap).filter(g=>g.length>=2);
+      const sec=(title,color,items,render)=>`<div class="card"><div class="card-title text-section" style="color:${color}">${title}</div>${items.length?items.map(render).join(''):'<div style="font-size:13px;color:#888">None.</div>'}</div>`;
+      body = sec('Decisions made','#1B3A6B',byType('decision'),x=>`<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)">${mgEsc(x.content)} <span style="font-size:11px;color:#a0aec0">— ${mgEsc(x.meeting_title)}</span></div>`)
+        + sec('Recurring blockers (2+ meetings)','#991B1B',recurring,g=>`<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)">⚠️ ${mgEsc(g[0].content)} <span style="font-size:11px;color:#991B1B">(${g.length}×)</span></div>`)
+        + sec('Opportunities flagged','#166534',byType('opportunity'),x=>`<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)">${mgEsc(x.content)} <span style="font-size:11px;color:#a0aec0">— ${mgEsc(x.meeting_title)}</span></div>`);
+    }
     c.innerHTML = head + tabBar + body;
   };
 }

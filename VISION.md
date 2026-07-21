@@ -366,5 +366,7 @@ Status of each component as of the date of this commit. Refresh as features ship
 | `0 10 * * 1` CST | Monday LinkedIn content scheduler — drafts Mon/Wed/Fri posts | Layer 7 (built) |
 | continuous | Layer 3 marketplace-intelligence ingestion | Layer 3 (spec) |
 | `0 15 * * 1` | Monday Market Intelligence molecule feed | Layer 2F (built) |
+| `0 11 * * 1` | Monday Meet Agent — standup transcripts → tasks | new (built) |
+| `0 16 * * 5` | Friday Meet Agent — week's meeting recordings | new (built) |
 | `30 15 * * 1` | Monday AI Email Engine — 40 campaigns / 80 variants across 4 segments, 3 sources | Layer 4A (built) |
 | continuous | Layer 4 outbound sequence orchestration | Layer 4 (partial) |

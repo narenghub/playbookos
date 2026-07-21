@@ -15,7 +15,7 @@ const ALL_PAGES = [
   'dashboard', 'command-center', 'ai-insights', 'agent-control', 'decision-engine', 'performance',
   'my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones',
   'revenue', 'sales-pipeline', 'apollo-outreach',
-  'market-intelligence', 'procurement-agent', 'seo-intelligence', 'seo-content', 'linkedin-content', 'email-engine',
+  'market-intelligence', 'procurement-agent', 'meet-agent', 'seo-intelligence', 'seo-content', 'linkedin-content', 'email-engine',
   'team', 'sku-economics', 'data-pipeline', 'execution-graph', 'settings',
 ];
 

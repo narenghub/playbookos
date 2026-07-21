@@ -1,0 +1,330 @@
+// Google Meet Agent — transcribes/ingests standup recordings, extracts action items
+// with Claude, and assigns tasks in PlaybookOS.
+//
+// Two ingestion paths:
+//  1. Google Calendar/Drive (fetchMeetingRecordings + getTranscript) — best-effort.
+//     The shared GOOGLE_REFRESH_TOKEN is scoped for Search Console, so Calendar/Drive
+//     calls may 403 for lack of scope; the agent degrades gracefully (returns no
+//     meetings + a reason) rather than throwing.
+//  2. Manual transcript upload (analyzeAndStore from a pre-filled meeting row) — the
+//     reliable fallback: Naresh pastes a transcript and gets the full analysis.
+const crypto = require('crypto');
+const { query } = require('../db');
+const { sendEmail } = require('../mailer');
+const { sendWhatsApp } = require('../whatsapp');
+const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday } = require('../agent-core');
+
+const AGENT = 'meet-agent';
+const MEET_MODEL = 'claude-opus-4-8';
+const BASE_URL = () => process.env.BASE_URL || 'https://playbook.abiozen.com';
+const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const isoDate = d => new Date(d).toISOString().slice(0, 10);
+
+async function callClaude(prompt, { maxTokens = 3000, json = false } = {}) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return { data: null, text: null, error: 'ANTHROPIC_API_KEY not configured' };
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: MEET_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
+    });
+    if (!res.ok) return { data: null, text: null, error: `Claude ${res.status}: ${(await res.text()).slice(0, 160)}` };
+    const text = (await res.json()).content?.[0]?.text || '';
+    return { data: json ? parseClaudeJSON(text) : null, text };
+  } catch (e) { return { data: null, text: null, error: e.message }; }
+}
+
+// Google OAuth access token (same refresh-token flow as the GSC integration).
+async function getGoogleAccessToken() {
+  const clientId = process.env.GOOGLE_CLIENT_ID, clientSecret = process.env.GOOGLE_CLIENT_SECRET, refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) return { error: 'GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN must all be set' };
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }).toString(),
+    });
+    if (!res.ok) return { error: `OAuth ${res.status}: ${(await res.text()).slice(0, 160)}` };
+    const data = await res.json();
+    return data.access_token ? { access_token: data.access_token } : { error: 'no access_token in response' };
+  } catch (e) { return { error: e.message }; }
+}
+
+async function teamMembers() {
+  return (await query(`SELECT id, name, email, role, whatsapp_number FROM users WHERE is_active=1 ORDER BY name`)).rows;
+}
+async function getNaresh() {
+  const r = (await query(
+    `SELECT id, name, email FROM users WHERE is_active=1 AND role IN ('admin','super_admin')
+     ORDER BY CASE WHEN LOWER(email) LIKE 'naren%' THEN 0 ELSE 1 END, created_at LIMIT 1`)).rows[0];
+  return r || { name: 'Naresh', email: 'naren@abiozen.com', id: null };
+}
+
+// Fuzzy-match an action item's owner ("person name or email") to a user. Matches by
+// email, exact name, first-name, or containment. Returns the user or null.
+function matchUser(assignedTo, users) {
+  const raw = String(assignedTo || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (raw.includes('@')) { const u = users.find(u => (u.email || '').toLowerCase() === raw); if (u) return u; }
+  let best = null;
+  for (const u of users) {
+    const name = (u.name || '').toLowerCase();
+    if (!name) continue;
+    if (name === raw) return u;
+    const first = name.split(/\s+/)[0];
+    if (first === raw || raw === first) best = best || u;
+    else if (name.includes(raw) || raw.includes(first)) best = best || u;
+  }
+  return best;
+}
+
+// ── Function 1 — fetch meeting recordings from Google Calendar ─────────────────
+async function fetchMeetingRecordings({ lookbackDays = 7 } = {}) {
+  const tok = await getGoogleAccessToken();
+  if (tok.error) return { meetings: [], warning: 'Google auth unavailable: ' + tok.error };
+  const timeMin = new Date(Date.now() - lookbackDays * 86400000).toISOString();
+  const timeMax = new Date().toISOString();
+  try {
+    const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime&maxResults=100`;
+    const res = await fetch(url, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    if (!res.ok) {
+      // Almost always a scope problem (the shared token is GSC-scoped). Surface it.
+      return { meetings: [], warning: `Calendar API ${res.status}: ${(await res.text()).slice(0, 160)}. The Google token likely lacks Calendar scope — use manual transcript upload.` };
+    }
+    const items = (await res.json()).items || [];
+    const kw = /(standup|stand-up|update|sync|meeting|briefing|review)/i;
+    const meetings = [];
+    for (const ev of items) {
+      const attendees = (ev.attendees || []).map(a => a.email).filter(Boolean);
+      const abiozen = attendees.some(e => /@abiozen\.com$/i.test(e));
+      if (!abiozen || !kw.test(ev.summary || '')) continue;
+      const start = ev.start?.dateTime || ev.start?.date;
+      const end = ev.end?.dateTime || ev.end?.date;
+      meetings.push({
+        meeting_id: ev.id,
+        meeting_title: ev.summary || 'Untitled meeting',
+        meeting_date: start ? isoDate(start) : businessToday(),
+        duration_seconds: start && end ? Math.max(0, Math.round((new Date(end) - new Date(start)) / 1000)) : null,
+        attendees,
+        description: ev.description || '',
+        recording_url: (ev.attachments || []).map(a => a.fileUrl).find(Boolean) || ev.hangoutLink || null,
+        _event: ev,
+      });
+    }
+    // Filter out meetings already processed.
+    const out = [];
+    for (const m of meetings) {
+      const done = (await query('SELECT id FROM meeting_recordings WHERE meeting_id=$1 AND processed=1', [m.meeting_id])).rows[0];
+      if (!done) out.push(m);
+    }
+    return { meetings: out };
+  } catch (e) { return { meetings: [], warning: e.message }; }
+}
+
+// ── Function 2 — get a transcript for a meeting ───────────────────────────────
+// Cleans timestamps/cue numbers and normalises to "Speaker: text" lines.
+function cleanTranscript(raw) {
+  return String(raw || '')
+    .replace(/^WEBVTT.*$/gim, '')
+    .replace(/^\d+\s*$/gm, '')                                   // SRT cue numbers
+    .replace(/\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}.*$/gim, '') // timestamps
+    .replace(/^\[\d{1,2}:\d{2}(:\d{2})?\]\s*/gm, '')             // [00:12] leading stamps
+    .replace(/<[^>]+>/g, '')                                     // vtt tags
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+async function getTranscript(meeting) {
+  // meeting can be a fetched meeting object (with _event/description) or a stored row.
+  const tok = await getGoogleAccessToken();
+  if (!tok.error && meeting.meeting_id) {
+    try {
+      // Search Drive for a transcript/caption file whose name references the meeting title.
+      const title = (meeting.meeting_title || '').split(/\s+/).slice(0, 3).join(' ');
+      const q = encodeURIComponent(`name contains 'Transcript' and (name contains '.vtt' or name contains '.txt' or name contains '.srt' or mimeType='text/plain')`);
+      const list = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=10&fields=files(id,name)`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+      if (list.ok) {
+        const files = (await list.json()).files || [];
+        const hit = files.find(f => title && new RegExp(title.replace(/[^\w ]/g, ''), 'i').test(f.name)) || files[0];
+        if (hit) {
+          const dl = await fetch(`https://www.googleapis.com/drive/v3/files/${hit.id}?alt=media`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+          if (dl.ok) return cleanTranscript(await dl.text());
+        }
+      }
+    } catch { /* fall through to description */ }
+  }
+  // Fallbacks: an already-stored transcript, then the calendar description/notes.
+  return cleanTranscript(meeting.transcript_text || meeting.description || meeting._event?.description || '');
+}
+
+// ── Function 3 — analyse the transcript with Claude ───────────────────────────
+async function analyzeMeetingWithClaude(transcript, meetingTitle, attendees, date, members) {
+  const teamList = (members || []).map(m => `${m.name} (${m.email}, ${m.role})`).join('; ');
+  const prompt = `You are analyzing a standup/update meeting transcript for Abiozen LLC, a pharmaceutical API marketplace.
+
+Meeting: ${meetingTitle}
+Date: ${date}
+Attendees: ${(attendees || []).join(', ')}
+
+Transcript:
+${String(transcript || '').slice(0, 24000)}
+
+Extract and return as JSON:
+{
+  "summary": "3-4 sentence executive summary of the meeting",
+  "decisions": ["key decisions made"],
+  "blockers": ["blockers or issues raised"],
+  "risks": ["risks mentioned"],
+  "opportunities": ["opportunities or ideas mentioned"],
+  "action_items": [
+    {"assigned_to": "person name or email", "task": "specific action item", "due_date": "YYYY-MM-DD or null", "priority": "high/medium/low", "source_quote": "exact quote from transcript that generated this task"}
+  ]
+}
+
+Rules:
+- Only extract SPECIFIC action items with a clear owner.
+- If no owner mentioned, assign to the person who raised the topic.
+- Be specific — "Follow up with Sigma-Aldrich about Semaglutide pricing" not "follow up".
+- Priority: high if a deadline is mentioned or urgent language is used.
+- Match assigned_to to these team members: ${teamList || '(none listed)'}
+Return ONLY the JSON object, no prose, no code fences.`;
+  const { data, error } = await callClaude(prompt, { maxTokens: 3500, json: true });
+  if (!data) return { error: error || 'unparseable analysis', summary: '', decisions: [], blockers: [], risks: [], opportunities: [], action_items: [] };
+  return {
+    summary: String(data.summary || ''),
+    decisions: Array.isArray(data.decisions) ? data.decisions : [],
+    blockers: Array.isArray(data.blockers) ? data.blockers : [],
+    risks: Array.isArray(data.risks) ? data.risks : [],
+    opportunities: Array.isArray(data.opportunities) ? data.opportunities : [],
+    action_items: Array.isArray(data.action_items) ? data.action_items : [],
+  };
+}
+
+// ── Function 4 — assign extracted action items to the team ────────────────────
+async function assignTasksToTeam(meetingId, actionItems, { dryRun = false } = {}) {
+  const users = await teamMembers();
+  let created = 0; const assigned = [];
+  for (const it of actionItems || []) {
+    const user = matchUser(it.assigned_to, users);
+    const pri = ['high', 'medium', 'low'].includes(String(it.priority || '').toLowerCase()) ? String(it.priority).toLowerCase() : 'medium';
+    const due = /^\d{4}-\d{2}-\d{2}$/.test(String(it.due_date || '')) ? it.due_date : null;
+    const mtId = crypto.randomUUID();
+    let dailyTaskId = null;
+    if (!dryRun) {
+      if (user) {
+        dailyTaskId = await createDailyTask({
+          user_id: user.id, task_date: due || businessToday(),
+          task_title: String(it.task || 'Action item from meeting').slice(0, 300),
+          task_description: it.source_quote ? `From meeting: "${String(it.source_quote).slice(0, 400)}"` : '',
+          priority: pri.toUpperCase(), agent_name: AGENT,
+          reasoning: `Action item extracted from meeting ${meetingId}.`,
+        }).catch(() => null);
+      }
+      await query(
+        `INSERT INTO meeting_tasks (id, meeting_id, assigned_to_user_id, assigned_to_name, task_title,
+           task_description, due_date, priority, source_quote, status, daily_task_id, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())`,
+        [mtId, meetingId, user ? user.id : null, user ? user.name : (it.assigned_to || null),
+         String(it.task || '').slice(0, 300), it.source_quote ? String(it.source_quote).slice(0, 500) : null,
+         due, pri, it.source_quote ? String(it.source_quote).slice(0, 500) : null,
+         user && dailyTaskId ? 'assigned' : 'pending', dailyTaskId]
+      );
+      // Notify the assignee on WhatsApp if we have a number.
+      if (user && user.whatsapp_number) {
+        await sendWhatsApp(user.whatsapp_number,
+          `📋 New task from a meeting:\n${it.task}\n${due ? 'Due ' + due + ' · ' : ''}${pri.toUpperCase()} priority\nOpen My Tasks in PlaybookOS.`,
+          { user_id: user.id, message_type: 'meeting_task' }).catch(() => {});
+      }
+    }
+    created++;
+    assigned.push({ task: it.task, assigned_to: user ? user.name : (it.assigned_to || 'unassigned'), matched: !!user, priority: pri, due });
+  }
+  if (!dryRun) {
+    await logAgentActivity({ agent_name: AGENT, action_type: 'meeting_tasks_assigned', user_id: null,
+      reasoning: `Assigned ${created} tasks from meeting ${meetingId} (${assigned.filter(a => a.matched).length} matched to users).`,
+      source_kpi: 'kpi-vision', output_summary: `meeting=${meetingId} tasks=${created}` }).catch(() => {});
+  }
+  return { tasks_created: created, assigned };
+}
+
+// ── Function 5 — email the meeting brief to Naresh ────────────────────────────
+async function sendMeetingBriefToNaresh(meeting, analysis) {
+  const naresh = await getNaresh();
+  const list = (arr, empty) => (arr && arr.length) ? '<ul style="margin:6px 0 14px;padding-left:18px">' + arr.map(x => `<li style="margin:3px 0">${esc(typeof x === 'string' ? x : x.task)}</li>`).join('') + '</ul>' : `<p style="color:#888;font-size:13px">${empty}</p>`;
+  const actions = (analysis.action_items || []).length
+    ? '<ul style="margin:6px 0 14px;padding-left:18px">' + analysis.action_items.map(a => `<li style="margin:3px 0"><strong>${esc(a.assigned_to || 'Unassigned')}</strong>: ${esc(a.task)}${a.due_date ? ` <span style="color:#888">(due ${esc(a.due_date)})</span>` : ''} <span style="color:#B45309">[${esc(a.priority || 'medium')}]</span></li>`).join('') + '</ul>'
+    : '<p style="color:#888;font-size:13px">No action items extracted.</p>';
+  const html = `<div style="font-family:Arial;max-width:640px;color:#222">
+    <div style="background:#1B3A6B;padding:16px 22px;border-radius:8px 8px 0 0"><h2 style="color:#fff;margin:0">Meeting Brief</h2><p style="color:#9FE1CB;margin:4px 0 0;font-size:13px">${esc(meeting.meeting_title)} · ${esc(meeting.meeting_date)}</p></div>
+    <div style="padding:18px 22px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px">
+      <h3 style="color:#1B3A6B;margin:0 0 6px">Summary</h3><p style="font-size:14px;line-height:1.6">${esc(analysis.summary) || '—'}</p>
+      <h3 style="color:#1B3A6B;margin:14px 0 6px">Decisions</h3>${list(analysis.decisions, 'None recorded.')}
+      <h3 style="color:#991B1B;margin:14px 0 6px">Blockers to resolve</h3>${list(analysis.blockers, 'None raised.')}
+      <h3 style="color:#166534;margin:14px 0 6px">Action items assigned</h3>${actions}
+      <h3 style="color:#6B21A8;margin:14px 0 6px">Risks &amp; opportunities</h3>${list([...(analysis.risks || []), ...(analysis.opportunities || [])], 'None flagged.')}
+      <p style="margin-top:16px"><a href="${BASE_URL()}/#meet-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Meet Agent →</a></p>
+    </div></div>`;
+  return sendEmail({ to: naresh.email, subject: `Meeting Brief: ${meeting.meeting_title} — ${meeting.meeting_date}`, html });
+}
+
+// Core: analyse a stored meeting row and run assignment + brief. Used by both the
+// Google pipeline and the manual upload endpoint.
+async function analyzeAndStore(meeting, { dryRun = false } = {}) {
+  const members = await teamMembers();
+  const transcript = meeting.transcript_text || await getTranscript(meeting);
+  const analysis = await analyzeMeetingWithClaude(transcript, meeting.meeting_title, meeting.attendees, meeting.meeting_date, members);
+
+  if (!dryRun) {
+    // Upsert the recording row (may already exist for a Google meeting).
+    await query(
+      `INSERT INTO meeting_recordings (id, meeting_id, meeting_title, meeting_date, duration_seconds,
+         attendees, transcript_text, summary, recording_url, processed, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,NOW())
+       ON CONFLICT (meeting_id) DO UPDATE SET transcript_text=EXCLUDED.transcript_text,
+         summary=EXCLUDED.summary, processed=1`,
+      [meeting.id || crypto.randomUUID(), meeting.meeting_id, meeting.meeting_title, meeting.meeting_date,
+       meeting.duration_seconds || null, JSON.stringify(meeting.attendees || []), transcript,
+       analysis.summary, meeting.recording_url || null]
+    );
+    // Insights
+    const insert = (type, arr) => Promise.all((arr || []).map(c =>
+      query(`INSERT INTO meeting_insights (id, meeting_id, insight_type, content, created_at) VALUES ($1,$2,$3,$4,NOW())`,
+        [crypto.randomUUID(), meeting.meeting_id, type, String(c).slice(0, 800)]).catch(() => {})));
+    await Promise.all([insert('decision', analysis.decisions), insert('blocker', analysis.blockers), insert('risk', analysis.risks), insert('opportunity', analysis.opportunities)]);
+  }
+
+  const assign = await assignTasksToTeam(meeting.meeting_id, analysis.action_items, { dryRun });
+  let briefed = false;
+  if (!dryRun) { briefed = !!(await sendMeetingBriefToNaresh(meeting, analysis).catch(() => false)); }
+  return { meeting_id: meeting.meeting_id, analysis, tasks_created: assign.tasks_created, assigned: assign.assigned, brief_sent: briefed };
+}
+
+// ── Function 6 — full pipeline for one Google meeting ─────────────────────────
+async function processMeeting(meeting, { dryRun = false } = {}) {
+  return analyzeAndStore(meeting, { dryRun });
+}
+
+// ── Function 7 — orchestration ────────────────────────────────────────────────
+async function runMeetAgent({ dryRun = false, lookbackDays = 7 } = {}) {
+  const { meetings, warning } = await fetchMeetingRecordings({ lookbackDays });
+  const out = { meetings_processed: 0, tasks_created: 0, emails_sent: 0, warning: warning || null, errors: [] };
+  for (const m of meetings) {
+    try {
+      const r = await processMeeting(m, { dryRun });
+      out.meetings_processed++;
+      out.tasks_created += r.tasks_created;
+      if (r.brief_sent) out.emails_sent++;
+    } catch (e) { out.errors.push(`${m.meeting_title}: ${e.message}`); }
+  }
+  if (!dryRun) {
+    await logAgentActivity({ agent_name: AGENT, action_type: 'meet_agent_run', user_id: null,
+      reasoning: `Processed ${out.meetings_processed} meetings, created ${out.tasks_created} tasks.${warning ? ' Warning: ' + warning : ''}`,
+      source_kpi: 'kpi-vision', confidence_score: out.errors.length ? 60 : 90,
+      output_summary: `meetings=${out.meetings_processed} tasks=${out.tasks_created} dryRun=${dryRun}` }).catch(() => {});
+  }
+  return out;
+}
+
+module.exports = {
+  runMeetAgent, processMeeting, fetchMeetingRecordings, getTranscript,
+  analyzeMeetingWithClaude, assignTasksToTeam, sendMeetingBriefToNaresh, analyzeAndStore, matchUser,
+};

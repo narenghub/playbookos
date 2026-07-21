@@ -155,6 +155,8 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
 | `0 15 * * 1` (Monday 15:00 UTC) | Layer 2F — Market Intelligence: weekly molecule feed | `runMarketIntelligence()` |
 | `30 15 * * 1` (Monday 15:30 UTC) | Layer 4 — AI Email Engine: 5 molecules x 4 segments = 20 campaigns / 40 variants. Offset 30 min so it reads the molecule rows Market Intelligence just wrote | `runEmailEngine()` |
+| `0 11 * * 1` (Mon 11am CST) | Meet Agent — process weekend/Monday standup recordings | `runMeetAgent()` |
+| `0 16 * * 5` (Fri 4pm CST) | Meet Agent — process the week's meeting recordings | `runMeetAgent()` |
 | `0 9 * * 2` (Tue 9am CST) | Procurement Agent — send RFQs for Monday-approved molecules | `runProcurementAgent()` |
 | `0 9 * * 4` (Thu 9am CST) | Procurement — flag RFQ outreach with no response after 48h | `checkNoResponse()` |
 | `0 18 * * *` (daily 6pm) | Milestone trigger check | `checkMilestoneTriggers()` via HTTP to self with `TRIGGERS_SECRET` |
@@ -311,6 +313,20 @@ Signals are merged by molecule: GSC contributes a 0–60 impression-normalised s
 **Endpoints** — `POST /email-engine/run` (admin, 202; `?dryRun=1` returns the resolved molecule list synchronously without calling Claude), `GET /email-engine/campaigns` (filters: `week`, `segment`, `status`), `PUT /email-engine/campaigns/:id` (approve/reject; draft-only transition), `POST /email-engine/campaigns/:id/publish`, `GET /email-engine/campaigns/:id/preview?variant=a|b`.
 
 Caveat on publish: Apollo's sequence-creation endpoint needs a **master** API key and is not on every plan. A non-2xx returns 502 with Apollo's verbatim response plus the payload, which the UI shows in a copyable modal so the sequence can be built by hand. Nothing is marked `sent` unless Apollo accepts it.
+
+### Google Meet Agent — meeting → tasks
+
+`src/lib/agents/meet-agent.js`, page **Google Meet Agent** (INTELLIGENCE), crons Mon 11am + Fri 4pm CST.
+
+Ingests standup/update transcripts, has Claude extract a summary + decisions/blockers/risks/opportunities + owned action items, then auto-assigns tasks and emails Naresh a brief.
+
+Two ingestion paths:
+- **Google Calendar/Drive** (`fetchMeetingRecordings` + `getTranscript`) — lists last-N-days events with abiozen.com attendees and standup/update/sync/meeting titles, pulls a Drive transcript (.vtt/.txt/.srt) or the event notes. Best-effort: the shared `GOOGLE_REFRESH_TOKEN` is Search-Console-scoped, so Calendar/Drive calls may 403; the agent returns a warning instead of failing.
+- **Manual upload** (`POST /meetings/upload-transcript`) — the reliable fallback: paste a transcript and get the full analysis. `?dryRun` previews the extraction before assigning.
+
+`analyzeMeetingWithClaude` returns structured JSON (summary, decisions, blockers, risks, opportunities, action_items with owner/task/due/priority/source_quote). `assignTasksToTeam` fuzzy-matches each owner to a user, creates a `daily_tasks` row (shows in My Tasks) + a `meeting_tasks` row (with the source quote), and WhatsApps the assignee if they have a number. `sendMeetingBriefToNaresh` emails the formatted brief.
+
+Tables: `meeting_recordings`, `meeting_tasks`, `meeting_insights`. Endpoints under `/api/meetings/*`. Page tabs: Recent Meetings, Upload Transcript, Meeting Tasks, Insights (incl. recurring blockers).
 
 ### Procurement Agent v2 — automated supplier outreach
 

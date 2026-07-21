@@ -14,6 +14,7 @@ const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence
 const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo } = require('../lib/agents/email-engine');
 const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
 const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/procurement-agent');
+const { runMeetAgent, analyzeAndStore } = require('../lib/agents/meet-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1717,6 +1718,100 @@ router.get('/email-engine/campaigns/:id/preview', authMiddleware, requireAnyTier
       subject: variant === 'b' ? c.variant_b_subject : c.variant_a_subject,
       html: sanitizeHtml(variant === 'b' ? c.variant_b_html : c.variant_a_html),
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Google Meet Agent ─────────────────────────────────────────────────────────
+const parseJson = v => { try { return JSON.parse(v || '[]'); } catch { return []; } };
+
+// Trigger the full agent (Google Calendar/Drive path). admin, async 202.
+router.post('/meetings/run', authMiddleware, adminOnly, async (req, res) => {
+  const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
+  const lookbackDays = Math.min(30, Math.max(1, parseInt(req.body?.lookbackDays, 10) || 7));
+  if (dryRun) {
+    try { return res.json(await runMeetAgent({ dryRun: true, lookbackDays })); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+  runMeetAgent({ lookbackDays })
+    .then(r => console.log(`[meet] run — ${r.meetings_processed} meetings, ${r.tasks_created} tasks`))
+    .catch(e => console.error('[meet] run failed:', e.message));
+  res.status(202).json({ started: true, message: 'Meet agent started. Note: needs Google Calendar/Drive scope — use manual upload if it finds nothing.' });
+});
+
+// Manual transcript upload → full analysis + assignment + brief. The reliable path.
+router.post('/meetings/upload-transcript', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.transcript_text || !b.meeting_title) return res.status(400).json({ error: 'meeting_title and transcript_text required' });
+    const attendees = Array.isArray(b.attendees) ? b.attendees
+      : String(b.attendees || '').split(',').map(x => x.trim()).filter(Boolean);
+    const meeting = {
+      meeting_id: 'manual-' + crypto.randomUUID(),
+      meeting_title: String(b.meeting_title).slice(0, 300),
+      meeting_date: /^\d{4}-\d{2}-\d{2}$/.test(String(b.meeting_date || '')) ? b.meeting_date : new Date().toISOString().slice(0, 10),
+      duration_seconds: null,
+      attendees,
+      transcript_text: String(b.transcript_text),
+      recording_url: null,
+    };
+    const dryRun = b.dryRun === true; // preview extraction before assigning
+    const result = await analyzeAndStore(meeting, { dryRun });
+    res.json({ success: true, meeting_id: meeting.meeting_id, dryRun, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/meetings/dashboard', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const month = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const m = (await query(`SELECT COUNT(*)::int c FROM meeting_recordings WHERE meeting_date >= $1`, [month])).rows[0].c;
+    const t = (await query(`SELECT COUNT(*)::int c, COUNT(*) FILTER (WHERE status='completed')::int done FROM meeting_tasks`)).rows[0];
+    const ins = (await query(`SELECT insight_type, COUNT(*)::int c FROM meeting_insights GROUP BY insight_type`)).rows;
+    const by = Object.fromEntries(ins.map(r => [r.insight_type, r.c]));
+    res.json({ meetings_month: m, tasks_created: t.c, tasks_completed: t.done, decisions: by.decision || 0, blockers: by.blocker || 0, opportunities: by.opportunity || 0 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/meetings', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const rows = (await query(`
+      SELECT r.id, r.meeting_id, r.meeting_title, r.meeting_date, r.duration_seconds, r.attendees, r.summary, r.processed, r.created_at,
+        (SELECT COUNT(*)::int FROM meeting_tasks t WHERE t.meeting_id=r.meeting_id) AS tasks_generated
+      FROM meeting_recordings r ORDER BY r.meeting_date DESC, r.created_at DESC LIMIT 100`)).rows;
+    res.json({ meetings: rows.map(m => ({ ...m, attendees: parseJson(m.attendees) })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/meetings/:id', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const mtg = (await query(`SELECT * FROM meeting_recordings WHERE meeting_id=$1 OR id=$1`, [req.params.id])).rows[0];
+    if (!mtg) return res.status(404).json({ error: 'meeting not found' });
+    const tasks = (await query(`SELECT * FROM meeting_tasks WHERE meeting_id=$1 ORDER BY created_at`, [mtg.meeting_id])).rows;
+    const insights = (await query(`SELECT * FROM meeting_insights WHERE meeting_id=$1 ORDER BY insight_type`, [mtg.meeting_id])).rows;
+    res.json({ meeting: { ...mtg, attendees: parseJson(mtg.attendees) }, tasks, insights });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/meetings/:id/tasks', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const mtg = (await query(`SELECT meeting_id FROM meeting_recordings WHERE meeting_id=$1 OR id=$1`, [req.params.id])).rows[0];
+    const mid = mtg ? mtg.meeting_id : req.params.id;
+    const tasks = (await query(`SELECT * FROM meeting_tasks WHERE meeting_id=$1 ORDER BY created_at`, [mid])).rows;
+    res.json({ tasks });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Update a meeting task's status; syncs the linked daily_task when completed.
+router.put('/meetings/tasks/:id', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
+  try {
+    const status = req.body?.status;
+    if (!['pending', 'assigned', 'completed'].includes(status)) return res.status(400).json({ error: 'invalid status' });
+    const t = (await query('SELECT * FROM meeting_tasks WHERE id=$1', [req.params.id])).rows[0];
+    if (!t) return res.status(404).json({ error: 'task not found' });
+    await query('UPDATE meeting_tasks SET status=$1 WHERE id=$2', [status, req.params.id]);
+    if (status === 'completed' && t.daily_task_id) {
+      await query(`UPDATE daily_tasks SET status='completed', updated_at=NOW() WHERE id=$1`, [t.daily_task_id]).catch(() => {});
+    }
+    res.json({ success: true, status });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
