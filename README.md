@@ -155,6 +155,7 @@ Defined in `server.js`, implementations in `src/lib/jobs.js`.
 | `0 9 * * 1` (Monday 9am) | Revenue Intelligence agent — 30-day analysis, emails Naresh, then chains procurement priorities email to Palash | `analyzeRevenueTrends()` → `getProcurementPriorities()` |
 | `0 15 * * 1` (Monday 15:00 UTC) | Layer 2F — Market Intelligence: weekly molecule feed | `runMarketIntelligence()` |
 | `30 15 * * 1` (Monday 15:30 UTC) | Layer 4 — AI Email Engine: 5 molecules x 4 segments = 20 campaigns / 40 variants. Offset 30 min so it reads the molecule rows Market Intelligence just wrote | `runEmailEngine()` |
+| `0 9 * * *` (daily 9am CST) | Inquiry Agent — follow-ups + daily summary | `runInquiryAgent()` |
 | `0 10 * * 3` (Wed 10am CST) | Reorder Agent — mid-week reorder sweep | `runReorderAgent()` |
 | `0 20 * * 0` (Sun 8pm CST) | Reorder Agent — weekend prep for Monday | `runReorderAgent()` |
 | `0 23 * * *` (nightly 11pm CST) | Research Agent — scan PubMed/FDA/patents/trials | `runResearchAgent()` |
@@ -332,6 +333,22 @@ Scans PubMed, OpenFDA, patent expiries, and ClinicalTrials.gov (all free APIs, r
 - `generateResearchReport()` — Claude synthesises the week's findings into a ranked executive report.
 
 Every external call degrades gracefully (returns a warning, never throws). Tables: `research_findings`, `patent_watch`. Endpoints under `/api/research/*`. Page tabs: Opportunities (score-colored), Patent Watch (EXPIRES THIS/NEXT YEAR badges), FDA Tracker (in-catalog indicator), Research Report.
+
+### GMP Inquiry Agent — autonomous inquiry-to-order
+
+`src/lib/agents/inquiry-agent.js`, page **Inquiry Agent** (REVENUE), cron daily 9am CST (follow-ups + summary) + hourly :45 (reply-poll slot).
+
+Handles the full B2B inquiry conversation for GMP APIs. A buyer submits the form on abiozen.com → webhook → the AI acknowledges, asks qualifying questions, answers pricing/documentation/compliance/lead-time, sends a formal quote, and escalates to a human when asked or when the deal exceeds $50k — all from sales@abiozen.com.
+
+- `receiveInquiry()` — creates the inquiry, classifies buyer type, sets priority (GLP-1/oncology or >1kg = high), fires the first response immediately, WhatsApps Naresh.
+- `sendFirstResponse()` — Claude writes a warm acknowledgment + the qualifying questions (use, docs, timeline, country, sample).
+- `processInboundReply()` — Claude analyses the buyer's reply → `ready_for_quote` / `needs_human` / `still_qualifying` and responds accordingly.
+- `generateQuote()` — applies quantity-discount tiers (sample +50%, small std, medium -10%, bulk -15% with >10kg flagged for Palash) + $150 doc fee, stores + emails a formal quote CC palash/naren.
+- `escalateToHuman()` — status human_requested, urgent WhatsApp to Naresh, full thread to Palash, "specialist within 24h" to the buyer.
+- `handleFollowUp()` — day 3 gentle / 7 value-add / 14 final / 21 close-inactive.
+- `runInquiryAgent()` — daily follow-up sweep + summary to Naresh.
+
+Tables: `inquiries`, `inquiry_messages`, `molecule_pricing` (20 GMP APIs seeded with real pricing), `inquiry_quotes`. Webhook `POST /api/inquiry/receive` (X-PlaybookOS-Secret). Page tabs: Active Inquiries (conversation thread + reply/quote/escalate), Pricing Table (admin-editable), Analytics.
 
 ### Reorder Agent — recurring revenue from past buyers
 

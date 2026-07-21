@@ -1,6 +1,6 @@
 // server.js — PlaybookOS main server
 require('dotenv').config();
-const { initDB, initPhase2, migrateSchemas, query } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSchemas()).then(() => require('./src/lib/agents/procurement-agent').seedSupplierDatabase().then(r => console.log(`[boot] supplier seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] supplier seed failed:', e.message))).then(() => require('./src/lib/agents/research-agent').seedPatentWatch().then(r => console.log(`[boot] patent-watch seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] patent seed failed:', e.message))).catch(e => { console.error("DB init error:", e.message); process.exit(1); });
+const { initDB, initPhase2, migrateSchemas, query } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSchemas()).then(() => require('./src/lib/agents/procurement-agent').seedSupplierDatabase().then(r => console.log(`[boot] supplier seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] supplier seed failed:', e.message))).then(() => require('./src/lib/agents/research-agent').seedPatentWatch().then(r => console.log(`[boot] patent-watch seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] patent seed failed:', e.message))).then(() => require('./src/lib/agents/inquiry-agent').seedMoleculePricing().then(r => console.log(`[boot] pricing seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] pricing seed failed:', e.message))).catch(e => { console.error("DB init error:", e.message); process.exit(1); });
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -21,6 +21,7 @@ const { runProcurementAgent, checkNoResponse, seedSupplierDatabase } = require('
 const { runMeetAgent } = require('./src/lib/agents/meet-agent');
 const { runResearchAgent, runWeeklyDigest } = require('./src/lib/agents/research-agent');
 const { runReorderAgent } = require('./src/lib/agents/reorder-agent');
+const { runInquiryAgent } = require('./src/lib/agents/inquiry-agent');
 const { businessToday } = require('./src/lib/agent-core');
 const routes = require('./src/api/routes');
 
@@ -287,6 +288,19 @@ cron.schedule('0 9 * * 2', withAlerts('weekly-tue-9cst-procurement-rfqs', async 
   const r = await runProcurementAgent();
   console.log(`[CRON] Procurement Agent done — ${r.rfqs_created} RFQs, ${r.emails_sent} supplier emails, ${r.errors.length} errors`);
   if (r.errors.length) console.warn('[CRON] Procurement errors:', r.errors.slice(0, 5));
+}), CST);
+
+// Daily 9am CST — Inquiry Agent: send follow-ups + daily summary to Naresh.
+cron.schedule('0 9 * * *', withAlerts('daily-9cst-inquiry-agent', async () => {
+  console.log('[CRON] Inquiry Agent starting...');
+  const r = await runInquiryAgent();
+  console.log(`[CRON] Inquiry Agent done — ${r.active_inquiries} active, ${r.follow_ups_sent} follow-ups, ${r.closed} closed`);
+}), CST);
+
+// Hourly :45 — placeholder for inbound-reply polling (manual/webhook driven for now).
+cron.schedule('45 * * * *', withAlerts('hourly-45-inquiry-poll', async () => {
+  // No IMAP poller wired yet; inbound replies arrive via POST /api/inquiry/:id/reply
+  // or a future inbound-email webhook. This tick keeps the schedule slot reserved.
 }), CST);
 
 // Wednesday 10am CST — Reorder Agent: mid-week reorder sweep of past buyers.

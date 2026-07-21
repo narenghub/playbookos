@@ -804,6 +804,86 @@ async function migrateSchemas() {
       );
       CREATE INDEX IF NOT EXISTS idx_reorder_buyer ON reorder_campaigns (buyer_id, campaign_status);
       CREATE INDEX IF NOT EXISTS idx_reorder_status ON reorder_campaigns (campaign_status, created_at DESC);
+      -- GMP Inquiry Agent — autonomous inquiry-to-order handling.
+      CREATE TABLE IF NOT EXISTS inquiries (
+        id TEXT PRIMARY KEY,
+        molecule_name TEXT,
+        cas_number TEXT,
+        buyer_name TEXT,
+        buyer_email TEXT,
+        buyer_company TEXT,
+        buyer_type TEXT CHECK (buyer_type IN ('compounding_pharmacy','research_lab','generic_manufacturer','university','other')),
+        country TEXT,
+        intended_use TEXT,
+        quantity_requested REAL,
+        quantity_unit TEXT CHECK (quantity_unit IN ('g','kg')),
+        status TEXT DEFAULT 'new' CHECK (status IN ('new','in_conversation','quote_sent','order_placed','human_requested','closed')),
+        priority TEXT DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
+        source TEXT DEFAULT 'abiozen_form' CHECK (source IN ('abiozen_form','email','apollo','manual')),
+        apollo_contact_id TEXT,
+        assigned_to_user_id TEXT,
+        total_emails_sent INTEGER DEFAULT 0,
+        last_email_at TEXT,
+        order_value_usd REAL,
+        created_at TEXT DEFAULT NOW(),
+        updated_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_inquiries_status ON inquiries (status, created_at DESC);
+      CREATE TABLE IF NOT EXISTS inquiry_messages (
+        id TEXT PRIMARY KEY,
+        inquiry_id TEXT,
+        direction TEXT CHECK (direction IN ('inbound','outbound')),
+        sender_name TEXT,
+        sender_email TEXT,
+        subject TEXT,
+        body_text TEXT,
+        body_html TEXT,
+        sent_at TEXT,
+        read_at TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_inq_msg ON inquiry_messages (inquiry_id, created_at);
+      CREATE TABLE IF NOT EXISTS molecule_pricing (
+        id TEXT PRIMARY KEY,
+        molecule_name TEXT NOT NULL,
+        cas_number TEXT,
+        gmp_grade TEXT,
+        purity TEXT,
+        price_per_kg_usd REAL,
+        min_quantity_g REAL,
+        max_quantity_kg REAL,
+        lead_time_days INTEGER,
+        sample_available INTEGER DEFAULT 1,
+        sample_price_usd REAL,
+        gmp_certified INTEGER DEFAULT 1,
+        dmf_available INTEGER DEFAULT 0,
+        coa_available INTEGER DEFAULT 1,
+        sds_available INTEGER DEFAULT 1,
+        regulatory_status TEXT,
+        storage_conditions TEXT,
+        shelf_life_months INTEGER,
+        notes TEXT,
+        active INTEGER DEFAULT 1,
+        created_at TEXT DEFAULT NOW(),
+        updated_at TEXT DEFAULT NOW()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_pricing_name ON molecule_pricing (LOWER(molecule_name));
+      CREATE TABLE IF NOT EXISTS inquiry_quotes (
+        id TEXT PRIMARY KEY,
+        inquiry_id TEXT,
+        molecule_name TEXT,
+        cas_number TEXT,
+        quantity_kg REAL,
+        unit_price_usd REAL,
+        total_price_usd REAL,
+        lead_time_days INTEGER,
+        valid_until_date TEXT,
+        gmp_docs_included INTEGER DEFAULT 1,
+        status TEXT DEFAULT 'draft' CHECK (status IN ('draft','sent','accepted','expired')),
+        quote_pdf_url TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_quotes_inq ON inquiry_quotes (inquiry_id, status);
     `);
     console.log('✅ Schema migrations applied (owner columns + legacy role remap + email_campaigns)');
   } catch(e) { console.error('Migration error:', e.message); }

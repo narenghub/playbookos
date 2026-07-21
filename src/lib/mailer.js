@@ -14,7 +14,7 @@ async function logEmail({ to, subject, status, errorMessage }) {
 // the domain (not the individual address) is verified in Resend — so RFQ emails can
 // legitimately go out as "Palash Das <palash@abiozen.com>". Defaults preserve the
 // existing PlaybookOS sender for every current caller.
-async function sendEmail({ to, subject, html, from, replyTo }) {
+async function sendEmail({ to, subject, html, from, replyTo, cc }) {
   const key = process.env.RESEND_API_KEY;
   if (!key) {
     console.log('No RESEND_API_KEY');
@@ -24,6 +24,7 @@ async function sendEmail({ to, subject, html, from, replyTo }) {
   try {
     const body = { from: from || 'PlaybookOS <naren@abiozen.com>', to, subject, html };
     if (replyTo) body.reply_to = replyTo;
+    if (cc) body.cc = cc;
     const res = await fetch('https://api.resend.com/emails', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },

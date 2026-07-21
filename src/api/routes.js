@@ -17,6 +17,7 @@ const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/pr
 const { runMeetAgent, analyzeAndStore } = require('../lib/agents/meet-agent');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
+const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent } = require('../lib/agents/inquiry-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1720,6 +1721,122 @@ router.get('/email-engine/campaigns/:id/preview', authMiddleware, requireAnyTier
       subject: variant === 'b' ? c.variant_b_subject : c.variant_a_subject,
       html: sanitizeHtml(variant === 'b' ? c.variant_b_html : c.variant_a_html),
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GMP Inquiry Agent ─────────────────────────────────────────────────────────
+// Webhook from abiozen.com — secret-header auth (no JWT), like /orders/webhook.
+router.post('/inquiry/receive', async (req, res) => {
+  try {
+    const secret = process.env.PLAYBOOKOS_WEBHOOK_SECRET;
+    const provided = req.headers['x-playbookos-secret'];
+    if (!secret) return res.status(503).json({ error: 'PLAYBOOKOS_WEBHOOK_SECRET not configured' });
+    if (!provided || provided !== secret) return res.status(401).json({ error: 'Invalid or missing X-PlaybookOS-Secret header' });
+    const b = req.body || {};
+    if (!b.buyer_email || !b.molecule_name) return res.status(400).json({ error: 'buyer_email and molecule_name required' });
+    const id = await receiveInquiry({
+      molecule_name: b.molecule_name, cas_number: b.cas_number, buyer_name: b.buyer_name,
+      buyer_email: b.buyer_email, buyer_company: b.buyer_company, country: b.country,
+      quantity: b.quantity, quantity_unit: b.quantity_unit, intended_use: b.intended_use,
+      message: b.message, source: b.source || 'abiozen_form',
+    });
+    res.json({ inquiry_id: id, status: 'received' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/inquiry/run', authMiddleware, adminOnly, async (req, res) => {
+  const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
+  if (dryRun) { try { return res.json(await runInquiryAgent({ dryRun: true })); } catch (e) { return res.status(500).json({ error: e.message }); } }
+  runInquiryAgent().then(r => console.log(`[inquiry] run — ${r.active_inquiries} active, ${r.follow_ups_sent} follow-ups`)).catch(e => console.error('[inquiry] run failed:', e.message));
+  res.status(202).json({ started: true, message: 'Inquiry agent started — sending follow-ups + daily summary.' });
+});
+
+router.get('/inquiry/dashboard', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const month = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const inq = (await query(`SELECT
+        COUNT(*) FILTER (WHERE status IN ('new','in_conversation','quote_sent','human_requested'))::int active,
+        COUNT(*) FILTER (WHERE status='quote_sent')::int quotes_pending,
+        COUNT(*) FILTER (WHERE status='order_placed' AND created_at >= ($1)::text)::int orders_month,
+        COALESCE(SUM(order_value_usd) FILTER (WHERE status IN ('quote_sent','order_placed')),0) pipeline
+      FROM inquiries`, [month])).rows[0];
+    res.json({ active_inquiries: inq.active, quotes_pending: inq.quotes_pending, orders_month: inq.orders_month, pipeline_value: Number(inq.pipeline) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/inquiry/pricing', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try { res.json({ pricing: (await query(`SELECT * FROM molecule_pricing WHERE active=1 ORDER BY price_per_kg_usd DESC`)).rows }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/inquiry/pricing/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const b = req.body || {}, sets = [], params = [];
+    const push = (c, v) => { params.push(v); sets.push(`${c}=$${params.length}`); };
+    for (const f of ['price_per_kg_usd', 'min_quantity_g', 'lead_time_days', 'sample_price_usd', 'purity', 'regulatory_status', 'notes']) if (b[f] !== undefined) push(f, b[f]);
+    for (const f of ['gmp_certified', 'dmf_available', 'coa_available', 'sds_available', 'sample_available', 'active']) if (b[f] !== undefined) push(f, b[f] ? 1 : 0);
+    if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+    sets.push('updated_at=NOW()'); params.push(req.params.id);
+    const r = await query(`UPDATE molecule_pricing SET ${sets.join(', ')} WHERE id=$${params.length}`, params);
+    if (!r.rowCount) return res.status(404).json({ error: 'not found' });
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/inquiry', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const where = [], params = [];
+    for (const [q, col] of [['status', 'status'], ['priority', 'priority']]) if (typeof req.query[q] === 'string' && req.query[q] !== 'all') { params.push(req.query[q]); where.push(`${col}=$${params.length}`); }
+    const rows = (await query(`SELECT i.*, (SELECT COUNT(*)::int FROM inquiry_quotes q WHERE q.inquiry_id=i.id) AS quote_count
+      FROM inquiries i ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+      ORDER BY CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, updated_at DESC LIMIT 200`, params)).rows;
+    res.json({ inquiries: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/inquiry/:id', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [req.params.id])).rows[0];
+    if (!inq) return res.status(404).json({ error: 'inquiry not found' });
+    const messages = (await query('SELECT * FROM inquiry_messages WHERE inquiry_id=$1 ORDER BY created_at', [req.params.id])).rows;
+    const quotes = (await query('SELECT * FROM inquiry_quotes WHERE inquiry_id=$1 ORDER BY created_at DESC', [req.params.id])).rows;
+    res.json({ inquiry: inq, messages, quotes });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Manually add a buyer's inbound reply → triggers the AI response.
+router.post('/inquiry/:id/reply', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    if (!req.body?.email_text) return res.status(400).json({ error: 'email_text required' });
+    const r = await processInboundReply(req.params.id, req.body.email_text, { dryRun: req.body.dryRun === true });
+    if (r.error) return res.status(404).json({ error: r.error });
+    res.json({ success: true, ...r });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/inquiry/:id/quote', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try { const r = await generateQuote(req.params.id); if (r.error) return res.status(400).json(r); res.json({ success: true, ...r }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/inquiry/:id/escalate', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try { const r = await escalateToHuman(req.params.id, req.body?.reason || 'manually escalated'); if (r.error) return res.status(404).json(r); res.json({ success: true, ...r }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put('/inquiry/:id', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try {
+    const b = req.body || {}, sets = [], params = [];
+    const push = (c, v) => { params.push(v); sets.push(`${c}=$${params.length}`); };
+    if (b.status !== undefined && ['new', 'in_conversation', 'quote_sent', 'order_placed', 'human_requested', 'closed'].includes(b.status)) push('status', b.status);
+    if (b.assigned_to_user_id !== undefined) push('assigned_to_user_id', b.assigned_to_user_id || null);
+    if (b.order_value_usd !== undefined) push('order_value_usd', Number(b.order_value_usd) || 0);
+    if (b.notes !== undefined) push('intended_use', String(b.notes).slice(0, 500)); // notes stored on intended_use if no dedicated col
+    if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+    sets.push('updated_at=NOW()'); params.push(req.params.id);
+    const r = await query(`UPDATE inquiries SET ${sets.join(', ')} WHERE id=$${params.length}`, params);
+    if (!r.rowCount) return res.status(404).json({ error: 'inquiry not found' });
+    res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

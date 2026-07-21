@@ -385,6 +385,7 @@ const NAV_SECTIONS = [
     {id:'revenue', label:'Revenue & Orders', icon:'💰'},
     {id:'sales-pipeline', label:'Sales Pipeline', icon:'🎯'},
     {id:'reorder-agent', label:'Reorder Agent', icon:'🔁'},
+    {id:'inquiry-agent', label:'Inquiry Agent', icon:'📨'},
     {id:'apollo-outreach', label:'Apollo Outreach', icon:'📧'},
     {id:'email-engine', label:'Email Engine', icon:'✉️'},
   ]},
@@ -478,7 +479,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -4751,6 +4752,109 @@ if(typeof pages !== 'undefined') {
         </div>
         <div class="card"><div class="card-title text-section">Avg days between orders (by buyer type)</div>
           ${Object.keys(byType).length?Object.entries(byType).map(([t,arr])=>`<div style="display:flex;justify-content:space-between;padding:5px 0;font-size:13px"><span>${roEsc(t)}</span><span style="color:#718096">${Math.round(arr.reduce((s,x)=>s+x,0)/arr.length)} days</span></div>`).join(''):'<div style="font-size:13px;color:#888">Needs buyers with 2+ orders.</div>'}
+        </div>`;
+    }
+    c.innerHTML = head + tabBar + body;
+  };
+}
+
+// ── GMP Inquiry Agent ─────────────────────────────────────────────────────────
+function iqEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function iqMoney(n){ return n==null||n===''?'—':'$'+Math.round(Number(n)).toLocaleString(); }
+window._iqTab = window._iqTab || 'inquiries';
+const IQ_STATUS = { new:['New','#166534'], in_conversation:['In Conversation','#0D7377'], quote_sent:['Quote Sent','#B45309'], order_placed:['Order Placed','#1B3A6B'], human_requested:['Human Requested','#991B1B'], closed:['Closed','#718096'] };
+function iqStatusBadge(st){ const [l,c]=IQ_STATUS[st]||[st,'#718096']; return `<span style="display:inline-block;background:${c};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">${l}</span>`; }
+function iqRowColor(st){ return st==='human_requested'?'#991B1B':st==='quote_sent'?'#B45309':'#166534'; }
+function iqTab(t){ window._iqTab=t; pages['inquiry-agent'](); }
+async function iqRun(){ const m=document.getElementById('iq-run-msg'),b=document.getElementById('iq-run-btn'); if(b){b.disabled=true;b.textContent='Running…';} try{ const r=await API('/inquiry/run',{method:'POST',body:JSON.stringify({})}); if(m){m.style.color=r&&r.error?'#dc2626':'#166534';m.textContent=(r&&(r.error||r.message))||'Started';} }catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} } if(b){b.disabled=false;b.textContent='Run Follow-ups';} }
+async function iqExpand(id){
+  const box=document.getElementById('iq-i-'+id); if(!box) return;
+  if(box.dataset.open==='1'){ box.innerHTML=''; box.dataset.open='0'; return; }
+  box.innerHTML='<div style="padding:8px;color:#888;font-size:12px">Loading…</div>'; box.dataset.open='1';
+  let d; try{ d=await API('/inquiry/'+encodeURIComponent(id)); }catch(e){ box.innerHTML='<div style="color:#dc2626;font-size:12px">'+iqEsc(e.message)+'</div>'; return; }
+  const thread=(d.messages||[]).map(m=>`<div style="margin:6px 0;padding:8px 10px;background:${m.direction==='inbound'?'#eff6ff':'#f8fafc'};border-radius:6px;border-left:3px solid ${m.direction==='inbound'?'#3b82f6':'#0D7377'}">
+    <div style="font-size:11px;font-weight:700;color:${m.direction==='inbound'?'#1e40af':'#0D7377'}">${m.direction==='inbound'?'⬅ '+iqEsc(m.sender_name||'Buyer'):'➡ Abiozen Sales'}${m.subject?' · '+iqEsc(m.subject):''}</div>
+    <div style="font-size:12px;color:#1a202c;white-space:pre-wrap;margin-top:3px">${iqEsc(String(m.body_text||'').slice(0,1200))}</div></div>`).join('')||'<div style="font-size:12px;color:#a0aec0">No messages yet.</div>';
+  const quotes=(d.quotes||[]).map(q=>`<div style="font-size:12px;color:#166534;padding:2px 0">💰 ${iqMoney(q.total_price_usd)} · ${q.quantity_kg}kg @ ${iqMoney(q.unit_price_usd)}/kg · ${q.status} · valid to ${iqEsc(q.valid_until_date)}</div>`).join('');
+  box.innerHTML=`<div style="background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:10px;margin-top:8px">
+    <div style="font-size:10px;text-transform:uppercase;color:#a0aec0;letter-spacing:.5px;margin-bottom:4px">Conversation</div>${thread}
+    ${quotes?'<div style="margin-top:6px">'+quotes+'</div>':''}
+    <div style="margin-top:10px"><textarea id="iq-reply-${id}" rows="2" placeholder="Paste buyer's reply → AI responds" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:4px;font-size:12px;box-sizing:border-box;font-family:inherit"></textarea>
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+        <button onclick="iqReply('${id}')" class="btn-primary" style="padding:4px 12px;font-size:11px">Add Reply → AI responds</button>
+        <button onclick="iqQuote('${id}')" style="background:#B45309;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">Send Quote</button>
+        <button onclick="iqEscalate('${id}')" style="background:#991B1B;color:#fff;border:none;padding:4px 12px;border-radius:4px;font-size:11px;cursor:pointer">Escalate to Human</button>
+        <span id="iq-msg-${id}" style="font-size:11px;color:var(--text-muted)"></span>
+      </div></div></div>`;
+}
+async function iqReply(id){ const t=document.getElementById('iq-reply-'+id),m=document.getElementById('iq-msg-'+id); if(!t.value.trim()){if(m)m.textContent='Paste the reply first';return;} if(m)m.textContent='AI analyzing + responding…'; try{ const r=await API('/inquiry/'+id+'/reply',{method:'POST',body:JSON.stringify({email_text:t.value})}); if(r&&r.error){if(m){m.style.color='#dc2626';m.textContent=r.error;}return;} pages['inquiry-agent'](); }catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} } }
+async function iqQuote(id){ const m=document.getElementById('iq-msg-'+id); if(m)m.textContent='Generating quote…'; try{ const r=await API('/inquiry/'+id+'/quote',{method:'POST',body:JSON.stringify({})}); if(r&&r.error){if(m){m.style.color='#dc2626';m.textContent=r.error;}return;} pages['inquiry-agent'](); }catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} } }
+async function iqEscalate(id){ if(!confirm('Escalate this inquiry to a human?'))return; try{ const r=await API('/inquiry/'+id+'/escalate',{method:'POST',body:JSON.stringify({reason:'manually escalated from dashboard'})}); if(r&&r.error){alert(r.error);return;} pages['inquiry-agent'](); }catch(e){ alert(e.message); } }
+async function iqSavePrice(id){ const g=k=>document.getElementById('iq-p-'+k+'-'+id); const body={price_per_kg_usd:g('price').value,lead_time_days:g('lead').value}; try{ const r=await API('/inquiry/pricing/'+id,{method:'PUT',body:JSON.stringify(body)}); if(r&&r.error){alert(r.error);return;} const m=document.getElementById('iq-p-msg-'+id); if(m){m.style.color='#166534';m.textContent='saved';} }catch(e){ alert(e.message); } }
+
+if(typeof pages !== 'undefined') {
+  pages['inquiry-agent'] = async function() {
+    const c = document.getElementById('content');
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading Inquiry Agent…</p>';
+    let dash, inqData, priceData;
+    try { [dash, inqData, priceData] = await Promise.all([ API('/inquiry/dashboard').catch(()=>({})), API('/inquiry').catch(()=>({inquiries:[]})), API('/inquiry/pricing').catch(()=>({pricing:[]})) ]); }
+    catch(e){ c.innerHTML = `<div class="card"><div class="card-title">Inquiry Agent</div><p style="color:#dc2626">${iqEsc(e.message)}</p></div>`; return; }
+    if (dash && dash.error) { c.innerHTML = `<div class="card"><div class="card-title">Inquiry Agent</div><p style="color:#dc2626">${iqEsc(dash.error)}</p></div>`; return; }
+    const inquiries=(inqData&&inqData.inquiries)||[], pricing=(priceData&&priceData.pricing)||[];
+    const isAdmin=currentUser&&(currentUser.role==='admin'||currentUser.role==='super_admin');
+
+    const head=`<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">GMP Inquiry Agent</div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px"><span id="iq-run-msg" style="font-size:12px;color:var(--text-muted)"></span>
+        <button id="iq-run-btn" onclick="iqRun()" class="btn-primary" style="padding:8px 16px">Run Follow-ups</button></div></div>
+      <div class="metric-grid">
+        <div class="metric"><div class="label">Active inquiries</div><div class="value">${dash.active_inquiries||0}</div></div>
+        <div class="metric amber"><div class="label">Quotes pending</div><div class="value">${dash.quotes_pending||0}</div></div>
+        <div class="metric green"><div class="label">Orders this month</div><div class="value">${dash.orders_month||0}</div></div>
+        <div class="metric"><div class="label">Pipeline value</div><div class="value">${iqMoney(dash.pipeline_value)}</div></div>
+      </div>`;
+    const tabs=[['inquiries','Active Inquiries'],['pricing','Pricing Table'],['analytics','Analytics']];
+    const tabBar=`<div class="card" style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([k,l])=>`<button onclick="iqTab('${k}')" class="btn-outline" style="padding:6px 14px;font-size:13px;${window._iqTab===k?'background:#1B3A6B;color:#fff':''}">${l}</button>`).join('')}</div>`;
+
+    let body='';
+    if (window._iqTab==='inquiries') {
+      body = inquiries.length ? inquiries.map(i=>{const col=iqRowColor(i.status);const days=i.created_at?Math.floor((Date.now()-new Date(i.created_at).getTime())/86400000):0;return `<div class="card" style="border-left:4px solid ${col}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
+          <div><div style="font-size:15px;font-weight:700;color:#1a202c">${iqEsc(i.buyer_company||i.buyer_name||i.buyer_email)}</div>
+            <div style="font-size:12px;color:#718096;margin-top:2px">${iqEsc(i.buyer_name||'')} · ${iqEsc(i.molecule_name||'?')}${i.quantity_requested?' · '+iqEsc(i.quantity_requested)+iqEsc(i.quantity_unit):''} · ${days}d open${i.order_value_usd?' · '+iqMoney(i.order_value_usd):''}</div></div>
+          ${iqStatusBadge(i.status)}</div>
+        <button onclick="iqExpand('${i.id}')" class="btn-outline" style="padding:4px 10px;font-size:11px;margin-top:8px">Conversation & actions</button>
+        <div id="iq-i-${i.id}" data-open="0"></div></div>`;}).join('')
+        : `<div class="card"><p style="color:#718096">No inquiries yet. They arrive via the abiozen.com form (webhook <code>POST /api/inquiry/receive</code>) — the AI acknowledges and qualifies each one automatically.</p></div>`;
+    } else if (window._iqTab==='pricing') {
+      body=`<div class="card"><div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:12px">
+        <tr style="background:#f8fafc"><th style="padding:6px 8px;text-align:left">Molecule</th><th style="padding:6px 8px;text-align:left">CAS</th><th style="padding:6px 8px;text-align:left">Price/kg</th><th style="padding:6px 8px;text-align:left">Min</th><th style="padding:6px 8px;text-align:left">Lead</th><th style="padding:6px 8px;text-align:left">GMP</th><th style="padding:6px 8px;text-align:left">DMF</th>${isAdmin?'<th></th>':''}</tr>
+        ${pricing.map(p=>`<tr>
+          <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;font-weight:600">${iqEsc(p.molecule_name)}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;color:#718096">${iqEsc(p.cas_number||'—')}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">${isAdmin?`<input id="iq-p-price-${p.id}" value="${p.price_per_kg_usd}" style="width:80px;padding:2px 4px;border:1px solid var(--border);border-radius:3px;font-size:12px">`:iqMoney(p.price_per_kg_usd)}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">${p.min_quantity_g>=1000?(p.min_quantity_g/1000)+'kg':p.min_quantity_g+'g'}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">${isAdmin?`<input id="iq-p-lead-${p.id}" value="${p.lead_time_days}" style="width:44px;padding:2px 4px;border:1px solid var(--border);border-radius:3px;font-size:12px">d`:p.lead_time_days+'d'}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">${p.gmp_certified?'✓':'—'}</td>
+          <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">${p.dmf_available?'<span style="color:#166534">✓</span>':'—'}</td>
+          ${isAdmin?`<td style="padding:6px 8px;border-bottom:1px solid #e2e8f0"><button onclick="iqSavePrice('${p.id}')" class="btn-outline" style="padding:2px 8px;font-size:10px">Save</button> <span id="iq-p-msg-${p.id}" style="font-size:10px"></span></td>`:''}</tr>`).join('')}
+        </table></div>${!isAdmin?'<div style="font-size:11px;color:#a0aec0;margin-top:8px">Pricing is editable by admin/procurement.</div>':''}</div>`;
+    } else if (window._iqTab==='analytics') {
+      const quoted=inquiries.filter(i=>['quote_sent','order_placed'].includes(i.status)).length;
+      const orders=inquiries.filter(i=>i.status==='order_placed');
+      const total=inquiries.length;
+      const convRate=total?Math.round(quoted/total*100):0;
+      const avgDeal=orders.length?Math.round(orders.reduce((s,i)=>s+(Number(i.order_value_usd)||0),0)/orders.length):0;
+      const byMol={}; inquiries.forEach(i=>{ if(i.molecule_name){byMol[i.molecule_name]=(byMol[i.molecule_name]||0)+1;} });
+      const topMol=Object.entries(byMol).sort((a,b)=>b[1]-a[1]).slice(0,5);
+      body=`<div class="metric-grid">
+          <div class="metric"><div class="label">Inquiries this month</div><div class="value">${total}</div></div>
+          <div class="metric"><div class="label">Quote conversion</div><div class="value">${convRate}%</div><div class="sub">${quoted} quoted</div></div>
+          <div class="metric"><div class="label">Avg deal size</div><div class="value">${iqMoney(avgDeal)}</div></div>
+          <div class="metric green"><div class="label">Orders</div><div class="value">${orders.length}</div></div>
+        </div>
+        <div class="card"><div class="card-title text-section">Top molecules by inquiry volume</div>
+          ${topMol.length?topMol.map(([m,n])=>`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:13px"><span>${iqEsc(m)}</span><span style="color:#718096">${n} inquir${n===1?'y':'ies'}</span></div>`).join(''):'<div style="font-size:13px;color:#888">No inquiries yet.</div>'}
         </div>`;
     }
     c.innerHTML = head + tabBar + body;
