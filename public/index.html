@@ -364,74 +364,94 @@ async function showApp() {
   document.getElementById('app').style.display = 'flex';
   await buildNav();
   document.getElementById("user-info-box").innerHTML = '<div class="uname">' + (currentUser.name||"Admin") + '</div><div class="urole">' + (currentUser.role||"") + '</div><div style="margin-top:6px"><a href="#" onclick="editMyWhatsApp();return false" style="font-size:10px;color:#9FE1CB;text-decoration:none">📱 Set WhatsApp</a></div>';
-  navigate('dashboard');
+  // Land on the first page the user's role can actually see (dashboard is now
+  // EXECUTIVE-only, so non-exec roles land on My Tasks).
+  navigate(firstNavPage((currentUser && currentUser.role) || ''));
 }
 
-// Sidebar visibility is driven by the role's `pages` list from GET /api/roles
-// ('*' = all). The full link set is fixed; what each role sees comes from roles.js.
-// Sidebar nav — grouped sections with icons. Each item shows only if it's in
-// the user's role pages list (or the user has pages '*' for admin/super_admin).
+// Sidebar structure — simplified to revenue-driving pages. Each section is gated
+// by role family (`access`); admin/super_admin see every section. Pages removed
+// from the sidebar (AI Insights, Playbook, Milestones, My Activity, Employee
+// Activity, Adoption, Automation Rules, Execution Graph, Data Pipeline) keep their
+// backend endpoints and page handlers — they're just no longer in the nav.
+// Data Pipeline is reachable from the Settings page for dev_team.
 const NAV_SECTIONS = [
-  {title:'EXECUTIVE', items:[
+  {title:'EXECUTIVE', access:['admin','director'], items:[
     {id:'command-center', label:'Command Center', icon:'🎯'},
     {id:'dashboard', label:'Dashboard', icon:'📊'},
-    {id:'ai-insights', label:'AI Insights', icon:'🤖'},
     {id:'performance', label:'Performance', icon:'🏆'},
   ]},
-  {title:'OPERATIONS', items:[
-    {id:'my-tasks', label:'My Tasks', icon:'✓'},
-    {id:'my-kpis', label:'My KPIs', icon:'📈'},
-    {id:'my-activity', label:'My Activity', icon:'📝'},
-    {id:'playbook', label:'Playbook', icon:'📋'},
-    {id:'milestones', label:'Milestones', icon:'🏁'},
-    {id:'my-performance', label:'My Performance', icon:'🥇'},
-  ]},
-  {title:'REVENUE', items:[
+  {title:'REVENUE', access:['admin','sales'], items:[
     {id:'revenue', label:'Revenue & Orders', icon:'💰'},
     {id:'sales-pipeline', label:'Sales Pipeline', icon:'🎯'},
-  ]},
-  {title:'INTELLIGENCE', items:[
     {id:'apollo-outreach', label:'Apollo Outreach', icon:'📧'},
-    {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
-    {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
-    {id:'seo-content', label:'SEO Content', icon:'✍️'},
-    {id:'market-intelligence', label:'Market Intelligence', icon:'🔬'},
     {id:'email-engine', label:'Email Engine', icon:'✉️'},
   ]},
-  {title:'TEAM', items:[
+  {title:'INTELLIGENCE', access:['admin','procurement','seo'], items:[
+    {id:'market-intelligence', label:'Market Intelligence', icon:'🔬'},
+    {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
+    {id:'seo-content', label:'SEO Content', icon:'✍️'},
+    {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
+  ]},
+  {title:'OPERATIONS', access:'*', items:[
+    {id:'my-tasks', label:'My Tasks', icon:'✓'},
+    {id:'my-kpis', label:'My KPIs', icon:'📈'},
+    {id:'my-performance', label:'My Performance', icon:'🥇'},
+  ]},
+  {title:'TEAM', access:['admin','director'], items:[
     {id:'team', label:'Team Management', icon:'👥'},
     {id:'agent-control', label:'Agent Control', icon:'⚡'},
-    {id:'employee-activity', label:'Employee Activity', icon:'🧭'},
-    {id:'adoption', label:'Adoption', icon:'📈'},
-    {id:'decision-engine', label:'Automation Rules', icon:'🧠'},
   ]},
-  {title:'PLATFORM', items:[
+  {title:'PLATFORM', access:['admin'], items:[
     {id:'sku-economics', label:'SKU Economics', icon:'📦'},
-    {id:'data-pipeline', label:'Data Pipeline', icon:'🔗'},
-    {id:'execution-graph', label:'Execution Graph', icon:'⚡'},
     {id:'settings', label:'Settings', icon:'⚙️'},
   ]},
 ];
+// Role families for section access. admin/super_admin bypass this (see below).
+const NAV_FAMILIES = {
+  admin: ['admin','super_admin'],
+  director: ['sales_director','recruitment_director','procurement_director'],
+  sales: ['sales_team','sales_director','account_manager'],
+  procurement: ['procurement_team','procurement_director'],
+  seo: ['seo_specialist'],
+};
+function navSectionVisible(access, role) {
+  if (role === 'admin' || role === 'super_admin') return true; // admin sees all
+  if (access === '*') return true;
+  return (access || []).some(fam => (NAV_FAMILIES[fam] || []).includes(role));
+}
+function firstNavPage(role) {
+  for (const s of NAV_SECTIONS) if (navSectionVisible(s.access, role) && s.items.length) return s.items[0].id;
+  return 'my-tasks';
+}
 
 async function buildNav() {
-  // Safe default for non-admin roles before the role catalog loads.
-  let pages = ['my-tasks', 'my-kpis', 'my-activity', 'playbook', 'milestones'];
+  // Keep the role catalog available for other consumers (team page, etc.); nav
+  // visibility itself is now section-level by role family, not per-page.
   try {
     const rolesResp = await API('/roles');
     window._roleCatalog = rolesResp.roles || [];
-    const myRole = window._roleCatalog.find(r => r.role_name === currentUser.role);
-    if (myRole && myRole.pages) pages = myRole.pages;
   } catch (e) {}
-  const isAll = pages === '*';
+  const role = (typeof currentUser !== 'undefined' && currentUser && currentUser.role) || '';
   const html = NAV_SECTIONS.map(section => {
-    const visible = section.items.filter(it => isAll || pages.includes(it.id) || it.id === 'employee-activity');
-    if (!visible.length) return '';
+    if (!navSectionVisible(section.access, role)) return '';
     return `<div class="nav-section-title">${section.title}</div>` +
-      visible.map(it =>
+      section.items.map(it =>
         `<a href="#" onclick="navigate('${it.id}');return false" id="nav-${it.id}"><span class="nav-icon">${it.icon}</span><span>${it.label}</span></a>`
       ).join('');
   }).join('');
   document.getElementById('nav-links').innerHTML = html;
+}
+
+// Dashboard Quick Actions — fire an admin trigger endpoint and report inline.
+async function dashAction(endpoint, body, btnId, msgId) {
+  const b = document.getElementById(btnId), m = document.getElementById(msgId);
+  if (b) { b.dataset.o = b.textContent; b.disabled = true; b.textContent = 'Starting…'; }
+  try {
+    const r = await API(endpoint, { method:'POST', body: JSON.stringify(body || {}) });
+    if (m) { m.style.color = r && r.error ? '#dc2626' : '#166534'; m.textContent = (r && (r.error || r.message)) || 'Started'; }
+  } catch(e) { if (m) { m.style.color = '#dc2626'; m.textContent = e.message; } }
+  if (b) { b.disabled = false; b.textContent = b.dataset.o || 'Run'; }
 }
 
 function toggleMobileSidebar() {
@@ -515,6 +535,15 @@ async dashboard() {
       ${metric('Active Sequences', activeSeq, 'Apollo cadences')}
       ${metric('Open Tasks', openTaskCount, 'across the team today')}
     </div>
+    ${(currentUser && (currentUser.role==='admin'||currentUser.role==='super_admin')) ? `<div class="card">
+      <div class="card-title text-section">Quick Actions</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button id="qa-replies" onclick="dashAction('/leads/process-replies',{},'qa-replies','qa-msg')" class="btn-primary" style="padding:9px 16px">Process Apollo Replies</button>
+        <button id="qa-email" onclick="dashAction('/email-engine/run',{top_molecules:10},'qa-email','qa-msg')" class="btn-primary" style="padding:9px 16px">Generate Email Campaigns</button>
+        <button id="qa-mi" onclick="dashAction('/market/analyze',{},'qa-mi','qa-msg')" class="btn-primary" style="padding:9px 16px">Run Market Intelligence</button>
+        <span id="qa-msg" style="font-size:12px;color:var(--text-muted)"></span>
+      </div>
+    </div>` : ''}
     <div class="card">
       <div class="card-title text-section">Today's Priority Actions</div>
       ${priority.length ? priority.map(t => `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border);gap:12px">
@@ -989,7 +1018,13 @@ async 'ai-insights'() {
 
 // ── SETTINGS ──────────────────────────────────────────────────────────────────
 async settings() {
-  document.getElementById('content').innerHTML = `
+  const isDevOrAdmin = currentUser && ['dev_team','admin','super_admin'].includes(currentUser.role);
+  const dataPipelineCard = isDevOrAdmin ? `<div class="card">
+      <div class="card-title text-section">Data Pipeline</div>
+      <div style="font-size:13px;color:var(--text-muted);margin-bottom:10px">Ingestion and sync status for the data pipeline (dev team).</div>
+      <button onclick="navigate('data-pipeline')" class="btn-primary" style="padding:9px 16px">Open Data Pipeline →</button>
+    </div>` : '';
+  document.getElementById('content').innerHTML = dataPipelineCard + `
     <div class="card">
       <div class="card-title">Deployment & configuration guide</div>
       <div style="font-size:13px;line-height:2;color:#444">
