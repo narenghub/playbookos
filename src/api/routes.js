@@ -3378,12 +3378,12 @@ router.get('/agent/overview', authMiddleware, adminOnly, async (req, res) => {
 // computed from these specs, so the countdown reflects reality even where the
 // human `label` reads "CST". cron dow: 0/7=Sun … 6=Sat; h:null = hourly.
 const MC_AGENTS = [
-  { key:'ceo-agent',           name:'CEO Agent',           icon:'🧭', label:'Daily · 7:00 AM CST',
-    crons:[{ m:0,  h:7,  dow:null, tz:'UTC' }] },
+  { key:'ceo-agent',           name:'CEO Agent',           icon:'🧭', label:'Weekdays · 7:00 AM CST',
+    crons:[{ m:0,  h:7,  dows:[1,2,3,4,5], tz:'America/Chicago' }] },
   { key:'market-intelligence', name:'Market Intelligence', icon:'🛰️', label:'Monday · 9:00 AM CST',
-    crons:[{ m:0,  h:15, dow:1,    tz:'UTC' }] },
+    crons:[{ m:0,  h:9,  dow:1,    tz:'America/Chicago' }] },
   { key:'email-engine',        name:'Email Engine',        icon:'✉️', label:'Monday · 9:30 AM CST',
-    crons:[{ m:30, h:15, dow:1,    tz:'UTC' }] },
+    crons:[{ m:30, h:9,  dow:1,    tz:'America/Chicago' }] },
   { key:'sales-agent',         name:'Sales Agent',         icon:'📈', label:'Hourly · :17',
     crons:[{ m:17, h:null, dow:null, tz:'UTC' }] },
   { key:'procurement-agent',   name:'Procurement Agent',   icon:'📦', label:'Tuesday · 9:00 AM CST',
@@ -3423,6 +3423,14 @@ function mcYmdInTz(date, tz) {
 function mcWeekdayNum(date, tz) {
   return MC_WD[new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday:'short' }).format(date)];
 }
+// Does `inst` fall on a day-of-week this cron spec allows? Supports a single
+// `dow` (0/7=Sun), a `dows` array (e.g. [1..5] weekdays), or neither (any day).
+function mcDowOk(spec, inst, tz) {
+  const wd = mcWeekdayNum(inst, tz);
+  if (spec.dows) return spec.dows.includes(wd);
+  if (spec.dow != null) return wd === (spec.dow === 7 ? 0 : spec.dow);
+  return true;
+}
 function mcHourFloatInTz(date, tz) {
   const p = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour:'2-digit', minute:'2-digit', hour12:false })
     .formatToParts(date).reduce((o, x) => (o[x.type] = x.value, o), {});
@@ -3443,7 +3451,7 @@ function mcZonedToUtc(y, mon, d, hh, mm, tz) {
 }
 // Next fire (UTC Date) strictly after `from` for one cron spec.
 function mcNextFire(spec, from) {
-  const { m, h, dow, tz } = spec;
+  const { m, h, tz } = spec;
   if (h === null) { // hourly at minute m
     const cand = new Date(from); cand.setUTCSeconds(0, 0); cand.setUTCMinutes(m);
     return cand > from ? cand : new Date(cand.getTime() + 3600000);
@@ -3454,7 +3462,7 @@ function mcNextFire(spec, from) {
     const { y, mon, d } = mcYmdInTz(new Date(base + i * 86400000), tz);
     const inst = mcZonedToUtc(y, mon, d, h, m, tz);
     if (inst <= from) continue;
-    if (dow !== null && mcWeekdayNum(inst, tz) !== (dow === 7 ? 0 : dow)) continue;
+    if (!mcDowOk(spec, inst, tz)) continue;
     return inst;
   }
   return null;
@@ -3474,7 +3482,7 @@ function mcFiresToday(agent, dayStart, dayEnd, now) {
       const inst = mcZonedToUtc(y, mon, d, c.h, c.m, c.tz);
       const t = inst.getTime();
       if (t < dayStart || t >= dayEnd) continue;
-      if (c.dow !== null && mcWeekdayNum(inst, c.tz) !== (c.dow === 7 ? 0 : c.dow)) continue;
+      if (!mcDowOk(c, inst, c.tz)) continue;
       const iso = inst.toISOString();
       if (seen.has(iso)) continue; seen.add(iso);
       out.push({ iso, hour: mcHourFloatInTz(inst, 'America/Chicago'), fired: t <= now.getTime() });

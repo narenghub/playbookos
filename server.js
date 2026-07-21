@@ -87,12 +87,12 @@ cron.schedule('0 0 * * *', withAlerts('daily-0utc-metrics-snapshot', async () =>
   console.log(`[CRON] Metrics snapshot done — ${snap.snapshot_date}: rev=$${snap.revenue_actual} (${snap.revenue_pct}% of daily target), team=${snap.team_avg_score}, anomaly_seed_written`);
 }));
 
-// Daily 7 AM: Command Center briefing to admin
-cron.schedule('0 7 * * *', withAlerts('daily-7utc-command-center-briefing', async () => {
+// Weekdays 7:00 AM CST: Command Center briefing to admin.
+cron.schedule('0 7 * * 1-5', withAlerts('daily-7cst-command-center-briefing', async () => {
   console.log('[CRON] Daily briefing starting...');
   const result = await generateDailyBriefing();
   console.log(`[CRON] Daily briefing done — date=${result.snapshot.date}, emailed=${result.emailed} to ${result.emailed_to}`);
-}));
+}), { timezone: 'America/Chicago' });
 
 // Monday 8 AM: Goal Engine — cascade goals then assign weekly KPIs for all active users
 cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8utc-goal-engine', async () => {
@@ -187,28 +187,28 @@ cron.schedule('0 9 * * 1', withAlerts('weekly-mon-9utc-revenue-intel', async () 
   else console.log(`[CRON] Procurement priorities done — ${proc.items.length} SKUs, emailed ${proc.emailed} of ${proc.recipients.length} procurement users`);
 }));
 
-// Monday 3 PM UTC (9 AM CST) — weekly Market Intelligence: 150 molecules
+// Monday 9:00 AM CST — weekly Market Intelligence: 150 molecules
 // (100 research chemicals + 50 GMP APIs). Its own slot, not chained to the 09:00
 // UTC weekly analysis, so results land when Naresh and procurement are awake to
 // review them. ~2-5 min, 7 Claude calls; withAlerts handles error alerting.
-cron.schedule('0 15 * * 1', withAlerts('weekly-mon-15utc-market-intelligence', async () => {
+cron.schedule('0 9 * * 1', withAlerts('weekly-mon-9cst-market-intelligence', async () => {
   console.log('[CRON] Market Intelligence starting...');
   const mi = await runMarketIntelligence();
   console.log(`[CRON] Market Intelligence done — ${mi.total} molecules (${mi.research_count} research + ${mi.gmp_count} GMP) for ${mi.week_start}, ${mi.tasks_queued || 0} tasks queued`);
-}));
+}), { timezone: 'America/Chicago' });
 
-// Monday 3:30 PM UTC (9:30 AM CST) — AI Email Engine, 30 min after Market
-// Intelligence. The offset is load-bearing, not cosmetic: the engine reads the
-// molecule_history rows that the 15:00 job writes, so starting earlier (or
+// Monday 9:30 AM CST — AI Email Engine, 30 min after Market Intelligence.
+// The offset is load-bearing, not cosmetic: the engine reads the
+// molecule_history rows that the 9:00 job writes, so starting earlier (or
 // chaining both into one slot) would generate campaigns off last week's feed.
 // 10 molecules x 4 segments = 40 campaigns / 80 variants, ~40 Claude calls,
 // drawn from GSC + molecule_history + the Algolia marketplace catalog.
-cron.schedule('30 15 * * 1', withAlerts('weekly-mon-1530utc-email-engine', async () => {
+cron.schedule('30 9 * * 1', withAlerts('weekly-mon-930cst-email-engine', async () => {
   console.log('[CRON] Email Engine starting...');
   const ee = await runEmailEngine({ topMolecules: 10 });
   console.log(`[CRON] Email Engine done — ${ee.generated} campaigns (${ee.generated * 2} variants) for ${ee.week_start} from ${ee.unique_molecules} molecules, ${ee.skipped} skipped, ${ee.errors.length} errors`);
   if (ee.errors.length) console.warn('[CRON] Email Engine errors:', ee.errors.slice(0, 5));
-}));
+}), { timezone: 'America/Chicago' });
 
 // Hourly (:17) — Sales Agent: pull Apollo replies, classify into leads, WhatsApp
 // Naresh on HOT, draft follow-ups on WARM. Off-minute so it doesn't pile onto the
@@ -387,8 +387,9 @@ cron.schedule('0 10 * * 1', withAlerts('weekly-mon-10cst-linkedin-content', asyn
   console.log(`[CRON] LinkedIn content scheduler done — ${r.drafts_created} drafts for week of ${r.week.monday}`);
 }), CST);
 
-// 8:00am CST — US team briefing + agent task assignment (HR review on Mondays)
-cron.schedule('0 8 * * *', withAlerts('daily-8cst-us-team-briefing', async () => {
+// Weekdays 8:00am CST — US team briefing + agent task assignment (HR review on
+// Mondays). Already ran in America/Chicago via CST; restricted to weekdays here.
+cron.schedule('0 8 * * 1-5', withAlerts('weekdays-8cst-us-team-briefing', async () => {
   console.log('[CRON] US team briefing starting...');
   const r = await runMorningBriefing({ segment: 'us_team' });
   console.log(`[CRON] US team briefing done — ran: ${r.ran.join(', ') || 'none'}`);
