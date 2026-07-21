@@ -1,9 +1,16 @@
 const crypto = require('crypto');
+const { Pool } = require('pg');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
 const { fetchGSCData, syncAlgoliaSearchData } = require('./growth-agent');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
+const { logAgentActivity } = require('../agent-core');
+
+// CAS numbers that have generated SEO content but NO matching product in the
+// abiozen catalog — never pushed (they'd match nothing anyway). Semaglutide and
+// Retatrutide, per the pre-push match analysis (113/115 matched on CAS).
+const SEO_PUSH_EXCLUDE_CAS = new Set(['910463-68-5', '2381089-83-2']);
 
 const isoDate = d => d.toISOString().slice(0, 10);
 
@@ -342,7 +349,75 @@ async function generateCatalogSeoPages({ force = false, limit = 0 } = {}) {
   return { total: products.length, attempted: list.length, generated, skipped, failed, errors: errors.slice(0, 20) };
 }
 
+// ── Push SEO content to the live abiozen product DB ───────────────────────────
+// Writes PlaybookOS seo_content into the abiozen `products` table (a separate DB
+// reached via ABIOZEN_DATABASE_URL, same connection the Algolia sync uses),
+// matched on cas_number. Populates meta_title / meta_description / seo_content_html
+// / schema_json — the four columns added by store migration 0041. Idempotent: an
+// UPDATE keyed on CAS just re-writes the same values on a re-run.
+//
+// A CAS can map to more than one product row (e.g. multiple pack forms); all of
+// them get the SEO, so `updated` (product rows written) may exceed `matched`
+// (seo_content rows that hit at least one product).
+async function pushSeoContentToAbiozen({ dryRun = false } = {}) {
+  const abiozenUrl = process.env.ABIOZEN_DATABASE_URL;
+  const out = { total: 0, eligible: 0, matched: 0, updated: 0, skipped_no_cas: 0, skipped_excluded: 0, unmatched: [], errors: [] };
+  if (!abiozenUrl) { out.errors.push('ABIOZEN_DATABASE_URL is not configured'); return out; }
+
+  const rows = (await query(
+    `SELECT molecule_name, cas_number, title, meta_desc, content_html, schema_json
+     FROM seo_content ORDER BY molecule_name`
+  )).rows;
+  out.total = rows.length;
+
+  const eligible = [];
+  for (const r of rows) {
+    const cas = String(r.cas_number || '').trim();
+    if (!cas) { out.skipped_no_cas++; continue; }
+    if (SEO_PUSH_EXCLUDE_CAS.has(cas)) { out.skipped_excluded++; continue; }
+    eligible.push({ ...r, cas });
+  }
+  out.eligible = eligible.length;
+  if (dryRun) return { ...out, dryRun: true };
+
+  const pool = new Pool({ connectionString: abiozenUrl, ssl: { rejectUnauthorized: false } });
+  try {
+    for (const r of eligible) {
+      try {
+        const res = await pool.query(
+          `UPDATE products
+             SET meta_title = $1, meta_description = $2, seo_content_html = $3, schema_json = $4
+           WHERE TRIM(cas_number) = $5`,
+          [
+            (r.title || '').slice(0, 200),     // varchar(200)
+            (r.meta_desc || '').slice(0, 300), // varchar(300)
+            r.content_html || null,
+            r.schema_json || null,
+            r.cas,
+          ]
+        );
+        if (res.rowCount > 0) { out.matched++; out.updated += res.rowCount; }
+        else out.unmatched.push(`${r.molecule_name} (cas ${r.cas})`);
+      } catch (e) { out.errors.push(`${r.molecule_name}: ${e.message}`); }
+    }
+  } finally {
+    await pool.end();
+  }
+
+  await logAgentActivity({
+    agent_name: 'seo-agent', action_type: 'seo_content_pushed', user_id: null,
+    reasoning: `Pushed SEO content to abiozen products: ${out.matched}/${out.eligible} molecules matched, ${out.updated} product rows updated. `
+      + `Skipped ${out.skipped_excluded} excluded + ${out.skipped_no_cas} without CAS. ${out.unmatched.length} eligible had no matching product. ${out.errors.length} errors.`,
+    source_kpi: 'kpi-sg-marketing',
+    confidence_score: out.errors.length ? 60 : 90,
+    output_summary: `matched=${out.matched} updated=${out.updated} skipped=${out.skipped_excluded + out.skipped_no_cas} unmatched=${out.unmatched.length} errors=${out.errors.length}`,
+  }).catch(e => console.error('[seo-agent] push audit failed:', e.message));
+
+  return out;
+}
+
 module.exports = {
   trackKeywordRankings, identifyContentGaps, generateSEOTasksForTeam, trackAlgoliaNoResults,
   fetchCatalogProducts, generateSeoPage, generateCatalogSeoPages, slugify, productUrl,
+  pushSeoContentToAbiozen,
 };

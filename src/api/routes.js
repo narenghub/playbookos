@@ -9,7 +9,7 @@ const { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf } = req
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
-const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings, generateCatalogSeoPages } = require('../lib/agents/seo-agent');
+const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings, generateCatalogSeoPages, pushSeoContentToAbiozen } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('../lib/agents/growth-agent');
 const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo } = require('../lib/agents/email-engine');
 const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
@@ -1717,6 +1717,21 @@ router.get('/email-engine/campaigns/:id/preview', authMiddleware, requireAnyTier
       html: sanitizeHtml(variant === 'b' ? c.variant_b_html : c.variant_a_html),
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Push SEO content to the live abiozen product DB ───────────────────────────
+// Writes seo_content → abiozen products (matched on CAS) via ABIOZEN_DATABASE_URL.
+// Async 202; ?dryRun=1 reports eligible/excluded counts without writing.
+router.post('/seo/push-to-abiozen', authMiddleware, adminOnly, async (req, res) => {
+  const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
+  if (dryRun) {
+    try { return res.json(await pushSeoContentToAbiozen({ dryRun: true })); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+  pushSeoContentToAbiozen()
+    .then(r => console.log(`[seo] push to abiozen — ${r.matched} matched, ${r.updated} product rows updated, ${r.errors.length} errors`))
+    .catch(e => console.error('[seo] push to abiozen failed:', e.message));
+  res.status(202).json({ started: true, message: 'SEO content push to abiozen started. Check back shortly.' });
 });
 
 // ── Sales Pipeline (leads from Apollo replies) ────────────────────────────────
