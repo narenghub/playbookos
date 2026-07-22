@@ -22,8 +22,38 @@ const SANCTIONED_COUNTRIES = /\b(iran|north korea|dprk|russia|russian federation
 const ESCALATION_KEYWORDS = /\b(contract|audit|legal|attorney|lawyer|compliance officer|fda inspection|phone call|call me|video call|zoom|teams meeting|schedule a call|jump on a call)\b/i;
 const ACCEPT_KEYWORDS = /\b(accepted|i accept|we accept|accept the quote|proceed|go ahead|confirm the order|place the order|let'?s proceed|move forward)\b/i;
 const NEGOTIATE_KEYWORDS = /\b(too high|too expensive|can you do better|better price|lower price|discount|reduce the price|beat this|come down|price is high|cheaper)\b/i;
-const BANK_WIRE = () => process.env.ABIOZEN_BANK_WIRE_DETAILS || 'Bank: [to be provided]  |  Account: [to be provided]  |  Routing: [to be provided]  |  SWIFT: [to be provided]';
+const ORDER_CONFIRMED_URL = 'https://abiozen.com/order-confirmed/';
+const stripeConfigured = () => /^sk_(test|live)_/.test(process.env.STRIPE_SECRET_KEY || '');
 const quoteRef = inqId => `QT-${new Date().getUTCFullYear()}-${String(inqId).replace(/[^a-z0-9]/gi, '').slice(0, 6).toUpperCase()}`;
+
+// Create a Stripe Payment Link for a one-off charge (the 50% advance). Returns
+// { url, id } or { error }; never throws.
+async function createStripePaymentLink({ amountCents, productName, metadata = {} }) {
+  const key = process.env.STRIPE_SECRET_KEY;
+  if (!stripeConfigured()) return { error: 'STRIPE_SECRET_KEY not configured' };
+  const form = new URLSearchParams();
+  form.set('line_items[0][price_data][currency]', 'usd');
+  form.set('line_items[0][price_data][product_data][name]', productName);
+  form.set('line_items[0][price_data][unit_amount]', String(Math.round(amountCents)));
+  form.set('line_items[0][quantity]', '1');
+  form.set('after_completion[type]', 'redirect');
+  form.set('after_completion[redirect][url]', ORDER_CONFIRMED_URL);
+  for (const [k, v] of Object.entries(metadata)) {
+    form.set(`metadata[${k}]`, String(v == null ? '' : v));
+    // Propagate to the PaymentIntent so payment_intent.succeeded carries it.
+    form.set(`payment_intent_data[metadata][${k}]`, String(v == null ? '' : v));
+  }
+  try {
+    const res = await fetch('https://api.stripe.com/v1/payment_links', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: form.toString(),
+    });
+    const data = await res.json();
+    if (!res.ok) return { error: `Stripe ${res.status}: ${(data.error && data.error.message) || JSON.stringify(data).slice(0, 160)}` };
+    return { url: data.url, id: data.id };
+  } catch (e) { return { error: e.message }; }
+}
 const BASE_URL = () => process.env.BASE_URL || 'https://playbook.abiozen.com';
 const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const htmlWrap = body => `<div style="font-family:Arial;font-size:14px;line-height:1.6;color:#222;white-space:pre-wrap">${esc(body)}</div>`;
@@ -124,7 +154,7 @@ function textToHtml(text) {
 
 // World-class responsive email shell. `bodyHtml` is the message body; `specsTable`
 // is an optional full <tr>…</tr> spec block (quotes only).
-function renderEmail({ moleculeName, cas, productTypeLabel, bodyHtml, specsTable = '', controlled = false, ctaLabel = 'Reply to Continue &rarr;' }) {
+function renderEmail({ moleculeName, cas, productTypeLabel, bodyHtml, specsTable = '', controlled = false, ctaLabel = 'Reply to Continue &rarr;', ctaUrl = 'mailto:sales@abiozen.com' }) {
   const ruo = controlled ? `
 <!-- RUO disclaimer -->
 <tr><td style="padding:0 40px 20px"><p style="margin:0;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 14px;font-size:12px;color:#9a3412">For research use only. Not for human or veterinary use, food, drug, or diagnostic applications.</p></td></tr>` : '';
@@ -160,7 +190,7 @@ ${bodyHtml}
 ${specsTable}${ruo}
 <!-- CTA -->
 <tr><td style="padding:0 40px 32px;text-align:center">
-<a href="mailto:sales@abiozen.com" style="background:linear-gradient(135deg,#1D9E75,#0D7377);color:#ffffff;padding:14px 36px;border-radius:30px;font-size:15px;font-weight:700;text-decoration:none;display:inline-block">${ctaLabel}</a>
+<a href="${ctaUrl}" style="background:linear-gradient(135deg,#1D9E75,#0D7377);color:#ffffff;padding:14px 36px;border-radius:30px;font-size:15px;font-weight:700;text-decoration:none;display:inline-block">${ctaLabel}</a>
 </td></tr>
 
 <!-- Footer -->
@@ -204,7 +234,7 @@ function buildSpecsTable({ molecule, cas, grade, purity, quantity, unitPrice, le
 </td></tr>`;
 }
 
-async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', productTypeLabel, controlled, ctaLabel } = {}) {
+async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', productTypeLabel, controlled, ctaLabel, ctaUrl } = {}) {
   let pricing = null;
   if (!productTypeLabel || controlled === undefined) pricing = await findPricing(inquiry.molecule_name, inquiry.cas_number);
   if (!productTypeLabel) productTypeLabel = productTypeLabelFor(pricing, inquiry.molecule_name);
@@ -212,6 +242,7 @@ async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', product
   const html = renderEmail({
     moleculeName: inquiry.molecule_name, cas: inquiry.cas_number,
     productTypeLabel, bodyHtml: textToHtml(body), specsTable, controlled, ctaLabel,
+    ...(ctaUrl ? { ctaUrl } : {}),
   });
   const ok = await sendEmail({ to: inquiry.buyer_email, subject, html, from: SALES_FROM, replyTo: 'sales@abiozen.com', cc });
   await logMessage(inquiry.id, { direction: 'outbound', sender_name: REP_NAME, sender_email: 'sales@abiozen.com', subject, body_text: body, body_html: html });
@@ -467,60 +498,57 @@ async function handleNegotiation(inquiryId, text) {
   return { action: 'counter_offered' };
 }
 
-// Stage 6 — acceptance: payment email, status, WhatsApp Naresh, Palash email, order row.
+// Stage 6 — acceptance: create a Stripe payment link for the 50% advance and send
+// the secure-payment email. Order creation + team notifications happen on the
+// Stripe webhook (confirmPayment) when the payment actually clears.
 async function handleAcceptance(inquiryId) {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
+  if (!inq) return { error: 'inquiry not found' };
   const quote = (await query(`SELECT * FROM inquiry_quotes WHERE inquiry_id=$1 ORDER BY created_at DESC LIMIT 1`, [inquiryId])).rows[0];
   const total = Math.round(inq.order_value_usd || (quote ? quote.total_price_usd : 0));
   const advance = Math.round(total * 0.5);
+  const balance = total - advance;
   const ref = inq.quote_ref || quoteRef(inquiryId);
   const lead = quote?.lead_time_days || 30;
-  const eta = new Date(Date.now() + (lead + 5) * 86400000).toISOString().slice(0, 10);
   const pricing = await findPricing(inq.molecule_name, inq.cas_number);
   const ptl = productTypeLabelFor(pricing, inq.molecule_name);
   const qtyStr = `${inq.quantity_requested || ''}${inq.quantity_unit || ''}`;
 
-  // Create the order row in PlaybookOS.
-  const orderId = crypto.randomUUID();
-  await query(
-    `INSERT INTO orders (id, order_date, amount, buyer_type, product_category, status, notes, created_at)
-     VALUES ($1, to_char(NOW(),'YYYY-MM-DD'), $2, $3, $4, 'payment_pending', $5, NOW())`,
-    [orderId, total, inq.buyer_type || null, inq.molecule_name,
-     `${ref} · ${inq.buyer_company || inq.buyer_email} · ${qtyStr} · advance $${advance} · inquiry ${inquiryId}`]
-  ).catch(e => console.error('[inquiry] order insert failed:', e.message));
+  // Stripe Payment Link for the 50% advance.
+  const link = await createStripePaymentLink({
+    amountCents: advance * 100,
+    productName: `Abiozen — ${inq.molecule_name} ${qtyStr} — Order ${ref}`,
+    metadata: { inquiry_id: inquiryId, quote_ref: ref, buyer_email: inq.buyer_email || '', molecule_name: inq.molecule_name || '' },
+  });
 
-  // Payment-instructions email to the buyer.
-  const body = `Dear ${inq.buyer_name || 'Customer'},\n\nWonderful — thank you for confirming your order. Here is everything you need to get production moving.\n\nORDER SUMMARY\nReference: ${ref}\nMolecule: ${inq.molecule_name}\nQuantity: ${qtyStr}\nOrder total: $${total.toLocaleString()}\n\n50% ADVANCE PAYMENT DUE NOW: $${advance.toLocaleString()}\n\nWIRE TRANSFER DETAILS\n${BANK_WIRE()}\nReference: ${ref}\n\nOnce payment is received, we will confirm production start within 24 hours. Estimated delivery: ${eta}. The remaining 50% balance is due before shipment.\n\nThank you for choosing Abiozen — I'll personally see this through for you.\n\nWarm regards,\n${REP_NAME}\n${REP_TITLE}, Abiozen LLC`;
-  await sendAndLog(inq, { subject: `Payment Instructions — Order ${ref} — ${inq.molecule_name}`, body, productTypeLabel: ptl, ctaLabel: 'Reply to Confirm Payment &rarr;' });
+  const orderDetails = `Order details:\n- Molecule: ${inq.molecule_name}${inq.cas_number ? ` (${inq.cas_number})` : ''}\n- Quantity: ${qtyStr}\n- Advance payment (50%): $${advance.toLocaleString()}\n- Balance due before shipment: $${balance.toLocaleString()}\n- Estimated lead time: ${lead} days from payment confirmation`;
+  const security = `Our payment portal is secured by Stripe — your payment information is never stored on our servers. We accept all major credit cards, ACH bank transfer, and wire transfer.`;
+  let body, ctaLabel, ctaUrl;
+  if (link.url) {
+    body = `Dear ${inq.buyer_name || 'Customer'},\n\nThank you for accepting our quotation. To confirm your order and initiate production, please complete the 50% advance payment via our secure payment portal using the button below.\n\n${orderDetails}\n\n${security}\n\nOnce payment is confirmed, you'll receive an order confirmation within 2 hours and production will begin immediately.\n\nIf you have any questions, just reply to this email.\n\nWarm regards,\n${REP_NAME}\n${REP_TITLE}, Abiozen LLC`;
+    ctaLabel = `Pay Now — $${advance.toLocaleString()} &rarr;`;
+    ctaUrl = link.url;
+  } else {
+    // Stripe not configured / call failed — degrade gracefully; a human sends the link.
+    body = `Dear ${inq.buyer_name || 'Customer'},\n\nThank you for accepting our quotation. I'm preparing your secure payment link for the 50% advance and will have it to you very shortly.\n\n${orderDetails}\n\n${security}\n\nOnce payment is confirmed, you'll receive an order confirmation within 2 hours and production will begin immediately.\n\nWarm regards,\n${REP_NAME}\n${REP_TITLE}, Abiozen LLC`;
+    ctaLabel = 'Reply to Continue &rarr;';
+    ctaUrl = null;
+  }
+  await sendAndLog(inq, { subject: `Payment Instructions — Order ${ref} | Abiozen LLC`, body, productTypeLabel: ptl, ctaLabel, ctaUrl });
 
-  await query(`UPDATE inquiries SET status='payment_pending', accepted_at=NOW(), advance_amount=$2, order_value_usd=$3, quote_ref=$4, order_id=$5, updated_at=NOW() WHERE id=$1`,
-    [inquiryId, advance, total, ref, orderId]);
+  await query(`UPDATE inquiries SET status='payment_link_sent', accepted_at=NOW(), advance_amount=$2, order_value_usd=$3, quote_ref=$4, payment_link_url=$5, updated_at=NOW() WHERE id=$1`,
+    [inquiryId, advance, total, ref, link.url || null]);
 
-  // WhatsApp Naresh immediately.
+  // Keep Naresh in the loop that a deal is at the payment stage.
   const naresh = await getNaresh();
   if (naresh.whatsapp_number) await sendWhatsApp(naresh.whatsapp_number,
-    `🎯 ORDER ACCEPTED — ${inq.buyer_name || 'Buyer'} at ${inq.buyer_company || '?'}\nMolecule: ${inq.molecule_name} | Qty: ${qtyStr}\nValue: $${total.toLocaleString()}\nQuote ref: ${ref}\nWaiting for 50% advance: $${advance.toLocaleString()}\nBuyer email: ${inq.buyer_email}`,
-    { user_id: naresh.id || null, message_type: 'order_accepted' }).catch(() => {});
+    `✅ QUOTE ACCEPTED — ${inq.buyer_name || 'Buyer'} at ${inq.buyer_company || '?'}\nMolecule: ${inq.molecule_name} | Qty: ${qtyStr}\nValue: $${total.toLocaleString()} | Quote ref: ${ref}\nStripe link sent — awaiting 50% advance $${advance.toLocaleString()}${link.error ? `\n⚠️ Stripe link FAILED (${link.error}) — send a link manually` : ''}`,
+    { user_id: naresh.id || null, message_type: 'quote_accepted' }).catch(() => {});
 
-  // Email Palash (sourcing).
-  const palash = await getUser('procurement_director');
-  if (palash) await sendEmail({
-    to: palash.email, cc: 'naren@abiozen.com',
-    subject: `NEW ORDER — Source ${inq.molecule_name} ${qtyStr} — ${inq.buyer_company || inq.buyer_email}`,
-    html: `<div style="font-family:Arial;max-width:640px"><h2 style="color:#1B3A6B">New order — sourcing required</h2>
-      <p style="font-size:14px"><strong>Quote ref:</strong> ${esc(ref)}<br>
-      <strong>Buyer:</strong> ${esc(inq.buyer_name)} at ${esc(inq.buyer_company)} (${esc(inq.buyer_email)})<br>
-      <strong>Molecule:</strong> ${esc(inq.molecule_name)} (CAS ${esc(inq.cas_number || 'TBC')})<br>
-      <strong>Quantity:</strong> ${esc(qtyStr)} · <strong>Order value:</strong> $${total.toLocaleString()} · <strong>Advance due:</strong> $${advance.toLocaleString()}<br>
-      <strong>Intended use:</strong> ${esc(inq.intended_use || '—')} · <strong>Country:</strong> ${esc(inq.country || '—')}</p>
-      <p>Please begin sourcing. Production starts on advance receipt; target delivery ${eta}.</p>
-      <p><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>`
-  }).catch(() => {});
-
-  await logAgentActivity({ agent_name: AGENT, action_type: 'order_accepted', user_id: null,
-    reasoning: `Order accepted: ${inq.buyer_company || inq.buyer_email} — ${inq.molecule_name} ${qtyStr} = $${total.toLocaleString()} (ref ${ref}).`,
-    source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} ref=${ref} total=${total} advance=${advance} order=${orderId}` }).catch(() => {});
-  return { accepted: true, order_id: orderId, ref, total, advance };
+  await logAgentActivity({ agent_name: AGENT, action_type: 'quote_accepted', user_id: null,
+    reasoning: `Quote accepted: ${inq.buyer_company || inq.buyer_email} — ${inq.molecule_name} ${qtyStr} = $${total.toLocaleString()} (ref ${ref}). Stripe link ${link.url ? 'sent' : 'FAILED: ' + link.error}.`,
+    source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} ref=${ref} total=${total} advance=${advance} stripe=${link.url ? 'ok' : 'err'}` }).catch(() => {});
+  return { accepted: true, ref, total, advance, payment_link: link.url || null, stripe_error: link.error };
 }
 
 // ── Function 4 — generate + send a formal quote ───────────────────────────────
@@ -742,7 +770,7 @@ function parseFromHeader(v) {
 // Find the open inquiry an inbound email is a reply to: first by Gmail thread (a
 // prior processed message in the same thread already mapped to an inquiry), then
 // by From/Reply-To address matching an open inquiry's buyer_email.
-const OPEN_STATUSES = "('new','in_conversation','kyb_pending','kyb_passed','quote_sent','negotiating','accepted','payment_pending','payment_received','in_production','shipped','human_requested')";
+const OPEN_STATUSES = "('new','in_conversation','kyb_pending','kyb_passed','quote_sent','negotiating','accepted','payment_link_sent','payment_pending','payment_received','in_production','shipped','human_requested')";
 async function matchReplyInquiry(candidateEmails, threadId) {
   if (threadId) {
     const t = (await query(
@@ -1012,27 +1040,75 @@ async function seedMoleculePricing() {
   return { seeded, skipped: total - seeded };
 }
 
-// Manual/agent: payment received → move to production + notify sourcing (Stage 6b).
-async function markPaymentReceived(inquiryId) {
+// Payment confirmed (Stripe webhook or manual): open the order, move to production,
+// and notify buyer + Naresh + Palash. Idempotent — safe to call more than once
+// (Stripe may deliver a webhook multiple times).
+async function markPaymentReceived(inquiryId, { amount } = {}) {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
   if (!inq) return { error: 'inquiry not found' };
-  await query(`UPDATE inquiries SET status='in_production', payment_received_at=NOW(), updated_at=NOW() WHERE id=$1`, [inquiryId]);
-  if (inq.order_id) await query(`UPDATE orders SET status='in_production' WHERE id=$1`, [inq.order_id]).catch(() => {});
+  if (['payment_received', 'in_production', 'shipped', 'completed'].includes(inq.status)) {
+    return { ok: true, already: true, status: inq.status };
+  }
   const pricing = await findPricing(inq.molecule_name, inq.cas_number);
   const ptl = productTypeLabelFor(pricing, inq.molecule_name);
+  const qtyStr = `${inq.quantity_requested || ''}${inq.quantity_unit || ''}`;
+  const total = Math.round(inq.order_value_usd || 0);
+  const advance = Math.round(inq.advance_amount || total * 0.5);
   const lead = (await query(`SELECT lead_time_days FROM inquiry_quotes WHERE inquiry_id=$1 ORDER BY created_at DESC LIMIT 1`, [inquiryId])).rows[0]?.lead_time_days || 30;
   const eta = new Date(Date.now() + lead * 86400000).toISOString().slice(0, 10);
+
+  // Create the order (payment_confirmed) if one wasn't already opened for this inquiry.
+  let orderId = inq.order_id;
+  if (!orderId) {
+    orderId = crypto.randomUUID();
+    await query(
+      `INSERT INTO orders (id, order_date, amount, buyer_type, product_category, status, payment_confirmed, notes, created_at)
+       VALUES ($1, to_char(NOW(),'YYYY-MM-DD'), $2, $3, $4, 'in_production', 1, $5, NOW())`,
+      [orderId, total, inq.buyer_type || null, inq.molecule_name,
+       `${inq.quote_ref || ''} · ${inq.buyer_company || inq.buyer_email} · ${qtyStr} · advance $${advance} paid · inquiry ${inquiryId}`]
+    ).catch(e => console.error('[inquiry] order insert failed:', e.message));
+  } else {
+    await query(`UPDATE orders SET status='in_production', payment_confirmed=1 WHERE id=$1`, [orderId]).catch(() => {});
+  }
+  await query(`UPDATE inquiries SET status='in_production', payment_received_at=NOW(), order_id=$2, updated_at=NOW() WHERE id=$1`, [inquiryId, orderId]);
+
+  // Buyer confirmation.
   await sendAndLog(inq, {
-    subject: `Production Confirmed — Order ${inq.quote_ref || ''} — ${inq.molecule_name}`,
-    body: `Dear ${inq.buyer_name || 'Customer'},\n\nGreat news — we've received your advance payment and production is now underway. Estimated delivery: ${eta}.\n\nI'll keep you posted at each milestone; the remaining 50% balance is due before shipment.\n\nThank you for your trust in Abiozen.\n\nWarm regards,\n${REP_NAME}`,
+    subject: `Payment Confirmed — Order ${inq.quote_ref || ''} | Abiozen LLC`,
+    body: `Dear ${inq.buyer_name || 'Customer'},\n\nPayment confirmed — thank you! Production starts today, and your estimated delivery is ${eta}.\n\nI'll keep you posted at each milestone; the remaining 50% balance is due before shipment.\n\nThank you for your trust in Abiozen.\n\nWarm regards,\n${REP_NAME}\n${REP_TITLE}, Abiozen LLC`,
     productTypeLabel: ptl,
   });
+  // WhatsApp Naresh.
+  const naresh = await getNaresh();
+  if (naresh.whatsapp_number) await sendWhatsApp(naresh.whatsapp_number,
+    `💰 PAYMENT RECEIVED — ${inq.buyer_company || inq.buyer_name || inq.buyer_email} — ${inq.molecule_name} $${(amount || advance).toLocaleString()} — Order ${inq.quote_ref || ''}`,
+    { user_id: naresh.id || null, message_type: 'payment_received' }).catch(() => {});
+  // Palash: start production.
   const palash = await getUser('procurement_director');
   if (palash) await sendEmail({ to: palash.email, cc: 'naren@abiozen.com',
-    subject: `PAYMENT RECEIVED — proceed on ${inq.molecule_name} — ${inq.buyer_company || inq.buyer_email}`,
-    html: `<div style="font-family:Arial"><p>Advance received for <strong>${esc(inq.quote_ref || '')}</strong>. Please proceed with sourcing/production of ${esc(inq.molecule_name)} ${esc(inq.quantity_requested)}${esc(inq.quantity_unit)}. Target delivery ${eta}.</p></div>` }).catch(() => {});
-  await logAgentActivity({ agent_name: AGENT, action_type: 'payment_received', reasoning: `Payment received for ${inquiryId} (${inq.quote_ref}).`, source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} status=in_production` }).catch(() => {});
-  return { ok: true, status: 'in_production', eta };
+    subject: `START PRODUCTION — ${inq.molecule_name} ${qtyStr} — Payment confirmed`,
+    html: `<div style="font-family:Arial;max-width:640px"><h2 style="color:#1B3A6B">Payment confirmed — start production</h2>
+      <p style="font-size:14px"><strong>Order:</strong> ${esc(inq.quote_ref || '')} · <strong>Buyer:</strong> ${esc(inq.buyer_company || inq.buyer_email)}<br>
+      <strong>Molecule:</strong> ${esc(inq.molecule_name)} (CAS ${esc(inq.cas_number || 'TBC')}) · <strong>Qty:</strong> ${esc(qtyStr)}<br>
+      <strong>Advance received:</strong> $${(amount || advance).toLocaleString()} · <strong>Order value:</strong> $${total.toLocaleString()} · <strong>Target delivery:</strong> ${eta}</p>
+      <p>Please begin sourcing/production now.</p>
+      <p><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>` }).catch(() => {});
+
+  await logAgentActivity({ agent_name: AGENT, action_type: 'payment_received', reasoning: `Payment received for ${inquiryId} (${inq.quote_ref}) — order ${orderId} in production.`, source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} order=${orderId} status=in_production amount=${amount || advance}` }).catch(() => {});
+  return { ok: true, status: 'in_production', order_id: orderId, eta };
+}
+
+// Map a verified Stripe event to a payment confirmation. Returns a small summary.
+async function handleStripeEvent(event) {
+  const type = event?.type;
+  if (!['checkout.session.completed', 'payment_intent.succeeded'].includes(type)) return { ignored: true, type };
+  const obj = event.data?.object || {};
+  const md = obj.metadata || {};
+  const inquiryId = md.inquiry_id;
+  if (!inquiryId) return { ignored: true, reason: 'no inquiry_id in metadata', type };
+  const amount = Math.round((obj.amount_total || obj.amount_received || obj.amount || 0) / 100) || undefined;
+  const r = await markPaymentReceived(inquiryId, { amount });
+  return { type, inquiry_id: inquiryId, ...r };
 }
 
 // Sales pipeline: kanban columns + weighted revenue forecast (Stage view).
@@ -1040,7 +1116,7 @@ const PIPELINE_COLS = {
   qualifying: ['new', 'in_conversation', 'kyb_pending', 'kyb_passed'],
   quoted: ['quote_sent', 'negotiating'],
   accepted: ['accepted'],
-  payment: ['payment_pending', 'payment_received'],
+  payment: ['payment_link_sent', 'payment_pending', 'payment_received'],
   production: ['in_production'],
   shipped: ['shipped', 'completed'],
 };
@@ -1066,4 +1142,5 @@ module.exports = {
   receiveInquiry, sendFirstResponse, processInboundReply, generateQuote, escalateToHuman,
   handleFollowUp, runInquiryAgent, seedMoleculePricing, findPricing, classifyBuyer,
   pollSalesEmailbox, findStock, findDemand, handleAcceptance, markPaymentReceived, getPipeline,
+  handleStripeEvent, createStripePaymentLink,
 };

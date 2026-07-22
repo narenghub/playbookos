@@ -17,7 +17,7 @@ const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/pr
 const { runMeetAgent, analyzeAndStore } = require('../lib/agents/meet-agent');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
-const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent, pollSalesEmailbox, handleAcceptance, markPaymentReceived, getPipeline } = require('../lib/agents/inquiry-agent');
+const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent, pollSalesEmailbox, handleAcceptance, markPaymentReceived, getPipeline, handleStripeEvent } = require('../lib/agents/inquiry-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1743,6 +1743,30 @@ router.post('/inquiry/receive', async (req, res) => {
     quantity: b.quantity, quantity_unit: b.quantity_unit, intended_use: b.intended_use,
     message: b.message, source: b.source || 'abiozen_form',
   }).catch(e => console.error('[inquiry/receive] receiveInquiry failed:', e.message));
+});
+
+// Stripe webhook — verifies the signature against the RAW body (captured in
+// server.js via express.json's verify hook). No JWT; the Stripe signature is auth.
+// On a completed payment it confirms the order → production. Responds 200 fast.
+router.post('/inquiry/stripe-webhook', async (req, res) => {
+  const secret = process.env.STRIPE_WEBHOOK_SECRET;
+  const sig = req.headers['stripe-signature'];
+  if (!secret) return res.status(503).json({ error: 'STRIPE_WEBHOOK_SECRET not configured' });
+  const raw = req.rawBody;
+  if (!raw || !sig) return res.status(400).json({ error: 'missing signature or raw body' });
+  const parts = Object.fromEntries(String(sig).split(',').map(p => p.split('=')));
+  const t = parts.t, v1 = parts.v1;
+  if (!t || !v1) return res.status(400).json({ error: 'malformed Stripe-Signature header' });
+  const expected = crypto.createHmac('sha256', secret).update(`${t}.${raw.toString('utf8')}`, 'utf8').digest('hex');
+  let valid = false;
+  try { valid = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1)); } catch (_) { valid = false; }
+  if (!valid) return res.status(400).json({ error: 'signature verification failed' });
+  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return res.status(400).json({ error: 'timestamp outside tolerance' });
+  let event;
+  try { event = JSON.parse(raw.toString('utf8')); } catch (_) { return res.status(400).json({ error: 'invalid JSON' }); }
+  // Ack fast, process in the background (Stripe expects a prompt 200).
+  res.status(200).json({ received: true });
+  handleStripeEvent(event).then(r => console.log('[stripe-webhook]', event.type, JSON.stringify(r).slice(0, 200))).catch(e => console.error('[stripe-webhook] failed:', e.message));
 });
 
 router.post('/inquiry/run', authMiddleware, adminOnly, async (req, res) => {

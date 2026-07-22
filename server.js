@@ -39,7 +39,9 @@ const PORT = process.env.PORT || 3000;
 
 app.set('trust proxy', 1);
 app.use(cors());
-app.use(express.json());
+// Keep the raw request bytes so webhook routes (e.g. Stripe) can verify signatures;
+// harmless for every other route, which still receive the parsed JSON body.
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true }));
 
 app.get('/health', async (req, res) => {

@@ -56,6 +56,7 @@ async function initDB() {
       buyer_type TEXT, product_category TEXT, status TEXT DEFAULT 'confirmed',
       notes TEXT, created_at TEXT DEFAULT NOW()
     );
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_confirmed INTEGER DEFAULT 0;
     CREATE TABLE IF NOT EXISTS github_stats (
       id TEXT PRIMARY KEY, github_username TEXT NOT NULL, stat_date TEXT NOT NULL,
       commits INTEGER DEFAULT 0, prs_opened INTEGER DEFAULT 0,
@@ -839,6 +840,7 @@ async function migrateSchemas() {
       ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS accepted_at TEXT;
       ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS payment_received_at TEXT;
       ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS followups_sent INTEGER DEFAULT 0;
+      ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS payment_link_url TEXT;
       CREATE TABLE IF NOT EXISTS inquiry_messages (
         id TEXT PRIMARY KEY,
         inquiry_id TEXT,
