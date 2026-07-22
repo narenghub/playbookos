@@ -96,8 +96,107 @@ async function logMessage(inquiryId, m) {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),NOW())`,
     [crypto.randomUUID(), inquiryId, m.direction, m.sender_name || null, m.sender_email || null, m.subject || null, m.body_text || null, m.body_html || null]);
 }
-async function sendAndLog(inquiry, { subject, body, cc }) {
-  const html = htmlWrap(body);
+// ── Professional email template ───────────────────────────────────────────────
+const LOGO_URL = 'https://playbook.abiozen.com/abiozen-logo.png';
+const productTypeLabelFor = (pricing, molecule) => (productType(pricing, molecule) === 'research_chemical' ? 'Research Chemical' : 'GMP API');
+// Shared executive voice for all AI-written inquiry emails.
+const VOICE = `Voice: confident, specific, and value-focused — executive pharma, never generic, hedging, or fluffy. Where it reads naturally (never forced or in every email), draw on Abiozen's real proof points: ISO 9001 & ISO 27001 certification, rigorous US-based quality control, and an established APAC manufacturing/sourcing network. Never fabricate specifics or over-promise. End with a brief professional sign-off ("Warm regards,\\nAbiozen Sales Team") — do NOT append a postal address, phone, or company block; the email footer already carries that.`;
+
+// AI plain-text body → styled HTML paragraphs for the {EMAIL_BODY_HTML} slot.
+function textToHtml(text) {
+  return String(text || '').trim()
+    .split(/\n{2,}/)
+    .map(p => `<p style="margin:0 0 16px;font-size:15px;line-height:1.65;color:#334155">${esc(p).replace(/\n/g, '<br>')}</p>`)
+    .join('') || '<p style="margin:0;font-size:15px;line-height:1.65;color:#334155"></p>';
+}
+
+// World-class responsive email shell. `bodyHtml` is the message body; `specsTable`
+// is an optional full <tr>…</tr> spec block (quotes only).
+function renderEmail({ moleculeName, cas, productTypeLabel, bodyHtml, specsTable = '' }) {
+  const hero = moleculeName ? `
+<!-- Molecule Hero -->
+<tr><td style="background:#f8fafc;padding:20px 40px;border-bottom:1px solid #e8edf2">
+<table width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td><p style="margin:0;font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:0.5px">Inquiry Reference</p>
+<p style="margin:4px 0 0;font-size:20px;font-weight:700;color:#1B3A6B">${esc(moleculeName)}</p>
+<p style="margin:4px 0 0;font-size:13px;color:#64748b">CAS: ${esc(cas || 'To be confirmed')} &nbsp;|&nbsp; ${esc(productTypeLabel || 'GMP API')}</p></td>
+<td align="right"><span style="background:#E8F5F0;color:#0D7377;padding:6px 14px;border-radius:20px;font-size:12px;font-weight:600">&#10003; Available</span></td>
+</tr></table>
+</td></tr>` : '';
+  return `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:Arial,Helvetica,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:30px 0">
+<tr><td align="center">
+<table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.08)">
+
+<!-- Header -->
+<tr><td style="background:linear-gradient(135deg,#1B3A6B 0%,#0D7377 100%);padding:32px 40px;text-align:center">
+<img src="${LOGO_URL}" alt="Abiozen" height="45" style="display:block;margin:0 auto 12px">
+<p style="color:rgba(255,255,255,0.85);font-size:13px;margin:0;letter-spacing:1px;text-transform:uppercase">Pharmaceutical API Marketplace</p>
+</td></tr>
+${hero}
+<!-- Body -->
+<tr><td style="padding:32px 40px">
+${bodyHtml}
+</td></tr>
+${specsTable}
+<!-- CTA -->
+<tr><td style="padding:0 40px 32px;text-align:center">
+<a href="mailto:sales@abiozen.com" style="background:linear-gradient(135deg,#1D9E75,#0D7377);color:#ffffff;padding:14px 36px;border-radius:30px;font-size:15px;font-weight:700;text-decoration:none;display:inline-block">Reply to Continue &rarr;</a>
+</td></tr>
+
+<!-- Footer -->
+<tr><td style="background:#f8fafc;border-top:1px solid #e8edf2;padding:24px 40px">
+<table width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td><p style="margin:0;font-size:13px;font-weight:600;color:#1B3A6B">Abiozen LLC</p>
+<p style="margin:4px 0 0;font-size:12px;color:#64748b">1333 Barclay Blvd, Suite 1333, Buffalo Grove, IL 60089</p>
+<p style="margin:4px 0 0;font-size:12px;color:#64748b">sales@abiozen.com | abiozen.com</p></td>
+<td align="right">
+<p style="margin:0;font-size:11px;color:#94a3b8">ISO 9001 Certified</p>
+<p style="margin:2px 0 0;font-size:11px;color:#94a3b8">ISO 27001 Certified</p>
+</td>
+</tr></table>
+</td></tr>
+
+</table>
+</td></tr></table>
+</body></html>`;
+}
+
+// Quotation specs table (a full <tr>…</tr> block placed after the body).
+function buildSpecsTable({ molecule, cas, grade, purity, quantity, unitPrice, leadTime, docs, total }) {
+  const money = n => '$' + Number(n || 0).toLocaleString();
+  return `
+<!-- Specs Table -->
+<tr><td style="padding:0 40px 24px">
+<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e8edf2;border-radius:8px;overflow:hidden">
+<tr style="background:#1B3A6B"><td style="padding:10px 16px;color:#fff;font-size:12px;font-weight:600">SPECIFICATION</td><td style="padding:10px 16px;color:#fff;font-size:12px;font-weight:600">DETAILS</td></tr>
+<tr style="background:#f8fafc"><td style="padding:10px 16px;font-size:13px;color:#64748b">Molecule</td><td style="padding:10px 16px;font-size:13px;font-weight:600;color:#1B3A6B">${esc(molecule)}</td></tr>
+<tr><td style="padding:10px 16px;font-size:13px;color:#64748b">CAS Number</td><td style="padding:10px 16px;font-size:13px;color:#333">${esc(cas || 'To be confirmed')}</td></tr>
+<tr style="background:#f8fafc"><td style="padding:10px 16px;font-size:13px;color:#64748b">Grade</td><td style="padding:10px 16px;font-size:13px;color:#333">${esc(grade)}</td></tr>
+<tr><td style="padding:10px 16px;font-size:13px;color:#64748b">Purity</td><td style="padding:10px 16px;font-size:13px;color:#333">${esc(purity)}</td></tr>
+<tr style="background:#f8fafc"><td style="padding:10px 16px;font-size:13px;color:#64748b">Quantity</td><td style="padding:10px 16px;font-size:13px;color:#333">${esc(quantity)}</td></tr>
+<tr><td style="padding:10px 16px;font-size:13px;color:#64748b">Unit Price</td><td style="padding:10px 16px;font-size:13px;font-weight:700;color:#1D9E75">${money(unitPrice)}/kg</td></tr>
+<tr style="background:#f8fafc"><td style="padding:10px 16px;font-size:13px;color:#64748b">Lead Time</td><td style="padding:10px 16px;font-size:13px;color:#333">${esc(leadTime)} days</td></tr>
+<tr><td style="padding:10px 16px;font-size:13px;color:#64748b">Documentation</td><td style="padding:10px 16px;font-size:13px;color:#333">${esc(docs)}</td></tr>
+<tr style="background:#E8F5F0"><td style="padding:12px 16px;font-size:14px;font-weight:700;color:#1B3A6B">Total Estimate</td><td style="padding:12px 16px;font-size:14px;font-weight:700;color:#1D9E75">${money(total)}</td></tr>
+</table>
+</td></tr>`;
+}
+
+async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', productTypeLabel } = {}) {
+  if (!productTypeLabel) {
+    const p = await findPricing(inquiry.molecule_name, inquiry.cas_number);
+    productTypeLabel = productTypeLabelFor(p, inquiry.molecule_name);
+  }
+  const html = renderEmail({
+    moleculeName: inquiry.molecule_name, cas: inquiry.cas_number,
+    productTypeLabel, bodyHtml: textToHtml(body), specsTable,
+  });
   const ok = await sendEmail({ to: inquiry.buyer_email, subject, html, from: SALES_FROM, replyTo: 'sales@abiozen.com', cc });
   await logMessage(inquiry.id, { direction: 'outbound', sender_name: 'Abiozen Sales', sender_email: 'sales@abiozen.com', subject, body_text: body, body_html: html });
   await query(`UPDATE inquiries SET total_emails_sent=COALESCE(total_emails_sent,0)+1, last_email_at=NOW(), updated_at=NOW() WHERE id=$1`, [inquiry.id]);
@@ -187,15 +286,12 @@ Write an email that:
 3. Asks these qualifying questions naturally: ${askBlock}
 4. Sets delivery expectations from the Stock line above (faster if in stock, otherwise the standard lead time of ${lead} days) — state it honestly, do not promise stock we don't have
 5. ${toneLine} Under 200 words.
-Do not commit to a specific final price or a documentation guarantee you cannot verify — keep pricing as "starting at". Return ONLY the email body as plain text, ending with:
-
-Abiozen Sales Team
-Abiozen LLC
-sales@abiozen.com`;
+${VOICE}
+Do not commit to a specific final price or a documentation guarantee you cannot verify — keep pricing as "starting at". Return ONLY the email body as plain text.`;
   const { text, error } = await callClaude(prompt, { maxTokens: 900 });
   if (!text) return { error: error || 'no body' };
   const subject = `Re: Inquiry — ${inq.molecule_name} | Abiozen LLC`;
-  await sendAndLog(inq, { subject, body: text });
+  await sendAndLog(inq, { subject, body: text, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API' });
   await query(`UPDATE inquiries SET status='in_conversation', updated_at=NOW() WHERE id=$1 AND status='new'`, [inquiryId]);
   return { sent: true };
 }
@@ -224,8 +320,10 @@ Buyer's latest reply:
 
 ${supplyLine}
 
+${VOICE}
+
 Return ONLY JSON:
-{"intent":"ready_for_quote|needs_human|still_qualifying","reason":"one line","reply_body":"the email body to send them next — answer their questions using ONLY facts stated above; do not invent prices/docs; if quoting is next, keep it brief and say a formal quote follows"}`,
+{"intent":"ready_for_quote|needs_human|still_qualifying","reason":"one line","reply_body":"the email body to send them next, written in the Voice above — answer their questions using ONLY facts stated above; do not invent prices/docs; if quoting is next, keep it brief and say a formal quote follows"}`,
     { maxTokens: 1200, json: true });
   const intent = data?.intent || 'still_qualifying';
   const replyBody = data?.reply_body || 'Thank you for your reply — a member of our team will follow up shortly.';
@@ -237,11 +335,11 @@ Return ONLY JSON:
     await escalateToHuman(inquiryId, data?.reason || 'buyer requested a human');
     action = 'escalated';
   } else if (intent === 'ready_for_quote') {
-    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`, body: replyBody });
+    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`, body: replyBody, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API' });
     await generateQuote(inquiryId);
     action = 'quoted';
   } else {
-    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`, body: replyBody });
+    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`, body: replyBody, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API' });
     await query(`UPDATE inquiries SET status='in_conversation', updated_at=NOW() WHERE id=$1`, [inquiryId]);
   }
   await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_reply_handled', user_id: null,
@@ -280,32 +378,32 @@ async function generateQuote(inquiryId) {
 
   const isResearch = productType(pricing, inq.molecule_name) === 'research_chemical';
   const gradeLabel = isResearch ? `research grade, ${pricing.purity || '98%+'}` : 'GMP grade';
-  const docLabel = isResearch ? 'COA + SDS' : 'COA / GMP cert';
+  const docsLine = isResearch ? 'COA + SDS' : `COA + GMP cert (DMF/CEP ${pricing.dmf_available ? 'available' : 'on request'})`;
   const signatory = isResearch
-    ? 'Abiozen Sales Team\nAbiozen LLC\nsales@abiozen.com'
-    : 'Palash Das\nProcurement Director\nAbiozen LLC\npalash@abiozen.com';
-  const prompt = `Write a formal ${isResearch ? 'research-chemical' : 'pharmaceutical API'} quotation email from Abiozen LLC. Return ONLY the email body as plain text (no subject).
+    ? 'Warm regards,\nAbiozen Sales Team'
+    : 'Palash Das\nProcurement Director, Abiozen LLC\npalash@abiozen.com';
+  const prompt = `Write the COVER NOTE for a formal ${isResearch ? 'research-chemical' : 'pharmaceutical API'} quotation from Abiozen LLC. A full specification & pricing TABLE is rendered directly below your text, so do NOT re-list every line item or repeat all the numbers. Return ONLY the cover-note body as plain text (no subject).
 
+Context (shown in the table below your note):
 Buyer: ${inq.buyer_name || (isResearch ? 'Research Team' : 'Procurement Team')} at ${inq.buyer_company || 'the buyer'}
 Molecule: ${inq.molecule_name} (CAS ${inq.cas_number || 'to confirm'}), ${gradeLabel}
-Quantity: ${qtyKg} kg
-Unit price: $${unitPrice.toLocaleString()}/kg
-Subtotal: $${apiTotal.toLocaleString()}
-Documentation fee (${docLabel}): $${DOC_FEE}
-Total: $${total.toLocaleString()} (shipping billed separately, TBD by destination)
-Lead time: ${pricing.lead_time_days} days
-Valid until: ${validUntil} (30 days)
-Payment terms: 50% advance, 50% before shipment.
-${isResearch ? 'This is a RESEARCH CHEMICAL (research-use-only) — do NOT reference GMP, DMF, CEP or ICH; keep it technical and concise.' : 'Professional pharma tone; it is appropriate to reference GMP documentation and DMF/CEP.'}
+Quantity ${qtyKg} kg · Unit price $${unitPrice.toLocaleString()}/kg · Total $${total.toLocaleString()} (shipping TBD by destination) · Lead time ${pricing.lead_time_days} days · Valid until ${validUntil}
+${isResearch ? 'RESEARCH CHEMICAL (research-use-only) — do NOT reference GMP, DMF, CEP or ICH.' : 'GMP API — referencing GMP documentation and DMF/CEP is appropriate.'}
 
-Format as a clean formal quotation with clear line items (product price, documentation fee, shipping TBD), the validity date, and payment terms. Add a bank-details placeholder line "[Bank wire details provided on order confirmation]". Do NOT invent bank numbers. End with:
+Write a concise, confident cover note (120-160 words) that greets the buyer, presents the quotation and points them to the specification table below, states payment terms (50% advance, 50% before shipment), notes shipping is quoted separately by destination, and includes a bank-details placeholder line "[Bank wire details provided on order confirmation]" (do NOT invent bank numbers).
+${VOICE}
+End with:
 
 ${signatory}`;
-  const { text } = await callClaude(prompt, { maxTokens: 1400 });
-  const body = (text || `Please find our quotation for ${inq.molecule_name}: ${qtyKg}kg at $${unitPrice}/kg, total $${total}. Valid until ${validUntil}.`)
-    + (needsApproval ? '' : '');
+  const { text } = await callClaude(prompt, { maxTokens: 1200 });
+  const body = text || `Dear ${inq.buyer_name || 'Buyer'},\n\nPlease find our quotation for ${inq.molecule_name} (${qtyKg} kg) in the specification table below. Total estimate $${total.toLocaleString()}, valid until ${validUntil}. Payment terms: 50% advance, 50% before shipment; shipping is quoted separately by destination.\n[Bank wire details provided on order confirmation]\n\n${signatory}`;
+  const specsTable = buildSpecsTable({
+    molecule: inq.molecule_name, cas: inq.cas_number, grade: gradeLabel,
+    purity: pricing.purity || '98%+', quantity: `${qtyKg} kg`, unitPrice,
+    leadTime: pricing.lead_time_days, docs: docsLine, total,
+  });
   const subject = `Quotation — ${inq.molecule_name} (${qtyKg}kg) | Abiozen LLC`;
-  await sendAndLog(inq, { subject, body, cc: isResearch ? ['naren@abiozen.com'] : ['palash@abiozen.com', 'naren@abiozen.com'] });
+  await sendAndLog(inq, { subject, body, specsTable, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API', cc: isResearch ? ['naren@abiozen.com'] : ['palash@abiozen.com', 'naren@abiozen.com'] });
   await query(`UPDATE inquiries SET status='quote_sent', order_value_usd=$1, updated_at=NOW() WHERE id=$2`, [total, inquiryId]);
 
   if (needsApproval || total > ESCALATE_ABOVE) {
@@ -343,7 +441,7 @@ async function escalateToHuman(inquiryId, reason = 'buyer requested a human') {
 
   // Reassure the buyer.
   await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`,
-    body: `Thank you for your message. I'm connecting you with one of our specialists who will personally follow up on your ${inq.molecule_name} requirement within 24 hours.\n\nWe appreciate your interest in working with Abiozen.\n\nAbiozen Sales Team\nAbiozen LLC\nsales@abiozen.com` });
+    body: `Thank you for your message. I'm connecting you with one of our specialists who will personally follow up on your ${inq.molecule_name} requirement within 24 hours.\n\nWe appreciate your interest in working with Abiozen.\n\nWarm regards,\nAbiozen Sales Team` });
   await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_escalated', user_id: null, reasoning: `Escalated inquiry ${inquiryId}: ${reason}.`, source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId}` }).catch(() => {});
   return { escalated: true };
 }
@@ -361,7 +459,7 @@ async function handleFollowUp(inquiry) {
   else if (days >= 7 && sent < 3) stage = ['value', `Following up on ${inquiry.molecule_name} — demand for this molecule remains steady, so I wanted to keep your quote current. Happy to refresh pricing or documentation details whenever it's useful.`];
   else if (days >= 3 && sent < 2) stage = ['gentle', `Just checking that you received our response on ${inquiry.molecule_name}. I'm here if you have any questions on grade, documentation, or lead time.`];
   if (!stage) return null;
-  await sendAndLog(inquiry, { subject: `Re: GMP API Inquiry — ${inquiry.molecule_name}`, body: `Hi ${inquiry.buyer_name || 'there'},\n\n${stage[1]}\n\nAbiozen Sales Team\nAbiozen LLC\nsales@abiozen.com` });
+  await sendAndLog(inquiry, { subject: `Re: Inquiry — ${inquiry.molecule_name}`, body: `Hi ${inquiry.buyer_name || 'there'},\n\n${stage[1]}\n\nWarm regards,\nAbiozen Sales Team` });
   return { inquiry: inquiry.id, action: 'follow_up_' + stage[0] };
 }
 
@@ -447,6 +545,26 @@ function parseFromHeader(v) {
   const e = v.match(/([^\s<]+@[^\s>]+)/);
   return { name: null, email: e ? e[1].trim().toLowerCase() : v.trim().toLowerCase() };
 }
+// Find the open inquiry an inbound email is a reply to: first by Gmail thread (a
+// prior processed message in the same thread already mapped to an inquiry), then
+// by From/Reply-To address matching an open inquiry's buyer_email.
+const OPEN_STATUSES = "('new','in_conversation','quote_sent','human_requested')";
+async function matchReplyInquiry(candidateEmails, threadId) {
+  if (threadId) {
+    const t = (await query(
+      `SELECT i.id FROM processed_emails p JOIN inquiries i ON i.id=p.inquiry_id
+       WHERE p.thread_id=$1 AND p.inquiry_id IS NOT NULL AND i.status IN ${OPEN_STATUSES}
+       ORDER BY p.processed_at DESC LIMIT 1`, [threadId])).rows[0];
+    if (t) return t.id;
+  }
+  for (const em of (candidateEmails || [])) {
+    const r = (await query(
+      `SELECT id FROM inquiries WHERE LOWER(buyer_email)=LOWER($1) AND status IN ${OPEN_STATUSES} ORDER BY created_at DESC LIMIT 1`,
+      [em])).rows[0];
+    if (r) return r.id;
+  }
+  return null;
+}
 
 async function pollSalesEmailbox({ dryRun = false, maxMessages = 40 } = {}) {
   const out = {
@@ -476,17 +594,19 @@ async function pollSalesEmailbox({ dryRun = false, maxMessages = 40 } = {}) {
     list = await res.json();
   } catch (e) { out.errors.push('list: ' + e.message); await pollLog(out, dryRun); return out; }
 
-  const ids = (list.messages || []).map(m => m.id);
-  out.listed = ids.length;
+  const msgRefs = list.messages || [];
+  out.listed = msgRefs.length;
   const sample = (subject, from, decision) => { if (out.samples.length < 12) out.samples.push({ subject: (subject || '(no subject)').slice(0, 60), from: from || '?', decision }); };
 
-  for (const gmailId of ids) {
+  for (const mref of msgRefs) {
+    const gmailId = mref.id;
+    const threadId = mref.threadId || null;
     try {
-      // Idempotency: claim each id once (at-most-once). Already-seen → skip cheaply
-      // without re-fetching. Skips below are NOT marked read (left for a human) but
-      // stay claimed, so they aren't re-processed.
+      // Idempotency: claim each id once (at-most-once), recording its Gmail thread
+      // so later messages in the thread route to the same inquiry. Already-seen →
+      // skip cheaply. Skips below stay claimed (not re-processed) but unread.
       if (!dryRun) {
-        const claimed = await query(`INSERT INTO processed_emails (id, source, processed_at) VALUES ($1,'gmail',NOW()) ON CONFLICT (id) DO NOTHING RETURNING id`, [gmailId]);
+        const claimed = await query(`INSERT INTO processed_emails (id, source, thread_id, processed_at) VALUES ($1,'gmail',$2,NOW()) ON CONFLICT (id) DO NOTHING RETURNING id`, [gmailId, threadId]);
         if (!claimed.rows.length) { out.skipped_seen++; continue; }
       }
       out.checked++;
@@ -495,10 +615,25 @@ async function pollSalesEmailbox({ dryRun = false, maxMessages = 40 } = {}) {
       const msg = await detailRes.json();
       const subject = gmailHeader(msg.payload, 'Subject');
       const from = parseFromHeader(gmailHeader(msg.payload, 'From'));
+      const replyTo = parseFromHeader(gmailHeader(msg.payload, 'Reply-To'));
       const body = extractGmailBody(msg.payload) || msg.snippet || '';
 
-      // Subject filter: keep if empty/None OR contains any inquiry keyword. A
-      // non-matching subject is inbox spam/noise — mark it read (after logging the
+      // REPLY DETECTION — runs BEFORE the subject filter, because a known buyer
+      // replying is always relevant whatever the subject line reads. Matches on the
+      // Gmail thread, then the From / Reply-To address vs an open inquiry.
+      const candidateEmails = [from.email, replyTo.email].filter(e => e && !/@abiozen\.com$/i.test(e));
+      const replyInquiryId = await matchReplyInquiry(candidateEmails, threadId);
+      if (replyInquiryId) {
+        if (dryRun) { out.replies_routed++; sample(subject, candidateEmails[0] || from.email, 'reply(dry)'); continue; }
+        await processInboundReply(replyInquiryId, `Subject: ${subject}\n\n${body}`);
+        await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [replyInquiryId, gmailId]).catch(() => {});
+        out.replies_routed++; sample(subject, candidateEmails[0] || from.email, 'reply');
+        await markGmailRead(user, gmailId, tok.access_token, dryRun);
+        continue;
+      }
+
+      // Subject filter (non-replies only): keep if empty/None OR contains a keyword.
+      // A non-matching subject is inbox spam/noise — mark it read (after logging the
       // sample) so it leaves the unread window and doesn't crowd out real RFQs.
       const subjLower = String(subject || '').toLowerCase();
       const subjEmpty = !subject || !subject.trim();
@@ -515,21 +650,6 @@ async function pollSalesEmailbox({ dryRun = false, maxMessages = 40 } = {}) {
       const contactFormBody = /inquiry type\s*:/i.test(body) || (/\bname\s*:/i.test(body) && /\bemail\s*:\s*[^\s@]+@[^\s]+/i.test(body));
       const isRelay = relaySender || contactFormBody;
       if (internal && !isRelay) { out.skipped_internal++; sample(subject, from.email, 'skip:internal'); continue; }
-
-      // Fast path: a direct external reply from a known open buyer → route it.
-      if (!isRelay) {
-        const open = (await query(
-          `SELECT id FROM inquiries WHERE LOWER(buyer_email)=LOWER($1) AND status IN ('new','in_conversation','quote_sent','human_requested') ORDER BY created_at DESC LIMIT 1`,
-          [from.email])).rows[0];
-        if (open) {
-          if (dryRun) { out.replies_routed++; sample(subject, from.email, 'reply(dry)'); continue; }
-          await processInboundReply(open.id, `Subject: ${subject}\n\n${body}`);
-          await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [open.id, gmailId]).catch(() => {});
-          out.replies_routed++; sample(subject, from.email, 'reply');
-          await markGmailRead(user, gmailId, tok.access_token, dryRun);
-          continue;
-        }
-      }
 
       const { data } = await callClaude(
         `Extract structured fields from this inbound sales email to a chemical/API supplier (Abiozen). The product may be a RESEARCH CHEMICAL or a PHARMACEUTICAL API — both are valid inquiries.

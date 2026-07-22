@@ -847,8 +847,11 @@ async function migrateSchemas() {
         id TEXT PRIMARY KEY,
         source TEXT,
         inquiry_id TEXT,
+        thread_id TEXT,
         processed_at TEXT DEFAULT NOW()
       );
+      ALTER TABLE processed_emails ADD COLUMN IF NOT EXISTS thread_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_processed_emails_thread ON processed_emails (thread_id);
       CREATE TABLE IF NOT EXISTS molecule_pricing (
         id TEXT PRIMARY KEY,
         molecule_name TEXT NOT NULL,
