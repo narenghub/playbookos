@@ -409,7 +409,12 @@ async function runInquiryAgent({ dryRun = false } = {}) {
 // conversation. Degrades gracefully: the shared GOOGLE_REFRESH_TOKEN is
 // GSC-scoped, so Gmail may 401/403 for lack of scope — then it returns a warning
 // and never throws.
-const INQUIRY_SUBJECT_KEYWORDS = ['quote', 'inquiry', 'enquiry', 'rfq', 'request', 'api', 'molecule'];
+// Matched client-side (substring, case-insensitive) so multi-word phrases and
+// the "Contact Form: …" subject the abiozen contact form sends both match.
+const INQUIRY_SUBJECT_KEYWORDS = [
+  'quote', 'quote request', 'inquiry', 'enquiry', 'rfq', 'request', 'api', 'molecule',
+  'contact', 'product', 'form', 'submission', 'new message', 'message', 'pricing', 'sample', 'order',
+];
 // Gmail API userId: 'me' resolves to the impersonated mailbox (sales@abiozen.com).
 const GMAIL_USER = () => process.env.SALES_GMAIL_USER || 'me';
 const SALES_MAILBOX = () => process.env.SALES_MAILBOX_EMAIL || 'sales@abiozen.com';
@@ -443,31 +448,46 @@ function parseFromHeader(v) {
   return { name: null, email: e ? e[1].trim().toLowerCase() : v.trim().toLowerCase() };
 }
 
-async function pollSalesEmailbox({ dryRun = false, maxMessages = 25 } = {}) {
-  const out = { checked: 0, new_inquiries: 0, replies_routed: 0, skipped: 0, errors: [] };
+async function pollSalesEmailbox({ dryRun = false, maxMessages = 40 } = {}) {
+  const out = {
+    listed: 0, checked: 0, new_inquiries: 0, replies_routed: 0,
+    skipped_seen: 0, skipped_subject: 0, skipped_internal: 0, skipped_no_sender: 0,
+    skipped_not_inquiry: 0, skipped_no_buyer: 0, skipped: 0, samples: [], errors: [],
+  };
   const tok = await getGoogleAccessToken();
-  if (tok.error) { out.warning = `Gmail poll skipped — ${tok.error}. Check the service account (DWD) can impersonate ${SALES_MAILBOX()}.`; return out; }
+  if (tok.error) {
+    out.warning = `Gmail poll skipped — ${tok.error}. Check the service account (DWD) can impersonate ${SALES_MAILBOX()}.`;
+    await pollLog(out, dryRun); return out;
+  }
 
   const user = encodeURIComponent(GMAIL_USER());
-  const q = encodeURIComponent(`is:unread newer_than:7d subject:(${INQUIRY_SUBJECT_KEYWORDS.join(' OR ')})`);
+  // Fetch recent unread and filter subjects CLIENT-SIDE: multi-word keywords match
+  // by substring, and empty-subject emails are still processed (a server-side
+  // subject: query would exclude them and tokenize awkwardly).
+  const q = encodeURIComponent('is:unread newer_than:7d');
   let list;
   try {
     const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages?q=${q}&maxResults=${maxMessages}`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
     if (!res.ok) {
       const body = (await res.text()).slice(0, 200);
       out.warning = `Gmail list ${res.status}: ${body}. Check the Gmail API is enabled in the service account's Cloud project and that DWD can impersonate ${SALES_MAILBOX()}.`;
-      return out;
+      await pollLog(out, dryRun); return out;
     }
     list = await res.json();
-  } catch (e) { out.errors.push('list: ' + e.message); return out; }
+  } catch (e) { out.errors.push('list: ' + e.message); await pollLog(out, dryRun); return out; }
 
   const ids = (list.messages || []).map(m => m.id);
+  out.listed = ids.length;
+  const sample = (subject, from, decision) => { if (out.samples.length < 12) out.samples.push({ subject: (subject || '(no subject)').slice(0, 60), from: from || '?', decision }); };
+
   for (const gmailId of ids) {
     try {
-      // Idempotency: claim this Gmail message id; skip if already processed.
+      // Idempotency: claim each id once (at-most-once). Already-seen → skip cheaply
+      // without re-fetching. Skips below are NOT marked read (left for a human) but
+      // stay claimed, so they aren't re-processed.
       if (!dryRun) {
         const claimed = await query(`INSERT INTO processed_emails (id, source, processed_at) VALUES ($1,'gmail',NOW()) ON CONFLICT (id) DO NOTHING RETURNING id`, [gmailId]);
-        if (!claimed.rows.length) { out.skipped++; continue; }
+        if (!claimed.rows.length) { out.skipped_seen++; continue; }
       }
       out.checked++;
       const detailRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages/${gmailId}?format=full`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
@@ -477,40 +497,41 @@ async function pollSalesEmailbox({ dryRun = false, maxMessages = 25 } = {}) {
       const from = parseFromHeader(gmailHeader(msg.payload, 'From'));
       const body = extractGmailBody(msg.payload) || msg.snippet || '';
 
-      if (!from.email) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
-      // Detect a relayed contact-form/website email: the sender is our own site
-      // (noreply@, contact@, abiozen domain) or the body is a contact-form dump —
-      // the REAL buyer's name/email are in the BODY, not the From header.
+      // Subject filter: keep if empty/None OR contains any inquiry keyword.
+      const subjLower = String(subject || '').toLowerCase();
+      const subjEmpty = !subject || !subject.trim();
+      if (!subjEmpty && !INQUIRY_SUBJECT_KEYWORDS.some(k => subjLower.includes(k))) {
+        out.skipped_subject++; sample(subject, from.email, 'skip:subject-no-keyword'); continue;
+      }
+      if (!from.email) { out.skipped_no_sender++; sample(subject, null, 'skip:no-sender'); continue; }
+
+      // Relay detection (contact-form/website): the buyer is in the BODY, not From.
       const internal = /@abiozen\.com$/i.test(from.email);
       const relaySender = /^(noreply|no-reply|do-not-reply|contact|mailer|forms?|website|wordpress|notifications?|hello|info)@/i.test(from.email);
       const contactFormBody = /inquiry type\s*:/i.test(body) || (/\bname\s*:/i.test(body) && /\bemail\s*:\s*[^\s@]+@[^\s]+/i.test(body));
       const isRelay = relaySender || contactFormBody;
+      if (internal && !isRelay) { out.skipped_internal++; sample(subject, from.email, 'skip:internal'); continue; }
 
-      // Genuinely internal mail (an abiozen person/system that isn't a buyer relay) → skip.
-      if (internal && !isRelay) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
-
-      // Fast path: a direct external reply from a known open buyer → route it (no Claude call).
+      // Fast path: a direct external reply from a known open buyer → route it.
       if (!isRelay) {
         const open = (await query(
           `SELECT id FROM inquiries WHERE LOWER(buyer_email)=LOWER($1) AND status IN ('new','in_conversation','quote_sent','human_requested') ORDER BY created_at DESC LIMIT 1`,
           [from.email])).rows[0];
         if (open) {
-          if (dryRun) { out.replies_routed++; continue; }
+          if (dryRun) { out.replies_routed++; sample(subject, from.email, 'reply(dry)'); continue; }
           await processInboundReply(open.id, `Subject: ${subject}\n\n${body}`);
           await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [open.id, gmailId]).catch(() => {});
-          out.replies_routed++;
+          out.replies_routed++; sample(subject, from.email, 'reply');
           await markGmailRead(user, gmailId, tok.access_token, dryRun);
           continue;
         }
       }
 
-      // Claude-extract fields. Products may be research chemicals OR APIs; for
-      // relays the buyer's real name/email are pulled from the body.
       const { data } = await callClaude(
         `Extract structured fields from this inbound sales email to a chemical/API supplier (Abiozen). The product may be a RESEARCH CHEMICAL or a PHARMACEUTICAL API — both are valid inquiries.
 
 From header: ${gmailHeader(msg.payload, 'From')}
-Subject: ${subject}
+Subject: ${subject || '(no subject)'}
 Body:
 """${body.slice(0, 4000)}"""
 
@@ -521,26 +542,24 @@ Return ONLY JSON:
 Set "is_inquiry": false ONLY if this is clearly NOT a buyer inquiry (newsletter, auto-reply, spam, internal notice).`,
         { maxTokens: 700, json: true });
 
-      if (!data || data.is_inquiry === false) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
+      if (!data || data.is_inquiry === false) { out.skipped_not_inquiry++; sample(subject, from.email, 'skip:not-inquiry'); continue; }
 
-      // Resolve the buyer email: extracted (body for relays) → else the From address.
       let buyerEmail = (data.buyer_email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(data.buyer_email).trim())) ? String(data.buyer_email).trim().toLowerCase() : null;
       if (!buyerEmail && !isRelay) buyerEmail = from.email;
-      if (!buyerEmail || /@abiozen\.com$/i.test(buyerEmail)) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
+      if (!buyerEmail || /@abiozen\.com$/i.test(buyerEmail)) { out.skipped_no_buyer++; sample(subject, from.email, 'skip:no-buyer-email'); continue; }
 
-      // Known open buyer → route as a reply; otherwise open a new inquiry.
       const openByBuyer = (await query(
         `SELECT id FROM inquiries WHERE LOWER(buyer_email)=LOWER($1) AND status IN ('new','in_conversation','quote_sent','human_requested') ORDER BY created_at DESC LIMIT 1`,
         [buyerEmail])).rows[0];
       if (openByBuyer) {
-        if (dryRun) { out.replies_routed++; continue; }
+        if (dryRun) { out.replies_routed++; sample(subject, buyerEmail, 'reply(dry)'); continue; }
         await processInboundReply(openByBuyer.id, `Subject: ${subject}\n\n${body}`);
         await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [openByBuyer.id, gmailId]).catch(() => {});
-        out.replies_routed++;
+        out.replies_routed++; sample(subject, buyerEmail, 'reply');
         await markGmailRead(user, gmailId, tok.access_token, dryRun);
         continue;
       }
-      if (dryRun) { out.new_inquiries++; continue; }
+      if (dryRun) { out.new_inquiries++; sample(subject, buyerEmail, 'new(dry)'); continue; }
 
       const inquiryId = await receiveInquiry({
         molecule_name: data.molecule_name || null,
@@ -556,18 +575,36 @@ Set "is_inquiry": false ONLY if this is clearly NOT a buyer inquiry (newsletter,
         source: 'email',
       });
       await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [inquiryId, gmailId]).catch(() => {});
-      out.new_inquiries++;
+      out.new_inquiries++; sample(subject, buyerEmail, 'new_inquiry');
       await markGmailRead(user, gmailId, tok.access_token, dryRun);
     } catch (e) { out.errors.push(`${gmailId}: ${e.message}`); }
   }
 
-  if (!dryRun && (out.new_inquiries || out.replies_routed)) {
-    await logAgentActivity({ agent_name: AGENT, action_type: 'sales_mailbox_polled', user_id: null,
-      reasoning: `Polled sales@ mailbox: ${out.new_inquiries} new inquiries, ${out.replies_routed} replies routed.`,
-      source_kpi: 'kpi-sg-sales', output_summary: `new=${out.new_inquiries} replies=${out.replies_routed} skipped=${out.skipped}` }).catch(() => {});
-  }
+  out.skipped = out.skipped_subject + out.skipped_internal + out.skipped_no_sender + out.skipped_not_inquiry + out.skipped_no_buyer;
+  await pollLog(out, dryRun);
   return out;
 }
+
+// Log a detailed poll summary to agent_activity_log: what was found and why each
+// message was skipped (subject samples + decisions), for debugging the mailbox.
+async function pollLog(out, dryRun) {
+  if (dryRun) return;
+  if (!out.checked && !out.warning && !(out.errors && out.errors.length)) return; // nothing new to report
+  const reasons = [];
+  if (out.skipped_subject) reasons.push(`${out.skipped_subject} subject-no-keyword`);
+  if (out.skipped_not_inquiry) reasons.push(`${out.skipped_not_inquiry} not-inquiry`);
+  if (out.skipped_internal) reasons.push(`${out.skipped_internal} internal`);
+  if (out.skipped_no_buyer) reasons.push(`${out.skipped_no_buyer} no-buyer-email`);
+  if (out.skipped_no_sender) reasons.push(`${out.skipped_no_sender} no-sender`);
+  const samples = (out.samples || []).map(s => `"${s.subject}" <${s.from}> → ${s.decision}`).join(' | ');
+  const reasoning = `Polled ${SALES_MAILBOX()}: listed ${out.listed} unread, ${out.checked} new, ${out.skipped_seen} already-seen. Created ${out.new_inquiries} inquiries, routed ${out.replies_routed} replies. Skipped: ${reasons.join(', ') || 'none'}.${out.warning ? ' WARNING: ' + out.warning : ''}${out.errors && out.errors.length ? ' ERRORS: ' + out.errors.slice(0, 5).join('; ') : ''}${samples ? ' Samples: ' + samples : ''}`.slice(0, 3000);
+  await logAgentActivity({
+    agent_name: AGENT, action_type: 'sales_mailbox_polled', user_id: null,
+    reasoning, source_kpi: 'kpi-sg-sales',
+    output_summary: `listed=${out.listed} new=${out.checked} inq=${out.new_inquiries} replies=${out.replies_routed} skip=${out.skipped}${out.warning ? ' WARN' : ''}`.slice(0, 300),
+  }).catch(() => {});
+}
+
 // Best-effort: drop the UNREAD label (needs gmail.modify scope). Non-fatal.
 async function markGmailRead(user, gmailId, accessToken, dryRun) {
   if (dryRun) return;
@@ -577,40 +614,6 @@ async function markGmailRead(user, gmailId, accessToken, dryRun) {
       body: JSON.stringify({ removeLabelIds: ['UNREAD'] }),
     });
   } catch (_) {}
-}
-
-// Diagnostic: exercise the Gmail connection end-to-end and report exactly where
-// it stands (auth method, API/mailbox reachability, unread inquiry count).
-async function gmailConnectionTest() {
-  const out = { auth_method: null, gmail_accessible: false, messages_found: null, error_if_any: null, sales_email_valid: null, mailbox: SALES_MAILBOX() };
-  const tok = await getGoogleAccessToken();
-  if (tok.error) { out.error_if_any = tok.error; return out; }
-  out.auth_method = tok.via;
-  const user = encodeURIComponent(GMAIL_USER());
-  try {
-    // getProfile validates BOTH: Gmail API enabled (403 if not) and the mailbox
-    // is a real Workspace user vs a bare alias (400 failedPrecondition).
-    const profRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/profile`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
-    if (!profRes.ok) {
-      const body = (await profRes.text()).slice(0, 400);
-      out.error_if_any = `getProfile ${profRes.status}: ${body}`;
-      if (profRes.status === 400) out.sales_email_valid = false; // alias, not a full mailbox
-      else if (/gmail.*not been used|has not been enabled|is disabled/i.test(body)) out.error_if_any += ' — enable the Gmail API in the service account\'s Cloud project.';
-      return out;
-    }
-    const prof = await profRes.json();
-    out.sales_email_valid = true;
-    out.mailbox = prof.emailAddress || out.mailbox;
-    out.mailbox_messages_total = prof.messagesTotal;
-    const q = encodeURIComponent(`is:unread newer_than:7d subject:(${INQUIRY_SUBJECT_KEYWORDS.join(' OR ')})`);
-    const listRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages?q=${q}&maxResults=10`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
-    if (!listRes.ok) { out.error_if_any = `messages.list ${listRes.status}: ${(await listRes.text()).slice(0, 300)}`; return out; }
-    const list = await listRes.json();
-    out.gmail_accessible = true;
-    out.messages_found = (list.messages || []).length;
-    out.result_size_estimate = list.resultSizeEstimate;
-    return out;
-  } catch (e) { out.error_if_any = e.message; return out; }
 }
 
 // ── PART 2 — molecule pricing seed (20 GMP APIs) ──────────────────────────────
@@ -694,5 +697,5 @@ async function seedMoleculePricing() {
 module.exports = {
   receiveInquiry, sendFirstResponse, processInboundReply, generateQuote, escalateToHuman,
   handleFollowUp, runInquiryAgent, seedMoleculePricing, findPricing, classifyBuyer,
-  pollSalesEmailbox, findStock, findDemand, gmailConnectionTest,
+  pollSalesEmailbox, findStock, findDemand,
 };
