@@ -21,7 +21,7 @@ const { runProcurementAgent, checkNoResponse, seedSupplierDatabase } = require('
 const { runMeetAgent } = require('./src/lib/agents/meet-agent');
 const { runResearchAgent, runWeeklyDigest } = require('./src/lib/agents/research-agent');
 const { runReorderAgent } = require('./src/lib/agents/reorder-agent');
-const { runInquiryAgent } = require('./src/lib/agents/inquiry-agent');
+const { runInquiryAgent, pollSalesEmailbox } = require('./src/lib/agents/inquiry-agent');
 const { businessToday } = require('./src/lib/agent-core');
 const routes = require('./src/api/routes');
 
@@ -299,8 +299,10 @@ cron.schedule('0 9 * * *', withAlerts('daily-9cst-inquiry-agent', async () => {
 
 // Hourly :45 — placeholder for inbound-reply polling (manual/webhook driven for now).
 cron.schedule('45 * * * *', withAlerts('hourly-45-inquiry-poll', async () => {
-  // No IMAP poller wired yet; inbound replies arrive via POST /api/inquiry/:id/reply
-  // or a future inbound-email webhook. This tick keeps the schedule slot reserved.
+  // Poll sales@abiozen.com for new inquiry emails: open new inquiries (auto-send
+  // the AI first response) and route buyer replies into their open threads.
+  const r = await pollSalesEmailbox();
+  console.log(`[CRON] Sales mailbox poll — ${r.new_inquiries} new, ${r.replies_routed} replies, ${r.skipped} skipped${r.warning ? ' · ' + r.warning : ''}`);
 }), CST);
 
 // Wednesday 10am CST — Reorder Agent: mid-week reorder sweep of past buyers.

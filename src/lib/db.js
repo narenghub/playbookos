@@ -843,6 +843,12 @@ async function migrateSchemas() {
         created_at TEXT DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_inq_msg ON inquiry_messages (inquiry_id, created_at);
+      CREATE TABLE IF NOT EXISTS processed_emails (
+        id TEXT PRIMARY KEY,
+        source TEXT,
+        inquiry_id TEXT,
+        processed_at TEXT DEFAULT NOW()
+      );
       CREATE TABLE IF NOT EXISTS molecule_pricing (
         id TEXT PRIMARY KEY,
         molecule_name TEXT NOT NULL,

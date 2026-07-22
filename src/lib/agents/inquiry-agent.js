@@ -55,6 +55,31 @@ async function findPricing(molecule, cas) {
     [molecule || '', cas || null]
   )).rows[0] || null;
 }
+// Stock availability from the SKU catalog (units on hand + demand trend). SKU
+// names carry a purity suffix (e.g. "Semaglutide 99%"), so match on the molecule
+// as a name prefix as well as exact.
+async function findStock(molecule) {
+  if (!molecule || String(molecule).trim().length < 3) return null;
+  return (await query(
+    `SELECT name, units_in_stock, demand_trend, lead_time_days, is_gmp, sale_price
+     FROM skus WHERE is_active=1 AND (LOWER(name)=LOWER($1) OR LOWER(name) LIKE LOWER($1) || '%')
+     ORDER BY units_in_stock DESC LIMIT 1`,
+    [molecule]
+  )).rows[0] || null;
+}
+// Demand context from the last ~12 weeks of Market Intelligence scans.
+async function findDemand(molecule, cas) {
+  if (!molecule && !cas) return null;
+  const r = (await query(
+    `SELECT COUNT(*)::int appearances, MIN(rank) best_rank, MAX(week_start) latest_week,
+            MAX(therapeutic_area) therapeutic_area, MAX(estimated_value) est_value
+     FROM molecule_history
+     WHERE (LOWER(molecule_name)=LOWER($1) OR (cas_number IS NOT NULL AND cas_number=$2))
+       AND week_start >= to_char((NOW() - INTERVAL '84 days'), 'YYYY-MM-DD')`,
+    [molecule || '', cas || null]
+  )).rows[0];
+  return (r && r.appearances > 0) ? r : null;
+}
 async function logMessage(inquiryId, m) {
   await query(
     `INSERT INTO inquiry_messages (id, inquiry_id, direction, sender_name, sender_email, subject, body_text, body_html, sent_at, created_at)
@@ -114,20 +139,30 @@ async function sendFirstResponse(inquiryId) {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
   if (!inq) return { error: 'inquiry not found' };
   const pricing = await findPricing(inq.molecule_name, inq.cas_number);
+  const stock = await findStock(inq.molecule_name);
+  const demand = await findDemand(inq.molecule_name, inq.cas_number);
   const priceLine = pricing ? `${pricing.price_per_kg_usd >= 1000 ? '$' + Number(pricing.price_per_kg_usd).toLocaleString() : '$' + pricing.price_per_kg_usd}/kg` : 'available on request';
   const lead = pricing?.lead_time_days || 30;
+  const stockLine = stock && stock.units_in_stock > 0
+    ? `Stock: we currently hold ${stock.units_in_stock} unit(s) on hand — delivery can be faster than the standard lead time.`
+    : `Stock: this is sourced/produced to order — the standard lead time applies.`;
+  const demandLine = demand
+    ? `Internal demand signal (context only, not for the buyer's eyes): this molecule appeared in ${demand.appearances} recent market-intelligence scan(s)${demand.best_rank ? `, best rank ${demand.best_rank}` : ''}${demand.therapeutic_area ? `, area ${demand.therapeutic_area}` : ''}. Demand is active — you MAY convey a sense that quality supply is in demand, but do NOT fabricate specific scarcity figures or deadlines.`
+    : `Internal demand signal: none tracked for this molecule.`;
   const prompt = `Write a professional first response email for a GMP pharmaceutical API inquiry.
 
 Buyer: ${inq.buyer_name || 'there'} at ${inq.buyer_company || 'your organization'}
 Molecule: ${inq.molecule_name} (CAS: ${inq.cas_number || 'to confirm'})
 Quantity requested: ${inq.quantity_requested ? inq.quantity_requested + inq.quantity_unit : 'to confirm'}
 We have this molecule available. Pricing starts at ${priceLine}.
+${stockLine}
+${demandLine}
 
 Write an email that:
 1. Acknowledges their inquiry warmly and professionally
 2. Confirms we have the molecule in GMP grade
 3. Asks these qualifying questions naturally: intended use (compounding/research/manufacturing); required documentation (USP/EP grade, GMP cert, DMF, COA format); delivery timeline needed; destination country (for export compliance); whether they need a 1-5 g evaluation sample first
-4. Mentions our standard lead time of ${lead} days
+4. Sets delivery expectations from the Stock line above (faster if in stock, otherwise the standard lead time of ${lead} days) — state it honestly, do not promise stock we don't have
 5. Is warm but professional — pharma industry tone; under 200 words
 Do not commit to a specific final price or a documentation guarantee you cannot verify — keep pricing as "starting at". Return ONLY the email body as plain text, ending with:
 
@@ -335,6 +370,158 @@ async function runInquiryAgent({ dryRun = false } = {}) {
   return out;
 }
 
+// ── Function 8 — poll the sales mailbox for new inquiry emails ────────────────
+// Reads UNREAD, inquiry-like messages at sales@abiozen.com via the Gmail REST
+// API (same Google OAuth refresh-token flow as GSC/Meet), extracts buyer +
+// molecule + quantity with Claude, and either opens a new inquiry (auto-sends
+// the AI first response) or routes a reply from a known buyer into its existing
+// conversation. Degrades gracefully: the shared GOOGLE_REFRESH_TOKEN is
+// GSC-scoped, so Gmail may 401/403 for lack of scope — then it returns a warning
+// and never throws.
+const INQUIRY_SUBJECT_KEYWORDS = ['quote', 'inquiry', 'enquiry', 'rfq', 'request', 'api', 'molecule'];
+const GMAIL_USER = () => process.env.SALES_GMAIL_USER || 'me';
+
+async function getGoogleAccessToken() {
+  const clientId = process.env.GOOGLE_CLIENT_ID, clientSecret = process.env.GOOGLE_CLIENT_SECRET, refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+  if (!clientId || !clientSecret || !refreshToken) return { error: 'Google OAuth env vars not configured' };
+  try {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }).toString(),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.access_token) return { error: `OAuth token ${res.status}: ${JSON.stringify(data).slice(0, 160)}` };
+    return { access_token: data.access_token };
+  } catch (e) { return { error: e.message }; }
+}
+function b64urlDecode(d) { return Buffer.from(String(d || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); }
+function gmailHeader(payload, name) {
+  const h = (payload?.headers || []).find(x => x.name.toLowerCase() === name.toLowerCase());
+  return h ? h.value : '';
+}
+function extractGmailBody(payload) {
+  const walk = p => {
+    if (!p) return '';
+    if (p.mimeType === 'text/plain' && p.body?.data) return b64urlDecode(p.body.data);
+    if (p.parts) { for (const sub of p.parts) { const t = walk(sub); if (t) return t; } }
+    if (p.mimeType === 'text/html' && p.body?.data) return b64urlDecode(p.body.data).replace(/<[^>]+>/g, ' ');
+    if (p.body?.data) return b64urlDecode(p.body.data);
+    return '';
+  };
+  return String(walk(payload) || '').replace(/\r/g, '').slice(0, 8000);
+}
+function parseFromHeader(v) {
+  if (!v) return { name: null, email: null };
+  const m = v.match(/^\s*"?([^"<]*?)"?\s*<([^>]+)>/);
+  if (m) return { name: (m[1] || '').trim() || null, email: m[2].trim().toLowerCase() };
+  const e = v.match(/([^\s<]+@[^\s>]+)/);
+  return { name: null, email: e ? e[1].trim().toLowerCase() : v.trim().toLowerCase() };
+}
+
+async function pollSalesEmailbox({ dryRun = false, maxMessages = 25 } = {}) {
+  const out = { checked: 0, new_inquiries: 0, replies_routed: 0, skipped: 0, errors: [] };
+  const tok = await getGoogleAccessToken();
+  if (tok.error) { out.warning = `Gmail poll skipped — ${tok.error}. The shared Google token is GSC-scoped; grant Gmail read access on sales@abiozen.com to enable.`; return out; }
+
+  const user = encodeURIComponent(GMAIL_USER());
+  const q = encodeURIComponent(`is:unread newer_than:7d subject:(${INQUIRY_SUBJECT_KEYWORDS.join(' OR ')})`);
+  let list;
+  try {
+    const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages?q=${q}&maxResults=${maxMessages}`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 200);
+      out.warning = `Gmail list ${res.status}: ${body}. The shared GOOGLE_REFRESH_TOKEN is likely GSC-scoped and lacks Gmail scope — re-consent with gmail.readonly (+ gmail.modify to mark read) on the sales@abiozen.com account.`;
+      return out;
+    }
+    list = await res.json();
+  } catch (e) { out.errors.push('list: ' + e.message); return out; }
+
+  const ids = (list.messages || []).map(m => m.id);
+  for (const gmailId of ids) {
+    try {
+      // Idempotency: claim this Gmail message id; skip if already processed.
+      if (!dryRun) {
+        const claimed = await query(`INSERT INTO processed_emails (id, source, processed_at) VALUES ($1,'gmail',NOW()) ON CONFLICT (id) DO NOTHING RETURNING id`, [gmailId]);
+        if (!claimed.rows.length) { out.skipped++; continue; }
+      }
+      out.checked++;
+      const detailRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages/${gmailId}?format=full`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+      if (!detailRes.ok) { out.errors.push(`${gmailId}: get ${detailRes.status}`); continue; }
+      const msg = await detailRes.json();
+      const subject = gmailHeader(msg.payload, 'Subject');
+      const from = parseFromHeader(gmailHeader(msg.payload, 'From'));
+      const body = extractGmailBody(msg.payload) || msg.snippet || '';
+
+      // Ignore our own / internal mail.
+      if (!from.email || /@abiozen\.com$/i.test(from.email)) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
+
+      // A reply from a buyer with an already-open inquiry → route into that thread.
+      const open = (await query(
+        `SELECT id FROM inquiries WHERE LOWER(buyer_email)=LOWER($1) AND status IN ('new','in_conversation','quote_sent','human_requested') ORDER BY created_at DESC LIMIT 1`,
+        [from.email])).rows[0];
+      if (open) {
+        if (dryRun) { out.replies_routed++; continue; }
+        await processInboundReply(open.id, `Subject: ${subject}\n\n${body}`);
+        await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [open.id, gmailId]).catch(() => {});
+        out.replies_routed++;
+        await markGmailRead(user, gmailId, tok.access_token, dryRun);
+        continue;
+      }
+
+      // Otherwise Claude-extract the inquiry fields and open a new inquiry.
+      const { data } = await callClaude(
+        `Extract structured fields from this inbound sales email to a GMP pharmaceutical API supplier.
+
+From: ${gmailHeader(msg.payload, 'From')}
+Subject: ${subject}
+Body:
+"""${body.slice(0, 4000)}"""
+
+Return ONLY JSON:
+{"is_inquiry": true, "buyer_name": "sender's name or null", "buyer_company": "company or null", "molecule_name": "the API/molecule they want, or null", "cas_number": "if stated else null", "quantity": number or null, "quantity_unit": "g|kg", "intended_use": "compounding|research|manufacturing|null", "country": "if stated else null", "message": "one-line summary of the request"}
+Set "is_inquiry": false ONLY if this is clearly NOT a buyer inquiry (newsletter, auto-reply, spam, internal notice).`,
+        { maxTokens: 700, json: true });
+
+      if (!data || data.is_inquiry === false) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
+      if (dryRun) { out.new_inquiries++; continue; }
+
+      const inquiryId = await receiveInquiry({
+        molecule_name: data.molecule_name || null,
+        cas_number: data.cas_number || null,
+        buyer_name: data.buyer_name || from.name || null,
+        buyer_email: from.email,
+        buyer_company: data.buyer_company || null,
+        quantity: data.quantity || null,
+        quantity_unit: data.quantity_unit === 'kg' ? 'kg' : 'g',
+        intended_use: data.intended_use || null,
+        country: data.country || null,
+        message: data.message || body.slice(0, 500),
+        source: 'email',
+      });
+      await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [inquiryId, gmailId]).catch(() => {});
+      out.new_inquiries++;
+      await markGmailRead(user, gmailId, tok.access_token, dryRun);
+    } catch (e) { out.errors.push(`${gmailId}: ${e.message}`); }
+  }
+
+  if (!dryRun && (out.new_inquiries || out.replies_routed)) {
+    await logAgentActivity({ agent_name: AGENT, action_type: 'sales_mailbox_polled', user_id: null,
+      reasoning: `Polled sales@ mailbox: ${out.new_inquiries} new inquiries, ${out.replies_routed} replies routed.`,
+      source_kpi: 'kpi-sg-sales', output_summary: `new=${out.new_inquiries} replies=${out.replies_routed} skipped=${out.skipped}` }).catch(() => {});
+  }
+  return out;
+}
+// Best-effort: drop the UNREAD label (needs gmail.modify scope). Non-fatal.
+async function markGmailRead(user, gmailId, accessToken, dryRun) {
+  if (dryRun) return;
+  try {
+    await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages/${gmailId}/modify`, {
+      method: 'POST', headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ removeLabelIds: ['UNREAD'] }),
+    });
+  } catch (_) {}
+}
+
 // ── PART 2 — molecule pricing seed (20 GMP APIs) ──────────────────────────────
 // [name, cas, price/kg, minGrams, leadDays, dmfAvailable, regStatus]
 const PRICING_SEED = [
@@ -381,4 +568,5 @@ async function seedMoleculePricing() {
 module.exports = {
   receiveInquiry, sendFirstResponse, processInboundReply, generateQuote, escalateToHuman,
   handleFollowUp, runInquiryAgent, seedMoleculePricing, findPricing, classifyBuyer,
+  pollSalesEmailbox, findStock, findDemand,
 };
