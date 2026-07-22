@@ -497,11 +497,15 @@ async function pollSalesEmailbox({ dryRun = false, maxMessages = 40 } = {}) {
       const from = parseFromHeader(gmailHeader(msg.payload, 'From'));
       const body = extractGmailBody(msg.payload) || msg.snippet || '';
 
-      // Subject filter: keep if empty/None OR contains any inquiry keyword.
+      // Subject filter: keep if empty/None OR contains any inquiry keyword. A
+      // non-matching subject is inbox spam/noise — mark it read (after logging the
+      // sample) so it leaves the unread window and doesn't crowd out real RFQs.
       const subjLower = String(subject || '').toLowerCase();
       const subjEmpty = !subject || !subject.trim();
       if (!subjEmpty && !INQUIRY_SUBJECT_KEYWORDS.some(k => subjLower.includes(k))) {
-        out.skipped_subject++; sample(subject, from.email, 'skip:subject-no-keyword'); continue;
+        out.skipped_subject++; sample(subject, from.email, 'skip:subject-no-keyword');
+        await markGmailRead(user, gmailId, tok.access_token, dryRun);
+        continue;
       }
       if (!from.email) { out.skipped_no_sender++; sample(subject, null, 'skip:no-sender'); continue; }
 
