@@ -11,9 +11,19 @@ const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth
 
 const AGENT = 'inquiry-agent';
 const MODEL = 'claude-opus-4-8';
-const SALES_FROM = 'Abiozen Sales <sales@abiozen.com>';
+const REP_NAME = 'Sarah Chen';
+const REP_TITLE = 'Business Development Manager';
+const SALES_FROM = `${REP_NAME} · Abiozen <sales@abiozen.com>`;
 const DOC_FEE = 150;
 const ESCALATE_ABOVE = 50000;
+// Export-controlled destinations that force human review (Stage 8).
+const SANCTIONED_COUNTRIES = /\b(iran|north korea|dprk|russia|russian federation|syria|cuba|crimea)\b/i;
+// Buyer phrases that always warrant a human (Stage 8).
+const ESCALATION_KEYWORDS = /\b(contract|audit|legal|attorney|lawyer|compliance officer|fda inspection|phone call|call me|video call|zoom|teams meeting|schedule a call|jump on a call)\b/i;
+const ACCEPT_KEYWORDS = /\b(accepted|i accept|we accept|accept the quote|proceed|go ahead|confirm the order|place the order|let'?s proceed|move forward)\b/i;
+const NEGOTIATE_KEYWORDS = /\b(too high|too expensive|can you do better|better price|lower price|discount|reduce the price|beat this|come down|price is high|cheaper)\b/i;
+const BANK_WIRE = () => process.env.ABIOZEN_BANK_WIRE_DETAILS || 'Bank: [to be provided]  |  Account: [to be provided]  |  Routing: [to be provided]  |  SWIFT: [to be provided]';
+const quoteRef = inqId => `QT-${new Date().getUTCFullYear()}-${String(inqId).replace(/[^a-z0-9]/gi, '').slice(0, 6).toUpperCase()}`;
 const BASE_URL = () => process.env.BASE_URL || 'https://playbook.abiozen.com';
 const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const htmlWrap = body => `<div style="font-family:Arial;font-size:14px;line-height:1.6;color:#222;white-space:pre-wrap">${esc(body)}</div>`;
@@ -99,8 +109,10 @@ async function logMessage(inquiryId, m) {
 // ── Professional email template ───────────────────────────────────────────────
 const LOGO_URL = 'https://playbook.abiozen.com/abiozen-logo.png';
 const productTypeLabelFor = (pricing, molecule) => (productType(pricing, molecule) === 'research_chemical' ? 'Research Chemical' : 'GMP API');
-// Shared executive voice for all AI-written inquiry emails.
-const VOICE = `Voice: confident, specific, and value-focused — executive pharma, never generic, hedging, or fluffy. Where it reads naturally (never forced or in every email), draw on Abiozen's real proof points: ISO 9001 & ISO 27001 certification, rigorous US-based quality control, and an established APAC manufacturing/sourcing network. Never fabricate specifics or over-promise. End with a brief professional sign-off ("Warm regards,\\nAbiozen Sales Team") — do NOT append a postal address, phone, or company block; the email footer already carries that.`;
+// Shared persona + voice for all AI-written inquiry emails.
+const VOICE = `You are ${REP_NAME}, ${REP_TITLE} at Abiozen LLC — a warm, knowledgeable, confident human salesperson. Write in the first person as Sarah. NEVER say or imply you are an AI, a bot, automated, or a system; only if the buyer directly asks "are you an AI/bot/real person?" do you answer honestly and briefly.
+Voice: confident, specific, and value-focused — executive pharma, never generic, hedging, or fluffy. Where it reads naturally (never forced), draw on Abiozen's real proof points: ISO 9001 & ISO 27001 certification, rigorous US-based quality control, and an established APAC manufacturing/sourcing network. Never fabricate specifics, and never claim a product is FDA-approved unless explicitly told it is.
+End with a brief warm sign-off signed "${REP_NAME}" (optionally with "${REP_TITLE}, Abiozen LLC") — do NOT append a postal address, phone, or bank block; the email footer carries the company details.`;
 
 // AI plain-text body → styled HTML paragraphs for the {EMAIL_BODY_HTML} slot.
 function textToHtml(text) {
@@ -112,7 +124,10 @@ function textToHtml(text) {
 
 // World-class responsive email shell. `bodyHtml` is the message body; `specsTable`
 // is an optional full <tr>…</tr> spec block (quotes only).
-function renderEmail({ moleculeName, cas, productTypeLabel, bodyHtml, specsTable = '' }) {
+function renderEmail({ moleculeName, cas, productTypeLabel, bodyHtml, specsTable = '', controlled = false, ctaLabel = 'Reply to Continue &rarr;' }) {
+  const ruo = controlled ? `
+<!-- RUO disclaimer -->
+<tr><td style="padding:0 40px 20px"><p style="margin:0;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 14px;font-size:12px;color:#9a3412">For research use only. Not for human or veterinary use, food, drug, or diagnostic applications.</p></td></tr>` : '';
   const hero = moleculeName ? `
 <!-- Molecule Hero -->
 <tr><td style="background:#f8fafc;padding:20px 40px;border-bottom:1px solid #e8edf2">
@@ -142,10 +157,10 @@ ${hero}
 <tr><td style="padding:32px 40px">
 ${bodyHtml}
 </td></tr>
-${specsTable}
+${specsTable}${ruo}
 <!-- CTA -->
 <tr><td style="padding:0 40px 32px;text-align:center">
-<a href="mailto:sales@abiozen.com" style="background:linear-gradient(135deg,#1D9E75,#0D7377);color:#ffffff;padding:14px 36px;border-radius:30px;font-size:15px;font-weight:700;text-decoration:none;display:inline-block">Reply to Continue &rarr;</a>
+<a href="mailto:sales@abiozen.com" style="background:linear-gradient(135deg,#1D9E75,#0D7377);color:#ffffff;padding:14px 36px;border-radius:30px;font-size:15px;font-weight:700;text-decoration:none;display:inline-block">${ctaLabel}</a>
 </td></tr>
 
 <!-- Footer -->
@@ -160,6 +175,7 @@ ${specsTable}
 <p style="margin:2px 0 0;font-size:11px;color:#94a3b8">ISO 27001 Certified</p>
 </td>
 </tr></table>
+<p style="margin:16px 0 0;font-size:11px;color:#94a3b8;line-height:1.5">Abiozen LLC operates in compliance with US export regulations. All sales subject to applicable laws.</p>
 </td></tr>
 
 </table>
@@ -188,17 +204,17 @@ function buildSpecsTable({ molecule, cas, grade, purity, quantity, unitPrice, le
 </td></tr>`;
 }
 
-async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', productTypeLabel } = {}) {
-  if (!productTypeLabel) {
-    const p = await findPricing(inquiry.molecule_name, inquiry.cas_number);
-    productTypeLabel = productTypeLabelFor(p, inquiry.molecule_name);
-  }
+async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', productTypeLabel, controlled, ctaLabel } = {}) {
+  let pricing = null;
+  if (!productTypeLabel || controlled === undefined) pricing = await findPricing(inquiry.molecule_name, inquiry.cas_number);
+  if (!productTypeLabel) productTypeLabel = productTypeLabelFor(pricing, inquiry.molecule_name);
+  if (controlled === undefined) controlled = !!(pricing && pricing.controlled_substance);
   const html = renderEmail({
     moleculeName: inquiry.molecule_name, cas: inquiry.cas_number,
-    productTypeLabel, bodyHtml: textToHtml(body), specsTable,
+    productTypeLabel, bodyHtml: textToHtml(body), specsTable, controlled, ctaLabel,
   });
   const ok = await sendEmail({ to: inquiry.buyer_email, subject, html, from: SALES_FROM, replyTo: 'sales@abiozen.com', cc });
-  await logMessage(inquiry.id, { direction: 'outbound', sender_name: 'Abiozen Sales', sender_email: 'sales@abiozen.com', subject, body_text: body, body_html: html });
+  await logMessage(inquiry.id, { direction: 'outbound', sender_name: REP_NAME, sender_email: 'sales@abiozen.com', subject, body_text: body, body_html: html });
   await query(`UPDATE inquiries SET total_emails_sent=COALESCE(total_emails_sent,0)+1, last_email_at=NOW(), updated_at=NOW() WHERE id=$1`, [inquiry.id]);
   return ok;
 }
@@ -296,55 +312,215 @@ Do not commit to a specific final price or a documentation guarantee you cannot 
   return { sent: true };
 }
 
-// ── Function 3 — process an inbound reply ─────────────────────────────────────
+// The exact KYB / compliance ask (Stage 3), sent verbatim so the wording is
+// consistent and compliant.
+const KYB_BLOCK = `Before I prepare your formal quotation, I need a few quick details for our compliance team:
+
+- Your company's registered name and website
+- Country of operation
+- Intended use (compounding / research / manufacturing)
+- Any relevant licenses or registrations
+
+This is standard procedure for all new clients and usually takes just a few minutes to clear.`;
+
+async function logReply(inquiryId, action, extra = '') {
+  await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_reply_handled', user_id: null,
+    reasoning: `Handled reply on inquiry ${inquiryId}: ${action}. ${extra}`.trim(),
+    source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} action=${action}` }).catch(() => {});
+}
+
+// Stage 8 — deterministic hard-escalation triggers. Returns a reason or null.
+function escalationReason(inq, text, msgCount) {
+  const t = String(text || '');
+  if ((inq.order_value_usd || 0) > ESCALATE_ABOVE) return `order value $${Number(inq.order_value_usd).toLocaleString()} exceeds the $${ESCALATE_ABOVE.toLocaleString()} auto-quote ceiling`;
+  const kw = t.match(ESCALATION_KEYWORDS);
+  if (kw) return `buyer raised a sensitive/complex topic or requested a call ("${kw[0]}")`;
+  if (SANCTIONED_COUNTRIES.test(`${t} ${inq.country || ''}`)) return 'export-controlled destination — manual review required';
+  if (inq.kyb_status === 'flagged') return 'KYB flagged high risk';
+  if ((msgCount || 0) >= 4 && !['accepted', 'payment_pending', 'payment_received', 'in_production', 'shipped', 'completed'].includes(inq.status)) return '4+ buyer exchanges without acceptance';
+  return null;
+}
+
+// ── Function 3 — process an inbound reply (full stage machine) ─────────────────
 async function processInboundReply(inquiryId, emailText, { dryRun = false } = {}) {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
   if (!inq) return { error: 'inquiry not found' };
   if (!dryRun) await logMessage(inquiryId, { direction: 'inbound', sender_name: inq.buyer_name, sender_email: inq.buyer_email, subject: `Re: ${inq.molecule_name}`, body_text: emailText });
 
+  const text = String(emailText || '');
+  const inbound = (await query(`SELECT COUNT(*) FILTER (WHERE direction='inbound')::int c FROM inquiry_messages WHERE inquiry_id=$1`, [inquiryId])).rows[0].c;
+  const quoted = ['quote_sent', 'negotiating'].includes(inq.status);
+
+  // Stage 8 — hard escalation (checked first).
+  const escReason = escalationReason(inq, text, inbound);
+  if (escReason) {
+    if (dryRun) return { intent: 'needs_human', reason: escReason };
+    await escalateToHuman(inquiryId, escReason);
+    await logReply(inquiryId, 'escalated', escReason);
+    return { intent: 'needs_human', action: 'escalated', reason: escReason };
+  }
+  // Stage 6 — acceptance (only meaningful after a quote).
+  if (quoted && ACCEPT_KEYWORDS.test(text)) {
+    if (dryRun) return { intent: 'accepted' };
+    const r = await handleAcceptance(inquiryId);
+    await logReply(inquiryId, 'accepted', `ref ${r.ref} total $${r.total}`);
+    return { intent: 'accepted', action: 'accepted', ...r };
+  }
+  // Stage 5 — negotiation (only after a quote).
+  if (quoted && NEGOTIATE_KEYWORDS.test(text)) {
+    if (dryRun) return { intent: 'negotiating' };
+    const r = await handleNegotiation(inquiryId, text);
+    await logReply(inquiryId, r.action);
+    return { intent: 'negotiating', action: r.action };
+  }
+
+  // Stages 2-4 — Claude-driven qualify → KYB → quote.
   const history = (await query('SELECT direction, body_text FROM inquiry_messages WHERE inquiry_id=$1 ORDER BY created_at', [inquiryId])).rows
     .map(m => `[${m.direction}] ${String(m.body_text || '').slice(0, 500)}`).join('\n');
   const pricing = await findPricing(inq.molecule_name, inq.cas_number);
   const isResearch = productType(pricing, inq.molecule_name) === 'research_chemical';
+  const ptl = isResearch ? 'Research Chemical' : 'GMP API';
+  const kybDone = inq.kyb_status === 'passed';
   const supplyLine = isResearch
     ? `We supply this as a RESEARCH CHEMICAL (research-use-only, non-GMP)${pricing ? `, ${pricing.purity || '98%+'} purity, COA + SDS, price starting ~$${pricing.price_per_kg_usd}/kg, lead ${pricing.lead_time_days}d` : ', COA + SDS available'}. Do NOT reference GMP/DMF/CEP for this product.`
     : `We supply this GMP-grade${pricing ? `, price starting ~$${pricing.price_per_kg_usd}/kg, lead ${pricing.lead_time_days}d, DMF ${pricing.dmf_available ? 'available' : 'on request'}` : ''}.`;
   const { data } = await callClaude(
-    `You are the Abiozen sales agent handling an email inquiry for ${inq.molecule_name}. Analyse the buyer's latest reply and the thread, then decide the next step. Match the buyer's context: ${isResearch ? 'research/academic, technical tone' : 'pharma procurement, regulatory tone'}.
+    `You are ${REP_NAME}, ${REP_TITLE} at Abiozen, handling an email inquiry for ${inq.molecule_name} with a ${isResearch ? 'research/academic' : 'pharma procurement'} buyer. Decide the next step from the thread and their latest reply.
 
 Thread:
 ${history}
 
 Buyer's latest reply:
-"""${String(emailText).slice(0, 3000)}"""
+"""${text.slice(0, 3000)}"""
 
 ${supplyLine}
+Compliance/KYB status: ${kybDone ? 'already collected — you may proceed to a quote' : 'NOT yet collected — before quoting a NEW client we must collect company name/website, country, intended use, and any licenses'}.
+
+Choose "intent":
+- "needs_kyb": requirements are clear enough to quote (they've given a quantity and intended use) BUT KYB is not yet collected.
+- "kyb_provided": the buyer's latest reply supplies the KYB details (company/website, country, use, licenses).
+- "ready_for_quote": requirements clear AND (KYB already collected OR provided in this reply).
+- "still_qualifying": still gathering the quantity/grade/documentation requirements.
+- "needs_human": buyer explicitly wants a human, or asks something we shouldn't answer autonomously.
 
 ${VOICE}
 
 Return ONLY JSON:
-{"intent":"ready_for_quote|needs_human|still_qualifying","reason":"one line","reply_body":"the email body to send them next, written in the Voice above — answer their questions using ONLY facts stated above; do not invent prices/docs; if quoting is next, keep it brief and say a formal quote follows"}`,
-    { maxTokens: 1200, json: true });
+{"intent":"needs_kyb|kyb_provided|ready_for_quote|still_qualifying|needs_human","reason":"one line","kyb":{"company":"","website":"","country":"","intended_use":"","licenses":""},"reply_body":"the email body to send next, in the Voice above — for still_qualifying/ready_for_quote only; answer using ONLY facts stated above, never invent prices/docs"}`,
+    { maxTokens: 1400, json: true });
   const intent = data?.intent || 'still_qualifying';
-  const replyBody = data?.reply_body || 'Thank you for your reply — a member of our team will follow up shortly.';
+  const replyBody = data?.reply_body || 'Thank you for your reply — let me pull the details together and come right back to you.';
+  if (dryRun) return { intent, reason: data?.reason, reply_preview: String(replyBody).slice(0, 300) };
 
   let action = intent;
-  if (dryRun) return { intent, reason: data?.reason, reply_preview: replyBody.slice(0, 300) };
-
   if (intent === 'needs_human') {
     await escalateToHuman(inquiryId, data?.reason || 'buyer requested a human');
     action = 'escalated';
-  } else if (intent === 'ready_for_quote') {
-    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`, body: replyBody, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API' });
+  } else if (intent === 'needs_kyb') {
+    await sendKYBRequest(inq, ptl);
+    await query(`UPDATE inquiries SET status='kyb_pending', updated_at=NOW() WHERE id=$1`, [inquiryId]);
+    action = 'kyb_requested';
+  } else if (intent === 'kyb_provided' || intent === 'ready_for_quote') {
+    const k = data?.kyb || {};
+    await query(
+      `UPDATE inquiries SET kyb_status='passed', status='kyb_passed', updated_at=NOW(),
+         buyer_company=COALESCE(NULLIF($2,''), buyer_company),
+         country=COALESCE(NULLIF($3,''), country),
+         intended_use=COALESCE(NULLIF($4,''), intended_use)
+       WHERE id=$1`,
+      [inquiryId, k.company || '', k.country || '', k.intended_use || '']);
+    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name} | Abiozen LLC`, body: replyBody, productTypeLabel: ptl });
     await generateQuote(inquiryId);
     action = 'quoted';
   } else {
-    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`, body: replyBody, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API' });
-    await query(`UPDATE inquiries SET status='in_conversation', updated_at=NOW() WHERE id=$1`, [inquiryId]);
+    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name} | Abiozen LLC`, body: replyBody, productTypeLabel: ptl });
+    await query(`UPDATE inquiries SET status='in_conversation', updated_at=NOW() WHERE id=$1 AND status IN ('new','in_conversation')`, [inquiryId]);
   }
-  await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_reply_handled', user_id: null,
-    reasoning: `Handled reply on inquiry ${inquiryId}: ${action}.`, source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} action=${action}` }).catch(() => {});
+  await logReply(inquiryId, action);
   return { intent, action };
+}
+
+// Stage 3 — send the KYB / compliance request (verbatim block, Sarah's voice).
+async function sendKYBRequest(inq, productTypeLabel) {
+  const body = `Hi ${inq.buyer_name || 'there'},\n\nThank you — I have what I need on your ${inq.molecule_name} requirement, and I'd love to get your formal quotation over quickly.\n\n${KYB_BLOCK}\n\nAs soon as these clear, I'll send your quotation with pricing, documentation, and lead time.\n\nWarm regards,\n${REP_NAME}`;
+  await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name} | Abiozen LLC`, body, productTypeLabel });
+}
+
+// Stage 5 — negotiation. First push → a time-boxed counter-offer; second → human.
+async function handleNegotiation(inquiryId, text) {
+  const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
+  if (inq.status === 'negotiating') {
+    await escalateToHuman(inquiryId, 'buyer still pushing on price after a counter-offer');
+    return { action: 'escalated' };
+  }
+  const pricing = await findPricing(inq.molecule_name, inq.cas_number);
+  const ptl = productTypeLabelFor(pricing, inq.molecule_name);
+  const quote = (await query(`SELECT * FROM inquiry_quotes WHERE inquiry_id=$1 ORDER BY created_at DESC LIMIT 1`, [inquiryId])).rows[0];
+  const discountPct = 5;
+  const qtyStr = inq.quantity_requested ? `${inq.quantity_requested}${inq.quantity_unit}` : 'your quantity';
+  const newUnit = quote ? Math.round(quote.unit_price_usd * (1 - discountPct / 100)) : null;
+  const newTotal = quote ? Math.round(quote.total_price_usd * (1 - discountPct / 100)) : null;
+  const body = `Hi ${inq.buyer_name || 'there'},\n\nI understand — let me see what I can do. For your quantity of ${qtyStr}, I can offer a ${discountPct}% discount${newUnit ? ` (bringing it to $${newUnit.toLocaleString()}/kg, roughly $${newTotal.toLocaleString()} all-in)` : ''} if you can confirm the order within 7 days. Does that work for you?\n\nI'd genuinely like to make this happen — just say the word and I'll lock it in.\n\nWarm regards,\n${REP_NAME}`;
+  await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name} | Abiozen LLC`, body, productTypeLabel: ptl });
+  if (newTotal) await query(`UPDATE inquiries SET order_value_usd=$2 WHERE id=$1`, [inquiryId, newTotal + 0]).catch(() => {});
+  await query(`UPDATE inquiries SET status='negotiating', updated_at=NOW() WHERE id=$1`, [inquiryId]);
+  return { action: 'counter_offered' };
+}
+
+// Stage 6 — acceptance: payment email, status, WhatsApp Naresh, Palash email, order row.
+async function handleAcceptance(inquiryId) {
+  const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
+  const quote = (await query(`SELECT * FROM inquiry_quotes WHERE inquiry_id=$1 ORDER BY created_at DESC LIMIT 1`, [inquiryId])).rows[0];
+  const total = Math.round(inq.order_value_usd || (quote ? quote.total_price_usd : 0));
+  const advance = Math.round(total * 0.5);
+  const ref = inq.quote_ref || quoteRef(inquiryId);
+  const lead = quote?.lead_time_days || 30;
+  const eta = new Date(Date.now() + (lead + 5) * 86400000).toISOString().slice(0, 10);
+  const pricing = await findPricing(inq.molecule_name, inq.cas_number);
+  const ptl = productTypeLabelFor(pricing, inq.molecule_name);
+  const qtyStr = `${inq.quantity_requested || ''}${inq.quantity_unit || ''}`;
+
+  // Create the order row in PlaybookOS.
+  const orderId = crypto.randomUUID();
+  await query(
+    `INSERT INTO orders (id, order_date, amount, buyer_type, product_category, status, notes, created_at)
+     VALUES ($1, to_char(NOW(),'YYYY-MM-DD'), $2, $3, $4, 'payment_pending', $5, NOW())`,
+    [orderId, total, inq.buyer_type || null, inq.molecule_name,
+     `${ref} · ${inq.buyer_company || inq.buyer_email} · ${qtyStr} · advance $${advance} · inquiry ${inquiryId}`]
+  ).catch(e => console.error('[inquiry] order insert failed:', e.message));
+
+  // Payment-instructions email to the buyer.
+  const body = `Dear ${inq.buyer_name || 'Customer'},\n\nWonderful — thank you for confirming your order. Here is everything you need to get production moving.\n\nORDER SUMMARY\nReference: ${ref}\nMolecule: ${inq.molecule_name}\nQuantity: ${qtyStr}\nOrder total: $${total.toLocaleString()}\n\n50% ADVANCE PAYMENT DUE NOW: $${advance.toLocaleString()}\n\nWIRE TRANSFER DETAILS\n${BANK_WIRE()}\nReference: ${ref}\n\nOnce payment is received, we will confirm production start within 24 hours. Estimated delivery: ${eta}. The remaining 50% balance is due before shipment.\n\nThank you for choosing Abiozen — I'll personally see this through for you.\n\nWarm regards,\n${REP_NAME}\n${REP_TITLE}, Abiozen LLC`;
+  await sendAndLog(inq, { subject: `Payment Instructions — Order ${ref} — ${inq.molecule_name}`, body, productTypeLabel: ptl, ctaLabel: 'Reply to Confirm Payment &rarr;' });
+
+  await query(`UPDATE inquiries SET status='payment_pending', accepted_at=NOW(), advance_amount=$2, order_value_usd=$3, quote_ref=$4, order_id=$5, updated_at=NOW() WHERE id=$1`,
+    [inquiryId, advance, total, ref, orderId]);
+
+  // WhatsApp Naresh immediately.
+  const naresh = await getNaresh();
+  if (naresh.whatsapp_number) await sendWhatsApp(naresh.whatsapp_number,
+    `🎯 ORDER ACCEPTED — ${inq.buyer_name || 'Buyer'} at ${inq.buyer_company || '?'}\nMolecule: ${inq.molecule_name} | Qty: ${qtyStr}\nValue: $${total.toLocaleString()}\nQuote ref: ${ref}\nWaiting for 50% advance: $${advance.toLocaleString()}\nBuyer email: ${inq.buyer_email}`,
+    { user_id: naresh.id || null, message_type: 'order_accepted' }).catch(() => {});
+
+  // Email Palash (sourcing).
+  const palash = await getUser('procurement_director');
+  if (palash) await sendEmail({
+    to: palash.email, cc: 'naren@abiozen.com',
+    subject: `NEW ORDER — Source ${inq.molecule_name} ${qtyStr} — ${inq.buyer_company || inq.buyer_email}`,
+    html: `<div style="font-family:Arial;max-width:640px"><h2 style="color:#1B3A6B">New order — sourcing required</h2>
+      <p style="font-size:14px"><strong>Quote ref:</strong> ${esc(ref)}<br>
+      <strong>Buyer:</strong> ${esc(inq.buyer_name)} at ${esc(inq.buyer_company)} (${esc(inq.buyer_email)})<br>
+      <strong>Molecule:</strong> ${esc(inq.molecule_name)} (CAS ${esc(inq.cas_number || 'TBC')})<br>
+      <strong>Quantity:</strong> ${esc(qtyStr)} · <strong>Order value:</strong> $${total.toLocaleString()} · <strong>Advance due:</strong> $${advance.toLocaleString()}<br>
+      <strong>Intended use:</strong> ${esc(inq.intended_use || '—')} · <strong>Country:</strong> ${esc(inq.country || '—')}</p>
+      <p>Please begin sourcing. Production starts on advance receipt; target delivery ${eta}.</p>
+      <p><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>`
+  }).catch(() => {});
+
+  await logAgentActivity({ agent_name: AGENT, action_type: 'order_accepted', user_id: null,
+    reasoning: `Order accepted: ${inq.buyer_company || inq.buyer_email} — ${inq.molecule_name} ${qtyStr} = $${total.toLocaleString()} (ref ${ref}).`,
+    source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} ref=${ref} total=${total} advance=${advance} order=${orderId}` }).catch(() => {});
+  return { accepted: true, order_id: orderId, ref, total, advance };
 }
 
 // ── Function 4 — generate + send a formal quote ───────────────────────────────
@@ -377,34 +553,36 @@ async function generateQuote(inquiryId) {
     [quoteId, inquiryId, inq.molecule_name, inq.cas_number, qtyKg, unitPrice, total, pricing.lead_time_days, validUntil]);
 
   const isResearch = productType(pricing, inq.molecule_name) === 'research_chemical';
+  const controlled = !!pricing.controlled_substance;
+  const ref = inq.quote_ref || quoteRef(inquiryId);
   const gradeLabel = isResearch ? `research grade, ${pricing.purity || '98%+'}` : 'GMP grade';
   const docsLine = isResearch ? 'COA + SDS' : `COA + GMP cert (DMF/CEP ${pricing.dmf_available ? 'available' : 'on request'})`;
-  const signatory = isResearch
-    ? 'Warm regards,\nAbiozen Sales Team'
-    : 'Palash Das\nProcurement Director, Abiozen LLC\npalash@abiozen.com';
-  const prompt = `Write the COVER NOTE for a formal ${isResearch ? 'research-chemical' : 'pharmaceutical API'} quotation from Abiozen LLC. A full specification & pricing TABLE is rendered directly below your text, so do NOT re-list every line item or repeat all the numbers. Return ONLY the cover-note body as plain text (no subject).
+  const discountNote = mult < 1 ? `A ${Math.round((1 - mult) * 100)}% quantity discount is already reflected in the unit price at your volume.` : (tier === 'sample' ? 'This reflects our small-quantity / evaluation rate.' : 'Volume discounts apply on larger quantities.');
+  const signatory = 'Warm regards,\nSarah Chen\nBusiness Development Manager, Abiozen LLC';
+  const prompt = `Write the COVER NOTE for a formal ${isResearch ? 'research-chemical' : 'pharmaceutical API'} quotation from Abiozen LLC, written by Sarah Chen. A full specification & pricing TABLE is rendered directly below your text, so do NOT re-list every line item. Return ONLY the cover-note body as plain text (no subject).
 
-Context (shown in the table below your note):
-Buyer: ${inq.buyer_name || (isResearch ? 'Research Team' : 'Procurement Team')} at ${inq.buyer_company || 'the buyer'}
+Quote reference: ${ref}
+Buyer: ${inq.buyer_name || 'there'} at ${inq.buyer_company || 'your organization'}
 Molecule: ${inq.molecule_name} (CAS ${inq.cas_number || 'to confirm'}), ${gradeLabel}
-Quantity ${qtyKg} kg · Unit price $${unitPrice.toLocaleString()}/kg · Total $${total.toLocaleString()} (shipping TBD by destination) · Lead time ${pricing.lead_time_days} days · Valid until ${validUntil}
+Quantity ${qtyKg} kg · Unit price $${unitPrice.toLocaleString()}/kg · Total $${total.toLocaleString()} (shipping TBD by destination) · Lead time ${pricing.lead_time_days} days · Valid until ${validUntil} (30 days)
+Pricing note: ${discountNote}
 ${isResearch ? 'RESEARCH CHEMICAL (research-use-only) — do NOT reference GMP, DMF, CEP or ICH.' : 'GMP API — referencing GMP documentation and DMF/CEP is appropriate.'}
 
-Write a concise, confident cover note (120-160 words) that greets the buyer, presents the quotation and points them to the specification table below, states payment terms (50% advance, 50% before shipment), notes shipping is quoted separately by destination, and includes a bank-details placeholder line "[Bank wire details provided on order confirmation]" (do NOT invent bank numbers).
+Write a concise, confident cover note (130-170 words) that: greets the buyer by name; presents quote ${ref} and points to the specification table below; notes the quantity discount reflected in the price; states the quote is valid 30 days (until ${validUntil}); states payment terms (50% advance, 50% before shipment) and that shipping is quoted separately by destination; includes a bank-details placeholder line "[Bank wire details will be provided on acceptance]" (do NOT invent bank numbers); and gives a clear, simple ACCEPTANCE INSTRUCTION: to accept this quotation and proceed, simply reply to this email with the single word "ACCEPTED".
 ${VOICE}
 End with:
 
 ${signatory}`;
   const { text } = await callClaude(prompt, { maxTokens: 1200 });
-  const body = text || `Dear ${inq.buyer_name || 'Buyer'},\n\nPlease find our quotation for ${inq.molecule_name} (${qtyKg} kg) in the specification table below. Total estimate $${total.toLocaleString()}, valid until ${validUntil}. Payment terms: 50% advance, 50% before shipment; shipping is quoted separately by destination.\n[Bank wire details provided on order confirmation]\n\n${signatory}`;
+  const body = text || `Dear ${inq.buyer_name || 'Buyer'},\n\nPlease find quotation ${ref} for ${inq.molecule_name} (${qtyKg} kg) in the specification table below — valid 30 days (until ${validUntil}). ${discountNote} Payment terms: 50% advance, 50% before shipment; shipping is quoted separately by destination. [Bank wire details will be provided on acceptance]\n\nTo accept this quotation and proceed, simply reply with the word "ACCEPTED".\n\n${signatory}`;
   const specsTable = buildSpecsTable({
     molecule: inq.molecule_name, cas: inq.cas_number, grade: gradeLabel,
     purity: pricing.purity || '98%+', quantity: `${qtyKg} kg`, unitPrice,
     leadTime: pricing.lead_time_days, docs: docsLine, total,
   });
-  const subject = `Quotation — ${inq.molecule_name} (${qtyKg}kg) | Abiozen LLC`;
-  await sendAndLog(inq, { subject, body, specsTable, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API', cc: isResearch ? ['naren@abiozen.com'] : ['palash@abiozen.com', 'naren@abiozen.com'] });
-  await query(`UPDATE inquiries SET status='quote_sent', order_value_usd=$1, updated_at=NOW() WHERE id=$2`, [total, inquiryId]);
+  const subject = `Quotation ${ref} — ${inq.molecule_name} (${qtyKg}kg) | Abiozen LLC`;
+  await sendAndLog(inq, { subject, body, specsTable, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API', controlled, ctaLabel: 'Reply "ACCEPTED" to Proceed &rarr;', cc: isResearch ? ['naren@abiozen.com'] : ['palash@abiozen.com', 'naren@abiozen.com'] });
+  await query(`UPDATE inquiries SET status='quote_sent', order_value_usd=$1, quote_ref=$3, updated_at=NOW() WHERE id=$2`, [total, inquiryId, ref]);
 
   if (needsApproval || total > ESCALATE_ABOVE) {
     const naresh = await getNaresh();
@@ -446,26 +624,42 @@ async function escalateToHuman(inquiryId, reason = 'buyer requested a human') {
   return { escalated: true };
 }
 
-// ── Function 6 — timed follow-ups ─────────────────────────────────────────────
+// ── Function 6 — Stage 7 timed follow-up sequence (day 3 / 7 / 14 → close) ─────
 async function handleFollowUp(inquiry) {
   if (!inquiry.last_email_at) return null;
+  // Chase only inquiries awaiting the buyer.
+  if (!['in_conversation', 'kyb_pending', 'quote_sent', 'negotiating'].includes(inquiry.status)) return null;
   const days = Math.floor((Date.now() - new Date(inquiry.last_email_at).getTime()) / 86400000);
-  const sent = inquiry.total_emails_sent || 0;
-  // Only chase inquiries still open and awaiting the buyer.
-  if (!['in_conversation', 'quote_sent'].includes(inquiry.status)) return null;
-  let stage = null;
-  if (days >= 21) { await query(`UPDATE inquiries SET status='closed', updated_at=NOW() WHERE id=$1`, [inquiry.id]); return { inquiry: inquiry.id, action: 'closed_inactive' }; }
-  else if (days >= 14 && sent < 4) stage = ['final', `Are you still looking for ${inquiry.molecule_name}? If your requirement has changed we'll close this out, but we're glad to help whenever you're ready.`];
-  else if (days >= 7 && sent < 3) stage = ['value', `Following up on ${inquiry.molecule_name} — demand for this molecule remains steady, so I wanted to keep your quote current. Happy to refresh pricing or documentation details whenever it's useful.`];
-  else if (days >= 3 && sent < 2) stage = ['gentle', `Just checking that you received our response on ${inquiry.molecule_name}. I'm here if you have any questions on grade, documentation, or lead time.`];
-  if (!stage) return null;
-  await sendAndLog(inquiry, { subject: `Re: Inquiry — ${inquiry.molecule_name}`, body: `Hi ${inquiry.buyer_name || 'there'},\n\n${stage[1]}\n\nWarm regards,\nAbiozen Sales Team` });
-  return { inquiry: inquiry.id, action: 'follow_up_' + stage[0] };
+  const fu = inquiry.followups_sent || 0;
+  const name = inquiry.buyer_name || 'there';
+  const mol = inquiry.molecule_name;
+  // After the 3rd nudge (day ~14) → close as inactive.
+  if (fu >= 3) {
+    if (days >= 5) { await query(`UPDATE inquiries SET status='closed', updated_at=NOW() WHERE id=$1`, [inquiry.id]); return { inquiry: inquiry.id, action: 'closed_inactive' }; }
+    return null;
+  }
+  // Cumulative gaps 3 → +4 (day 7) → +7 (day 14).
+  const gap = fu === 0 ? 3 : fu === 1 ? 4 : 7;
+  if (days < gap) return null;
+  let body;
+  if (fu === 0) {
+    body = `Hi ${name}, just checking in on your inquiry for ${mol}. We have stock available this month — happy to answer any questions.`;
+  } else if (fu === 1) {
+    const demand = await findDemand(inquiry.molecule_name, inquiry.cas_number);
+    const area = demand?.therapeutic_area ? `${demand.therapeutic_area} ` : '';
+    const peer = ({ compounding_pharmacy: 'a compounding pharmacy', research_lab: 'a research lab', generic_manufacturer: 'a generic manufacturer', university: 'a university group' })[inquiry.buyer_type] || 'a similar company';
+    body = `Hi ${name}, wanted to share that we recently helped ${peer} source ${area}APIs with 99.5% purity and 14-day delivery. Would love to do the same for ${inquiry.buyer_company || 'you'}.`;
+  } else {
+    body = `Hi ${name}, this will be my last follow-up. If you're still sourcing ${mol} in the future, we're always here. Our catalog: abiozen.com`;
+  }
+  await sendAndLog(inquiry, { subject: `Re: Inquiry — ${mol} | Abiozen LLC`, body: `${body}\n\nWarm regards,\n${REP_NAME}` });
+  await query(`UPDATE inquiries SET followups_sent=$2, updated_at=NOW() WHERE id=$1`, [inquiry.id, fu + 1]);
+  return { inquiry: inquiry.id, action: 'follow_up_' + ['gentle', 'value', 'final'][fu] };
 }
 
 // ── Function 7 — daily orchestration ──────────────────────────────────────────
 async function runInquiryAgent({ dryRun = false } = {}) {
-  const open = (await query(`SELECT * FROM inquiries WHERE status IN ('in_conversation','quote_sent')`)).rows;
+  const open = (await query(`SELECT * FROM inquiries WHERE status IN ('in_conversation','kyb_pending','quote_sent','negotiating')`)).rows;
   const out = { active_inquiries: 0, follow_ups_sent: 0, closed: 0, quotes_week: 0, orders: 0, escalations: 0, errors: [] };
   for (const inq of open) {
     try {
@@ -477,9 +671,9 @@ async function runInquiryAgent({ dryRun = false } = {}) {
     } catch (e) { out.errors.push(`${inq.id}: ${e.message}`); }
   }
   const stats = (await query(`SELECT
-      COUNT(*) FILTER (WHERE status IN ('new','in_conversation','quote_sent','human_requested'))::int active,
+      COUNT(*) FILTER (WHERE status IN ('new','in_conversation','kyb_pending','kyb_passed','quote_sent','negotiating','human_requested'))::int active,
       COUNT(*) FILTER (WHERE status='human_requested')::int escalations,
-      COUNT(*) FILTER (WHERE status='order_placed')::int orders FROM inquiries`)).rows[0];
+      COUNT(*) FILTER (WHERE status IN ('accepted','payment_pending','payment_received','in_production','shipped','completed','order_placed'))::int orders FROM inquiries`)).rows[0];
   out.active_inquiries = stats.active; out.escalations = stats.escalations; out.orders = stats.orders;
   out.quotes_week = (await query(`SELECT COUNT(*)::int c FROM inquiry_quotes WHERE created_at >= (NOW() - INTERVAL '7 days')::text`)).rows[0].c;
 
@@ -548,7 +742,7 @@ function parseFromHeader(v) {
 // Find the open inquiry an inbound email is a reply to: first by Gmail thread (a
 // prior processed message in the same thread already mapped to an inquiry), then
 // by From/Reply-To address matching an open inquiry's buyer_email.
-const OPEN_STATUSES = "('new','in_conversation','quote_sent','human_requested')";
+const OPEN_STATUSES = "('new','in_conversation','kyb_pending','kyb_passed','quote_sent','negotiating','accepted','payment_pending','payment_received','in_production','shipped','human_requested')";
 async function matchReplyInquiry(candidateEmails, threadId) {
   if (threadId) {
     const t = (await query(
@@ -818,8 +1012,58 @@ async function seedMoleculePricing() {
   return { seeded, skipped: total - seeded };
 }
 
+// Manual/agent: payment received → move to production + notify sourcing (Stage 6b).
+async function markPaymentReceived(inquiryId) {
+  const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
+  if (!inq) return { error: 'inquiry not found' };
+  await query(`UPDATE inquiries SET status='in_production', payment_received_at=NOW(), updated_at=NOW() WHERE id=$1`, [inquiryId]);
+  if (inq.order_id) await query(`UPDATE orders SET status='in_production' WHERE id=$1`, [inq.order_id]).catch(() => {});
+  const pricing = await findPricing(inq.molecule_name, inq.cas_number);
+  const ptl = productTypeLabelFor(pricing, inq.molecule_name);
+  const lead = (await query(`SELECT lead_time_days FROM inquiry_quotes WHERE inquiry_id=$1 ORDER BY created_at DESC LIMIT 1`, [inquiryId])).rows[0]?.lead_time_days || 30;
+  const eta = new Date(Date.now() + lead * 86400000).toISOString().slice(0, 10);
+  await sendAndLog(inq, {
+    subject: `Production Confirmed — Order ${inq.quote_ref || ''} — ${inq.molecule_name}`,
+    body: `Dear ${inq.buyer_name || 'Customer'},\n\nGreat news — we've received your advance payment and production is now underway. Estimated delivery: ${eta}.\n\nI'll keep you posted at each milestone; the remaining 50% balance is due before shipment.\n\nThank you for your trust in Abiozen.\n\nWarm regards,\n${REP_NAME}`,
+    productTypeLabel: ptl,
+  });
+  const palash = await getUser('procurement_director');
+  if (palash) await sendEmail({ to: palash.email, cc: 'naren@abiozen.com',
+    subject: `PAYMENT RECEIVED — proceed on ${inq.molecule_name} — ${inq.buyer_company || inq.buyer_email}`,
+    html: `<div style="font-family:Arial"><p>Advance received for <strong>${esc(inq.quote_ref || '')}</strong>. Please proceed with sourcing/production of ${esc(inq.molecule_name)} ${esc(inq.quantity_requested)}${esc(inq.quantity_unit)}. Target delivery ${eta}.</p></div>` }).catch(() => {});
+  await logAgentActivity({ agent_name: AGENT, action_type: 'payment_received', reasoning: `Payment received for ${inquiryId} (${inq.quote_ref}).`, source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} status=in_production` }).catch(() => {});
+  return { ok: true, status: 'in_production', eta };
+}
+
+// Sales pipeline: kanban columns + weighted revenue forecast (Stage view).
+const PIPELINE_COLS = {
+  qualifying: ['new', 'in_conversation', 'kyb_pending', 'kyb_passed'],
+  quoted: ['quote_sent', 'negotiating'],
+  accepted: ['accepted'],
+  payment: ['payment_pending', 'payment_received'],
+  production: ['in_production'],
+  shipped: ['shipped', 'completed'],
+};
+const STAGE_PROB = { qualifying: 0.10, quoted: 0.35, accepted: 0.70, payment: 0.85, production: 0.95, shipped: 1.0 };
+async function getPipeline() {
+  const rows = (await query(`SELECT id, molecule_name, buyer_company, buyer_email, buyer_name, status, order_value_usd, quote_ref, quantity_requested, quantity_unit, updated_at FROM inquiries WHERE status <> 'closed' ORDER BY updated_at DESC`)).rows;
+  const colOf = s => Object.keys(PIPELINE_COLS).find(c => PIPELINE_COLS[c].includes(s)) || 'qualifying';
+  const columns = {};
+  for (const c of Object.keys(PIPELINE_COLS)) columns[c] = { items: [], value: 0, weighted: 0, prob: STAGE_PROB[c] };
+  for (const r of rows) {
+    const c = colOf(r.status);
+    const v = Number(r.order_value_usd) || 0;
+    columns[c].items.push({ id: r.id, molecule: r.molecule_name, company: r.buyer_company || r.buyer_email, status: r.status, value: v, quote_ref: r.quote_ref, qty: `${r.quantity_requested || ''}${r.quantity_unit || ''}`, updated_at: r.updated_at });
+    columns[c].value += v; columns[c].weighted += v * (STAGE_PROB[c] || 0);
+  }
+  const total_pipeline = rows.reduce((s, r) => s + (Number(r.order_value_usd) || 0), 0);
+  const weighted_forecast = Math.round(Object.keys(columns).reduce((s, c) => s + columns[c].weighted, 0));
+  const won = (await query(`SELECT COALESCE(SUM(order_value_usd),0) v FROM inquiries WHERE status IN ('payment_received','in_production','shipped','completed')`)).rows[0].v;
+  return { columns, total_pipeline, weighted_forecast, won_value: Number(won), count: rows.length };
+}
+
 module.exports = {
   receiveInquiry, sendFirstResponse, processInboundReply, generateQuote, escalateToHuman,
   handleFollowUp, runInquiryAgent, seedMoleculePricing, findPricing, classifyBuyer,
-  pollSalesEmailbox, findStock, findDemand,
+  pollSalesEmailbox, findStock, findDemand, handleAcceptance, markPaymentReceived, getPipeline,
 };

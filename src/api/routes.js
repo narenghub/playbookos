@@ -17,7 +17,7 @@ const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/pr
 const { runMeetAgent, analyzeAndStore } = require('../lib/agents/meet-agent');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
-const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent, pollSalesEmailbox } = require('../lib/agents/inquiry-agent');
+const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent, pollSalesEmailbox, handleAcceptance, markPaymentReceived, getPipeline } = require('../lib/agents/inquiry-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1782,6 +1782,12 @@ router.get('/inquiry/pricing', authMiddleware, requireAnyTier('sales', 'revenue'
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Sales pipeline (kanban columns + weighted revenue forecast). Literal path, so it
+// must sit before /inquiry/:id.
+router.get('/inquiry/pipeline', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try { res.json(await getPipeline()); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.put('/inquiry/pricing/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     const b = req.body || {}, sets = [], params = [];
@@ -1837,11 +1843,24 @@ router.post('/inquiry/:id/escalate', authMiddleware, requireAnyTier('sales', 're
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Manually mark an inquiry accepted — sends payment instructions, WhatsApps Naresh,
+// emails Palash, and opens an order (Stage 6).
+router.post('/inquiry/:id/accept', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try { const r = await handleAcceptance(req.params.id); if (r.error) return res.status(404).json(r); res.json({ success: true, ...r }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Mark the advance payment received — moves to production and notifies sourcing.
+router.post('/inquiry/:id/payment-received', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
+  try { const r = await markPaymentReceived(req.params.id); if (r.error) return res.status(404).json(r); res.json({ success: true, ...r }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.put('/inquiry/:id', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
   try {
     const b = req.body || {}, sets = [], params = [];
     const push = (c, v) => { params.push(v); sets.push(`${c}=$${params.length}`); };
-    if (b.status !== undefined && ['new', 'in_conversation', 'quote_sent', 'order_placed', 'human_requested', 'closed'].includes(b.status)) push('status', b.status);
+    if (b.status !== undefined && ['new', 'in_conversation', 'kyb_pending', 'kyb_passed', 'quote_sent', 'negotiating', 'accepted', 'payment_pending', 'payment_received', 'in_production', 'shipped', 'completed', 'order_placed', 'human_requested', 'closed'].includes(b.status)) push('status', b.status);
     if (b.assigned_to_user_id !== undefined) push('assigned_to_user_id', b.assigned_to_user_id || null);
     if (b.order_value_usd !== undefined) push('order_value_usd', Number(b.order_value_usd) || 0);
     if (b.notes !== undefined) push('intended_use', String(b.notes).slice(0, 500)); // notes stored on intended_use if no dedicated col

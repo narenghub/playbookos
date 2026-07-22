@@ -4927,7 +4927,7 @@ if(typeof pages !== 'undefined') {
 function iqEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function iqMoney(n){ return n==null||n===''?'—':'$'+Math.round(Number(n)).toLocaleString(); }
 window._iqTab = window._iqTab || 'inquiries';
-const IQ_STATUS = { new:['New','#166534'], in_conversation:['In Conversation','#0D7377'], quote_sent:['Quote Sent','#B45309'], order_placed:['Order Placed','#1B3A6B'], human_requested:['Human Requested','#991B1B'], closed:['Closed','#718096'] };
+const IQ_STATUS = { new:['New','#166534'], in_conversation:['In Conversation','#0D7377'], kyb_pending:['KYB Pending','#7C3AED'], kyb_passed:['KYB Passed','#6D28D9'], quote_sent:['Quote Sent','#B45309'], negotiating:['Negotiating','#D97706'], accepted:['Accepted','#6B2D8B'], payment_pending:['Payment Pending','#0D7377'], payment_received:['Payment Received','#0F766E'], in_production:['In Production','#1B3A6B'], shipped:['Shipped','#1D9E75'], completed:['Completed','#166534'], order_placed:['Order Placed','#1B3A6B'], human_requested:['Human Requested','#991B1B'], closed:['Closed','#718096'] };
 function iqStatusBadge(st){ const [l,c]=IQ_STATUS[st]||[st,'#718096']; return `<span style="display:inline-block;background:${c};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">${l}</span>`; }
 function iqRowColor(st){ return st==='human_requested'?'#991B1B':st==='quote_sent'?'#B45309':'#166534'; }
 function iqTab(t){ window._iqTab=t; pages['inquiry-agent'](); }
@@ -4961,8 +4961,8 @@ if(typeof pages !== 'undefined') {
   pages['inquiry-agent'] = async function() {
     const c = document.getElementById('content');
     c.innerHTML = '<p style="color:#888;padding:20px">Loading Inquiry Agent…</p>';
-    let dash, inqData, priceData;
-    try { [dash, inqData, priceData] = await Promise.all([ API('/inquiry/dashboard').catch(()=>({})), API('/inquiry').catch(()=>({inquiries:[]})), API('/inquiry/pricing').catch(()=>({pricing:[]})) ]); }
+    let dash, inqData, priceData, pipeData;
+    try { [dash, inqData, priceData, pipeData] = await Promise.all([ API('/inquiry/dashboard').catch(()=>({})), API('/inquiry').catch(()=>({inquiries:[]})), API('/inquiry/pricing').catch(()=>({pricing:[]})), API('/inquiry/pipeline').catch(()=>({columns:{}})) ]); }
     catch(e){ c.innerHTML = `<div class="card"><div class="card-title">Inquiry Agent</div><p style="color:#dc2626">${iqEsc(e.message)}</p></div>`; return; }
     if (dash && dash.error) { c.innerHTML = `<div class="card"><div class="card-title">Inquiry Agent</div><p style="color:#dc2626">${iqEsc(dash.error)}</p></div>`; return; }
     const inquiries=(inqData&&inqData.inquiries)||[], pricing=(priceData&&priceData.pricing)||[];
@@ -4978,7 +4978,7 @@ if(typeof pages !== 'undefined') {
         <div class="metric green"><div class="label">Orders this month</div><div class="value">${dash.orders_month||0}</div></div>
         <div class="metric"><div class="label">Pipeline value</div><div class="value">${iqMoney(dash.pipeline_value)}</div></div>
       </div>`;
-    const tabs=[['inquiries','Active Inquiries'],['pricing','Pricing Table'],['analytics','Analytics']];
+    const tabs=[['inquiries','Active Inquiries'],['pipeline','Pipeline'],['pricing','Pricing Table'],['analytics','Analytics']];
     const tabBar=`<div class="card" style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([k,l])=>`<button onclick="iqTab('${k}')" class="btn-outline" style="padding:6px 14px;font-size:13px;${window._iqTab===k?'background:#1B3A6B;color:#fff':''}">${l}</button>`).join('')}</div>`;
 
     let body='';
@@ -5021,6 +5021,27 @@ if(typeof pages !== 'undefined') {
         <div class="card"><div class="card-title text-section">Top molecules by inquiry volume</div>
           ${topMol.length?topMol.map(([m,n])=>`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border);font-size:13px"><span>${iqEsc(m)}</span><span style="color:#718096">${n} inquir${n===1?'y':'ies'}</span></div>`).join(''):'<div style="font-size:13px;color:#888">No inquiries yet.</div>'}
         </div>`;
+    } else if (window._iqTab==='pipeline') {
+      const p = pipeData||{columns:{}};
+      const cols=[['qualifying','Qualifying','#94a3b8'],['quoted','Quoted','#EF9F27'],['accepted','Accepted','#6B2D8B'],['payment','Payment','#0D7377'],['production','Production','#1B3A6B'],['shipped','Shipped','#1D9E75']];
+      const summary=`<div class="metric-grid">
+        <div class="metric"><div class="label">Total pipeline value</div><div class="value">${iqMoney(p.total_pipeline)}</div><div class="sub">${p.count||0} open</div></div>
+        <div class="metric amber"><div class="label">Weighted forecast</div><div class="value">${iqMoney(p.weighted_forecast)}</div><div class="sub">stage-probability adjusted</div></div>
+        <div class="metric green"><div class="label">Won (paid+)</div><div class="value">${iqMoney(p.won_value)}</div></div>
+      </div>`;
+      const board=`<div class="card"><div style="overflow-x:auto"><div style="display:flex;gap:10px;min-width:960px">
+        ${cols.map(([k,label,col])=>{const c=(p.columns&&p.columns[k])||{items:[],value:0,prob:0};return `<div style="flex:1;min-width:150px;background:#f8fafc;border-radius:10px;padding:8px">
+          <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid ${col};padding-bottom:6px;margin-bottom:8px">
+            <span style="font-size:12px;font-weight:800;color:${col}">${label}</span><span style="font-size:11px;color:#718096">${c.items.length}</span></div>
+          <div style="font-size:11px;color:#718096;margin-bottom:8px">${iqMoney(c.value)} · ${Math.round((c.prob||0)*100)}% avg</div>
+          ${(c.items||[]).map(it=>`<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px;margin-bottom:6px;cursor:pointer" onclick="window._iqTab='inquiries';pages['inquiry-agent']();">
+            <div style="font-size:12px;font-weight:700;color:#1a202c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${iqEsc(it.molecule||'?')}</div>
+            <div style="font-size:11px;color:#718096;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${iqEsc(it.company||'')}</div>
+            <div style="font-size:11px;margin-top:4px;display:flex;justify-content:space-between"><span style="color:#1D9E75;font-weight:700">${it.value?iqMoney(it.value):'—'}</span>${it.quote_ref?`<span style="color:#a0aec0">${iqEsc(it.quote_ref)}</span>`:''}</div>
+          </div>`).join('')||'<div style="font-size:11px;color:#cbd5e1;text-align:center;padding:8px">—</div>'}
+        </div>`;}).join('')}
+      </div></div></div>`;
+      body=summary+board;
     }
     c.innerHTML = head + tabBar + body;
   };

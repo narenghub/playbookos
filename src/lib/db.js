@@ -829,6 +829,16 @@ async function migrateSchemas() {
         updated_at TEXT DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_inquiries_status ON inquiries (status, created_at DESC);
+      -- Richer sales pipeline stages replace the original 6-value enum, so drop the
+      -- CHECK and let the Inquiry Agent manage the full lifecycle.
+      ALTER TABLE inquiries DROP CONSTRAINT IF EXISTS inquiries_status_check;
+      ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS quote_ref TEXT;
+      ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS kyb_status TEXT;
+      ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS advance_amount REAL;
+      ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS order_id TEXT;
+      ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS accepted_at TEXT;
+      ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS payment_received_at TEXT;
+      ALTER TABLE inquiries ADD COLUMN IF NOT EXISTS followups_sent INTEGER DEFAULT 0;
       CREATE TABLE IF NOT EXISTS inquiry_messages (
         id TEXT PRIMARY KEY,
         inquiry_id TEXT,
@@ -877,6 +887,7 @@ async function migrateSchemas() {
         updated_at TEXT DEFAULT NOW()
       );
       CREATE UNIQUE INDEX IF NOT EXISTS idx_pricing_name ON molecule_pricing (LOWER(molecule_name));
+      ALTER TABLE molecule_pricing ADD COLUMN IF NOT EXISTS controlled_substance INTEGER DEFAULT 0;
       CREATE TABLE IF NOT EXISTS inquiry_quotes (
         id TEXT PRIMARY KEY,
         inquiry_id TEXT,
