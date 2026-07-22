@@ -13,6 +13,7 @@ const { query } = require('../db');
 const { sendEmail } = require('../mailer');
 const { sendWhatsApp } = require('../whatsapp');
 const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday } = require('../agent-core');
+const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth');
 
 const AGENT = 'meet-agent';
 const MEET_MODEL = 'claude-opus-4-8';
@@ -35,19 +36,11 @@ async function callClaude(prompt, { maxTokens = 3000, json = false } = {}) {
   } catch (e) { return { data: null, text: null, error: e.message }; }
 }
 
-// Google OAuth access token (same refresh-token flow as the GSC integration).
+// Service-account token (DWD, impersonating naren@abiozen.com) with refresh-token
+// fallback. Needs calendar.readonly + drive.readonly.
+const MEET_IMPERSONATE = () => process.env.MEET_IMPERSONATE || 'naren@abiozen.com';
 async function getGoogleAccessToken() {
-  const clientId = process.env.GOOGLE_CLIENT_ID, clientSecret = process.env.GOOGLE_CLIENT_SECRET, refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) return { error: 'GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN must all be set' };
-  try {
-    const res = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }).toString(),
-    });
-    if (!res.ok) return { error: `OAuth ${res.status}: ${(await res.text()).slice(0, 160)}` };
-    const data = await res.json();
-    return data.access_token ? { access_token: data.access_token } : { error: 'no access_token in response' };
-  } catch (e) { return { error: e.message }; }
+  return getGoogleToken({ subject: MEET_IMPERSONATE(), scopes: [SCOPES.calendarReadonly, SCOPES.driveReadonly] });
 }
 
 async function teamMembers() {

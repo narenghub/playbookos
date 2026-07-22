@@ -7,6 +7,7 @@ const { query } = require('../db');
 const { sendEmail } = require('../mailer');
 const { sendWhatsApp } = require('../whatsapp');
 const { logAgentActivity, parseClaudeJSON } = require('../agent-core');
+const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth');
 
 const AGENT = 'inquiry-agent';
 const MODEL = 'claude-opus-4-8';
@@ -379,20 +380,14 @@ async function runInquiryAgent({ dryRun = false } = {}) {
 // GSC-scoped, so Gmail may 401/403 for lack of scope — then it returns a warning
 // and never throws.
 const INQUIRY_SUBJECT_KEYWORDS = ['quote', 'inquiry', 'enquiry', 'rfq', 'request', 'api', 'molecule'];
+// Gmail API userId: 'me' resolves to the impersonated mailbox (sales@abiozen.com).
 const GMAIL_USER = () => process.env.SALES_GMAIL_USER || 'me';
+const SALES_MAILBOX = () => process.env.SALES_MAILBOX_EMAIL || 'sales@abiozen.com';
 
+// Service-account token (DWD, impersonating the sales mailbox) with refresh-token
+// fallback. Needs gmail.readonly (read) + gmail.modify (mark read).
 async function getGoogleAccessToken() {
-  const clientId = process.env.GOOGLE_CLIENT_ID, clientSecret = process.env.GOOGLE_CLIENT_SECRET, refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) return { error: 'Google OAuth env vars not configured' };
-  try {
-    const res = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }).toString(),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.access_token) return { error: `OAuth token ${res.status}: ${JSON.stringify(data).slice(0, 160)}` };
-    return { access_token: data.access_token };
-  } catch (e) { return { error: e.message }; }
+  return getGoogleToken({ subject: SALES_MAILBOX(), scopes: [SCOPES.gmailReadonly, SCOPES.gmailModify] });
 }
 function b64urlDecode(d) { return Buffer.from(String(d || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); }
 function gmailHeader(payload, name) {

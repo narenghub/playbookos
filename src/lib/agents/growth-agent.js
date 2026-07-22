@@ -5,6 +5,7 @@ const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
 const { sendEmail } = require('../mailer');
 const { getCEOUser } = require('../agent-core');
 const { sendCronAlert } = require('../cron-alerts');
+const { getGoogleAccessToken: getGoogleToken, SCOPES, serviceAccountConfigured } = require('../google-auth');
 
 const DAY_MS = 86400000;
 const isoDate = d => d.toISOString().slice(0, 10);
@@ -71,44 +72,19 @@ async function syncAlgoliaSearchData({ days = 7 } = {}) {
   };
 }
 
-// Exchange the long-lived OAuth refresh token for a short-lived access token.
-// The refresh token is minted once via a browser consent flow (see
-// .env.example) using a Google account that already has access to the
-// abiozen.com Search Console property, and does not expire under normal use.
+// Short-lived access token for Search Console. Primary: the Workspace service
+// account (DWD, impersonating GSC_IMPERSONATE, a user with property access);
+// fallback: the legacy OAuth refresh token (minted via a browser consent flow by
+// an account with access to the abiozen.com property). The fallback keeps GSC
+// working until DWD is enabled in the Admin Console.
+const GSC_IMPERSONATE = () => process.env.GSC_IMPERSONATE || 'naren@abiozen.com';
 async function getGSCAccessToken() {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
-  if (!clientId || !clientSecret || !refreshToken) {
-    return { error: 'GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and GOOGLE_REFRESH_TOKEN must all be set' };
-  }
-
-  try {
-    const res = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: clientId,
-        client_secret: clientSecret,
-        refresh_token: refreshToken,
-        grant_type: 'refresh_token',
-      }).toString(),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      return { error: `OAuth token endpoint ${res.status}: ${body.slice(0, 200)}` };
-    }
-    const data = await res.json();
-    if (!data.access_token) return { error: 'OAuth token response had no access_token' };
-    return { access_token: data.access_token };
-  } catch (e) {
-    return { error: e.message };
-  }
+  return getGoogleToken({ subject: GSC_IMPERSONATE(), scopes: [SCOPES.webmastersReadonly] });
 }
 
 async function fetchGSCData({ siteUrl, days = 30 } = {}) {
-  if (!process.env.GOOGLE_REFRESH_TOKEN) {
-    return { skipped: true, reason: 'GOOGLE_REFRESH_TOKEN not set' };
+  if (!serviceAccountConfigured() && !process.env.GOOGLE_REFRESH_TOKEN) {
+    return { skipped: true, reason: 'No Google credentials (neither GOOGLE_SERVICE_ACCOUNT_JSON nor GOOGLE_REFRESH_TOKEN set)' };
   }
 
   const token = await getGSCAccessToken();
