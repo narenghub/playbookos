@@ -1727,21 +1727,22 @@ router.get('/email-engine/campaigns/:id/preview', authMiddleware, requireAnyTier
 // ── GMP Inquiry Agent ─────────────────────────────────────────────────────────
 // Webhook from abiozen.com — secret-header auth (no JWT), like /orders/webhook.
 router.post('/inquiry/receive', async (req, res) => {
-  try {
-    const secret = process.env.PLAYBOOKOS_WEBHOOK_SECRET;
-    const provided = req.headers['x-playbookos-secret'];
-    if (!secret) return res.status(503).json({ error: 'PLAYBOOKOS_WEBHOOK_SECRET not configured' });
-    if (!provided || provided !== secret) return res.status(401).json({ error: 'Invalid or missing X-PlaybookOS-Secret header' });
-    const b = req.body || {};
-    if (!b.buyer_email || !b.molecule_name) return res.status(400).json({ error: 'buyer_email and molecule_name required' });
-    const id = await receiveInquiry({
-      molecule_name: b.molecule_name, cas_number: b.cas_number, buyer_name: b.buyer_name,
-      buyer_email: b.buyer_email, buyer_company: b.buyer_company, country: b.country,
-      quantity: b.quantity, quantity_unit: b.quantity_unit, intended_use: b.intended_use,
-      message: b.message, source: b.source || 'abiozen_form',
-    });
-    res.json({ inquiry_id: id, status: 'received' });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  const secret = process.env.PLAYBOOKOS_WEBHOOK_SECRET;
+  const provided = req.headers['x-playbookos-secret'];
+  if (!secret) return res.status(503).json({ error: 'PLAYBOOKOS_WEBHOOK_SECRET not configured' });
+  if (!provided || provided !== secret) return res.status(401).json({ error: 'Invalid or missing X-PlaybookOS-Secret header' });
+  const b = req.body || {};
+  if (!b.buyer_email || !b.molecule_name) return res.status(400).json({ error: 'buyer_email and molecule_name required' });
+  // Respond immediately, then create the inquiry + send the AI first-response in
+  // the background. receiveInquiry does a synchronous Claude call (~10s), so
+  // blocking on it would time out fast callers (e.g. the storefront forward).
+  res.status(202).json({ status: 'accepted' });
+  receiveInquiry({
+    molecule_name: b.molecule_name, cas_number: b.cas_number, buyer_name: b.buyer_name,
+    buyer_email: b.buyer_email, buyer_company: b.buyer_company, country: b.country,
+    quantity: b.quantity, quantity_unit: b.quantity_unit, intended_use: b.intended_use,
+    message: b.message, source: b.source || 'abiozen_form',
+  }).catch(e => console.error('[inquiry/receive] receiveInquiry failed:', e.message));
 });
 
 router.post('/inquiry/run', authMiddleware, adminOnly, async (req, res) => {
