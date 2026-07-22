@@ -517,6 +517,40 @@ async function markGmailRead(user, gmailId, accessToken, dryRun) {
   } catch (_) {}
 }
 
+// Diagnostic: exercise the Gmail connection end-to-end and report exactly where
+// it stands (auth method, API/mailbox reachability, unread inquiry count).
+async function gmailConnectionTest() {
+  const out = { auth_method: null, gmail_accessible: false, messages_found: null, error_if_any: null, sales_email_valid: null, mailbox: SALES_MAILBOX() };
+  const tok = await getGoogleAccessToken();
+  if (tok.error) { out.error_if_any = tok.error; return out; }
+  out.auth_method = tok.via;
+  const user = encodeURIComponent(GMAIL_USER());
+  try {
+    // getProfile validates BOTH: Gmail API enabled (403 if not) and the mailbox
+    // is a real Workspace user vs a bare alias (400 failedPrecondition).
+    const profRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/profile`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    if (!profRes.ok) {
+      const body = (await profRes.text()).slice(0, 400);
+      out.error_if_any = `getProfile ${profRes.status}: ${body}`;
+      if (profRes.status === 400) out.sales_email_valid = false; // alias, not a full mailbox
+      else if (/gmail.*not been used|has not been enabled|is disabled/i.test(body)) out.error_if_any += ' — enable the Gmail API in the service account\'s Cloud project.';
+      return out;
+    }
+    const prof = await profRes.json();
+    out.sales_email_valid = true;
+    out.mailbox = prof.emailAddress || out.mailbox;
+    out.mailbox_messages_total = prof.messagesTotal;
+    const q = encodeURIComponent(`is:unread newer_than:7d subject:(${INQUIRY_SUBJECT_KEYWORDS.join(' OR ')})`);
+    const listRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages?q=${q}&maxResults=10`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    if (!listRes.ok) { out.error_if_any = `messages.list ${listRes.status}: ${(await listRes.text()).slice(0, 300)}`; return out; }
+    const list = await listRes.json();
+    out.gmail_accessible = true;
+    out.messages_found = (list.messages || []).length;
+    out.result_size_estimate = list.resultSizeEstimate;
+    return out;
+  } catch (e) { out.error_if_any = e.message; return out; }
+}
+
 // ── PART 2 — molecule pricing seed (20 GMP APIs) ──────────────────────────────
 // [name, cas, price/kg, minGrams, leadDays, dmfAvailable, regStatus]
 const PRICING_SEED = [
@@ -563,5 +597,5 @@ async function seedMoleculePricing() {
 module.exports = {
   receiveInquiry, sendFirstResponse, processInboundReply, generateQuote, escalateToHuman,
   handleFollowUp, runInquiryAgent, seedMoleculePricing, findPricing, classifyBuyer,
-  pollSalesEmailbox, findStock, findDemand,
+  pollSalesEmailbox, findStock, findDemand, gmailConnectionTest,
 };

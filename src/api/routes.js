@@ -17,7 +17,7 @@ const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/pr
 const { runMeetAgent, analyzeAndStore } = require('../lib/agents/meet-agent');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
-const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent } = require('../lib/agents/inquiry-agent');
+const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent, pollSalesEmailbox, gmailConnectionTest } = require('../lib/agents/inquiry-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
@@ -1746,9 +1746,27 @@ router.post('/inquiry/receive', async (req, res) => {
 
 router.post('/inquiry/run', authMiddleware, adminOnly, async (req, res) => {
   const dryRun = req.query?.dryRun === '1' || req.body?.dryRun === true;
-  if (dryRun) { try { return res.json(await runInquiryAgent({ dryRun: true })); } catch (e) { return res.status(500).json({ error: e.message }); } }
-  runInquiryAgent().then(r => console.log(`[inquiry] run — ${r.active_inquiries} active, ${r.follow_ups_sent} follow-ups`)).catch(e => console.error('[inquiry] run failed:', e.message));
-  res.status(202).json({ started: true, message: 'Inquiry agent started — sending follow-ups + daily summary.' });
+  if (dryRun) {
+    try {
+      const poll = await pollSalesEmailbox({ dryRun: true });
+      const agent = await runInquiryAgent({ dryRun: true });
+      return res.json({ dryRun: true, poll, agent });
+    } catch (e) { return res.status(500).json({ error: e.message }); }
+  }
+  // Poll the sales mailbox for new inquiries first, then run follow-ups + summary.
+  (async () => {
+    const poll = await pollSalesEmailbox();
+    console.log(`[inquiry] mailbox poll — ${poll.new_inquiries} new, ${poll.replies_routed} replies, ${poll.skipped} skipped${poll.warning ? ' · ' + poll.warning : ''}`);
+    const r = await runInquiryAgent();
+    console.log(`[inquiry] run — ${r.active_inquiries} active, ${r.follow_ups_sent} follow-ups`);
+  })().catch(e => console.error('[inquiry] run failed:', e.message));
+  res.status(202).json({ started: true, message: 'Inquiry agent started — polling sales mailbox, then follow-ups + daily summary.' });
+});
+
+// Gmail connection diagnostic — surfaces auth method, API/mailbox reachability,
+// and unread inquiry count so we can test the poll without waiting for the cron.
+router.get('/inquiry/gmail-test', authMiddleware, adminOnly, async (req, res) => {
+  try { res.json(await gmailConnectionTest()); } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/inquiry/dashboard', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
