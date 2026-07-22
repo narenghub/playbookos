@@ -81,6 +81,15 @@ async function findDemand(molecule, cas) {
   )).rows[0];
   return (r && r.appearances > 0) ? r : null;
 }
+// Classify a molecule as a GMP/generic API vs a research chemical, to set the
+// response's regulatory framing and tone. Prefers the catalog row's flags; falls
+// back to a name heuristic when the molecule isn't priced.
+function productType(pricing, molecule) {
+  if (pricing) return pricing.gmp_certified ? 'gmp_api' : 'research_chemical';
+  const t = String(molecule || '').toLowerCase();
+  if (/research grade|\bruo\b|\bcatalyst\b|grubbs|xphos|sphos|phosphine|palladium|pd\(|pt\/|ligand|fmoc-|boc-|cbz-|dicarbonate|malonate|boc2o|reagent|building block/.test(t)) return 'research_chemical';
+  return 'gmp_api';
+}
 async function logMessage(inquiryId, m) {
   await query(
     `INSERT INTO inquiry_messages (id, inquiry_id, direction, sender_name, sender_email, subject, body_text, body_html, sent_at, created_at)
@@ -126,11 +135,11 @@ async function receiveInquiry(data) {
   const naresh = await getNaresh();
   if (naresh.whatsapp_number) {
     await sendWhatsApp(naresh.whatsapp_number,
-      `📩 New GMP inquiry: ${data.buyer_name || 'Buyer'} at ${data.buyer_company || '?'} for ${molecule || 'a molecule'} — ${qty ? qty + unit : 'qty TBD'}`,
-      { user_id: naresh.id || null, message_type: 'gmp_inquiry' }).catch(() => {});
+      `📩 New inquiry: ${data.buyer_name || 'Buyer'} at ${data.buyer_company || '?'} for ${molecule || 'a molecule'} — ${qty ? qty + unit : 'qty TBD'}`,
+      { user_id: naresh.id || null, message_type: 'inquiry' }).catch(() => {});
   }
   await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_received', user_id: null,
-    reasoning: `New GMP inquiry from ${data.buyer_company || data.buyer_email} for ${molecule} (${priority}).`,
+    reasoning: `New inquiry from ${data.buyer_company || data.buyer_email} for ${molecule} (${priority}).`,
     source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${id} molecule=${molecule} priority=${priority}` }).catch(() => {});
   return id;
 }
@@ -142,29 +151,42 @@ async function sendFirstResponse(inquiryId) {
   const pricing = await findPricing(inq.molecule_name, inq.cas_number);
   const stock = await findStock(inq.molecule_name);
   const demand = await findDemand(inq.molecule_name, inq.cas_number);
+  const type = productType(pricing, inq.molecule_name);
+  const isResearch = type === 'research_chemical';
+  const purity = pricing?.purity || '98%+';
   const priceLine = pricing ? `${pricing.price_per_kg_usd >= 1000 ? '$' + Number(pricing.price_per_kg_usd).toLocaleString() : '$' + pricing.price_per_kg_usd}/kg` : 'available on request';
-  const lead = pricing?.lead_time_days || 30;
+  const lead = pricing?.lead_time_days || (isResearch ? 10 : 30);
   const stockLine = stock && stock.units_in_stock > 0
     ? `Stock: we currently hold ${stock.units_in_stock} unit(s) on hand — delivery can be faster than the standard lead time.`
     : `Stock: this is sourced/produced to order — the standard lead time applies.`;
   const demandLine = demand
     ? `Internal demand signal (context only, not for the buyer's eyes): this molecule appeared in ${demand.appearances} recent market-intelligence scan(s)${demand.best_rank ? `, best rank ${demand.best_rank}` : ''}${demand.therapeutic_area ? `, area ${demand.therapeutic_area}` : ''}. Demand is active — you MAY convey a sense that quality supply is in demand, but do NOT fabricate specific scarcity figures or deadlines.`
     : `Internal demand signal: none tracked for this molecule.`;
-  const prompt = `Write a professional first response email for a GMP pharmaceutical API inquiry.
+  const productLine = isResearch
+    ? `Product type: RESEARCH CHEMICAL (research/analytical use only, non-GMP). We supply it at ${purity} purity with COA and SDS.`
+    : `Product type: GMP / generic pharmaceutical API. We supply it GMP-grade${pricing ? `, ${pricing.dmf_available ? 'DMF available' : 'DMF/CEP on request'}` : ''}, with COA and GMP documentation.`;
+  const askBlock = isResearch
+    ? `research application; required purity and whether a COA + SDS suffice; quantity and delivery timeline; destination country; whether they'd like a small evaluation quantity first`
+    : `intended use (compounding/research/manufacturing); required documentation (USP/EP grade, GMP cert, DMF/CEP, COA format, ICH stability data); delivery timeline; destination country (export compliance); whether they need a 1-5 g evaluation sample first`;
+  const toneLine = isResearch
+    ? `Tone: efficient, technical, collegial — an academic/R&D audience. Do NOT mention GMP, DMF, CEP or regulatory filings (this is research-use-only). Small quantities (mg-g scale) are welcome and turnaround is quick.`
+    : `Tone: formal, professional pharma — a regulatory/procurement audience. Referencing GMP, DMF/CEP and ICH compliance is appropriate.`;
+  const prompt = `Write a professional first-response email for a chemical/API inquiry from Abiozen LLC.
 
 Buyer: ${inq.buyer_name || 'there'} at ${inq.buyer_company || 'your organization'}
 Molecule: ${inq.molecule_name} (CAS: ${inq.cas_number || 'to confirm'})
 Quantity requested: ${inq.quantity_requested ? inq.quantity_requested + inq.quantity_unit : 'to confirm'}
-We have this molecule available. Pricing starts at ${priceLine}.
+${productLine}
+Pricing starts at ${priceLine}. Standard lead time ${lead} days.
 ${stockLine}
 ${demandLine}
 
 Write an email that:
 1. Acknowledges their inquiry warmly and professionally
-2. Confirms we have the molecule in GMP grade
-3. Asks these qualifying questions naturally: intended use (compounding/research/manufacturing); required documentation (USP/EP grade, GMP cert, DMF, COA format); delivery timeline needed; destination country (for export compliance); whether they need a 1-5 g evaluation sample first
+2. Confirms availability and the grade we supply (${isResearch ? `research grade, ${purity}, with COA + SDS` : 'GMP grade, with COA + GMP documentation'})
+3. Asks these qualifying questions naturally: ${askBlock}
 4. Sets delivery expectations from the Stock line above (faster if in stock, otherwise the standard lead time of ${lead} days) — state it honestly, do not promise stock we don't have
-5. Is warm but professional — pharma industry tone; under 200 words
+5. ${toneLine} Under 200 words.
 Do not commit to a specific final price or a documentation guarantee you cannot verify — keep pricing as "starting at". Return ONLY the email body as plain text, ending with:
 
 Abiozen Sales Team
@@ -172,7 +194,7 @@ Abiozen LLC
 sales@abiozen.com`;
   const { text, error } = await callClaude(prompt, { maxTokens: 900 });
   if (!text) return { error: error || 'no body' };
-  const subject = `Re: GMP API Inquiry — ${inq.molecule_name} | Abiozen LLC`;
+  const subject = `Re: Inquiry — ${inq.molecule_name} | Abiozen LLC`;
   await sendAndLog(inq, { subject, body: text });
   await query(`UPDATE inquiries SET status='in_conversation', updated_at=NOW() WHERE id=$1 AND status='new'`, [inquiryId]);
   return { sent: true };
@@ -187,8 +209,12 @@ async function processInboundReply(inquiryId, emailText, { dryRun = false } = {}
   const history = (await query('SELECT direction, body_text FROM inquiry_messages WHERE inquiry_id=$1 ORDER BY created_at', [inquiryId])).rows
     .map(m => `[${m.direction}] ${String(m.body_text || '').slice(0, 500)}`).join('\n');
   const pricing = await findPricing(inq.molecule_name, inq.cas_number);
+  const isResearch = productType(pricing, inq.molecule_name) === 'research_chemical';
+  const supplyLine = isResearch
+    ? `We supply this as a RESEARCH CHEMICAL (research-use-only, non-GMP)${pricing ? `, ${pricing.purity || '98%+'} purity, COA + SDS, price starting ~$${pricing.price_per_kg_usd}/kg, lead ${pricing.lead_time_days}d` : ', COA + SDS available'}. Do NOT reference GMP/DMF/CEP for this product.`
+    : `We supply this GMP-grade${pricing ? `, price starting ~$${pricing.price_per_kg_usd}/kg, lead ${pricing.lead_time_days}d, DMF ${pricing.dmf_available ? 'available' : 'on request'}` : ''}.`;
   const { data } = await callClaude(
-    `You are the Abiozen GMP sales agent handling an email inquiry for ${inq.molecule_name}. Analyse the buyer's latest reply and the thread, then decide the next step.
+    `You are the Abiozen sales agent handling an email inquiry for ${inq.molecule_name}. Analyse the buyer's latest reply and the thread, then decide the next step. Match the buyer's context: ${isResearch ? 'research/academic, technical tone' : 'pharma procurement, regulatory tone'}.
 
 Thread:
 ${history}
@@ -196,7 +222,7 @@ ${history}
 Buyer's latest reply:
 """${String(emailText).slice(0, 3000)}"""
 
-We have this molecule GMP-grade${pricing ? `, price starting ~$${pricing.price_per_kg_usd}/kg, lead ${pricing.lead_time_days}d, DMF ${pricing.dmf_available ? 'available' : 'on request'}` : ''}.
+${supplyLine}
 
 Return ONLY JSON:
 {"intent":"ready_for_quote|needs_human|still_qualifying","reason":"one line","reply_body":"the email body to send them next — answer their questions using ONLY facts stated above; do not invent prices/docs; if quoting is next, keep it brief and say a formal quote follows"}`,
@@ -211,11 +237,11 @@ Return ONLY JSON:
     await escalateToHuman(inquiryId, data?.reason || 'buyer requested a human');
     action = 'escalated';
   } else if (intent === 'ready_for_quote') {
-    await sendAndLog(inq, { subject: `Re: GMP API Inquiry — ${inq.molecule_name}`, body: replyBody });
+    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`, body: replyBody });
     await generateQuote(inquiryId);
     action = 'quoted';
   } else {
-    await sendAndLog(inq, { subject: `Re: GMP API Inquiry — ${inq.molecule_name}`, body: replyBody });
+    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`, body: replyBody });
     await query(`UPDATE inquiries SET status='in_conversation', updated_at=NOW() WHERE id=$1`, [inquiryId]);
   }
   await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_reply_handled', user_id: null,
@@ -252,36 +278,40 @@ async function generateQuote(inquiryId) {
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,'sent',NOW())`,
     [quoteId, inquiryId, inq.molecule_name, inq.cas_number, qtyKg, unitPrice, total, pricing.lead_time_days, validUntil]);
 
-  const prompt = `Write a formal pharmaceutical API quotation email from Abiozen LLC. Return ONLY the email body as plain text (no subject).
+  const isResearch = productType(pricing, inq.molecule_name) === 'research_chemical';
+  const gradeLabel = isResearch ? `research grade, ${pricing.purity || '98%+'}` : 'GMP grade';
+  const docLabel = isResearch ? 'COA + SDS' : 'COA / GMP cert';
+  const signatory = isResearch
+    ? 'Abiozen Sales Team\nAbiozen LLC\nsales@abiozen.com'
+    : 'Palash Das\nProcurement Director\nAbiozen LLC\npalash@abiozen.com';
+  const prompt = `Write a formal ${isResearch ? 'research-chemical' : 'pharmaceutical API'} quotation email from Abiozen LLC. Return ONLY the email body as plain text (no subject).
 
-Buyer: ${inq.buyer_name || 'Procurement Team'} at ${inq.buyer_company || 'the buyer'}
-Molecule: ${inq.molecule_name} (CAS ${inq.cas_number || 'to confirm'}), GMP grade
+Buyer: ${inq.buyer_name || (isResearch ? 'Research Team' : 'Procurement Team')} at ${inq.buyer_company || 'the buyer'}
+Molecule: ${inq.molecule_name} (CAS ${inq.cas_number || 'to confirm'}), ${gradeLabel}
 Quantity: ${qtyKg} kg
 Unit price: $${unitPrice.toLocaleString()}/kg
-API subtotal: $${apiTotal.toLocaleString()}
-Documentation fee (COA/GMP cert): $${DOC_FEE}
+Subtotal: $${apiTotal.toLocaleString()}
+Documentation fee (${docLabel}): $${DOC_FEE}
 Total: $${total.toLocaleString()} (shipping billed separately, TBD by destination)
 Lead time: ${pricing.lead_time_days} days
 Valid until: ${validUntil} (30 days)
 Payment terms: 50% advance, 50% before shipment.
+${isResearch ? 'This is a RESEARCH CHEMICAL (research-use-only) — do NOT reference GMP, DMF, CEP or ICH; keep it technical and concise.' : 'Professional pharma tone; it is appropriate to reference GMP documentation and DMF/CEP.'}
 
-Format as a clean formal quotation with clear line items (API price, documentation fee, shipping TBD), the validity date, and payment terms. Add a bank-details placeholder line "[Bank wire details provided on order confirmation]". Do NOT invent bank numbers. End with:
+Format as a clean formal quotation with clear line items (product price, documentation fee, shipping TBD), the validity date, and payment terms. Add a bank-details placeholder line "[Bank wire details provided on order confirmation]". Do NOT invent bank numbers. End with:
 
-Palash Das
-Procurement Director
-Abiozen LLC
-palash@abiozen.com`;
+${signatory}`;
   const { text } = await callClaude(prompt, { maxTokens: 1400 });
   const body = (text || `Please find our quotation for ${inq.molecule_name}: ${qtyKg}kg at $${unitPrice}/kg, total $${total}. Valid until ${validUntil}.`)
     + (needsApproval ? '' : '');
   const subject = `Quotation — ${inq.molecule_name} (${qtyKg}kg) | Abiozen LLC`;
-  await sendAndLog(inq, { subject, body, cc: ['palash@abiozen.com', 'naren@abiozen.com'] });
+  await sendAndLog(inq, { subject, body, cc: isResearch ? ['naren@abiozen.com'] : ['palash@abiozen.com', 'naren@abiozen.com'] });
   await query(`UPDATE inquiries SET status='quote_sent', order_value_usd=$1, updated_at=NOW() WHERE id=$2`, [total, inquiryId]);
 
   if (needsApproval || total > ESCALATE_ABOVE) {
     const naresh = await getNaresh();
     if (naresh.whatsapp_number) await sendWhatsApp(naresh.whatsapp_number,
-      `💰 Large GMP quote sent: ${inq.buyer_company || inq.buyer_email} — ${inq.molecule_name} ${qtyKg}kg = $${total.toLocaleString()}${needsApproval ? ' (>10kg — review pricing)' : ''}`,
+      `💰 Large quote sent: ${inq.buyer_company || inq.buyer_email} — ${inq.molecule_name} ${qtyKg}kg = $${total.toLocaleString()}${needsApproval ? ' (>10kg — review pricing)' : ''}`,
       { user_id: naresh.id || null, message_type: 'large_quote' }).catch(() => {});
   }
   return { quote_id: quoteId, unit_price: unitPrice, total, tier, needs_approval: needsApproval };
@@ -312,7 +342,7 @@ async function escalateToHuman(inquiryId, reason = 'buyer requested a human') {
       <p style="margin-top:12px"><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>` }).catch(() => {});
 
   // Reassure the buyer.
-  await sendAndLog(inq, { subject: `Re: GMP API Inquiry — ${inq.molecule_name}`,
+  await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`,
     body: `Thank you for your message. I'm connecting you with one of our specialists who will personally follow up on your ${inq.molecule_name} requirement within 24 hours.\n\nWe appreciate your interest in working with Abiozen.\n\nAbiozen Sales Team\nAbiozen LLC\nsales@abiozen.com` });
   await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_escalated', user_id: null, reasoning: `Escalated inquiry ${inquiryId}: ${reason}.`, source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId}` }).catch(() => {});
   return { escalated: true };
@@ -416,7 +446,7 @@ function parseFromHeader(v) {
 async function pollSalesEmailbox({ dryRun = false, maxMessages = 25 } = {}) {
   const out = { checked: 0, new_inquiries: 0, replies_routed: 0, skipped: 0, errors: [] };
   const tok = await getGoogleAccessToken();
-  if (tok.error) { out.warning = `Gmail poll skipped — ${tok.error}. The shared Google token is GSC-scoped; grant Gmail read access on sales@abiozen.com to enable.`; return out; }
+  if (tok.error) { out.warning = `Gmail poll skipped — ${tok.error}. Check the service account (DWD) can impersonate ${SALES_MAILBOX()}.`; return out; }
 
   const user = encodeURIComponent(GMAIL_USER());
   const q = encodeURIComponent(`is:unread newer_than:7d subject:(${INQUIRY_SUBJECT_KEYWORDS.join(' OR ')})`);
@@ -425,7 +455,7 @@ async function pollSalesEmailbox({ dryRun = false, maxMessages = 25 } = {}) {
     const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages?q=${q}&maxResults=${maxMessages}`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
     if (!res.ok) {
       const body = (await res.text()).slice(0, 200);
-      out.warning = `Gmail list ${res.status}: ${body}. The shared GOOGLE_REFRESH_TOKEN is likely GSC-scoped and lacks Gmail scope — re-consent with gmail.readonly (+ gmail.modify to mark read) on the sales@abiozen.com account.`;
+      out.warning = `Gmail list ${res.status}: ${body}. Check the Gmail API is enabled in the service account's Cloud project and that DWD can impersonate ${SALES_MAILBOX()}.`;
       return out;
     }
     list = await res.json();
@@ -447,44 +477,76 @@ async function pollSalesEmailbox({ dryRun = false, maxMessages = 25 } = {}) {
       const from = parseFromHeader(gmailHeader(msg.payload, 'From'));
       const body = extractGmailBody(msg.payload) || msg.snippet || '';
 
-      // Ignore our own / internal mail.
-      if (!from.email || /@abiozen\.com$/i.test(from.email)) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
+      if (!from.email) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
+      // Detect a relayed contact-form/website email: the sender is our own site
+      // (noreply@, contact@, abiozen domain) or the body is a contact-form dump —
+      // the REAL buyer's name/email are in the BODY, not the From header.
+      const internal = /@abiozen\.com$/i.test(from.email);
+      const relaySender = /^(noreply|no-reply|do-not-reply|contact|mailer|forms?|website|wordpress|notifications?|hello|info)@/i.test(from.email);
+      const contactFormBody = /inquiry type\s*:/i.test(body) || (/\bname\s*:/i.test(body) && /\bemail\s*:\s*[^\s@]+@[^\s]+/i.test(body));
+      const isRelay = relaySender || contactFormBody;
 
-      // A reply from a buyer with an already-open inquiry → route into that thread.
-      const open = (await query(
-        `SELECT id FROM inquiries WHERE LOWER(buyer_email)=LOWER($1) AND status IN ('new','in_conversation','quote_sent','human_requested') ORDER BY created_at DESC LIMIT 1`,
-        [from.email])).rows[0];
-      if (open) {
-        if (dryRun) { out.replies_routed++; continue; }
-        await processInboundReply(open.id, `Subject: ${subject}\n\n${body}`);
-        await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [open.id, gmailId]).catch(() => {});
-        out.replies_routed++;
-        await markGmailRead(user, gmailId, tok.access_token, dryRun);
-        continue;
+      // Genuinely internal mail (an abiozen person/system that isn't a buyer relay) → skip.
+      if (internal && !isRelay) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
+
+      // Fast path: a direct external reply from a known open buyer → route it (no Claude call).
+      if (!isRelay) {
+        const open = (await query(
+          `SELECT id FROM inquiries WHERE LOWER(buyer_email)=LOWER($1) AND status IN ('new','in_conversation','quote_sent','human_requested') ORDER BY created_at DESC LIMIT 1`,
+          [from.email])).rows[0];
+        if (open) {
+          if (dryRun) { out.replies_routed++; continue; }
+          await processInboundReply(open.id, `Subject: ${subject}\n\n${body}`);
+          await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [open.id, gmailId]).catch(() => {});
+          out.replies_routed++;
+          await markGmailRead(user, gmailId, tok.access_token, dryRun);
+          continue;
+        }
       }
 
-      // Otherwise Claude-extract the inquiry fields and open a new inquiry.
+      // Claude-extract fields. Products may be research chemicals OR APIs; for
+      // relays the buyer's real name/email are pulled from the body.
       const { data } = await callClaude(
-        `Extract structured fields from this inbound sales email to a GMP pharmaceutical API supplier.
+        `Extract structured fields from this inbound sales email to a chemical/API supplier (Abiozen). The product may be a RESEARCH CHEMICAL or a PHARMACEUTICAL API — both are valid inquiries.
 
-From: ${gmailHeader(msg.payload, 'From')}
+From header: ${gmailHeader(msg.payload, 'From')}
 Subject: ${subject}
 Body:
 """${body.slice(0, 4000)}"""
 
+This may be a RELAYED contact-form/website email — if the From is a system address (noreply@, contact@, an abiozen.com address) or the body contains "Inquiry Type:", "Name:", "Email:" lines, the REAL buyer's name and email are IN THE BODY; extract those. Never use an @abiozen.com address as the buyer.
+
 Return ONLY JSON:
-{"is_inquiry": true, "buyer_name": "sender's name or null", "buyer_company": "company or null", "molecule_name": "the API/molecule they want, or null", "cas_number": "if stated else null", "quantity": number or null, "quantity_unit": "g|kg", "intended_use": "compounding|research|manufacturing|null", "country": "if stated else null", "message": "one-line summary of the request"}
+{"is_inquiry": true, "buyer_name": "buyer's name or null", "buyer_email": "the buyer's own email (from the body for relays, else the From address); never an @abiozen.com address", "buyer_company": "company or null", "molecule_name": "the molecule/chemical/API they want, or null", "cas_number": "if stated else null", "quantity": number or null, "quantity_unit": "g|kg", "intended_use": "research|compounding|manufacturing|null", "country": "if stated else null", "message": "one-line summary of the request"}
 Set "is_inquiry": false ONLY if this is clearly NOT a buyer inquiry (newsletter, auto-reply, spam, internal notice).`,
         { maxTokens: 700, json: true });
 
       if (!data || data.is_inquiry === false) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
+
+      // Resolve the buyer email: extracted (body for relays) → else the From address.
+      let buyerEmail = (data.buyer_email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(data.buyer_email).trim())) ? String(data.buyer_email).trim().toLowerCase() : null;
+      if (!buyerEmail && !isRelay) buyerEmail = from.email;
+      if (!buyerEmail || /@abiozen\.com$/i.test(buyerEmail)) { out.skipped++; await markGmailRead(user, gmailId, tok.access_token, dryRun); continue; }
+
+      // Known open buyer → route as a reply; otherwise open a new inquiry.
+      const openByBuyer = (await query(
+        `SELECT id FROM inquiries WHERE LOWER(buyer_email)=LOWER($1) AND status IN ('new','in_conversation','quote_sent','human_requested') ORDER BY created_at DESC LIMIT 1`,
+        [buyerEmail])).rows[0];
+      if (openByBuyer) {
+        if (dryRun) { out.replies_routed++; continue; }
+        await processInboundReply(openByBuyer.id, `Subject: ${subject}\n\n${body}`);
+        await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [openByBuyer.id, gmailId]).catch(() => {});
+        out.replies_routed++;
+        await markGmailRead(user, gmailId, tok.access_token, dryRun);
+        continue;
+      }
       if (dryRun) { out.new_inquiries++; continue; }
 
       const inquiryId = await receiveInquiry({
         molecule_name: data.molecule_name || null,
         cas_number: data.cas_number || null,
-        buyer_name: data.buyer_name || from.name || null,
-        buyer_email: from.email,
+        buyer_name: data.buyer_name || (isRelay ? null : from.name) || null,
+        buyer_email: buyerEmail,
         buyer_company: data.buyer_company || null,
         quantity: data.quantity || null,
         quantity_unit: data.quantity_unit === 'kg' ? 'kg' : 'g',
@@ -575,23 +637,58 @@ const PRICING_SEED = [
   ['Lenalidomide', '191732-72-6', 15000, 5, 45, 0, 'GMP'],
   ['Abiraterone', '154229-18-2', 2800, 100, 21, 1, 'DMF available'],
 ];
+// Top 20 research chemicals (research-use-only, non-GMP). [name, price/kg, minGrams, leadDays, purity]
+const RESEARCH_PRICING_SEED = [
+  ['4-Fluoroacetophenone', 85, 100, 7, '98%'],
+  ['Semaglutide (research grade)', 12000, 1, 14, '98%'],
+  ['Fmoc-L-Lysine(Boc)-OH', 450, 100, 10, '98%'],
+  ['SPhos', 6500, 10, 14, '98%'],
+  ['Grubbs Catalyst 2nd Gen', 45000, 1, 21, '98%'],
+  ['Pd(OAc)2', 18000, 5, 14, '98%'],
+  ['XPhos Pd G3', 95000, 1, 21, '98%'],
+  ['Fmoc-AEEA-OH', 1200, 50, 10, '98%'],
+  ['Berberine Chloride', 450, 500, 7, '98%'],
+  ['Curcumin 98%', 180, 1000, 7, '98%'],
+  ['Paclitaxel', 55000, 0.1, 30, '99%'],
+  ['Artemisinin', 950, 100, 14, '98%'],
+  ['Resveratrol 98%', 380, 500, 7, '98%'],
+  ['Testosterone Cypionate', 2800, 100, 14, '98%'],
+  ['BPC-157', 8500, 1, 21, '98%'],
+  ['TB-500', 12000, 1, 21, '98%'],
+  ['Dimethyl Malonate', 25, 5000, 7, '99%'],
+  ['Di-tert-butyl dicarbonate (Boc2O)', 45, 1000, 7, '99%'],
+  ['Fmoc-L-Histidine(Trt)-OH', 750, 100, 10, '98%'],
+  ['Camptothecin', 4500, 0.1, 30, '98%'],
+];
+// Idempotent: inserts any missing GMP + research rows (ON CONFLICT DO NOTHING on
+// LOWER(molecule_name)), so it safely tops up the catalog on every boot.
 async function seedMoleculePricing() {
-  const existing = (await query('SELECT COUNT(*)::int c FROM molecule_pricing')).rows[0].c;
-  if (existing > 0) return { seeded: 0, skipped: existing };
   let seeded = 0;
   for (const [name, cas, price, minG, lead, dmf, reg] of PRICING_SEED) {
     const samplePrice = Math.max(150, Math.round((price / 1000) * 5 * 1.5)); // ~5g at a premium
-    await query(
+    const r = await query(
       `INSERT INTO molecule_pricing (id, molecule_name, cas_number, gmp_grade, purity, price_per_kg_usd,
          min_quantity_g, lead_time_days, sample_available, sample_price_usd, gmp_certified, dmf_available,
          coa_available, sds_available, regulatory_status, storage_conditions, shelf_life_months, active, created_at, updated_at)
        VALUES ($1,$2,$3,'GMP','99%+',$4,$5,$6,1,$7,1,$8,1,1,$9,'Store at 2-8°C, protect from light',36,1,NOW(),NOW())
-       ON CONFLICT (LOWER(molecule_name)) DO NOTHING`,
+       ON CONFLICT (LOWER(molecule_name)) DO NOTHING RETURNING id`,
       [crypto.randomUUID(), name, cas, price, minG, lead, samplePrice, dmf, reg]);
-    seeded++;
+    if (r.rows.length) seeded++;
   }
-  await logAgentActivity({ agent_name: AGENT, action_type: 'pricing_seeded', reasoning: `Seeded ${seeded} GMP molecule prices.`, source_kpi: 'kpi-sg-sales', output_summary: `seeded=${seeded}` }).catch(() => {});
-  return { seeded, skipped: 0 };
+  for (const [name, price, minG, lead, purity] of RESEARCH_PRICING_SEED) {
+    const samplePrice = Math.max(120, Math.round((price / 1000) * Math.min(minG, 5) * 1.5));
+    const r = await query(
+      `INSERT INTO molecule_pricing (id, molecule_name, cas_number, gmp_grade, purity, price_per_kg_usd,
+         min_quantity_g, lead_time_days, sample_available, sample_price_usd, gmp_certified, dmf_available,
+         coa_available, sds_available, regulatory_status, storage_conditions, shelf_life_months, active, created_at, updated_at)
+       VALUES ($1,$2,NULL,'RUO',$3,$4,$5,$6,1,$7,0,0,1,1,'Research Use Only','Store cool & dry, protect from light',36,1,NOW(),NOW())
+       ON CONFLICT (LOWER(molecule_name)) DO NOTHING RETURNING id`,
+      [crypto.randomUUID(), name, purity, price, minG, lead, samplePrice]);
+    if (r.rows.length) seeded++;
+  }
+  const total = PRICING_SEED.length + RESEARCH_PRICING_SEED.length;
+  if (seeded) await logAgentActivity({ agent_name: AGENT, action_type: 'pricing_seeded', reasoning: `Seeded ${seeded} molecule prices (GMP + research).`, source_kpi: 'kpi-sg-sales', output_summary: `seeded=${seeded}` }).catch(() => {});
+  return { seeded, skipped: total - seeded };
 }
 
 module.exports = {
