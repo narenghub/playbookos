@@ -14,7 +14,7 @@ const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence
 const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo, addSequenceContacts } = require('../lib/agents/email-engine');
 const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
 const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/procurement-agent');
-const { runMeetAgent, analyzeAndStore } = require('../lib/agents/meet-agent');
+const { runMeetAgent, analyzeAndStore, runStandup } = require('../lib/agents/meet-agent');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
 const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent, pollSalesEmailbox, handleAcceptance, markPaymentReceived, getPipeline, handleStripeEvent } = require('../lib/agents/inquiry-agent');
@@ -2146,6 +2146,23 @@ router.post('/meetings/upload-transcript', authMiddleware, adminOnly, async (req
     const dryRun = b.dryRun === true; // preview extraction before assigning
     const result = await analyzeAndStore(meeting, { dryRun });
     res.json({ success: true, meeting_id: meeting.meeting_id, dryRun, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Daily standup — the primary workflow. Body: {date, attendees[], notes}.
+// dryRun=true previews the extracted tasks for review before assigning; a second
+// call with dryRun=false (or omitted) creates the tasks + emails Naresh the brief.
+router.post('/meetings/standup', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.notes || !String(b.notes).trim()) return res.status(400).json({ error: 'notes (standup transcript/notes) required' });
+    const result = await runStandup({
+      date: b.date,
+      attendees: b.attendees || [],
+      notes: b.notes,
+      dryRun: b.dryRun === true,
+    });
+    res.json({ success: true, ...result });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

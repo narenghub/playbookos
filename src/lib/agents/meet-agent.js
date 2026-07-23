@@ -71,20 +71,83 @@ function matchUser(assignedTo, users) {
   return best;
 }
 
+const log = (...a) => console.log('[meet]', ...a);
+
+// Search Drive with a raw query string. Returns { ok, files, status, error }.
+// Logs the query and the resulting count so a failed pickup is diagnosable.
+async function searchDrive(tok, q, { label = 'drive', pageSize = 25 } = {}) {
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}`
+    + `&orderBy=createdTime desc&pageSize=${pageSize}`
+    + `&fields=${encodeURIComponent('files(id,name,mimeType,createdTime,webViewLink,parents)')}`
+    + `&supportsAllDrives=true&includeItemsFromAllDrives=true`;
+  log(`Drive search [${label}]: q=${q}`);
+  try {
+    const res = await fetch(url, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 200);
+      log(`Drive search [${label}] FAILED ${res.status}: ${body}`);
+      return { ok: false, files: [], status: res.status, error: body };
+    }
+    const files = (await res.json()).files || [];
+    log(`Drive search [${label}] → ${files.length} file(s): ${files.slice(0, 5).map(f => f.name).join(' | ') || '(none)'}`);
+    return { ok: true, files };
+  } catch (e) {
+    log(`Drive search [${label}] ERROR: ${e.message}`);
+    return { ok: false, files: [], error: e.message };
+  }
+}
+
+// Google Meet recordings + transcripts land in Drive (folder "Meet Recordings")
+// shortly after the call ends: an .mp4 named after the meeting, and a .vtt/
+// "…- Transcript" doc. Pull both for the lookback window so getTranscript() can
+// match one to a meeting by title.
+async function findMeetDriveArtifacts(tok, { lookbackDays = 7 } = {}) {
+  const sinceIso = new Date(Date.now() - lookbackDays * 86400000).toISOString();
+  // mp4 recordings created in the window (name matched to a meeting later — the
+  // "name contains 'Meet'" filter from the folder default is too narrow since Meet
+  // names the file after the meeting title, so we window by createdTime instead).
+  const rec = await searchDrive(tok, `mimeType='video/mp4' and createdTime > '${sinceIso}' and trashed=false`, { label: 'recordings' });
+  // transcript/caption files created in the window.
+  const tr = await searchDrive(tok, `(name contains '.vtt' or name contains 'Transcript' or name contains 'transcript') and createdTime > '${sinceIso}' and trashed=false`, { label: 'transcripts' });
+  return { recordings: rec.files || [], transcripts: tr.files || [], warnings: [rec.error, tr.error].filter(Boolean) };
+}
+
+// Best file whose name references the meeting title (first 3 words), else the
+// most recent file (already createdTime-desc ordered).
+function matchArtifactByTitle(files, meetingTitle) {
+  if (!files || !files.length) return null;
+  const title = (meetingTitle || '').split(/\s+/).slice(0, 3).join(' ').replace(/[^\w ]/g, '').trim();
+  if (title) { const hit = files.find(f => new RegExp(title, 'i').test(f.name)); if (hit) return hit; }
+  return files[0];
+}
+
 // ── Function 1 — fetch meeting recordings from Google Calendar ─────────────────
 async function fetchMeetingRecordings({ lookbackDays = 7 } = {}) {
   const tok = await getGoogleAccessToken();
-  if (tok.error) return { meetings: [], warning: 'Google auth unavailable: ' + tok.error };
+  if (tok.error) { log('Google auth unavailable:', tok.error); return { meetings: [], warning: 'Google auth unavailable: ' + tok.error }; }
+  log(`auth OK via ${tok.via || 'unknown'}; impersonating ${MEET_IMPERSONATE()}, lookback ${lookbackDays}d`);
   const timeMin = new Date(Date.now() - lookbackDays * 86400000).toISOString();
   const timeMax = new Date().toISOString();
   try {
     const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&orderBy=startTime&maxResults=100`;
+    log(`Calendar GET events ${timeMin} → ${timeMax}`);
     const res = await fetch(url, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    log(`Calendar API responded ${res.status}`);
     if (!res.ok) {
       // Almost always a scope problem (the shared token is GSC-scoped). Surface it.
-      return { meetings: [], warning: `Calendar API ${res.status}: ${(await res.text()).slice(0, 160)}. The Google token likely lacks Calendar scope — use manual transcript upload.` };
+      const body = (await res.text()).slice(0, 160);
+      log(`Calendar API FAILED: ${body}`);
+      return { meetings: [], warning: `Calendar API ${res.status}: ${body}. The Google token likely lacks Calendar scope — use manual transcript upload.` };
     }
     const items = (await res.json()).items || [];
+    log(`Calendar returned ${items.length} event(s) in the last ${lookbackDays} days`);
+    const withMeet = items.filter(ev => (ev.conferenceData?.entryPoints || []).some(e => e.entryPointType === 'video') || ev.hangoutLink);
+    log(`${withMeet.length} of ${items.length} event(s) have a Google Meet link`);
+
+    // Pull Drive recordings/transcripts once for the window so we can attach them.
+    const artifacts = await findMeetDriveArtifacts(tok, { lookbackDays });
+    log(`Drive: ${artifacts.recordings.length} recording(s), ${artifacts.transcripts.length} transcript(s) in window`);
+
     const kw = /(standup|stand-up|update|sync|meeting|briefing|review)/i;
     const meetings = [];
     for (const ev of items) {
@@ -93,6 +156,9 @@ async function fetchMeetingRecordings({ lookbackDays = 7 } = {}) {
       if (!abiozen || !kw.test(ev.summary || '')) continue;
       const start = ev.start?.dateTime || ev.start?.date;
       const end = ev.end?.dateTime || ev.end?.date;
+      const meetLink = (ev.conferenceData?.entryPoints || []).find(e => e.entryPointType === 'video')?.uri || ev.hangoutLink || null;
+      const recFile = matchArtifactByTitle(artifacts.recordings, ev.summary);
+      const trFile = matchArtifactByTitle(artifacts.transcripts, ev.summary);
       meetings.push({
         meeting_id: ev.id,
         meeting_title: ev.summary || 'Untitled meeting',
@@ -100,18 +166,21 @@ async function fetchMeetingRecordings({ lookbackDays = 7 } = {}) {
         duration_seconds: start && end ? Math.max(0, Math.round((new Date(end) - new Date(start)) / 1000)) : null,
         attendees,
         description: ev.description || '',
-        recording_url: (ev.attachments || []).map(a => a.fileUrl).find(Boolean) || ev.hangoutLink || null,
+        recording_url: (recFile && recFile.webViewLink) || (ev.attachments || []).map(a => a.fileUrl).find(Boolean) || meetLink || null,
+        _transcriptFileId: trFile ? trFile.id : null,
         _event: ev,
       });
     }
+    log(`${meetings.length} event(s) match the standup/update keyword + Abiozen attendee filter`);
     // Filter out meetings already processed.
     const out = [];
     for (const m of meetings) {
       const done = (await query('SELECT id FROM meeting_recordings WHERE meeting_id=$1 AND processed=1', [m.meeting_id])).rows[0];
       if (!done) out.push(m);
     }
-    return { meetings: out };
-  } catch (e) { return { meetings: [], warning: e.message }; }
+    log(`${out.length} unprocessed meeting(s) to analyze`);
+    return { meetings: out, warning: artifacts.warnings[0] || null };
+  } catch (e) { log('fetchMeetingRecordings error:', e.message); return { meetings: [], warning: e.message }; }
 }
 
 // ── Function 2 — get a transcript for a meeting ───────────────────────────────
@@ -131,19 +200,20 @@ async function getTranscript(meeting) {
   const tok = await getGoogleAccessToken();
   if (!tok.error && meeting.meeting_id) {
     try {
-      // Search Drive for a transcript/caption file whose name references the meeting title.
-      const title = (meeting.meeting_title || '').split(/\s+/).slice(0, 3).join(' ');
-      const q = encodeURIComponent(`name contains 'Transcript' and (name contains '.vtt' or name contains '.txt' or name contains '.srt' or mimeType='text/plain')`);
-      const list = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&orderBy=modifiedTime desc&pageSize=10&fields=files(id,name)`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
-      if (list.ok) {
-        const files = (await list.json()).files || [];
-        const hit = files.find(f => title && new RegExp(title.replace(/[^\w ]/g, ''), 'i').test(f.name)) || files[0];
-        if (hit) {
-          const dl = await fetch(`https://www.googleapis.com/drive/v3/files/${hit.id}?alt=media`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
-          if (dl.ok) return cleanTranscript(await dl.text());
-        }
+      // Prefer the transcript file already matched during fetch; otherwise search now.
+      let fileId = meeting._transcriptFileId || null;
+      if (!fileId) {
+        const r = await searchDrive(tok, `(name contains 'Transcript' or name contains '.vtt') and (name contains '.vtt' or name contains '.txt' or name contains '.srt' or mimeType='text/plain') and trashed=false`, { label: 'transcript-lookup', pageSize: 10 });
+        const hit = matchArtifactByTitle(r.files, meeting.meeting_title);
+        fileId = hit ? hit.id : null;
       }
-    } catch { /* fall through to description */ }
+      if (fileId) {
+        log(`downloading transcript file ${fileId} for "${meeting.meeting_title}"`);
+        const dl = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+        if (dl.ok) { const t = cleanTranscript(await dl.text()); if (t) return t; }
+        else log(`transcript download ${dl.status}`);
+      }
+    } catch (e) { log('getTranscript drive error:', e.message); }
   }
   // Fallbacks: an already-stored transcript, then the calendar description/notes.
   return cleanTranscript(meeting.transcript_text || meeting.description || meeting._event?.description || '');
@@ -270,13 +340,13 @@ async function analyzeAndStore(meeting, { dryRun = false } = {}) {
     // Upsert the recording row (may already exist for a Google meeting).
     await query(
       `INSERT INTO meeting_recordings (id, meeting_id, meeting_title, meeting_date, duration_seconds,
-         attendees, transcript_text, summary, recording_url, processed, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,NOW())
+         attendees, transcript_text, summary, recording_url, is_standup, processed, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,NOW())
        ON CONFLICT (meeting_id) DO UPDATE SET transcript_text=EXCLUDED.transcript_text,
-         summary=EXCLUDED.summary, processed=1`,
+         summary=EXCLUDED.summary, is_standup=EXCLUDED.is_standup, processed=1`,
       [meeting.id || crypto.randomUUID(), meeting.meeting_id, meeting.meeting_title, meeting.meeting_date,
        meeting.duration_seconds || null, JSON.stringify(meeting.attendees || []), transcript,
-       analysis.summary, meeting.recording_url || null]
+       analysis.summary, meeting.recording_url || null, meeting.is_standup ? 1 : 0]
     );
     // Insights
     const insert = (type, arr) => Promise.all((arr || []).map(c =>
@@ -317,7 +387,52 @@ async function runMeetAgent({ dryRun = false, lookbackDays = 7 } = {}) {
   return out;
 }
 
+// ── Daily standup — the primary, no-OAuth workflow ───────────────────────────
+// Naresh (or any admin) picks a date + attendees and pastes the standup notes;
+// Claude extracts action items, they're matched to users and turned into tasks,
+// and Naresh gets the brief. dryRun=true returns the extraction for review
+// BEFORE anything is written/assigned (the "review before assigning" step).
+async function runStandup({ date, attendees = [], notes = '', dryRun = false } = {}) {
+  const meeting_date = /^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) ? date : businessToday();
+  const list = Array.isArray(attendees)
+    ? attendees.map(String).map(s => s.trim()).filter(Boolean)
+    : String(attendees || '').split(',').map(s => s.trim()).filter(Boolean);
+  const meeting = {
+    meeting_id: 'standup-' + meeting_date + '-' + crypto.randomUUID().slice(0, 8),
+    meeting_title: `Daily Standup — ${meeting_date}`,
+    meeting_date,
+    duration_seconds: null,
+    attendees: list,
+    transcript_text: String(notes || ''),
+    recording_url: null,
+    is_standup: true,
+  };
+  const result = await analyzeAndStore(meeting, { dryRun });
+  return { meeting_id: meeting.meeting_id, meeting_title: meeting.meeting_title, meeting_date, is_standup: true, dryRun, ...result };
+}
+
+// Summary of a standup processed on `date` (default: the day before today, CST),
+// for the CEO morning briefing. Returns null when there was no standup that day.
+async function getYesterdayStandupSummary(date) {
+  const day = date || isoDate(new Date(Date.now() - 86400000));
+  const rows = (await query(
+    `SELECT meeting_id, meeting_title, summary FROM meeting_recordings
+     WHERE is_standup=1 AND processed=1 AND meeting_date=$1
+     ORDER BY created_at DESC`, [day])).rows;
+  if (!rows.length) return null;
+  const ids = rows.map(r => r.meeting_id);
+  const decisions = parseInt((await query(`SELECT COUNT(*) c FROM meeting_insights WHERE meeting_id = ANY($1) AND insight_type='decision'`, [ids])).rows[0].c, 10);
+  const blockers = parseInt((await query(`SELECT COUNT(*) c FROM meeting_insights WHERE meeting_id = ANY($1) AND insight_type='blocker'`, [ids])).rows[0].c, 10);
+  const tasks = parseInt((await query(`SELECT COUNT(*) c FROM meeting_tasks WHERE meeting_id = ANY($1)`, [ids])).rows[0].c, 10);
+  return {
+    date: day, count: rows.length, decisions, blockers, tasks_assigned: tasks,
+    summary: rows[0].summary || '',
+    line: `Yesterday's standup: ${decisions} decision${decisions === 1 ? '' : 's'}, ${tasks} task${tasks === 1 ? '' : 's'} assigned, ${blockers} blocker${blockers === 1 ? '' : 's'}`,
+  };
+}
+
 module.exports = {
   runMeetAgent, processMeeting, fetchMeetingRecordings, getTranscript,
   analyzeMeetingWithClaude, assignTasksToTeam, sendMeetingBriefToNaresh, analyzeAndStore, matchUser,
+  runStandup, getYesterdayStandupSummary,
 };

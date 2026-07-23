@@ -4605,7 +4605,7 @@ if(typeof pages !== 'undefined') {
 
 // ── Google Meet Agent ─────────────────────────────────────────────────────────
 function mgEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-window._mgTab = window._mgTab || 'meetings';
+window._mgTab = window._mgTab || 'standup';
 function mgTab(t){ window._mgTab=t; pages['meet-agent'](); }
 async function mgExpand(id){
   const box=document.getElementById('mg-m-'+id); if(!box) return;
@@ -4652,32 +4652,89 @@ async function mgAssign(){
 async function mgComplete(id){
   try{ const r=await API('/meetings/tasks/'+id,{method:'PUT',body:JSON.stringify({status:'completed'})}); if(r&&r.error){alert(r.error);return;} pages['meet-agent'](); }catch(e){ alert(e.message); }
 }
+// ── New Standup — the primary, no-OAuth workflow ──
+function mgStandupAttendees(){
+  return Array.from(document.querySelectorAll('.mg-su-att:checked')).map(x=>x.value);
+}
+async function mgStandupPreview(){
+  const date=document.getElementById('mg-su-date').value;
+  const notes=document.getElementById('mg-su-notes').value;
+  const att=mgStandupAttendees();
+  const msg=document.getElementById('mg-su-msg'), out=document.getElementById('mg-su-result');
+  if(!notes.trim()){ if(msg){msg.style.color='#dc2626';msg.textContent='Paste the standup notes first';} return; }
+  if(msg){msg.style.color='var(--text-muted)';msg.textContent='Extracting tasks with Claude…';}
+  try{
+    const r=await API('/meetings/standup',{method:'POST',body:JSON.stringify({date,attendees:att,notes,dryRun:true})});
+    if(r&&r.error){ if(msg){msg.style.color='#dc2626';msg.textContent=r.error;} return; }
+    if(msg)msg.textContent='';
+    window._mgStandup={date,attendees:att,notes};
+    const a=r.analysis||{};
+    const items=(a.action_items||[]).map(x=>`<div style="font-size:13px;padding:5px 0;border-bottom:1px solid var(--border)">• <strong>${mgEsc(x.assigned_to||'?')}</strong>: ${mgEsc(x.task)} <span style="color:#B45309">[${mgEsc(x.priority)}]</span>${x.due_date?' <span style="color:#888">due '+mgEsc(x.due_date)+'</span>':''}</div>`).join('')||'<div style="font-size:13px;color:#888">No action items extracted.</div>';
+    const chip=(label,arr,color)=>`<span style="display:inline-block;background:${color};color:#fff;font-size:11px;font-weight:700;padding:2px 9px;border-radius:10px;margin-right:6px">${(arr||[]).length} ${label}</span>`;
+    out.innerHTML=`<div class="card" style="margin-top:12px">
+      <div class="card-title text-section">Review before assigning</div>
+      <div style="margin-bottom:8px">${chip('decisions',a.decisions,'#1B3A6B')}${chip('blockers',a.blockers,'#991B1B')}${chip('tasks',a.action_items,'#166534')}</div>
+      <div style="font-size:13px;color:#4a5568;margin-bottom:8px">${mgEsc(a.summary)}</div>
+      <div style="font-size:11px;text-transform:uppercase;color:#166534;font-weight:700">Action items (${(a.action_items||[]).length})</div>${items}
+      <div style="margin-top:10px"><button onclick="mgStandupConfirm()" class="btn-primary" style="padding:8px 18px">Assign Tasks &amp; Email Brief</button> <span id="mg-su-confirm-msg" style="font-size:12px;color:var(--text-muted)"></span></div>
+    </div>`;
+  }catch(e){ if(msg){msg.style.color='#dc2626';msg.textContent=e.message;} }
+}
+async function mgStandupConfirm(){
+  const m=document.getElementById('mg-su-confirm-msg'); if(m){m.style.color='var(--text-muted)';m.textContent='Assigning…';}
+  const s=window._mgStandup; if(!s){ if(m)m.textContent='Preview first'; return; }
+  try{
+    const r=await API('/meetings/standup',{method:'POST',body:JSON.stringify({...s,dryRun:false})});
+    if(r&&r.error){ if(m){m.style.color='#dc2626';m.textContent=r.error;} return; }
+    if(m){m.style.color='#166534';m.textContent=`Created ${r.tasks_created} task(s), brief ${r.brief_sent?'emailed to Naresh':'skipped'}.`;}
+    window._mgStandup=null;
+  }catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} }
+}
 
 if(typeof pages !== 'undefined') {
   pages['meet-agent'] = async function() {
     const c = document.getElementById('content');
     c.innerHTML = '<p style="color:#888;padding:20px">Loading Meet Agent…</p>';
-    let dash, meetData;
-    try { [dash, meetData] = await Promise.all([ API('/meetings/dashboard').catch(()=>({})), API('/meetings').catch(()=>({meetings:[]})) ]); }
+    let dash, meetData, usersData;
+    try { [dash, meetData, usersData] = await Promise.all([ API('/meetings/dashboard').catch(()=>({})), API('/meetings').catch(()=>({meetings:[]})), API('/users').catch(()=>[]) ]); }
     catch(e){ c.innerHTML = `<div class="card"><div class="card-title">Google Meet Agent</div><p style="color:#dc2626">${mgEsc(e.message)}</p></div>`; return; }
     if (dash && dash.error) { c.innerHTML = `<div class="card"><div class="card-title">Google Meet Agent</div><p style="color:#dc2626">${mgEsc(dash.error)}</p></div>`; return; }
     const meetings=(meetData&&meetData.meetings)||[];
+    const team=(Array.isArray(usersData)?usersData:[]).filter(u=>u.is_active);
 
     const head=`<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <div class="card-title" style="margin:0">Google Meet Agent</div>
-      <div style="margin-left:auto"><span id="mg-run-msg" style="font-size:12px;color:var(--text-muted);margin-right:8px"></span>
-        <button onclick="mgTab('upload')" class="btn-primary" style="padding:8px 16px">Upload Transcript</button></div></div>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center"><span id="mg-run-msg" style="font-size:12px;color:var(--text-muted);margin-right:4px"></span>
+        <button onclick="mgTab('standup')" class="btn-primary" style="padding:8px 16px">➕ New Standup</button>
+        <button onclick="mgTab('upload')" class="btn-outline" style="padding:8px 16px">Upload Transcript</button></div></div>
       <div class="metric-grid">
         <div class="metric"><div class="label">Meetings this month</div><div class="value">${dash.meetings_month||0}</div></div>
         <div class="metric"><div class="label">Tasks created</div><div class="value">${dash.tasks_created||0}</div><div class="sub">${dash.tasks_completed||0} completed</div></div>
         <div class="metric"><div class="label">Decisions</div><div class="value">${dash.decisions||0}</div></div>
         <div class="metric amber"><div class="label">Blockers</div><div class="value">${dash.blockers||0}</div></div>
       </div>`;
-    const tabs=[['meetings','Recent Meetings'],['upload','Upload Transcript'],['tasks','Meeting Tasks'],['insights','Insights']];
+    const tabs=[['standup','➕ New Standup'],['meetings','Recent Meetings'],['upload','Upload Transcript'],['tasks','Meeting Tasks'],['insights','Insights']];
     const tabBar=`<div class="card" style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([k,l])=>`<button onclick="mgTab('${k}')" class="btn-outline" style="padding:6px 14px;font-size:13px;${window._mgTab===k?'background:#1B3A6B;color:#fff':''}">${l}</button>`).join('')}</div>`;
 
     let body='';
-    if (window._mgTab==='meetings') {
+    if (window._mgTab==='standup') {
+      const today=new Date().toISOString().slice(0,10);
+      const checks=team.length ? team.map(u=>`<label style="display:inline-flex;align-items:center;gap:5px;background:var(--bg-subtle,#f8fafc);border:1px solid var(--border);border-radius:14px;padding:4px 10px;font-size:12px;cursor:pointer;margin:0 6px 6px 0">
+          <input type="checkbox" class="mg-su-att" value="${mgEsc(u.email||u.name)}" checked style="margin:0"> ${mgEsc(u.name)}</label>`).join('')
+        : '<span style="font-size:12px;color:#888">No active team members found.</span>';
+      body=`<div class="card">
+        <div style="font-size:13px;color:#166534;font-weight:600;margin-bottom:4px">Fastest path — no Google/OAuth needed</div>
+        <div style="font-size:12px;color:#718096;margin-bottom:12px">Pick the date and who attended, paste your standup notes, and Claude extracts action items, assigns them to the team, and emails Naresh the brief. Review the tasks before they're assigned.</div>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+          <label style="font-size:12px;color:#4a5568">Date <input id="mg-su-date" type="date" value="${today}" style="padding:6px;border:1px solid var(--border);border-radius:4px;font-size:13px;margin-left:4px"></label>
+        </div>
+        <div style="font-size:11px;text-transform:uppercase;color:#718096;font-weight:700;margin-bottom:6px">Attendees</div>
+        <div style="margin-bottom:12px">${checks}</div>
+        <div style="font-size:11px;text-transform:uppercase;color:#718096;font-weight:700;margin-bottom:6px">Standup notes / transcript</div>
+        <textarea id="mg-su-notes" rows="10" placeholder="Paste or type today's standup — what each person did, decisions, blockers…" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+        <div style="margin-top:10px"><button onclick="mgStandupPreview()" class="btn-primary" style="padding:9px 20px">Extract Tasks →</button> <span id="mg-su-msg" style="font-size:12px;color:var(--text-muted);margin-left:6px"></span></div>
+        <div id="mg-su-result"></div></div>`;
+    } else if (window._mgTab==='meetings') {
       body = meetings.length ? meetings.map(m=>`<div class="card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
           <div><div style="font-size:15px;font-weight:700;color:#1a202c">${mgEsc(m.meeting_title)}</div>

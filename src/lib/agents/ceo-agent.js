@@ -6,6 +6,7 @@ const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies } = require('../kpi-engine');
 const { logAgentActivity, createDailyTask, getCEOUser, parseClaudeJSON, businessToday } = require('../agent-core');
+const { getYesterdayStandupSummary } = require('./meet-agent');
 
 const AGENT = 'ceo-agent';
 const fmt = n => '$' + (Number(n) || 0).toLocaleString('en-US', { maximumFractionDigits: 0 });
@@ -25,6 +26,7 @@ function renderEmail(r) {
     </div>
     <div style="border:1px solid #e0e0e0;border-top:none;padding:20px">
       <p style="font-size:14px;line-height:1.6">${r.summary || ''}</p>
+      ${r.standup ? `<div style="background:#f0f7ff;border-left:3px solid #1B3A6B;padding:8px 12px;margin-top:12px;font-size:13px;color:#1a1a2e">📋 <strong>${r.standup.line}</strong>${r.standup.summary ? `<div style="font-size:12px;color:#555;margin-top:4px">${r.standup.summary}</div>` : ''}</div>` : ''}
       <div style="font-size:13px;font-weight:700;color:#1D9E75;margin-top:14px">WINS</div>${list(r.wins)}
       <div style="font-size:13px;font-weight:700;color:#E24B4A;margin-top:14px">RISKS</div>${list(r.risks)}
       <div style="font-size:13px;font-weight:700;color:#1B3A6B;margin-top:14px">5 ACTIONS FOR TODAY (ranked by revenue impact)</div>${actions}
@@ -62,6 +64,9 @@ async function runCEOBriefing({ dryRun = false } = {}) {
   )).rows;
 
   const vision = hierarchy.vision || { current_value: monthlyActual, target_value: 10000000, pct: 0 };
+
+  // Yesterday's standup (if one was processed) — surfaced in the briefing.
+  const standup = await getYesterdayStandupSummary().catch(() => null);
 
   const prompt = `You are the CEO Agent for Abiozen LLC, a US pharmaceutical API distributor targeting $10M revenue by Dec 31, 2026. Write today's executive briefing for ${ceo?.name || 'the CEO'}.
 
@@ -121,7 +126,7 @@ Provide EXACTLY 5 actions, ranked most revenue-impactful first. Every line must 
     vision: { current: vision.current_value, target: vision.target_value, pct: vision.pct },
     month: { actual: monthlyActual, target: monthlyTarget },
     team_avg_score: avgScore, pending_approvals: pendingApprovals.length,
-    ...parsed, task_ids: taskIds,
+    standup, ...parsed, task_ids: taskIds,
   };
 
   if (!dryRun && ceo?.email) {

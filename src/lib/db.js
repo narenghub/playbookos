@@ -705,6 +705,9 @@ async function migrateSchemas() {
         created_at TEXT DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_meeting_rec_date ON meeting_recordings (meeting_date DESC);
+      -- Flags a row created via the daily-standup workflow (POST /meetings/standup)
+      -- so the CEO morning briefing can surface "yesterday's standup" separately.
+      ALTER TABLE meeting_recordings ADD COLUMN IF NOT EXISTS is_standup INTEGER DEFAULT 0;
       CREATE TABLE IF NOT EXISTS meeting_tasks (
         id TEXT PRIMARY KEY,
         meeting_id TEXT,
