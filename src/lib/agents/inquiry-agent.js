@@ -20,7 +20,7 @@ const ESCALATE_ABOVE = 50000;
 const SANCTIONED_COUNTRIES = /\b(iran|north korea|dprk|russia|russian federation|syria|cuba|crimea)\b/i;
 // Buyer phrases that always warrant a human (Stage 8).
 const ESCALATION_KEYWORDS = /\b(contract|audit|legal|attorney|lawyer|compliance officer|fda inspection|phone call|call me|video call|zoom|teams meeting|schedule a call|jump on a call)\b/i;
-const ACCEPT_KEYWORDS = /\b(accepted|i accept|we accept|accept the quote|proceed|go ahead|confirm the order|place the order|let'?s proceed|move forward)\b/i;
+const ACCEPT_KEYWORDS = /\b(accept(ed)?|proceed|confirmed|go ahead|move forward|place the order|let'?s proceed)\b/i;
 const NEGOTIATE_KEYWORDS = /\b(too high|too expensive|can you do better|better price|lower price|discount|reduce the price|beat this|come down|price is high|cheaper)\b/i;
 const ORDER_CONFIRMED_URL = 'https://abiozen.com/order-confirmed/';
 const stripeConfigured = () => /^sk_(test|live)_/.test(process.env.STRIPE_SECRET_KEY || '');
@@ -360,6 +360,18 @@ async function logReply(inquiryId, action, extra = '') {
     source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} action=${action}` }).catch(() => {});
 }
 
+// Atomically claim "we are replying to this Gmail message". Returns true if this
+// is the first time (proceed) or false if it was already replied to (skip). The
+// poll pre-inserts each message id with replied_at NULL, so the UPDATE wins the
+// race; a manual reply with no prior row is claimed via the INSERT.
+async function claimReply(messageId) {
+  if (!messageId) return true;
+  const upd = await query(`UPDATE processed_emails SET replied_at=NOW() WHERE id=$1 AND replied_at IS NULL RETURNING id`, [messageId]);
+  if (upd.rows.length) return true;
+  const ins = await query(`INSERT INTO processed_emails (id, source, replied_at, processed_at) VALUES ($1,'reply',NOW(),NOW()) ON CONFLICT (id) DO NOTHING RETURNING id`, [messageId]);
+  return ins.rows.length > 0;
+}
+
 // Stage 8 — deterministic hard-escalation triggers. Returns a reason or null.
 function escalationReason(inq, text, msgCount) {
   const t = String(text || '');
@@ -373,29 +385,37 @@ function escalationReason(inq, text, msgCount) {
 }
 
 // ── Function 3 — process an inbound reply (full stage machine) ─────────────────
-async function processInboundReply(inquiryId, emailText, { dryRun = false } = {}) {
+async function processInboundReply(inquiryId, emailText, { dryRun = false, messageId } = {}) {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
   if (!inq) return { error: 'inquiry not found' };
+
+  // BUG 2 — dedup by Gmail message id: if we've already replied to this exact
+  // message, skip entirely (no inbound log, no Claude call, no email sent).
+  if (!dryRun && messageId && !(await claimReply(messageId))) {
+    return { skipped: true, reason: 'duplicate — already replied to this Gmail message' };
+  }
+
   if (!dryRun) await logMessage(inquiryId, { direction: 'inbound', sender_name: inq.buyer_name, sender_email: inq.buyer_email, subject: `Re: ${inq.molecule_name}`, body_text: emailText });
 
   const text = String(emailText || '');
   const inbound = (await query(`SELECT COUNT(*) FILTER (WHERE direction='inbound')::int c FROM inquiry_messages WHERE inquiry_id=$1`, [inquiryId])).rows[0].c;
   const quoted = ['quote_sent', 'negotiating'].includes(inq.status);
 
-  // Stage 8 — hard escalation (checked first).
+  // BUG 1 — Stage 6 acceptance is checked FIRST: an "ACCEPTED" on a quoted
+  // inquiry must always route to payment, never to escalation or negotiation.
+  if (quoted && ACCEPT_KEYWORDS.test(text)) {
+    if (dryRun) return { intent: 'accepted' };
+    const r = await handleAcceptance(inquiryId);
+    await logReply(inquiryId, 'accepted', `ref ${r.ref} total $${r.total}`);
+    return { intent: 'accepted', action: 'accepted', ...r };
+  }
+  // Stage 8 — hard escalation.
   const escReason = escalationReason(inq, text, inbound);
   if (escReason) {
     if (dryRun) return { intent: 'needs_human', reason: escReason };
     await escalateToHuman(inquiryId, escReason);
     await logReply(inquiryId, 'escalated', escReason);
     return { intent: 'needs_human', action: 'escalated', reason: escReason };
-  }
-  // Stage 6 — acceptance (only meaningful after a quote).
-  if (quoted && ACCEPT_KEYWORDS.test(text)) {
-    if (dryRun) return { intent: 'accepted' };
-    const r = await handleAcceptance(inquiryId);
-    await logReply(inquiryId, 'accepted', `ref ${r.ref} total $${r.total}`);
-    return { intent: 'accepted', action: 'accepted', ...r };
   }
   // Stage 5 — negotiation (only after a quote).
   if (quoted && NEGOTIATE_KEYWORDS.test(text)) {
@@ -603,13 +623,13 @@ Quantity ${qtyKg} kg · Unit price $${unitPrice.toLocaleString()}/kg · Total $$
 Pricing note: ${discountNote}
 ${isResearch ? 'RESEARCH CHEMICAL (research-use-only) — do NOT reference GMP, DMF, CEP or ICH.' : 'GMP API — referencing GMP documentation and DMF/CEP is appropriate.'}
 
-Write a concise, confident cover note (130-170 words) that: greets the buyer by name; presents quote ${ref} and points to the specification table below; notes the quantity discount reflected in the price; states the quote is valid 30 days (until ${validUntil}); states payment terms (50% advance, 50% before shipment) and that shipping is quoted separately by destination; includes this exact payment line: "Secure payment via Stripe will be provided upon acceptance." (do NOT include any bank, account, routing, or SWIFT numbers); and gives a clear, simple ACCEPTANCE INSTRUCTION: to accept this quotation and proceed, simply reply to this email with the single word "ACCEPTED".
+Write a concise, confident cover note (130-170 words) that: greets the buyer by name; presents quote ${ref} and points to the specification table below; notes the quantity discount reflected in the price; states the quote is valid 30 days (until ${validUntil}); states payment terms (50% advance, 50% before shipment) and that shipping is quoted separately by destination; includes this exact payment line: "Secure online payment link will be provided upon acceptance." (do NOT include any bank, account, routing, or SWIFT numbers); and gives a clear, simple ACCEPTANCE INSTRUCTION: to accept this quotation and proceed, simply reply to this email with the single word "ACCEPTED".
 ${VOICE}
 End with:
 
 ${signatory}`;
   const { text } = await callClaude(prompt, { maxTokens: 1200 });
-  const body = text || `Dear ${inq.buyer_name || 'Buyer'},\n\nPlease find quotation ${ref} for ${inq.molecule_name} (${qtyKg} kg) in the specification table below — valid 30 days (until ${validUntil}). ${discountNote} Payment terms: 50% advance, 50% before shipment; shipping is quoted separately by destination. Secure payment via Stripe will be provided upon acceptance.\n\nTo accept this quotation and proceed, simply reply with the word "ACCEPTED".\n\n${signatory}`;
+  const body = text || `Dear ${inq.buyer_name || 'Buyer'},\n\nPlease find quotation ${ref} for ${inq.molecule_name} (${qtyKg} kg) in the specification table below — valid 30 days (until ${validUntil}). ${discountNote} Payment terms: 50% advance, 50% before shipment; shipping is quoted separately by destination. Secure online payment link will be provided upon acceptance.\n\nTo accept this quotation and proceed, simply reply with the word "ACCEPTED".\n\n${signatory}`;
   const specsTable = buildSpecsTable({
     molecule: inq.molecule_name, cas: inq.cas_number, grade: gradeLabel,
     purity: pricing.purity || '98%+', quantity: `${qtyKg} kg`, unitPrice,
@@ -654,7 +674,7 @@ async function escalateToHuman(inquiryId, reason = 'buyer requested a human') {
 
   // Reassure the buyer.
   await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name}`,
-    body: `Thank you for your message. I'm connecting you with one of our specialists who will personally follow up on your ${inq.molecule_name} requirement within 24 hours.\n\nWe appreciate your interest in working with Abiozen.\n\nWarm regards,\nAbiozen Sales Team` });
+    body: `Thank you for your message. I'm looping in one of our senior specialists who will personally follow up on your ${inq.molecule_name} requirement within 24 hours.\n\nWe appreciate your interest in working with Abiozen.\n\nWarm regards,\n${REP_NAME}\n${REP_TITLE}, Abiozen LLC` });
   await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_escalated', user_id: null, reasoning: `Escalated inquiry ${inquiryId}: ${reason}.`, source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId}` }).catch(() => {});
   return { escalated: true };
 }
@@ -854,7 +874,7 @@ async function pollSalesEmailbox({ dryRun = false, maxMessages = 40 } = {}) {
       const replyInquiryId = await matchReplyInquiry(candidateEmails, threadId);
       if (replyInquiryId) {
         if (dryRun) { out.replies_routed++; sample(subject, candidateEmails[0] || from.email, 'reply(dry)'); continue; }
-        await processInboundReply(replyInquiryId, `Subject: ${subject}\n\n${body}`);
+        await processInboundReply(replyInquiryId, `Subject: ${subject}\n\n${body}`, { messageId: gmailId });
         await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [replyInquiryId, gmailId]).catch(() => {});
         out.replies_routed++; sample(subject, candidateEmails[0] || from.email, 'reply');
         await markGmailRead(user, gmailId, tok.access_token, dryRun);
@@ -906,7 +926,7 @@ Set "is_inquiry": false ONLY if this is clearly NOT a buyer inquiry (newsletter,
         [buyerEmail])).rows[0];
       if (openByBuyer) {
         if (dryRun) { out.replies_routed++; sample(subject, buyerEmail, 'reply(dry)'); continue; }
-        await processInboundReply(openByBuyer.id, `Subject: ${subject}\n\n${body}`);
+        await processInboundReply(openByBuyer.id, `Subject: ${subject}\n\n${body}`, { messageId: gmailId });
         await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [openByBuyer.id, gmailId]).catch(() => {});
         out.replies_routed++; sample(subject, buyerEmail, 'reply');
         await markGmailRead(user, gmailId, tok.access_token, dryRun);
