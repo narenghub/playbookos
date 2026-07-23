@@ -555,4 +555,34 @@ async function publishSequenceToApollo(payload, apolloKey) {
   return { ok: true, sequenceId, stepsDone };
 }
 
-module.exports = { runEmailEngine, SEGMENTS, buildApolloPayload, sanitizeHtml, generateEmailHtml, EMAIL_MODEL, publishSequenceToApollo };
+// ── Segment → Apollo contact source (FIX 4) ───────────────────────────────────
+// Each buyer segment maps to a saved Apollo contact source S1–S4. Supply the
+// Apollo contact ids to enroll per label via env, comma/space-separated, e.g.
+//   APOLLO_CONTACTS_S1="5f3…,5f3…"   (compounding pharmacies)
+// Best-effort: if the env var is unset the sequence still publishes with content,
+// it just isn't auto-enrolled — nothing throws.
+const SEGMENT_APOLLO_LABEL = {
+  compounding_pharmacy: 'S1',
+  research_lab: 'S2',
+  generic_manufacturer: 'S3',
+  university: 'S4',
+};
+async function addSequenceContacts(sequenceId, segment, apolloKey) {
+  const label = SEGMENT_APOLLO_LABEL[segment] || null;
+  if (!label) return { label: null, added: 0, skipped: `no S-label for segment ${segment}` };
+  const raw = (process.env[`APOLLO_CONTACTS_${label}`] || '').trim();
+  const contactIds = raw ? raw.split(/[\s,]+/).filter(Boolean) : [];
+  if (!contactIds.length) return { label, added: 0, skipped: `APOLLO_CONTACTS_${label} not configured` };
+  try {
+    const r = await fetch(`https://api.apollo.io/api/v1/emailer_campaigns/${sequenceId}/add_contact_ids`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
+      body: JSON.stringify({ emailer_campaign_id: sequenceId, contact_ids: contactIds }),
+    });
+    const text = await r.text();
+    if (!r.ok) return { label, added: 0, error: `Apollo add_contact_ids ${r.status}: ${text.slice(0, 200)}` };
+    return { label, added: contactIds.length };
+  } catch (e) { return { label, added: 0, error: e.message }; }
+}
+
+module.exports = { runEmailEngine, SEGMENTS, buildApolloPayload, sanitizeHtml, generateEmailHtml, EMAIL_MODEL, publishSequenceToApollo, addSequenceContacts, SEGMENT_APOLLO_LABEL };

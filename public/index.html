@@ -4122,11 +4122,20 @@ async function eeRun() {
 }
 async function eeReview(id, status) {
   const msg = document.getElementById('ee-msg-' + id);
-  if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = 'Saving…'; }
+  if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = status === 'approved' ? 'Approving + publishing to Apollo…' : 'Saving…'; }
   try {
     const r = await API('/email-engine/campaigns/' + encodeURIComponent(id), {
       method:'PUT', body: JSON.stringify({ status }) });
-    if (r && r.error) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = r.error; } return; }
+    // Hard error (400/404/409) — no `published` field on the response.
+    if (r && r.error && r.published === undefined) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = r.error; } return; }
+    // Approve succeeded but Apollo auto-publish failed → surface it + payload; the
+    // card re-renders with a Retry button (status stays 'approved').
+    if (status === 'approved' && r && r.published === false) {
+      if (msg) { msg.style.color = '#dc2626'; msg.textContent = '❌ Apollo publish failed — ' + (r.error || 'unknown') + (r.hint ? ' — ' + r.hint : ''); }
+      if (r.payload) eeShowPayload(r.payload);
+      pages['email-engine']();
+      return;
+    }
     pages['email-engine']();
   } catch(e) { if (msg) { msg.style.color = '#dc2626'; msg.textContent = e.message; } }
 }
@@ -4245,12 +4254,14 @@ if(typeof pages !== 'undefined') {
     const cards = campaigns.map(t => {
       const color = EE_SEG_COLORS[t.segment] || '#718096';
       const actions = t.status === 'draft'
-        ? `<button onclick="eeReview('${t.id}','approved')" style="background:#1D9E75;color:#fff;border:none;padding:7px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer">Approve</button>
+        ? `<button onclick="eeReview('${t.id}','approved')" style="background:#1D9E75;color:#fff;border:none;padding:7px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer" title="Approves and publishes to Apollo immediately">Approve &amp; Publish</button>
            <button onclick="eeReview('${t.id}','rejected')" class="btn-outline" style="padding:7px 14px;font-size:13px">Reject</button>`
         : t.status === 'approved'
-        ? `<button onclick="eePublish('${t.id}')" style="background:#1B3A6B;color:#fff;border:none;padding:7px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer">Push to Apollo</button>`
+        ? `<span style="background:#fee2e2;color:#991B1B;padding:5px 12px;border-radius:14px;font-size:12px;font-weight:600">❌ Apollo publish failed</span>
+           <button onclick="eePublish('${t.id}')" style="background:#1B3A6B;color:#fff;border:none;padding:7px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer">Retry Apollo publish</button>`
         : t.status === 'sent'
-        ? `<span style="font-size:12px;color:#166534">Apollo sequence ${eeEsc(t.apollo_sequence_id || '—')}</span>`
+        ? `<span style="background:#dcfce7;color:#166534;padding:5px 12px;border-radius:14px;font-size:12px;font-weight:600">✅ Published to Apollo — Sequence ID: ${eeEsc(t.apollo_sequence_id || '—')}</span>
+           ${t.apollo_sequence_id ? `<a href="https://app.apollo.io/#/sequences/${eeEsc(t.apollo_sequence_id)}" target="_blank" rel="noopener" style="font-size:12px;color:#1B3A6B;font-weight:600;text-decoration:none">View in Apollo →</a>` : ''}`
         : '';
       return `<div class="card" style="border-left:4px solid ${color}">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">

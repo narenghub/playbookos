@@ -11,7 +11,7 @@ const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
 const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings, generateCatalogSeoPages, pushSeoContentToAbiozen } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('../lib/agents/growth-agent');
-const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo } = require('../lib/agents/email-engine');
+const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo, addSequenceContacts } = require('../lib/agents/email-engine');
 const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
 const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/procurement-agent');
 const { runMeetAgent, analyzeAndStore } = require('../lib/agents/meet-agent');
@@ -1618,88 +1618,93 @@ router.get('/email-engine/campaigns', authMiddleware, requireAnyTier('sales', 'i
 
 // Approve / reject. Only a draft can transition — an already-sent campaign must
 // not be silently re-approved, and rejecting a sent campaign is meaningless.
+// Publish an approved campaign to Apollo — the 4-call sequence flow. Shared by the
+// approval auto-publish (PUT) and the manual retry (POST /:id/publish). Overrides
+// the sequence name to the standard "[Molecule] — [Segment] — Week of [date] —
+// Test A/B" format, records the sequence id + status, and best-effort enrolls the
+// segment's Apollo contacts (S1–S4). Never throws — returns a plain result.
+//
+// NOTE: Apollo's sequence-creation endpoint needs a MASTER API key and a plan that
+// exposes it; on failure the stored payload is returned so the sequence can be
+// recreated by hand.
+async function publishCampaignRow(c, userEmail) {
+  const apolloKey = process.env.APOLLO_API_KEY;
+  if (!apolloKey) return { ok: false, error: 'APOLLO_API_KEY not configured' };
+  if (c.apollo_sequence_id) return { ok: false, error: `Already published as Apollo sequence ${c.apollo_sequence_id}`, apollo_sequence_id: c.apollo_sequence_id };
+  let payload;
+  try { payload = JSON.parse(c.apollo_payload || 'null'); } catch { payload = null; }
+  if (!payload) return { ok: false, error: 'Stored Apollo payload is missing or unparseable — re-run the engine for this week' };
+  const seg = SEGMENTS.find(s => s.key === c.segment);
+  payload.name = `${c.molecule_name} — ${seg?.label || c.segment} — Week of ${c.week_start} — Test A/B`;
+
+  const result = await publishSequenceToApollo(payload, apolloKey);
+  if (!result.ok) {
+    // Record any partial sequence id so a retry doesn't create a duplicate.
+    if (result.sequenceId) await query(`UPDATE email_campaigns SET apollo_sequence_id=$1 WHERE id=$2`, [result.sequenceId, c.id]);
+    return {
+      ok: false,
+      error: `Apollo publish failed at ${result.stage} (HTTP ${result.status})`,
+      apollo_response: result.detail, apollo_sequence_id: result.sequenceId || null,
+      steps_created: result.stepsDone || [],
+      hint: result.sequenceId
+        ? `A partial sequence was created in Apollo (${result.sequenceId}) with steps ${JSON.stringify(result.stepsDone || [])}. Finish or delete it in Apollo before retrying — retrying would create a duplicate.`
+        : 'Sequence creation needs an Apollo master API key and a plan that exposes the endpoint. The payload below can be recreated manually.',
+      payload,
+    };
+  }
+  await query(`UPDATE email_campaigns SET status='sent', apollo_sequence_id=$1 WHERE id=$2`, [result.sequenceId, c.id]);
+  // FIX 4 — best-effort: enroll the segment's Apollo contacts (S1–S4).
+  let contacts = null;
+  try { contacts = await addSequenceContacts(result.sequenceId, c.segment, apolloKey); } catch (e) { contacts = { error: e.message }; }
+  logAgentActivity({
+    agent_name: 'email-engine', action_type: 'email_campaign_published',
+    reasoning: `${userEmail} published "${c.molecule_name} / ${c.segment}" to Apollo as sequence ${result.sequenceId} with ${result.stepsDone.length} steps${contacts && contacts.added ? `; enrolled ${contacts.added} ${contacts.label} contacts` : ''}`,
+    output_summary: `campaign_id=${c.id} apollo_sequence_id=${result.sequenceId} steps=${result.stepsDone.length}`,
+  }).catch(e => console.error('[email-engine] publish audit failed:', e.message));
+  return { ok: true, apollo_sequence_id: result.sequenceId, steps_created: result.stepsDone.length, contacts, status: 'sent' };
+}
+
 router.put('/email-engine/campaigns/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     const status = req.body?.status;
     if (!['approved', 'rejected'].includes(status)) {
       return res.status(400).json({ error: "status must be 'approved' or 'rejected'" });
     }
-    const c = (await query('SELECT id, status FROM email_campaigns WHERE id=$1', [req.params.id])).rows[0];
+    const c = (await query('SELECT * FROM email_campaigns WHERE id=$1', [req.params.id])).rows[0];
     if (!c) return res.status(404).json({ error: 'Campaign not found' });
     if (c.status !== 'draft') {
       return res.status(409).json({ error: `Campaign is already '${c.status}' — only draft campaigns can be approved or rejected` });
     }
-    await query(
-      `UPDATE email_campaigns SET status=$1, approved_at=NOW(), approved_by=$2 WHERE id=$3`,
-      [status, req.user.email, req.params.id]
-    );
-    logAgentActivity({
-      agent_name: 'email-engine', action_type: 'email_campaign_review',
-      reasoning: `${req.user.email} ${status} campaign ${req.params.id}`,
-      output_summary: `campaign_id=${req.params.id} -> ${status}`,
-    }).catch(e => console.error('[email-engine] review audit failed:', e.message));
-    res.json({ success: true, id: req.params.id, status });
+
+    if (status === 'rejected') {
+      await query(`UPDATE email_campaigns SET status='rejected', approved_at=NOW(), approved_by=$1 WHERE id=$2`, [req.user.email, req.params.id]);
+      logAgentActivity({ agent_name: 'email-engine', action_type: 'email_campaign_review', reasoning: `${req.user.email} rejected campaign ${req.params.id}`, output_summary: `campaign_id=${req.params.id} -> rejected` }).catch(() => {});
+      return res.json({ success: true, id: req.params.id, status: 'rejected', published: false });
+    }
+
+    // Approved → mark approved, then immediately auto-publish to Apollo.
+    await query(`UPDATE email_campaigns SET status='approved', approved_at=NOW(), approved_by=$1 WHERE id=$2`, [req.user.email, req.params.id]);
+    const pub = await publishCampaignRow({ ...c, status: 'approved' }, req.user.email);
+    if (!pub.ok) {
+      // Approval stands; publish failed → status stays 'approved' so the UI can retry.
+      logAgentActivity({ agent_name: 'email-engine', action_type: 'email_campaign_review', reasoning: `${req.user.email} approved campaign ${req.params.id}; Apollo auto-publish failed: ${pub.error}`, output_summary: `campaign_id=${req.params.id} -> approved (publish failed)` }).catch(() => {});
+      return res.json({ success: true, id: req.params.id, status: 'approved', published: false, error: pub.error, apollo_sequence_id: pub.apollo_sequence_id || null, apollo_response: pub.apollo_response, hint: pub.hint, payload: pub.payload });
+    }
+    return res.json({ success: true, id: req.params.id, status: 'sent', published: true, apollo_sequence_id: pub.apollo_sequence_id, steps_created: pub.steps_created, contacts: pub.contacts });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Push an approved campaign to Apollo as a sequence.
-//
-// NOTE: Apollo's sequence-creation endpoint requires a MASTER API key (the
-// read-only key used elsewhere in this file will 403), and its availability on
-// a given plan is not guaranteed. Rather than pretend the call succeeded, a
-// non-2xx from Apollo is surfaced verbatim with the stored payload attached so
-// the sequence can be created by hand from the same content.
+// Manual retry — publish an approved campaign whose auto-publish failed.
 router.post('/email-engine/campaigns/:id/publish', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const apolloKey = process.env.APOLLO_API_KEY;
-    if (!apolloKey) return res.status(400).json({ error: 'APOLLO_API_KEY not configured' });
     const c = (await query('SELECT * FROM email_campaigns WHERE id=$1', [req.params.id])).rows[0];
     if (!c) return res.status(404).json({ error: 'Campaign not found' });
-    if (c.status !== 'approved') {
-      return res.status(409).json({ error: `Campaign is '${c.status}' — approve it before publishing to Apollo` });
+    if (c.status !== 'approved') return res.status(409).json({ error: `Campaign is '${c.status}' — approve it before publishing to Apollo` });
+    const pub = await publishCampaignRow(c, req.user.email);
+    if (!pub.ok) {
+      return res.status(502).json({ error: pub.error, apollo_response: pub.apollo_response, apollo_sequence_id: pub.apollo_sequence_id || null, steps_created: pub.steps_created || [], hint: pub.hint, payload: pub.payload });
     }
-    if (c.apollo_sequence_id) {
-      return res.status(409).json({ error: `Already published as Apollo sequence ${c.apollo_sequence_id}` });
-    }
-    let payload;
-    try { payload = JSON.parse(c.apollo_payload || 'null'); }
-    catch { payload = null; }
-    if (!payload) return res.status(500).json({ error: 'Stored Apollo payload is missing or unparseable — re-run the engine for this week' });
-
-    const result = await publishSequenceToApollo(payload, apolloKey);
-
-    if (!result.ok) {
-      // If the sequence was created before the failure it exists in Apollo as a
-      // partial. Record the id anyway (status stays 'approved' so it is NOT
-      // counted as sent) — otherwise it becomes an orphan nobody can find, and a
-      // retry would create a second copy.
-      if (result.sequenceId) {
-        await query(`UPDATE email_campaigns SET apollo_sequence_id=$1 WHERE id=$2`,
-          [result.sequenceId, req.params.id]);
-      }
-      return res.status(502).json({
-        error: `Apollo publish failed at ${result.stage} (HTTP ${result.status})`,
-        apollo_response: result.detail,
-        apollo_sequence_id: result.sequenceId || null,
-        steps_created: result.stepsDone || [],
-        hint: result.sequenceId
-          ? `A partial sequence was created in Apollo (${result.sequenceId}) with steps ${JSON.stringify(result.stepsDone || [])}. Finish or delete it in Apollo before retrying — retrying here would create a duplicate.`
-          : 'Sequence creation needs an Apollo master API key and a plan that exposes the endpoint. The payload below can be recreated manually.',
-        payload,
-      });
-    }
-
-    await query(
-      `UPDATE email_campaigns SET status='sent', apollo_sequence_id=$1 WHERE id=$2`,
-      [result.sequenceId, req.params.id]
-    );
-    logAgentActivity({
-      agent_name: 'email-engine', action_type: 'email_campaign_published',
-      reasoning: `${req.user.email} published "${c.molecule_name} / ${c.segment}" to Apollo as sequence ${result.sequenceId} with ${result.stepsDone.length} steps`,
-      output_summary: `campaign_id=${req.params.id} apollo_sequence_id=${result.sequenceId} steps=${result.stepsDone.length}`,
-    }).catch(e => console.error('[email-engine] publish audit failed:', e.message));
-    res.json({ success: true, id: req.params.id, apollo_sequence_id: result.sequenceId,
-               steps_created: result.stepsDone.length, status: 'sent' });
+    res.json({ success: true, id: req.params.id, apollo_sequence_id: pub.apollo_sequence_id, steps_created: pub.steps_created, contacts: pub.contacts, status: 'sent' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
