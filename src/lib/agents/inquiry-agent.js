@@ -137,7 +137,6 @@ async function logMessage(inquiryId, m) {
     [crypto.randomUUID(), inquiryId, m.direction, m.sender_name || null, m.sender_email || null, m.subject || null, m.body_text || null, m.body_html || null]);
 }
 // ── Professional email template ───────────────────────────────────────────────
-const LOGO_URL = 'https://playbook.abiozen.com/abiozen-logo.png';
 const productTypeLabelFor = (pricing, molecule) => (productType(pricing, molecule) === 'research_chemical' ? 'Research Chemical' : 'GMP API');
 // Shared persona + voice for all AI-written inquiry emails.
 const VOICE = `You are ${REP_NAME}, ${REP_TITLE} at Abiozen LLC — a warm, knowledgeable, confident human salesperson. Write in the first person as Sarah. NEVER say or imply you are an AI, a bot, automated, or a system; only if the buyer directly asks "are you an AI/bot/real person?" do you answer honestly and briefly.
@@ -179,7 +178,7 @@ function renderEmail({ moleculeName, cas, productTypeLabel, bodyHtml, specsTable
 
 <!-- Header -->
 <tr><td style="background:linear-gradient(135deg,#1B3A6B 0%,#0D7377 100%);padding:32px 40px;text-align:center">
-<img src="${LOGO_URL}" alt="Abiozen" height="45" style="display:block;margin:0 auto 12px">
+<div style="font-family:Arial,sans-serif;font-size:24px;font-weight:700;color:#ffffff;letter-spacing:2px;margin:0 0 4px">ABIOZEN</div>
 <p style="color:rgba(255,255,255,0.85);font-size:13px;margin:0;letter-spacing:1px;text-transform:uppercase">Pharmaceutical API Marketplace</p>
 </td></tr>
 ${hero}

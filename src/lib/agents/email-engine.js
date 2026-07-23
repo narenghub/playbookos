@@ -20,7 +20,6 @@ const crypto = require('crypto');
 const { query } = require('../db');
 const { logAgentActivity, parseClaudeJSON } = require('../agent-core');
 const { getAppId, getSearchKey } = require('../algolia-keys');
-const { LOGO_SRC } = require('./email-assets');
 
 const EMAIL_MODEL = 'claude-opus-4-8';
 const MAX_TOKENS = 4000; // copy-only now, not full HTML — smaller budget suffices
@@ -310,11 +309,10 @@ function generateEmailHtml(mol, seg, copyParas) {
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef1f5"><tr><td align="center" style="padding:24px 12px">
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:10px;overflow:hidden;border:1px solid ${C.line}">
 
-  <!-- Navy header with white logo strip -->
-  <tr><td style="background:${C.navy};padding:22px 24px" align="center">
-    <table role="presentation" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px"><tr>
-      <td style="padding:14px 26px" align="center"><img src="${LOGO_SRC}" width="180" alt="Abiozen" style="display:block;width:180px;max-width:180px;height:auto;border:0"></td>
-    </tr></table>
+  <!-- Text-based navy header (renders in all clients, no image loading) -->
+  <tr><td style="padding:24px 40px;background:#1B3A6B;text-align:center">
+    <div style="font-family:Arial,sans-serif;font-size:24px;font-weight:700;color:#ffffff;letter-spacing:2px">ABIOZEN</div>
+    <div style="font-family:Arial,sans-serif;font-size:11px;color:#9FE1CB;letter-spacing:3px;margin-top:4px;text-transform:uppercase">Pharmaceutical API Marketplace</div>
   </td></tr>
 
   <!-- Molecule hero -->
