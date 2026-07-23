@@ -460,9 +460,16 @@ Return ONLY JSON:
          intended_use=COALESCE(NULLIF($4,''), intended_use)
        WHERE id=$1`,
       [inquiryId, k.company || '', k.country || '', k.intended_use || '']);
-    await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name} | Abiozen LLC`, body: replyBody, productTypeLabel: ptl });
-    await generateQuote(inquiryId);
-    action = 'quoted';
+    // Send exactly ONE email: the formal quote is the response. Only if the
+    // molecule can't be priced do we fall back to the conversational note, so the
+    // buyer always gets one — and only one — reply.
+    const q = await generateQuote(inquiryId);
+    if (q && q.error) {
+      await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name} | Abiozen LLC`, body: replyBody, productTypeLabel: ptl });
+      action = 'replied_no_pricing';
+    } else {
+      action = 'quoted';
+    }
   } else {
     await sendAndLog(inq, { subject: `Re: Inquiry — ${inq.molecule_name} | Abiozen LLC`, body: replyBody, productTypeLabel: ptl });
     await query(`UPDATE inquiries SET status='in_conversation', updated_at=NOW() WHERE id=$1 AND status IN ('new','in_conversation')`, [inquiryId]);
@@ -596,13 +603,13 @@ Quantity ${qtyKg} kg · Unit price $${unitPrice.toLocaleString()}/kg · Total $$
 Pricing note: ${discountNote}
 ${isResearch ? 'RESEARCH CHEMICAL (research-use-only) — do NOT reference GMP, DMF, CEP or ICH.' : 'GMP API — referencing GMP documentation and DMF/CEP is appropriate.'}
 
-Write a concise, confident cover note (130-170 words) that: greets the buyer by name; presents quote ${ref} and points to the specification table below; notes the quantity discount reflected in the price; states the quote is valid 30 days (until ${validUntil}); states payment terms (50% advance, 50% before shipment) and that shipping is quoted separately by destination; includes a bank-details placeholder line "[Bank wire details will be provided on acceptance]" (do NOT invent bank numbers); and gives a clear, simple ACCEPTANCE INSTRUCTION: to accept this quotation and proceed, simply reply to this email with the single word "ACCEPTED".
+Write a concise, confident cover note (130-170 words) that: greets the buyer by name; presents quote ${ref} and points to the specification table below; notes the quantity discount reflected in the price; states the quote is valid 30 days (until ${validUntil}); states payment terms (50% advance, 50% before shipment) and that shipping is quoted separately by destination; includes this exact payment line: "Secure payment via Stripe will be provided upon acceptance." (do NOT include any bank, account, routing, or SWIFT numbers); and gives a clear, simple ACCEPTANCE INSTRUCTION: to accept this quotation and proceed, simply reply to this email with the single word "ACCEPTED".
 ${VOICE}
 End with:
 
 ${signatory}`;
   const { text } = await callClaude(prompt, { maxTokens: 1200 });
-  const body = text || `Dear ${inq.buyer_name || 'Buyer'},\n\nPlease find quotation ${ref} for ${inq.molecule_name} (${qtyKg} kg) in the specification table below — valid 30 days (until ${validUntil}). ${discountNote} Payment terms: 50% advance, 50% before shipment; shipping is quoted separately by destination. [Bank wire details will be provided on acceptance]\n\nTo accept this quotation and proceed, simply reply with the word "ACCEPTED".\n\n${signatory}`;
+  const body = text || `Dear ${inq.buyer_name || 'Buyer'},\n\nPlease find quotation ${ref} for ${inq.molecule_name} (${qtyKg} kg) in the specification table below — valid 30 days (until ${validUntil}). ${discountNote} Payment terms: 50% advance, 50% before shipment; shipping is quoted separately by destination. Secure payment via Stripe will be provided upon acceptance.\n\nTo accept this quotation and proceed, simply reply with the word "ACCEPTED".\n\n${signatory}`;
   const specsTable = buildSpecsTable({
     molecule: inq.molecule_name, cas: inq.cas_number, grade: gradeLabel,
     purity: pricing.purity || '98%+', quantity: `${qtyKg} kg`, unitPrice,
