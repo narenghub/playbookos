@@ -4713,7 +4713,7 @@ if(typeof pages !== 'undefined') {
         <div class="metric"><div class="label">Decisions</div><div class="value">${dash.decisions||0}</div></div>
         <div class="metric amber"><div class="label">Blockers</div><div class="value">${dash.blockers||0}</div></div>
       </div>`;
-    const tabs=[['standup','➕ New Standup'],['meetings','Recent Meetings'],['upload','Upload Transcript'],['tasks','Meeting Tasks'],['insights','Insights']];
+    const tabs=[['standup','➕ New Standup'],['workspace','🌐 Workspace Activity'],['meetings','Recent Meetings'],['upload','Upload Transcript'],['tasks','Meeting Tasks'],['insights','Insights']];
     const tabBar=`<div class="card" style="display:flex;gap:6px;flex-wrap:wrap">${tabs.map(([k,l])=>`<button onclick="mgTab('${k}')" class="btn-outline" style="padding:6px 14px;font-size:13px;${window._mgTab===k?'background:#1B3A6B;color:#fff':''}">${l}</button>`).join('')}</div>`;
 
     let body='';
@@ -4734,6 +4734,45 @@ if(typeof pages !== 'undefined') {
         <textarea id="mg-su-notes" rows="10" placeholder="Paste or type today's standup — what each person did, decisions, blockers…" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
         <div style="margin-top:10px"><button onclick="mgStandupPreview()" class="btn-primary" style="padding:9px 20px">Extract Tasks →</button> <span id="mg-su-msg" style="font-size:12px;color:var(--text-muted);margin-left:6px"></span></div>
         <div id="mg-su-result"></div></div>`;
+    } else if (window._mgTab==='workspace') {
+      let w; try{ w=await API('/meetings/workspace-activity'); }catch(e){ w={error:e.message}; }
+      if(w&&w.error){
+        body=`<div class="card"><div class="card-title text-section">🌐 Workspace Activity</div><p style="color:#dc2626">${mgEsc(w.error)}</p></div>`;
+      } else {
+        const warn = w.warning ? `<div class="card" style="border-left:3px solid #B45309;background:#fffbeb"><div style="font-size:12px;color:#92400e">⚠️ ${mgEsc(w.warning)}</div></div>` : '';
+        const dow=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+        const grid=w.heatmap||[], max=w.heatmap_max||0;
+        const cell=(n)=>{ const a=max?n/max:0; const bg=n===0?'#f1f5f9':`rgba(27,58,107,${(0.15+a*0.85).toFixed(2)})`; return `<td title="${n} session(s)" style="width:15px;height:15px;background:${bg};border:1px solid #fff"></td>`; };
+        const hours=Array.from({length:24},(_,h)=>h);
+        const heat=`<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:9px;color:#718096">
+          <tr><td></td>${hours.map(h=>`<td style="text-align:center;width:15px">${h%3===0?h:''}</td>`).join('')}</tr>
+          ${dow.map((d,di)=>`<tr><td style="padding-right:6px;text-align:right">${d}</td>${hours.map(h=>cell((grid[di]&&grid[di][h])||0)).join('')}</tr>`).join('')}
+        </table><div style="font-size:10px;color:#a0aec0;margin-top:4px">Sessions by day × hour (UTC), last ${w.lookbackDays} days</div></div>`;
+        const suRows=(w.standups||[]).map(s=>`<div style="font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">🎯 <strong>${mgEsc(s.meeting_code)}</strong> · ${mgEsc(s.organizer_email||'?')} · ${s.attendee_count} ppl · ${s.duration_minutes}min · ${mgEsc(s.date||'')} <span style="color:#166534">(${s.likelihood}%)</span></div>`).join('')||'<div style="font-size:12px;color:#888">None detected.</div>';
+        const recRows=(w.recordings||[]).map(r=>`<div style="font-size:12px;padding:4px 0;border-bottom:1px solid var(--border)">🎬 ${mgEsc(r.doc_title)} <span style="color:#a0aec0">— ${mgEsc(r.owner||r.actor||'')}</span></div>`).join('')||'<div style="font-size:12px;color:#888">No recordings in the window.</div>';
+        const sesRows=(w.sessions||[]).slice(0,40).map(s=>`<tr>
+          <td style="padding:5px 8px;border-bottom:1px solid #e2e8f0;font-family:monospace;font-size:11px">${mgEsc(s.meeting_code)}</td>
+          <td style="padding:5px 8px;border-bottom:1px solid #e2e8f0;font-size:11px">${mgEsc(s.organizer_email||'—')}</td>
+          <td style="padding:5px 8px;border-bottom:1px solid #e2e8f0;text-align:center">${s.attendee_count}</td>
+          <td style="padding:5px 8px;border-bottom:1px solid #e2e8f0;text-align:center">${s.duration_minutes}m</td>
+          <td style="padding:5px 8px;border-bottom:1px solid #e2e8f0;font-size:11px">${mgEsc(s.date||'')}</td>
+          <td style="padding:5px 8px;border-bottom:1px solid #e2e8f0;text-align:center">${s.has_recording?'🎬':''}</td></tr>`).join('');
+        body=warn+`<div class="metric-grid">
+            <div class="metric"><div class="label">Meet sessions</div><div class="value">${w.total_sessions||0}</div><div class="sub">last ${w.lookbackDays} days · ${(w.domains||[]).join(', ')}</div></div>
+            <div class="metric"><div class="label">Active participants</div><div class="value">${w.active_participants||0}</div></div>
+            <div class="metric"><div class="label">Recordings available</div><div class="value">${w.recordings_available||0}</div></div>
+            <div class="metric"><div class="label">Standups detected</div><div class="value">${w.standups_detected||0}</div><div class="sub">${w.workspace_users||0} workspace users</div></div>
+          </div>
+          <div class="card"><div class="card-title text-section">Org-wide meeting heatmap</div>${heat}</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div class="card"><div class="card-title text-section">Detected standups</div>${suRows}</div>
+            <div class="card"><div class="card-title text-section">Recordings</div>${recRows}</div>
+          </div>
+          <div class="card"><div class="card-title text-section">All Meet sessions</div><div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:12px">
+            <tr style="background:#f8fafc"><th style="padding:5px 8px;text-align:left">Code</th><th style="padding:5px 8px;text-align:left">Organizer</th><th style="padding:5px 8px">Attendees</th><th style="padding:5px 8px">Duration</th><th style="padding:5px 8px;text-align:left">Date</th><th style="padding:5px 8px">Rec</th></tr>
+            ${sesRows||'<tr><td colspan="6" style="padding:8px;color:#888">No sessions.</td></tr>'}
+          </table></div></div>`;
+      }
     } else if (window._mgTab==='meetings') {
       body = meetings.length ? meetings.map(m=>`<div class="card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">

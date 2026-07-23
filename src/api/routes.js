@@ -14,7 +14,8 @@ const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence
 const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo, addSequenceContacts } = require('../lib/agents/email-engine');
 const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
 const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/procurement-agent');
-const { runMeetAgent, analyzeAndStore, runStandup } = require('../lib/agents/meet-agent');
+const { runMeetAgent, analyzeAndStore, runStandup, detectStandups } = require('../lib/agents/meet-agent');
+const workspaceActivity = require('../lib/agents/workspace-activity');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
 const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent, pollSalesEmailbox, handleAcceptance, markPaymentReceived, getPipeline, handleStripeEvent } = require('../lib/agents/inquiry-agent');
@@ -2174,6 +2175,41 @@ router.get('/meetings/dashboard', authMiddleware, requireAnyTier('intelligence',
     const ins = (await query(`SELECT insight_type, COUNT(*)::int c FROM meeting_insights GROUP BY insight_type`)).rows;
     const by = Object.fromEntries(ins.map(r => [r.insight_type, r.c]));
     res.json({ meetings_month: m, tasks_created: t.c, tasks_completed: t.done, decisions: by.decision || 0, blockers: by.blocker || 0, opportunities: by.opportunity || 0 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PART 8 — org-wide Workspace Activity via the Admin SDK Reports API. Returns
+// Meet sessions, unique recordings, active participants, detected standups, a
+// day×hour heatmap, and the workspace user count. Degrades gracefully (with a
+// `warning`) when the admin scopes/super-admin aren't configured yet.
+router.get('/meetings/workspace-activity', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const lookbackDays = Math.min(30, Math.max(1, parseInt(req.query?.lookbackDays, 10) || 7));
+    const [meet, drive, users] = await Promise.all([
+      workspaceActivity.getWorkspaceMeetActivity({ lookbackDays }),
+      workspaceActivity.getWorkspaceDriveActivity({ lookbackDays }).catch(() => ({ recordings: [] })),
+      workspaceActivity.getAllWorkspaceUsers().catch(() => ({ users: [] })),
+    ]);
+    const sessions = meet.sessions || [];
+    const standups = await detectStandups(sessions).catch(() => []);
+    const participants = new Set();
+    sessions.forEach(s => (s.participants || []).forEach(p => participants.add(p)));
+    const heatmap = workspaceActivity.meetHeatmap(sessions);
+    res.json({
+      lookbackDays,
+      domains: workspaceActivity.workspaceDomains(),
+      workspace_users: (users.users || []).length,
+      total_sessions: sessions.length,
+      active_participants: participants.size,
+      recordings_available: (drive.recordings || []).length,
+      standups_detected: standups.length,
+      sessions: sessions.slice(0, 100),
+      recordings: (drive.recordings || []).slice(0, 50),
+      standups: standups.slice(0, 30),
+      heatmap: heatmap.grid,
+      heatmap_max: heatmap.maxCount,
+      warning: meet.warning || drive.warning || users.warning || null,
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

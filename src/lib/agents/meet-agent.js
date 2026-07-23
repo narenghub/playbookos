@@ -14,6 +14,7 @@ const { sendEmail } = require('../mailer');
 const { sendWhatsApp } = require('../whatsapp');
 const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday } = require('../agent-core');
 const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth');
+const workspace = require('./workspace-activity');
 
 const AGENT = 'meet-agent';
 const MEET_MODEL = 'claude-opus-4-8';
@@ -366,10 +367,95 @@ async function processMeeting(meeting, { dryRun = false } = {}) {
   return analyzeAndStore(meeting, { dryRun });
 }
 
+// ── PART 4 — smart standup detection over org-wide Meet sessions ───────────────
+// Given reconstructed Meet sessions (from the Reports API), ask Claude which are
+// likely Abiozen team meetings/standups. Returns the sessions Claude picked, each
+// annotated with a likelihood, most-likely first. Falls back to a heuristic
+// (2+ participants, 10–75 min) if Claude is unavailable.
+async function detectStandups(sessions) {
+  const list = (sessions || []).filter(s => s.meeting_code);
+  if (!list.length) return [];
+  const heuristic = () => list
+    .filter(s => s.attendee_count >= 2 && s.duration_minutes >= 10 && s.duration_minutes <= 75)
+    .map(s => ({ ...s, likelihood: 60, why: 'heuristic: multi-person, 10–75 min' }));
+
+  const rows = list.slice(0, 60).map((s, i) =>
+    `${i}. code=${s.meeting_code} organizer=${s.organizer_email || '?'} attendees=${s.attendee_count} duration=${s.duration_minutes}min date=${s.date || '?'} participants=${(s.participants || []).slice(0, 6).join(',')}`).join('\n');
+  const prompt = `From these Google Meet sessions in the last 7 days, identify which ones are likely standups/team meetings for Abiozen LLC, a pharmaceutical API marketplace (team emails are @abiozen.com and @adificetechnologies.com).
+
+${rows}
+
+A standup/team meeting typically:
+- Has multiple Abiozen/Adifice team members
+- Duration 15-60 minutes
+- Happens regularly (Mon/Fri or daily)
+- Organizer is an Abiozen/Adifice employee
+
+Return ONLY a JSON array, most-likely first, no prose:
+[{"index": <the number above>, "likelihood": <0-100>, "why": "<short reason>"}]`;
+  const { data } = await callClaude(prompt, { maxTokens: 1500, json: true });
+  if (!Array.isArray(data)) return heuristic();
+  const picked = [];
+  for (const d of data) {
+    const idx = Number(d.index);
+    if (Number.isInteger(idx) && list[idx] && Number(d.likelihood) >= 50) {
+      picked.push({ ...list[idx], likelihood: Number(d.likelihood), why: String(d.why || '').slice(0, 160) });
+    }
+  }
+  return picked.length ? picked : heuristic();
+}
+
 // ── Function 7 — orchestration ────────────────────────────────────────────────
+// Preferred path (PART 7): org-wide Meet activity via the Reports API → detect
+// standups → pull a transcript from Drive if a recording exists → analyze →
+// assign → brief. Falls back to the single-calendar scan when the Admin SDK
+// scopes/super-admin aren't configured yet (both 403 gracefully).
 async function runMeetAgent({ dryRun = false, lookbackDays = 7 } = {}) {
-  const { meetings, warning } = await fetchMeetingRecordings({ lookbackDays });
-  const out = { meetings_processed: 0, tasks_created: 0, emails_sent: 0, warning: warning || null, errors: [] };
+  const out = { meetings_processed: 0, tasks_created: 0, emails_sent: 0, standups_detected: 0, path: null, warning: null, errors: [] };
+
+  // Try the workspace-wide path first when domains are configured.
+  let meetings = null, warning = null;
+  const domainsConfigured = !!process.env.WORKSPACE_DOMAINS;
+  if (domainsConfigured) {
+    const act = await workspace.getWorkspaceMeetActivity({ lookbackDays });
+    if (act.sessions && act.sessions.length) {
+      const standups = await detectStandups(act.sessions);
+      out.standups_detected = standups.length;
+      out.path = 'workspace_reports';
+      log(`workspace path: ${act.sessions.length} session(s), ${standups.length} detected standup(s)`);
+      // Turn each detected standup session into a meeting object. Content still
+      // comes from a Drive transcript (getTranscript searches by title); the
+      // Reports API supplies only metadata (who/when/how long), not the words.
+      meetings = [];
+      for (const s of standups) {
+        const mid = 'meet-' + s.meeting_code + (s.date ? '-' + s.date : '');
+        const done = (await query('SELECT id FROM meeting_recordings WHERE meeting_id=$1 AND processed=1', [mid])).rows[0];
+        if (done) continue;
+        meetings.push({
+          meeting_id: mid,
+          meeting_title: `Team meeting ${s.meeting_code}${s.date ? ' — ' + s.date : ''}`,
+          meeting_date: s.date || businessToday(),
+          duration_seconds: s.duration_seconds || null,
+          attendees: s.participants || [],
+          description: `Meet session organized by ${s.organizer_email || 'unknown'} · ${s.attendee_count} participants · ${s.duration_minutes}min (detected ${s.likelihood}% standup).`,
+          recording_url: null,
+        });
+      }
+      warning = act.warning || null;
+    } else {
+      warning = act.warning || 'No Meet activity from Reports API';
+      log(`workspace path yielded no sessions (${warning}); falling back to calendar scan`);
+    }
+  }
+
+  // Fallback: the original single-calendar scan.
+  if (!meetings) {
+    const r = await fetchMeetingRecordings({ lookbackDays });
+    meetings = r.meetings;
+    warning = warning || r.warning || null;
+    out.path = out.path || 'calendar_scan';
+  }
+
   for (const m of meetings) {
     try {
       const r = await processMeeting(m, { dryRun });
@@ -378,11 +464,12 @@ async function runMeetAgent({ dryRun = false, lookbackDays = 7 } = {}) {
       if (r.brief_sent) out.emails_sent++;
     } catch (e) { out.errors.push(`${m.meeting_title}: ${e.message}`); }
   }
+  out.warning = warning;
   if (!dryRun) {
     await logAgentActivity({ agent_name: AGENT, action_type: 'meet_agent_run', user_id: null,
-      reasoning: `Processed ${out.meetings_processed} meetings, created ${out.tasks_created} tasks.${warning ? ' Warning: ' + warning : ''}`,
+      reasoning: `[${out.path}] Processed ${out.meetings_processed} meetings, created ${out.tasks_created} tasks, detected ${out.standups_detected} standup(s).${warning ? ' Warning: ' + warning : ''}`,
       source_kpi: 'kpi-vision', confidence_score: out.errors.length ? 60 : 90,
-      output_summary: `meetings=${out.meetings_processed} tasks=${out.tasks_created} dryRun=${dryRun}` }).catch(() => {});
+      output_summary: `path=${out.path} meetings=${out.meetings_processed} tasks=${out.tasks_created} dryRun=${dryRun}` }).catch(() => {});
   }
   return out;
 }
@@ -434,5 +521,5 @@ async function getYesterdayStandupSummary(date) {
 module.exports = {
   runMeetAgent, processMeeting, fetchMeetingRecordings, getTranscript,
   analyzeMeetingWithClaude, assignTasksToTeam, sendMeetingBriefToNaresh, analyzeAndStore, matchUser,
-  runStandup, getYesterdayStandupSummary,
+  runStandup, getYesterdayStandupSummary, detectStandups,
 };

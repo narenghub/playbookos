@@ -13,6 +13,12 @@ const SCOPES = {
   calendarReadonly: 'https://www.googleapis.com/auth/calendar.readonly',
   driveReadonly: 'https://www.googleapis.com/auth/drive.readonly',
   webmastersReadonly: 'https://www.googleapis.com/auth/webmasters.readonly',
+  // Admin SDK — org-wide user directory + activity reports. These require the
+  // impersonated subject (WORKSPACE_SUPER_ADMIN) to be a Workspace super admin,
+  // and must be added to the DWD client's scope list in admin.google.com before
+  // they work (until then the calls 403 and the agent degrades gracefully).
+  adminDirectoryUserReadonly: 'https://www.googleapis.com/auth/admin.directory.user.readonly',
+  adminReportsAuditReadonly: 'https://www.googleapis.com/auth/admin.reports.audit.readonly',
 };
 
 let _creds; // parsed service-account JSON, cached (undefined = not yet parsed)
