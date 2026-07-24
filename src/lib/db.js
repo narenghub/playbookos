@@ -708,6 +708,10 @@ async function migrateSchemas() {
       -- Flags a row created via the daily-standup workflow (POST /meetings/standup)
       -- so the CEO morning briefing can surface "yesterday's standup" separately.
       ALTER TABLE meeting_recordings ADD COLUMN IF NOT EXISTS is_standup INTEGER DEFAULT 0;
+      -- Lifecycle for workspace-synced sessions: 'needs_transcript' (session known
+      -- from Reports API but no transcript yet), 'processing', 'processed'. Rows
+      -- created before this column default to 'processed' when processed=1.
+      ALTER TABLE meeting_recordings ADD COLUMN IF NOT EXISTS status TEXT;
       CREATE TABLE IF NOT EXISTS meeting_tasks (
         id TEXT PRIMARY KEY,
         meeting_id TEXT,

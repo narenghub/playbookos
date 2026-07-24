@@ -14,7 +14,7 @@ const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence
 const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo, addSequenceContacts } = require('../lib/agents/email-engine');
 const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
 const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/procurement-agent');
-const { runMeetAgent, analyzeAndStore, runStandup, detectStandups } = require('../lib/agents/meet-agent');
+const { runMeetAgent, analyzeAndStore, runStandup, detectStandups, syncWorkspaceMeetings } = require('../lib/agents/meet-agent');
 const workspaceActivity = require('../lib/agents/workspace-activity');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
@@ -2167,6 +2167,36 @@ router.post('/meetings/standup', authMiddleware, adminOnly, async (req, res) => 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Sync org-wide Meet sessions (Reports API) into meeting_recordings: detect
+// standups, auto-process any with a fetchable transcript, store the rest as
+// 'needs_transcript' for manual paste. Bridges Workspace Activity → the page.
+router.post('/meetings/sync-workspace', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const lookbackDays = Math.min(30, Math.max(1, parseInt(req.body?.lookbackDays, 10) || 7));
+    const result = await syncWorkspaceMeetings({ lookbackDays });
+    res.json({ success: true, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Attach a transcript to an existing (typically 'needs_transcript') meeting row
+// and run the full analysis against the SAME meeting_id. dryRun previews first.
+router.post('/meetings/:id/transcript', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const text = req.body?.transcript_text;
+    if (!text || !String(text).trim()) return res.status(400).json({ error: 'transcript_text required' });
+    const c = (await query(`SELECT * FROM meeting_recordings WHERE meeting_id=$1 OR id=$1`, [req.params.id])).rows[0];
+    if (!c) return res.status(404).json({ error: 'meeting not found' });
+    const meeting = {
+      meeting_id: c.meeting_id, meeting_title: c.meeting_title, meeting_date: c.meeting_date,
+      duration_seconds: c.duration_seconds, attendees: parseJson(c.attendees),
+      transcript_text: String(text), recording_url: c.recording_url, is_standup: c.is_standup,
+    };
+    const dryRun = req.body?.dryRun === true;
+    const result = await analyzeAndStore(meeting, { dryRun });
+    res.json({ success: true, meeting_id: c.meeting_id, dryRun, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/meetings/dashboard', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
   try {
     const month = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
@@ -2216,7 +2246,9 @@ router.get('/meetings/workspace-activity', authMiddleware, adminOnly, async (req
 router.get('/meetings', authMiddleware, requireAnyTier('intelligence', 'goals'), async (req, res) => {
   try {
     const rows = (await query(`
-      SELECT r.id, r.meeting_id, r.meeting_title, r.meeting_date, r.duration_seconds, r.attendees, r.summary, r.processed, r.created_at,
+      SELECT r.id, r.meeting_id, r.meeting_title, r.meeting_date, r.duration_seconds, r.attendees, r.summary, r.processed,
+        COALESCE(r.status, CASE WHEN r.processed=1 THEN 'processed' ELSE 'needs_transcript' END) AS status,
+        r.is_standup, r.recording_url, r.created_at,
         (SELECT COUNT(*)::int FROM meeting_tasks t WHERE t.meeting_id=r.meeting_id) AS tasks_generated
       FROM meeting_recordings r ORDER BY r.meeting_date DESC, r.created_at DESC LIMIT 100`)).rows;
     res.json({ meetings: rows.map(m => ({ ...m, attendees: parseJson(m.attendees) })) });

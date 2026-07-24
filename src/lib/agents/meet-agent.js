@@ -341,10 +341,10 @@ async function analyzeAndStore(meeting, { dryRun = false } = {}) {
     // Upsert the recording row (may already exist for a Google meeting).
     await query(
       `INSERT INTO meeting_recordings (id, meeting_id, meeting_title, meeting_date, duration_seconds,
-         attendees, transcript_text, summary, recording_url, is_standup, processed, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,NOW())
+         attendees, transcript_text, summary, recording_url, is_standup, status, processed, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'processed',1,NOW())
        ON CONFLICT (meeting_id) DO UPDATE SET transcript_text=EXCLUDED.transcript_text,
-         summary=EXCLUDED.summary, is_standup=EXCLUDED.is_standup, processed=1`,
+         summary=EXCLUDED.summary, is_standup=EXCLUDED.is_standup, status='processed', processed=1`,
       [meeting.id || crypto.randomUUID(), meeting.meeting_id, meeting.meeting_title, meeting.meeting_date,
        meeting.duration_seconds || null, JSON.stringify(meeting.attendees || []), transcript,
        analysis.summary, meeting.recording_url || null, meeting.is_standup ? 1 : 0]
@@ -518,8 +518,90 @@ async function getYesterdayStandupSummary(date) {
   };
 }
 
+// Best-effort: download a Meet transcript for a session from the Drive audit
+// list. We can only reliably map a Reports session (which carries a meeting_code,
+// not a title) to a Drive file by DATE + owner==organizer, so this stays a
+// heuristic — it returns null (→ needs_transcript) whenever it can't be sure.
+async function fetchSessionTranscript(session, driveRecordings) {
+  const transcripts = (driveRecordings || []).filter(r => /\.vtt|transcript/i.test(String(r.doc_title || '')) && r.doc_id);
+  if (!transcripts.length) return null;
+  const org = (session.organizer_email || '').toLowerCase();
+  const cand = transcripts.find(r =>
+    (!session.date || String(r.time || '').slice(0, 10) === session.date) &&
+    (!org || String(r.owner || r.actor || '').toLowerCase() === org)) || null;
+  if (!cand) return null;
+  // Download impersonating the file's owner (falls back to the meet impersonate user).
+  const subject = (cand.owner && cand.owner.includes('@')) ? cand.owner : (cand.actor || MEET_IMPERSONATE());
+  const tok = await getGoogleToken({ subject, scopes: [SCOPES.driveReadonly] });
+  if (tok.error) { log(`transcript token for ${subject} failed: ${tok.error}`); return null; }
+  try {
+    const dl = await fetch(`https://www.googleapis.com/drive/v3/files/${cand.doc_id}?alt=media&supportsAllDrives=true`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    if (!dl.ok) { log(`transcript download ${cand.doc_id} → ${dl.status}`); return null; }
+    const text = cleanTranscript(await dl.text());
+    return text || null;
+  } catch (e) { log('fetchSessionTranscript error:', e.message); return null; }
+}
+
+// ── Sync workspace Meet sessions → meeting_recordings ─────────────────────────
+// Bridges the org-wide Reports API data into the table the page reads from. Each
+// detected standup becomes a row: 'processed' when a transcript could be fetched
+// and analyzed, else 'needs_transcript' (Naresh pastes it later). Already-processed
+// rows are left untouched. Returns per-session outcomes for the UI.
+async function syncWorkspaceMeetings({ lookbackDays = 7, autoProcess = true } = {}) {
+  const act = await workspace.getWorkspaceMeetActivity({ lookbackDays });
+  const sessions = act.sessions || [];
+  const out = { sessions_found: sessions.length, standups_detected: 0, processed: 0, needs_transcript: 0, already_processed: 0, rows: [], warning: act.warning || null };
+  if (!sessions.length) return out;
+
+  const standups = await detectStandups(sessions);
+  out.standups_detected = standups.length;
+  // Drive recordings once, for best-effort transcript matching.
+  let driveRecordings = [];
+  if (autoProcess) { try { driveRecordings = (await workspace.getWorkspaceDriveActivity({ lookbackDays })).recordings || []; } catch { driveRecordings = []; } }
+
+  for (const s of standups) {
+    const code = s.meeting_code;
+    const date = s.date || businessToday();
+    const mid = 'meet-' + code + (date ? '-' + date : '');
+    const title = `Team meeting ${code}${date ? ' — ' + date : ''}`;
+    const attendees = s.participants || [];
+    const meetLink = /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/i.test(code) ? `https://meet.google.com/${code}` : null;
+
+    const existing = (await query('SELECT id, processed FROM meeting_recordings WHERE meeting_id=$1', [mid])).rows[0];
+    if (existing && existing.processed) { out.already_processed++; out.rows.push({ meeting_id: mid, title, date, status: 'processed' }); continue; }
+
+    // Try to pull + analyze a transcript; otherwise store as needs_transcript.
+    let transcript = null;
+    if (autoProcess) transcript = await fetchSessionTranscript(s, driveRecordings);
+    if (transcript) {
+      try {
+        const r = await analyzeAndStore({ meeting_id: mid, meeting_title: title, meeting_date: date, duration_seconds: s.duration_seconds || null, attendees, transcript_text: transcript, recording_url: meetLink, is_standup: true }, { dryRun: false });
+        out.processed++;
+        out.rows.push({ meeting_id: mid, title, date, status: 'processed', tasks: r.tasks_created });
+        continue;
+      } catch (e) { log(`analyze failed for ${mid}: ${e.message}`); /* fall through to needs_transcript */ }
+    }
+    await query(
+      `INSERT INTO meeting_recordings (id, meeting_id, meeting_title, meeting_date, duration_seconds, attendees, recording_url, is_standup, status, processed, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,1,'needs_transcript',0,NOW())
+       ON CONFLICT (meeting_id) DO UPDATE SET meeting_title=EXCLUDED.meeting_title, meeting_date=EXCLUDED.meeting_date,
+         duration_seconds=EXCLUDED.duration_seconds, attendees=EXCLUDED.attendees, recording_url=EXCLUDED.recording_url,
+         status=CASE WHEN meeting_recordings.processed=1 THEN meeting_recordings.status ELSE 'needs_transcript' END`,
+      [crypto.randomUUID(), mid, title, date, s.duration_seconds || null, JSON.stringify(attendees), meetLink]
+    );
+    out.needs_transcript++;
+    out.rows.push({ meeting_id: mid, title, date, status: 'needs_transcript', attendee_count: s.attendee_count, duration_minutes: s.duration_minutes });
+  }
+
+  await logAgentActivity({ agent_name: AGENT, action_type: 'workspace_sync', user_id: null,
+    reasoning: `Synced ${out.sessions_found} Meet session(s): ${out.standups_detected} standup(s) detected, ${out.processed} processed, ${out.needs_transcript} awaiting transcript.`,
+    source_kpi: 'kpi-vision', confidence_score: 90,
+    output_summary: `sessions=${out.sessions_found} standups=${out.standups_detected} processed=${out.processed} needs_transcript=${out.needs_transcript}` }).catch(() => {});
+  return out;
+}
+
 module.exports = {
   runMeetAgent, processMeeting, fetchMeetingRecordings, getTranscript,
   analyzeMeetingWithClaude, assignTasksToTeam, sendMeetingBriefToNaresh, analyzeAndStore, matchUser,
-  runStandup, getYesterdayStandupSummary, detectStandups,
+  runStandup, getYesterdayStandupSummary, detectStandups, syncWorkspaceMeetings,
 };

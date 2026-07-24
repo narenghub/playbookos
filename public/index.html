@@ -4652,6 +4652,38 @@ async function mgAssign(){
 async function mgComplete(id){
   try{ const r=await API('/meetings/tasks/'+id,{method:'PUT',body:JSON.stringify({status:'completed'})}); if(r&&r.error){alert(r.error);return;} pages['meet-agent'](); }catch(e){ alert(e.message); }
 }
+// Pull org-wide Meet sessions into meeting_recordings.
+async function mgSyncWorkspace(){
+  const msg=document.getElementById('mg-run-msg');
+  if(msg){msg.style.color='var(--text-muted)';msg.textContent='Syncing workspace sessions…';}
+  try{
+    const r=await API('/meetings/sync-workspace',{method:'POST',body:JSON.stringify({lookbackDays:7})});
+    if(r&&r.error){ if(msg){msg.style.color='#dc2626';msg.textContent=r.error;} return; }
+    if(msg){msg.style.color='#166534';msg.textContent=`Found ${r.sessions_found} sessions, identified ${r.standups_detected} standups — ${r.processed} processed, ${r.needs_transcript} need transcript.`;}
+    window._mgTab='meetings';
+    setTimeout(()=>pages['meet-agent'](), 1400);
+  }catch(e){ if(msg){msg.style.color='#dc2626';msg.textContent=e.message;} }
+}
+// Inline paste-transcript for a needs_transcript meeting.
+function mgPasteBox(id){
+  const box=document.getElementById('mg-pt-'+id); if(!box) return;
+  if(box.dataset.open==='1'){ box.innerHTML=''; box.dataset.open='0'; return; }
+  box.dataset.open='1';
+  box.innerHTML=`<div style="margin-top:8px">
+    <textarea id="mg-pt-tx-${id}" rows="6" placeholder="Paste this meeting's transcript / notes…" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;font-size:13px;font-family:inherit;resize:vertical;box-sizing:border-box"></textarea>
+    <div style="margin-top:6px"><button onclick="mgPasteSubmit('${mgEsc(id)}')" class="btn-primary" style="padding:6px 14px;font-size:12px">Analyze &amp; Assign</button> <span id="mg-pt-msg-${id}" style="font-size:12px;color:var(--text-muted);margin-left:6px"></span></div></div>`;
+}
+async function mgPasteSubmit(id){
+  const tx=document.getElementById('mg-pt-tx-'+id), m=document.getElementById('mg-pt-msg-'+id);
+  const text=tx?tx.value:''; if(!text.trim()){ if(m){m.style.color='#dc2626';m.textContent='Paste the transcript first';} return; }
+  if(m){m.style.color='var(--text-muted)';m.textContent='Analyzing…';}
+  try{
+    const r=await API('/meetings/'+encodeURIComponent(id)+'/transcript',{method:'POST',body:JSON.stringify({transcript_text:text})});
+    if(r&&r.error){ if(m){m.style.color='#dc2626';m.textContent=r.error;} return; }
+    if(m){m.style.color='#166534';m.textContent=`Created ${r.tasks_created} task(s), brief ${r.brief_sent?'emailed':'skipped'}.`;}
+    setTimeout(()=>pages['meet-agent'](), 1200);
+  }catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} }
+}
 // ── New Standup — the primary, no-OAuth workflow ──
 function mgStandupAttendees(){
   return Array.from(document.querySelectorAll('.mg-su-att:checked')).map(x=>x.value);
@@ -4695,22 +4727,27 @@ if(typeof pages !== 'undefined') {
   pages['meet-agent'] = async function() {
     const c = document.getElementById('content');
     c.innerHTML = '<p style="color:#888;padding:20px">Loading Meet Agent…</p>';
-    let dash, meetData, usersData;
-    try { [dash, meetData, usersData] = await Promise.all([ API('/meetings/dashboard').catch(()=>({})), API('/meetings').catch(()=>({meetings:[]})), API('/users').catch(()=>[]) ]); }
+    let dash, meetData, usersData, wsData;
+    try { [dash, meetData, usersData, wsData] = await Promise.all([ API('/meetings/dashboard').catch(()=>({})), API('/meetings').catch(()=>({meetings:[]})), API('/users').catch(()=>[]), API('/meetings/workspace-activity').catch(()=>null) ]); }
     catch(e){ c.innerHTML = `<div class="card"><div class="card-title">Google Meet Agent</div><p style="color:#dc2626">${mgEsc(e.message)}</p></div>`; return; }
     if (dash && dash.error) { c.innerHTML = `<div class="card"><div class="card-title">Google Meet Agent</div><p style="color:#dc2626">${mgEsc(dash.error)}</p></div>`; return; }
     const meetings=(meetData&&meetData.meetings)||[];
     const team=(Array.isArray(usersData)?usersData:[]).filter(u=>u.is_active);
+    window._mgWs = (wsData && !wsData.error) ? wsData : null;
 
+    const sessCard = window._mgWs
+      ? `<div class="metric"><div class="label">Sessions detected</div><div class="value">${window._mgWs.total_sessions||0}</div><div class="sub">${window._mgWs.workspace_users||0} workspace users · ${window._mgWs.standups_detected||0} standups</div></div>`
+      : `<div class="metric"><div class="label">Sessions detected</div><div class="value">—</div><div class="sub">Sync from Workspace</div></div>`;
     const head=`<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
       <div class="card-title" style="margin:0">Google Meet Agent</div>
-      <div style="margin-left:auto;display:flex;gap:8px;align-items:center"><span id="mg-run-msg" style="font-size:12px;color:var(--text-muted);margin-right:4px"></span>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span id="mg-run-msg" style="font-size:12px;color:var(--text-muted);margin-right:4px"></span>
+        <button onclick="mgSyncWorkspace()" class="btn-primary" style="padding:8px 16px;background:#0D7377">🔄 Sync from Workspace</button>
         <button onclick="mgTab('standup')" class="btn-primary" style="padding:8px 16px">➕ New Standup</button>
         <button onclick="mgTab('upload')" class="btn-outline" style="padding:8px 16px">Upload Transcript</button></div></div>
       <div class="metric-grid">
         <div class="metric"><div class="label">Meetings this month</div><div class="value">${dash.meetings_month||0}</div></div>
         <div class="metric"><div class="label">Tasks created</div><div class="value">${dash.tasks_created||0}</div><div class="sub">${dash.tasks_completed||0} completed</div></div>
-        <div class="metric"><div class="label">Decisions</div><div class="value">${dash.decisions||0}</div></div>
+        ${sessCard}
         <div class="metric amber"><div class="label">Blockers</div><div class="value">${dash.blockers||0}</div></div>
       </div>`;
     const tabs=[['standup','➕ New Standup'],['workspace','🌐 Workspace Activity'],['meetings','Recent Meetings'],['upload','Upload Transcript'],['tasks','Meeting Tasks'],['insights','Insights']];
@@ -4774,14 +4811,21 @@ if(typeof pages !== 'undefined') {
           </table></div></div>`;
       }
     } else if (window._mgTab==='meetings') {
+      const stBadge=(s)=>{ const map={processed:['#166534','Processed'],needs_transcript:['#B45309','Needs transcript'],processing:['#1B3A6B','Processing']}; const [col,lbl]=map[s]||['#718096','Pending']; return `<span style="background:${col};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">${lbl}</span>`; };
       body = meetings.length ? meetings.map(m=>`<div class="card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap">
-          <div><div style="font-size:15px;font-weight:700;color:#1a202c">${mgEsc(m.meeting_title)}</div>
+          <div><div style="font-size:15px;font-weight:700;color:#1a202c">${mgEsc(m.meeting_title)}${m.is_standup?' <span style="font-size:10px;background:#e0e7ff;color:#3730a3;padding:1px 6px;border-radius:8px;vertical-align:middle">standup</span>':''}</div>
             <div style="font-size:12px;color:#718096;margin-top:2px">${mgEsc(m.meeting_date)}${m.duration_seconds?' · '+Math.round(m.duration_seconds/60)+'min':''} · ${(m.attendees||[]).length} attendees · ${m.tasks_generated||0} tasks</div></div>
-          <span style="background:${m.processed?'#166534':'#718096'};color:#fff;font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px">${m.processed?'Processed':'Pending'}</span></div>
-        <button onclick="mgExpand('${mgEsc(m.meeting_id)}')" class="btn-outline" style="padding:4px 10px;font-size:11px;margin-top:8px">Details</button>
+          ${stBadge(m.status)}</div>
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+          ${m.status==='needs_transcript'
+            ? `<button onclick="mgPasteBox('${mgEsc(m.meeting_id)}')" class="btn-primary" style="padding:4px 12px;font-size:11px">Paste Transcript</button>`
+            : `<button onclick="mgExpand('${mgEsc(m.meeting_id)}')" class="btn-outline" style="padding:4px 10px;font-size:11px">Details</button>`}
+          ${m.recording_url?`<a href="${mgEsc(m.recording_url)}" target="_blank" rel="noopener" class="btn-outline" style="padding:4px 10px;font-size:11px;text-decoration:none">Open Meet ↗</a>`:''}
+        </div>
+        <div id="mg-pt-${mgEsc(m.meeting_id)}" data-open="0"></div>
         <div id="mg-m-${mgEsc(m.meeting_id)}" data-open="0"></div></div>`).join('')
-        : `<div class="card"><p style="color:#718096">No meetings processed yet. Use <strong>Upload Transcript</strong> to paste a standup transcript, or trigger the Google sync (needs Calendar/Drive scope).</p></div>`;
+        : `<div class="card"><p style="color:#718096">No meetings yet. Click <strong>🔄 Sync from Workspace</strong> to pull org-wide Meet sessions, use <strong>➕ New Standup</strong>, or <strong>Upload Transcript</strong>.</p></div>`;
     } else if (window._mgTab==='upload') {
       body=`<div class="card">
         <div style="font-size:12px;color:#718096;margin-bottom:10px">Paste a meeting transcript to get an AI summary, extracted action items, and auto-assigned tasks. Works without Google Calendar access.</div>
