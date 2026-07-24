@@ -263,6 +263,7 @@ async function initPhase2() {
 }
 
 async function migrateSchemas() {
+  const crypto = require('crypto');
   try {
     await query(`
       ALTER TABLE skus ADD COLUMN IF NOT EXISTS cas_number TEXT;
@@ -915,6 +916,16 @@ async function migrateSchemas() {
       );
       CREATE INDEX IF NOT EXISTS idx_quotes_inq ON inquiry_quotes (inquiry_id, status);
     `);
+    // Placeholder user for a Gemini meeting assignee who isn't a real account yet,
+    // so the Meet Agent assigns their action items to a stable user_id instead of
+    // routing everything to admin. excluded_from_scoring keeps this unmanned
+    // account out of performance scoring/escalation. Replace the email via Team
+    // Management once she has a real account.
+    await query(
+      `INSERT INTO users (id,email,name,role,is_active,excluded_from_scoring,created_at)
+       VALUES ($1,$2,$3,'recruitment_team',1,TRUE,NOW()) ON CONFLICT (email) DO NOTHING`,
+      [crypto.randomUUID(), 'neha.potdar@placeholder.local', 'Neha Potdar']
+    );
     console.log('✅ Schema migrations applied (owner columns + legacy role remap + email_campaigns)');
   } catch(e) { console.error('Migration error:', e.message); }
 }

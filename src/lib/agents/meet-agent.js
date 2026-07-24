@@ -54,12 +54,25 @@ async function getNaresh() {
   return r || { name: 'Naresh', email: 'naren@abiozen.com', id: null };
 }
 
+// Known name variants that fuzzy-matching alone can't resolve — map a spoken/Gemini
+// name to a canonical user email. e.g. Gemini writes "Naren B" but the account is
+// "Naresh"; "Bala Sowjanya" is the same person as "Sowjanya Gayam".
+const NAME_ALIASES = {
+  'naren': 'naren@abiozen.com',
+  'naren b': 'naren@abiozen.com',
+  'bala sowjanya': 'sowjanya@adificetechnologies.com',
+  'neha': 'neha.potdar@placeholder.local',
+  'neha potdar': 'neha.potdar@placeholder.local',
+};
+
 // Fuzzy-match an action item's owner ("person name or email") to a user. Matches by
-// email, exact name, first-name, or containment. Returns the user or null.
+// email, explicit alias, exact name, first-name, or containment. Returns the user or null.
 function matchUser(assignedTo, users) {
   const raw = String(assignedTo || '').trim().toLowerCase();
   if (!raw) return null;
   if (raw.includes('@')) { const u = users.find(u => (u.email || '').toLowerCase() === raw); if (u) return u; }
+  const alias = NAME_ALIASES[raw];
+  if (alias) { const u = users.find(u => (u.email || '').toLowerCase() === alias); if (u) return u; }
   let best = null;
   for (const u of users) {
     const name = (u.name || '').toLowerCase();
