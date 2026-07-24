@@ -311,7 +311,7 @@ async function assignTasksToTeam(meetingId, actionItems, { dryRun = false } = {}
 }
 
 // ── Function 5 — email the meeting brief to Naresh ────────────────────────────
-async function sendMeetingBriefToNaresh(meeting, analysis) {
+async function sendMeetingBriefToNaresh(meeting, analysis, { subject } = {}) {
   const naresh = await getNaresh();
   const list = (arr, empty) => (arr && arr.length) ? '<ul style="margin:6px 0 14px;padding-left:18px">' + arr.map(x => `<li style="margin:3px 0">${esc(typeof x === 'string' ? x : x.task)}</li>`).join('') + '</ul>' : `<p style="color:#888;font-size:13px">${empty}</p>`;
   const actions = (analysis.action_items || []).length
@@ -327,15 +327,21 @@ async function sendMeetingBriefToNaresh(meeting, analysis) {
       <h3 style="color:#6B21A8;margin:14px 0 6px">Risks &amp; opportunities</h3>${list([...(analysis.risks || []), ...(analysis.opportunities || [])], 'None flagged.')}
       <p style="margin-top:16px"><a href="${BASE_URL()}/#meet-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Meet Agent →</a></p>
     </div></div>`;
-  return sendEmail({ to: naresh.email, subject: `Meeting Brief: ${meeting.meeting_title} — ${meeting.meeting_date}`, html });
+  return sendEmail({ to: naresh.email, subject: subject || `Meeting Brief: ${meeting.meeting_title} — ${meeting.meeting_date}`, html });
 }
 
 // Core: analyse a stored meeting row and run assignment + brief. Used by both the
 // Google pipeline and the manual upload endpoint.
-async function analyzeAndStore(meeting, { dryRun = false } = {}) {
-  const members = await teamMembers();
-  const transcript = meeting.transcript_text || await getTranscript(meeting);
-  const analysis = await analyzeMeetingWithClaude(transcript, meeting.meeting_title, meeting.attendees, meeting.meeting_date, members);
+async function analyzeAndStore(meeting, { dryRun = false, skipBrief = false, briefSubject = null, analysisOverride = null } = {}) {
+  // analysisOverride: skip Claude and use a pre-computed analysis (e.g. parsed
+  // Gemini notes, where the "[Name] task" next steps are the authoritative
+  // assignments). Otherwise derive the analysis from the transcript with Claude.
+  const transcript = meeting.transcript_text || (analysisOverride ? '' : await getTranscript(meeting));
+  let analysis = analysisOverride;
+  if (!analysis) {
+    const members = await teamMembers();
+    analysis = await analyzeMeetingWithClaude(transcript, meeting.meeting_title, meeting.attendees, meeting.meeting_date, members);
+  }
 
   if (!dryRun) {
     // Upsert the recording row (may already exist for a Google meeting).
@@ -358,7 +364,10 @@ async function analyzeAndStore(meeting, { dryRun = false } = {}) {
 
   const assign = await assignTasksToTeam(meeting.meeting_id, analysis.action_items, { dryRun });
   let briefed = false;
-  if (!dryRun) { briefed = !!(await sendMeetingBriefToNaresh(meeting, analysis).catch(() => false)); }
+  if (!dryRun && !skipBrief) {
+    const subject = briefSubject ? briefSubject.replace('{n}', assign.tasks_created).replace('{title}', meeting.meeting_title) : null;
+    briefed = !!(await sendMeetingBriefToNaresh(meeting, analysis, { subject }).catch(() => false));
+  }
   return { meeting_id: meeting.meeting_id, analysis, tasks_created: assign.tasks_created, assigned: assign.assigned, brief_sent: briefed };
 }
 
@@ -411,9 +420,21 @@ Return ONLY a JSON array, most-likely first, no prose:
 // assign → brief. Falls back to the single-calendar scan when the Admin SDK
 // scopes/super-admin aren't configured yet (both 403 gracefully).
 async function runMeetAgent({ dryRun = false, lookbackDays = 7 } = {}) {
-  const out = { meetings_processed: 0, tasks_created: 0, emails_sent: 0, standups_detected: 0, path: null, warning: null, errors: [] };
+  const out = { meetings_processed: 0, tasks_created: 0, emails_sent: 0, standups_detected: 0, gemini_processed: 0, path: null, warning: null, errors: [] };
 
-  // Try the workspace-wide path first when domains are configured.
+  // PRIMARY capture: Gemini meeting-notes emails (auto, no transcript paste).
+  try {
+    const g = await pollGeminiMeetingNotes({ dryRun, lookbackDays });
+    out.gemini_processed = g.processed;
+    out.meetings_processed += g.processed;
+    out.tasks_created += g.tasks_created;
+    out.emails_sent += g.meetings.filter(m => m.brief_sent).length;
+    if (g.warning) out.errors.push('gemini: ' + g.warning);
+    if (g.errors && g.errors.length) out.errors.push(...g.errors.map(e => 'gemini: ' + e));
+    log(`Gemini poll: ${g.processed} processed, ${g.tasks_created} tasks`);
+  } catch (e) { out.errors.push('gemini poll: ' + e.message); }
+
+  // Secondary: org-wide Meet activity when domains are configured.
   let meetings = null, warning = null;
   const domainsConfigured = !!process.env.WORKSPACE_DOMAINS;
   if (domainsConfigured) {
@@ -600,8 +621,214 @@ async function syncWorkspaceMeetings({ lookbackDays = 7, autoProcess = true } = 
   return out;
 }
 
+// ══ Gemini meeting notes → auto-capture from Gmail ════════════════════════════
+// Google Workspace Gemini emails meeting notes to naren@abiozen.com after each
+// meeting (from gemini-notes@google.com, subject "Notes from <Title>"). We poll
+// that mailbox and turn each note into a processed meeting — no manual paste.
+const GEMINI_MAILBOX = () => process.env.GEMINI_MAILBOX || process.env.MEET_IMPERSONATE || 'naren@abiozen.com';
+const GEMINI_SENDER = () => process.env.GEMINI_NOTES_SENDER || 'gemini-notes@google.com';
+
+function b64urlDecode(d) { return Buffer.from(String(d || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); }
+function gmailHeader(payload, name) {
+  const h = (payload?.headers || []).find(x => x.name.toLowerCase() === name.toLowerCase());
+  return h ? h.value : '';
+}
+function extractGmailBody(payload) {
+  const walk = p => {
+    if (!p) return '';
+    if (p.mimeType === 'text/plain' && p.body?.data) return b64urlDecode(p.body.data);
+    if (p.parts) { for (const sub of p.parts) { const t = walk(sub); if (t) return t; } }
+    if (p.mimeType === 'text/html' && p.body?.data) return b64urlDecode(p.body.data).replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ');
+    if (p.body?.data) return b64urlDecode(p.body.data);
+    return '';
+  };
+  return String(walk(payload) || '').replace(/\r/g, '').replace(/[ \t]+\n/g, '\n');
+}
+async function markGmailRead(user, gmailId, accessToken) {
+  try {
+    await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages/${gmailId}/modify`, {
+      method: 'POST', headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ removeLabelIds: ['UNREAD'] }),
+    });
+  } catch (_) {}
+}
+async function getGmailToken() {
+  return getGoogleToken({ subject: GEMINI_MAILBOX(), scopes: [SCOPES.gmailReadonly, SCOPES.gmailModify] });
+}
+
+// ── PART 2 — parse the Gemini notes email into structured data ────────────────
+function extractGeminiNotes(emailBody) {
+  const body = String(emailBody || '').replace(/\r/g, '');
+  const rawLines = body.split('\n').map(l => l.replace(/ /g, ' ').trim());
+  const HEAD = /^(summary|recap|details|decisions?|suggested next steps|next steps|action items|attendees|invited|participants)\b/i;
+  const sections = { _preamble: [] };
+  let cur = '_preamble';
+  for (const l of rawLines) {
+    const h = l.match(HEAD);
+    if (h && l.length < 42) { cur = h[1].toLowerCase().replace(/s$/, ''); sections[cur] = sections[cur] || []; continue; }
+    (sections[cur] = sections[cur] || []).push(l);
+  }
+  const sec = names => { for (const n of names) if (sections[n]) return sections[n]; return []; };
+  const deBullet = l => l.replace(/^[\-\*•·•\s]+/, '').trim();
+
+  const summary = sec(['summary', 'recap']).map(deBullet).filter(Boolean).join(' ').slice(0, 2000).trim();
+  const decisions = sec(['decision']).map(deBullet).filter(l => l && !HEAD.test(l)).slice(0, 30);
+
+  // Next steps use "[Name] task". Prefer the next-steps section; else scan all.
+  const nsSection = sec(['suggested next step', 'next step', 'action item']);
+  const scan = nsSection.length ? nsSection : rawLines;
+  const re = /\[([^\]]{2,60})\]\s*(.+)/;
+  const next_steps = [];
+  const seen = new Set();
+  for (const l of scan) {
+    const m = l.match(re);
+    if (!m) continue;
+    const task = deBullet(m[2]).replace(/\s+/g, ' ').trim();
+    const key = (m[1] + '|' + task).toLowerCase();
+    if (!task || seen.has(key)) continue;
+    seen.add(key);
+    next_steps.push({ assignee_name: m[1].trim(), task, raw_line: l });
+  }
+
+  let attendees = sec(['attendee', 'invited', 'participant'])
+    .flatMap(l => deBullet(l).split(/[,;·|]| and /i)).map(x => x.trim())
+    .filter(x => x && x.length > 1 && !/^https?:/i.test(x) && !HEAD.test(x));
+  if (!attendees.length) attendees = [...new Set(next_steps.map(n => n.assignee_name))];
+
+  return { summary, decisions, next_steps, attendees: attendees.slice(0, 40) };
+}
+
+// ── PART 7 — read the full "Open meeting notes" Google Doc ────────────────────
+function extractDocId(body) {
+  const m = String(body || '').match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]{20,})/);
+  return m ? m[1] : null;
+}
+async function fetchGeminiDoc(docId) {
+  if (!docId) return null;
+  const tok = await getGoogleToken({ subject: GEMINI_MAILBOX(), scopes: [SCOPES.driveReadonly] });
+  if (tok.error) { log('doc token failed:', tok.error); return null; }
+  try {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${docId}/export?mimeType=text/plain`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    if (!res.ok) { log(`doc export ${docId} → ${res.status}`); return null; }
+    return cleanTranscript(await res.text());
+  } catch (e) { log('fetchGeminiDoc error:', e.message); return null; }
+}
+
+// ── PARTs 3 & 4 — process ONE Gemini email into a processed meeting ────────────
+async function processGeminiEmail({ title, date, body, docText }, { dryRun = false } = {}) {
+  const notes = extractGeminiNotes(body);
+  const isStandup = /stand[\s-]?up|daily|scrum/i.test(title || '');
+
+  // If we have the full Google Doc, enrich blockers/risks/opportunities + summary
+  // via Claude — but the "[Name] task" next steps remain the authoritative owners.
+  let enriched = null;
+  if (docText && docText.length > 200) {
+    const members = await teamMembers();
+    enriched = await analyzeMeetingWithClaude(docText, title, notes.attendees, date, members).catch(() => null);
+  }
+
+  // Authoritative assignments come from the parsed next steps; fall back to
+  // Claude's action items only if Gemini listed none. Unmatched owners → admin.
+  const users = await teamMembers();
+  const naresh = await getNaresh();
+  let action_items;
+  if (notes.next_steps.length) {
+    action_items = notes.next_steps.map(ns => {
+      const matched = matchUser(ns.assignee_name, users);
+      return {
+        assigned_to: matched ? ns.assignee_name : naresh.email,
+        task: matched ? ns.task : `(for ${ns.assignee_name}) ${ns.task}`,
+        priority: 'medium', due_date: null, source_quote: ns.raw_line,
+      };
+    });
+  } else {
+    action_items = (enriched && enriched.action_items) || [];
+  }
+
+  const analysis = {
+    summary: (enriched && enriched.summary) || notes.summary || '',
+    decisions: notes.decisions.length ? notes.decisions : ((enriched && enriched.decisions) || []),
+    blockers: (enriched && enriched.blockers) || [],
+    risks: (enriched && enriched.risks) || [],
+    opportunities: (enriched && enriched.opportunities) || [],
+    action_items,
+  };
+
+  const slug = String(title || 'meeting').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50);
+  const meeting = {
+    meeting_id: `gemini-${date}-${slug}`,
+    meeting_title: title || 'Gemini meeting notes',
+    meeting_date: date,
+    duration_seconds: null,
+    attendees: notes.attendees,
+    transcript_text: docText || body || '',
+    recording_url: null,
+    is_standup: isStandup,
+  };
+
+  const result = await analyzeAndStore(meeting, {
+    dryRun, analysisOverride: analysis,
+    briefSubject: `Meeting processed: ${meeting.meeting_title} — {n} tasks assigned`,
+  });
+  return { ...result, meeting_title: meeting.meeting_title, meeting_date: date, next_steps: notes.next_steps.length, had_doc: !!docText };
+}
+
+// ── PART 1 — poll Gmail for Gemini meeting notes ──────────────────────────────
+async function pollGeminiMeetingNotes({ dryRun = false, lookbackDays = 7, maxMessages = 25 } = {}) {
+  const out = { found: 0, processed: 0, tasks_created: 0, skipped: 0, meetings: [], warning: null, errors: [] };
+  const tok = await getGmailToken();
+  if (tok.error) { out.warning = `Gmail unavailable: ${tok.error}. Check the service account (DWD) can impersonate ${GEMINI_MAILBOX()} with gmail scopes.`; return out; }
+  const user = encodeURIComponent(GEMINI_MAILBOX());
+  const q = encodeURIComponent(`from:${GEMINI_SENDER()} subject:"Notes from" is:unread newer_than:${lookbackDays}d`);
+  let list;
+  try {
+    const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages?q=${q}&maxResults=${maxMessages}`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+    if (!res.ok) { out.warning = `Gmail list ${res.status}: ${(await res.text()).slice(0, 180)}`; return out; }
+    list = await res.json();
+  } catch (e) { out.warning = e.message; return out; }
+  const refs = list.messages || [];
+  out.found = refs.length;
+  log(`Gemini poll: ${refs.length} unread note email(s) in last ${lookbackDays}d`);
+
+  for (const ref of refs) {
+    const gmailId = ref.id;
+    try {
+      // At-most-once: claim the id before processing (survives re-runs even if the
+      // mark-as-read below fails).
+      if (!dryRun) {
+        const claimed = await query(`INSERT INTO processed_emails (id, source, processed_at) VALUES ($1,'gemini',NOW()) ON CONFLICT (id) DO NOTHING RETURNING id`, [gmailId]);
+        if (!claimed.rows.length) { out.skipped++; continue; }
+      }
+      const dRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages/${gmailId}?format=full`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
+      if (!dRes.ok) { out.errors.push(`${gmailId}: get ${dRes.status}`); continue; }
+      const msg = await dRes.json();
+      const subject = gmailHeader(msg.payload, 'Subject') || '';
+      const title = subject.replace(/^\s*Notes from\s*[:\-]?\s*/i, '').trim() || 'Gemini meeting notes';
+      const dateHeader = gmailHeader(msg.payload, 'Date');
+      const date = dateHeader && !isNaN(new Date(dateHeader)) ? isoDate(dateHeader) : businessToday();
+      const body = extractGmailBody(msg.payload) || msg.snippet || '';
+      const docText = await fetchGeminiDoc(extractDocId(body));
+
+      const r = await processGeminiEmail({ title, date, body, docText }, { dryRun });
+      out.processed++;
+      out.tasks_created += r.tasks_created || 0;
+      out.meetings.push({ title, date, tasks: r.tasks_created || 0, next_steps: r.next_steps, had_doc: r.had_doc, brief_sent: r.brief_sent });
+      if (!dryRun) await markGmailRead(user, gmailId, tok.access_token);
+    } catch (e) { out.errors.push(`${gmailId}: ${e.message}`); }
+  }
+
+  if (!dryRun && (out.processed || out.errors.length)) {
+    await logAgentActivity({ agent_name: AGENT, action_type: 'gemini_notes_poll', user_id: null,
+      reasoning: `Polled ${GEMINI_MAILBOX()} for Gemini notes: ${out.processed} processed, ${out.tasks_created} tasks assigned, ${out.errors.length} error(s).`,
+      source_kpi: 'kpi-vision', confidence_score: out.errors.length ? 65 : 92,
+      output_summary: `found=${out.found} processed=${out.processed} tasks=${out.tasks_created}` }).catch(() => {});
+  }
+  return out;
+}
+
 module.exports = {
   runMeetAgent, processMeeting, fetchMeetingRecordings, getTranscript,
   analyzeMeetingWithClaude, assignTasksToTeam, sendMeetingBriefToNaresh, analyzeAndStore, matchUser,
   runStandup, getYesterdayStandupSummary, detectStandups, syncWorkspaceMeetings,
+  pollGeminiMeetingNotes, extractGeminiNotes, processGeminiEmail, fetchGeminiDoc,
 };

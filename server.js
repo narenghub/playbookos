@@ -349,6 +349,15 @@ cron.schedule('0 16 * * 5', withAlerts('weekly-fri-16cst-meet-agent', async () =
   console.log(`[CRON] Meet Agent done — ${r.meetings_processed} meetings, ${r.tasks_created} tasks${r.warning ? ' | ' + r.warning : ''}`);
 }), CST);
 
+// Every 2 hours during business hours (9/11/13/15/17 CST, Mon–Fri) — poll Gmail
+// for new Gemini meeting-notes emails and auto-process them (1-day lookback so
+// each run only touches fresh notes; unread + at-most-once claim make it idempotent).
+cron.schedule('0 9,11,13,15,17 * * 1-5', withAlerts('biz-hours-2h-gemini-notes', async () => {
+  console.log('[CRON] Gemini notes poll starting...');
+  const r = await require('./src/lib/agents/meet-agent').pollGeminiMeetingNotes({ lookbackDays: 1 });
+  console.log(`[CRON] Gemini notes done — ${r.processed}/${r.found} processed, ${r.tasks_created} tasks${r.warning ? ' | ' + r.warning : ''}`);
+}), CST);
+
 // Thursday 9am CST — flag RFQ outreach with no supplier response after 48h.
 cron.schedule('0 9 * * 4', withAlerts('weekly-thu-9cst-procurement-followup', async () => {
   const r = await checkNoResponse({ hours: 48 });

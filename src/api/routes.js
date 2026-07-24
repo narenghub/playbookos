@@ -14,7 +14,7 @@ const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence
 const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo, addSequenceContacts } = require('../lib/agents/email-engine');
 const { processApolloReplies, generateFollowUp, getLeadPipeline } = require('../lib/agents/sales-agent');
 const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/procurement-agent');
-const { runMeetAgent, analyzeAndStore, runStandup, detectStandups, syncWorkspaceMeetings } = require('../lib/agents/meet-agent');
+const { runMeetAgent, analyzeAndStore, runStandup, detectStandups, syncWorkspaceMeetings, pollGeminiMeetingNotes } = require('../lib/agents/meet-agent');
 const workspaceActivity = require('../lib/agents/workspace-activity');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
@@ -2163,6 +2163,17 @@ router.post('/meetings/standup', authMiddleware, adminOnly, async (req, res) => 
       notes: b.notes,
       dryRun: b.dryRun === true,
     });
+    res.json({ success: true, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Auto-capture: poll Gmail for Gemini meeting-notes emails and process them
+// (parse summary/decisions/next-steps, read the full Google Doc, assign tasks,
+// email the brief). The primary, no-transcript-paste path.
+router.post('/meetings/poll-gemini', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const lookbackDays = Math.min(30, Math.max(1, parseInt(req.body?.lookbackDays, 10) || 7));
+    const result = await pollGeminiMeetingNotes({ dryRun: req.body?.dryRun === true, lookbackDays });
     res.json({ success: true, ...result });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
