@@ -2173,8 +2173,17 @@ router.post('/meetings/standup', authMiddleware, adminOnly, async (req, res) => 
 router.post('/meetings/poll-gemini', authMiddleware, adminOnly, async (req, res) => {
   try {
     const lookbackDays = Math.min(30, Math.max(1, parseInt(req.body?.lookbackDays, 10) || 7));
-    const result = await pollGeminiMeetingNotes({ dryRun: req.body?.dryRun === true, lookbackDays });
-    res.json({ success: true, ...result });
+    // dryRun previews synchronously. A real run can face a multi-email backlog
+    // (each email = Doc fetch + Claude), which would exceed the HTTP timeout, so
+    // fire it in the background and return 202 — the page reloads to show results.
+    if (req.body?.dryRun === true) {
+      const result = await pollGeminiMeetingNotes({ dryRun: true, lookbackDays });
+      return res.json({ success: true, ...result });
+    }
+    pollGeminiMeetingNotes({ lookbackDays })
+      .then(r => console.log(`[meet] gemini poll — ${r.processed}/${r.found} processed, ${r.tasks_created} tasks${r.warning ? ' | ' + r.warning : ''}`))
+      .catch(e => console.error('[meet] gemini poll failed:', e.message));
+    res.status(202).json({ started: true, message: 'Gemini sync started — processing notes in the background. Meetings will appear shortly.' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
