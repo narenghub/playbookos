@@ -22,7 +22,7 @@ const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, run
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
 const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require('../lib/agents/orchestrator');
 const { sendWhatsApp } = require('../lib/whatsapp');
-const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
+const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, selectImagePrompt, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
 const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday, enqueueApproval } = require('../lib/agent-core');
 
@@ -3891,12 +3891,15 @@ router.post('/linkedin/regenerate-image/:id', authMiddleware, adminOnly, async (
   try {
     const row = (await query(`SELECT * FROM linkedin_content_queue WHERE id=$1`, [req.params.id])).rows[0];
     if (!row) return res.status(404).json({ error: 'post not found' });
-    const result = await generatePostImage(row.source_molecule, row.post_type);
+    // BUG 1 fix — use the varied, day-themed prompt (by molecule + scheduled date)
+    // so regenerating doesn't reproduce the same image; store it back too.
+    const prompt = selectImagePrompt(row.source_molecule, row.full_post, row.scheduled_for);
+    const result = await generatePostImage(row.source_molecule, row.post_type, prompt);
     if (result.skipped) return res.status(503).json({ error: result.reason });
     if (result.error) return res.status(502).json({ error: result.error });
     await query(
-      `UPDATE linkedin_content_queue SET generated_image_url=$1, linkedin_image_asset_urn=$2 WHERE id=$3`,
-      [result.url, result.asset_urn || null, req.params.id]
+      `UPDATE linkedin_content_queue SET generated_image_url=$1, linkedin_image_asset_urn=$2, image_prompt=$3 WHERE id=$4`,
+      [result.url, result.asset_urn || null, result.prompt || prompt, req.params.id]
     );
     res.json({ success: true, id: req.params.id, generated_image_url: result.url, linkedin_image_asset_urn: result.asset_urn || null, prompt: result.prompt });
   } catch(e) { res.status(500).json({ error: e.message }); }

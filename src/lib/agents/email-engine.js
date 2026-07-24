@@ -10,7 +10,7 @@
 //
 // Design split (changed in the PART 2 upgrade): Claude no longer emits HTML. It
 // returns COPY ONLY (subjects + a few body paragraphs) as JSON, and
-// generateEmailHtml() assembles the deterministic template — logo header, molecule
+// generateEmailHtml() assembles the deterministic template — text header, molecule
 // hero, spec table, badges, CTAs, footer. This guarantees a consistent, on-brand
 // design, guarantees the CTA/footer/unsubscribe are always present, and cuts the
 // per-variant token spend by ~3KB of HTML the model used to write every time.
@@ -309,10 +309,14 @@ function generateEmailHtml(mol, seg, copyParas) {
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef1f5"><tr><td align="center" style="padding:24px 12px">
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:10px;overflow:hidden;border:1px solid ${C.line}">
 
-  <!-- Text-based navy header (renders in all clients, no image loading) -->
-  <tr><td style="padding:24px 40px;background:#1B3A6B;text-align:center">
-    <div style="font-family:Arial,sans-serif;font-size:24px;font-weight:700;color:#ffffff;letter-spacing:2px">ABIOZEN</div>
-    <div style="font-family:Arial,sans-serif;font-size:11px;color:#9FE1CB;letter-spacing:3px;margin-top:4px;text-transform:uppercase">Pharmaceutical API Marketplace</div>
+  <!-- BUG 3 — pure text header, ZERO images: no image tag, no logo, no data URI -->
+  <tr><td style="padding:0">
+    <table width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr><td style="background:#1B3A6B;padding:28px 40px;text-align:center">
+      <div style="font-family:Arial,Helvetica,sans-serif;font-size:26px;font-weight:700;color:#ffffff;letter-spacing:2px">ABIOZEN</div>
+      <div style="font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#9FE1CB;letter-spacing:3px;margin-top:4px;text-transform:uppercase">Pharmaceutical API Marketplace</div>
+    </td></tr>
+    </table>
   </td></tr>
 
   <!-- Molecule hero -->
@@ -369,7 +373,7 @@ function buildPrompt(mol, seg) {
     `Indicative price: ${mol.price ? `${mol.currency} ${mol.price} per kg` : 'not published — invite a quote instead of naming a price'}`,
   ].join('\n');
 
-  return `You write B2B pharmaceutical sourcing email COPY for Abiozen LLC, a US API and specialty-chemical distributor. You are writing the body paragraphs only — a separate template supplies the logo, spec table, buttons and footer, so do NOT write HTML structure, headers, greetings-with-logos, tables, buttons, or a signature. Just persuasive paragraphs.
+  return `You write B2B pharmaceutical sourcing email COPY for Abiozen LLC, a US API and specialty-chemical distributor. You are writing the body paragraphs only — a separate template supplies the header, spec table, buttons and footer, so do NOT write HTML structure, headers, greetings, logos, images, tables, buttons, or a signature. Just persuasive paragraphs.
 
 VERIFIED FACTS — the only claims you may make about availability, documentation, GMP status or price. Never assert a fact marked "not available"/"NO".
 ${facts}
@@ -402,10 +406,15 @@ function buildApolloPayload(campaign, mol, seg, week) {
     name: `${campaign.molecule_name} — ${seg.label} — Week of ${week}`,
     permissions: 'team_can_use',
     active: false,
+    // BUG 2 — explicit, correctly-ordered 3-step cadence. Each step carries a
+    // human label so the publish log can show which content lands on which step.
+    //   Step 1 / day 0 : Variant A — introductory (first contact)
+    //   Step 2 / day 3 : Variant B — follow-up (second contact)
+    //   Step 3 / day 7 : short nudge — final follow-up (third contact)
     emailer_steps: [
-      { position: 1, wait_days: 0, type: 'auto_email', subject: campaign.variant_a_subject, body_html: campaign.variant_a_html },
-      { position: 2, wait_days: 3, type: 'auto_email', subject: campaign.variant_b_subject, body_html: campaign.variant_b_html },
-      { position: 3, wait_days: 7, type: 'auto_email', subject: `Re: ${campaign.variant_a_subject}`, body_html: nudgeHtml },
+      { position: 1, wait_days: 0, type: 'auto_email', label: 'Variant A (introductory)', subject: campaign.variant_a_subject, body_html: campaign.variant_a_html },
+      { position: 2, wait_days: 3, type: 'auto_email', label: 'Variant B (follow-up)', subject: campaign.variant_b_subject, body_html: campaign.variant_b_html },
+      { position: 3, wait_days: 7, type: 'auto_email', label: 'Follow-up nudge (final)', subject: `Re: ${campaign.variant_a_subject}`, body_html: nudgeHtml },
     ],
   };
 }
@@ -533,8 +542,14 @@ async function publishSequenceToApollo(payload, apolloKey) {
   const sequenceId = created.json?.emailer_campaign?.id || created.json?.id || null;
   if (!sequenceId) return { ok: false, stage: 'create', status: created.status, detail: 'Apollo returned no sequence id' };
 
+  console.log(`[email-engine] Apollo sequence ${sequenceId} created — publishing ${(payload.emailer_steps || []).length} steps`);
   const stepsDone = [];
-  for (const step of payload.emailer_steps || []) {
+  // BUG 2 — create steps strictly in ascending position order so the cadence is
+  // never reversed regardless of how the payload array was assembled.
+  const steps = [...(payload.emailer_steps || [])].sort((a, b) => (a.position || 0) - (b.position || 0));
+  for (const step of steps) {
+    const label = step.label || `step ${step.position}`;
+    console.log(`[email-engine] → step ${step.position} (day ${step.wait_days || 0}) = ${label} | subject: "${String(step.subject || '').slice(0, 80)}"`);
     const s = await call('/emailer_steps', {
       emailer_campaign_id: sequenceId, position: step.position,
       type: step.type || 'auto_email', wait_time: step.wait_days || 0, wait_mode: 'day',
@@ -542,14 +557,17 @@ async function publishSequenceToApollo(payload, apolloKey) {
     const stepId = s.json?.emailer_step?.id || null;
     if (!s.ok || !stepId) return { ok: false, stage: `step ${step.position}`, status: s.status, detail: s.text.slice(0, 400), sequenceId, stepsDone };
 
+    // Touch for THIS step → its own empty template id → PUT this step's content.
     const t = await call('/emailer_touches', { emailer_step_id: stepId, type: step.type || 'auto_email' });
     const templateId = t.json?.emailer_touch?.emailer_template_id || null;
     if (!t.ok || !templateId) return { ok: false, stage: `touch for step ${step.position}`, status: t.status, detail: t.text.slice(0, 400), sequenceId, stepsDone };
 
     const tpl = await call(`/emailer_templates/${templateId}`, { subject: step.subject, body_html: step.body_html }, 'PUT');
     if (!tpl.ok) return { ok: false, stage: `content for step ${step.position}`, status: tpl.status, detail: tpl.text.slice(0, 400), sequenceId, stepsDone };
+    console.log(`[email-engine]   ✓ step ${step.position} → apollo_step ${stepId} → template ${templateId} (${label})`);
     stepsDone.push(step.position);
   }
+  console.log(`[email-engine] Apollo sequence ${sequenceId} published — steps ${stepsDone.join(', ')} in order`);
   return { ok: true, sequenceId, stepsDone };
 }
 

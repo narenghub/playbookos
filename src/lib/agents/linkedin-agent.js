@@ -198,6 +198,53 @@ function generateImagePrompt(post_type, molecule_name) {
   return `Photorealistic macro photograph of advanced research laboratory environment, shot like documentary photography for a scientific journal, shallow depth of field, real equipment partially visible softly out of focus, deep blue ambient laboratory lighting, photorealistic detail — must look like an actual photograph taken inside a real research facility, not illustration or 3D render. ${exclusions}`;
 }
 
+// BUG 1 fix — stop the generated image repeating for the same molecule.
+// Six distinct scene templates grouped by weekday theme (Mon=laboratory/research,
+// Wed=business/professional, Fri=innovation/future). A deterministic hash of
+// (molecule + postDate) picks one WITHIN the day's theme, so the same molecule on
+// different dates gets a different image, while a given (molecule,date) is stable.
+const IMAGE_PROMPT_OPTIONS = {
+  laboratory: [ // Monday — laboratory / research
+    'Professional pharmaceutical laboratory with scientist examining {molecule} crystals under microscope, clean white lab, blue lighting, photorealistic',
+    'Pharmaceutical manufacturing facility producing {molecule}, GMP-certified clean room, workers in protective gear, photorealistic',
+  ],
+  business: [ // Wednesday — business / professional
+    'Modern biotech facility with {molecule} molecular structure visualization, scientists collaborating, high-tech equipment, photorealistic',
+    'Medical research breakthrough concept, {molecule} chemical formula on glass board, doctor reviewing data, photorealistic',
+  ],
+  innovation: [ // Friday — innovation / future
+    'Abstract molecular structure of {molecule} floating in space, DNA helix background, navy and teal colors, professional',
+    'Supply chain visualization showing {molecule} journey from synthesis to pharmacy, world map, logistics theme, professional',
+  ],
+};
+const IMAGE_STYLE_SUFFIX = 'High quality, corporate and professional, no cartoon or illustration aesthetic, no watermarks or brand logos.';
+
+// djb2 string hash → unsigned 32-bit. Deterministic across runs (unlike Math.random).
+function hashString(s) {
+  let h = 5381;
+  for (let i = 0; i < String(s).length; i++) h = ((h << 5) + h + String(s).charCodeAt(i)) >>> 0;
+  return h;
+}
+// Weekday (0=Sun..6=Sat) → theme. Mon/Wed/Fri map directly; other days rotate.
+function imageThemeForDay(dow) {
+  if (dow === 1) return 'laboratory';
+  if (dow === 3) return 'business';
+  if (dow === 5) return 'innovation';
+  return ['laboratory', 'business', 'innovation'][dow % 3];
+}
+// postDate: 'YYYY-MM-DD' string or Date. Returns a unique, day-themed prompt.
+function selectImagePrompt(molecule, postContent, postDate) {
+  const m = (molecule || '').trim();
+  const label = (m && m.toLowerCase() !== 'pharmaceutical molecule') ? m : 'a pharmaceutical API';
+  const d = postDate ? new Date(postDate) : null;
+  const dow = (d && !isNaN(d)) ? d.getUTCDay() : 1;
+  const dateKey = typeof postDate === 'string' ? postDate : (d && !isNaN(d) ? d.toISOString().slice(0, 10) : '');
+  const pool = IMAGE_PROMPT_OPTIONS[imageThemeForDay(dow)];
+  const idx = hashString(`${m}|${dateKey}`) % pool.length;
+  const base = pool[idx].replace(/\{molecule\}/g, label);
+  return `${base}. ${IMAGE_STYLE_SUFFIX}`;
+}
+
 // Construct a PubChem 2D-structure PNG URL for a CAS number or chemical name.
 // PubChem's PUG REST /compound/name/{lookup}/PNG accepts both. No fetch is
 // performed — the URL is direct and the browser loads the image.
@@ -210,13 +257,14 @@ function getMoleculeStructureImage(casOrName) {
 // Generate a 1024x1024 background image for a post via OpenAI DALL-E 3, then
 // download it to public/linkedin-images/ (OpenAI URLs expire ~1h). Returns
 // { url, prompt } on success, { skipped|error, reason } on failure.
-async function generatePostImage(molecule_name, post_type) {
+async function generatePostImage(molecule_name, post_type, promptOverride = null) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return { skipped: true, reason: 'OPENAI_API_KEY is not set' };
 
-  // Single source of truth — the same template drives the displayed prompt (:638)
-  // and the actually-generated image, so they never diverge.
-  const prompt = generateImagePrompt(post_type, molecule_name);
+  // A caller (campaign / regenerate) may pass the varied selectImagePrompt() text
+  // so the generated image matches the displayed prompt; else fall back to the
+  // per-post-type template.
+  const prompt = promptOverride || generateImagePrompt(post_type, molecule_name);
 
   // OpenAI's image endpoint is the same path for every model — gpt-image-1,
   // dall-e-3, and dall-e-2 all POST to /v1/images/generations. The fallback
@@ -643,8 +691,8 @@ async function runWeeklyLinkedInCampaign({ dryRun = false } = {}) {
         const profile = await generateChemicalProfile({ name: post.source_molecule, cas: top.cas });
         if (profile) post.full_post = clampPost(post.full_post + '\n\n🔬 Chemical profile: ' + profile);
       }
-      // Part 4 — text image prompt for DALL-E / Midjourney
-      post.image_prompt = generateImagePrompt(post.post_type, post.source_molecule);
+      // Part 4 — varied, day-themed image prompt (BUG 1): unique per molecule+date.
+      post.image_prompt = selectImagePrompt(post.source_molecule, post.full_post, slot);
       // Part 1 — PubChem 2D structure for molecule-specific posts (free, no key)
       if (post.source_molecule) {
         post.structure_image_url = getMoleculeStructureImage(top.cas || post.source_molecule);
@@ -707,6 +755,7 @@ module.exports = {
   generateCapabilityPost,
   generateChemicalProfile,
   generateImagePrompt,
+  selectImagePrompt,
   getMoleculeStructureImage,
   generatePostImage,
   getCombinedDemandMolecules,
