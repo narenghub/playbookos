@@ -657,50 +657,89 @@ async function getGmailToken() {
 }
 
 // ── PART 2 — parse the Gemini notes email into structured data ────────────────
+// Real format (observed): "Summary" para, optional subsection paras, then
+// "Suggested next steps" with "[Name] Task..." entries that WRAP across lines,
+// then a footer ("Is the Next Steps section helpful?", "Google LLC..."). We
+// unwrap the multi-line entries and cut the footer.
 function extractGeminiNotes(emailBody) {
-  const body = String(emailBody || '').replace(/\r/g, '');
-  const rawLines = body.split('\n').map(l => l.replace(/ /g, ' ').trim());
-  const HEAD = /^(summary|recap|details|decisions?|suggested next steps|next steps|action items|attendees|invited|participants)\b/i;
+  let body = String(emailBody || '').replace(/\r/g, '').replace(/ /g, ' ');
+  const cut = body.search(/\n\s*(Is the Next Steps section|We've updated|Meeting records\b|Was this summary|What do you think\?|Not Useful Email|Google LLC,)/i);
+  if (cut > 0) body = body.slice(0, cut);
+  const lines = body.split('\n').map(l => l.replace(/[ \t]+$/, ''));
+  const HEAD = /^\s*(summary|recap|details|decisions?|suggested next steps|next steps|action items|attendees|invited|participants)\s*$/i;
   const sections = { _preamble: [] };
   let cur = '_preamble';
-  for (const l of rawLines) {
-    const h = l.match(HEAD);
-    if (h && l.length < 42) { cur = h[1].toLowerCase().replace(/s$/, ''); sections[cur] = sections[cur] || []; continue; }
+  for (const l of lines) {
+    const h = l.trim().match(HEAD);
+    if (h) { cur = h[1].toLowerCase().replace(/s$/, ''); sections[cur] = sections[cur] || []; continue; }
     (sections[cur] = sections[cur] || []).push(l);
   }
   const sec = names => { for (const n of names) if (sections[n]) return sections[n]; return []; };
-  const deBullet = l => l.replace(/^[\-\*•·•\s]+/, '').trim();
+  const deBullet = l => l.replace(/^[-*•·\s]+/, '').trim();
 
-  const summary = sec(['summary', 'recap']).map(deBullet).filter(Boolean).join(' ').slice(0, 2000).trim();
-  const decisions = sec(['decision']).map(deBullet).filter(l => l && !HEAD.test(l)).slice(0, 30);
+  // Summary = the first paragraph after "Summary" (stop at the first blank line).
+  let summary = '';
+  for (const l of sec(['summary', 'recap'])) {
+    if (!l.trim()) { if (summary) break; else continue; }
+    summary += (summary ? ' ' : '') + l.trim();
+  }
+  summary = summary.slice(0, 2000);
 
-  // Next steps use "[Name] task". Prefer the next-steps section; else scan all.
+  const decisions = sec(['decision']).map(deBullet).filter(Boolean).slice(0, 30);
+
+  // Next steps: "[Name] task" where the task may wrap over several lines. Start a
+  // new entry on a "[Name]" line; append continuation lines until a blank line or
+  // the next "[Name]".
   const nsSection = sec(['suggested next step', 'next step', 'action item']);
-  const scan = nsSection.length ? nsSection : rawLines;
-  const re = /\[([^\]]{2,60})\]\s*(.+)/;
-  const next_steps = [];
+  const scan = nsSection.length ? nsSection : lines;
+  const START = /^\s*\[([^\]]{2,60})\]\s*(.*)$/;
+  const entries = [];
+  let e = null;
+  for (const raw of scan) {
+    const line = raw.trim();
+    const m = line.match(START);
+    if (m) { if (e) entries.push(e); e = { name: m[1].trim(), parts: m[2] ? [m[2].trim()] : [] }; }
+    else if (!line) { if (e) { entries.push(e); e = null; } }
+    else if (e) { e.parts.push(line); }
+  }
+  if (e) entries.push(e);
   const seen = new Set();
-  for (const l of scan) {
-    const m = l.match(re);
-    if (!m) continue;
-    const task = deBullet(m[2]).replace(/\s+/g, ' ').trim();
-    const key = (m[1] + '|' + task).toLowerCase();
+  const next_steps = [];
+  for (const it of entries) {
+    const task = it.parts.join(' ').replace(/\s+/g, ' ').trim();
+    const key = (it.name + '|' + task).toLowerCase();
     if (!task || seen.has(key)) continue;
     seen.add(key);
-    next_steps.push({ assignee_name: m[1].trim(), task, raw_line: l });
+    next_steps.push({ assignee_name: it.name, task, raw_line: `[${it.name}] ${task}` });
   }
 
   let attendees = sec(['attendee', 'invited', 'participant'])
     .flatMap(l => deBullet(l).split(/[,;·|]| and /i)).map(x => x.trim())
-    .filter(x => x && x.length > 1 && !/^https?:/i.test(x) && !HEAD.test(x));
+    .filter(x => x && x.length > 1 && !/^https?:/i.test(x));
   if (!attendees.length) attendees = [...new Set(next_steps.map(n => n.assignee_name))];
 
   return { summary, decisions, next_steps, attendees: attendees.slice(0, 40) };
 }
+// Raw HTML of the message (untouched) — the "Open meeting notes" Doc link lives
+// in an <a href> here, not in the text/plain part.
+function extractGmailHtml(payload) {
+  const walk = p => {
+    if (!p) return '';
+    if (p.mimeType === 'text/html' && p.body?.data) return b64urlDecode(p.body.data);
+    if (p.parts) { for (const sub of p.parts) { const t = walk(sub); if (t) return t; } }
+    return '';
+  };
+  return walk(payload) || '';
+}
 
 // ── PART 7 — read the full "Open meeting notes" Google Doc ────────────────────
+// The link may be a direct docs.google.com URL or wrapped in a google.com/url?q=
+// redirect (URL-encoded) — handle both.
 function extractDocId(body) {
-  const m = String(body || '').match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]{20,})/);
+  const s = String(body || '');
+  let m = s.match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]{20,})/);
+  if (m) return m[1];
+  m = s.match(/docs\.google\.com(?:%2F|\/)document(?:%2F|\/)d(?:%2F|\/)([a-zA-Z0-9_-]{20,})/);
   return m ? m[1] : null;
 }
 async function fetchGeminiDoc(docId) {
@@ -779,7 +818,14 @@ async function pollGeminiMeetingNotes({ dryRun = false, lookbackDays = 7, maxMes
   const tok = await getGmailToken();
   if (tok.error) { out.warning = `Gmail unavailable: ${tok.error}. Check the service account (DWD) can impersonate ${GEMINI_MAILBOX()} with gmail scopes.`; return out; }
   const user = encodeURIComponent(GEMINI_MAILBOX());
-  const q = encodeURIComponent(`from:${GEMINI_SENDER()} subject:"Notes from" is:unread newer_than:${lookbackDays}d`);
+  // Match by SENDER, not subject: the real subject is `Notes: "<Title>" <date>`,
+  // not "Notes from …", so a subject filter misses them. Sender is reliable. We
+  // do NOT require is:unread (Naresh may have opened them) — the processed_emails
+  // claim below is the idempotency guard, so already-read notes still process once.
+  const qStr = `from:${GEMINI_SENDER()} newer_than:${lookbackDays}d`;
+  const q = encodeURIComponent(qStr);
+  out.query = qStr;
+  log(`Gemini poll query: [${qStr}] on ${GEMINI_MAILBOX()}`);
   let list;
   try {
     const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/${user}/messages?q=${q}&maxResults=${maxMessages}`, { headers: { Authorization: 'Bearer ' + tok.access_token } });
@@ -788,7 +834,7 @@ async function pollGeminiMeetingNotes({ dryRun = false, lookbackDays = 7, maxMes
   } catch (e) { out.warning = e.message; return out; }
   const refs = list.messages || [];
   out.found = refs.length;
-  log(`Gemini poll: ${refs.length} unread note email(s) in last ${lookbackDays}d`);
+  log(`Gemini poll: ${refs.length} note email(s) from ${GEMINI_SENDER()} in last ${lookbackDays}d`);
 
   for (const ref of refs) {
     const gmailId = ref.id;
@@ -803,11 +849,13 @@ async function pollGeminiMeetingNotes({ dryRun = false, lookbackDays = 7, maxMes
       if (!dRes.ok) { out.errors.push(`${gmailId}: get ${dRes.status}`); continue; }
       const msg = await dRes.json();
       const subject = gmailHeader(msg.payload, 'Subject') || '';
-      const title = subject.replace(/^\s*Notes from\s*[:\-]?\s*/i, '').trim() || 'Gemini meeting notes';
+      const parsed = parseGeminiSubject(subject);
+      const title = parsed.title;
       const dateHeader = gmailHeader(msg.payload, 'Date');
-      const date = dateHeader && !isNaN(new Date(dateHeader)) ? isoDate(dateHeader) : businessToday();
+      const date = parsed.date || (dateHeader && !isNaN(new Date(dateHeader)) ? isoDate(dateHeader) : businessToday());
       const body = extractGmailBody(msg.payload) || msg.snippet || '';
-      const docText = await fetchGeminiDoc(extractDocId(body));
+      const html = extractGmailHtml(msg.payload);
+      const docText = await fetchGeminiDoc(extractDocId(html) || extractDocId(body));
 
       const r = await processGeminiEmail({ title, date, body, docText }, { dryRun });
       out.processed++;
