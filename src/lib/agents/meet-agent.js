@@ -720,6 +720,21 @@ function extractGeminiNotes(emailBody) {
 
   return { summary, decisions, next_steps, attendees: attendees.slice(0, 40) };
 }
+// Gemini's real subject format is: Notes: "<Title>" <Mon D, YYYY> (curly quotes,
+// sometimes a trailing star). Also tolerate the older "Notes from <Title>" shape.
+// Returns { title, date } with date parsed from the subject when present.
+function parseGeminiSubject(subject) {
+  const s = String(subject || '').trim();
+  const dm = s.match(/([A-Z][a-z]{2,},?\s+)?[A-Z][a-z]{2,}\s+\d{1,2},?\s+\d{4}\s*$/);
+  const date = dm && !isNaN(new Date(dm[0])) ? isoDate(dm[0]) : null;
+  let title = dm ? s.slice(0, dm.index) : s;
+  title = title
+    .replace(/^\s*notes\s*(from|:)?\s*/i, '')
+    .replace(/^[\s"'“”‘’]+|[\s"'“”‘’]+$/g, '')
+    .trim();
+  return { title: title || 'Gemini meeting notes', date };
+}
+
 // Raw HTML of the message (untouched) — the "Open meeting notes" Doc link lives
 // in an <a href> here, not in the text/plain part.
 function extractGmailHtml(payload) {
