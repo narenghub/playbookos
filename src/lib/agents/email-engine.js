@@ -382,15 +382,15 @@ BUYER SEGMENT: ${seg.label}
 ${seg.brief}
 For this segment, emphasise: ${seg.emphasis}.
 
-Write TWO variants.
+Write the first two emails of a 3-email outreach SEQUENCE (a short final nudge is added separately by the template). These are sent to the SAME prospect in order — the second is a genuine follow-up to the first, NOT a second cold pitch.
 
-Variant A — direct / product-focused: 2 short paragraphs. Lead with the molecule and its availability, then the documentation/quality posture and a nudge to request a quote. Procurement tone, no fluff.
+Email 1 — Welcome / opener (variant_a): 2 short paragraphs. Lead with the molecule and its availability, then the documentation/quality posture and a nudge to request a quote. Procurement tone, no fluff.
 
-Variant B — insight / market-focused: 2 short paragraphs. Open with why this molecule matters right now (demand, supply, or regulatory context relevant to this segment), then position Abiozen as the sourcing partner. Consultative, analyst voice.
+Email 2 — Follow-up (variant_b), sent a few days later with no reply: 2 SHORT paragraphs. This is a real follow-up, not a fresh pitch — briefly reference the earlier note ("circling back on…", "following up on my note about…"), add ONE new reason to engage (a market/supply/regulatory angle, or a documentation point), and close with a softer, lower-friction CTA (a quick reply, a short call, or "happy to send specs"). Warmer and more concise than Email 1.
 
-Each subject line: under 70 characters. Variant A subject names the molecule; Variant B subject leads with the market angle. No emoji, no ALL CAPS, no "!".
+Each subject line: under 70 characters. Email 1 subject names the molecule; Email 2 subject reads like a follow-up (e.g. "Re: <molecule>" or "Following up on <molecule>"). No emoji, no ALL CAPS, no "!".
 
-Paragraphs: plain sentences wrapped in nothing (the template wraps them in <p>). You may use <strong> for one key phrase per paragraph. Under 90 words per paragraph. Do not mention "Variant A/B", do not add "Dear...", do not sign off.
+Paragraphs: plain sentences wrapped in nothing (the template wraps them in <p>). You may use <strong> for one key phrase per paragraph. Under 90 words per paragraph. Do not add email labels or headers, do not add "Dear...", do not sign off.
 
 Return ONLY this JSON, no prose, no code fences:
 {"variant_a":{"subject":"...","paragraphs":["...","..."]},"variant_b":{"subject":"...","paragraphs":["...","..."]}}`;
@@ -406,15 +406,16 @@ function buildApolloPayload(campaign, mol, seg, week) {
     name: `${campaign.molecule_name} — ${seg.label} — Week of ${week}`,
     permissions: 'team_can_use',
     active: false,
-    // BUG 2 — explicit, correctly-ordered 3-step cadence. Each step carries a
-    // human label so the publish log can show which content lands on which step.
-    //   Step 1 / day 0 : Variant A — introductory (first contact)
-    //   Step 2 / day 3 : Variant B — follow-up (second contact)
-    //   Step 3 / day 7 : short nudge — final follow-up (third contact)
+    // Sequential 3-email cadence (NOT A/B) — each is sent to the same prospect in
+    // order. Labels drive the publish log. (variant_a/variant_b are storage-slot
+    // names only; semantically they are Welcome / Follow-up 1.)
+    //   Step 1 / day 0 : Welcome        (variant_a — opener)
+    //   Step 2 / day 4 : Follow-up 1    (variant_b — genuine follow-up to email 1)
+    //   Step 3 / day 8 : Follow-up 2    (short nudge, template-generated)
     emailer_steps: [
-      { position: 1, wait_days: 0, type: 'auto_email', label: 'Variant A (introductory)', subject: campaign.variant_a_subject, body_html: campaign.variant_a_html },
-      { position: 2, wait_days: 3, type: 'auto_email', label: 'Variant B (follow-up)', subject: campaign.variant_b_subject, body_html: campaign.variant_b_html },
-      { position: 3, wait_days: 7, type: 'auto_email', label: 'Follow-up nudge (final)', subject: `Re: ${campaign.variant_a_subject}`, body_html: nudgeHtml },
+      { position: 1, wait_days: 0, type: 'auto_email', label: 'Welcome', subject: campaign.variant_a_subject, body_html: campaign.variant_a_html },
+      { position: 2, wait_days: 4, type: 'auto_email', label: 'Follow-up 1', subject: campaign.variant_b_subject, body_html: campaign.variant_b_html },
+      { position: 3, wait_days: 8, type: 'auto_email', label: 'Follow-up 2 (nudge)', subject: `Re: ${campaign.variant_a_subject}`, body_html: nudgeHtml },
     ],
   };
 }
@@ -504,31 +505,29 @@ async function runEmailEngine({ weekStart, dryRun = false, topMolecules = 10 } =
 }
 
 // ── Apollo publishing ─────────────────────────────────────────────────────────
-// Building a sequence with content takes FOUR calls, and Apollo accepts (HTTP
-// 200) three wrong shapes that silently drop the content. Every one was tried
-// against the live API; do not "simplify" this back down:
+// Per-step flow, empirically reverse-engineered (Apollo returns HTTP 200 on wrong
+// shapes that silently drop content, so we GET-and-verify at the end — never trust
+// the bare 200s). Do not "simplify" this:
 //
-//   1. POST /emailer_campaigns                       -> sequence id     (once)
-//   2. POST /emailer_steps                            -> step id        (per step)
-//        {emailer_campaign_id, position, type, wait_time, wait_mode:'day'}
-//   3. POST /emailer_touches {emailer_step_id, type}  -> emailer_template_id
-//        Apollo mints an EMPTY template for the touch and returns its id.
-//   4. PUT  /emailer_templates/{that id} {subject, body_html}
-//        The only shape where content survives.
+//   1. POST /emailer_campaigns                         -> sequence id     (once)
+//   2. POST /emailer_steps {emailer_campaign_id, position, type, wait_time, wait_mode:'day'}
+//        Apollo AUTO-CREATES one empty "new_thread" emailer_touch (+ template) here.
+//   3. GET  /emailer_touches?emailer_step_id={id}      -> that auto touch's template id
+//   4. PUT  /emailer_templates/{that id} {subject, body_html}  -> only shape content survives
 //
-// What returns 200 and silently loses content: inline emailer_steps on campaign
-// create; nested emailer_template on the touch; subject/body_html at the touch top
-// level; linking a pre-filled template by id (Apollo clones it empty). Also:
-// /sequences is an alias for /emailer_campaigns, but /sequences/{id}/sequence_steps
-// and /sequence_templates 404, and GET /emailer_campaigns/{id} never expands
-// emailer_touches — verify content by fetching the template id directly.
+// We REUSE the auto-minted touch (steps 3-4) instead of POSTing a second touch, so
+// each step ends with exactly ONE content touch — no empty phantom variant. (A prior
+// version POSTed an extra touch, leaving every step with a blank second variant that
+// Apollo would treat as an A/B arm and could send empty on activation.)
+//
+// Still true: inline emailer_steps on campaign create, nested emailer_template on the
+// touch, and subject/body_html at the touch top level all 200 and silently lose
+// content; /sequences aliases /emailer_campaigns but its sub-routes 404.
 async function publishSequenceToApollo(payload, apolloKey) {
   const call = async (path, body, method = 'POST') => {
-    const r = await fetch('https://api.apollo.io/api/v1' + path, {
-      method,
-      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
-      body: JSON.stringify(body),
-    });
+    const opts = { method, headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey } };
+    if (body !== null && body !== undefined && method !== 'GET') opts.body = JSON.stringify(body);
+    const r = await fetch('https://api.apollo.io/api/v1' + path, opts);
     const text = await r.text();
     let json = null;
     try { json = JSON.parse(text); } catch {}
@@ -557,17 +556,42 @@ async function publishSequenceToApollo(payload, apolloKey) {
     const stepId = s.json?.emailer_step?.id || null;
     if (!s.ok || !stepId) return { ok: false, stage: `step ${step.position}`, status: s.status, detail: s.text.slice(0, 400), sequenceId, stepsDone };
 
-    // Touch for THIS step → its own empty template id → PUT this step's content.
-    const t = await call('/emailer_touches', { emailer_step_id: stepId, type: step.type || 'auto_email' });
-    const templateId = t.json?.emailer_touch?.emailer_template_id || null;
-    if (!t.ok || !templateId) return { ok: false, stage: `touch for step ${step.position}`, status: t.status, detail: t.text.slice(0, 400), sequenceId, stepsDone };
+    // REUSE the touch Apollo auto-mints on step creation (type 'new_thread') — GET
+    // it and PUT this step's content into ITS template. Do NOT POST a second touch:
+    // that would leave an empty phantom variant on the step.
+    const listed = await call(`/emailer_touches?emailer_step_id=${stepId}`, null, 'GET');
+    const touches = listed.json?.emailer_touches || [];
+    const auto = touches.find(t => t.type === 'new_thread') || touches[0];
+    const templateId = auto?.emailer_template_id || null;
+    if (!listed.ok || !templateId) return { ok: false, stage: `touch for step ${step.position}`, status: listed.status, detail: (listed.text || '').slice(0, 400), sequenceId, stepsDone };
 
     const tpl = await call(`/emailer_templates/${templateId}`, { subject: step.subject, body_html: step.body_html }, 'PUT');
     if (!tpl.ok) return { ok: false, stage: `content for step ${step.position}`, status: tpl.status, detail: tpl.text.slice(0, 400), sequenceId, stepsDone };
-    console.log(`[email-engine]   ✓ step ${step.position} → apollo_step ${stepId} → template ${templateId} (${label})`);
+    console.log(`[email-engine]   ✓ step ${step.position} → apollo_step ${stepId} → reused touch ${auto.id} → template ${templateId} (${label})`);
     stepsDone.push(step.position);
   }
-  console.log(`[email-engine] Apollo sequence ${sequenceId} published — steps ${stepsDone.join(', ')} in order`);
+
+  // GET-and-verify — Apollo silently 200s on wrong shapes, so confirm the real
+  // structure: expected number of steps, and EXACTLY ONE non-empty content touch
+  // per step (no empty phantoms). Hard error on any mismatch.
+  const verify = await call(`/emailer_campaigns/${sequenceId}`, null, 'GET');
+  const vsteps = verify.json?.emailer_campaign?.emailer_steps || verify.json?.emailer_steps || [];
+  if (!verify.ok || vsteps.length !== steps.length) {
+    return { ok: false, stage: 'verify', status: verify.status, detail: `expected ${steps.length} steps, Apollo reports ${vsteps.length}`, sequenceId, stepsDone };
+  }
+  for (const vs of vsteps) {
+    const lt = await call(`/emailer_touches?emailer_step_id=${vs.id}`, null, 'GET');
+    const tarr = lt.json?.emailer_touches || [];
+    if (!lt.ok || tarr.length !== 1) {
+      return { ok: false, stage: 'verify', status: lt.status, detail: `step position ${vs.position} has ${tarr.length} touch(es), expected exactly 1 (empty phantom?)`, sequenceId, stepsDone };
+    }
+    const gt = await call(`/emailer_templates/${tarr[0].emailer_template_id}`, null, 'GET');
+    const body = String(gt.json?.emailer_template?.body_html || gt.json?.body_html || '').replace(/<[^>]+>/g, '').trim();
+    if (!body) {
+      return { ok: false, stage: 'verify', status: gt.status, detail: `step position ${vs.position} content is empty`, sequenceId, stepsDone };
+    }
+  }
+  console.log(`[email-engine] Apollo sequence ${sequenceId} published + verified — ${vsteps.length} steps, exactly 1 content touch each`);
   return { ok: true, sequenceId, stepsDone };
 }
 
