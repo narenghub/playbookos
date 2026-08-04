@@ -71,10 +71,18 @@ async function syncBuyersFromOrders() {
     buyers.set(k, cur);
   };
 
-  // Leads = real contact identities (the Sales Pipeline). Every lead with an email
-  // is a buyer/prospect; a WARM/HOT lead's source_sequence names the molecule.
-  const leads = (await query(`SELECT email, contact_name, company, source_sequence, classification, created_at FROM leads WHERE email IS NOT NULL`)).rows;
+  // Leads = real contact identities (the Sales Pipeline). Seed reorder buyers ONLY
+  // from HOT leads (positive buy intent per apolloReplyClassToBucket). A COLD
+  // "not interested"/unsubscribe or a WARM referral/question is NOT a customer and
+  // must never enter the reorder funnel — the previous unfiltered query pulled
+  // every lead (it even SELECTed classification and ignored it), which is how a
+  // "not_interested" reply became a phantom order and got a reorder sequence.
+  const NEGATIVE_REPLY = /(not_interested|unsubscrib|do_not_contact|wrong_person|bounced|blocked)/;
+  const leads = (await query(`SELECT email, contact_name, company, source_sequence, classification, reply_class, created_at FROM leads WHERE email IS NOT NULL AND classification = 'HOT'`)).rows;
   for (const l of leads) {
+    // Belt-and-suspenders: even within HOT, drop anything whose raw Apollo reply
+    // class signals a rejection (guards against a future relaxation of the filter).
+    if (NEGATIVE_REPLY.test(String(l.reply_class || '').toLowerCase())) continue;
     add(l.email, {
       contact_name: l.contact_name, company_name: l.company,
       buyer_type: inferBuyerType(l.source_sequence), molecule: moleculeFrom(l.source_sequence),
