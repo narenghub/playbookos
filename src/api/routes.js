@@ -3891,9 +3891,13 @@ router.post('/linkedin/regenerate-image/:id', authMiddleware, adminOnly, async (
   try {
     const row = (await query(`SELECT * FROM linkedin_content_queue WHERE id=$1`, [req.params.id])).rows[0];
     if (!row) return res.status(404).json({ error: 'post not found' });
-    // BUG 1 fix — use the varied, day-themed prompt (by molecule + scheduled date)
-    // so regenerating doesn't reproduce the same image; store it back too.
-    const prompt = selectImagePrompt(row.source_molecule, row.full_post, row.scheduled_for);
+    // Issue 4b — editable prompt: if the admin supplied a custom prompt, use it
+    // verbatim (they own the entire prompt — no brand suffix appended). Otherwise
+    // fall back to the varied, day-themed auto-selected prompt (BUG 1 fix) so a
+    // plain regenerate still doesn't reproduce the same image. Either way it is
+    // stored back into image_prompt below.
+    const custom = typeof req.body?.prompt === 'string' ? req.body.prompt.trim().slice(0, 1000) : '';
+    const prompt = custom || selectImagePrompt(row.source_molecule, row.full_post, row.scheduled_for);
     const result = await generatePostImage(row.source_molecule, row.post_type, prompt);
     if (result.skipped) return res.status(503).json({ error: result.reason });
     if (result.error) return res.status(502).json({ error: result.error });

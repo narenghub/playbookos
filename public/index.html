@@ -2398,7 +2398,10 @@ function renderLinkedInPreview(q, esc, statusBadge) {
         <span>👍 Like</span><span>💬 Comment</span><span>↗ Share</span>
       </div>
     </div>
-    ${q.image_prompt ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:11px;color:#0D7377;font-weight:600">Image prompt for DALL-E / Midjourney</summary><div style="background:#f8fafc;border:1px solid var(--border);padding:8px;border-radius:6px;font-size:11px;color:var(--text-body);margin-top:6px;font-family:monospace">${esc(q.image_prompt)}</div></details>` : ''}
+    ${q.image_prompt ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:11px;color:#0D7377;font-weight:600">Image prompt (editable — edit then Regenerate)</summary>
+      <textarea id="li-imgprompt-${q.id}" rows="4" style="width:100%;box-sizing:border-box;background:#f8fafc;border:1px solid var(--border);padding:8px;border-radius:6px;font-size:11px;color:var(--text-body);margin-top:6px;font-family:monospace;resize:vertical">${esc(q.image_prompt)}</textarea>
+      <div style="font-size:10px;color:#a0aec0;margin-top:2px">Edit the prompt, then click “🎨 Regenerate image” to use it verbatim (you own the full prompt — no brand styling is appended). Leave it unchanged to auto-generate a fresh varied prompt.</div>
+    </details>` : ''}
     ${q.linkedin_post_id ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px">LinkedIn post ID: ${esc(q.linkedin_post_id)}</div>` : ''}
     ${eng}
     ${buttons.length ? `<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${buttons.join('')}</div>` : ''}
@@ -2516,7 +2519,14 @@ async function linkedinRegenerate(id, btn) {
   const origHTML = btn ? btn.innerHTML : null;
   if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.innerHTML = '<span class="btn-spinner"></span>Generating…'; }
   try {
-    const res = await API('/linkedin/regenerate-image/' + id, {method:'POST'});
+    // Issue 4b — send the edited prompt only if the admin actually changed it;
+    // if unchanged (or the textarea is absent) send nothing so the backend
+    // auto-selects a fresh varied prompt (preserves the original behavior).
+    const ta = document.getElementById('li-imgprompt-' + id);
+    const orig = String(((window._linkedinQueue || []).find(x => x.id === id) || {}).image_prompt || '').trim();
+    const edited = ta ? ta.value.trim() : '';
+    const custom = (edited && edited !== orig) ? edited : '';
+    const res = await API('/linkedin/regenerate-image/' + id, {method:'POST', body: JSON.stringify({ prompt: custom })});
     if (!res || res.error) {
       showToast('Error: ' + ((res && res.error) || 'unknown'), 'error', 5000);
       if (btn) { btn.disabled = false; btn.innerHTML = origHTML; btn.dataset.busy = ''; }
