@@ -233,9 +233,52 @@ async function getTranscript(meeting) {
   return cleanTranscript(meeting.transcript_text || meeting.description || meeting._event?.description || '');
 }
 
+// ── Work-week task scheduling (Issue 2) ───────────────────────────────────────
+// Spread a meeting's action items across Mon–Fri instead of dumping them all on
+// the meeting day.
+const WEEKDAY_NAME = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Mon–Fri ISO dates a meeting's tasks may be scheduled into. Tasks never land
+// before the meeting date; if fewer than 2 weekdays remain in the meeting's week
+// (meeting on Thu/Fri/weekend), roll to next week's full Mon–Fri so there's room.
+function workWeekDates(meetingDate) {
+  const anchor = /^\d{4}-\d{2}-\d{2}$/.test(String(meetingDate || '')) ? meetingDate : businessToday();
+  const base = new Date(anchor + 'T12:00:00Z');
+  const dow = base.getUTCDay();                          // 0=Sun..6=Sat
+  const monday = new Date(base.getTime() + (dow === 0 ? -6 : 1 - dow) * 86400000);
+  const mkWeek = mon => Array.from({ length: 5 }, (_, i) => new Date(mon.getTime() + i * 86400000).toISOString().slice(0, 10));
+  let week = mkWeek(monday).filter(d => d >= anchor);    // meeting-day-or-later weekdays only
+  if (week.length < 2) week = mkWeek(new Date(monday.getTime() + 7 * 86400000)); // roll to next week
+  return week;
+}
+
+// Give every action item a due_date on a valid Mon–Fri work-week day. A genuine
+// future deadline Claude extracted is kept (a weekend date is snapped to Monday);
+// null / past / malformed dates are round-robined across the work week in item
+// order, so tasks spread out instead of all landing on the meeting day.
+function distributeAcrossWorkWeek(actionItems, meetingDate) {
+  const md = /^\d{4}-\d{2}-\d{2}$/.test(String(meetingDate || '')) ? meetingDate : businessToday();
+  const week = workWeekDates(md);
+  const snapWeekend = iso => {
+    const d = new Date(iso + 'T12:00:00Z'), day = d.getUTCDay();
+    if (day === 6) return new Date(d.getTime() + 2 * 86400000).toISOString().slice(0, 10); // Sat→Mon
+    if (day === 0) return new Date(d.getTime() + 86400000).toISOString().slice(0, 10);      // Sun→Mon
+    return iso;
+  };
+  let rr = 0;
+  for (const it of actionItems || []) {
+    const raw = String(it.due_date || '');
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw) && raw >= md) it.due_date = snapWeekend(raw); // honor real deadline
+    else { it.due_date = week[rr % week.length]; rr++; }                              // round-robin fill
+  }
+  return actionItems;
+}
+
 // ── Function 3 — analyse the transcript with Claude ───────────────────────────
 async function analyzeMeetingWithClaude(transcript, meetingTitle, attendees, date, members) {
   const teamList = (members || []).map(m => `${m.name} (${m.email}, ${m.role})`).join('; ');
+  const week = workWeekDates(date);
+  const weekList = week.map(d => `${WEEKDAY_NAME[new Date(d + 'T12:00:00Z').getUTCDay()]} ${d}`).join(', ');
   const prompt = `You are analyzing a standup/update meeting transcript for Abiozen LLC, a pharmaceutical API marketplace.
 
 Meeting: ${meetingTitle}
@@ -253,7 +296,7 @@ Extract and return as JSON:
   "risks": ["risks mentioned"],
   "opportunities": ["opportunities or ideas mentioned"],
   "action_items": [
-    {"assigned_to": "person name or email", "task": "specific action item", "due_date": "YYYY-MM-DD or null", "priority": "high/medium/low", "source_quote": "exact quote from transcript that generated this task"}
+    {"assigned_to": "person name or email", "task": "specific action item", "due_date": "one of the work-week dates listed below (YYYY-MM-DD)", "priority": "high/medium/low", "source_quote": "exact quote from transcript that generated this task"}
   ]
 }
 
@@ -262,6 +305,7 @@ Rules:
 - If no owner mentioned, assign to the person who raised the topic.
 - Be specific — "Follow up with Sigma-Aldrich about Semaglutide pricing" not "follow up".
 - Priority: high if a deadline is mentioned or urgent language is used.
+- SCHEDULING — set each due_date to ONE of these work-week days: ${weekList}. Spread the work: urgent or blocking items on the earliest day(s); an item that depends on another lands AFTER its dependency; do NOT put everything on the first day. If the transcript states a specific real deadline, use that exact date instead.
 - Match assigned_to to these team members: ${teamList || '(none listed)'}
 Return ONLY the JSON object, no prose, no code fences.`;
   const { data, error } = await callClaude(prompt, { maxTokens: 3500, json: true });
@@ -375,6 +419,9 @@ async function analyzeAndStore(meeting, { dryRun = false, skipBrief = false, bri
     await Promise.all([insert('decision', analysis.decisions), insert('blocker', analysis.blockers), insert('risk', analysis.risks), insert('opportunity', analysis.opportunities)]);
   }
 
+  // Issue 2 — spread tasks across the Mon–Fri work week (all paths: transcript,
+  // standup, Gemini) so they don't all land on the meeting day. Real deadlines kept.
+  distributeAcrossWorkWeek(analysis.action_items, meeting.meeting_date);
   const assign = await assignTasksToTeam(meeting.meeting_id, analysis.action_items, { dryRun });
   let briefed = false;
   if (!dryRun && !skipBrief) {
