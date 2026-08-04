@@ -42,7 +42,13 @@ app.use(cors());
 // Keep the raw request bytes so webhook routes (e.g. Stripe) can verify signatures;
 // harmless for every other route, which still receive the parsed JSON body.
 app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
-app.use(express.static(path.join(__dirname, "public"), { maxAge: "1h", etag: true }));
+app.use(express.static(path.join(__dirname, "public"), {
+  maxAge: "1h", etag: true,
+  // Never cache the SPA HTML shell — otherwise a front-end deploy can lag up to an
+  // hour behind (stale index.html served from browser/edge cache). Other static
+  // assets keep the 1h cache.
+  setHeaders: (res, filePath) => { if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store'); },
+}));
 
 app.get('/health', async (req, res) => {
   try {
@@ -77,6 +83,7 @@ app.use('/api', routes);
 // SPA fallback
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
+  res.set('Cache-Control', 'no-store'); // SPA shell must never be cached (see above)
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
