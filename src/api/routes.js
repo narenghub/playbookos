@@ -1659,6 +1659,22 @@ async function publishCampaignRow(c, userEmail) {
   if (!payload) return { ok: false, error: 'Stored Apollo payload is missing or unparseable — re-run the engine for this week' };
   const seg = SEGMENTS.find(s => s.key === c.segment);
   payload.name = `${c.molecule_name} — ${seg?.label || c.segment} — Week of ${c.week_start} — Test A/B`;
+  // Defense-in-depth (Issue 1): rebuild the step cadence + labels from the CURRENT
+  // campaign row so any draft — including pre-fix ones whose stored payload still
+  // has the old 0/3/7 / "Variant A/B" shape — publishes with the corrected
+  // Welcome → Follow-up 1 → Follow-up 2 flow at 0/4/8. Content comes from the row's
+  // variant fields (source of truth, so a re-generated variant_b is picked up); the
+  // step-3 nudge HTML is reused from the stored payload because the mol fields
+  // buildApolloPayload needs to regenerate it (in_catalog, purity, …) aren't stored
+  // on the row. NOTE: this fixes cadence/labels only — stale variant_b CONTENT still
+  // requires regeneration (Step B).
+  const _sorted = [...(payload.emailer_steps || [])].sort((a, b) => (a.position || 0) - (b.position || 0));
+  const _nudgeHtml = (_sorted[2] && _sorted[2].body_html) || (_sorted.length && _sorted[_sorted.length - 1].body_html) || c.variant_a_html;
+  payload.emailer_steps = [
+    { position: 1, wait_days: 0, type: 'auto_email', label: 'Welcome', subject: c.variant_a_subject, body_html: c.variant_a_html },
+    { position: 2, wait_days: 4, type: 'auto_email', label: 'Follow-up 1', subject: c.variant_b_subject, body_html: c.variant_b_html },
+    { position: 3, wait_days: 8, type: 'auto_email', label: 'Follow-up 2 (nudge)', subject: `Re: ${c.variant_a_subject}`, body_html: _nudgeHtml },
+  ];
 
   const result = await publishSequenceToApollo(payload, apolloKey);
   if (!result.ok) {
