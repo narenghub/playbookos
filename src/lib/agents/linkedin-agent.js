@@ -257,7 +257,7 @@ function getMoleculeStructureImage(casOrName) {
 // Generate a 1024x1024 background image for a post via OpenAI DALL-E 3, then
 // download it to public/linkedin-images/ (OpenAI URLs expire ~1h). Returns
 // { url, prompt } on success, { skipped|error, reason } on failure.
-async function generatePostImage(molecule_name, post_type, promptOverride = null) {
+async function generatePostImage(molecule_name, post_type, promptOverride = null, referenceImage = null) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return { skipped: true, reason: 'OPENAI_API_KEY is not set' };
 
@@ -326,26 +326,57 @@ async function generatePostImage(molecule_name, post_type, promptOverride = null
       && /model/i.test(raw);
   };
 
-  // Tier 1: gpt-image-1 (the newer image model — replaces dall-e on some
-  // accounts; does NOT accept response_format and returns b64_json by default).
-  let attempt = await tryModel('gpt-image-1', '1024x1024');
-  let modelUsed = 'gpt-image-1';
+  let attempt, modelUsed;
+  if (referenceImage && referenceImage.buffer) {
+    // Issue 4c — reference-image path: transform the uploaded image with gpt-image-1
+    // via /v1/images/edits (multipart). quality:'medium' is set EXPLICITLY because
+    // the endpoint defaults to 'high' (~4x the output-token cost — the probe billed
+    // 4160 output tokens at default). No silent fallback: an uploaded reference must
+    // yield a reference-based image or a clear error (dall-e-2 edits need a mask, so
+    // there is no clean non-gpt-image-1 fallback).
+    modelUsed = 'gpt-image-1-edit';
+    console.log(`[linkedin-agent] /v1/images/edits (gpt-image-1, quality=medium) with reference image ${referenceImage.buffer.length} bytes (${referenceImage.mimetype || 'image/png'})`);
+    const fd = new FormData();
+    fd.append('model', 'gpt-image-1');
+    fd.append('prompt', prompt);
+    fd.append('size', '1024x1024');
+    fd.append('quality', 'medium');
+    fd.append('image', new Blob([referenceImage.buffer], { type: referenceImage.mimetype || 'image/png' }), 'reference.png');
+    try {
+      const res = await fetch('https://api.openai.com/v1/images/edits', { method: 'POST', headers: { Authorization: 'Bearer ' + apiKey }, body: fd });
+      if (!res.ok) {
+        const t = await res.text().catch(() => '');
+        console.error('[linkedin-agent] images/edits FAILED — status ' + res.status + ': ' + t.slice(0, 400));
+        return { error: `OpenAI images/edits ${res.status}: ${t.slice(0, 300)}`, last_model_tried: modelUsed };
+      }
+      const item = (((await res.json()) || {}).data || [])[0] || {};
+      if (!item.b64_json) return { error: 'OpenAI images/edits returned no b64_json payload', last_model_tried: modelUsed };
+      attempt = { b64: item.b64_json, model: modelUsed };
+    } catch (e) {
+      return { error: 'images/edits network error: ' + e.message, last_model_tried: modelUsed };
+    }
+  } else {
+    // Tier 1: gpt-image-1 (the newer image model — replaces dall-e on some
+    // accounts; does NOT accept response_format and returns b64_json by default).
+    attempt = await tryModel('gpt-image-1', '1024x1024');
+    modelUsed = 'gpt-image-1';
 
-  // Tier 2: dall-e-3 with explicit response_format=url.
-  if (attempt.error && isModelError(attempt.raw, attempt.status)) {
-    console.log('[linkedin-agent] gpt-image-1 unavailable — falling back to dall-e-3');
-    attempt = await tryModel('dall-e-3', '1024x1024', { response_format: 'url' });
-    modelUsed = 'dall-e-3';
+    // Tier 2: dall-e-3 with explicit response_format=url.
+    if (attempt.error && isModelError(attempt.raw, attempt.status)) {
+      console.log('[linkedin-agent] gpt-image-1 unavailable — falling back to dall-e-3');
+      attempt = await tryModel('dall-e-3', '1024x1024', { response_format: 'url' });
+      modelUsed = 'dall-e-3';
+    }
+
+    // Tier 3: dall-e-2 at 512x512 with explicit response_format=url.
+    if (attempt.error && isModelError(attempt.raw, attempt.status)) {
+      console.log('[linkedin-agent] dall-e-3 unavailable — falling back to dall-e-2 / 512x512');
+      attempt = await tryModel('dall-e-2', '512x512', { response_format: 'url' });
+      modelUsed = 'dall-e-2';
+    }
+
+    if (attempt.error) return { error: attempt.error, last_model_tried: modelUsed };
   }
-
-  // Tier 3: dall-e-2 at 512x512 with explicit response_format=url.
-  if (attempt.error && isModelError(attempt.raw, attempt.status)) {
-    console.log('[linkedin-agent] dall-e-3 unavailable — falling back to dall-e-2 / 512x512');
-    attempt = await tryModel('dall-e-2', '512x512', { response_format: 'url' });
-    modelUsed = 'dall-e-2';
-  }
-
-  if (attempt.error) return { error: attempt.error, last_model_tried: modelUsed };
 
   // Convert the response into a Buffer either by downloading the URL or
   // base64-decoding the b64_json payload.

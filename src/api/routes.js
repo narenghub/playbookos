@@ -28,6 +28,28 @@ const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday, enque
 
 const router = express.Router();
 
+// Issue 4c — in-memory multipart handling for the LinkedIn reference-image upload.
+// memoryStorage keeps the file in req.file.buffer (no temp file → nothing to clean
+// up on Railway's ephemeral disk); it's forwarded straight to OpenAI and discarded.
+const multer = require('multer');
+const uploadRefImageMw = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 }, // 10 MB, single file
+  fileFilter: (req, file, cb) => cb(
+    /^image\/(png|jpe?g|webp)$/i.test(file.mimetype) ? null : new Error('Only PNG, JPG, or WebP images are allowed'),
+    /^image\/(png|jpe?g|webp)$/i.test(file.mimetype)
+  ),
+}).single('image');
+// Wrap multer so its errors (size/type) return clean JSON instead of an HTML 500.
+// On a non-multipart (JSON) request it is a no-op, so the Issue 4b text-only path
+// is unchanged. req.file is set only when an image part is present.
+function uploadReferenceImage(req, res, next) {
+  uploadRefImageMw(req, res, err => {
+    if (err) return res.status(400).json({ error: err.message || 'image upload failed' });
+    next();
+  });
+}
+
 // Role-based "director sees their team" map (inverse of getDirectorRole). Used by
 // the employee-activity timeline permission gate. No schema — pure role mapping.
 const DIRECTOR_TEAM = {
@@ -3885,9 +3907,11 @@ router.post('/linkedin/get-structure/:cas_number', authMiddleware, requireTier('
   res.json({ cas_number: req.params.cas_number, structure_image_url: url });
 });
 
-// Regenerate the DALL-E background image for a queued post. Admin-only because
-// it costs ~$0.04 per call against the OpenAI account.
-router.post('/linkedin/regenerate-image/:id', authMiddleware, adminOnly, async (req, res) => {
+// Regenerate the background image for a queued post. Admin-only (OpenAI cost).
+// Two paths on ONE route (uploadReferenceImage is a no-op for JSON requests):
+//   • JSON            → text-to-image via /v1/images/generations (Issue 4b)
+//   • multipart+image → reference-image transform via /v1/images/edits (Issue 4c)
+router.post('/linkedin/regenerate-image/:id', authMiddleware, adminOnly, uploadReferenceImage, async (req, res) => {
   try {
     const row = (await query(`SELECT * FROM linkedin_content_queue WHERE id=$1`, [req.params.id])).rows[0];
     if (!row) return res.status(404).json({ error: 'post not found' });
@@ -3898,14 +3922,16 @@ router.post('/linkedin/regenerate-image/:id', authMiddleware, adminOnly, async (
     // stored back into image_prompt below.
     const custom = typeof req.body?.prompt === 'string' ? req.body.prompt.trim().slice(0, 1000) : '';
     const prompt = custom || selectImagePrompt(row.source_molecule, row.full_post, row.scheduled_for);
-    const result = await generatePostImage(row.source_molecule, row.post_type, prompt);
+    // Issue 4c — a reference image (multipart) routes to the /v1/images/edits path.
+    const referenceImage = req.file ? { buffer: req.file.buffer, mimetype: req.file.mimetype } : null;
+    const result = await generatePostImage(row.source_molecule, row.post_type, prompt, referenceImage);
     if (result.skipped) return res.status(503).json({ error: result.reason });
     if (result.error) return res.status(502).json({ error: result.error });
     await query(
       `UPDATE linkedin_content_queue SET generated_image_url=$1, linkedin_image_asset_urn=$2, image_prompt=$3 WHERE id=$4`,
       [result.url, result.asset_urn || null, result.prompt || prompt, req.params.id]
     );
-    res.json({ success: true, id: req.params.id, generated_image_url: result.url, linkedin_image_asset_urn: result.asset_urn || null, prompt: result.prompt });
+    res.json({ success: true, id: req.params.id, generated_image_url: result.url, linkedin_image_asset_urn: result.asset_urn || null, prompt: result.prompt, used_reference: !!referenceImage, model: result.model || null });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
