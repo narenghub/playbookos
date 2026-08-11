@@ -930,4 +930,75 @@ async function migrateSchemas() {
   } catch(e) { console.error('Migration error:', e.message); }
 }
 
-module.exports = { query, withTransaction, initDB, initPhase2, migrateSchemas };
+// ── Research Intelligence (Clinical Demand Intelligence agent, spec v1.0) ──────
+// Two net-new, ADDITIVE tables. Runs unconditionally at boot (idempotent CREATE IF
+// NOT EXISTS) so the schema is always ready; the ingestion cron and the
+// /api/research-intelligence routes are separately gated by RESEARCH_INTEL_ENABLED.
+// Touches no existing table. Manual rollback:
+//   DROP TABLE IF EXISTS study_molecules; DROP TABLE IF EXISTS clinical_studies;
+async function migrateResearchIntelligence() {
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS clinical_studies (
+        id TEXT PRIMARY KEY,
+        nct_id TEXT UNIQUE NOT NULL,
+        brief_title TEXT,
+        official_title TEXT,
+        overall_status TEXT,
+        phase TEXT,
+        study_type TEXT,
+        conditions TEXT,
+        interventions TEXT,
+        molecules_mentioned TEXT,
+        lead_sponsor_name TEXT,
+        sponsor_type TEXT,
+        collaborators TEXT,
+        institution TEXT,
+        enrollment_count INTEGER,
+        locations_countries TEXT,
+        start_date TEXT,
+        first_posted_date TEXT,
+        last_update_post_date TEXT,
+        expected_completion TEXT,
+        therapeutic_area TEXT,
+        disease TEXT,
+        biomarkers TEXT,
+        classification_summary TEXT,
+        classification_confidence REAL,
+        classify_prompt_version TEXT,
+        raw_json TEXT,
+        ingested_at TEXT DEFAULT NOW(),
+        classified_at TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_cs_phase      ON clinical_studies (phase);
+      CREATE INDEX IF NOT EXISTS idx_cs_ta         ON clinical_studies (therapeutic_area);
+      CREATE INDEX IF NOT EXISTS idx_cs_status     ON clinical_studies (overall_status);
+      CREATE INDEX IF NOT EXISTS idx_cs_lastupdate ON clinical_studies (last_update_post_date DESC);
+
+      CREATE TABLE IF NOT EXISTS study_molecules (
+        id TEXT PRIMARY KEY,
+        study_id TEXT NOT NULL,
+        nct_id TEXT,
+        molecule_name TEXT NOT NULL,
+        cas_number TEXT,
+        molecule_type TEXT CHECK (molecule_type IN ('api','reference_standard','metabolite','impurity','intermediate','tool_compound','other')),
+        inference_rationale TEXT,
+        inference_confidence REAL,
+        catalog_match_status TEXT CHECK (catalog_match_status IN ('catalog_match','sourcing_opportunity','unknown')) DEFAULT 'unknown',
+        matched_sku_id TEXT,
+        matched_source TEXT,
+        infer_prompt_version TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_sm_study ON study_molecules (study_id);
+      CREATE INDEX IF NOT EXISTS idx_sm_nct   ON study_molecules (nct_id);
+      CREATE INDEX IF NOT EXISTS idx_sm_match ON study_molecules (catalog_match_status);
+      CREATE INDEX IF NOT EXISTS idx_sm_mol   ON study_molecules (LOWER(molecule_name));
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_sm_unique ON study_molecules (study_id, LOWER(molecule_name));
+    `);
+    console.log('✅ Research-intelligence schema applied (clinical_studies, study_molecules)');
+  } catch (e) { console.error('Research-intel migration error:', e.message); }
+}
+
+module.exports = { query, withTransaction, initDB, initPhase2, migrateSchemas, migrateResearchIntelligence };
