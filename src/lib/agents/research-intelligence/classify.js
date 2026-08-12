@@ -62,7 +62,8 @@ async function classifyStudy(study, { apiKey = process.env.ANTHROPIC_API_KEY } =
     });
   } catch (e) { return { error: 'Claude request failed: ' + e.message, prompt_version: CLASSIFY_PROMPT_VERSION }; }
   if (!res.ok) return { error: `Claude ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`, prompt_version: CLASSIFY_PROMPT_VERSION };
-  const text = (await res.json()).content?.[0]?.text || '';
+  const body = await res.json();
+  const text = (body.content || []).filter(c => c.type === 'text').map(c => c.text || '').join('');
   const data = parseClaudeJSON(text);
   if (!data) return { error: 'unparseable classification JSON', prompt_version: CLASSIFY_PROMPT_VERSION };
 

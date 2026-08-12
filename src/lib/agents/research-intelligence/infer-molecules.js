@@ -73,7 +73,8 @@ async function inferMolecules(study, classification, { apiKey = process.env.ANTH
     });
   } catch (e) { return { error: 'Claude request failed: ' + e.message, ...base }; }
   if (!res.ok) return { error: `Claude ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`, ...base };
-  const text = (await res.json()).content?.[0]?.text || '';
+  const body = await res.json();
+  const text = (body.content || []).filter(c => c.type === 'text').map(c => c.text || '').join('');
   const data = parseClaudeJSON(text);
   if (!data || !Array.isArray(data.molecules)) return { error: 'unparseable molecule-inference JSON', ...base };
 
