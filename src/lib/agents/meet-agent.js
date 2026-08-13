@@ -12,7 +12,7 @@ const crypto = require('crypto');
 const { query } = require('../db');
 const { sendEmail } = require('../mailer');
 const { sendWhatsApp } = require('../whatsapp');
-const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday } = require('../agent-core');
+const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday, extractClaudeText } = require('../agent-core');
 const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth');
 const workspace = require('./workspace-activity');
 
@@ -32,7 +32,8 @@ async function callClaude(prompt, { maxTokens = 3000, json = false } = {}) {
       body: JSON.stringify({ model: MEET_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
     });
     if (!res.ok) return { data: null, text: null, error: `Claude ${res.status}: ${(await res.text()).slice(0, 160)}` };
-    const text = (await res.json()).content?.[0]?.text || '';
+    const body = await res.json();
+    const text = extractClaudeText(body);
     return { data: json ? parseClaudeJSON(text) : null, text };
   } catch (e) { return { data: null, text: null, error: e.message }; }
 }

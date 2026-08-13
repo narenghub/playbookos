@@ -18,7 +18,7 @@
 // Runs Monday 15:30 UTC, after market intelligence (15:00) writes molecule_history.
 const crypto = require('crypto');
 const { query } = require('../db');
-const { logAgentActivity, parseClaudeJSON } = require('../agent-core');
+const { logAgentActivity, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const { getAppId, getSearchKey } = require('../algolia-keys');
 
 const EMAIL_MODEL = 'claude-opus-4-8';
@@ -104,7 +104,7 @@ async function callClaudeEmail(prompt) {
       return { data: null, error: `Claude ${res.status}: ${body.slice(0, 200)}` };
     }
     const data = await res.json();
-    const parsed = parseClaudeJSON(data.content?.[0]?.text || '');
+    const parsed = parseClaudeJSON(extractClaudeText(data));
     if (!parsed) return { data: null, error: 'unparseable JSON from Claude' };
     return { data: parsed };
   } catch (e) { return { data: null, error: e.message }; }

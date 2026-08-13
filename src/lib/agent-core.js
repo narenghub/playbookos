@@ -148,6 +148,19 @@ function parseClaudeJSON(text) {
   try { return JSON.parse(cleaned.slice(start, end + 1)); } catch { return null; }
 }
 
+// Extract assistant text from a Claude Messages API response body. Adaptive-
+// thinking models (sonnet-5, opus-4.6+, fable) emit a `thinking` content block
+// BEFORE the `text` block, so the old `body.content[0].text` grabbed the empty
+// thinking block and silently returned '' — see the Aug 2026 thinking-block bug
+// (commit 6d7857f). Join ALL text-type blocks; skip thinking/other blocks.
+// Never throws; returns '' when body/content is missing or has no text block.
+function extractClaudeText(body) {
+  return ((body && body.content) || [])
+    .filter(c => c && c.type === 'text')
+    .map(c => c.text || '')
+    .join('');
+}
+
 module.exports = {
   businessToday,
   logAgentActivity,
@@ -156,4 +169,5 @@ module.exports = {
   createDailyTask,
   getCEOUser,
   parseClaudeJSON,
+  extractClaudeText,
 };

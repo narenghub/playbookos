@@ -5,7 +5,7 @@ const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
 const { fetchGSCData, syncAlgoliaSearchData } = require('./growth-agent');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
-const { logAgentActivity } = require('../agent-core');
+const { logAgentActivity, extractClaudeText } = require('../agent-core');
 
 // CAS numbers that have generated SEO content but NO matching product in the
 // abiozen catalog — never pushed (they'd match nothing anyway). Semaglutide and
@@ -305,7 +305,7 @@ Do NOT invent specific prices, lot numbers, or medical/regulatory claims. Keep l
     });
     if (!res.ok) return { error: `Claude ${res.status}: ${(await res.text().catch(() => '')).slice(0, 160)}` };
     const data = await res.json();
-    const raw = (data.content?.[0]?.text || '').trim();
+    const raw = extractClaudeText(data).trim();
     const match = raw.match(/\{[\s\S]*\}/);
     content = JSON.parse(match ? match[0] : raw);
   } catch (e) { return { error: e.message }; }

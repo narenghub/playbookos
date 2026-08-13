@@ -24,7 +24,7 @@ const { runMorningBriefing, runPerformanceCheck, runEscalationCheck } = require(
 const { sendWhatsApp } = require('../lib/whatsapp');
 const { generateProductPost, generateMarketIntelligencePost, generateCompanyUpdate, runWeeklyLinkedInCampaign, scheduleLinkedInContent, getCombinedDemandMolecules, enrichWithCatalog, getMoleculeStructureImage, generatePostImage, selectImagePrompt, publishPost: publishLinkedInPost } = require('../lib/agents/linkedin-agent');
 const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync');
-const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday, enqueueApproval } = require('../lib/agent-core');
+const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday, enqueueApproval, extractClaudeText } = require('../lib/agent-core');
 
 const router = express.Router();
 
@@ -1217,7 +1217,7 @@ Requirements:
       return res.status(502).json({ error: `Claude API ${ares.status}: ${body.slice(0, 200)}` });
     }
     const adata = await ares.json();
-    const raw = (adata.content?.[0]?.text || '').trim();
+    const raw = extractClaudeText(adata).trim();
     let content;
     try {
       const match = raw.match(/\{[\s\S]*\}/);
@@ -3236,7 +3236,7 @@ ${instruction}${clarBlock}`;
       return res.status(502).json({ error: `Claude API ${aiRes.status}: ${t.slice(0, 300)}` });
     }
     const aiData = await aiRes.json();
-    const claudeText = aiData.content?.[0]?.text || '';
+    const claudeText = extractClaudeText(aiData);
     const parsed = parseClaudeJSON(claudeText);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return res.status(502).json({ error: 'Claude returned unparseable JSON', raw: claudeText.slice(0, 400) });

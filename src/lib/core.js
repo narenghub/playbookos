@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { query } = require('./db');
 const { sendEmail } = require('./mailer');
 const { getRoleTier } = require('./roles');
+const { extractClaudeText } = require('./agent-core');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -113,7 +114,7 @@ async function runClaudeAnalysis(prompt) {
       body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1500, messages: [{ role: 'user', content: prompt }] })
     });
     const data = await res.json();
-    const claudeText = data.content?.[0]?.text; console.error("Claude raw response:", JSON.stringify(data)); return claudeText || "Claude error: " + JSON.stringify(data?.error);
+    const claudeText = extractClaudeText(data); console.error("Claude raw response:", JSON.stringify(data)); return claudeText || "Claude error: " + JSON.stringify(data?.error);
   } catch(e) { return 'Claude API error: ' + e.message; }
 }
 

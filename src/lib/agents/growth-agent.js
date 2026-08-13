@@ -3,7 +3,7 @@ const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
 const { sendEmail } = require('../mailer');
-const { getCEOUser } = require('../agent-core');
+const { getCEOUser, extractClaudeText } = require('../agent-core');
 const { sendCronAlert } = require('../cron-alerts');
 const { getGoogleAccessToken: getGoogleToken, SCOPES, serviceAccountConfigured } = require('../google-auth');
 
@@ -268,7 +268,7 @@ async function callClaudeJsonArray(prompt, { maxTokens = 8000 } = {}) {
       return { items: [], error: `Claude ${res.status}: ${body.slice(0, 200)}` };
     }
     const data = await res.json();
-    const text = data.content?.[0]?.text || '';
+    const text = extractClaudeText(data);
     const match = text.match(/\[[\s\S]*\]/);
     if (!match) return { items: [], error: 'no JSON array in Claude response' };
     return { items: JSON.parse(match[0]) };

@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
-const { logAgentActivity, enqueueApproval, getCEOUser, parseClaudeJSON } = require('../agent-core');
+const { logAgentActivity, enqueueApproval, getCEOUser, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 
 const AGENT = 'procurement-agent';
 const PROC_MODEL = 'claude-opus-4-8';
@@ -31,7 +31,8 @@ async function callClaude(prompt, { maxTokens = 1500, json = false } = {}) {
       body: JSON.stringify({ model: PROC_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
     });
     if (!res.ok) return { data: null, text: null, error: `Claude ${res.status}: ${(await res.text()).slice(0, 160)}` };
-    const text = (await res.json()).content?.[0]?.text || '';
+    const body = await res.json();
+    const text = extractClaudeText(body);
     return { data: json ? parseClaudeJSON(text) : null, text };
   } catch (e) { return { data: null, text: null, error: e.message }; }
 }
