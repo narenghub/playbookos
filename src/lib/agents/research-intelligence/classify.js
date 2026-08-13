@@ -74,6 +74,7 @@ async function classifyStudy(study, { apiKey = process.env.ANTHROPIC_API_KEY } =
     summary: String(data.summary || '').slice(0, 1000),
     is_drug_interventional: data.is_drug_interventional !== false, // default true unless explicitly false
     confidence: typeof data.confidence === 'number' ? Math.min(1, Math.max(0, data.confidence)) : null,
+    usage: body.usage || null, // {input_tokens, output_tokens} — orchestrator sums for cost cap
     prompt_version: CLASSIFY_PROMPT_VERSION,
     model: CLASSIFY_MODEL,
   };

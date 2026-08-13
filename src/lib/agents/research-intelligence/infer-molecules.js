@@ -86,7 +86,7 @@ async function inferMolecules(study, classification, { apiKey = process.env.ANTH
     confidence: (m && typeof m.confidence === 'number') ? Math.min(1, Math.max(0, m.confidence)) : null,
   })).filter(m => m.molecule_name); // drop entries with no usable name
 
-  return { molecules, ...base };
+  return { molecules, usage: body.usage || null, ...base }; // usage → orchestrator cost cap
 }
 
 module.exports = { inferMolecules, buildPrompt, INFER_MODEL, INFER_PROMPT_VERSION, MOLECULE_TYPES };
