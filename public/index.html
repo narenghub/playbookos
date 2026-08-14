@@ -397,6 +397,7 @@ const NAV_SECTIONS = [
     {id:'procurement-agent', label:'Procurement Agent', icon:'🏭'},
     {id:'meet-agent', label:'Google Meet Agent', icon:'🎥'},
     {id:'research-agent', label:'Research Agent', icon:'🔬'},
+    {id:'clinical-demand-intelligence', label:'Clinical Demand Intelligence', icon:'🧬'},
     {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
     {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
@@ -482,7 +483,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -5276,5 +5277,139 @@ if(typeof pages !== 'undefined') {
     }
     c.innerHTML = head + tabBar + body;
   };
+}
+
+/* ── Clinical Demand Intelligence (Step 9) ─────────────────────────────────── */
+function cdiEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+const CDI_TAS = ['Oncology','Metabolic/Endocrine','Cardiovascular','Neurology/CNS','Infectious Disease','Immunology/Inflammation','Respiratory','Dermatology','Rare Disease','Other'];
+function cdiState(){ if(!window._cdi) window._cdi={view:'list',detail:null,offset:0,limit:25,filters:{phase:'',therapeutic_area:'',catalog_match_status:''},includeRaw:false,running:false}; return window._cdi; }
+function cdiPhaseBadge(p){ return p?`<span class="badge badge-blue">${cdiEsc(p)}</span>`:'<span style="color:#a0aec0">—</span>'; }
+function cdiMatchBadge(s){ const m={catalog_match:'badge-green',sourcing_opportunity:'badge-amber',unknown:'badge-gray'}; return `<span class="badge ${m[s]||'badge-gray'}">${cdiEsc((s||'unknown').replace(/_/g,' '))}</span>`; }
+function cdiTypeBadge(t){ return `<span class="badge badge-blue">${cdiEsc(t||'other')}</span>`; }
+function cdiSetFilter(key,val){ const st=cdiState(); st.filters[key]=val; st.offset=0; pages['clinical-demand-intelligence'](); }
+function cdiPage(delta){ const st=cdiState(); st.offset=Math.max(0, st.offset + delta*st.limit); pages['clinical-demand-intelligence'](); }
+function cdiOpen(id){ const st=cdiState(); st.view='detail'; st.detail=id; st.includeRaw=false; pages['clinical-demand-intelligence'](); }
+function cdiBack(){ const st=cdiState(); st.view='list'; st.detail=null; pages['clinical-demand-intelligence'](); }
+function cdiToggleRaw(){ const st=cdiState(); st.includeRaw=!st.includeRaw; pages['clinical-demand-intelligence'](); }
+async function cdiRun(){
+  const st=cdiState(); if(st.running) return;
+  const real=!!(document.getElementById('cdi-run-real')||{}).checked;
+  const b=document.getElementById('cdi-run-btn'), m=document.getElementById('cdi-run-msg');
+  st.running=true; if(b){b.disabled=true;b.textContent=real?'Running (writes)…':'Dry run…';}
+  if(m){m.style.color='#718096';m.textContent=real?'Real run — ingesting up to 10 studies, may take ~2 min…':'Dry run — previewing up to 10 studies…';}
+  try{
+    const r=await API('/research-intelligence/run',{method:'POST',body:JSON.stringify({maxStudies:10,dryRun:!real})});
+    if(r&&r.error){ if(m){m.style.color='#dc2626';m.textContent=r.error;} }
+    else { const msg=`${r.dry_run?'Dry run':'Run'} done — ${r.studies_new} new, ${r.molecules_persisted} molecules, ${r.sourcing_opportunities} opps, $${r.cost_usd}, ${r.errors?r.errors.length:0} errors`; showToast(msg, r.errors&&r.errors.length?'info':'success', 6000); if(m){m.style.color='#166534';m.textContent=msg;} }
+  }catch(e){ if(m){m.style.color='#dc2626';m.textContent=e.message;} }
+  st.running=false; if(b){b.disabled=false;b.textContent='Run Now';}
+  if(real) pages['clinical-demand-intelligence']();
+}
+
+if(typeof pages !== 'undefined') {
+  pages['clinical-demand-intelligence'] = async function(){
+    const c=document.getElementById('content');
+    const st=cdiState();
+    if(st.view==='detail'&&st.detail) return cdiRenderDetail(c, st);
+    return cdiRenderList(c, st);
+  };
+}
+
+async function cdiRenderList(c, st){
+  c.innerHTML='<p style="color:#888;padding:20px">Loading Clinical Demand Intelligence…</p>';
+  const qs=new URLSearchParams({limit:st.limit, offset:st.offset});
+  if(st.filters.phase) qs.set('phase', st.filters.phase);
+  if(st.filters.therapeutic_area) qs.set('therapeutic_area', st.filters.therapeutic_area);
+  if(st.filters.catalog_match_status) qs.set('catalog_match_status', st.filters.catalog_match_status);
+  let res; try{ res=await API('/research-intelligence/studies?'+qs.toString()); }catch(e){ res={error:e.message}; }
+  const isAdmin = typeof currentUser!=='undefined' && currentUser && (currentUser.role==='admin'||currentUser.role==='super_admin');
+  const runBar = isAdmin ? `<div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+      <span id="cdi-run-msg" style="font-size:12px;color:var(--text-muted)"></span>
+      <label style="font-size:12px;color:#4a5568;display:flex;align-items:center;gap:4px"><input type="checkbox" id="cdi-run-real"> Run for real (writes to DB)</label>
+      <button id="cdi-run-btn" onclick="cdiRun()" class="btn-primary" style="padding:8px 16px">Run Now</button></div>` : '';
+  const head=`<div class="card" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="card-title" style="margin:0">🧬 Clinical Demand Intelligence</div>${runBar}</div>`;
+
+  if(res&&res.error){
+    const disabled=/not enabled/i.test(res.error);
+    c.innerHTML=head+`<div class="card"><p style="color:${disabled?'#856404':'#dc2626'}">${disabled?'⚠️ Feature not enabled — ask an admin to enable it (RESEARCH_INTEL_ENABLED).':cdiEsc(res.error)}</p></div>`;
+    return;
+  }
+  const studies=(res&&res.studies)||[];
+  const filterBar=`<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <select onchange="cdiSetFilter('phase',this.value)" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+      <option value="">All phases</option>${['Phase 1','Phase 2','Phase 3'].map(p=>`<option value="${p}" ${st.filters.phase===p?'selected':''}>${p}</option>`).join('')}</select>
+    <select onchange="cdiSetFilter('therapeutic_area',this.value)" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+      <option value="">All therapeutic areas</option>${CDI_TAS.map(t=>`<option value="${t}" ${st.filters.therapeutic_area===t?'selected':''}>${cdiEsc(t)}</option>`).join('')}</select>
+    <select onchange="cdiSetFilter('catalog_match_status',this.value)" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
+      <option value="">All catalog status</option>
+      <option value="sourcing_opportunity" ${st.filters.catalog_match_status==='sourcing_opportunity'?'selected':''}>Has sourcing opps</option>
+      <option value="catalog_match" ${st.filters.catalog_match_status==='catalog_match'?'selected':''}>Has catalog match</option>
+      <option value="unknown" ${st.filters.catalog_match_status==='unknown'?'selected':''}>Has unknown</option></select>
+    <span style="margin-left:auto;font-size:12px;color:#718096">${res.total_count} total</span></div>`;
+
+  if(!studies.length){
+    const filtered=st.filters.phase||st.filters.therapeutic_area||st.filters.catalog_match_status;
+    c.innerHTML=head+filterBar+`<div class="card"><p style="color:#718096">No studies${filtered?' match these filters':' yet'} — the ingestion cron runs nightly at 2am CST once enabled.${isAdmin&&!filtered?' Or click <strong>Run Now</strong> above.':''}</p></div>`;
+    return;
+  }
+  const rows=studies.map(s=>`<tr style="cursor:pointer" onclick="cdiOpen('${cdiEsc(s.id)}')">
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;white-space:nowrap"><a href="https://clinicaltrials.gov/study/${cdiEsc(s.nct_id)}" target="_blank" onclick="event.stopPropagation()" style="color:#1B3A6B;font-weight:600;text-decoration:none">${cdiEsc(s.nct_id)}</a></td>
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${cdiEsc(s.brief_title)}">${cdiEsc(s.brief_title||'—')}</td>
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0">${cdiPhaseBadge(s.phase)}</td>
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${cdiEsc(s.lead_sponsor_name)}">${cdiEsc(s.lead_sponsor_name||'—')}</td>
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px">${cdiEsc(s.therapeutic_area||'—')}</td>
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${cdiEsc(s.disease)}">${cdiEsc(s.disease||'—')}</td>
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;text-align:center">${s.molecule_count||0}</td>
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;text-align:center">${s.sourcing_opportunity_count>0?`<span class="badge badge-amber">${s.sourcing_opportunity_count}</span>`:'0'}</td>
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;white-space:nowrap">${cdiEsc(s.last_update_post_date||'—')}</td></tr>`).join('');
+  const table=`<div class="card"><div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">
+    <tr style="background:#f8fafc"><th style="padding:7px 10px;text-align:left">NCT</th><th style="padding:7px 10px;text-align:left">Title</th><th style="padding:7px 10px;text-align:left">Phase</th><th style="padding:7px 10px;text-align:left">Sponsor</th><th style="padding:7px 10px;text-align:left">TA</th><th style="padding:7px 10px;text-align:left">Disease</th><th style="padding:7px 10px;text-align:center">Mol</th><th style="padding:7px 10px;text-align:center">Opps</th><th style="padding:7px 10px;text-align:left">Updated</th></tr>
+    ${rows}</table></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+      <button onclick="cdiPage(-1)" class="btn-outline" style="padding:6px 14px;font-size:13px" ${st.offset<=0?'disabled':''}>← Prev</button>
+      <span style="font-size:12px;color:#718096">Showing ${st.offset+1}–${st.offset+studies.length} of ${res.total_count}</span>
+      <button onclick="cdiPage(1)" class="btn-outline" style="padding:6px 14px;font-size:13px" ${res.has_more?'':'disabled'}>Next →</button></div></div>`;
+  c.innerHTML=head+filterBar+table;
+}
+
+async function cdiRenderDetail(c, st){
+  c.innerHTML='<p style="color:#888;padding:20px">Loading study…</p>';
+  let res; try{ res=await API('/research-intelligence/studies/'+encodeURIComponent(st.detail)+(st.includeRaw?'?include_raw=true':'')); }catch(e){ res={error:e.message}; }
+  const back=`<div style="margin-bottom:12px"><a href="#" onclick="cdiBack();return false" style="color:#1B3A6B;font-size:13px;text-decoration:none">← Back to list</a></div>`;
+  if(res&&res.error){ const disabled=/not enabled/i.test(res.error); c.innerHTML=back+`<div class="card"><p style="color:${disabled?'#856404':'#dc2626'}">${disabled?'⚠️ Feature not enabled.':cdiEsc(res.error)}</p></div>`; return; }
+  const s=res.study||{}, mols=res.molecules||[];
+  const row=(label,val)=>`<div style="display:flex;padding:4px 0;border-bottom:1px solid #f1f5f9"><div style="width:170px;color:#718096;font-size:12px">${label}</div><div style="flex:1;font-size:13px;color:#1a202c">${val}</div></div>`;
+  const header=`<div class="card">
+    <div style="flex:1"><div style="font-size:16px;font-weight:700;color:#1a202c">${cdiEsc(s.brief_title||'—')}</div>
+      ${s.official_title&&s.official_title!==s.brief_title?`<div style="font-size:12px;color:#718096;margin-top:3px">${cdiEsc(s.official_title)}</div>`:''}
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <a href="https://clinicaltrials.gov/study/${cdiEsc(s.nct_id)}" target="_blank" style="color:#1B3A6B;font-weight:600;text-decoration:none;font-size:13px">${cdiEsc(s.nct_id)} ↗</a>
+        ${cdiPhaseBadge(s.phase)}<span class="badge badge-gray">${cdiEsc(s.overall_status||'—')}</span></div></div></div>`;
+  const details=`<div class="card"><div class="card-title" style="font-size:13px">Study details</div>
+    ${row('Therapeutic area',cdiEsc(s.therapeutic_area||'—'))}${row('Disease',cdiEsc(s.disease||'—'))}
+    ${row('Lead sponsor',cdiEsc(s.lead_sponsor_name||'—')+(s.sponsor_type?` <span class="badge badge-gray">${cdiEsc(s.sponsor_type)}</span>`:''))}
+    ${row('Institution',cdiEsc(s.institution||'—'))}${row('Enrollment',s.enrollment_count!=null?s.enrollment_count:'—')}
+    ${row('Start date',cdiEsc(s.start_date||'—'))}${row('First posted',cdiEsc(s.first_posted_date||'—'))}
+    ${row('Last update',cdiEsc(s.last_update_post_date||'—'))}${row('Expected completion',cdiEsc(s.expected_completion||'—'))}
+    ${row('Conditions',(s.conditions||[]).map(cdiEsc).join(', ')||'—')}${row('Countries',(s.locations_countries||[]).map(cdiEsc).join(', ')||'—')}</div>`;
+  const cls=`<div class="card"><div class="card-title" style="font-size:13px">Classification ${s.classification_confidence!=null?`<span style="font-size:11px;color:#a0aec0;font-weight:400">confidence ${s.classification_confidence}</span>`:''}</div>
+    <div style="font-size:13px;color:#333;line-height:1.6">${cdiEsc(s.classification_summary||'—')}</div>
+    ${(s.biomarkers&&s.biomarkers.length)?`<div style="margin-top:8px">${s.biomarkers.map(b=>`<span class="badge badge-blue" style="margin-right:4px">${cdiEsc(b)}</span>`).join('')}</div>`:''}</div>`;
+  const molRows=mols.map(m=>`<tr>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;font-weight:600">${cdiEsc(m.molecule_name)}</td>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0">${cdiTypeBadge(m.molecule_type)}</td>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;font-size:12px">${cdiEsc(m.cas_number||'—')}</td>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0">${cdiMatchBadge(m.catalog_match_status)}</td>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;font-size:12px">${cdiEsc(m.matched_source||'—')}</td>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;max-width:280px">${cdiEsc(m.inference_rationale||'—')}</td>
+    <td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right">${m.inference_confidence!=null?m.inference_confidence:'—'}</td></tr>`).join('');
+  const molecules=`<div class="card"><div class="card-title" style="font-size:13px">Molecules (${mols.length})</div>
+    ${mols.length?`<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">
+      <tr style="background:#f8fafc"><th style="padding:6px 10px;text-align:left">Molecule</th><th style="padding:6px 10px;text-align:left">Type</th><th style="padding:6px 10px;text-align:left">CAS</th><th style="padding:6px 10px;text-align:left">Catalog</th><th style="padding:6px 10px;text-align:left">Source</th><th style="padding:6px 10px;text-align:left">Rationale</th><th style="padding:6px 10px;text-align:right">Conf</th></tr>
+      ${molRows}</table></div>`:'<p style="color:#718096">No molecules inferred (non-drug study or inference skipped).</p>'}</div>`;
+  const raw=`<div class="card"><button onclick="cdiToggleRaw()" class="btn-outline" style="padding:5px 12px;font-size:12px">${st.includeRaw?'Hide':'Show'} raw JSON</button>
+    ${st.includeRaw?`<pre style="margin-top:10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px;overflow:auto;font-size:11px;max-height:400px">${cdiEsc(JSON.stringify(s.raw_json,null,2))}</pre>`:''}</div>`;
+  c.innerHTML=back+header+details+cls+molecules+raw;
 }
 </script>
