@@ -5282,15 +5282,14 @@ if(typeof pages !== 'undefined') {
 /* ── Clinical Demand Intelligence (Step 9) ─────────────────────────────────── */
 function cdiEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 const CDI_TAS = ['Oncology','Metabolic/Endocrine','Cardiovascular','Neurology/CNS','Infectious Disease','Immunology/Inflammation','Respiratory','Dermatology','Rare Disease','Other'];
-function cdiState(){ if(!window._cdi) window._cdi={view:'list',detail:null,offset:0,limit:25,filters:{phase:'',therapeutic_area:'',catalog_match_status:''},includeRaw:false,running:false}; return window._cdi; }
+function cdiState(){ if(!window._cdi) window._cdi={view:'list',detail:null,offset:0,limit:25,filters:{phase:'',therapeutic_area:'',catalog_match_status:''},running:false}; return window._cdi; }
 function cdiPhaseBadge(p){ return p?`<span class="badge badge-blue">${cdiEsc(p)}</span>`:'<span style="color:#a0aec0">—</span>'; }
 function cdiMatchBadge(s){ const m={catalog_match:'badge-green',sourcing_opportunity:'badge-amber',unknown:'badge-gray'}; return `<span class="badge ${m[s]||'badge-gray'}">${cdiEsc((s||'unknown').replace(/_/g,' '))}</span>`; }
 function cdiTypeBadge(t){ return `<span class="badge badge-blue">${cdiEsc(t||'other')}</span>`; }
 function cdiSetFilter(key,val){ const st=cdiState(); st.filters[key]=val; st.offset=0; pages['clinical-demand-intelligence'](); }
 function cdiPage(delta){ const st=cdiState(); st.offset=Math.max(0, st.offset + delta*st.limit); pages['clinical-demand-intelligence'](); }
-function cdiOpen(id){ const st=cdiState(); st.view='detail'; st.detail=id; st.includeRaw=false; pages['clinical-demand-intelligence'](); }
+function cdiOpen(id){ const st=cdiState(); st.view='detail'; st.detail=id; pages['clinical-demand-intelligence'](); }
 function cdiBack(){ const st=cdiState(); st.view='list'; st.detail=null; pages['clinical-demand-intelligence'](); }
-function cdiToggleRaw(){ const st=cdiState(); st.includeRaw=!st.includeRaw; pages['clinical-demand-intelligence'](); }
 async function cdiRun(){
   const st=cdiState(); if(st.running) return;
   const real=!!(document.getElementById('cdi-run-real')||{}).checked;
@@ -5375,7 +5374,7 @@ async function cdiRenderList(c, st){
 
 async function cdiRenderDetail(c, st){
   c.innerHTML='<p style="color:#888;padding:20px">Loading study…</p>';
-  let res; try{ res=await API('/research-intelligence/studies/'+encodeURIComponent(st.detail)+(st.includeRaw?'?include_raw=true':'')); }catch(e){ res={error:e.message}; }
+  let res; try{ res=await API('/research-intelligence/studies/'+encodeURIComponent(st.detail)); }catch(e){ res={error:e.message}; }
   const back=`<div style="margin-bottom:12px"><a href="#" onclick="cdiBack();return false" style="color:#1B3A6B;font-size:13px;text-decoration:none">← Back to list</a></div>`;
   if(res&&res.error){ const disabled=/not enabled/i.test(res.error); c.innerHTML=back+`<div class="card"><p style="color:${disabled?'#856404':'#dc2626'}">${disabled?'⚠️ Feature not enabled.':cdiEsc(res.error)}</p></div>`; return; }
   const s=res.study||{}, mols=res.molecules||[];
@@ -5408,8 +5407,6 @@ async function cdiRenderDetail(c, st){
     ${mols.length?`<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">
       <tr style="background:#f8fafc"><th style="padding:6px 10px;text-align:left">Molecule</th><th style="padding:6px 10px;text-align:left">Type</th><th style="padding:6px 10px;text-align:left">CAS</th><th style="padding:6px 10px;text-align:left">Catalog</th><th style="padding:6px 10px;text-align:left">Source</th><th style="padding:6px 10px;text-align:left">Rationale</th><th style="padding:6px 10px;text-align:right">Conf</th></tr>
       ${molRows}</table></div>`:'<p style="color:#718096">No molecules inferred (non-drug study or inference skipped).</p>'}</div>`;
-  const raw=`<div class="card"><button onclick="cdiToggleRaw()" class="btn-outline" style="padding:5px 12px;font-size:12px">${st.includeRaw?'Hide':'Show'} raw JSON</button>
-    ${st.includeRaw?`<pre style="margin-top:10px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px;overflow:auto;font-size:11px;max-height:400px">${cdiEsc(JSON.stringify(s.raw_json,null,2))}</pre>`:''}</div>`;
-  c.innerHTML=back+header+details+cls+molecules+raw;
+  c.innerHTML=back+header+details+cls+molecules;
 }
 </script>
