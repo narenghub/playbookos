@@ -4013,7 +4013,7 @@ function riParseStudyArrays(row) {
 // GET /studies — paginated list. Molecule COUNTS only (full molecules in detail).
 router.get('/research-intelligence/studies', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
-    if (!researchIntelEnabled()) return res.status(503).json({ error: 'Clinical Demand Intelligence is not enabled (RESEARCH_INTEL_ENABLED)' });
+    if (!researchIntelEnabled()) return res.status(503).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Clinical Demand Intelligence is not enabled (RESEARCH_INTEL_ENABLED)' });
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
     const offset = Math.max(0, parseInt(req.query.offset) || 0);
 
@@ -4044,7 +4044,9 @@ router.get('/research-intelligence/studies', authMiddleware, requireTier('intell
              (SELECT COUNT(*)::int FROM study_molecules sm WHERE sm.study_id = cs.id AND sm.catalog_match_status = 'sourcing_opportunity') AS sourcing_opportunity_count
       FROM clinical_studies cs
       ${whereSql}
-      ORDER BY cs.last_update_post_date DESC NULLS LAST
+      -- Tiebreaker on cs.id ensures deterministic pagination when many studies share
+      -- last_update_post_date (common — CT.gov updates in batches by date)
+      ORDER BY cs.last_update_post_date DESC NULLS LAST, cs.id
       LIMIT $${limIdx} OFFSET $${offIdx}`, pageParams)).rows;
 
     const studies = rows.map(riParseStudyArrays);
@@ -4059,10 +4061,10 @@ router.get('/research-intelligence/studies', authMiddleware, requireTier('intell
 // excluded unless ?include_raw=true.
 router.get('/research-intelligence/studies/:id', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
-    if (!researchIntelEnabled()) return res.status(503).json({ error: 'Clinical Demand Intelligence is not enabled (RESEARCH_INTEL_ENABLED)' });
+    if (!researchIntelEnabled()) return res.status(503).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Clinical Demand Intelligence is not enabled (RESEARCH_INTEL_ENABLED)' });
     const includeRaw = String(req.query.include_raw).toLowerCase() === 'true';
     const row = (await query(`SELECT * FROM clinical_studies cs WHERE cs.id = $1 OR cs.nct_id = $1 LIMIT 1`, [req.params.id])).rows[0];
-    if (!row) return res.status(404).json({ error: 'Study not found' });
+    if (!row) return res.status(404).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Study not found' });
 
     const study = riParseStudyArrays(row);
     // JSON.stringify drops undefined keys, so raw_json simply won't appear unless requested.
@@ -4081,7 +4083,10 @@ router.get('/research-intelligence/studies/:id', authMiddleware, requireTier('in
 // defaults TRUE and only an explicit false runs live. Runs even when the flag is off.
 router.post('/research-intelligence/run', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const maxStudies = Math.min(20, Math.max(1, parseInt(req.body?.maxStudies) || 10));
+    // Number.isFinite guard so maxStudies=0 clamps to the floor of 1 (not the
+    // default 10 — `0 || 10` is the classic falsy-value gotcha); NaN/undefined → 10.
+    const rawMax = parseInt(req.body?.maxStudies);
+    const maxStudies = Math.min(20, Math.max(1, Number.isFinite(rawMax) ? rawMax : 10));
     const dryRun = !(req.body?.dryRun === false || req.body?.dryRun === 'false'); // default true; explicit false → live
     const flagOn = researchIntelEnabled();
     const summary = await runResearchIntelIngest({ maxStudies, dryRun });
