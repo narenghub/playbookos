@@ -17,6 +17,7 @@ const { runProcurementAgent, scoreAndRankSuppliers } = require('../lib/agents/pr
 const { runMeetAgent, analyzeAndStore, runStandup, detectStandups, syncWorkspaceMeetings, pollGeminiMeetingNotes } = require('../lib/agents/meet-agent');
 const workspaceActivity = require('../lib/agents/workspace-activity');
 const { runResearchAgent } = require('../lib/agents/research-agent');
+const { runResearchIntelIngest } = require('../lib/agents/research-intelligence');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
 const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent, pollSalesEmailbox, handleAcceptance, markPaymentReceived, getPipeline, handleStripeEvent } = require('../lib/agents/inquiry-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
@@ -3981,4 +3982,114 @@ router.get('/linkedin/analytics', authMiddleware, requireTier('intelligence'), a
     `)).rows;
     res.json({ totals, recent });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Clinical Demand Intelligence (Step 7) ─────────────────────────────────────
+// Additive, isolated block. GET endpoints are tier-gated (intelligence) AND
+// feature-flag-gated (503 when RESEARCH_INTEL_ENABLED != 'true'). The admin /run
+// endpoint is admin-only and intentionally NOT flag-gated — admins can invoke the
+// orchestrator for testing even while the flag (and thus the nightly cron) is off.
+// api_version is stamped on every response so a future v2 can change shapes without
+// breaking existing clients.
+const RESEARCH_INTEL_API_VERSION = 'research-intel-v1';
+function researchIntelEnabled() {
+  return String(process.env.RESEARCH_INTEL_ENABLED).toLowerCase() === 'true';
+}
+// clinical_studies stores array/object columns as JSON.stringify'd TEXT; parse them
+// back for the client, falling back to a safe default on any malformed value.
+function riSafeParse(str, fallback) { try { return JSON.parse(str); } catch { return fallback; } }
+function riParseStudyArrays(row) {
+  return {
+    ...row,
+    conditions: riSafeParse(row.conditions, []),
+    interventions: riSafeParse(row.interventions, []),
+    molecules_mentioned: riSafeParse(row.molecules_mentioned, []),
+    collaborators: riSafeParse(row.collaborators, []),
+    locations_countries: riSafeParse(row.locations_countries, []),
+    biomarkers: riSafeParse(row.biomarkers, []),
+  };
+}
+
+// GET /studies — paginated list. Molecule COUNTS only (full molecules in detail).
+router.get('/research-intelligence/studies', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    if (!researchIntelEnabled()) return res.status(503).json({ error: 'Clinical Demand Intelligence is not enabled (RESEARCH_INTEL_ENABLED)' });
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
+    const offset = Math.max(0, parseInt(req.query.offset) || 0);
+
+    const where = [];
+    const params = [];
+    if (req.query.phase) { params.push(req.query.phase); where.push(`cs.phase = $${params.length}`); }
+    if (req.query.therapeutic_area) { params.push(req.query.therapeutic_area); where.push(`cs.therapeutic_area = $${params.length}`); }
+    if (req.query.catalog_match_status) {
+      params.push(req.query.catalog_match_status);
+      where.push(`EXISTS (SELECT 1 FROM study_molecules sm WHERE sm.study_id = cs.id AND sm.catalog_match_status = $${params.length})`);
+    }
+    const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+
+    const total = Number((await query(`SELECT COUNT(*)::int AS c FROM clinical_studies cs ${whereSql}`, params)).rows[0].c);
+
+    const pageParams = params.slice();
+    pageParams.push(limit); const limIdx = pageParams.length;
+    pageParams.push(offset); const offIdx = pageParams.length;
+    // raw_json is deliberately NOT selected here (large; detail endpoint opt-in only).
+    const rows = (await query(`
+      SELECT cs.id, cs.nct_id, cs.brief_title, cs.official_title, cs.overall_status, cs.phase, cs.study_type,
+             cs.conditions, cs.interventions, cs.molecules_mentioned, cs.lead_sponsor_name, cs.sponsor_type,
+             cs.collaborators, cs.institution, cs.enrollment_count, cs.locations_countries, cs.start_date,
+             cs.first_posted_date, cs.last_update_post_date, cs.expected_completion, cs.therapeutic_area, cs.disease,
+             cs.biomarkers, cs.classification_summary, cs.classification_confidence, cs.classify_prompt_version,
+             cs.ingested_at, cs.classified_at, cs.created_at,
+             (SELECT COUNT(*)::int FROM study_molecules sm WHERE sm.study_id = cs.id) AS molecule_count,
+             (SELECT COUNT(*)::int FROM study_molecules sm WHERE sm.study_id = cs.id AND sm.catalog_match_status = 'sourcing_opportunity') AS sourcing_opportunity_count
+      FROM clinical_studies cs
+      ${whereSql}
+      ORDER BY cs.last_update_post_date DESC NULLS LAST
+      LIMIT $${limIdx} OFFSET $${offIdx}`, pageParams)).rows;
+
+    const studies = rows.map(riParseStudyArrays);
+    res.json({
+      api_version: RESEARCH_INTEL_API_VERSION,
+      studies, total_count: total, has_more: offset + rows.length < total, limit, offset,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /studies/:id — single study (by id OR nct_id) + all its molecules. raw_json
+// excluded unless ?include_raw=true.
+router.get('/research-intelligence/studies/:id', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    if (!researchIntelEnabled()) return res.status(503).json({ error: 'Clinical Demand Intelligence is not enabled (RESEARCH_INTEL_ENABLED)' });
+    const includeRaw = String(req.query.include_raw).toLowerCase() === 'true';
+    const row = (await query(`SELECT * FROM clinical_studies cs WHERE cs.id = $1 OR cs.nct_id = $1 LIMIT 1`, [req.params.id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'Study not found' });
+
+    const study = riParseStudyArrays(row);
+    // JSON.stringify drops undefined keys, so raw_json simply won't appear unless requested.
+    study.raw_json = includeRaw ? riSafeParse(row.raw_json, null) : undefined;
+
+    const molecules = (await query(
+      `SELECT * FROM study_molecules WHERE study_id = $1 ORDER BY inference_confidence DESC NULLS LAST`,
+      [row.id]
+    )).rows;
+    res.json({ api_version: RESEARCH_INTEL_API_VERSION, study, molecules });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /run — admin-only manual orchestrator invocation. Synchronous. Defaults to a
+// small, safe dry run. maxStudies clamped 1-20 (cron does the nightly 50); dryRun
+// defaults TRUE and only an explicit false runs live. Runs even when the flag is off.
+router.post('/research-intelligence/run', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const maxStudies = Math.min(20, Math.max(1, parseInt(req.body?.maxStudies) || 10));
+    const dryRun = !(req.body?.dryRun === false || req.body?.dryRun === 'false'); // default true; explicit false → live
+    const flagOn = researchIntelEnabled();
+    const summary = await runResearchIntelIngest({ maxStudies, dryRun });
+    res.json({
+      api_version: RESEARCH_INTEL_API_VERSION,
+      flag_enabled: flagOn,
+      note: flagOn ? undefined : 'RESEARCH_INTEL_ENABLED is off; ran via admin override (nightly cron remains disabled).',
+      ...summary,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
