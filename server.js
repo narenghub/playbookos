@@ -17,6 +17,7 @@ const { runMorningBriefing, runPerformanceCheck, runEscalationCheck, workdayStat
 const { runWeeklyLinkedInCampaign } = require('./src/lib/agents/linkedin-agent');
 const { runEmailEngine } = require('./src/lib/agents/email-engine');
 const { processApolloReplies } = require('./src/lib/agents/sales-agent');
+const { runResearchIntelIngest } = require('./src/lib/agents/research-intelligence');
 const { runProcurementAgent, checkNoResponse, seedSupplierDatabase } = require('./src/lib/agents/procurement-agent');
 const { runMeetAgent } = require('./src/lib/agents/meet-agent');
 const { runResearchAgent, runWeeklyDigest } = require('./src/lib/agents/research-agent');
@@ -340,6 +341,20 @@ cron.schedule('0 23 * * *', withAlerts('nightly-23cst-research-agent', async () 
 cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8cst-research-digest', async () => {
   const r = await runWeeklyDigest();
   console.log(`[CRON] Research digest — ${r.findings} findings, sent=${r.sent}`);
+}), CST);
+
+// Daily 2am CST — Clinical Demand Intelligence: ingest ClinicalTrials.gov studies,
+// classify → infer molecules → catalog-match. Flag-gated no-op unless
+// RESEARCH_INTEL_ENABLED='true'; orchestrator never throws (returns errors[]).
+cron.schedule('0 2 * * *', withAlerts('daily-2cst-research-intel', async () => {
+  if (String(process.env.RESEARCH_INTEL_ENABLED).toLowerCase() !== 'true') {
+    console.log('[CRON] Clinical Demand Intelligence skipped (RESEARCH_INTEL_ENABLED != true)');
+    return;
+  }
+  console.log('[CRON] Clinical Demand Intelligence starting...');
+  const r = await runResearchIntelIngest({ maxStudies: 50, dryRun: false });
+  console.log(`[CRON] Clinical Demand Intelligence done — ${r.studies_new} new studies, ${r.molecules_persisted} molecules, ${r.sourcing_opportunities} opps, $${r.cost_usd}, watermark=${r.watermark_after}, ${r.errors.length} errors`);
+  if (r.errors.length) console.warn('[CRON] RI errors:', r.errors.slice(0, 5));
 }), CST);
 
 // Monday 11am CST — Meet Agent: process weekend/Monday-morning standup recordings.
