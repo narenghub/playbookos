@@ -5374,10 +5374,13 @@ async function cdiRenderList(c, st){
 
 async function cdiRenderDetail(c, st){
   c.innerHTML='<p style="color:#888;padding:20px">Loading study…</p>';
-  let res; try{ res=await API('/research-intelligence/studies/'+encodeURIComponent(st.detail)); }catch(e){ res={error:e.message}; }
+  // Eager parallel fetch: study detail + its resolved contacts/outreach (credit-free GET).
+  let res, cres;
+  try{ [res, cres] = await Promise.all([ API('/research-intelligence/studies/'+encodeURIComponent(st.detail)).catch(e=>({error:e.message})), API('/research-intelligence/studies/'+encodeURIComponent(st.detail)+'/contacts').catch(()=>null) ]); }catch(e){ res={error:e.message}; }
   const back=`<div style="margin-bottom:12px"><a href="#" onclick="cdiBack();return false" style="color:#1B3A6B;font-size:13px;text-decoration:none">← Back to list</a></div>`;
   if(res&&res.error){ const disabled=/not enabled/i.test(res.error); c.innerHTML=back+`<div class="card"><p style="color:${disabled?'#856404':'#dc2626'}">${disabled?'⚠️ Feature not enabled.':cdiEsc(res.error)}</p></div>`; return; }
   const s=res.study||{}, mols=res.molecules||[];
+  window._cdi.study = { id: st.detail, nct: s.nct_id, sponsor: s.lead_sponsor_name }; // context for the contacts flow
   const row=(label,val)=>`<div style="display:flex;padding:4px 0;border-bottom:1px solid #f1f5f9"><div style="width:170px;color:#718096;font-size:12px">${label}</div><div style="flex:1;font-size:13px;color:#1a202c">${val}</div></div>`;
   const header=`<div class="card">
     <div style="flex:1"><div style="font-size:16px;font-weight:700;color:#1a202c">${cdiEsc(s.brief_title||'—')}</div>
@@ -5407,6 +5410,158 @@ async function cdiRenderDetail(c, st){
     ${mols.length?`<div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">
       <tr style="background:#f8fafc"><th style="padding:6px 10px;text-align:left">Molecule</th><th style="padding:6px 10px;text-align:left">Type</th><th style="padding:6px 10px;text-align:left">CAS</th><th style="padding:6px 10px;text-align:left">Catalog</th><th style="padding:6px 10px;text-align:left">Source</th><th style="padding:6px 10px;text-align:left">Rationale</th><th style="padding:6px 10px;text-align:right">Conf</th></tr>
       ${molRows}</table></div>`:'<p style="color:#718096">No molecules inferred (non-drug study or inference skipped).</p>'}</div>`;
-  c.innerHTML=back+header+details+cls+molecules;
+  c.innerHTML=back+header+details+cls+molecules+cdiContactsSection(cres, s);
+}
+
+/* ── Contacts & Outreach (Phase 3.6) — NEVER auto-resolve; human picks the org ── */
+function cdiFmtNum(n){ return (n == null || isNaN(Number(n))) ? null : Number(n).toLocaleString(); }
+function cdiRoleBadge(role){
+  const map = { procurement: ['badge-blue', 'Procurement'], rd_cmc: ['badge-green', 'R&D / CMC'] };
+  const [cls, label] = map[role] || ['badge-gray', role || 'other'];
+  return `<span class="badge ${cls}">${cdiEsc(label)}</span>`;
+}
+function cdiCopyText(btn){
+  const text = btn.dataset.copy || '';
+  const done = () => { const o = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = o; }, 2000); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(() => {});
+}
+function cdiCopyOutreach(btn){
+  const box = btn.closest('.cdi-outreach'); if (!box) return;
+  const subject = box.dataset.subject || '';
+  const body = (box.querySelector('textarea') || {}).value || '';
+  const text = 'Subject: ' + subject + '\n\n' + body;
+  const done = () => { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy email'; }, 2000); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(() => {});
+}
+
+// Section HTML: empty state (no org) or populated (org card + contacts + outreach).
+function cdiContactsSection(cres, s){
+  const org = cres && cres.organization;
+  const sponsor = (s && s.lead_sponsor_name) || '';
+  // Transient partial-resolve errors banner (set by cdiSelectOrg, shown once).
+  let errBanner = '';
+  const re = window._cdi && window._cdi.resolveErrors;
+  if (re && window._cdi.study && re.id === window._cdi.study.id && re.errors.length) {
+    errBanner = `<div style="background:#fff8ec;border:1px solid #f0c675;border-radius:6px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#8a5a00"><strong>⚠️ Partial results:</strong> ${re.errors.map(cdiEsc).join('; ')}</div>`;
+    window._cdi.resolveErrors = null;
+  }
+  if (!org) {
+    return `<div class="card"><div class="card-title" style="font-size:13px">🔗 Contacts &amp; Outreach</div>${errBanner}
+      <p style="color:#718096;font-size:13px;margin-bottom:8px">No contacts yet.</p>
+      <button class="btn-primary" style="padding:8px 16px" onclick="cdiFindContacts(false)">Find Contacts</button>
+      <p style="font-size:12px;color:#a0aec0;margin-top:8px">Searches Apollo for procurement + R&amp;D contacts at ${cdiEsc(sponsor) || 'the sponsor'} — you confirm the company before anything is spent.</p></div>`;
+  }
+  const emp = cdiFmtNum(org.estimated_num_employees);
+  const orgCard = `<div style="display:flex;align-items:center;gap:12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-bottom:12px">
+    ${org.logo_url ? `<img src="${cdiEsc(org.logo_url)}" alt="" style="width:36px;height:36px;border-radius:6px;object-fit:contain;background:#fff">` : ''}
+    <div style="flex:1"><div style="font-weight:700;font-size:14px">${cdiEsc(org.display_name || org.name || '—')}</div>
+      <div style="font-size:12px"><span style="color:#1B3A6B;font-weight:700">${cdiEsc(org.primary_domain || '—')}</span>${emp ? ` · <span style="color:#4a5568">${emp} employees</span>` : ''}</div></div>
+    <button class="btn-outline" style="padding:5px 12px;font-size:12px" onclick="cdiReResolve()">Re-resolve</button></div>`;
+
+  const outByContact = {}; (cres.outreach || []).forEach(o => { outByContact[o.contact_id] = o; });
+  const cards = (cres.contacts || []).map(c => {
+    const o = outByContact[c.id];
+    const emailLine = c.email
+      ? `<a href="mailto:${cdiEsc(c.email)}" style="color:#1B3A6B">${cdiEsc(c.email)}</a> <button class="btn-outline" style="padding:2px 8px;font-size:11px" data-copy="${cdiEsc(c.email)}" onclick="cdiCopyText(this)">Copy</button>`
+      : '<span style="color:#a0aec0">no email</span>';
+    const phoneLine = c.phone ? `<div style="font-size:12px;color:#4a5568;margin-top:2px">${cdiEsc(c.phone)}</div>` : '';
+    const liLine = c.linkedin_url ? `<div style="margin-top:2px"><a href="${cdiEsc(c.linkedin_url)}" target="_blank" style="font-size:12px;color:#1B3A6B">LinkedIn ↗</a></div>` : '';
+    const outreachBlock = o
+      ? `<div class="cdi-outreach" data-subject="${cdiEsc(o.subject || '')}" style="margin-top:8px;border-top:1px dashed #e2e8f0;padding-top:8px">
+          <div style="font-size:12px;color:#718096">Subject: <strong style="color:#1a202c">${cdiEsc(o.subject || '')}</strong></div>
+          <textarea readonly style="width:100%;min-height:150px;margin-top:6px;font-size:12px;font-family:inherit;border:1px solid #e2e8f0;border-radius:6px;padding:8px;resize:vertical">${cdiEsc(o.body || '')}</textarea>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+            <button class="btn-primary" style="padding:5px 14px;font-size:12px" onclick="cdiCopyOutreach(this)">Copy email</button>
+            ${(o.referenced_molecules && o.referenced_molecules.length) ? `<span style="font-size:11px;color:#a0aec0">Referenced: ${o.referenced_molecules.map(cdiEsc).join(', ')}</span>` : ''}
+          </div></div>`
+      : '<div style="margin-top:8px;font-size:12px;color:#a0aec0">No outreach (no sourceable molecules for this study).</div>';
+    return `<div style="border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-bottom:10px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;flex-wrap:wrap">
+        <div><div style="font-weight:700;font-size:13px">${cdiEsc(c.full_name || '—')}</div>
+          <div style="font-size:12px;color:#718096">${cdiEsc(c.title || '—')}</div></div>
+        ${cdiRoleBadge(c.role_category)}</div>
+      <div style="margin-top:6px;font-size:12px">${emailLine}</div>${phoneLine}${liLine}${outreachBlock}</div>`;
+  }).join('') || '<p style="color:#718096;font-size:13px">No contacts enriched.</p>';
+
+  return `<div class="card"><div class="card-title" style="font-size:13px">🔗 Contacts &amp; Outreach</div>${errBanner}${orgCard}${cards}</div>`;
+}
+
+// ── Modal (ESC + click-outside) ──
+function cdiCloseModal(){
+  const ov = document.getElementById('cdi-modal'); if (ov) ov.remove();
+  if (window._cdiEsc) { document.removeEventListener('keydown', window._cdiEsc); window._cdiEsc = null; }
+}
+function cdiOpenModal(inner){
+  cdiCloseModal();
+  const ov = document.createElement('div');
+  ov.id = 'cdi-modal';
+  ov.style = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;display:flex;align-items:center;justify-content:center;padding:16px';
+  ov.onclick = (e) => { if (e.target === ov) cdiCloseModal(); };
+  ov.innerHTML = `<div id="cdi-modal-card" class="card" style="max-width:560px;width:100%;max-height:88vh;overflow-y:auto">${inner}</div>`;
+  document.body.appendChild(ov);
+  window._cdiEsc = (e) => { if (e.key === 'Escape') cdiCloseModal(); };
+  document.addEventListener('keydown', window._cdiEsc);
+}
+function cdiSetModal(inner){ const card = document.getElementById('cdi-modal-card'); if (card) card.innerHTML = inner; else cdiOpenModal(inner); }
+
+// ── Picker flow ──
+async function cdiFindContacts(force){
+  const st = window._cdi.study; if (!st) return;
+  cdiOpenModal('<div style="text-align:center;padding:24px;color:#718096">Searching Apollo…</div>');
+  let r; try { r = await API('/research-intelligence/studies/' + encodeURIComponent(st.id) + '/find-contacts', { method: 'POST', body: JSON.stringify({}) }); } catch (e) { r = { error: e.message }; }
+  window._cdiPicker = { candidates: (r && r.candidates) || [], resolution: r && r.resolution, force: !!force, error: r && r.error };
+  cdiRenderPicker();
+}
+async function cdiDomainSearch(){
+  const st = window._cdi.study; const input = document.getElementById('cdi-domain-input');
+  const domain = input ? input.value.trim() : ''; if (!domain) return;
+  cdiSetModal('<div style="text-align:center;padding:24px;color:#718096">Looking up ' + cdiEsc(domain) + '…</div>');
+  let r; try { r = await API('/research-intelligence/studies/' + encodeURIComponent(st.id) + '/find-contacts', { method: 'POST', body: JSON.stringify({ domain }) }); } catch (e) { r = { error: e.message }; }
+  window._cdiPicker = { candidates: (r && r.candidates) || [], resolution: r && r.resolution, force: window._cdiPicker.force, error: r && r.error };
+  cdiRenderPicker();
+}
+function cdiRenderPicker(){
+  const p = window._cdiPicker, st = window._cdi.study;
+  const warn = `<div style="background:#fef3c7;border:2px solid #f59e0b;border-radius:8px;padding:10px 12px;margin:10px 0;font-size:13px;color:#92400e;font-weight:600">⚠️ Verify this is the right company — a wrong pick sends outreach to unrelated firms.</div>`;
+  let candHtml;
+  if (p.error) candHtml = `<p style="color:#dc2626;font-size:13px">${cdiEsc(p.error)} — try the domain override below.</p>`;
+  else if (!p.candidates.length) candHtml = `<p style="color:#856404;font-size:13px">No candidates found. Use the domain override below.</p>`;
+  else candHtml = p.candidates.map((o, i) => {
+    const emp = cdiFmtNum(o.estimated_num_employees);
+    return `<div style="display:flex;align-items:center;gap:10px;border:1px solid #e2e8f0;border-radius:8px;padding:10px;margin-bottom:8px">
+      ${o.logo_url ? `<img src="${cdiEsc(o.logo_url)}" alt="" style="width:34px;height:34px;border-radius:6px;object-fit:contain">` : ''}
+      <div style="flex:1"><div style="font-weight:700;font-size:14px">${cdiEsc(o.name || '—')}</div>
+        <div style="font-size:13px"><span style="color:#1B3A6B;font-weight:700">${cdiEsc(o.primary_domain || '(no domain)')}</span>${emp ? ` · <span style="color:#4a5568">${emp} employees</span>` : ''}</div></div>
+      <button class="btn-primary" style="padding:6px 14px;font-size:12px" onclick="cdiSelectOrg(${i})">Select this</button></div>`;
+  }).join('');
+
+  cdiSetModal(`
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div class="card-title" style="margin:0">Select the correct ${cdiEsc(st.sponsor || 'company')}</div>
+      <button class="btn-outline" style="padding:4px 10px;font-size:12px" onclick="cdiCloseModal()">✕</button></div>
+    ${warn}${candHtml}
+    <div style="border-top:1px solid #e2e8f0;margin-top:10px;padding-top:10px">
+      <div style="font-size:13px;color:#4a5568;margin-bottom:6px">Not seeing the right company? Enter their domain:</div>
+      <div style="display:flex;gap:8px"><input id="cdi-domain-input" placeholder="example.com" style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px">
+        <button class="btn-outline" style="padding:7px 14px;font-size:12px" onclick="cdiDomainSearch()">Use this domain</button></div></div>
+    <p style="font-size:11px;color:#a0aec0;margin-top:10px">Selecting will use ~4 Apollo credits + ~$0.02 for AI-generated outreach.</p>`);
+}
+async function cdiSelectOrg(index){
+  const p = window._cdiPicker, st = window._cdi.study;
+  const org = p.candidates[index]; if (!org) return;
+  cdiSetModal(`<div style="text-align:center;padding:26px"><div style="font-size:14px;color:#4a5568">Working — enriching contacts and generating outreach…</div><div style="font-size:12px;color:#a0aec0;margin-top:6px">This can take up to ~60 seconds — please keep this open.</div></div>`);
+  let r; try { r = await API('/research-intelligence/studies/' + encodeURIComponent(st.id) + '/resolve-org', { method: 'POST', body: JSON.stringify({ org, resolution_metadata: p.resolution, user_selected_index: index, force: p.force }) }); } catch (e) { r = { error: e.message }; }
+  cdiCloseModal();
+  if (r && r.error) { showToast(r.error, 'error', 5000); }
+  else {
+    window._cdi.resolveErrors = { id: st.id, errors: (r && r.errors) || [] };
+    const on = r.organization ? (r.organization.display_name || r.organization.name) : '';
+    showToast(`Resolved ${on} — ${(r.contacts || []).length} contacts, ${r.outreach_generated || 0} emails (${r.credits_used || 0} credits, $${r.cost_usd || 0})`, 'success', 6000);
+  }
+  pages['clinical-demand-intelligence'](); // re-render detail (eager GET refreshes the section)
+}
+function cdiReResolve(){
+  if (!confirm('Re-resolve will search Apollo again, re-spend credits, and regenerate outreach. Continue?')) return;
+  cdiFindContacts(true);
 }
 </script>
