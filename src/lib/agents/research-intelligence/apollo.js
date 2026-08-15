@@ -15,6 +15,7 @@
 
 const APOLLO_BASE = 'https://api.apollo.io/api/v1';
 const ORG_SEARCH = '/mixed_companies/search';
+const ORG_ENRICH = '/organizations/enrich';       // domain -> canonical org (probe-verified)
 const PEOPLE_SEARCH = '/mixed_people/api_search'; // NOT the deprecated /mixed_people/search
 const PEOPLE_ENRICH = '/people/match';
 
@@ -40,6 +41,22 @@ async function apolloPost(path, body, apiKey) {
   return { ok: res.ok, status: res.status, json, text };
 }
 
+// Shape a raw Apollo org into our flat candidate record (shared by search + enrich).
+function mapOrg(o) {
+  if (!o) return null;
+  return {
+    apollo_org_id: o.id || null,
+    name: o.name || null,
+    primary_domain: o.primary_domain || null,
+    website_url: o.website_url || null,
+    linkedin_url: o.linkedin_url || null,
+    primary_phone: phoneNumber(o.primary_phone),
+    estimated_num_employees: (typeof o.estimated_num_employees === 'number') ? o.estimated_num_employees : null,
+    logo_url: o.logo_url || null,
+    founded_year: (typeof o.founded_year === 'number') ? o.founded_year : null,
+  };
+}
+
 // Org disambiguation candidates by (normalized) name. 1 credit/page.
 async function searchOrganizations(queryName, { perPage = 5, apiKey = process.env.APOLLO_API_KEY } = {}) {
   if (!apiKey) return { error: 'APOLLO_API_KEY not configured', credits_used: 0 };
@@ -51,18 +68,24 @@ async function searchOrganizations(queryName, { perPage = 5, apiKey = process.en
   catch (e) { return { error: 'Apollo org search failed: ' + e.message, credits_used: 0 }; }
   if (!r.ok) return { error: `Apollo org search ${r.status}: ${(r.text || '').slice(0, 200)}`, credits_used: 0 };
   const raw = (r.json && (r.json.organizations || r.json.accounts)) || [];
-  const organizations = raw.slice(0, perPage).map(o => ({
-    apollo_org_id: o.id || null,
-    name: o.name || null,
-    primary_domain: o.primary_domain || null,
-    website_url: o.website_url || null,
-    linkedin_url: o.linkedin_url || null,
-    primary_phone: phoneNumber(o.primary_phone),
-    estimated_num_employees: (typeof o.estimated_num_employees === 'number') ? o.estimated_num_employees : null,
-    logo_url: o.logo_url || null,
-    founded_year: (typeof o.founded_year === 'number') ? o.founded_year : null,
-  })).filter(o => o.apollo_org_id);
+  const organizations = raw.slice(0, perPage).map(mapOrg).filter(o => o && o.apollo_org_id);
   return { organizations, credits_used: 1 };
+}
+
+// Tier-B resolution: domain -> canonical org (the real HQ, with true employee count).
+// Probe-verified: mixed_companies/search does NOT do domain lookup, but
+// /organizations/enrich does. ~1 credit.
+async function enrichOrganizationByDomain(domain, { apiKey = process.env.APOLLO_API_KEY } = {}) {
+  if (!apiKey) return { error: 'APOLLO_API_KEY not configured', credits_used: 0 };
+  const d = String(domain || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+  if (!d) return { error: 'domain required', credits_used: 0 };
+  let r;
+  try { r = await apolloPost(ORG_ENRICH, { domain: d }, apiKey); }
+  catch (e) { return { error: 'Apollo org enrich failed: ' + e.message, credits_used: 0 }; }
+  if (!r.ok) return { error: `Apollo org enrich ${r.status}: ${(r.text || '').slice(0, 200)}`, credits_used: 0 };
+  const org = mapOrg(r.json && r.json.organization);
+  if (!org || !org.apollo_org_id) return { organization: null, credits_used: 1 };
+  return { organization: org, credits_used: 1 };
 }
 
 // Contacts at an org filtered by role titles. FREE (no credit). Returns
@@ -114,7 +137,7 @@ async function enrichContact(apolloContactId, { apiKey = process.env.APOLLO_API_
 }
 
 module.exports = {
-  searchOrganizations, searchContactsByOrg, enrichContact,
+  searchOrganizations, enrichOrganizationByDomain, searchContactsByOrg, enrichContact,
   PROCUREMENT_TITLES, RD_CMC_TITLES,
-  APOLLO_BASE, ORG_SEARCH, PEOPLE_SEARCH, PEOPLE_ENRICH,
+  APOLLO_BASE, ORG_SEARCH, ORG_ENRICH, PEOPLE_SEARCH, PEOPLE_ENRICH,
 };

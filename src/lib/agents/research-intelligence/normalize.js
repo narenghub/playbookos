@@ -21,4 +21,13 @@ function normalize(name) {
   return s.replace(/\s+/g, ' ').trim();
 }
 
-module.exports = { normalize, LEGAL_SUFFIXES };
+// First significant token of a normalized name — the Tier-A fallback query when the
+// full normalized name returns 0 orgs (Apollo partial-match fails when the query has
+// MORE words than the indexed org name, e.g. "alnylam pharmaceuticals" → 0 but
+// "alnylam" → hits). Returns '' for empty input.
+function firstToken(normalized) {
+  const s = String(normalized == null ? '' : normalized).trim();
+  return s ? s.split(/\s+/)[0] : '';
+}
+
+module.exports = { normalize, firstToken, LEGAL_SUFFIXES };

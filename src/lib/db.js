@@ -1036,6 +1036,11 @@ async function migrateResearchIntelligencePhase3() {
       CREATE INDEX IF NOT EXISTS idx_ro_domain     ON research_organizations (primary_domain);
       CREATE INDEX IF NOT EXISTS idx_ro_normalized ON research_organizations (normalized_name);
 
+      -- P3.3 audit trail: how this org was resolved (JSON: original_sponsor_name,
+      -- normalized_query, query_used, fallback_fired, candidates_shown,
+      -- user_selected_index, manual_domain). Additive; safe on existing rows.
+      ALTER TABLE research_organizations ADD COLUMN IF NOT EXISTS resolution_metadata TEXT;
+
       CREATE TABLE IF NOT EXISTS research_contacts (
         id TEXT PRIMARY KEY,
         organization_id TEXT NOT NULL,   -- logical FK -> research_organizations.id
