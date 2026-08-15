@@ -18,6 +18,8 @@ const { runMeetAgent, analyzeAndStore, runStandup, detectStandups, syncWorkspace
 const workspaceActivity = require('../lib/agents/workspace-activity');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runResearchIntelIngest } = require('../lib/agents/research-intelligence');
+const riResolve = require('../lib/agents/research-intelligence/resolve');
+const riOutreach = require('../lib/agents/research-intelligence/outreach');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
 const { receiveInquiry, processInboundReply, generateQuote, escalateToHuman, runInquiryAgent, pollSalesEmailbox, handleAcceptance, markPaymentReceived, getPipeline, handleStripeEvent } = require('../lib/agents/inquiry-agent');
 const { getKPIHierarchy, getBottlenecks, getCrossTeamDependencies, calculateKPIScore } = require('../lib/kpi-engine');
@@ -4096,5 +4098,115 @@ router.post('/research-intelligence/run', authMiddleware, adminOnly, async (req,
       note: flagOn ? undefined : 'RESEARCH_INTEL_ENABLED is off; ran via admin override (nightly cron remains disabled).',
       ...summary,
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Clinical Demand Intelligence — Phase 3 (contact enrichment + outreach) ────
+// find-contacts (discovery, no persist) / resolve-org (persist + enrich + generate,
+// force-gated) / contacts (read). requireTier('intelligence') naturally makes the
+// two POSTs admin-effective (write access = rw = admin/super_admin only) while GET
+// is readable by any intelligence-tier role. All flag-gated (503 when off).
+
+// opus-4-8 standard pricing ($5 in / $25 out per 1M) for outreach LLM cost.
+function outreachCostUsd(usage) {
+  if (!usage) return 0;
+  return (usage.input_tokens || 0) * 5 / 1e6 + (usage.output_tokens || 0) * 25 / 1e6;
+}
+// Load persisted org + contacts + outreach for a study (shared by GET /contacts and
+// the resolve-org 409 "already resolved" response). Parses JSON-TEXT fields.
+async function riLoadStudyContacts(study) {
+  if (!study || !study.resolved_organization_id) return { organization: null, contacts: [], outreach: [] };
+  const org = (await query('SELECT * FROM research_organizations WHERE id=$1', [study.resolved_organization_id])).rows[0] || null;
+  if (org && org.resolution_metadata) org.resolution_metadata = riSafeParse(org.resolution_metadata, null);
+  const contacts = org ? (await query('SELECT * FROM research_contacts WHERE organization_id=$1 ORDER BY role_category, full_name', [org.id])).rows : [];
+  const outreach = (await query('SELECT * FROM research_outreach WHERE study_id=$1', [study.id])).rows
+    .map(o => ({ ...o, referenced_molecules: riSafeParse(o.referenced_molecules, []) }));
+  return { organization: org, contacts, outreach };
+}
+
+// POST /studies/:id/find-contacts — Tier A (name) or Tier B (body.domain). No persist,
+// no LLM. Returns disambiguation candidates for the UI picker.
+router.post('/research-intelligence/studies/:id/find-contacts', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    if (!researchIntelEnabled()) return res.status(503).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Clinical Demand Intelligence is not enabled (RESEARCH_INTEL_ENABLED)' });
+    const study = (await query('SELECT * FROM clinical_studies cs WHERE cs.id=$1 OR cs.nct_id=$1 LIMIT 1', [req.params.id])).rows[0];
+    if (!study) return res.status(404).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Study not found' });
+
+    const domain = (req.body && typeof req.body.domain === 'string') ? req.body.domain.trim() : '';
+    if (domain) {
+      const r = await riResolve.resolveByDomain(domain);
+      return res.json({ api_version: RESEARCH_INTEL_API_VERSION, mode: 'domain', candidates: r.organization ? [r.organization] : [], resolution: r.resolution, credits_used: r.credits_used, error: r.error });
+    }
+    const r = await riResolve.findOrgCandidates(study.lead_sponsor_name);
+    res.json({ api_version: RESEARCH_INTEL_API_VERSION, mode: 'name', candidates: r.candidates, resolution: r.resolution, credits_used: r.credits_used, error: r.error });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /studies/:id/resolve-org — persist the picked org + enrich contacts (2+2 cap)
+// + generate & persist outreach per contact. force:true required to re-resolve.
+router.post('/research-intelligence/studies/:id/resolve-org', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    if (!researchIntelEnabled()) return res.status(503).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Clinical Demand Intelligence is not enabled (RESEARCH_INTEL_ENABLED)' });
+    const study = (await query('SELECT * FROM clinical_studies cs WHERE cs.id=$1 OR cs.nct_id=$1 LIMIT 1', [req.params.id])).rows[0];
+    if (!study) return res.status(404).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Study not found' });
+
+    const org = req.body && req.body.org;
+    if (!org || !org.apollo_org_id) return res.status(400).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'body.org with apollo_org_id required' });
+    const force = req.body.force === true || req.body.force === 'true';
+
+    // Safety: already resolved + not force → 409 with the existing data (no double-spend).
+    if (study.resolved_organization_id && !force) {
+      const existing = await riLoadStudyContacts(study);
+      return res.status(409).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Study already resolved. Pass force:true to refresh contacts and outreach.', existing });
+    }
+
+    const pr = await riResolve.persistResolvedOrg({ studyId: study.id, org, resolution: req.body.resolution_metadata || null, userSelectedIndex: (req.body.user_selected_index ?? null) });
+    if (pr.error) return res.status(500).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'persist failed: ' + pr.error });
+
+    const fe = await riResolve.findAndEnrichContacts({ organizationId: pr.organization_id, apolloOrgId: org.apollo_org_id });
+    const molecules = (await query('SELECT molecule_name, molecule_type, cas_number, catalog_match_status, inference_confidence FROM study_molecules WHERE study_id=$1', [study.id])).rows;
+
+    let outreach_generated = 0, cost_usd = 0;
+    const outErrors = [];
+    for (const c of fe.contacts) {   // fe.contacts is capped at 2+2 — outreach spend is bounded
+      const gen = await riOutreach.generateOutreach(study, { ...c, organization_name: org.name || org.display_name }, molecules);
+      if (gen.usage) cost_usd += outreachCostUsd(gen.usage);
+      if (gen.error) { outErrors.push('outreach ' + (c.full_name || c.apollo_contact_id) + ': ' + gen.error); continue; }
+      if (gen.skipped) continue; // no actionable molecules — nothing to persist
+      const row = (await query('SELECT id FROM research_contacts WHERE apollo_contact_id=$1', [c.apollo_contact_id])).rows[0];
+      if (!row) { outErrors.push('outreach: contact row missing for ' + c.apollo_contact_id); continue; }
+      await query(
+        `INSERT INTO research_outreach (id, study_id, contact_id, subject, body, referenced_molecules, generation_prompt_version, model, generated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())
+         ON CONFLICT (study_id, contact_id) DO UPDATE SET
+           subject=EXCLUDED.subject, body=EXCLUDED.body, referenced_molecules=EXCLUDED.referenced_molecules,
+           generation_prompt_version=EXCLUDED.generation_prompt_version, model=EXCLUDED.model, generated_at=NOW()`,
+        [crypto.randomUUID(), study.id, row.id, gen.subject, gen.body, JSON.stringify(gen.referenced_molecules || []), gen.prompt_version, gen.model]
+      );
+      outreach_generated++;
+    }
+
+    const data = await riLoadStudyContacts({ id: study.id, resolved_organization_id: pr.organization_id });
+    res.json({
+      api_version: RESEARCH_INTEL_API_VERSION,
+      organization: data.organization,
+      contacts: data.contacts,
+      outreach: data.outreach,
+      outreach_generated,
+      credits_used: fe.credits_used,          // Apollo credits
+      cost_usd: Number(cost_usd.toFixed(4)),  // LLM (opus-4-8)
+      errors: [...(fe.errors || []), ...outErrors],
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /studies/:id/contacts — persisted org + contacts + outreach. Read-only, no spend.
+router.get('/research-intelligence/studies/:id/contacts', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    if (!researchIntelEnabled()) return res.status(503).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Clinical Demand Intelligence is not enabled (RESEARCH_INTEL_ENABLED)' });
+    const study = (await query('SELECT id, resolved_organization_id FROM clinical_studies cs WHERE cs.id=$1 OR cs.nct_id=$1 LIMIT 1', [req.params.id])).rows[0];
+    if (!study) return res.status(404).json({ api_version: RESEARCH_INTEL_API_VERSION, error: 'Study not found' });
+    const data = await riLoadStudyContacts(study);
+    res.json({ api_version: RESEARCH_INTEL_API_VERSION, ...data });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
