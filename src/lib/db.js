@@ -1001,4 +1001,83 @@ async function migrateResearchIntelligence() {
   } catch (e) { console.error('Research-intel migration error:', e.message); }
 }
 
-module.exports = { query, withTransaction, initDB, initPhase2, migrateSchemas, migrateResearchIntelligence };
+// ── Clinical Demand Intelligence — Phase 3 (contact enrichment + org mapping) ──
+// Additive-only. Introduces the first canonical organization entity (keyed on the
+// Apollo org id / primary domain), enriched contacts, per-study→org linkage, and
+// generated outreach drafts (manual-copy only — NOTHING auto-sends). Logical FKs
+// are plain TEXT columns (matching the codebase convention — no REFERENCES clauses
+// elsewhere, e.g. study_molecules.study_id). Runs AFTER migrateResearchIntelligence()
+// so clinical_studies already exists for the ALTER.
+//
+// ROLLBACK (safe, additive):
+//   DROP TABLE IF EXISTS research_outreach;
+//   DROP TABLE IF EXISTS research_contacts;
+//   DROP TABLE IF EXISTS research_organizations;
+//   ALTER TABLE clinical_studies DROP COLUMN IF EXISTS resolved_organization_id;
+async function migrateResearchIntelligencePhase3() {
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS research_organizations (
+        id TEXT PRIMARY KEY,
+        apollo_org_id TEXT UNIQUE,
+        normalized_name TEXT,
+        display_name TEXT,
+        primary_domain TEXT,
+        website_url TEXT,
+        linkedin_url TEXT,
+        primary_phone TEXT,
+        founded_year INTEGER,
+        logo_url TEXT,
+        matched_buyer_account_id TEXT,   -- logical FK -> buyer_accounts.id (if we already sell to them)
+        created_at TEXT DEFAULT NOW(),
+        last_enriched_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_ro_apollo_id  ON research_organizations (apollo_org_id);
+      CREATE INDEX IF NOT EXISTS idx_ro_domain     ON research_organizations (primary_domain);
+      CREATE INDEX IF NOT EXISTS idx_ro_normalized ON research_organizations (normalized_name);
+
+      CREATE TABLE IF NOT EXISTS research_contacts (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL,   -- logical FK -> research_organizations.id
+        apollo_contact_id TEXT UNIQUE,
+        full_name TEXT NOT NULL,
+        first_name TEXT,
+        last_name TEXT,
+        title TEXT,
+        email TEXT,
+        email_status TEXT,               -- verified | unverified | likely_to_engage | null
+        phone TEXT,
+        linkedin_url TEXT,
+        department TEXT,
+        role_category TEXT CHECK (role_category IN ('procurement','rd_cmc','other')),
+        enriched_at TEXT,
+        created_at TEXT DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_rc_org       ON research_contacts (organization_id);
+      CREATE INDEX IF NOT EXISTS idx_rc_apollo_id ON research_contacts (apollo_contact_id);
+      CREATE INDEX IF NOT EXISTS idx_rc_role      ON research_contacts (role_category);
+
+      ALTER TABLE clinical_studies ADD COLUMN IF NOT EXISTS resolved_organization_id TEXT;  -- logical FK -> research_organizations.id
+      CREATE INDEX IF NOT EXISTS idx_cs_resolved_org ON clinical_studies (resolved_organization_id);
+
+      CREATE TABLE IF NOT EXISTS research_outreach (
+        id TEXT PRIMARY KEY,
+        study_id TEXT NOT NULL,          -- logical FK -> clinical_studies.id
+        contact_id TEXT NOT NULL,        -- logical FK -> research_contacts.id
+        subject TEXT,
+        body TEXT,
+        referenced_molecules TEXT,       -- JSON array of molecule_name strings
+        generation_prompt_version TEXT,
+        model TEXT,
+        generated_at TEXT DEFAULT NOW(),
+        copied_at TEXT,
+        UNIQUE (study_id, contact_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_rout_study   ON research_outreach (study_id);
+      CREATE INDEX IF NOT EXISTS idx_rout_contact ON research_outreach (contact_id);
+    `);
+    console.log('✅ Research-intelligence Phase 3 schema applied (research_organizations, research_contacts, research_outreach + clinical_studies.resolved_organization_id)');
+  } catch (e) { console.error('Research-intel Phase 3 migration error:', e.message); }
+}
+
+module.exports = { query, withTransaction, initDB, initPhase2, migrateSchemas, migrateResearchIntelligence, migrateResearchIntelligencePhase3 };
