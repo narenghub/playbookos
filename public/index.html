@@ -392,7 +392,7 @@ const NAV_SECTIONS = [
     {id:'apollo-outreach', label:'Apollo Outreach', icon:'📧'},
     {id:'email-engine', label:'Email Engine', icon:'✉️'},
   ]},
-  {title:'INTELLIGENCE', access:['admin','procurement','seo'], items:[
+  {title:'INTELLIGENCE', access:['admin','procurement','seo','business_dev'], items:[
     {id:'market-intelligence', label:'Market Intelligence', icon:'🔬'},
     {id:'procurement-agent', label:'Procurement Agent', icon:'🏭'},
     {id:'meet-agent', label:'Google Meet Agent', icon:'🎥'},
@@ -420,9 +420,10 @@ const NAV_SECTIONS = [
 const NAV_FAMILIES = {
   admin: ['admin','super_admin'],
   director: ['sales_director','recruitment_director','procurement_director'],
-  sales: ['sales_team','sales_director','account_manager'],
+  sales: ['sales_team','sales_director','account_manager','business_dev'],
   procurement: ['procurement_team','procurement_director'],
   seo: ['seo_specialist'],
+  business_dev: ['business_dev'], // self-family so the INTELLIGENCE section resolves for this role
 };
 function navSectionVisible(access, role) {
   if (role === 'admin' || role === 'super_admin') return true; // admin sees all

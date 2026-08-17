@@ -68,6 +68,17 @@ const BUILT_IN_ROLES = {
     metrics: ['accounts_managed', 'quotes_sent', 'orders_processed'],
     baseline: 12,
   },
+  business_dev: {
+    // BD managers who work Clinical Demand Intelligence: keep their sales tools
+    // (sales:own) + full Clinical Demand Intelligence access (intelligence:rw).
+    // Scoped — NO admin/settings/team/financial tiers.
+    display_name: 'Business Development',
+    level: 4, domain: 'sales', data_scope: 'own',
+    pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones', 'apollo-outreach'],
+    tiers: { self: 'rw', sales: 'own', intelligence: 'rw' },
+    metrics: ['outreach_emails', 'accounts_managed', 'quotes_sent'],
+    baseline: 12,
+  },
   sales_team: {
     display_name: 'Sales Team',
     level: 5, domain: 'sales', data_scope: 'own',
