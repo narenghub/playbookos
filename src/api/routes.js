@@ -1800,15 +1800,16 @@ router.post('/inquiry/stripe-webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   if (!secret) return res.status(503).json({ error: 'STRIPE_WEBHOOK_SECRET not configured' });
   const raw = req.rawBody;
-  if (!raw || !sig) return res.status(400).json({ error: 'missing signature or raw body' });
+  const reject = (reason) => { console.warn(`[stripe-webhook] signature rejected (${reason}) from ${req.ip}`); return res.status(400).json({ error: reason }); };
+  if (!raw || !sig) return reject('missing signature or raw body');
   const parts = Object.fromEntries(String(sig).split(',').map(p => p.split('=')));
   const t = parts.t, v1 = parts.v1;
-  if (!t || !v1) return res.status(400).json({ error: 'malformed Stripe-Signature header' });
+  if (!t || !v1) return reject('malformed Stripe-Signature header');
   const expected = crypto.createHmac('sha256', secret).update(`${t}.${raw.toString('utf8')}`, 'utf8').digest('hex');
   let valid = false;
   try { valid = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(v1)); } catch (_) { valid = false; }
-  if (!valid) return res.status(400).json({ error: 'signature verification failed' });
-  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return res.status(400).json({ error: 'timestamp outside tolerance' });
+  if (!valid) return reject('signature verification failed');
+  if (Math.abs(Date.now() / 1000 - Number(t)) > 300) return reject('timestamp outside tolerance');
   let event;
   try { event = JSON.parse(raw.toString('utf8')); } catch (_) { return res.status(400).json({ error: 'invalid JSON' }); }
   // Ack fast, process in the background (Stripe expects a prompt 200).
