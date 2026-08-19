@@ -78,6 +78,11 @@ app.get('/sitemap.xml', async (req, res) => {
   }
 });
 
+// Permission resolver SHADOW MODE — observes gate-vs-resolver disagreements after each
+// request finishes. Off by default (PERMISSIONS_SHADOW_ENABLED); when off it mounts no
+// middleware, so zero shadow code runs per request. Never enforces, never alters responses.
+require('./src/lib/permissions/shadow').mount(app);
+
 // API routes
 app.use('/api', routes);
 
