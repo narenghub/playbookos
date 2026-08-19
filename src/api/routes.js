@@ -609,6 +609,23 @@ router.post('/orders/webhook', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Multi-product event ingestion (E0) ────────────────────────────────────────
+// Additive, never-throws, per-product Bearer secret (NOT the shared Abiozen secret),
+// flag-gated by EVENT_INGEST_ENABLED (default OFF). Thin wrapper — all logic + idempotency
+// + quarantine live in src/lib/events/ingest.js. Touches no existing route or table.
+router.post('/events/ingest', async (req, res) => {
+  try {
+    const { ingestEvent } = require('../lib/events/ingest');
+    const result = await ingestEvent({ authorization: req.headers['authorization'], body: req.body });
+    res.status(result.status).json(result.body);
+  } catch (e) {
+    // ingestEvent is never-throws; this is belt-and-suspenders so one product's event
+    // can never crash the request or affect the Abiozen webhooks above.
+    try { console.error('[events/ingest] route error:', e && e.message); } catch (_) {}
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
 router.get('/orders', authMiddleware, requireTier('revenue'), async (req, res) => {
   try {
     const { from, to } = req.query;
