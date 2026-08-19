@@ -3020,14 +3020,24 @@ module.exports = {
 
 /*
  * UNGATED — NOT PERMISSION-CONTROLLED
- * These 7 routes carry gate:'none' and are intentionally omitted from FEATURES:
- *   POST /api/auth/login              — public login
- *   POST /api/auth/accept-invite      — public, invite-token gated
- *   POST /api/orders/webhook          — external webhook (should verify a shared secret)
- *   POST /api/customers/engagement-event — public ingestion (should verify a shared secret)
- *   POST /api/inquiry/receive         — inbound inquiry webhook (should verify a shared secret)
- *   POST /api/inquiry/stripe-webhook  — Stripe webhook (should verify Stripe signature)
- *   POST /api/triggers/check          — *** APPEARS MIS-GATED *** unauthenticated, and it
- *                                        reaches runPerformanceCheck -> LLM spend. Recommend
- *                                        making this adminOnly / internal-only. Not changed here.
+ * These 7 routes carry gate:'none' and are intentionally omitted from FEATURES.
+ *
+ * IMPORTANT: "gate: none" here means NO EXPRESS MIDDLEWARE GATE (no authMiddleware /
+ * requireTier / adminOnly). The P1 gate scan inspected middleware only, so it could not
+ * see routes that authenticate INSIDE the handler. Several of these do exactly that —
+ * via a shared-secret header or a signature check — so the "none" label understates their
+ * actual protection. Only /auth/login and /auth/accept-invite are genuinely public.
+ *
+ *   POST /api/auth/login              — genuinely public: login
+ *   POST /api/auth/accept-invite      — genuinely public: gated by the invite token in the body
+ *   POST /api/orders/webhook          — in-handler: X-PlaybookOS-Secret === PLAYBOOKOS_WEBHOOK_SECRET (401/503)
+ *   POST /api/customers/engagement-event — in-handler: X-Engagement-Secret === ENGAGEMENT_SECRET (401/503)
+ *   POST /api/inquiry/receive         — in-handler: X-PlaybookOS-Secret === PLAYBOOKOS_WEBHOOK_SECRET (401/503)
+ *   POST /api/inquiry/stripe-webhook  — in-handler: Stripe HMAC signature verification (see e0ce480)
+ *   POST /api/triggers/check          — in-handler: Authorization: Bearer ${TRIGGERS_SECRET}
+ *                                        (routes.js:762-766; 401 on mismatch, 503 if unset). Called by the
+ *                                        daily-18utc-milestone-triggers cron over HTTP localhost
+ *                                        (server.js:239). Runs checkMilestoneTriggers (jobs.js:88) —
+ *                                        email + DB writes only, NO LLM. (The earlier "mis-gated /
+ *                                        reaches LLM spend" note was wrong on both counts — corrected here.)
  */
