@@ -430,8 +430,23 @@ function navSectionVisible(access, role) {
   if (access === '*') return true;
   return (access || []).some(fam => (NAV_FAMILIES[fam] || []).includes(role));
 }
+// Pages hidden from a specific role even though its section is visible — for a role that
+// sits in a section's family but lacks the tier to actually use a page (avoids the
+// sees-but-403 trap and keeps nav/API parity at cutover). Role-scoped; affects no one else.
+const NAV_PAGE_DENY = {
+  // sales+intelligence nav sections show these, but business_dev lacks the revenue/procurement
+  // tiers, so their reads 403 (revenue -> GET /orders; procurement-agent -> GET /procurement/*).
+  business_dev: ['revenue', 'procurement-agent'],
+};
+function navPageHidden(pageId, role) {
+  return (NAV_PAGE_DENY[role] || []).includes(pageId);
+}
 function firstNavPage(role) {
-  for (const s of NAV_SECTIONS) if (navSectionVisible(s.access, role) && s.items.length) return s.items[0].id;
+  for (const s of NAV_SECTIONS) {
+    if (!navSectionVisible(s.access, role)) continue;
+    const items = s.items.filter(it => !navPageHidden(it.id, role));
+    if (items.length) return items[0].id;
+  }
   return 'my-tasks';
 }
 
@@ -445,8 +460,10 @@ async function buildNav() {
   const role = (typeof currentUser !== 'undefined' && currentUser && currentUser.role) || '';
   const html = NAV_SECTIONS.map(section => {
     if (!navSectionVisible(section.access, role)) return '';
+    const items = section.items.filter(it => !navPageHidden(it.id, role));
+    if (!items.length) return '';
     return `<div class="nav-section-title">${section.title}</div>` +
-      section.items.map(it =>
+      items.map(it =>
         `<a href="#" onclick="navigate('${it.id}');return false" id="nav-${it.id}"><span class="nav-icon">${it.icon}</span><span>${it.label}</span></a>`
       ).join('');
   }).join('');
