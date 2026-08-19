@@ -430,21 +430,36 @@ function navSectionVisible(access, role) {
   if (access === '*') return true;
   return (access || []).some(fam => (NAV_FAMILIES[fam] || []).includes(role));
 }
-// Pages hidden from a specific role even though its section is visible — for a role that
-// sits in a section's family but lacks the tier to actually use a page (avoids the
-// sees-but-403 trap and keeps nav/API parity at cutover). Role-scoped; affects no one else.
-const NAV_PAGE_DENY = {
-  // sales+intelligence nav sections show these, but business_dev lacks the revenue/procurement
-  // tiers, so their reads 403 (revenue -> GET /orders; procurement-agent -> GET /procurement/*).
-  business_dev: ['revenue', 'procurement-agent'],
-};
-function navPageHidden(pageId, role) {
-  return (NAV_PAGE_DENY[role] || []).includes(pageId);
+// INTERSECTION NAV MODEL. Sections are the coarse candidate boundary (navSectionVisible);
+// WITHIN a visible section a page is shown only if the role can pass ALL of that page's
+// implied reads — the same registry `implies` data the resolver's rule 6 uses. NAV_PAGE_REQS
+// is generated from the registry (src/lib/permissions/registry.js): per page, one entry per
+// tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
+// no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
+// Regenerate alongside the registry — do not hand-edit.
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"clinical-demand-intelligence":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
+function roleTiersFor(role) {
+  const cat = (typeof window !== 'undefined' && window._roleCatalog) || [];
+  const row = Array.isArray(cat) ? cat.find(r => r.role_name === role) : null;
+  return (row && row.tiers) || null;
+}
+function roleCanRead(tiers, tier) {
+  const a = tiers && tiers[tier];
+  return a === 'rw' || a === 'r' || a === 'own';
+}
+// Does the role pass every implied read of the page? (the intra-section page filter)
+function passesPageReads(pageId, role, tiers) {
+  if (role === 'admin' || role === 'super_admin') return true; // admins pass every read
+  const reqs = NAV_PAGE_REQS[pageId];
+  if (!reqs) return true;                 // no tier-gated implied reads -> always passes
+  if (!tiers) return true;                // role catalog not loaded -> fall back to section-only
+  return reqs.every(anyOf => anyOf.some(t => roleCanRead(tiers, t)));
 }
 function firstNavPage(role) {
+  const tiers = roleTiersFor(role);
   for (const s of NAV_SECTIONS) {
     if (!navSectionVisible(s.access, role)) continue;
-    const items = s.items.filter(it => !navPageHidden(it.id, role));
+    const items = s.items.filter(it => passesPageReads(it.id, role, tiers));
     if (items.length) return items[0].id;
   }
   return 'my-tasks';
@@ -458,10 +473,11 @@ async function buildNav() {
     window._roleCatalog = rolesResp.roles || [];
   } catch (e) {}
   const role = (typeof currentUser !== 'undefined' && currentUser && currentUser.role) || '';
+  const tiers = roleTiersFor(role);
   const html = NAV_SECTIONS.map(section => {
-    if (!navSectionVisible(section.access, role)) return '';
-    const items = section.items.filter(it => !navPageHidden(it.id, role));
-    if (!items.length) return '';
+    if (!navSectionVisible(section.access, role)) return '';               // section = coarse candidate boundary
+    const items = section.items.filter(it => passesPageReads(it.id, role, tiers)); // page = passes all implied reads
+    if (!items.length) return '';                                          // section with no visible pages is hidden
     return `<div class="nav-section-title">${section.title}</div>` +
       items.map(it =>
         `<a href="#" onclick="navigate('${it.id}');return false" id="nav-${it.id}"><span class="nav-icon">${it.icon}</span><span>${it.label}</span></a>`
