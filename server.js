@@ -83,6 +83,12 @@ app.get('/sitemap.xml', async (req, res) => {
 // middleware, so zero shadow code runs per request. Never enforces, never alters responses.
 require('./src/lib/permissions/shadow').mount(app);
 
+// Permission resolver ENFORCEMENT (staged, per-role). Runs BEFORE the router: for a role
+// listed in PERMISSIONS_ENFORCE_ROLES the resolver decides (403 on deny, with the feature
+// key + rule in the body); every other role keeps the existing gate. Empty/unset list =
+// enforce nothing. Fails OPEN to the existing gate on any resolver error — never locks out.
+require('./src/lib/permissions/enforce').mount(app);
+
 // API routes
 app.use('/api', routes);
 
