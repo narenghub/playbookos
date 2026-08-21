@@ -20,6 +20,8 @@ function makeNext() { const n = (...a) => { n.called = true; n.args = a; }; n.ca
 const req = (over = {}) => ({ method: 'GET', originalUrl: '/api/x', headers: { authorization: 'Bearer t' }, ...over });
 const verifyAs = (role) => () => (role ? { id: 'u1', email: 'u@x', role } : null);
 const resolveTo = (allowed, rule, explain = 'x') => async () => ({ allowed, rule, source: null, explain });
+// a query() that records the denial-insert params so we can assert on the row written
+function capture() { const rows = []; return { query: (_sql, params) => { rows.push(params); return Promise.resolve({ rows: [] }); }, rows }; }
 
 // The six granted pairs (admin=Mohan, business_dev=Vinitha) — all now resolver-ALLOW via rule 5.
 const GRANTED = [
@@ -33,12 +35,14 @@ const GRANTED = [
 
 // ── 1. role IN the list is resolver-decided ────────────────────────────────────
 test('enrolled role — resolver DENY → 403 (handler never runs)', async () => {
+  const cap = capture();
   const res = makeRes(), next = makeNext();
   await enforce.enforceMiddleware(req(), res, next, {
     env: { PERMISSIONS_ENFORCE_ROLES: 'admin' },
     verifyToken: verifyAs('admin'),
     mapFeatureKey: () => 'intelligence.some.feature',
     resolve: resolveTo(false, 8, 'no rule matched'),
+    query: cap.query,
   });
   assert.equal(next.called, false, 'resolver deny must NOT call next()');
   assert.equal(res.statusCode, 403);
@@ -97,6 +101,7 @@ test('enforced role hits a defaultDeny feature → 403 carrying the mapped featu
     env: { PERMISSIONS_ENFORCE_ROLES: 'admin' },
     verifyToken: verifyAs('admin'),
     resolve: resolveTo(false, 8), // resolver denies a defaultDeny feature for admin
+    query: capture().query,
     // mapFeatureKey omitted → real matcher used
   });
   assert.equal(res.statusCode, 403);
@@ -160,6 +165,74 @@ test('unmapped route for an enrolled role → next() (not blocked)', async () =>
   });
   assert.equal(next.called, true, 'unmapped route must fall through to the gate');
   assert.equal(resolverCalls, 0, 'unmapped route must not consult the resolver');
+});
+
+// ── deny instrumentation (permission_enforce_denials) ───────────────────────────
+test('a deny WRITES a denial row and still returns 403', async () => {
+  const cap = capture();
+  const res = makeRes(), next = makeNext();
+  await enforce.enforceMiddleware(req({ method: 'POST', originalUrl: '/api/foo/bar?x=1' }), res, next, {
+    env: { PERMISSIONS_ENFORCE_ROLES: 'admin' },
+    verifyToken: () => ({ id: 'u42', email: 'u@x', role: 'admin' }),
+    mapFeatureKey: () => 'intelligence.some.feature',
+    resolve: resolveTo(false, 8, 'no rule matched'),
+    query: cap.query,
+  });
+  assert.equal(res.statusCode, 403, 'deny still returns 403');
+  assert.equal(next.called, false);
+  assert.equal(cap.rows.length, 1, 'exactly one denial row written');
+  const p = cap.rows[0];
+  assert.equal(p[0], 'u42');                          // user_id
+  assert.equal(p[1], 'admin');                        // role
+  assert.equal(p[2], 'intelligence.some.feature');    // feature_key
+  assert.equal(p[3], 'POST');                         // method
+  assert.equal(p[4], '/api/foo/bar');                 // path (query string stripped)
+  assert.equal(p[5], 8);                              // resolver_rule
+  assert.equal(p[6], 'no rule matched');              // resolver_explain
+});
+
+test('a FAILING denial write does not break the response (still 403, no throw)', async () => {
+  const res = makeRes(), next = makeNext();
+  // query throws synchronously — fireDenial must swallow it
+  const throwingSync = { query: () => { throw new Error('db down'); } };
+  await assert.doesNotReject(() => enforce.enforceMiddleware(req(), res, next, {
+    env: { PERMISSIONS_ENFORCE_ROLES: 'admin' },
+    verifyToken: verifyAs('admin'),
+    mapFeatureKey: () => 'intelligence.some.feature',
+    resolve: resolveTo(false, 8),
+    query: throwingSync.query,
+  }));
+  assert.equal(res.statusCode, 403, 'a failed write must not change the 403');
+  assert.equal(next.called, false);
+});
+
+test('a FAILING async denial write (rejected promise) does not break the response', async () => {
+  const res = makeRes(), next = makeNext();
+  const rejecting = { query: () => Promise.reject(new Error('write timeout')) };
+  await assert.doesNotReject(() => enforce.enforceMiddleware(req(), res, next, {
+    env: { PERMISSIONS_ENFORCE_ROLES: 'admin' },
+    verifyToken: verifyAs('admin'),
+    mapFeatureKey: () => 'intelligence.some.feature',
+    resolve: resolveTo(false, 8),
+    query: rejecting.query,
+  }));
+  assert.equal(res.statusCode, 403);
+  assert.equal(next.called, false);
+});
+
+test('an ALLOW writes nothing to the denial log', async () => {
+  const cap = capture();
+  const res = makeRes(), next = makeNext();
+  await enforce.enforceMiddleware(req(), res, next, {
+    env: { PERMISSIONS_ENFORCE_ROLES: 'admin' },
+    verifyToken: verifyAs('admin'),
+    mapFeatureKey: () => 'intelligence.some.feature',
+    resolve: resolveTo(true, 5),
+    query: cap.query,
+  });
+  assert.equal(next.called, true, 'allow calls next()');
+  assert.equal(res._sent, false);
+  assert.equal(cap.rows.length, 0, 'allow must write no denial row');
 });
 
 // ── parseRoles helper ───────────────────────────────────────────────────────────

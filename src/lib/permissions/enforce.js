@@ -35,9 +35,28 @@
 const { mapFeatureKey } = require('./shadow'); // shared METHOD+path → feature_key matcher
 
 // Lazy so importing this module never eagerly pulls in resolve/db/core.
-let _resolve = null, _verify = null;
+let _resolve = null, _verify = null, _query = null;
 function resolveFn() { if (!_resolve) _resolve = require('./resolve').resolve; return _resolve; }
 function verifyTokenFn() { if (!_verify) _verify = require('../core').verifyToken; return _verify; }
+function queryFn() { if (!_query) _query = require('../db').query; return _query; }
+
+// ── fire-and-forget denial log write ───────────────────────────────────────────
+// Records every enforcement 403 to permission_enforce_denials. Same hard contract as the
+// shadow hook's fireInsert: NEVER throws and is NEVER awaited by the response, so a failed
+// (or slow) write can never affect the 403 or the request. Sync and async failures are both
+// swallowed. Table/index live in scripts/migrate-enforce-denials.js (run manually).
+function fireDenial(query, row) {
+  try {
+    const p = query(
+      `INSERT INTO permission_enforce_denials
+         (user_id, role, feature_key, method, path, resolver_rule, resolver_explain)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [row.user_id || null, row.role || null, row.feature_key || null, row.method, row.path,
+       row.resolver_rule == null ? null : row.resolver_rule, row.resolver_explain || null]
+    );
+    if (p && typeof p.catch === 'function') p.catch(() => {}); // swallow async failure
+  } catch (_) { /* swallow sync failure */ }
+}
 
 // PERMISSIONS_ENFORCE_ROLES="admin, business_dev" → Set{'admin','business_dev'}. Read fresh
 // per request (cheap) so the resolver-fresh philosophy holds and tests can inject deps.env.
@@ -87,11 +106,20 @@ async function enforceMiddleware(req, res, next, deps = {}) {
     if (r && r.allowed) return next(); // ALLOW → the existing gate still runs after us
 
     // DENY — block before the handler. Body names the feature and the precedence rule.
+    const rule = r ? r.rule : null;
+    const explain = r ? (r.explain || null) : null;
+    // Loud log (Railway) + durable denial record — both fire-and-forget; neither can affect
+    // or delay the 403 (fireDenial is never awaited and never throws).
+    try { console.warn(`[permissions-enforce] DENY role=${user.role} user=${user.id} feature=${feature_key} rule=${rule} ${method} ${path}`); } catch (_) {}
+    fireDenial(deps.query || queryFn(), {
+      user_id: user.id, role: user.role, feature_key, method, path,
+      resolver_rule: rule, resolver_explain: explain,
+    });
     return res.status(403).json({
       error: 'Forbidden by permission resolver',
       feature_key,
-      rule: r ? r.rule : null,
-      explain: r ? (r.explain || null) : null,
+      rule,
+      explain,
     });
   } catch (e) {
     // Never-throws: any unexpected error fails open to the existing gate.
@@ -111,4 +139,4 @@ function mount(app, deps = {}) {
   return true;
 }
 
-module.exports = { mount, enforceMiddleware, parseRoles, decodeUser };
+module.exports = { mount, enforceMiddleware, parseRoles, decodeUser, fireDenial };
