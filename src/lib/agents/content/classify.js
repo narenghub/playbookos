@@ -14,7 +14,7 @@ const CLASSIFY_PROMPT_VERSION = 'content-classify-v1';
 
 function buildPrompt(item, config) {
   return `You are a content curator for ${config.description}. Decide whether the news item below is genuinely relevant to that community, and if so classify it.
-
+${config.classifyGuidance ? '\n' + config.classifyGuidance + '\n' : ''}
 ITEM:
 Title: ${item.title || '(none)'}
 Summary: ${item.summary || '(none)'}
