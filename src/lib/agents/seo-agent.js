@@ -5,7 +5,8 @@ const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
 const { fetchGSCData, syncAlgoliaSearchData } = require('./growth-agent');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
-const { logAgentActivity, extractClaudeText } = require('../agent-core');
+const { logAgentActivity } = require('../agent-core');
+const { callClaude } = require('../llm');
 
 // CAS numbers that have generated SEO content but NO matching product in the
 // abiozen catalog — never pushed (they'd match nothing anyway). Semaglutide and
@@ -296,19 +297,10 @@ Requirements for "content_html":
 Requirements for "schema_json": valid schema.org "Product" JSON-LD — "@context", "@type":"Product", name, description, an identifier using the CAS number when present, brand "Abiozen LLC", and an "offers" object (availability InStock, priceCurrency USD; do NOT invent a specific price — use "offers" with "availability" and a "url").
 Do NOT invent specific prices, lot numbers, or medical/regulatory claims. Keep language factual and conservative. Return ONLY the JSON object.`;
 
-  let content;
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model: SEO_MODEL, max_tokens: 4000, messages: [{ role: 'user', content: prompt }] }),
-    });
-    if (!res.ok) return { error: `Claude ${res.status}: ${(await res.text().catch(() => '')).slice(0, 160)}` };
-    const data = await res.json();
-    const raw = extractClaudeText(data).trim();
-    const match = raw.match(/\{[\s\S]*\}/);
-    content = JSON.parse(match ? match[0] : raw);
-  } catch (e) { return { error: e.message }; }
+  const r = await callClaude({ model: SEO_MODEL, prompt, maxTokens: 4000, expectJson: true, apiKey });
+  if (r.error) return { error: r.error };
+  const content = r.json;
+  if (!content) return { error: 'unparseable SEO JSON' };
   if (!content.title || !content.content_html) return { error: 'missing title/content_html' };
 
   const schemaStr = content.schema_json != null

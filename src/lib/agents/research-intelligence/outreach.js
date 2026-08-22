@@ -10,7 +10,7 @@
 // { skipped, ... } when there is nothing actionable to pitch, or { error, ... } on any
 // failure. Never throws. The signature is appended deterministically (the model is told
 // NOT to write one) so it is always exact.
-const { parseClaudeJSON, extractClaudeText } = require('../../agent-core');
+const { callClaude } = require('../../llm');
 
 const OUTREACH_MODEL = 'claude-opus-4-8';
 const OUTREACH_PROMPT_VERSION = 'outreach-v1';
@@ -103,18 +103,9 @@ async function generateOutreach(study, contact, molecules, { apiKey = process.en
   if (!contact || !(contact.full_name || contact.first_name)) return { error: 'contact name required', ...base };
 
   const prompt = buildPrompt(study, contact, selected);
-  let res;
-  try {
-    res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: OUTREACH_MODEL, max_tokens: MAX_TOKENS, messages: [{ role: 'user', content: prompt }] }),
-    });
-  } catch (e) { return { error: 'Claude request failed: ' + e.message, ...base }; }
-  if (!res.ok) return { error: `Claude ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`, ...base };
-
-  const respBody = await res.json();
-  const data = parseClaudeJSON(extractClaudeText(respBody));
+  const r = await callClaude({ model: OUTREACH_MODEL, prompt, maxTokens: MAX_TOKENS, expectJson: true, apiKey });
+  if (r.error) return { error: r.error, ...base };
+  const data = r.json;
   if (!data || !data.subject || !data.body) return { error: 'unparseable outreach JSON', ...base };
 
   // Signature is deterministic — append it (model was told not to write one).
@@ -136,7 +127,7 @@ async function generateOutreach(study, contact, molecules, { apiKey = process.en
     referenced_molecules: referenced,
     molecules_available: (molecules || []).length,   // total molecules passed in
     molecules_referenced: referenced.length,          // how many made it into the email
-    usage: respBody.usage || null,                    // {input_tokens, output_tokens} for cost tracking
+    usage: r.usage,                                   // {input_tokens, output_tokens} for cost tracking
     ...base,
   };
 }

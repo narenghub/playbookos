@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { query } = require('./db');
 const { sendEmail } = require('./mailer');
 const { getRoleTier } = require('./roles');
-const { extractClaudeText } = require('./agent-core');
+const { callClaude } = require('./llm');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -104,18 +104,16 @@ async function syncGitHubForUser(user, dateStr) {
   } catch(e) { console.error('Sync error:', e.message); }
 }
 
+// Existing signature preserved: (prompt) -> string. Callers (LinkedIn, SEO tasks, CEO,
+// sales) run parseClaudeJSON on the returned string and treat a non-JSON string as
+// "unavailable", so returning an error STRING on failure keeps their behaviour identical.
+// Now built on the shared callClaude wrapper (same model, same max_tokens, same request).
 async function runClaudeAnalysis(prompt) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || key.includes('REPLACE')) return 'Claude API key not configured.';
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1500, messages: [{ role: 'user', content: prompt }] })
-    });
-    const data = await res.json();
-    const claudeText = extractClaudeText(data); console.error("Claude raw response:", JSON.stringify(data)); return claudeText || "Claude error: " + JSON.stringify(data?.error);
-  } catch(e) { return 'Claude API error: ' + e.message; }
+  const r = await callClaude({ model: 'claude-haiku-4-5-20251001', prompt, maxTokens: 1500, apiKey: key });
+  if (r.error) return 'Claude API error: ' + r.error;
+  return r.text || 'Claude error: no text';
 }
 
 async function analyzeTeamProgress({ period, revenue, revenueTarget, teamActivity, behindMetrics }) {

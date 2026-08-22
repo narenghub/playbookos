@@ -7,7 +7,7 @@
 //
 // Precision over recall: prefer FEWER, high-confidence molecules; [] is valid.
 // Never guess a CAS number (null if unknown). Generic/chemical names, not brands.
-const { parseClaudeJSON } = require('../../agent-core');
+const { callClaude } = require('../../llm');
 
 const INFER_MODEL = 'claude-sonnet-5';
 const INFER_PROMPT_VERSION = 'infer-v1';
@@ -64,18 +64,9 @@ async function inferMolecules(study, classification, { apiKey = process.env.ANTH
   const base = { prompt_version: INFER_PROMPT_VERSION, model: INFER_MODEL };
   if (!apiKey) return { error: 'ANTHROPIC_API_KEY not configured', ...base };
   const prompt = buildPrompt(study, classification);
-  let res;
-  try {
-    res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: INFER_MODEL, max_tokens: 1200, messages: [{ role: 'user', content: prompt }] }),
-    });
-  } catch (e) { return { error: 'Claude request failed: ' + e.message, ...base }; }
-  if (!res.ok) return { error: `Claude ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`, ...base };
-  const body = await res.json();
-  const text = (body.content || []).filter(c => c.type === 'text').map(c => c.text || '').join('');
-  const data = parseClaudeJSON(text);
+  const r = await callClaude({ model: INFER_MODEL, prompt, maxTokens: 1200, expectJson: true, apiKey });
+  if (r.error) return { error: r.error, ...base };
+  const data = r.json;
   if (!data || !Array.isArray(data.molecules)) return { error: 'unparseable molecule-inference JSON', ...base };
 
   const molecules = data.molecules.map(m => ({
@@ -86,7 +77,7 @@ async function inferMolecules(study, classification, { apiKey = process.env.ANTH
     confidence: (m && typeof m.confidence === 'number') ? Math.min(1, Math.max(0, m.confidence)) : null,
   })).filter(m => m.molecule_name); // drop entries with no usable name
 
-  return { molecules, usage: body.usage || null, ...base }; // usage → orchestrator cost cap
+  return { molecules, usage: r.usage, ...base }; // usage → orchestrator cost cap
 }
 
 module.exports = { inferMolecules, buildPrompt, INFER_MODEL, INFER_PROMPT_VERSION, MOLECULE_TYPES };

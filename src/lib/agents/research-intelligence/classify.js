@@ -8,7 +8,7 @@
 //
 // PHASE is deliberately NOT classified here — it's authoritative from
 // clinicaltrials.js (CT.gov's structured phase enum). Always trust the source.
-const { parseClaudeJSON } = require('../../agent-core');
+const { callClaude } = require('../../llm');
 
 const CLASSIFY_MODEL = 'claude-sonnet-5';
 const CLASSIFY_PROMPT_VERSION = 'classify-v1';
@@ -53,18 +53,9 @@ Rules:
 async function classifyStudy(study, { apiKey = process.env.ANTHROPIC_API_KEY } = {}) {
   if (!apiKey) return { error: 'ANTHROPIC_API_KEY not configured', prompt_version: CLASSIFY_PROMPT_VERSION };
   const prompt = buildPrompt(study);
-  let res;
-  try {
-    res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: CLASSIFY_MODEL, max_tokens: 700, messages: [{ role: 'user', content: prompt }] }),
-    });
-  } catch (e) { return { error: 'Claude request failed: ' + e.message, prompt_version: CLASSIFY_PROMPT_VERSION }; }
-  if (!res.ok) return { error: `Claude ${res.status}: ${(await res.text().catch(() => '')).slice(0, 200)}`, prompt_version: CLASSIFY_PROMPT_VERSION };
-  const body = await res.json();
-  const text = (body.content || []).filter(c => c.type === 'text').map(c => c.text || '').join('');
-  const data = parseClaudeJSON(text);
+  const r = await callClaude({ model: CLASSIFY_MODEL, prompt, maxTokens: 700, expectJson: true, apiKey });
+  if (r.error) return { error: r.error, prompt_version: CLASSIFY_PROMPT_VERSION };
+  const data = r.json;
   if (!data) return { error: 'unparseable classification JSON', prompt_version: CLASSIFY_PROMPT_VERSION };
 
   return {
@@ -74,7 +65,7 @@ async function classifyStudy(study, { apiKey = process.env.ANTHROPIC_API_KEY } =
     summary: String(data.summary || '').slice(0, 1000),
     is_drug_interventional: data.is_drug_interventional !== false, // default true unless explicitly false
     confidence: typeof data.confidence === 'number' ? Math.min(1, Math.max(0, data.confidence)) : null,
-    usage: body.usage || null, // {input_tokens, output_tokens} — orchestrator sums for cost cap
+    usage: r.usage, // {input_tokens, output_tokens} — orchestrator sums for cost cap
     prompt_version: CLASSIFY_PROMPT_VERSION,
     model: CLASSIFY_MODEL,
   };
