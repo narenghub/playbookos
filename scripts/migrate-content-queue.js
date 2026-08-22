@@ -28,6 +28,8 @@ async function migrateContentQueue() {
       segment      TEXT,                                -- who it is for
       headline     TEXT NOT NULL,
       body         TEXT NOT NULL,
+      original_headline TEXT,                           -- captured once on first edit (never overwritten)
+      original_body     TEXT,                           -- captured once on first edit (never overwritten)
       status       TEXT NOT NULL DEFAULT 'draft',       -- draft | approved | rejected | published
       reviewed_by  TEXT,
       reviewed_at  TIMESTAMPTZ,

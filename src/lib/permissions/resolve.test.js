@@ -100,13 +100,13 @@ test('T10 — unknown feature key is denied and does not throw (rule 1)', async 
   assert.equal(r.rule, 1);
 });
 
-test('T11 — super_admin holds all 218 non-cron features (and no crons)', async () => {
+test('T11 — super_admin holds all 223 non-cron features (and no crons)', async () => {
   const map = await resolveAll(user('super_admin'), { env: ENV_ON, overrides: [] });
   const isCron = f => f.surface === 'agent_trigger' && !f.ref.startsWith('POST ');
   const nonCron = FEATURES.filter(f => !isCron(f));
   const crons = FEATURES.filter(isCron);
   const allowedNonCron = nonCron.filter(f => map.get(f.key).allowed).length;
-  assert.equal(allowedNonCron, 218);
+  assert.equal(allowedNonCron, 223); // +5 Content Studio features (page + list/get/update/run)
   assert.ok(crons.every(f => !map.get(f.key).allowed), 'no cron is ever held');
 });
 

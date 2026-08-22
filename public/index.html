@@ -398,6 +398,7 @@ const NAV_SECTIONS = [
     {id:'meet-agent', label:'Google Meet Agent', icon:'🎥'},
     {id:'research-agent', label:'Research Agent', icon:'🔬'},
     {id:'clinical-demand-intelligence', label:'Clinical Demand Intelligence', icon:'🧬'},
+    {id:'content-studio', label:'Content Studio', icon:'📝'},
     {id:'seo-intelligence', label:'SEO Intelligence', icon:'🔍'},
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
     {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
@@ -437,7 +438,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"clinical-demand-intelligence":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"clinical-demand-intelligence":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
 function roleTiersFor(role) {
   const cat = (typeof window !== 'undefined' && window._roleCatalog) || [];
   const row = Array.isArray(cat) ? cat.find(r => r.role_name === role) : null;
@@ -517,7 +518,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','content-studio':'Content Studio','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -2383,6 +2384,135 @@ async function aiCommit() {
     status.textContent = 'Error: ' + e.message;
     btn.disabled = false;
   }
+}
+
+// ── Content Studio — multi-product content review (GolfNex first) ─────────────
+// Plain review tool for one reviewer: list drafts, edit/approve/reject, and copy the text
+// out to post MANUALLY. No auto-publishing. Modelled on the LinkedIn content queue.
+window._csItems = window._csItems || [];
+window._csFilters = window._csFilters || { product: 'golfnex', status: 'draft' };
+function csEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function csBadge(s){ const cls={draft:'badge-blue',approved:'badge-green',rejected:'badge-red',published:'badge-gray'}[s]||'badge-gray'; return '<span class="badge '+cls+'">'+csEsc(s)+'</span>'; }
+function csIsAdmin(){ return currentUser && (currentUser.role==='admin'||currentUser.role==='super_admin'); }
+
+pages['content-studio'] = async function() {
+  const c = document.getElementById('content');
+  const f = window._csFilters;
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading content…</p>';
+  const qs = new URLSearchParams();
+  if (f.product) qs.set('product', f.product);
+  if (f.status && f.status !== 'all') qs.set('status', f.status);
+  const res = await API('/content?' + qs.toString()).catch(e => ({ error: e.message }));
+  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">Content Studio</div><p style="color:#dc2626">'+csEsc(res.error)+'</p></div>'; return; }
+  window._csItems = (res && res.items) || [];
+  const statusOpts = ['draft','approved','rejected','all'];
+  const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+    <div>
+      <div class="card-title text-section" style="margin:0">Content Studio</div>
+      <div class="text-body">Review, edit, and approve drafts, then copy the text to post manually. No auto-publishing.</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <label style="font-size:11px;color:var(--text-muted)">Product
+        <input value="${csEsc(f.product)}" onchange="csSetFilter('product', this.value)" style="margin-left:4px;width:110px">
+      </label>
+      <div style="display:flex;gap:4px">
+        ${statusOpts.map(s => `<button onclick="csSetFilter('status','${s}')" class="${f.status===s?'btn-primary':'btn-outline'} btn-sm" style="font-size:11px">${s}</button>`).join('')}
+      </div>
+      ${csIsAdmin() ? `<button onclick="csRun()" class="btn-secondary" style="padding:5px 12px;font-size:11px">▶ Run pipeline</button>` : ''}
+    </div>
+  </div>`;
+  const cards = window._csItems.length
+    ? window._csItems.map(csRenderCard).join('')
+    : '<div class="card"><p style="color:var(--text-muted)">No drafts for this filter.</p></div>';
+  c.innerHTML = header + cards;
+};
+
+function csRenderCard(it) {
+  const accent = it.status==='approved'?'#1D9E75':it.status==='rejected'?'#dc2626':it.status==='published'?'#64748b':'#1B3A6B';
+  const meta = [it.topic, it.segment, it.product].filter(Boolean).map(csEsc).join(' · ');
+  const buttons = [];
+  buttons.push(`<button onclick="csCopy('${it.id}')" class="btn-outline btn-sm" style="font-size:11px">📋 Copy text</button>`);
+  if (it.status === 'draft') {
+    buttons.push(`<button onclick="csAction('${it.id}','approve',this)" class="btn-success" style="padding:5px 10px;font-size:11px">Approve</button>`);
+    buttons.push(`<button onclick="csEdit('${it.id}')" class="btn-secondary" style="padding:5px 10px;font-size:11px">Edit</button>`);
+    buttons.push(`<button onclick="csAction('${it.id}','reject',this)" class="btn-danger" style="padding:5px 10px;font-size:11px">Reject</button>`);
+  } else if (it.status === 'approved') {
+    buttons.push(`<button onclick="csAction('${it.id}','reject',this)" class="btn-danger" style="padding:5px 10px;font-size:11px">Reject</button>`);
+  }
+  return `<div class="card" id="cs-card-${it.id}" style="border-left:4px solid ${accent}">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+      <div style="flex:1">
+        <div class="text-label">${meta || '&nbsp;'}${it.edited ? ' · <span style="color:#EF9F27">edited</span>' : ''}</div>
+        <div style="font-weight:700;font-size:15px;margin-top:2px">${csEsc(it.headline)}</div>
+      </div>
+      ${csBadge(it.status)}
+    </div>
+    <div style="white-space:pre-wrap;line-height:1.55;margin-top:8px;font-size:13px;color:var(--text-body)">${csEsc(it.body)}</div>
+    ${it.source_ref ? `<div style="margin-top:8px;font-size:11px"><a href="${csEsc(it.source_ref)}" target="_blank" rel="noopener noreferrer">Source ↗</a></div>` : ''}
+    <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${buttons.join('')}</div>
+  </div>`;
+}
+
+function csSetFilter(key, val){ window._csFilters[key] = val; pages['content-studio'](); }
+
+async function csAction(id, action, btn){
+  if (btn) btn.disabled = true;
+  try {
+    const res = await API('/content/' + id, { method:'PUT', body: JSON.stringify({ action }) });
+    if (res && res.error) { showToast('Error: ' + res.error, 'error', 5000); if(btn) btn.disabled=false; return; }
+    showToast(action === 'approve' ? 'Approved' : 'Rejected', 'success');
+    pages['content-studio']();
+  } catch(e){ showToast('Error: ' + e.message, 'error', 5000); if(btn) btn.disabled=false; }
+}
+
+function csEdit(id){
+  const card = document.getElementById('cs-card-' + id);
+  if (!card || document.getElementById('cs-edit-' + id)) return;
+  const it = (window._csItems || []).find(x => String(x.id) === String(id));
+  if (!it) return;
+  const escAttr = s => String(s==null?'':s).replace(/"/g,'&quot;');
+  const f = document.createElement('div');
+  f.id = 'cs-edit-' + id;
+  f.style.cssText = 'margin-top:10px;padding:10px;border:1px dashed var(--border);border-radius:6px;background:#fafafa';
+  f.innerHTML = '<div class="text-label">Headline</div>'
+    + '<input id="cs-ed-h-' + id + '" value="' + escAttr(it.headline||'') + '" style="width:100%;margin-bottom:8px">'
+    + '<div class="text-label">Body</div>'
+    + '<textarea id="cs-ed-b-' + id + '" style="width:100%;height:140px;margin-bottom:8px;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:Arial">' + csEsc(it.body||'') + '</textarea>'
+    + '<div style="display:flex;gap:6px">'
+    + '<button onclick="csSaveEdit(\'' + id + '\')" class="btn-primary" style="padding:5px 12px;font-size:11px">Save changes</button>'
+    + '<button onclick="document.getElementById(\'cs-edit-' + id + '\').remove()" class="btn-outline btn-sm">Cancel</button>'
+    + '</div>';
+  card.appendChild(f);
+}
+
+async function csSaveEdit(id){
+  const headline = document.getElementById('cs-ed-h-' + id).value;
+  const body = document.getElementById('cs-ed-b-' + id).value;
+  try {
+    const res = await API('/content/' + id, { method:'PUT', body: JSON.stringify({ action:'edit', headline, body }) });
+    if (res && res.error) { showToast('Error: ' + res.error, 'error', 5000); return; }
+    showToast('Changes saved', 'success');
+    pages['content-studio']();
+  } catch(e){ showToast('Error: ' + e.message, 'error', 5000); }
+}
+
+function csCopy(id){
+  const it = (window._csItems || []).find(x => String(x.id) === String(id));
+  if (!it) return;
+  const text = (it.headline ? it.headline + '\n\n' : '') + (it.body || '');
+  navigator.clipboard.writeText(text).then(() => showToast('Copied to clipboard', 'success')).catch(() => showToast('Copy failed', 'error'));
+}
+
+async function csRun(){
+  if (!confirm('Run the content pipeline now for "' + window._csFilters.product + '"? (Requires CONTENT_PIPELINE_ENABLED.)')) return;
+  showToast('Running pipeline…');
+  try {
+    const res = await API('/content/run', { method:'POST', body: JSON.stringify({ product: window._csFilters.product }) });
+    if (res && res.error) { showToast('Error: ' + res.error, 'error', 6000); return; }
+    if (res && res.enabled === false) { showToast('Pipeline flag is OFF (CONTENT_PIPELINE_ENABLED). Nothing ran.', 'error', 6000); return; }
+    showToast('Pipeline done: ' + (res.drafts_created||0) + ' new drafts, ' + (res.dropped_irrelevant||0) + ' dropped', 'success', 6000);
+    pages['content-studio']();
+  } catch(e){ showToast('Error: ' + e.message, 'error', 6000); }
 }
 
 function renderLinkedInPreview(q, esc, statusBadge) {
