@@ -2593,6 +2593,24 @@ module.exports = {
     defaultDeny: true,
   },
 
+    // ===================== MCP TOOLS — outbound tool calls to product servers =====================
+    // surface 'mcp_tool', ref = the JSON-RPC toolName (not an HTTP route, so the shadow/enforce
+    // METHOD+path matcher never matches it). cost is what PLAYBOOKOS spends: publishing to
+    // GolfNex costs us nothing (no model/credit/email) → cost:'free', spend:[]. dangerous:true
+    // + defaultDeny:true carry the weight — it executes an action inside another product.
+  {
+    key: 'golfnex.content.publish_post',
+    label: "Publish post — GolfNex MCP tool",
+    domain: 'golfnex',
+    surface: 'mcp_tool',
+    ref: "publish_post",
+    cost: 'free',
+    spend: [],
+    dangerous: true,
+    implies: [],
+    defaultDeny: true,
+  },
+
     // ===================== AGENT TRIGGERS — mission-control manual runs (9) =====================
   {
     key: 'admin.agent_ceo.run',

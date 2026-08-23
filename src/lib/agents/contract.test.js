@@ -92,3 +92,17 @@ test('unknown agent name errors clearly and lists the registered ones', async ()
   await assert.rejects(() => runAgent('nope'), /Unknown agent 'nope'.*content-pipeline.*research-intelligence/s);
   assert.equal(getAgent('nope'), null);
 });
+
+// ── remote-tool registry ─────────────────────────────────────────────────────
+const { getRemoteTool, REMOTE_TOOLS } = require('./contract');
+test('remote-tool registry resolves golfnex/publish_post to a real featureKey + env-driven server', () => {
+  const t = getRemoteTool('golfnex', 'publish_post', { env: { GOLFNEX_MCP_URL: 'http://gn.internal/mcp' } });
+  assert.equal(t.featureKey, 'golfnex.content.publish_post');
+  assert.ok(FKEYS.has(t.featureKey), 'featureKey exists in permissions registry');
+  assert.equal(t.server, 'http://gn.internal/mcp');
+  // server is null when the env var is unset (no GolfNex MCP server yet)
+  assert.equal(getRemoteTool('golfnex', 'publish_post', { env: {} }).server, null);
+  // unknown product/tool → null
+  assert.equal(getRemoteTool('golfnex', 'nope', { env: {} }), null);
+  assert.equal(getRemoteTool('nope', 'publish_post', { env: {} }), null);
+});

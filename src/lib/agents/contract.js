@@ -88,6 +88,25 @@ const REGISTRY = [
   },
 ];
 
+// ── remote (MCP) tool registry ─────────────────────────────────────────────────
+// Keyed { product → { toolName → { featureKey, serverEnv } } }. featureKey references the
+// permissions registry (a surface:'mcp_tool' entry) so callTool authorises via the same
+// resolve() path as local agents. server URL is read from serverEnv at call time (env-driven,
+// private-network URL) — not baked in — mirroring the outbound credential accessor. There is
+// no GolfNex MCP server yet, so GOLFNEX_MCP_URL is unset today (callTool then fails as a
+// transport error, audited as such).
+const REMOTE_TOOLS = {
+  golfnex: {
+    publish_post: { featureKey: 'golfnex.content.publish_post', serverEnv: 'GOLFNEX_MCP_URL' },
+  },
+};
+
+function getRemoteTool(product, toolName, { env = process.env } = {}) {
+  const t = REMOTE_TOOLS[product] && REMOTE_TOOLS[product][toolName];
+  if (!t) return null;
+  return { product, toolName, featureKey: t.featureKey, serverEnv: t.serverEnv, server: env[t.serverEnv] || null };
+}
+
 // ── build + validate the registry at load (fail fast on a bad entry) ────────────
 const AGENTS = new Map();
 for (const e of REGISTRY) {
@@ -95,6 +114,15 @@ for (const e of REGISTRY) {
   if (errs.length) throw new Error(`Invalid agent registry entry '${e && e.name}': ${errs.join('; ')}`);
   if (AGENTS.has(e.name)) throw new Error(`Duplicate agent name '${e.name}'`);
   AGENTS.set(e.name, e);
+}
+
+// validate every remote-tool featureKey against the permissions registry (fail fast)
+for (const [product, tools] of Object.entries(REMOTE_TOOLS)) {
+  for (const [toolName, t] of Object.entries(tools)) {
+    if (!FEATURE_BY_KEY.has(t.featureKey)) {
+      throw new Error(`Remote tool '${product}/${toolName}' references unknown featureKey '${t.featureKey}'`);
+    }
+  }
 }
 
 // ── accessors ──────────────────────────────────────────────────────────────────
@@ -121,4 +149,4 @@ async function runAgent(name, ctx = {}) {
   return entry.run({ user: ctx.user || null, product, deps: ctx.deps || {}, args: ctx.args || {} });
 }
 
-module.exports = { REGISTRY, AGENTS, validateEntry, getAgent, listAgents, featureFor, runAgent };
+module.exports = { REGISTRY, AGENTS, validateEntry, getAgent, listAgents, featureFor, runAgent, REMOTE_TOOLS, getRemoteTool };

@@ -152,3 +152,86 @@ test('resolver error fails CLOSED (deny), audited, no execution', async () => {
   assert.equal(res.audit.decision, 'deny');
   assert.match(res.audit.decision_explain, /resolver error/);
 });
+
+// ── callTool (remote MCP tool) ─────────────────────────────────────────────────
+const { callTool } = require('./gate');
+const CRED_ENV = { OUTBOUND_GOLFNEX_MCP: 'sk-out' }; // real getOutboundCredential resolves this
+
+test('callTool DENIES without calling out (audit deny + fireDenial, no mcp call)', async () => {
+  const q = capQuery(); let denials = 0; let calledOut = false;
+  const res = await callTool(USER, {
+    product: 'golfnex', toolName: 'publish_post', args: { draftId: 9 }, tenantId: 't-1',
+    deps: { query: q, resolve: deny(8, 'no'), fireDenial: () => { denials++; }, env: CRED_ENV,
+      callMcpTool: async () => { calledOut = true; return { result: {} }; } },
+  });
+  assert.equal(res.allowed, false);
+  assert.equal(res.result, null);
+  assert.equal(calledOut, false, 'must NOT call the product server on deny');
+  assert.equal(res.audit.decision, 'deny');
+  assert.equal(res.audit.feature_key, 'golfnex.content.publish_post');
+  assert.equal(res.audit.product, 'golfnex');
+  assert.equal(res.audit.tenant_id, 't-1');
+  assert.equal(denials, 1);
+});
+
+test('callTool ALLOW audits with product + tenant, passes _meta on_behalf_of, returns result', async () => {
+  const q = capQuery(); let seenMeta, seenCred;
+  const res = await callTool(USER, {
+    product: 'golfnex', server: 'http://gn.internal/mcp', toolName: 'publish_post', args: { draftId: 9 },
+    tenantId: 't-1', actorAgent: 'content-pipeline',
+    deps: { query: q, resolve: allow(7, 'granted'), env: CRED_ENV,
+      callMcpTool: async ({ credential, meta }) => { seenCred = credential; seenMeta = meta; return { result: { posted: true, id: 'p1' } }; } },
+  });
+  assert.equal(res.allowed, true);
+  assert.deepEqual(res.result, { posted: true, id: 'p1' });
+  assert.equal(res.audit.decision, 'allow');
+  assert.equal(res.audit.success, true);
+  assert.equal(res.audit.product, 'golfnex');
+  assert.equal(res.audit.tenant_id, 't-1');
+  assert.equal(res.audit.actor_agent, 'content-pipeline');
+  assert.equal(res.audit.tool_name, 'publish_post');
+  assert.equal(res.audit.feature_key, 'golfnex.content.publish_post');
+  // _meta carried tenant + on_behalf_of; credential came from the accessor
+  assert.deepEqual(seenMeta, { product: 'golfnex', tenant_id: 't-1', on_behalf_of: 'u1', actor_agent: 'content-pipeline' });
+  assert.equal(seenCred.secret, 'sk-out');
+});
+
+test('callTool distinguishes TRANSPORT failure from JSON-RPC tool error (both success=false)', async () => {
+  const q = capQuery();
+  const transport = await callTool(USER, {
+    product: 'golfnex', server: 'http://x', toolName: 'publish_post', tenantId: 't-1',
+    deps: { query: q, resolve: allow(), env: CRED_ENV, callMcpTool: async () => ({ error: 'request timed out after 15000ms', transport: true, timedOut: true }) },
+  });
+  assert.equal(transport.allowed, true);
+  assert.equal(transport.audit.success, false);
+  assert.match(transport.audit.error, /^transport: /);
+
+  const toolErr = await callTool(USER, {
+    product: 'golfnex', server: 'http://x', toolName: 'publish_post', tenantId: 't-1',
+    deps: { query: q, resolve: allow(), env: CRED_ENV, callMcpTool: async () => ({ error: 'JSON-RPC error -32000: quota exceeded', rpcError: { code: -32000 }, transport: false }) },
+  });
+  assert.equal(toolErr.allowed, true);
+  assert.equal(toolErr.audit.success, false);
+  assert.match(toolErr.audit.error, /^tool_error: /);
+  assert.ok(!/^transport: /.test(toolErr.audit.error), 'a JSON-RPC error is not labelled transport');
+});
+
+test('callTool unknown remote tool → deny, never calls out', async () => {
+  const q = capQuery(); let calledOut = false;
+  const res = await callTool(USER, { product: 'golfnex', toolName: 'nope', deps: { query: q, resolve: allow(), env: CRED_ENV, callMcpTool: async () => { calledOut = true; return {}; } } });
+  assert.equal(res.allowed, false);
+  assert.equal(calledOut, false);
+  assert.match(res.audit.error, /unknown remote tool 'golfnex\/nope'/);
+  assert.equal(res.audit.product, 'golfnex');
+});
+
+test('callTool with no credential → allowed but success=false (credential error, no throw)', async () => {
+  const q = capQuery();
+  const res = await callTool(USER, {
+    product: 'golfnex', server: 'http://x', toolName: 'publish_post', tenantId: 't-1',
+    deps: { query: q, resolve: allow(), env: {} /* no OUTBOUND_GOLFNEX_MCP */, callMcpTool: async () => ({ result: {} }) },
+  });
+  assert.equal(res.allowed, true);
+  assert.equal(res.audit.success, false);
+  assert.match(res.audit.error, /^credential: /);
+});
