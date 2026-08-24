@@ -30,9 +30,11 @@ async function migrateProspects() {
       rating           NUMERIC(2,1),
       rating_count     INTEGER,
       subtype          TEXT,                          -- which query found it: course | range | simulator
-      region           TEXT,                          -- which tile found it
+      region           TEXT,                          -- which tile found it (NOT authoritative geography)
+      state            TEXT,                          -- 2-letter state derived from address (authoritative)
       booking_platform TEXT,                          -- null until qualified
       qualified_at     TIMESTAMPTZ,
+      reject_reason    TEXT,                          -- why status='rejected' (e.g. non-IL address)
       status           TEXT NOT NULL DEFAULT 'new',   -- new | qualified | enriched | contacted | rejected
       created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (product, place_id)

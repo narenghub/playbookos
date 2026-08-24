@@ -99,3 +99,25 @@ test('url is required → { error }, without touching the network', async () => 
     assert.equal(fetched, false);
   } finally { restore(); }
 });
+
+// ── httpText (raw-body fetch for HTML scraping) ─────────────────────────────────
+const { httpText } = require('./http');
+test('httpText success → { text, status, contentType }', async () => {
+  stub(async () => ({ ok: true, status: 200, text: async () => '<html>hi</html>', headers: { get: (k) => k.toLowerCase() === 'content-type' ? 'text/html' : null } }));
+  try {
+    const r = await httpText({ url: 'https://x' });
+    assert.equal(r.text, '<html>hi</html>'); assert.equal(r.status, 200); assert.equal(r.contentType, 'text/html');
+  } finally { restore(); }
+});
+test('httpText non-2xx → { error, status }, no throw', async () => {
+  stub(async () => ({ ok: false, status: 403 }));
+  try { const r = await httpText({ url: 'https://x' }); assert.match(r.error, /HTTP 403/); assert.equal(r.status, 403); } finally { restore(); }
+});
+test('httpText timeout → { error, timedOut }', async () => {
+  stub((url, opts) => new Promise((_r, rej) => opts.signal.addEventListener('abort', () => { const e = new Error('a'); e.name = 'AbortError'; rej(e); })));
+  try { const r = await httpText({ url: 'https://x', timeoutMs: 15 }); assert.equal(r.timedOut, true); assert.match(r.error, /timed out/); } finally { restore(); }
+});
+test('httpText network throw → { error }, no throw', async () => {
+  stub(async () => { throw new Error('ECONN'); });
+  try { let r; await assert.doesNotReject(async () => { r = await httpText({ url: 'https://x' }); }); assert.match(r.error, /request failed: ECONN/); } finally { restore(); }
+});

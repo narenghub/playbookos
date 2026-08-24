@@ -60,4 +60,30 @@ async function httpJson({ url, method = 'GET', headers = {}, body, timeoutMs = D
   return { data, status: res.status };
 }
 
-module.exports = { httpJson, DEFAULT_TIMEOUT_MS };
+// Like httpJson but returns the raw response BODY as text (for scraping HTML — e.g. the
+// booking-signature qualifier). Same never-throws contract + timeout. Returns
+// { text, status, contentType } on a 2xx, or { error, status?, timedOut? } otherwise.
+async function httpText({ url, method = 'GET', headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  if (!url) return { error: 'url is required' };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(url, { method, headers, signal: controller.signal, redirect: 'follow' });
+  } catch (e) {
+    clearTimeout(timer);
+    const timedOut = !!(e && (e.name === 'AbortError' || controller.signal.aborted));
+    return timedOut
+      ? { error: `request timed out after ${timeoutMs}ms`, timedOut: true }
+      : { error: 'request failed: ' + (e && e.message ? e.message : String(e)) };
+  }
+  clearTimeout(timer);
+  if (!res.ok) return { error: `HTTP ${res.status}`, status: res.status };
+  let text;
+  try { text = await res.text(); }
+  catch (e) { return { error: 'body read failed: ' + (e && e.message ? e.message : String(e)), status: res.status }; }
+  const contentType = (res.headers && res.headers.get && res.headers.get('content-type')) || null;
+  return { text, status: res.status, contentType };
+}
+
+module.exports = { httpJson, httpText, DEFAULT_TIMEOUT_MS };

@@ -15,6 +15,7 @@ const { query } = require('../../db');
 const { logAgentActivity } = require('../../agent-core');
 const places = require('./places');
 const { tilesForProduct } = require('./tiles');
+const { qualifyFacility } = require('./qualify');
 
 const AGENT_NAME = 'prospecting';
 const PAGE_CAP = 3; // Places New: 20/page, max 3 pages = 60 results per query
@@ -100,4 +101,50 @@ async function runProspecting(product, { dryRun = false, deps = {} } = {}) {
   return summary;
 }
 
-module.exports = { runProspecting, AGENT_NAME };
+// ── qualifier orchestrator step ─────────────────────────────────────────────────
+// Qualify prospects that are status='new' with a website: run the booking-signature
+// qualifier, write booking_platform + qualified_at, set status='qualified'. Never-throws;
+// flag-gated by PROSPECTING_ENABLED; capped; rate-limited. Facilities with no website are
+// left 'new' (nothing to scan). logAgentActivity on completion.
+async function runQualifyProspects(product, { deps = {} } = {}) {
+  const env = deps.env || process.env;
+  const summary = { product, enabled: true, considered: 0, qualified: 0, with_platform: 0, no_platform: 0, by_platform: {}, errors: [] };
+  if (String(env.PROSPECTING_ENABLED) !== 'true') { summary.enabled = false; return summary; }
+
+  const q = deps.query || query;
+  const qualify = deps.qualifyFacility || qualifyFacility;
+  const logActivity = deps.logAgentActivity || logAgentActivity;
+  const cap = envNum(env, 'PROSPECTING_QUALIFY_CAP', 500);
+  const rateMs = envNum(env, 'PROSPECTING_RATE_MS', 200);
+
+  let rows;
+  try {
+    rows = (await q(
+      `SELECT id, website FROM prospects
+        WHERE product=$1 AND status='new' AND website IS NOT NULL
+        ORDER BY id LIMIT $2`, [product, cap])).rows;
+  } catch (e) { summary.errors.push({ stage: 'select', error: e && e.message ? e.message : String(e) }); return summary; }
+
+  for (const r of rows) {
+    summary.considered++;
+    let res;
+    try { res = await qualify(r.website, { deps }); }
+    catch (e) { res = { platform: null, confidence: null, evidence: 'qualify threw: ' + (e && e.message ? e.message : String(e)) }; }
+    try {
+      await q(`UPDATE prospects SET booking_platform=$1, qualified_at=NOW(), status='qualified' WHERE id=$2`, [res.platform || null, r.id]);
+      summary.qualified++;
+      if (res.platform) { summary.with_platform++; summary.by_platform[res.platform] = (summary.by_platform[res.platform] || 0) + 1; }
+      else summary.no_platform++;
+    } catch (e) { summary.errors.push({ stage: 'update', id: r.id, error: e && e.message ? e.message : String(e) }); }
+    await sleep(rateMs);
+  }
+
+  try {
+    await logActivity({ agent_name: AGENT_NAME, action_type: 'qualify',
+      reasoning: `Booking-signature qualification for ${product}`,
+      output_summary: `considered=${summary.considered} qualified=${summary.qualified} with_platform=${summary.with_platform} no_platform=${summary.no_platform} errors=${summary.errors.length}` });
+  } catch { /* logging must never break the run */ }
+  return summary;
+}
+
+module.exports = { runProspecting, runQualifyProspects, AGENT_NAME };

@@ -102,3 +102,32 @@ test('golfnex tiles = 3 subtypes × 13 IL regions = 39 tiles; unknown product = 
   assert.ok(t.every(x => x.query.includes(' in ')));
   assert.equal(tilesForProduct('nope').length, 0);
 });
+
+// ── runQualifyProspects (booking-signature orchestrator step) ──────────────────
+const { runQualifyProspects } = require('./index');
+function qualDB(rows) { const updates = []; const q = async (sql, params) => { if (/^SELECT/i.test(sql.trim())) return { rows }; if (/UPDATE/i.test(sql)) { updates.push(params); return { rows: [] }; } return { rows: [] }; }; return { query: q, updates }; }
+
+test('runQualifyProspects flag OFF → no-op (no select)', async () => {
+  let sel = false; const q = async () => { sel = true; return { rows: [] }; };
+  const s = await runQualifyProspects('golfnex', { deps: { env: {}, query: q, qualifyFacility: async () => ({ platform: null }), logAgentActivity: noopLog } });
+  assert.equal(s.enabled, false); assert.equal(sel, false);
+});
+
+test('runQualifyProspects writes platform + status=qualified, tallies by_platform', async () => {
+  const db = qualDB([{ id: 1, website: 'a' }, { id: 2, website: 'b' }, { id: 3, website: 'c' }]);
+  const qualify = async (w) => w === 'a' ? { platform: 'foreup', confidence: 'high' } : w === 'b' ? { platform: null } : { platform: 'golfnow', confidence: 'medium' };
+  const s = await runQualifyProspects('golfnex', { deps: { env: ON, query: db.query, qualifyFacility: qualify, logAgentActivity: noopLog } });
+  assert.equal(s.considered, 3); assert.equal(s.qualified, 3);
+  assert.equal(s.with_platform, 2); assert.equal(s.no_platform, 1);
+  assert.deepEqual(s.by_platform, { foreup: 1, golfnow: 1 });
+  assert.equal(db.updates.length, 3);
+  assert.deepEqual(db.updates[0], ['foreup', 1]); // booking_platform, id
+  assert.deepEqual(db.updates[1], [null, 2]);
+});
+
+test('runQualifyProspects never-throws when the qualifier throws', async () => {
+  const db = qualDB([{ id: 1, website: 'a' }]);
+  let s;
+  await assert.doesNotReject(async () => { s = await runQualifyProspects('golfnex', { deps: { env: ON, query: db.query, qualifyFacility: async () => { throw new Error('kaboom'); }, logAgentActivity: noopLog } }); });
+  assert.equal(s.qualified, 1); assert.equal(s.no_platform, 1); // recorded as no-platform, still marked qualified
+});
