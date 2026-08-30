@@ -8,25 +8,23 @@
 // 3. Return the platform, or null if none found.
 //
 // confidence: high = signature in a <script>/<iframe> src; medium = in a link href;
-//             low = only a text mention. NEVER THROWS — a dead site/timeout/403/non-HTML is
-//             a RESULT (platform:null with evidence), not an error.
+//             low = only a text mention. NEVER THROWS on a RUNTIME site failure — a dead
+//             site/timeout/403/non-HTML is a RESULT (platform:null with evidence).
 //
-// The signature list + booking-link words are NOT hardcoded here — they come from config.js
-// per product, passed in by the orchestrator. The golfnex set is used as a back-compat DEFAULT
-// for direct callers that omit them (the data still lives in config.js, not here).
+// signatures + bookingLinkTerms are REQUIRED — there is NO default. A domain default is how
+// a wrong assumption creeps back: qualifyFacility(url) for salons would silently scan for
+// tee-time platforms, find nothing, and produce a clean-looking-but-wrong prospect list.
+// Missing config is therefore a LOUD programming error (thrown before the runtime try), not a
+// swallowed null. The orchestrator passes the product's config from config.js.
 
 const { httpText } = require('../../outbound/http');
-const { getConfig } = require('./config');
-
-const _golf = getConfig('golfnex');
-const DEFAULT_SIGNATURES = _golf.signatures;
-const DEFAULT_TERMS = _golf.bookingLinkTerms;
 
 const esc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Detect the highest-confidence signature in one HTML blob against a given signature set.
 // high (script/iframe src) beats medium (link href) beats low (text mention).
-function detect(html, signatures = DEFAULT_SIGNATURES) {
+function detect(html, signatures) {
+  if (!Array.isArray(signatures) || !signatures.length) throw new Error('detect(html, signatures): a non-empty signatures array is required');
   const h = String(html || '');
   for (const s of signatures) {
     if (new RegExp('<(?:script|iframe)\\b[^>]+src=["\'][^"\']*' + esc(s.key) + '[^"\']*["\']', 'i').test(h))
@@ -44,15 +42,16 @@ function detect(html, signatures = DEFAULT_SIGNATURES) {
 }
 
 // Build the booking-link matcher from config terms: a space in a term becomes [\s-]? (so
-// 'tee time' matches 'tee-time' / 'tee time'), reproducing the previous hardcoded regex.
+// 'tee time' matches 'tee-time' / 'tee time'). Terms are required — no default.
 function bookingLinkRegex(terms) {
-  const alt = (terms && terms.length ? terms : DEFAULT_TERMS).map(t => esc(t).replace(/ /g, '[\\s-]?')).join('|');
+  if (!Array.isArray(terms) || !terms.length) throw new Error('bookingLinkRegex(terms): a non-empty terms array is required');
+  const alt = terms.map(t => esc(t).replace(/ /g, '[\\s-]?')).join('|');
   return new RegExp('(?:' + alt + ')', 'i');
 }
 
 // Find the first booking link and resolve it absolute against baseUrl.
-function findBookingLink(html, baseUrl, terms = DEFAULT_TERMS) {
-  const rx = bookingLinkRegex(terms);
+function findBookingLink(html, baseUrl, terms) {
+  const rx = bookingLinkRegex(terms); // throws if terms missing
   const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(String(html || '')))) {
@@ -66,7 +65,11 @@ function findBookingLink(html, baseUrl, terms = DEFAULT_TERMS) {
   return null;
 }
 
-async function qualifyFacility(website, { signatures = DEFAULT_SIGNATURES, bookingLinkTerms = DEFAULT_TERMS, deps = {} } = {}) {
+async function qualifyFacility(website, { signatures, bookingLinkTerms, deps = {} } = {}) {
+  // Misuse (missing domain config) is a LOUD error, validated BEFORE the try so it can never
+  // be swallowed into a silent null. Runtime site failures inside the try stay results.
+  if (!Array.isArray(signatures) || !signatures.length) throw new Error('qualifyFacility: signatures (from the product config) are required');
+  if (!Array.isArray(bookingLinkTerms) || !bookingLinkTerms.length) throw new Error('qualifyFacility: bookingLinkTerms (from the product config) are required');
   try {
     if (!website) return { platform: null, confidence: null, evidence: 'no website' };
     const fetchText = deps.httpText || httpText;
@@ -93,5 +96,4 @@ async function qualifyFacility(website, { signatures = DEFAULT_SIGNATURES, booki
   }
 }
 
-// SIGNATURES re-exported (the golfnex default) for back-compat with direct importers.
-module.exports = { qualifyFacility, detect, findBookingLink, bookingLinkRegex, SIGNATURES: DEFAULT_SIGNATURES };
+module.exports = { qualifyFacility, detect, findBookingLink, bookingLinkRegex };
