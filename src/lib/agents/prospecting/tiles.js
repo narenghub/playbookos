@@ -1,18 +1,14 @@
-// GolfNex prospecting — tile configuration. The Places Text Search cap is 60 results per
-// query, so a statewide search must be TILED: 3 subtypes × geographic regions. Adding a new
-// state (or product) is a config entry here, NOT new code — the orchestrator reads tiles
-// from tilesForProduct().
+// Prospecting — geographic tiles. The Places Text Search cap is 60 results per query, so a
+// statewide search must be TILED: subtypes × regions. Subtypes + which states a product
+// prospects now live in config.js (per product); REGIONS (state → region list) stays here.
+// Adding a state = a REGIONS entry; adding a product = a config.js entry — neither is code.
 
-const SUBTYPES = [
-  { key: 'course', term: 'golf course' },
-  { key: 'range', term: 'driving range' },
-  { key: 'simulator', term: 'golf simulator' },
-];
+const { getConfig } = require('./config');
 
-// state → regions. Chicago metro is subdivided (it holds most facilities and would hit the
-// 60 cap as one tile); downstate metros are single tiles.
+// state key → regions. Chicago metro is subdivided (it alone would hit the 60 cap); downstate
+// metros are single tiles. Region STRINGS are what Places searches — keep them stable.
 const REGIONS = {
-  illinois: [
+  IL: [
     'Chicago, IL',
     'North Shore, Illinois',
     'Northwest suburbs, Chicago, IL',
@@ -29,18 +25,15 @@ const REGIONS = {
   ],
 };
 
-// product → states it prospects. Adding a product/state is a data change here.
-const PRODUCT_STATES = {
-  golfnex: ['illinois'],
-};
-
-// Build every { region, subtype, query } tile for a product. query = "<term> in <region>".
+// Build every { state, region, subtype, query } tile for a product from its config.
+// query = "<subtype term> in <region>". Unknown product → [] (orchestrator reports it).
 function tilesForProduct(product) {
-  const states = PRODUCT_STATES[product] || [];
+  const cfg = getConfig(product);
+  if (!cfg) return [];
   const tiles = [];
-  for (const state of states) {
+  for (const state of (cfg.states || [])) {
     for (const region of (REGIONS[state] || [])) {
-      for (const st of SUBTYPES) {
+      for (const st of (cfg.subtypes || [])) {
         tiles.push({ state, region, subtype: st.key, query: `${st.term} in ${region}` });
       }
     }
@@ -48,4 +41,4 @@ function tilesForProduct(product) {
   return tiles;
 }
 
-module.exports = { SUBTYPES, REGIONS, PRODUCT_STATES, tilesForProduct };
+module.exports = { REGIONS, tilesForProduct };

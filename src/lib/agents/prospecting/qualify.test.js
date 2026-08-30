@@ -95,3 +95,26 @@ test('no website → null without fetching', async () => {
   assert.equal(r.platform, null);
   assert.equal(called, false);
 });
+
+// ── config-driven signatures (refactor) ────────────────────────────────────────
+const { getConfig } = require('./config');
+test('the golfnex signature set (now from config) still detects all 13 platforms via detect(html, signatures)', () => {
+  const sigs = getConfig('golfnex').signatures;
+  assert.equal(sigs.length, 13);
+  for (const s of sigs) {
+    const r = detect(`<html> ... ${s.key} ... </html>`, sigs);
+    assert.equal(r.platform, s.platform, `explicit signatures detect ${s.key}`);
+  }
+  // and detect with NO signatures still uses the golf default (back-compat)
+  assert.equal(detect('powered by golfnow').platform, 'golfnow');
+});
+
+test('getConfig: golfnex shape present; unknown product → null', () => {
+  const c = getConfig('golfnex');
+  assert.ok(Array.isArray(c.subtypes) && c.subtypes.length === 3);
+  assert.deepEqual(c.states, ['IL']);
+  assert.ok(Array.isArray(c.signatures) && c.signatures.length === 13);
+  assert.deepEqual(c.bookingLinkTerms, ['book','tee time','reserve','booking']);
+  assert.equal(getConfig('favly'), null, 'no Favly config yet');
+  assert.equal(getConfig('nope'), null);
+});

@@ -1,74 +1,72 @@
-// GolfNex prospecting — booking-signature qualifier (PURE, uses outbound/http.js httpText).
+// Prospecting — booking-signature qualifier (PURE, uses outbound/http.js httpText).
 //
-//   qualifyFacility(website) -> { platform, confidence, evidence }
+//   qualifyFacility(website, { signatures, bookingLinkTerms }) -> { platform, confidence, evidence }
 //
-// The strongest prospecting signal: does the facility already run tee-time booking software?
-// 1. Fetch the homepage; scan for known platform signatures.
-// 2. If none, follow ONE "book / tee time / reserve" link (widgets often live on a subdomain
-//    — homepage-only scanning misses most of them).
+// The strongest prospecting signal: does the facility already run booking software?
+// 1. Fetch the homepage; scan for the product's platform signatures.
+// 2. If none, follow ONE booking link (widgets often live on a subdomain).
 // 3. Return the platform, or null if none found.
 //
 // confidence: high = signature in a <script>/<iframe> src; medium = in a link href;
-//             low = only a text mention.
+//             low = only a text mention. NEVER THROWS — a dead site/timeout/403/non-HTML is
+//             a RESULT (platform:null with evidence), not an error.
 //
-// NEVER THROWS. A dead site, timeout, 403, or non-HTML body is a RESULT (platform:null with
-// evidence), not an error.
+// The signature list + booking-link words are NOT hardcoded here — they come from config.js
+// per product, passed in by the orchestrator. The golfnex set is used as a back-compat DEFAULT
+// for direct callers that omit them (the data still lives in config.js, not here).
 
 const { httpText } = require('../../outbound/http');
+const { getConfig } = require('./config');
 
-// platform → signature token (searched in the HTML). Ordered: more specific first.
-const SIGNATURES = [
-  { platform: 'foreup', key: 'foreupsoftware.com' },
-  { platform: 'foreup', key: 'foreup' },
-  { platform: 'golfnow', key: 'golfnow' },
-  { platform: 'ezlinks', key: 'ezlinks' },
-  { platform: 'chronogolf', key: 'chronogolf' },
-  { platform: 'lightspeed', key: 'lightspeed' },
-  { platform: 'teesnap', key: 'teesnap' },
-  { platform: 'clubprophet', key: 'clubprophet' },
-  { platform: 'supremegolf', key: 'supremegolf' },
-  { platform: 'membersports', key: 'membersports' },
-  { platform: 'teeitup', key: 'teeitup' },
-  { platform: 'golfrev', key: 'golfrev' },
-  { platform: 'quick18', key: 'quick18' },
-];
-const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const _golf = getConfig('golfnex');
+const DEFAULT_SIGNATURES = _golf.signatures;
+const DEFAULT_TERMS = _golf.bookingLinkTerms;
 
-// Detect the highest-confidence signature in one HTML blob. high (script/iframe src) beats
-// medium (link href) beats low (text mention) — scanned in that order across all platforms.
-function detect(html) {
+const esc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Detect the highest-confidence signature in one HTML blob against a given signature set.
+// high (script/iframe src) beats medium (link href) beats low (text mention).
+function detect(html, signatures = DEFAULT_SIGNATURES) {
   const h = String(html || '');
-  for (const s of SIGNATURES) {
+  for (const s of signatures) {
     if (new RegExp('<(?:script|iframe)\\b[^>]+src=["\'][^"\']*' + esc(s.key) + '[^"\']*["\']', 'i').test(h))
       return { platform: s.platform, confidence: 'high', evidence: 'script/iframe src ~ ' + s.key };
   }
-  for (const s of SIGNATURES) {
+  for (const s of signatures) {
     if (new RegExp('href=["\'][^"\']*' + esc(s.key) + '[^"\']*["\']', 'i').test(h))
       return { platform: s.platform, confidence: 'medium', evidence: 'link href ~ ' + s.key };
   }
-  for (const s of SIGNATURES) {
+  for (const s of signatures) {
     if (new RegExp(esc(s.key), 'i').test(h))
       return { platform: s.platform, confidence: 'low', evidence: 'text mention ~ ' + s.key };
   }
   return { platform: null, confidence: null, evidence: null };
 }
 
-// Find the first "book / tee time / reserve" link and resolve it absolute against baseUrl.
-function findBookingLink(html, baseUrl) {
+// Build the booking-link matcher from config terms: a space in a term becomes [\s-]? (so
+// 'tee time' matches 'tee-time' / 'tee time'), reproducing the previous hardcoded regex.
+function bookingLinkRegex(terms) {
+  const alt = (terms && terms.length ? terms : DEFAULT_TERMS).map(t => esc(t).replace(/ /g, '[\\s-]?')).join('|');
+  return new RegExp('(?:' + alt + ')', 'i');
+}
+
+// Find the first booking link and resolve it absolute against baseUrl.
+function findBookingLink(html, baseUrl, terms = DEFAULT_TERMS) {
+  const rx = bookingLinkRegex(terms);
   const re = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let m;
   while ((m = re.exec(String(html || '')))) {
     const href = m[1];
     if (/^(mailto:|tel:|javascript:|#)/i.test(href)) continue;
     const text = (m[2] || '').replace(/<[^>]+>/g, ' ');
-    if (/book|tee[\s-]?time|reserve|booking/i.test(href + ' ' + text)) {
+    if (rx.test(href + ' ' + text)) {
       try { return new URL(href, baseUrl).href; } catch { /* skip malformed href */ }
     }
   }
   return null;
 }
 
-async function qualifyFacility(website, { deps = {} } = {}) {
+async function qualifyFacility(website, { signatures = DEFAULT_SIGNATURES, bookingLinkTerms = DEFAULT_TERMS, deps = {} } = {}) {
   try {
     if (!website) return { platform: null, confidence: null, evidence: 'no website' };
     const fetchText = deps.httpText || httpText;
@@ -77,14 +75,14 @@ async function qualifyFacility(website, { deps = {} } = {}) {
     if (home.error || !home.text) {
       return { platform: null, confidence: null, evidence: 'homepage unreachable: ' + (home.error || 'empty body') };
     }
-    let hit = detect(home.text);
+    let hit = detect(home.text, signatures);
     if (hit.platform) return hit;
 
-    const link = findBookingLink(home.text, website);
+    const link = findBookingLink(home.text, website, bookingLinkTerms);
     if (link) {
       const page = await fetchText({ url: link });
       if (!page.error && page.text) {
-        hit = detect(page.text);
+        hit = detect(page.text, signatures);
         if (hit.platform) return { ...hit, evidence: hit.evidence + ' (via book link ' + link + ')' };
       }
       return { platform: null, confidence: null, evidence: 'no signature (homepage + book link ' + link + ')' };
@@ -95,4 +93,5 @@ async function qualifyFacility(website, { deps = {} } = {}) {
   }
 }
 
-module.exports = { qualifyFacility, detect, findBookingLink, SIGNATURES };
+// SIGNATURES re-exported (the golfnex default) for back-compat with direct importers.
+module.exports = { qualifyFacility, detect, findBookingLink, bookingLinkRegex, SIGNATURES: DEFAULT_SIGNATURES };

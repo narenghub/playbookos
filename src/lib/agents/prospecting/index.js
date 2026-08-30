@@ -16,6 +16,7 @@ const { logAgentActivity } = require('../../agent-core');
 const places = require('./places');
 const { tilesForProduct } = require('./tiles');
 const { qualifyFacility } = require('./qualify');
+const { getConfig } = require('./config');
 
 const AGENT_NAME = 'prospecting';
 const PAGE_CAP = 3; // Places New: 20/page, max 3 pages = 60 results per query
@@ -111,6 +112,10 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
   const summary = { product, enabled: true, considered: 0, qualified: 0, with_platform: 0, no_platform: 0, by_platform: {}, errors: [] };
   if (String(env.PROSPECTING_ENABLED) !== 'true') { summary.enabled = false; return summary; }
 
+  // Resolve the product's domain config (signatures + booking-link terms). Unknown → error.
+  const cfg = (deps.getConfig || getConfig)(product);
+  if (!cfg) { summary.errors.push({ stage: 'config', error: `no config for product '${product}'` }); return summary; }
+
   const q = deps.query || query;
   const qualify = deps.qualifyFacility || qualifyFacility;
   const logActivity = deps.logAgentActivity || logAgentActivity;
@@ -128,7 +133,7 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
   for (const r of rows) {
     summary.considered++;
     let res;
-    try { res = await qualify(r.website, { deps }); }
+    try { res = await qualify(r.website, { signatures: cfg.signatures, bookingLinkTerms: cfg.bookingLinkTerms, deps }); }
     catch (e) { res = { platform: null, confidence: null, evidence: 'qualify threw: ' + (e && e.message ? e.message : String(e)) }; }
     try {
       await q(`UPDATE prospects SET booking_platform=$1, qualified_at=NOW(), status='qualified' WHERE id=$2`, [res.platform || null, r.id]);

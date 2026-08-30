@@ -131,3 +131,25 @@ test('runQualifyProspects never-throws when the qualifier throws', async () => {
   await assert.doesNotReject(async () => { s = await runQualifyProspects('golfnex', { deps: { env: ON, query: db.query, qualifyFacility: async () => { throw new Error('kaboom'); }, logAgentActivity: noopLog } }); });
   assert.equal(s.qualified, 1); assert.equal(s.no_platform, 1); // recorded as no-platform, still marked qualified
 });
+
+// ── REFACTOR REGRESSION (config externalisation) ───────────────────────────────
+test('tilesForProduct(golfnex) returns the SAME 39 tiles as before the refactor', () => {
+  const regions = ['Chicago, IL','North Shore, Illinois','Northwest suburbs, Chicago, IL','West suburbs, Chicago, IL','South suburbs, Chicago, IL','Rockford, IL','Peoria, IL','Springfield, IL','Champaign, IL','Bloomington, IL','Quad Cities, IL','Decatur, IL','Metro East, Illinois'];
+  const terms = ['golf course','driving range','golf simulator'];
+  const expected = [];
+  for (const r of regions) for (const t of terms) expected.push(`${t} in ${r}`);
+  const got = tilesForProduct('golfnex');
+  assert.equal(got.length, 39);
+  assert.deepEqual(got.map(t => t.query).sort(), expected.sort(), 'exact 39 queries unchanged');
+  assert.deepEqual([...new Set(got.map(t => t.subtype))].sort(), ['course','range','simulator']);
+  assert.ok(got.every(t => t.state === 'IL'));
+});
+
+test('runQualifyProspects on an unknown product → config error, no throw (does not run)', async () => {
+  let selected = false;
+  const q = async () => { selected = true; return { rows: [] }; };
+  let s;
+  await assert.doesNotReject(async () => { s = await runQualifyProspects('nope', { deps: { env: ON, query: q, qualifyFacility: async () => ({ platform: null }), logAgentActivity: noopLog } }); });
+  assert.ok(s.errors.some(e => e.stage === 'config'), 'clear config error for unknown product');
+  assert.equal(selected, false, 'did not query prospects for an unconfigured product');
+});
