@@ -390,6 +390,7 @@ const NAV_SECTIONS = [
     {id:'reorder-agent', label:'Reorder Agent', icon:'🔁'},
     {id:'inquiry-agent', label:'Inquiry Agent', icon:'📨'},
     {id:'apollo-outreach', label:'Apollo Outreach', icon:'📧'},
+    {id:'prospects', label:'Prospects', icon:'📍'},
     {id:'email-engine', label:'Email Engine', icon:'✉️'},
   ]},
   {title:'INTELLIGENCE', access:['admin','procurement','seo','business_dev'], items:[
@@ -438,7 +439,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"clinical-demand-intelligence":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
 function roleTiersFor(role) {
   const cat = (typeof window !== 'undefined' && window._roleCatalog) || [];
   const row = Array.isArray(cat) ? cat.find(r => r.role_name === role) : null;
@@ -518,7 +519,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','content-studio':'Content Studio','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','content-studio':'Content Studio','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
@@ -2512,6 +2513,202 @@ async function csRun(){
     if (res && res.enabled === false) { showToast('Pipeline flag is OFF (CONTENT_PIPELINE_ENABLED). Nothing ran.', 'error', 6000); return; }
     showToast('Pipeline done: ' + (res.drafts_created||0) + ' new drafts, ' + (res.dropped_irrelevant||0) + ' dropped', 'success', 6000);
     pages['content-studio']();
+  } catch(e){ showToast('Error: ' + e.message, 'error', 6000); }
+}
+
+// ── Prospects — product-scoped facility list (first product-aware page) ─────────
+window._ppFilters = window._ppFilters || { product: 'golfnex', status: 'qualified', subtype: '', booking_platform: 'none', has_website: '', page: 1 };
+window._ppState = window._ppState || { total: 0, pageSize: 50, summary: null };
+const PP_PRODUCTS = [{ id:'golfnex', label:'GolfNex' }, { id:'favly', label:'Favly' }];
+const PP_STATUSES = ['new','qualified','enriched','contacted','rejected'];
+function ppEsc(s){ return csEsc(s); }                                    // reuse the studio escaper
+function ppIsAdmin(){ return csIsAdmin(); }
+function ppCity(addr){ const m = String(addr||'').match(/,\s*([^,]+),\s*[A-Z]{2}\s+\d{5}/); return m ? m[1].trim() : ''; }
+function ppStatusBadge(s){ const cls={ new:'badge-gray', qualified:'badge-blue', enriched:'badge-green', contacted:'badge-green', rejected:'badge-red' }[s]||'badge-gray'; return '<span class="badge '+cls+'">'+ppEsc(s)+'</span>'; }
+
+pages['prospects'] = async function() {
+  const c = document.getElementById('content');
+  const f = window._ppFilters;
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading prospects…</p>';
+  const qs = new URLSearchParams();
+  qs.set('product', f.product);
+  if (f.status) qs.set('status', f.status);
+  if (f.subtype) qs.set('subtype', f.subtype);
+  if (f.booking_platform) qs.set('booking_platform', f.booking_platform);
+  if (f.has_website) qs.set('has_website', f.has_website);
+  qs.set('page', String(f.page || 1));
+  qs.set('pageSize', String(window._ppState.pageSize));
+  const res = await API('/prospects?' + qs.toString()).catch(e => ({ error: e.message }));
+  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">Prospects</div><p style="color:#dc2626">'+ppEsc(res.error)+'</p></div>'; return; }
+  window._ppItems = (res && res.items) || [];
+  window._ppState.total = (res && res.total) || 0;
+  window._ppState.pageSize = (res && res.pageSize) || window._ppState.pageSize;
+  window._ppState.summary = (res && res.summary) || null;
+
+  const prodBtns = PP_PRODUCTS.map(p =>
+    `<button onclick="ppSetProduct('${p.id}')" class="${f.product===p.id?'btn-primary':'btn-outline'} btn-sm" style="font-size:12px">${p.label}</button>`).join('');
+  const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+    <div>
+      <div class="card-title text-section" style="margin:0">Prospects</div>
+      <div class="text-body">Qualified facilities discovered via Places, scoped by product. Prime pool = qualified with no booking platform yet.</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <span style="font-size:11px;color:var(--text-muted)">Product</span>
+      <div style="display:flex;gap:4px">${prodBtns}</div>
+      ${ppIsAdmin() ? `<button onclick="ppRun('run')" class="btn-secondary" style="padding:5px 12px;font-size:11px">▶ Run prospecting</button>
+      <button onclick="ppRun('qualify')" class="btn-secondary" style="padding:5px 12px;font-size:11px">✓ Qualify</button>` : ''}
+    </div>
+  </div>`;
+
+  const s = window._ppState.summary || {};
+  const stat = (label, val, color) => `<div style="flex:1;min-width:110px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;text-align:center">
+    <div style="font-size:22px;font-weight:800;color:${color||'var(--text-body)'}">${(val==null?0:val).toLocaleString()}</div>
+    <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">${label}</div></div>`;
+  const summaryRow = `<div class="card" style="display:flex;gap:10px;flex-wrap:wrap">
+    ${stat('Total', s.total, '#1B3A6B')}
+    ${stat('Qualified', s.qualified, '#2563eb')}
+    ${stat('No platform (prime)', s.no_platform, '#1D9E75')}
+    ${stat('On a platform', s.on_platform, '#64748b')}
+    ${stat('Rejected', s.rejected, '#dc2626')}
+  </div>`;
+
+  const statusOpts = ['<option value="">status: any</option>'].concat(
+    PP_STATUSES.map(st => `<option value="${st}"${f.status===st?' selected':''}>${st}</option>`)).join('');
+  const platOpts = [['','platform: any'],['none','no platform (prime)']].map(
+    ([v,l]) => `<option value="${v}"${f.booking_platform===v?' selected':''}>${l}</option>`).join('');
+  const siteOpts = [['','website: any'],['true','has website'],['false','no website']].map(
+    ([v,l]) => `<option value="${v}"${f.has_website===v?' selected':''}>${l}</option>`).join('');
+  const filters = `<div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <select onchange="ppSetFilter('status', this.value)" style="font-size:12px;padding:4px">${statusOpts}</select>
+    <input value="${ppEsc(f.subtype)}" onchange="ppSetFilter('subtype', this.value)" placeholder="subtype" style="font-size:12px;width:120px;padding:4px">
+    <select onchange="ppSetFilter('booking_platform', this.value)" style="font-size:12px;padding:4px">${platOpts}</select>
+    <select onchange="ppSetFilter('has_website', this.value)" style="font-size:12px;padding:4px">${siteOpts}</select>
+    <button onclick="ppResetFilters()" class="btn-outline btn-sm" style="font-size:11px">Reset to prime pool</button>
+  </div>`;
+
+  const rows = window._ppItems.map(it => {
+    const site = it.website ? `<a href="${ppEsc(it.website)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">↗</a>` : '<span style="color:var(--text-muted)">—</span>';
+    return `<tr onclick="ppOpen('${it.id}')" style="cursor:pointer;border-top:1px solid var(--border)">
+      <td style="padding:7px 8px;font-weight:600">${ppEsc(it.name)}</td>
+      <td style="padding:7px 8px">${ppEsc(ppCity(it.address))||'<span style="color:var(--text-muted)">—</span>'}</td>
+      <td style="padding:7px 8px">${ppEsc(it.subtype)||'—'}</td>
+      <td style="padding:7px 8px;text-align:right">${it.rating!=null?ppEsc(it.rating)+'★':'—'}</td>
+      <td style="padding:7px 8px;text-align:right">${(it.rating_count||0).toLocaleString()}</td>
+      <td style="padding:7px 8px">${it.booking_platform?ppEsc(it.booking_platform):'<span style="color:#1D9E75">none</span>'}</td>
+      <td style="padding:7px 8px;text-align:center">${site}</td>
+      <td style="padding:7px 8px">${it.phone?ppEsc(it.phone):'<span style="color:var(--text-muted)">—</span>'}</td>
+      <td style="padding:7px 8px">${ppStatusBadge(it.status)}</td>
+    </tr>`;
+  }).join('');
+  const totalPages = Math.max(1, Math.ceil(window._ppState.total / window._ppState.pageSize));
+  const from = window._ppState.total ? (f.page - 1) * window._ppState.pageSize + 1 : 0;
+  const to = Math.min(f.page * window._ppState.pageSize, window._ppState.total);
+  const pager = `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 8px;font-size:12px;color:var(--text-muted)">
+    <span>${from.toLocaleString()}–${to.toLocaleString()} of ${window._ppState.total.toLocaleString()} (sorted by review count)</span>
+    <span style="display:flex;gap:6px;align-items:center">
+      <button onclick="ppPage(-1)" class="btn-outline btn-sm" style="font-size:11px" ${f.page<=1?'disabled':''}>‹ Prev</button>
+      <span>Page ${f.page} / ${totalPages}</span>
+      <button onclick="ppPage(1)" class="btn-outline btn-sm" style="font-size:11px" ${f.page>=totalPages?'disabled':''}>Next ›</button>
+    </span></div>`;
+  const table = `<div class="card" style="padding:0;overflow-x:auto">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px">
+        <th style="padding:8px">Name</th><th style="padding:8px">City</th><th style="padding:8px">Subtype</th>
+        <th style="padding:8px;text-align:right">Rating</th><th style="padding:8px;text-align:right">Reviews</th>
+        <th style="padding:8px">Platform</th><th style="padding:8px;text-align:center">Site</th><th style="padding:8px">Phone</th><th style="padding:8px">Status</th>
+      </tr></thead>
+      <tbody>${rows || '<tr><td colspan="9" style="padding:16px;color:var(--text-muted)">No prospects match this filter.</td></tr>'}</tbody>
+    </table>${pager}</div>`;
+
+  c.innerHTML = header + summaryRow + filters + table + '<div id="pp-detail"></div>';
+};
+
+function ppSetProduct(p){ window._ppFilters.product = p; window._ppFilters.page = 1; pages['prospects'](); }
+function ppSetFilter(key, val){ window._ppFilters[key] = val; window._ppFilters.page = 1; pages['prospects'](); }
+function ppResetFilters(){ window._ppFilters = { ...window._ppFilters, status:'qualified', subtype:'', booking_platform:'none', has_website:'', page:1 }; pages['prospects'](); }
+function ppPage(delta){
+  const totalPages = Math.max(1, Math.ceil(window._ppState.total / window._ppState.pageSize));
+  const next = Math.min(totalPages, Math.max(1, (window._ppFilters.page || 1) + delta));
+  if (next === window._ppFilters.page) return;
+  window._ppFilters.page = next; pages['prospects']();
+}
+
+async function ppOpen(id){
+  const panel = document.getElementById('pp-detail');
+  if (!panel) return;
+  panel.innerHTML = '<div class="card"><p style="color:var(--text-muted)">Loading record…</p></div>';
+  const p = await API('/prospects/' + id).catch(e => ({ error: e.message }));
+  if (p && p.error) { panel.innerHTML = '<div class="card"><p style="color:#dc2626">'+ppEsc(p.error)+'</p></div>'; return; }
+  window._ppDetail = p;
+  const maps = 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent([p.name, p.address].filter(Boolean).join(' '));
+  const field = (label, val) => `<div style="margin-bottom:6px"><span style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">${label}</span><div style="font-size:13px">${val}</div></div>`;
+  const statusBtns = PP_STATUSES.map(st =>
+    `<button onclick="ppSetStatus('${p.id}','${st}',this)" class="${p.status===st?'btn-primary':'btn-outline'} btn-sm" style="font-size:11px">${st}</button>`).join('');
+  panel.innerHTML = `<div class="card" style="border-left:4px solid #1B3A6B" id="pp-panel-${p.id}">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+      <div><div style="font-weight:800;font-size:17px">${ppEsc(p.name)}</div>
+        <div class="text-label">${[ppEsc(p.subtype), ppEsc(p.region), ppEsc(p.state)].filter(Boolean).join(' · ')||'&nbsp;'}</div></div>
+      <button onclick="document.getElementById('pp-detail').innerHTML=''" class="btn-outline btn-sm" style="font-size:11px">✕ Close</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+      <div>
+        ${field('Address', ppEsc(p.address)||'—')}
+        ${field('Phone', p.phone?ppEsc(p.phone):'—')}
+        ${field('Rating', (p.rating!=null?ppEsc(p.rating)+'★':'—') + ' · ' + (p.rating_count||0).toLocaleString() + ' reviews')}
+        ${field('Booking platform', p.booking_platform?ppEsc(p.booking_platform):'<span style="color:#1D9E75">none — prime target</span>')}
+      </div>
+      <div>
+        ${field('Status', ppStatusBadge(p.status))}
+        ${field('Types', Array.isArray(p.types)&&p.types.length?ppEsc(p.types.join(', ')):'—')}
+        ${p.reject_reason?field('Reject reason', ppEsc(p.reject_reason)):''}
+        ${field('Links', (p.website?`<a href="${ppEsc(p.website)}" target="_blank" rel="noopener noreferrer">Website ↗</a> · `:'') + `<a href="${maps}" target="_blank" rel="noopener noreferrer">Google Maps ↗</a>`)}
+      </div>
+    </div>
+    <div style="margin-top:12px">
+      <div class="text-label">Notes</div>
+      <textarea id="pp-notes-${p.id}" style="width:100%;height:80px;padding:6px;border:1px solid var(--border);border-radius:6px;font-family:Arial;font-size:13px">${ppEsc(p.notes||'')}</textarea>
+      <div style="display:flex;gap:6px;align-items:center;margin-top:8px;flex-wrap:wrap">
+        <button onclick="ppSaveNotes('${p.id}',this)" class="btn-primary" style="padding:5px 12px;font-size:11px">Save notes</button>
+        <span style="font-size:11px;color:var(--text-muted);margin-left:8px">Set status:</span>
+        ${statusBtns}
+      </div>
+    </div>
+  </div>`;
+  panel.scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+
+async function ppSaveNotes(id, btn){
+  const notes = document.getElementById('pp-notes-' + id).value;
+  if (btn) btn.disabled = true;
+  try {
+    const res = await API('/prospects/' + id, { method:'PUT', body: JSON.stringify({ notes }) });
+    if (res && res.error) { showToast('Error: ' + res.error, 'error', 5000); if(btn) btn.disabled=false; return; }
+    showToast('Notes saved', 'success');
+    if (btn) btn.disabled = false;
+  } catch(e){ showToast('Error: ' + e.message, 'error', 5000); if(btn) btn.disabled=false; }
+}
+
+async function ppSetStatus(id, status, btn){
+  if (btn) btn.disabled = true;
+  try {
+    const res = await API('/prospects/' + id, { method:'PUT', body: JSON.stringify({ status }) });
+    if (res && res.error) { showToast('Error: ' + res.error, 'error', 5000); if(btn) btn.disabled=false; return; }
+    showToast('Status → ' + status, 'success');
+    await pages['prospects']();       // refresh table + summary
+    ppOpen(id);                       // re-open the panel on the updated record
+  } catch(e){ showToast('Error: ' + e.message, 'error', 5000); if(btn) btn.disabled=false; }
+}
+
+async function ppRun(kind){
+  const prod = window._ppFilters.product;
+  const verb = kind === 'run' ? 'prospecting enumeration' : 'the booking-signature qualifier';
+  if (!confirm('Run ' + verb + ' for "' + prod + '" now? This can take a while and may incur API cost.')) return;
+  showToast('Running ' + kind + '…');
+  try {
+    const res = await API('/prospects/' + kind, { method:'POST', body: JSON.stringify({ product: prod }) });
+    if (res && res.error) { showToast('Error: ' + res.error, 'error', 6000); return; }
+    showToast(kind + ' done: ' + JSON.stringify(res).slice(0, 160), 'success', 7000);
+    pages['prospects']();
   } catch(e){ showToast('Error: ' + e.message, 'error', 6000); }
 }
 

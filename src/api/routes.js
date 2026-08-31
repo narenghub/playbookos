@@ -19,6 +19,7 @@ const workspaceActivity = require('../lib/agents/workspace-activity');
 const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runResearchIntelIngest } = require('../lib/agents/research-intelligence');
 const { runContentPipeline } = require('../lib/agents/content');
+const { runProspecting, runQualifyProspects } = require('../lib/agents/prospecting');
 const riResolve = require('../lib/agents/research-intelligence/resolve');
 const riOutreach = require('../lib/agents/research-intelligence/outreach');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
@@ -4304,5 +4305,96 @@ router.put('/content/:id', authMiddleware, requireTier('intelligence'), async (r
     }
 
     return res.status(400).json({ error: "action must be 'approve', 'reject', or 'edit'" });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Prospects — product-scoped facility prospecting (GolfNex, Favly) ───────────
+// The first product-aware page. reads/writes requireTier('sales'); the two run routes
+// adminOnly. Paginated; sorted by review count (best proxy for a real business).
+const PROSPECT_STATUSES = ['new', 'qualified', 'enriched', 'contacted', 'rejected'];
+
+// GET /prospects — filterable (product/status/subtype/booking_platform/has_website), paginated.
+router.get('/prospects', authMiddleware, requireTier('sales'), async (req, res) => {
+  try {
+    const product = String(req.query.product || 'golfnex').trim();
+    const clauses = ['product = $1'], params = [product];
+    if (req.query.status)  { params.push(req.query.status);  clauses.push(`status = $${params.length}`); }
+    if (req.query.subtype) { params.push(req.query.subtype); clauses.push(`subtype = $${params.length}`); }
+    if (req.query.booking_platform === 'none') clauses.push('booking_platform IS NULL');
+    else if (req.query.booking_platform) { params.push(req.query.booking_platform); clauses.push(`booking_platform = $${params.length}`); }
+    if (req.query.has_website === 'true') clauses.push('website IS NOT NULL');
+    else if (req.query.has_website === 'false') clauses.push('website IS NULL');
+    const where = 'WHERE ' + clauses.join(' AND ');
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
+    const offset = (page - 1) * pageSize;
+
+    const total = (await query(`SELECT COUNT(*)::int n FROM prospects ${where}`, params)).rows[0].n;
+    const items = (await query(
+      `SELECT id, product, name, address, phone, website, subtype, region, state, rating, rating_count,
+              booking_platform, status, notes, qualified_at, created_at
+         FROM prospects ${where}
+         ORDER BY rating_count DESC NULLS LAST, id
+         LIMIT ${pageSize} OFFSET ${offset}`, params)).rows;
+
+    // product-wide summary (independent of the table filters)
+    const summary = (await query(
+      `SELECT COUNT(*)::int total,
+              COUNT(*) FILTER (WHERE status='qualified')::int qualified,
+              COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NULL)::int no_platform,
+              COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NOT NULL)::int on_platform,
+              COUNT(*) FILTER (WHERE status='rejected')::int rejected
+         FROM prospects WHERE product = $1`, [product])).rows[0];
+
+    res.json({ product, page, pageSize, total, items, summary });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /prospects/run — admin-only Places enumeration. Never-throws (relays the summary).
+router.post('/prospects/run', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const product = (req.body && req.body.product) || 'golfnex';
+    const summary = await runProspecting(product);
+    res.json(summary);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /prospects/qualify — admin-only booking-signature qualifier. Never-throws (relays summary).
+router.post('/prospects/qualify', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const product = (req.body && req.body.product) || 'golfnex';
+    const summary = await runQualifyProspects(product);
+    res.json(summary);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /prospects/:id — one prospect (full record).
+router.get('/prospects/:id', authMiddleware, requireTier('sales'), async (req, res) => {
+  try {
+    const row = (await query('SELECT * FROM prospects WHERE id = $1', [req.params.id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT /prospects/:id — update status and/or notes.
+router.put('/prospects/:id', authMiddleware, requireTier('sales'), async (req, res) => {
+  try {
+    const { status, notes } = req.body || {};
+    if (status !== undefined && !PROSPECT_STATUSES.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${PROSPECT_STATUSES.join(', ')}` });
+    }
+    if (status === undefined && notes === undefined) {
+      return res.status(400).json({ error: 'nothing to update (status and/or notes required)' });
+    }
+    const upd = await query(
+      `UPDATE prospects
+          SET status = COALESCE($1, status),
+              notes  = COALESCE($2, notes)
+        WHERE id = $3 RETURNING *`,
+      [status !== undefined ? status : null, notes !== undefined ? notes : null, req.params.id]);
+    if (!upd.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(upd.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

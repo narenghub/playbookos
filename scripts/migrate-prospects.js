@@ -35,10 +35,13 @@ async function migrateProspects() {
       booking_platform TEXT,                          -- null until qualified
       qualified_at     TIMESTAMPTZ,
       reject_reason    TEXT,                          -- why status='rejected' (e.g. non-IL address)
+      notes            TEXT,                          -- free-text notes from the Prospects page
       status           TEXT NOT NULL DEFAULT 'new',   -- new | qualified | enriched | contacted | rejected
       created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       UNIQUE (product, place_id)
     );
+    -- notes was added after the table shipped; ensure it exists on already-created tables.
+    ALTER TABLE prospects ADD COLUMN IF NOT EXISTS notes TEXT;
     CREATE INDEX IF NOT EXISTS idx_prospects_product_status   ON prospects (product, status);
     CREATE INDEX IF NOT EXISTS idx_prospects_product_platform ON prospects (product, booking_platform);
   `);
