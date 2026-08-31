@@ -23,6 +23,16 @@ body{font-family:Arial,sans-serif;background:#f0f2f5;color:#1a1a2e;font-size:14p
 #sidebar .user-info{padding:12px 16px;border-top:1px solid rgba(255,255,255,.12);font-size:12px;color:rgba(255,255,255,.7)}
 #main{flex:1;overflow:auto}
 #topbar{background:#fff;border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;justify-content:space-between}
+/* Product-first shell (flag-gated). Hidden by default → classic layout is byte-identical. */
+#product-bar{display:none;background:var(--navy);border-bottom:1px solid rgba(255,255,255,.14);padding:0 16px;align-items:center;gap:2px;min-height:42px;flex-wrap:wrap}
+#product-bar.show{display:flex}
+#product-bar .pb-tab{padding:9px 14px;font-size:13px;font-weight:600;color:rgba(255,255,255,.72);cursor:pointer;border:none;background:none;border-bottom:3px solid transparent;display:inline-flex;align-items:center;gap:6px}
+#product-bar .pb-tab:hover{color:#fff}
+#product-bar .pb-tab.active{color:#fff;border-bottom-color:#9FE1CB}
+#product-bar .pb-spacer{flex:1;min-width:12px}
+#product-bar .pb-sep{width:1px;height:20px;background:rgba(255,255,255,.22);margin:0 8px}
+#product-bar .pb-globals .pb-tab{color:rgba(255,255,255,.55)}
+#product-bar .pb-globals .pb-tab:hover,#product-bar .pb-globals .pb-tab.active{color:#fff}
 #topbar h2{font-size:16px;font-weight:600;color:var(--navy)}
 #content{padding:24px;max-width:1300px}
 
@@ -231,6 +241,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
   </div>
   <div id="sidebar-overlay" onclick="closeMobileSidebar()"></div>
   <div id="main">
+    <div id="product-bar"></div>
     <div id="mobile-topbar">
       <button id="mobile-hamburger" onclick="toggleMobileSidebar()" aria-label="Open menu">☰</button>
       <div class="mobile-brand">ABIOZEN</div>
@@ -457,8 +468,57 @@ function passesPageReads(pageId, role, tiers) {
   if (!tiers) return true;                // role catalog not loaded -> fall back to section-only
   return reqs.every(anyOf => anyOf.some(t => roleCanRead(tiers, t)));
 }
+// ── PRODUCT-FIRST SHELL (flag-gated, additive; NAV-LAYER ONLY) ──────────────────
+// PRODUCT_NAV regroups the SAME visible pages under product tabs. It changes NOTHING about
+// page bodies (pages[x] untouched), server enforcement, or per-page visibility: a page is
+// visible in product mode iff it is visible in the classic nav today — navSectionVisible ∩
+// passesPageReads, reused verbatim. Tabs are UI chrome; NO registry feature key backs them.
+//
+// prospects lives under BOTH golfnex and favly; selecting either sets the page's own product
+// filter (window._ppFilters.product) so the same page function opens pre-scoped — no dup page.
+// platform + me are NOT products: they render to the right of the product tabs, separated.
+const PRODUCTS = [
+  { key:'abiozen',  label:'Abiozen',  icon:'🧪', kind:'product',
+    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','seo-intelligence','seo-content','linkedin-content'] },
+  { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
+  { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
+  // global areas (not products). Some listed pages are not in the classic nav (data-pipeline,
+  // execution-graph, decision-engine, my-activity) — they stay non-navigable and never surface
+  // in product mode either (pageVisibleToRole is false for anything not in the classic nav).
+  { key:'platform', label:'Platform', icon:'⚙️', kind:'global', pages:['team','agent-control','settings','sku-economics','data-pipeline','execution-graph','decision-engine'] },
+  { key:'me',       label:'Me',       icon:'👤', kind:'global', pages:['my-tasks','my-kpis','my-performance','my-activity'] },
+];
+// Flag: query param ?productNav=1 (for testing), else an optional server-injected global
+// window.PRODUCT_NAV_ENABLED (forward-compatible). Absent → OFF → classic sidebar, byte-identical.
+function productNavEnabled() {
+  try { const qp = new URLSearchParams(location.search).get('productNav'); if (qp != null) return qp === '1' || qp === 'true'; } catch (_) {}
+  return typeof window !== 'undefined' && window.PRODUCT_NAV_ENABLED === true;
+}
+// id -> its classic NAV_SECTIONS section, so product mode reuses the EXACT classic visibility.
+const PAGE_SECTION = (() => { const m = {}; for (const s of NAV_SECTIONS) for (const it of s.items) m[it.id] = s; return m; })();
+function pageVisibleToRole(pageId, role, tiers) {
+  const sec = PAGE_SECTION[pageId];
+  if (!sec) return false;                                          // not in classic nav -> never shown (no new exposure)
+  return navSectionVisible(sec.access, role) && passesPageReads(pageId, role, tiers);
+}
+function productVisiblePages(product, role, tiers) { return product.pages.filter(id => pageVisibleToRole(id, role, tiers)); }
+function visibleProducts(role, tiers) { return PRODUCTS.filter(p => productVisiblePages(p, role, tiers).length > 0); }
+function activeProductFor(role, tiers) {
+  const vis = visibleProducts(role, tiers);
+  if (!vis.length) return null;
+  const cur = vis.find(p => p.key === window._activeProduct);
+  return (cur || vis[0]).key;                                      // keep current if still visible, else first
+}
+
 function firstNavPage(role) {
   const tiers = roleTiersFor(role);
+  if (productNavEnabled()) {
+    // land on the first visible page of the first (or current) visible product
+    const vis = visibleProducts(role, tiers);
+    const preferred = vis.find(p => p.key === window._activeProduct) || vis[0];
+    if (preferred) { window._activeProduct = preferred.key; return productVisiblePages(preferred, role, tiers)[0]; }
+    return 'my-tasks';
+  }
   for (const s of NAV_SECTIONS) {
     if (!navSectionVisible(s.access, role)) continue;
     const items = s.items.filter(it => passesPageReads(it.id, role, tiers));
@@ -476,6 +536,15 @@ async function buildNav() {
   } catch (e) {}
   const role = (typeof currentUser !== 'undefined' && currentUser && currentUser.role) || '';
   const tiers = roleTiersFor(role);
+  const bar = document.getElementById('product-bar');
+  if (productNavEnabled()) {                                                // product-first shell (flag ON)
+    window._activeProduct = activeProductFor(role, tiers);
+    buildProductBar(role, tiers);
+    buildProductSidebar(role, tiers);
+    if (bar) bar.classList.add('show');
+    return;
+  }
+  if (bar) bar.classList.remove('show');                                    // classic shell → product bar stays hidden
   const html = NAV_SECTIONS.map(section => {
     if (!navSectionVisible(section.access, role)) return '';               // section = coarse candidate boundary
     const items = section.items.filter(it => passesPageReads(it.id, role, tiers)); // page = passes all implied reads
@@ -486,6 +555,54 @@ async function buildNav() {
       ).join('');
   }).join('');
   document.getElementById('nav-links').innerHTML = html;
+}
+
+// Product bar: one tab per product the role can see ≥1 page in (same "hide empty" rule as
+// sections). Real products on the left; global areas (platform, me) pushed right + separated.
+function buildProductBar(role, tiers) {
+  const bar = document.getElementById('product-bar');
+  if (!bar) return;
+  const vis = visibleProducts(role, tiers);
+  const active = window._activeProduct;
+  const tab = p => `<button class="pb-tab${p.key===active?' active':''}" id="pb-${p.key}" onclick="selectProduct('${p.key}')"><span>${p.icon}</span><span>${p.label}</span></button>`;
+  const products = vis.filter(p => p.kind === 'product').map(tab).join('');
+  const globals = vis.filter(p => p.kind === 'global').map(tab).join('');
+  bar.innerHTML = products + '<span class="pb-spacer"></span>' + (globals ? '<span class="pb-sep"></span><span class="pb-globals">' + globals + '</span>' : '');
+}
+
+// Sidebar in product mode: the SAME section-grouped nav, filtered to the active product's
+// pages. Reuses navSectionVisible + passesPageReads verbatim — no new visibility logic.
+function buildProductSidebar(role, tiers) {
+  const product = PRODUCTS.find(p => p.key === window._activeProduct);
+  const pageset = product ? new Set(product.pages) : new Set();
+  const html = NAV_SECTIONS.map(section => {
+    if (!navSectionVisible(section.access, role)) return '';
+    const items = section.items.filter(it => pageset.has(it.id) && passesPageReads(it.id, role, tiers));
+    if (!items.length) return '';
+    return `<div class="nav-section-title">${section.title}</div>` +
+      items.map(it =>
+        `<a href="#" onclick="navigate('${it.id}');return false" id="nav-${it.id}"><span class="nav-icon">${it.icon}</span><span>${it.label}</span></a>`
+      ).join('');
+  }).join('');
+  document.getElementById('nav-links').innerHTML = html;
+}
+
+// Switch products: set the active product, carry the product dimension into the product-scoped
+// pages (prospects/content — no page function touched), rebuild bar+sidebar, open first page.
+function selectProduct(key) {
+  const role = (currentUser && currentUser.role) || '';
+  const tiers = roleTiersFor(role);
+  const product = PRODUCTS.find(p => p.key === key);
+  if (!product) return;
+  window._activeProduct = key;
+  if (key === 'golfnex' || key === 'favly') {                              // real products pre-scope the page
+    if (window._ppFilters) { window._ppFilters.product = key; window._ppFilters.page = 1; }
+    if (window._csFilters && key === 'golfnex') window._csFilters.product = key;
+  }
+  buildProductBar(role, tiers);
+  buildProductSidebar(role, tiers);
+  const pages = productVisiblePages(product, role, tiers);
+  if (pages.length) navigate(pages[0]);
 }
 
 // Dashboard Quick Actions — fire an admin trigger endpoint and report inline.
