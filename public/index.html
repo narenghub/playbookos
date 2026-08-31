@@ -39,6 +39,7 @@ body{font-family:Arial,sans-serif;background:#f0f2f5;color:#1a1a2e;font-size:14p
 body.pnav{
   --awsc-bg:#fafafa; --awsc-fg:#16191f; --awsc-fg2:#5f6b7a; --awsc-border:#d5dbdb;
   --awsc-link:#0972d3; --awsc-active:#e9f2fb; --awsc-strip:#f2f3f3;
+  --awsc-primary:#ec7211; --awsc-cur:#414d5c;   /* primary action = orange; current-crumb = dark grey */
   --awsc-topbar:#232f3e; --awsc-topbar-fg:#d5dbdb; --awsc-topbar-dim:#aab7b8;
 }
 @media (prefers-color-scheme:dark){
@@ -47,14 +48,24 @@ body.pnav{
     --awsc-link:#5aa0e6; --awsc-active:#16344d; --awsc-strip:#1c2530;
   }
 }
-/* E — square corners throughout (overrides inline border-radius in page HTML too) */
-body.pnav *{border-radius:0 !important}
+/* E — square corners on PANELS, CARDS and TABLES only (incl. inline-radius page divs);
+   interactive controls are excluded so buttons can be pills (correction 1). */
+body.pnav .card,body.pnav .metric,body.pnav table,body.pnav thead,body.pnav th,body.pnav td,
+body.pnav #content [style*="border-radius"]:not(button):not(input):not(select):not(textarea):not(.btn){border-radius:0 !important}
+/* Buttons are AWS pills: white fill, blue border, blue text, fully rounded. */
+body.pnav button,body.pnav .btn{border-radius:16px !important}
+body.pnav #content .btn,body.pnav #content button,body.pnav #topbar .btn,body.pnav .aws-actions{
+  background:#fff;border:1px solid var(--awsc-link);color:var(--awsc-link);border-radius:16px !important;font-weight:600}
+/* the single primary action is orange (correction 7); every other button stays a blue pill. */
+body.pnav #content .btn-primary{background:var(--awsc-primary);border-color:var(--awsc-primary);color:#fff}
+body.pnav input,body.pnav select,body.pnav textarea{border-radius:4px}
 /* hide the classic chrome the console replaces */
 body.pnav #product-bar,body.pnav #mobile-topbar,body.pnav #sidebar .brand,body.pnav #sidebar #user-info-box{display:none}
 body:not(.pnav) #aws-topbar,body:not(.pnav) #breadcrumb,body:not(.pnav) .aws-actions,body:not(.pnav) #page-status-badge{display:none}
 /* A — top bar: fixed, full width, dark in both light and dark modes */
 body.pnav #aws-topbar{display:flex;position:fixed;top:0;left:0;right:0;height:34px;z-index:300;align-items:center;gap:12px;padding:0 12px;background:var(--awsc-topbar);color:var(--awsc-topbar-fg);font-size:13px}
-body.pnav #aws-topbar .aws-icon-btn{background:none;border:none;color:var(--awsc-topbar-fg);font-size:16px;cursor:pointer;padding:2px 6px;line-height:1}
+body.pnav #aws-topbar .aws-icon-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:50% !important;background:var(--awsc-link);color:#fff;border:1px solid var(--awsc-link);font-size:13px;cursor:pointer;line-height:1}
+body.pnav.side-collapsed #aws-topbar .aws-icon-btn{border-radius:0 !important;background:#fff;color:var(--awsc-fg);border:1px solid var(--awsc-border)}
 body.pnav #aws-topbar .aws-wordmark{font-weight:700;color:#fff;font-size:14px;letter-spacing:.3px}
 body.pnav #aws-topbar .aws-search{display:flex;align-items:center;gap:6px;background:#2f3d4f;color:var(--awsc-topbar-dim);padding:4px 10px;min-width:200px;font-size:12px;cursor:text}
 body.pnav #aws-topbar .aws-spacer{flex:1}
@@ -64,28 +75,39 @@ body.pnav #aws-topbar .aws-user-email{color:var(--awsc-topbar-dim);font-size:12p
 body.pnav #breadcrumb{display:flex;position:fixed;top:34px;left:0;right:0;height:28px;z-index:299;align-items:center;gap:6px;padding:0 16px;font-size:12px;background:var(--awsc-bg);color:var(--awsc-fg2);border-bottom:1px solid var(--awsc-border)}
 body.pnav #breadcrumb .bc-link{color:var(--awsc-link)}
 body.pnav #breadcrumb .bc-sep{color:var(--awsc-fg2);opacity:.55}
-body.pnav #breadcrumb .bc-current{color:var(--awsc-fg2)}
+body.pnav #breadcrumb .bc-current{color:var(--awsc-cur)}
+body.pnav #breadcrumb .bc-spacer{flex:1}
+body.pnav #breadcrumb .bc-info{color:var(--awsc-link);font-size:14px;cursor:default}
 /* push the app below the two fixed bars (34 + 28). box-sizing:border-box is global (line 2). */
 body.pnav #app{padding-top:62px}
 /* C — sidebar: light AWS left nav, collapsible */
 body.pnav #sidebar{background:var(--awsc-bg);color:var(--awsc-fg);border-right:1px solid var(--awsc-border);width:240px;transition:width .12s}
 body.pnav #sidebar.collapsed{width:34px}
-body.pnav .pnav-side-head{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--awsc-border);font-size:13px;font-weight:700;color:var(--awsc-fg)}
+body.pnav .pnav-side-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--awsc-border);color:var(--awsc-fg)}
+body.pnav .pnav-side-name{font-size:17px;font-weight:700;color:var(--awsc-fg)}
 body.pnav #sidebar.collapsed .pnav-side-name{display:none}
-body.pnav .pnav-collapse{background:none;border:none;color:var(--awsc-fg2);cursor:pointer;font-size:14px;padding:0 4px;line-height:1}
+/* correction 2 — collapse control: square button, blue border, blue chevron */
+body.pnav .pnav-collapse{background:#fff;border:1px solid var(--awsc-link);color:var(--awsc-link);cursor:pointer;font-size:13px;line-height:1;padding:2px 7px;border-radius:0 !important}
 body.pnav #nav-links{padding:6px 0}
-body.pnav #nav-links a{display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:12px;color:var(--awsc-link);text-decoration:none;border-left:2px solid transparent}
+body.pnav #nav-links a{display:flex;align-items:center;gap:8px;padding:9px 16px;font-size:14px;color:var(--awsc-link);text-decoration:none;border-left:2px solid transparent}
 body.pnav #nav-links a:hover{background:var(--awsc-strip)}
-body.pnav #nav-links a.active{background:var(--awsc-active);color:var(--awsc-fg);border-left-color:var(--awsc-link);font-weight:600}
+body.pnav #nav-links a.active{background:var(--awsc-active);color:var(--awsc-link);border-left-color:var(--awsc-link);font-weight:700}
 body.pnav #sidebar.collapsed #nav-links a span:last-child,body.pnav #sidebar.collapsed .nav-section-title{display:none}
-body.pnav .nav-section-title{padding:8px 12px 4px;font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--awsc-fg2)}
+/* correction 5 — section headers: bold (black in light / light in dark) + filled-triangle disclosure */
+body.pnav .nav-section-title{padding:12px 14px 4px;font-size:13px;font-weight:700;letter-spacing:0;text-transform:none;color:var(--awsc-fg);display:flex;align-items:center;gap:6px}
+body.pnav .nav-section-title::before{content:"\25BC";font-size:9px;color:var(--awsc-fg)}
 /* D — content chrome: title 17px + optional status badge + Actions button; bordered square tables */
 body.pnav #topbar{background:#fff;border-bottom:1px solid var(--awsc-border);padding:10px 20px}
 body.pnav #page-title{font-size:17px;font-weight:700;color:var(--awsc-fg)}
 body.pnav #page-status-badge{font-size:11px;padding:2px 8px;background:var(--awsc-strip);border:1px solid var(--awsc-border);color:var(--awsc-fg2);margin-right:10px}
 body.pnav #page-status-badge:empty{display:none}
-body.pnav .aws-actions{display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid var(--awsc-border);color:var(--awsc-fg);font-size:12px;padding:5px 12px;cursor:pointer;font-weight:600}
+body.pnav .aws-actions{display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid var(--awsc-link);color:var(--awsc-link);font-size:12px;padding:5px 14px;cursor:pointer;font-weight:600}
 body.pnav #content .card{border:1px solid var(--awsc-border);box-shadow:none}
+/* correction 6 — panel headings centred, 19px bold; metrics = big blue number + blue underline + grey caption */
+body.pnav #content .card-title{text-align:center;font-size:19px;font-weight:700;color:var(--awsc-fg)}
+body.pnav #content .metric{text-align:center;background:#fff}
+body.pnav #content .metric .value{color:var(--awsc-link);font-size:28px;font-weight:700;display:inline-block;border-bottom:1px solid var(--awsc-link);padding-bottom:2px;line-height:1.25}
+body.pnav #content .metric .label,body.pnav #content .metric .sub{color:var(--awsc-fg2)}
 body.pnav #content table th{background:var(--awsc-strip);border-bottom:1px solid var(--awsc-border);font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--awsc-fg2);padding:7px 10px}
 body.pnav #content td{border-bottom:1px solid var(--awsc-border);font-size:12px;padding:6px 10px}
 #content{padding:24px;max-width:1300px}
@@ -660,7 +682,7 @@ function buildAwsTopbar(role, tiers) {
   const opts = vis.map(p => `<option value="${p.key}"${p.key === window._activeProduct ? ' selected' : ''}>${p.icon} ${p.label}</option>`).join('');
   const email = (currentUser && currentUser.email) || '';
   el.innerHTML =
-    `<button class="aws-icon-btn" onclick="toggleMobileSidebar()" aria-label="Menu">☰</button>` +
+    `<button class="aws-icon-btn" onclick="toggleSidebarCollapse()" aria-label="Toggle navigation">☰</button>` +
     `<span class="aws-wordmark">PlayNexa</span>` +
     `<div class="aws-search" aria-hidden="true"><span>🔍</span><span>Search</span></div>` +
     `<span class="aws-spacer"></span>` +
@@ -679,13 +701,16 @@ function updateBreadcrumb(page) {
   el.innerHTML =
     `<span class="bc-link">PlayNexa</span><span class="bc-sep">›</span>` +
     (product ? `<span class="bc-link">${esc(product.label)}</span><span class="bc-sep">›</span>` : '') +
-    `<span class="bc-current">${esc(pageLabel)}</span>`;
+    `<span class="bc-current">${esc(pageLabel)}</span>` +
+    `<span class="bc-spacer"></span><span class="bc-info" title="Info" aria-hidden="true">ⓘ</span>`;
 }
 
 // C — collapse: narrows the sidebar to icons only. Do NOT unmount — CSS hides the labels.
 function toggleSidebarCollapse() {
   const sb = document.getElementById('sidebar');
   if (sb) sb.classList.toggle('collapsed');
+  // reflect the collapsed state on <body> so the top-bar hamburger restyles (circle ↔ square)
+  document.body.classList.toggle('side-collapsed', !!(sb && sb.classList.contains('collapsed')));
 }
 
 // Switch products: set the active product, carry the product dimension into the product-scoped
