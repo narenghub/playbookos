@@ -4324,6 +4324,10 @@ router.get('/prospects', authMiddleware, requireTier('sales'), async (req, res) 
     else if (req.query.booking_platform) { params.push(req.query.booking_platform); clauses.push(`booking_platform = $${params.length}`); }
     if (req.query.has_website === 'true') clauses.push('website IS NOT NULL');
     else if (req.query.has_website === 'false') clauses.push('website IS NULL');
+    // reachable filter: 'true' = the true prime pool (site actually fetched); 'false' = the
+    // unreachable pool (dead/403/timeout — still findable, they need a phone call not a visit).
+    if (req.query.reachable === 'true') clauses.push('reachable = true');
+    else if (req.query.reachable === 'false') clauses.push('reachable = false');
     const where = 'WHERE ' + clauses.join(' AND ');
 
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -4333,16 +4337,19 @@ router.get('/prospects', authMiddleware, requireTier('sales'), async (req, res) 
     const total = (await query(`SELECT COUNT(*)::int n FROM prospects ${where}`, params)).rows[0].n;
     const items = (await query(
       `SELECT id, product, name, address, phone, website, subtype, region, state, rating, rating_count,
-              booking_platform, status, notes, qualified_at, created_at
+              booking_platform, reachable, unreachable_reason, status, notes, qualified_at, created_at
          FROM prospects ${where}
          ORDER BY rating_count DESC NULLS LAST, id
          LIMIT ${pageSize} OFFSET ${offset}`, params)).rows;
 
-    // product-wide summary (independent of the table filters)
+    // product-wide summary (independent of the table filters). no_platform is split: the true
+    // prime pool (reachable) vs the unreachable pool (dead but still worth a phone call).
     const summary = (await query(
       `SELECT COUNT(*)::int total,
               COUNT(*) FILTER (WHERE status='qualified')::int qualified,
               COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NULL)::int no_platform,
+              COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NULL AND reachable = true)::int no_platform_reachable,
+              COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NULL AND reachable = false)::int no_platform_unreachable,
               COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NOT NULL)::int on_platform,
               COUNT(*) FILTER (WHERE status='rejected')::int rejected
          FROM prospects WHERE product = $1`, [product])).rows[0];

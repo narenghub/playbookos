@@ -113,23 +113,48 @@ test('runQualifyProspects flag OFF → no-op (no select)', async () => {
   assert.equal(s.enabled, false); assert.equal(sel, false);
 });
 
-test('runQualifyProspects writes platform + status=qualified, tallies by_platform', async () => {
+test('runQualifyProspects writes platform + reachability, tallies by_platform + reachable', async () => {
   const db = qualDB([{ id: 1, website: 'a' }, { id: 2, website: 'b' }, { id: 3, website: 'c' }]);
-  const qualify = async (w) => w === 'a' ? { platform: 'foreup', confidence: 'high' } : w === 'b' ? { platform: null } : { platform: 'golfnow', confidence: 'medium' };
+  const qualify = async (w) => w === 'a' ? { platform: 'foreup', confidence: 'high', reachable: true }
+    : w === 'b' ? { platform: null, reachable: true, unreachableReason: null }       // reached, no platform → prime
+    : { platform: 'golfnow', confidence: 'medium', reachable: true };
   const s = await runQualifyProspects('golfnex', { deps: { env: ON, query: db.query, qualifyFacility: qualify, logAgentActivity: noopLog } });
   assert.equal(s.considered, 3); assert.equal(s.qualified, 3);
   assert.equal(s.with_platform, 2); assert.equal(s.no_platform, 1);
+  assert.equal(s.reachable, 3); assert.equal(s.unreachable, 0);
   assert.deepEqual(s.by_platform, { foreup: 1, golfnow: 1 });
   assert.equal(db.updates.length, 3);
-  assert.deepEqual(db.updates[0], ['foreup', 1]); // booking_platform, id
-  assert.deepEqual(db.updates[1], [null, 2]);
+  assert.deepEqual(db.updates[0], ['foreup', true, null, 1]); // booking_platform, reachable, unreachable_reason, id
+  assert.deepEqual(db.updates[1], [null, true, null, 2]);
 });
 
-test('runQualifyProspects never-throws when the qualifier throws', async () => {
+test('runQualifyProspects persists unreachable rows with a reason + tallies by_reason', async () => {
+  const db = qualDB([{ id: 1, website: 'dead' }, { id: 2, website: 'slow' }]);
+  const qualify = async (w) => w === 'dead'
+    ? { platform: null, reachable: false, unreachableReason: '403' }
+    : { platform: null, reachable: false, unreachableReason: 'timeout' };
+  const s = await runQualifyProspects('golfnex', { deps: { env: ON, query: db.query, qualifyFacility: qualify, logAgentActivity: noopLog } });
+  assert.equal(s.qualified, 2); assert.equal(s.no_platform, 2);
+  assert.equal(s.reachable, 0); assert.equal(s.unreachable, 2);
+  assert.deepEqual(s.by_reason, { '403': 1, timeout: 1 });
+  assert.deepEqual(db.updates[0], [null, false, '403', 1]);
+  assert.deepEqual(db.updates[1], [null, false, 'timeout', 2]);
+});
+
+test('runQualifyProspects backfill: SELECT also picks up qualified rows with reachable IS NULL', async () => {
+  let selSql = '';
+  const q = async (sql, params) => { if (/^SELECT/i.test(sql.trim())) { selSql = sql; return { rows: [] }; } return { rows: [] }; };
+  await runQualifyProspects('golfnex', { deps: { env: ON, query: q, qualifyFacility: async () => ({ platform: null, reachable: true }), logAgentActivity: noopLog } });
+  assert.match(selSql, /status='new'\s+OR\s+reachable IS NULL/i, 'select covers new + untagged-qualified rows');
+});
+
+test('runQualifyProspects never-throws when the qualifier throws (reachable stays null → retryable)', async () => {
   const db = qualDB([{ id: 1, website: 'a' }]);
   let s;
   await assert.doesNotReject(async () => { s = await runQualifyProspects('golfnex', { deps: { env: ON, query: db.query, qualifyFacility: async () => { throw new Error('kaboom'); }, logAgentActivity: noopLog } }); });
   assert.equal(s.qualified, 1); assert.equal(s.no_platform, 1); // recorded as no-platform, still marked qualified
+  assert.equal(s.reachable, 0); assert.equal(s.unreachable, 0); // undetermined → neither tally
+  assert.deepEqual(db.updates[0], [null, null, null, 1]); // reachable persisted null so a later run retries it
 });
 
 // ── REFACTOR REGRESSION (config externalisation) ───────────────────────────────

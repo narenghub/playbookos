@@ -109,7 +109,7 @@ async function runProspecting(product, { dryRun = false, deps = {} } = {}) {
 // left 'new' (nothing to scan). logAgentActivity on completion.
 async function runQualifyProspects(product, { deps = {} } = {}) {
   const env = deps.env || process.env;
-  const summary = { product, enabled: true, considered: 0, qualified: 0, with_platform: 0, no_platform: 0, by_platform: {}, errors: [] };
+  const summary = { product, enabled: true, considered: 0, qualified: 0, with_platform: 0, no_platform: 0, reachable: 0, unreachable: 0, by_platform: {}, by_reason: {}, errors: [] };
   if (String(env.PROSPECTING_ENABLED) !== 'true') { summary.enabled = false; return summary; }
 
   // Resolve the product's domain config (signatures + booking-link terms). Unknown → error.
@@ -124,22 +124,33 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
 
   let rows;
   try {
+    // Qualify anything not yet reachability-tagged: brand-new rows AND already-'qualified' rows
+    // whose reachable is still null (the pre-reachability backfill population). This makes the
+    // step self-healing — re-running it fills reachable/unreachable_reason on old rows.
     rows = (await q(
       `SELECT id, website FROM prospects
-        WHERE product=$1 AND status='new' AND website IS NOT NULL
+        WHERE product=$1 AND website IS NOT NULL AND (status='new' OR reachable IS NULL)
         ORDER BY id LIMIT $2`, [product, cap])).rows;
   } catch (e) { summary.errors.push({ stage: 'select', error: e && e.message ? e.message : String(e) }); return summary; }
 
   for (const r of rows) {
     summary.considered++;
     let res;
+    // orchestrator-level throw (injected qualifier misbehaves) → undetermined reachability (null),
+    // so the row stays retryable on the next run rather than being falsely marked dead.
     try { res = await qualify(r.website, { signatures: cfg.signatures, bookingLinkTerms: cfg.bookingLinkTerms, deps }); }
-    catch (e) { res = { platform: null, confidence: null, evidence: 'qualify threw: ' + (e && e.message ? e.message : String(e)) }; }
+    catch (e) { res = { platform: null, confidence: null, evidence: 'qualify threw: ' + (e && e.message ? e.message : String(e)), reachable: null, unreachableReason: null }; }
+    const platform = res.platform || null;
+    const reachable = res.reachable === true ? true : (res.reachable === false ? false : null);
+    const reason = reachable === false ? (res.unreachableReason || null) : null;
     try {
-      await q(`UPDATE prospects SET booking_platform=$1, qualified_at=NOW(), status='qualified' WHERE id=$2`, [res.platform || null, r.id]);
+      await q(`UPDATE prospects SET booking_platform=$1, reachable=$2, unreachable_reason=$3, qualified_at=NOW(), status='qualified' WHERE id=$4`,
+        [platform, reachable, reason, r.id]);
       summary.qualified++;
-      if (res.platform) { summary.with_platform++; summary.by_platform[res.platform] = (summary.by_platform[res.platform] || 0) + 1; }
+      if (platform) { summary.with_platform++; summary.by_platform[platform] = (summary.by_platform[platform] || 0) + 1; }
       else summary.no_platform++;
+      if (reachable === true) summary.reachable++;
+      else if (reachable === false) { summary.unreachable++; summary.by_reason[reason || 'unknown'] = (summary.by_reason[reason || 'unknown'] || 0) + 1; }
     } catch (e) { summary.errors.push({ stage: 'update', id: r.id, error: e && e.message ? e.message : String(e) }); }
     await sleep(rateMs);
   }
@@ -147,7 +158,7 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
   try {
     await logActivity({ agent_name: AGENT_NAME, action_type: 'qualify',
       reasoning: `Booking-signature qualification for ${product}`,
-      output_summary: `considered=${summary.considered} qualified=${summary.qualified} with_platform=${summary.with_platform} no_platform=${summary.no_platform} errors=${summary.errors.length}` });
+      output_summary: `considered=${summary.considered} qualified=${summary.qualified} with_platform=${summary.with_platform} no_platform=${summary.no_platform} reachable=${summary.reachable} unreachable=${summary.unreachable} errors=${summary.errors.length}` });
   } catch { /* logging must never break the run */ }
   return summary;
 }

@@ -3,7 +3,7 @@
 // call passes the golf set explicitly, imported from config (never redefined here).
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { qualifyFacility, detect, findBookingLink } = require('./qualify');
+const { qualifyFacility, detect, findBookingLink, classifyUnreachable } = require('./qualify');
 const { getConfig } = require('./config');
 
 const GOLF = getConfig('golfnex');
@@ -100,6 +100,87 @@ test('no website → null without fetching', async () => {
   const r = await q('', { deps: { httpText: http } });
   assert.equal(r.platform, null);
   assert.equal(called, false);
+});
+
+// ── reachability: qualifyFacility surfaces reachable + unreachableReason ─────────
+// The whole point of the fix: a reached-no-signature site and a never-reached site both have
+// platform:null, but must be distinguishable so dead links don't sort into the prime pool.
+test('reached, no signature → reachable:true, no reason', async () => {
+  const http = async () => ({ text: '<p>call us to book</p>' }); // homepage fetched, no signature, no book link
+  const r = await q('https://live.com', { deps: { httpText: http } });
+  assert.equal(r.platform, null);
+  assert.equal(r.reachable, true);
+  assert.equal(r.unreachableReason, null);
+});
+
+test('platform found (homepage) → reachable:true', async () => {
+  const http = async () => ({ text: '<script src="https://app.foreupsoftware.com/a.js"></script>' });
+  const r = await q('https://club.com', { deps: { httpText: http } });
+  assert.equal(r.platform, 'foreup');
+  assert.equal(r.reachable, true);
+  assert.equal(r.unreachableReason, null);
+});
+
+test('platform found via book link → reachable:true (homepage was reached)', async () => {
+  const http = async ({ url }) => url === 'https://club.com'
+    ? { text: '<a href="/reserve">Reserve a tee time</a>' }
+    : { text: '<iframe src="https://club.chronogolf.com/widget"></iframe>' };
+  const r = await q('https://club.com', { deps: { httpText: http } });
+  assert.equal(r.platform, 'chronogolf');
+  assert.equal(r.reachable, true);
+});
+
+test('403 → reachable:false, reason 403', async () => {
+  const r = await q('https://dead.com', { deps: { httpText: async () => ({ error: 'HTTP 403', status: 403 }) } });
+  assert.equal(r.reachable, false);
+  assert.equal(r.unreachableReason, '403');
+});
+
+test('other HTTP error (500) → reachable:false, reason http_error', async () => {
+  const r = await q('https://err.com', { deps: { httpText: async () => ({ error: 'HTTP 500', status: 500 }) } });
+  assert.equal(r.reachable, false);
+  assert.equal(r.unreachableReason, 'http_error');
+});
+
+test('timeout → reachable:false, reason timeout', async () => {
+  const r = await q('https://slow.com', { deps: { httpText: async () => ({ error: 'request timed out after 7000ms', timedOut: true }) } });
+  assert.equal(r.reachable, false);
+  assert.equal(r.unreachableReason, 'timeout');
+});
+
+test('network throw (dns/conn) → reachable:false, reason dns', async () => {
+  const r = await q('https://nxdomain.com', { deps: { httpText: async () => ({ error: 'request failed: getaddrinfo ENOTFOUND nxdomain.com' }) } });
+  assert.equal(r.reachable, false);
+  assert.equal(r.unreachableReason, 'dns');
+});
+
+test('2xx but empty body → reachable:false, reason empty', async () => {
+  const r = await q('https://blank.com', { deps: { httpText: async () => ({ text: '', status: 200 }) } });
+  assert.equal(r.reachable, false);
+  assert.equal(r.unreachableReason, 'empty');
+});
+
+test('throwing fetch (caught) → reachable:false, reason http_error', async () => {
+  const r = await q('https://x.com', { deps: { httpText: async () => { throw new Error('boom'); } } });
+  assert.equal(r.reachable, false);
+  assert.equal(r.unreachableReason, 'http_error');
+  assert.match(r.evidence, /qualify error: boom/);
+});
+
+test('no website → reachable:null (not applicable)', async () => {
+  const r = await q('', { deps: { httpText: async () => ({ text: 'x' }) } });
+  assert.equal(r.reachable, null);
+  assert.equal(r.unreachableReason, null);
+});
+
+test('classifyUnreachable maps each httpText failure shape', () => {
+  assert.equal(classifyUnreachable({ error: 'request timed out after 7000ms', timedOut: true }), 'timeout');
+  assert.equal(classifyUnreachable({ error: 'HTTP 403', status: 403 }), '403');
+  assert.equal(classifyUnreachable({ error: 'HTTP 404', status: 404 }), 'http_error');
+  assert.equal(classifyUnreachable({ error: 'HTTP 503', status: 503 }), 'http_error');
+  assert.equal(classifyUnreachable({ error: 'request failed: ECONNREFUSED' }), 'dns');
+  assert.equal(classifyUnreachable({ error: 'body read failed: x', status: 200 }), 'empty');
+  assert.equal(classifyUnreachable({}), 'empty');
 });
 
 // ── signatures/terms are REQUIRED — missing config is a LOUD error, not silent golf ──

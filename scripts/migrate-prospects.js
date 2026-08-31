@@ -33,6 +33,8 @@ async function migrateProspects() {
       region           TEXT,                          -- which tile found it (NOT authoritative geography)
       state            TEXT,                          -- 2-letter state derived from address (authoritative)
       booking_platform TEXT,                          -- null until qualified
+      reachable        BOOLEAN,                        -- null = not yet qualified; true = homepage fetched; false = unreachable
+      unreachable_reason TEXT,                        -- 403 | dns | timeout | http_error | empty (null unless reachable=false)
       qualified_at     TIMESTAMPTZ,
       reject_reason    TEXT,                          -- why status='rejected' (e.g. non-IL address)
       notes            TEXT,                          -- free-text notes from the Prospects page

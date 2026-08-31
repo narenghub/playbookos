@@ -11,6 +11,12 @@
 //             low = only a text mention. NEVER THROWS on a RUNTIME site failure — a dead
 //             site/timeout/403/non-HTML is a RESULT (platform:null with evidence).
 //
+// reachable / unreachableReason: the qualifier ALSO reports whether it could actually fetch the
+// homepage. A reached-but-no-signature site (reachable:true, platform:null) is a true prime
+// target — visit it. A never-reached site (reachable:false, unreachableReason set) is qualified
+// but dead and must not sort into the top of the prime pool by review count. Both used to look
+// identical (platform:null); surfacing reachable is the whole point of this module's return.
+//
 // signatures + bookingLinkTerms are REQUIRED — there is NO default. A domain default is how
 // a wrong assumption creeps back: qualifyFacility(url) for salons would silently scan for
 // tee-time platforms, find nothing, and produce a clean-looking-but-wrong prospect list.
@@ -20,6 +26,20 @@
 const { httpText } = require('../../outbound/http');
 
 const esc = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Map an httpText failure result to one of the persisted unreachable reasons.
+//   403 (bot-detection / auth wall) | http_error (any other non-2xx) | timeout | dns
+//   (network throw: DNS/connection) | empty (2xx but no usable body). Order matters: check the
+// specific signals before the catch-all 'empty'.
+function classifyUnreachable(r) {
+  const err = (r && r.error) || '';
+  if ((r && r.timedOut) || /timed out/i.test(err)) return 'timeout';
+  const s = r && r.status;
+  if (s === 403) return '403';
+  if (typeof s === 'number' && s >= 400) return 'http_error';
+  if (/request failed/i.test(err)) return 'dns';   // fetch threw: ENOTFOUND / ECONNREFUSED / etc.
+  return 'empty';                                   // 2xx-but-empty body, or body read failure
+}
 
 // Detect the highest-confidence signature in one HTML blob against a given signature set.
 // high (script/iframe src) beats medium (link href) beats low (text mention).
@@ -71,29 +91,38 @@ async function qualifyFacility(website, { signatures, bookingLinkTerms, deps = {
   if (!Array.isArray(signatures) || !signatures.length) throw new Error('qualifyFacility: signatures (from the product config) are required');
   if (!Array.isArray(bookingLinkTerms) || !bookingLinkTerms.length) throw new Error('qualifyFacility: bookingLinkTerms (from the product config) are required');
   try {
-    if (!website) return { platform: null, confidence: null, evidence: 'no website' };
+    // no website to reach → reachability is not applicable (the orchestrator only qualifies rows
+    // WITH a website, so this is a defensive/direct-call path).
+    if (!website) return { platform: null, confidence: null, evidence: 'no website', reachable: null, unreachableReason: null };
     const fetchText = deps.httpText || httpText;
 
     const home = await fetchText({ url: website });
     if (home.error || !home.text) {
-      return { platform: null, confidence: null, evidence: 'homepage unreachable: ' + (home.error || 'empty body') };
+      // homepage never came back → UNREACHABLE. Classify why so a dead site can be filtered out
+      // of the prime pool yet stay findable (it needs a phone call, not a site visit).
+      const unreachableReason = home.error ? classifyUnreachable(home) : 'empty';
+      return { platform: null, confidence: null,
+        evidence: 'homepage unreachable: ' + (home.error || 'empty body'),
+        reachable: false, unreachableReason };
     }
+    // homepage fetched → REACHABLE from here on, regardless of signature or book-link outcome.
     let hit = detect(home.text, signatures);
-    if (hit.platform) return hit;
+    if (hit.platform) return { ...hit, reachable: true, unreachableReason: null };
 
     const link = findBookingLink(home.text, website, bookingLinkTerms);
     if (link) {
       const page = await fetchText({ url: link });
       if (!page.error && page.text) {
         hit = detect(page.text, signatures);
-        if (hit.platform) return { ...hit, evidence: hit.evidence + ' (via book link ' + link + ')' };
+        if (hit.platform) return { ...hit, evidence: hit.evidence + ' (via book link ' + link + ')', reachable: true, unreachableReason: null };
       }
-      return { platform: null, confidence: null, evidence: 'no signature (homepage + book link ' + link + ')' };
+      return { platform: null, confidence: null, evidence: 'no signature (homepage + book link ' + link + ')', reachable: true, unreachableReason: null };
     }
-    return { platform: null, confidence: null, evidence: 'no signature (homepage; no book link found)' };
+    return { platform: null, confidence: null, evidence: 'no signature (homepage; no book link found)', reachable: true, unreachableReason: null };
   } catch (e) {
-    return { platform: null, confidence: null, evidence: 'qualify error: ' + (e && e.message ? e.message : String(e)) };
+    // unexpected internal failure (not a normal site result) → treat as unreachable, catch-all reason.
+    return { platform: null, confidence: null, evidence: 'qualify error: ' + (e && e.message ? e.message : String(e)), reachable: false, unreachableReason: 'http_error' };
   }
 }
 
-module.exports = { qualifyFacility, detect, findBookingLink, bookingLinkRegex };
+module.exports = { qualifyFacility, detect, findBookingLink, bookingLinkRegex, classifyUnreachable };

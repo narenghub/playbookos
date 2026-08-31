@@ -2517,7 +2517,7 @@ async function csRun(){
 }
 
 // ── Prospects — product-scoped facility list (first product-aware page) ─────────
-window._ppFilters = window._ppFilters || { product: 'golfnex', status: 'qualified', subtype: '', booking_platform: 'none', has_website: '', page: 1 };
+window._ppFilters = window._ppFilters || { product: 'golfnex', status: 'qualified', subtype: '', booking_platform: 'none', reachable: 'true', has_website: '', page: 1 };
 window._ppState = window._ppState || { total: 0, pageSize: 50, summary: null };
 const PP_PRODUCTS = [{ id:'golfnex', label:'GolfNex' }, { id:'favly', label:'Favly' }];
 const PP_STATUSES = ['new','qualified','enriched','contacted','rejected'];
@@ -2535,6 +2535,7 @@ pages['prospects'] = async function() {
   if (f.status) qs.set('status', f.status);
   if (f.subtype) qs.set('subtype', f.subtype);
   if (f.booking_platform) qs.set('booking_platform', f.booking_platform);
+  if (f.reachable) qs.set('reachable', f.reachable);
   if (f.has_website) qs.set('has_website', f.has_website);
   qs.set('page', String(f.page || 1));
   qs.set('pageSize', String(window._ppState.pageSize));
@@ -2550,7 +2551,7 @@ pages['prospects'] = async function() {
   const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
     <div>
       <div class="card-title text-section" style="margin:0">Prospects</div>
-      <div class="text-body">Qualified facilities discovered via Places, scoped by product. Prime pool = qualified with no booking platform yet.</div>
+      <div class="text-body">Qualified facilities discovered via Places, scoped by product. Prime pool = qualified, no booking platform, and reachable. Unreachable ones (dead/403/timeout) are kept but filtered out by default — they need a phone call, not a site visit.</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span style="font-size:11px;color:var(--text-muted)">Product</span>
@@ -2567,7 +2568,8 @@ pages['prospects'] = async function() {
   const summaryRow = `<div class="card" style="display:flex;gap:10px;flex-wrap:wrap">
     ${stat('Total', s.total, '#1B3A6B')}
     ${stat('Qualified', s.qualified, '#2563eb')}
-    ${stat('No platform (prime)', s.no_platform, '#1D9E75')}
+    ${stat('Prime (reachable)', s.no_platform_reachable, '#1D9E75')}
+    ${stat('Unreachable', s.no_platform_unreachable, '#d97706')}
     ${stat('On a platform', s.on_platform, '#64748b')}
     ${stat('Rejected', s.rejected, '#dc2626')}
   </div>`;
@@ -2576,12 +2578,15 @@ pages['prospects'] = async function() {
     PP_STATUSES.map(st => `<option value="${st}"${f.status===st?' selected':''}>${st}</option>`)).join('');
   const platOpts = [['','platform: any'],['none','no platform (prime)']].map(
     ([v,l]) => `<option value="${v}"${f.booking_platform===v?' selected':''}>${l}</option>`).join('');
+  const reachOpts = [['true','reachable (prime)'],['','reachability: any'],['false','unreachable only']].map(
+    ([v,l]) => `<option value="${v}"${f.reachable===v?' selected':''}>${l}</option>`).join('');
   const siteOpts = [['','website: any'],['true','has website'],['false','no website']].map(
     ([v,l]) => `<option value="${v}"${f.has_website===v?' selected':''}>${l}</option>`).join('');
   const filters = `<div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
     <select onchange="ppSetFilter('status', this.value)" style="font-size:12px;padding:4px">${statusOpts}</select>
     <input value="${ppEsc(f.subtype)}" onchange="ppSetFilter('subtype', this.value)" placeholder="subtype" style="font-size:12px;width:120px;padding:4px">
     <select onchange="ppSetFilter('booking_platform', this.value)" style="font-size:12px;padding:4px">${platOpts}</select>
+    <select onchange="ppSetFilter('reachable', this.value)" style="font-size:12px;padding:4px">${reachOpts}</select>
     <select onchange="ppSetFilter('has_website', this.value)" style="font-size:12px;padding:4px">${siteOpts}</select>
     <button onclick="ppResetFilters()" class="btn-outline btn-sm" style="font-size:11px">Reset to prime pool</button>
   </div>`;
@@ -2625,7 +2630,7 @@ pages['prospects'] = async function() {
 
 function ppSetProduct(p){ window._ppFilters.product = p; window._ppFilters.page = 1; pages['prospects'](); }
 function ppSetFilter(key, val){ window._ppFilters[key] = val; window._ppFilters.page = 1; pages['prospects'](); }
-function ppResetFilters(){ window._ppFilters = { ...window._ppFilters, status:'qualified', subtype:'', booking_platform:'none', has_website:'', page:1 }; pages['prospects'](); }
+function ppResetFilters(){ window._ppFilters = { ...window._ppFilters, status:'qualified', subtype:'', booking_platform:'none', reachable:'true', has_website:'', page:1 }; pages['prospects'](); }
 function ppPage(delta){
   const totalPages = Math.max(1, Math.ceil(window._ppState.total / window._ppState.pageSize));
   const next = Math.min(totalPages, Math.max(1, (window._ppFilters.page || 1) + delta));
@@ -2655,7 +2660,13 @@ async function ppOpen(id){
         ${field('Address', ppEsc(p.address)||'—')}
         ${field('Phone', p.phone?ppEsc(p.phone):'—')}
         ${field('Rating', (p.rating!=null?ppEsc(p.rating)+'★':'—') + ' · ' + (p.rating_count||0).toLocaleString() + ' reviews')}
-        ${field('Booking platform', p.booking_platform?ppEsc(p.booking_platform):'<span style="color:#1D9E75">none — prime target</span>')}
+        ${field('Booking platform', p.booking_platform ? ppEsc(p.booking_platform)
+            : (p.reachable === true ? '<span style="color:#1D9E75">none — prime target</span>'
+            : p.reachable === false ? '<span style="color:#d97706">none (site unreachable)</span>'
+            : '<span style="color:var(--text-muted)">none</span>'))}
+        ${field('Reachability', p.reachable === true ? '<span style="color:#1D9E75">reachable</span>'
+            : p.reachable === false ? `<span style="color:#d97706">unreachable — ${ppEsc(p.unreachable_reason||'?')}</span> · needs a phone call, not a site visit`
+            : '<span style="color:var(--text-muted)">not yet qualified</span>')}
       </div>
       <div>
         ${field('Status', ppStatusBadge(p.status))}

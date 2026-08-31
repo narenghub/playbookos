@@ -18,11 +18,14 @@ prospecting.runQualifyProspects = async (product) => ({ product, scanned: 0, qua
 let STORE = [];
 function seed() {
   STORE = [
-    { id: 1, product: 'golfnex', place_id: 'p1', name: 'Alpha Range',  address: '1 A St, Chicago, IL 60601', phone: '311', website: 'https://a.com', types: ['golf'], rating: '4.5', rating_count: 300, subtype: 'range',     region: 'IL-N', state: 'IL', booking_platform: null,     qualified_at: 1, reject_reason: null, notes: null, status: 'qualified', created_at: 100 },
-    { id: 2, product: 'golfnex', place_id: 'p2', name: 'Beta Course',  address: '2 B St, Aurora, IL 60505',  phone: '312', website: 'https://b.com', types: ['golf'], rating: '4.1', rating_count: 900, subtype: 'course',    region: 'IL-N', state: 'IL', booking_platform: 'teesnap', qualified_at: 1, reject_reason: null, notes: null, status: 'qualified', created_at: 200 },
-    { id: 3, product: 'golfnex', place_id: 'p3', name: 'Gamma Sim',    address: '3 C St, Peoria, IL 61602',  phone: null,  website: null,           types: [],       rating: null,  rating_count: 50,  subtype: 'simulator', region: 'IL-C', state: 'IL', booking_platform: null,     qualified_at: null, reject_reason: 'no website', notes: null, status: 'new', created_at: 300 },
-    { id: 4, product: 'golfnex', place_id: 'p4', name: 'Delta Bad',    address: 'nowhere',                    phone: null,  website: null,           types: [],       rating: null,  rating_count: null, subtype: 'course',   region: 'IL-S', state: null, booking_platform: null,     qualified_at: null, reject_reason: 'non-IL', notes: 'x', status: 'rejected', created_at: 400 },
-    { id: 5, product: 'favly',   place_id: 'p5', name: 'Favly Salon',  address: '5 E St, Chicago, IL 60614', phone: '773', website: 'https://e.com', types: ['spa'],  rating: '4.8', rating_count: 120, subtype: 'hair',     region: 'IL-N', state: 'IL', booking_platform: null,     qualified_at: 1, reject_reason: null, notes: null, status: 'qualified', created_at: 500 },
+    { id: 1, product: 'golfnex', place_id: 'p1', name: 'Alpha Range',  address: '1 A St, Chicago, IL 60601', phone: '311', website: 'https://a.com', types: ['golf'], rating: '4.5', rating_count: 300, subtype: 'range',     region: 'IL-N', state: 'IL', booking_platform: null,     reachable: true,  unreachable_reason: null,  qualified_at: 1, reject_reason: null, notes: null, status: 'qualified', created_at: 100 },
+    { id: 2, product: 'golfnex', place_id: 'p2', name: 'Beta Course',  address: '2 B St, Aurora, IL 60505',  phone: '312', website: 'https://b.com', types: ['golf'], rating: '4.1', rating_count: 900, subtype: 'course',    region: 'IL-N', state: 'IL', booking_platform: 'teesnap', reachable: true,  unreachable_reason: null,  qualified_at: 1, reject_reason: null, notes: null, status: 'qualified', created_at: 200 },
+    { id: 3, product: 'golfnex', place_id: 'p3', name: 'Gamma Sim',    address: '3 C St, Peoria, IL 61602',  phone: null,  website: null,           types: [],       rating: null,  rating_count: 50,  subtype: 'simulator', region: 'IL-C', state: 'IL', booking_platform: null,     reachable: null,  unreachable_reason: null,  qualified_at: null, reject_reason: 'no website', notes: null, status: 'new', created_at: 300 },
+    { id: 4, product: 'golfnex', place_id: 'p4', name: 'Delta Bad',    address: 'nowhere',                    phone: null,  website: null,           types: [],       rating: null,  rating_count: null, subtype: 'course',   region: 'IL-S', state: null, booking_platform: null,     reachable: null,  unreachable_reason: null,  qualified_at: null, reject_reason: 'non-IL', notes: 'x', status: 'rejected', created_at: 400 },
+    { id: 5, product: 'favly',   place_id: 'p5', name: 'Favly Salon',  address: '5 E St, Chicago, IL 60614', phone: '773', website: 'https://e.com', types: ['spa'],  rating: '4.8', rating_count: 120, subtype: 'hair',     region: 'IL-N', state: 'IL', booking_platform: null,     reachable: true,  unreachable_reason: null,  qualified_at: 1, reject_reason: null, notes: null, status: 'qualified', created_at: 500 },
+    // favly prime-pool row that was qualified but NEVER reachable (dead 403) — must be excluded
+    // from the default prime pool yet returned by the explicit unreachable filter.
+    { id: 6, product: 'favly',   place_id: 'p6', name: 'Dead Spa',     address: '6 F St, Chicago, IL 60614', phone: '773', website: 'https://f.com', types: ['spa'],  rating: '4.2', rating_count: 200, subtype: 'hair',     region: 'IL-N', state: 'IL', booking_platform: null,     reachable: false, unreachable_reason: '403', qualified_at: 1, reject_reason: null, notes: null, status: 'qualified', created_at: 600 },
   ];
 }
 seed();
@@ -35,6 +38,8 @@ function applyFilters(sql, params) {
   if (/subtype = \$\d/i.test(sql)) { const s = params[pi++]; rows = rows.filter(r => r.subtype === s); }
   if (/booking_platform IS NULL/i.test(sql)) rows = rows.filter(r => r.booking_platform == null);
   else if (/booking_platform = \$\d/i.test(sql)) { const b = params[pi++]; rows = rows.filter(r => r.booking_platform === b); }
+  if (/reachable = true/i.test(sql)) rows = rows.filter(r => r.reachable === true);
+  else if (/reachable = false/i.test(sql)) rows = rows.filter(r => r.reachable === false);
   if (/website IS NOT NULL/i.test(sql)) rows = rows.filter(r => r.website != null);
   else if (/website IS NULL/i.test(sql)) rows = rows.filter(r => r.website == null);
   return rows;
@@ -47,10 +52,13 @@ db.query = async (sql, params = []) => {
   if (/COUNT\(\*\) FILTER/i.test(sql)) {
     const rows = STORE.filter(r => r.product === params[0]);
     const q = rows.filter(r => r.status === 'qualified');
+    const noPlat = q.filter(r => r.booking_platform == null);
     return { rows: [{
       total: rows.length,
       qualified: q.length,
-      no_platform: q.filter(r => r.booking_platform == null).length,
+      no_platform: noPlat.length,
+      no_platform_reachable: noPlat.filter(r => r.reachable === true).length,
+      no_platform_unreachable: noPlat.filter(r => r.reachable === false).length,
       on_platform: q.filter(r => r.booking_platform != null).length,
       rejected: rows.filter(r => r.status === 'rejected').length,
     }] };
@@ -143,7 +151,7 @@ test('GET /prospects prime-pool filter (status=qualified & booking_platform=none
 test('GET /prospects?product=favly scopes to the other product', async () => {
   seed();
   const j = await (await req('GET', '/api/prospects?product=favly', { role: 'sales_team' })).json();
-  assert.deepEqual(j.items.map(i => i.id), [5]);
+  assert.deepEqual(j.items.map(i => i.id), [6, 5]); // both favly rows, rc DESC (id6=200 > id5=120)
 });
 
 test('GET /prospects filters by subtype and has_website', async () => {
@@ -157,7 +165,7 @@ test('GET /prospects filters by subtype and has_website', async () => {
 test('GET /prospects summary is product-wide, independent of table filters', async () => {
   seed();
   const j = await (await req('GET', '/api/prospects?status=new', { role: 'sales_team' })).json();
-  assert.deepEqual(j.summary, { total: 4, qualified: 2, no_platform: 1, on_platform: 1, rejected: 1 });
+  assert.deepEqual(j.summary, { total: 4, qualified: 2, no_platform: 1, no_platform_reachable: 1, no_platform_unreachable: 0, on_platform: 1, rejected: 1 });
   assert.deepEqual(j.items.map(i => i.id), [3]); // filter still applied to the rows
 });
 
@@ -169,6 +177,31 @@ test('GET /prospects paginates', async () => {
   assert.deepEqual(p1.items.map(i => i.id), [2, 1]);
   const p2 = await (await req('GET', '/api/prospects?pageSize=2&page=2', { role: 'sales_team' })).json();
   assert.deepEqual(p2.items.map(i => i.id), [3, 4]);
+});
+
+// ── reachability: default prime pool excludes unreachable; explicit filter returns them ──
+test('default prime-pool filter (reachable=true) EXCLUDES the unreachable row', async () => {
+  seed();
+  // this is the page's default: qualified + no platform + reachable → the true prime pool
+  const j = await (await req('GET', '/api/prospects?product=favly&status=qualified&booking_platform=none&reachable=true', { role: 'sales_team' })).json();
+  assert.deepEqual(j.items.map(i => i.id), [5]);       // id6 (dead 403) is filtered out
+  assert.ok(j.items.every(i => i.reachable === true));
+});
+
+test('explicit unreachable filter (reachable=false) RETURNS the dead rows with their reason', async () => {
+  seed();
+  const j = await (await req('GET', '/api/prospects?product=favly&reachable=false', { role: 'sales_team' })).json();
+  assert.deepEqual(j.items.map(i => i.id), [6]);
+  assert.equal(j.items[0].reachable, false);
+  assert.equal(j.items[0].unreachable_reason, '403');  // still findable — they need a phone call
+});
+
+test('summary splits no_platform into reachable (prime) vs unreachable', async () => {
+  seed();
+  const j = await (await req('GET', '/api/prospects?product=favly', { role: 'sales_team' })).json();
+  assert.equal(j.summary.no_platform, 2);              // both id5 + id6 are qualified null-platform
+  assert.equal(j.summary.no_platform_reachable, 1);    // id5 — the true prime pool
+  assert.equal(j.summary.no_platform_unreachable, 1);  // id6 — dead, kept but not prime
 });
 
 // ── get one / 404 ──────────────────────────────────────────────────────────────
