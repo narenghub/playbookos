@@ -54,6 +54,19 @@ body.pnav{
 /* Override the inline `font-family:Georgia,serif` in page HTML (briefing text, email previews) —
    the only serif in the console. Scoped to [style*="Georgia"] so monospace code blocks are left as-is. */
 body.pnav #content [style*="Georgia"]{font-family:var(--awsc-font) !important}
+/* Apollo Outreach dark-navy panels (inline styling that predates the AWS chrome) → light console.
+   Only the dark backgrounds and their light text are overridden; green/amber/teal meaning colours
+   and the navy Day badge are left untouched. Scoped to #content so the dark top bar is unaffected. */
+body.pnav #content [style*="background:#1a2540"],
+body.pnav #content [style*="background:#0f1a2e"],
+body.pnav #content [style*="background:#0a1628"],
+body.pnav #content [style*="background:#0f1623"]{background:var(--awsc-bg) !important}
+body.pnav #content [style*="background:#1e2d45"]{background:var(--awsc-border) !important}
+body.pnav #content [style*="border:1px solid #1e2d45"]{border-color:var(--awsc-border) !important}
+body.pnav #content [style*="color:#e2e8f0"]{color:var(--awsc-fg) !important}
+body.pnav #content [style*="color:#9FE1CB"],
+body.pnav #content [style*="color:#a0aec0"],
+body.pnav #content [style*="color:#8899aa"]{color:var(--awsc-fg2) !important}
 /* E — square corners on PANELS, CARDS and TABLES only (incl. inline-radius page divs);
    interactive controls are excluded so buttons can be pills (correction 1). */
 body.pnav .card,body.pnav .metric,body.pnav table,body.pnav thead,body.pnav th,body.pnav td,
@@ -134,7 +147,11 @@ body.pnav #breadcrumb .bc-current{color:var(--awsc-cur)}
 body.pnav #breadcrumb .bc-spacer{flex:1}
 body.pnav #breadcrumb .bc-info{color:var(--awsc-link);font-size:14px;cursor:default}
 /* push the app below the two fixed bars (34 + 28). box-sizing:border-box is global (line 2). */
-body.pnav #app{padding-top:68px}   /* 40px top bar + 28px breadcrumb */
+/* Definite height + min-height:0 make #main the real scroll container, so the body never
+   scrolls and content can never slide under the fixed top bar / breadcrumb (title-row clip fix). */
+body.pnav #app{padding-top:68px;height:100vh}   /* 40px top bar + 28px breadcrumb */
+body.pnav #main{min-height:0}
+body.pnav #sidebar{min-height:0;overflow-y:auto}
 /* C — sidebar: light AWS left nav, collapsible */
 body.pnav #sidebar{background:var(--awsc-bg);color:var(--awsc-fg);border-right:1px solid var(--awsc-border);width:240px;transition:width .12s}
 body.pnav #sidebar.collapsed{width:48px}
@@ -157,7 +174,7 @@ body.pnav #sidebar.collapsed .pnav-side-head{justify-content:center;padding:8px 
 body.pnav #nav-links .nav-section-title{padding:12px 14px 4px;font-size:13px;font-weight:700;letter-spacing:0;text-transform:none;color:var(--awsc-fg);display:flex;align-items:center;gap:6px}
 body.pnav #nav-links .nav-section-title::before{content:"\25BC";font-size:9px;color:var(--awsc-fg)}
 /* D — content chrome: title 17px + optional status badge + Actions button; bordered square tables */
-body.pnav #topbar{background:#fff;border-bottom:1px solid var(--awsc-border);padding:10px 20px}
+body.pnav #topbar{background:#fff;border-bottom:1px solid var(--awsc-border);padding:10px 20px;position:sticky;top:0;z-index:250}
 body.pnav #page-title{font-size:17px;font-weight:700;color:var(--awsc-fg)}
 body.pnav #page-status-badge{font-size:11px;padding:2px 8px;background:var(--awsc-strip);border:1px solid var(--awsc-border);color:var(--awsc-fg2);margin-right:10px}
 body.pnav #page-status-badge:empty{display:none}
