@@ -4,6 +4,7 @@ const { initDB, initPhase2, migrateSchemas, migrateResearchIntelligence, migrate
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
 const cron = require('node-cron');
 const { withAlerts, sendCronAlert } = require('./src/lib/cron-alerts');
 const { syncGitHubAllDevs, runWeeklyAnalysis, scoreAllAndCoach } = require('./src/lib/jobs');
@@ -45,11 +46,31 @@ app.use(cors());
 app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(express.static(path.join(__dirname, "public"), {
   maxAge: "1h", etag: true,
+  // index:false so '/' is NOT auto-served here — it falls through to serveShell(), which can
+  // inject the PlayNexa flag. (Other static assets keep the 1h cache.)
+  index: false,
   // Never cache the SPA HTML shell — otherwise a front-end deploy can lag up to an
   // hour behind (stale index.html served from browser/edge cache). Other static
   // assets keep the 1h cache.
   setHeaders: (res, filePath) => { if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store'); },
 }));
+
+// Serve the SPA shell, injecting window.PRODUCT_NAV_ENABLED=true when PRODUCT_NAV_ENABLED is set
+// so productNavEnabled() defaults on (the PlayNexa console) without the ?productNav query param.
+// Flag read once at boot (a Railway env change restarts the process). Rollback = unset the var
+// (classic on next boot); ?productNav=0 always forces classic, no deploy/restart needed.
+const PRODUCT_NAV_DEFAULT = String(process.env.PRODUCT_NAV_ENABLED) === 'true';
+const SHELL_PATH = path.join(__dirname, 'public', 'index.html');
+let _shellInjected = null;
+function serveShell(res) {
+  res.set('Cache-Control', 'no-store');
+  if (!PRODUCT_NAV_DEFAULT) return res.sendFile(SHELL_PATH);            // default OFF → byte-identical static shell
+  if (_shellInjected == null) {
+    const raw = fs.readFileSync(SHELL_PATH, 'utf8');
+    _shellInjected = raw.replace('</head>', '<script>window.PRODUCT_NAV_ENABLED=true;</script></head>');
+  }
+  res.set('Content-Type', 'text/html; charset=utf-8').send(_shellInjected);
+}
 
 app.get('/health', async (req, res) => {
   try {
@@ -92,11 +113,10 @@ require('./src/lib/permissions/enforce').mount(app);
 // API routes
 app.use('/api', routes);
 
-// SPA fallback
+// SPA fallback ('/' now routes here too, since express.static has index:false)
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
-  res.set('Cache-Control', 'no-store'); // SPA shell must never be cached (see above)
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  serveShell(res);
 });
 
 // ── CRON JOBS ─────────────────────────────────────────────────────────────────
