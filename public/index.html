@@ -36,17 +36,16 @@ body{font-family:Arial,sans-serif;background:#f0f2f5;color:#1a1a2e;font-size:14p
 #topbar h2{font-size:16px;font-weight:600;color:var(--navy)}
 /* ═══ AWS-style console chrome — EVERY rule below is scoped under body.pnav, so with
    PRODUCT_NAV_ENABLED off (no .pnav class) the classic shell is byte-identical. ═══ */
+/* The console is intentionally ALWAYS-LIGHT (like the AWS console): light left nav, breadcrumb,
+   panels and tables in BOTH OS light and dark modes. Only the top bar is dark (--awsc-topbar,
+   #232f3e), in both. So there is deliberately NO prefers-color-scheme override on these surface
+   vars — darkening --awsc-bg/strip in dark mode was what turned the sidebar/breadcrumb/table
+   header dark, which is wrong for this design. */
 body.pnav{
   --awsc-bg:#fafafa; --awsc-fg:#16191f; --awsc-fg2:#5f6b7a; --awsc-border:#d5dbdb;
   --awsc-link:#0972d3; --awsc-active:#e9f2fb; --awsc-strip:#f2f3f3;
   --awsc-primary:#ec7211; --awsc-cur:#414d5c;   /* primary action = orange; current-crumb = dark grey */
   --awsc-topbar:#232f3e; --awsc-topbar-fg:#d5dbdb; --awsc-topbar-dim:#aab7b8;
-}
-@media (prefers-color-scheme:dark){
-  body.pnav{ /* chrome adapts to dark; content cards stay light for readability (page HTML not touched) */
-    --awsc-bg:#12181f; --awsc-fg:#e6e9ec; --awsc-fg2:#98a3b0; --awsc-border:#2c3742;
-    --awsc-link:#5aa0e6; --awsc-active:#16344d; --awsc-strip:#1c2530;
-  }
 }
 /* E — square corners on PANELS, CARDS and TABLES only (incl. inline-radius page divs);
    interactive controls are excluded so buttons can be pills (correction 1). */
