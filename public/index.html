@@ -119,10 +119,9 @@ body.pnav #nav-links{padding:6px 0}
 body.pnav #nav-links a{display:flex;align-items:center;gap:8px;padding:9px 16px;font-size:14px;color:var(--awsc-link);text-decoration:none;border-left:2px solid transparent}
 body.pnav #nav-links a:hover{background:var(--awsc-strip)}
 body.pnav #nav-links a.active{background:var(--awsc-active);color:var(--awsc-link);border-left-color:var(--awsc-link);font-weight:700}
-body.pnav #sidebar.collapsed #nav-links a span:last-child,body.pnav #sidebar.collapsed .nav-section-title{display:none}
-/* collapsed: items centred within the 48px, nothing clipped; collapse control stays inline at top */
-body.pnav #sidebar.collapsed #nav-links a{padding:9px 0;gap:0;justify-content:center;border-left-width:0}
-body.pnav #sidebar.collapsed .nav-icon{width:100%;text-align:center;margin:0}
+/* collapsed: with no icons there is nothing to show as a rail, so hide the items + section
+   headers entirely (AWS collapses its text nav to a thin bar); the « chevron stays to expand. */
+body.pnav #sidebar.collapsed #nav-links a,body.pnav #sidebar.collapsed .nav-section-title{display:none}
 body.pnav #sidebar.collapsed .pnav-side-head{justify-content:center;padding:8px 0}
 /* correction 5 — section headers: bold (black in light / light in dark) + filled-triangle disclosure */
 /* scoped under #nav-links so it OUTWEIGHS the classic `#sidebar nav .nav-section-title`
@@ -700,11 +699,13 @@ function buildProductSidebar(role, tiers) {
     if (!items.length) return '';
     return `<div class="nav-section-title">${section.title}</div>` +
       items.map(it =>
-        `<a href="#" onclick="navigate('${it.id}');return false" id="nav-${it.id}"><span class="nav-icon">${it.icon}</span><span>${it.label}</span></a>`
+        // pnav sidebar is text-only (no icon element) — AWS left nav has no icons. The emoji in
+        // it.icon is left in NAV_SECTIONS and still rendered by the classic path (buildNav OFF).
+        `<a href="#" onclick="navigate('${it.id}');return false" id="nav-${it.id}"><span>${it.label}</span></a>`
       ).join('');
   }).join('');
-  // C — active product name at top with a collapse chevron (chrome; CSS handles collapse).
-  const head = product ? `<div class="pnav-side-head"><span class="pnav-side-name">${product.icon} ${product.label}</span><button class="pnav-collapse" onclick="toggleSidebarCollapse()" aria-label="Collapse sidebar" title="Collapse">«</button></div>` : '';
+  // C — active product name at top (text only, no emoji) with a collapse chevron.
+  const head = product ? `<div class="pnav-side-head"><span class="pnav-side-name">${product.label}</span><button class="pnav-collapse" onclick="toggleSidebarCollapse()" aria-label="Collapse sidebar" title="Collapse">«</button></div>` : '';
   document.getElementById('nav-links').innerHTML = head + html;
 }
 
@@ -728,7 +729,8 @@ function buildAwsTopbar(role, tiers) {
   }
   const vis = visibleProducts(role, tiers);
   // B — products are NO LONGER tabs; only the global areas (Platform, Me) stay as top-bar tabs.
-  const gtab = p => `<button class="aws-ptab${p.key === window._activeProduct ? ' active' : ''}" onclick="selectProduct('${p.key}')" title="${p.label}"><span class="aws-picon aws-picon-fb">${p.icon}</span><span class="aws-ptab-label">${p.label}</span></button>`;
+  // Platform/Me are plain text labels (no emoji) to match the AWS bar.
+  const gtab = p => `<button class="aws-ptab${p.key === window._activeProduct ? ' active' : ''}" onclick="selectProduct('${p.key}')" title="${p.label}"><span class="aws-ptab-label">${p.label}</span></button>`;
   el.querySelector('.aws-tb-globals').innerHTML = vis.filter(p => p.kind === 'global').map(gtab).join('');
   // A — the hamburger opens the product launcher (it no longer toggles the sidebar).
   el.querySelector('.aws-tb-left').innerHTML =
