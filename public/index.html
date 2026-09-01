@@ -69,18 +69,18 @@ body.pnav #content [style*="color:#a0aec0"],
 body.pnav #content [style*="color:#8899aa"]{color:var(--awsc-fg2) !important}
 /* E — square corners on PANELS, CARDS and TABLES only (incl. inline-radius page divs);
    interactive controls are excluded so buttons can be pills (correction 1). */
-body.pnav .card,body.pnav .metric,body.pnav table,body.pnav thead,body.pnav th,body.pnav td,
-body.pnav #content [style*="border-radius"]:not(button):not(input):not(select):not(textarea):not(.btn){border-radius:0 !important}
-/* Buttons are AWS pills: white fill, blue border, blue text, fully rounded. */
-body.pnav button,body.pnav .btn{border-radius:16px !important}
+body.pnav .metric,body.pnav table,body.pnav thead,body.pnav th,body.pnav td,
+body.pnav #content [style*="border-radius"]:not(button):not(input):not(select):not(textarea):not(.btn):not(.card){border-radius:0 !important}
+/* Buttons are AWS bordered pills: white fill, #0972d3 border + text, radius 20px, 5px 20px, 14px. */
+body.pnav button,body.pnav .btn{border-radius:20px !important}
 body.pnav #content .btn,body.pnav #content button,body.pnav #topbar .btn,body.pnav .aws-actions{
-  background:#fff;border:1px solid var(--awsc-link);color:var(--awsc-link);border-radius:16px !important;font-weight:600}
+  background:#fff;border:1px solid var(--awsc-link);color:var(--awsc-link);border-radius:20px !important;font-weight:600;font-size:14px;padding:5px 20px}
 /* the single primary action is orange (correction 7); every other button stays a blue pill. */
 body.pnav #content .btn-primary{background:var(--awsc-primary);border-color:var(--awsc-primary);color:#fff}
 body.pnav input,body.pnav select,body.pnav textarea{border-radius:4px}
 /* hide the classic chrome the console replaces */
 body.pnav #product-bar,body.pnav #mobile-topbar,body.pnav #sidebar .brand,body.pnav #sidebar #user-info-box{display:none}
-body:not(.pnav) #aws-topbar,body:not(.pnav) #breadcrumb,body:not(.pnav) .aws-actions,body:not(.pnav) #page-status-badge{display:none}
+body:not(.pnav) #aws-topbar,body:not(.pnav) #breadcrumb,body:not(.pnav) .aws-actions,body:not(.pnav) #page-status-badge,body:not(.pnav) .page-info{display:none}
 /* A — top bar: fixed, full width, dark in both light and dark modes */
 body.pnav #aws-topbar{display:flex;position:fixed;top:0;left:0;right:0;height:40px;z-index:300;align-items:center;gap:12px;padding:0 16px;background:var(--awsc-topbar);color:var(--awsc-topbar-fg);font-size:13px}
 body.pnav #aws-topbar .aws-icon-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:50% !important;background:var(--awsc-link);color:#fff;border:1px solid var(--awsc-link);font-size:13px;cursor:pointer;line-height:1}
@@ -153,15 +153,17 @@ body.pnav #app{padding-top:68px;height:100vh}   /* 40px top bar + 28px breadcrum
 body.pnav #main{min-height:0}
 body.pnav #sidebar{min-height:0;overflow-y:auto}
 /* C — sidebar: light AWS left nav, collapsible */
-body.pnav #sidebar{background:var(--awsc-bg);color:var(--awsc-fg);border-right:1px solid var(--awsc-border);width:240px;transition:width .12s}
+body.pnav #sidebar{background:#fff;color:var(--awsc-fg);border-right:1px solid #e9ebed;width:240px;transition:width .12s}
 body.pnav #sidebar.collapsed{width:48px}
 body.pnav .pnav-side-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--awsc-border);color:var(--awsc-fg)}
-body.pnav .pnav-side-name{font-size:17px;font-weight:700;color:var(--awsc-fg)}
+body.pnav .pnav-side-name{font-size:20px;font-weight:700;color:var(--awsc-fg)}
 body.pnav #sidebar.collapsed .pnav-side-name{display:none}
-/* correction 2 — collapse control: square button, blue border, blue chevron */
-body.pnav .pnav-collapse{background:#fff;border:1px solid var(--awsc-link);color:var(--awsc-link);cursor:pointer;font-size:13px;line-height:1;padding:2px 7px;border-radius:0 !important}
+/* collapse control: a plain ‹ chevron — no border, no box */
+body.pnav .pnav-collapse{background:none;border:none;color:var(--awsc-fg2);cursor:pointer;font-size:18px;line-height:1;padding:0 4px}
 body.pnav #nav-links{padding:6px 0}
-body.pnav #nav-links a{display:flex;align-items:center;gap:8px;padding:9px 16px;font-size:14px;color:var(--awsc-link);text-decoration:none;border-left:2px solid transparent}
+/* nav items: near-black (NOT blue), 14px, generous padding; hover greys the bg, text stays dark;
+   only the ACTIVE item is blue + bold on a light fill. */
+body.pnav #nav-links a{display:flex;align-items:center;gap:8px;padding:8px 20px;font-size:14px;color:var(--awsc-fg);text-decoration:none;border-left:2px solid transparent}
 body.pnav #nav-links a:hover{background:var(--awsc-strip)}
 body.pnav #nav-links a.active{background:var(--awsc-active);color:var(--awsc-link);border-left-color:var(--awsc-link);font-weight:700}
 /* collapsed: with no icons there is nothing to show as a rail, so hide the items + section
@@ -171,17 +173,26 @@ body.pnav #sidebar.collapsed .pnav-side-head{justify-content:center;padding:8px 
 /* correction 5 — section headers: bold (black in light / light in dark) + filled-triangle disclosure */
 /* scoped under #nav-links so it OUTWEIGHS the classic `#sidebar nav .nav-section-title`
    (1 id) rule that otherwise forces white text on the now-light sidebar. */
-body.pnav #nav-links .nav-section-title{padding:12px 14px 4px;font-size:13px;font-weight:700;letter-spacing:0;text-transform:none;color:var(--awsc-fg);display:flex;align-items:center;gap:6px}
-body.pnav #nav-links .nav-section-title::before{content:"\25BC";font-size:9px;color:var(--awsc-fg)}
+/* section headers: 15px bold near-black, Title Case (the UPPERCASE source is title-cased in
+   buildProductSidebar so the classic path stays byte-identical), filled ▼, generous top margin. */
+body.pnav #nav-links .nav-section-title{margin-top:14px;padding:6px 20px 4px;font-size:15px;font-weight:700;letter-spacing:0;text-transform:none;color:var(--awsc-fg);display:flex;align-items:center;gap:7px}
+body.pnav #nav-links .nav-section-title::before{content:"\25BC";font-size:10px;color:var(--awsc-fg)}
 /* D — content chrome: title 17px + optional status badge + Actions button; bordered square tables */
 body.pnav #topbar{background:#fff;border-bottom:1px solid var(--awsc-border);padding:10px 20px;position:sticky;top:0;z-index:250}
-body.pnav #page-title{font-size:17px;font-weight:700;color:var(--awsc-fg)}
+body.pnav #page-title{font-size:28px;font-weight:700;color:var(--awsc-fg)}
+/* small blue "Info" link after the page title */
+body.pnav .page-info{font-size:13px;color:var(--awsc-link);text-decoration:none;margin-left:2px}
+body.pnav .page-info:hover{text-decoration:underline}
 body.pnav #page-status-badge{font-size:11px;padding:2px 8px;background:var(--awsc-strip);border:1px solid var(--awsc-border);color:var(--awsc-fg2);margin-right:10px}
 body.pnav #page-status-badge:empty{display:none}
-body.pnav .aws-actions{display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid var(--awsc-link);color:var(--awsc-link);font-size:12px;padding:5px 14px;cursor:pointer;font-weight:600}
-body.pnav #content .card{border:1px solid var(--awsc-border);box-shadow:none}
-/* correction 6 — panel headings centred, 19px bold; metrics = big blue number + blue underline + grey caption */
-body.pnav #content .card-title{text-align:center;font-size:19px;font-weight:700;color:var(--awsc-fg)}
+body.pnav .aws-actions{display:inline-flex;align-items:center;gap:4px;background:#fff;border:1px solid var(--awsc-link);color:var(--awsc-link);font-size:14px;padding:5px 20px;cursor:pointer;font-weight:600}
+/* cards: rounded (16px, NOT square), 1px #e9ebed border, white, generous padding */
+body.pnav #content .card{border:1px solid #e9ebed;box-shadow:none;border-radius:16px;background:#fff;padding:24px}
+/* body text 14px near-black; content links #0972d3 (inline colours in page HTML are left intact) */
+body.pnav #content{font-size:14px;color:var(--awsc-fg)}
+body.pnav #content a{color:var(--awsc-link)}
+/* panel headings centred, 22px bold */
+body.pnav #content .card-title{text-align:center;font-size:22px;font-weight:700;color:var(--awsc-fg)}
 body.pnav #content .metric{text-align:center;background:#fff}
 body.pnav #content .metric .value{color:var(--awsc-link);font-size:28px;font-weight:700;display:inline-block;border-bottom:1px solid var(--awsc-link);padding-bottom:2px;line-height:1.25}
 body.pnav #content .metric .label,body.pnav #content .metric .sub{color:var(--awsc-fg2)}
@@ -408,6 +419,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
       <div style="display:flex;align-items:center;gap:10px">
         <span id="page-status-badge"></span>
         <h2 id="page-title" class="text-page-title">Dashboard</h2>
+        <a class="page-info" href="#" onclick="return false">Info</a>
       </div>
       <div style="display:flex;gap:14px;align-items:center">
         <span id="revenue-status"></span>
@@ -743,7 +755,9 @@ function buildProductSidebar(role, tiers) {
     if (!navSectionVisible(section.access, role)) return '';
     const items = section.items.filter(it => pageset.has(it.id) && passesPageReads(it.id, role, tiers));
     if (!items.length) return '';
-    return `<div class="nav-section-title">${section.title}</div>` +
+    // Title Case the UPPERCASE section title for pnav only (classic buildNav keeps it verbatim).
+    const secTitle = section.title.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+    return `<div class="nav-section-title">${secTitle}</div>` +
       items.map(it =>
         // pnav sidebar is text-only (no icon element) — AWS left nav has no icons. The emoji in
         // it.icon is left in NAV_SECTIONS and still rendered by the classic path (buildNav OFF).
@@ -751,7 +765,7 @@ function buildProductSidebar(role, tiers) {
       ).join('');
   }).join('');
   // C — active product name at top (text only, no emoji) with a collapse chevron.
-  const head = product ? `<div class="pnav-side-head"><span class="pnav-side-name">${product.label}</span><button class="pnav-collapse" onclick="toggleSidebarCollapse()" aria-label="Collapse sidebar" title="Collapse">«</button></div>` : '';
+  const head = product ? `<div class="pnav-side-head"><span class="pnav-side-name">${product.label}</span><button class="pnav-collapse" onclick="toggleSidebarCollapse()" aria-label="Collapse sidebar" title="Collapse">‹</button></div>` : '';
   document.getElementById('nav-links').innerHTML = head + html;
 }
 
