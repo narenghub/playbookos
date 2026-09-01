@@ -8,6 +8,7 @@
 
 const { query } = require('../../db');
 const { logAgentActivity } = require('../../agent-core');
+const { notify } = require('../../notify');
 const { getConfig } = require('./config');
 const news = require('./news-source');
 const { classifyItem } = require('./classify');
@@ -132,6 +133,18 @@ async function runContentPipeline(product, { dryRun = false, deps = {} } = {}) {
           + `cost=$${summary.cost_usd} errors=${summary.errors.length}`,
       });
     } catch { /* logging must never break the run */ }
+    // Notifications (never-throws; must not affect the run). New drafts → approval_pending;
+    // a run that collected errors → agent_failed.
+    if (summary.drafts_created > 0) {
+      await notify({ product, kind: 'approval_pending', severity: 'info',
+        title: `${summary.drafts_created} content draft${summary.drafts_created === 1 ? '' : 's'} awaiting approval`,
+        body: `${product}: review and approve in Content Studio.`, link_page: 'content-studio' }, { query: q });
+    }
+    if (summary.errors.length > 0) {
+      await notify({ product, kind: 'agent_failed', severity: 'error',
+        title: `Content pipeline: ${summary.errors.length} error${summary.errors.length === 1 ? '' : 's'} for ${product}`,
+        body: summary.errors.slice(0, 3).map(e => `${e.stage}: ${e.error}`).join(' · '), link_page: 'content-studio' }, { query: q });
+    }
   }
   return summary;
 }

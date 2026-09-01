@@ -15,6 +15,7 @@
 const crypto = require('crypto');
 const { query } = require('../../db');
 const { logAgentActivity } = require('../../agent-core');
+const { notify } = require('../../notify');
 const ct = require('./clinicaltrials');
 const { classifyStudy } = require('./classify');
 const { inferMolecules } = require('./infer-molecules');
@@ -182,6 +183,10 @@ async function runResearchIntelIngest({ maxStudies = 50, dryRun = false } = {}) 
         // Cost fuse: stop BEFORE spending on a study that could blow the cap.
         if (summary.cost_usd + EST_PER_STUDY_USD > cap) {
           summary.errors.push({ stage: 'cost_cap', error: `cost cap $${cap} reached (spent $${summary.cost_usd.toFixed(3)})` });
+          // budget notification — platform-level (product null); never-throws.
+          await notify({ product: null, kind: 'budget', severity: 'warning',
+            title: `Clinical Demand Intelligence: daily cost fuse hit`,
+            body: `Stopped at $${summary.cost_usd.toFixed(3)} of the $${cap} daily cap.`, link_page: 'clinical-demand-intelligence' });
           stop = true; break;
         }
 

@@ -4405,3 +4405,37 @@ router.put('/prospects/:id', authMiddleware, requireTier('sales'), async (req, r
     res.json(upd.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── Notifications — the pnav top-bar bell feed ────────────────────────────────
+// reads + writes requireTier('intelligence') (GET needs intelligence read; PUT/POST need
+// intelligence write). All free, no spend.
+router.get('/notifications', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const where = req.query.unread === 'true' ? 'WHERE read_at IS NULL' : '';
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 30));
+    const items = (await query(
+      `SELECT id, product, kind, severity, title, body, link_page, read_at, created_at
+         FROM notifications ${where}
+         ORDER BY created_at DESC LIMIT ${limit}`)).rows;
+    const unread = (await query(`SELECT COUNT(*)::int n FROM notifications WHERE read_at IS NULL`)).rows[0].n;
+    res.json({ items, unread });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT /notifications/:id/read — mark one read (idempotent; keeps the original read_at).
+router.put('/notifications/:id/read', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const upd = await query(
+      `UPDATE notifications SET read_at = COALESCE(read_at, NOW()) WHERE id = $1 RETURNING *`, [req.params.id]);
+    if (!upd.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(upd.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /notifications/read-all — mark every unread notification read.
+router.post('/notifications/read-all', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const upd = await query(`UPDATE notifications SET read_at = NOW() WHERE read_at IS NULL`);
+    res.json({ marked: upd.rowCount || 0 });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});

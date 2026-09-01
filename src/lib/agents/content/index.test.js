@@ -19,7 +19,8 @@ function fakeDB() {
   const seen = new Set(); let id = 0;
   return {
     rows: seen,
-    query: async (_sql, params) => {
+    query: async (sql, params) => {
+      if (/INSERT INTO notifications/i.test(sql)) return { rows: [{ id: -1 }] };  // feed write, not a content row
       const key = params[0] + '|' + params[1];
       if (seen.has(key)) return { rows: [] };       // conflict → nothing returned
       seen.add(key); return { rows: [{ id: ++id }] };
@@ -106,7 +107,7 @@ test('dedup: the same source_ref twice produces exactly one row', async () => {
 
 test('happy path: relevant items become drafts with topic/segment/cost', async () => {
   const db = fakeDB(); let insertParams;
-  const q = async (sql, params) => { insertParams = params; return db.query(sql, params); };
+  const q = async (sql, params) => { if (/INSERT INTO content_queue/i.test(sql)) insertParams = params; return db.query(sql, params); };
   const s = await runContentPipeline('golfnex', { deps: { env: ON, source: srcOf([item(1)]), classify: okClassify(), generate: okGenerate(), query: q, logAgentActivity: noopLog } });
   assert.equal(s.drafts_created, 1);
   assert.equal(insertParams[0], 'golfnex');                 // product

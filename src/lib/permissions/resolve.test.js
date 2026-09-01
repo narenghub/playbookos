@@ -100,13 +100,13 @@ test('T10 — unknown feature key is denied and does not throw (rule 1)', async 
   assert.equal(r.rule, 1);
 });
 
-test('T11 — super_admin holds all 230 non-cron features (and no crons)', async () => {
+test('T11 — super_admin holds all 233 non-cron features (and no crons)', async () => {
   const map = await resolveAll(user('super_admin'), { env: ENV_ON, overrides: [] });
   const isCron = f => f.surface === 'agent_trigger' && !f.ref.startsWith('POST ');
   const nonCron = FEATURES.filter(f => !isCron(f));
   const crons = FEATURES.filter(isCron);
   const allowedNonCron = nonCron.filter(f => map.get(f.key).allowed).length;
-  assert.equal(allowedNonCron, 230); // +5 Content Studio (Part 3) +1 golfnex.content.publish_post (mcp_tool) +6 Prospects (page+list/get/update/run/qualify)
+  assert.equal(allowedNonCron, 233); // +5 Content Studio (Part 3) +1 golfnex.content.publish_post (mcp_tool) +6 Prospects (page+list/get/update/run/qualify) +3 Notifications (list/read/read-all)
   assert.ok(crons.every(f => !map.get(f.key).allowed), 'no cron is ever held');
 });
 

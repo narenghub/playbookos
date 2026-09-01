@@ -13,6 +13,7 @@
 
 const { query } = require('../../db');
 const { logAgentActivity } = require('../../agent-core');
+const { notify } = require('../../notify');
 const places = require('./places');
 const { tilesForProduct } = require('./tiles');
 const { qualifyFacility } = require('./qualify');
@@ -98,6 +99,11 @@ async function runProspecting(product, { dryRun = false, deps = {} } = {}) {
           + `new=${summary.new_facilities} dup=${summary.duplicates} capped=${summary.capped_tiles.length} errors=${summary.errors.length}`,
       });
     } catch { /* logging must never break the run */ }
+    if (summary.errors.length > 0) {   // agent_failed notification (never-throws)
+      await notify({ product, kind: 'agent_failed', severity: 'error',
+        title: `Prospecting: ${summary.errors.length} error${summary.errors.length === 1 ? '' : 's'} for ${product}`,
+        body: summary.errors.slice(0, 3).map(e => `${e.stage}: ${e.error}`).join(' · '), link_page: 'prospects' }, { query: q });
+    }
   }
   return summary;
 }
@@ -160,6 +166,11 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
       reasoning: `Booking-signature qualification for ${product}`,
       output_summary: `considered=${summary.considered} qualified=${summary.qualified} with_platform=${summary.with_platform} no_platform=${summary.no_platform} reachable=${summary.reachable} unreachable=${summary.unreachable} errors=${summary.errors.length}` });
   } catch { /* logging must never break the run */ }
+  if (summary.errors.length > 0) {   // agent_failed notification (never-throws)
+    await notify({ product, kind: 'agent_failed', severity: 'error',
+      title: `Qualifier: ${summary.errors.length} error${summary.errors.length === 1 ? '' : 's'} for ${product}`,
+      body: summary.errors.slice(0, 3).map(e => `${e.stage}: ${e.error}`).join(' · '), link_page: 'prospects' }, { query: q });
+  }
   return summary;
 }
 
