@@ -113,8 +113,10 @@ body.pnav #sidebar.collapsed #nav-links a{padding:9px 0;gap:0;justify-content:ce
 body.pnav #sidebar.collapsed .nav-icon{width:100%;text-align:center;margin:0}
 body.pnav #sidebar.collapsed .pnav-side-head{justify-content:center;padding:8px 0}
 /* correction 5 — section headers: bold (black in light / light in dark) + filled-triangle disclosure */
-body.pnav .nav-section-title{padding:12px 14px 4px;font-size:13px;font-weight:700;letter-spacing:0;text-transform:none;color:var(--awsc-fg);display:flex;align-items:center;gap:6px}
-body.pnav .nav-section-title::before{content:"\25BC";font-size:9px;color:var(--awsc-fg)}
+/* scoped under #nav-links so it OUTWEIGHS the classic `#sidebar nav .nav-section-title`
+   (1 id) rule that otherwise forces white text on the now-light sidebar. */
+body.pnav #nav-links .nav-section-title{padding:12px 14px 4px;font-size:13px;font-weight:700;letter-spacing:0;text-transform:none;color:var(--awsc-fg);display:flex;align-items:center;gap:6px}
+body.pnav #nav-links .nav-section-title::before{content:"\25BC";font-size:9px;color:var(--awsc-fg)}
 /* D — content chrome: title 17px + optional status badge + Actions button; bordered square tables */
 body.pnav #topbar{background:#fff;border-bottom:1px solid var(--awsc-border);padding:10px 20px}
 body.pnav #page-title{font-size:17px;font-weight:700;color:var(--awsc-fg)}
