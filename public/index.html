@@ -46,7 +46,14 @@ body.pnav{
   --awsc-link:#0972d3; --awsc-active:#e9f2fb; --awsc-strip:#f2f3f3;
   --awsc-primary:#ec7211; --awsc-cur:#414d5c;   /* primary action = orange; current-crumb = dark grey */
   --awsc-topbar:#232f3e; --awsc-topbar-fg:#d5dbdb; --awsc-topbar-dim:#aab7b8;
+  /* ONE sans-serif family across the whole console (the AWS stack). Inherited by every pnav
+     surface — sidebar, top bar, breadcrumb, titles, card headings + body. Sizes are untouched. */
+  --awsc-font:"Amazon Ember","Helvetica Neue",Helvetica,Arial,sans-serif;
+  font-family:var(--awsc-font);
 }
+/* Override the inline `font-family:Georgia,serif` in page HTML (briefing text, email previews) —
+   the only serif in the console. Scoped to [style*="Georgia"] so monospace code blocks are left as-is. */
+body.pnav #content [style*="Georgia"]{font-family:var(--awsc-font) !important}
 /* E — square corners on PANELS, CARDS and TABLES only (incl. inline-radius page divs);
    interactive controls are excluded so buttons can be pills (correction 1). */
 body.pnav .card,body.pnav .metric,body.pnav table,body.pnav thead,body.pnav th,body.pnav td,
@@ -62,7 +69,7 @@ body.pnav input,body.pnav select,body.pnav textarea{border-radius:4px}
 body.pnav #product-bar,body.pnav #mobile-topbar,body.pnav #sidebar .brand,body.pnav #sidebar #user-info-box{display:none}
 body:not(.pnav) #aws-topbar,body:not(.pnav) #breadcrumb,body:not(.pnav) .aws-actions,body:not(.pnav) #page-status-badge{display:none}
 /* A — top bar: fixed, full width, dark in both light and dark modes */
-body.pnav #aws-topbar{display:flex;position:fixed;top:0;left:0;right:0;height:34px;z-index:300;align-items:center;gap:12px;padding:0 12px;background:var(--awsc-topbar);color:var(--awsc-topbar-fg);font-size:13px}
+body.pnav #aws-topbar{display:flex;position:fixed;top:0;left:0;right:0;height:40px;z-index:300;align-items:center;gap:12px;padding:0 16px;background:var(--awsc-topbar);color:var(--awsc-topbar-fg);font-size:13px}
 body.pnav #aws-topbar .aws-icon-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:50% !important;background:var(--awsc-link);color:#fff;border:1px solid var(--awsc-link);font-size:13px;cursor:pointer;line-height:1}
 body.pnav #aws-topbar .aws-logo{width:20px;height:20px;object-fit:contain;flex-shrink:0}
 body.pnav #aws-topbar .aws-wordmark{font-weight:700;color:#fff;font-size:14px;letter-spacing:.3px}
@@ -84,7 +91,7 @@ body.pnav #aws-topbar .aws-tb-right{display:flex;align-items:center;gap:14px}
 body.pnav #aws-topbar .aws-tb-globals{display:flex;align-items:center;gap:2px}
 /* A — product launcher: a services-grid-style panel anchored below the hamburger. */
 #product-launcher{display:none}
-body.pnav #product-launcher.open{display:block;position:fixed;top:35px;left:8px;z-index:400;min-width:280px;max-width:340px;max-height:70vh;overflow-y:auto;background:#fff;border:1px solid var(--awsc-border);box-shadow:0 6px 20px rgba(0,0,0,.22)}
+body.pnav #product-launcher.open{display:block;position:fixed;top:41px;left:8px;z-index:400;min-width:280px;max-width:340px;max-height:70vh;overflow-y:auto;background:#fff;border:1px solid var(--awsc-border);box-shadow:0 6px 20px rgba(0,0,0,.22)}
 body.pnav #product-launcher .pl-head{padding:8px 14px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--awsc-fg2);border-bottom:1px solid var(--awsc-border);position:sticky;top:0;background:#fff}
 body.pnav #product-launcher .pl-row{display:flex;align-items:center;gap:10px;width:100%;padding:9px 14px;cursor:pointer;background:none;border:0;border-bottom:1px solid var(--awsc-strip);text-align:left}
 body.pnav #product-launcher .pl-row:hover{background:var(--awsc-strip)}
@@ -100,7 +107,7 @@ body.pnav #aws-topbar .notif-bell:hover{color:#fff}
 body.pnav #aws-topbar .notif-badge{position:absolute;top:-4px;right:-3px;min-width:15px;height:15px;padding:0 3px;background:var(--awsc-primary);color:#fff;font-size:10px;font-weight:700;border-radius:8px;display:flex;align-items:center;justify-content:center;line-height:1}
 body:not(.pnav) #notif-bell,body:not(.pnav) #notif-panel{display:none}
 #notif-panel{display:none}
-body.pnav #notif-panel.open{display:block;position:fixed;top:35px;right:8px;z-index:400;width:340px;max-width:calc(100vw - 16px);max-height:70vh;overflow-y:auto;background:#fff;border:1px solid var(--awsc-border);box-shadow:0 6px 20px rgba(0,0,0,.22)}
+body.pnav #notif-panel.open{display:block;position:fixed;top:41px;right:8px;z-index:400;width:340px;max-width:calc(100vw - 16px);max-height:70vh;overflow-y:auto;background:#fff;border:1px solid var(--awsc-border);box-shadow:0 6px 20px rgba(0,0,0,.22)}
 body.pnav #notif-panel .np-head{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-bottom:1px solid var(--awsc-border);position:sticky;top:0;background:#fff}
 body.pnav #notif-panel .np-head span{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--awsc-fg2)}
 body.pnav #notif-panel .np-head button{background:none;border:none;color:var(--awsc-link);font-size:12px;cursor:pointer;font-weight:600}
@@ -120,14 +127,14 @@ body.pnav #aws-topbar #signout-btn{background:transparent;border:1px solid var(-
 body.pnav #aws-topbar #signout-btn:hover{border-color:#fff;color:#fff}
 body.pnav #aws-topbar .aws-user-email{color:var(--awsc-topbar-dim);font-size:12px;white-space:nowrap}
 /* B — breadcrumb strip */
-body.pnav #breadcrumb{display:flex;position:fixed;top:34px;left:0;right:0;height:28px;z-index:299;align-items:center;gap:6px;padding:0 16px;font-size:12px;background:var(--awsc-bg);color:var(--awsc-fg2);border-bottom:1px solid var(--awsc-border)}
+body.pnav #breadcrumb{display:flex;position:fixed;top:40px;left:0;right:0;height:28px;z-index:299;align-items:center;gap:6px;padding:0 16px;font-size:12px;background:var(--awsc-bg);color:var(--awsc-fg2);border-bottom:1px solid var(--awsc-border)}
 body.pnav #breadcrumb .bc-link{color:var(--awsc-link)}
 body.pnav #breadcrumb .bc-sep{color:var(--awsc-fg2);opacity:.55}
 body.pnav #breadcrumb .bc-current{color:var(--awsc-cur)}
 body.pnav #breadcrumb .bc-spacer{flex:1}
 body.pnav #breadcrumb .bc-info{color:var(--awsc-link);font-size:14px;cursor:default}
 /* push the app below the two fixed bars (34 + 28). box-sizing:border-box is global (line 2). */
-body.pnav #app{padding-top:62px}
+body.pnav #app{padding-top:68px}   /* 40px top bar + 28px breadcrumb */
 /* C — sidebar: light AWS left nav, collapsible */
 body.pnav #sidebar{background:var(--awsc-bg);color:var(--awsc-fg);border-right:1px solid var(--awsc-border);width:240px;transition:width .12s}
 body.pnav #sidebar.collapsed{width:48px}
