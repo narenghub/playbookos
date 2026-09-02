@@ -68,6 +68,56 @@ const PRODUCT_CONFIG = {
     ],
     bookingLinkTerms: ['book', 'appointment', 'schedule', 'reserve'],
   },
+
+  linkabl: {
+    // Recruiting/staffing agencies. IMPORTANT: Google Places has ONE underlying type for all of
+    // these — `employment_agency`; it does NOT expose distinct types for IT vs healthcare vs
+    // generic staffing. The split below is purely the free-text query, which biases WHICH firms
+    // rank, not a Places category. Measured overlap (Chicago, one page each): 'healthcare
+    // staffing agency' shares 0% place_ids with the others (its own clean set); 'IT staffing
+    // agency' shares 54–67% with 'staffing agency' (generic firms crowd the IT query), so the
+    // tech/general split is FUZZY — the qualifier/enrichment (below) is the real classifier, not
+    // the query. Dropped 'recruiting agency' + 'employment agency' (43–67% dupes of 'staffing
+    // agency', same type — wasted tiles) and 'executive search firm' (a different business —
+    // headhunting, not the volume ATS-running staffing market). Order matters: subtype is claimed
+    // by the FIRST tile to insert a place (ON CONFLICT DO NOTHING), region-by-region, in this
+    // array order — specialists first so a genuine IT firm that also ranks generically (e.g.
+    // Motion Recruitment) keeps the 'tech' tag instead of being swallowed by 'general'.
+    subtypes: [
+      { key: 'healthcare', term: 'healthcare staffing agency' },
+      { key: 'tech', term: 'IT staffing agency' },
+      { key: 'general', term: 'staffing agency' },
+    ],
+    states: ['IL'], // match GolfNex/Favly (reuses tiles.js REGIONS['IL'])
+    // ATS / recruiting-CRM tokens as they appear in careers-page HTML (job-board link href,
+    // embed script/iframe src, or text). INVERTED polarity vs golf/beauty: here a detected
+    // platform is the BETTER prospect (real req volume + a workflow to improve); no-platform is
+    // likely a one-person shop. Keys are host/brand tokens chosen to avoid English-word false
+    // positives — 'lever.co' not 'lever', 'workable.com' not 'workable', 'greenhouse.io' not
+    // 'greenhouse', 'loxo.co' not 'loxo'. See report for the per-signature sanity-check list.
+    signatures: [
+      { platform: 'bullhorn', key: 'bullhorn' },
+      { platform: 'greenhouse', key: 'greenhouse.io' },
+      { platform: 'greenhouse', key: 'grnh.se' },
+      { platform: 'lever', key: 'lever.co' },
+      { platform: 'jobdiva', key: 'jobdiva' },
+      { platform: 'ceipal', key: 'ceipal' },
+      { platform: 'jobvite', key: 'jobvite' },
+      { platform: 'workable', key: 'workable.com' },
+      { platform: 'recruitee', key: 'recruitee' },
+      { platform: 'smartrecruiters', key: 'smartrecruiters' },
+      { platform: 'icims', key: 'icims' },
+      { platform: 'taleo', key: 'taleo' },
+      { platform: 'zohorecruit', key: 'zohorecruit' },
+      { platform: 'zohorecruit', key: 'recruit.zoho' },
+      { platform: 'crelate', key: 'crelate' },
+      { platform: 'loxo', key: 'loxo.co' },
+      { platform: 'avionte', key: 'avionte' },
+    ],
+    // Careers-page finder (the equivalent of a "book" link): the qualifier follows the first
+    // matching link off the homepage and scans THAT page for the ATS signatures above.
+    bookingLinkTerms: ['careers', 'jobs', 'apply', 'openings'],
+  },
 };
 
 function getConfig(product) {
