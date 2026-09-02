@@ -259,7 +259,7 @@ async function fetchCatalogProducts() {
 }
 
 // Generate one SEO landing page via Claude and upsert into seo_content.
-async function generateSeoPage(product) {
+async function generateSeoPage(product, { tier = null } = {}) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return { error: 'ANTHROPIC_API_KEY not configured' };
   const { name, cas_number, purity, category, is_gmp } = product;
@@ -307,16 +307,17 @@ Do NOT invent specific prices, lot numbers, or medical/regulatory claims. Keep l
     ? (typeof content.schema_json === 'string' ? content.schema_json : JSON.stringify(content.schema_json))
     : null;
   await query(
-    `INSERT INTO seo_content (id, molecule_name, cas_number, title, meta_desc, content_html, schema_json, category, slug, url, purity, generated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+    `INSERT INTO seo_content (id, molecule_name, cas_number, title, meta_desc, content_html, schema_json, category, slug, url, purity, tier, generated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
      ON CONFLICT (molecule_name, cas_number) DO UPDATE
        SET title=EXCLUDED.title, meta_desc=EXCLUDED.meta_desc, content_html=EXCLUDED.content_html,
            schema_json=EXCLUDED.schema_json, category=EXCLUDED.category, slug=EXCLUDED.slug,
-           url=EXCLUDED.url, purity=EXCLUDED.purity, generated_at=NOW()`,
+           url=EXCLUDED.url, purity=EXCLUDED.purity,
+           tier=COALESCE(EXCLUDED.tier, seo_content.tier), generated_at=NOW()`,
     [crypto.randomUUID(), name, cas_number || '', content.title || null, content.meta_desc || null,
-     content.content_html || null, schemaStr, category, slugify(name), url, purity]
+     content.content_html || null, schemaStr, category, slugify(name), url, purity, tier]
   );
-  return { ok: true, molecule: name, url };
+  return { ok: true, molecule: name, url, costUsd: r.costUsd || 0, usage: r.usage || null };
 }
 
 // Generate (or refresh) SEO pages for every molecule in the catalog. Sequential

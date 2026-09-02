@@ -305,6 +305,9 @@ async function migrateSchemas() {
       ALTER TABLE seo_content ADD COLUMN IF NOT EXISTS slug TEXT;
       ALTER TABLE seo_content ADD COLUMN IF NOT EXISTS url TEXT;
       ALTER TABLE seo_content ADD COLUMN IF NOT EXISTS purity TEXT;
+      -- Evidence tier the page was generated under (A=GSC demand, B=CDI trials, C=catalog fill),
+      -- so ranking lift can be measured per tier later. Null for pages generated before batches.
+      ALTER TABLE seo_content ADD COLUMN IF NOT EXISTS tier TEXT;
       CREATE TABLE IF NOT EXISTS custom_roles (
         id TEXT PRIMARY KEY,
         role_name TEXT NOT NULL UNIQUE,
