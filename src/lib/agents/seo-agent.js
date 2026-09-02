@@ -258,6 +258,30 @@ async function fetchCatalogProducts() {
   } catch (e) { return { products: [], error: e.message }; }
 }
 
+// Remove fabricated review markup (aggregateRating / review / reviews) from schema.org
+// JSON-LD anywhere in the tree. There are no real reviews, so this markup is fabricated;
+// fake review rich-results risk a Google manual action against the domain. Accepts an
+// object or a JSON string; returns { json: <string|null>, stripped: <bool> }.
+function sanitizeSchemaJson(input) {
+  if (input == null) return { json: null, stripped: false };
+  let obj;
+  try { obj = typeof input === 'string' ? JSON.parse(input) : input; }
+  catch { return { json: typeof input === 'string' ? input : null, stripped: false }; }
+  let stripped = false;
+  const BAD = new Set(['aggregateRating', 'review', 'reviews']);
+  const walk = (node) => {
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if (node && typeof node === 'object') {
+      for (const k of Object.keys(node)) {
+        if (BAD.has(k)) { delete node[k]; stripped = true; }
+        else walk(node[k]);
+      }
+    }
+  };
+  walk(obj);
+  return { json: JSON.stringify(obj), stripped };
+}
+
 // Generate one SEO landing page via Claude and upsert into seo_content.
 async function generateSeoPage(product, { tier = null } = {}) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -265,6 +289,17 @@ async function generateSeoPage(product, { tier = null } = {}) {
   const { name, cas_number, purity, category, is_gmp } = product;
   const grade = is_gmp ? 'GMP grade' : 'research grade';
   const url = productUrl(category, name);
+
+  // Keyword targeting + grade guard. The "GMP grade pharmaceutical" keyword is only
+  // used for actual GMP products; on research-grade products it would be a false
+  // quality claim on a regulated product, so we target research-appropriate terms and
+  // explicitly forbid GMP / pharmaceutical-grade language everywhere in the output.
+  const gradeKeyword = is_gmp
+    ? `- "${name} GMP grade pharmaceutical"`
+    : `- "${name} research grade"\n- "${name} reference standard supplier"`;
+  const gradeGuard = is_gmp
+    ? ''
+    : ` This product is RESEARCH GRADE, not GMP: do NOT describe it as "GMP", "GMP grade", "GMP-grade", "cGMP", or "pharmaceutical grade" anywhere — not in the body, headings, FAQ, or schema_json — as that is a false quality claim. Use research-grade / research-use language instead.`;
 
   const prompt = `You are an SEO content writer for Abiozen LLC, a US-based pharmaceutical API distribution company. Generate a complete, SEO-optimized product landing page for the molecule below.
 
@@ -277,7 +312,7 @@ Category: ${category}
 Target these Google search keywords naturally in the copy and headings:
 - "buy ${name} API USA"
 - "${name} bulk supplier"
-- "${name} GMP grade pharmaceutical"
+${gradeKeyword}
 - "${cas_number} supplier"
 
 Return EXACTLY one JSON object and nothing else (no markdown fences, no commentary):
@@ -295,7 +330,7 @@ Requirements for "content_html":
 - A clear call-to-action: a "Request Quote" button/link pointing to mailto:naren@abiozen.com (e.g. <a href="mailto:naren@abiozen.com?subject=Quote%20request%3A%20${encodeURIComponent(name)}" ...>Request Quote</a>).
 - An <h2>Frequently Asked Questions</h2> with 3-5 buyer questions (pricing, MOQ, lead time, documentation) each with a <p> answer.
 Requirements for "schema_json": valid schema.org "Product" JSON-LD — "@context", "@type":"Product", name, description, an identifier using the CAS number when present, brand "Abiozen LLC", and an "offers" object (availability InStock, priceCurrency USD; do NOT invent a specific price — use "offers" with "availability" and a "url").
-Do NOT invent specific prices, lot numbers, or medical/regulatory claims. Keep language factual and conservative. Return ONLY the JSON object.`;
+Do NOT invent specific prices, lot numbers, or medical/regulatory claims. Do NOT include "aggregateRating", "review", or "reviews" in schema_json — there are no real reviews, and fabricated review markup violates Google's structured-data policy. Keep language factual and conservative.${gradeGuard} Return ONLY the JSON object.`;
 
   const r = await callClaude({ model: SEO_MODEL, prompt, maxTokens: 4000, expectJson: true, apiKey });
   if (r.error) return { error: r.error };
@@ -303,9 +338,7 @@ Do NOT invent specific prices, lot numbers, or medical/regulatory claims. Keep l
   if (!content) return { error: 'unparseable SEO JSON' };
   if (!content.title || !content.content_html) return { error: 'missing title/content_html' };
 
-  const schemaStr = content.schema_json != null
-    ? (typeof content.schema_json === 'string' ? content.schema_json : JSON.stringify(content.schema_json))
-    : null;
+  const schemaStr = sanitizeSchemaJson(content.schema_json).json;
   await query(
     `INSERT INTO seo_content (id, molecule_name, cas_number, title, meta_desc, content_html, schema_json, category, slug, url, purity, tier, generated_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NOW())
@@ -412,5 +445,5 @@ async function pushSeoContentToAbiozen({ dryRun = false } = {}) {
 module.exports = {
   trackKeywordRankings, identifyContentGaps, generateSEOTasksForTeam, trackAlgoliaNoResults,
   fetchCatalogProducts, generateSeoPage, generateCatalogSeoPages, slugify, productUrl,
-  pushSeoContentToAbiozen,
+  pushSeoContentToAbiozen, sanitizeSchemaJson,
 };
