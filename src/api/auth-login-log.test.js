@@ -39,6 +39,14 @@ async function boot() {
   return base;
 }
 
+// The login route is rate-limited to 10 attempts per minute PER IP, and this file makes more
+// calls than that. Each request therefore presents its own X-Forwarded-For so it lands in its
+// own bucket — the app sets `trust proxy`, so req.ip follows the header. This keeps the limiter
+// in the production path exactly as it ships; the alternative was exporting its internal store
+// purely so a test could reach in and clear it.
+let ipSeq = 0;
+const nextIp = () => `10.${(++ipSeq >> 8) & 255}.${ipSeq & 255}.1`;
+
 /** Capture console.warn/log/error for one request. */
 async function loginCapturing(body) {
   const b = await boot();
@@ -49,11 +57,26 @@ async function loginCapturing(body) {
   console.error = (...a) => lines.push(a.join(' '));
   try {
     const res = await fetch(b + '/api/auth/login', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextIp() },
+      body: JSON.stringify(body),
     });
     return { status: res.status, body: await res.json(), lines };
   } finally { console.warn = warn; console.log = log; console.error = err; }
 }
+
+test('the rate limiter still bites when the SAME ip retries — the per-test ip is a test device, not a hole', async () => {
+  const b = await boot();
+  const ip = '203.0.113.99';
+  const hit = () => fetch(b + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip },
+    body: JSON.stringify({ email: 'active@x.com', password: 'wrong' }),
+  }).then(r => r.status);
+  const codes = [];
+  for (let i = 0; i < 12; i++) codes.push(await hit());
+  assert.ok(codes.includes(429), `expected a 429 within 12 attempts, got ${codes.join(',')}`);
+});
 
 test('no such active user is logged as no_active_user', async () => {
   const r = await loginCapturing({ email: 'ghost@x.com', password: 'whatever' });
@@ -92,6 +115,40 @@ test('the password is NEVER written to the log', async () => {
   assert.equal(r.status, 401);
   assert.ok(r.lines.length > 0, 'expected at least one log line');
   for (const l of r.lines) assert.ok(!l.includes(secret), `password leaked into log: ${l}`);
+});
+
+// ── the trailing-newline bug ────────────────────────────────────────────────
+// A temporary password handed over in a text file carries the file's trailing newline. The
+// paste brings it along, bcrypt sees a string one character longer than the one that was
+// hashed, and the failure is logged as password_mismatch — indistinguishable from simply
+// typing the wrong password. This cost a real outage; these pin the fix.
+
+test('a password with a trailing newline authenticates', async () => {
+  const r = await loginCapturing({ email: 'active@x.com', password: 'correct-horse\n' });
+  assert.equal(r.status, 200, 'trailing newline must not defeat login');
+  assert.ok(r.body.token);
+});
+
+test('trailing and leading whitespace of every shape is tolerated', async () => {
+  for (const pw of ['correct-horse ', ' correct-horse', 'correct-horse\r\n', '  correct-horse\t\n']) {
+    const r = await loginCapturing({ email: 'active@x.com', password: pw });
+    assert.equal(r.status, 200, `should authenticate: ${JSON.stringify(pw)}`);
+  }
+});
+
+test('trimming does NOT make a genuinely wrong password work', async () => {
+  // The guard against over-reading the fix: only edge whitespace is forgiven. Interior
+  // characters, case and any other difference must still fail.
+  for (const pw of ['correct horse', 'Correct-Horse', 'correct-hors', 'correct-horse!']) {
+    const r = await loginCapturing({ email: 'active@x.com', password: pw });
+    assert.equal(r.status, 401, `must NOT authenticate: ${JSON.stringify(pw)}`);
+    assert.ok(r.lines.some(l => /\(password_mismatch\)/.test(l)));
+  }
+});
+
+test('a whitespace-only password is rejected, not trimmed into an empty match', async () => {
+  const r = await loginCapturing({ email: 'active@x.com', password: '   \n' });
+  assert.equal(r.status, 401);
 });
 
 test('a successful login is logged with role, and returns a token', async () => {

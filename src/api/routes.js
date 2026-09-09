@@ -123,7 +123,13 @@ router.post('/auth/login', authLimiter, async (req, res) => {
       logLoginFailure(req, 'no_password_set', email);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
-    if (!bcrypt.compareSync(password, user.password_hash)) {
+    // .trim() to match the email on line 113. That asymmetry was a real outage: a temporary
+    // password handed over in a text file carries the file's trailing newline, the paste brings
+    // it along, and bcrypt correctly rejects a string one character longer than the one that was
+    // hashed — logged as password_mismatch, which reads like the wrong password entirely.
+    // Trailing whitespace in a password is never intentional, and trimming costs no entropy:
+    // we never hash a password with edge whitespace, so no stored hash can require it.
+    if (!bcrypt.compareSync(password.trim(), user.password_hash)) {
       logLoginFailure(req, 'password_mismatch', email);
       return res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -142,7 +148,9 @@ router.post('/auth/accept-invite', authLimiter, async (req, res) => {
     const result = await query('SELECT * FROM users WHERE invite_token=$1', [token]);
     const user = result.rows[0];
     if (!user) return res.status(400).json({ error: 'Invalid or expired invite token' });
-    const hash = bcrypt.hashSync(password, 10);
+    // Trimmed to match the login comparison. Both sides must agree: login trims, so hashing an
+    // untrimmed value here would store a hash that login can never satisfy.
+    const hash = bcrypt.hashSync(password.trim(), 10);
     await query('UPDATE users SET password_hash=$1, name=$2, invite_token=NULL, joined_at=$3 WHERE id=$4', [hash, name, new Date().toISOString(), user.id]);
     const updated = (await query('SELECT * FROM users WHERE id=$1', [user.id])).rows[0];
     res.json({ token: signToken(updated), user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role } });
