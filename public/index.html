@@ -117,8 +117,6 @@ body.pnav #product-launcher .pl-head{padding:8px 14px;font-size:10px;font-weight
 body.pnav #product-launcher .pl-row{display:flex;align-items:center;gap:10px;width:100%;padding:9px 14px;cursor:pointer;background:none;border:0;border-bottom:1px solid var(--awsc-strip);text-align:left}
 body.pnav #product-launcher .pl-row:hover{background:var(--awsc-strip)}
 body.pnav #product-launcher .pl-row.active{background:var(--awsc-active)}
-body.pnav #product-launcher .pl-icon{width:24px;height:24px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center}
-body.pnav #product-launcher .pl-icon img{width:24px;height:24px;border-radius:2px;object-fit:cover}
 body.pnav #product-launcher .pl-name{flex:1;font-size:14px;font-weight:600;color:var(--awsc-fg)}
 body.pnav #product-launcher .pl-count{font-size:12px;color:var(--awsc-fg2)}
 body.pnav #product-launcher .pl-mark{width:14px;text-align:center;color:var(--awsc-link);font-size:13px;font-weight:700}
@@ -884,7 +882,8 @@ function buildAwsTopbar(role, tiers) {
 }
 
 // A/D — build the launcher rows: one per role-visible PRODUCT (same visibility as the tabs used),
-// 24px icon + name + page count; active product marked; scrolls for many products (config-driven).
+// name + page count; active product marked; scrolls for many products (config-driven). No icon:
+// the launcher is a text list. The product PNGs are still used by the top-bar tabs (.aws-picon).
 function buildLauncher(role, tiers) {
   const el = document.getElementById('product-launcher');
   if (!el) return;
@@ -893,7 +892,6 @@ function buildLauncher(role, tiers) {
     const count = productVisiblePages(p, role, tiers).length;
     const active = p.key === window._activeProduct;
     return `<button class="pl-row${active ? ' active' : ''}" onclick="launchProduct('${p.key}')" role="menuitem">` +
-      `<span class="pl-icon"><img src="/img/${p.key}-icon.png" alt="" onerror="this.remove()"></span>` +
       `<span class="pl-name">${p.label}</span>` +
       `<span class="pl-count">${count} page${count === 1 ? '' : 's'}</span>` +
       `<span class="pl-mark">${active ? '✓' : ''}</span>` +
