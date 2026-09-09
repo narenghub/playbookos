@@ -91,16 +91,48 @@ function rateLimit(maxRequests, windowMs) {
 }
 const authLimiter = rateLimit(10, 60 * 1000);
 
+// A failed login used to leave NO trace at all — same opaque 401 for "no such user", "user has
+// no password set" and "wrong password", and nothing written anywhere. Diagnosing one meant
+// querying the users table by hand. These logs name the branch that actually failed.
+//
+// The RESPONSE stays deliberately uniform ("Invalid credentials" for every failure) — telling a
+// caller which branch failed is a user-enumeration oracle. The distinction goes to the log,
+// which only we read. The password is never logged, in any form.
+function logLoginFailure(req, branch, email) {
+  // trust proxy is set (server.js:42), so req.ip is the client, not Railway's edge.
+  console.warn(`[auth] login FAILED (${branch}) email=${String(email || '').toLowerCase().trim() || '(none)'} ip=${req.ip}`);
+}
+
 router.post('/auth/login', authLimiter, async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    if (!email || !password) {
+      logLoginFailure(req, 'missing_field', email);
+      return res.status(400).json({ error: 'Email and password required' });
+    }
     const result = await query('SELECT * FROM users WHERE email=$1 AND is_active=1', [email.toLowerCase().trim()]);
     const user = result.rows[0];
-    if (!user || !user.password_hash) return res.status(401).json({ error: 'Invalid credentials' });
-    if (!bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Invalid credentials' });
+    // Split from the no-hash case: "no active row" and "row exists but never set a password"
+    // are different problems — the first is a typo or a deactivated account, the second is a
+    // half-finished invite.
+    if (!user) {
+      logLoginFailure(req, 'no_active_user', email);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (!user.password_hash) {
+      logLoginFailure(req, 'no_password_set', email);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    if (!bcrypt.compareSync(password, user.password_hash)) {
+      logLoginFailure(req, 'password_mismatch', email);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    console.log(`[auth] login ok email=${user.email} role=${user.role} ip=${req.ip}`);
     res.json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, github_username: user.github_username, can_run_standup: !!user.can_run_standup } });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) {
+    console.error(`[auth] login ERROR ip=${req.ip}: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 router.post('/auth/accept-invite', authLimiter, async (req, res) => {
