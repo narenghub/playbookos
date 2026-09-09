@@ -6,7 +6,8 @@
 //                          plus two normalized columns computed at ingest time.
 //   molecule_dmf_matches   the join from a Clinical Demand molecule to a DMF, carrying the
 //                          TIER that produced it so precision can be judged per tier rather
-//                          than as one blended number.
+//                          than as one blended number, plus a review gate for the one tier
+//                          that cannot be trusted unattended.
 //
 // dmf_number is the natural primary key — it is the FDA's own identifier, stable across
 // quarterly files, and the thing an ON CONFLICT re-ingest keys on.
@@ -53,6 +54,17 @@ async function migrateDmf() {
       molecule_name TEXT NOT NULL,       -- verbatim as it appears in study_molecules
       dmf_number    INTEGER NOT NULL,
       match_tier    TEXT NOT NULL,       -- exact | salt_form | annotated | contained
+      -- Review gate. The 'contained' (substring) tier is ~50% wrong on live data — it reads
+      -- "89 Zr daratumumab" as a daratumumab source and "20% dronabinol in sesame oil" as a
+      -- sesame-oil source — but it is also the ONLY tier that reaches biologics whose registry
+      -- subject carries a prefix ("recombinant interleukin 2 aldesleukin"). So it is kept and
+      -- recorded, never discarded, and gated here: nothing reaches the CPHI target list unless
+      -- review_status <> 'unreviewed'. The three deterministic tiers are written as
+      -- 'auto_confirmed'; only 'contained' lands on the DEFAULT.
+      review_status TEXT NOT NULL DEFAULT 'unreviewed',  -- unreviewed | auto_confirmed | confirmed | rejected
+      matched_subject TEXT,              -- the DMF subject that produced the hit; the report
+                                         -- groups on this so one molecule counts once even when
+                                         -- study_molecules holds it under several source names
       matched_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -60,6 +72,9 @@ async function migrateDmf() {
     -- the ingest keeps the STRONGEST tier and this constraint is what enforces that.
     CREATE UNIQUE INDEX IF NOT EXISTS idx_mdm_unique ON molecule_dmf_matches (molecule_name, dmf_number);
     CREATE INDEX IF NOT EXISTS idx_mdm_molecule ON molecule_dmf_matches (molecule_name);
+    -- The target-list query is "everything not awaiting review", so index the gate.
+    CREATE INDEX IF NOT EXISTS idx_mdm_review ON molecule_dmf_matches (review_status, match_tier);
+    CREATE INDEX IF NOT EXISTS idx_mdm_subject ON molecule_dmf_matches (matched_subject);
   `);
 
   console.log('✅ DMF schema applied (dmf_holders + molecule_dmf_matches)');

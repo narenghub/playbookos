@@ -74,11 +74,30 @@ async function main() {
   console.log(`with annotated     ${matched.length}/${results.length}   ${(100 * matched.length / results.length).toFixed(1)}%`);
   console.log(`gain               +${gain} molecules   +${(100 * gain / results.length).toFixed(1)} pp`);
 
-  console.log('\n══════════ TOP 20 MOLECULES BY DMF HOLDER COUNT ══════════');
-  const top = [...matched].sort((a, b) => b.holders.length - a.holders.length || a.molecule_name.localeCompare(b.molecule_name)).slice(0, 20);
-  for (const [i, r] of top.entries()) {
-    console.log(`${String(i + 1).padStart(3)}. ${String(r.holders.length).padStart(3)} holders  ${r.tier.padEnd(10)} ${r.molecule_name}`);
+  // Ranked by the MATCHED DMF SUBJECT, not the source name. study_molecules legitimately
+  // holds the same substance under several names from different studies ("Semaglutide" and
+  // "Semaglutide USP Reference Standard" are separate rows with separate provenance, and
+  // collapsing them upstream would destroy that) — but a supplier ranking must count the
+  // substance once. Grouping here gets both.
+  console.log('\n══════════ TOP 20 SUBSTANCES BY DMF HOLDER COUNT ══════════');
+  console.log('Grouped by matched DMF subject; source names that collapsed are listed under each.\n');
+  const bySubject = new Map();
+  for (const r of matched) {
+    const g = bySubject.get(r.matchedSubject) || { subject: r.matchedSubject, holders: r.holders, tiers: new Set(), names: [] };
+    if (r.holders.length > g.holders.length) g.holders = r.holders;
+    g.tiers.add(r.tier);
+    g.names.push(r.molecule_name);
+    bySubject.set(r.matchedSubject, g);
   }
+  const top = [...bySubject.values()]
+    .sort((a, b) => b.holders.length - a.holders.length || a.subject.localeCompare(b.subject))
+    .slice(0, 20);
+  for (const [i, g] of top.entries()) {
+    const tiers = [...g.tiers].join('+');
+    console.log(`${String(i + 1).padStart(3)}. ${String(g.holders.length).padStart(3)} holders  ${tiers.padEnd(22)} ${g.subject}`);
+    console.log(`      from ${g.names.length} source name${g.names.length > 1 ? 's' : ''}: ${g.names.join(' | ')}`);
+  }
+  console.log(`\ndistinct substances matched: ${bySubject.size}  (from ${matched.length} source names)`);
 
   const contained = matched.filter((r) => r.tier === 'contained');
   console.log(`\n══════════ ALL CONTAINED-TIER MATCHES (${contained.length}) ══════════`);
