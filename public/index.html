@@ -588,6 +588,9 @@ const NAV_SECTIONS = [
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
     {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
   ]},
+  {title:'EVENT AGENT', access:['admin','procurement','business_dev'], items:[
+    {id:'cphi-milan', label:'CPHI Milan 2026', icon:'🧪'},
+  ]},
   {title:'OPERATIONS', access:'*', items:[
     {id:'my-tasks', label:'My Tasks', icon:'✓'},
     {id:'my-kpis', label:'My KPIs', icon:'📈'},
@@ -623,7 +626,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence"],["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
 function roleTiersFor(role) {
   const cat = (typeof window !== 'undefined' && window._roleCatalog) || [];
   const row = Array.isArray(cat) ? cat.find(r => r.role_name === role) : null;
@@ -652,7 +655,7 @@ function passesPageReads(pageId, role, tiers) {
 // platform + me are NOT products: they render to the right of the product tabs, separated.
 const PRODUCTS = [
   { key:'abiozen',  label:'Abiozen',  icon:'🧪', kind:'product',
-    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','seo-intelligence','seo-content','linkedin-content'] },
+    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','seo-intelligence','seo-content','linkedin-content','cphi-milan'] },
   { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
   { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
   // global areas (not products). Some listed pages are not in the classic nav (data-pipeline,
@@ -2990,6 +2993,171 @@ function ppEsc(s){ return csEsc(s); }                                    // reus
 function ppIsAdmin(){ return csIsAdmin(); }
 function ppCity(addr){ const m = String(addr||'').match(/,\s*([^,]+),\s*[A-Z]{2}\s+\d{5}/); return m ? m[1].trim() : ''; }
 function ppStatusBadge(s){ const cls={ new:'badge-gray', qualified:'badge-blue', enriched:'badge-green', contacted:'badge-green', rejected:'badge-red' }[s]||'badge-gray'; return '<span class="badge '+cls+'">'+ppEsc(s)+'</span>'; }
+
+// ── CPHI Milan 2026 (Event Agent) ─────────────────────────────────────────────
+// Sourcing intelligence for the show floor. Three panels, in the order you use them:
+// the priority table (who to visit), thin supply (the sharper commercial list — this is
+// the one that matters, so it gets the visual weight), and the unverified token tier,
+// collapsed because roughly half of it is wrong and it needs a human before it is acted on.
+window._cmState = { exhibiting: 'true', tier: '', showUnverified: false, data: null, thin: null };
+
+function cmEsc(v){ return String(v==null?'':v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function cmTierBadge(t){
+  const map = { exact:['#0972d3','#e8f2fc'], core:['#0972d3','#e8f2fc'], prefix:['#8a5a00','#fdf3e0'],
+                token:['#8a2f2f','#fbeaea'], not_found:['#5f6b7a','#eef1f4'] };
+  const [fg,bg] = map[t] || map.not_found;
+  return `<span style="font-size:11px;padding:1px 6px;border:1px solid ${fg}33;background:${bg};color:${fg}">${cmEsc(t)}</span>`;
+}
+// Quarterly file, shown in weeks so a stale page is obvious rather than merely dated.
+function cmFileAge(src){
+  if (!src || !src.source_file) return '<span style="color:#8a2f2f">no DMF file ingested</span>';
+  const m = /^(\d)Q(\d{4})/.exec(src.source_file);
+  if (!m) return cmEsc(src.source_file);
+  const quarterEnd = new Date(Date.UTC(+m[2], (+m[1]) * 3, 0));
+  const weeks = Math.max(0, Math.floor((Date.now() - quarterEnd.getTime()) / 6048e5));
+  const warn = weeks >= 10;
+  return `${cmEsc(src.source_file)} <span style="color:${warn?'#8a5a00':'#5f6b7a'}">· ${weeks} weeks old${warn?' — next quarterly file supersedes this':''}</span>`;
+}
+
+pages['cphi-milan'] = async function() {
+  const c = document.getElementById('content');
+  const st = window._cmState;
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading CPHI Milan…</p>';
+
+  const qs = new URLSearchParams();
+  qs.set('exhibiting', st.exhibiting);
+  if (st.tier) qs.set('tier', st.tier);
+  const [res, thin] = await Promise.all([
+    API('/events/cphi/exhibitors?' + qs.toString()).catch(e => ({ error: e.message })),
+    API('/events/cphi/thin-supply?max_holders=3&limit=25').catch(e => ({ error: e.message })),
+  ]);
+  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">CPHI Milan 2026</div><p style="color:#dc2626">'+cmEsc(res.error)+'</p></div>'; return; }
+  st.data = res; st.thin = thin && !thin.error ? thin : { items: [] };
+
+  const s = res.summary || {};
+  const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+    <div>
+      <div class="card-title text-section" style="margin:0">CPHI MILAN 2026 · 6–8 OCTOBER · FIERA MILANO</div>
+      <div class="text-body">API manufacturers holding an active US Type II drug master file for a molecule the trial pipeline needs, and whether they are on the floor. Ranked by how many of those molecules each one covers.</div>
+    </div>
+  </div>`;
+
+  const stat = (label, val, color) => `<div style="flex:1;min-width:120px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;text-align:center">
+    <div style="font-size:22px;font-weight:800;color:${color||'var(--text-body)'}">${(val==null?0:val).toLocaleString()}</div>
+    <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">${label}</div></div>`;
+  const summaryRow = `<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:stretch">
+    ${stat('Exhibiting', s.exhibiting, '#0972d3')}
+    ${stat('Distinct booths', s.booths, '#1B3A6B')}
+    ${stat('Molecule links', s.molecule_links, '#1D9E75')}
+    ${stat('Entity check', s.entity_review, '#8a5a00')}
+    ${stat('Unverified', s.unverified, '#8a2f2f')}
+    <div style="flex:2;min-width:230px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
+      <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Supplier data</div>
+      <div style="font-size:13px;margin-top:4px">FDA DMF list ${cmFileAge(res.dmf_source)}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${s.checked||0} holders checked against the public exhibitor directory</div>
+    </div>
+  </div>`;
+
+  // ── PANEL 2 gets the visual weight: thin supply is the commercial edge ──
+  const thinRows = (st.thin.items || []).map(m => {
+    const hs = (m.holders || []).map(h => h.exhibiting && h.booth
+      ? `<span style="white-space:nowrap"><b>${cmEsc(h.holder)}</b> <span style="font-family:ui-monospace,Menlo,monospace;background:#0972d3;color:#fff;padding:0 5px">${cmEsc(h.booth)}</span></span>`
+      : `<span style="white-space:nowrap;color:var(--text-muted)">${cmEsc(h.holder)} · not on floor</span>`).join(' &nbsp; ');
+    const sole = m.holder_count === 1;
+    return `<tr style="border-top:1px solid var(--border)">
+      <td style="padding:9px 10px;font-weight:700">${cmEsc(m.molecule)}</td>
+      <td style="padding:9px 10px;text-align:right;font-variant-numeric:tabular-nums">${m.studies}</td>
+      <td style="padding:9px 10px;text-align:right;font-variant-numeric:tabular-nums">${m.ph3}</td>
+      <td style="padding:9px 10px;text-align:center">
+        <span style="font-weight:800;color:${sole?'#8a2f2f':'#8a5a00'}">${m.holder_count}</span>
+        ${sole?'<div style="font-size:9px;color:#8a2f2f;letter-spacing:.5px">SOLE</div>':''}</td>
+      <td style="padding:9px 10px;font-size:12px">${hs || '<span style="color:var(--text-muted)">—</span>'}</td>
+    </tr>`;
+  }).join('');
+  const thinPanel = `<div class="card" style="padding:0;border:2px solid #8a5a00">
+    <div style="padding:12px 14px;border-bottom:1px solid var(--border);background:#fdf3e0">
+      <div class="card-title" style="margin:0;color:#7a4f00">Thin Supply — where the leverage is</div>
+      <div style="font-size:12px;color:#7a4f00;margin-top:2px">Molecules many recruiting trials need that three or fewer companies hold an active US Type II DMF for. <b>SOLE</b> means one supplier on earth with a filed DMF.</div>
+    </div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+        <th style="padding:8px 10px">Molecule</th><th style="padding:8px 10px;text-align:right">Studies</th>
+        <th style="padding:8px 10px;text-align:right">Phase 3</th><th style="padding:8px 10px;text-align:center">DMF holders</th>
+        <th style="padding:8px 10px">Who holds it, and where</th></tr></thead>
+      <tbody>${thinRows || '<tr><td colspan="5" style="padding:16px;color:var(--text-muted)">No thin-supply molecules.</td></tr>'}</tbody>
+    </table></div></div>`;
+
+  // ── PANEL 1: the priority table ──
+  const tierOpts = [['','tier: any'],['exact','exact'],['core','core'],['prefix','prefix']].map(
+    ([v,l]) => `<option value="${v}"${st.tier===v?' selected':''}>${l}</option>`).join('');
+  const exhOpts = [['true','on the floor'],['false','not exhibiting'],['any','everyone checked']].map(
+    ([v,l]) => `<option value="${v}"${st.exhibiting===v?' selected':''}>${l}</option>`).join('');
+  const items = (res.items || []).filter(i => i.match_tier !== 'token');
+  const rows = items.map((it, i) => `<tr style="border-top:1px solid var(--border)">
+      <td style="padding:7px 8px;color:var(--text-muted);font-variant-numeric:tabular-nums">${i+1}</td>
+      <td style="padding:7px 8px;font-weight:600">${cmEsc(it.holder)}
+        ${it.entity_note ? `<div style="font-size:11px;color:#8a5a00;margin-top:2px">⚠ Stand reads “${cmEsc(it.exhibitor_name)}” — confirm the entity before contracting</div>` : ''}</td>
+      <td style="padding:7px 8px;font-family:ui-monospace,Menlo,monospace">${it.booth?`<span style="background:#0972d3;color:#fff;padding:1px 6px">${cmEsc(it.booth)}</span>`:'<span style="color:var(--text-muted)">—</span>'}</td>
+      <td style="padding:7px 8px;text-align:center;color:var(--text-muted)">${it.hall?cmEsc(it.hall):'—'}</td>
+      <td style="padding:7px 8px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${it.molecules_covered}</td>
+      <td style="padding:7px 8px">${cmTierBadge(it.match_tier)}</td>
+    </tr>`).join('');
+  const priorityPanel = `<div class="card" style="padding:0">
+    <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div><div class="card-title" style="margin:0">Milan Sourcing Priority</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${items.length} companies, ranked by molecules covered. The unverified token tier is excluded — see below.</div></div>
+      <div style="display:flex;gap:6px">
+        <select onchange="cmSet('exhibiting', this.value)" style="font-size:12px;padding:4px">${exhOpts}</select>
+        <select onchange="cmSet('tier', this.value)" style="font-size:12px;padding:4px">${tierOpts}</select>
+      </div>
+    </div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+        <th style="padding:8px">#</th><th style="padding:8px">Company</th><th style="padding:8px">Booth</th>
+        <th style="padding:8px;text-align:center">Hall</th><th style="padding:8px;text-align:right">Molecules</th><th style="padding:8px">Match</th>
+      </tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" style="padding:16px;color:var(--text-muted)">Nothing matches this filter.</td></tr>'}</tbody>
+    </table></div></div>`;
+
+  // ── PANEL 3: unverified, collapsed ──
+  const unv = (res.items || []).filter(i => i.match_tier === 'token');
+  const unvRows = unv.map(it => `<tr style="border-top:1px solid var(--border)">
+      <td style="padding:7px 8px">${cmEsc(it.holder)}</td>
+      <td style="padding:7px 8px;color:var(--text-muted)">${cmEsc(it.exhibitor_name)}</td>
+      <td style="padding:7px 8px;font-family:ui-monospace,Menlo,monospace">${cmEsc(it.booth)}</td>
+      <td style="padding:7px 8px;text-align:right;font-variant-numeric:tabular-nums">${it.molecules_covered}</td>
+      <td style="padding:7px 8px;white-space:nowrap">
+        <button onclick="cmReview(${it.id},'confirmed')" class="btn-primary btn-sm" style="font-size:11px">Approve</button>
+        <button onclick="cmReview(${it.id},'rejected')" class="btn-outline btn-sm" style="font-size:11px">Reject</button>
+      </td></tr>`).join('');
+  const unverifiedPanel = `<div class="card" style="padding:0">
+    <div onclick="cmToggleUnverified()" style="padding:12px 14px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <div><div class="card-title" style="margin:0">Unverified matches <span style="font-weight:400;color:var(--text-muted)">(${unv.length})</span></div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">Matched on a single shared brand word — roughly half are wrong. Nothing here counts until it is approved.</div></div>
+      <span style="color:#0972d3;font-size:12px">${st.showUnverified?'Hide ▲':'Review ▼'}</span>
+    </div>
+    ${st.showUnverified ? `<div style="border-top:1px solid var(--border);overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+        <th style="padding:8px">DMF holder</th><th style="padding:8px">Possible stand</th><th style="padding:8px">Booth</th>
+        <th style="padding:8px;text-align:right">Molecules</th><th style="padding:8px">Verdict</th></tr></thead>
+      <tbody>${unvRows || '<tr><td colspan="5" style="padding:16px;color:var(--text-muted)">Nothing left to review.</td></tr>'}</tbody>
+    </table></div>` : ''}
+  </div>`;
+
+  c.innerHTML = header + summaryRow + thinPanel + priorityPanel + unverifiedPanel;
+};
+
+function cmSet(k, v){ window._cmState[k] = v; pages['cphi-milan'](); }
+function cmToggleUnverified(){ window._cmState.showUnverified = !window._cmState.showUnverified; pages['cphi-milan'](); }
+async function cmReview(id, verdict){
+  try {
+    await API('/events/cphi/exhibitors/' + id, { method: 'PUT', body: JSON.stringify({ review_status: verdict }) });
+    // An approved row leaves the unverified list and joins the priority table on reload; a
+    // rejected one leaves both. Either way the counts in the summary move, so re-render.
+    window._cmState.showUnverified = true;
+    await pages['cphi-milan']();
+  } catch (e) { alert('Could not save that verdict: ' + e.message); }
+}
 
 pages['prospects'] = async function() {
   const c = document.getElementById('content');

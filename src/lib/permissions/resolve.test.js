@@ -100,13 +100,13 @@ test('T10 — unknown feature key is denied and does not throw (rule 1)', async 
   assert.equal(r.rule, 1);
 });
 
-test('T11 — super_admin holds all 233 non-cron features (and no crons)', async () => {
+test('T11 — super_admin holds all 237 non-cron features (and no crons)', async () => {
   const map = await resolveAll(user('super_admin'), { env: ENV_ON, overrides: [] });
   const isCron = f => f.surface === 'agent_trigger' && !f.ref.startsWith('POST ');
   const nonCron = FEATURES.filter(f => !isCron(f));
   const crons = FEATURES.filter(isCron);
   const allowedNonCron = nonCron.filter(f => map.get(f.key).allowed).length;
-  assert.equal(allowedNonCron, 233); // +5 Content Studio (Part 3) +1 golfnex.content.publish_post (mcp_tool) +6 Prospects (page+list/get/update/run/qualify) +3 Notifications (list/read/read-all)
+  assert.equal(allowedNonCron, 237); // +5 Content Studio (Part 3) +1 golfnex.content.publish_post (mcp_tool) +6 Prospects (page+list/get/update/run/qualify) +3 Notifications (list/read/read-all) +4 CPHI Event Agent (page+exhibitors.list/thin-supply.list/exhibitors.update)
   assert.ok(crons.every(f => !map.get(f.key).allowed), 'no cron is ever held');
 });
 
@@ -119,6 +119,28 @@ test('T12 — business_dev holds CDI view but NOT find-contacts (until ticked)',
   const rTicked = await resolve(user('business_dev'), F.findContacts, { env: ENV_ON, overrides: [ov(F.findContacts, 'allow')] });
   assert.equal(rTicked.allowed, true);
   assert.equal(rTicked.rule, 5);
+});
+
+test('T13 — CPHI Event Agent grants follow the tier rules, not the section alone', async () => {
+  const PAGE = 'intelligence.page_cphi_milan.view';
+  const LIST = 'intelligence.cphi_exhibitors.list';
+  const WRITE = 'intelligence.cphi_exhibitors.update';
+  const held = async (role, key) => (await resolve(user(role), key, { env: ENV_ON, overrides: [] })).allowed;
+
+  // business_dev has intelligence:rw and is in the EVENT AGENT section -> everything.
+  assert.equal(await held('business_dev', PAGE), true);
+  assert.equal(await held('business_dev', WRITE), true);
+  // procurement_director has intelligence:r -> page + reads, but the review write is denied.
+  assert.equal(await held('procurement_director', PAGE), true);
+  assert.equal(await held('procurement_director', LIST), true);
+  assert.equal(await held('procurement_director', WRITE), false);
+  // sales_director reads the API (intelligence:r) but the section is not in its nav families,
+  // so it never gets the page. Route access and nav access are separate gates.
+  assert.equal(await held('sales_director', LIST), true);
+  assert.equal(await held('sales_director', PAGE), false);
+  // no intelligence tier at all -> nothing, not even the read.
+  assert.equal(await held('sales_team', LIST), false);
+  assert.equal(await held('support_team', PAGE), false);
 });
 
 test('bonus — resolveNav returns only held nav_page features (sidebar == API)', async () => {

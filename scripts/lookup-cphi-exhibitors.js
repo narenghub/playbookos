@@ -66,6 +66,19 @@ async function searchExhibitors(term) {
   }
 }
 
+/**
+ * The parent/sibling warning, written only for `prefix` matches. Prefix means one company name
+ * is a PREFIX of the other rather than equal, which on live data is almost always a group
+ * relationship: Umicore Argentina vs Umicore AG & Co KG, Cambrex Charles City vs Cambrex,
+ * Zydus Worldwide DMCC vs Zydus Pharmaceuticals USA. The booth is right; the entity on the DMF
+ * is not necessarily the entity on the stand, which matters for a contract and not for a chat.
+ */
+function entityNote(holder, best) {
+  if (!best || best.tier !== 'prefix') return null;
+  return `Booth is correct, legal entity may differ: the DMF is filed by "${holder}" but the `
+    + `stand reads "${best.name}". Same group — confirm which entity holds the file before contracting.`;
+}
+
 /** CPHI booths are <hall><row><number>, e.g. "10K47" is hall 10. */
 function hallOf(booth) {
   const m = /^(\d+)/.exec(String(booth || ''));
@@ -130,8 +143,8 @@ async function main() {
       await query(
         `INSERT INTO cphi_exhibitor_matches
            (event_slug, holder, holder_normalized, exhibiting, exhibitor_name, booth, hall,
-            match_tier, molecules_covered, review_status, searched_terms)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            match_tier, molecules_covered, review_status, searched_terms, entity_note)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
          ON CONFLICT (event_slug, holder_normalized) DO UPDATE SET
            holder = EXCLUDED.holder,
            exhibiting = EXCLUDED.exhibiting,
@@ -141,6 +154,7 @@ async function main() {
            match_tier = EXCLUDED.match_tier,
            molecules_covered = EXCLUDED.molecules_covered,
            searched_terms = EXCLUDED.searched_terms,
+           entity_note = EXCLUDED.entity_note,
            -- A human verdict outranks the matcher: once someone has confirmed or rejected a
            -- row, a quarterly re-run must not silently reset it.
            review_status = CASE
@@ -151,9 +165,11 @@ async function main() {
         [
           EVENT_SLUG, h.holder, h.holder_normalized, !!best,
           best ? best.name : null, best ? best.booth : null, best ? hallOf(best.booth) : null,
-          best ? best.tier : null, h.molecules,
+          // 'not_found' rather than NULL so match_tier is total and the API filters uniformly.
+          best ? best.tier : 'not_found', h.molecules,
           best ? reviewStatusFor(best.tier) : 'unreviewed',
           terms.join(' | '),
+          entityNote(h.holder, best),
         ],
       );
       written++;

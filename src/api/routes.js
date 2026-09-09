@@ -4406,6 +4406,120 @@ router.put('/prospects/:id', authMiddleware, requireTier('sales'), async (req, r
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Event Agent: CPHI Milan 2026 ──────────────────────────────────────────────
+// Sourcing intelligence for the show floor: which API manufacturers holding an active US
+// Type II DMF for a molecule our trial pipeline needs are actually exhibiting, and where.
+// All three routes are requireTier('intelligence') and FREE — they read tables the offline
+// scripts populate (scripts/ingest-dmf.js -> match-dmf-molecules.js -> lookup-cphi-exhibitors.js).
+// Nothing here calls FDA, CPHI or an LLM, so no route can spend.
+const CPHI_EVENT = 'cphi-milan-2026';
+const CPHI_REVIEW_STATUSES = ['unreviewed', 'auto_confirmed', 'entity_review', 'confirmed', 'rejected'];
+
+// GET /events/cphi/exhibitors — the priority table, ranked by molecules covered.
+// Defaults to exhibiting-only because that is what the page opens on; pass exhibiting=false
+// for the "not on the floor" view or exhibiting=any for everything.
+router.get('/events/cphi/exhibitors', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const clauses = ['event_slug = $1'], params = [CPHI_EVENT];
+    if (req.query.exhibiting === 'false') clauses.push('exhibiting = false');
+    else if (req.query.exhibiting !== 'any') clauses.push('exhibiting = true');
+    if (req.query.tier) { params.push(req.query.tier); clauses.push(`match_tier = $${params.length}`); }
+    if (req.query.review_status) { params.push(req.query.review_status); clauses.push(`review_status = $${params.length}`); }
+    const where = 'WHERE ' + clauses.join(' AND ');
+
+    const items = (await query(
+      `SELECT id, holder, exhibitor_name, exhibiting, booth, hall, match_tier, review_status,
+              entity_note, molecules_covered, checked_at
+         FROM cphi_exhibitor_matches ${where}
+        ORDER BY molecules_covered DESC, holder`, params)).rows;
+
+    // Event-wide summary, independent of the filters above — the header row must not move
+    // when someone filters the table.
+    const summary = (await query(
+      `SELECT COUNT(*) FILTER (WHERE exhibiting)::int exhibiting,
+              COUNT(*)::int checked,
+              COUNT(DISTINCT booth) FILTER (WHERE exhibiting)::int booths,
+              COALESCE(SUM(molecules_covered) FILTER (WHERE exhibiting AND review_status IN ('auto_confirmed','entity_review','confirmed')), 0)::int molecule_links,
+              COUNT(*) FILTER (WHERE review_status = 'entity_review')::int entity_review,
+              COUNT(*) FILTER (WHERE review_status = 'unreviewed' AND match_tier = 'token')::int unverified
+         FROM cphi_exhibitor_matches WHERE event_slug = $1`, [CPHI_EVENT])).rows[0];
+
+    // The DMF file the whole page rests on. Surfaced so staleness is visible: the list is
+    // quarterly, so by the October show this data is roughly ten weeks old.
+    const src = (await query(
+      `SELECT source_file, MAX(ingested_at) ingested_at, COUNT(*)::int rows
+         FROM dmf_holders GROUP BY source_file ORDER BY MAX(ingested_at) DESC LIMIT 1`)).rows[0] || null;
+
+    res.json({ event: CPHI_EVENT, items, summary, dmf_source: src });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /events/cphi/thin-supply — high clinical demand against a thin DMF bench.
+// The sharper commercial list: a molecule many trials need and few companies can legally
+// supply is where an intermediary has leverage. Threshold is a query param, default 3.
+router.get('/events/cphi/thin-supply', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const maxHolders = Math.min(10, Math.max(1, parseInt(req.query.max_holders) || 3));
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 40));
+    const items = (await query(
+      `WITH demand AS (
+         SELECT LOWER(sm.molecule_name) k, MIN(sm.molecule_name) molecule,
+                COUNT(DISTINCT sm.study_id) studies,
+                SUM(COALESCE(cs.enrollment_count,0)) patients,
+                COUNT(DISTINCT sm.study_id) FILTER (WHERE cs.phase='Phase 3') ph3,
+                COUNT(DISTINCT sm.study_id) FILTER (WHERE cs.phase='Phase 2') ph2
+           FROM study_molecules sm JOIN clinical_studies cs ON cs.id = sm.study_id
+          GROUP BY 1),
+       holders AS (
+         SELECT LOWER(m.molecule_name) k, d.holder_normalized, MIN(d.holder) holder
+           FROM molecule_dmf_matches m JOIN dmf_holders d ON d.dmf_number = m.dmf_number
+          WHERE m.review_status = 'auto_confirmed'
+          GROUP BY 1, 2),
+       counted AS (SELECT k, COUNT(*)::int n FROM holders GROUP BY 1)
+       SELECT dm.molecule, dm.studies::int, dm.ph3::int, dm.ph2::int, dm.patients::int,
+              c.n::int AS holder_count,
+              ROUND((dm.studies*3 + dm.ph3*5 + dm.ph2*2 + LEAST(dm.patients/500.0, 20))::numeric, 1) AS score,
+              COALESCE(json_agg(json_build_object('holder', h.holder, 'booth', x.booth, 'hall', x.hall,
+                                                  'exhibiting', COALESCE(x.exhibiting, false))
+                                ORDER BY x.booth NULLS LAST) FILTER (WHERE h.holder IS NOT NULL), '[]') AS holders
+         FROM demand dm
+         JOIN counted c ON c.k = dm.k
+         JOIN holders h ON h.k = dm.k
+         LEFT JOIN cphi_exhibitor_matches x
+                ON x.holder_normalized = h.holder_normalized AND x.event_slug = $1
+        WHERE c.n <= $2
+        GROUP BY dm.molecule, dm.studies, dm.ph3, dm.ph2, dm.patients, c.n
+        ORDER BY score DESC
+        LIMIT ${limit}`, [CPHI_EVENT, maxHolders])).rows;
+    res.json({ event: CPHI_EVENT, max_holders: maxHolders, items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT /events/cphi/exhibitors/:id — a human verdict on a match. This is the whole point of
+// the review gate: the token tier is roughly half wrong, so nothing acts on it until someone
+// says so here. Writes are the same tier as reads and cost nothing.
+router.put('/events/cphi/exhibitors/:id', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const { review_status, entity_note } = req.body || {};
+    if (review_status !== undefined && !CPHI_REVIEW_STATUSES.includes(review_status)) {
+      return res.status(400).json({ error: `review_status must be one of: ${CPHI_REVIEW_STATUSES.join(', ')}` });
+    }
+    if (review_status === undefined && entity_note === undefined) {
+      return res.status(400).json({ error: 'nothing to update (review_status and/or entity_note required)' });
+    }
+    const upd = await query(
+      `UPDATE cphi_exhibitor_matches
+          SET review_status = COALESCE($1, review_status),
+              entity_note   = COALESCE($2, entity_note)
+        WHERE id = $3 RETURNING *`,
+      [review_status !== undefined ? review_status : null,
+       entity_note !== undefined ? entity_note : null,
+       req.params.id]);
+    if (!upd.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(upd.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Notifications — the pnav top-bar bell feed ────────────────────────────────
 // reads + writes requireTier('intelligence') (GET needs intelligence read; PUT/POST need
 // intelligence write). All free, no spend.

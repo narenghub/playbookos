@@ -202,6 +202,20 @@ module.exports = {
     defaultDeny: false,
   },
   {
+    // excluded from implies (Rule 2 — separate features): PUT /api/events/cphi/exhibitors/:id
+    // [write]. The page implies both of its initial-render reads; the review write is separate.
+    key: 'intelligence.page_cphi_milan.view',
+    label: "CPHI Milan 2026 (page)",
+    domain: 'intelligence',
+    surface: 'nav_page',
+    ref: "cphi-milan",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: ['intelligence.cphi_exhibitors.list', 'intelligence.cphi_thin_supply.list'],
+    defaultDeny: false,
+  },
+  {
     // excluded from implies (Rule 2 — separate features): PUT /api/content/:id [write];
     // POST /api/content/run [adminOnly, high/llm]
     key: 'intelligence.page_content_studio.view',
@@ -2636,6 +2650,44 @@ module.exports = {
     domain: 'intelligence',
     surface: 'api_route',
     ref: "POST /api/notifications/read-all",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: [],
+    defaultDeny: false,
+  },
+  {
+    key: 'intelligence.cphi_exhibitors.list',
+    label: "List — GET /api/events/cphi/exhibitors",
+    domain: 'intelligence',
+    surface: 'api_route',
+    ref: "GET /api/events/cphi/exhibitors",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: [],
+    defaultDeny: false,
+  },
+  {
+    key: 'intelligence.cphi_thin_supply.list',
+    label: "Thin supply — GET /api/events/cphi/thin-supply",
+    domain: 'intelligence',
+    surface: 'api_route',
+    ref: "GET /api/events/cphi/thin-supply",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: [],
+    defaultDeny: false,
+  },
+  {
+    // Review verdict only (review_status + entity_note). Free: it writes one row, calls
+    // nothing external. Gated at the same tier as the reads per the Event Agent spec.
+    key: 'intelligence.cphi_exhibitors.update',
+    label: "Review — PUT /api/events/cphi/exhibitors/:id",
+    domain: 'intelligence',
+    surface: 'api_route',
+    ref: "PUT /api/events/cphi/exhibitors/:id",
     cost: 'free',
     spend: [],
     dangerous: false,
