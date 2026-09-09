@@ -91,7 +91,9 @@ body:not(.pnav) #aws-topbar,body:not(.pnav) #breadcrumb,body:not(.pnav) .aws-act
 body.pnav #aws-topbar{display:flex;position:fixed;top:0;left:0;right:0;height:40px;z-index:300;align-items:center;gap:12px;padding:0 16px;background:var(--awsc-topbar);color:var(--awsc-topbar-fg);font-size:13px}
 body.pnav #aws-topbar .aws-icon-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:50% !important;background:var(--awsc-link);color:#fff;border:1px solid var(--awsc-link);font-size:13px;cursor:pointer;line-height:1}
 body.pnav #aws-topbar .aws-logo{width:20px;height:20px;object-fit:contain;flex-shrink:0}
-body.pnav #aws-topbar .aws-wordmark{font-weight:700;color:#fff;font-size:14px;letter-spacing:.3px}
+body.pnav #aws-topbar .aws-wordmark{color:#fff;font-size:14px;letter-spacing:.3px}
+body.pnav #aws-topbar .aws-wordmark .wm-play{font-weight:400}
+body.pnav #aws-topbar .aws-wordmark .wm-nexa{font-weight:700}
 body.pnav #aws-topbar .aws-search{display:flex;align-items:center;gap:6px;background:#2f3d4f;color:var(--awsc-topbar-dim);padding:4px 10px;min-width:200px;font-size:12px;cursor:text}
 body.pnav #aws-topbar .aws-spacer{flex:1}
 /* product switcher: tabs with a product icon (18px) + label. Icons load from
@@ -262,10 +264,33 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--teal)}
 .progress-green{background:var(--success)}.progress-amber{background:var(--warn)}.progress-red{background:var(--danger)}
 
 /* ── Auth page ── */
-#auth-page{display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--navy)}
-.auth-card{background:#fff;border-radius:12px;padding:36px;width:380px;box-shadow:0 8px 32px rgba(0,0,0,.25)}
-.auth-card h1{color:var(--navy);font-size:22px;margin-bottom:4px}
-.auth-card p{color:var(--gray);font-size:13px;margin-bottom:24px}
+/* Login card — the console's own vocabulary, so signing in looks like the thing it opens
+   into: the dark top-bar colour as the ground, a SQUARE white panel with the console's
+   1px border, console type tokens, and the console's link-blue as the one accent.
+   The console tokens are declared on body.pnav, and login happens BEFORE the shell mounts,
+   so they are re-declared here on #auth-page itself — not moved up to :root, which would
+   leak them into the classic shell. Same values as the body.pnav block above; keep them in
+   step. Everything below is scoped under #auth-page for the same reason. */
+#auth-page{
+  --awsc-fg:#16191f; --awsc-fg2:#5f6b7a; --awsc-border:#d5dbdb;
+  --awsc-link:#0972d3; --awsc-topbar:#232f3e;
+  --awsc-font:"Amazon Ember","Helvetica Neue",Helvetica,Arial,sans-serif;
+  font-family:var(--awsc-font);
+  display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--awsc-topbar)}
+#auth-page .auth-card{background:#fff;border:1px solid var(--awsc-border);border-radius:0;padding:40px 36px 36px;width:380px;box-shadow:0 1px 4px rgba(0,0,0,.18)}
+#auth-page .auth-card .auth-mark{display:block;margin:0 auto 14px;width:52px;height:52px}
+/* Play lighter, Nexa heavier — the wordmark reads as one word with a weight shift, not two. */
+#auth-page .auth-card .auth-wordmark{text-align:center;font-size:27px;line-height:1.1;letter-spacing:-.2px;color:var(--awsc-fg);margin-bottom:6px}
+#auth-page .auth-card .wm-play{font-weight:400}
+#auth-page .auth-card .wm-nexa{font-weight:700}
+#auth-page .auth-card #auth-subtitle{text-align:center;color:var(--awsc-fg2);font-size:13px;margin-bottom:28px}
+#auth-page .auth-card .form-group label{color:var(--awsc-fg2);font-weight:600;font-size:12px}
+#auth-page .auth-card input{border:1px solid var(--awsc-border);border-radius:2px;padding:9px 11px;font-size:14px;color:var(--awsc-fg)}
+#auth-page .auth-card input:focus{border-color:var(--awsc-link);outline:2px solid rgba(9,114,211,.18);outline-offset:0}
+/* one accent, the console's link-blue, as a pill */
+#auth-page .auth-card .btn-primary{background:var(--awsc-link);border:none;border-radius:999px;width:100%;padding:11px 18px;font-size:14px;font-weight:700;margin-top:6px}
+#auth-page .auth-card .btn-primary:hover{background:#0761b4}
+#auth-page .auth-card .btn-primary:focus-visible{outline:2px solid var(--awsc-fg);outline-offset:2px}
 .error-msg{background:#f8d7da;color:#721c24;padding:10px;border-radius:6px;font-size:13px;margin-bottom:12px}
 .success-msg{background:#d4edda;color:#155724;padding:10px;border-radius:6px;font-size:13px;margin-bottom:12px}
 
@@ -341,7 +366,7 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--teal)}
   #toast-container{left:12px;right:12px;bottom:12px}
   .toast{max-width:100%;min-width:0;width:100%}
   /* Auth card fits viewport */
-  .auth-card{width:calc(100% - 24px);margin:0 12px;padding:24px}
+  #auth-page .auth-card{width:calc(100% - 24px);margin:0 12px;padding:24px}
 }
 
 /* ── Enterprise UI redesign ─────────────────────────────────────────────────── */
@@ -393,8 +418,9 @@ button:disabled{opacity:.6;cursor:not-allowed}
 <!-- AUTH PAGE -->
 <div id="auth-page" style="display:none">
   <div class="auth-card">
-    <h1>Abiozen PlaybookOS</h1>
-    <p id="auth-subtitle">Sign in to your dashboard</p>
+    <img class="auth-mark" src="/img/playnexa-icon.png" alt="" width="52" height="52">
+    <h1 class="auth-wordmark"><span class="wm-play">Play</span><span class="wm-nexa">Nexa</span></h1>
+    <p id="auth-subtitle">The operating console for the whole group</p>
     <div id="auth-error" class="error-msg" style="display:none"></div>
     <div id="auth-success" class="success-msg" style="display:none"></div>
     <div id="login-form">
@@ -851,7 +877,7 @@ function buildAwsTopbar(role, tiers) {
   el.querySelector('.aws-tb-left').innerHTML =
     `<button class="aws-icon-btn" onclick="togglePlauncher()" aria-label="Open product launcher" aria-haspopup="true">☰</button>` +
     `<img class="aws-logo" src="/img/playnexa-icon.png" alt="" onerror="this.remove()">` +
-    `<span class="aws-wordmark">PlayNexa</span>` +
+    `<span class="aws-wordmark"><span class="wm-play">Play</span><span class="wm-nexa">Nexa</span></span>` +
     `<div class="aws-search" aria-hidden="true"><span>🔍</span><span>Search</span></div>`;
   buildLauncher(role, tiers);
   const emailEl = document.getElementById('aws-user-email'); if (emailEl) emailEl.textContent = (currentUser && currentUser.email) || '';

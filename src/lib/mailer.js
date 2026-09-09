@@ -22,7 +22,7 @@ async function sendEmail({ to, subject, html, from, replyTo, cc }) {
     return false;
   }
   try {
-    const body = { from: from || 'PlaybookOS <naren@abiozen.com>', to, subject, html };
+    const body = { from: from || 'PlayNexa <naren@abiozen.com>', to, subject, html };
     if (replyTo) body.reply_to = replyTo;
     if (cc) body.cc = cc;
     const res = await fetch('https://api.resend.com/emails', {

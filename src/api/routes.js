@@ -219,15 +219,15 @@ router.post('/users/invite', authMiddleware, adminOnly, async (req, res) => {
       [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, wa, inviteToken, new Date().toISOString()]);
     const baseUrl = process.env.BASE_URL || 'https://playbookos-production.up.railway.app';
     const inviteUrl = `${baseUrl}/#/accept-invite?token=${inviteToken}`;
-    sendEmail({ to: email, subject: `You've been invited to Abiozen PlaybookOS`, triggerType: 'invite',
-      html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#1B3A6B">Abiozen PlaybookOS</h2><p>You've been invited as <strong>${role}</strong>.</p><a href="${inviteUrl}" style="background:#0D7377;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;margin:16px 0">Accept Invite</a><p style="color:#666;font-size:13px">Or copy: ${inviteUrl}</p></div>` });
+    sendEmail({ to: email, subject: `You've been invited to PlayNexa`, triggerType: 'invite',
+      html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#232f3e;font-weight:400">Play<strong style="font-weight:700">Nexa</strong></h2><p>You've been invited as <strong>${role}</strong>.</p><a href="${inviteUrl}" style="background:#0D7377;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;margin:16px 0">Accept Invite</a><p style="color:#666;font-size:13px">Or copy: ${inviteUrl}</p></div>` });
 
     // Fire-and-forget WhatsApp welcome if a number was provided. Skips
     // gracefully when Twilio env vars are unset (sendWhatsApp returns
     // { skipped, reason }). Failures must not break the invite response.
     let whatsapp_status = null;
     if (wa) {
-      const welcome = `Welcome to Abiozen PlaybookOS! 🚀 You've been invited as ${role}. Login at ${baseUrl} with your email. You'll receive daily task assignments and KPI updates here on WhatsApp.`;
+      const welcome = `Welcome to PlayNexa! 🚀 You've been invited as ${role}. Login at ${baseUrl} with your email. You'll receive daily task assignments and KPI updates here on WhatsApp.`;
       try {
         const r = await sendWhatsApp(wa, welcome, { user_id: id, message_type: 'welcome' });
         whatsapp_status = r.success ? 'sent' : (r.skipped ? 'skipped:' + r.reason : 'error:' + r.error);
