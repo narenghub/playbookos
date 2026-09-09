@@ -178,11 +178,16 @@ body.pnav #sidebar.collapsed .pnav-side-head{justify-content:center;padding:8px 
 body.pnav #nav-links .nav-section-title{margin-top:14px;padding:6px 20px 4px;font-size:15px;font-weight:700;letter-spacing:0;text-transform:none;color:var(--awsc-fg);display:flex;align-items:center;gap:7px;cursor:pointer;user-select:none}
 body.pnav #nav-links .nav-section-title:hover{background:var(--awsc-strip)}
 body.pnav #nav-links .nav-section-title:focus-visible{outline:2px solid var(--awsc-link);outline-offset:-2px}
-/* The triangle is the state indicator: ▼ open, rotated to ▶ when collapsed. */
-body.pnav #nav-links .nav-section-title::before{content:"\25BC";font-size:10px;color:var(--awsc-fg);display:inline-block;transition:transform .12s ease}
+/* The triangle is the state indicator: ▼ open, rotated to ▶ when collapsed.
+   NO transition here, deliberately. Chrome leaves a transitioned ::before transform stuck at
+   the identity matrix when the class is toggled on the originating element — verified on the
+   deployed build: the rule matched and .collapsed was set, but the computed transform stayed
+   matrix(1,0,0,1,0,0), so the triangle never turned. Dropping the transition makes it resolve
+   to matrix(0,-1,1,0,0,0) every time. A state indicator that is reliably right beats one that
+   animates, and AWS's own carets snap anyway. */
+body.pnav #nav-links .nav-section-title::before{content:"\25BC";font-size:10px;color:var(--awsc-fg);display:inline-block}
 body.pnav #nav-links .nav-section-title.collapsed::before{transform:rotate(-90deg)}
 body.pnav #nav-links .nav-section-items.collapsed{display:none}
-@media (prefers-reduced-motion:reduce){body.pnav #nav-links .nav-section-title::before{transition:none}}
 /* D — content chrome: title 17px + optional status badge + Actions button; bordered square tables */
 body.pnav #topbar{background:#fff;border-bottom:1px solid var(--awsc-border);padding:10px 20px;position:sticky;top:0;z-index:250}
 body.pnav #page-title{font-size:28px;font-weight:700;color:var(--awsc-fg)}
