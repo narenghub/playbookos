@@ -164,6 +164,53 @@ router.get('/auth/me', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Self-service password change. Until now every reset meant a hand-written UPDATE against
+// production, which is how a temporary credential ends up living in a text file and being
+// retyped — the failure mode this route exists to end.
+//
+// authMiddleware ONLY, deliberately no requireTier: the tiers describe business domains
+// (revenue, intelligence, technical) and any one of them would exclude some role from changing
+// its own password. The identity comes from the token, never the body, so a caller can only
+// ever change their own — there is no user_id parameter to tamper with.
+const MIN_PASSWORD_LEN = 12;
+router.put('/auth/password', authMiddleware, async (req, res) => {
+  try {
+    const currentPassword = String((req.body || {}).currentPassword || '').trim();
+    const newPassword = String((req.body || {}).newPassword || '').trim();
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new password are required' });
+    }
+    // Length is checked on the TRIMMED value, so 12 spaces and a character is not a password.
+    if (newPassword.length < MIN_PASSWORD_LEN) {
+      return res.status(400).json({ error: `New password must be at least ${MIN_PASSWORD_LEN} characters` });
+    }
+    if (newPassword === currentPassword) {
+      return res.status(400).json({ error: 'New password must be different from the current one' });
+    }
+    const result = await query('SELECT id, email, password_hash FROM users WHERE id=$1 AND is_active=1', [req.user.id]);
+    const user = result.rows[0];
+    if (!user || !user.password_hash) {
+      console.warn(`[auth] password change FAILED (no_active_user) user=${req.user.id} ip=${req.ip}`);
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    // .trim() on both sides matches the login route; a hash we store can never require edge
+    // whitespace, so trimming costs no entropy and spares the paste-a-trailing-newline bug.
+    if (!bcrypt.compareSync(currentPassword, user.password_hash)) {
+      console.warn(`[auth] password change FAILED (password_mismatch) user=${user.email} ip=${req.ip}`);
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    // Cost 10 — the same factor every existing hash in the table uses ($2a$10$).
+    const hash = bcrypt.hashSync(newPassword, 10);
+    await query('UPDATE users SET password_hash=$1 WHERE id=$2 AND is_active=1', [hash, user.id]);
+    // The change is logged; neither password appears, in any form.
+    console.log(`[auth] password CHANGED user=${user.email} ip=${req.ip}`);
+    res.json({ ok: true });
+  } catch(e) {
+    console.error(`[auth] password change ERROR ip=${req.ip}: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/roles', authMiddleware, async (req, res) => {
   try {
     const catalog = await getAllRoles();

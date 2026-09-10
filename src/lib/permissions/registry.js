@@ -449,6 +449,23 @@ module.exports = {
 
     // ===================== API ROUTES (gated) =====================
   {
+    // Self-service password change. defaultDeny MUST stay false and dangerous MUST stay false:
+    // either one flips this to "explicit per-user grant only", which would mean no template
+    // grants it and every role is locked out of changing its own password — the precise
+    // opposite of the intent. It is sensitive, not dangerous; the token identifies the user,
+    // so the blast radius is that one account.
+    key: 'personal.auth_password.update',
+    label: "Update — PUT /api/auth/password",
+    domain: 'personal',
+    surface: 'api_route',
+    ref: "PUT /api/auth/password",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: [],
+    defaultDeny: false,
+  },
+  {
     key: 'personal.auth_me.list',
     label: "List — GET /api/auth/me",
     domain: 'personal',

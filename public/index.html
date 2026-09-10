@@ -153,6 +153,25 @@ body.pnav #aws-acct-menu .am-name{font-size:13px;font-weight:700;color:var(--aws
 body.pnav #aws-acct-menu .am-email{font-size:12px;color:var(--awsc-fg2);margin-top:2px;word-break:break-all}
 body.pnav #aws-acct-menu .am-row{display:block;width:100%;padding:9px 14px;text-align:left;background:none;border:0;cursor:pointer;font-size:14px;font-weight:600;color:var(--awsc-fg);font-family:inherit}
 body.pnav #aws-acct-menu .am-row:hover{background:var(--awsc-strip)}
+/* C — change-password panel. Centred over a scrim rather than hung off the menu: three fields
+   and a result message is too much to read in a dropdown, and the scrim makes it obvious the
+   rest of the console is not the thing you are answering. */
+#cpw-panel{display:none}
+body.pnav #cpw-panel.open{display:flex;position:fixed;inset:0;z-index:500;align-items:center;justify-content:center;background:rgba(16,25,35,.55)}
+body.pnav #cpw-panel .cpw-card{background:#fff;border:1px solid var(--awsc-border);width:380px;max-width:calc(100% - 24px);box-shadow:0 8px 28px rgba(0,0,0,.3)}
+body.pnav #cpw-panel .cpw-head{padding:12px 18px;font-size:14px;font-weight:700;color:var(--awsc-fg);border-bottom:1px solid var(--awsc-border)}
+body.pnav #cpw-panel .cpw-body{padding:18px}
+body.pnav #cpw-panel label{color:var(--awsc-fg2);font-weight:600;font-size:12px}
+body.pnav #cpw-panel input{border:1px solid var(--awsc-border);border-radius:2px;padding:9px 11px;font-size:14px;color:var(--awsc-fg)}
+body.pnav #cpw-panel input:focus{border-color:var(--awsc-link);outline:2px solid rgba(9,114,211,.18)}
+body.pnav #cpw-panel .cpw-hint{font-size:11px;color:var(--awsc-fg2);margin-top:4px}
+body.pnav #cpw-panel .cpw-msg{padding:9px 11px;font-size:13px;margin-bottom:14px;border:1px solid}
+body.pnav #cpw-panel .cpw-msg.err{background:#fdf3f3;border-color:#d13212;color:#7d2105}
+body.pnav #cpw-panel .cpw-msg.ok{background:#f2f8f0;border-color:#037f0c;color:#1d5f1d}
+body.pnav #cpw-panel .cpw-foot{display:flex;justify-content:flex-end;gap:10px;padding:0 18px 18px}
+body.pnav #cpw-panel .cpw-cancel{background:none;border:1px solid var(--awsc-border);border-radius:999px;padding:8px 16px;font-size:13px;font-weight:600;color:var(--awsc-fg);cursor:pointer;font-family:inherit}
+body.pnav #cpw-panel .cpw-save{background:var(--awsc-link);border:none;border-radius:999px;padding:8px 18px;font-size:13px;font-weight:700;color:#fff;cursor:pointer;font-family:inherit}
+body.pnav #cpw-panel .cpw-save[disabled]{opacity:.6;cursor:default}
 /* B — breadcrumb strip */
 body.pnav #breadcrumb{display:flex;position:fixed;top:40px;left:0;right:0;height:28px;z-index:299;align-items:center;gap:6px;padding:0 16px;font-size:12px;background:var(--awsc-bg);color:var(--awsc-fg2);border-bottom:1px solid var(--awsc-border)}
 body.pnav #breadcrumb .bc-link{color:var(--awsc-link)}
@@ -452,6 +471,21 @@ button:disabled{opacity:.6;cursor:not-allowed}
   <div id="aws-topbar"></div>
   <div id="breadcrumb"></div>
   <div id="product-launcher"></div>
+  <div id="cpw-panel" role="dialog" aria-modal="true" aria-labelledby="cpw-title">
+    <div class="cpw-card">
+      <div class="cpw-head" id="cpw-title">Change password</div>
+      <div class="cpw-body">
+        <div class="cpw-msg" id="cpw-msg" hidden></div>
+        <div class="form-group"><label>Current password</label><input id="cpw-cur" type="password" autocomplete="current-password"></div>
+        <div class="form-group"><label>New password</label><input id="cpw-new" type="password" autocomplete="new-password"><div class="cpw-hint">At least 12 characters.</div></div>
+        <div class="form-group"><label>Confirm new password</label><input id="cpw-conf" type="password" autocomplete="new-password"></div>
+      </div>
+      <div class="cpw-foot">
+        <button class="cpw-cancel" onclick="closeChangePassword()">Cancel</button>
+        <button class="cpw-save" id="cpw-save" onclick="submitChangePassword()">Change password</button>
+      </div>
+    </div>
+  </div>
   <div id="notif-panel"></div>
   <div id="sidebar">
     <div class="brand">
@@ -884,6 +918,7 @@ function buildAwsTopbar(role, tiers) {
         `<span class="aws-acct-name"></span><span class="aws-acct-caret" aria-hidden="true">\u25be</span></button>` +
       `<div id="aws-acct-menu" role="menu">` +
         `<div class="am-head"><div class="am-name"></div><div class="am-email"></div></div>` +
+        `<button class="am-row" role="menuitem" onclick="openChangePassword()">Change password</button>` +
         `<button class="am-row" role="menuitem" onclick="logout()">Sign out</button></div>`;
     right.appendChild(acct);
   }
@@ -993,6 +1028,58 @@ function acctOutside(e) {
   if (el && !el.contains(e.target) && !(btn && btn.contains(e.target))) closeAcctMenu();
 }
 function acctEsc(e) { if (e.key === 'Escape') closeAcctMenu(); }
+
+// ── C — change password ─────────────────────────────────────────────────────────
+function cpwMsg(text, kind) {
+  const el = document.getElementById('cpw-msg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'cpw-msg' + (kind ? ' ' + kind : '');
+  el.hidden = !text;
+}
+function openChangePassword() {
+  closeAcctMenu();
+  const el = document.getElementById('cpw-panel');
+  if (!el) return;
+  ['cpw-cur', 'cpw-new', 'cpw-conf'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+  cpwMsg('');
+  const save = document.getElementById('cpw-save'); if (save) save.disabled = false;
+  el.classList.add('open');
+  const cur = document.getElementById('cpw-cur'); if (cur) cur.focus();
+  setTimeout(() => document.addEventListener('keydown', cpwEsc), 0);
+}
+function closeChangePassword() {
+  const el = document.getElementById('cpw-panel');
+  if (el) el.classList.remove('open');
+  // Never leave a typed password sitting in a hidden field.
+  ['cpw-cur', 'cpw-new', 'cpw-conf'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+  document.removeEventListener('keydown', cpwEsc);
+}
+function cpwEsc(e) { if (e.key === 'Escape') closeChangePassword(); }
+async function submitChangePassword() {
+  // Trimmed here as well as server-side, so the client validates the same string the server
+  // will judge — otherwise a pasted trailing newline passes the length check here and fails there.
+  const cur = document.getElementById('cpw-cur').value.trim();
+  const nw = document.getElementById('cpw-new').value.trim();
+  const conf = document.getElementById('cpw-conf').value.trim();
+  if (!cur || !nw || !conf) return cpwMsg('Fill in all three fields.', 'err');
+  if (nw.length < 12) return cpwMsg('New password must be at least 12 characters.', 'err');
+  if (nw !== conf) return cpwMsg('The new passwords do not match.', 'err');
+  if (nw === cur) return cpwMsg('New password must be different from the current one.', 'err');
+
+  const save = document.getElementById('cpw-save');
+  if (save) save.disabled = true;
+  cpwMsg('Changing…', '');
+  const res = await API('/auth/password', { method: 'PUT', body: JSON.stringify({ currentPassword: cur, newPassword: nw }) });
+  if (res && res.ok) {
+    cpwMsg('Password changed. Use the new one next time you sign in.', 'ok');
+    ['cpw-cur', 'cpw-new', 'cpw-conf'].forEach(id => { document.getElementById(id).value = ''; });
+    setTimeout(closeChangePassword, 2200);
+    return;
+  }
+  if (save) save.disabled = false;
+  cpwMsg((res && res.error) || 'Could not change the password.', 'err');
+}
 function launchProduct(key) { closePlauncher(); selectProduct(key); }   // switch + close
 
 // ── B — notifications bell + panel ──────────────────────────────────────────────
