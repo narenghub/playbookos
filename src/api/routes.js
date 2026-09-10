@@ -20,6 +20,7 @@ const { runResearchAgent } = require('../lib/agents/research-agent');
 const { runResearchIntelIngest } = require('../lib/agents/research-intelligence');
 const { runContentPipeline } = require('../lib/agents/content');
 const { runProspecting, runQualifyProspects } = require('../lib/agents/prospecting');
+const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/config');
 const riResolve = require('../lib/agents/research-intelligence/resolve');
 const riOutreach = require('../lib/agents/research-intelligence/outreach');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
@@ -4404,10 +4405,21 @@ const PROSPECT_STATUSES = ['new', 'qualified', 'enriched', 'contacted', 'rejecte
 router.get('/prospects', authMiddleware, requireTier('sales'), async (req, res) => {
   try {
     const product = String(req.query.product || 'golfnex').trim();
+    // Default to the historical reading for an unconfigured product, so a new product added to
+    // the table but not to config.js behaves as before rather than inverting silently.
+    const primeSignal = ((getProspectingConfig(product) || {}).primeSignal) === 'platform' ? 'platform' : 'no-platform';
     const clauses = ['product = $1'], params = [product];
     if (req.query.status)  { params.push(req.query.status);  clauses.push(`status = $${params.length}`); }
     if (req.query.subtype) { params.push(req.query.subtype); clauses.push(`subtype = $${params.length}`); }
-    if (req.query.booking_platform === 'none') clauses.push('booking_platform IS NULL');
+    // 'prime' is SEMANTIC, resolved per product from prospecting config rather than by the
+    // caller: for golf/beauty a platform means they already solved booking (prime = none), for
+    // linkabl an ATS means real requisition volume (prime = has one). Sending the polarity from
+    // the client would mean two copies of the rule; this keeps config.js the only place it lives.
+    if (req.query.booking_platform === 'prime') {
+      clauses.push(primeSignal === 'platform' ? 'booking_platform IS NOT NULL' : 'booking_platform IS NULL');
+    }
+    else if (req.query.booking_platform === 'none') clauses.push('booking_platform IS NULL');
+    else if (req.query.booking_platform === 'any-platform') clauses.push('booking_platform IS NOT NULL');
     else if (req.query.booking_platform) { params.push(req.query.booking_platform); clauses.push(`booking_platform = $${params.length}`); }
     if (req.query.has_website === 'true') clauses.push('website IS NOT NULL');
     else if (req.query.has_website === 'false') clauses.push('website IS NULL');
@@ -4438,10 +4450,15 @@ router.get('/prospects', authMiddleware, requireTier('sales'), async (req, res) 
               COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NULL AND reachable = true)::int no_platform_reachable,
               COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NULL AND reachable = false)::int no_platform_unreachable,
               COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NOT NULL)::int on_platform,
-              COUNT(*) FILTER (WHERE status='rejected')::int rejected
+              COUNT(*) FILTER (WHERE status='rejected')::int rejected,
+              COUNT(*) FILTER (WHERE status='qualified' AND booking_platform IS NOT NULL AND reachable = true)::int on_platform_reachable
          FROM prospects WHERE product = $1`, [product])).rows[0];
 
-    res.json({ product, page, pageSize, total, items, summary });
+    // The one number that means "worth contacting", computed on the product's own polarity so
+    // the page never has to decide.
+    summary.prime_pool = primeSignal === 'platform' ? summary.on_platform_reachable : summary.no_platform_reachable;
+
+    res.json({ product, page, pageSize, total, items, summary, prime_signal: primeSignal });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

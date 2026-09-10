@@ -133,9 +133,18 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
     // Qualify anything not yet reachability-tagged: brand-new rows AND already-'qualified' rows
     // whose reachable is still null (the pre-reachability backfill population). This makes the
     // step self-healing — re-running it fills reachable/unreachable_reason on old rows.
+    //
+    // status <> 'rejected' is LOAD-BEARING, not tidiness. `reachable IS NULL` matches rejected
+    // rows too, and the UPDATE below sets status='qualified' unconditionally — so without this
+    // clause a qualify run silently resurrects every row rejected for geography, being a national
+    // chain, or not being an agency, and discards the reject_reason that recorded why. It only
+    // stayed hidden because golfnex and favly were qualified BEFORE they were rejected; a product
+    // filtered first (linkabl) hits it on the first run.
     rows = (await q(
       `SELECT id, website FROM prospects
-        WHERE product=$1 AND website IS NOT NULL AND (status='new' OR reachable IS NULL)
+        WHERE product=$1 AND website IS NOT NULL
+          AND status <> 'rejected'
+          AND (status='new' OR reachable IS NULL)
         ORDER BY id LIMIT $2`, [product, cap])).rows;
   } catch (e) { summary.errors.push({ stage: 'select', error: e && e.message ? e.message : String(e) }); return summary; }
 
@@ -150,7 +159,9 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
     const reachable = res.reachable === true ? true : (res.reachable === false ? false : null);
     const reason = reachable === false ? (res.unreachableReason || null) : null;
     try {
-      await q(`UPDATE prospects SET booking_platform=$1, reachable=$2, unreachable_reason=$3, qualified_at=NOW(), status='qualified' WHERE id=$4`,
+      // The WHERE also re-checks status: a row rejected while this run was in flight (the loop
+      // is rate-limited and can take minutes) must not be flipped back by a stale id.
+      await q(`UPDATE prospects SET booking_platform=$1, reachable=$2, unreachable_reason=$3, qualified_at=NOW(), status='qualified' WHERE id=$4 AND status <> 'rejected'`,
         [platform, reachable, reason, r.id]);
       summary.qualified++;
       if (platform) { summary.with_platform++; summary.by_platform[platform] = (summary.by_platform[platform] || 0) + 1; }

@@ -216,3 +216,17 @@ test('getConfig shapes: golfnex + favly present; unknown → null', () => {
   assert.deepEqual(f.states, ['IL']);
   assert.equal(getConfig('nope'), null);
 });
+
+test('every product declares a primeSignal, and linkabl is the inverted one', () => {
+  // The polarity is data, not prose. golf/beauty: a booking platform means they already solved
+  // scheduling, so prime = none. linkabl: an ATS means real requisition volume, so prime = has one.
+  // Getting this backwards points a whole sales list at the wrong half of the market.
+  const { PRODUCT_CONFIG } = require('./config');
+  for (const [key, cfg] of Object.entries(PRODUCT_CONFIG)) {
+    assert.ok(['platform', 'no-platform'].includes(cfg.primeSignal),
+      `${key} must declare primeSignal as 'platform' or 'no-platform', got ${JSON.stringify(cfg.primeSignal)}`);
+  }
+  assert.equal(getConfig('golfnex').primeSignal, 'no-platform');
+  assert.equal(getConfig('favly').primeSignal, 'no-platform');
+  assert.equal(getConfig('linkabl').primeSignal, 'platform');
+});

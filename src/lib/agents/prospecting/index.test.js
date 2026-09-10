@@ -128,6 +128,34 @@ test('runQualifyProspects writes platform + reachability, tallies by_platform + 
   assert.deepEqual(db.updates[1], [null, true, null, 2]);
 });
 
+// ── the qualifier must never resurrect a rejected row ─────────────────────────
+// `reachable IS NULL` matches rejected rows as readily as new ones, and the UPDATE sets
+// status='qualified'. Before the fix, a qualify run on a product that was FILTERED FIRST
+// (geography, national chains, non-agencies) silently un-rejected every one of them and threw
+// away the reject_reason. golfnex/favly never saw it because they qualified before rejecting.
+test('runQualifyProspects SELECT excludes rejected rows', async () => {
+  let sql = '';
+  const q = async (text, params) => {
+    if (/SELECT id, website/i.test(text)) { sql = text; return { rows: [] }; }
+    return { rows: [] };
+  };
+  await runQualifyProspects('linkabl', { deps: { env: ON, query: q, qualifyFacility: async () => ({}), logAgentActivity: noopLog } });
+  assert.match(sql, /status <> 'rejected'/, 'the selection must exclude rejected rows');
+  // and the reachable-is-null self-healing clause must still be there
+  assert.match(sql, /reachable IS NULL/);
+});
+
+test('runQualifyProspects UPDATE re-checks status, so a row rejected mid-run is not flipped back', async () => {
+  let upd = '';
+  const q = async (text, params) => {
+    if (/SELECT id, website/i.test(text)) return { rows: [{ id: 7, website: 'x' }] };
+    if (/UPDATE prospects/i.test(text)) { upd = text; return { rows: [] }; }
+    return { rows: [] };
+  };
+  await runQualifyProspects('linkabl', { deps: { env: ON, query: q, qualifyFacility: async () => ({ platform: 'bullhorn', reachable: true }), logAgentActivity: noopLog } });
+  assert.match(upd, /WHERE id=\$4 AND status <> 'rejected'/, 'the write must refuse a rejected row');
+});
+
 test('runQualifyProspects persists unreachable rows with a reason + tallies by_reason', async () => {
   const db = qualDB([{ id: 1, website: 'dead' }, { id: 2, website: 'slow' }]);
   const qualify = async (w) => w === 'dead'

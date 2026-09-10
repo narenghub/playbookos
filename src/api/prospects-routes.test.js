@@ -60,6 +60,7 @@ db.query = async (sql, params = []) => {
       no_platform_reachable: noPlat.filter(r => r.reachable === true).length,
       no_platform_unreachable: noPlat.filter(r => r.reachable === false).length,
       on_platform: q.filter(r => r.booking_platform != null).length,
+      on_platform_reachable: q.filter(r => r.booking_platform != null && r.reachable === true).length,
       rejected: rows.filter(r => r.status === 'rejected').length,
     }] };
   }
@@ -165,8 +166,34 @@ test('GET /prospects filters by subtype and has_website', async () => {
 test('GET /prospects summary is product-wide, independent of table filters', async () => {
   seed();
   const j = await (await req('GET', '/api/prospects?status=new', { role: 'sales_team' })).json();
-  assert.deepEqual(j.summary, { total: 4, qualified: 2, no_platform: 1, no_platform_reachable: 1, no_platform_unreachable: 0, on_platform: 1, rejected: 1 });
+  // prime_pool is derived from the product's primeSignal; golfnex is 'no-platform', so it
+  // equals no_platform_reachable. See the linkabl test below for the inverted case.
+  assert.deepEqual(j.summary, { total: 4, qualified: 2, no_platform: 1, no_platform_reachable: 1,
+    no_platform_unreachable: 0, on_platform: 1, on_platform_reachable: 1, rejected: 1, prime_pool: 1 });
   assert.deepEqual(j.items.map(i => i.id), [3]); // filter still applied to the rows
+});
+
+// ── prime polarity is per product, resolved server-side ──────────────────────
+// golfnex/favly: a booking platform means scheduling is already solved, so prime = NO platform.
+// linkabl: an ATS means real requisition volume, so prime = HAS one. The client sends
+// booking_platform=prime and never encodes the rule, so the two cannot drift apart.
+test('prime_signal is reported per product', async () => {
+  seed();
+  const g = await (await req('GET', '/api/prospects?product=golfnex', { role: 'sales_team' })).json();
+  assert.equal(g.prime_signal, 'no-platform');
+  const l = await (await req('GET', '/api/prospects?product=linkabl', { role: 'sales_team' })).json();
+  assert.equal(l.prime_signal, 'platform');
+  // a product with no config must keep the historical reading rather than invert silently
+  const u = await (await req('GET', '/api/prospects?product=unknownprod', { role: 'sales_team' })).json();
+  assert.equal(u.prime_signal, 'no-platform');
+});
+
+test("booking_platform=prime resolves to IS NULL for golfnex and IS NOT NULL for linkabl", async () => {
+  seed();
+  const g = await (await req('GET', '/api/prospects?product=golfnex&booking_platform=prime', { role: 'sales_team' })).json();
+  for (const it of g.items) assert.equal(it.booking_platform, null, 'golfnex prime = no platform');
+  const l = await (await req('GET', '/api/prospects?product=linkabl&booking_platform=prime', { role: 'sales_team' })).json();
+  for (const it of l.items) assert.ok(it.booking_platform, 'linkabl prime = HAS a platform');
 });
 
 test('GET /prospects paginates', async () => {

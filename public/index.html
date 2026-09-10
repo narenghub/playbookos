@@ -748,6 +748,7 @@ const PRODUCTS = [
     pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','seo-intelligence','seo-content','linkedin-content','cphi-milan'] },
   { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
   { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
+  { key:'linkabl',  label:'Linkabl',  icon:'🧑‍💼', kind:'product', pages:['prospects'] },
   // global areas (not products). Some listed pages are not in the classic nav (data-pipeline,
   // execution-graph, decision-engine, my-activity) — they stay non-navigable and never surface
   // in product mode either (pageVisibleToRole is false for anything not in the classic nav).
@@ -3214,9 +3215,16 @@ async function csRun(){
 }
 
 // ── Prospects — product-scoped facility list (first product-aware page) ─────────
-window._ppFilters = window._ppFilters || { product: 'golfnex', status: 'qualified', subtype: '', booking_platform: 'none', reachable: 'true', has_website: '', page: 1 };
+window._ppFilters = window._ppFilters || { product: 'golfnex', status: 'qualified', subtype: '', booking_platform: 'prime', reachable: 'true', has_website: '', page: 1 };
 window._ppState = window._ppState || { total: 0, pageSize: 50, summary: null };
-const PP_PRODUCTS = [{ id:'golfnex', label:'GolfNex' }, { id:'favly', label:'Favly' }];
+const PP_PRODUCTS = [{ id:'golfnex', label:'GolfNex' }, { id:'favly', label:'Favly' }, { id:'linkabl', label:'Linkabl' }];
+// Polarity for the CURRENT product, learned from the last /prospects response (prime_signal),
+// which the server derives from prospecting config.js. Never hardcoded here — golf/beauty and
+// linkabl mean opposite things by "prime" and duplicating that rule is how they drift apart.
+window._ppPrime = 'no-platform';
+function ppPrimeIsPlatform(){ return window._ppPrime === 'platform'; }
+// Does THIS row sit in the prime pool? One test, both polarities.
+function ppRowIsPrime(it){ return ppPrimeIsPlatform() ? !!it.booking_platform : !it.booking_platform; }
 const PP_STATUSES = ['new','qualified','enriched','contacted','rejected'];
 function ppEsc(s){ return csEsc(s); }                                    // reuse the studio escaper
 function ppIsAdmin(){ return csIsAdmin(); }
@@ -3407,13 +3415,17 @@ pages['prospects'] = async function() {
   window._ppState.total = (res && res.total) || 0;
   window._ppState.pageSize = (res && res.pageSize) || window._ppState.pageSize;
   window._ppState.summary = (res && res.summary) || null;
+  // The server tells us the polarity for THIS product; it comes from prospecting config.js.
+  if (res && res.prime_signal) window._ppPrime = res.prime_signal;
 
   const prodBtns = PP_PRODUCTS.map(p =>
     `<button onclick="ppSetProduct('${p.id}')" class="${f.product===p.id?'btn-primary':'btn-outline'} btn-sm" style="font-size:12px">${p.label}</button>`).join('');
   const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
     <div>
       <div class="card-title text-section" style="margin:0">Prospects</div>
-      <div class="text-body">Qualified facilities discovered via Places, scoped by product. Prime pool = qualified, no booking platform, and reachable. Unreachable ones (dead/403/timeout) are kept but filtered out by default — they need a phone call, not a site visit.</div>
+      <div class="text-body">Qualified businesses discovered via Places, scoped by product. Prime pool = qualified, reachable, and ${ppPrimeIsPlatform()
+        ? '<strong>running an ATS</strong> — a detected system means real requisition volume and a workflow worth improving'
+        : '<strong>no booking platform</strong> — they have not solved scheduling yet'}. Unreachable ones (dead/403/timeout) are kept but filtered out by default — they need a phone call, not a site visit.</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span style="font-size:11px;color:var(--text-muted)">Product</span>
@@ -3430,15 +3442,21 @@ pages['prospects'] = async function() {
   const summaryRow = `<div class="card" style="display:flex;gap:10px;flex-wrap:wrap">
     ${stat('Total', s.total, '#1B3A6B')}
     ${stat('Qualified', s.qualified, '#2563eb')}
-    ${stat('Prime (reachable)', s.no_platform_reachable, '#1D9E75')}
-    ${stat('Unreachable', s.no_platform_unreachable, '#d97706')}
-    ${stat('On a platform', s.on_platform, '#64748b')}
+    ${stat('Prime (reachable)', s.prime_pool, '#1D9E75')}
+    ${ppPrimeIsPlatform()
+      ? stat('No ATS', s.no_platform, '#64748b') + stat('ATS, unreachable', (s.on_platform||0) - (s.on_platform_reachable||0), '#d97706')
+      : stat('Unreachable', s.no_platform_unreachable, '#d97706') + stat('On a platform', s.on_platform, '#64748b')}
     ${stat('Rejected', s.rejected, '#dc2626')}
   </div>`;
 
   const statusOpts = ['<option value="">status: any</option>'].concat(
     PP_STATUSES.map(st => `<option value="${st}"${f.status===st?' selected':''}>${st}</option>`)).join('');
-  const platOpts = [['','platform: any'],['none','no platform (prime)']].map(
+  // 'prime' asks the SERVER for whichever side is prime for this product; the two explicit
+  // options stay available for looking at the other side deliberately.
+  const platOpts = [['prime', ppPrimeIsPlatform() ? 'has an ATS (prime)' : 'no platform (prime)'],
+                    ['','platform: any'],
+                    ['none', ppPrimeIsPlatform() ? 'no ATS' : 'no platform'],
+                    ['any-platform', ppPrimeIsPlatform() ? 'has an ATS' : 'on a platform']].map(
     ([v,l]) => `<option value="${v}"${f.booking_platform===v?' selected':''}>${l}</option>`).join('');
   const reachOpts = [['true','reachable (prime)'],['','reachability: any'],['false','unreachable only']].map(
     ([v,l]) => `<option value="${v}"${f.reachable===v?' selected':''}>${l}</option>`).join('');
@@ -3461,7 +3479,9 @@ pages['prospects'] = async function() {
       <td style="padding:7px 8px">${ppEsc(it.subtype)||'—'}</td>
       <td style="padding:7px 8px;text-align:right">${it.rating!=null?ppEsc(it.rating)+'★':'—'}</td>
       <td style="padding:7px 8px;text-align:right">${(it.rating_count||0).toLocaleString()}</td>
-      <td style="padding:7px 8px">${it.booking_platform?ppEsc(it.booking_platform):'<span style="color:#1D9E75">none</span>'}</td>
+      <td style="padding:7px 8px">${it.booking_platform
+        ? (ppRowIsPrime(it) ? `<span style="color:#1D9E75">${ppEsc(it.booking_platform)}</span>` : ppEsc(it.booking_platform))
+        : (ppRowIsPrime(it) ? '<span style="color:#1D9E75">none</span>' : '<span style="color:var(--text-muted)">none</span>')}</td>
       <td style="padding:7px 8px;text-align:center">${site}</td>
       <td style="padding:7px 8px">${it.phone?ppEsc(it.phone):'<span style="color:var(--text-muted)">—</span>'}</td>
       <td style="padding:7px 8px">${ppStatusBadge(it.status)}</td>
@@ -3492,7 +3512,7 @@ pages['prospects'] = async function() {
 
 function ppSetProduct(p){ window._ppFilters.product = p; window._ppFilters.page = 1; pages['prospects'](); }
 function ppSetFilter(key, val){ window._ppFilters[key] = val; window._ppFilters.page = 1; pages['prospects'](); }
-function ppResetFilters(){ window._ppFilters = { ...window._ppFilters, status:'qualified', subtype:'', booking_platform:'none', reachable:'true', has_website:'', page:1 }; pages['prospects'](); }
+function ppResetFilters(){ window._ppFilters = { ...window._ppFilters, status:'qualified', subtype:'', booking_platform:'prime', reachable:'true', has_website:'', page:1 }; pages['prospects'](); }
 function ppPage(delta){
   const totalPages = Math.max(1, Math.ceil(window._ppState.total / window._ppState.pageSize));
   const next = Math.min(totalPages, Math.max(1, (window._ppFilters.page || 1) + delta));
@@ -3522,9 +3542,12 @@ async function ppOpen(id){
         ${field('Address', ppEsc(p.address)||'—')}
         ${field('Phone', p.phone?ppEsc(p.phone):'—')}
         ${field('Rating', (p.rating!=null?ppEsc(p.rating)+'★':'—') + ' · ' + (p.rating_count||0).toLocaleString() + ' reviews')}
-        ${field('Booking platform', p.booking_platform ? ppEsc(p.booking_platform)
-            : (p.reachable === true ? '<span style="color:#1D9E75">none — prime target</span>'
-            : p.reachable === false ? '<span style="color:#d97706">none (site unreachable)</span>'
+        ${field(ppPrimeIsPlatform() ? 'ATS' : 'Booking platform', p.booking_platform
+            ? (ppRowIsPrime(p) && p.reachable === true
+                ? `<span style="color:#1D9E75">${ppEsc(p.booking_platform)} — prime target</span>`
+                : ppEsc(p.booking_platform))
+            : (ppRowIsPrime(p) && p.reachable === true ? '<span style="color:#1D9E75">none — prime target</span>'
+            : ppRowIsPrime(p) && p.reachable === false ? '<span style="color:#d97706">none (site unreachable)</span>'
             : '<span style="color:var(--text-muted)">none</span>'))}
         ${field('Reachability', p.reachable === true ? '<span style="color:#1D9E75">reachable</span>'
             : p.reachable === false ? `<span style="color:#d97706">unreachable — ${ppEsc(p.unreachable_reason||'?')}</span> · needs a phone call, not a site visit`

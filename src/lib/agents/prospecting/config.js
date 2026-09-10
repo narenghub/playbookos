@@ -12,6 +12,8 @@
 
 const PRODUCT_CONFIG = {
   golfnex: {
+    // Prime = NO platform: they have not solved booking yet, so there is something to sell.
+    primeSignal: 'no-platform',
     subtypes: [
       { key: 'course', term: 'golf course' },
       { key: 'range', term: 'driving range' },
@@ -37,6 +39,8 @@ const PRODUCT_CONFIG = {
   },
 
   favly: {
+    // Prime = NO platform: they have not solved booking yet, so there is something to sell.
+    primeSignal: 'no-platform',
     // Facility TYPES that enumerate the appointment-based beauty/grooming market. Chose the
     // four clean Places facility categories; deliberately dropped 'esthetician' (a profession,
     // not a facility — it returns individuals/med-spas and enumerates noisily).
@@ -70,6 +74,9 @@ const PRODUCT_CONFIG = {
   },
 
   linkabl: {
+    // INVERTED. Prime = HAS a platform: an ATS means real requisition volume and a workflow
+    // worth improving. No platform is more likely a one-person shop with nothing to integrate.
+    primeSignal: 'platform',
     // Recruiting/staffing agencies. IMPORTANT: Google Places has ONE underlying type for all of
     // these — `employment_agency`; it does NOT expose distinct types for IT vs healthcare vs
     // generic staffing. The split below is purely the free-text query, which biases WHICH firms
