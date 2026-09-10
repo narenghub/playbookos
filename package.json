@@ -9,6 +9,7 @@
     "setup": "node scripts/setup-db.js"
   },
   "dependencies": {
+    "adm-zip": "^0.6.0",
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^9.4.3",
     "cors": "^2.8.5",
