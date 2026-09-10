@@ -96,16 +96,11 @@ body.pnav #aws-topbar .aws-wordmark .wm-play{font-weight:400}
 body.pnav #aws-topbar .aws-wordmark .wm-nexa{font-weight:700}
 body.pnav #aws-topbar .aws-search{display:flex;align-items:center;gap:6px;background:#2f3d4f;color:var(--awsc-topbar-dim);padding:4px 10px;min-width:200px;font-size:12px;cursor:text}
 body.pnav #aws-topbar .aws-spacer{flex:1}
-/* product switcher: tabs with a product icon (18px) + label. Icons load from
-   /img/<key>-icon.png (keyed off product key); a missing file falls back to the emoji. */
-body.pnav #aws-topbar .aws-pswitch{display:flex;align-items:center;gap:2px}
-body.pnav #aws-topbar .aws-psep{width:1px;height:20px;background:#3b4b5e;margin:0 6px}
+/* Global tabs (Platform, Me) — text only, no icon. Products are not tabs any more; they live
+   in the launcher, which is also a text list. Nothing in the bar renders a product PNG. */
 body.pnav #aws-topbar .aws-ptab{display:inline-flex;align-items:center;gap:6px;background:none;border:none;color:var(--awsc-topbar-fg);font-size:12px;padding:4px 8px;cursor:pointer;border-bottom:2px solid transparent}
 body.pnav #aws-topbar .aws-ptab:hover{color:#fff}
 body.pnav #aws-topbar .aws-ptab.active{color:#fff;border-bottom-color:#9fe1cb}
-/* consistent sizing + 2px radius so Favly's own dark-navy icon sits evenly with the rest */
-body.pnav #aws-topbar .aws-picon{width:18px;height:18px;border-radius:2px;object-fit:cover;display:inline-block;flex-shrink:0}
-body.pnav #aws-topbar .aws-picon-fb{width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;line-height:1}
 /* #3 — left (dynamic) + right (spend, email, Sign out moved off the title row) groups */
 body.pnav #aws-topbar .aws-tb-left{display:flex;align-items:center;gap:12px}
 body.pnav #aws-topbar .aws-tb-right{display:flex;align-items:center;gap:14px}
@@ -909,7 +904,8 @@ function buildAwsTopbar(role, tiers) {
 
 // A/D — build the launcher rows: one per role-visible PRODUCT (same visibility as the tabs used),
 // name + page count; active product marked; scrolls for many products (config-driven). No icon:
-// the launcher is a text list. The product PNGs are still used by the top-bar tabs (.aws-picon).
+// the launcher is a text list. The product PNGs in public/img are now unused by the chrome —
+// kept on disk deliberately, not referenced by the bar or the launcher.
 function buildLauncher(role, tiers) {
   const el = document.getElementById('product-launcher');
   if (!el) return;
