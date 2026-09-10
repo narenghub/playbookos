@@ -276,11 +276,14 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--teal)}
   font-family:var(--awsc-font);
   display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--awsc-topbar)}
 #auth-page .auth-card{background:#fff;border:1px solid var(--awsc-border);border-radius:0;padding:40px 36px 36px;width:380px;box-shadow:0 1px 4px rgba(0,0,0,.18)}
-#auth-page .auth-card .auth-mark{display:block;margin:0 auto 14px;width:52px;height:52px}
-/* Play lighter, Nexa heavier — the wordmark reads as one word with a weight shift, not two. */
-#auth-page .auth-card .auth-wordmark{text-align:center;font-size:27px;line-height:1.1;letter-spacing:-.2px;color:var(--awsc-fg);margin-bottom:6px}
-#auth-page .auth-card .wm-play{font-weight:400}
-#auth-page .auth-card .wm-nexa{font-weight:700}
+/* The lockup is the wordmark now — the R mark and PLAYNEXA are one asset, so the card no
+   longer sets the name in type. It stays inside the <h1> so the page keeps its heading and
+   the product name still reaches a screen reader, via the alt text.
+   width/height are on the <img> as well as here: 640x263 scaled to 280 is 115, and stating
+   it reserves the box so the card does not jolt when the PNG arrives. max-width keeps it
+   inside the card on a narrow phone, where the card is 100%-24px rather than 380. */
+#auth-page .auth-card .auth-wordmark{margin:0 0 6px;text-align:center}
+#auth-page .auth-card .auth-lockup{display:block;margin:0 auto;width:280px;max-width:100%;height:auto}
 #auth-page .auth-card #auth-subtitle{text-align:center;color:var(--awsc-fg2);font-size:13px;margin-bottom:28px}
 #auth-page .auth-card .form-group label{color:var(--awsc-fg2);font-weight:600;font-size:12px}
 #auth-page .auth-card input{border:1px solid var(--awsc-border);border-radius:2px;padding:9px 11px;font-size:14px;color:var(--awsc-fg)}
@@ -416,8 +419,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 <!-- AUTH PAGE -->
 <div id="auth-page" style="display:none">
   <div class="auth-card">
-    <img class="auth-mark" src="/img/playnexa-icon.png" alt="" width="52" height="52">
-    <h1 class="auth-wordmark"><span class="wm-play">Play</span><span class="wm-nexa">Nexa</span></h1>
+    <h1 class="auth-wordmark"><img class="auth-lockup" src="/img/playnexa-lockup.png" alt="PlayNexa" width="280" height="115"></h1>
     <p id="auth-subtitle">The operating console for the whole group</p>
     <div id="auth-error" class="error-msg" style="display:none"></div>
     <div id="auth-success" class="success-msg" style="display:none"></div>
