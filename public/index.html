@@ -142,9 +142,22 @@ body.pnav #notif-panel .np-meta{font-size:11px;color:var(--awsc-fg2);margin-top:
 body.pnav #notif-panel .np-empty{padding:16px 14px;font-size:13px;color:var(--awsc-fg2)}
 body.pnav #aws-topbar #revenue-status .rs-wrap{color:var(--awsc-topbar-fg);font-size:12px}
 body.pnav #aws-topbar #revenue-status .rs-wrap span{color:var(--awsc-topbar-fg) !important}
-body.pnav #aws-topbar #signout-btn{background:transparent;border:1px solid var(--awsc-topbar-dim);color:var(--awsc-topbar-fg);border-radius:16px !important;font-size:12px;padding:3px 12px;font-weight:600}
-body.pnav #aws-topbar #signout-btn:hover{border-color:#fff;color:#fff}
-body.pnav #aws-topbar .aws-user-email{color:var(--awsc-topbar-dim);font-size:12px;white-space:nowrap}
+/* The classic shell's Sign out button lives in the page header and is NOT removed — with the
+   flag off it is still the only way to sign out. pnav simply hides it and offers the account
+   menu instead. Deleting the element would change the classic shell. */
+body.pnav #signout-btn{display:none}
+/* C — account menu: first name + caret in the bar, panel styled exactly like the launcher. */
+body.pnav #aws-topbar .aws-acct{position:relative;display:inline-flex}
+body.pnav #aws-topbar .aws-acct-btn{display:inline-flex;align-items:center;gap:6px;background:none;border:none;color:var(--awsc-topbar-fg);font-size:12px;font-weight:600;cursor:pointer;padding:4px 6px;line-height:1;white-space:nowrap}
+body.pnav #aws-topbar .aws-acct-btn:hover{color:#fff}
+body.pnav #aws-topbar .aws-acct-caret{font-size:9px;line-height:1}
+#aws-acct-menu{display:none}
+body.pnav #aws-acct-menu.open{display:block;position:fixed;top:41px;right:8px;z-index:400;min-width:240px;max-width:320px;background:#fff;border:1px solid var(--awsc-border);box-shadow:0 6px 20px rgba(0,0,0,.22)}
+body.pnav #aws-acct-menu .am-head{padding:10px 14px;border-bottom:1px solid var(--awsc-border)}
+body.pnav #aws-acct-menu .am-name{font-size:13px;font-weight:700;color:var(--awsc-fg)}
+body.pnav #aws-acct-menu .am-email{font-size:12px;color:var(--awsc-fg2);margin-top:2px;word-break:break-all}
+body.pnav #aws-acct-menu .am-row{display:block;width:100%;padding:9px 14px;text-align:left;background:none;border:0;cursor:pointer;font-size:14px;font-weight:600;color:var(--awsc-fg);font-family:inherit}
+body.pnav #aws-acct-menu .am-row:hover{background:var(--awsc-strip)}
 /* B — breadcrumb strip */
 body.pnav #breadcrumb{display:flex;position:fixed;top:40px;left:0;right:0;height:28px;z-index:299;align-items:center;gap:6px;padding:0 16px;font-size:12px;background:var(--awsc-bg);color:var(--awsc-fg2);border-bottom:1px solid var(--awsc-border)}
 body.pnav #breadcrumb .bc-link{color:var(--awsc-link)}
@@ -282,9 +295,12 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--teal)}
    width/height are on the <img> as well as here: 640x263 scaled to 280 is 115, and stating
    it reserves the box so the card does not jolt when the PNG arrives. max-width keeps it
    inside the card on a narrow phone, where the card is 100%-24px rather than 380. */
-#auth-page .auth-card .auth-wordmark{margin:0 0 6px;text-align:center}
+#auth-page .auth-card .auth-wordmark{margin:0 0 28px;text-align:center}
+/* Only the invite view fills this; on the login card it is empty and hidden, so the lockup
+   sits directly above the form. The negative top margin pulls it back into the 28px the
+   wordmark already reserves, rather than adding a second gap. */
+#auth-page .auth-card #auth-note{text-align:center;color:var(--awsc-fg2);font-size:13px;margin:-18px 0 24px}
 #auth-page .auth-card .auth-lockup{display:block;margin:0 auto;width:280px;max-width:100%;height:auto}
-#auth-page .auth-card #auth-subtitle{text-align:center;color:var(--awsc-fg2);font-size:13px;margin-bottom:28px}
 #auth-page .auth-card .form-group label{color:var(--awsc-fg2);font-weight:600;font-size:12px}
 #auth-page .auth-card input{border:1px solid var(--awsc-border);border-radius:2px;padding:9px 11px;font-size:14px;color:var(--awsc-fg)}
 #auth-page .auth-card input:focus{border-color:var(--awsc-link);outline:2px solid rgba(9,114,211,.18);outline-offset:0}
@@ -420,7 +436,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
 <div id="auth-page" style="display:none">
   <div class="auth-card">
     <h1 class="auth-wordmark"><img class="auth-lockup" src="/img/playnexa-lockup.png" alt="PlayNexa" width="280" height="115"></h1>
-    <p id="auth-subtitle">The operating console for the whole group</p>
+    <p id="auth-note" hidden></p>
     <div id="auth-error" class="error-msg" style="display:none"></div>
     <div id="auth-success" class="success-msg" style="display:none"></div>
     <div id="login-form">
@@ -546,7 +562,9 @@ function showAuth() {
 function showInviteForm(t) {
   document.getElementById('auth-page').style.display = 'flex';
   document.getElementById('app').style.display = 'none';
-  document.getElementById('auth-subtitle').textContent = 'Set your password to activate your account';
+  const note = document.getElementById('auth-note');
+  note.textContent = 'Set your password to activate your account';
+  note.hidden = false;
   document.getElementById('login-form').style.display = 'none';
   document.getElementById('invite-form').style.display = 'block';
   window._inviteToken = t;
@@ -864,9 +882,15 @@ function buildAwsTopbar(role, tiers) {
       refreshNotifBadge();
     }
     const rs = document.getElementById('revenue-status'); if (rs) right.appendChild(rs);   // move, keep id + content
-    const email = document.createElement('span'); email.id = 'aws-user-email'; email.className = 'aws-user-email';
-    right.appendChild(email);
-    const so = document.getElementById('signout-btn'); if (so) right.appendChild(so);       // move Sign out into the top bar
+    // C — one account control at the far right, in place of the bare email + Sign out button.
+    const acct = document.createElement('div'); acct.className = 'aws-acct';
+    acct.innerHTML =
+      `<button class="aws-acct-btn" onclick="toggleAcctMenu()" aria-haspopup="true" aria-expanded="false">` +
+        `<span class="aws-acct-name"></span><span class="aws-acct-caret" aria-hidden="true">\u25be</span></button>` +
+      `<div id="aws-acct-menu" role="menu">` +
+        `<div class="am-head"><div class="am-name"></div><div class="am-email"></div></div>` +
+        `<button class="am-row" role="menuitem" onclick="logout()">Sign out</button></div>`;
+    right.appendChild(acct);
   }
   const vis = visibleProducts(role, tiers);
   // B — products are NO LONGER tabs; only the global areas (Platform, Me) stay as top-bar tabs.
@@ -880,7 +904,7 @@ function buildAwsTopbar(role, tiers) {
     `<span class="aws-wordmark"><span class="wm-play">Play</span><span class="wm-nexa">Nexa</span></span>` +
     `<div class="aws-search" aria-hidden="true"><span>🔍</span><span>Search</span></div>`;
   buildLauncher(role, tiers);
-  const emailEl = document.getElementById('aws-user-email'); if (emailEl) emailEl.textContent = (currentUser && currentUser.email) || '';
+  fillAcctMenu();
 }
 
 // A/D — build the launcher rows: one per role-visible PRODUCT (same visibility as the tabs used),
@@ -905,6 +929,7 @@ function togglePlauncher() {
   const el = document.getElementById('product-launcher');
   if (!el) return;
   if (el.classList.contains('open')) { closePlauncher(); return; }
+  if (typeof closeAcctMenu === 'function') closeAcctMenu();   // never two panels at once
   el.classList.add('open');
   // defer so THIS opening click doesn't immediately trigger the outside-click close
   setTimeout(() => { document.addEventListener('click', plauncherOutside, true); document.addEventListener('keydown', plauncherEsc); }, 0);
@@ -921,6 +946,57 @@ function plauncherOutside(e) {
   if (el && !el.contains(e.target) && !(ham && ham.contains(e.target))) closePlauncher();   // click outside (not the hamburger)
 }
 function plauncherEsc(e) { if (e.key === 'Escape') closePlauncher(); }
+
+// ── C — top-bar account menu ────────────────────────────────────────────────────
+// The bar shows a FIRST NAME, not an address: an email is long, repeats the domain on every
+// row and tells you nothing you did not know. The full name and the address are one click
+// away in the panel, so nothing is actually lost.
+//
+// There is no first_name column — users.name is a single text field — so the first name is
+// its first whitespace-delimited token. All 12 active accounts carry a populated multi-word
+// name, so the email fallback below is a safety net for a half-finished invite (which sets
+// name = the email's local part) rather than something anyone sees today.
+function acctFirstName(u) {
+  const n = ((u && u.name) || '').trim();
+  if (n) return n.split(/\s+/)[0];
+  const local = (((u && u.email) || '').split('@')[0] || '').trim();
+  return local ? local.charAt(0).toUpperCase() + local.slice(1) : 'Account';
+}
+// textContent throughout: a name or address is user data and never markup.
+function fillAcctMenu() {
+  // NB: `let currentUser` is script-scoped, so it is NOT window.currentUser — reading it off
+  // window returns undefined and every user falls through to the email branch.
+  const u = currentUser || null;
+  const set = (sel, v) => { const el = document.querySelector(sel); if (el) el.textContent = v; };
+  set('#aws-topbar .aws-acct-name', acctFirstName(u));
+  set('#aws-acct-menu .am-name', (u && u.name) || acctFirstName(u));
+  set('#aws-acct-menu .am-email', (u && u.email) || '');
+}
+function toggleAcctMenu() {
+  const el = document.getElementById('aws-acct-menu');
+  if (!el) return;
+  if (el.classList.contains('open')) { closeAcctMenu(); return; }
+  closePlauncher();                       // never leave two panels open at once
+  el.classList.add('open');
+  const btn = document.querySelector('#aws-topbar .aws-acct-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'true');
+  // defer so THIS opening click doesn't immediately trigger the outside-click close
+  setTimeout(() => { document.addEventListener('click', acctOutside, true); document.addEventListener('keydown', acctEsc); }, 0);
+}
+function closeAcctMenu() {
+  const el = document.getElementById('aws-acct-menu');
+  if (el) el.classList.remove('open');
+  const btn = document.querySelector('#aws-topbar .aws-acct-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('click', acctOutside, true);
+  document.removeEventListener('keydown', acctEsc);
+}
+function acctOutside(e) {
+  const el = document.getElementById('aws-acct-menu');
+  const btn = document.querySelector('#aws-topbar .aws-acct-btn');
+  if (el && !el.contains(e.target) && !(btn && btn.contains(e.target))) closeAcctMenu();
+}
+function acctEsc(e) { if (e.key === 'Escape') closeAcctMenu(); }
 function launchProduct(key) { closePlauncher(); selectProduct(key); }   // switch + close
 
 // ── B — notifications bell + panel ──────────────────────────────────────────────
