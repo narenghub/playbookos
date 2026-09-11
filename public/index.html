@@ -89,7 +89,17 @@ body.pnav #product-bar,body.pnav #mobile-topbar,body.pnav #sidebar .brand,body.p
 body:not(.pnav) #aws-topbar,body:not(.pnav) #breadcrumb,body:not(.pnav) .aws-actions,body:not(.pnav) #page-status-badge,body:not(.pnav) .page-info{display:none}
 /* A — top bar: fixed, full width, dark in both light and dark modes */
 body.pnav #aws-topbar{display:flex;position:fixed;top:0;left:0;right:0;height:40px;z-index:300;align-items:center;gap:12px;padding:0 16px;background:var(--awsc-topbar);color:var(--awsc-topbar-fg);font-size:13px}
-body.pnav #aws-topbar .aws-icon-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:50% !important;background:var(--awsc-link);color:#fff;border:1px solid var(--awsc-link);font-size:13px;cursor:pointer;line-height:1}
+/* A — the hamburger, carrying the sidebar's state in its own shape (AWS does the same):
+   OPEN = filled blue circle with a white glyph; COLLAPSED = bordered square, dark glyph on a
+   light fill. The two states are visually different objects, not a colour change, so the
+   current state reads at a glance rather than needing comparison. */
+body.pnav #aws-topbar .aws-icon-btn{width:24px;height:24px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:50% !important;background:var(--awsc-link);color:#fff;border:1px solid var(--awsc-link);font-size:13px;cursor:pointer;line-height:1;transition:background .12s,color .12s,border-color .12s}
+body.pnav #aws-topbar .aws-icon-btn.is-collapsed{border-radius:2px !important;background:var(--awsc-topbar-fg);color:var(--awsc-topbar);border-color:var(--awsc-topbar-fg)}
+body.pnav #aws-topbar .aws-icon-btn:focus-visible,body.pnav #aws-topbar .aws-grid-btn:focus-visible{outline:2px solid #fff;outline-offset:1px}
+/* A — the 3x3 grid that opens the launcher, immediately right of the lockup. Quiet by
+   default: it is chrome, not an action, so it only lifts to white on hover. */
+body.pnav #aws-topbar .aws-grid-btn{width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:none;border:none;border-radius:2px;color:var(--awsc-topbar-fg);cursor:pointer;line-height:0}
+body.pnav #aws-topbar .aws-grid-btn:hover{color:#fff;background:#2f3d4f}
 body.pnav #aws-topbar .aws-logo{width:20px;height:20px;object-fit:contain;flex-shrink:0}
 body.pnav #aws-topbar .aws-wordmark{color:#fff;font-size:14px;letter-spacing:.3px}
 body.pnav #aws-topbar .aws-wordmark .wm-play{font-weight:400}
@@ -183,7 +193,15 @@ body.pnav #breadcrumb .bc-info{color:var(--awsc-link);font-size:14px;cursor:defa
 /* Definite height + min-height:0 make #main the real scroll container, so the body never
    scrolls and content can never slide under the fixed top bar / breadcrumb (title-row clip fix). */
 body.pnav #app{padding-top:68px;height:100vh}   /* 40px top bar + 28px breadcrumb */
+/* C — #content carries a global `max-width:1300px`, which is a reading measure for the classic
+   shell and wrong for a console. #main reflows correctly on its own (flex:1, 1200 -> 1392 when
+   the sidebar collapses), but the cap meant the extra width could not be used and 92px fell off
+   the right edge at 1440. It was invisible while expanded only by arithmetic accident —
+   1440 - 240 = 1200, just under the cap — so it appeared to be a collapse bug when it is a
+   width cap that also bites both states on a wider monitor. Lifted for the console only; the
+   classic shell keeps its reading column. */
 body.pnav #main{min-height:0}
+body.pnav #content{max-width:none}
 body.pnav #sidebar{min-height:0;overflow-y:auto}
 /* C — sidebar: light AWS left nav, collapsible */
 body.pnav #sidebar{background:#fff;color:var(--awsc-fg);border-right:1px solid #e9ebed;width:240px;transition:width .12s}
@@ -930,13 +948,43 @@ function buildAwsTopbar(role, tiers) {
   const gtab = p => `<button class="aws-ptab${p.key === window._activeProduct ? ' active' : ''}" onclick="selectProduct('${p.key}')" title="${p.label}"><span class="aws-ptab-label">${p.label}</span></button>`;
   el.querySelector('.aws-tb-globals').innerHTML = vis.filter(p => p.kind === 'global').map(gtab).join('');
   // A — the hamburger opens the product launcher (it no longer toggles the sidebar).
+  // A — the hamburger toggles the SIDEBAR, and the 3x3 grid immediately right of the lockup
+  // opens the product launcher. That is the AWS division of labour: global chrome on the left
+  // of the logo, the services panel hung off a grid icon beside it. The hamburger no longer
+  // opens the launcher.
   el.querySelector('.aws-tb-left').innerHTML =
-    `<button class="aws-icon-btn" onclick="togglePlauncher()" aria-label="Open product launcher" aria-haspopup="true">☰</button>` +
+    `<button class="aws-icon-btn" id="pnav-hamburger" onclick="toggleSidebarCollapse()" aria-label="Toggle navigation" aria-expanded="true">☰</button>` +
     `<img class="aws-logo" src="/img/playnexa-icon.png" alt="" onerror="this.remove()">` +
     `<span class="aws-wordmark"><span class="wm-play">Play</span><span class="wm-nexa">Nexa</span></span>` +
+    `<button class="aws-grid-btn" id="pnav-grid" onclick="togglePlauncher()" aria-label="Open product launcher" aria-haspopup="true">${GRID_SVG}</button>` +
     `<div class="aws-search" aria-hidden="true"><span>🔍</span><span>Search</span></div>`;
+  syncHamburgerState();
   buildLauncher(role, tiers);
   fillAcctMenu();
+}
+
+// A 3x3 grid, drawn rather than typed: the ⊞ and ▦ characters render at wildly different
+// weights across the fonts this bar falls back to, and this sits next to a logo.
+const GRID_SVG = '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">'
+  + [0,1,2].map(r => [0,1,2].map(c =>
+      `<rect x="${c*6}" y="${r*6}" width="3.4" height="3.4" rx="0.6" fill="currentColor"></rect>`).join('')).join('')
+  + '</svg>';
+
+/**
+ * The hamburger carries the sidebar's state, matching AWS: a filled blue circle while the nav
+ * is open, a bordered square with a dark glyph once it is collapsed. Driven from the sidebar
+ * itself rather than a second variable, so the two can never disagree.
+ */
+function syncHamburgerState() {
+  const sb = document.getElementById('sidebar');
+  const btn = document.getElementById('pnav-hamburger');
+  if (!btn) return;
+  const collapsed = !!(sb && sb.classList.contains('collapsed'));
+  btn.classList.toggle('is-collapsed', collapsed);
+  btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  // Body carries it too: the content-width rule and any future collapsed-only styling read
+  // one class rather than reaching into the sidebar's.
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
 }
 
 // A/D — build the launcher rows: one per role-visible PRODUCT (same visibility as the tabs used),
@@ -963,6 +1011,10 @@ function togglePlauncher() {
   if (!el) return;
   if (el.classList.contains('open')) { closePlauncher(); return; }
   if (typeof closeAcctMenu === 'function') closeAcctMenu();   // never two panels at once
+  // Anchor under the grid icon it now hangs from. Measured rather than hardcoded: the left
+  // group's width depends on the wordmark, which is a font-dependent string.
+  const grid = document.getElementById('pnav-grid');
+  if (grid) el.style.left = Math.round(grid.getBoundingClientRect().left) + 'px';
   el.classList.add('open');
   // defer so THIS opening click doesn't immediately trigger the outside-click close
   setTimeout(() => { document.addEventListener('click', plauncherOutside, true); document.addEventListener('keydown', plauncherEsc); }, 0);
@@ -975,8 +1027,8 @@ function closePlauncher() {
 }
 function plauncherOutside(e) {
   const el = document.getElementById('product-launcher');
-  const ham = document.querySelector('#aws-topbar .aws-icon-btn');
-  if (el && !el.contains(e.target) && !(ham && ham.contains(e.target))) closePlauncher();   // click outside (not the hamburger)
+  const opener = document.getElementById('pnav-grid');
+  if (el && !el.contains(e.target) && !(opener && opener.contains(e.target))) closePlauncher();
 }
 function plauncherEsc(e) { if (e.key === 'Escape') closePlauncher(); }
 
@@ -1165,6 +1217,7 @@ function updateBreadcrumb(page) {
 function toggleSidebarCollapse() {
   const sb = document.getElementById('sidebar');
   if (sb) sb.classList.toggle('collapsed');
+  syncHamburgerState();
 }
 
 // Switch products: set the active product, carry the product dimension into the product-scoped
@@ -3217,6 +3270,22 @@ async function csRun(){
 
 // ── Prospects — product-scoped facility list (first product-aware page) ─────────
 window._ppFilters = window._ppFilters || { product: 'golfnex', status: 'qualified', subtype: '', booking_platform: 'prime', reachable: 'true', has_website: '', page: 1 };
+/**
+ * Which product is this page scoped to?
+ *
+ * The pnav shell already asked — you chose a product in the launcher to get here — so an
+ * in-page switcher duplicated that choice and let the two disagree. The shell's
+ * window._activeProduct is authoritative.
+ *
+ * FALLS BACK to _ppFilters.product, and that fallback is load-bearing rather than defensive:
+ * with the flag OFF there is no launcher and no _activeProduct at all, so the classic shell
+ * would be stranded on whatever the default happened to be.
+ */
+function ppActiveProduct() {
+  const a = window._activeProduct;
+  if (a && PP_PRODUCTS.some(p => p.id === a)) return a;
+  return window._ppFilters.product || 'golfnex';
+}
 window._ppState = window._ppState || { total: 0, pageSize: 50, summary: null };
 const PP_PRODUCTS = [{ id:'golfnex', label:'GolfNex' }, { id:'favly', label:'Favly' }, { id:'linkabl', label:'Linkabl' }];
 // Polarity for the CURRENT product, learned from the last /prospects response (prime_signal),
@@ -3532,6 +3601,9 @@ pages['prospects'] = async function() {
   const c = document.getElementById('content');
   const f = window._ppFilters;
   c.innerHTML = '<p style="color:#888;padding:20px">Loading prospects…</p>';
+  // Re-read the shell on every render: launching a product rebuilds the page, and reading the
+  // filter object instead would show the previous product's rows for one paint.
+  f.product = ppActiveProduct();
   const qs = new URLSearchParams();
   qs.set('product', f.product);
   if (f.status) qs.set('status', f.status);
@@ -3550,18 +3622,17 @@ pages['prospects'] = async function() {
   // The server tells us the polarity for THIS product; it comes from prospecting config.js.
   if (res && res.prime_signal) window._ppPrime = res.prime_signal;
 
-  const prodBtns = PP_PRODUCTS.map(p =>
-    `<button onclick="ppSetProduct('${p.id}')" class="${f.product===p.id?'btn-primary':'btn-outline'} btn-sm" style="font-size:12px">${p.label}</button>`).join('');
+  // NO in-page product switcher: the launcher already asked. The product is named in the
+  // heading so the scope is still visible, but it is not a control here.
+  const prodLabel = (PP_PRODUCTS.find(p => p.id === f.product) || {}).label || f.product;
   const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
     <div>
-      <div class="card-title text-section" style="margin:0">Prospects</div>
+      <div class="card-title text-section" style="margin:0">Prospects · ${ppEsc(prodLabel)}</div>
       <div class="text-body">Qualified businesses discovered via Places, scoped by product. Prime pool = qualified, reachable, and ${ppPrimeIsPlatform()
         ? '<strong>running an ATS</strong> — a detected system means real requisition volume and a workflow worth improving'
         : '<strong>no booking platform</strong> — they have not solved scheduling yet'}. Unreachable ones (dead/403/timeout) are kept but filtered out by default — they need a phone call, not a site visit.</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <span style="font-size:11px;color:var(--text-muted)">Product</span>
-      <div style="display:flex;gap:4px">${prodBtns}</div>
       ${ppIsAdmin() ? `<button onclick="ppRun('run')" class="btn-secondary" style="padding:5px 12px;font-size:11px">▶ Run prospecting</button>
       <button onclick="ppRun('qualify')" class="btn-secondary" style="padding:5px 12px;font-size:11px">✓ Qualify</button>` : ''}
     </div>
@@ -3642,7 +3713,6 @@ pages['prospects'] = async function() {
   c.innerHTML = header + summaryRow + filters + table + '<div id="pp-detail"></div>';
 };
 
-function ppSetProduct(p){ window._ppFilters.product = p; window._ppFilters.page = 1; pages['prospects'](); }
 function ppSetFilter(key, val){ window._ppFilters[key] = val; window._ppFilters.page = 1; pages['prospects'](); }
 function ppResetFilters(){ window._ppFilters = { ...window._ppFilters, status:'qualified', subtype:'', booking_platform:'prime', reachable:'true', has_website:'', page:1 }; pages['prospects'](); }
 function ppPage(delta){
