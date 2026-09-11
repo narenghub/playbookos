@@ -132,8 +132,50 @@ function reviewStatusFor(tier) {
   return tier === 'exact' || tier === 'core' ? 'auto_confirmed' : 'unreviewed';
 }
 
+/**
+ * Collapse rows that describe the SAME SITE, merging their operations.
+ *
+ * The register lists some sites twice with different operation sets:
+ *
+ *     Lifecore Biomedical, LLC  fei=1000115753  MANUFACTURE
+ *     Lifecore Biomedical, LLC  fei=1000115753  ANALYSIS; API MANUFACTURE; LABEL; PACK
+ *
+ * Letting one row win loses whatever the other said, and if the loser was the row carrying
+ * API MANUFACTURE the site silently drops out of the ICP filter. Taking the UNION is the only
+ * reading that cannot lose a registered operation, and is_api_manufacturer is then recomputed
+ * from the merged set rather than inherited from whichever row happened to be first.
+ *
+ * (It also has to happen before the upsert regardless: Postgres refuses a single INSERT whose
+ * ON CONFLICT would touch one row twice.)
+ */
+function dedupeBySite(rows, keyOf) {
+  const bySite = new Map();
+  for (const r of rows) {
+    const k = keyOf(r);
+    const prev = bySite.get(k);
+    if (!prev) { bySite.set(k, { ...r }); continue; }
+    const ops = new Set();
+    for (const src of [prev.operations, r.operations]) {
+      for (const op of String(src || '').split(';')) {
+        const t = op.trim();
+        if (t) ops.add(t);
+      }
+    }
+    prev.operations = [...ops].sort().join('; ') || null;
+    prev.is_api_manufacturer = isApiManufacturer(prev.operations);
+    // Prefer any present value over a null one; the rows agree on everything else by
+    // construction, since the key is built from them.
+    for (const f of ['duns_number', 'establishment_contact_name', 'establishment_contact_email',
+                     'registrant_name', 'registrant_contact_email', 'exclusion_flag']) {
+      if (prev[f] == null && r[f] != null) prev[f] = r[f];
+    }
+    prev.is_us_agent = prev.is_us_agent || r.is_us_agent;
+  }
+  return [...bySite.values()];
+}
+
 module.exports = {
   FIELDS, US_AGENT_DOMAINS, GENERIC,
   normalizeName, firmCore, countryOf, isApiManufacturer, isUsAgent,
-  parseDecrs, matchTier, reviewStatusFor,
+  parseDecrs, dedupeBySite, matchTier, reviewStatusFor,
 };

@@ -14,10 +14,21 @@
 // can simply be fetched. Two mirrors of a public file is not duplication worth avoiding —
 // a cross-database read is.
 //
-// THE NATURAL KEY IS (fei_number, firm_name), NOT fei_number ALONE. The source carries 7-digit,
-// 10-digit and zero-padded forms of the same number, and 193 of 10,454 rows have no FEI at all
-// — real registrations that are simply unreachable by it. Keying on FEI alone would drop those
-// rows on ON CONFLICT, and firm_name is what the DMF join actually matches on anyway.
+// THE NATURAL KEY IS THE SITE, NOT THE FIRM. FEI alone is wrong — the source carries 7-digit,
+// 10-digit and zero-padded forms of one number, and 201 of 10,454 rows have no FEI at all.
+// (fei_number, firm_name) is ALSO wrong, and measurably so: 160 keys are duplicated across 222
+// rows, and 158 of those differ on ADDRESS — one firm, several registered sites. 81 differ on
+// OPERATIONS, which is worse than losing a row:
+//
+//     Lifecore Biomedical, LLC  fei=1000115753  MANUFACTURE
+//     Lifecore Biomedical, LLC  fei=1000115753  ANALYSIS; API MANUFACTURE; LABEL; PACK
+//
+// Collapsing those keeps whichever arrived last, so a site can silently lose the
+// API MANUFACTURE flag the entire ICP filter runs on.
+//
+// site_key is md5 over the triple, computed at ingest rather than a UNIQUE on the three columns
+// directly, because address is nullable and Postgres treats NULLs as distinct — two rows with no
+// address would never conflict and would duplicate on every re-run.
 //
 // FOUR COMPUTED COLUMNS, stored rather than derived on read, because every one is a filter the
 // page runs on every request:
@@ -50,7 +61,8 @@ async function migrateFdaEstablishments() {
   await query(`
     CREATE TABLE IF NOT EXISTS fda_establishments (
       id                    BIGSERIAL PRIMARY KEY,
-      fei_number            TEXT,          -- nullable: 193 registered rows carry none
+      site_key              TEXT NOT NULL, -- md5(fei | firm_name | address); one row per SITE
+      fei_number            TEXT,          -- nullable: 201 registered rows carry none
       duns_number           TEXT,
       firm_name             TEXT NOT NULL,
       firm_normalized       TEXT NOT NULL, -- org-name fold; the DMF join key
@@ -66,7 +78,7 @@ async function migrateFdaEstablishments() {
       exclusion_flag        TEXT,
       source_last_modified  TEXT,          -- the FDA response header; makes a re-run a no-op
       ingested_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      UNIQUE (fei_number, firm_name)
+      UNIQUE (site_key)
     );
 
     CREATE INDEX IF NOT EXISTS idx_fda_est_firm_norm ON fda_establishments (firm_normalized);

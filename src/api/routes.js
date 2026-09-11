@@ -4558,6 +4558,88 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireTier('intelligence'
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── AROS sourcing: DMF holders joined to FDA establishment registrations ───────
+// The seed for an AROS target list. Every field here is regulator-published — firm name,
+// registered address, what the site is licensed to do, and a named contact — which is why
+// this route exists at all: the routes we measured that inferred those from a company NAME
+// (Places, Apollo) were wrong often enough to be unusable.
+const AROS_US_EU = ['USA', 'GBR', 'CHE', 'NOR', 'ISL', 'LIE',
+  'AUT', 'BEL', 'BGR', 'HRV', 'CYP', 'CZE', 'DNK', 'EST', 'FIN', 'FRA', 'DEU', 'GRC',
+  'HUN', 'IRL', 'ITA', 'LVA', 'LTU', 'LUX', 'MLT', 'NLD', 'POL', 'PRT', 'ROU', 'SVK',
+  'SVN', 'ESP', 'SWE'];
+
+router.get('/aros/establishments', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    // A join is always required: a holder with no establishment has nothing to show on a
+    // page whose every column comes from the register.
+    const clauses = ['m.establishment_id IS NOT NULL'];
+    const params = [];
+
+    // The DEFAULT is the ICP slice, not everything. 946 holders joined, but the ones worth
+    // contacting are API manufacturers in the market AROS sells into that are small enough to
+    // lack an in-house compliance platform. `scope=all` opts out.
+    const icp = req.query.scope !== 'all';
+    if (icp) {
+      clauses.push('e.is_api_manufacturer = true');
+      params.push(AROS_US_EU);
+      clauses.push(`e.country = ANY($${params.length})`);
+      clauses.push('m.dmf_count BETWEEN 1 AND 3');
+    }
+    if (req.query.country) { params.push(req.query.country); clauses.push(`e.country = $${params.length}`); }
+    if (req.query.api === 'true') clauses.push('e.is_api_manufacturer = true');
+    else if (req.query.api === 'false') clauses.push('e.is_api_manufacturer = false');
+    if (req.query.tier) { params.push(req.query.tier); clauses.push(`m.match_tier = $${params.length}`); }
+    // Filing band: the size proxy. 1-3 is a company with one or two products.
+    const BANDS = { '1': [1, 1], '2-3': [2, 3], '4-10': [4, 10], '11-30': [11, 30], '31+': [31, 100000] };
+    if (BANDS[req.query.band]) {
+      params.push(BANDS[req.query.band][0], BANDS[req.query.band][1]);
+      clauses.push(`m.dmf_count BETWEEN $${params.length - 1} AND $${params.length}`);
+    }
+    const where = 'WHERE ' + clauses.join(' AND ');
+
+    const items = (await query(
+      `SELECT m.id, m.holder, m.dmf_count, m.match_tier, m.review_status,
+              e.firm_name, e.fei_number, e.address, e.country, e.operations,
+              e.is_api_manufacturer, e.is_us_agent,
+              e.establishment_contact_name, e.establishment_contact_email,
+              e.registrant_name, e.registrant_contact_email
+         FROM dmf_establishment_matches m
+         JOIN fda_establishments e ON e.id = m.establishment_id
+         ${where}
+        ORDER BY m.dmf_count ASC, e.country, m.holder
+        LIMIT 1000`, params)).rows;
+
+    // Summary is CENSUS-WIDE and does NOT move with the filters — the header must describe
+    // the dataset, not the current view, or a filtered table silently redefines "how many".
+    const summary = (await query(
+      `SELECT COUNT(*)::int holders,
+              COUNT(*) FILTER (WHERE m.establishment_id IS NOT NULL)::int joined,
+              COUNT(*) FILTER (WHERE m.match_tier = 'exact')::int exact,
+              COUNT(*) FILTER (WHERE m.match_tier = 'core')::int core,
+              COUNT(*) FILTER (WHERE m.match_tier = 'not_found')::int not_found,
+              COUNT(*) FILTER (WHERE e.is_api_manufacturer)::int api,
+              COUNT(*) FILTER (WHERE e.is_api_manufacturer AND e.country = ANY($1)
+                               AND m.dmf_count BETWEEN 1 AND 3)::int icp,
+              COUNT(*) FILTER (WHERE e.is_us_agent)::int us_agent
+         FROM dmf_establishment_matches m
+         LEFT JOIN fda_establishments e ON e.id = m.establishment_id`, [AROS_US_EU])).rows[0];
+
+    // The publication this page rests on. The register is refreshed on FDA's schedule, so
+    // staleness has to be visible rather than assumed.
+    const src = (await query(
+      `SELECT source_last_modified, MAX(ingested_at) ingested_at, COUNT(*)::int sites
+         FROM fda_establishments GROUP BY source_last_modified
+         ORDER BY MAX(ingested_at) DESC LIMIT 1`)).rows[0] || null;
+
+    const countries = (await query(
+      `SELECT e.country, COUNT(*)::int n FROM dmf_establishment_matches m
+         JOIN fda_establishments e ON e.id = m.establishment_id
+        WHERE e.country IS NOT NULL GROUP BY 1 ORDER BY 2 DESC`)).rows;
+
+    res.json({ items, summary, source: src, countries, scope: icp ? 'icp' : 'all' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /events/cphi/thin-supply — high clinical demand against a thin DMF bench.
 // The sharper commercial list: a molecule many trials need and few companies can legally
 // supply is where an intermediary has leverage. Threshold is a query param, default 3.

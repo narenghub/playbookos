@@ -5,7 +5,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const {
   normalizeName, firmCore, countryOf, isApiManufacturer, isUsAgent,
-  parseDecrs, matchTier, reviewStatusFor,
+  parseDecrs, dedupeBySite, matchTier, reviewStatusFor,
 } = require('./establishments');
 
 const HEADER = ' FEI_NUMBER\tDUNS_NUMBER\tFIRM_NAME\tADDRESS\tEXPIRATION_DATE\tOPERATIONS\t'
@@ -108,4 +108,35 @@ test('only exact and core are auto-confirmed', () => {
   assert.equal(reviewStatusFor('core'), 'auto_confirmed');
   assert.equal(reviewStatusFor('not_found'), 'unreviewed');
   assert.equal(reviewStatusFor(null), 'unreviewed');
+});
+
+test('dedupeBySite UNIONS operations, so a site never loses API MANUFACTURE', () => {
+  // The real Lifecore rows: same firm, same FEI, same address, different operation sets.
+  const key = r => `${r.fei_number}|${r.firm_name}|${r.address}`;
+  const rows = [
+    { fei_number: '1000115753', firm_name: 'Lifecore Biomedical, LLC', address: 'X',
+      operations: 'MANUFACTURE', is_api_manufacturer: false, is_us_agent: false,
+      duns_number: null, establishment_contact_email: null, registrant_name: null,
+      registrant_contact_email: null, exclusion_flag: null },
+    { fei_number: '1000115753', firm_name: 'Lifecore Biomedical, LLC', address: 'X',
+      operations: 'ANALYSIS; API MANUFACTURE; LABEL', is_api_manufacturer: true, is_us_agent: false,
+      duns_number: '9', establishment_contact_email: 'q@lifecore.com', registrant_name: null,
+      registrant_contact_email: null, exclusion_flag: null },
+  ];
+  const out = dedupeBySite(rows, key);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].operations, 'ANALYSIS; API MANUFACTURE; LABEL; MANUFACTURE');
+  // recomputed from the MERGED set — the first row said false
+  assert.equal(out[0].is_api_manufacturer, true);
+  // a present value fills a null one
+  assert.equal(out[0].duns_number, '9');
+  assert.equal(out[0].establishment_contact_email, 'q@lifecore.com');
+});
+
+test('dedupeBySite leaves genuinely distinct sites alone', () => {
+  const key = r => `${r.fei_number}|${r.firm_name}|${r.address}`;
+  const mk = (addr) => ({ fei_number: '1', firm_name: 'Acme', address: addr,
+    operations: 'API MANUFACTURE', is_api_manufacturer: true, is_us_agent: false });
+  assert.equal(dedupeBySite([mk('Site A'), mk('Site B')], key).length, 2);
+  assert.equal(dedupeBySite([], key).length, 0);
 });

@@ -202,6 +202,21 @@ module.exports = {
     defaultDeny: false,
   },
   {
+    // The page implies its single initial-render read. No write exists on this surface at all:
+    // the data is a regulator publication, so there is nothing a user could legitimately edit
+    // here — a correction belongs in a re-ingest, not in a row edit.
+    key: 'intelligence.page_aros_establishments.view',
+    label: "AROS Sourcing — FDA establishments (page)",
+    domain: 'intelligence',
+    surface: 'nav_page',
+    ref: "aros-establishments",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: ['intelligence.aros_establishments.list'],
+    defaultDeny: false,
+  },
+  {
     // excluded from implies (Rule 2 — separate features): PUT /api/events/cphi/exhibitors/:id
     // [write]. The page implies both of its initial-render reads; the review write is separate.
     key: 'intelligence.page_cphi_milan.view',
@@ -2667,6 +2682,18 @@ module.exports = {
     domain: 'intelligence',
     surface: 'api_route',
     ref: "POST /api/notifications/read-all",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: [],
+    defaultDeny: false,
+  },
+  {
+    key: 'intelligence.aros_establishments.list',
+    label: "List — GET /api/aros/establishments",
+    domain: 'intelligence',
+    surface: 'api_route',
+    ref: "GET /api/aros/establishments",
     cost: 'free',
     spend: [],
     dangerous: false,

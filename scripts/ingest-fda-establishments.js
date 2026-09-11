@@ -14,13 +14,21 @@
 // this the same way.
 const MIN_ROWS = 1000;
 
+const crypto = require('crypto');
 const AdmZip = require('adm-zip');
 const { query } = require('../src/lib/db');
-const { parseDecrs } = require('../src/lib/fda/establishments');
+const { parseDecrs, dedupeBySite } = require('../src/lib/fda/establishments');
 
 const URL = 'https://www.accessdata.fda.gov/cder/drls_reg.zip';
 const MEMBER = 'drls_reg.txt';
 const UA = 'playnexa/aros-sourcing (+https://app.playnexa.ai)';
+
+/** One row per registered SITE: a firm may hold several, differing by address and operations. */
+function siteKey(r) {
+  return crypto.createHash('md5')
+    .update(`${r.fei_number || ''}|${r.firm_name}|${r.address || ''}`)
+    .digest('hex');
+}
 
 const argv = process.argv.slice(2);
 const EXECUTE = argv.includes('--execute');
@@ -57,8 +65,10 @@ async function main() {
 
   const entry = new AdmZip(buf).getEntry(MEMBER);
   if (!entry) throw new Error(`${MEMBER} not found in the zip`);
-  const rows = parseDecrs(entry.getData().toString('utf8'));
-  console.log(`\nparsed ${rows.length} establishment rows`);
+  const parsed = parseDecrs(entry.getData().toString('utf8'));
+  // One row per SITE, operations unioned — see dedupeBySite.
+  const rows = dedupeBySite(parsed, siteKey);
+  console.log(`\nparsed ${parsed.length} rows -> ${rows.length} distinct sites (${parsed.length - rows.length} merged)`);
   if (rows.length < MIN_ROWS) {
     throw new Error(`only ${rows.length} rows parsed (floor is ${MIN_ROWS}) — refusing to load`);
   }
@@ -82,16 +92,31 @@ async function main() {
     return;
   }
 
+  // BATCHED. Row-at-a-time was 10,454 round trips and took ten minutes — long enough that a
+  // quarterly refresh is a job someone has to babysit. 500 rows per statement is one order of
+  // magnitude fewer round trips and still well under Postgres's parameter ceiling (16 columns
+  // x 500 = 8,000, against a limit of 65,535).
+  const COLS = 16, CHUNK = 500;
   let written = 0;
-  for (const r of rows) {
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const slice = rows.slice(i, i + CHUNK);
+    const values = [];
+    const tuples = slice.map((r, j) => {
+      const base = j * COLS;
+      values.push(siteKey(r), r.fei_number, r.duns_number, r.firm_name, r.firm_normalized,
+        r.address, r.country, r.operations, r.is_api_manufacturer, r.establishment_contact_name,
+        r.establishment_contact_email, r.registrant_name, r.registrant_contact_email,
+        r.is_us_agent, r.exclusion_flag, lastModified);
+      return '(' + Array.from({ length: COLS }, (_, k) => `$${base + k + 1}`).join(',') + ')';
+    }).join(',');
     await query(
       `INSERT INTO fda_establishments
-         (fei_number, duns_number, firm_name, firm_normalized, address, country, operations,
+         (site_key, fei_number, duns_number, firm_name, firm_normalized, address, country, operations,
           is_api_manufacturer, establishment_contact_name, establishment_contact_email,
           registrant_name, registrant_contact_email, is_us_agent, exclusion_flag,
           source_last_modified)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-       ON CONFLICT (fei_number, firm_name) DO UPDATE SET
+       VALUES ${tuples}
+       ON CONFLICT (site_key) DO UPDATE SET
          duns_number = EXCLUDED.duns_number,
          firm_normalized = EXCLUDED.firm_normalized,
          address = EXCLUDED.address,
@@ -105,12 +130,9 @@ async function main() {
          is_us_agent = EXCLUDED.is_us_agent,
          exclusion_flag = EXCLUDED.exclusion_flag,
          source_last_modified = EXCLUDED.source_last_modified,
-         ingested_at = NOW()`,
-      [r.fei_number, r.duns_number, r.firm_name, r.firm_normalized, r.address, r.country,
-       r.operations, r.is_api_manufacturer, r.establishment_contact_name,
-       r.establishment_contact_email, r.registrant_name, r.registrant_contact_email,
-       r.is_us_agent, r.exclusion_flag, lastModified]);
-    written++;
+         ingested_at = NOW()`, values);
+    written += slice.length;
+    if (written % 2000 === 0 || written === rows.length) console.log(`  ...${written}/${rows.length}`);
   }
   const total = (await query('SELECT COUNT(*)::int n FROM fda_establishments')).rows[0].n;
   console.log(`\n✅ upserted ${written} rows; table now holds ${total}`);

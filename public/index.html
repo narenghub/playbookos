@@ -680,6 +680,7 @@ const NAV_SECTIONS = [
   ]},
   {title:'EVENT AGENT', access:['admin','procurement','business_dev'], items:[
     {id:'cphi-milan', label:'CPHI Milan 2026', icon:'🧪'},
+    {id:'aros-establishments', label:'AROS Sourcing', icon:'🏭'},
   ]},
   {title:'OPERATIONS', access:'*', items:[
     {id:'my-tasks', label:'My Tasks', icon:'✓'},
@@ -716,7 +717,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence"],["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence"],["intelligence"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
 function roleTiersFor(role) {
   const cat = (typeof window !== 'undefined' && window._roleCatalog) || [];
   const row = Array.isArray(cat) ? cat.find(r => r.role_name === role) : null;
@@ -745,7 +746,7 @@ function passesPageReads(pageId, role, tiers) {
 // platform + me are NOT products: they render to the right of the product tabs, separated.
 const PRODUCTS = [
   { key:'abiozen',  label:'Abiozen',  icon:'🧪', kind:'product',
-    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','seo-intelligence','seo-content','linkedin-content','cphi-milan'] },
+    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','seo-intelligence','seo-content','linkedin-content','cphi-milan','aros-establishments'] },
   { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
   { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
   { key:'linkabl',  label:'Linkabl',  icon:'🧑‍💼', kind:'product', pages:['prospects'] },
@@ -1216,7 +1217,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'AROS Sourcing','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   const content = document.getElementById('content');
@@ -3255,6 +3256,137 @@ function cmFileAge(src){
   const warn = weeks >= 10;
   return `${cmEsc(src.source_file)} <span style="color:${warn?'#8a5a00':'#5f6b7a'}">· ${weeks} weeks old${warn?' — next quarterly file supersedes this':''}</span>`;
 }
+
+// ── AROS SOURCING — FDA establishment registrations ───────────────────────────
+// Every column here is regulator-published. That is the point: the routes we measured that
+// inferred a company from its NAME (Google Places, Apollo) were wrong often enough to be
+// unusable — Apollo returned a film company for RISING PHARMA HOLDINGS. The register answers
+// the same questions as fact.
+window._aeState = window._aeState || { scope:'icp', country:'', api:'', band:'', tier:'', data:null };
+function aeEsc(s){ return cmEsc(s); }
+function aeSet(k, v){ window._aeState[k] = v; pages['aros-establishments'](); }
+function aeScope(v){ window._aeState.scope = v; pages['aros-establishments'](); }
+// "Rue Grands Navoirs, Chauny,  F-02300, France (FRA)" -> "Chauny". The register has no city
+// column, so this is a parse, and it returns '' rather than guessing when the shape differs.
+function aeCity(addr){
+  const parts = String(addr||'').split(',').map(x=>x.trim()).filter(Boolean);
+  if (parts.length < 3) return '';
+  const city = parts[1];
+  return /^\d/.test(city) ? (parts[2] || '') : city;
+}
+function aeTierBadge(t){
+  const m = { exact:['#1D9E75','exact'], core:['#0972d3','core'] }[t] || ['#64748b', t||'—'];
+  return `<span style="font-size:10px;font-weight:700;color:${m[0]};border:1px solid ${m[0]};padding:1px 5px;border-radius:3px;text-transform:uppercase;letter-spacing:.4px">${aeEsc(m[1])}</span>`;
+}
+
+pages['aros-establishments'] = async function() {
+  const c = document.getElementById('content');
+  const st = window._aeState;
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading FDA establishments…</p>';
+
+  const qs = new URLSearchParams();
+  if (st.scope === 'all') qs.set('scope','all');
+  if (st.country) qs.set('country', st.country);
+  if (st.api) qs.set('api', st.api);
+  if (st.band) qs.set('band', st.band);
+  if (st.tier) qs.set('tier', st.tier);
+  const res = await API('/aros/establishments?' + qs.toString()).catch(e => ({ error: e.message }));
+  if (res && res.error) {
+    c.innerHTML = '<div class="card"><div class="card-title">AROS Sourcing</div><p style="color:#dc2626">'+aeEsc(res.error)+'</p></div>';
+    return;
+  }
+  st.data = res;
+  const s = res.summary || {};
+  const items = res.items || [];
+
+  const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+    <div>
+      <div class="card-title text-section" style="margin:0">AROS SOURCING · FDA ESTABLISHMENT REGISTER</div>
+      <div class="text-body">Holders of an active US Type II drug master file, joined to their FDA establishment registration. Firm name, registered address, licensed operations and a named contact are all published by the regulator — none of it is inferred. Default view is the ICP slice: API manufacturers in the US/EU with one to three filings.</div>
+    </div>
+  </div>`;
+
+  const stat = (label, val, color) => `<div style="flex:1;min-width:118px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;text-align:center">
+    <div style="font-size:22px;font-weight:800;color:${color||'var(--text-body)'}">${(val==null?0:val).toLocaleString()}</div>
+    <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">${label}</div></div>`;
+  // Census-wide and deliberately fixed: these describe the dataset, not the filtered view.
+  const summaryRow = `<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:stretch">
+    ${stat('ICP slice', s.icp, '#1D9E75')}
+    ${stat('Joined', s.joined, '#0972d3')}
+    ${stat('API manufacture', s.api, '#1B3A6B')}
+    ${stat('Not in register', s.not_found, '#64748b')}
+    ${stat('US-agent registrant', s.us_agent, '#8a2f2f')}
+    <div style="flex:2;min-width:230px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
+      <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Source</div>
+      <div style="font-size:13px;margin-top:4px">FDA CDER register · ${res.source && res.source.source_last_modified ? aeEsc(res.source.source_last_modified) : 'unknown'}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${(res.source&&res.source.sites)||0} registered sites · ${s.exact||0} exact + ${s.core||0} core of ${s.holders||0} holders</div>
+    </div>
+  </div>`;
+
+  // THE WARNING PANEL. 15 of the 132 ICP rows have a third-party US agent as registrant, and
+  // mailing that address reaches a compliance intermediary rather than the plant. It is the
+  // one mistake this dataset makes easy, so it gets a banner rather than a column.
+  const agentCount = items.filter(i => i.is_us_agent).length;
+  const agentWarn = agentCount ? `<div class="card" style="padding:12px 14px;border:2px solid #8a2f2f;background:#fdf3f3">
+    <div style="font-weight:700;color:#8a2f2f">⚠ ${agentCount} of these ${items.length} rows list a third-party US agent as registrant</div>
+    <div style="font-size:12px;color:#7a2525;margin-top:3px">A foreign establishment must name a US agent to register, so its <b>registrant</b> mailbox belongs to a compliance firm (Registrar Corp and similar), not the manufacturer. Use the <b>establishment</b> contact — marked in the table — or you are writing to an intermediary.</div>
+  </div>` : '';
+
+  const countryOpts = ['<option value="">country: any</option>'].concat(
+    (res.countries||[]).map(x => `<option value="${aeEsc(x.country)}"${st.country===x.country?' selected':''}>${aeEsc(x.country)} (${x.n})</option>`)).join('');
+  const bandOpts = [['','filings: any'],['1','1 filing'],['2-3','2-3'],['4-10','4-10'],['11-30','11-30'],['31+','31+']].map(
+    ([v,l]) => `<option value="${v}"${st.band===v?' selected':''}>${l}</option>`).join('');
+  const apiOpts = [['','operations: any'],['true','API MANUFACTURE only'],['false','no API MANUFACTURE']].map(
+    ([v,l]) => `<option value="${v}"${st.api===v?' selected':''}>${l}</option>`).join('');
+  const tierOpts = [['','tier: any'],['exact','exact'],['core','core']].map(
+    ([v,l]) => `<option value="${v}"${st.tier===v?' selected':''}>${l}</option>`).join('');
+
+  const filters = `<div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <div style="display:flex;gap:4px">
+      <button onclick="aeScope('icp')" class="${st.scope==='icp'?'btn-primary':'btn-outline'} btn-sm" style="font-size:12px">ICP slice (${s.icp||0})</button>
+      <button onclick="aeScope('all')" class="${st.scope==='all'?'btn-primary':'btn-outline'} btn-sm" style="font-size:12px">All joined (${s.joined||0})</button>
+    </div>
+    <select onchange="aeSet('country', this.value)" style="font-size:12px;padding:4px">${countryOpts}</select>
+    <select onchange="aeSet('api', this.value)" style="font-size:12px;padding:4px">${apiOpts}</select>
+    <select onchange="aeSet('band', this.value)" style="font-size:12px;padding:4px">${bandOpts}</select>
+    <select onchange="aeSet('tier', this.value)" style="font-size:12px;padding:4px">${tierOpts}</select>
+    <span style="font-size:11px;color:var(--text-muted);margin-left:auto">${items.length} row${items.length===1?'':'s'}</span>
+  </div>`;
+
+  const rows = items.map((it, i) => {
+    const city = aeCity(it.address);
+    const ops = String(it.operations||'').split(';').map(x=>x.trim()).filter(Boolean);
+    const opsHtml = ops.map(o => o.toUpperCase()==='API MANUFACTURE'
+      ? `<span style="background:#1B3A6B;color:#fff;padding:0 5px;border-radius:2px;white-space:nowrap">API MANUFACTURE</span>`
+      : `<span style="color:var(--text-muted);white-space:nowrap">${aeEsc(o)}</span>`).join(' · ');
+    return `<tr style="border-top:1px solid var(--border)${it.is_us_agent?';background:#fdf6f6':''}">
+      <td style="padding:7px 8px;color:var(--text-muted);font-variant-numeric:tabular-nums">${i+1}</td>
+      <td style="padding:7px 8px;font-weight:600">${aeEsc(it.firm_name)}
+        ${it.holder && it.holder.toLowerCase() !== String(it.firm_name).toLowerCase()
+          ? `<div style="font-size:11px;color:var(--text-muted);margin-top:1px">DMF holder: ${aeEsc(it.holder)}</div>` : ''}</td>
+      <td style="padding:7px 8px;white-space:nowrap"><b>${aeEsc(it.country||'—')}</b>${city?`<div style="font-size:11px;color:var(--text-muted)">${aeEsc(city)}</div>`:''}</td>
+      <td style="padding:7px 8px;font-size:11px">${opsHtml||'<span style="color:var(--text-muted)">—</span>'}</td>
+      <td style="padding:7px 8px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${it.dmf_count}</td>
+      <td style="padding:7px 8px;font-size:12px">
+        ${it.establishment_contact_name?`<div>${aeEsc(it.establishment_contact_name)}</div>`:''}
+        ${it.establishment_contact_email?`<a href="mailto:${aeEsc(it.establishment_contact_email)}" style="color:var(--awsc-link,#0972d3)">${aeEsc(it.establishment_contact_email)}</a>`:'<span style="color:var(--text-muted)">—</span>'}
+        ${it.is_us_agent?`<div style="font-size:10px;font-weight:700;color:#8a2f2f;margin-top:3px">⚠ US AGENT ON REGISTRANT — use the address above, not the registrant</div>`:''}</td>
+      <td style="padding:7px 8px">${aeTierBadge(it.match_tier)}</td>
+    </tr>`;
+  }).join('');
+
+  const table = `<div class="card" style="padding:0">
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+        <th style="padding:8px 8px">#</th><th style="padding:8px 8px">Registered firm</th>
+        <th style="padding:8px 8px">Country</th><th style="padding:8px 8px">Licensed operations</th>
+        <th style="padding:8px 8px;text-align:right">DMFs</th><th style="padding:8px 8px">Establishment contact</th>
+        <th style="padding:8px 8px">Match</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="7" style="padding:16px;color:var(--text-muted)">No establishments match these filters.</td></tr>'}</tbody>
+    </table></div></div>`;
+
+  c.innerHTML = header + summaryRow + agentWarn + filters + table;
+};
 
 pages['cphi-milan'] = async function() {
   const c = document.getElementById('content');
