@@ -109,11 +109,12 @@ body.pnav #aws-topbar .aws-wordmark{color:#fff;font-size:14px;letter-spacing:.3p
 body.pnav #aws-topbar .aws-wordmark .wm-play{font-weight:400}
 body.pnav #aws-topbar .aws-wordmark .wm-nexa{font-weight:700}
 /* Search, sized from the AROS admin console measured at 1440: 520px = 36.1% of the window,
-   #1a242f, 34px tall, 8px radius. width is the percentage with a min/max so it stays usable on
-   a laptop and does not sprawl on an ultrawide. flex:0 1 auto so it YIELDS before the account
+   #1a242f, 34px tall, 8px radius. 36vw, NOT 36% — the field sits inside .aws-tb-left, so a
+   percentage resolves against that flex group and lands at 260px, not a third of the bar. The
+   min/max keep it usable on a laptop and stop it sprawling on an ultrawide. flex:0 1 auto so it YIELDS before the account
    control does when the bar gets tight — losing part of a search field is recoverable, losing
    the sign-out control is not. */
-body.pnav #aws-topbar .aws-search{display:flex;align-items:center;gap:8px;background:#1a242f;color:var(--awsc-topbar-dim);padding:0 12px;height:34px;border-radius:8px;width:36%;min-width:260px;max-width:560px;flex:0 1 auto;font-size:13px;cursor:text}
+body.pnav #aws-topbar .aws-search{display:flex;align-items:center;gap:8px;background:#1a242f;color:var(--awsc-topbar-dim);padding:0 12px;height:34px;border-radius:8px;width:36vw;min-width:260px;max-width:560px;flex:0 1 auto;font-size:13px;cursor:text}
 body.pnav #aws-topbar .aws-search .aws-search-label{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* The keyboard hint sits right, quiet — it is an affordance, not a control. */
 body.pnav #aws-topbar .aws-search .aws-kbd{flex-shrink:0;font-size:10px;font-weight:600;letter-spacing:.3px;color:var(--awsc-topbar-dim);border:1px solid #3b4b5e;border-radius:4px;padding:1px 5px;line-height:1.4}
