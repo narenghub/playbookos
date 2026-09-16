@@ -100,11 +100,23 @@ body.pnav #aws-topbar .aws-icon-btn:focus-visible,body.pnav #aws-topbar .aws-gri
    default: it is chrome, not an action, so it only lifts to white on hover. */
 body.pnav #aws-topbar .aws-grid-btn{width:26px;height:26px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:none;border:none;border-radius:2px;color:var(--awsc-topbar-fg);cursor:pointer;line-height:0}
 body.pnav #aws-topbar .aws-grid-btn:hover{color:#fff;background:#2f3d4f}
+/* Help + settings: the same quiet chrome treatment as the grid and the bell. */
+body.pnav #aws-topbar .aws-chrome-btn{width:28px;height:28px;padding:0;display:inline-flex;align-items:center;justify-content:center;background:none;border:none;border-radius:4px;color:var(--awsc-topbar-fg);cursor:pointer;line-height:0}
+body.pnav #aws-topbar .aws-chrome-btn:hover{color:#fff;background:#2f3d4f}
+body.pnav #aws-topbar .aws-chrome-btn:focus-visible{outline:2px solid #fff;outline-offset:1px}
 body.pnav #aws-topbar .aws-logo{width:20px;height:20px;object-fit:contain;flex-shrink:0}
 body.pnav #aws-topbar .aws-wordmark{color:#fff;font-size:14px;letter-spacing:.3px}
 body.pnav #aws-topbar .aws-wordmark .wm-play{font-weight:400}
 body.pnav #aws-topbar .aws-wordmark .wm-nexa{font-weight:700}
-body.pnav #aws-topbar .aws-search{display:flex;align-items:center;gap:6px;background:#2f3d4f;color:var(--awsc-topbar-dim);padding:4px 10px;min-width:200px;font-size:12px;cursor:text}
+/* Search, sized from the AROS admin console measured at 1440: 520px = 36.1% of the window,
+   #1a242f, 34px tall, 8px radius. width is the percentage with a min/max so it stays usable on
+   a laptop and does not sprawl on an ultrawide. flex:0 1 auto so it YIELDS before the account
+   control does when the bar gets tight — losing part of a search field is recoverable, losing
+   the sign-out control is not. */
+body.pnav #aws-topbar .aws-search{display:flex;align-items:center;gap:8px;background:#1a242f;color:var(--awsc-topbar-dim);padding:0 12px;height:34px;border-radius:8px;width:36%;min-width:260px;max-width:560px;flex:0 1 auto;font-size:13px;cursor:text}
+body.pnav #aws-topbar .aws-search .aws-search-label{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The keyboard hint sits right, quiet — it is an affordance, not a control. */
+body.pnav #aws-topbar .aws-search .aws-kbd{flex-shrink:0;font-size:10px;font-weight:600;letter-spacing:.3px;color:var(--awsc-topbar-dim);border:1px solid #3b4b5e;border-radius:4px;padding:1px 5px;line-height:1.4}
 body.pnav #aws-topbar .aws-spacer{flex:1}
 /* Global tabs (Platform, Me) — text only, no icon. Products are not tabs any more; they live
    in the launcher, which is also a text list. Nothing in the bar renders a product PNG. */
@@ -119,6 +131,9 @@ body.pnav #aws-topbar .aws-tb-globals{display:flex;align-items:center;gap:2px}
 #product-launcher{display:none}
 body.pnav #product-launcher.open{display:block;position:fixed;top:41px;left:8px;z-index:400;min-width:280px;max-width:340px;max-height:70vh;overflow-y:auto;background:#fff;border:1px solid var(--awsc-border);box-shadow:0 6px 20px rgba(0,0,0,.22)}
 body.pnav #product-launcher .pl-head{padding:8px 14px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--awsc-fg2);border-bottom:1px solid var(--awsc-border);position:sticky;top:0;background:#fff}
+/* the second group's heading scrolls with its rows — only the first is sticky, or two headings
+   would stack at the top and neither would say which rows you are looking at. */
+body.pnav #product-launcher .pl-head-2{position:static;border-top:1px solid var(--awsc-border)}
 body.pnav #product-launcher .pl-row{display:flex;align-items:center;gap:10px;width:100%;padding:9px 14px;cursor:pointer;background:none;border:0;border-bottom:1px solid var(--awsc-strip);text-align:left}
 body.pnav #product-launcher .pl-row:hover{background:var(--awsc-strip)}
 body.pnav #product-launcher .pl-row.active{background:var(--awsc-active)}
@@ -145,8 +160,17 @@ body.pnav #notif-panel .np-title{font-size:13px;color:var(--awsc-fg);font-weight
 body.pnav #notif-panel .np-row.np-sev-error .np-title{color:#dc2626}
 body.pnav #notif-panel .np-meta{font-size:11px;color:var(--awsc-fg2);margin-top:2px}
 body.pnav #notif-panel .np-empty{padding:16px 14px;font-size:13px;color:var(--awsc-fg2)}
-body.pnav #aws-topbar #revenue-status .rs-wrap{color:var(--awsc-topbar-fg);font-size:12px}
+/* C — the spend meter, shrunk to a figure and a status dot. The 140px track was the widest
+   thing in the bar after the search took a third of it, and a progress bar is a lot of pixels
+   to say what a coloured number says.
+   PURELY CSS: the dashboard writes this element's innerHTML by id (search rsEl), so the markup
+   must not be touched here. The track collapses to an 8px dot and the FILL keeps its inline
+   background — which is the status colour the dashboard computed — so the signal survives the
+   bar it used to live in. width is forced because the fill carries an inline percentage. */
+body.pnav #aws-topbar #revenue-status .rs-wrap{color:var(--awsc-topbar-fg);font-size:12px;gap:7px}
 body.pnav #aws-topbar #revenue-status .rs-wrap span{color:var(--awsc-topbar-fg) !important}
+body.pnav #aws-topbar #revenue-status .rs-bar{width:8px !important;height:8px;border-radius:50%;background:#3b4b5e;flex-shrink:0}
+body.pnav #aws-topbar #revenue-status .rs-fill{width:8px !important;height:8px;border-radius:50%}
 /* The classic shell's Sign out button lives in the page header and is NOT removed — with the
    flag off it is still the only way to sign out. pnav simply hides it and offers the account
    menu instead. Deleting the element would change the classic shell. */
@@ -163,6 +187,17 @@ body.pnav #aws-acct-menu .am-name{font-size:13px;font-weight:700;color:var(--aws
 body.pnav #aws-acct-menu .am-email{font-size:12px;color:var(--awsc-fg2);margin-top:2px;word-break:break-all}
 body.pnav #aws-acct-menu .am-row{display:block;width:100%;padding:9px 14px;text-align:left;background:none;border:0;cursor:pointer;font-size:14px;font-weight:600;color:var(--awsc-fg);font-family:inherit}
 body.pnav #aws-acct-menu .am-row:hover{background:var(--awsc-strip)}
+/* Help panel: same shell as the account menu — one popover treatment, not two. */
+#aws-help-menu{display:none}
+body.pnav #aws-help-menu.open{display:block;position:fixed;top:41px;right:8px;z-index:400;min-width:260px;max-width:320px;background:#fff;border:1px solid var(--awsc-border);box-shadow:0 6px 20px rgba(0,0,0,.22)}
+body.pnav #aws-help-menu .am-head{padding:10px 14px;border-bottom:1px solid var(--awsc-border)}
+body.pnav #aws-help-menu .am-name{font-size:13px;font-weight:700;color:var(--awsc-fg)}
+body.pnav #aws-help-menu .am-email{font-size:12px;color:var(--awsc-fg2);margin-top:2px}
+body.pnav #aws-help-menu .hm-body{padding:8px 14px;border-bottom:1px solid var(--awsc-border)}
+body.pnav #aws-help-menu .hm-row{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--awsc-fg2);padding:3px 0}
+body.pnav #aws-help-menu .hm-row b{color:var(--awsc-fg);font-weight:600}
+body.pnav #aws-help-menu .am-row{display:block;padding:9px 14px;font-size:14px;font-weight:600;color:var(--awsc-fg);text-decoration:none}
+body.pnav #aws-help-menu .am-row:hover{background:var(--awsc-strip)}
 /* C — change-password panel. Centred over a scrim rather than hung off the menu: three fields
    and a result message is too much to read in a dropdown, and the scrim makes it obvious the
    rest of the console is not the thing you are answering. */
@@ -489,6 +524,15 @@ button:disabled{opacity:.6;cursor:not-allowed}
   <div id="aws-topbar"></div>
   <div id="breadcrumb"></div>
   <div id="product-launcher"></div>
+  <div id="aws-help-menu" role="menu">
+    <div class="am-head"><div class="am-name">Help</div>
+      <div class="am-email">PlayNexa — the operating console for the whole group</div></div>
+    <div class="hm-body">
+      <div class="hm-row"><span>Current page</span><b id="hm-page">—</b></div>
+      <div class="hm-row"><span>Signed in as</span><b id="hm-role">—</b></div>
+    </div>
+    <a class="am-row" href="mailto:naren@abiozen.com?subject=PlayNexa%20support" role="menuitem">Email support</a>
+  </div>
   <div id="cpw-panel" role="dialog" aria-modal="true" aria-labelledby="cpw-title">
     <div class="cpw-card">
       <div class="cpw-head" id="cpw-title">Change password</div>
@@ -944,6 +988,20 @@ function buildAwsTopbar(role, tiers) {
       refreshNotifBadge();
     }
     const rs = document.getElementById('revenue-status'); if (rs) right.appendChild(rs);   // move, keep id + content
+    // Help and settings, between the bell and the account — the AWS order. The AROS console
+    // carries only the gear; help is standard in AWS and is wanted here, so both are added.
+    // Drawn, not typed: ? and a gear emoji render at different weights per platform and these
+    // sit beside the bell's SVG.
+    for (const [cls, label, svg, onclick] of [
+      ['aws-help-btn', 'Help', HELP_SVG, 'openHelp()'],
+      ['aws-gear-btn', 'Settings', GEAR_SVG, "navigate('settings')"],
+    ]) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'aws-chrome-btn ' + cls;
+      b.setAttribute('aria-label', label); b.title = label;
+      b.innerHTML = svg; b.setAttribute('onclick', onclick);
+      right.appendChild(b);
+    }
     // C — one account control at the far right, in place of the bare email + Sign out button.
     const acct = document.createElement('div'); acct.className = 'aws-acct';
     acct.innerHTML =
@@ -955,11 +1013,11 @@ function buildAwsTopbar(role, tiers) {
         `<button class="am-row" role="menuitem" onclick="logout()">Sign out</button></div>`;
     right.appendChild(acct);
   }
-  const vis = visibleProducts(role, tiers);
-  // B — products are NO LONGER tabs; only the global areas (Platform, Me) stay as top-bar tabs.
-  // Platform/Me are plain text labels (no emoji) to match the AWS bar.
-  const gtab = p => `<button class="aws-ptab${p.key === window._activeProduct ? ' active' : ''}" onclick="selectProduct('${p.key}')" title="${p.label}"><span class="aws-ptab-label">${p.label}</span></button>`;
-  el.querySelector('.aws-tb-globals').innerHTML = vis.filter(p => p.kind === 'global').map(gtab).join('');
+  // B — NOTHING is a top-bar tab any more. Products AND the global areas (Platform, Me) all
+  // live in the grid panel, which is what the reference console does: one place that answers
+  // "where else can I go", rather than two competing for the same bar. The bar is then free for
+  // the search, which needs a third of the window.
+  el.querySelector('.aws-tb-globals').innerHTML = '';
   // A — the hamburger opens the product launcher (it no longer toggles the sidebar).
   // A — the hamburger toggles the SIDEBAR, and the 3x3 grid immediately right of the lockup
   // opens the product launcher. That is the AWS division of labour: global chrome on the left
@@ -970,7 +1028,8 @@ function buildAwsTopbar(role, tiers) {
     `<img class="aws-logo" src="/img/playnexa-icon.png" alt="" onerror="this.remove()">` +
     `<span class="aws-wordmark"><span class="wm-play">Play</span><span class="wm-nexa">Nexa</span></span>` +
     `<button class="aws-grid-btn" id="pnav-grid" onclick="togglePlauncher()" aria-label="Open product launcher" aria-haspopup="true">${GRID_SVG}</button>` +
-    `<div class="aws-search" aria-hidden="true"><span>🔍</span><span>Search</span></div>`;
+    `<div class="aws-search" aria-hidden="true"><span>🔍</span>` +
+      `<span class="aws-search-label">Search PlayNexa</span><span class="aws-kbd">⌘K</span></div>`;
   syncHamburgerState();
   buildLauncher(role, tiers);
   fillAcctMenu();
@@ -978,6 +1037,15 @@ function buildAwsTopbar(role, tiers) {
 
 // A 3x3 grid, drawn rather than typed: the ⊞ and ▦ characters render at wildly different
 // weights across the fonts this bar falls back to, and this sits next to a logo.
+const HELP_SVG = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" '
+  + 'stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="6.6"/>'
+  + '<path d="M6.2 6.1a1.85 1.85 0 1 1 2.3 1.9c-.4.15-.6.5-.6.95v.35"/>'
+  + '<circle cx="8" cy="11.9" r=".75" fill="currentColor" stroke="none"/></svg>';
+const GEAR_SVG = '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" '
+  + 'stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="2.3"/>'
+  + '<path d="M8 1.3v1.6M8 13.1v1.6M14.7 8h-1.6M2.9 8H1.3M12.7 3.3l-1.1 1.1M4.4 11.6l-1.1 1.1'
+  + 'M12.7 12.7l-1.1-1.1M4.4 4.4L3.3 3.3"/></svg>';
+
 const GRID_SVG = '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" focusable="false">'
   + [0,1,2].map(r => [0,1,2].map(c =>
       `<rect x="${c*6}" y="${r*6}" width="3.4" height="3.4" rx="0.6" fill="currentColor"></rect>`).join('')).join('')
@@ -1017,7 +1085,11 @@ function buildLauncher(role, tiers) {
       `<span class="pl-mark">${active ? '✓' : ''}</span>` +
       `</button>`;
   };
-  el.innerHTML = `<div class="pl-head">Products</div>` + prods.map(row).join('');
+  // Two groups: the products, then the global areas beneath them. Same rows, one divider —
+  // Platform and Me are places you go, not a different KIND of thing needing its own chrome.
+  const globals = visibleProducts(role, tiers).filter(p => p.kind === 'global');
+  el.innerHTML = `<div class="pl-head">Products</div>` + prods.map(row).join('')
+    + (globals.length ? `<div class="pl-head pl-head-2">Platform</div>` + globals.map(row).join('') : '');
 }
 function togglePlauncher() {
   const el = document.getElementById('product-launcher');
@@ -1095,6 +1167,32 @@ function acctOutside(e) {
   if (el && !el.contains(e.target) && !(btn && btn.contains(e.target))) closeAcctMenu();
 }
 function acctEsc(e) { if (e.key === 'Escape') closeAcctMenu(); }
+
+// ── help ────────────────────────────────────────────────────────────────────────
+// Small and real. A (?) that does nothing is worse than no (?), so this carries the things
+// someone actually asks chrome for: where they are, who to ask, and what the shortcut is.
+function openHelp() {
+  closeAcctMenu(); closePlauncher();
+  const el = document.getElementById('aws-help-menu');
+  if (!el) return;
+  if (el.classList.contains('open')) { closeHelp(); return; }
+  const btn = document.querySelector('#aws-topbar .aws-help-btn');
+  if (btn) el.style.right = Math.max(8, Math.round(window.innerWidth - btn.getBoundingClientRect().right)) + 'px';
+  el.classList.add('open');
+  setTimeout(() => { document.addEventListener('click', helpOutside, true); document.addEventListener('keydown', helpEsc); }, 0);
+}
+function closeHelp() {
+  const el = document.getElementById('aws-help-menu');
+  if (el) el.classList.remove('open');
+  document.removeEventListener('click', helpOutside, true);
+  document.removeEventListener('keydown', helpEsc);
+}
+function helpOutside(e) {
+  const el = document.getElementById('aws-help-menu');
+  const btn = document.querySelector('#aws-topbar .aws-help-btn');
+  if (el && !el.contains(e.target) && !(btn && btn.contains(e.target))) closeHelp();
+}
+function helpEsc(e) { if (e.key === 'Escape') closeHelp(); }
 
 // ── C — change password ─────────────────────────────────────────────────────────
 function cpwMsg(text, kind) {
@@ -1286,6 +1384,11 @@ function navigate(page) {
   const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'FDA Establishments','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
+  // keep the help panel's facts true rather than stale
+  const hp = document.getElementById('hm-page');
+  if (hp) hp.textContent = titles[page] || page;
+  const hr = document.getElementById('hm-role');
+  if (hr) hr.textContent = (currentUser && currentUser.role) || '—';
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
   pages[page]();
