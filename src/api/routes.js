@@ -4564,6 +4564,61 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligen
 // review WRITE (PUT below) deliberately keeps the narrow gate — a verdict on a match is not a
 // read, and nothing about widening access to the list implies widening who may record one.
 
+// ── Abiozen sourcing: research institutions (trial SITES, not sponsors) ───────
+// The customer side: universities, hospitals, cancer centres and institutes that buy research
+// chemicals. Parsed from clinical_studies.raw_json — no external source, no enrichment step.
+const RI_US_EU = ['United States', 'United Kingdom', 'Switzerland', 'Norway', 'Iceland',
+  'Austria', 'Belgium', 'Bulgaria', 'Croatia', 'Cyprus', 'Czechia', 'Czech Republic', 'Denmark',
+  'Estonia', 'Finland', 'France', 'Germany', 'Greece', 'Hungary', 'Ireland', 'Italy', 'Latvia',
+  'Lithuania', 'Luxembourg', 'Malta', 'Netherlands', 'Poland', 'Portugal', 'Romania', 'Slovakia',
+  'Slovenia', 'Spain', 'Sweden'];
+
+router.get('/institutions', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const clauses = [];
+    const params = [];
+    // DEFAULT is the contactable US/EU cut, not everything: 10,493 institutions exist but the
+    // ones you can act on today are the US/EU rows carrying a published contact. scope=all opts out.
+    const scoped = req.query.scope !== 'all';
+    if (scoped) {
+      params.push(RI_US_EU);
+      clauses.push(`country = ANY($${params.length})`);
+      clauses.push('contact_email IS NOT NULL');
+    }
+    if (req.query.country) { params.push(req.query.country); clauses.push(`country = $${params.length}`); }
+    if (req.query.type) { params.push(req.query.type); clauses.push(`facility_type = $${params.length}`); }
+    if (req.query.has_email === 'true') clauses.push('contact_email IS NOT NULL');
+    else if (req.query.has_email === 'false') clauses.push('contact_email IS NULL');
+    const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+
+    const items = (await query(
+      `SELECT id, name, facility_type, city, state, country, study_count,
+              contact_name, contact_email, first_seen, last_seen
+         FROM research_institutions ${where}
+        ORDER BY study_count DESC, name
+        LIMIT 500`, params)).rows;
+
+    // Census-wide and fixed: the header describes the dataset, not the current view.
+    const summary = (await query(
+      `SELECT COUNT(*)::int total,
+              COUNT(*) FILTER (WHERE contact_email IS NOT NULL)::int with_email,
+              COUNT(*) FILTER (WHERE country = ANY($1))::int us_eu,
+              COUNT(*) FILTER (WHERE country = ANY($1) AND contact_email IS NOT NULL)::int contactable,
+              COUNT(DISTINCT country)::int countries
+         FROM research_institutions`, [RI_US_EU])).rows[0];
+
+    const countries = (await query(
+      `SELECT country, COUNT(*)::int n FROM research_institutions
+        WHERE country IS NOT NULL GROUP BY 1 ORDER BY 2 DESC`)).rows;
+    const types = (await query(
+      `SELECT facility_type, COUNT(*)::int n FROM research_institutions GROUP BY 1 ORDER BY 2 DESC`)).rows;
+    const src = (await query(
+      `SELECT MAX(refreshed_at) refreshed_at, COUNT(*)::int rows FROM research_institutions`)).rows[0];
+
+    res.json({ items, summary, countries, types, source: src, scope: scoped ? 'contactable' : 'all' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── AROS sourcing: DMF holders joined to FDA establishment registrations ───────
 // The seed for an AROS target list. Every field here is regulator-published — firm name,
 // registered address, what the site is licensed to do, and a named contact — which is why

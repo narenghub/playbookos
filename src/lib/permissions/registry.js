@@ -232,6 +232,20 @@ module.exports = {
     defaultDeny: false,
   },
   {
+    // The page implies its single read. No write surface: the rows are parsed from the trial
+    // registry, so a correction belongs in a re-parse, not a row edit.
+    key: 'intelligence.page_research_institutions.view',
+    label: "Research Institutions (page)",
+    domain: 'intelligence',
+    surface: 'nav_page',
+    ref: "research-institutions",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: ['intelligence.research_institutions.list'],
+    defaultDeny: false,
+  },
+  {
     // The page implies its single initial-render read. No write exists on this surface at all:
     // the data is a regulator publication, so there is nothing a user could legitimately edit
     // here — a correction belongs in a re-ingest, not in a row edit.
@@ -2712,6 +2726,18 @@ module.exports = {
     domain: 'intelligence',
     surface: 'api_route',
     ref: "POST /api/notifications/read-all",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: [],
+    defaultDeny: false,
+  },
+  {
+    key: 'intelligence.research_institutions.list',
+    label: "List — GET /api/institutions",
+    domain: 'intelligence',
+    surface: 'api_route',
+    ref: "GET /api/institutions",
     cost: 'free',
     spend: [],
     dangerous: false,
