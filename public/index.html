@@ -117,6 +117,17 @@ body.pnav #aws-topbar .aws-wordmark .wm-nexa{font-weight:700}
 body.pnav #aws-topbar .aws-search{display:flex;align-items:center;gap:8px;background:#1a242f;color:var(--awsc-topbar-dim);padding:0 12px;height:34px;border-radius:8px;width:36vw;min-width:260px;max-width:560px;flex:0 1 auto;font-size:13px;cursor:text}
 body.pnav #aws-topbar .aws-search .aws-search-label{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* The keyboard hint sits right, quiet — it is an affordance, not a control. */
+/* the real input, dressed as the bar rather than as a form control */
+body.pnav #aws-topbar .aws-search input{flex:1;min-width:0;width:auto;background:none;border:none;outline:none;color:#fff;font-size:13px;font-family:inherit;padding:0;height:32px}
+body.pnav #aws-topbar .aws-search input::placeholder{color:var(--awsc-topbar-dim);opacity:1}
+/* Results: the same popover shell as the account and help panels. */
+#pnav-search-results{display:none}
+body.pnav #pnav-search-results.open{display:block;position:fixed;top:44px;z-index:420;left:50%;transform:translateX(-50%);width:36vw;min-width:260px;max-width:560px;background:#fff;border:1px solid var(--awsc-border);box-shadow:0 6px 20px rgba(0,0,0,.22)}
+body.pnav #pnav-search-results .sr-row{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:9px 14px;background:none;border:0;border-bottom:1px solid var(--awsc-strip);text-align:left;cursor:pointer;font-family:inherit}
+body.pnav #pnav-search-results .sr-row:hover,body.pnav #pnav-search-results .sr-row.sel{background:var(--awsc-active)}
+body.pnav #pnav-search-results .sr-name{font-size:14px;font-weight:600;color:var(--awsc-fg)}
+/* the product is CONTEXT, not a second title: prospects exists in three of them */
+body.pnav #pnav-search-results .sr-prod{font-size:11px;color:var(--awsc-fg2);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
 body.pnav #aws-topbar .aws-search .aws-kbd{flex-shrink:0;font-size:10px;font-weight:600;letter-spacing:.3px;color:var(--awsc-topbar-dim);border:1px solid #3b4b5e;border-radius:4px;padding:1px 5px;line-height:1.4}
 body.pnav #aws-topbar .aws-spacer{flex:1}
 /* Global tabs (Platform, Me) — text only, no icon. Products are not tabs any more; they live
@@ -525,6 +536,7 @@ button:disabled{opacity:.6;cursor:not-allowed}
   <div id="aws-topbar"></div>
   <div id="breadcrumb"></div>
   <div id="product-launcher"></div>
+  <div id="pnav-search-results" role="listbox" aria-label="Search results"></div>
   <div id="aws-help-menu" role="menu">
     <div class="am-head"><div class="am-name">Help</div>
       <div class="am-email">PlayNexa — the operating console for the whole group</div></div>
@@ -1029,8 +1041,12 @@ function buildAwsTopbar(role, tiers) {
     `<img class="aws-logo" src="/img/playnexa-icon.png" alt="" onerror="this.remove()">` +
     `<span class="aws-wordmark"><span class="wm-play">Play</span><span class="wm-nexa">Nexa</span></span>` +
     `<button class="aws-grid-btn" id="pnav-grid" onclick="togglePlauncher()" aria-label="Open product launcher" aria-haspopup="true">${GRID_SVG}</button>` +
-    `<div class="aws-search" aria-hidden="true"><span>🔍</span>` +
-      `<span class="aws-search-label">Search PlayNexa</span><span class="aws-kbd">⌘K</span></div>`;
+    `<div class="aws-search"><span aria-hidden="true">🔍</span>` +
+      `<input id="pnav-search" type="text" autocomplete="off" spellcheck="false" role="combobox"` +
+      ` aria-expanded="false" aria-controls="pnav-search-results" aria-label="Search pages"` +
+      ` placeholder="Search PlayNexa" oninput="searchInput()" onkeydown="searchKey(event)"` +
+      ` onfocus="searchInput()">` +
+      `<span class="aws-kbd" aria-hidden="true">${SEARCH_HINT}</span></div>`;
   syncHamburgerState();
   buildLauncher(role, tiers);
   fillAcctMenu();
@@ -1195,6 +1211,117 @@ function helpOutside(e) {
 }
 function helpEsc(e) { if (e.key === 'Escape') closeHelp(); }
 
+// ── search ──────────────────────────────────────────────────────────────────────
+// PAGE NAMES ONLY, and only pages THIS user can already open.
+//
+// The candidate set is not computed here. It is visibleProducts() x productVisiblePages(),
+// the same two functions the sidebar and the launcher call, which bottom out in
+// pageVisibleToRole() — section family AND page tier reads. So the search cannot offer a page
+// the sidebar would not, and it changes automatically when the nav rules do. It also inherits
+// the guard on the 8 routed-only pages for free: PAGE_SECTION has no entry for them, so
+// pageVisibleToRole is false and they can never surface here.
+//
+// Results are (page, product) PAIRS, not pages: `prospects` belongs to GolfNex, Favly and
+// Linkabl, and "Prospects" alone would not say which one you were about to open.
+const SEARCH_HINT = (navigator.platform || '').toLowerCase().includes('mac') ? '⌘K' : 'Ctrl K';
+window._searchSel = 0;
+
+function searchCandidates() {
+  const role = (currentUser && currentUser.role) || '';
+  const tiers = roleTiersFor(role);
+  const out = [];
+  for (const p of visibleProducts(role, tiers)) {
+    for (const id of productVisiblePages(p, role, tiers)) {
+      const item = (PAGE_SECTION[id] && PAGE_SECTION[id].items.find(i => i.id === id)) || null;
+      out.push({ id, product: p.key, productLabel: p.label, label: (item && item.label) || id });
+    }
+  }
+  return out;
+}
+
+// prefix > word-start > substring. Not fuzzy: "mark" should put Market Intelligence first, and
+// a typo returning something confident is worse than returning nothing.
+function searchScore(label, q) {
+  const l = label.toLowerCase();
+  if (l.startsWith(q)) return 0;
+  if (l.split(/\s+/).some(w => w.startsWith(q))) return 1;
+  if (l.includes(q)) return 2;
+  return -1;
+}
+
+function searchMatches(q) {
+  q = String(q || '').trim().toLowerCase();
+  if (!q) return [];
+  return searchCandidates()
+    .map(c => ({ ...c, score: searchScore(c.label, q) }))
+    .filter(c => c.score >= 0)
+    .sort((a, b) => a.score - b.score || a.label.localeCompare(b.label))
+    .slice(0, 8);
+}
+
+function searchInput() {
+  const input = document.getElementById('pnav-search');
+  const box = document.getElementById('pnav-search-results');
+  if (!input || !box) return;
+  const items = searchMatches(input.value);
+  window._searchItems = items;
+  if (window._searchSel >= items.length) window._searchSel = 0;
+  if (!items.length) {
+    box.classList.remove('open'); input.setAttribute('aria-expanded', 'false');
+    box.innerHTML = ''; return;
+  }
+  box.innerHTML = items.map((it, i) =>
+    `<button class="sr-row${i === window._searchSel ? ' sel' : ''}" role="option"` +
+    ` aria-selected="${i === window._searchSel}"` +
+    ` onmousedown="event.preventDefault();searchGo(${i})">` +
+      `<span class="sr-name">${cmEsc(it.label)}</span>` +
+      `<span class="sr-prod">${cmEsc(it.productLabel)}</span></button>`).join('');
+  box.classList.add('open'); input.setAttribute('aria-expanded', 'true');
+}
+
+function searchGo(i) {
+  const items = window._searchItems || [];
+  const it = items[i];
+  if (!it) return;
+  searchClear();
+  // Cross-product: switch AND land on the chosen page, not the product's first one.
+  if (it.product !== window._activeProduct) switchProduct(it.product, it.id);
+  else navigate(it.id);
+}
+
+function searchClear() {
+  const input = document.getElementById('pnav-search');
+  const box = document.getElementById('pnav-search-results');
+  if (input) { input.value = ''; input.setAttribute('aria-expanded', 'false'); input.blur(); }
+  if (box) { box.classList.remove('open'); box.innerHTML = ''; }
+  window._searchItems = []; window._searchSel = 0;
+}
+
+function searchKey(e) {
+  const items = window._searchItems || [];
+  if (e.key === 'Escape') { e.preventDefault(); searchClear(); return; }
+  if (e.key === 'Enter') { e.preventDefault(); searchGo(window._searchSel); return; }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    if (!items.length) return;
+    e.preventDefault();
+    window._searchSel = (window._searchSel + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length;
+    searchInput();
+  }
+}
+
+// One global listener, registered once. preventDefault so the browser's own find does not open.
+if (!window._searchHotkeyBound) {
+  window._searchHotkeyBound = true;
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+      const input = document.getElementById('pnav-search');
+      if (!input) return;                       // flag OFF: no top bar, no search, no hotkey
+      e.preventDefault();
+      input.focus(); input.select();
+    }
+  });
+}
+
 // ── C — change password ─────────────────────────────────────────────────────────
 function cpwMsg(text, kind) {
   const el = document.getElementById('cpw-msg');
@@ -1334,11 +1461,21 @@ function toggleSidebarCollapse() {
 
 // Switch products: set the active product, carry the product dimension into the product-scoped
 // pages (prospects/content — no page function touched), rebuild bar+sidebar, open first page.
-function selectProduct(key) {
+/**
+ * Switch to a product and open ONE page in it.
+ *
+ * Extracted from selectProduct so search can land on the page you picked rather than the
+ * product's first one. selectProduct is now this with the target left out — the switching
+ * sequence (pre-scoping the product-scoped filters, then rebuilding bar, top bar and sidebar
+ * in that order) lives here and nowhere else.
+ *
+ * Returns the page it opened, or null.
+ */
+function switchProduct(key, targetPage) {
   const role = (currentUser && currentUser.role) || '';
   const tiers = roleTiersFor(role);
   const product = PRODUCTS.find(p => p.key === key);
-  if (!product) return;
+  if (!product) return null;
   window._activeProduct = key;
   if (key === 'golfnex' || key === 'favly') {                              // real products pre-scope the page
     if (window._ppFilters) { window._ppFilters.product = key; window._ppFilters.page = 1; }
@@ -1348,8 +1485,13 @@ function selectProduct(key) {
   buildAwsTopbar(role, tiers);
   buildProductSidebar(role, tiers);
   const pages = productVisiblePages(product, role, tiers);
-  if (pages.length) navigate(pages[0]);
+  // A target is honoured only if it is VISIBLE in this product for this role — the search can
+  // only offer such pages anyway, but this way the guarantee lives at the navigation site too.
+  const target = (targetPage && pages.includes(targetPage)) ? targetPage : pages[0];
+  if (target) { navigate(target); return target; }
+  return null;
 }
+function selectProduct(key) { return switchProduct(key, null); }
 
 // Dashboard Quick Actions — fire an admin trigger endpoint and report inline.
 async function dashAction(endpoint, body, btnId, msgId) {
