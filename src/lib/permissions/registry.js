@@ -10,6 +10,36 @@
 // implies a write, a spend action, or an adminOnly route — those are listed as separate
 // features and noted in a comment on the page entry.
 
+// ── ORPHAN NAV_PAGE FEATURES — the trap in any resolver-driven nav work ──────────────
+//
+// 36 features carry surface:'nav_page'. NAV_SECTIONS in public/index.html holds 28 items.
+// Every nav item HAS a feature; 8 features have NO nav item:
+//
+//     my-activity         personal.page_my_activity.view
+//     playbook            personal.page_playbook.view
+//     milestones          personal.page_milestones.view
+//     ai-insights         intelligence.page_ai_insights.view
+//     decision-engine     intelligence.page_decision_engine.view
+//     data-pipeline       platform.page_data_pipeline.view
+//     execution-graph     platform.page_execution_graph.view
+//     employee-activity   team.page_employee_activity.view
+//
+// WHY THEY HAVE NO HOME. They are routed-only: reachable by id but deliberately absent from
+// the sidebar. templates.js records the reason — they have no nav section, so NAV_FAMILIES
+// cannot gate them, and their grants were derived from the legacy per-role `pages` array in
+// roles.js "which reflects intent better than 'everyone'". PRODUCTS[] repeats the point:
+// several are listed under Platform/Me and "stay non-navigable and never surface in product
+// mode either".
+//
+// THE TRAP. A nav built from resolveNav() would render a link for every held nav_page feature,
+// which means these 8 would start appearing for anyone whose template grants them — surfacing
+// pages two separate layers went out of their way to keep out of the sidebar. Anything
+// resolver-driven needs an explicit `navigable` flag or an allow-list, decided BEFORE the
+// endpoint is written rather than discovered after someone sees Execution Graph in their nav.
+//
+// See the ⚠ block at resolveNav() in resolve.js for the wider finding: overrides govern API
+// access only and do not affect client nav at all.
+
 module.exports = {
   FEATURES: [
 

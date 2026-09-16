@@ -206,7 +206,44 @@ async function resolveAll(user, deps = {}) {
   return out;
 }
 
-// nav_page features the user holds — this is what keeps the sidebar and the API in agreement.
+// ── ⚠ THIS FUNCTION IS EXPORTED AND CALLED BY NOTHING. READ THIS BEFORE GRANTING AN OVERRIDE ──
+//
+// THE OVERRIDE SYSTEM GOVERNS API ACCESS ONLY. IT DOES NOT AFFECT CLIENT NAV.
+//
+// There is no /api/permissions/nav endpoint and the SPA never asks the server what a user may
+// see. BOTH shells compute nav entirely client-side, from two tables in public/index.html:
+//
+//     NAV_FAMILIES    role -> which SECTIONS are visible
+//     NAV_PAGE_REQS   page -> which TIERS its initial reads need
+//
+// Neither consults this resolver, the overrides table, or anything else server-side.
+//
+// SO: granting a per-user override to someone WITHOUT role-level nav access produces a
+// REACHABLE ROUTE WITH NO LINK TO IT. The API will allow them; the sidebar will not render the
+// page; they have no way in. Every override granted so far has worked only because the user
+// already had nav access by role, which makes the gap invisible until the first grant to
+// someone who does not.
+//
+// (The mirror failure is just as easy: relaxing a route's requireTier WITHOUT the nav tables
+// gives nav access with a 403 behind it. The two systems must be changed together or not at
+// all.)
+//
+// Wiring this function up is a 2-3 day job, not an afternoon, and the cost is not the endpoint:
+//   • nav becomes async and server-dependent, so scripts/verify-classic-nav-parity.js — which
+//     proves the flag-OFF sidebar byte-identical for 13 roles by running the tables
+//     SYNCHRONOUSLY with no server — can no longer model it. That is the strongest regression
+//     check in this repo and it would need replacing, not deleting.
+//   • a held page still needs a visible SECTION (NAV_FAMILIES) and, under pnav, membership of
+//     the active product's pageset (PRODUCTS[].pages). Resolver-allow alone renders nothing.
+//   • fail-open vs fail-closed has no good answer for nav the way it does for API calls: a
+//     wrong sidebar is visible to the user, not merely logged.
+//   • 8 nav_page features have NO nav home (see registry.js, "ORPHAN NAV_PAGE FEATURES") and a
+//     naive implementation would start surfacing them.
+// If it is ever built, do it as the AROS QUALIFICATION_SOURCE cutover was done: compute both
+// answers, render the old one, log divergence, flip one env var when divergence is zero.
+//
+// nav_page features the user holds — intended to keep the sidebar and the API in agreement.
+// It does not do that yet, because nothing calls it.
 async function resolveNav(user, deps = {}) {
   const ctx = await gatherContext(user, deps);
   const held = [];
