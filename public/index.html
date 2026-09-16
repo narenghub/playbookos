@@ -696,7 +696,7 @@ const NAV_SECTIONS = [
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
     {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
   ]},
-  {title:'EVENT AGENT', access:['admin','procurement','business_dev'], items:[
+  {title:'EVENT AGENT', access:['admin','procurement','business_dev','events'], items:[
     {id:'cphi-milan', label:'CPHI Milan 2026', icon:'🧪'},
   ]},
   // AROS's own section. Access is deliberately IDENTICAL to EVENT AGENT's, so moving the page
@@ -726,6 +726,11 @@ const NAV_FAMILIES = {
   procurement: ['procurement_team','procurement_director'],
   seo: ['seo_specialist'],
   business_dev: ['business_dev'], // self-family so the INTELLIGENCE section resolves for this role
+  // Event work: who plans and staffs the trade shows, which is scheduling work rather than a
+  // domain. Deliberately NOT the whole recruitment side of the house — it is the two roles that
+  // actually run the calendar. Built as a family rather than a one-off so the next event page
+  // costs a line in NAV_SECTIONS and nothing else.
+  events: ['recruitment_team', 'recruitment_director'],
 };
 function navSectionVisible(access, role) {
   if (role === 'admin' || role === 'super_admin') return true; // admin sees all
@@ -739,7 +744,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence"],["intelligence"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
 function roleTiersFor(role) {
   const cat = (typeof window !== 'undefined' && window._roleCatalog) || [];
   const row = Array.isArray(cat) ? cat.find(r => r.role_name === role) : null;

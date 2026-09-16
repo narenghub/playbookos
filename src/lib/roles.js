@@ -91,7 +91,16 @@ const BUILT_IN_ROLES = {
     display_name: 'Recruitment Team',
     level: 5, domain: 'recruitment', data_scope: 'own',
     pages: ['my-tasks', 'my-kpis', 'my-performance', 'my-activity', 'playbook', 'milestones'],
-    tiers: { self: 'rw' },
+    // procurement:'r' is here for ONE reason: the CPHI Milan page. Its reads are gated
+    // requireAnyTier('intelligence','procurement') and enforce.js is tighten-only, so the tier
+    // gate still runs after the resolver — without a tier the route rejects this role however
+    // the nav is configured. 'r', never 'rw': this role has no business writing procurement.
+    //
+    // The tier does NOT hand them the procurement surface. The resolver decides for
+    // recruitment_team (it is in PERMISSIONS_ENFORCE_ROLES) and its template grants ONLY the
+    // three CPHI features — see the DELIBERATE DEVIATION block in permissions/templates.js
+    // before re-deriving anything.
+    tiers: { self: 'rw', procurement: 'r' },
     metrics: ['candidates_screened', 'interviews_scheduled', 'offers_made', 'hires_completed'],
     baseline: 6,
   },

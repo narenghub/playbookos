@@ -4522,7 +4522,7 @@ const CPHI_REVIEW_STATUSES = ['unreviewed', 'auto_confirmed', 'entity_review', '
 // GET /events/cphi/exhibitors — the priority table, ranked by molecules covered.
 // Defaults to exhibiting-only because that is what the page opens on; pass exhibiting=false
 // for the "not on the floor" view or exhibiting=any for everything.
-router.get('/events/cphi/exhibitors', authMiddleware, requireTier('intelligence'), async (req, res) => {
+router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res) => {
   try {
     const clauses = ['event_slug = $1'], params = [CPHI_EVENT];
     if (req.query.exhibiting === 'false') clauses.push('exhibiting = false');
@@ -4557,6 +4557,12 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireTier('intelligence'
     res.json({ event: CPHI_EVENT, items, summary, dmf_source: src });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// CPHI's two READ routes are requireAnyTier('intelligence','procurement'): sourcing suppliers
+// for the marketplace is procurement work, and Market Intelligence already uses the OR form for
+// the same kind of data. The single-tier gate was an oversight when this was written. The
+// review WRITE (PUT below) deliberately keeps the narrow gate — a verdict on a match is not a
+// read, and nothing about widening access to the list implies widening who may record one.
 
 // ── AROS sourcing: DMF holders joined to FDA establishment registrations ───────
 // The seed for an AROS target list. Every field here is regulator-published — firm name,
@@ -4643,7 +4649,7 @@ router.get('/aros/establishments', authMiddleware, requireTier('intelligence'), 
 // GET /events/cphi/thin-supply — high clinical demand against a thin DMF bench.
 // The sharper commercial list: a molecule many trials need and few companies can legally
 // supply is where an intermediary has leverage. Threshold is a query param, default 3.
-router.get('/events/cphi/thin-supply', authMiddleware, requireTier('intelligence'), async (req, res) => {
+router.get('/events/cphi/thin-supply', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res) => {
   try {
     const maxHolders = Math.min(10, Math.max(1, parseInt(req.query.max_holders) || 3));
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 40));

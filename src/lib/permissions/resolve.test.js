@@ -6,6 +6,8 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { resolve, resolveAll, resolveNav } = require('./resolve');
 const { FEATURES } = require('./registry');
+const { TEMPLATES } = require('./templates');
+const { BUILT_IN_ROLES } = require('../roles');
 
 const ENV_ON = { RESEARCH_INTEL_ENABLED: 'true' };
 const ENV_OFF = { RESEARCH_INTEL_ENABLED: 'false' };
@@ -148,4 +150,57 @@ test('bonus — resolveNav returns only held nav_page features (sidebar == API)'
   assert.ok(nav.includes(F.cdiView), 'business_dev sees Clinical Demand Intelligence');
   assert.ok(nav.every(k => FEATURES.find(f => f.key === k).surface === 'nav_page'));
   assert.ok(!nav.includes('platform.page_settings.view'), 'business_dev does not see admin-only Settings');
+});
+
+// ── the deviation guard ───────────────────────────────────────────────────────
+// recruitment_team was given procurement:'r' so ONE page (CPHI Milan) would load — its reads
+// are gated requireAnyTier('intelligence','procurement') and the tier gate still runs after
+// the resolver. The tier makes 19 further features REACHABLE, so a faithful re-derivation of
+// templates.js would grant them: SKU creation, supplier creation, RFQ supplier-approval.
+// Those grants were deliberately withheld.
+//
+// This test is the tripwire. If someone re-derives templates.js, it fails here rather than the
+// write access appearing silently in production.
+test('T14 — recruitment_team holds the CPHI features and NOT the procurement surface', () => {
+  const grants = new Set(TEMPLATES.recruitment_team.grants);
+
+  for (const k of ['intelligence.page_cphi_milan.view',
+                   'intelligence.cphi_exhibitors.list',
+                   'intelligence.cphi_thin_supply.list']) {
+    assert.ok(grants.has(k), `recruitment_team must hold ${k} — Navya's CPHI access depends on it`);
+  }
+
+  // The 19 a re-derivation would add. Writes first: these are the ones that matter.
+  const WITHHELD = [
+    'procurement.skus.create', 'procurement.skus.bulk_upload',
+    'procurement.procurement_suppliers.create', 'procurement.procurement_suppliers.update',
+    'procurement.procurement_rfqs.approve_supplier',
+    'procurement.page_procurement_agent.view', 'procurement.procurement_dashboard.list',
+    'procurement.procurement_rfqs.get', 'procurement.procurement_rfqs.list',
+    'procurement.procurement_suppliers.list', 'procurement.skus.list',
+    'procurement.skus_export.list',
+    'intelligence.page_market_intelligence.view', 'intelligence.market_weekly.list',
+    'intelligence.market_gaps.list', 'intelligence.market_history.list',
+    'intelligence.market_molecule.update', 'intelligence.market_export_gmp.list',
+    'intelligence.market_export_research.list',
+  ];
+  const leaked = WITHHELD.filter(k => grants.has(k));
+  assert.deepEqual(leaked, [],
+    'templates.js looks re-derived: recruitment_team gained procurement features that were '
+    + 'deliberately withheld. See the DELIBERATE DEVIATION block in templates.js — this role '
+    + 'holds procurement:\'r\' for ONE page, not for the procurement surface.');
+
+  // and the tier that causes all this is still 'r', never 'rw'
+  assert.equal(BUILT_IN_ROLES.recruitment_team.tiers.procurement, 'r');
+});
+
+test('T15 — nobody gains a CPHI nav link without the feature behind it', () => {
+  // The failure this whole change was shaped to avoid: a visible link with a 403 behind it.
+  // Every role the OR-form page reqs newly admit to the nav must also hold the page feature.
+  for (const role of ['recruitment_team', 'recruitment_director', 'procurement_team']) {
+    assert.ok(TEMPLATES[role].grants.includes('intelligence.page_cphi_milan.view'),
+      `${role} can now see the CPHI nav link, so it must hold the page feature`);
+    assert.ok(TEMPLATES[role].grants.includes('intelligence.cphi_exhibitors.list'),
+      `${role} must hold the list route, or the page renders and the data 403s`);
+  }
 });

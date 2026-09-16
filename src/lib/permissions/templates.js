@@ -32,6 +32,37 @@
 //
 // Nothing imports this file yet.
 
+// ╔══════════════════════════════════════════════════════════════════════════════════════╗
+// ║  ⚠  DELIBERATE DEVIATION — THIS FILE IS NO LONGER PURELY DERIVED.  READ BEFORE      ║
+// ║     RE-DERIVING, OR YOU WILL SILENTLY GRANT WRITE ACCESS NOBODY ASKED FOR.          ║
+// ╚══════════════════════════════════════════════════════════════════════════════════════╝
+//
+// recruitment_team holds procurement:'r' (roles.js) for ONE page: CPHI Milan. Its reads are
+// gated requireAnyTier('intelligence','procurement') and enforce.js is tighten-only, so the
+// tier gate runs after the resolver — without the tier the route rejects the role whatever the
+// nav says. The tier is the only way in.
+//
+// A FAITHFUL RE-DERIVATION WOULD THEREFORE GRANT recruitment_team 19 MORE FEATURES — every
+// procurement-reachable feature procurement_team holds, including:
+//
+//     procurement.skus.create            procurement.skus.bulk_upload
+//     procurement.procurement_suppliers.create / .update
+//     procurement.procurement_rfqs.approve_supplier
+//     procurement.page_procurement_agent.view
+//     intelligence.page_market_intelligence.view + the market_* reads/exports
+//
+// SKU creation, supplier creation and RFQ supplier-approval, for every recruiter, arising from
+// a request to READ one trade-show page. That is not what was agreed, so the three CPHI
+// features below are placed BY HAND and the other 19 are deliberately absent.
+//
+// The gap is pinned by resolve.test.js ("recruitment_team holds the CPHI features and NOT the
+// procurement surface"). If you re-derive this file, that test fails — which is the point.
+// Either keep the deviation, or take the widening to whoever owns the role before shipping it.
+//
+// The same three features were added by hand to recruitment_director (which already held the
+// list route but not the page) and procurement_team (which the OR-form page reqs newly admit
+// to the nav). Neither is a re-derivation; both exist so nobody sees a link that 403s.
+//
 module.exports = {
   TEMPLATES: {
   "super_admin": {
@@ -648,6 +679,7 @@ module.exports = {
   "recruitment_director": {
     label: "Recruitment Director",
     grants: [
+      'intelligence.page_cphi_milan.view',
       'admin.agent_dependencies.list',
       'admin.agent_tasks.update',
       'admin.page_agent_control.view',
@@ -1120,6 +1152,9 @@ module.exports = {
   "recruitment_team": {
     label: "Recruitment Team",
     grants: [
+      'intelligence.page_cphi_milan.view',
+      'intelligence.cphi_exhibitors.list',
+      'intelligence.cphi_thin_supply.list',
       'admin.agent_tasks.update',
       'admin.roles.list',
       'admin.targets.list',
@@ -1152,6 +1187,9 @@ module.exports = {
   "procurement_team": {
     label: "Procurement Team",
     grants: [
+      'intelligence.page_cphi_milan.view',
+      'intelligence.cphi_exhibitors.list',
+      'intelligence.cphi_thin_supply.list',
       'admin.agent_tasks.update',
       'admin.roles.list',
       'admin.targets.list',
