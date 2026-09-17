@@ -613,6 +613,18 @@ const SEGMENT_APOLLO_LABEL = {
 // company may have more than APOLLO_MAX_PER_COMPANY contacts in flight across ALL
 // Apollo sequences (weekly campaigns each create a new sequence, so a
 // per-sequence cap alone would multiply). "Company" = recipient email domain.
+//
+// ⚠️  THIS CAP ONLY GUARDS LISTS BUILT THROUGH PLAYBOOKOS. Read before relying on it:
+//   - The only enrollment path it covers is addSequenceContacts() below, i.e. contacts
+//     named in APOLLO_CONTACTS_S1–S4. Those env vars are UNSET in production, so as of
+//     2026-09-17 this guard has never actually capped anything.
+//   - Apollo's own UI has NO per-company limit. Every contact now in Apollo — all 2,902
+//     across S1–S4, including the 413 at bms.com — was added that way and never passed
+//     through here. Adding contacts in Apollo, importing a CSV, or using an Apollo
+//     list/automation all bypass this code completely.
+//   - So a rebuilt list is only capped if it is enrolled via APOLLO_CONTACTS_S1–S4 (or
+//     another caller of addSequenceContacts). If the list is built in the Apollo UI, the
+//     cap must be enforced before import — see docs/OUTREACH_RESTART.md.
 const DEFAULT_MAX_PER_COMPANY = 3;
 function maxPerCompany() {
   const n = parseInt(process.env.APOLLO_MAX_PER_COMPANY, 10);

@@ -49,6 +49,8 @@ curl http://localhost:3000/health
 | `ANTHROPIC_API_KEY` | yes | Claude API key for AI analysis and market intelligence. |
 | `RESEND_API_KEY` | yes | Resend API key for outbound email (invites, weekly reports, milestone triggers, Apollo outreach). |
 | `APOLLO_API_KEY` | yes (for Apollo features) | Apollo.io API key. Required for every `/api/apollo/*` endpoint. |
+| `APOLLO_MAX_PER_COMPANY` | no (default 3) | Max contacts per recipient email domain enrolled in flight across all Apollo sequences. Only applies to lists enrolled through PlaybookOS (`APOLLO_CONTACTS_S1`–`S4`) — Apollo's UI has no such limit. See [docs/OUTREACH_RESTART.md](docs/OUTREACH_RESTART.md). |
+| `APOLLO_CONTACTS_S1` … `S4` | no | Comma/space-separated Apollo contact ids to auto-enroll per segment when a campaign publishes. Unset in production, so nothing is auto-enrolled today. |
 | `GITHUB_TOKEN` | yes (for GitHub sync) | Personal access token with `repo`, `read:org`, `read:user` scopes. Used by the 8am sync cron and the manual "Sync GitHub now" button. |
 | `GITHUB_ORG` | no | Default org for GitHub queries. |
 | `ALGOLIA_APP_ID` / `ALGOLIA_API_KEY` / `ALGOLIA_INDEX_NAME` | yes (for Growth Agent) | Algolia Analytics API credentials. The Growth Agent queries no-result searches, top queries, CTR, and conversion rate against the named index. |
@@ -316,6 +318,10 @@ Signals are merged by molecule: GSC contributes a 0–60 impression-normalised s
 **Storage & Apollo.** Rows land in `email_campaigns`, unique on `(week_start, segment, molecule_name)` — a cron re-run cannot duplicate or clobber an approved campaign. Each row carries a prebuilt `apollo_payload`: a 3-step sequence (Email A day 0 → Email B day 3 → a generated one-line nudge day 7).
 
 **Endpoints** — `POST /email-engine/run` (admin, 202; `?dryRun=1` returns the resolved molecule list synchronously without calling Claude), `GET /email-engine/campaigns` (filters: `week`, `segment`, `status`), `PUT /email-engine/campaigns/:id` (approve/reject; draft-only transition), `POST /email-engine/campaigns/:id/publish`, `GET /email-engine/campaigns/:id/preview?variant=a|b`.
+
+**Per-company send cap — and the gap in it.** `addSequenceContacts()` enrolls at most `APOLLO_MAX_PER_COMPANY` (default **3**) contacts per recipient email domain, counting contacts already scheduled in *any* Apollo sequence (weekly campaigns each create a new sequence, so a per-sequence cap would multiply). It fails closed: if the in-flight count or a contact lookup can't be read, nobody is enrolled. **The cap only guards lists enrolled through PlaybookOS** — that is, contacts named in `APOLLO_CONTACTS_S1`–`S4`. Those env vars are unset in production, so the guard has never capped anything, and **Apollo's own UI has no per-company limit**: all 2,902 contacts in sequences S1–S4 (including 413 at bms.com, which received 334 emails to 242 people) were added there and bypassed this code entirely. A list built in the Apollo UI or by CSV import must be deduped to the cap *before* import. See **[docs/OUTREACH_RESTART.md](docs/OUTREACH_RESTART.md)**.
+
+**Outbound cold email is paused as of 2026-09-17** — sequences S1–S4 delivered to 1,685 contacts for 4 replies (0.24%), with open tracking off on 100% of sends (so the reported 0% open rate measured nothing). Do not restart until targeting and copy change; the preconditions and the Apollo pause/resume mechanics are in [docs/OUTREACH_RESTART.md](docs/OUTREACH_RESTART.md).
 
 Caveat on publish: Apollo's sequence-creation endpoint needs a **master** API key and is not on every plan. A non-2xx returns 502 with Apollo's verbatim response plus the payload, which the UI shows in a copyable modal so the sequence can be built by hand. Nothing is marked `sent` unless Apollo accepts it.
 
