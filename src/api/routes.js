@@ -1807,7 +1807,7 @@ async function publishCampaignRow(c, userEmail) {
   try { contacts = await addSequenceContacts(result.sequenceId, c.segment, apolloKey); } catch (e) { contacts = { error: e.message }; }
   logAgentActivity({
     agent_name: 'email-engine', action_type: 'email_campaign_published',
-    reasoning: `${userEmail} published "${c.molecule_name} / ${c.segment}" to Apollo as sequence ${result.sequenceId} with ${result.stepsDone.length} steps${contacts && contacts.added ? `; enrolled ${contacts.added} ${contacts.label} contacts` : ''}`,
+    reasoning: `${userEmail} published "${c.molecule_name} / ${c.segment}" to Apollo as sequence ${result.sequenceId} with ${result.stepsDone.length} steps${contacts && contacts.added ? `; enrolled ${contacts.added} ${contacts.label} contacts` : ''}${contacts && contacts.dropped ? ` (${contacts.dropped} dropped by per-company cap)` : ''}`,
     output_summary: `campaign_id=${c.id} apollo_sequence_id=${result.sequenceId} steps=${result.stepsDone.length}`,
   }).catch(e => console.error('[email-engine] publish audit failed:', e.message));
   return { ok: true, apollo_sequence_id: result.sequenceId, steps_created: result.stepsDone.length, contacts, status: 'sent' };

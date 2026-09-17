@@ -607,22 +607,84 @@ const SEGMENT_APOLLO_LABEL = {
   generic_manufacturer: 'S3',
   university: 'S4',
 };
-async function addSequenceContacts(sequenceId, segment, apolloKey) {
+// ── Per-company send cap ──────────────────────────────────────────────────────
+// Sept 2026: S1–S4 queued 413 contacts at bms.com (334 emails to 242 people) —
+// the pattern that gets a sending domain blocked by one recipient's filter. No
+// company may have more than APOLLO_MAX_PER_COMPANY contacts in flight across ALL
+// Apollo sequences (weekly campaigns each create a new sequence, so a
+// per-sequence cap alone would multiply). "Company" = recipient email domain.
+const DEFAULT_MAX_PER_COMPANY = 3;
+function maxPerCompany() {
+  const n = parseInt(process.env.APOLLO_MAX_PER_COMPANY, 10);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_MAX_PER_COMPANY;
+}
+const emailDomain = (email) => (String(email || '').split('@')[1] || '').trim().toLowerCase();
+
+// Pure. contacts: [{id, email}]; inFlight: {domain: count already queued elsewhere}.
+// Contacts without an email are dropped — Apollo can't send to them anyway.
+function capPerCompany(contacts, inFlight = {}, max = maxPerCompany()) {
+  const used = { ...inFlight };
+  const kept = [], dropped = [];
+  for (const c of contacts) {
+    const d = emailDomain(c.email);
+    if (!d) { dropped.push({ ...c, reason: 'no_email' }); continue; }
+    if ((used[d] || 0) >= max) { dropped.push({ ...c, reason: `company_cap:${d}` }); continue; }
+    used[d] = (used[d] || 0) + 1;
+    kept.push(c);
+  }
+  return { kept, dropped };
+}
+
+// Distinct contacts per domain with an email still scheduled in any active sequence.
+async function inFlightByDomain(apolloKey, fetchFn = fetch) {
+  const seen = new Set(), counts = {};
+  for (let page = 1; page <= 50; page++) {
+    const r = await fetchFn('https://api.apollo.io/api/v1/emailer_messages/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
+      body: JSON.stringify({ per_page: 100, page, emailer_message_stats: ['scheduled'] }),
+    });
+    if (!r.ok) throw new Error(`Apollo emailer_messages/search ${r.status}`);
+    const msgs = (await r.json()).emailer_messages || [];
+    for (const m of msgs) {
+      const email = String(m.to_email || '').toLowerCase();
+      if (!email || seen.has(email)) continue;
+      seen.add(email);
+      const d = emailDomain(email);
+      if (d) counts[d] = (counts[d] || 0) + 1;
+    }
+    if (msgs.length < 100) return counts;
+  }
+  throw new Error('in-flight scan exceeded 50 pages — refusing to guess the per-company count');
+}
+
+async function addSequenceContacts(sequenceId, segment, apolloKey, fetchFn = fetch) {
   const label = SEGMENT_APOLLO_LABEL[segment] || null;
   if (!label) return { label: null, added: 0, skipped: `no S-label for segment ${segment}` };
   const raw = (process.env[`APOLLO_CONTACTS_${label}`] || '').trim();
   const contactIds = raw ? raw.split(/[\s,]+/).filter(Boolean) : [];
   if (!contactIds.length) return { label, added: 0, skipped: `APOLLO_CONTACTS_${label} not configured` };
   try {
-    const r = await fetch(`https://api.apollo.io/api/v1/emailer_campaigns/${sequenceId}/add_contact_ids`, {
+    // Fail closed: if the cap can't be checked, enroll nobody.
+    const inFlight = await inFlightByDomain(apolloKey, fetchFn);
+    const contacts = [];
+    for (const id of contactIds) {
+      const cr = await fetchFn(`https://api.apollo.io/api/v1/contacts/${id}`, { headers: { 'X-Api-Key': apolloKey } });
+      if (!cr.ok) return { label, added: 0, error: `Apollo contacts/${id} ${cr.status} — enrollment aborted, per-company cap unverifiable` };
+      const cj = await cr.json();
+      contacts.push({ id, email: cj.contact?.email || null });
+    }
+    const { kept, dropped } = capPerCompany(contacts, inFlight);
+    if (!kept.length) return { label, added: 0, dropped: dropped.length, skipped: 'every contact was over the per-company cap or had no email' };
+    const r = await fetchFn(`https://api.apollo.io/api/v1/emailer_campaigns/${sequenceId}/add_contact_ids`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Api-Key': apolloKey },
-      body: JSON.stringify({ emailer_campaign_id: sequenceId, contact_ids: contactIds }),
+      body: JSON.stringify({ emailer_campaign_id: sequenceId, contact_ids: kept.map(c => c.id) }),
     });
     const text = await r.text();
     if (!r.ok) return { label, added: 0, error: `Apollo add_contact_ids ${r.status}: ${text.slice(0, 200)}` };
-    return { label, added: contactIds.length };
+    return { label, added: kept.length, dropped: dropped.length };
   } catch (e) { return { label, added: 0, error: e.message }; }
 }
 
-module.exports = { runEmailEngine, SEGMENTS, buildApolloPayload, sanitizeHtml, generateEmailHtml, EMAIL_MODEL, publishSequenceToApollo, addSequenceContacts, SEGMENT_APOLLO_LABEL };
+module.exports = { runEmailEngine, SEGMENTS, buildApolloPayload, sanitizeHtml, generateEmailHtml, EMAIL_MODEL, publishSequenceToApollo, addSequenceContacts, SEGMENT_APOLLO_LABEL, capPerCompany, inFlightByDomain, maxPerCompany };
