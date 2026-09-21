@@ -8,6 +8,7 @@ const { sendEmail } = require('../mailer');
 const { sendWhatsApp } = require('../whatsapp');
 const { logAgentActivity, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth');
+const { classifyInquirySpam } = require('./inquiry-spam');
 
 const AGENT = 'inquiry-agent';
 const MODEL = 'claude-opus-4-8';
@@ -80,6 +81,37 @@ async function getUser(role) {
 async function getNaresh() {
   const r = (await query(`SELECT id, name, email, whatsapp_number FROM users WHERE is_active=1 AND role IN ('admin','super_admin') ORDER BY CASE WHEN LOWER(email) LIKE 'naren%' THEN 0 ELSE 1 END, created_at LIMIT 1`)).rows[0];
   return r || { name: 'Naresh', email: 'naren@abiozen.com', whatsapp_number: null };
+}
+
+// Have we ever sent mail to this address? Feeds the spam gate's
+// "a Re: on a thread we never started" signal. Errors yield undefined, which the
+// classifier reads as unknown rather than as evidence.
+async function haveWeEmailed(email) {
+  if (!email) return undefined;
+  try {
+    const r = await query(
+      `SELECT 1 FROM email_log WHERE LOWER(to_email)=LOWER($1)
+       UNION ALL
+       SELECT 1 FROM inquiry_messages WHERE direction='outbound' AND LOWER(sender_email)<>LOWER($1)
+         AND inquiry_id IN (SELECT id FROM inquiries WHERE LOWER(buyer_email)=LOWER($1))
+       LIMIT 1`, [email]);
+    return r.rows.length > 0;
+  } catch (e) { return undefined; }
+}
+
+// Real people at Abiozen, for the spam gate's "greets a name that isn't ours" signal.
+// The sales persona counts as ours. Cached for a poll cycle; failure yields [] so the
+// signal simply doesn't fire (it can never invent a spam verdict on its own).
+let _employeeNamesCache = { at: 0, names: null };
+async function employeeNames() {
+  if (_employeeNamesCache.names && Date.now() - _employeeNamesCache.at < 300000) return _employeeNamesCache.names;
+  let names = [];
+  try {
+    names = (await query(`SELECT name FROM users WHERE name IS NOT NULL AND name <> ''`)).rows.map(r => r.name);
+  } catch (e) { names = []; }
+  names.push(REP_NAME);
+  _employeeNamesCache = { at: Date.now(), names };
+  return names;
 }
 
 // Best-effort buyer-type classification from company name / email domain.
@@ -278,17 +310,41 @@ async function receiveInquiry(data) {
   const isHot = /semaglutide|tirzepatide|liraglutide|glp|osimertinib|ibrutinib|lenalidomide|abiraterone|onco/i.test(molecule || '') || (qtyKg && qtyKg > 1);
   const priority = isHot ? 'high' : 'medium';
 
+  // SPAM GATE — runs before anything is sent. A match is recorded as an inquiry with
+  // status 'spam' so it stays auditable, but gets no reply, no WhatsApp and no
+  // escalation. Substance (molecule/quantity/company) always wins — see inquiry-spam.js.
+  const ctx = data.spam_context || {};
+  const verdict = classifyInquirySpam({
+    subject: ctx.subject,
+    body: ctx.body || data.message,
+    fromName: ctx.from_name != null ? ctx.from_name : data.buyer_name,
+    fromEmail: ctx.from_email || data.buyer_email,
+    molecule,
+    quantity: qty,
+    company: data.buyer_company,
+    weEverEmailed: ctx.we_ever_emailed,
+    employeeNames: await employeeNames(),
+  });
+
   const id = crypto.randomUUID();
   await query(
     `INSERT INTO inquiries (id, molecule_name, cas_number, buyer_name, buyer_email, buyer_company, buyer_type,
        country, intended_use, quantity_requested, quantity_unit, status, priority, source, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'new',$12,$13,NOW(),NOW())`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,${verdict.spam ? "'spam'" : "'new'"},$12,$13,NOW(),NOW())`,
     [id, molecule, data.cas_number || pricing?.cas_number || null, data.buyer_name || null, data.buyer_email || null,
      data.buyer_company || null, buyerType, data.country || null, data.intended_use || null, qty, unit,
      priority, ['abiozen_form', 'email', 'apollo', 'manual'].includes(data.source) ? data.source : 'abiozen_form']);
 
   // Log the buyer's inbound message (the form message).
   if (data.message) await logMessage(id, { direction: 'inbound', sender_name: data.buyer_name, sender_email: data.buyer_email, subject: `Inquiry: ${molecule || 'GMP API'}`, body_text: data.message });
+
+  if (verdict.spam) {
+    await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_spam_blocked', user_id: null,
+      reasoning: `Blocked inbound as spam from ${data.buyer_email}: ${verdict.reasons.join(', ')}. No reply sent, no escalation.`,
+      source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${id} status=spam reasons=${verdict.reasons.join('|')}`.slice(0, 300) }).catch(() => {});
+    console.log(`[inquiry] spam blocked ${data.buyer_email} — ${verdict.reasons.join(', ')}`);
+    return id;
+  }
 
   // Immediate first response (satisfies the "within 5 minutes" SLA).
   const inquiry = (await query('SELECT * FROM inquiries WHERE id=$1', [id])).rows[0];
@@ -311,6 +367,7 @@ async function receiveInquiry(data) {
 async function sendFirstResponse(inquiryId) {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
   if (!inq) return { error: 'inquiry not found' };
+  if (inq.status === 'spam') return { skipped: 'spam' };
   const pricing = await findPricing(inq.molecule_name, inq.cas_number);
   const stock = await findStock(inq.molecule_name);
   const demand = await findDemand(inq.molecule_name, inq.cas_number);
@@ -405,6 +462,8 @@ function escalationReason(inq, text, msgCount) {
 async function processInboundReply(inquiryId, emailText, { dryRun = false, messageId } = {}) {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
   if (!inq) return { error: 'inquiry not found' };
+  // Once an inquiry is spam, later messages on the thread never get a reply either.
+  if (inq.status === 'spam') return { skipped: 'spam' };
 
   // BUG 2 — dedup by Gmail message id: if we've already replied to this exact
   // message, skip entirely (no inbound log, no Claude call, no email sent).
@@ -669,6 +728,7 @@ ${signatory}`;
 async function escalateToHuman(inquiryId, reason = 'buyer requested a human') {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
   if (!inq) return { error: 'inquiry not found' };
+  if (inq.status === 'spam') return { skipped: 'spam' };
   await query(`UPDATE inquiries SET status='human_requested', updated_at=NOW() WHERE id=$1`, [inquiryId]);
   const value = inq.order_value_usd || 0;
   const naresh = await getNaresh();
@@ -836,7 +896,7 @@ async function matchReplyInquiry(candidateEmails, threadId) {
 
 async function pollSalesEmailbox({ dryRun = false, maxMessages = 40 } = {}) {
   const out = {
-    listed: 0, checked: 0, new_inquiries: 0, replies_routed: 0,
+    listed: 0, checked: 0, new_inquiries: 0, replies_routed: 0, spam_blocked: 0,
     skipped_seen: 0, skipped_subject: 0, skipped_internal: 0, skipped_no_sender: 0,
     skipped_not_inquiry: 0, skipped_no_buyer: 0, skipped: 0, samples: [], errors: [],
   };
@@ -954,6 +1014,13 @@ Set "is_inquiry": false ONLY if this is clearly NOT a buyer inquiry (newsletter,
       if (dryRun) { out.new_inquiries++; sample(subject, buyerEmail, 'new(dry)'); continue; }
 
       const inquiryId = await receiveInquiry({
+        spam_context: {
+          subject,
+          body,
+          from_name: isRelay ? (data.buyer_name || null) : from.name,
+          from_email: buyerEmail,
+          we_ever_emailed: await haveWeEmailed(buyerEmail),
+        },
         molecule_name: data.molecule_name || null,
         cas_number: data.cas_number || null,
         buyer_name: data.buyer_name || (isRelay ? null : from.name) || null,
@@ -967,7 +1034,9 @@ Set "is_inquiry": false ONLY if this is clearly NOT a buyer inquiry (newsletter,
         source: 'email',
       });
       await query(`UPDATE processed_emails SET inquiry_id=$1 WHERE id=$2`, [inquiryId, gmailId]).catch(() => {});
-      out.new_inquiries++; sample(subject, buyerEmail, 'new_inquiry');
+      const landedSpam = (await query(`SELECT status FROM inquiries WHERE id=$1`, [inquiryId])).rows[0]?.status === 'spam';
+      if (landedSpam) { out.spam_blocked++; sample(subject, buyerEmail, 'spam_blocked'); }
+      else { out.new_inquiries++; sample(subject, buyerEmail, 'new_inquiry'); }
       await markGmailRead(user, gmailId, tok.access_token, dryRun);
     } catch (e) { out.errors.push(`${gmailId}: ${e.message}`); }
   }
