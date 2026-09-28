@@ -189,4 +189,131 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
   return summary;
 }
 
-module.exports = { runProspecting, runQualifyProspects, AGENT_NAME };
+// ── site-quality scorer (ACBM) ─────────────────────────────────────────────────
+// The ACBM equivalent of runQualifyProspects, and deliberately NOT the same function: the
+// booking qualifier writes booking_platform, which would read as correct while holding "wix".
+// This writes site_url / site_score / site_findings / recommended_package, plus the same
+// reachable / unreachable_reason the qualifier uses (those mean exactly what they say).
+//
+// Never-throws, flag-gated, capped, rate-limited. Rows already rejected are skipped — the
+// chain/franchise rejection passes run BEFORE this.
+async function runScoreSites(product, { subtypes = null, cap = null, rescore = false, deps = {} } = {}) {
+  const env = deps.env || process.env;
+  const summary = { product, enabled: true, considered: 0, scored: 0, no_website: 0, unreachable: 0,
+    p1: 0, p2: 0, no_fit: 0, by_builder: {}, score_bands: {}, errors: [] };
+  if (String(env.PROSPECTING_ENABLED) !== 'true') { summary.enabled = false; return summary; }
+
+  const cfg = (deps.getConfig || getConfig)(product);
+  if (!cfg) { summary.errors.push({ stage: 'config', error: `no config for product '${product}'` }); return summary; }
+
+  const q = deps.query || query;
+  const fetchText = deps.httpText || require('../../outbound/http').httpText;
+  const { scoreSite, recommendPackage } = deps.scorer || require('./site-score');
+  const { detectAll } = deps.detector || require('./qualify');
+  const logActivity = deps.logAgentActivity || logAgentActivity;
+  const limit = Number.isInteger(cap) && cap > 0 ? cap : envNum(env, 'PROSPECTING_SCORE_CAP', 800);
+  const rateMs = envNum(env, 'PROSPECTING_RATE_MS', 200);
+
+  let rows;
+  try {
+    // status <> 'rejected' is load-bearing for the same reason as in the qualifier: a row
+    // rejected as a chain must not be resurrected by a later pass.
+    rows = (await q(
+      `SELECT id, name, website FROM prospects
+        WHERE product=$1 AND status <> 'rejected'
+          AND ($2::text[] IS NULL OR subtype = ANY($2))
+          AND ($3::boolean OR site_score IS NULL)
+        ORDER BY id LIMIT $4`, [product, subtypes, !!rescore, limit])).rows;
+  } catch (e) { summary.errors.push({ stage: 'select', error: e && e.message ? e.message : String(e) }); return summary; }
+
+  for (const r of rows) {
+    summary.considered++;
+    try {
+      if (!r.website) {
+        // Nothing to score. This is the P1 pool: they need a site built, not rebuilt.
+        const findings = { scanned_at: new Date().toISOString(), no_website: true, signals: [], builder: null };
+        await q(`UPDATE prospects SET site_score=NULL, site_findings=$2::jsonb, recommended_package='P1',
+                   qualified_at=NOW(), status='qualified' WHERE id=$1 AND status <> 'rejected'`,
+          [r.id, JSON.stringify(findings)]);
+        summary.no_website++; summary.p1++;
+        continue;
+      }
+      const res = await fetchText({ url: r.website });
+      // httpText reports non-2xx as { error, status } but now also returns the body; error first.
+      const reachable = !res.error;
+      const unreachableReason = res.error ? (res.status === 403 ? '403' : classifyFetchReason(res)) : null;
+      const html = res.text || '';
+      const builderHits = html ? detectAll(html, cfg.signatures) : [];
+      const { score, signals, builder } = scoreSite({
+        html, finalUrl: res.url, website: r.website, reachable, unreachableReason, builderHits,
+      });
+      const findings = {
+        scanned_at: new Date().toISOString(), final_url: res.url || r.website, score, signals,
+        builder, builder_hits: builderHits, reachable, unreachable_reason: unreachableReason,
+      };
+      const pkg = recommendPackage({ hasWebsite: true, score });
+      await q(`UPDATE prospects SET site_url=$2, site_score=$3, site_findings=$4::jsonb, recommended_package=$5,
+                 reachable=$6, unreachable_reason=$7, qualified_at=NOW(), status='qualified'
+               WHERE id=$1 AND status <> 'rejected'`,
+        [r.id, res.url || r.website, score, JSON.stringify(findings), pkg, reachable, unreachableReason]);
+      summary.scored++;
+      if (!reachable) summary.unreachable++;
+      if (builder) summary.by_builder[builder] = (summary.by_builder[builder] || 0) + 1;
+      const band = score >= 60 ? '60+' : score >= 40 ? '40-59' : score >= 20 ? '20-39' : '0-19';
+      summary.score_bands[band] = (summary.score_bands[band] || 0) + 1;
+      if (pkg === 'P2') summary.p2++; else summary.no_fit++;
+    } catch (e) { summary.errors.push({ stage: 'score', id: r.id, error: e && e.message ? e.message : String(e) }); }
+    await sleep(rateMs);
+  }
+
+  try {
+    await logActivity({ agent_name: AGENT_NAME, action_type: 'score_sites',
+      reasoning: `Site-quality scoring for ${product}${subtypes ? ' (' + subtypes.join('+') + ')' : ''}`,
+      output_summary: `considered=${summary.considered} scored=${summary.scored} noSite=${summary.no_website} p1=${summary.p1} p2=${summary.p2} noFit=${summary.no_fit} errors=${summary.errors.length}` });
+  } catch { /* logging must never break the run */ }
+  return summary;
+}
+// httpText's error strings mapped to the persisted vocabulary, mirroring qualify.classifyUnreachable.
+function classifyFetchReason(r) {
+  const err = (r && r.error) || '';
+  if (r && r.timedOut) return 'timeout';
+  if (typeof r.status === 'number' && r.status >= 400) return 'http_error';
+  if (/request failed/i.test(err)) return 'dns';
+  return 'empty';
+}
+
+// ── PageSpeed second pass ──────────────────────────────────────────────────────
+// Runs ONLY on rows already at/above the P2 threshold, worst first. PSI is slow (10-30s/URL),
+// so it is wasted on a site that already scored low, and it never changes site_score — it adds
+// Google's own mobile number to site_findings.psi for the outreach to quote.
+async function runPageSpeedPass(product, { subtypes = null, cap = 15, deps = {} } = {}) {
+  const env = deps.env || process.env;
+  const summary = { product, enabled: true, considered: 0, updated: 0, failed: 0, scores: [], errors: [] };
+  if (String(env.PROSPECTING_ENABLED) !== 'true') { summary.enabled = false; return summary; }
+  const q = deps.query || query;
+  const { pageSpeedMobile, P2_THRESHOLD } = deps.scorer || require('./site-score');
+  const apiKey = env.PAGESPEED_API_KEY || null;   // keyless works but is rate-limited
+  let rows;
+  try {
+    rows = (await q(
+      `SELECT id, name, site_url, site_score FROM prospects
+        WHERE product=$1 AND status='qualified' AND site_score >= $2 AND site_url IS NOT NULL
+          AND ($3::text[] IS NULL OR subtype = ANY($3))
+          AND NOT (site_findings ? 'psi')
+        ORDER BY site_score DESC, id LIMIT $4`, [product, P2_THRESHOLD, subtypes, cap])).rows;
+  } catch (e) { summary.errors.push({ stage: 'select', error: e && e.message ? e.message : String(e) }); return summary; }
+
+  for (const r of rows) {
+    summary.considered++;
+    const psi = await pageSpeedMobile(r.site_url, { apiKey, deps });
+    if (psi.error) { summary.failed++; summary.errors.push({ id: r.id, error: psi.error }); continue; }
+    try {
+      await q(`UPDATE prospects SET site_findings = jsonb_set(COALESCE(site_findings,'{}'::jsonb), '{psi}', $2::jsonb, true) WHERE id=$1`,
+        [r.id, JSON.stringify(psi)]);
+      summary.updated++; summary.scores.push({ name: r.name, site_score: r.site_score, psi_mobile: psi.mobile_score });
+    } catch (e) { summary.errors.push({ stage: 'update', id: r.id, error: e && e.message ? e.message : String(e) }); }
+  }
+  return summary;
+}
+
+module.exports = { runProspecting, runQualifyProspects, runScoreSites, runPageSpeedPass, AGENT_NAME };
