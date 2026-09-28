@@ -145,20 +145,33 @@ const PRODUCT_CONFIG = {
     // ?booking_platform=prime filter, so that filter must NOT be used for acbm; the page needs
     // to branch on primeBy. Until it does, filter acbm by site_score directly.
     primeBy: 'site_score',            // prime = HIGH site_score (0-100, higher = worse)
-    // Four subtypes for the first run, on purpose: two trades and two professional services, so
-    // the first read shows which segment converts before the list is scaled. Deliberately NOT
-    // salons or golf — favly and golfnex already enumerate those; UNIQUE(product, place_id)
-    // permits the duplicate rows by design, but re-enumerating them would waste Places calls and
-    // muddy the comparison.
+    // These three survived a four-cell experiment (2026-09-28, ~$1.50) that separated the
+    // CATEGORY effect from the GEOGRAPHY effect. Metrics per cell were: share with no website
+    // (the P1 pool), share on plain http://, and share whose URL carries utm_/campaign tracking
+    // — the last being the sharpest proxy for "already pays an agency", i.e. won't buy a rebuild.
+    //
+    //   old cats (hvac/plumbing/dental/legal) × Chicago :  3.1% noSite / 27.5% http / 27.5% tracked
+    //   new cats × Chicago                              : 12.6% / 44.6% / 13.8%
+    //   old cats × Rockford                             : 16.1% / 35.3% / 13.2%
+    //   new cats × Rockford                             : 27.6% / 40.5% /  7.1%   <- best cell
+    //
+    // Category and geography both help and compound, but the category effect is the larger one:
+    // machine_shop scores 66.7% http / 0.0% tracked in Rockford AND 58.8% / 5.9% in CHICAGO, so
+    // the metro was never the problem — the original four categories were. Chicago therefore
+    // stays in (it holds the largest pool of the best category, and it subdivides across five
+    // regions so the 60-result Places cap works in our favour rather than against us).
+    //
+    // DROPPED after the experiment: auto_repair (only 52% even have a website, and http:// is
+    // flat at 28.6/33.3/26.5% across review bands — review count carries no site-quality signal,
+    // so it is noise, not a segment) and daycare (26.3% tracked, near the discarded baseline —
+    // a credibility purchase means they already bought a site).
     subtypes: [
-      { key: 'hvac', term: 'HVAC contractor' },
-      { key: 'plumbing', term: 'plumber' },
-      { key: 'dental', term: 'dental practice' },
-      { key: 'legal', term: 'law firm' },
+      { key: 'machine_shop', term: 'machine shop' },   // best of the set: B2B, real revenue, unmarketed
+      { key: 'funeral', term: 'funeral home' },        // family-owned, high-margin, nobody calls them
+      { key: 'pharmacy', term: 'independent pharmacy' }, // squeezed by chains, so local presence matters
     ],
-    states: ['IL'],
-    regions: ['Chicago, IL'],         // ONE metro for the first run, not all 13 IL tiles
-    callCap: 60,                      // 4 subtypes × up to 3 pages = 12 calls; 60 is headroom
+    states: ['IL'],                   // all 13 REGIONS — this segment scales by METRO, not category
+    callCap: 150,                     // 3 subtypes × 13 regions × ≤3 pages ≈ 117 calls (~$4)
     // CMS / site-builder tokens. NOTE: these are scored, not chosen between — the site-quality
     // scorer (not built yet) will use detectAll() so every signal counts. Until that scorer
     // exists, running the EXISTING booking qualifier against acbm will record whichever builder
@@ -186,6 +199,23 @@ const PRODUCT_CONFIG = {
     // The scorer fetches the homepage; these are the one-hop links worth following when the
     // homepage alone is thin. Not booking links — ACBM sells the site itself.
     bookingLinkTerms: ['about', 'contact', 'services'],
+    // NOT YET READ BY ANY CODE. Declared here for the scorer's qualify pass, which will consume
+    // it; until that ships, nothing rejects anything and these rows enumerate like any other.
+    // Rejection patterns — a rebuild is unsellable to a franchise
+    // or a hospital system, and pharmacy in particular pulls them in (Walgreens, CVS, and
+    // hospital outpatient pharmacies all rank for 'independent pharmacy').
+    //
+    // NOTE what is deliberately NOT here: a high-review-count rejection. That correlation
+    // ("many reviews ≈ has an agency") held in the ESTABLISHED verticals — hvac 14→3→44%,
+    // legal 13→23→46%, plumbing 0→15→32% tracked by review band — but these three categories
+    // are the opposite case: machine shops average FIVE reviews, and that is the whole point.
+    rejectNamePatterns: [
+      'walgreens', 'cvs', 'rite aid', 'walmart', 'costco', 'sam\'s club', 'kroger', 'jewel-osco',
+      'mariano\'s', 'meijer', 'target pharmacy', 'osco', 'hy-vee',
+      'health system', 'healthcare system', 'medical center', 'hospital', 'uw health',
+      'advocate', 'northwestern medicine', 'osf ', 'carle ', 'mercyhealth', 'swedishamerican',
+      'dignity memorial', 'service corporation international',
+    ],
   },
 };
 

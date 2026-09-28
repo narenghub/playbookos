@@ -248,16 +248,28 @@ test('every product declares EXACTLY ONE prime axis, and linkabl is the inverted
   assert.equal(getConfig('acbm').primeBy, 'site_score');
 });
 
-test('acbm config: one metro, capped run, four subtypes, no salons or golf', () => {
+test('acbm shipping config: 3 experiment-backed subtypes, all IL regions, capped', () => {
   const a = getConfig('acbm');
   assert.deepEqual(a.states, ['IL']);
-  assert.deepEqual(a.regions, ['Chicago, IL']);
-  assert.equal(a.callCap, 60);
-  assert.deepEqual(a.subtypes.map(s => s.key), ['hvac', 'plumbing', 'dental', 'legal']);
-  // favly and golfnex already enumerate these; re-enumerating wastes Places calls.
+  assert.equal(a.regions, undefined, 'no metro override — the segment scales by adding metros');
+  assert.equal(a.callCap, 150);       // 3 × 13 × ≤3 pages ≈ 117 calls
+  assert.deepEqual(a.subtypes.map(s => s.key), ['machine_shop', 'funeral', 'pharmacy']);
+  // Dropped by the 2026-09-28 experiment: auto_repair (review bands show no site-quality signal)
+  // and daycare (already marketed). Never included: salons/golf — favly and golfnex own those.
   const terms = a.subtypes.map(s => s.term.toLowerCase()).join(' ');
-  assert.doesNotMatch(terms, /salon|barber|spa|golf|driving range/);
+  assert.doesNotMatch(terms, /salon|barber|spa|golf|driving range|auto repair|daycare/);
   assert.ok(a.signatures.length >= 10 && a.bookingLinkTerms.length >= 1);
+});
+
+test('acbm reject patterns cover chains and hospital systems, but NOT review count', () => {
+  const pats = getConfig('acbm').rejectNamePatterns;
+  assert.ok(Array.isArray(pats) && pats.length >= 10);
+  for (const needle of ['walgreens', 'cvs', 'health system', 'hospital']) {
+    assert.ok(pats.includes(needle), `missing reject pattern: ${needle}`);
+  }
+  // machine shops average 5 reviews — a review-count floor would reject the best segment.
+  assert.ok(!pats.some(p => /review|rating|count/.test(p)));
+  assert.equal(getConfig('acbm').minRatingCount, undefined);
 });
 
 // ── detectAll — every signal present, not just the first ────────────────────────

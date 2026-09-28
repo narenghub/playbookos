@@ -210,15 +210,28 @@ test('runQualifyProspects on an unknown product → config error, no throw (does
 // ── per-product region + call-cap overrides (acbm) ─────────────────────────────
 // Both fields are additive and guarded; the point of these tests is that the other three
 // products are BYTE-IDENTICAL after the change, not merely that acbm works.
-test('cfg.regions narrows acbm to ONE metro; golfnex/favly/linkabl tile counts are unchanged', () => {
+test('acbm ships ALL 13 IL regions × 3 subtypes = 39 tiles; other products unchanged', () => {
   const a = tilesForProduct('acbm');
-  assert.equal(a.length, 4, '4 subtypes × 1 region');
-  assert.ok(a.every(t => t.region === 'Chicago, IL'), 'every acbm tile is Chicago');
-  assert.deepEqual([...new Set(a.map(t => t.subtype))], ['hvac', 'plumbing', 'dental', 'legal']);
+  assert.equal(a.length, 39, '3 subtypes × 13 regions — no metro override');
+  assert.deepEqual([...new Set(a.map(t => t.subtype))], ['machine_shop', 'funeral', 'pharmacy']);
+  assert.ok(a.some(t => t.region === 'Chicago, IL'), 'Chicago is IN — the metro was never the problem');
+  assert.ok(a.some(t => t.region === 'Rockford, IL'));
   // unchanged: 13 IL regions each
   assert.equal(tilesForProduct('golfnex').length, 39);  // 3 × 13
   assert.equal(tilesForProduct('favly').length, 52);    // 4 × 13
   assert.equal(tilesForProduct('linkabl').length, 39);  // 3 × 13
+});
+
+test('cfg.regions override still works (mechanism kept for one-metro runs)', () => {
+  // acbm no longer sets it, so exercise the mechanism directly rather than losing the coverage.
+  const { PRODUCT_CONFIG } = require('./config');
+  const saved = PRODUCT_CONFIG.acbm.regions;
+  try {
+    PRODUCT_CONFIG.acbm.regions = ['Rockford, IL'];
+    const t = tilesForProduct('acbm');
+    assert.equal(t.length, 3, '3 subtypes × 1 region');
+    assert.ok(t.every(x => x.region === 'Rockford, IL'));
+  } finally { PRODUCT_CONFIG.acbm.regions = saved; }
 });
 
 test('a cfg.regions entry that is not a real REGIONS value yields NO tiles (not a bad query)', () => {
