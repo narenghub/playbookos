@@ -3,7 +3,7 @@
 // call passes the golf set explicitly, imported from config (never redefined here).
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { qualifyFacility, detect, findBookingLink, classifyUnreachable } = require('./qualify');
+const { qualifyFacility, detect, detectAll, findBookingLink, classifyUnreachable } = require('./qualify');
 const { getConfig } = require('./config');
 
 const GOLF = getConfig('golfnex');
@@ -217,16 +217,74 @@ test('getConfig shapes: golfnex + favly present; unknown → null', () => {
   assert.equal(getConfig('nope'), null);
 });
 
-test('every product declares a primeSignal, and linkabl is the inverted one', () => {
+test('every product declares EXACTLY ONE prime axis, and linkabl is the inverted one', () => {
   // The polarity is data, not prose. golf/beauty: a booking platform means they already solved
   // scheduling, so prime = none. linkabl: an ATS means real requisition volume, so prime = has one.
   // Getting this backwards points a whole sales list at the wrong half of the market.
+  //
+  // acbm introduced a SECOND axis: prime there is "the site is bad" (high site_score), which
+  // primeSignal's vocabulary cannot express. So the invariant is no longer "everyone declares
+  // primeSignal" but the stricter "everyone declares exactly one axis, and never both" — a
+  // product silent about how prime is defined is the actual bug this test exists to catch.
   const { PRODUCT_CONFIG } = require('./config');
   for (const [key, cfg] of Object.entries(PRODUCT_CONFIG)) {
-    assert.ok(['platform', 'no-platform'].includes(cfg.primeSignal),
-      `${key} must declare primeSignal as 'platform' or 'no-platform', got ${JSON.stringify(cfg.primeSignal)}`);
+    const hasSignal = cfg.primeSignal !== undefined;
+    const hasBy = cfg.primeBy !== undefined;
+    assert.ok(hasSignal !== hasBy, `${key} must declare exactly one of primeSignal / primeBy (got primeSignal=${JSON.stringify(cfg.primeSignal)}, primeBy=${JSON.stringify(cfg.primeBy)})`);
+    if (hasSignal) {
+      assert.ok(['platform', 'no-platform'].includes(cfg.primeSignal),
+        `${key} primeSignal must be 'platform' or 'no-platform', got ${JSON.stringify(cfg.primeSignal)}`);
+    } else {
+      assert.ok(['site_score'].includes(cfg.primeBy),
+        `${key} primeBy must be a known axis, got ${JSON.stringify(cfg.primeBy)}`);
+    }
   }
   assert.equal(getConfig('golfnex').primeSignal, 'no-platform');
   assert.equal(getConfig('favly').primeSignal, 'no-platform');
   assert.equal(getConfig('linkabl').primeSignal, 'platform');
+  // acbm deliberately has NO primeSignal: routes.js:4410 would otherwise read it as
+  // 'no-platform' and the page's prime filter would mean "no CMS detected".
+  assert.equal(getConfig('acbm').primeSignal, undefined);
+  assert.equal(getConfig('acbm').primeBy, 'site_score');
+});
+
+test('acbm config: one metro, capped run, four subtypes, no salons or golf', () => {
+  const a = getConfig('acbm');
+  assert.deepEqual(a.states, ['IL']);
+  assert.deepEqual(a.regions, ['Chicago, IL']);
+  assert.equal(a.callCap, 60);
+  assert.deepEqual(a.subtypes.map(s => s.key), ['hvac', 'plumbing', 'dental', 'legal']);
+  // favly and golfnex already enumerate these; re-enumerating wastes Places calls.
+  const terms = a.subtypes.map(s => s.term.toLowerCase()).join(' ');
+  assert.doesNotMatch(terms, /salon|barber|spa|golf|driving range/);
+  assert.ok(a.signatures.length >= 10 && a.bookingLinkTerms.length >= 1);
+});
+
+// ── detectAll — every signal present, not just the first ────────────────────────
+test('detectAll returns EVERY matching platform where detect() returns one', () => {
+  const html = '<script src="https://static1.squarespace.com/x.js"></script><a href="/wp-content/themes/t">t</a> powered by weebly';
+  const sigs = [
+    { platform: 'squarespace', key: 'static1.squarespace' },
+    { platform: 'wordpress', key: 'wp-content' },
+    { platform: 'weebly', key: 'weebly' },
+  ];
+  assert.equal(detect(html, sigs).platform, 'squarespace');           // unchanged: first/highest only
+  const all = detectAll(html, sigs);
+  assert.deepEqual(all.map(h => h.platform), ['squarespace', 'wordpress', 'weebly']);
+  assert.deepEqual(all.map(h => h.confidence), ['high', 'medium', 'low']);
+});
+
+test('detectAll counts a multi-key platform ONCE, at its highest confidence', () => {
+  const html = '<script src="//parastorage.com/a.js"></script> see wix.com for details';
+  const sigs = [{ platform: 'wix', key: 'wix.com' }, { platform: 'wix', key: 'parastorage.com' }];
+  const all = detectAll(html, sigs);
+  assert.equal(all.length, 1);
+  assert.equal(all[0].confidence, 'high');
+  assert.equal(all[0].key, 'parastorage.com');
+});
+
+test('detectAll: no matches → [], and missing signatures throws loudly', () => {
+  assert.deepEqual(detectAll('<html>nothing</html>', [{ platform: 'wix', key: 'wix.com' }]), []);
+  assert.throws(() => detectAll('<html/>', []), /non-empty signatures array is required/);
+  assert.throws(() => detectAll('<html/>'), /non-empty signatures array is required/);
 });

@@ -61,6 +61,39 @@ function detect(html, signatures) {
   return { platform: null, confidence: null, evidence: null };
 }
 
+// detect() answers "WHICH platform is this?" and stops at the first, highest-confidence hit —
+// correct for booking, wrong for scoring. detectAll() answers "WHICH SIGNALS ARE PRESENT?" and
+// returns every match, because a site-quality score is a sum over signals: scoring with detect()
+// would grade every site on whichever token happened to match first.
+//
+// One entry per PLATFORM (a platform with several keys, e.g. two Square hosts, counts once) at
+// its highest confidence. Sorted high → medium → low, then by config order, so the caller can
+// take the strongest evidence without re-sorting. Same tier meanings as detect().
+const CONFIDENCE_RANK = { high: 0, medium: 1, low: 2 };
+function detectAll(html, signatures) {
+  if (!Array.isArray(signatures) || !signatures.length) throw new Error('detectAll(html, signatures): a non-empty signatures array is required');
+  const h = String(html || '');
+  const best = new Map(); // platform -> { platform, key, confidence, evidence, order }
+  signatures.forEach((s, order) => {
+    let confidence = null, evidence = null;
+    if (new RegExp('<(?:script|iframe)\\b[^>]+src=["\'][^"\']*' + esc(s.key) + '[^"\']*["\']', 'i').test(h)) {
+      confidence = 'high'; evidence = 'script/iframe src ~ ' + s.key;
+    } else if (new RegExp('href=["\'][^"\']*' + esc(s.key) + '[^"\']*["\']', 'i').test(h)) {
+      confidence = 'medium'; evidence = 'link href ~ ' + s.key;
+    } else if (new RegExp(esc(s.key), 'i').test(h)) {
+      confidence = 'low'; evidence = 'text mention ~ ' + s.key;
+    }
+    if (!confidence) return;
+    const prev = best.get(s.platform);
+    if (!prev || CONFIDENCE_RANK[confidence] < CONFIDENCE_RANK[prev.confidence]) {
+      best.set(s.platform, { platform: s.platform, key: s.key, confidence, evidence, order });
+    }
+  });
+  return [...best.values()]
+    .sort((a, b) => (CONFIDENCE_RANK[a.confidence] - CONFIDENCE_RANK[b.confidence]) || (a.order - b.order))
+    .map(({ order, ...rest }) => rest);
+}
+
 // Build the booking-link matcher from config terms: a space in a term becomes [\s-]? (so
 // 'tee time' matches 'tee-time' / 'tee time'). Terms are required — no default.
 function bookingLinkRegex(terms) {
@@ -125,4 +158,4 @@ async function qualifyFacility(website, { signatures, bookingLinkTerms, deps = {
   }
 }
 
-module.exports = { qualifyFacility, detect, findBookingLink, bookingLinkRegex, classifyUnreachable };
+module.exports = { qualifyFacility, detect, detectAll, findBookingLink, bookingLinkRegex, classifyUnreachable };

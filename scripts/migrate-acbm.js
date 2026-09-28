@@ -66,6 +66,15 @@ async function migrateAcbm() {
     COMMENT ON COLUMN prospects.recommended_package IS 'acbm_packages.code — P1 | P2 | P3';
     COMMENT ON COLUMN prospects.owner_source IS 'places | facebook | instagram | sos | manual';
   `);
+  // ACBM's prime pool is ordered by site_score DESC (higher = worse = better prospect), NOT by
+  // booking_platform polarity, so idx_prospects_prime — partial on `booking_platform IS NULL AND
+  // reachable = true` — cannot serve it. This is its sibling: same partial-index trick, ACBM's
+  // axis. Config names the axis via primeBy:'site_score' (prospecting/config.js).
+  await query(`
+    CREATE INDEX IF NOT EXISTS idx_prospects_site_score
+      ON prospects (product, site_score DESC)
+      WHERE status = 'qualified';
+  `);
 
   // ── 2. acbm_packages — the offer catalogue ──
   // included / not_included are both NOT NULL: a package must state what it does NOT cover,

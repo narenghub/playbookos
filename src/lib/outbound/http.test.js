@@ -121,3 +121,48 @@ test('httpText network throw → { error }, no throw', async () => {
   stub(async () => { throw new Error('ECONN'); });
   try { let r; await assert.doesNotReject(async () => { r = await httpText({ url: 'https://x' }); }); assert.match(r.error, /request failed: ECONN/); } finally { restore(); }
 });
+
+// ── httpText additions: final URL, body on non-2xx, User-Agent ──────────────────
+test('httpText returns the FINAL url after redirects (http → https is detectable)', async () => {
+  stub(async () => ({ ok: true, status: 200, url: 'https://x.com/', text: async () => '<html/>', headers: { get: () => 'text/html' } }));
+  try {
+    const r = await httpText({ url: 'http://x.com' });
+    assert.equal(r.url, 'https://x.com/', 'final url, not the requested one');
+  } finally { restore(); }
+});
+
+test('httpText falls back to the requested url when the response carries none', async () => {
+  stub(async () => ({ ok: true, status: 200, text: async () => '<html/>', headers: { get: () => null } }));
+  try { assert.equal((await httpText({ url: 'https://y.com' })).url, 'https://y.com'); } finally { restore(); }
+});
+
+test('httpText KEEPS the body on non-2xx, while still reporting { error, status }', async () => {
+  stub(async () => ({ ok: false, status: 404, url: 'https://x.com/404', text: async () => '<html>parked domain</html>', headers: { get: () => 'text/html' } }));
+  try {
+    const r = await httpText({ url: 'https://x.com' });
+    assert.match(r.error, /HTTP 404/);        // callers must keep checking error FIRST
+    assert.equal(r.status, 404);
+    assert.match(r.text, /parked domain/);    // ...but the page is now inspectable
+  } finally { restore(); }
+});
+
+test('httpText non-2xx with NO body reader still returns { error, status } and text null', async () => {
+  stub(async () => ({ ok: false, status: 403 }));   // the original contract, unchanged
+  try {
+    const r = await httpText({ url: 'https://x' });
+    assert.match(r.error, /HTTP 403/); assert.equal(r.status, 403); assert.equal(r.text, null);
+  } finally { restore(); }
+});
+
+test('httpText sends a default User-Agent; a caller-supplied one wins', async () => {
+  const { DEFAULT_USER_AGENT } = require('./http');
+  let seen;
+  stub(async (_u, opts) => { seen = opts.headers; return { ok: true, status: 200, text: async () => '', headers: { get: () => null } }; });
+  try {
+    await httpText({ url: 'https://x' });
+    assert.equal(seen['User-Agent'], DEFAULT_USER_AGENT);
+    await httpText({ url: 'https://x', headers: { 'user-agent': 'mine/1.0' } });
+    assert.equal(seen['user-agent'], 'mine/1.0');
+    assert.equal(seen['User-Agent'], undefined, 'no duplicate UA header');
+  } finally { restore(); }
+});

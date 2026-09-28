@@ -206,3 +206,53 @@ test('runQualifyProspects on an unknown product → config error, no throw (does
   assert.ok(s.errors.some(e => e.stage === 'config'), 'clear config error for unknown product');
   assert.equal(selected, false, 'did not query prospects for an unconfigured product');
 });
+
+// ── per-product region + call-cap overrides (acbm) ─────────────────────────────
+// Both fields are additive and guarded; the point of these tests is that the other three
+// products are BYTE-IDENTICAL after the change, not merely that acbm works.
+test('cfg.regions narrows acbm to ONE metro; golfnex/favly/linkabl tile counts are unchanged', () => {
+  const a = tilesForProduct('acbm');
+  assert.equal(a.length, 4, '4 subtypes × 1 region');
+  assert.ok(a.every(t => t.region === 'Chicago, IL'), 'every acbm tile is Chicago');
+  assert.deepEqual([...new Set(a.map(t => t.subtype))], ['hvac', 'plumbing', 'dental', 'legal']);
+  // unchanged: 13 IL regions each
+  assert.equal(tilesForProduct('golfnex').length, 39);  // 3 × 13
+  assert.equal(tilesForProduct('favly').length, 52);    // 4 × 13
+  assert.equal(tilesForProduct('linkabl').length, 39);  // 3 × 13
+});
+
+test('a cfg.regions entry that is not a real REGIONS value yields NO tiles (not a bad query)', () => {
+  const tiles = tilesForProduct('acbm');
+  assert.ok(tiles.length > 0);
+  // simulate a typo by injecting a config with an unknown region
+  const { PRODUCT_CONFIG } = require('./config');
+  const saved = PRODUCT_CONFIG.acbm.regions;
+  try {
+    PRODUCT_CONFIG.acbm.regions = ['Chicagoo, IL'];
+    assert.equal(tilesForProduct('acbm').length, 0, 'typo → 0 tiles, orchestrator reports it');
+  } finally { PRODUCT_CONFIG.acbm.regions = saved; }
+});
+
+test('cfg.callCap overrides the GLOBAL env cap; a product without one still uses env', async () => {
+  const manyTiles = Array.from({ length: 10 }, (_, i) => ({ state: 'IL', region: 'R' + i, subtype: 'hvac', query: 'q' + i }));
+  const env = { ...ON, PROSPECTING_CALL_CAP: '999' };
+  const mkSearch = (counter) => async () => { counter.n++; return { places: [place('x' + counter.n)], nextPageToken: 'more' }; };
+
+  const c1 = { n: 0 };
+  const s1 = await runProspecting('acbm', { deps: { env, tilesForProduct: () => manyTiles, query: fakeDB(), searchText: mkSearch(c1), logAgentActivity: noopLog, getConfig: () => ({ callCap: 2 }) } });
+  assert.equal(s1.calls_made, 2, 'cfg.callCap=2 beat env 999');
+
+  const c2 = { n: 0 };
+  const s2 = await runProspecting('golfnex', { deps: { env: { ...ON, PROSPECTING_CALL_CAP: '3' }, tilesForProduct: () => manyTiles, query: fakeDB(), searchText: mkSearch(c2), logAgentActivity: noopLog, getConfig: () => ({}) } });
+  assert.equal(s2.calls_made, 3, 'no cfg.callCap → env cap still applies');
+});
+
+test('a non-integer or zero cfg.callCap falls back to the env cap rather than capping at 0', async () => {
+  const manyTiles = Array.from({ length: 5 }, (_, i) => ({ state: 'IL', region: 'R' + i, subtype: 'hvac', query: 'q' + i }));
+  for (const bad of [0, -5, 1.5, 'sixty', null]) {
+    let calls = 0;
+    const s = await runProspecting('acbm', { deps: { env: { ...ON, PROSPECTING_CALL_CAP: '2' }, tilesForProduct: () => manyTiles, query: fakeDB(),
+      searchText: async () => { calls++; return { places: [], nextPageToken: null }; }, logAgentActivity: noopLog, getConfig: () => ({ callCap: bad }) } });
+    assert.equal(s.calls_made, 2, `callCap=${JSON.stringify(bad)} → env cap 2, not 0`);
+  }
+});

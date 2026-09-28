@@ -17,6 +17,9 @@
 //   • cache, or throw.
 
 const DEFAULT_TIMEOUT_MS = 15000;
+// Sent by httpText when the caller passes no User-Agent of its own. Honest about what we are
+// and reachable, rather than impersonating a browser.
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (compatible; PlayNexaBot/1.0; +https://app.playnexa.ai/bot)';
 
 function hasHeader(headers, name) {
   const lower = name.toLowerCase();
@@ -67,9 +70,15 @@ async function httpText({ url, method = 'GET', headers = {}, timeoutMs = DEFAULT
   if (!url) return { error: 'url is required' };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const finalHeaders = { ...headers };
+  // Identify ourselves. Without a User-Agent a meaningful share of small-business sites answer
+  // 403 to the bare fetch agent, which lands in the prospecting pipeline as
+  // unreachable_reason='403' — noise indistinguishable from a genuinely broken site. A caller
+  // passing its own User-Agent always wins.
+  if (!hasHeader(finalHeaders, 'user-agent')) finalHeaders['User-Agent'] = DEFAULT_USER_AGENT;
   let res;
   try {
-    res = await fetch(url, { method, headers, signal: controller.signal, redirect: 'follow' });
+    res = await fetch(url, { method, headers: finalHeaders, signal: controller.signal, redirect: 'follow' });
   } catch (e) {
     clearTimeout(timer);
     const timedOut = !!(e && (e.name === 'AbortError' || controller.signal.aborted));
@@ -78,12 +87,24 @@ async function httpText({ url, method = 'GET', headers = {}, timeoutMs = DEFAULT
       : { error: 'request failed: ' + (e && e.message ? e.message : String(e)) };
   }
   clearTimeout(timer);
-  if (!res.ok) return { error: `HTTP ${res.status}`, status: res.status };
-  let text;
-  try { text = await res.text(); }
-  catch (e) { return { error: 'body read failed: ' + (e && e.message ? e.message : String(e)), status: res.status }; }
   const contentType = (res.headers && res.headers.get && res.headers.get('content-type')) || null;
-  return { text, status: res.status, contentType };
+  // The URL after redirects. Needed to tell http → https apart from http-only, which no caller
+  // could see before: fetch follows redirects silently, so the requested url proves nothing.
+  // Falls back to the requested url when the response has none (stubs, exotic runtimes).
+  const finalUrl = (typeof res.url === 'string' && res.url) ? res.url : url;
+  // Body read is best-effort and guarded: a non-2xx response may legitimately carry no body,
+  // and a stubbed response may have no .text() at all.
+  let text = null, readError = null;
+  if (typeof res.text === 'function') {
+    try { text = await res.text(); }
+    catch (e) { readError = e && e.message ? e.message : String(e); }
+  }
+  // Non-2xx keeps { error, status } EXACTLY as before — callers must keep checking `error`
+  // FIRST — but now also carries the body, so an error page can be inspected (a parked-domain
+  // or expired-host page is itself a site-quality signal) instead of being thrown away.
+  if (!res.ok) return { error: `HTTP ${res.status}`, status: res.status, url: finalUrl, contentType, text };
+  if (readError) return { error: 'body read failed: ' + readError, status: res.status, url: finalUrl, contentType };
+  return { text, status: res.status, contentType, url: finalUrl };
 }
 
-module.exports = { httpJson, httpText, DEFAULT_TIMEOUT_MS };
+module.exports = { httpJson, httpText, DEFAULT_TIMEOUT_MS, DEFAULT_USER_AGENT };

@@ -41,7 +41,11 @@ async function runProspecting(product, { dryRun = false, deps = {} } = {}) {
   const tiles = tilesFn(product);
   if (!tiles.length) { summary.errors.push({ stage: 'config', error: `no tiles for product '${product}'` }); return summary; }
 
-  const callCap = envNum(env, 'PROSPECTING_CALL_CAP', 300);
+  // Per-product cap wins over the env var, which is GLOBAL — bounding one product's first run
+  // via PROSPECTING_CALL_CAP would throttle every other product too. Guarded: only a positive
+  // integer in config overrides, so products without callCap keep the env/default behaviour.
+  const cfgCap = ((deps.getConfig || getConfig)(product) || {}).callCap;
+  const callCap = (Number.isInteger(cfgCap) && cfgCap > 0) ? cfgCap : envNum(env, 'PROSPECTING_CALL_CAP', 300);
   const rateMs = envNum(env, 'PROSPECTING_RATE_MS', 200);
   const q = deps.query || query;
   const search = deps.searchText || places.searchText;

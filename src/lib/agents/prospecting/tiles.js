@@ -31,8 +31,15 @@ function tilesForProduct(product) {
   const cfg = getConfig(product);
   if (!cfg) return [];
   const tiles = [];
+  // cfg.regions (optional) narrows a state to specific metros — a first run can be one metro
+  // instead of all 13 IL tiles. Guarded so it changes nothing for a product that omits it:
+  // only a non-empty array overrides, and each region is still filtered to REGIONS[state], so a
+  // typo yields no tiles (which the orchestrator reports) rather than an unsearchable query.
+  const override = Array.isArray(cfg.regions) && cfg.regions.length ? cfg.regions : null;
   for (const state of (cfg.states || [])) {
-    for (const region of (REGIONS[state] || [])) {
+    const all = REGIONS[state] || [];
+    const regions = override ? all.filter(r => override.includes(r)) : all;
+    for (const region of regions) {
       for (const st of (cfg.subtypes || [])) {
         tiles.push({ state, region, subtype: st.key, query: `${st.term} in ${region}` });
       }
