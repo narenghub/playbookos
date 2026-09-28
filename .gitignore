@@ -6,3 +6,6 @@ node_modules/
 scripts/seed-real-data.js
 scripts/sync-abiozen-products.js
 public/linkedin-images/
+
+# Generated call sheets contain prospect contact data — keep them out of git.
+docs/acbm-call-sheet-*.md
