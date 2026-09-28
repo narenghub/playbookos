@@ -110,6 +110,17 @@ require('./src/lib/permissions/shadow').mount(app);
 // enforce nothing. Fails OPEN to the existing gate on any resolver error — never locks out.
 require('./src/lib/permissions/enforce').mount(app);
 
+// PRODUCT BOUNDARY — a SECOND, independent gate: does the caller hold the product this route
+// belongs to? PRODUCT_BOUNDARY_MODE = off | shadow | enforce, defaulting to SHADOW, so this ships
+// observing and blocking nothing. In shadow it logs every evaluated request to product_shadow_log
+// (the denominator matters: zero would-blocks across 3 requests means nothing, across 40,000 it
+// means the route map is right). Only in enforce does it 403 — and there it FAILS CLOSED on an
+// unresolvable product, because the completeness test guarantees the map is total, so an
+// unresolvable product at runtime means the map and the routes have diverged.
+// Mounted before the router (it matches the concrete path back to a route pattern itself) and
+// after enforce, so a permissions denial still reads as a permissions denial.
+app.use(require('./src/lib/products/boundary').productBoundary());
+
 // API routes
 app.use('/api', routes);
 
