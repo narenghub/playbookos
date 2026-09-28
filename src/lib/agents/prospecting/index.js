@@ -199,8 +199,8 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
 // chain/franchise rejection passes run BEFORE this.
 async function runScoreSites(product, { subtypes = null, cap = null, rescore = false, deps = {} } = {}) {
   const env = deps.env || process.env;
-  const summary = { product, enabled: true, considered: 0, scored: 0, no_website: 0, unreachable: 0,
-    p1: 0, p2: 0, no_fit: 0, by_builder: {}, score_bands: {}, errors: [] };
+  const summary = { product, enabled: true, considered: 0, scored: 0, unscannable: 0, no_website: 0,
+    unreachable: 0, agency_flagged: 0, p1: 0, p2: 0, no_fit: 0, by_builder: {}, score_bands: {}, errors: [] };
   if (String(env.PROSPECTING_ENABLED) !== 'true') { summary.enabled = false; return summary; }
 
   const cfg = (deps.getConfig || getConfig)(product);
@@ -218,11 +218,14 @@ async function runScoreSites(product, { subtypes = null, cap = null, rescore = f
   try {
     // status <> 'rejected' is load-bearing for the same reason as in the qualifier: a row
     // rejected as a chain must not be resurrected by a later pass.
+    // site_findings comes along so a re-scan can read the prior unreachable strike count. NOTE
+    // the selection condition: `site_score IS NULL` alone would re-scan every UNSCANNABLE (403)
+    // row on each run, so an already-scanned row is skipped unless rescore is set.
     rows = (await q(
-      `SELECT id, name, website FROM prospects
+      `SELECT id, name, website, site_findings FROM prospects
         WHERE product=$1 AND status <> 'rejected'
           AND ($2::text[] IS NULL OR subtype = ANY($2))
-          AND ($3::boolean OR site_score IS NULL)
+          AND ($3::boolean OR (site_score IS NULL AND site_findings IS NULL))
         ORDER BY id LIMIT $4`, [product, subtypes, !!rescore, limit])).rows;
   } catch (e) { summary.errors.push({ stage: 'select', error: e && e.message ? e.message : String(e) }); return summary; }
 
@@ -244,24 +247,36 @@ async function runScoreSites(product, { subtypes = null, cap = null, rescore = f
       const unreachableReason = res.error ? (res.status === 403 ? '403' : classifyFetchReason(res)) : null;
       const html = res.text || '';
       const builderHits = html ? detectAll(html, cfg.signatures) : [];
-      const { score, signals, builder } = scoreSite({
+      const out = scoreSite({
         html, finalUrl: res.url, website: r.website, reachable, unreachableReason, builderHits,
       });
+      const { score, signals, builder, agencySignals, unscannable, unscannableReason } = out;
+      // Strike count for genuinely-unreachable sites only: a 403 is unscannable, not dead, and a
+      // reachable scan resets the count to 0.
+      const prior = (r.site_findings && Number(r.site_findings.unreachable_strikes)) || 0;
+      const isDead = reachable === false && unreachableReason !== '403';
+      const strikes = isDead ? prior + 1 : 0;
       const findings = {
         scanned_at: new Date().toISOString(), final_url: res.url || r.website, score, signals,
-        builder, builder_hits: builderHits, reachable, unreachable_reason: unreachableReason,
+        builder, builder_hits: builderHits, agency_signals: agencySignals || [],
+        reachable, unreachable_reason: unreachableReason, unreachable_strikes: strikes,
+        ...(unscannable ? { unscannable: true, unscannable_reason: unscannableReason } : {}),
       };
-      const pkg = recommendPackage({ hasWebsite: true, score });
+      const pkg = recommendPackage({ hasWebsite: true, score, unreachableStrikes: strikes });
       await q(`UPDATE prospects SET site_url=$2, site_score=$3, site_findings=$4::jsonb, recommended_package=$5,
                  reachable=$6, unreachable_reason=$7, qualified_at=NOW(), status='qualified'
                WHERE id=$1 AND status <> 'rejected'`,
         [r.id, res.url || r.website, score, JSON.stringify(findings), pkg, reachable, unreachableReason]);
-      summary.scored++;
-      if (!reachable) summary.unreachable++;
+      if (unscannable) summary.unscannable++;
+      else summary.scored++;
+      if (isDead) summary.unreachable++;
       if (builder) summary.by_builder[builder] = (summary.by_builder[builder] || 0) + 1;
-      const band = score >= 60 ? '60+' : score >= 40 ? '40-59' : score >= 20 ? '20-39' : '0-19';
-      summary.score_bands[band] = (summary.score_bands[band] || 0) + 1;
-      if (pkg === 'P2') summary.p2++; else summary.no_fit++;
+      if ((agencySignals || []).length) summary.agency_flagged++;
+      if (typeof score === 'number') {
+        const band = score >= 60 ? '60+' : score >= 40 ? '40-59' : score >= 20 ? '20-39' : '0-19';
+        summary.score_bands[band] = (summary.score_bands[band] || 0) + 1;
+      }
+      if (pkg === 'P2') summary.p2++; else if (pkg === 'P1') summary.p1++; else summary.no_fit++;
     } catch (e) { summary.errors.push({ stage: 'score', id: r.id, error: e && e.message ? e.message : String(e) }); }
     await sleep(rateMs);
   }
@@ -292,7 +307,12 @@ async function runPageSpeedPass(product, { subtypes = null, cap = 15, deps = {} 
   if (String(env.PROSPECTING_ENABLED) !== 'true') { summary.enabled = false; return summary; }
   const q = deps.query || query;
   const { pageSpeedMobile, P2_THRESHOLD } = deps.scorer || require('./site-score');
-  const apiKey = env.PAGESPEED_API_KEY || null;   // keyless works but is rate-limited
+  // EXPLICITLY DISABLED without a key rather than half-working. Keyless PSI returns HTTP 429
+  // (the anonymous per-project quota is exhausted), so calling it would burn a minute per run to
+  // write nothing. To enable: turn on the PageSpeed Insights API in Google Cloud project
+  // instant-maxim-497102-k5, then set PAGESPEED_API_KEY in Railway.
+  const apiKey = env.PAGESPEED_API_KEY || null;
+  if (!apiKey) { summary.enabled = false; summary.skipped = 'PAGESPEED_API_KEY not configured — second pass disabled (keyless PSI is 429-quota-blocked)'; return summary; }
   let rows;
   try {
     rows = (await q(

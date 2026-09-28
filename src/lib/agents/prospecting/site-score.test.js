@@ -37,13 +37,55 @@ test('social-only presence scores 40 and does NOT fetch-score anything else', ()
   assert.equal(r.score, 40);
 });
 
-test('unreachable scores 35, but a 403 scores only 5 (bot protection, not a bad site)', () => {
+test('unreachable scores 35; a 403 is UNSCANNABLE with a NULL score, never a low one', () => {
   const dead = scoreSite({ website: 'https://deadshop.com', reachable: false, unreachableReason: 'dns' });
   assert.equal(dead.score, 35);
   assert.match(dead.signals[0].evidence, /unreachable \(dns\)/);
+
+  // The important one: a blocked fetch must NOT produce a low score, because "we could not look"
+  // would then be indistinguishable from "the site is fine" in a list someone calls from.
   const blocked = scoreSite({ website: 'https://deadshop.com', reachable: false, unreachableReason: '403' });
-  assert.equal(blocked.score, 5);
-  assert.match(blocked.signals[0].evidence, /treated as unknown/);
+  assert.equal(blocked.score, null, 'a 403 must not be scored at all');
+  assert.equal(blocked.unscannable, true);
+  assert.match(blocked.unscannableReason, /NOT assessed/);
+  assert.deepEqual(blocked.signals, [], 'no penalties invented for a page we never saw');
+});
+
+test('a 403 row gets NO package — we cannot justify one without seeing the site', () => {
+  assert.equal(recommendPackage({ hasWebsite: true, score: null }), null);
+});
+
+test('confirmed-dead sites become P1 only on the SECOND strike', () => {
+  // One 15-second timeout is not a dead business.
+  assert.equal(recommendPackage({ hasWebsite: true, score: 35, unreachableStrikes: 1 }), null);
+  assert.equal(recommendPackage({ hasWebsite: true, score: 35, unreachableStrikes: 2 }), 'P1');
+  assert.equal(recommendPackage({ hasWebsite: true, score: 35, unreachableStrikes: 5 }), 'P1');
+  // and a dead site is P1, never P2 — P2 means migrating content that does not load.
+  assert.notEqual(recommendPackage({ hasWebsite: true, score: 100, unreachableStrikes: 2 }), 'P2');
+});
+
+test('duda is an AGENCY signal, not a datedness penalty (it scored the wrong way before)', () => {
+  const r = scoreSite({ html: MODERN, website: 'https://fh.com', finalUrl: 'https://fh.com', reachable: true,
+    builderHits: [{ platform: 'duda', confidence: 'high', evidence: 'script/iframe src ~ dudamobile' }] });
+  assert.ok(!r.signals.some(s => s.key === 'dated_builder'), 'no penalty');
+  assert.equal(r.score, 0);
+  assert.deepEqual(r.agencySignals.map(s => s.key), ['reseller_builder']);
+  assert.match(r.agencySignals[0].evidence, /maintained by agencies/);
+});
+
+test('campaign tracking on the URL is agency evidence, and never touches the score', () => {
+  const tracked = 'https://fh.com/?utm_source=google&utm_medium=organic&utm_campaign=gbp';
+  const r = scoreSite({ html: MODERN, website: tracked, finalUrl: tracked, reachable: true });
+  assert.equal(r.score, 0, 'agency evidence is not a site defect');
+  assert.deepEqual(r.agencySignals.map(s => s.key), ['campaign_tracking']);
+  const clean = scoreSite({ html: MODERN, website: 'https://fh.com/', finalUrl: 'https://fh.com/', reachable: true });
+  assert.deepEqual(clean.agencySignals, []);
+});
+
+test('agency signals are reported even for an unscannable 403 row', () => {
+  const r = scoreSite({ website: 'https://fh.com/?gclid=abc', reachable: false, unreachableReason: '403' });
+  assert.equal(r.score, null);
+  assert.deepEqual(r.agencySignals.map(s => s.key), ['campaign_tracking']);
 });
 
 test('https is judged on the FINAL url, so http → https redirect is not penalised', () => {
