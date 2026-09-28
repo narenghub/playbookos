@@ -16,6 +16,9 @@
 // Flags: --subtype <key> (default machine_shop) · --limit <n> (default 15) · --package <P1|P2>
 
 const { query } = require('../src/lib/db');
+// Findings wording lives in ONE place — shared with the acbm-prospects screen so the sheet a rep
+// reads and the screen a manager reads never describe the same site differently.
+const { findingSentences, agencyNote, pageSpeedNote } = require('../src/lib/agents/prospecting/findings-text');
 
 const arg = (name, def) => {
   const i = process.argv.indexOf('--' + name);
@@ -27,54 +30,6 @@ const arg = (name, def) => {
 function cityOf(address, region) {
   const m = /,\s*([^,]+),\s*[A-Z]{2}\s+\d{5}/.exec(address || '');
   return (m && m[1].trim()) || (region || '').replace(/,\s*(IL|Illinois)$/, '') || 'unknown';
-}
-
-// One signal -> one sentence someone can say. Reads the evidence string for the specifics
-// (which year the footer says, which jQuery version) so the sentence is concrete.
-function sentence(sig) {
-  const ev = String(sig.evidence || '');
-  switch (sig.key) {
-    case 'no_viewport':
-      return "The site doesn't resize on a phone — it loads at desktop width, so you have to pinch and drag to read it.";
-    case 'legacy_layout': {
-      // Speakable main clause, with the technical detail in brackets in case they ask what we saw.
-      const bits = [];
-      if (/layout <table>/.test(ev)) bits.push('the layout is built out of tables');
-      if (/<font>|<center>/.test(ev)) bits.push('the text styling is hard-coded into each page (font and center tags)');
-      if (/Flash/.test(ev)) bits.push('there is still Flash content, which no browser has run since 2020');
-      return `The page is built the way sites were built twenty years ago — ${bits.join(', and ')}.`;
-    }
-    case 'no_https':
-      return 'The site is served over plain http, so browsers show "Not secure" next to the address.';
-    case 'stale_copyright': {
-      const y = (/reads (\d{4})/.exec(ev) || [])[1];
-      return `The footer still says ${y || 'an old year'}.`;
-    }
-    case 'missing_title_or_desc':
-      return /no <title> and no meta description/.test(ev)
-        ? 'The page has no title and no description, so Google has nothing to show for it in search results.'
-        : (/no <title>/.test(ev)
-          ? 'The page has no title, so it shows up in search results with a URL instead of a name.'
-          : 'The page has no description, so Google writes its own snippet from whatever text it finds.');
-    case 'dated_builder': {
-      const raw = (/built on (\w+)/.exec(ev) || [])[1] || '';
-      const PRETTY = { weebly: 'Weebly', godaddy: 'GoDaddy', frontpage: 'Microsoft FrontPage', duda: 'Duda' };
-      const b = PRETTY[raw.toLowerCase()] || raw || 'a DIY builder';
-      return raw.toLowerCase() === 'frontpage'
-        ? 'The site was made in Microsoft FrontPage, which Microsoft discontinued in 2006.'
-        : `It was put together with ${b}'s DIY site builder.`;
-    }
-    case 'old_jquery': {
-      const v = (/jQuery ([\d.]+)/.exec(ev) || [])[1];
-      return `It still loads jQuery ${v || '1.x'}, a version that stopped getting security fixes years ago.`;
-    }
-    case 'social_as_website':
-      return 'They have no website at all — the only web presence is a social page.';
-    case 'site_unreachable':
-      return "The website doesn't load at all.";
-    default:
-      return ev || sig.key;
-  }
 }
 
 (async () => {
@@ -114,17 +69,11 @@ function sentence(sig) {
     out.push(`${r.site_url}`);
     out.push('');
     out.push(`What's wrong with it:`);
-    (f.signals || []).forEach(s => out.push(`- ${sentence(s)}`));
-    if ((f.agency_signals || []).length) {
-      out.push('');
-      out.push(`> Careful: ${f.agency_signals.map(a => a.key === 'reseller_builder'
-        ? 'this site was built on a platform that agencies resell, so someone may already be looking after it'
-        : 'the web address Google holds carries advertising tracking, so someone may already be running campaigns for them').join('; ')}.`);
-    }
-    if (f.psi && typeof f.psi.mobile_score === 'number') {
-      out.push('');
-      out.push(`> Google rates this site ${f.psi.mobile_score}/100 on mobile.`);
-    }
+    findingSentences(f).forEach(line => out.push(`- ${line}`));
+    const agency = agencyNote(f);
+    if (agency) { out.push(''); out.push(`> Careful: ${agency}.`); }
+    const psi = pageSpeedNote(f);
+    if (psi) { out.push(''); out.push(`> ${psi}`); }
     out.push('');
     out.push('Who answered: ______________________________________________');
     out.push('');
