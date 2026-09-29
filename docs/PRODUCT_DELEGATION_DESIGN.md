@@ -127,9 +127,9 @@ What the account *can* reach:
   (`row:prospects.product`), because that URL carries no product at all and a guessed id would
   otherwise read, or `PUT` would modify, another product's row
 
-What it cannot reach, and why it is two separate reasons: `/api/users` and `/api/settings` are
-`internal` in the route map (boundary), *and* gated by `adminOnly`/`superAdminOnly` (role). Either one
-alone would refuse it.
+What it cannot reach, and why it is two separate reasons: `GET /api/users`, `POST /api/users/invite`,
+`POST /api/roles` and the rest of the platform surface are `internal` in the route map (boundary),
+*and* gated by `adminOnly`/`superAdminOnly` (role). Either one alone would refuse it.
 
 > **`PERMISSIONS_ENFORCE_ROLES` must list `acbm_partner`.** The template above decides nothing
 > otherwise — `enforce.js:82` returns early for a role that is not listed, leaving the route gates

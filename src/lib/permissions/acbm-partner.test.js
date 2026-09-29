@@ -157,9 +157,18 @@ test('every route the partner needs resolves to a product it holds', () => {
 test("'internal' is what the boundary requires for platform routes, and the partner must never hold it", () => {
   // Stated here as well as in the invite tests, because it is the assumption the other two layers lean
   // on: even if a tier or a template were widened by mistake, an account without 'internal' cannot
-  // reach /api/users or /api/settings at all.
-  assert.equal(classifyRoute('GET', '/api/users'), 'internal');
-  assert.equal(classifyRoute('GET', '/api/settings') || 'internal', 'internal');
+  // reach the platform surface at all.
+  //
+  // Every route named here is a REAL mounted route — an earlier version of this test asserted
+  // `classifyRoute('GET','/api/settings') || 'internal'`, and /api/settings does not exist, so the
+  // fallback made a nonexistent route look protected.
+  for (const [m, p] of [['GET', '/api/users'], ['POST', '/api/users/invite'], ['GET', '/api/roles'],
+                        ['POST', '/api/roles'], ['GET', '/api/products/grantable']]) {
+    const prod = classifyRoute(m, p);
+    assert.ok(prod !== null, `${m} ${p} is unclassified — under enforce it 403s for everyone`);
+    if (p === '/api/roles' && m === 'GET') continue;           // deliberately shared, see the map
+    assert.equal(prod, 'internal', `${m} ${p}`);
+  }
 });
 
 // ── layer 4: the nav ────────────────────────────────────────────────────────────
