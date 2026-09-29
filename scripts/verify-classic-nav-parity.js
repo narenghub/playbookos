@@ -71,7 +71,20 @@ const after = classicNavFor(require('fs').readFileSync(FILE, 'utf8'));
 console.log(`Classic nav (PRODUCT_NAV OFF) — ${BASE_REF} vs working tree`);
 console.log(`${roles.length} roles\n`);
 
-let mismatched = 0, added = 0;
+// DECLARED, INTENDED CHANGES. A parity script that can only say "different" is a script somebody turns
+// off the first time they change the nav on purpose. Each entry names a role and the exact pages it should
+// gain or lose; the run passes if the real diff matches, and FAILS if it differs even slightly — so an
+// intended change does not become cover for an unintended one.
+const EXPECTED = {
+  // 2026-09-29, the final nav model: Platform became super-admin only, and the three pages that had no
+  // nav entry at all (they were listed under the platform product tab but no section, so
+  // pageVisibleToRole returned false) were added to it.
+  super_admin: { gained: ['decision-engine', 'data-pipeline', 'execution-graph'], lost: [] },
+  admin:       { gained: [], lost: ['sku-economics', 'settings'] },
+};
+const linksOf = (html) => [...html.matchAll(/navigate\('([^']+)'\)/g)].map(m => m[1]);
+
+let mismatched = 0, added = 0, accepted = 0;
 for (const role of roles) {
   const t = tiersFor(role);
   const b = after(role, t);
@@ -83,15 +96,31 @@ for (const role of roles) {
   }
   const a = before(role, t);
   const same = a === b;
-  if (!same) mismatched++;
-  console.log(`  ${same ? 'IDENTICAL' : 'DIFFERENT'}  ${role.padEnd(22)} ${b.length} bytes`);
-  if (!same) {
-    console.log(`    before: ${a.slice(0, 200)}`);
-    console.log(`    after : ${b.slice(0, 200)}`);
+  if (same) { console.log(`  IDENTICAL  ${role.padEnd(22)} ${b.length} bytes`); continue; }
+
+  // Report the diff as PAGES, not as truncated HTML — 200 characters of identical markup told nobody
+  // anything about what actually changed.
+  const gained = linksOf(b).filter(x => !linksOf(a).includes(x));
+  const lost = linksOf(a).filter(x => !linksOf(b).includes(x));
+  const exp = EXPECTED[role];
+  const matches = exp && String(exp.gained.slice().sort()) === String(gained.slice().sort())
+                      && String(exp.lost.slice().sort()) === String(lost.slice().sort());
+  if (matches) {
+    accepted++;
+    console.log(`  EXPECTED   ${role.padEnd(22)} ${b.length} bytes` +
+      (gained.length ? `  +${gained.join(', ')}` : '') + (lost.length ? `  −${lost.join(', ')}` : ''));
+  } else {
+    mismatched++;
+    console.log(`  DIFFERENT  ${role.padEnd(22)} ${b.length} bytes`);
+    console.log(`    gained : ${gained.join(', ') || '(none)'}`);
+    console.log(`    lost   : ${lost.join(', ') || '(none)'}`);
+    if (exp) console.log(`    EXPECTED gained ${exp.gained.join(', ') || '(none)'} / lost ${exp.lost.join(', ') || '(none)'}`);
+    else console.log(`    no entry in EXPECTED — if this change is intended, declare it there`);
   }
 }
 
 console.log();
-if (mismatched) { console.error(`FAIL — ${mismatched}/${roles.length} roles differ with the flag OFF`); process.exit(1); }
-console.log(`PASS — classic nav is byte-identical for all ${roles.length - added} pre-existing role(s)` +
-  (added ? `; ${added} new role(s) listed above — read their pages and confirm each one is intended` : ''));
+if (mismatched) { console.error(`FAIL — ${mismatched}/${roles.length} role(s) differ in a way nobody declared`); process.exit(1); }
+console.log(`PASS — ${roles.length - added - accepted} role(s) byte-identical` +
+  (accepted ? `, ${accepted} changed exactly as declared in EXPECTED` : '') +
+  (added ? `, ${added} new role(s) listed above` : ''));

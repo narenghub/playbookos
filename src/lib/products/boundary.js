@@ -91,9 +91,17 @@ function productBoundary(deps = {}) {
     return (r.rows[0] && r.rows[0].product) || null;
   });
 
+  // effectiveProductsById, not a raw table read: super_admin holds every grantable product BY ROLE, so
+  // creating a new product cannot lock out the only account able to grant it. See products/held.js for why
+  // that bypass is safe and applies to no other role.
+  //
+  // BY ID, and not with the role from the token: this middleware runs before authMiddleware, so the only
+  // role it has is a claim that can be up to seven days stale. Taking the bypass from that claim would
+  // mean a demoted super_admin kept it until their token expired — the same bug that broke the Edit
+  // button. The role is read from the users row instead, in the same query as the products.
   const heldProducts = deps.heldProducts || (async (userId) => {
-    const r = await q(`SELECT product FROM user_products WHERE user_id = $1`, [userId]);
-    return r.rows.map(x => x.product);
+    const { effectiveProductsById } = require('./held');
+    return effectiveProductsById(userId, { query: q });
   });
 
   const logShadow = deps.logShadow || ((row) => {

@@ -21,7 +21,7 @@ const { runResearchIntelIngest } = require('../lib/agents/research-intelligence'
 const { runContentPipeline } = require('../lib/agents/content');
 const { runProspecting, runQualifyProspects } = require('../lib/agents/prospecting');
 const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/config');
-const { heldProducts, productScopeSql } = require('../lib/products/held');
+const { heldProducts, effectiveProducts, productScopeSql } = require('../lib/products/held');
 const { partnerScopeSql } = require('../lib/products/partner-scope');
 const { PRODUCTS: PRODUCT_KEYS, GRANTABLE } = require('../lib/products/route-map');
 const { checkGrantChange, routeCountsByProduct, describeChange } = require('../lib/products/grants');
@@ -139,7 +139,7 @@ router.post('/auth/login', authLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     console.log(`[auth] login ok email=${user.email} role=${user.role} ip=${req.ip}`);
-    res.json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, github_username: user.github_username, can_run_standup: !!user.can_run_standup, tiers: roleTiers(user.role) } });
+    res.json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, github_username: user.github_username, can_run_standup: !!user.can_run_standup, tiers: roleTiers(user.role), products: await effectiveProducts(user) } });
   } catch(e) {
     console.error(`[auth] login ERROR ip=${req.ip}: ${e.message}`);
     res.status(500).json({ error: e.message });
@@ -183,7 +183,7 @@ router.post('/auth/accept-invite', authLimiter, async (req, res) => {
     });
     console.log(`[invite] ACCEPTED ${user.email} — granted products [${chosen.join(', ') || 'NONE'}]`);
     const updated = (await query('SELECT * FROM users WHERE id=$1', [user.id])).rows[0];
-    res.json({ token: signToken(updated), user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role, tiers: roleTiers(updated.role) }, products: chosen });
+    res.json({ token: signToken(updated), user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role, tiers: roleTiers(updated.role), products: await effectiveProducts(updated) }, products: chosen });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -202,7 +202,12 @@ router.get('/auth/me', authMiddleware, async (req, res) => {
     const result = await query('SELECT id,name,email,role,github_username,can_run_standup FROM users WHERE id=$1', [req.user.id]);
     const u = result.rows[0];
     if (!u) return res.status(404).json({ error: 'Not found' });
-    res.json({ ...u, tiers: roleTiers(u.role) });
+    // PRODUCTS ARRIVE WITH IDENTITY, for the same reason tiers do. The sidebar is built from what the
+    // caller holds, and a separate fetch for it could fail — and a nav computed from a failed fetch is a
+    // nav that guesses. This call cannot degrade open: its failure logs you out.
+    //
+    // effectiveProducts, so super_admin sees every product without holding a row for each.
+    res.json({ ...u, tiers: roleTiers(u.role), products: await effectiveProducts(u) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

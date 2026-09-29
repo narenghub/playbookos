@@ -182,11 +182,28 @@ test('the JWT carries NO products, so a revoke cannot wait for a token to expire
 test('the boundary reads user_products per request, with no cache', () => {
   const fs = require('fs');
   const boundary = fs.readFileSync(__dirname + '/../lib/products/boundary.js', 'utf8');
-  assert.match(boundary, /SELECT product FROM user_products WHERE user_id = \$1/,
-    'held products come from the table on every evaluated request');
-  assert.doesNotMatch(boundary, /_cache|Map\(\)|memo/i, 'and nothing memoises them');
+  // The query moved into held.js (effectiveProductsById, which reads the ROLE in the same round trip so
+  // the super_admin bypass cannot be taken from a stale token). What matters for revocation is unchanged:
+  // it runs per request and nothing memoises the answer.
+  assert.match(boundary, /effectiveProductsById/, 'the boundary resolves held products per request');
   const held = fs.readFileSync(__dirname + '/../lib/products/held.js', 'utf8');
-  assert.doesNotMatch(held, /_cache|Map\(\)|memo/i);
+  assert.match(held, /FROM user_products p WHERE p\.user_id = u\.id/, 'and it reads the table, not a cache');
+  for (const [name, src] of [['boundary.js', boundary], ['held.js', held]]) {
+    assert.doesNotMatch(src, /_cache|new Map\(\)|memo/i, `${name} must not memoise held products`);
+  }
+});
+
+test('the super_admin bypass takes the role from the DATABASE, not the token', () => {
+  // Otherwise a demoted super_admin keeps the bypass until their 7-day token expires — the same bug that
+  // broke the Edit button, reintroduced in a new place.
+  const fs = require('fs');
+  const boundary = fs.readFileSync(__dirname + '/../lib/products/boundary.js', 'utf8');
+  const call = /heldProducts\(caller\.id(,\s*caller\.role)?\)/.exec(boundary);
+  assert.ok(call, 'the boundary must resolve products by caller id');
+  assert.equal(call[1], undefined, "caller.role comes from the token and must NOT be passed to the bypass");
+  const held = fs.readFileSync(__dirname + '/../lib/products/held.js', 'utf8');
+  const fn = held.slice(held.indexOf('async function effectiveProductsById'));
+  assert.match(fn.slice(0, 900), /SELECT u\.role/, 'the role is read from the users row');
 });
 
 test('the response says so, because the person clicking needs to know', async () => {

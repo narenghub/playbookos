@@ -788,14 +788,27 @@ const NAV_SECTIONS = [
     {id:'sitenex-deals', label:'SiteNex Deals', icon:'📋'},
     {id:'sitenex-packages', label:'SiteNex Packages', icon:'📦'},
   ]},
-  {title:'PLATFORM', access:['admin'], items:[
+  // PLATFORM — SUPER ADMIN ONLY. access:['superadmin'] is a family of one; 'admin' would admit every
+  // admin, and navSectionVisible's admin short-circuit is what used to let five roles in here.
+  //
+  // The last three had NO nav entry at all until now: they were listed under the 'platform' product tab
+  // but pageVisibleToRole returned false for anything not in a section, so they were unreachable. If
+  // Platform is a super-admin section, they belong in it rather than nowhere.
+  {title:'PLATFORM', access:['superadmin'], items:[
     {id:'sku-economics', label:'SKU Economics', icon:'📦'},
     {id:'settings', label:'Settings', icon:'⚙️'},
+    {id:'decision-engine', label:'Automation Rules', icon:'🔀'},
+    {id:'data-pipeline', label:'Data Pipeline', icon:'🗄️'},
+    {id:'execution-graph', label:'Execution Graph', icon:'🕸️'},
   ]},
 ];
-// Role families for section access. admin/super_admin bypass this (see below).
+// Role families for section access. admin/super_admin bypass this (see below) — EXCEPT for 'superadmin',
+// which is checked before the bypass.
 const NAV_FAMILIES = {
   admin: ['admin','super_admin'],
+  // A family of one. Platform is super-admin only, and that cannot be expressed with the 'admin' family
+  // because navSectionVisible short-circuits for admin as well.
+  superadmin: ['super_admin'],
   director: ['sales_director','recruitment_director','procurement_director'],
   sales: ['sales_team','sales_director','account_manager','business_dev'],
   procurement: ['procurement_team','procurement_director'],
@@ -811,6 +824,11 @@ const NAV_FAMILIES = {
   sitenex: ['partner'],
 };
 function navSectionVisible(access, role) {
+  // 'superadmin' is checked FIRST, before the admin short-circuit. Otherwise an admin would see Platform
+  // through the blanket bypass — which is exactly how five roles ended up seeing it.
+  if (Array.isArray(access) && access.includes('superadmin') && !access.includes('admin')) {
+    return role === 'super_admin';
+  }
   if (role === 'admin' || role === 'super_admin') return true; // admin sees all
   if (access === '*') return true;
   return (access || []).some(fam => (NAV_FAMILIES[fam] || []).includes(role));
@@ -888,11 +906,16 @@ const PRODUCTS = [
   { key:'platform', label:'Platform', icon:'⚙️', kind:'global', pages:['team','agent-control','settings','sku-economics','data-pipeline','execution-graph','decision-engine'] },
   { key:'me',       label:'Me',       icon:'👤', kind:'global', pages:['my-tasks','my-kpis','my-performance','my-activity'] },
 ];
-// Flag: query param ?productNav=1 (for testing), else an optional server-injected global
-// window.PRODUCT_NAV_ENABLED (forward-compatible). Absent → OFF → classic sidebar, byte-identical.
+// DEFAULT ON as of the final nav model. The product shell IS the nav now: held products, plus Platform
+// for a super admin, plus Me.
+//
+// ?productNav=0 is the escape hatch and it still works — it restores the classic section sidebar
+// instantly, with no deploy, for anyone who needs it. window.PRODUCT_NAV_ENABLED === false does the same
+// globally if it ever has to be turned off for everybody.
 function productNavEnabled() {
   try { const qp = new URLSearchParams(location.search).get('productNav'); if (qp != null) return qp === '1' || qp === 'true'; } catch (_) {}
-  return typeof window !== 'undefined' && window.PRODUCT_NAV_ENABLED === true;
+  if (typeof window !== 'undefined' && window.PRODUCT_NAV_ENABLED === false) return false;
+  return true;
 }
 // id -> its classic NAV_SECTIONS section, so product mode reuses the EXACT classic visibility.
 const PAGE_SECTION = (() => { const m = {}; for (const s of NAV_SECTIONS) for (const it of s.items) m[it.id] = s; return m; })();
@@ -902,7 +925,37 @@ function pageVisibleToRole(pageId, role, tiers) {
   return navSectionVisible(sec.access, role) && passesPageReads(pageId, role, tiers);
 }
 function productVisiblePages(product, role, tiers) { return product.pages.filter(id => pageVisibleToRole(id, role, tiers)); }
-function visibleProducts(role, tiers) { return PRODUCTS.filter(p => productVisiblePages(p, role, tiers).length > 0); }
+
+// The products this account HOLDS, from /auth/me. Not derived from the role: deriving products from the
+// role is how a recruitment_team account ended up being shown Abiozen and five roles were shown Platform.
+// currentUser.products is the server's own answer (effectiveProducts), so the sidebar and the product
+// boundary cannot disagree about what somebody can reach.
+//
+// Returns null when unknown — the app has no products yet — which the caller must treat as "show no
+// product tabs", never as "show them all".
+function heldProductKeys() {
+  const me = (typeof currentUser !== 'undefined' && currentUser) || null;
+  return me && Array.isArray(me.products) ? me.products : null;
+}
+
+// THE NAV MODEL.
+//   every user      the products they hold, plus Me
+//   super admin     every product, plus Platform, plus Me
+//
+// 'platform' is gated on the ROLE, because it is not a product and holding 'internal' is not the same as
+// being able to administer the platform. 'me' is unconditional: everybody has their own tasks.
+// A product tab still only appears if at least one of its pages is visible to the role — a held product
+// with no reachable page would render an empty tab.
+function visibleProducts(role, tiers) {
+  const held = heldProductKeys();
+  return PRODUCTS.filter(p => {
+    if (p.key === 'me') return true;
+    if (p.key === 'platform') return role === 'super_admin';
+    if (held === null) return false;            // products unknown → no product tabs, never all of them
+    if (!held.includes(p.key)) return false;    // not held → not shown, whatever the role allows
+    return productVisiblePages(p, role, tiers).length > 0;
+  });
+}
 function activeProductFor(role, tiers) {
   const vis = visibleProducts(role, tiers);
   if (!vis.length) return null;
