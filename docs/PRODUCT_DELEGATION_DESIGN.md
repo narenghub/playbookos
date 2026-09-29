@@ -137,6 +137,56 @@ What it cannot reach, and why it is two separate reasons: `GET /api/users`, `POS
 
 ---
 
+## Role and products disagree by design
+
+**This is the section to read before "fixing" a permissions inconsistency.**
+
+The two gates answer different questions, so a broad role next to narrow products is the normal state, not
+a bug:
+
+| | asks | example |
+|---|---|---|
+| role / tier | *is this kind of user allowed to do this kind of thing?* | `admin` grants nearly every feature |
+| product boundary | *whose business's data is this?* | Prasanthi holds `abiozen, golfnex, internal` — so `linkabl`, `favly`, `aros` and `acbm` are refused |
+
+Prasanthi is an `admin`. Her role grants the Reorder Agent, the Linkabl digest, AROS Sourcing, everything.
+The boundary refuses the ones whose product she does not hold. **That 403 is the feature.** The value of a
+second gate is precisely that a tier granted by mistake — the likeliest permissions error there is, since
+tiers are coarse and granted by hand — cannot become a cross-product data exposure. If holding a role
+implied holding its products, there would be one gate wearing two names.
+
+As of 2026-09-29 the real state is deliberately uneven, because products are being narrowed one person at
+a time:
+
+```
+admin             prasanthi    [abiozen, golfnex, internal]
+business_dev      vinitha      [abiozen, internal]
+dev_team          muni         [abiozen, favly, internal]
+dev_team          premnath     [abiozen, internal, linkabl]
+recruitment_team  nikhil       [internal, linkabl]          ← no abiozen at all, on purpose
+super_admin       naren        all seven
+```
+
+Two people on the same role hold different products. That is correct: products follow the **person's
+work**, not their job title.
+
+### The wrong fixes, in the order somebody will reach for them
+
+1. **Granting the missing products to "make the role consistent."** This removes the boundary for that
+   person while leaving all the code that looks like it is still protecting them.
+2. **Having the boundary consult the role.** The same thing, for everyone at once.
+3. **Deriving products from the role.** This is what the nav used to do, and it is why several roles could
+   see products they had no business in.
+
+### The right fix
+
+When a 403 is genuinely wrong, grant that **one** product to that **one** person, deliberately, through
+the team page. That records who did it and when in `user_product_grants_log`. If the same grant keeps
+being needed by everyone on a role, that is a signal about the route's classification in
+`ROUTE_PRODUCT` — take it up there, not by widening people.
+
+---
+
 ## Fail-closed, and the kill switch
 
 `PRODUCT_BOUNDARY_MODE` — `off` | `shadow` | `enforce`. An env var, so it needs no code change:

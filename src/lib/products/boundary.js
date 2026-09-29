@@ -26,6 +26,39 @@
 // products, and the downstream authMiddleware is what should reject them. Evaluating here would
 // bury the real 401 under a product 403.
 
+// ── ROLE AND PRODUCTS DISAGREE ON PURPOSE. DO NOT "FIX" IT BY WIDENING PRODUCTS. ──
+//
+// If you are here because somebody said "Prasanthi is an admin but gets 403 on the Reorder Agent", that is
+// the system working. Read this before changing anything.
+//
+// The two gates answer different questions and are meant to disagree:
+//
+//   ROLE / TIER        "is this KIND of user allowed to do this KIND of thing?"
+//                      admin's template grants nearly every feature, because an admin is trusted with the
+//                      CAPABILITY.
+//   PRODUCT BOUNDARY   "which BUSINESS's data is this?"
+//                      prasanthi@adificetechnologies.com holds [abiozen, golfnex, internal], so linkabl,
+//                      favly, aros and acbm data is refused — however senior her role is.
+//
+// So a broad role plus narrow products is the NORMAL, INTENDED state, and the 403s that produces are the
+// point of having a second gate. The whole value of the boundary is that a tier granted by mistake — the
+// most likely permissions error there is, since tiers are coarse and granted by hand — cannot become a
+// cross-product data exposure. If holding a role implied holding its products, there would be one gate
+// wearing two names.
+//
+// THE WRONG FIXES, in the order somebody will reach for them:
+//   1. granting the missing products to "make the role consistent" — this removes the boundary for that
+//      person while leaving the code that looks like it is still there
+//   2. having the boundary consult the role — same thing, for everybody at once
+//   3. deriving products from the role — that is what the nav used to do, and it is why several roles
+//      could see products they had no business in
+//
+// THE RIGHT FIX, when a 403 is genuinely wrong: grant that ONE product to that ONE person, deliberately,
+// through the team page — which records who did it and when (user_product_grants_log).
+//
+// Products are assigned per PERSON by a super admin, not derived from anything. Roles say what you may
+// do; products say whose data you may do it to.
+
 const jwt = require('jsonwebtoken');
 const { resolveProduct } = require('./resolve-product');
 const { query: defaultQuery } = require('../db');

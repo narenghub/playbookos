@@ -5434,7 +5434,16 @@ if(typeof pages !== 'undefined') {
     }
   }
   function acTab(name){ window._acTab=name; acRender(); }
-  async function mcTrigger(key, btn){
+  // window.mcTrigger, NOT a bare declaration.
+  //
+  // Everything from `if (typeof pages !== 'undefined') {` is inside a BLOCK. A plain function declared in
+  // a block is hoisted to the global scope by Annex B (B.3.3) — which is why acTab above works from an
+  // inline onclick. That rule explicitly does NOT cover async functions, so `async function mcTrigger`
+  // was block-scoped only, the inline onclick="mcTrigger(...)" threw ReferenceError, and the Run button
+  // did nothing at all. product_shadow_log confirms it: ZERO requests ever reached
+  // /api/agent/mission-control/*/run, and zero manual_run_error rows. Nothing was blocking the button —
+  // the request was never sent.
+  window.mcTrigger = async function mcTrigger(key, btn){
     const msg=document.getElementById('mc-msg-'+key);
     const orig=btn.textContent; btn.disabled=true; btn.textContent='Starting…';
     if(msg){msg.style.color='#718096';msg.textContent='';}
