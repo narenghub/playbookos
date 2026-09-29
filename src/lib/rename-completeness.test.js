@@ -37,6 +37,7 @@ const ALLOWED_LINE = [
   /not about ACBM/,                   // the comment in partner-deal-scope.test.js saying exactly that
   /'acbm'/,                           // a literal being renamed FROM, in a migration or a comment about one
   /referred_by/,                      // prose about the free-text column the FK replaced
+  /\/api\/acbm\//,                    // a check that the OLD routes are gone has to name them
 ];
 
 function walk(dir, out = []) {
