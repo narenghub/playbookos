@@ -492,11 +492,19 @@ router.post('/users/invite', authMiddleware, superAdminOnly, async (req, res) =>
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// Self-service profile edit — open to everyone, for their OWN row.
+//
+// The `user_id` override is a different capability wearing the same clothes: it edits ANOTHER account's
+// name, github_username and whatsapp_number. It used to accept admin, which made it a back door around
+// the lock on PUT /api/users/:id — same capability, different path. Editing other people is now
+// super_admin only; editing yourself is unchanged for every role.
 router.put('/users/profile', authMiddleware, async (req, res) => {
   try {
     const { github_username, name, whatsapp_number, user_id } = req.body;
-    const isAdmin = ['super_admin', 'admin'].includes(req.user.role);
-    const targetId = (isAdmin && user_id) ? user_id : req.user.id;
+    if (user_id && user_id !== req.user.id && req.user.role !== 'super_admin') {
+      return res.status(403).json({ error: 'Super admin only — editing another user\'s profile is user management' });
+    }
+    const targetId = user_id || req.user.id;
     const wa = whatsapp_number === undefined ? null : String(whatsapp_number || '').trim();
     await query(
       `UPDATE users SET
@@ -510,21 +518,48 @@ router.put('/users/profile', authMiddleware, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/users/:id', authMiddleware, async (req, res) => {
+// PUT /users/:id — EDIT ANOTHER ACCOUNT. super_admin only.
+//
+// This route had no middleware at all. Its guard was an inline `req.user.role !== 'admin'`, which was
+// wrong in both directions: every one of the 13 roles held admin.users.update in its template (the
+// resolver permitted the call, and only that inline string comparison stopped it), and the comparison
+// EXCLUDED super_admin — so the one account that is supposed to manage users could not change anyone's
+// role, while every admin could.
+//
+// The SPA never calls this route; self-service profile edits go to PUT /api/users/profile, which stays
+// open to everyone. So locking it whole costs nothing and closes both halves of the bug.
+router.put('/users/:id', authMiddleware, superAdminOnly, async (req, res) => {
   try {
     const { id } = req.params;
-    if (req.user.id !== id && req.user.role !== 'admin') return res.status(403).json({ error: 'Forbidden' });
     const { github_username, name, role, user_id } = req.body;
-    const targetId = (req.user.role === 'admin' && user_id) ? user_id : id;
+    const targetId = user_id || id;
 
-    // role changes are admin-only and validated against the catalog —
-    // a non-admin editing their own profile must not be able to self-escalate.
     let validatedRole = null;
     if (role !== undefined && role !== null && role !== '') {
-      if (req.user.role !== 'admin') return res.status(403).json({ error: 'Only an admin can change a user role' });
       const catalog = await getAllRoles();
       if (!catalog[role]) return res.status(400).json({ error: `Unknown role "${role}". Valid roles: ${Object.keys(catalog).join(', ')}` });
+      // NO SELF-DEMOTION. The same failure as removing your own 'internal' product: a super_admin who
+      // sets their own role to 'admin' takes away the only account that can set it back, and the fix is
+      // a hand-written UPDATE against production.
+      if (targetId === req.user.id && role !== 'super_admin') {
+        return res.status(403).json({ error: `You cannot change your own role to "${role}". That would `
+          + `remove your own access to user management, and the only way back is a manual database `
+          + `change. Ask another super admin.`, code: 'self_demote' });
+      }
+      // And the last super_admin cannot be demoted by anyone, for the same reason the last one's
+      // products cannot be revoked — there would be nobody left able to undo it.
+      const target = (await query('SELECT id, role, email FROM users WHERE id=$1', [targetId])).rows[0];
+      if (!target) return res.status(404).json({ error: 'User not found' });
+      if (target.role === 'super_admin' && role !== 'super_admin') {
+        const supers = (await query(`SELECT COUNT(*)::int n FROM users WHERE role='super_admin' AND is_active=1`)).rows[0].n;
+        if (supers <= 1) {
+          return res.status(403).json({ error: `${target.email} is the only active super admin and cannot `
+            + `be demoted — nobody would be able to manage users afterwards. Promote a second super admin `
+            + `first.`, code: 'last_super_admin' });
+        }
+      }
       validatedRole = role;
+      console.warn(`[users] ROLE CHANGE by ${req.user.email}: ${targetId} → ${role}`);
     }
 
     await query(
@@ -546,7 +581,7 @@ router.put('/users/:id', authMiddleware, async (req, res) => {
 // A deleted user is the largest possible permission removal, so it goes in the same audit log as a
 // revoke — written BEFORE the delete, because afterwards the grants are gone and there is nothing left
 // to describe. The log table has no foreign key precisely so these rows survive the cascade.
-router.delete('/users/:id', authMiddleware, adminOnly, async (req, res) => {
+router.delete('/users/:id', authMiddleware, superAdminOnly, async (req, res) => {
   try {
     const { id } = req.params;
     if (id === req.user.id) return res.status(400).json({ error: 'You cannot remove your own account' });
@@ -578,7 +613,7 @@ router.delete('/users/:id', authMiddleware, adminOnly, async (req, res) => {
 
 // PUT /users/:id/toggle-status — if the body carries is_active (0|1) the
 // status is set explicitly; otherwise the current value is flipped.
-router.put('/users/:id/toggle-status', authMiddleware, adminOnly, async (req, res) => {
+router.put('/users/:id/toggle-status', authMiddleware, superAdminOnly, async (req, res) => {
   try {
     const { id } = req.params;
     if (id === req.user.id) return res.status(400).json({ error: 'You cannot change your own status' });
@@ -614,7 +649,7 @@ function generateTempPassword(len = 12) {
 // password_hash is updated. The temp password is returned ONCE in the response
 // body and is never persisted or logged in plaintext. super_admin and self are
 // blocked, mirroring the delete / toggle-status guards above.
-router.post('/admin/users/:user_id/reset-password', authMiddleware, adminOnly, async (req, res) => {
+router.post('/admin/users/:user_id/reset-password', authMiddleware, superAdminOnly, async (req, res) => {
   try {
     const { user_id } = req.params;
     if (user_id === req.user.id) return res.status(400).json({ error: 'You cannot reset your own password here' });
@@ -637,7 +672,7 @@ router.post('/admin/users/:user_id/reset-password', authMiddleware, adminOnly, a
 // Edit a user's display name (admin-only). Fixes invite typos without delete +
 // re-invite, so all of the user's data (tasks, KPIs, scores, history) is kept.
 // Name only — no role/email/other-field changes here.
-router.post('/admin/users/:user_id/edit-name', authMiddleware, adminOnly, async (req, res) => {
+router.post('/admin/users/:user_id/edit-name', authMiddleware, superAdminOnly, async (req, res) => {
   try {
     const { user_id } = req.params;
     if (typeof req.body?.name !== 'string') return res.status(400).json({ error: 'name must be a string' });
