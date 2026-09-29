@@ -4558,7 +4558,7 @@ router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
     const total = parseInt((await query(`SELECT COUNT(*)::int n FROM prospects WHERE ${where}`, params)).rows[0].n);
     const rows = (await query(
       `SELECT id, name, subtype, address, region, phone, website, site_url, site_score, rating_count,
-              recommended_package, site_findings, status, reject_reason
+              recommended_package, site_findings, status, reject_reason, owner_email, owner_source
          FROM prospects WHERE ${where}
         ORDER BY site_score DESC NULLS LAST, rating_count ASC NULLS FIRST, id
         LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, params)).rows;
@@ -4574,6 +4574,14 @@ router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
         id: r.id, name: r.name, subtype: r.subtype, city: cityOf(r.address, r.region), region: r.region,
         phone: r.phone, website: r.website, site_url: r.site_url,
         site_score: r.site_score, rating_count: r.rating_count,
+        owner_email: r.owner_email, owner_source: r.owner_source,
+        // WHY there is no email, so the column can say so instead of looking empty by accident.
+        // A blank cell and "we could not look" are different facts and a rep needs to know which.
+        email_absence: r.owner_email ? null
+          : (!r.website ? 'no website to scan'
+            : (f.unscannable ? 'site blocked our scan'
+              : (f.reachable === false ? "site doesn't load"
+                : (f.emails ? 'none published on the site' : 'not scanned for email yet')))),
         recommended_package: r.recommended_package, package_label: packageLabel(r.recommended_package),
         bucket: b, bucket_label: BUCKET_LABEL[b],
         agency_flag: (f.agency_signals || []).length > 0,
@@ -4591,7 +4599,11 @@ router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
               COUNT(*) FILTER (WHERE site_findings->>'reachable' = 'false' AND site_findings->>'unscannable' IS NULL)::int dead_site,
               COUNT(*) FILTER (WHERE recommended_package = 'P2')::int p2,
               COUNT(*) FILTER (WHERE recommended_package = 'P1')::int p1,
-              COUNT(*) FILTER (WHERE status = 'rejected')::int rejected
+              COUNT(*) FILTER (WHERE status = 'rejected')::int rejected,
+              COUNT(owner_email)::int with_email,
+              COUNT(*) FILTER (WHERE owner_email IS NULL AND website IS NOT NULL
+                               AND site_findings->>'unscannable' IS NULL
+                               AND COALESCE(site_findings->>'reachable','') <> 'false')::int scannable_without_email
          FROM prospects WHERE product = 'acbm'`)).rows[0];
     const facets = {
       subtypes: (await query(`SELECT DISTINCT subtype FROM prospects WHERE product='acbm' AND subtype IS NOT NULL ORDER BY 1`)).rows.map(x => x.subtype),

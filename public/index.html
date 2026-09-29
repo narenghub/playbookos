@@ -713,8 +713,15 @@ function logout() {
 
 // ── APP SHELL ─────────────────────────────────────────────────────────────────
 async function showApp() {
-  document.getElementById('app').style.display = 'flex';
-  await buildNav();
+  // NO FLASH OF THE CLASSIC LAYOUT. This used to reveal #app first and then await buildNav(), which
+  // awaits a /roles fetch before it adds body.pnav (buildNav ~line 911) — so the classic sidebar
+  // painted, a network round-trip happened, and only then did the product console appear.
+  // Two changes: the pnav class goes on BEFORE anything is visible (productNavEnabled() is
+  // synchronous — a query param or a server-injected global, no I/O), and #app stays hidden until
+  // buildNav has resolved the product state, so the first paint is already the final shell.
+  // try/finally: if buildNav throws, the app is still revealed rather than leaving a blank screen.
+  if (productNavEnabled()) document.body.classList.add('pnav');
+  try { await buildNav(); } finally { document.getElementById('app').style.display = 'flex'; }
   document.getElementById("user-info-box").innerHTML = '<div class="uname">' + (currentUser.name||"Admin") + '</div><div class="urole">' + (currentUser.role||"") + '</div><div style="margin-top:6px"><a href="#" onclick="editMyWhatsApp();return false" style="font-size:10px;color:#9FE1CB;text-decoration:none">📱 Set WhatsApp</a></div>';
   // Land on the first page the user's role can actually see (dashboard is now
   // EXECUTIVE-only, so non-exec roles land on My Tasks).
@@ -7461,7 +7468,23 @@ function apResetFilters(){ window._apFilters = { subtype:apDefaultSubtype(), reg
 function apDefaultSubtype(){ return (window._apShipping && window._apShipping.length) ? window._apShipping.join(',') : ''; }
 function apPage(d){ const st=window._apState, f=window._apFilters;
   const max=Math.max(1,Math.ceil((st.total||0)/(st.pageSize||50))); f.page=Math.min(max,Math.max(1,(f.page||1)+d)); pages['acbm-prospects'](); }
-function apToggle(id){ window._apState.open = (window._apState.open === String(id)) ? null : String(id); pages['acbm-prospects'](); }
+/* A LOCAL DOM TOGGLE, not a re-render. The first version called pages['acbm-prospects']() again,
+   which refetched the list, rebuilt every row and threw away the scroll position — expanding one
+   row repainted the page. Every row's detail panel is now rendered up front as a hidden <tr>, so
+   expanding is a display flip: nothing refetches, nothing else moves, scroll stays put. */
+function apToggle(id){
+  const det = document.getElementById('ap-det-'+id);
+  const caret = document.getElementById('ap-caret-'+id);
+  if (!det) return;
+  const showing = det.style.display !== 'none';
+  det.style.display = showing ? 'none' : '';
+  if (caret) caret.textContent = showing ? '▸' : '▾';
+  const row = document.getElementById('ap-row-'+id);
+  if (row) row.style.background = showing ? '' : 'var(--light)';
+  // Remember it only so a later full render (a filter change) restores what was open.
+  const openSet = window._apState.openRows || (window._apState.openRows = {});
+  if (showing) delete openSet[String(id)]; else openSet[String(id)] = true;
+}
 /* site_score is 0-100 and HIGHER = WORSE, so the colour scale runs the opposite way to a score
    people are used to reading. 40 is the P2 threshold. */
 function apScoreChip(v){
@@ -7496,6 +7519,10 @@ pages['acbm-prospects'] = async function(){
     + '&ldquo;how bad is the site&rdquo;, reviews answer &ldquo;do they need customers&rdquo;. An agency flag means '
     + 'someone may already be paid to look after the site.</div>'
     + '<div class="text-body" style="margin-top:4px;font-size:12px;color:var(--text-muted)">'
+    +   'Email is read off the site itself (Places does not supply one), so the rows with no website and the '
+    +   'rows whose site blocked the scan can never have one — the column says which. '
+    + '</div>'
+    + '<div class="text-body" style="margin-top:2px;font-size:12px;color:var(--text-muted)">'
     +   (f.subtype && f.subtype === apDefaultSubtype()
           ? 'Showing the three shipping subtypes. The other six are retired experiment categories — still here, still selectable above.'
           : (f.subtype ? 'Filtered to '+apEsc(f.subtype.replace(/,/g,', ').replace(/_/g,' '))+'.' : 'Showing all nine subtypes, including the six retired experiment categories.'))
@@ -7507,7 +7534,8 @@ pages['acbm-prospects'] = async function(){
   const summaryRow = '<div class="card" style="display:flex;gap:10px;flex-wrap:wrap">'
     + stat('Total', sm.total, '#1B3A6B') + stat('P2 · rebuild', sm.p2, '#d97706') + stat('P1 · new site', sm.p1, '#2563eb')
     + stat('No website', sm.no_website, '#64748b') + stat('Blocked (not assessed)', sm.unscannable, '#64748b')
-    + stat("Site doesn't load", sm.dead_site, '#64748b') + stat('Rejected', sm.rejected, '#dc2626') + '</div>';
+    + stat("Site doesn't load", sm.dead_site, '#64748b') + stat('Rejected', sm.rejected, '#dc2626')
+    + stat('Have an email', sm.with_email, '#1D9E75') + '</div>';
 
   const sel = (key, blank, opts) => '<select onchange="apSetFilter(\''+key+'\', this.value)" style="font-size:12px;padding:4px">'
     + '<option value="">'+blank+'</option>'
@@ -7530,21 +7558,28 @@ pages['acbm-prospects'] = async function(){
     + '<button onclick="apResetFilters()" class="btn-outline btn-sm" style="font-size:11px">Reset</button></div>';
 
   const rows = items.map(it => {
-    const isOpen = st.open === String(it.id);
+    const isOpen = !!(st.openRows && st.openRows[String(it.id)]);
     const site = it.site_url || it.website;
-    const main = '<tr onclick="apToggle(\''+it.id+'\')" style="cursor:pointer;border-top:1px solid var(--border)'+(isOpen?';background:var(--light)':'')+'">'
-      + '<td style="padding:7px 8px;font-weight:600">'+(isOpen?'▾ ':'▸ ')+apEsc(it.name)+'</td>'
+    const main = '<tr id="ap-row-'+it.id+'" onclick="apToggle(\''+it.id+'\')" style="cursor:pointer;border-top:1px solid var(--border)'+(isOpen?';background:var(--light)':'')+'">'
+      + '<td style="padding:7px 8px;font-weight:600"><span id="ap-caret-'+it.id+'">'+(isOpen?'▾':'▸')+'</span> '+apEsc(it.name)+'</td>'
       + '<td style="padding:7px 8px">'+apEsc((it.subtype||'').replace(/_/g,' '))+'</td>'
       + '<td style="padding:7px 8px">'+(apEsc(it.city)||apDash)+'</td>'
       + '<td style="padding:7px 8px">'+(it.phone?'<a href="tel:'+apEsc(String(it.phone).replace(/[^0-9+]/g,''))+'" onclick="event.stopPropagation()">'+apEsc(it.phone)+'</a>':apDash)+'</td>'
+      /* Email is never silently blank: without an address the cell says WHY, because "none
+         published" and "we could not load the site" are different facts to a rep. */
+      + '<td style="padding:7px 8px">'+(it.owner_email
+          ? '<a href="mailto:'+apEsc(it.owner_email)+'" onclick="event.stopPropagation()">'+apEsc(it.owner_email)+'</a>'
+          : '<span style="color:var(--text-muted);font-size:11px">'+apEsc(it.email_absence||'—')+'</span>')+'</td>'
       + '<td style="padding:7px 8px;text-align:right">'+apScoreChip(it.site_score)+'</td>'
       + '<td style="padding:7px 8px;text-align:right">'+(it.rating_count==null?apDash:it.rating_count.toLocaleString())+'</td>'
       + '<td style="padding:7px 8px">'+(it.package_label?apEsc(it.recommended_package):apDash)+'</td>'
       + '<td style="padding:7px 8px;text-align:center">'+(it.agency_flag?'<span title="someone may already be looking after this site" style="color:#d97706">⚠</span>':apDash)+'</td>'
       + '</tr>';
-    if (!isOpen) return main;
+    // The detail row is ALWAYS rendered, hidden unless open, so apToggle is a display flip rather
+    // than a re-render. Everything it shows is already in the list payload — there is nothing to
+    // fetch on expand.
     const lines = (it.findings||[]).map(x => '<li style="margin:3px 0">'+apEsc(x)+'</li>').join('') || '<li style="color:var(--text-muted)">no findings recorded</li>';
-    const detail = '<tr style="background:var(--light)"><td colspan="8" style="padding:10px 14px 14px 22px">'
+    const detail = '<tr id="ap-det-'+it.id+'"'+(isOpen?'':' style="display:none"')+'><td colspan="9" style="background:var(--light);padding:10px 14px 14px 22px">'
       + '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:4px">What&rsquo;s wrong with it</div>'
       + '<ul style="margin:0 0 8px 16px;padding:0;font-size:13px">'+lines+'</ul>'
       + (it.agency_note ? '<div style="font-size:12px;color:#d97706;margin-bottom:6px">⚠ Careful: '+apEsc(it.agency_note)+'</div>' : '')
@@ -7566,10 +7601,10 @@ pages['acbm-prospects'] = async function(){
 
   const table = '<div class="card" style="padding:0;overflow-x:auto">'
     + '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">'
-    + '<th style="padding:8px">Business</th><th style="padding:8px">Subtype</th><th style="padding:8px">City</th><th style="padding:8px">Phone</th>'
+    + '<th style="padding:8px">Business</th><th style="padding:8px">Subtype</th><th style="padding:8px">City</th><th style="padding:8px">Phone</th><th style="padding:8px">Email</th>'
     + '<th style="padding:8px;text-align:right">Site score</th><th style="padding:8px;text-align:right">Reviews</th><th style="padding:8px">Package</th><th style="padding:8px;text-align:center">Agency</th>'
     + '</tr></thead><tbody>'
-    + (rows || '<tr><td colspan="8" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
+    + (rows || '<tr><td colspan="9" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
     + '</tbody></table>'+pager+'</div>';
 
   c.innerHTML = header + summaryRow + filters + table;

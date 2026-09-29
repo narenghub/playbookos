@@ -17,6 +17,7 @@ const { notify } = require('../../notify');
 const places = require('./places');
 const { tilesForProduct } = require('./tiles');
 const { qualifyFacility } = require('./qualify');
+const { extractEmails, pickOwnerEmail, designerSignals } = require('./site-email');
 const { getConfig } = require('./config');
 
 const AGENT_NAME = 'prospecting';
@@ -200,7 +201,8 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
 async function runScoreSites(product, { subtypes = null, cap = null, rescore = false, deps = {} } = {}) {
   const env = deps.env || process.env;
   const summary = { product, enabled: true, considered: 0, scored: 0, unscannable: 0, no_website: 0,
-    unreachable: 0, agency_flagged: 0, p1: 0, p2: 0, no_fit: 0, by_builder: {}, score_bands: {}, errors: [] };
+    unreachable: 0, agency_flagged: 0, emails_found: 0, designer_emails: 0,
+    p1: 0, p2: 0, no_fit: 0, by_builder: {}, score_bands: {}, errors: [] };
   if (String(env.PROSPECTING_ENABLED) !== 'true') { summary.enabled = false; return summary; }
 
   const cfg = (deps.getConfig || getConfig)(product);
@@ -210,6 +212,7 @@ async function runScoreSites(product, { subtypes = null, cap = null, rescore = f
   const fetchText = deps.httpText || require('../../outbound/http').httpText;
   const { scoreSite, recommendPackage } = deps.scorer || require('./site-score');
   const { detectAll } = deps.detector || require('./qualify');
+  const { findBookingLink } = deps.detector || require('./qualify');
   const logActivity = deps.logAgentActivity || logAgentActivity;
   const limit = Number.isInteger(cap) && cap > 0 ? cap : envNum(env, 'PROSPECTING_SCORE_CAP', 800);
   const rateMs = envNum(env, 'PROSPECTING_RATE_MS', 200);
@@ -247,6 +250,26 @@ async function runScoreSites(product, { subtypes = null, cap = null, rescore = f
       const unreachableReason = res.error ? (res.status === 403 ? '403' : classifyFetchReason(res)) : null;
       const html = res.text || '';
       const builderHits = html ? detectAll(html, cfg.signatures) : [];
+
+      // ONE HOP for an email. A contact/about page is where an address actually lives; a homepage
+      // footer often has none or a generic one. Reuses the qualifier's link finder with the
+      // product's own terms (for acbm: about / contact / services).
+      //
+      // IMPORTANT: the followed page feeds EMAIL EXTRACTION ONLY, never the score. Scoring stays on
+      // the homepage, because that is what every existing site_score was computed from — letting a
+      // contact page contribute would silently move scores that a human has already read.
+      let followedHtml = '', contactUrl = null;
+      if (html && Array.isArray(cfg.bookingLinkTerms) && cfg.bookingLinkTerms.length) {
+        try {
+          contactUrl = findBookingLink(html, res.url || r.website, cfg.bookingLinkTerms);
+          if (contactUrl) {
+            const p2 = await fetchText({ url: contactUrl });
+            followedHtml = (!p2.error && p2.text) ? p2.text : '';
+          }
+        } catch (_) { /* a missing contact page is a normal result, not an error */ }
+      }
+      const extracted = extractEmails({ html, followedHtml, siteUrl: res.url || r.website });
+      const ownerEmail = pickOwnerEmail(extracted);
       const out = scoreSite({
         html, finalUrl: res.url, website: r.website, reachable, unreachableReason, builderHits,
       });
@@ -256,17 +279,31 @@ async function runScoreSites(product, { subtypes = null, cap = null, rescore = f
       const prior = (r.site_findings && Number(r.site_findings.unreachable_strikes)) || 0;
       const isDead = reachable === false && unreachableReason !== '403';
       const strikes = isDead ? prior + 1 : 0;
+      // A third-party address on the site is agency evidence, so it joins agency_signals rather
+      // than being discarded — same "the seat is taken" read as a reseller platform.
+      const allAgency = [...(agencySignals || []), ...designerSignals(extracted)];
       const findings = {
         scanned_at: new Date().toISOString(), final_url: res.url || r.website, score, signals,
-        builder, builder_hits: builderHits, agency_signals: agencySignals || [],
+        builder, builder_hits: builderHits, agency_signals: allAgency,
         reachable, unreachable_reason: unreachableReason, unreachable_strikes: strikes,
+        emails: { own: extracted.own, third_party: extracted.thirdParty, contact_page: contactUrl },
         ...(unscannable ? { unscannable: true, unscannable_reason: unscannableReason } : {}),
       };
       const pkg = recommendPackage({ hasWebsite: true, score, unreachableStrikes: strikes });
+      // owner_email is only written when we FOUND one, and never over a human's entry: COALESCE on
+      // the new value keeps an existing address if this scan found nothing, and the owner_source
+      // guard means a manually-entered address is never overwritten by a scrape.
       await q(`UPDATE prospects SET site_url=$2, site_score=$3, site_findings=$4::jsonb, recommended_package=$5,
-                 reachable=$6, unreachable_reason=$7, qualified_at=NOW(), status='qualified'
+                 reachable=$6, unreachable_reason=$7,
+                 owner_email = CASE WHEN $8::text IS NOT NULL AND (owner_source IS NULL OR owner_source='site')
+                                    THEN $8::text ELSE owner_email END,
+                 owner_source = CASE WHEN $8::text IS NOT NULL AND (owner_source IS NULL OR owner_source='site')
+                                     THEN 'site' ELSE owner_source END,
+                 qualified_at=NOW(), status='qualified'
                WHERE id=$1 AND status <> 'rejected'`,
-        [r.id, res.url || r.website, score, JSON.stringify(findings), pkg, reachable, unreachableReason]);
+        [r.id, res.url || r.website, score, JSON.stringify(findings), pkg, reachable, unreachableReason, ownerEmail]);
+      if (ownerEmail) summary.emails_found++;
+      if ((extracted.thirdParty || []).length) summary.designer_emails++;
       if (unscannable) summary.unscannable++;
       else summary.scored++;
       if (isDead) summary.unreachable++;
