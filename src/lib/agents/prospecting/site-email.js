@@ -11,12 +11,19 @@
 //   The FOLLOWED page is preferred over the homepage, because a contact page is where the address
 //   actually lives; a homepage footer often carries a generic one.
 //
-// OWN vs THIRD-PARTY — the important distinction, and the reason this returns two lists.
-// An address whose domain does not match the site's registrable domain is usually NOT the business:
-// it is the web designer or agency who built the site and left their address in the footer. Those
-// are wrong to call as the owner, but they are worth KEEPING, because they identify who built the
-// site — which is the same "the seat is taken" signal as a reseller platform or campaign tracking.
-// So they go to thirdParty, are never written to owner_email, and are surfaced as agency evidence.
+// THREE CLASSES, not two — the first version had only two and got it badly wrong.
+// An off-domain address is NOT automatically a designer: a small machine shop using gmail is using
+// its OWN address. Measured on the first real run: the "designer" list was topped by gmail.com (47),
+// yahoo.com (7), comcast.net (5), att.net (4) — every one of those a business's own mailbox. That
+// fabricated an agency signal AND threw away ~63 genuine leads.
+//   own        — the address is on the site's own registrable domain
+//   freeMail   — a consumer mailbox (gmail/yahoo/comcast/att/...): the BUSINESS's address, used when
+//                there is no on-domain one. Never agency evidence.
+//   thirdParty — off-domain AND not consumer mail: usually whoever built the site.
+//
+// A thirdParty address is wrong to call as the owner, but worth KEEPING: it identifies who built the
+// site, which is the same "the seat is taken" signal as a reseller platform or campaign tracking. So
+// it is never written to owner_email, and is surfaced as agency evidence instead.
 
 const SLD = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac']);
 function registrableDomain(urlOrHost) {
@@ -37,6 +44,16 @@ const NOISE_LOCAL = /^(no-?reply|donotreply|do-not-reply|postmaster|abuse|webmas
 const ASSET_LIKE = /\.(png|jpe?g|gif|svg|webp|ico|css|js|woff2?|ttf|eot|mp4|webm|pdf)$/i;
 // Sentry/analytics DSNs and versioned package specifiers also look like addresses.
 const VERSION_LIKE = /^[\d.]+$|@\d+\.\d+/;
+
+// Consumer mailbox providers. An address here belongs to the BUSINESS (or its owner personally),
+// never to a web designer, so it is a usable lead and is not agency evidence.
+const FREE_MAIL = new Set([
+  'gmail.com', 'googlemail.com', 'yahoo.com', 'ymail.com', 'hotmail.com', 'outlook.com', 'live.com',
+  'msn.com', 'aol.com', 'icloud.com', 'me.com', 'mac.com', 'comcast.net', 'att.net', 'sbcglobal.net',
+  'verizon.net', 'bellsouth.net', 'cox.net', 'charter.net', 'earthlink.net', 'juno.com', 'mail.com',
+  'protonmail.com', 'proton.me', 'gmx.com', 'zoho.com', 'yandex.com', 'ameritech.net', 'prodigy.net',
+]);
+const isFreeMail = (domain) => FREE_MAIL.has(String(domain || '').toLowerCase());
 
 const EMAIL_RX = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
 const MAILTO_RX = /href\s*=\s*["']\s*mailto:([^"'?>\s]+)/gi;
@@ -83,23 +100,30 @@ function harvest({ html, followedHtml }) {
 function extractEmails({ html, followedHtml, siteUrl } = {}) {
   const siteDomain = registrableDomain(siteUrl);
   const found = harvest({ html, followedHtml });
-  const own = [], thirdParty = [];
+  const own = [], freeMail = [], thirdParty = [];
   for (const f of found) {
     const d = registrableDomain(f.email.split('@')[1]);
     const entry = { ...f, domain: d };
-    if (siteDomain && d === siteDomain) own.push(entry); else thirdParty.push(entry);
+    if (siteDomain && d === siteDomain) own.push(entry);
+    else if (isFreeMail(d)) freeMail.push(entry);       // the business's own mailbox, not a designer
+    else thirdParty.push(entry);
   }
-  return { own, thirdParty, all: found, site_domain: siteDomain };
+  return { own, freeMail, thirdParty, all: found, site_domain: siteDomain };
 }
 
 // The one address to put on the row: the business's own, most-trusted first. Never a third-party
 // address — calling the web designer and asking for the owner is a bad first impression.
 function pickOwnerEmail(extracted) {
   const own = (extracted && extracted.own) || [];
-  if (!own.length) return null;
+  const free = (extracted && extracted.freeMail) || [];
+  // On-domain first; a consumer mailbox is a real fallback (plenty of small shops have no other
+  // address). A third-party address is NEVER used — calling the web designer to ask for the owner is
+  // a bad first impression.
+  const pool = own.length ? own : free;
+  if (!pool.length) return null;
   // Prefer a role address a business actually monitors over a personal one, then earliest found.
-  const preferred = own.find(x => /^(info|contact|sales|hello|office|admin|enquir|inquir)/i.test(x.email.split('@')[0]));
-  return (preferred || own[0]).email;
+  const preferred = pool.find(x => /^(info|contact|sales|hello|office|admin|enquir|inquir)/i.test(x.email.split('@')[0]));
+  return (preferred || pool[0]).email;
 }
 
 // Third-party addresses as agency evidence, in the same shape site-score.js uses.
@@ -113,4 +137,4 @@ function designerSignals(extracted) {
   }];
 }
 
-module.exports = { extractEmails, pickOwnerEmail, designerSignals, registrableDomain, looksReal };
+module.exports = { extractEmails, pickOwnerEmail, designerSignals, registrableDomain, looksReal, isFreeMail, FREE_MAIL };

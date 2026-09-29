@@ -106,3 +106,42 @@ test('duplicates collapse, keeping the earliest (most trusted) source', () => {
   assert.equal(r.own.length, 1);
   assert.match(r.own[0].source, /mailto on the contact\/about page/);
 });
+
+// ── free mail is the BUSINESS's address, not a designer's ───────────────────────
+// The first version classified every off-domain address as a designer, which on real data made
+// gmail.com the top "designer" domain (47 rows) — fabricating an agency signal and discarding the
+// only address those businesses publish.
+const { isFreeMail } = require('./site-email');
+
+test('a gmail address on a shop site is the OWNER, not a designer', () => {
+  const html = '<a href="mailto:acmemachine1978@gmail.com">email</a>';
+  const r = extractEmails({ html, siteUrl: 'https://acme-machine.com' });
+  assert.deepEqual(r.own, []);
+  assert.deepEqual(r.thirdParty, [], 'a consumer mailbox is never a designer');
+  assert.deepEqual(r.freeMail.map(x => x.email), ['acmemachine1978@gmail.com']);
+  assert.equal(pickOwnerEmail(r), 'acmemachine1978@gmail.com', 'it is a usable lead');
+  assert.deepEqual(designerSignals(r), [], 'and it raises NO agency signal');
+});
+
+test('an on-domain address still wins over a consumer one', () => {
+  const html = '<a href="mailto:shop@gmail.com">g</a> <a href="mailto:info@acme-machine.com">own</a>';
+  const r = extractEmails({ html, siteUrl: 'https://acme-machine.com' });
+  assert.equal(pickOwnerEmail(r), 'info@acme-machine.com');
+});
+
+test('a genuine designer domain is still flagged, alongside a free-mail owner', () => {
+  const html = '<a href="mailto:shop1978@yahoo.com">us</a> <a href="mailto:studio@webguys.net">site by</a>';
+  const r = extractEmails({ html, siteUrl: 'https://acme-machine.com' });
+  assert.equal(pickOwnerEmail(r), 'shop1978@yahoo.com');
+  assert.deepEqual(r.thirdParty.map(x => x.domain), ['webguys.net']);
+  assert.equal(designerSignals(r).length, 1);
+  assert.match(designerSignals(r)[0].evidence, /webguys\.net/);
+  assert.doesNotMatch(designerSignals(r)[0].evidence, /yahoo/, 'the owner mailbox must not appear as the builder');
+});
+
+test('isFreeMail covers the providers US small businesses actually use', () => {
+  for (const d of ['gmail.com','yahoo.com','hotmail.com','outlook.com','aol.com','comcast.net','att.net','sbcglobal.net','icloud.com','verizon.net','cox.net','charter.net']) {
+    assert.equal(isFreeMail(d), true, d);
+  }
+  for (const d of ['acme-machine.com','webguys.net','brightspark.co']) assert.equal(isFreeMail(d), false, d);
+});
