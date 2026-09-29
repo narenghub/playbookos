@@ -21,6 +21,7 @@ const { runResearchIntelIngest } = require('../lib/agents/research-intelligence'
 const { runContentPipeline } = require('../lib/agents/content');
 const { runProspecting, runQualifyProspects } = require('../lib/agents/prospecting');
 const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/config');
+const { heldProducts, productScopeSql } = require('../lib/products/held');
 const riResolve = require('../lib/agents/research-intelligence/resolve');
 const riOutreach = require('../lib/agents/research-intelligence/outreach');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
@@ -4926,15 +4927,24 @@ router.put('/events/cphi/exhibitors/:id', authMiddleware, requireTier('intellige
 // ── Notifications — the pnav top-bar bell feed ────────────────────────────────
 // reads + writes requireTier('intelligence') (GET needs intelligence read; PUT/POST need
 // intelligence write). All free, no spend.
+// PRODUCT-SCOPED. The ROUTE is shared — everyone needs their own alerts — but the TABLE carries a
+// product column and no user_id, so an unscoped read handed every logged-in user every other
+// product's agent failures (molecule names, sequence errors, inquiry detail). Scoping the DATA is the
+// fix; reclassifying the route would have hidden a product's own alerts from the people running it.
+// A NULL product is platform-wide and needs 'internal'. The unread COUNT is scoped too — an
+// unreachable badge count is still a leak, and a number nobody can explain.
 router.get('/notifications', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
-    const where = req.query.unread === 'true' ? 'WHERE read_at IS NULL' : '';
+    const held = await heldProducts(req.user.id);
+    const scope = productScopeSql(held, '', 1);
+    const unreadOnly = req.query.unread === 'true' ? ' AND read_at IS NULL' : '';
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 30));
     const items = (await query(
       `SELECT id, product, kind, severity, title, body, link_page, read_at, created_at
-         FROM notifications ${where}
-         ORDER BY created_at DESC LIMIT ${limit}`)).rows;
-    const unread = (await query(`SELECT COUNT(*)::int n FROM notifications WHERE read_at IS NULL`)).rows[0].n;
+         FROM notifications WHERE ${scope.sql}${unreadOnly}
+         ORDER BY created_at DESC LIMIT ${limit}`, scope.params)).rows;
+    const unread = (await query(
+      `SELECT COUNT(*)::int n FROM notifications WHERE ${scope.sql} AND read_at IS NULL`, scope.params)).rows[0].n;
     res.json({ items, unread });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -4942,8 +4952,14 @@ router.get('/notifications', authMiddleware, requireTier('intelligence'), async 
 // PUT /notifications/:id/read — mark one read (idempotent; keeps the original read_at).
 router.put('/notifications/:id/read', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
+    // Scoped in the WHERE rather than fetched-then-checked: a row whose product the caller does not
+    // hold simply does not match, so it reads as 404 — the same answer as a row that does not exist,
+    // which is also the right answer to give (it tells a prober nothing).
+    const held = await heldProducts(req.user.id);
+    const scope = productScopeSql(held, '', 2);
     const upd = await query(
-      `UPDATE notifications SET read_at = COALESCE(read_at, NOW()) WHERE id = $1 RETURNING *`, [req.params.id]);
+      `UPDATE notifications SET read_at = COALESCE(read_at, NOW())
+        WHERE id = $1 AND ${scope.sql} RETURNING *`, [req.params.id, ...scope.params]);
     if (!upd.rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(upd.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -4952,7 +4968,14 @@ router.put('/notifications/:id/read', authMiddleware, requireTier('intelligence'
 // POST /notifications/read-all — mark every unread notification read.
 router.post('/notifications/read-all', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
-    const upd = await query(`UPDATE notifications SET read_at = NOW() WHERE read_at IS NULL`);
+    // Was org-wide state wearing per-user clothes: one person clicking "mark all read" cleared
+    // everybody's notifications, which is a correctness bug even among staff. Now it marks only the
+    // products the caller holds — identical behaviour for the 17 people who hold everything, and
+    // automatically contained for anyone who does not.
+    const held = await heldProducts(req.user.id);
+    const scope = productScopeSql(held, '', 1);
+    const upd = await query(
+      `UPDATE notifications SET read_at = NOW() WHERE read_at IS NULL AND ${scope.sql}`, scope.params);
     res.json({ marked: upd.rowCount || 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

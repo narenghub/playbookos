@@ -51,6 +51,47 @@
 // created, check BOTH layers, and consider whether the internal 'shared' block below should
 // become its own value.
 
+//
+// ── AUDIT: WHAT DATA EACH 'shared' ROUTE READS (2026-09-29) ───────────────────
+// A 'shared' route means "safe for anyone with a login" — but a ROUTE can be genuinely shared while
+// the TABLE behind it is product-bearing. That is not a classification error; it is a second job the
+// middleware cannot do, because the boundary decides whether a REQUEST is admitted and never filters
+// rows. The notifications leak was exactly this, so every shared route was audited once by hand:
+// which tables does its handler read, and does any of them carry a `product` column?
+//
+// Tables that carry `product`: content_queue, event_sources, ingested_events, notifications,
+// prospects, user_products.
+//
+//   route                                  tables                              product column?
+//   GET  /health                           (none)                              —
+//   GET  /sitemap.xml                      (static)                            —
+//   GET  *                                 (static SPA)                        —
+//   POST /api/auth/login                   users                               no
+//   POST /api/auth/accept-invite           users, invites                      no
+//   GET  /api/auth/me                      users                               no
+//   PUT  /api/auth/password                users                               no
+//   PUT  /api/users/profile                users                               no
+//   GET  /api/activity/my                  activity_log        (own rows)      no
+//   POST /api/activity                     activity_log        (own rows)      no
+//   GET  /api/dashboard/my                 tasks, kpis, activity_log (own)     no
+//   GET  /api/agent/tasks/my               agent_tasks         (own rows)      no
+//   PUT  /api/agent/tasks/:id              agent_tasks                         no
+//   GET  /api/goals/my-week                goals, kpis         (own rows)      no
+//   GET  /api/performance/my               kpis, activity_log  (own rows)      no
+//   PUT  /api/kpis/:id/progress            kpis                                no
+//   GET  /api/notifications                notifications                       YES → scoped
+//   PUT  /api/notifications/:id/read       notifications                       YES → scoped
+//   POST /api/notifications/read-all       notifications                       YES → scoped
+//
+// 3 of 19. The other 16 are either user-scoped by `user_id` already or hold no product data at all;
+// prospects, content_queue, ingested_events and event_sources appear in no shared handler. The three
+// notification routes stay 'shared' — reclassifying them 'internal' would hide a product's own alerts
+// from the people running that product — and scope their DATA instead, via
+// src/lib/products/held.js (productScopeSql). A NULL product is platform-wide and needs 'internal'.
+//
+// WHEN ADDING A SHARED ROUTE: if its handler touches a table in the list above, it must scope by
+// product in the WHERE clause. The route being shared is not the question; the data is.
+
 // ── genuinely neutral: safe for anyone with a login ───────────────────────────
 const SHARED = [
   // app shell + infrastructure
