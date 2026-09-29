@@ -41,7 +41,7 @@ the products, so neither one failing opens the other.
 Layer 3 exists because layer 2 deliberately does **not** filter rows. It admits or refuses a request
 and never touches `req.user`. A route can be genuinely *shared* — safe for anyone with a login — while
 the table behind it carries a `product` column. `notifications` was exactly that, and the audit of all
-19 shared routes lives in a comment in `src/lib/products/route-map.js` so the next shared route gets
+20 shared routes lives in a comment in `src/lib/products/route-map.js` so the next shared route gets
 the same question asked of it.
 
 ---
