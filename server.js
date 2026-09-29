@@ -357,6 +357,40 @@ cron.schedule('45 * * * *', withAlerts('hourly-45-inquiry-poll', async () => {
   console.log(`[CRON] Sales mailbox poll — ${r.new_inquiries} new, ${r.replies_routed} replies, ${r.skipped} skipped${r.warning ? ' · ' + r.warning : ''}`);
 }), CST);
 
+// Noon CST daily — PRODUCT BOUNDARY shadow read, while the boundary is in shadow mode.
+// Reports to agent_activity_log + a notification so nobody has to remember to look. Runs in-app
+// because the shadow log is only reachable from here: DATABASE_URL is postgres.railway.internal,
+// which nothing outside this container can resolve, so a cloud routine would fire and fail.
+// SELF-RETIRING: skips unless PRODUCT_BOUNDARY_MODE is 'shadow', so it stops once enforcement is
+// decided rather than becoming a daily message nobody reads.
+cron.schedule('0 12 * * *', withAlerts('daily-12cst-product-shadow-read', async () => {
+  if (String(process.env.PRODUCT_BOUNDARY_MODE || 'shadow').toLowerCase() !== 'shadow') {
+    console.log('[CRON] product-boundary shadow read skipped — mode is not shadow');
+    return;
+  }
+  const { productShadowReport, formatShadowReport } = require('./src/lib/products/shadow-report');
+  const r = await productShadowReport({ hours: 24 });
+  const body = formatShadowReport(r);
+  console.log('[CRON] product-boundary shadow read\n' + body);
+  const { logAgentActivity } = require('./src/lib/agent-core');
+  await logAgentActivity({
+    agent_name: 'product-boundary', action_type: 'shadow_read',
+    reasoning: body.slice(0, 3000),
+    output_summary: `evaluated=${r.totals.evaluated} would_block=${r.totals.would_block} unresolved=${r.totals.unresolved}`.slice(0, 300),
+  }).catch(() => {});
+  // A would_block or an unresolved route is actionable; a clean read is not worth a notification.
+  if (r.totals.would_block > 0 || r.totals.unresolved > 0) {
+    await require('./src/lib/notify').notify({
+      kind: 'agent_failed',
+      severity: r.totals.would_block > 0 ? 'error' : 'warning',
+      title: r.totals.would_block > 0
+        ? `Product boundary: ${r.totals.would_block} would-block — middleware bug`
+        : `Product boundary: ${r.totals.unresolved} unresolved route(s) — map gap`,
+      body: body.slice(0, 500), link_page: 'agent-control',
+    }).catch(() => {});
+  }
+}), CST);
+
 // Wednesday 10am CST — Reorder Agent: mid-week reorder sweep of past buyers.
 cron.schedule('0 10 * * 3', withAlerts('weekly-wed-10cst-reorder-agent', async () => {
   console.log('[CRON] Reorder Agent (Wed) starting...');
