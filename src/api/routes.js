@@ -8,7 +8,7 @@ const { checkMilestoneTriggers } = require('../lib/jobs');
 const { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf } = require('../lib/agents/goal-engine');
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
 const { takeMetricsSnapshot } = require('../lib/agents/metrics-snapshot');
-const { getAllRoles, isBuiltIn, getRolePages } = require('../lib/roles');
+const { getAllRoles, isBuiltIn, getRolePages, isExternalRole, excludeExternalSql, roleTiers } = require('../lib/roles');
 const { identifyContentGaps, trackAlgoliaNoResults, trackKeywordRankings, generateCatalogSeoPages, pushSeoContentToAbiozen } = require('../lib/agents/seo-agent');
 const { syncAlgoliaSearchData, generateSEORecommendations, runMarketIntelligence } = require('../lib/agents/growth-agent');
 const { runEmailEngine, SEGMENTS, sanitizeHtml, publishSequenceToApollo, addSequenceContacts } = require('../lib/agents/email-engine');
@@ -137,7 +137,7 @@ router.post('/auth/login', authLimiter, async (req, res) => {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     console.log(`[auth] login ok email=${user.email} role=${user.role} ip=${req.ip}`);
-    res.json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, github_username: user.github_username, can_run_standup: !!user.can_run_standup } });
+    res.json({ token: signToken(user), user: { id: user.id, name: user.name, email: user.email, role: user.role, github_username: user.github_username, can_run_standup: !!user.can_run_standup, tiers: roleTiers(user.role) } });
   } catch(e) {
     console.error(`[auth] login ERROR ip=${req.ip}: ${e.message}`);
     res.status(500).json({ error: e.message });
@@ -174,14 +174,26 @@ router.post('/auth/accept-invite', authLimiter, async (req, res) => {
     });
     console.log(`[invite] ACCEPTED ${user.email} — granted products [${chosen.join(', ') || 'NONE'}]`);
     const updated = (await query('SELECT * FROM users WHERE id=$1', [user.id])).rows[0];
-    res.json({ token: signToken(updated), user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role }, products: chosen });
+    res.json({ token: signToken(updated), user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role, tiers: roleTiers(updated.role) }, products: chosen });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// `tiers` is returned WITH IDENTITY, and that is the point.
+//
+// The client nav filters pages by the caller's tiers (NAV_PAGE_REQS). It used to get them from
+// GET /api/roles, fetched separately in buildNav inside a try/catch that swallowed the error — so a
+// 403 or a blip on THAT call left tiers unknown, and passesPageReads() fell back to showing every page
+// in a visible section. A tighter server gate produced a looser client UI.
+//
+// Tiers now arrive on the same call that establishes who you are. That call cannot degrade open,
+// because a failure logs you out (checkAuth in index.html). Read fresh from the users row, like the
+// role, so a role change takes effect on the next request rather than the next login.
 router.get('/auth/me', authMiddleware, async (req, res) => {
   try {
     const result = await query('SELECT id,name,email,role,github_username,can_run_standup FROM users WHERE id=$1', [req.user.id]);
-    res.json(result.rows[0]);
+    const u = result.rows[0];
+    if (!u) return res.status(404).json({ error: 'Not found' });
+    res.json({ ...u, tiers: roleTiers(u.role) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -334,8 +346,13 @@ router.post('/users/invite', authMiddleware, superAdminOnly, async (req, res) =>
     const inviteToken = crypto.randomBytes(32).toString('hex');
     const id = crypto.randomUUID();
     const wa = whatsapp_number ? String(whatsapp_number).trim() : null;
-    await query('INSERT INTO users (id,email,name,role,github_username,whatsapp_number,invite_token,invited_at,invited_products,invited_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
-      [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, wa, inviteToken, new Date().toISOString(), chosen, req.user.id]);
+    // An EXTERNAL role sets excluded_from_scoring on the row as well. The role property is what the
+    // agents actually check (src/lib/roles.js excludeExternalSql), so this is redundant by design: it
+    // keeps the column truthful for the handful of older queries that filter on it, and it makes the
+    // exclusion visible to anyone reading the row instead of only to anyone reading roles.js.
+    const external = isExternalRole(role);
+    await query('INSERT INTO users (id,email,name,role,github_username,whatsapp_number,invite_token,invited_at,invited_products,invited_by,excluded_from_scoring) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
+      [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, wa, inviteToken, new Date().toISOString(), chosen, req.user.id, external]);
     // Logged plainly, because granting 'internal' to an outside account is the one mistake here that
     // does not announce itself.
     console.log(`[invite] ${req.user.email} invited ${email.toLowerCase()} as ${role} with products [${chosen.join(', ') || 'NONE'}]${chosen.includes('internal') ? ' ⚠ INCLUDES internal' : ''}`);
@@ -348,7 +365,10 @@ router.post('/users/invite', authMiddleware, superAdminOnly, async (req, res) =>
     // gracefully when Twilio env vars are unset (sendWhatsApp returns
     // { skipped, reason }). Failures must not break the invite response.
     let whatsapp_status = null;
-    if (wa) {
+    // WhatsApp is our team's escalation channel. An external account has no business in it, so the
+    // number is ignored rather than messaged even if one was typed in.
+    if (wa && external) whatsapp_status = 'skipped:external_role';
+    else if (wa) {
       const welcome = `Welcome to PlayNexa! 🚀 You've been invited as ${role}. Login at ${baseUrl} with your email. You'll receive daily task assignments and KPI updates here on WhatsApp.`;
       try {
         const r = await sendWhatsApp(wa, welcome, { user_id: id, message_type: 'welcome' });
@@ -522,7 +542,7 @@ router.post('/users/send-onboarding', authMiddleware, adminOnly, async (req, res
       ) s ON true
       WHERE u.is_active = 1 AND u.email IS NOT NULL
         AND u.role <> 'super_admin'
-        AND COALESCE(u.excluded_from_scoring, false) = false
+        AND COALESCE(u.excluded_from_scoring, false) = false${excludeExternalSql('u')}
         AND COALESCE(s.total_score, 0) = 0
       ORDER BY u.name`)).rows;
 
@@ -581,7 +601,7 @@ router.post('/users/send-task-nudge', authMiddleware, adminOnly, async (req, res
       FROM users u
       WHERE u.is_active = 1 AND u.email IS NOT NULL
         AND u.role <> 'super_admin'
-        AND COALESCE(u.excluded_from_scoring, false) = false
+        AND COALESCE(u.excluded_from_scoring, false) = false${excludeExternalSql('u')}
       ORDER BY u.name`)).rows;
 
     if (dryRun) {

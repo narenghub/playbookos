@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
-const { getAllRoles, BUILT_IN_ROLES } = require('../roles');
+const { getAllRoles, BUILT_IN_ROLES, excludeExternalSql, isExternalRole } = require('../roles');
 
 const DAY_MS = 86400000;
 const isoDate = d => d.toISOString().slice(0, 10);
@@ -117,8 +117,9 @@ async function cascadeGoals({ dryRun = false } = {}) {
     return { skipped: true, reason: `no annual targets found in targets table for ${year}` };
   }
 
+  // The cascade distributes company targets across the people who carry them. A partner carries none.
   const team = (await query(
-    `SELECT id, name, role FROM users WHERE is_active=1 AND role IS NOT NULL ORDER BY role, name`
+    `SELECT id, name, role FROM users WHERE is_active=1 AND role IS NOT NULL${excludeExternalSql()} ORDER BY role, name`
   )).rows;
   const teamByRole = {};
   for (const u of team) {
@@ -344,6 +345,12 @@ Return ONLY the JSON object.`;
 async function assignWeeklyKPIs(userId, weekStart) {
   const user = (await query(`SELECT id, name, role FROM users WHERE id=$1`, [userId])).rows[0];
   if (!user || !user.role) return { skipped: true, reason: 'user not found or no role', user_id: userId };
+  // Guarded HERE as well as in the caller, because this is also reachable one user at a time from the
+  // route. An external account must not acquire KPIs by any path — they are what the score is measured
+  // against, so a KPI is the first step of the thing we are trying not to do.
+  if (isExternalRole(user.role)) {
+    return { user_id: userId, role: user.role, week_start: weekStart, skipped: true, reason: 'external role — partners are not assigned KPIs' };
+  }
 
   const weeklyGoals = (await query(
     `SELECT metric, target_value FROM goal_cascades
@@ -370,7 +377,7 @@ async function assignWeeklyKPIs(userId, weekStart) {
 
 async function assignWeeklyKPIsForAll({ dryRun = false } = {}) {
   const weekStart = isoDate(mondayOf(new Date()));
-  const users = (await query(`SELECT id, name, role FROM users WHERE is_active=1 AND role IS NOT NULL`)).rows;
+  const users = (await query(`SELECT id, name, role FROM users WHERE is_active=1 AND role IS NOT NULL${excludeExternalSql()}`)).rows;
   if (dryRun) {
     return { dryRun: true, week_start: weekStart, would_process: users.length };
   }

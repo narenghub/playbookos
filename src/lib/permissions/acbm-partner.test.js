@@ -91,10 +91,9 @@ test('the partner does not hold anything internal', async () => {
   for (const key of mustDeny) {
     assert.equal(await can(key), false, `expected DENY for ${key}`);
   }
-  // admin.roles.list is the ONE 'admin' feature it does hold, and only because the client-side nav
-  // cannot compute this role's tiers without it. Asserted positively so the exception is visible here
-  // rather than looking like an oversight in the list above.
-  assert.equal(await can('admin.roles.list'), true, 'the role catalog — the nav needs it; see the template comment');
+  // admin.roles.list was granted here for one release, because buildNav fetched /api/roles to learn the
+  // caller's tiers. The tiers now arrive on /auth/me, so the partner does not see our role catalog.
+  assert.equal(await can('admin.roles.list'), false, 'the nav no longer needs it — see roleTiersFor');
 });
 
 test('the partner reaches nothing beyond its listed features', async () => {
@@ -137,13 +136,14 @@ test("every acbm route classifies as the 'acbm' product, so holding ['acbm'] is 
 });
 
 test('every route the partner needs resolves to a product it holds', () => {
-  // The third layer has to agree with the other two, and this is where they can silently disagree:
-  // GET /api/roles was classified 'internal', so under enforce the boundary would 403 the one route
-  // buildNav needs — the resolver would say yes and the nav would still break.
+  // The third layer has to agree with the other two, and this is where they can silently disagree. It
+  // did once: GET /api/roles is 'internal', and the nav used to need it, so the boundary would have
+  // 403'd the one route buildNav depended on — the resolver saying yes and the nav breaking anyway.
+  // /api/roles is deliberately NOT in this list any more; the nav gets tiers from /auth/me instead.
   const held = ['acbm'];              // NOT 'internal'
   const needed = [
     ['GET', '/api/acbm/deals'], ['GET', '/api/acbm/packages'],
-    ['GET', '/api/roles'], ['GET', '/api/auth/me'], ['PUT', '/api/auth/password'],
+    ['GET', '/api/auth/me'], ['PUT', '/api/auth/password'],
     ['PUT', '/api/users/profile'], ['GET', '/api/agent/tasks/my'], ['GET', '/api/activity/my'],
     ['POST', '/api/activity'], ['GET', '/api/goals/my-week'], ['GET', '/api/performance/my'],
   ];
@@ -166,7 +166,6 @@ test("'internal' is what the boundary requires for platform routes, and the part
                         ['POST', '/api/roles'], ['GET', '/api/products/grantable']]) {
     const prod = classifyRoute(m, p);
     assert.ok(prod !== null, `${m} ${p} is unclassified — under enforce it 403s for everyone`);
-    if (p === '/api/roles' && m === 'GET') continue;           // deliberately shared, see the map
     assert.equal(prod, 'internal', `${m} ${p}`);
   }
 });

@@ -823,7 +823,17 @@ function navSectionVisible(access, role) {
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
 const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"acbm-prospects":[["intelligence"]],"acbm-deals":[["acbm"]],"acbm-packages":[["acbm"]]};
+// The caller's tiers. They arrive on /auth/me and /auth/login WITH the identity, so this needs no
+// fetch of its own and cannot be left unknown by a failed request — a failed /auth/me logs you out
+// rather than showing you a nav computed from nothing.
+//
+// The role catalog is still consulted as a fallback, for the one case that is not the current user:
+// nothing does that today, but roleTiersFor(someOtherRole) would otherwise silently return {}.
+// Returns null ONLY when the role is genuinely unknown to us, and passesPageReads treats null as
+// "hide anything tier-gated".
 function roleTiersFor(role) {
+  const me = (typeof currentUser !== 'undefined' && currentUser) || null;
+  if (me && me.role === role && me.tiers) return me.tiers;
   const cat = (typeof window !== 'undefined' && window._roleCatalog) || [];
   const row = Array.isArray(cat) ? cat.find(r => r.role_name === role) : null;
   return (row && row.tiers) || null;
@@ -837,12 +847,15 @@ function passesPageReads(pageId, role, tiers) {
   if (role === 'admin' || role === 'super_admin') return true; // admins pass every read
   const reqs = NAV_PAGE_REQS[pageId];
   if (!reqs) return true;                 // no tier-gated implied reads -> always passes
-  // FAIL OPEN, deliberately. `tiers` is null when GET /api/roles failed (buildNav swallows the error),
-  // and returning false there would empty the sidebar on a transient blip — an outage for a UI layer
-  // that guards nothing. What it can do is show a link the API then refuses, so any role whose nav
-  // DEPENDS on this filter must be able to read /api/roles: see admin.roles.list in the acbm_partner
-  // template. The API gate is the boundary; this is the label on the door.
-  if (!tiers) return true;                // role catalog not loaded -> fall back to section-only
+  // FAIL CLOSED. This used to return true when tiers were unknown, which meant a FAILED FETCH made the
+  // nav MORE permissive: /api/roles 403s or blips, tiers are null, and every tier-gated page in a
+  // visible section is drawn. A tighter server gate producing a looser client UI is exactly backwards.
+  //
+  // Unknown tiers are now nearly impossible rather than merely handled: they arrive on /auth/me with
+  // the identity, and a failed /auth/me logs you out. If they are somehow still unknown, hiding a
+  // tier-gated page costs a reload; showing one invites a click that 403s. Pages with NO tier
+  // requirement are unaffected (the `!reqs` line above), so a role does not lose My Tasks over this.
+  if (!tiers) return false;               // tiers unknown -> hide anything tier-gated
   return reqs.every(anyOf => anyOf.some(t => roleCanRead(tiers, t)));
 }
 // ── PRODUCT-FIRST SHELL (flag-gated, additive; NAV-LAYER ONLY) ──────────────────
@@ -914,13 +927,16 @@ function firstNavPage(role) {
   return 'my-tasks';
 }
 
+// NOTHING IS FETCHED HERE ANY MORE, and that is the fix rather than a tidy-up.
+//
+// buildNav used to `await API('/roles')` inside a try/catch that swallowed the error, purely to learn
+// the caller's tiers. That made a failed request widen the nav (see passesPageReads). Tiers now come
+// from currentUser, set by /auth/me or /auth/login — the same call that decides whether the app is
+// shown at all, so its failure mode is the login screen, not a permissive sidebar.
+//
+// window._roleCatalog is no longer populated here. Its only remaining consumers are the team page's
+// role dropdown and the invite form, and pages.team() fetches it itself.
 async function buildNav() {
-  // Keep the role catalog available for other consumers (team page, etc.); nav
-  // visibility itself is now section-level by role family, not per-page.
-  try {
-    const rolesResp = await API('/roles');
-    window._roleCatalog = rolesResp.roles || [];
-  } catch (e) {}
   const role = (typeof currentUser !== 'undefined' && currentUser && currentUser.role) || '';
   const tiers = roleTiersFor(role);
   const bar = document.getElementById('product-bar');

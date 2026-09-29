@@ -42,10 +42,10 @@ db.query = async (sql, params = []) => {
   if (/^SELECT \* FROM users WHERE id/i.test(s)) {
     return { rows: USERS.filter(u => u.id === params[0]) };
   }
-  if (/^INSERT INTO users \(id,email,name,role,github_username,whatsapp_number,invite_token,invited_at,invited_products,invited_by\)/i.test(s)) {
-    const [id, email, name, role, gh, wa, token, invited_at, invited_products, invited_by] = params;
+  if (/^INSERT INTO users \(id,email,name,role,github_username,whatsapp_number,invite_token,invited_at,invited_products,invited_by,excluded_from_scoring\)/i.test(s)) {
+    const [id, email, name, role, gh, wa, token, invited_at, invited_products, invited_by, excluded_from_scoring] = params;
     USERS.push({ id, email, name, role, github_username: gh, whatsapp_number: wa, invite_token: token,
-                 invited_at, invited_products, invited_by, is_active: 1, joined_at: null });
+                 invited_at, invited_products, invited_by, excluded_from_scoring, is_active: 1, joined_at: null });
     return { rows: [] };
   }
   if (/^UPDATE users SET password_hash=\$1/i.test(s)) {
@@ -200,4 +200,24 @@ test('GET /users reports what each account holds', async () => {
   });
   const after_ = await (await req('GET', '/api/users', asSuper)).json();
   assert.deepEqual(after_.find(u => u.email === 'partner@acbm.test').products, ['acbm']);
+});
+
+// ── external roles are excluded from scoring AT INVITE TIME ─────────────────────
+test('inviting an external role sets excluded_from_scoring on the row', async () => {
+  const r = await invite({ email: 'partner@acbm.test', role: 'acbm_partner', products: ['acbm'] });
+  assert.equal(r.status, 200);
+  assert.equal(USERS.find(u => u.email === 'partner@acbm.test').excluded_from_scoring, true,
+    'otherwise the 6pm agent scores them at 0 and the escalation ladder emails a partner');
+});
+
+test('inviting an internal role does NOT set it', async () => {
+  await invite({ email: 'staff@abiozen.com', role: 'business_dev', products: ['abiozen'] });
+  assert.equal(USERS.find(u => u.email === 'staff@abiozen.com').excluded_from_scoring, false);
+});
+
+test('a WhatsApp number on an external invite is ignored, not messaged', async () => {
+  const r = await invite({ email: 'partner@acbm.test', role: 'acbm_partner', products: ['acbm'], whatsapp_number: '+15555550123' });
+  const j = await r.json();
+  assert.equal(j.whatsapp_status, 'skipped:external_role',
+    'WhatsApp is our escalation channel — a partner has no business in it');
 });

@@ -157,6 +157,10 @@ const BUILT_IN_ROLES = {
     level: 6, domain: 'partner', data_scope: 'readonly',
     pages: ['acbm-deals', 'acbm-packages', 'my-tasks', 'my-activity'],
     tiers: { self: 'rw', acbm: 'r' },
+    // external:true is the SWITCH THAT TURNS OFF EVERYTHING WE DO TO OUR OWN STAFF. See
+    // EXTERNAL_ROLES below for what it governs and why it is a property of the role rather than a
+    // column somebody has to remember to tick.
+    external: true,
     metrics: [],
     baseline: 1,
   },
@@ -169,6 +173,50 @@ const BUILT_IN_ROLES = {
     baseline: 25,
   },
 };
+
+// ── EXTERNAL ROLES — what we do to our own staff and must not do to a partner ─────────────────
+//
+// PlaybookOS measures and manages the people in it. An account with external:true is someone we do
+// NOT employ, so none of that applies, and several parts of it would be actively damaging:
+//
+//   performance scoring      they do no work we measure, so they sit at 0
+//   the daily score email    a partner being emailed their productivity score
+//   the escalation ladder    five days at 0 escalates to L4 — Naresh emailing a partner about their
+//                            "critically low productivity" is not a good look for a partnership
+//   weekly KPI assignment    goal_cascades rows aimed at a role that has no cascade anyway
+//   AI daily task assignment we do not set a partner's agenda
+//   meeting action items     they are not in our standups
+//
+// WHY A ROLE PROPERTY AND NOT users.excluded_from_scoring. That column exists and still works — the
+// invite handler sets it for an external role, so every query that filters on it keeps behaving. But a
+// column is per-account state that somebody has to remember to set, and "remember to tick the box or
+// the partner gets coaching emails" is not a boundary. The role knows what it is; the queries ask the
+// role. The column is the belt, this is the braces.
+const EXTERNAL_ROLES = Object.entries(BUILT_IN_ROLES)
+  .filter(([, def]) => def.external === true).map(([key]) => key);
+
+// A custom role (POST /api/roles) gets no tiers and no definition here, so it is NOT external —
+// treating an unknown role as external would silently stop scoring anyone on a new role.
+function isExternalRole(roleKey) {
+  return EXTERNAL_ROLES.includes(roleKey);
+}
+
+// SQL fragment excluding external roles, for the queries that sweep every active user.
+//   `... WHERE is_active=1 ${excludeExternalSql('u')}`
+// Inlined as a literal rather than parameterised so it drops into queries that already number their
+// params (several of these run with $1 already bound). Safe because role keys are code-defined, never
+// user input — asserted below so a future role with a quote or space fails loudly at require time
+// instead of producing broken SQL.
+for (const key of EXTERNAL_ROLES) {
+  if (!/^[a-z][a-z0-9_]*$/.test(key)) {
+    throw new Error(`external role key "${key}" is not a bare identifier — excludeExternalSql inlines it into SQL`);
+  }
+}
+function excludeExternalSql(alias = '') {
+  if (!EXTERNAL_ROLES.length) return '';
+  const col = alias ? `${alias}.role` : 'role';
+  return ` AND COALESCE(${col}, '') NOT IN (${EXTERNAL_ROLES.map(r => `'${r}'`).join(', ')})`;
+}
 
 function getMetricsSync(roleKey) {
   return BUILT_IN_ROLES[roleKey]?.metrics || [];
@@ -185,6 +233,14 @@ function isBuiltIn(roleKey) {
 // API tier access for a role: 'rw' | 'r' | 'w' | 'own' | null.
 function getRoleTier(roleKey, tier) {
   return BUILT_IN_ROLES[roleKey]?.tiers?.[tier] || null;
+}
+
+// The whole tier map for a role, for the client to filter its own nav with. Returned by /auth/me and
+// /auth/login so the nav never has to fetch its inputs separately — see the comment on /auth/me.
+// A custom role has no definition here and gets {}, which means "no tiers", which is correct: a custom
+// role holds none. Never null, so the caller cannot mistake "no tiers" for "unknown".
+function roleTiers(roleKey) {
+  return { ...(BUILT_IN_ROLES[roleKey]?.tiers || {}) };
 }
 
 // Sidebar pages a role can see: '*' or an array.
@@ -222,4 +278,5 @@ async function getAllRoles() {
   return out;
 }
 
-module.exports = { BUILT_IN_ROLES, ALL_PAGES, getAllRoles, getMetricsSync, getBaselineSync, isBuiltIn, getRoleTier, getRolePages };
+module.exports = {
+  EXTERNAL_ROLES, isExternalRole, excludeExternalSql, BUILT_IN_ROLES, ALL_PAGES, getAllRoles, getMetricsSync, getBaselineSync, isBuiltIn, getRoleTier, roleTiers, getRolePages };

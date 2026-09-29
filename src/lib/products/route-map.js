@@ -82,9 +82,8 @@
 //   GET  /api/notifications                notifications                       YES → scoped
 //   PUT  /api/notifications/:id/read       notifications                       YES → scoped
 //   POST /api/notifications/read-all       notifications                       YES → scoped
-//   GET  /api/roles                        custom_roles                        no
 //
-// 3 of 20. The other 17 are either user-scoped by `user_id` already or hold no product data at all;
+// 3 of 19. The other 16 are either user-scoped by `user_id` already or hold no product data at all;
 // prospects, content_queue, ingested_events and event_sources appear in no shared handler. The three
 // notification routes stay 'shared' — reclassifying them 'internal' would hide a product's own alerts
 // from the people running that product — and scope their DATA instead, via
@@ -106,13 +105,6 @@ const SHARED = [
   'GET /api/goals/my-week', 'GET /api/performance/my', 'PUT /api/kpis/:id/progress',
   // own notifications
   'GET /api/notifications', 'PUT /api/notifications/:id/read', 'POST /api/notifications/read-all',
-  // The ROLE CATALOG. This was classified 'internal', which was wrong the moment a non-internal
-  // account existed: buildNav() fetches it on EVERY page load for EVERY user to work out that user's
-  // tiers, and a 403 here silently falls back to section-only nav (index.html passesPageReads) — so an
-  // 'internal' classification would show an acbm partner links it cannot open. It returns role names,
-  // tiers and baselines: our structure, no user or business data, and every logged-in account already
-  // reads it. POST /api/roles (creating one) stays internal.
-  'GET /api/roles',
 ];
 
 // ── internal: not one product's, but not for an outside account either ────────
@@ -123,7 +115,11 @@ const INTERNAL = [
   'GET /api/users', 'POST /api/users/invite', 'PUT /api/users/:id', 'DELETE /api/users/:id',
   'PUT /api/users/:id/toggle-status', 'POST /api/users/send-onboarding', 'POST /api/users/send-task-nudge',
   'POST /api/admin/users/:user_id/edit-name', 'POST /api/admin/users/:user_id/reset-password',
-  'GET /api/admin/adoption', 'POST /api/roles',
+  // GET /api/roles is the ROLE CATALOG, and it stays internal. It was briefly reclassified 'shared',
+  // because buildNav() fetched it on every page load to learn the caller's tiers and a 403 made the nav
+  // MORE permissive. The right fix was to stop the nav depending on a separate fetch at all — tiers now
+  // arrive on /auth/me — so the only remaining consumer is the team page, which is admin-only.
+  'GET /api/admin/adoption', 'GET /api/roles', 'POST /api/roles',
   'GET /api/products/grantable',
   // company targets + milestones
   'GET /api/targets', 'POST /api/targets', 'GET /api/milestones', 'PUT /api/milestones/:id',

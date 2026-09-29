@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { query } = require('./db');
+const { excludeExternalSql } = require('./roles');
 const { syncGitHubForUser, analyzeTeamProgress, scoreTeamMember } = require('./core');
 const { sendEmail } = require('./mailer');
 
@@ -112,10 +113,12 @@ async function checkMilestoneTriggers({ dryRun = false } = {}) {
 
 async function scoreAllAndCoach({ dryRun = false, date = null } = {}) {
   const scoreDate = date || new Date().toISOString().slice(0, 10);
+  // excludeExternalSql: a partner account is not scored and is not coached, by virtue of its ROLE —
+  // not by virtue of somebody having ticked excluded_from_scoring on the row.
   const users = (await query(
     `SELECT id, name, email, role FROM users
      WHERE is_active=1 AND role <> 'admin' AND email IS NOT NULL
-       AND COALESCE(excluded_from_scoring, FALSE) = FALSE`
+       AND COALESCE(excluded_from_scoring, FALSE) = FALSE${excludeExternalSql()}`
   )).rows;
 
   if (dryRun) {

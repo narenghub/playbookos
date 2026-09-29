@@ -3,6 +3,7 @@
 // time that matches that team's morning.
 const crypto = require('crypto');
 const { query } = require('../db');
+const { excludeExternalSql } = require('../roles');
 const { mondayOf } = require('./goal-engine');
 const { createDailyTask, logAgentActivity, enqueueApproval, getCEOUser, businessToday } = require('../agent-core');
 const { sendEmail } = require('../mailer');
@@ -19,8 +20,11 @@ const AGENT = 'orchestrator';
 async function generateKpiTasks(roles) {
   const today = businessToday();
   const weekStart = mondayOf(new Date()).toISOString().slice(0, 10);
+  // The role list is an allowlist, so an external role could only arrive here by somebody adding it to
+  // one of the segment lists below. The filter is here anyway: "we do not set a partner's agenda" is a
+  // rule about the role, and a rule that depends on nobody editing a list elsewhere is not enforced.
   const users = (await query(
-    `SELECT id, name, role FROM users WHERE is_active=1 AND role = ANY($1)`, [roles]
+    `SELECT id, name, role FROM users WHERE is_active=1 AND role = ANY($1)${excludeExternalSql()}`, [roles]
   )).rows;
   let created = 0;
   for (const u of users) {
@@ -120,7 +124,7 @@ async function runPerformanceCheck({ dryRun = false, date, userId = null, silent
   const weekStart = mondayOf(new Date(today)).toISOString().slice(0, 10);
   const users = (await query(
     `SELECT id, name, role FROM users
-     WHERE is_active=1 AND COALESCE(excluded_from_scoring, FALSE) = FALSE
+     WHERE is_active=1 AND COALESCE(excluded_from_scoring, FALSE) = FALSE${excludeExternalSql()}
        AND ($1::text IS NULL OR id = $1::text)
      ORDER BY name`, [userId]
   )).rows;
@@ -289,7 +293,7 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
     SELECT p.*, u.name, u.role, u.email, u.whatsapp_number
     FROM performance_scores p JOIN users u ON u.id = p.user_id
     WHERE p.score_date = $1 AND COALESCE(p.is_weekly_summary,0)=0 AND u.is_active=1
-      AND COALESCE(u.excluded_from_scoring, FALSE) = FALSE
+      AND COALESCE(u.excluded_from_scoring, FALSE) = FALSE${excludeExternalSql('u')}
       AND (u.created_at IS NULL OR u.created_at::timestamptz <= NOW() - INTERVAL '7 days')
   `, [today])).rows;
 

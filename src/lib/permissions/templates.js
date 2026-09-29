@@ -1466,13 +1466,10 @@ module.exports = {
       'acbm.packages.list',
       'acbm.page_acbm_deals.view',
       'acbm.page_acbm_packages.view',
-      // GET /api/roles. It is in the 'admin' domain but it is not an admin capability — it returns the
-      // ROLE CATALOG, which buildNav needs to know this account's tiers. Without it roleTiersFor()
-      // returns null, passesPageReads() falls back to section-only, and the partner would be shown
-      // ACBM Prospects (the API still refuses it — but a link that should not be there is not something
-      // to leave in place). It leaks our role names and tiers to the partner, which is the cost of the
-      // nav being computed client-side; it carries no user or business data.
-      'admin.roles.list',
+      // NOT 'admin.roles.list'. It was granted here for one reason — buildNav fetched /api/roles to
+      // learn this account's tiers, and without it the nav fell back to showing every page in a
+      // visible section. The tiers now arrive on /auth/me with the identity, so the role catalog is
+      // not needed by the nav at all and the partner does not see our role names and tiers.
       'personal.activity_my.list',
       'personal.agent_tasks_my.list',
       'personal.auth_me.list',
@@ -1483,7 +1480,10 @@ module.exports = {
       // (goals/my-week, performance/my — both own-rows-only) are granted. Scoring a referral partner
       // is meaningless, but a broken link is worse than an empty page.
       'personal.goals_my_week.list',
-      'personal.page_my_activity.view',
+      // NOT 'personal.page_my_activity.view'. It IMPLIES admin.roles.list (the My Activity page needed
+      // the role catalog), so granting the page would hand the partner our role names and tiers through
+      // an implies chain nobody would think to look at. My Activity is not in this role's nav anyway.
+      // If it is ever added, the implied read has to be dealt with rather than inherited.
       'personal.page_my_kpis.view',
       'personal.page_my_performance.view',
       'personal.page_my_tasks.view',

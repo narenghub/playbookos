@@ -10,6 +10,7 @@
 //     reliable fallback: Naresh pastes a transcript and gets the full analysis.
 const crypto = require('crypto');
 const { query } = require('../db');
+const { excludeExternalSql } = require('../roles');
 const { sendEmail } = require('../mailer');
 const { sendWhatsApp } = require('../whatsapp');
 const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday, extractClaudeText } = require('../agent-core');
@@ -46,7 +47,9 @@ async function getGoogleAccessToken() {
 }
 
 async function teamMembers() {
-  return (await query(`SELECT id, name, email, role, whatsapp_number FROM users WHERE is_active=1 ORDER BY name`)).rows;
+  // Used to match meeting action items to people. A partner is not in our standups, so they can never
+  // be the assignee of one.
+  return (await query(`SELECT id, name, email, role, whatsapp_number FROM users WHERE is_active=1${excludeExternalSql()} ORDER BY name`)).rows;
 }
 async function getNaresh() {
   const r = (await query(
