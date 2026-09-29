@@ -778,15 +778,15 @@ const NAV_SECTIONS = [
     {id:'team', label:'Team Management', icon:'👥'},
     {id:'agent-control', label:'Agent Control', icon:'⚡'},
   ]},
-  // ACBM referral pipeline. access:['admin','acbm'] — admin + super_admin, plus acbm_partner via the
-  // one-role 'acbm' family. The section being visible is NOT the same as all three pages being
-  // visible: NAV_PAGE_REQS gates ACBM Prospects on the 'intelligence' tier, which acbm_partner has
+  // SiteNex referral pipeline. access:['admin','sitenex'] — admin + super_admin, plus partner via the
+  // one-role 'sitenex' family. The section being visible is NOT the same as all three pages being
+  // visible: NAV_PAGE_REQS gates SiteNex Prospects on the 'intelligence' tier, which partner has
   // not got, so the partner sees Deals and Packages only. The route keeps adminOnly regardless —
   // the nav hiding a link is never the thing that protects it.
-  {title:'ACBM', access:['admin','acbm'], items:[
-    {id:'acbm-prospects', label:'ACBM Prospects', icon:'🏭'},
-    {id:'acbm-deals', label:'ACBM Deals', icon:'📋'},
-    {id:'acbm-packages', label:'ACBM Packages', icon:'📦'},
+  {title:'SITENEX', access:['admin','sitenex'], items:[
+    {id:'sitenex-prospects', label:'SiteNex Prospects', icon:'🏭'},
+    {id:'sitenex-deals', label:'SiteNex Deals', icon:'📋'},
+    {id:'sitenex-packages', label:'SiteNex Packages', icon:'📦'},
   ]},
   {title:'PLATFORM', access:['admin'], items:[
     {id:'sku-economics', label:'SKU Economics', icon:'📦'},
@@ -806,9 +806,9 @@ const NAV_FAMILIES = {
   // actually run the calendar. Built as a family rather than a one-off so the next event page
   // costs a line in NAV_SECTIONS and nothing else.
   events: ['recruitment_team', 'recruitment_director'],
-  // The referral partner. A family of one, so the ACBM section can widen by one role without
+  // The referral partner. A family of one, so the SiteNex section can widen by one role without
   // widening anything else — and so the next partner role costs a line here and nothing else.
-  acbm: ['acbm_partner'],
+  sitenex: ['partner'],
 };
 function navSectionVisible(access, role) {
   if (role === 'admin' || role === 'super_admin') return true; // admin sees all
@@ -822,7 +822,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"acbm-prospects":[["intelligence"]],"acbm-deals":[["acbm"]],"acbm-packages":[["acbm"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["intelligence"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]]};
 // The caller's tiers. They arrive on /auth/me and /auth/login WITH the identity, so this needs no
 // fetch of its own and cannot be left unknown by a failed request — a failed /auth/me logs you out
 // rather than showing you a nav computed from nothing.
@@ -877,11 +877,11 @@ const PRODUCTS = [
   // marketplace; AROS Sourcing finds CUSTOMERS for AROS. Opposite directions, different
   // businesses — so they do not belong under one product however similar the data looks.
   { key:'aros',     label:'AROS',     icon:'🏭', kind:'product', pages:['aros-establishments'] },
-  // ACBM is a referral partner: these screens track the CLIENT deals it refers. 'prospects' is
-  // NOT listed here — the acbm rows live in the same table but are read through acbm-prospects,
+  // SiteNex is the service line; ACBM Partners is one referral partner inside it. These screens track the CLIENT deals a partner refers. 'prospects' is
+  // NOT listed here — the sitenex rows live in the same table but are read through sitenex-prospects,
   // which filters on site_score rather than the booking-platform 'prime' filter that does not
-  // apply to acbm.
-  { key:'acbm',     label:'ACBM',     icon:'🔧', kind:'product', pages:['acbm-prospects','acbm-deals','acbm-packages'] },
+  // apply to sitenex.
+  { key:'sitenex',     label:'SiteNex',     icon:'🔧', kind:'product', pages:['sitenex-prospects','sitenex-deals','sitenex-packages'] },
   // global areas (not products). Some listed pages are not in the classic nav (data-pipeline,
   // execution-graph, decision-engine, my-activity) — they stay non-navigable and never surface
   // in product mode either (pageVisibleToRole is false for anything not in the classic nav).
@@ -1571,7 +1571,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'FDA Establishments','acbm-prospects':'ACBM Prospects','acbm-deals':'ACBM Deals','acbm-packages':'ACBM Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -7660,7 +7660,7 @@ function cdiReResolve(){
   if (!confirm('Re-resolve will search Apollo again, re-spend credits, and regenerate outreach. Continue?')) return;
   cdiFindContacts(true);
 }
-/* ── ACBM referral pipeline (Milestone 1: three read-only screens) ────────────── */
+/* ── SiteNex referral pipeline (Milestone 1: three read-only screens) ────────────── */
 /* Mirrors the Prospects page idiom exactly: innerHTML into #content, the same card /
    card-title / text-body / metric-grid components, filter <select>s wired to a state object,
    and a row that expands in place. Nothing bespoke.
@@ -7679,7 +7679,7 @@ window._apShipping = null;                 // set from facets.shipping_subtypes 
    body (a proxy 502, an HTML error page) makes it REJECT. Combined with a render that assumed
    success, a 403, a 500 and a timeout all looked identical — the screen sat on "Loading…" forever,
    which is how a broken screen becomes indistinguishable from a slow one. That is exactly how this
-   page shipped broken, so every ACBM screen now goes through apGet() and can fail visibly, with the
+   page shipped broken, so every SiteNex screen now goes through apGet() and can fail visibly, with the
    status and a retry. */
 async function apGet(path){
   try {
@@ -7714,14 +7714,14 @@ window._apFilters = { subtype:null, region:'', bucket:'', package:'', page:1 };
 window._apState = { total:0, pageSize:50, summary:null, facets:null, open:null };
 const apEsc = (x) => csEsc(x);
 const apDash = '<span style="color:var(--text-muted)">—</span>';
-function apSetFilter(k, v){ window._apFilters[k] = v; window._apFilters.page = 1; pages['acbm-prospects'](); }
+function apSetFilter(k, v){ window._apFilters[k] = v; window._apFilters.page = 1; pages['sitenex-prospects'](); }
 /* Reset returns to the DEFAULT view (the shipping three), not to everything — the default is the
    safe list, so "reset" should mean "back to safe", not "show me the retired rows too". */
-function apResetFilters(){ window._apFilters = { subtype:apDefaultSubtype(), region:'', bucket:'', package:'', page:1 }; pages['acbm-prospects'](); }
+function apResetFilters(){ window._apFilters = { subtype:apDefaultSubtype(), region:'', bucket:'', package:'', page:1 }; pages['sitenex-prospects'](); }
 function apDefaultSubtype(){ return (window._apShipping && window._apShipping.length) ? window._apShipping.join(',') : ''; }
 function apPage(d){ const st=window._apState, f=window._apFilters;
-  const max=Math.max(1,Math.ceil((st.total||0)/(st.pageSize||50))); f.page=Math.min(max,Math.max(1,(f.page||1)+d)); pages['acbm-prospects'](); }
-/* A LOCAL DOM TOGGLE, not a re-render. The first version called pages['acbm-prospects']() again,
+  const max=Math.max(1,Math.ceil((st.total||0)/(st.pageSize||50))); f.page=Math.min(max,Math.max(1,(f.page||1)+d)); pages['sitenex-prospects'](); }
+/* A LOCAL DOM TOGGLE, not a re-render. The first version called pages['sitenex-prospects']() again,
    which refetched the list, rebuilt every row and threw away the scroll position — expanding one
    row repainted the page. Every row's detail panel is now rendered up front as a hidden <tr>, so
    expanding is a display flip: nothing refetches, nothing else moves, scroll stays put. */
@@ -7745,15 +7745,15 @@ function apScoreChip(v){
   const c = v >= 60 ? '#dc2626' : v >= 40 ? '#d97706' : v >= 20 ? '#64748b' : '#1D9E75';
   return '<span style="display:inline-block;min-width:30px;padding:1px 6px;border-radius:10px;font-weight:700;font-size:11px;background:'+c+'22;color:'+c+'">'+v+'</span>';
 }
-pages['acbm-prospects'] = async function(){
+pages['sitenex-prospects'] = async function(){
   const c = document.getElementById('content');
   const f = window._apFilters, st = window._apState;
-  c.innerHTML = '<p style="color:#888;padding:20px">Loading ACBM prospects…</p>';
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading SiteNex prospects…</p>';
   const qs = new URLSearchParams();
   ['subtype','region','bucket','package'].forEach(k => { if (f[k]) qs.set(k, f[k]); });
   qs.set('page', String(f.page||1)); qs.set('pageSize', String(st.pageSize));
-  const got = await apGet('/acbm/prospects?'+qs.toString());
-  if (!got.ok) { c.innerHTML = apErrorCard('ACBM Prospects', got, "pages['acbm-prospects']()"); return; }
+  const got = await apGet('/sitenex/prospects?'+qs.toString());
+  if (!got.ok) { c.innerHTML = apErrorCard('SiteNex Prospects', got, "pages['sitenex-prospects']()"); return; }
   const res = got.data || {};
   const items = res.items || []; st.total = res.total||0; st.summary = res.summary||null; st.facets = res.facets||null;
   // First render: learn the shipping subtypes from the server and re-render with them applied.
@@ -7761,11 +7761,11 @@ pages['acbm-prospects'] = async function(){
   if (shipping.length && !window._apShipping) window._apShipping = shipping;
   // RETURN the re-render's promise rather than firing and forgetting it: a caller that awaits this
   // page (and any test) must not see the intermediate loading state as the final one.
-  if (f.subtype === null) { f.subtype = apDefaultSubtype(); if (f.subtype) return pages['acbm-prospects'](); f.subtype = ''; }
+  if (f.subtype === null) { f.subtype = apDefaultSubtype(); if (f.subtype) return pages['sitenex-prospects'](); f.subtype = ''; }
   const sm = st.summary || {}, fa = st.facets || { subtypes:[], regions:[], buckets:[], packages:[] };
 
   const header = '<div class="card">'
-    + '<div class="card-title text-section" style="margin:0">ACBM Prospects</div>'
+    + '<div class="card-title text-section" style="margin:0">SiteNex Prospects</div>'
     + '<div class="text-body">Businesses whose website is bad enough to sell a rebuild against, worst site first. '
     + '<strong>site_score is 0-100 and higher means worse</strong> — it scores how bad the current site is, so the '
     + 'worst sort to the top. Review count sits beside it deliberately and is NOT part of the score: the score answers '
@@ -7863,17 +7863,17 @@ pages['acbm-prospects'] = async function(){
   c.innerHTML = header + summaryRow + filters + table;
 };
 
-pages['acbm-deals'] = async function(){
+pages['sitenex-deals'] = async function(){
   const c = document.getElementById('content');
-  c.innerHTML = '<p style="color:#888;padding:20px">Loading ACBM deals…</p>';
-  const got = await apGet('/acbm/deals');
-  if (!got.ok) { c.innerHTML = apErrorCard('ACBM Deals', got, "pages['acbm-deals']()"); return; }
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading SiteNex deals…</p>';
+  const got = await apGet('/sitenex/deals');
+  if (!got.ok) { c.innerHTML = apErrorCard('SiteNex Deals', got, "pages['sitenex-deals']()"); return; }
   const res = got.data || {};
   const cols = res.columns || [];
   const header = '<div class="card">'
-    + '<div class="card-title text-section" style="margin:0">ACBM Deals</div>'
-    + '<div class="text-body">One column per deal status. ACBM is a referral <em>partner</em>, not a billed account — these are the '
-    + 'client deals ACBM refers. '+(res.total?('<strong>'+res.total+'</strong> deal'+(res.total===1?'':'s')+'.'):'No deals yet: the board shows the pipeline shape, so the columns are here before the rows are.')
+    + '<div class="card-title text-section" style="margin:0">SiteNex Deals</div>'
+    + '<div class="text-body">One column per deal status. A referral <em>partner</em> is not a billed account — these are the '
+    + 'client deals partners refer. '+(res.total?('<strong>'+res.total+'</strong> deal'+(res.total===1?'':'s')+'.'):'No deals yet: the board shows the pipeline shape, so the columns are here before the rows are.')
     + '</div></div>';
   const card = (d) => '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--white)">'
     + '<div style="font-weight:600;font-size:13px">'+apEsc(d.prospect_name || ('deal #'+d.id))+'</div>'
@@ -7896,14 +7896,14 @@ pages['acbm-deals'] = async function(){
   c.innerHTML = header + board;
 };
 
-pages['acbm-packages'] = async function(){
+pages['sitenex-packages'] = async function(){
   const c = document.getElementById('content');
-  c.innerHTML = '<p style="color:#888;padding:20px">Loading ACBM packages…</p>';
-  const got = await apGet('/acbm/packages');
-  if (!got.ok) { c.innerHTML = apErrorCard('ACBM Packages', got, "pages['acbm-packages']()"); return; }
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading SiteNex packages…</p>';
+  const got = await apGet('/sitenex/packages');
+  if (!got.ok) { c.innerHTML = apErrorCard('SiteNex Packages', got, "pages['sitenex-packages']()"); return; }
   const res = got.data || {};
   const header = '<div class="card">'
-    + '<div class="card-title text-section" style="margin:0">ACBM Packages</div>'
+    + '<div class="card-title text-section" style="margin:0">SiteNex Packages</div>'
     + '<div class="text-body">Read-only. What each package includes <strong>and what it does not</strong> — the exclusions are what stop a client '
     + 'expecting content writing or an App Store account. Prices are not decided yet, so none is shown: a package without a price says so rather than showing $0.</div></div>';
   const list = (res.packages||[]).map(p => {
@@ -7933,8 +7933,8 @@ pages['acbm-packages'] = async function(){
 
 /* A PERMANENT LOADING STATE IS HOW THE NEXT FAILURE HIDES TOO.
    apGet covers a bad response, but an exception thrown while BUILDING the html would still leave
-   "Loading…" on screen — which is exactly how acbm-prospects shipped broken (a ReferenceError after
-   the loading paint). Wrapping each page guarantees the visible-failure property for every ACBM
+   "Loading…" on screen — which is exactly how sitenex-prospects shipped broken (a ReferenceError after
+   the loading paint). Wrapping each page guarantees the visible-failure property for every SiteNex
    screen instead of relying on whoever edits one next to remember it. */
 function apGuard(pageId, title, fn){
   return async function(){
@@ -7949,7 +7949,7 @@ function apGuard(pageId, title, fn){
     }
   };
 }
-pages['acbm-prospects'] = apGuard('acbm-prospects', 'ACBM Prospects', pages['acbm-prospects']);
-pages['acbm-deals']     = apGuard('acbm-deals',     'ACBM Deals',     pages['acbm-deals']);
-pages['acbm-packages']  = apGuard('acbm-packages',  'ACBM Packages',  pages['acbm-packages']);
+pages['sitenex-prospects'] = apGuard('sitenex-prospects', 'SiteNex Prospects', pages['sitenex-prospects']);
+pages['sitenex-deals']     = apGuard('sitenex-deals',     'SiteNex Deals',     pages['sitenex-deals']);
+pages['sitenex-packages']  = apGuard('sitenex-packages',  'SiteNex Packages',  pages['sitenex-packages']);
 </script>

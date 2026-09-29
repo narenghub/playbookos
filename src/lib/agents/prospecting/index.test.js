@@ -207,11 +207,11 @@ test('runQualifyProspects on an unknown product → config error, no throw (does
   assert.equal(selected, false, 'did not query prospects for an unconfigured product');
 });
 
-// ── per-product region + call-cap overrides (acbm) ─────────────────────────────
+// ── per-product region + call-cap overrides (sitenex) ─────────────────────────────
 // Both fields are additive and guarded; the point of these tests is that the other three
-// products are BYTE-IDENTICAL after the change, not merely that acbm works.
-test('acbm ships ALL 13 IL regions × 3 subtypes = 39 tiles; other products unchanged', () => {
-  const a = tilesForProduct('acbm');
+// products are BYTE-IDENTICAL after the change, not merely that sitenex works.
+test('sitenex ships ALL 13 IL regions × 3 subtypes = 39 tiles; other products unchanged', () => {
+  const a = tilesForProduct('sitenex');
   assert.equal(a.length, 39, '3 subtypes × 13 regions — no metro override');
   assert.deepEqual([...new Set(a.map(t => t.subtype))], ['machine_shop', 'funeral', 'pharmacy']);
   assert.ok(a.some(t => t.region === 'Chicago, IL'), 'Chicago is IN — the metro was never the problem');
@@ -223,27 +223,27 @@ test('acbm ships ALL 13 IL regions × 3 subtypes = 39 tiles; other products unch
 });
 
 test('cfg.regions override still works (mechanism kept for one-metro runs)', () => {
-  // acbm no longer sets it, so exercise the mechanism directly rather than losing the coverage.
+  // sitenex no longer sets it, so exercise the mechanism directly rather than losing the coverage.
   const { PRODUCT_CONFIG } = require('./config');
-  const saved = PRODUCT_CONFIG.acbm.regions;
+  const saved = PRODUCT_CONFIG.sitenex.regions;
   try {
-    PRODUCT_CONFIG.acbm.regions = ['Rockford, IL'];
-    const t = tilesForProduct('acbm');
+    PRODUCT_CONFIG.sitenex.regions = ['Rockford, IL'];
+    const t = tilesForProduct('sitenex');
     assert.equal(t.length, 3, '3 subtypes × 1 region');
     assert.ok(t.every(x => x.region === 'Rockford, IL'));
-  } finally { PRODUCT_CONFIG.acbm.regions = saved; }
+  } finally { PRODUCT_CONFIG.sitenex.regions = saved; }
 });
 
 test('a cfg.regions entry that is not a real REGIONS value yields NO tiles (not a bad query)', () => {
-  const tiles = tilesForProduct('acbm');
+  const tiles = tilesForProduct('sitenex');
   assert.ok(tiles.length > 0);
   // simulate a typo by injecting a config with an unknown region
   const { PRODUCT_CONFIG } = require('./config');
-  const saved = PRODUCT_CONFIG.acbm.regions;
+  const saved = PRODUCT_CONFIG.sitenex.regions;
   try {
-    PRODUCT_CONFIG.acbm.regions = ['Chicagoo, IL'];
-    assert.equal(tilesForProduct('acbm').length, 0, 'typo → 0 tiles, orchestrator reports it');
-  } finally { PRODUCT_CONFIG.acbm.regions = saved; }
+    PRODUCT_CONFIG.sitenex.regions = ['Chicagoo, IL'];
+    assert.equal(tilesForProduct('sitenex').length, 0, 'typo → 0 tiles, orchestrator reports it');
+  } finally { PRODUCT_CONFIG.sitenex.regions = saved; }
 });
 
 test('cfg.callCap overrides the GLOBAL env cap; a product without one still uses env', async () => {
@@ -252,7 +252,7 @@ test('cfg.callCap overrides the GLOBAL env cap; a product without one still uses
   const mkSearch = (counter) => async () => { counter.n++; return { places: [place('x' + counter.n)], nextPageToken: 'more' }; };
 
   const c1 = { n: 0 };
-  const s1 = await runProspecting('acbm', { deps: { env, tilesForProduct: () => manyTiles, query: fakeDB(), searchText: mkSearch(c1), logAgentActivity: noopLog, getConfig: () => ({ callCap: 2 }) } });
+  const s1 = await runProspecting('sitenex', { deps: { env, tilesForProduct: () => manyTiles, query: fakeDB(), searchText: mkSearch(c1), logAgentActivity: noopLog, getConfig: () => ({ callCap: 2 }) } });
   assert.equal(s1.calls_made, 2, 'cfg.callCap=2 beat env 999');
 
   const c2 = { n: 0 };
@@ -264,7 +264,7 @@ test('a non-integer or zero cfg.callCap falls back to the env cap rather than ca
   const manyTiles = Array.from({ length: 5 }, (_, i) => ({ state: 'IL', region: 'R' + i, subtype: 'hvac', query: 'q' + i }));
   for (const bad of [0, -5, 1.5, 'sixty', null]) {
     let calls = 0;
-    const s = await runProspecting('acbm', { deps: { env: { ...ON, PROSPECTING_CALL_CAP: '2' }, tilesForProduct: () => manyTiles, query: fakeDB(),
+    const s = await runProspecting('sitenex', { deps: { env: { ...ON, PROSPECTING_CALL_CAP: '2' }, tilesForProduct: () => manyTiles, query: fakeDB(),
       searchText: async () => { calls++; return { places: [], nextPageToken: null }; }, logAgentActivity: noopLog, getConfig: () => ({ callCap: bad }) } });
     assert.equal(s.calls_made, 2, `callCap=${JSON.stringify(bad)} → env cap 2, not 0`);
   }

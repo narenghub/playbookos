@@ -68,12 +68,12 @@ module.exports = {
   "super_admin": {
     label: "Super Admin",
     grants: [
-      'acbm.deals.list',
-      'acbm.packages.list',
-      'acbm.page_acbm_deals.view',
-      'acbm.page_acbm_packages.view',
-      'acbm.page_acbm_prospects.view',
-      'acbm.prospects.list',
+      'sitenex.deals.list',
+      'sitenex.packages.list',
+      'sitenex.page_sitenex_deals.view',
+      'sitenex.page_sitenex_packages.view',
+      'sitenex.page_sitenex_prospects.view',
+      'sitenex.prospects.list',
       'admin.admin_adoption.list',
       'admin.admin_users.edit_name',
       'admin.admin_users.reset_password',
@@ -324,12 +324,12 @@ module.exports = {
   "admin": {
     label: "Admin",
     grants: [
-      'acbm.deals.list',
-      'acbm.packages.list',
-      'acbm.page_acbm_deals.view',
-      'acbm.page_acbm_packages.view',
-      'acbm.page_acbm_prospects.view',
-      'acbm.prospects.list',
+      'sitenex.deals.list',
+      'sitenex.packages.list',
+      'sitenex.page_sitenex_deals.view',
+      'sitenex.page_sitenex_packages.view',
+      'sitenex.page_sitenex_prospects.view',
+      'sitenex.prospects.list',
       'admin.admin_adoption.list',
       'admin.agent_activity.list',
       'admin.agent_approvals.list',
@@ -1426,13 +1426,13 @@ module.exports = {
     ],
     needsExplicitGrant: [],
   },
-  // ── acbm_partner — THE FIRST TEMPLATE FOR SOMEONE WHO DOES NOT WORK HERE ─────
+  // ── partner — THE FIRST TEMPLATE FOR SOMEONE WHO DOES NOT WORK HERE ─────
   // Not derived from anything. Every other template here was generated from a role's tiers and then
   // adjusted; this one was written by hand and is short on purpose, because the question for an
   // outside account is not "what does this role normally get" but "what does this account need".
   //
-  // Four acbm features: Deals and Packages, page + route. acbm.prospects.list and
-  // acbm.page_acbm_prospects.view are ABSENT — that is the second of the three refusals that keep a
+  // Four sitenex features: Deals and Packages, page + route. sitenex.prospects.list and
+  // sitenex.page_sitenex_prospects.view are ABSENT — that is the second of the three refusals that keep a
   // referral partner out of our scored lead list (the route's adminOnly is the first, not holding
   // 'internal' in user_products is unrelated and the product boundary is the third for platform
   // routes).
@@ -1445,16 +1445,16 @@ module.exports = {
   //   personal.milestones.list / page_playbook.view   company milestones and the playbook
   //   personal.page_my_kpis / page_my_performance     scoring an outside account is meaningless
   //
-  // REMEMBER: this template only decides anything if 'acbm_partner' is in PERMISSIONS_ENFORCE_ROLES.
+  // REMEMBER: this template only decides anything if 'partner' is in PERMISSIONS_ENFORCE_ROLES.
   // Without that env entry the resolver is not consulted for this role at all and the route gates are
   // alone — see enforce.js:82.
-  "acbm_partner": {
-    label: "ACBM Partner",
+  "partner": {
+    label: "Partner",
     grants: [
-      'acbm.deals.list',
-      'acbm.packages.list',
-      'acbm.page_acbm_deals.view',
-      'acbm.page_acbm_packages.view',
+      'sitenex.deals.list',
+      'sitenex.packages.list',
+      'sitenex.page_sitenex_deals.view',
+      'sitenex.page_sitenex_packages.view',
       // NOT 'admin.roles.list'. It was granted here for one reason — buildNav fetched /api/roles to
       // learn this account's tiers, and without it the nav fell back to showing every page in a
       // visible section. The tiers now arrive on /auth/me with the identity, so the role catalog is

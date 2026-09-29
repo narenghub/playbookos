@@ -20,7 +20,7 @@
 //                     is the point — a tier mistake must not be sufficient to become an exposure.
 //                     Deliberately NOT called 'platform': that is already a nav product key, and
 //                     conflating a nav grouping with a security class is how this gets confusing.
-//   '<product>'       abiozen | golfnex | favly | linkabl | aros | acbm. The caller must hold
+//   '<product>'       abiozen | golfnex | favly | linkabl | aros | sitenex. The caller must hold
 //                     that product in user_products.
 //   'param:product'   the product is in the request — query `?product=`, or `body.product`. The
 //                     resolver reads it and checks THAT product. A request naming no product
@@ -33,7 +33,7 @@
 //   'row:<table>.<col>'  the request carries no product at all; the ROW does. Fetch the row by
 //                     :id and read that column. Used by `GET|PUT /api/prospects/:id`, where a
 //                     guessed id would otherwise read — or with PUT, MODIFY — another product's
-//                     data. Generic on purpose, so acbm_deals/:id and friends reuse it.
+//                     data. Generic on purpose, so sitenex_deals/:id and friends reuse it.
 //
 // ABSENCE IS NOT NEUTRALITY. A route missing from this map is UNCLASSIFIED, which the
 // completeness test fails on. Collapsing "neutral" and "nobody has looked at this yet" into the
@@ -182,14 +182,14 @@ const GOLFNEX = [
   'GET /api/content', 'GET /api/content/:id', 'PUT /api/content/:id', 'POST /api/content/run',
 ];
 const AROS = ['GET /api/aros/establishments'];
-const ACBM = [
-  // The ACBM screens. Wildcarded deliberately: everything under /api/acbm is ACBM by
+const SITENEX = [
+  // The SiteNex screens. Wildcarded deliberately: everything under /api/sitenex is SiteNex by
   // construction, and a new route there needs no map edit to be correctly classified.
-  'GET /api/acbm/*', 'POST /api/acbm/*', 'PUT /api/acbm/*',
+  'GET /api/sitenex/*', 'POST /api/sitenex/*', 'PUT /api/sitenex/*',
 ];
 
 // ── the product is in the request ─────────────────────────────────────────────
-// /api/prospects serves golfnex, favly, linkabl AND acbm off one table, selected by `product`.
+// /api/prospects serves golfnex, favly, linkabl AND sitenex off one table, selected by `product`.
 const PARAM_PRODUCT = [
   'GET /api/prospects', 'POST /api/prospects/run', 'POST /api/prospects/qualify',
   // Per-product event ingestion: the product comes from the Bearer secret in event_sources, which
@@ -220,7 +220,7 @@ for (const r of INTERNAL) ROUTE_PRODUCT[r] = 'internal';
 for (const r of ABIOZEN) ROUTE_PRODUCT[r] = 'abiozen';
 for (const r of GOLFNEX) ROUTE_PRODUCT[r] = 'golfnex';
 for (const r of AROS) ROUTE_PRODUCT[r] = 'aros';
-for (const r of ACBM) ROUTE_PRODUCT[r] = 'acbm';
+for (const r of SITENEX) ROUTE_PRODUCT[r] = 'sitenex';
 for (const r of PARAM_PRODUCT) ROUTE_PRODUCT[r] = 'param:product';
 for (const [r, v] of Object.entries(ROW_PRODUCT)) ROUTE_PRODUCT[r] = v;
 // Running an agent by key: the agent decides the product.
@@ -242,7 +242,7 @@ const AGENT_PRODUCT = {
   'inquiry-agent':       'abiozen',
 };
 
-const PRODUCTS = ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'acbm'];
+const PRODUCTS = ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'sitenex'];
 // 'internal' is a pseudo-product: it lives in user_products alongside the real ones, so the
 // backfill and any future grant/revoke work identically for it.
 const PSEUDO_PRODUCTS = ['internal'];
@@ -271,4 +271,4 @@ function classifyRoute(method, path) {
 
 module.exports = { ROUTE_PRODUCT, AGENT_PRODUCT, PARAM_DEFAULT, ROW_PRODUCT, ROW_FORM,
   PRODUCTS, PSEUDO_PRODUCTS, GRANTABLE, VALUES, classifyRoute,
-  SHARED, INTERNAL, ABIOZEN, GOLFNEX, AROS, ACBM, PARAM_PRODUCT };
+  SHARED, INTERNAL, ABIOZEN, GOLFNEX, AROS, SITENEX, PARAM_PRODUCT };

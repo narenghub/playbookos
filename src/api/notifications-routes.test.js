@@ -17,7 +17,7 @@ function seed() {
     { id: 1, product: 'golfnex', kind: 'approval_pending', severity: 'info',  title: '2 drafts awaiting approval', body: 'x', link_page: 'content-studio', read_at: null, created_at: 300 },
     { id: 2, product: 'golfnex', kind: 'agent_failed',     severity: 'error', title: 'Prospecting: 1 error',         body: 'y', link_page: 'prospects',      read_at: 1,    created_at: 200 },
     { id: 3, product: null,      kind: 'budget',           severity: 'warning', title: 'RI cost fuse hit',          body: 'z', link_page: 'clinical-demand-intelligence', read_at: null, created_at: 100 },
-    { id: 4, product: 'acbm',    kind: 'agent_failed',     severity: 'error', title: 'ACBM prospecting: 3 errors',  body: 'w', link_page: 'acbm-prospects',  read_at: null, created_at: 50 },
+    { id: 4, product: 'sitenex',    kind: 'agent_failed',     severity: 'error', title: 'SiteNex prospecting: 3 errors',  body: 'w', link_page: 'sitenex-prospects',  read_at: null, created_at: 50 },
   ];
 }
 seed();
@@ -25,9 +25,9 @@ seed();
 // Who holds what. Staff hold everything (that is the backfill); the partner holds one product and
 // NOT 'internal', so platform-wide (NULL product) rows are invisible to them.
 const HELD = {
-  'u-business_dev': ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'acbm', 'internal'],
-  'u-dev_team':     ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'acbm', 'internal'],
-  'u-partner':      ['acbm'],
+  'u-business_dev': ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'sitenex', 'internal'],
+  'u-dev_team':     ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'sitenex', 'internal'],
+  'u-partner':      ['sitenex'],
 };
 
 // Apply the scope the way Postgres would: `product = ANY($n)` [ OR product IS NULL ].
@@ -138,7 +138,7 @@ test('POST /notifications/read-all marks every unread read', async () => {
 test('a single-product user sees ONLY their product, and no platform-wide rows', async () => {
   seed();
   const j = await (await req('GET', '/api/notifications', asPartner)).json();
-  assert.deepEqual(j.items.map(i => i.id), [4], 'only the acbm row');
+  assert.deepEqual(j.items.map(i => i.id), [4], 'only the sitenex row');
   assert.equal(j.unread, 1, 'the badge count is scoped too — an unexplainable number is still a leak');
   assert.ok(!JSON.stringify(j).includes('golfnex'), 'no other product name reaches the response');
   assert.ok(!JSON.stringify(j).includes('cost fuse'), "NULL product is platform-wide and needs 'internal'");

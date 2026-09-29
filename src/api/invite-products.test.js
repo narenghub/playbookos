@@ -91,7 +91,7 @@ const invite = (body, who = asSuper) => req('POST', '/api/users/invite', { ...wh
 
 // ── who may create an account ──────────────────────────────────────────────────
 test('inviting is super_admin only — admin is refused', async () => {
-  const r = await invite({ email: 'partner@acbm.test', role: 'business_dev', products: ['acbm'] }, asAdmin);
+  const r = await invite({ email: 'partner@sitenex.test', role: 'business_dev', products: ['sitenex'] }, asAdmin);
   assert.equal(r.status, 403);
   assert.match((await r.json()).error, /Super admin only/);
   assert.equal(USERS.length, 2, 'and no row was created');
@@ -102,7 +102,7 @@ test('GET /products/grantable is super_admin only, and keeps internal out of the
   const r = await req('GET', '/api/products/grantable', asSuper);
   assert.equal(r.status, 200);
   const j = await r.json();
-  assert.ok(j.products.some(p => p.key === 'acbm'), 'the real products are listed');
+  assert.ok(j.products.some(p => p.key === 'sitenex'), 'the real products are listed');
   assert.ok(!j.products.some(p => p.key === 'internal'), "'internal' is not one of the products");
   assert.equal(j.internal.key, 'internal');
   assert.match(j.internal.warning, /Never grant this to an outside account/);
@@ -110,14 +110,14 @@ test('GET /products/grantable is super_admin only, and keeps internal out of the
 
 // ── validation ─────────────────────────────────────────────────────────────────
 test('an unknown product is REJECTED, not silently dropped', async () => {
-  const r = await invite({ email: 'x@y.test', role: 'business_dev', products: ['acbm', 'golfnexx'] });
+  const r = await invite({ email: 'x@y.test', role: 'business_dev', products: ['sitenex', 'golfnexx'] });
   assert.equal(r.status, 400);
   assert.match((await r.json()).error, /Unknown product\(s\): golfnexx/);
   assert.equal(USERS.length, 2, 'a rejected invite creates nothing — an account that looks granted and is not is the worst outcome');
 });
 
 test('products must be an array; omitting them is allowed and grants nothing', async () => {
-  assert.equal((await invite({ email: 'x@y.test', role: 'business_dev', products: 'acbm' })).status, 400);
+  assert.equal((await invite({ email: 'x@y.test', role: 'business_dev', products: 'sitenex' })).status, 400);
   const r = await invite({ email: 'plain@abiozen.com', role: 'business_dev' });
   assert.equal(r.status, 200);
   assert.deepEqual((await r.json()).products, []);
@@ -125,39 +125,39 @@ test('products must be an array; omitting them is allowed and grants nothing', a
 
 // ── the grant is written on ACCEPT, not on SEND ─────────────────────────────────
 test('sending an invite parks the choice and grants NOTHING yet', async () => {
-  const r = await invite({ email: 'partner@acbm.test', role: 'business_dev', products: ['acbm'] });
+  const r = await invite({ email: 'partner@sitenex.test', role: 'business_dev', products: ['sitenex'] });
   assert.equal(r.status, 200);
-  assert.deepEqual((await r.json()).products, ['acbm']);
-  const row = USERS.find(u => u.email === 'partner@acbm.test');
-  assert.deepEqual(row.invited_products, ['acbm'], 'parked on the row');
+  assert.deepEqual((await r.json()).products, ['sitenex']);
+  const row = USERS.find(u => u.email === 'partner@sitenex.test');
+  assert.deepEqual(row.invited_products, ['sitenex'], 'parked on the row');
   assert.equal(row.invited_by, 'u-super', 'and who chose it is recorded');
   assert.deepEqual(GRANTS, [], 'NO grant exists until the invite is accepted');
 });
 
 test('accepting writes exactly the chosen grants, and clears the pending choice', async () => {
-  await invite({ email: 'partner@acbm.test', role: 'business_dev', products: ['acbm'] });
-  const token = USERS.find(u => u.email === 'partner@acbm.test').invite_token;
+  await invite({ email: 'partner@sitenex.test', role: 'business_dev', products: ['sitenex'] });
+  const token = USERS.find(u => u.email === 'partner@sitenex.test').invite_token;
   const r = await fetch(base() + '/api/auth/accept-invite', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token, name: 'ACBM Partner', password: 'hunter2hunter2' }),
+    body: JSON.stringify({ token, name: 'Partner', password: 'hunter2hunter2' }),
   });
   assert.equal(r.status, 200);
   const j = await r.json();
-  assert.deepEqual(j.products, ['acbm']);
-  assert.deepEqual(GRANTS.map(g => g.product), ['acbm']);
+  assert.deepEqual(j.products, ['sitenex']);
+  assert.deepEqual(GRANTS.map(g => g.product), ['sitenex']);
   assert.equal(GRANTS[0].granted_by, 'u-super', 'granted_by is the inviter, not the acceptor');
-  assert.equal(USERS.find(u => u.email === 'partner@acbm.test').invited_products, null, 'consumed');
+  assert.equal(USERS.find(u => u.email === 'partner@sitenex.test').invited_products, null, 'consumed');
 });
 
-test("an ACBM partner never receives 'internal' — it is not implicit in anything", async () => {
-  await invite({ email: 'partner@acbm.test', role: 'business_dev', products: ['acbm'] });
-  const token = USERS.find(u => u.email === 'partner@acbm.test').invite_token;
+test("a partner never receives 'internal' — it is not implicit in anything", async () => {
+  await invite({ email: 'partner@sitenex.test', role: 'business_dev', products: ['sitenex'] });
+  const token = USERS.find(u => u.email === 'partner@sitenex.test').invite_token;
   await fetch(base() + '/api/auth/accept-invite', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token, name: 'P', password: 'hunter2hunter2' }),
   });
-  const held = GRANTS.filter(g => g.user_id === USERS.find(u => u.email === 'partner@acbm.test').id).map(g => g.product);
-  assert.deepEqual(held, ['acbm']);
+  const held = GRANTS.filter(g => g.user_id === USERS.find(u => u.email === 'partner@sitenex.test').id).map(g => g.product);
+  assert.deepEqual(held, ['sitenex']);
   assert.ok(!held.includes('internal'), "'internal' must be asked for by name, never inherited");
 });
 
@@ -174,14 +174,14 @@ test('accepting an invite that chose nothing grants nothing (and still logs in)'
 });
 
 test('a replayed accept-invite token cannot double-grant or resurrect the account', async () => {
-  await invite({ email: 'partner@acbm.test', role: 'business_dev', products: ['acbm', 'golfnex'] });
-  const token = USERS.find(u => u.email === 'partner@acbm.test').invite_token;
+  await invite({ email: 'partner@sitenex.test', role: 'business_dev', products: ['sitenex', 'golfnex'] });
+  const token = USERS.find(u => u.email === 'partner@sitenex.test').invite_token;
   const accept = () => fetch(base() + '/api/auth/accept-invite', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token, name: 'P', password: 'hunter2hunter2' }),
   });
   assert.equal((await accept()).status, 200);
-  assert.deepEqual(GRANTS.map(g => g.product).sort(), ['acbm', 'golfnex']);
+  assert.deepEqual(GRANTS.map(g => g.product).sort(), ['sitenex', 'golfnex'].sort());
   // The token is cleared, so the replay is rejected outright — and even if it were not, the insert is
   // ON CONFLICT DO NOTHING.
   assert.equal((await accept()).status, 400);
@@ -190,26 +190,26 @@ test('a replayed accept-invite token cannot double-grant or resurrect the accoun
 
 // ── visibility: a grant you cannot see is a grant nobody audits ─────────────────
 test('GET /users reports what each account holds', async () => {
-  await invite({ email: 'partner@acbm.test', role: 'business_dev', products: ['acbm'] });
+  await invite({ email: 'partner@sitenex.test', role: 'business_dev', products: ['sitenex'] });
   const before = await (await req('GET', '/api/users', asSuper)).json();
-  const pendingRow = before.find(u => u.email === 'partner@acbm.test');
+  const pendingRow = before.find(u => u.email === 'partner@sitenex.test');
   assert.deepEqual(pendingRow.products, [], 'holds nothing yet');
-  assert.deepEqual(pendingRow.invited_products, ['acbm'], 'chosen, shown separately from held');
+  assert.deepEqual(pendingRow.invited_products, ['sitenex'], 'chosen, shown separately from held');
 
-  const token = USERS.find(u => u.email === 'partner@acbm.test').invite_token;
+  const token = USERS.find(u => u.email === 'partner@sitenex.test').invite_token;
   await fetch(base() + '/api/auth/accept-invite', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token, name: 'P', password: 'hunter2hunter2' }),
   });
   const after_ = await (await req('GET', '/api/users', asSuper)).json();
-  assert.deepEqual(after_.find(u => u.email === 'partner@acbm.test').products, ['acbm']);
+  assert.deepEqual(after_.find(u => u.email === 'partner@sitenex.test').products, ['sitenex']);
 });
 
 // ── external roles are excluded from scoring AT INVITE TIME ─────────────────────
 test('inviting an external role sets excluded_from_scoring on the row', async () => {
-  const r = await invite({ email: 'partner@acbm.test', role: 'acbm_partner', products: ['acbm'] });
+  const r = await invite({ email: 'partner@sitenex.test', role: 'partner', products: ['sitenex'] });
   assert.equal(r.status, 200);
-  assert.equal(USERS.find(u => u.email === 'partner@acbm.test').excluded_from_scoring, true,
+  assert.equal(USERS.find(u => u.email === 'partner@sitenex.test').excluded_from_scoring, true,
     'otherwise the 6pm agent scores them at 0 and the escalation ladder emails a partner');
 });
 
@@ -219,7 +219,7 @@ test('inviting an internal role does NOT set it', async () => {
 });
 
 test('a WhatsApp number on an external invite is ignored, not messaged', async () => {
-  const r = await invite({ email: 'partner@acbm.test', role: 'acbm_partner', products: ['acbm'], whatsapp_number: '+15555550123' });
+  const r = await invite({ email: 'partner@sitenex.test', role: 'partner', products: ['sitenex'], whatsapp_number: '+15555550123' });
   const j = await r.json();
   assert.equal(j.whatsapp_status, 'skipped:external_role',
     'WhatsApp is our escalation channel — a partner has no business in it');
@@ -228,8 +228,8 @@ test('a WhatsApp number on an external invite is ignored, not messaged', async (
 test('accepting an invite writes the audit log too, not just the grant rows', async () => {
   // Every way a grant comes into being goes through the same log. Otherwise "who granted this?" has no
   // answer for every account that got its products at signup — which, at the start, is all of them.
-  await invite({ email: 'partner@acbm.test', role: 'acbm_partner', products: ['acbm'] });
-  const token = USERS.find(u => u.email === 'partner@acbm.test').invite_token;
+  await invite({ email: 'partner@sitenex.test', role: 'partner', products: ['sitenex'] });
+  const token = USERS.find(u => u.email === 'partner@sitenex.test').invite_token;
   await fetch(base() + '/api/auth/accept-invite', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token, name: 'P', password: 'hunter2hunter2' }),
@@ -238,8 +238,8 @@ test('accepting an invite writes the audit log too, not just the grant rows', as
   // 'grant' and 'invite_accept' are SQL literals in that INSERT, so the params are
   // (user_id, user_email, product, actor_id) — checked positionally rather than assumed.
   const [user_id, user_email, product, actor_id] = LOG[0];
-  assert.equal(user_id, USERS.find(u => u.email === 'partner@acbm.test').id);
-  assert.equal(user_email, 'partner@acbm.test');
-  assert.equal(product, 'acbm');
+  assert.equal(user_id, USERS.find(u => u.email === 'partner@sitenex.test').id);
+  assert.equal(user_email, 'partner@sitenex.test');
+  assert.equal(product, 'sitenex');
   assert.equal(actor_id, 'u-super', 'the inviter, not the acceptor');
 });

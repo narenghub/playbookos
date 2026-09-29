@@ -53,7 +53,7 @@ function syntheticReq({ method, path }) {
   return {
     method, originalUrl: concrete, url: concrete, params,
     // param:product routes read the product from the request; the screens always send it.
-    query: { product: 'acbm' }, body: { product: 'acbm' },
+    query: { product: 'sitenex' }, body: { product: 'sitenex' },
     headers: {},
   };
 }
@@ -62,7 +62,7 @@ test('SWEEP: every mounted route resolves to a concrete product', async () => {
   const routes = mountedRoutes();
   assert.ok(routes.length > 200, `expected the full route table, got ${routes.length}`);
   // A row: lookup needs a row; stub it so the sweep tests the MATCHER, not the database.
-  const lookupRowProduct = async () => 'acbm';
+  const lookupRowProduct = async () => 'sitenex';
   const failures = [];
   for (const r of routes) {
     const res = await resolveProduct(syntheticReq(r), { lookupRowProduct });
@@ -78,7 +78,7 @@ test('SWEEP: every mounted route resolves to a concrete product', async () => {
 test('SWEEP: no route resolves to an intermediate marker', async () => {
   const bad = [];
   for (const r of mountedRoutes()) {
-    const res = await resolveProduct(syntheticReq(r), { lookupRowProduct: async () => 'acbm' });
+    const res = await resolveProduct(syntheticReq(r), { lookupRowProduct: async () => 'sitenex' });
     if (res.product === 'param:product' || res.product === 'param:agent' || /^row:/.test(String(res.product))) {
       bad.push(`${r.method} ${r.path} → ${res.product}`);
     }
@@ -93,7 +93,7 @@ test('SWEEP: the concrete-path matcher agrees with the pattern classification', 
   const mismatches = [];
   for (const r of mountedRoutes()) {
     const byPattern = classifyRoute(r.method, r.path);
-    const byConcrete = await resolveProduct(syntheticReq(r), { lookupRowProduct: async () => 'acbm' });
+    const byConcrete = await resolveProduct(syntheticReq(r), { lookupRowProduct: async () => 'sitenex' });
     if (byPattern === null) { mismatches.push(`${r.method} ${r.path}: unclassified by pattern`); continue; }
     if (byConcrete.product === null) mismatches.push(`${r.method} ${r.path}: pattern says ${byPattern}, concrete path resolves to null`);
   }
@@ -112,7 +112,7 @@ test('an UNMAPPED /api route fails closed — the GET wildcard must not cover it
   assert.equal(res.unresolved, true, 'which fails closed under enforce');
 
   // And the SPA still works: a front-end path is 'shared', because that is what the wildcard is for.
-  for (const url of ['/', '/dashboard', '/acbm-prospects']) {
+  for (const url of ['/', '/dashboard', '/sitenex-prospects']) {
     const r = await resolveProduct({ ...unmapped, originalUrl: url, url }, { lookupRowProduct: async () => null });
     assert.equal(r.product, 'shared', `${url} must still be served`);
   }
@@ -125,7 +125,7 @@ test('SWEEP: a param:product route with NO product named still resolves or fails
   assert.ok(paramRoutes.length >= 4, 'expected the param:product routes to be found');
   for (const r of paramRoutes) {
     const req = syntheticReq(r); req.query = {}; req.body = {};
-    const res = await resolveProduct(req, { lookupRowProduct: async () => 'acbm' });
+    const res = await resolveProduct(req, { lookupRowProduct: async () => 'sitenex' });
     const deliberate = res.product === null ? res.unresolved === true : GRANTABLE.includes(res.product);
     assert.ok(deliberate, `${r.method} ${r.path} with no product: ${JSON.stringify(res)}`);
   }

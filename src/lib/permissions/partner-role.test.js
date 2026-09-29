@@ -1,5 +1,5 @@
-// acbm_partner — THE OUTSIDE ACCOUNT, pinned from every angle.
-//   node --test src/lib/permissions/acbm-partner.test.js
+// partner — THE OUTSIDE ACCOUNT, pinned from every angle.
+//   node --test src/lib/permissions/partner-role.test.js
 //
 // This is the first role in PlaybookOS for somebody who does not work here, so the interesting
 // assertions are all negative: what it must NOT reach, stated once per layer, because the layers fail
@@ -21,7 +21,7 @@ const { FEATURES } = require('./registry');
 const { resolve } = require('./resolve');
 const { classifyRoute } = require('../products/route-map');
 
-const PARTNER = { id: 'u-partner', role: 'acbm_partner', is_active: 1, permissions_version: 1 };
+const PARTNER = { id: 'u-partner', role: 'partner', is_active: 1, permissions_version: 1 };
 // `overrides: []` puts the resolver in INJECTED mode (no DB). Passing a stub `query` instead would put
 // it in DB mode, where an empty users row means is_active=false and rule 3 denies EVERYTHING — which
 // makes every "must not reach" assertion below pass for the wrong reason. The guard test right after
@@ -30,47 +30,47 @@ const can = (key, user = PARTNER) => resolve(user, key, { overrides: [], env: pr
   .then(r => r.allowed);
 
 test('GUARD: the resolver is actually resolving — a granted feature ALLOWs and an absent one DENIEs', async () => {
-  assert.equal(await can('acbm.deals.list'), true, 'if this is false, every negative test below is vacuous');
+  assert.equal(await can('sitenex.deals.list'), true, 'if this is false, every negative test below is vacuous');
   assert.equal(await can('admin.users.list'), false);
   const asStaff = { id: 'u-super', role: 'super_admin', is_active: 1, permissions_version: 1 };
-  assert.equal(await can('acbm.prospects.list', asStaff), true, 'and staff DO hold the prospects list');
+  assert.equal(await can('sitenex.prospects.list', asStaff), true, 'and staff DO hold the prospects list');
 });
 
 // ── layer 1: the tier grid ──────────────────────────────────────────────────────
-test('the role exists and holds ONLY self + acbm, read-only', () => {
-  const def = BUILT_IN_ROLES.acbm_partner;
-  assert.ok(def, 'acbm_partner is a built-in role');
-  assert.deepEqual(Object.keys(def.tiers).sort(), ['acbm', 'self']);
-  assert.equal(def.tiers.acbm, 'r', "read-only: every acbm route is a GET, so 'rw' would pre-authorise a write route that does not exist yet");
+test('the role exists and holds ONLY self + sitenex, read-only', () => {
+  const def = BUILT_IN_ROLES.partner;
+  assert.ok(def, 'partner is a built-in role');
+  assert.deepEqual(Object.keys(def.tiers).sort(), ['self', 'sitenex'].sort());
+  assert.equal(def.tiers.sitenex, 'r', "read-only: every sitenex route is a GET, so 'rw' would pre-authorise a write route that does not exist yet");
   for (const tier of ['sales', 'procurement', 'revenue', 'technical', 'intelligence', 'goals', 'admin']) {
-    assert.equal(getRoleTier('acbm_partner', tier), null, `must not hold the ${tier} tier`);
+    assert.equal(getRoleTier('partner', tier), null, `must not hold the ${tier} tier`);
   }
 });
 
-test("the 'acbm' tier is held by exactly three roles", () => {
-  const holders = Object.keys(BUILT_IN_ROLES).filter(r => getRoleTier(r, 'acbm'));
-  assert.deepEqual(holders.sort(), ['acbm_partner', 'admin', 'super_admin']);
+test("the 'sitenex' tier is held by exactly three roles", () => {
+  const holders = Object.keys(BUILT_IN_ROLES).filter(r => getRoleTier(r, 'sitenex'));
+  assert.deepEqual(holders.sort(), ['partner', 'admin', 'super_admin'].sort());
 });
 
-test('no OTHER role gained anything from the acbm tier being added', () => {
+test('no OTHER role gained anything from the sitenex tier being added', () => {
   // The tier is new, so the only way an existing role could be affected is by holding it. Nobody but
   // admin/super_admin does, and those two already passed adminOnly on these routes.
   for (const role of Object.keys(BUILT_IN_ROLES)) {
-    if (['acbm_partner', 'admin', 'super_admin'].includes(role)) continue;
-    assert.equal(getRoleTier(role, 'acbm'), null, `${role} must not hold acbm`);
+    if (['partner', 'admin', 'super_admin'].includes(role)) continue;
+    assert.equal(getRoleTier(role, 'sitenex'), null, `${role} must not hold sitenex`);
   }
 });
 
 // ── layer 2: the resolver ───────────────────────────────────────────────────────
 test('the partner holds Deals and Packages — page and route', async () => {
-  for (const key of ['acbm.deals.list', 'acbm.packages.list', 'acbm.page_acbm_deals.view', 'acbm.page_acbm_packages.view']) {
+  for (const key of ['sitenex.deals.list', 'sitenex.packages.list', 'sitenex.page_sitenex_deals.view', 'sitenex.page_sitenex_packages.view']) {
     assert.equal(await can(key), true, `expected ALLOW for ${key}`);
   }
 });
 
-test('the partner does NOT hold ACBM Prospects — our scored lead list', async () => {
-  assert.equal(await can('acbm.prospects.list'), false);
-  assert.equal(await can('acbm.page_acbm_prospects.view'), false);
+test('the partner does NOT hold SiteNex Prospects — our scored lead list', async () => {
+  assert.equal(await can('sitenex.prospects.list'), false);
+  assert.equal(await can('sitenex.page_sitenex_prospects.view'), false);
 });
 
 test('the partner does not hold anything internal', async () => {
@@ -97,7 +97,7 @@ test('the partner does not hold anything internal', async () => {
 });
 
 test('the partner reaches nothing beyond its listed features', async () => {
-  const granted = new Set(TEMPLATES.acbm_partner.grants);
+  const granted = new Set(TEMPLATES.partner.grants);
   const leaked = [], unreachable = [];
   for (const f of FEATURES) {
     const allowed = await can(f.key);
@@ -116,7 +116,7 @@ test('the partner reaches nothing beyond its listed features', async () => {
 
 test('the template grants nothing that writes outside the account itself', () => {
   const byKey = new Map(FEATURES.map(f => [f.key, f]));
-  for (const key of TEMPLATES.acbm_partner.grants) {
+  for (const key of TEMPLATES.partner.grants) {
     const f = byKey.get(key);
     assert.ok(f, `${key} is not in the registry`);
     const isWrite = f.surface === 'api_route' && !/^GET /.test(f.ref);
@@ -129,9 +129,9 @@ test('the template grants nothing that writes outside the account itself', () =>
 });
 
 // ── layer 3: the product boundary ───────────────────────────────────────────────
-test("every acbm route classifies as the 'acbm' product, so holding ['acbm'] is what admits it", () => {
-  for (const path of ['/api/acbm/prospects', '/api/acbm/deals', '/api/acbm/packages']) {
-    assert.equal(classifyRoute('GET', path), 'acbm', path);
+test("every sitenex route classifies as the 'sitenex' product, so holding ['sitenex'] is what admits it", () => {
+  for (const path of ['/api/sitenex/prospects', '/api/sitenex/deals', '/api/sitenex/packages']) {
+    assert.equal(classifyRoute('GET', path), 'sitenex', path);
   }
 });
 
@@ -140,9 +140,9 @@ test('every route the partner needs resolves to a product it holds', () => {
   // did once: GET /api/roles is 'internal', and the nav used to need it, so the boundary would have
   // 403'd the one route buildNav depended on — the resolver saying yes and the nav breaking anyway.
   // /api/roles is deliberately NOT in this list any more; the nav gets tiers from /auth/me instead.
-  const held = ['acbm'];              // NOT 'internal'
+  const held = ['sitenex'];              // NOT 'internal'
   const needed = [
-    ['GET', '/api/acbm/deals'], ['GET', '/api/acbm/packages'],
+    ['GET', '/api/sitenex/deals'], ['GET', '/api/sitenex/packages'],
     ['GET', '/api/auth/me'], ['PUT', '/api/auth/password'],
     ['PUT', '/api/users/profile'], ['GET', '/api/agent/tasks/my'], ['GET', '/api/activity/my'],
     ['POST', '/api/activity'], ['GET', '/api/goals/my-week'], ['GET', '/api/performance/my'],
@@ -199,19 +199,19 @@ function navFor(role) {
   return ctx.__pages(role, BUILT_IN_ROLES[role].tiers);
 }
 
-test('the partner is shown Deals and Packages, and NOT ACBM Prospects', () => {
-  const pages = navFor('acbm_partner');
-  assert.ok(pages.includes('acbm-deals'), 'acbm-deals in the nav');
-  assert.ok(pages.includes('acbm-packages'), 'acbm-packages in the nav');
-  assert.ok(!pages.includes('acbm-prospects'), 'acbm-prospects must NOT be drawn for the partner');
+test('the partner is shown Deals and Packages, and NOT SiteNex Prospects', () => {
+  const pages = navFor('partner');
+  assert.ok(pages.includes('sitenex-deals'), 'sitenex-deals in the nav');
+  assert.ok(pages.includes('sitenex-packages'), 'sitenex-packages in the nav');
+  assert.ok(!pages.includes('sitenex-prospects'), 'sitenex-prospects must NOT be drawn for the partner');
   assert.ok(!pages.includes('team'), 'no team page');
   assert.ok(!pages.includes('settings'), 'no settings page');
 });
 
-test('staff still see all three ACBM pages', () => {
+test('staff still see all three SiteNex pages', () => {
   for (const role of ['admin', 'super_admin']) {
     const pages = navFor(role);
-    for (const id of ['acbm-prospects', 'acbm-deals', 'acbm-packages']) {
+    for (const id of ['sitenex-prospects', 'sitenex-deals', 'sitenex-packages']) {
       assert.ok(pages.includes(id), `${role} must still see ${id}`);
     }
   }
@@ -220,9 +220,9 @@ test('staff still see all three ACBM pages', () => {
 test('every page drawn for the partner is a page it actually holds', () => {
   // The exact pairing that produces a 403 link if it drifts: a nav item with no matching nav_page
   // feature in the template.
-  const granted = new Set(TEMPLATES.acbm_partner.grants);
+  const granted = new Set(TEMPLATES.partner.grants);
   const pageFeature = new Map(FEATURES.filter(f => f.surface === 'nav_page').map(f => [f.ref, f.key]));
-  const missing = navFor('acbm_partner').filter(id => {
+  const missing = navFor('partner').filter(id => {
     const key = pageFeature.get(id);
     return key && !granted.has(key);
   });

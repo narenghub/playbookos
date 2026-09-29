@@ -1,6 +1,6 @@
-// ACBM route gates — run with:  node --test src/api/acbm-routes.test.js
+// SiteNex route gates — run with:  node --test src/api/sitenex-routes.test.js
 //
-// acbm-partner.test.js proves the tier GRID and the resolver. This proves the WIRING: that the gate I
+// sitenex-partner.test.js proves the tier GRID and the resolver. This proves the WIRING: that the gate I
 // think is on each route is the gate that is actually on it. The three routes used to be identical
 // (authMiddleware + adminOnly) and now they are not, so the difference has to be pinned at the HTTP
 // layer or a future edit will quietly make them identical again.
@@ -37,7 +37,7 @@ const get = (path, role) => fetch(base() + path, {
   headers: { Authorization: 'Bearer ' + signToken({ id: 'u-' + role, email: role + '@x.com', role }) },
 }).then(r => r.status);
 
-const PROSPECTS = '/api/acbm/prospects', DEALS = '/api/acbm/deals', PACKAGES = '/api/acbm/packages';
+const PROSPECTS = '/api/sitenex/prospects', DEALS = '/api/sitenex/deals', PACKAGES = '/api/sitenex/packages';
 
 test('staff reach all three screens', async () => {
   for (const role of ['super_admin', 'admin']) {
@@ -48,16 +48,16 @@ test('staff reach all three screens', async () => {
 });
 
 test('the partner reaches Deals and Packages', async () => {
-  assert.notEqual(await get(DEALS, 'acbm_partner'), 403);
-  assert.notEqual(await get(PACKAGES, 'acbm_partner'), 403);
+  assert.notEqual(await get(DEALS, 'partner'), 403);
+  assert.notEqual(await get(PACKAGES, 'partner'), 403);
 });
 
-test('the partner is REFUSED ACBM Prospects — the route, not just the link', async () => {
-  assert.equal(await get(PROSPECTS, 'acbm_partner'), 403);
+test('the partner is REFUSED SiteNex Prospects — the route, not just the link', async () => {
+  assert.equal(await get(PROSPECTS, 'partner'), 403);
 });
 
-test('no other role reaches any ACBM screen', async () => {
-  // The acbm tier is what admits a request now, and only three roles hold it. Every other role must
+test('no other role reaches any SiteNex screen', async () => {
+  // The sitenex tier is what admits a request now, and only three roles hold it. Every other role must
   // still be refused all three — adminOnly used to do this for prospects and requireTier does it for
   // the other two.
   for (const role of ['sales_director', 'sales_team', 'business_dev', 'dev_team', 'procurement_team',

@@ -18,7 +18,7 @@ const { query } = require('../src/lib/db');
 const { isFreeMail, pickOwnerEmail, designerSignals } = require('../src/lib/agents/prospecting/site-email');
 
 const COMMIT = process.argv.includes('--commit');
-const PRODUCT = 'acbm';
+const PRODUCT = 'sitenex';
 
 (async () => {
   const rows = (await query(

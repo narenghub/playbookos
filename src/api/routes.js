@@ -22,6 +22,7 @@ const { runContentPipeline } = require('../lib/agents/content');
 const { runProspecting, runQualifyProspects } = require('../lib/agents/prospecting');
 const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/config');
 const { heldProducts, productScopeSql } = require('../lib/products/held');
+const { partnerScopeSql } = require('../lib/products/partner-scope');
 const { PRODUCTS: PRODUCT_KEYS, GRANTABLE } = require('../lib/products/route-map');
 const { checkGrantChange, routeCountsByProduct, describeChange } = require('../lib/products/grants');
 const riResolve = require('../lib/agents/research-intelligence/resolve');
@@ -313,7 +314,7 @@ router.get('/users', authMiddleware, async (req, res) => {
 // is not a product — it is the staff flag, and the form must not present it as one more checkbox in
 // the row.
 router.get('/products/grantable', authMiddleware, superAdminOnly, async (req, res) => {
-  const LABELS = { abiozen: 'Abiozen', golfnex: 'GolfNex', favly: 'Favly', linkabl: 'Linkabl', aros: 'AROS', acbm: 'ACBM' };
+  const LABELS = { abiozen: 'Abiozen', golfnex: 'GolfNex', favly: 'Favly', linkabl: 'Linkabl', aros: 'AROS', sitenex: 'SiteNex' };
   res.json({
     products: PRODUCT_KEYS.map(key => ({ key, label: LABELS[key] || key })),
     internal: {
@@ -4766,7 +4767,7 @@ router.put('/prospects/:id', authMiddleware, requireTier('sales'), async (req, r
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── ACBM (referral partner) read-only screens ─────────────────────────────────
+// ── SiteNex (sold through referral partners) read-only screens ─────────────────────────────────
 // Three GETs behind adminOnly: super_admin + admin only for now. A partner role does not exist,
 // and nobody else needs these yet — widen deliberately later rather than guess now.
 //
@@ -4776,26 +4777,26 @@ router.put('/prospects/:id', authMiddleware, requireTier('sales'), async (req, r
 // manager reads would describe the same site differently.
 //
 // NOTE: these deliberately do NOT use ?booking_platform=prime. That filter is resolved from
-// primeSignal, which acbm does not set (it declares primeBy:'site_score'), so 'prime' would fall
-// back to "no booking platform" — near the opposite of what ACBM wants. Filtering is on site_score.
-const ACBM_DEAL_STATUSES = ['new', 'contacted', 'proposal_sent', 'signed', 'intake', 'building', 'live', 'lost'];
-const ACBM_BUCKETS = ['scored', 'no_website', 'dead_site', 'unscannable'];
-// The subtypes ACBM actually ships, read from the prospecting config so this cannot drift from
+// primeSignal, which sitenex does not set (it declares primeBy:'site_score'), so 'prime' would fall
+// back to "no booking platform" — near the opposite of what SiteNex wants. Filtering is on site_score.
+const SITENEX_DEAL_STATUSES = ['new', 'contacted', 'proposal_sent', 'signed', 'intake', 'building', 'live', 'lost'];
+const SITENEX_BUCKETS = ['scored', 'no_website', 'dead_site', 'unscannable'];
+// The subtypes SiteNex actually ships, read from the prospecting config so this cannot drift from
 // what the enumerator runs. The screen DEFAULTS to these three but still lists all nine in the
 // facet: the other six are the dropped experiment categories (auto_repair, daycare, dental, hvac,
 // legal, plumbing) and their ~608 rows are still in the table. Defaulting stops anyone working the
 // wrong list by accident; keeping them visible stops anyone rediscovering orphan rows in six
 // months and wondering what they are. Hiding them is the version that causes the confusion later.
-const acbmShippingSubtypes = () => ((getProspectingConfig('acbm') || {}).subtypes || []).map(s => s.key);
+const sitenexShippingSubtypes = () => ((getProspectingConfig('sitenex') || {}).subtypes || []).map(s => s.key);
 
 // STAFF ONLY, and it stays that way. This is the scored machine-shop lead list — our pipeline, not
-// the partner's deals. adminOnly is one refusal; acbm_partner's template not granting
-// acbm.prospects.list is a second, independent one.
-router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
+// the partner's deals. adminOnly is one refusal; partner's template not granting
+// sitenex.prospects.list is a second, independent one.
+router.get('/sitenex/prospects', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { findingSentences, agencyNote, pageSpeedNote, bucketOf, BUCKET_LABEL, packageLabel } =
       require('../lib/agents/prospecting/findings-text');
-    const clauses = [`product = 'acbm'`], params = [];
+    const clauses = [`product = 'sitenex'`], params = [];
     // subtype accepts a comma-separated list so the screen can default to the shipping three.
     if (req.query.subtype) {
       const list = String(req.query.subtype).split(',').map(x => x.trim()).filter(Boolean);
@@ -4863,39 +4864,48 @@ router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
               COUNT(*) FILTER (WHERE owner_email IS NULL AND website IS NOT NULL
                                AND site_findings->>'unscannable' IS NULL
                                AND COALESCE(site_findings->>'reachable','') <> 'false')::int scannable_without_email
-         FROM prospects WHERE product = 'acbm'`)).rows[0];
+         FROM prospects WHERE product = 'sitenex'`)).rows[0];
     const facets = {
-      subtypes: (await query(`SELECT DISTINCT subtype FROM prospects WHERE product='acbm' AND subtype IS NOT NULL ORDER BY 1`)).rows.map(x => x.subtype),
-      regions: (await query(`SELECT DISTINCT region FROM prospects WHERE product='acbm' AND region IS NOT NULL ORDER BY 1`)).rows.map(x => x.region),
-      buckets: ACBM_BUCKETS, packages: ['P1', 'P2'],
+      subtypes: (await query(`SELECT DISTINCT subtype FROM prospects WHERE product='sitenex' AND subtype IS NOT NULL ORDER BY 1`)).rows.map(x => x.subtype),
+      regions: (await query(`SELECT DISTINCT region FROM prospects WHERE product='sitenex' AND region IS NOT NULL ORDER BY 1`)).rows.map(x => x.region),
+      buckets: SITENEX_BUCKETS, packages: ['P1', 'P2'],
       // What the screen should preselect, and which of the nine are retired. Sent rather than
       // duplicated client-side so config.js stays the single source of truth.
-      shipping_subtypes: acbmShippingSubtypes(),
+      shipping_subtypes: sitenexShippingSubtypes(),
     };
     res.json({ page, pageSize, total, items, summary, facets });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Deals and Packages are the COMMERCIAL relationship, so the referral partner sees them. adminOnly is
-// replaced by requireTier('acbm') — a tier held by super_admin, admin and acbm_partner and nobody
+// replaced by requireTier('sitenex') — a tier held by super_admin, admin and partner and nobody
 // else. That is a widening of exactly one role, and it is not the only gate: the resolver still has to
-// find the feature in the caller's template, and the product boundary still has to find 'acbm' in
+// find the feature in the caller's template, and the product boundary still has to find 'sitenex' in
 // their user_products. Three independent refusals for an outside account.
-router.get('/acbm/deals', authMiddleware, requireTier('acbm'), async (req, res) => {
+router.get('/sitenex/deals', authMiddleware, requireTier('sitenex'), async (req, res) => {
   try {
     const { packageLabel } = require('../lib/agents/prospecting/findings-text');
+    // ROW-LEVEL PARTNER SCOPING. Every partner on SiteNex holds the 'sitenex' product, so the product
+    // boundary admits all of them to this route and is right to — WHICH DEALS they may see is a
+    // different question, and the only place to answer it is here. Staff (partner_id NULL) see every
+    // partner's deals; a partner sees their own and nothing else. Scoped in the WHERE, never by a
+    // partner_id the client sends.
+    const scope = await partnerScopeSql(req.user, 'd', 1);
     const rows = (await query(
-      `SELECT d.id, d.status, d.package_code, d.referred_by, d.proposal_url, d.signed_at,
+      `SELECT d.id, d.status, d.package_code, d.partner_id, d.proposal_url, d.signed_at,
               d.value_cents, d.monthly_cents, d.created_at, d.updated_at,
+              pt.name AS partner_name,
               p.name AS prospect_name, p.phone AS prospect_phone, p.region AS prospect_region,
               u.name AS owner_name
-         FROM acbm_deals d
+         FROM sitenex_deals d
          LEFT JOIN prospects p ON p.id = d.prospect_id
          LEFT JOIN users u ON u.id = d.owner_user_id
-        ORDER BY d.updated_at DESC, d.id DESC`)).rows;
-    // One column per acbm_deals.status, in lifecycle order from the column's own COMMENT. Empty
+         LEFT JOIN partners pt ON pt.id = d.partner_id
+        WHERE ${scope.sql}
+        ORDER BY d.updated_at DESC, d.id DESC`, scope.params)).rows;
+    // One column per sitenex_deals.status, in lifecycle order from the column's own COMMENT. Empty
     // columns are rendered too — the board's shape is the pipeline, not a reflection of today's rows.
-    const columns = ACBM_DEAL_STATUSES.map(status => ({
+    const columns = SITENEX_DEAL_STATUSES.map(status => ({
       status,
       deals: rows.filter(r => r.status === status).map(r => ({
         ...r, package_label: packageLabel(r.package_code),
@@ -4903,16 +4913,18 @@ router.get('/acbm/deals', authMiddleware, requireTier('acbm'), async (req, res) 
         monthly_usd: r.monthly_cents == null ? null : r.monthly_cents / 100,
       })),
     }));
-    res.json({ total: rows.length, statuses: ACBM_DEAL_STATUSES, columns });
+    res.json({ total: rows.length, statuses: SITENEX_DEAL_STATUSES, columns,
+      scope: scope.isStaff ? 'all partners' : (scope.failed ? 'none' : 'own partner only'),
+      partner_id: scope.partnerId });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/acbm/packages', authMiddleware, requireTier('acbm'), async (req, res) => {
+router.get('/sitenex/packages', authMiddleware, requireTier('sitenex'), async (req, res) => {
   try {
     const rows = (await query(
       `SELECT code, name, summary, included, not_included, setup_fee_cents, monthly_cents,
               typical_weeks, active
-         FROM acbm_packages ORDER BY code`)).rows;
+         FROM sitenex_packages ORDER BY code`)).rows;
     // PRICES ARE DELIBERATELY NULL until they are decided. The contract is that a consumer must
     // REFUSE to render a null price rather than printing $0, so the API hands the client an
     // explicit `priced: false` and no numbers at all — there is nothing for a template to

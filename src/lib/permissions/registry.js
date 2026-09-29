@@ -2911,10 +2911,10 @@ module.exports = {
     defaultDeny: true,
   },
 
-  // ===================== ACBM — the referral pipeline's three read-only screens (6) =============
+  // ===================== SITENEX — the referral pipeline's three read-only screens (6) =============
   // Registered so the three routes are GRANTABLE. Until they exist, mapFeatureKey returns null for
   // them, enforce.js falls through to the route's own gate, and — the part that matters —
-  // user_feature_overrides has no feature key to hang a grant on, so an ACBM user could not be given
+  // user_feature_overrides has no feature key to hang a grant on, so a SiteNex user could not be given
   // these screens by ANY mechanism.
   //
   // defaultDeny:false on all six: they are read-only GETs with no spend. defaultDeny is for things
@@ -2922,50 +2922,50 @@ module.exports = {
   // would mean even a super_admin needed rule 3's bypass to see it.
   //
   // NOTE the routes still carry adminOnly today. Registering a feature TIGHTENS, it never loosens —
-  // moving them to a gate an ACBM user can pass is a separate, deliberate step that must come after
+  // moving them to a gate a SiteNex user can pass is a separate, deliberate step that must come after
   // the product boundary is enforcing.
   {
-    key: 'acbm.page_acbm_prospects.view',
-    label: "ACBM Prospects (page)",
-    domain: 'acbm',
+    key: 'sitenex.page_sitenex_prospects.view',
+    label: "SiteNex Prospects (page)",
+    domain: 'sitenex',
     surface: 'nav_page',
-    ref: "acbm-prospects",
+    ref: "sitenex-prospects",
     cost: 'free',
     spend: [],
     dangerous: false,
-    implies: ['acbm.prospects.list'],
+    implies: ['sitenex.prospects.list'],
     defaultDeny: false,
   },
   {
-    key: 'acbm.page_acbm_deals.view',
-    label: "ACBM Deals (page)",
-    domain: 'acbm',
+    key: 'sitenex.page_sitenex_deals.view',
+    label: "SiteNex Deals (page)",
+    domain: 'sitenex',
     surface: 'nav_page',
-    ref: "acbm-deals",
+    ref: "sitenex-deals",
     cost: 'free',
     spend: [],
     dangerous: false,
-    implies: ['acbm.deals.list'],
+    implies: ['sitenex.deals.list'],
     defaultDeny: false,
   },
   {
-    key: 'acbm.page_acbm_packages.view',
-    label: "ACBM Packages (page)",
-    domain: 'acbm',
+    key: 'sitenex.page_sitenex_packages.view',
+    label: "SiteNex Packages (page)",
+    domain: 'sitenex',
     surface: 'nav_page',
-    ref: "acbm-packages",
+    ref: "sitenex-packages",
     cost: 'free',
     spend: [],
     dangerous: false,
-    implies: ['acbm.packages.list'],
+    implies: ['sitenex.packages.list'],
     defaultDeny: false,
   },
   {
-    key: 'acbm.prospects.list',
-    label: "List scored ACBM prospects — GET /api/acbm/prospects",
-    domain: 'acbm',
+    key: 'sitenex.prospects.list',
+    label: "List scored SiteNex prospects — GET /api/sitenex/prospects",
+    domain: 'sitenex',
     surface: 'api_route',
-    ref: "GET /api/acbm/prospects",
+    ref: "GET /api/sitenex/prospects",
     cost: 'free',
     spend: [],
     dangerous: false,
@@ -2973,11 +2973,11 @@ module.exports = {
     defaultDeny: false,
   },
   {
-    key: 'acbm.deals.list',
-    label: "List ACBM deals — GET /api/acbm/deals",
-    domain: 'acbm',
+    key: 'sitenex.deals.list',
+    label: "List SiteNex deals — GET /api/sitenex/deals",
+    domain: 'sitenex',
     surface: 'api_route',
-    ref: "GET /api/acbm/deals",
+    ref: "GET /api/sitenex/deals",
     cost: 'free',
     spend: [],
     dangerous: false,
@@ -2985,11 +2985,11 @@ module.exports = {
     defaultDeny: false,
   },
   {
-    key: 'acbm.packages.list',
-    label: "List ACBM packages — GET /api/acbm/packages",
-    domain: 'acbm',
+    key: 'sitenex.packages.list',
+    label: "List SiteNex packages — GET /api/sitenex/packages",
+    domain: 'sitenex',
     surface: 'api_route',
-    ref: "GET /api/acbm/packages",
+    ref: "GET /api/sitenex/packages",
     cost: 'free',
     spend: [],
     dangerous: false,

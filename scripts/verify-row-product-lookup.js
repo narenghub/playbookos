@@ -1,8 +1,8 @@
 // ── row:prospects.product — REAL DATABASE verification (self-cleaning) ──
 //
 // The sweep test proves the MATCHER reaches this route; it stubs the lookup, so the database half is
-// unproven. Traffic will not prove it either: the ACBM screen calls /api/acbm/prospects, NOT
-// /api/prospects/:id, so clicking ACBM rows never exercises it — somebody would have to open the
+// unproven. Traffic will not prove it either: the SiteNex screen calls /api/sitenex/prospects, NOT
+// /api/prospects/:id, so clicking SiteNex rows never exercises it — somebody would have to open the
 // classic Prospects page and click a row. After three days of shadow it had never been hit.
 //
 // That matters more than any other route in the map. GET /api/prospects/:id carries no product in the
@@ -10,7 +10,7 @@
 // wrong, fail-closed hides the bug (everything 403s) or — worse — a bad lookup returns the wrong
 // product and the boundary waves it through.
 //
-// So: insert one golfnex row and one acbm row, resolve both through the REAL query the middleware
+// So: insert one golfnex row and one sitenex row, resolve both through the REAL query the middleware
 // uses, assert each returns its own product, and assert a missing id resolves UNRESOLVED rather than
 // permitted. Rows are deleted in a finally, and their place_ids are prefixed so a leak is obvious.
 //
@@ -43,7 +43,7 @@ function check(label, actual, expected) {
 
 (async () => {
   try {
-    for (const product of ['golfnex', 'acbm']) {
+    for (const product of ['golfnex', 'sitenex']) {
       const r = await query(
         `INSERT INTO prospects (product, place_id, name, status, created_at)
          VALUES ($1, $2, $3, 'new', NOW()) RETURNING id`,
@@ -78,13 +78,13 @@ function check(label, actual, expected) {
     check('a failing lookup fails closed', { product: broken.product, unresolved: broken.unresolved },
       { product: null, unresolved: true });
 
-    // And the cross-product case stated plainly: an acbm holder asking for a golfnex row resolves to
+    // And the cross-product case stated plainly: an sitenex holder asking for a golfnex row resolves to
     // GOLFNEX, so the middleware compares 'golfnex' against their grants and refuses. That is the
     // whole point of the row lookup.
     const golfnexRow = created.find(c => c.product === 'golfnex');
-    const asAcbmUser = await resolveProduct(req('GET', golfnexRow.id), { lookupRowProduct });
-    check("a golfnex row resolves to 'golfnex' regardless of who asks (so an acbm-only user is refused)",
-      asAcbmUser.product, 'golfnex');
+    const asSitenexUser = await resolveProduct(req('GET', golfnexRow.id), { lookupRowProduct });
+    check("a golfnex row resolves to 'golfnex' regardless of who asks (so an sitenex-only user is refused)",
+      asSitenexUser.product, 'golfnex');
   } catch (e) {
     failures++;
     console.error('ERROR:', e.message);

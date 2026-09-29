@@ -12,10 +12,10 @@ const fs = require('fs');
 const path = require('path');
 const { BUILT_IN_ROLES, EXTERNAL_ROLES, isExternalRole, excludeExternalSql } = require('./roles');
 
-test('acbm_partner is the external role, and no internal role is marked external', () => {
-  assert.deepEqual(EXTERNAL_ROLES, ['acbm_partner']);
+test('partner is the external role, and no internal role is marked external', () => {
+  assert.deepEqual(EXTERNAL_ROLES, ['partner']);
   for (const [key, def] of Object.entries(BUILT_IN_ROLES)) {
-    if (key === 'acbm_partner') continue;
+    if (key === 'partner') continue;
     assert.notEqual(def.external, true, `${key} must not be marked external`);
   }
 });
@@ -31,9 +31,9 @@ test('an UNKNOWN role is not external — a custom role must still be scored', (
 
 test('the SQL fragment is a bare AND clause that composes with an existing WHERE', () => {
   const sql = excludeExternalSql('u');
-  assert.match(sql, /^ AND COALESCE\(u\.role, ''\) NOT IN \('acbm_partner'\)$/);
-  assert.match(excludeExternalSql(), /^ AND COALESCE\(role, ''\) NOT IN \('acbm_partner'\)$/);
-  // COALESCE, not a bare comparison: `role <> 'acbm_partner'` is NULL for a row with no role, and NULL
+  assert.match(sql, /^ AND COALESCE\(u\.role, ''\) NOT IN \('partner'\)$/);
+  assert.match(excludeExternalSql(), /^ AND COALESCE\(role, ''\) NOT IN \('partner'\)$/);
+  // COALESCE, not a bare comparison: `role <> 'partner'` is NULL for a row with no role, and NULL
   // is not TRUE, so a role-less user would be dropped from scoring entirely.
   assert.match(sql, /COALESCE/);
 });

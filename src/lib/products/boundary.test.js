@@ -38,8 +38,8 @@ test("'internal' and 'shared' resolve as themselves", async () => {
 });
 
 test('param:product reads the request, and an unknown product name fails closed', async () => {
-  const named = await resolveProduct(mkReq('GET', '/api/prospects', { query: { product: 'acbm' } }));
-  assert.equal(named.product, 'acbm');
+  const named = await resolveProduct(mkReq('GET', '/api/prospects', { query: { product: 'sitenex' } }));
+  assert.equal(named.product, 'sitenex');
   const dflt = await resolveProduct(mkReq('GET', '/api/prospects'));
   assert.equal(dflt.product, 'golfnex', 'documented default');
   const bogus = await resolveProduct(mkReq('GET', '/api/prospects', { query: { product: 'not-a-product' } }));
@@ -87,11 +87,11 @@ test('an UNLISTED agent key fails closed', async () => {
 test('row: lookup reads the product off the row — GET and PUT alike', async () => {
   const lookupRowProduct = async (table, column, id) => {
     assert.equal(table, 'prospects'); assert.equal(column, 'product');
-    return id === '42' ? 'acbm' : null;
+    return id === '42' ? 'sitenex' : null;
   };
   for (const method of ['GET', 'PUT']) {
     const r = await resolveProduct(mkReq(method, '/api/prospects/:id', { params: { id: '42' } }), { lookupRowProduct });
-    assert.equal(r.product, 'acbm', `${method} resolves from the row`);
+    assert.equal(r.product, 'sitenex', `${method} resolves from the row`);
   }
 });
 
@@ -122,7 +122,7 @@ function harness(mode, { held = ['abiozen', 'internal'], lookupRowProduct } = {}
     env: { PRODUCT_BOUNDARY_MODE: mode, JWT_SECRET: SECRET },
     heldProducts: async () => held,
     logShadow: (row) => logged.push(row),
-    lookupRowProduct: lookupRowProduct || (async () => 'acbm'),
+    lookupRowProduct: lookupRowProduct || (async () => 'sitenex'),
   });
   return { mw, logged };
 }
@@ -138,7 +138,7 @@ test('shadow mode NEVER blocks, and logs allowed requests too (the denominator)'
   const { mw, logged } = harness('shadow');
   const res = mkRes(); let nexted = 0;
   await mw(mkReq('GET', '/api/apollo/stats'), res, () => nexted++);          // held
-  await mw(mkReq('GET', '/api/acbm/prospects'), res, () => nexted++);        // NOT held
+  await mw(mkReq('GET', '/api/sitenex/prospects'), res, () => nexted++);        // NOT held
   assert.equal(nexted, 2, 'both passed through');
   assert.equal(res.statusCode, null, 'nothing blocked');
   assert.equal(logged.length, 2, 'every evaluated request logged, not only would-blocks');
@@ -149,11 +149,11 @@ test('shadow mode NEVER blocks, and logs allowed requests too (the denominator)'
 test('enforce mode blocks a product the caller does not hold', async () => {
   const { mw } = harness('enforce');
   const res = mkRes(); let nexted = false;
-  await mw(mkReq('GET', '/api/acbm/prospects'), res, () => { nexted = true; });
+  await mw(mkReq('GET', '/api/sitenex/prospects'), res, () => { nexted = true; });
   assert.equal(nexted, false);
   assert.equal(res.statusCode, 403);
   assert.equal(res.body.reason, 'not_held');
-  assert.equal(res.body.resolved_product, 'acbm');
+  assert.equal(res.body.resolved_product, 'sitenex');
 });
 
 test('enforce mode FAILS CLOSED on an unresolvable product', async () => {
@@ -183,7 +183,7 @@ test("'shared' is allowed without any grant; 'internal' requires the grant", asy
 test('anonymous requests are not evaluated — authMiddleware owns the 401', async () => {
   const { mw, logged } = harness('enforce');
   const res = mkRes(); let nexted = false;
-  await mw(mkReq('GET', '/api/acbm/prospects', { auth: 'Bearer garbage' }), res, () => { nexted = true; });
+  await mw(mkReq('GET', '/api/sitenex/prospects', { auth: 'Bearer garbage' }), res, () => { nexted = true; });
   assert.equal(nexted, true);
   assert.equal(res.statusCode, null);
   assert.equal(logged.length, 0);

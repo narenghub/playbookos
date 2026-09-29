@@ -44,7 +44,7 @@ const check = (label, a, e) => { const ok = JSON.stringify(a) === JSON.stringify
 
     const WRITES = [
       ['GET',  `/api/users/${fixture}/products`,             null,                                      'read grants + history'],
-      ['PUT',  `/api/users/${fixture}/products`,             { products: ['abiozen', 'acbm'] },         'grant products'],
+      ['PUT',  `/api/users/${fixture}/products`,             { products: ['abiozen', 'sitenex'] },         'grant products'],
       ['POST', `/api/admin/users/${fixture}/edit-name`,      { name: 'Renamed By Stale Token' },        'Edit name (the Actions menu)'],
       ['PUT',  `/api/users/profile`,                         { user_id: fixture, whatsapp_number: '+15555550222' }, 'Set WhatsApp'],
       ['PUT',  `/api/users/${fixture}/toggle-status`,         { is_active: 0 },                          'Set Inactive'],
@@ -63,7 +63,7 @@ const check = (label, a, e) => { const ok = JSON.stringify(a) === JSON.stringify
     check('the writes really landed', row.name, 'Renamed By Stale Token');
     console.log(`     fixture row: ${JSON.stringify(row)}`);
     const held = (await query(`SELECT product FROM user_products WHERE user_id=$1 ORDER BY product`, [fixture])).rows.map(r => r.product);
-    check('and the grants landed', held, ['abiozen', 'acbm']);
+    check('and the grants landed', held, ['abiozen', 'sitenex']);
 
     console.log('\nthe same stale token must still be refused where it should be:');
     // Its role is now read from the DB, so it is a super_admin — including for the guards.

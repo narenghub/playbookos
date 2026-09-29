@@ -102,7 +102,7 @@ test('every locked route refuses ADMIN at the route gate', async () => {
 });
 
 test('every locked route refuses every OTHER role too', async () => {
-  for (const role of ['dev_team', 'business_dev', 'sales_director', 'recruitment_team', 'support_team', 'acbm_partner']) {
+  for (const role of ['dev_team', 'business_dev', 'sales_director', 'recruitment_team', 'support_team', 'partner']) {
     for (const [method, path] of LOCKED_ROUTES) {
       const r = await call(method, concrete(path), role, { products: [] });
       assert.equal(r.status, 403, `${method} ${path} must refuse ${role}`);
@@ -140,7 +140,7 @@ test('super_admin still reaches all of them', async () => {
 
 // ── the paths that are NOT obviously user management ─────────────────────────────
 test('PUT /users/profile still lets anyone edit THEMSELVES', async () => {
-  for (const role of ['dev_team', 'admin', 'acbm_partner']) {
+  for (const role of ['dev_team', 'admin', 'partner']) {
     const r = await call('PUT', '/api/users/profile', role, { whatsapp_number: '+15555550000' });
     assert.equal(r.status, 200, `${role} must still edit their own profile`);
   }

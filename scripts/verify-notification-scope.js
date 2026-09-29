@@ -16,23 +16,23 @@ const seen = async (held) => {
 };
 (async () => {
   try {
-    for (const p of ['golfnex', 'acbm', null]) {
+    for (const p of ['golfnex', 'sitenex', null]) {
       const r = await query(`INSERT INTO notifications (product, kind, severity, title, read_at, created_at)
         VALUES ($1,'agent_failed','error',$2,NULL,NOW()) RETURNING id`, [p, `${TAG} ${p || 'platform'}`]);
       ids.push(r.rows[0].id);
     }
     check('staff (holds everything incl. internal) sees all three',
-      await seen(['abiozen','golfnex','favly','linkabl','aros','acbm','internal']), ['(null)','acbm','golfnex']);
-    check('an acbm-only partner sees ONLY acbm — no golfnex, no platform-wide',
-      await seen(['acbm']), ['acbm']);
+      await seen(['abiozen','golfnex','favly','linkabl','aros','sitenex','internal']), ['(null)','sitenex','golfnex']);
+    check('an sitenex-only partner sees ONLY sitenex — no golfnex, no platform-wide',
+      await seen(['sitenex']), ['sitenex']);
     check('holding nothing sees nothing', await seen([]), []);
     check("'internal' alone sees only the platform-wide row", await seen(['internal']), ['(null)']);
 
     // read-all, scoped: a partner clicking the bell must not clear the other two.
-    const s = productScopeSql(['acbm'], '', 2);
+    const s = productScopeSql(['sitenex'], '', 2);
     const upd = await query(`UPDATE notifications SET read_at = NOW() WHERE title LIKE $1 AND read_at IS NULL AND ${s.sql}`,
       [TAG + '%', ...s.params]);
-    check('read-all as an acbm-only user marks exactly 1 row', upd.rowCount, 1);
+    check('read-all as an sitenex-only user marks exactly 1 row', upd.rowCount, 1);
     const stillUnread = (await query(`SELECT COUNT(*)::int n FROM notifications WHERE title LIKE $1 AND read_at IS NULL`, [TAG + '%'])).rows[0].n;
     check("the other two stay unread — one click does not clear the org", stillUnread, 2);
   } catch (e) { fail++; console.error('ERROR:', e.message); }

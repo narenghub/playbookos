@@ -190,8 +190,8 @@ async function runQualifyProspects(product, { deps = {} } = {}) {
   return summary;
 }
 
-// ── site-quality scorer (ACBM) ─────────────────────────────────────────────────
-// The ACBM equivalent of runQualifyProspects, and deliberately NOT the same function: the
+// ── site-quality scorer (SiteNex) ─────────────────────────────────────────────────
+// The SiteNex equivalent of runQualifyProspects, and deliberately NOT the same function: the
 // booking qualifier writes booking_platform, which would read as correct while holding "wix".
 // This writes site_url / site_score / site_findings / recommended_package, plus the same
 // reachable / unreachable_reason the qualifier uses (those mean exactly what they say).
@@ -253,7 +253,7 @@ async function runScoreSites(product, { subtypes = null, cap = null, rescore = f
 
       // ONE HOP for an email. A contact/about page is where an address actually lives; a homepage
       // footer often has none or a generic one. Reuses the qualifier's link finder with the
-      // product's own terms (for acbm: about / contact / services).
+      // product's own terms (for sitenex: about / contact / services).
       //
       // IMPORTANT: the followed page feeds EMAIL EXTRACTION ONLY, never the score. Scoring stays on
       // the homepage, because that is what every existing site_score was computed from — letting a

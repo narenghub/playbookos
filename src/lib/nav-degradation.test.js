@@ -3,7 +3,7 @@
 //
 // THE BUG THIS EXISTS FOR. /api/roles was classified 'internal'. Under enforce that 403s for a partner.
 // buildNav fetched it inside a try/catch that swallowed the error, so tiers were null, so
-// passesPageReads() returned true, so EVERY page in a visible section was drawn — including ACBM
+// passesPageReads() returned true, so EVERY page in a visible section was drawn — including SiteNex
 // Prospects, which the partner cannot open. A tighter server gate produced a LOOSER client UI.
 //
 // The property, stated generally: nav computed from a server fetch must not become more permissive when
@@ -76,11 +76,11 @@ test('with tiers unknown, a role still keeps the pages that need no tier at all'
   assert.ok(pages.length > 0, 'not blank');
 });
 
-test('with tiers unknown, the ACBM partner is not shown ACBM Prospects — the original bug', () => {
+test('with tiers unknown, the partner is not shown SiteNex Prospects — the original bug', () => {
   const ctx = navRenderer();
-  assert.ok(!ctx.__pages('acbm_partner', null).includes('acbm-prospects'));
+  assert.ok(!ctx.__pages('partner', null).includes('sitenex-prospects'));
   // And with tiers KNOWN, the same — so the test is not passing because tiers are null.
-  assert.ok(!ctx.__pages('acbm_partner', BUILT_IN_ROLES.acbm_partner.tiers).includes('acbm-prospects'));
+  assert.ok(!ctx.__pages('partner', BUILT_IN_ROLES.partner.tiers).includes('sitenex-prospects'));
 });
 
 test('admin and super_admin are unaffected — they short-circuit before tiers are consulted', () => {
@@ -92,7 +92,7 @@ test('admin and super_admin are unaffected — they short-circuit before tiers a
     const withTiers = ctx.__pages(role, BUILT_IN_ROLES[role].tiers);
     const without = ctx.__pages(role, null);
     assert.deepEqual(without, withTiers, `${role}'s nav must not change when tiers are unknown`);
-    assert.ok(without.includes('acbm-prospects'));
+    assert.ok(without.includes('sitenex-prospects'));
   }
 });
 
@@ -122,8 +122,8 @@ test('buildNav fetches NOTHING — the nav has no request that can fail', () => 
 
 test('tiers come from currentUser, which comes from the call that gates the whole app', () => {
   const ctx = navRenderer();
-  ctx.__setUser({ role: 'acbm_partner', tiers: { self: 'rw', acbm: 'r' } });
-  assert.deepEqual(ctx.__tiersFor('acbm_partner'), { self: 'rw', acbm: 'r' });
+  ctx.__setUser({ role: 'partner', tiers: { self: 'rw', sitenex: 'r' } });
+  assert.deepEqual(ctx.__tiersFor('partner'), { self: 'rw', sitenex: 'r' });
   // A different role than the current user's falls back to the catalog, and to null when absent —
   // never to {} , which would read as "this role holds no tiers" and quietly hide pages.
   assert.equal(ctx.__tiersFor('sales_team'), null);

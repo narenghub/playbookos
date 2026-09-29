@@ -62,8 +62,8 @@ test('every map value is a legal value', () => {
 test('no route is classified twice with different answers', () => {
   // ROUTE_PRODUCT is built by assignment, so a duplicate would be silently overwritten. Catch it
   // by rebuilding from the source lists and counting.
-  const { SHARED, INTERNAL, ABIOZEN, GOLFNEX, AROS, ACBM } = require('./route-map');
-  const all = [...SHARED, ...INTERNAL, ...ABIOZEN, ...GOLFNEX, ...AROS, ...ACBM, ...PARAM_PRODUCT, ...Object.keys(ROW_PRODUCT)];
+  const { SHARED, INTERNAL, ABIOZEN, GOLFNEX, AROS, SITENEX } = require('./route-map');
+  const all = [...SHARED, ...INTERNAL, ...ABIOZEN, ...GOLFNEX, ...AROS, ...SITENEX, ...PARAM_PRODUCT, ...Object.keys(ROW_PRODUCT)];
   const seen = new Map();
   const dupes = [];
   for (const r of all) { if (seen.has(r)) dupes.push(r); seen.set(r, true); }
@@ -83,7 +83,7 @@ test('exact keys beat wildcards, and the longest wildcard wins', () => {
   assert.equal(classifyRoute('PUT', '/api/prospects/:id'), 'row:prospects.product');
   // wildcards do cover their prefix
   assert.equal(classifyRoute('GET', '/api/apollo/stats'), 'abiozen');
-  assert.equal(classifyRoute('GET', '/api/acbm/prospects'), 'acbm');
+  assert.equal(classifyRoute('GET', '/api/sitenex/prospects'), 'sitenex');
 });
 
 test('an unclassified route resolves to null, never to shared', () => {

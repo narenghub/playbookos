@@ -18,15 +18,15 @@ function reset() {
     { id: 'u-super',  email: 'naren@abiozen.com',  name: 'Naren',   role: 'super_admin',  is_active: 1 },
     { id: 'u-super2', email: 'second@abiozen.com', name: 'Second',  role: 'super_admin',  is_active: 1 },
     { id: 'u-mano',   email: 'mano@abiozen.com',   name: 'Manohar', role: 'admin',        is_active: 1 },
-    { id: 'u-part',   email: 'p@acbm.test',        name: 'Partner', role: 'acbm_partner', is_active: 1 },
+    { id: 'u-part',   email: 'p@sitenex.test',        name: 'Partner', role: 'partner', is_active: 1 },
   ];
   GRANTS = [];
   for (const u of ['u-super', 'u-super2', 'u-mano']) {
-    for (const p of ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'acbm', 'internal']) {
+    for (const p of ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'sitenex', 'internal']) {
       GRANTS.push({ user_id: u, product: p, granted_by: 'backfill' });
     }
   }
-  GRANTS.push({ user_id: 'u-part', product: 'acbm', granted_by: 'u-super' });
+  GRANTS.push({ user_id: 'u-part', product: 'sitenex', granted_by: 'u-super' });
   LOG = [];
 }
 reset();
@@ -110,10 +110,10 @@ const heldBy = (id) => GRANTS.filter(g => g.user_id === id).map(g => g.product).
 
 // ── who may do this at all ──────────────────────────────────────────────────────
 test('super_admin only — an admin cannot reassign products', async () => {
-  const r = await setProducts('u-part', ['acbm', 'internal'], 'u-mano');
+  const r = await setProducts('u-part', ['sitenex', 'internal'], 'u-mano');
   assert.equal(r.status, 403);
   assert.match((await r.json()).error, /Super admin only/);
-  assert.deepEqual(heldBy('u-part'), ['acbm'], 'nothing changed');
+  assert.deepEqual(heldBy('u-part'), ['sitenex'], 'nothing changed');
 });
 
 test('GET is super_admin only too — the history is not public', async () => {
@@ -123,7 +123,7 @@ test('GET is super_admin only too — the history is not public', async () => {
 
 // ── GUARD 1: nobody narrows themselves; the last super admin is untouchable ──────
 test('a super admin CANNOT remove their own products — refused by the server', async () => {
-  const r = await setProducts('u-super', ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'acbm']);  // drops internal
+  const r = await setProducts('u-super', ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'sitenex']);  // drops internal
   assert.equal(r.status, 403);
   const j = await r.json();
   assert.equal(j.code, 'self_narrow');
@@ -134,10 +134,10 @@ test('a super admin CANNOT remove their own products — refused by the server',
 });
 
 test('but a super admin CAN widen themselves — that is not an escalation', async () => {
-  GRANTS = GRANTS.filter(g => !(g.user_id === 'u-super' && g.product === 'acbm'));
-  const r = await setProducts('u-super', ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'acbm', 'internal']);
+  GRANTS = GRANTS.filter(g => !(g.user_id === 'u-super' && g.product === 'sitenex'));
+  const r = await setProducts('u-super', ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'sitenex', 'internal']);
   assert.equal(r.status, 200);
-  assert.deepEqual((await r.json()).added, ['acbm']);
+  assert.deepEqual((await r.json()).added, ['sitenex']);
 });
 
 test('the LAST active super admin cannot be narrowed, even by another account', async () => {
@@ -157,19 +157,19 @@ test('with TWO super admins, one can narrow the other — they can rescue each o
 });
 
 test('an unknown product is refused, and refusal changes nothing', async () => {
-  const r = await setProducts('u-part', ['acbm', 'not_a_product']);
+  const r = await setProducts('u-part', ['sitenex', 'not_a_product']);
   assert.equal(r.status, 403);
   assert.equal((await r.json()).code, 'unknown_product');
-  assert.deepEqual(heldBy('u-part'), ['acbm']);
+  assert.deepEqual(heldBy('u-part'), ['sitenex']);
 });
 
 test('the body must be a complete array, not a delta', async () => {
-  assert.equal((await setProducts('u-part', 'acbm')).status, 400);
+  assert.equal((await setProducts('u-part', 'sitenex')).status, 400);
   assert.equal((await req('PUT', '/api/users/u-part/products', { as: 'u-super', body: {} })).status, 400);
 });
 
 test('an unknown user is 404, not a silent success', async () => {
-  assert.equal((await setProducts('u-nobody', ['acbm'])).status, 404);
+  assert.equal((await setProducts('u-nobody', ['sitenex'])).status, 404);
 });
 
 // ── GUARD 2: immediately, not at next login ─────────────────────────────────────
@@ -190,20 +190,20 @@ test('the boundary reads user_products per request, with no cache', () => {
 });
 
 test('the response says so, because the person clicking needs to know', async () => {
-  const j = await (await setProducts('u-part', ['acbm', 'golfnex'])).json();
+  const j = await (await setProducts('u-part', ['sitenex', 'golfnex'])).json();
   assert.match(j.takes_effect, /immediately/);
   assert.match(j.takes_effect, /nothing is cached in the token/);
 });
 
 // ── GUARD 3: every change is audited, including revokes ─────────────────────────
 test('a grant writes the row AND the log entry, with who did it', async () => {
-  await setProducts('u-part', ['acbm', 'golfnex']);
-  assert.deepEqual(heldBy('u-part'), ['acbm', 'golfnex']);
+  await setProducts('u-part', ['sitenex', 'golfnex']);
+  assert.deepEqual(heldBy('u-part'), ['sitenex', 'golfnex'].sort());
   const grants = LOG.filter(l => l.action === 'grant');
   assert.equal(grants.length, 1);
   assert.deepEqual({ p: grants[0].product, who: grants[0].actor_email, src: grants[0].source },
     { p: 'golfnex', who: 'naren@abiozen.com', src: 'admin_edit' });
-  assert.equal(grants[0].user_email, 'p@acbm.test', 'the log records the email too, so it survives a deleted user');
+  assert.equal(grants[0].user_email, 'p@sitenex.test', 'the log records the email too, so it survives a deleted user');
   assert.equal(GRANTS.find(g => g.user_id === 'u-part' && g.product === 'golfnex').granted_by, 'u-super',
     'and user_products.granted_by is written, not left null');
 });
@@ -214,7 +214,7 @@ test('a REVOKE leaves a trace — the row is gone but the history is not', async
   await setProducts('u-mano', ['golfnex', 'internal']);
   assert.deepEqual(heldBy('u-mano'), ['golfnex', 'internal'], 'the rows really are deleted');
   const revokes = LOG.filter(l => l.action === 'revoke').map(l => l.product).sort();
-  assert.deepEqual(revokes, ['abiozen', 'acbm', 'aros', 'favly', 'linkabl']);
+  assert.deepEqual(revokes, ['abiozen', 'sitenex', 'aros', 'favly', 'linkabl'].sort());
   for (const l of LOG) {
     assert.equal(l.actor_email, 'naren@abiozen.com');
     assert.equal(l.source, 'admin_edit');
@@ -222,16 +222,16 @@ test('a REVOKE leaves a trace — the row is gone but the history is not', async
 });
 
 test('the history is readable back, newest first', async () => {
-  await setProducts('u-part', ['acbm', 'aros']);
-  await setProducts('u-part', ['acbm']);
+  await setProducts('u-part', ['sitenex', 'aros']);
+  await setProducts('u-part', ['sitenex']);
   const j = await (await req('GET', '/api/users/u-part/products', { as: 'u-super' })).json();
-  assert.deepEqual(j.products, ['acbm']);
+  assert.deepEqual(j.products, ['sitenex']);
   assert.equal(j.history.length, 2);
   assert.deepEqual(j.history.map(h => `${h.action} ${h.product}`).sort(), ['grant aros', 'revoke aros']);
 });
 
 test('a no-op change writes nothing at all', async () => {
-  const r = await setProducts('u-part', ['acbm']);
+  const r = await setProducts('u-part', ['sitenex']);
   assert.equal(r.status, 200);
   const j = await r.json();
   assert.deepEqual([j.added, j.removed], [[], []]);
@@ -240,9 +240,9 @@ test('a no-op change writes nothing at all', async () => {
 });
 
 test('duplicates in the request are collapsed, not double-logged', async () => {
-  await setProducts('u-part', ['acbm', 'golfnex', 'golfnex']);
+  await setProducts('u-part', ['sitenex', 'golfnex', 'golfnex']);
   assert.equal(LOG.filter(l => l.product === 'golfnex').length, 1);
-  assert.deepEqual(heldBy('u-part'), ['acbm', 'golfnex']);
+  assert.deepEqual(heldBy('u-part'), ['sitenex', 'golfnex'].sort());
 });
 
 // ── a deleted user is the largest permission removal there is ───────────────────
@@ -254,7 +254,7 @@ test('a PERMANENT delete logs every grant it destroys, before destroying it', as
   assert.equal(r.status, 200);
   const j = await r.json();
   assert.equal(j.deleted, 'permanent');
-  assert.deepEqual(j.products_lost.sort(), ['abiozen', 'acbm', 'aros', 'favly', 'golfnex', 'internal', 'linkabl']);
+  assert.deepEqual(j.products_lost.sort(), ['abiozen', 'sitenex', 'aros', 'favly', 'golfnex', 'internal', 'linkabl'].sort());
   const revokes = LOG.filter(l => l.action === 'revoke');
   assert.equal(revokes.length, 7, 'one log row per grant destroyed');
   assert.equal(revokes[0].user_email, 'mano@abiozen.com', 'the email is on the row, so it survives the user');
@@ -270,7 +270,7 @@ test('a SOFT delete keeps the grants, so there is nothing to revoke', async () =
 
 // ── GUARD 4: show what changed ──────────────────────────────────────────────────
 test('the summary names the products AND what they cost in routes', async () => {
-  const j = await (await setProducts('u-mano', ['golfnex', 'favly', 'linkabl', 'acbm', 'internal'])).json();
+  const j = await (await setProducts('u-mano', ['golfnex', 'favly', 'linkabl', 'sitenex', 'internal'])).json();
   assert.deepEqual(j.removed.sort(), ['abiozen', 'aros']);
   assert.match(j.summary, /Manohar lost abiozen, aros/);
   assert.match(j.summary, /403 on \d+ routes/);
@@ -282,9 +282,9 @@ test('the summary names the products AND what they cost in routes', async () => 
 });
 
 test('before and after are both returned, so the change is checkable', async () => {
-  const j = await (await setProducts('u-part', ['acbm', 'aros'])).json();
-  assert.deepEqual(j.before, ['acbm']);
-  assert.deepEqual(j.after.sort(), ['acbm', 'aros']);
+  const j = await (await setProducts('u-part', ['sitenex', 'aros'])).json();
+  assert.deepEqual(j.before, ['sitenex']);
+  assert.deepEqual(j.after.sort(), ['sitenex', 'aros'].sort());
 });
 
 test("removing 'internal' says what that means in words, not just a count", async () => {

@@ -1,4 +1,4 @@
-// ── ACBM call sheet generator (READ-ONLY; prints Markdown to stdout) ──
+// ── SiteNex call sheet generator (READ-ONLY; prints Markdown to stdout) ──
 //
 // Turns scored prospects into something a person can read down a phone line. The findings in
 // site_findings are keys and penalties — correct for sorting, useless to say out loud — so this
@@ -10,13 +10,13 @@
 // and it was kept out of the score precisely so a human could weigh it here.
 //
 // Run (output is prospect contact data — write it somewhere, do not commit it):
-//   railway ssh 'node scripts/acbm-call-sheet.js' > docs/acbm-call-sheet-$(date +%F).md
-//   node scripts/acbm-call-sheet.js --subtype funeral --limit 20
+//   railway ssh 'node scripts/sitenex-call-sheet.js' > docs/sitenex-call-sheet-$(date +%F).md
+//   node scripts/sitenex-call-sheet.js --subtype funeral --limit 20
 //
 // Flags: --subtype <key> (default machine_shop) · --limit <n> (default 15) · --package <P1|P2>
 
 const { query } = require('../src/lib/db');
-// Findings wording lives in ONE place — shared with the acbm-prospects screen so the sheet a rep
+// Findings wording lives in ONE place — shared with the sitenex-prospects screen so the sheet a rep
 // reads and the screen a manager reads never describe the same site differently.
 const { findingSentences, agencyNote, pageSpeedNote } = require('../src/lib/agents/prospecting/findings-text');
 
@@ -39,7 +39,7 @@ function cityOf(address, region) {
   const rows = (await query(
     `SELECT name, address, region, phone, site_url, site_score, rating_count, site_findings
        FROM prospects
-      WHERE product='acbm' AND subtype=$1 AND status='qualified' AND recommended_package=$2
+      WHERE product='sitenex' AND subtype=$1 AND status='qualified' AND recommended_package=$2
         AND site_score IS NOT NULL AND site_findings->>'unscannable' IS NULL
       ORDER BY site_score DESC, rating_count ASC NULLS FIRST
       LIMIT $3`, [subtype, pkg, limit])).rows;
@@ -47,7 +47,7 @@ function cityOf(address, region) {
   const today = new Date().toISOString().slice(0, 10);
   const label = subtype.replace(/_/g, ' ');
   const out = [];
-  out.push(`# ACBM call sheet — ${label} (${pkg})`);
+  out.push(`# SiteNex call sheet — ${label} (${pkg})`);
   out.push('');
   out.push(`${rows.length} businesses · generated ${today} · sorted worst site first`);
   out.push('');

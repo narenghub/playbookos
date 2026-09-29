@@ -37,35 +37,35 @@ const hit = async (method, path, token, body) => {
 
     id = crypto.randomUUID();
     await query(`INSERT INTO users (id,email,name,role,is_active,joined_at,permissions_version)
-                 VALUES ($1,$2,'Revocation Fixture','acbm_partner',1,NOW(),1)`, [id, EMAIL]);
+                 VALUES ($1,$2,'Revocation Fixture','partner',1,NOW(),1)`, [id, EMAIL]);
     // ONE token, minted once, re-used throughout. This is the whole point of the exercise.
-    const userToken = jwt.sign({ id, email: EMAIL, role: 'acbm_partner' }, process.env.JWT_SECRET, { expiresIn: '5m' });
+    const userToken = jwt.sign({ id, email: EMAIL, role: 'partner' }, process.env.JWT_SECRET, { expiresIn: '5m' });
     console.log(`fixture: ${EMAIL}\n  one token minted, never refreshed\n`);
 
-    console.log('grant acbm through the admin route:');
-    const g = await hit('PUT', `/api/users/${id}/products`, adminToken, { products: ['acbm'] });
+    console.log('grant sitenex through the admin route:');
+    const g = await hit('PUT', `/api/users/${id}/products`, adminToken, { products: ['sitenex'] });
     check('PUT returns 200', g.status, 200);
-    check('and reports what changed', g.body.added, ['acbm']);
+    check('and reports what changed', g.body.added, ['sitenex']);
     console.log(`     summary: ${g.body.summary}`);
     check('and says it is immediate', /immediately/.test(g.body.takes_effect || ''), true);
 
     console.log('\nthe SAME token, before and after a revoke:');
-    const before = await hit('GET', '/api/acbm/deals', userToken);
-    check('GET /api/acbm/deals works while acbm is held', before.status, 200);
+    const before = await hit('GET', '/api/sitenex/deals', userToken);
+    check('GET /api/sitenex/deals works while sitenex is held', before.status, 200);
 
     const rev = await hit('PUT', `/api/users/${id}/products`, adminToken, { products: [] });
     check('revoke returns 200', rev.status, 200);
-    check('and names what was lost', rev.body.removed, ['acbm']);
+    check('and names what was lost', rev.body.removed, ['sitenex']);
     console.log(`     summary: ${rev.body.summary}`);
 
-    const after = await hit('GET', '/api/acbm/deals', userToken);
+    const after = await hit('GET', '/api/sitenex/deals', userToken);
     check('the SAME token is now refused — no new login, no token expiry', after.status, 403);
     console.log(`     refused by: ${after.body.error} (${after.body.reason || after.body.code || ''})`);
 
     console.log('\nthe audit trail:');
     const log = (await query(
       `SELECT product, action, source, actor_email FROM user_product_grants_log WHERE user_id=$1 ORDER BY id`, [id])).rows;
-    check('two entries — the grant and the revoke', log.map(l => `${l.action} ${l.product}`), ['grant acbm', 'revoke acbm']);
+    check('two entries — the grant and the revoke', log.map(l => `${l.action} ${l.product}`), ['grant sitenex', 'revoke sitenex']);
     check('both attributed to the super admin', [...new Set(log.map(l => l.actor_email))], [superUser.email]);
     check("both marked source='admin_edit'", [...new Set(log.map(l => l.source))], ['admin_edit']);
     check('and the revoke survives although the user_products row is gone',

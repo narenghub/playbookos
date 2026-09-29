@@ -2,8 +2,8 @@
 //
 // site_findings.signals holds keys and penalties. That is right for sorting and wrong for saying
 // out loud, so everything that shows a finding to a HUMAN comes through here:
-//   • scripts/acbm-call-sheet.js  (the printed call sheet)
-//   • the acbm-prospects screen   (expanded row)
+//   • scripts/sitenex-call-sheet.js  (the printed call sheet)
+//   • the sitenex-prospects screen   (expanded row)
 // One implementation on purpose — two copies of this wording would drift, and then the sheet a
 // rep reads and the screen a manager reads would describe the same site differently.
 //

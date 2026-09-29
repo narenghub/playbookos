@@ -38,7 +38,7 @@
 //                      CAPABILITY.
 //   PRODUCT BOUNDARY   "which BUSINESS's data is this?"
 //                      prasanthi@adificetechnologies.com holds [abiozen, golfnex, internal], so linkabl,
-//                      favly, aros and acbm data is refused — however senior her role is.
+//                      favly, aros and sitenex data is refused — however senior her role is.
 //
 // So a broad role plus narrow products is the NORMAL, INTENDED state, and the 403s that produces are the
 // point of having a second gate. The whole value of the boundary is that a tier granted by mistake — the

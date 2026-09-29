@@ -14,7 +14,7 @@
 //   callCap:         60               — OPTIONAL. Per-product Places call cap, preferred over
 //                                       PROSPECTING_CALL_CAP (which is global to every product).
 //   primeBy:         'site_score'     — OPTIONAL. Names the axis "prime" is measured on when it
-//                                       is NOT booking-platform polarity. See acbm below.
+//                                       is NOT booking-platform polarity. See sitenex below.
 
 const PRODUCT_CONFIG = {
   golfnex: {
@@ -132,18 +132,18 @@ const PRODUCT_CONFIG = {
     bookingLinkTerms: ['careers', 'jobs', 'apply', 'openings'],
   },
 
-  acbm: {
-    // ACBM referral pipeline, 'outdated site' segment: local businesses whose website is bad
-    // enough to sell a rebuild against. ACBM is a REFERRAL PARTNER — acbm_deals tracks the
-    // client deals it refers (see scripts/migrate-acbm.js).
+  sitenex: {
+    // SiteNex referral pipeline, 'outdated site' segment: local businesses whose website is bad
+    // enough to sell a rebuild against. SiteNex sells through REFERRAL PARTNERS — sitenex_deals tracks the
+    // client deals it refers (see scripts/migrate-sitenex.js).
     //
     // primeSignal is DELIBERATELY ABSENT. Its vocabulary ('platform' | 'no-platform') is about
-    // booking-software polarity and means nothing here; prime for ACBM is "the site is bad",
+    // booking-software polarity and means nothing here; prime for SiteNex is "the site is bad",
     // i.e. a high site_score. Setting primeSignal:'no-platform' would make the Prospects page's
     // prime filter read "no CMS detected" — close to the opposite of what we want. Because the
     // field is absent, routes.js:4410 still falls back to 'no-platform' for the legacy
-    // ?booking_platform=prime filter, so that filter must NOT be used for acbm; the page needs
-    // to branch on primeBy. Until it does, filter acbm by site_score directly.
+    // ?booking_platform=prime filter, so that filter must NOT be used for sitenex; the page needs
+    // to branch on primeBy. Until it does, filter sitenex by site_score directly.
     primeBy: 'site_score',            // prime = HIGH site_score (0-100, higher = worse)
     // These three survived a four-cell experiment (2026-09-28, ~$1.50) that separated the
     // CATEGORY effect from the GEOGRAPHY effect. Metrics per cell were: share with no website
@@ -174,9 +174,9 @@ const PRODUCT_CONFIG = {
     callCap: 150,                     // 3 subtypes × 13 regions × ≤3 pages ≈ 117 calls (~$4)
     // CMS / site-builder tokens. NOTE: these are scored, not chosen between — the site-quality
     // scorer (not built yet) will use detectAll() so every signal counts. Until that scorer
-    // exists, running the EXISTING booking qualifier against acbm will record whichever builder
+    // exists, running the EXISTING booking qualifier against sitenex will record whichever builder
     // it finds in booking_platform. That is harmless and mildly useful (it is a real builder
-    // detection), and it cannot corrupt the acbm prime pool because prime here is site_score,
+    // detection), and it cannot corrupt the sitenex prime pool because prime here is site_score,
     // not booking_platform.
     signatures: [
       { platform: 'wix', key: 'wix.com' },
@@ -197,7 +197,7 @@ const PRODUCT_CONFIG = {
       { platform: 'frontpage', key: 'vti_cnf' },          // FrontPage leftovers — ancient by definition
     ],
     // The scorer fetches the homepage; these are the one-hop links worth following when the
-    // homepage alone is thin. Not booking links — ACBM sells the site itself.
+    // homepage alone is thin. Not booking links — SiteNex sells the site itself.
     bookingLinkTerms: ['about', 'contact', 'services'],
     // NOT YET READ BY ANY CODE. Declared here for the scorer's qualify pass, which will consume
     // it; until that ships, nothing rejects anything and these rows enumerate like any other.

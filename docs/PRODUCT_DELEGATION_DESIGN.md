@@ -89,41 +89,41 @@ everything.
 
 ---
 
-## An ACBM account, concretely
+## A partner account, concretely
 
 ```
-role:      acbm_partner          tiers: { self: 'rw', acbm: 'r' }
-products:  ['acbm']
+role:      partner          tiers: { self: 'rw', sitenex: 'r' }
+products:  ['sitenex']
 NOT:       'internal'
 ```
 
-`acbm_partner` is the first role for somebody who does not work here, so nothing about it is inherited
-from a role designed for staff. It holds the `acbm` tier read-only — every acbm route is a GET today,
+`partner` is the first role for somebody who does not work here, so nothing about it is inherited
+from a role designed for staff. It holds the `sitenex` tier read-only — every sitenex route is a GET today,
 and `rw` would pre-authorise a write route that does not exist yet — and a hand-written permission
 template of 16 features.
 
-**It sees Deals and Packages. It does not see ACBM Prospects.** That screen is our scored machine-shop
+**It sees Deals and Packages. It does not see SiteNex Prospects.** That screen is our scored machine-shop
 lead list; a referral partner reading it would be reading our pipeline rather than their own deals.
 Three independent refusals, which is the point of having layers:
 
 | Layer | What refuses Prospects |
 |---|---|
 | role | the route keeps `adminOnly` |
-| resolver | `acbm.prospects.list` is not in the template |
-| nav | `NAV_PAGE_REQS['acbm-prospects']` needs the `intelligence` tier, which the role has not got |
+| resolver | `sitenex.prospects.list` is not in the template |
+| nav | `NAV_PAGE_REQS['sitenex-prospects']` needs the `intelligence` tier, which the role has not got |
 
 What the account *can* reach:
 
-- `GET /api/acbm/deals`, `GET /api/acbm/packages` — gated `requireTier('acbm')`, a tier held by
-  `super_admin`, `admin` and `acbm_partner` and nobody else
+- `GET /api/sitenex/deals`, `GET /api/sitenex/packages` — gated `requireTier('sitenex')`, a tier held by
+  `super_admin`, `admin` and `partner` and nobody else
 - the `shared` routes: its own tasks, activity, KPIs, performance, profile, password
 - `GET /api/roles` — the role catalog. Not an admin capability: `buildNav()` fetches it on every page
   load to work out the caller's tiers, and without it the nav falls back to section-only and would draw
-  the ACBM Prospects link it cannot open. It was classified `internal` in the route map, which was
+  the SiteNex Prospects link it cannot open. It was classified `internal` in the route map, which was
   wrong the moment a non-internal account existed.
-- notifications tagged `acbm` — although in practice the bell is not rendered for this role at all,
+- notifications tagged `sitenex` — although in practice the bell is not rendered for this role at all,
   because it needs the `intelligence` tier (`index.html:1016`), the same as `sales_team`
-- `GET /api/prospects/:id` only for rows whose own `product` is `acbm` — resolved by looking the row up
+- `GET /api/prospects/:id` only for rows whose own `product` is `sitenex` — resolved by looking the row up
   (`row:prospects.product`), because that URL carries no product at all and a guessed id would
   otherwise read, or `PUT` would modify, another product's row
 
@@ -131,9 +131,9 @@ What it cannot reach, and why it is two separate reasons: `GET /api/users`, `POS
 `POST /api/roles` and the rest of the platform surface are `internal` in the route map (boundary),
 *and* gated by `adminOnly`/`superAdminOnly` (role). Either one alone would refuse it.
 
-> **`PERMISSIONS_ENFORCE_ROLES` must list `acbm_partner`.** The template above decides nothing
+> **`PERMISSIONS_ENFORCE_ROLES` must list `partner`.** The template above decides nothing
 > otherwise — `enforce.js:82` returns early for a role that is not listed, leaving the route gates
-> alone. Pinned by `src/lib/permissions/acbm-partner.test.js` and `src/api/acbm-routes.test.js`.
+> alone. Pinned by `src/lib/permissions/sitenex-partner.test.js` and `src/api/sitenex-routes.test.js`.
 
 ---
 
@@ -147,7 +147,7 @@ a bug:
 | | asks | example |
 |---|---|---|
 | role / tier | *is this kind of user allowed to do this kind of thing?* | `admin` grants nearly every feature |
-| product boundary | *whose business's data is this?* | Prasanthi holds `abiozen, golfnex, internal` — so `linkabl`, `favly`, `aros` and `acbm` are refused |
+| product boundary | *whose business's data is this?* | Prasanthi holds `abiozen, golfnex, internal` — so `linkabl`, `favly`, `aros` and `sitenex` are refused |
 
 Prasanthi is an `admin`. Her role grants the Reorder Agent, the Linkabl digest, AROS Sourcing, everything.
 The boundary refuses the ones whose product she does not hold. **That 403 is the feature.** The value of a
@@ -229,7 +229,7 @@ designed, reviewed, and never built. Three reasons it was the wrong shape:
 1. **It creates a second authority over access.** The whole value of the boundary is that exactly one
    person decides who reaches what. A delegated invite splits that, and the split is invisible — you
    would have to read `user_products` to know who granted whom.
-2. **The interesting case is a partner, and a partner should not multiply.** ACBM is a referral
+2. **The interesting case is a partner, and a partner should not multiply.** ACBM Partners is a referral
    partner. An account that can create accounts inside our system is a different kind of relationship
    from an account that can read its own deals, and only one of those was ever wanted.
 3. **It solved a problem we do not have.** There are 17 internal users and one partner. Super admin
@@ -252,7 +252,7 @@ within these products" grant, which is the same check written where it can be se
 | `users.invited_products` + `users.invited_by` | `scripts/migrate-invite-products.js` |
 | Invite (super_admin only, products chosen) · accept (grants written) | `src/api/routes.js` |
 | The invite form and the products column | `public/index.html` (`pages.team`, `renderInviteProducts`) |
-| `acbm_partner` — tiers, template, nav family, and what each layer refuses | `src/lib/roles.js`, `src/lib/permissions/templates.js`, `public/index.html` (`NAV_FAMILIES`) |
+| `partner` — tiers, template, nav family, and what each layer refuses | `src/lib/roles.js`, `src/lib/permissions/templates.js`, `public/index.html` (`NAV_FAMILIES`) |
 
 ### Adding a route
 

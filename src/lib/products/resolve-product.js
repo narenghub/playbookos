@@ -2,7 +2,7 @@
 //
 //   resolveProduct(req, { lookupRowProduct }) -> { product, via, unresolved }
 //
-// `product` is always a CONCRETE grantable name ('abiozen' … 'acbm', or the pseudo-products
+// `product` is always a CONCRETE grantable name ('abiozen' … 'sitenex', or the pseudo-products
 // 'shared' / 'internal'), or null when it cannot be determined. Never an intermediate marker:
 // 'param:product' and 'param:agent' are instructions to keep resolving, not answers, and
 // comparing either literal against user_products would compare a sentinel to a grant and quietly
@@ -17,7 +17,7 @@ const { classifyRoute, AGENT_PRODUCT, PARAM_DEFAULT, ROW_FORM, GRANTABLE } = req
 const MAX_HOPS = 4;
 // Only these tables may be consulted by a `row:` value. The map is code, not user input, but an
 // allowlist means a typo fails closed instead of reaching the database with a bad identifier.
-const ROW_TABLES = { prospects: 'product', acbm_deals: null };
+const ROW_TABLES = { prospects: 'product', sitenex_deals: null };
 
 // The map is keyed on ROUTE PATTERNS ('/api/prospects/:id'), but this middleware runs BEFORE the
 // router, where `req.route` does not exist yet — so a concrete path ('/api/prospects/6533') has to

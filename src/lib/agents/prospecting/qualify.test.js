@@ -222,7 +222,7 @@ test('every product declares EXACTLY ONE prime axis, and linkabl is the inverted
   // scheduling, so prime = none. linkabl: an ATS means real requisition volume, so prime = has one.
   // Getting this backwards points a whole sales list at the wrong half of the market.
   //
-  // acbm introduced a SECOND axis: prime there is "the site is bad" (high site_score), which
+  // sitenex introduced a SECOND axis: prime there is "the site is bad" (high site_score), which
   // primeSignal's vocabulary cannot express. So the invariant is no longer "everyone declares
   // primeSignal" but the stricter "everyone declares exactly one axis, and never both" — a
   // product silent about how prime is defined is the actual bug this test exists to catch.
@@ -242,14 +242,14 @@ test('every product declares EXACTLY ONE prime axis, and linkabl is the inverted
   assert.equal(getConfig('golfnex').primeSignal, 'no-platform');
   assert.equal(getConfig('favly').primeSignal, 'no-platform');
   assert.equal(getConfig('linkabl').primeSignal, 'platform');
-  // acbm deliberately has NO primeSignal: routes.js:4410 would otherwise read it as
+  // sitenex deliberately has NO primeSignal: routes.js:4410 would otherwise read it as
   // 'no-platform' and the page's prime filter would mean "no CMS detected".
-  assert.equal(getConfig('acbm').primeSignal, undefined);
-  assert.equal(getConfig('acbm').primeBy, 'site_score');
+  assert.equal(getConfig('sitenex').primeSignal, undefined);
+  assert.equal(getConfig('sitenex').primeBy, 'site_score');
 });
 
-test('acbm shipping config: 3 experiment-backed subtypes, all IL regions, capped', () => {
-  const a = getConfig('acbm');
+test('sitenex shipping config: 3 experiment-backed subtypes, all IL regions, capped', () => {
+  const a = getConfig('sitenex');
   assert.deepEqual(a.states, ['IL']);
   assert.equal(a.regions, undefined, 'no metro override — the segment scales by adding metros');
   assert.equal(a.callCap, 150);       // 3 × 13 × ≤3 pages ≈ 117 calls
@@ -261,15 +261,15 @@ test('acbm shipping config: 3 experiment-backed subtypes, all IL regions, capped
   assert.ok(a.signatures.length >= 10 && a.bookingLinkTerms.length >= 1);
 });
 
-test('acbm reject patterns cover chains and hospital systems, but NOT review count', () => {
-  const pats = getConfig('acbm').rejectNamePatterns;
+test('sitenex reject patterns cover chains and hospital systems, but NOT review count', () => {
+  const pats = getConfig('sitenex').rejectNamePatterns;
   assert.ok(Array.isArray(pats) && pats.length >= 10);
   for (const needle of ['walgreens', 'cvs', 'health system', 'hospital']) {
     assert.ok(pats.includes(needle), `missing reject pattern: ${needle}`);
   }
   // machine shops average 5 reviews — a review-count floor would reject the best segment.
   assert.ok(!pats.some(p => /review|rating|count/.test(p)));
-  assert.equal(getConfig('acbm').minRatingCount, undefined);
+  assert.equal(getConfig('sitenex').minRatingCount, undefined);
 });
 
 // ── detectAll — every signal present, not just the first ────────────────────────

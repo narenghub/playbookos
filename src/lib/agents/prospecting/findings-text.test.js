@@ -1,7 +1,7 @@
 // Findings wording tests — run with:  node --test src/lib/agents/prospecting/findings-text.test.js
 // The contract: a human-facing string never contains a signal key, a penalty, or the score. This
 // module is the ONLY place that wording lives, so these tests guard the call sheet and the
-// acbm-prospects screen at once.
+// sitenex-prospects screen at once.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
