@@ -30,9 +30,12 @@ const lookupRowProduct = async (table, column, id) => {
   return (r.rows[0] && r.rows[0].product) || null;
 };
 
+// A BARE request — params EMPTY, as Express leaves it before the router. The previous version passed
+// `params: { id }`, which is the one thing the middleware never has at that point, and that is why this
+// script passed while GET/PUT /api/prospects/:id fail-closed 403'd in production.
 const req = (method, id) => ({
   method, originalUrl: `/api/prospects/${id}`, url: `/api/prospects/${id}`,
-  params: { id: String(id) }, query: {}, body: {}, headers: {},
+  params: {}, query: {}, body: {}, headers: {},
 });
 
 function check(label, actual, expected) {

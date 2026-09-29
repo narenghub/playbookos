@@ -38,20 +38,25 @@ function mountedRoutes() {
   return out;
 }
 
-// A request as it reaches the middleware: BEFORE the router, so req.route does not exist and the
-// path is concrete. Params are filled the way Express would have, so row:/param: routes resolve.
+// A request as it reaches the middleware: BEFORE the router.
+//
+// req.params IS EMPTY, and that is the point. The previous version of this helper filled it in "the way
+// Express would have" — which is exactly the way Express would NOT have, because this middleware is
+// mounted app-level and runs before the router that populates params. That one wrong assumption made the
+// sweep pass while every `param:agent` and `row:` route fail-closed 403'd in production: all nine Agent
+// Control Run buttons, and GET/PUT /api/prospects/:id.
+//
+// So the helper now hands over only what the middleware really has — a method, a concrete URL, query and
+// body — and the resolver has to work the params out of the path itself.
 function syntheticReq({ method, path }) {
   const concrete = path
     .replace(/:id\b/g, '12345')
     .replace(/:user_id\b/g, 'u-1').replace(/:userId\b/g, 'u-1')
     .replace(/:rfqId\b/g, '7').replace(/:cas_number\b/g, '50-00-0')
     .replace(/:key\b/g, 'sales-agent');
-  const params = {};
-  for (const m of path.matchAll(/:([a-zA-Z_]+)/g)) {
-    params[m[1]] = m[1] === 'key' ? 'sales-agent' : (m[1].includes('user') ? 'u-1' : '12345');
-  }
   return {
-    method, originalUrl: concrete, url: concrete, params,
+    method, originalUrl: concrete, url: concrete,
+    params: {},                       // ← as Express leaves it before the router
     // param:product routes read the product from the request; the screens always send it.
     query: { product: 'sitenex' }, body: { product: 'sitenex' },
     headers: {},
@@ -129,4 +134,43 @@ test('SWEEP: a param:product route with NO product named still resolves or fails
     const deliberate = res.product === null ? res.unresolved === true : GRANTABLE.includes(res.product);
     assert.ok(deliberate, `${r.method} ${r.path} with no product: ${JSON.stringify(res)}`);
   }
+});
+
+// ── the regression this file could not see ──────────────────────────────────────
+test('the params come from the PATH, because req.params is empty before the router', async () => {
+  // The bug in one assertion. If this passes with an EMPTY req.params, every param:agent and row: route
+  // resolves in production; if the resolver ever goes back to trusting req.params, it fails here.
+  const bare = (method, url) => ({ method, originalUrl: url, url, params: {}, query: {}, body: {}, headers: {} });
+  const agent = await resolveProduct(bare('POST', '/api/agent/mission-control/sales-agent/run'),
+    { lookupRowProduct: async () => null });
+  assert.equal(agent.product, 'abiozen', 'the agent key has to be read out of the path');
+  assert.equal(agent.unresolved, false);
+  assert.match(agent.via.join(' '), /agent:sales-agent=abiozen/);
+
+  const row = await resolveProduct(bare('GET', '/api/prospects/6533'), { lookupRowProduct: async () => 'sitenex' });
+  assert.equal(row.product, 'sitenex', 'the row id has to be read out of the path');
+  assert.match(row.via.join(' '), /#6533/, 'and it must be the id from the URL, not a placeholder');
+});
+
+test('ALL NINE mission-control agents resolve from a bare request', async () => {
+  // Named individually because the symptom was all nine at once, and a sweep that resolves eight of them
+  // would look almost fine.
+  const { AGENT_PRODUCT } = require('./route-map');
+  const keys = Object.keys(AGENT_PRODUCT);
+  assert.ok(keys.length >= 9, `expected at least 9 agent keys, got ${keys.length}`);
+  for (const key of keys) {
+    const url = `/api/agent/mission-control/${key}/run`;
+    const r = await resolveProduct({ method: 'POST', originalUrl: url, url, params: {}, query: {}, body: {}, headers: {} },
+      { lookupRowProduct: async () => null });
+    assert.equal(r.unresolved, false, `${key} must resolve (got ${JSON.stringify(r.product)} via ${r.via.join(' → ')})`);
+    assert.equal(r.product, AGENT_PRODUCT[key], `${key} must resolve to its mapped product`);
+  }
+});
+
+test('an UNLISTED agent key still fails closed', async () => {
+  const url = '/api/agent/mission-control/not-a-real-agent/run';
+  const r = await resolveProduct({ method: 'POST', originalUrl: url, url, params: {}, query: {}, body: {}, headers: {} },
+    { lookupRowProduct: async () => null });
+  assert.equal(r.product, null);
+  assert.equal(r.unresolved, true, 'reading the key from the path must not make unknown keys permissive');
 });

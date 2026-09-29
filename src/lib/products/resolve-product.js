@@ -28,12 +28,18 @@ const ROW_TABLES = { prospects: 'product', sitenex_deals: null };
 // shape ('/api/inquiry/dashboard' before '/api/inquiry/:id'), so literals are tried first and
 // wildcards last. Without that, '/api/prospects/run' would match '/api/prospects/:id' and resolve
 // by row lookup instead of by request param.
+// The named segments are CAPTURED, not just matched. That is the whole fix for the bug below: this
+// middleware runs before the router, so req.params is {} and the pattern is the only thing that knows
+// which path segment is the :id or the :key.
 function patternToRegex(p) {
   const wild = p.endsWith('/*');
   const body = wild ? p.slice(0, -2) : p;
-  const parts = body.split('/').map(seg =>
-    seg.startsWith(':') ? '[^/]+' : seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  return new RegExp('^' + parts.join('/') + (wild ? '(?:/.*)?$' : '$'));
+  const names = [];
+  const parts = body.split('/').map(seg => {
+    if (seg.startsWith(':')) { names.push(seg.slice(1)); return '([^/]+)'; }
+    return seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  });
+  return { rx: new RegExp('^' + parts.join('/') + (wild ? '(?:/.*)?$' : '$')), names };
 }
 let _matchers = null;
 function matchers() {
@@ -41,20 +47,47 @@ function matchers() {
   const { ROUTE_PRODUCT } = require('./route-map');
   const rank = (p) => (p.endsWith('/*') ? 2 : (p.includes('/:') ? 1 : 0));   // literal < param < wildcard
   _matchers = Object.keys(ROUTE_PRODUCT)
-    .map(key => { const [method, ...rest] = key.split(' '); const pattern = rest.join(' '); return { key, method, pattern, rank: rank(pattern), rx: patternToRegex(pattern) }; })
+    .map(key => { const [method, ...rest] = key.split(' '); const pattern = rest.join(' ');
+      const { rx, names } = patternToRegex(pattern);
+      return { key, method, pattern, rank: rank(pattern), rx, names }; })
     .sort((a, b) => a.rank - b.rank || b.pattern.length - a.pattern.length);
   return _matchers;
 }
 
-// Concrete request path → the map's pattern for it, or the raw path when nothing matches (which
-// then classifies as null, i.e. fail closed).
-function routePattern(req) {
-  if (req.route && req.route.path) return (req.baseUrl || '') + req.route.path;  // inside a handler
+// ── THE PARAMS PROBLEM, AND WHY IT WAS INVISIBLE ──────────────────────────────
+//
+// `param:agent` and `row:<table>.<column>` need a value out of the PATH — the agent key, the row id. They
+// used to read req.params, and req.params is EMPTY here: this middleware is mounted app-level, so it runs
+// before the router that would populate it. Every one of those routes therefore resolved to null and
+// fail-closed 403'd in production: all nine Agent Control Run buttons, and GET/PUT /api/prospects/:id.
+//
+// It was invisible because every test and every verification script I wrote built its synthetic request
+// with `params` already filled in — "the way Express would have" — which is exactly the way Express would
+// NOT have at this point in the chain. The sweep test, the row-lookup verification and the mission-control
+// diagnosis all passed against a request shape that cannot occur.
+//
+// The fix is to take the params from the matched PATTERN and the concrete PATH, which is information the
+// middleware genuinely has. req.params is still preferred when it is populated, so calling this from
+// inside a handler keeps working.
+function paramsFromPath(matcher, path) {
+  const m = matcher.rx.exec(path);
+  if (!m) return {};
+  const out = {};
+  matcher.names.forEach((n, i) => { if (m[i + 1] !== undefined) out[n] = m[i + 1]; });
+  return out;
+}
+
+// Concrete request path → the map's pattern for it, plus the params extracted from it. Returns the raw
+// path as the pattern when nothing matches (which then classifies as null, i.e. fail closed).
+function routeMatch(req) {
+  if (req.route && req.route.path) {
+    return { pattern: (req.baseUrl || '') + req.route.path, params: req.params || {} };   // inside a handler
+  }
   const method = String(req.method || 'GET').toUpperCase();
   const path = (req.originalUrl || req.url || '').split('?')[0].replace(/\/+$/, '') || '/';
   for (const m of matchers()) {
     if (m.method !== method) continue;
-    if (m.rx.test(path)) return m.pattern;
+    if (m.rx.test(path)) return { pattern: m.pattern, params: paramsFromPath(m, path) };
   }
   // The SPA catch-all is mapped as 'GET *' — index.html for any front-end path. It must NOT cover
   // /api/, and that is not a tidiness point: before this line was narrowed, a NEW GET route missing from
@@ -64,9 +97,13 @@ function routePattern(req) {
   //
   // An unmapped /api/ path now returns the raw path, which classifies as null, which fails closed under
   // enforce. That is the behaviour the design claimed and the wildcard quietly undid for every GET.
-  if (method === 'GET' && !path.startsWith('/api/') && require('./route-map').ROUTE_PRODUCT['GET *']) return '*';
-  return path;
+  if (method === 'GET' && !path.startsWith('/api/') && require('./route-map').ROUTE_PRODUCT['GET *']) {
+    return { pattern: '*', params: {} };
+  }
+  return { pattern: path, params: {} };
 }
+// Kept for callers that only want the pattern (the shadow reporter, tests).
+function routePattern(req) { return routeMatch(req).pattern; }
 
 // The product named in the request, for 'param:product'.
 function productFromRequest(req) {
@@ -78,7 +115,10 @@ function productFromRequest(req) {
 
 async function resolveProduct(req, { lookupRowProduct } = {}) {
   const method = String(req.method || 'GET').toUpperCase();
-  const pattern = routePattern(req);
+  const { pattern, params: pathParams } = routeMatch(req);
+  // req.params first (populated when called from inside a handler), then the params read out of the path.
+  // Before the router only the second exists, and that is the case that was broken.
+  const params = { ...pathParams, ...(req.params || {}) };
   let value = classifyRoute(method, pattern);
   const via = [`route:${method} ${pattern}`];
 
@@ -107,7 +147,7 @@ async function resolveProduct(req, { lookupRowProduct } = {}) {
     }
 
     if (value === 'param:agent') {
-      const agentKey = (req.params && (req.params.key || req.params.agent)) || null;
+      const agentKey = params.key || params.agent || null;
       if (!agentKey) return { product: null, via: [...via, 'param:agent with no :key'], unresolved: true };
       const mapped = AGENT_PRODUCT[agentKey];
       via.push(`agent:${agentKey}=${mapped || 'UNLISTED'}`);
@@ -125,7 +165,7 @@ async function resolveProduct(req, { lookupRowProduct } = {}) {
       if (!Object.prototype.hasOwnProperty.call(ROW_TABLES, table)) {
         return { product: null, via: [...via, `row: table '${table}' not allowlisted`], unresolved: true };
       }
-      const id = (req.params && (req.params.id || req.params.rowId)) || null;
+      const id = params.id || params.rowId || null;
       if (!id) return { product: null, via: [...via, 'row: lookup with no :id'], unresolved: true };
       if (typeof lookupRowProduct !== 'function') {
         return { product: null, via: [...via, 'row: no lookup available'], unresolved: true };

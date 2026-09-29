@@ -47,6 +47,11 @@ test('param:product reads the request, and an unknown product name fails closed'
   assert.equal(bogus.unresolved, true);
 });
 
+// NOTE ON THE REQUEST SHAPE IN THESE TESTS. They pass a PATTERN url and an explicit `params`, which is
+// not what the middleware sees — it gets a concrete path and an EMPTY params. That is deliberate here:
+// these drive the resolver's BRANCHES one at a time. It is also exactly the assumption that hid a real
+// bug, so the integration shape (bare request, params read out of the path) is covered separately and
+// non-negotiably in route-sweep.test.js. Do not treat these as proof the production path works.
 test('param:agent resolves a real agent key to its product', async () => {
   // Keys are the REAL MC_RUNNERS keys, suffixes included.
   const abiozenAgent = await resolveProduct(mkReq('POST', '/api/agent/mission-control/:key/run', { params: { key: 'sales-agent' } }));
