@@ -4510,6 +4510,136 @@ router.put('/prospects/:id', authMiddleware, requireTier('sales'), async (req, r
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── ACBM (referral partner) read-only screens ─────────────────────────────────
+// Three GETs behind adminOnly: super_admin + admin only for now. A partner role does not exist,
+// and nobody else needs these yet — widen deliberately later rather than guess now.
+//
+// Findings are rendered to PLAIN SENTENCES HERE, server-side, by the same findings-text.js the
+// call-sheet generator uses. The browser cannot require that module, so formatting in the client
+// would mean a second copy of the wording — and then the sheet a rep reads and the screen a
+// manager reads would describe the same site differently.
+//
+// NOTE: these deliberately do NOT use ?booking_platform=prime. That filter is resolved from
+// primeSignal, which acbm does not set (it declares primeBy:'site_score'), so 'prime' would fall
+// back to "no booking platform" — near the opposite of what ACBM wants. Filtering is on site_score.
+const ACBM_DEAL_STATUSES = ['new', 'contacted', 'proposal_sent', 'signed', 'intake', 'building', 'live', 'lost'];
+const ACBM_BUCKETS = ['scored', 'no_website', 'dead_site', 'unscannable'];
+
+router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { findingSentences, agencyNote, pageSpeedNote, bucketOf, BUCKET_LABEL, packageLabel } =
+      require('../lib/agents/prospecting/findings-text');
+    const clauses = [`product = 'acbm'`], params = [];
+    if (req.query.subtype) { params.push(req.query.subtype); clauses.push(`subtype = $${params.length}`); }
+    if (req.query.region)  { params.push(req.query.region);  clauses.push(`region = $${params.length}`); }
+    if (req.query.package === 'none') clauses.push(`recommended_package IS NULL`);
+    else if (req.query.package) { params.push(req.query.package); clauses.push(`recommended_package = $${params.length}`); }
+    // Bucket is derived, not stored — express each one as the condition the scorer writes.
+    const bucket = req.query.bucket;
+    if (bucket === 'no_website') clauses.push(`website IS NULL`);
+    else if (bucket === 'unscannable') clauses.push(`site_findings->>'unscannable' = 'true'`);
+    else if (bucket === 'dead_site') clauses.push(`site_findings->>'reachable' = 'false' AND site_findings->>'unscannable' IS NULL`);
+    else if (bucket === 'scored') clauses.push(`site_score IS NOT NULL AND site_findings->>'unscannable' IS NULL`);
+    const where = clauses.join(' AND ');
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
+
+    const total = parseInt((await query(`SELECT COUNT(*)::int n FROM prospects WHERE ${where}`, params)).rows[0].n);
+    const rows = (await query(
+      `SELECT id, name, subtype, address, region, phone, website, site_url, site_score, rating_count,
+              recommended_package, site_findings, status, reject_reason
+         FROM prospects WHERE ${where}
+        ORDER BY site_score DESC NULLS LAST, rating_count ASC NULLS FIRST, id
+        LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, params)).rows;
+
+    const cityOf = (address, region) => {
+      const m = /,\s*([^,]+),\s*[A-Z]{2}\s+\d{5}/.exec(address || '');
+      return (m && m[1].trim()) || String(region || '').replace(/,\s*(IL|Illinois)$/, '') || null;
+    };
+    const items = rows.map(r => {
+      const f = r.site_findings || {};
+      const b = bucketOf(r);
+      return {
+        id: r.id, name: r.name, subtype: r.subtype, city: cityOf(r.address, r.region), region: r.region,
+        phone: r.phone, website: r.website, site_url: r.site_url,
+        site_score: r.site_score, rating_count: r.rating_count,
+        recommended_package: r.recommended_package, package_label: packageLabel(r.recommended_package),
+        bucket: b, bucket_label: BUCKET_LABEL[b],
+        agency_flag: (f.agency_signals || []).length > 0,
+        builder: f.builder || null,
+        status: r.status, reject_reason: r.reject_reason,
+        // the expanded row — the same sentences the call sheet prints
+        findings: findingSentences(f), agency_note: agencyNote(f), pagespeed_note: pageSpeedNote(f),
+      };
+    });
+
+    const summary = (await query(
+      `SELECT COUNT(*)::int total,
+              COUNT(*) FILTER (WHERE website IS NULL)::int no_website,
+              COUNT(*) FILTER (WHERE site_findings->>'unscannable' = 'true')::int unscannable,
+              COUNT(*) FILTER (WHERE site_findings->>'reachable' = 'false' AND site_findings->>'unscannable' IS NULL)::int dead_site,
+              COUNT(*) FILTER (WHERE recommended_package = 'P2')::int p2,
+              COUNT(*) FILTER (WHERE recommended_package = 'P1')::int p1,
+              COUNT(*) FILTER (WHERE status = 'rejected')::int rejected
+         FROM prospects WHERE product = 'acbm'`)).rows[0];
+    const facets = {
+      subtypes: (await query(`SELECT DISTINCT subtype FROM prospects WHERE product='acbm' AND subtype IS NOT NULL ORDER BY 1`)).rows.map(x => x.subtype),
+      regions: (await query(`SELECT DISTINCT region FROM prospects WHERE product='acbm' AND region IS NOT NULL ORDER BY 1`)).rows.map(x => x.region),
+      buckets: ACBM_BUCKETS, packages: ['P1', 'P2'],
+    };
+    res.json({ page, pageSize, total, items, summary, facets });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/acbm/deals', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { packageLabel } = require('../lib/agents/prospecting/findings-text');
+    const rows = (await query(
+      `SELECT d.id, d.status, d.package_code, d.referred_by, d.proposal_url, d.signed_at,
+              d.value_cents, d.monthly_cents, d.created_at, d.updated_at,
+              p.name AS prospect_name, p.phone AS prospect_phone, p.region AS prospect_region,
+              u.name AS owner_name
+         FROM acbm_deals d
+         LEFT JOIN prospects p ON p.id = d.prospect_id
+         LEFT JOIN users u ON u.id = d.owner_user_id
+        ORDER BY d.updated_at DESC, d.id DESC`)).rows;
+    // One column per acbm_deals.status, in lifecycle order from the column's own COMMENT. Empty
+    // columns are rendered too — the board's shape is the pipeline, not a reflection of today's rows.
+    const columns = ACBM_DEAL_STATUSES.map(status => ({
+      status,
+      deals: rows.filter(r => r.status === status).map(r => ({
+        ...r, package_label: packageLabel(r.package_code),
+        value_usd: r.value_cents == null ? null : r.value_cents / 100,
+        monthly_usd: r.monthly_cents == null ? null : r.monthly_cents / 100,
+      })),
+    }));
+    res.json({ total: rows.length, statuses: ACBM_DEAL_STATUSES, columns });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/acbm/packages', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const rows = (await query(
+      `SELECT code, name, summary, included, not_included, setup_fee_cents, monthly_cents,
+              typical_weeks, active
+         FROM acbm_packages ORDER BY code`)).rows;
+    // PRICES ARE DELIBERATELY NULL until they are decided. The contract is that a consumer must
+    // REFUSE to render a null price rather than printing $0, so the API hands the client an
+    // explicit `priced: false` and no numbers at all — there is nothing for a template to
+    // accidentally coerce to zero.
+    res.json({
+      packages: rows.map(r => ({
+        code: r.code, name: r.name, summary: r.summary, active: r.active,
+        typical_weeks: r.typical_weeks,
+        included: r.included || [], not_included: r.not_included || [],
+        priced: r.setup_fee_cents != null || r.monthly_cents != null,
+        setup_fee_usd: r.setup_fee_cents == null ? null : r.setup_fee_cents / 100,
+        monthly_usd: r.monthly_cents == null ? null : r.monthly_cents / 100,
+      })),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Event Agent: CPHI Milan 2026 ──────────────────────────────────────────────
 // Sourcing intelligence for the show floor: which API manufacturers holding an active US
 // Type II DMF for a molecule our trial pipeline needs are actually exhibiting, and where.

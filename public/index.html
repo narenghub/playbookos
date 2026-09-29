@@ -771,6 +771,14 @@ const NAV_SECTIONS = [
     {id:'team', label:'Team Management', icon:'👥'},
     {id:'agent-control', label:'Agent Control', icon:'⚡'},
   ]},
+  // ACBM referral pipeline. access:['admin'] = admin + super_admin ONLY (there is no 'admin'
+  // family, so every other role fails navSectionVisible). A partner role does not exist yet;
+  // widen deliberately when it does rather than guessing now.
+  {title:'ACBM', access:['admin'], items:[
+    {id:'acbm-prospects', label:'ACBM Prospects', icon:'🏭'},
+    {id:'acbm-deals', label:'ACBM Deals', icon:'📋'},
+    {id:'acbm-packages', label:'ACBM Packages', icon:'📦'},
+  ]},
   {title:'PLATFORM', access:['admin'], items:[
     {id:'sku-economics', label:'SKU Economics', icon:'📦'},
     {id:'settings', label:'Settings', icon:'⚙️'},
@@ -839,6 +847,11 @@ const PRODUCTS = [
   // marketplace; AROS Sourcing finds CUSTOMERS for AROS. Opposite directions, different
   // businesses — so they do not belong under one product however similar the data looks.
   { key:'aros',     label:'AROS',     icon:'🏭', kind:'product', pages:['aros-establishments'] },
+  // ACBM is a referral partner: these screens track the CLIENT deals it refers. 'prospects' is
+  // NOT listed here — the acbm rows live in the same table but are read through acbm-prospects,
+  // which filters on site_score rather than the booking-platform 'prime' filter that does not
+  // apply to acbm.
+  { key:'acbm',     label:'ACBM',     icon:'🔧', kind:'product', pages:['acbm-prospects','acbm-deals','acbm-packages'] },
   // global areas (not products). Some listed pages are not in the classic nav (data-pipeline,
   // execution-graph, decision-engine, my-activity) — they stay non-navigable and never surface
   // in product mode either (pageVisibleToRole is false for anything not in the classic nav).
@@ -1525,7 +1538,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'FDA Establishments','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'FDA Establishments','acbm-prospects':'ACBM Prospects','acbm-deals':'ACBM Deals','acbm-packages':'ACBM Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -7387,4 +7400,177 @@ function cdiReResolve(){
   if (!confirm('Re-resolve will search Apollo again, re-spend credits, and regenerate outreach. Continue?')) return;
   cdiFindContacts(true);
 }
+/* ── ACBM referral pipeline (Milestone 1: three read-only screens) ────────────── */
+/* Mirrors the Prospects page idiom exactly: innerHTML into #content, the same card /
+   card-title / text-body / metric-grid components, filter <select>s wired to a state object,
+   and a row that expands in place. Nothing bespoke.
+   The FINDINGS come from the server already written as plain sentences — findings-text.js is a
+   Node module the browser cannot require, so formatting here would mean a second copy of the
+   wording and the sheet a rep reads would drift from the screen a manager reads. */
+window._apFilters = { subtype:'', region:'', bucket:'', package:'', page:1 };
+window._apState = { total:0, pageSize:50, summary:null, facets:null, open:null };
+const apEsc = (x) => csEsc(x);
+const apDash = '<span style="color:var(--text-muted)">—</span>';
+function apSetFilter(k, v){ window._apFilters[k] = v; window._apFilters.page = 1; pages['acbm-prospects'](); }
+function apResetFilters(){ window._apFilters = { subtype:'', region:'', bucket:'', package:'', page:1 }; pages['acbm-prospects'](); }
+function apPage(d){ const st=window._apState, f=window._apFilters;
+  const max=Math.max(1,Math.ceil((st.total||0)/(st.pageSize||50))); f.page=Math.min(max,Math.max(1,(f.page||1)+d)); pages['acbm-prospects'](); }
+function apToggle(id){ window._apState.open = (window._apState.open === String(id)) ? null : String(id); pages['acbm-prospects'](); }
+/* site_score is 0-100 and HIGHER = WORSE, so the colour scale runs the opposite way to a score
+   people are used to reading. 40 is the P2 threshold. */
+function apScoreChip(v){
+  if (v == null) return apDash;
+  const c = v >= 60 ? '#dc2626' : v >= 40 ? '#d97706' : v >= 20 ? '#64748b' : '#1D9E75';
+  return '<span style="display:inline-block;min-width:30px;padding:1px 6px;border-radius:10px;font-weight:700;font-size:11px;background:'+c+'22;color:'+c+'">'+v+'</span>';
+}
+pages['acbm-prospects'] = async function(){
+  const c = document.getElementById('content');
+  const f = window._apFilters, st = window._apState;
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading ACBM prospects…</p>';
+  const qs = new URLSearchParams();
+  ['subtype','region','bucket','package'].forEach(k => { if (f[k]) qs.set(k, f[k]); });
+  qs.set('page', String(f.page||1)); qs.set('pageSize', String(st.pageSize));
+  const res = await API('/acbm/prospects?'+qs.toString()).catch(e => ({ error:e.message }));
+  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">ACBM Prospects</div><p style="color:#dc2626">'+apEsc(res.error)+'</p></div>'; return; }
+  const items = res.items || []; st.total = res.total||0; st.summary = res.summary||null; st.facets = res.facets||null;
+  const sm = st.summary || {}, fa = st.facets || { subtypes:[], regions:[], buckets:[], packages:[] };
+
+  const header = '<div class="card">'
+    + '<div class="card-title text-section" style="margin:0">ACBM Prospects</div>'
+    + '<div class="text-body">Businesses whose website is bad enough to sell a rebuild against, worst site first. '
+    + '<strong>site_score is 0-100 and higher means worse</strong> — it scores how bad the current site is, so the '
+    + 'worst sort to the top. Review count sits beside it deliberately and is NOT part of the score: the score answers '
+    + '&ldquo;how bad is the site&rdquo;, reviews answer &ldquo;do they need customers&rdquo;. An agency flag means '
+    + 'someone may already be paid to look after the site.</div></div>';
+
+  const stat = (label,val,color) => '<div style="flex:1;min-width:110px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;text-align:center">'
+    + '<div style="font-size:22px;font-weight:800;color:'+(color||'var(--text-body)')+'">'+((val==null?0:val).toLocaleString())+'</div>'
+    + '<div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">'+label+'</div></div>';
+  const summaryRow = '<div class="card" style="display:flex;gap:10px;flex-wrap:wrap">'
+    + stat('Total', sm.total, '#1B3A6B') + stat('P2 · rebuild', sm.p2, '#d97706') + stat('P1 · new site', sm.p1, '#2563eb')
+    + stat('No website', sm.no_website, '#64748b') + stat('Blocked (not assessed)', sm.unscannable, '#64748b')
+    + stat("Site doesn't load", sm.dead_site, '#64748b') + stat('Rejected', sm.rejected, '#dc2626') + '</div>';
+
+  const sel = (key, blank, opts) => '<select onchange="apSetFilter(\''+key+'\', this.value)" style="font-size:12px;padding:4px">'
+    + '<option value="">'+blank+'</option>'
+    + opts.map(o => { const v = o.v!==undefined?o.v:o, l = o.l!==undefined?o.l:o;
+        return '<option value="'+apEsc(v)+'"'+(f[key]===v?' selected':'')+'>'+apEsc(l)+'</option>'; }).join('') + '</select>';
+  const filters = '<div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    + sel('subtype','subtype: any', fa.subtypes)
+    + sel('region','metro: any', fa.regions)
+    + sel('bucket','bucket: any', [{v:'scored',l:'scored'},{v:'no_website',l:'no website (P1)'},{v:'dead_site',l:"site doesn't load"},{v:'unscannable',l:'blocked (not assessed)'}])
+    + sel('package','package: any', [{v:'P2',l:'P2 · Renew'},{v:'P1',l:'P1 · Launch'},{v:'none',l:'no package'}])
+    + '<button onclick="apResetFilters()" class="btn-outline btn-sm" style="font-size:11px">Reset</button></div>';
+
+  const rows = items.map(it => {
+    const isOpen = st.open === String(it.id);
+    const site = it.site_url || it.website;
+    const main = '<tr onclick="apToggle(\''+it.id+'\')" style="cursor:pointer;border-top:1px solid var(--border)'+(isOpen?';background:var(--light)':'')+'">'
+      + '<td style="padding:7px 8px;font-weight:600">'+(isOpen?'▾ ':'▸ ')+apEsc(it.name)+'</td>'
+      + '<td style="padding:7px 8px">'+apEsc((it.subtype||'').replace(/_/g,' '))+'</td>'
+      + '<td style="padding:7px 8px">'+(apEsc(it.city)||apDash)+'</td>'
+      + '<td style="padding:7px 8px">'+(it.phone?'<a href="tel:'+apEsc(String(it.phone).replace(/[^0-9+]/g,''))+'" onclick="event.stopPropagation()">'+apEsc(it.phone)+'</a>':apDash)+'</td>'
+      + '<td style="padding:7px 8px;text-align:right">'+apScoreChip(it.site_score)+'</td>'
+      + '<td style="padding:7px 8px;text-align:right">'+(it.rating_count==null?apDash:it.rating_count.toLocaleString())+'</td>'
+      + '<td style="padding:7px 8px">'+(it.package_label?apEsc(it.recommended_package):apDash)+'</td>'
+      + '<td style="padding:7px 8px;text-align:center">'+(it.agency_flag?'<span title="someone may already be looking after this site" style="color:#d97706">⚠</span>':apDash)+'</td>'
+      + '</tr>';
+    if (!isOpen) return main;
+    const lines = (it.findings||[]).map(x => '<li style="margin:3px 0">'+apEsc(x)+'</li>').join('') || '<li style="color:var(--text-muted)">no findings recorded</li>';
+    const detail = '<tr style="background:var(--light)"><td colspan="8" style="padding:10px 14px 14px 22px">'
+      + '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:4px">What&rsquo;s wrong with it</div>'
+      + '<ul style="margin:0 0 8px 16px;padding:0;font-size:13px">'+lines+'</ul>'
+      + (it.agency_note ? '<div style="font-size:12px;color:#d97706;margin-bottom:6px">⚠ Careful: '+apEsc(it.agency_note)+'</div>' : '')
+      + (it.pagespeed_note ? '<div style="font-size:12px;margin-bottom:6px">'+apEsc(it.pagespeed_note)+'</div>' : '')
+      + '<div style="font-size:12px;color:var(--text-muted)">'
+      +   'bucket: '+apEsc(it.bucket_label||'—')
+      +   (it.builder?' · builder: '+apEsc(it.builder):'')
+      +   (it.package_label?' · '+apEsc(it.package_label):'')
+      +   (site?' · <a href="'+apEsc(site)+'" target="_blank" rel="noopener noreferrer">'+apEsc(site)+'</a>':' · no website')
+      + '</div></td></tr>';
+    return main + detail;
+  }).join('');
+
+  const maxPage = Math.max(1, Math.ceil(st.total/(st.pageSize||50)));
+  const pager = '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;font-size:12px;color:var(--text-muted)">'
+    + '<span>'+st.total.toLocaleString()+' prospect'+(st.total===1?'':'s')+'</span>'
+    + '<span><button onclick="apPage(-1)" class="btn-outline btn-sm" '+((f.page||1)<=1?'disabled':'')+'>‹</button> '
+    + 'page '+(f.page||1)+' of '+maxPage+' <button onclick="apPage(1)" class="btn-outline btn-sm" '+((f.page||1)>=maxPage?'disabled':'')+'>›</button></span></div>';
+
+  const table = '<div class="card" style="padding:0;overflow-x:auto">'
+    + '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">'
+    + '<th style="padding:8px">Business</th><th style="padding:8px">Subtype</th><th style="padding:8px">City</th><th style="padding:8px">Phone</th>'
+    + '<th style="padding:8px;text-align:right">Site score</th><th style="padding:8px;text-align:right">Reviews</th><th style="padding:8px">Package</th><th style="padding:8px;text-align:center">Agency</th>'
+    + '</tr></thead><tbody>'
+    + (rows || '<tr><td colspan="8" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
+    + '</tbody></table>'+pager+'</div>';
+
+  c.innerHTML = header + summaryRow + filters + table;
+};
+
+pages['acbm-deals'] = async function(){
+  const c = document.getElementById('content');
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading ACBM deals…</p>';
+  const res = await API('/acbm/deals').catch(e => ({ error:e.message }));
+  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">ACBM Deals</div><p style="color:#dc2626">'+apEsc(res.error)+'</p></div>'; return; }
+  const cols = res.columns || [];
+  const header = '<div class="card">'
+    + '<div class="card-title text-section" style="margin:0">ACBM Deals</div>'
+    + '<div class="text-body">One column per deal status. ACBM is a referral <em>partner</em>, not a billed account — these are the '
+    + 'client deals ACBM refers. '+(res.total?('<strong>'+res.total+'</strong> deal'+(res.total===1?'':'s')+'.'):'No deals yet: the board shows the pipeline shape, so the columns are here before the rows are.')
+    + '</div></div>';
+  const card = (d) => '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--white)">'
+    + '<div style="font-weight:600;font-size:13px">'+apEsc(d.prospect_name || ('deal #'+d.id))+'</div>'
+    + (d.prospect_region?'<div style="font-size:11px;color:var(--text-muted)">'+apEsc(d.prospect_region)+'</div>':'')
+    + '<div style="font-size:11px;margin-top:4px">'+(d.package_label?apEsc(d.package_label):'<span style="color:var(--text-muted)">no package</span>')+'</div>'
+    /* Value is shown ONLY when it exists. Pricing is not set, and printing $0 for an unpriced
+       deal is the specific failure the packages screen also guards against. */
+    + (d.value_usd!=null?'<div style="font-size:11px;margin-top:2px">$'+d.value_usd.toLocaleString()+(d.monthly_usd!=null?' + $'+d.monthly_usd.toLocaleString()+'/mo':'')+'</div>':'')
+    + (d.owner_name?'<div style="font-size:11px;color:var(--text-muted);margin-top:2px">'+apEsc(d.owner_name)+'</div>':'')
+    + (d.referred_by?'<div style="font-size:10px;color:var(--text-muted);margin-top:2px">via '+apEsc(d.referred_by)+'</div>':'')
+    + '</div>';
+  const board = '<div class="card" style="overflow-x:auto"><div style="display:flex;gap:10px;min-width:900px">'
+    + cols.map(col => '<div style="flex:1;min-width:150px">'
+        + '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);padding:0 2px 6px">'
+        +   apEsc(col.status.replace(/_/g,' '))+' <span style="color:var(--text-body);font-weight:700">'+col.deals.length+'</span></div>'
+        + (col.deals.length ? col.deals.map(card).join('')
+            : '<div style="border:1px dashed var(--border);border-radius:8px;padding:12px 8px;text-align:center;font-size:11px;color:var(--text-muted)">empty</div>')
+      + '</div>').join('')
+    + '</div></div>';
+  c.innerHTML = header + board;
+};
+
+pages['acbm-packages'] = async function(){
+  const c = document.getElementById('content');
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading ACBM packages…</p>';
+  const res = await API('/acbm/packages').catch(e => ({ error:e.message }));
+  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">ACBM Packages</div><p style="color:#dc2626">'+apEsc(res.error)+'</p></div>'; return; }
+  const header = '<div class="card">'
+    + '<div class="card-title text-section" style="margin:0">ACBM Packages</div>'
+    + '<div class="text-body">Read-only. What each package includes <strong>and what it does not</strong> — the exclusions are what stop a client '
+    + 'expecting content writing or an App Store account. Prices are not decided yet, so none is shown: a package without a price says so rather than showing $0.</div></div>';
+  const list = (res.packages||[]).map(p => {
+    const inc = (p.included||[]).map(x => '<li style="margin:2px 0">'+apEsc(x)+'</li>').join('');
+    const exc = (p.not_included||[]).map(x => '<li style="margin:2px 0">'+apEsc(x)+'</li>').join('')
+      || '<li style="color:var(--text-muted)">not specified yet</li>';
+    /* The null-price contract: REFUSE to render a price rather than print $0. */
+    const price = p.priced
+      ? ((p.setup_fee_usd!=null?'$'+p.setup_fee_usd.toLocaleString()+' setup':'')+(p.monthly_usd!=null?(p.setup_fee_usd!=null?' · ':'')+'$'+p.monthly_usd.toLocaleString()+'/mo':''))
+      : '<span style="color:var(--text-muted)">not priced yet</span>';
+    return '<div class="card">'
+      + '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap">'
+      +   '<div class="card-title" style="margin:0">'+apEsc(p.code)+' · '+apEsc(p.name)
+      +     (p.active?'':' <span style="font-size:11px;font-weight:600;color:#d97706;border:1px solid #d9770644;background:#d9770611;border-radius:10px;padding:1px 7px">not sold yet</span>')+'</div>'
+      +   '<div style="font-size:12px">'+price+(p.typical_weeks?' <span style="color:var(--text-muted)">· typically '+p.typical_weeks+' weeks</span>':'')+'</div>'
+      + '</div>'
+      + (p.summary?'<div class="text-body" style="margin-top:2px">'+apEsc(p.summary)+'</div>':'')
+      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px">'
+      +   '<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#1D9E75;margin-bottom:3px">Included</div>'
+      +     '<ul style="margin:0 0 0 16px;padding:0;font-size:13px">'+inc+'</ul></div>'
+      +   '<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#dc2626;margin-bottom:3px">Not included</div>'
+      +     '<ul style="margin:0 0 0 16px;padding:0;font-size:13px">'+exc+'</ul></div>'
+      + '</div></div>';
+  }).join('');
+  c.innerHTML = header + (list || '<div class="card"><p style="color:var(--text-muted)">No packages configured.</p></div>');
+};
 </script>
