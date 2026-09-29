@@ -4524,13 +4524,24 @@ router.put('/prospects/:id', authMiddleware, requireTier('sales'), async (req, r
 // back to "no booking platform" — near the opposite of what ACBM wants. Filtering is on site_score.
 const ACBM_DEAL_STATUSES = ['new', 'contacted', 'proposal_sent', 'signed', 'intake', 'building', 'live', 'lost'];
 const ACBM_BUCKETS = ['scored', 'no_website', 'dead_site', 'unscannable'];
+// The subtypes ACBM actually ships, read from the prospecting config so this cannot drift from
+// what the enumerator runs. The screen DEFAULTS to these three but still lists all nine in the
+// facet: the other six are the dropped experiment categories (auto_repair, daycare, dental, hvac,
+// legal, plumbing) and their ~608 rows are still in the table. Defaulting stops anyone working the
+// wrong list by accident; keeping them visible stops anyone rediscovering orphan rows in six
+// months and wondering what they are. Hiding them is the version that causes the confusion later.
+const acbmShippingSubtypes = () => ((getProspectingConfig('acbm') || {}).subtypes || []).map(s => s.key);
 
 router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { findingSentences, agencyNote, pageSpeedNote, bucketOf, BUCKET_LABEL, packageLabel } =
       require('../lib/agents/prospecting/findings-text');
     const clauses = [`product = 'acbm'`], params = [];
-    if (req.query.subtype) { params.push(req.query.subtype); clauses.push(`subtype = $${params.length}`); }
+    // subtype accepts a comma-separated list so the screen can default to the shipping three.
+    if (req.query.subtype) {
+      const list = String(req.query.subtype).split(',').map(x => x.trim()).filter(Boolean);
+      if (list.length) { params.push(list); clauses.push(`subtype = ANY($${params.length})`); }
+    }
     if (req.query.region)  { params.push(req.query.region);  clauses.push(`region = $${params.length}`); }
     if (req.query.package === 'none') clauses.push(`recommended_package IS NULL`);
     else if (req.query.package) { params.push(req.query.package); clauses.push(`recommended_package = $${params.length}`); }
@@ -4586,6 +4597,9 @@ router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
       subtypes: (await query(`SELECT DISTINCT subtype FROM prospects WHERE product='acbm' AND subtype IS NOT NULL ORDER BY 1`)).rows.map(x => x.subtype),
       regions: (await query(`SELECT DISTINCT region FROM prospects WHERE product='acbm' AND region IS NOT NULL ORDER BY 1`)).rows.map(x => x.region),
       buckets: ACBM_BUCKETS, packages: ['P1', 'P2'],
+      // What the screen should preselect, and which of the nine are retired. Sent rather than
+      // duplicated client-side so config.js stays the single source of truth.
+      shipping_subtypes: acbmShippingSubtypes(),
     };
     res.json({ page, pageSize, total, items, summary, facets });
   } catch (e) { res.status(500).json({ error: e.message }); }

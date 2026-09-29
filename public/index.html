@@ -7407,12 +7407,26 @@ function cdiReResolve(){
    The FINDINGS come from the server already written as plain sentences — findings-text.js is a
    Node module the browser cannot require, so formatting here would mean a second copy of the
    wording and the sheet a rep reads would drift from the screen a manager reads. */
-window._apFilters = { subtype:'', region:'', bucket:'', package:'', page:1 };
+/* The subtype filter OPENS on the three shipping subtypes and the facet still offers all nine.
+   The other six are the dropped experiment categories and their rows are still in the table:
+   defaulting stops anyone working the wrong list by accident, and keeping them selectable stops
+   anyone finding ~608 orphan rows in six months with no idea what they are. The default is filled
+   from the server's shipping_subtypes (which comes from prospecting config.js) on first render, so
+   it cannot drift from what the enumerator actually runs. */
+window._apShipping = null;                 // set from facets.shipping_subtypes on first load
+window._apFilters = { subtype:null, region:'', bucket:'', package:'', page:1 };
 window._apState = { total:0, pageSize:50, summary:null, facets:null, open:null };
 const apEsc = (x) => csEsc(x);
 const apDash = '<span style="color:var(--text-muted)">—</span>';
 function apSetFilter(k, v){ window._apFilters[k] = v; window._apFilters.page = 1; pages['acbm-prospects'](); }
-function apResetFilters(){ window._apFilters = { subtype:'', region:'', bucket:'', package:'', page:1 }; pages['acbm-prospects'](); }
+function apResetFilters(){ /* The subtype filter OPENS on the three shipping subtypes and the facet still offers all nine.
+   The other six are the dropped experiment categories and their rows are still in the table:
+   defaulting stops anyone working the wrong list by accident, and keeping them selectable stops
+   anyone finding ~608 orphan rows in six months with no idea what they are. The default is filled
+   from the server's shipping_subtypes (which comes from prospecting config.js) on first render, so
+   it cannot drift from what the enumerator actually runs. */
+window._apShipping = null;                 // set from facets.shipping_subtypes on first load
+window._apFilters = { subtype:null, region:'', bucket:'', package:'', page:1 }; pages['acbm-prospects'](); }
 function apPage(d){ const st=window._apState, f=window._apFilters;
   const max=Math.max(1,Math.ceil((st.total||0)/(st.pageSize||50))); f.page=Math.min(max,Math.max(1,(f.page||1)+d)); pages['acbm-prospects'](); }
 function apToggle(id){ window._apState.open = (window._apState.open === String(id)) ? null : String(id); pages['acbm-prospects'](); }
@@ -7433,6 +7447,10 @@ pages['acbm-prospects'] = async function(){
   const res = await API('/acbm/prospects?'+qs.toString()).catch(e => ({ error:e.message }));
   if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">ACBM Prospects</div><p style="color:#dc2626">'+apEsc(res.error)+'</p></div>'; return; }
   const items = res.items || []; st.total = res.total||0; st.summary = res.summary||null; st.facets = res.facets||null;
+  // First render: learn the shipping subtypes from the server and re-render with them applied.
+  const shipping = (res.facets && res.facets.shipping_subtypes) || [];
+  if (shipping.length && !window._apShipping) window._apShipping = shipping;
+  if (f.subtype === null) { f.subtype = apDefaultSubtype(); if (f.subtype) { pages['acbm-prospects'](); return; } f.subtype = ''; }
   const sm = st.summary || {}, fa = st.facets || { subtypes:[], regions:[], buckets:[], packages:[] };
 
   const header = '<div class="card">'
@@ -7441,7 +7459,12 @@ pages['acbm-prospects'] = async function(){
     + '<strong>site_score is 0-100 and higher means worse</strong> — it scores how bad the current site is, so the '
     + 'worst sort to the top. Review count sits beside it deliberately and is NOT part of the score: the score answers '
     + '&ldquo;how bad is the site&rdquo;, reviews answer &ldquo;do they need customers&rdquo;. An agency flag means '
-    + 'someone may already be paid to look after the site.</div></div>';
+    + 'someone may already be paid to look after the site.</div>'
+    + '<div class="text-body" style="margin-top:4px;font-size:12px;color:var(--text-muted)">'
+    +   (f.subtype && f.subtype === apDefaultSubtype()
+          ? 'Showing the three shipping subtypes. The other six are retired experiment categories — still here, still selectable above.'
+          : (f.subtype ? 'Filtered to '+apEsc(f.subtype.replace(/,/g,', ').replace(/_/g,' '))+'.' : 'Showing all nine subtypes, including the six retired experiment categories.'))
+    + '</div></div>';
 
   const stat = (label,val,color) => '<div style="flex:1;min-width:110px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;text-align:center">'
     + '<div style="font-size:22px;font-weight:800;color:'+(color||'var(--text-body)')+'">'+((val==null?0:val).toLocaleString())+'</div>'
@@ -7455,8 +7478,17 @@ pages['acbm-prospects'] = async function(){
     + '<option value="">'+blank+'</option>'
     + opts.map(o => { const v = o.v!==undefined?o.v:o, l = o.l!==undefined?o.l:o;
         return '<option value="'+apEsc(v)+'"'+(f[key]===v?' selected':'')+'>'+apEsc(l)+'</option>'; }).join('') + '</select>';
+  /* Built by hand rather than via sel() because the first option is a MULTI-value default and the
+     retired six are labelled as such — a plain facet list would make all nine look equivalent. */
+  const shipCsv = apDefaultSubtype();
+  const shipSet = new Set(window._apShipping || []);
+  const subtypeOpts = []
+    .concat(shipCsv ? ['<option value="'+apEsc(shipCsv)+'"'+(f.subtype===shipCsv?' selected':'')+'>shipping subtypes ('+shipSet.size+')</option>'] : [])
+    .concat(['<option value=""'+(f.subtype===''?' selected':'')+'>all subtypes ('+(fa.subtypes||[]).length+')</option>'])
+    .concat((fa.subtypes||[]).map(st2 => '<option value="'+apEsc(st2)+'"'+(f.subtype===st2?' selected':'')+'>'
+      + apEsc(st2.replace(/_/g,' ')) + (shipSet.has(st2) ? '' : ' · retired') + '</option>'));
   const filters = '<div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
-    + sel('subtype','subtype: any', fa.subtypes)
+    + '<select onchange="apSetFilter(\'subtype\', this.value)" style="font-size:12px;padding:4px">'+subtypeOpts.join('')+'</select>'
     + sel('region','metro: any', fa.regions)
     + sel('bucket','bucket: any', [{v:'scored',l:'scored'},{v:'no_website',l:'no website (P1)'},{v:'dead_site',l:"site doesn't load"},{v:'unscannable',l:'blocked (not assessed)'}])
     + sel('package','package: any', [{v:'P2',l:'P2 · Renew'},{v:'P1',l:'P1 · Launch'},{v:'none',l:'no package'}])
