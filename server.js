@@ -72,12 +72,24 @@ function serveShell(res) {
   res.set('Content-Type', 'text/html; charset=utf-8').send(_shellInjected);
 }
 
+// `commit` is here so a deploy can be VERIFIED rather than guessed at.
+//
+// The guess was `uptime < 180`, and it is wrong in the one case that matters: a container that restarted
+// for the PREVIOUS deploy also has a low uptime, so the check passes, the next verification runs against
+// old code, and reports a false result. That happened — a boundary fix was reported as still broken in
+// production when the container simply had not rolled yet.
+//
+// RAILWAY_GIT_COMMIT_SHA is set by the platform per build, so comparing it to the SHA just pushed is an
+// exact answer: `scripts/wait-for-deploy.sh`.
+const COMMIT = process.env.RAILWAY_GIT_COMMIT_SHA || null;
+
 app.get('/health', async (req, res) => {
+  const base = { uptime: process.uptime(), timestamp: new Date().toISOString(), commit: COMMIT };
   try {
     await query('SELECT 1');
-    res.json({ status: 'ok', uptime: process.uptime(), timestamp: new Date().toISOString(), db: 'connected' });
+    res.json({ status: 'ok', ...base, db: 'connected' });
   } catch (e) {
-    res.status(503).json({ status: 'error', uptime: process.uptime(), timestamp: new Date().toISOString(), db: 'error', error: e.message });
+    res.status(503).json({ status: 'error', ...base, db: 'error', error: e.message });
   }
 });
 
