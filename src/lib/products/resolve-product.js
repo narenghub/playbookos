@@ -56,8 +56,15 @@ function routePattern(req) {
     if (m.method !== method) continue;
     if (m.rx.test(path)) return m.pattern;
   }
-  // The SPA catch-all is mapped as 'GET *' and matches anything not matched above.
-  if (method === 'GET' && require('./route-map').ROUTE_PRODUCT['GET *']) return '*';
+  // The SPA catch-all is mapped as 'GET *' — index.html for any front-end path. It must NOT cover
+  // /api/, and that is not a tidiness point: before this line was narrowed, a NEW GET route missing from
+  // the map fell through to 'GET *' and resolved to 'shared', so the boundary waved it through. Found by
+  // the impact arithmetic on the product-assignment screen, which reported two routes it could not
+  // attribute — both of them mine, both unmapped, both already passing.
+  //
+  // An unmapped /api/ path now returns the raw path, which classifies as null, which fails closed under
+  // enforce. That is the behaviour the design claimed and the wildcard quietly undid for every GET.
+  if (method === 'GET' && !path.startsWith('/api/') && require('./route-map').ROUTE_PRODUCT['GET *']) return '*';
   return path;
 }
 

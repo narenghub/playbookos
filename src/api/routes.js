@@ -23,6 +23,7 @@ const { runProspecting, runQualifyProspects } = require('../lib/agents/prospecti
 const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/config');
 const { heldProducts, productScopeSql } = require('../lib/products/held');
 const { PRODUCTS: PRODUCT_KEYS, GRANTABLE } = require('../lib/products/route-map');
+const { checkGrantChange, routeCountsByProduct, describeChange } = require('../lib/products/grants');
 const riResolve = require('../lib/agents/research-intelligence/resolve');
 const riOutreach = require('../lib/agents/research-intelligence/outreach');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
@@ -170,6 +171,13 @@ router.post('/auth/accept-invite', authLimiter, async (req, res) => {
         // grant records who decided it, not the account that happened to accept.
         await c.query(`INSERT INTO user_products (user_id, product, granted_by) VALUES ($1, $2, $3)
                        ON CONFLICT (user_id, product) DO NOTHING`, [user.id, product, user.invited_by || null]);
+        // And the audit log, so EVERY way a grant comes into being is in one place. A log that only
+        // covers the admin screen would answer "who changed this" with silence for every account that
+        // got its products at signup — which is all of them, to begin with.
+        await c.query(
+          `INSERT INTO user_product_grants_log (user_id, user_email, product, action, actor_id, source)
+           VALUES ($1,$2,$3,'grant',$4,'invite_accept')`,
+          [user.id, user.email, product, user.invited_by || null]);
       }
     });
     console.log(`[invite] ACCEPTED ${user.email} — granted products [${chosen.join(', ') || 'NONE'}]`);
@@ -316,6 +324,110 @@ router.get('/products/grantable', authMiddleware, superAdminOnly, async (req, re
   });
 });
 
+// Every route this router has mounted, for the "how many routes does this cost them" arithmetic.
+// Computed on FIRST CALL, not at require time: routes are registered throughout this file (and some
+// after module.exports), so reading router.stack while the file is still loading would undercount.
+// Cached after that — the route table cannot change at runtime.
+let _mounted = null;
+function mountedRoutes() {
+  if (_mounted) return _mounted;
+  const out = [];
+  for (const layer of router.stack || []) {
+    if (!layer.route) continue;
+    for (const m of Object.keys(layer.route.methods)) {
+      if (layer.route.methods[m]) out.push({ method: m.toUpperCase(), path: `/api${layer.route.path}` });
+    }
+  }
+  out.push({ method: 'GET', path: '/health' }, { method: 'GET', path: '/sitemap.xml' });
+  _mounted = out;
+  return out;
+}
+
+// ── PRODUCT ASSIGNMENT FOR AN EXISTING USER ───────────────────────────────────
+//
+// PUT /api/users/:id/products  { products: ['abiozen', 'internal'] }  — super_admin only.
+//
+// The body is the COMPLETE desired set, not a delta. A delta API ("add these, remove those") makes a
+// lost request indistinguishable from a partial apply; a full set makes the write idempotent, so a
+// retry cannot double-apply and two admins editing at once end at one of the two states rather than a
+// blend of both.
+//
+// TAKES EFFECT IMMEDIATELY. Products are not in the JWT — boundary.js reads user_products on every
+// evaluated request, with no cache — so a revoke is live on the target's very next request, not when
+// their 7-day token expires. That is the whole point of having this screen.
+router.put('/users/:id/products', authMiddleware, superAdminOnly, async (req, res) => {
+  try {
+    const { products } = req.body || {};
+    if (!Array.isArray(products)) return res.status(400).json({ error: 'products must be an array' });
+    const next = [...new Set(products.map(p => String(p).trim()).filter(Boolean))];
+
+    const target = (await query('SELECT id, name, email, role, is_active FROM users WHERE id=$1', [req.params.id])).rows[0];
+    if (!target) return res.status(404).json({ error: 'Not found' });
+
+    const current = (await query('SELECT product FROM user_products WHERE user_id=$1 ORDER BY product', [target.id]))
+      .rows.map(r => r.product);
+    const supers = (await query(
+      `SELECT COUNT(*)::int n FROM users WHERE role='super_admin' AND is_active=1`)).rows[0].n;
+
+    const verdict = checkGrantChange({
+      actor: req.user, target, current, next, activeSuperAdmins: supers,
+    });
+    if (!verdict.ok) {
+      console.warn(`[products] REFUSED ${verdict.code}: ${req.user.email} → ${target.email} [${current.join(',')}] → [${next.join(',')}]`);
+      return res.status(403).json({ error: verdict.error, code: verdict.code, products: current });
+    }
+    const { added, removed } = verdict;
+
+    // One transaction for the rows AND the log. A grant that applied without a log entry is the exact
+    // gap this route was asked to close, so it must not be possible to get one without the other.
+    if (added.length || removed.length) {
+      await withTransaction(async (c) => {
+        for (const product of added) {
+          await c.query(
+            `INSERT INTO user_products (user_id, product, granted_by) VALUES ($1,$2,$3)
+             ON CONFLICT (user_id, product) DO NOTHING`, [target.id, product, req.user.id]);
+        }
+        if (removed.length) {
+          await c.query(`DELETE FROM user_products WHERE user_id=$1 AND product = ANY($2)`, [target.id, removed]);
+        }
+        for (const [action, list] of [['grant', added], ['revoke', removed]]) {
+          for (const product of list) {
+            await c.query(
+              `INSERT INTO user_product_grants_log
+                 (user_id, user_email, product, action, actor_id, actor_email, source)
+               VALUES ($1,$2,$3,$4,$5,$6,'admin_edit')`,
+              [target.id, target.email, product, action, req.user.id, req.user.email]);
+          }
+        }
+      });
+    }
+
+    const counts = routeCountsByProduct(mountedRoutes());
+    const summary = describeChange({ target, added, removed, counts });
+    console.log(`[products] ${req.user.email} → ${summary}`);
+    res.json({
+      success: true, user: { id: target.id, name: target.name, email: target.email, role: target.role },
+      before: current, after: next, added, removed, summary,
+      route_counts: counts,
+      takes_effect: 'immediately — the boundary reads user_products on every request, nothing is cached in the token',
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/users/:id/products — current grants plus the full history, so a revoke is answerable.
+router.get('/users/:id/products', authMiddleware, superAdminOnly, async (req, res) => {
+  try {
+    const held = (await query('SELECT product, granted_at, granted_by FROM user_products WHERE user_id=$1 ORDER BY product', [req.params.id])).rows;
+    const history = (await query(
+      `SELECT l.created_at, l.product, l.action, l.source, l.actor_email,
+              COALESCE(l.actor_email, a.email) AS actor
+         FROM user_product_grants_log l LEFT JOIN users a ON a.id = l.actor_id
+        WHERE l.user_id = $1 ORDER BY l.created_at DESC, l.id DESC LIMIT 200`, [req.params.id])).rows;
+    res.json({ products: held.map(h => h.product), held, history,
+      route_counts: routeCountsByProduct(mountedRoutes()) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // INVITE — super_admin ONLY, and the products are chosen here.
 // This was adminOnly. It is not any more: inviting a user now decides which products that account can
 // reach, and that decision stays with the person accountable for the boundary. admin keeps everything
@@ -425,19 +537,42 @@ router.put('/users/:id', authMiddleware, async (req, res) => {
 
 // DELETE /users/:id — default is a soft delete (is_active=0). With
 // ?permanent=true it hard-deletes the row (the "Delete Permanently" action).
+//
+// THIS USED TO RECORD NOTHING. No console line, no activity_log row, and user_products cascades — so a
+// hard delete removed the account AND every trace of what it had been granted, leaving no way to answer
+// "who had access to what, and when did that stop". Seven accounts were deleted on 2026-09-29 and there
+// is no record of who did it or when; that is what this block exists to prevent happening again.
+//
+// A deleted user is the largest possible permission removal, so it goes in the same audit log as a
+// revoke — written BEFORE the delete, because afterwards the grants are gone and there is nothing left
+// to describe. The log table has no foreign key precisely so these rows survive the cascade.
 router.delete('/users/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { id } = req.params;
     if (id === req.user.id) return res.status(400).json({ error: 'You cannot remove your own account' });
-    const target = (await query('SELECT id, role FROM users WHERE id=$1', [id])).rows[0];
+    const target = (await query('SELECT id, role, email, name FROM users WHERE id=$1', [id])).rows[0];
     if (!target) return res.status(404).json({ error: 'User not found' });
     if (target.role === 'super_admin') return res.status(403).json({ error: 'A super_admin account cannot be removed' });
+    const held = (await query('SELECT product FROM user_products WHERE user_id=$1', [id])).rows.map(r => r.product);
     if (req.query.permanent === 'true') {
-      await query('DELETE FROM users WHERE id=$1', [id]);
-      return res.json({ success: true, id, deleted: 'permanent' });
+      await withTransaction(async (c) => {
+        for (const product of held) {
+          await c.query(
+            `INSERT INTO user_product_grants_log (user_id, user_email, product, action, actor_id, actor_email, source)
+             VALUES ($1,$2,$3,'revoke',$4,$5,'user_deleted')`,
+            [target.id, target.email, product, req.user.id, req.user.email]);
+        }
+        await c.query('DELETE FROM users WHERE id=$1', [id]);
+      });
+      console.warn(`[users] PERMANENT DELETE by ${req.user.email}: ${target.email} (${target.role}) `
+        + `— products lost: [${held.join(', ') || 'none'}]`);
+      return res.json({ success: true, id, deleted: 'permanent', email: target.email, products_lost: held });
     }
     await query('UPDATE users SET is_active=0 WHERE id=$1', [id]);
-    res.json({ success: true, id, is_active: 0, deleted: 'soft' });
+    // A soft delete keeps the grants, which is right — reactivating restores the account as it was — so
+    // there is nothing to log against the products. The action itself is still worth a line.
+    console.log(`[users] deactivated by ${req.user.email}: ${target.email} (${target.role})`);
+    res.json({ success: true, id, is_active: 0, deleted: 'soft', email: target.email });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

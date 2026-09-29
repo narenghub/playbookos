@@ -1954,6 +1954,7 @@ async playbook() {
 // ── TEAM MANAGEMENT ───────────────────────────────────────────────────────────
 async team() {
   const isSuper = currentUser.role === 'super_admin';
+  const isSuper_viewer = isSuper;
   // The grantable product list comes from the SERVER's route map, never a copy kept here: a checkbox
   // for a product the boundary does not know about would grant nothing and look like it granted
   // something. super_admin only, so for everyone else the fetch is skipped rather than 403ing.
@@ -1964,7 +1965,12 @@ async team() {
   ]);
   window._roleCatalog = rolesResp.roles || [];
   window._grantable = grantable;
+  // A change to somebody else's access should still be on screen after the page re-renders. A toast that
+  // vanishes is how you end up unsure whether you edited the row you meant to.
+  const lastSummary = window._peLastSummary;
+  window._peLastSummary = null;
   document.getElementById('content').innerHTML = `
+    ${lastSummary ? `<div class="card" style="border-color:var(--teal)"><div class="success-msg" style="margin:0">${lastSummary}</div></div>` : ''}
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div class="card-title" style="margin:0">Team members</div>
@@ -1976,7 +1982,8 @@ async team() {
         <tr><th>Name</th><th>Email</th><th>Role</th><th>Products</th><th>Status</th><th>Actions</th></tr>
         ${users.map(u=>{
           const isSelf = u.id === currentUser.id;
-          const isSuper = u.role === 'super_admin';
+          const isSuper = u.role === 'super_admin';        // the ROW's user
+          const isSuper2 = isSuper_viewer;                 // the VIEWER — named apart to stop the mix-up
           const invited = !u.joined_at;
           const nm = (u.name||'').replace(/'/g,'');
           const statusBadge = invited
@@ -2004,9 +2011,16 @@ async team() {
           const held = u.products || [];
           const pending = u.invited_products || [];
           const chip = (p, dim) => `<span class="badge ${p === 'internal' ? 'badge-amber' : 'badge-gray'}"${dim ? ' style="opacity:.5"' : ''}>${p}</span>`;
-          const prodCell = held.length ? held.map(p => chip(p)).join(' ')
+          let prodCell = held.length ? held.map(p => chip(p)).join(' ')
             : (pending.length ? pending.map(p => chip(p, true)).join(' ') + '<div style="font-size:10px;color:#888">on accept</div>'
                               : '<span style="color:#bbb;font-size:11px">none</span>');
+          // The edit affordance lives HERE rather than in the Actions menu, because that menu is hidden
+          // for yourself and for other super admins — and both of those rows are editable: you may widen
+          // yourself, and a second super admin may be narrowed. The server refuses what must be refused.
+          if (isSuper2) {
+            prodCell += ` <a href="#" onclick="openProductEditor('${u.id}');return false" title="Edit products"
+              style="font-size:11px;color:var(--teal);text-decoration:none;white-space:nowrap">✎ edit</a>`;
+          }
           return `<tr>
           <td><strong>${u.name}</strong></td>
           <td>${u.email}</td>
@@ -2018,6 +2032,7 @@ async team() {
         }).join('')}
       </table>
     </div>
+    <div id="product-editor" style="display:none"></div>
     <div id="invite-modal" style="display:none">
       <div class="card" style="border-color:var(--teal)">
         <div class="card-title">Invite new team member</div>
@@ -2479,6 +2494,129 @@ function renderInviteProducts() {
       Tick nothing and the account can reach only its own tasks, KPIs and profile. That is a valid
       setup, not an error — it is also what happens if you forget.
     </div>`;
+}
+
+// ── PER-USER PRODUCT EDITING ───────────────────────────────────────────────────
+//
+// Same checkboxes as the invite form, on an existing record. The GUARDS ARE ON THE SERVER — this screen
+// hides nothing it is not allowed to send, it just explains what is about to happen. A UI that only
+// disables a checkbox is not a guard, because the request can be made without the UI.
+let _pe = null;   // { user, before, counts }
+
+async function openProductEditor(userId) {
+  const box = document.getElementById('product-editor');
+  box.style.display = 'block';
+  box.innerHTML = '<div class="card"><div style="color:#888;font-size:13px">Loading…</div></div>';
+  const [data, usersList] = await Promise.all([
+    API('/users/' + userId + '/products').catch(e => ({ error: e.message })),
+    API('/users').catch(() => []),
+  ]);
+  if (data.error) {
+    box.innerHTML = `<div class="card" style="border-color:var(--red)"><div class="error-msg">${data.error}</div></div>`;
+    return;
+  }
+  const user = (usersList || []).find(u => u.id === userId) || { id: userId, name: userId, email: '' };
+  _pe = { user, before: (data.products || []).slice(), counts: data.route_counts || {} };
+  const g = window._grantable;
+  const held = new Set(_pe.before);
+  const cb = (key, label) => `<label style="display:inline-flex;align-items:center;gap:6px;margin:0 14px 6px 0;font-weight:400;cursor:pointer">
+      <input type="checkbox" class="pe-product" value="${key}"${held.has(key) ? ' checked' : ''} onchange="peImpact()"> ${label}
+      <span style="color:#999;font-size:10px">${(_pe.counts[key] || 0)} routes</span></label>`;
+  const hist = (data.history || []);
+  box.innerHTML = `
+    <div class="card" style="border-color:var(--teal)">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div class="card-title" style="margin:0">Products — ${user.name || user.email}
+          <span style="font-weight:400;color:#666;font-size:12px">${user.email} · ${user.role}</span></div>
+        <button class="btn btn-outline btn-sm" onclick="closeProductEditor()">Close</button>
+      </div>
+      <div id="pe-msg"></div>
+      <div class="form-group" style="margin-top:12px">
+        <div>${(g && g.products ? g.products : []).map(p => cb(p.key, p.label)).join('')}</div>
+        <div style="margin-top:10px;padding:10px 12px;background:#fff3cd;border:1px solid #ffe08a;border-radius:6px">
+          ${g ? cb(g.internal.key, '<strong>' + g.internal.label + '</strong>') : ''}
+          <div style="font-size:11px;color:#856404;margin-top:2px">${g ? g.internal.warning : ''}</div>
+        </div>
+      </div>
+      <div id="pe-impact" style="font-size:12px;color:#444;margin:10px 0;min-height:18px"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-teal" onclick="saveProductEditor()">Save products</button>
+        <button class="btn btn-outline" onclick="closeProductEditor()">Cancel</button>
+      </div>
+      <div style="margin-top:18px;border-top:1px solid #eee;padding-top:12px">
+        <div style="font-weight:600;font-size:12px;margin-bottom:6px">History</div>
+        ${hist.length ? `<table style="font-size:11px">
+          <tr><th>When</th><th>Change</th><th>By</th><th>Where</th></tr>
+          ${hist.map(h => `<tr>
+            <td style="white-space:nowrap">${String(h.created_at).slice(0, 16).replace('T', ' ')}</td>
+            <td><span class="badge ${h.action === 'grant' ? 'badge-green' : 'badge-red'}">${h.action}</span> ${h.product}</td>
+            <td>${h.actor || '<span style="color:#999">—</span>'}</td>
+            <td style="color:#888">${h.source}</td></tr>`).join('')}
+        </table>` : '<div style="font-size:11px;color:#888">No recorded changes. Grants from the original backfill appear as source=backfill.</div>'}
+      </div>
+    </div>`;
+  peImpact();
+  box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeProductEditor() {
+  _pe = null;
+  const box = document.getElementById('product-editor');
+  box.style.display = 'none'; box.innerHTML = '';
+}
+
+function peSelected() {
+  return Array.from(document.querySelectorAll('#product-editor .pe-product:checked')).map(el => el.value);
+}
+
+// The same arithmetic the server returns after saving, shown BEFORE saving. Guard 4 asks for it after;
+// showing it before is what stops the mistake rather than reporting it.
+function peImpact() {
+  const el = document.getElementById('pe-impact');
+  if (!el || !_pe) return;
+  const next = new Set(peSelected());
+  const gained = [...next].filter(p => !_pe.before.includes(p));
+  const lost = _pe.before.filter(p => !next.has(p));
+  const n = list => list.reduce((s, p) => s + (_pe.counts[p] || 0), 0);
+  const self = _pe.user.id === currentUser.id;
+  if (!gained.length && !lost.length) { el.innerHTML = '<span style="color:#888">No change.</span>'; return; }
+  const bits = [];
+  if (gained.length) bits.push(`<span style="color:var(--green,#1D9E75)">+ ${gained.join(', ')} (${n(gained)} routes)</span>`);
+  if (lost.length) bits.push(`<span style="color:#E24B4A">− ${lost.join(', ')} → 403 on ${n(lost)} routes</span>`);
+  let warn = '';
+  if (self && lost.length) {
+    warn = `<div style="color:#E24B4A;font-weight:600;margin-top:4px">The server will refuse this: you cannot`
+      + ` remove your own products. Removing 'internal' would take away your access to this page.</div>`;
+  } else if (lost.includes('internal')) {
+    warn = `<div style="color:#BA7517;margin-top:4px">Removing 'internal' also hides every platform-wide`
+      + ` alert and the whole admin surface — team, settings, agent control.</div>`;
+  }
+  el.innerHTML = bits.join(' &nbsp;·&nbsp; ') + warn;
+}
+
+async function saveProductEditor() {
+  if (!_pe) return;
+  const products = peSelected();
+  const lost = _pe.before.filter(p => !products.includes(p));
+  if (lost.length && !confirm(`Remove ${lost.join(', ')} from ${_pe.user.name || _pe.user.email}?\n\n`
+      + `They will get 403 on ${lost.reduce((s, p) => s + (_pe.counts[p] || 0), 0)} routes, starting with their `
+      + `next request — this does not wait for them to log in again.`)) return;
+  const msg = document.getElementById('pe-msg');
+  msg.innerHTML = '<div style="color:#888;font-size:13px">Saving…</div>';
+  const res = await API('/users/' + _pe.user.id + '/products',
+    { method: 'PUT', body: JSON.stringify({ products }) }).catch(e => ({ error: e.message }));
+  if (res.error) {
+    // A refusal is the guard working. It is shown in full, because the reason IS the useful part.
+    msg.innerHTML = `<div class="error-msg">${res.error}</div>`;
+    return;
+  }
+  // GUARD 4 — what changed, not "saved". Left on screen rather than toasted away, and repeated at the
+  // top of the team page after the refresh so it survives the re-render.
+  window._peLastSummary = res.summary + ' Effective immediately.';
+  msg.innerHTML = `<div class="success-msg">${res.summary}</div>`;
+  _pe.before = (res.after || products).slice();
+  peImpact();
+  await pages.team();
 }
 
 function selectedInviteProducts() {

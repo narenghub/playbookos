@@ -115,6 +115,9 @@ const INTERNAL = [
   'GET /api/users', 'POST /api/users/invite', 'PUT /api/users/:id', 'DELETE /api/users/:id',
   'PUT /api/users/:id/toggle-status', 'POST /api/users/send-onboarding', 'POST /api/users/send-task-nudge',
   'POST /api/admin/users/:user_id/edit-name', 'POST /api/admin/users/:user_id/reset-password',
+  // Product assignment for an existing user. 'internal' rather than anything cleverer: deciding what
+  // another account may reach is platform administration, not work on a product.
+  'GET /api/users/:id/products', 'PUT /api/users/:id/products',
   // GET /api/roles is the ROLE CATALOG, and it stays internal. It was briefly reclassified 'shared',
   // because buildNav() fetched it on every page load to learn the caller's tiers and a 403 made the nav
   // MORE permissive. The right fix was to stop the nav depending on a separate fetch at all — tiers now

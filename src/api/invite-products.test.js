@@ -19,10 +19,12 @@ mailer.sendEmail = async () => ({ skipped: true, reason: 'test' });
 // ── the fake database ──────────────────────────────────────────────────────────
 let USERS = [];         // rows of the users table
 let GRANTS = [];        // rows of user_products
+let LOG = [];           // rows of user_product_grants_log
 function reset() {
   USERS = [{ id: 'u-super', email: 'super@abiozen.com', name: 'Super', role: 'super_admin', is_active: 1, joined_at: 'x' },
            { id: 'u-admin', email: 'admin@abiozen.com', name: 'Admin', role: 'admin', is_active: 1, joined_at: 'x' }];
   GRANTS = [];
+  LOG = [];
 }
 reset();
 
@@ -53,6 +55,7 @@ db.query = async (sql, params = []) => {
     Object.assign(u, { password_hash: params[0], name: params[1], joined_at: params[2], invite_token: null, invited_products: null });
     return { rows: [] };
   }
+  if (/INSERT INTO user_product_grants_log/i.test(s)) { LOG.push(params); return { rows: [] }; }
   if (/^INSERT INTO user_products \(user_id, product, granted_by\)/i.test(s)) {
     const [user_id, product, granted_by] = params;
     if (!GRANTS.some(g => g.user_id === user_id && g.product === product)) GRANTS.push({ user_id, product, granted_by });
@@ -220,4 +223,23 @@ test('a WhatsApp number on an external invite is ignored, not messaged', async (
   const j = await r.json();
   assert.equal(j.whatsapp_status, 'skipped:external_role',
     'WhatsApp is our escalation channel — a partner has no business in it');
+});
+
+test('accepting an invite writes the audit log too, not just the grant rows', async () => {
+  // Every way a grant comes into being goes through the same log. Otherwise "who granted this?" has no
+  // answer for every account that got its products at signup — which, at the start, is all of them.
+  await invite({ email: 'partner@acbm.test', role: 'acbm_partner', products: ['acbm'] });
+  const token = USERS.find(u => u.email === 'partner@acbm.test').invite_token;
+  await fetch(base() + '/api/auth/accept-invite', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token, name: 'P', password: 'hunter2hunter2' }),
+  });
+  assert.equal(LOG.length, 1);
+  // 'grant' and 'invite_accept' are SQL literals in that INSERT, so the params are
+  // (user_id, user_email, product, actor_id) — checked positionally rather than assumed.
+  const [user_id, user_email, product, actor_id] = LOG[0];
+  assert.equal(user_id, USERS.find(u => u.email === 'partner@acbm.test').id);
+  assert.equal(user_email, 'partner@acbm.test');
+  assert.equal(product, 'acbm');
+  assert.equal(actor_id, 'u-super', 'the inviter, not the acceptor');
 });

@@ -133,12 +133,20 @@ test('tiers come from currentUser, which comes from the call that gates the whol
 
 test('/auth/me and /auth/login both return tiers, or the nav has nothing to read', () => {
   const routes = fs.readFileSync(__dirname + '/../api/routes.js', 'utf8');
-  const me = routes.slice(routes.indexOf("router.get('/auth/me'"));
-  assert.match(me.slice(0, 700), /roleTiers\(/, '/auth/me must return tiers');
-  const login = routes.slice(routes.indexOf("router.post('/auth/login'"));
-  assert.match(login.slice(0, 2600), /tiers: roleTiers\(/, '/auth/login must return tiers on the user object');
-  const accept = routes.slice(routes.indexOf("router.post('/auth/accept-invite'"));
-  assert.match(accept.slice(0, 2600), /tiers: roleTiers\(/, 'accept-invite too — the first paint after accepting is a nav');
+  // One handler, delimited by the NEXT route declaration rather than a character count. A fixed slice
+  // broke the moment the accept-invite handler grew by a few lines, which is a test failing for a reason
+  // that has nothing to do with what it is testing.
+  const handler = (decl) => {
+    const start = routes.indexOf(decl);
+    assert.notEqual(start, -1, `could not find ${decl}`);
+    const rest = routes.slice(start + decl.length);
+    const end = rest.search(/\nrouter\.(get|post|put|patch|delete)\(/);
+    return rest.slice(0, end === -1 ? undefined : end);
+  };
+  assert.match(handler("router.get('/auth/me'"), /roleTiers\(/, '/auth/me must return tiers');
+  assert.match(handler("router.post('/auth/login'"), /tiers: roleTiers\(/, '/auth/login must return them on the user object');
+  assert.match(handler("router.post('/auth/accept-invite'"), /tiers: roleTiers\(/,
+    'accept-invite too — the first paint after accepting is a nav');
 });
 
 // ── is anything ELSE in the client gated on a fetch that can fail? ──────────────

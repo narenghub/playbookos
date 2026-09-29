@@ -100,6 +100,24 @@ test('SWEEP: the concrete-path matcher agrees with the pattern classification', 
   assert.deepEqual(mismatches, [], `\n${mismatches.map(m => '  ' + m).join('\n')}\n`);
 });
 
+test('an UNMAPPED /api route fails closed — the GET wildcard must not cover it', async () => {
+  // Regression test for a real fail-open. 'GET *' is the SPA catch-all, and it used to match ANY path,
+  // so a new GET route that nobody added to the map resolved to 'shared' and the boundary permitted it.
+  // Only GET was affected — an unmapped POST already failed closed — which is the worst shape for it to
+  // have, because reads are what leak.
+  const unmapped = { method: 'GET', originalUrl: '/api/not/in/the/map', url: '/api/not/in/the/map',
+                     params: {}, query: {}, body: {}, headers: {} };
+  const res = await resolveProduct(unmapped, { lookupRowProduct: async () => null });
+  assert.equal(res.product, null, 'an unmapped /api GET must resolve to nothing');
+  assert.equal(res.unresolved, true, 'which fails closed under enforce');
+
+  // And the SPA still works: a front-end path is 'shared', because that is what the wildcard is for.
+  for (const url of ['/', '/dashboard', '/acbm-prospects']) {
+    const r = await resolveProduct({ ...unmapped, originalUrl: url, url }, { lookupRowProduct: async () => null });
+    assert.equal(r.product, 'shared', `${url} must still be served`);
+  }
+});
+
 test('SWEEP: a param:product route with NO product named still resolves or fails loudly', async () => {
   // The screens always send ?product=, but a hand-made request might not. Whatever happens must be
   // deliberate: the documented default, or unresolved — never a silent pass.
