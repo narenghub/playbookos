@@ -1,195 +1,191 @@
-# Product-scoped delegation — DESIGN ONLY, NOT SHIPPED
+# Product access — how an account gets one, and what it means
 
-> **Nothing in this document is built.** It is the design for steps (a) and (d) of the sequence
-> below. (d) must not ship before (c). Written 2026-09-28.
+> **Status: BUILT AND ENFORCING.** `PRODUCT_BOUNDARY_MODE=enforce` in production since 2026-09-29.
+> This document replaces an earlier design for a `product_owner` role and delegated invites. That
+> model was **dropped before anything was built** — see [What was dropped, and why](#what-was-dropped-and-why).
 
-## Why the sequencing is the whole design
+## The model in four sentences
 
-A product owner who holds only `acbm` and invites a colleague is only *actually* scoped once
-`PRODUCT_BOUNDARY_MODE=enforce`. In `shadow`, an account holding one product in `user_products`
-still reaches every route — the middleware observes and calls `next()`.
+A **super admin** creates every account. At invite time they tick which **products** that account can
+reach. The grants are written when the invite is **accepted**, and from then on the **product
+boundary** checks them on every single request, independently of the account's role. Nobody else can
+create an account, and nobody can widen their own access.
 
-Shipping (d) during shadow would therefore create accounts that **look** scoped and are not, while
-everyone involved believes the scoping works. That is worse than not having the feature: absent, the
-risk is visible and nobody invites an outsider; present-but-inert, someone invites a partner in good
-faith.
-
-```
-a. Register the three /api/acbm/* features in the registry      ← the current blocker, designed below
-b. Finish the shadow week, read the reports, fix any map gaps
-c. Switch PRODUCT_BOUNDARY_MODE to enforce
-d. THEN product_owner + the scoped invite flow                  ← designed below, ship after (c)
-e. THEN an account for ACBM
-```
+That is the whole model. There is no delegation, no product-owner role, and no way for a product's
+users to multiply themselves.
 
 ---
 
-# (a) Registry features for the ACBM routes
+## The two gates, and why there are two
 
-**Why this is the blocker.** The three routes are `authMiddleware + adminOnly` with no registry
-feature. `mapFeatureKey` returns null for them, so `enforce.js:94` falls through to the gate. Two
-consequences: they never appear in `resolveAll`, and **a per-user override cannot grant them** —
-`user_feature_overrides` is keyed on a feature that does not exist. So a `product_owner` could not be
-given the ACBM screens at all, however the role were defined.
-
-**Four features**, following the existing registry shape (`src/lib/permissions/registry.js`):
-
-```js
-// nav_page — the page, so nav and API agree and resolveNav can see it
-{ key: 'acbm.page_acbm.view', label: 'Page — ACBM', domain: 'acbm', surface: 'nav_page',
-  ref: 'acbm-prospects', cost: 'free', spend: [], dangerous: false, defaultDeny: false,
-  implies: ['acbm.prospects.list', 'acbm.deals.list', 'acbm.packages.list'] },
-
-{ key: 'acbm.prospects.list', label: 'List — GET /api/acbm/prospects', domain: 'acbm',
-  surface: 'api_route', ref: 'GET /api/acbm/prospects', cost: 'free', spend: [],
-  dangerous: false, defaultDeny: false, implies: [] },
-
-{ key: 'acbm.deals.list', label: 'List — GET /api/acbm/deals', domain: 'acbm',
-  surface: 'api_route', ref: 'GET /api/acbm/deals', cost: 'free', spend: [],
-  dangerous: false, defaultDeny: false, implies: [] },
-
-{ key: 'acbm.packages.list', label: 'List — GET /api/acbm/packages', domain: 'acbm',
-  surface: 'api_route', ref: 'GET /api/acbm/packages', cost: 'free', spend: [],
-  dangerous: false, defaultDeny: false, implies: [] },
+```
+  request
+    │
+    ├─ 1. ROLE / TIER  ──── requireTier('intelligence'), adminOnly, superAdminOnly
+    │                       "is this KIND of user allowed to do this KIND of thing?"
+    │                       src/lib/core.js, src/lib/roles.js, src/lib/permissions/*
+    │
+    ├─ 2. PRODUCT BOUNDARY ─ does this caller hold the product this ROUTE belongs to?
+    │                       "which BUSINESS's data is this?"
+    │                       src/lib/products/*  ·  user_products  ·  ROUTE_PRODUCT
+    │
+    └─ 3. the handler ────── and where the TABLE is product-bearing, scope the ROWS too
+                            src/lib/products/held.js (productScopeSql)
 ```
 
-Notes on the choices, since each one is a decision:
+The two gates are independent **on purpose**. A tier granted by mistake — the single most likely
+permissions error, because tiers are granted by hand and roles are coarse — must not be sufficient to
+become a cross-product data exposure. Layer 2 does not consult the role and layer 1 does not consult
+the products, so neither one failing opens the other.
 
-- **`domain: 'acbm'`** is a new domain value. `golfnex` already exists as a domain, so this follows
-  precedent rather than inventing a pattern.
-- **`defaultDeny: false`** on all four. They are read-only GETs with no spend. `defaultDeny: true` is
-  for things that cost money or write (the 54 in admin's `needsExplicitGrant`); marking a read-only
-  list `defaultDeny` would mean even a super_admin needed rule 3's bypass to see it, which is noise.
-- **One `implies` chain from the page**, matching how every other page feature works: holding the
-  page implies its read routes, which is what `resolveNav` and rule 6 use.
-- **The three GETs keep `adminOnly` in the route definition** until (c). Registry features *tighten*;
-  they do not loosen. Relaxing `adminOnly` to `requireTier` is part of (d), not (a).
-
-**Template grants:** add all four to `super_admin` and `admin` in `src/lib/permissions/templates.js`.
-Nobody else, for now.
-
-**The step that is easy to forget:** `NAV_PAGE_REQS` in `public/index.html:805` is *generated from the
-registry* and marked "do not hand-edit". Adding a `nav_page` feature means regenerating it, and
-`scripts/verify-classic-nav-parity.js` will then report a diff for super_admin/admin — expected, and
-the same "did only the intended roles move?" reading as before.
-
-**Cost of (a):** four registry entries, two template edits, one regeneration, one parity re-read.
-It is inert for current users: admin and super_admin already reach these routes via `adminOnly`.
+Layer 3 exists because layer 2 deliberately does **not** filter rows. It admits or refuses a request
+and never touches `req.user`. A route can be genuinely *shared* — safe for anyone with a login — while
+the table behind it carries a `product` column. `notifications` was exactly that, and the audit of all
+19 shared routes lives in a comment in `src/lib/products/route-map.js` so the next shared route gets
+the same question asked of it.
 
 ---
 
-# (d) `product_owner` and the scoped invite
+## What actually happens when you invite someone
 
-## The invariant
+**1. The super admin opens the team page and clicks "Invite member".**
+The button is not there for anyone else — `admin` can still rename, activate, deactivate and reset
+passwords, but it cannot create an account. Inviting a user now decides what that account can reach,
+and that decision stays with the person accountable for the boundary.
 
-> **An inviter can never grant a product they do not hold.**
+**2. The form offers product checkboxes.**
+The list comes from `GET /api/products/grantable`, which reads `PRODUCTS` out of the route map. It is
+not a copy kept in the client. A checkbox for a product the boundary does not know about would grant
+nothing while looking like it granted something.
 
-This is the only thing that makes delegation safe, and it must be enforced **server-side**. The
-invite form is a convenience; the check belongs where the row is written. Stated as code:
+**3. `internal` is drawn separately, below the products, unchecked.**
+It is not a product. It is the staff flag: it carries the platform-wide routes (team, settings, agent
+control, roles) and every alert that is not attributable to a product. It is never pre-ticked, it is
+labelled with what it means, and ticking it raises a confirmation naming the address. Granting it to
+an outside account is the one mistake here that does not announce itself, so it has to be a decision
+somebody made rather than a default nobody noticed.
+
+**4. Sending the invite grants nothing.**
+The choice is parked on the row (`users.invited_products`, with `users.invited_by`). An invite that is
+never accepted, or is sent to the wrong address and revoked, leaves **no row in `user_products`** —
+because that row is what the boundary reads, and a grant should exist only for an account somebody
+actually holds.
+
+**5. Accepting writes the grants.**
+In the same transaction as the password, so there is no state where the account can log in but holds
+nothing — that would look like a boundary bug and be debugged as one. `granted_by` records the
+inviter, not the acceptor. `ON CONFLICT DO NOTHING` makes a replayed token harmless.
+
+**6. The team page shows what every account holds.**
+Held grants as badges; chosen-but-not-yet-accepted dimmed with "on accept"; `none` in grey when an
+account holds nothing. A grant you cannot see is a grant nobody audits.
+
+### Ticking nothing
+
+Valid, and it is also what happens if you forget. The account reaches only the `shared` routes: its
+own tasks, KPIs, activity, profile and notifications. The form says so. Empty is the safe direction —
+`product = ANY('{}')` matches no row, so every product filter narrows to nothing rather than
+everything.
+
+---
+
+## An ACBM account, concretely
 
 ```
-granted_products ⊆ inviter's user_products     (always, no exceptions, including for admins)
+products:  ['acbm']
+NOT:       'internal'
 ```
 
-An admin holding all 7 can grant any subset. A product owner holding `['acbm']` can grant `['acbm']`
-and nothing else. There is no "grant everything" flag, because the invariant makes one unnecessary.
+What that account can reach:
 
-## Schema
+- `/api/acbm/*` — the prospects, deals and packages screens (wildcard-classified `acbm`)
+- the `shared` routes: its own tasks, KPIs, activity, profile, notifications
+- notifications **tagged `acbm`** and nothing else. Not another product's agent failures, and not the
+  platform-wide ones (a NULL `product` requires `internal`)
+- `GET /api/prospects/:id` only for rows whose own `product` is `acbm` — resolved by looking the row
+  up (`row:prospects.product`), because that URL carries no product at all and a guessed id would
+  otherwise read, or `PUT` would modify, another product's row
 
-`user_products` already has the shape needed; delegation needs only provenance, which it already has
-(`granted_by`, `granted_at`). One addition:
+What it cannot reach, and why it is two separate reasons: `/api/users` and `/api/settings` are
+`internal` in the route map (boundary), *and* gated by `adminOnly`/`superAdminOnly` (role). Either one
+alone would refuse it.
 
-```sql
-ALTER TABLE users ADD COLUMN IF NOT EXISTS invited_by TEXT REFERENCES users(id);
-```
+---
 
-`invites` (or the existing `invite_token` columns on `users`) must carry the products being offered,
-so the grant is decided at invite time by someone who held them, not at accept time:
+## Fail-closed, and the kill switch
 
-```sql
-CREATE TABLE IF NOT EXISTS user_invites (
-  token        TEXT PRIMARY KEY,
-  email        TEXT NOT NULL,
-  role         TEXT NOT NULL,
-  products     TEXT[] NOT NULL,          -- validated ⊆ inviter's products AT INVITE TIME
-  invited_by   TEXT NOT NULL REFERENCES users(id),
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  expires_at   TIMESTAMPTZ NOT NULL,
-  accepted_at  TIMESTAMPTZ
-);
-```
+`PRODUCT_BOUNDARY_MODE` — `off` | `shadow` | `enforce`. An env var, so it needs no code change:
 
-**Re-validate the subset at ACCEPT time as well as invite time.** The inviter may have lost a product
-between sending and acceptance; the grant must reflect what they hold when it is actually written, and
-the intersection is the safe answer. An invite whose products no longer intersect is refused, not
-silently downgraded to nothing.
+- **off** — the middleware does nothing. No evaluation, no logging.
+- **shadow** — evaluate, log **every** request to `product_shadow_log`, never block.
+- **enforce** — evaluate, log, and `403` when the caller lacks the product, when the product cannot be
+  resolved, or when the middleware itself errors.
 
-## The role
+Unresolvable means the map and the routes have diverged, which is the moment to stop rather than
+continue. The costs are asymmetric in the direction that decides it: fail-closed fails loudly and
+immediately — someone internal is locked out, says so, and it is fixed in minutes — while fail-open
+fails silently and is discovered when an outside account has been reading Apollo for a month.
 
-```js
-product_owner: {
-  label: 'Product Owner',
-  tiers: { self: 'rw' },          // deliberately NO domain tiers
-  pages: [],                      // nav comes from the product, not the role
-}
-```
+Changing the variable triggers a redeploy (~3 minutes). If something is badly wrong, that is the
+rollback: set it to `off`.
 
-`tiers: { self: 'rw' }` and nothing else is the point: the role grants *no* domain access, so every
-door a product owner can open is opened by a product grant. The `internal` pseudo-product is **never**
-granted to a `product_owner` — that is what keeps `/api/users`, role administration and the meeting
-notes out of reach even though those routes are not product-specific.
+### What was proven before the switch was thrown
 
-**Consequence to accept deliberately:** with no domain tiers, `requireTier(...)` refuses a
-product_owner on every existing route. So (d) also requires the ACBM routes to move from `adminOnly`
-to a gate a product_owner can pass — the registry features from (a) plus the product boundary become
-the two gates, and `adminOnly` is replaced rather than supplemented. That is precisely why (a) comes
-first and why (d) cannot land during shadow: the product boundary must be the real gate before
-`adminOnly` is removed from anything.
-
-## Server-side enforcement points
-
-| Where | Check |
+| Check | Result |
 |---|---|
-`POST /api/users/invite` | `products ⊆ inviter.user_products`; reject the whole request on any element outside it, never silently filter — silent filtering teaches the inviter the wrong model |
-`POST /api/auth/accept-invite` | re-validate against the inviter's CURRENT products; write the intersection; refuse if empty |
-`POST /api/user-products/grant` (new) | same subset check; `granted_by = req.user.id` |
-`DELETE /api/user-products/:user/:product` (new) | an inviter may revoke only within their own holdings, and only for users they invited (`invited_by = req.user.id`) or if they are admin |
+| `src/lib/products/route-sweep.test.js` — all 210 mounted routes resolve to a concrete product | pass |
+| `scripts/verify-row-product-lookup.js` — the `row:prospects.product` lookup against a real table, incl. missing id and a failing lookup | pass in prod, 0 leaked fixtures |
+| `scripts/verify-notification-scope.js` — the notification data scope against the real column | pass in prod |
+| `product_shadow_log` — 212 requests over 14 hours, `would_block` | 0 |
+| `product_shadow_log` — unresolved products | 0 |
+| `user_products` — 17 users × 7 values | 119 grants, nobody short |
 
-Every one of these writes `permission_audit_log` — the table already exists and already has
-`actor_user_id`, `target_user_id`, `before`, `after`, `reason`.
+Shadow traffic touched 41 of 210 routes, which is why the sweep test exists: the 169 untouched routes
+include ~110 that mutate, and nobody is going to fire the email engine to test a route map. The sweep
+proves what traffic was going to prove, without traffic.
 
-## What a product owner must NOT be able to do
+---
 
-- grant `internal`, or any product they do not hold
-- change their own product set (self-grant), or another inviter's
-- see `/api/users` (that is `internal`)
-- reach any other product's data — this is the boundary's job, which is why enforce must be on first
+## What was dropped, and why
 
-## Tests the implementation needs
+The earlier design had a `product_owner` role that could invite users within its own product. It was
+designed, reviewed, and never built. Three reasons it was the wrong shape:
 
-1. `['acbm']` inviter offering `['acbm']` → allowed.
-2. `['acbm']` inviter offering `['acbm','abiozen']` → **rejected entirely**, not filtered.
-3. `['acbm']` inviter offering `['internal']` → rejected.
-4. Inviter loses `acbm` between invite and accept → accept refused, no partial grant.
-5. Inviter gains a product between invite and accept → the invite still grants only what it named.
-6. A product_owner calling the grant endpoint for a user they did not invite → rejected.
-7. With `PRODUCT_BOUNDARY_MODE=enforce`, a product_owner holding `['acbm']` gets 403 on
-   `/api/apollo/stats`, `/api/users`, and `GET /api/prospects?product=golfnex`.
-8. The same account gets 200 on the three `/api/acbm/*` routes.
-9. **`GET /api/prospects/:id` for a golfnex row → 403** (the `row:prospects.product` path — the one
-   that would otherwise leak another product's data by id, and PUT would modify it).
+1. **It creates a second authority over access.** The whole value of the boundary is that exactly one
+   person decides who reaches what. A delegated invite splits that, and the split is invisible — you
+   would have to read `user_products` to know who granted whom.
+2. **The interesting case is a partner, and a partner should not multiply.** ACBM is a referral
+   partner. An account that can create accounts inside our system is a different kind of relationship
+   from an account that can read its own deals, and only one of those was ever wanted.
+3. **It solved a problem we do not have.** There are 17 internal users and one partner. Super admin
+   creating each account by hand is minutes of work per year, against a permanent new surface.
 
-Test 9 is the one that proves the boundary rather than the role.
+If delegation is ever genuinely needed, the thing to add is not a role — it is a per-user "may invite
+within these products" grant, which is the same check written where it can be seen.
 
-## Residual risks, stated rather than discovered later
+---
 
-- **`shared` is reachable by anyone with a login** by design. Re-read the `shared` list before the
-  first external account exists and ask of each route: would I show this to a partner?
-- **`param:product` defaults to `golfnex`** on the prospects routes. A product_owner calling
-  `/api/prospects` with no `?product=` resolves to golfnex and is refused — correct, but it will read
-  as a bug to them. The screens always send the parameter.
-- **A product owner can invite unlimited users.** No cap is designed here; if that matters, it belongs
-  on the invite endpoint, not in the role.
-- **Revocation is not retroactive to sessions**: the boundary reads `user_products` per request, so a
-  revoke takes effect on the next request — good — but any already-downloaded page data stays in the
-  browser.
+## Where the code is
+
+| Concern | File |
+|---|---|
+| **The security model written down** — every route → its product | `src/lib/products/route-map.js` |
+| Resolving a request to a product (params, row lookups, agent keys) | `src/lib/products/resolve-product.js` |
+| The middleware, the three modes, fail-closed | `src/lib/products/boundary.js` |
+| Row-level scoping for product-bearing tables | `src/lib/products/held.js` |
+| `user_products` + `product_shadow_log` + the wide backfill | `scripts/migrate-product-boundary.js` |
+| `users.invited_products` + `users.invited_by` | `scripts/migrate-invite-products.js` |
+| Invite (super_admin only, products chosen) · accept (grants written) | `src/api/routes.js` |
+| The invite form and the products column | `public/index.html` (`pages.team`, `renderInviteProducts`) |
+
+### Adding a route
+
+Add it to the map. If you do not, the sweep test fails — which is the point; an unclassified route
+`403`s under enforce rather than passing. If the route is `shared` and its handler reads a table with a
+`product` column, scope the rows with `productScopeSql` as well. The list of product-bearing tables is
+in the audit comment in `route-map.js`.
+
+### Adding a product
+
+Add it to `PRODUCTS` in the route map, classify its routes, and it appears in the invite form on its
+own. No client change, no template change.

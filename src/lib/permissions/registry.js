@@ -573,8 +573,13 @@ module.exports = {
     defaultDeny: false,
   },
   {
+    // NOTE: the route is superAdminOnly as of the product boundary — inviting a user now chooses which
+    // products that account can reach, and that decision stays with the person accountable for the
+    // boundary. This feature therefore only ever resolves for super_admin; granting it to an admin is
+    // inert (the middleware refuses before the resolver is consulted). Kept registered rather than
+    // deleted so the route stays covered by the registry's completeness test.
     key: 'admin.users.invite',
-    label: "Invite — POST /api/users/invite",
+    label: "Invite — POST /api/users/invite (super_admin only)",
     domain: 'admin',
     surface: 'api_route',
     ref: "POST /api/users/invite",

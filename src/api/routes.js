@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { signToken, authMiddleware, adminOnly, requireTier, requireAnyTier, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
+const { signToken, authMiddleware, adminOnly, superAdminOnly, requireTier, requireAnyTier, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
 const { query, withTransaction } = require('../lib/db');
 const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
@@ -22,6 +22,7 @@ const { runContentPipeline } = require('../lib/agents/content');
 const { runProspecting, runQualifyProspects } = require('../lib/agents/prospecting');
 const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/config');
 const { heldProducts, productScopeSql } = require('../lib/products/held');
+const { PRODUCTS: PRODUCT_KEYS, GRANTABLE } = require('../lib/products/route-map');
 const riResolve = require('../lib/agents/research-intelligence/resolve');
 const riOutreach = require('../lib/agents/research-intelligence/outreach');
 const { runReorderAgent, syncBuyersFromOrders, identifyReorderCandidates } = require('../lib/agents/reorder-agent');
@@ -153,9 +154,27 @@ router.post('/auth/accept-invite', authLimiter, async (req, res) => {
     // Trimmed to match the login comparison. Both sides must agree: login trims, so hashing an
     // untrimmed value here would store a hash that login can never satisfy.
     const hash = bcrypt.hashSync(password.trim(), 10);
-    await query('UPDATE users SET password_hash=$1, name=$2, invite_token=NULL, joined_at=$3 WHERE id=$4', [hash, name, new Date().toISOString(), user.id]);
+    // The product grants are written HERE, not when the invite was sent. An invite that is never
+    // accepted must leave no row in user_products, because that row is what the product boundary
+    // reads — a grant should exist only for an account somebody actually holds.
+    //
+    // One transaction with the password: an account that can log in but holds no products would look
+    // like a boundary bug and be debugged as one, and a half-applied accept is exactly the state
+    // nobody would think to check. ON CONFLICT DO NOTHING makes a replayed token harmless.
+    const chosen = Array.isArray(user.invited_products) ? user.invited_products : [];
+    await withTransaction(async (c) => {
+      await c.query('UPDATE users SET password_hash=$1, name=$2, invite_token=NULL, joined_at=$3, invited_products=NULL WHERE id=$4',
+        [hash, name, new Date().toISOString(), user.id]);
+      for (const product of chosen) {
+        // granted_by is the super_admin who sent the invite, carried through from the row — so the
+        // grant records who decided it, not the account that happened to accept.
+        await c.query(`INSERT INTO user_products (user_id, product, granted_by) VALUES ($1, $2, $3)
+                       ON CONFLICT (user_id, product) DO NOTHING`, [user.id, product, user.invited_by || null]);
+      }
+    });
+    console.log(`[invite] ACCEPTED ${user.email} — granted products [${chosen.join(', ') || 'NONE'}]`);
     const updated = (await query('SELECT * FROM users WHERE id=$1', [user.id])).rows[0];
-    res.json({ token: signToken(updated), user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role } });
+    res.json({ token: signToken(updated), user: { id: updated.id, name: updated.name, email: updated.email, role: updated.role }, products: chosen });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -252,28 +271,74 @@ router.post('/roles', authMiddleware, adminOnly, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// `products` is included so the team page can show what each account actually holds. A grant you
+// cannot see is a grant nobody audits, and until now the only way to know was to query the table.
+// invited_products is surfaced separately for accounts that have not accepted yet — those are chosen,
+// not granted, and showing them as the same thing would misrepresent the boundary.
 router.get('/users', authMiddleware, async (req, res) => {
   try {
-    const result = await query('SELECT id,name,email,role,github_username,joined_at,is_active FROM users ORDER BY role,name');
+    const result = await query(`
+      SELECT u.id, u.name, u.email, u.role, u.github_username, u.joined_at, u.is_active,
+             u.invited_products,
+             COALESCE(ARRAY(SELECT p.product FROM user_products p WHERE p.user_id = u.id ORDER BY p.product), '{}') AS products
+        FROM users u ORDER BY u.role, u.name`);
     res.json(result.rows);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/users/invite', authMiddleware, adminOnly, async (req, res) => {
+// ── Grantable products, for the invite form ───────────────────────────────────
+// The list comes from the ROUTE MAP, not a second hand-kept list in the client: the products a user
+// can be granted are exactly the products routes are classified under, and a form offering anything
+// else would grant something the boundary never checks. 'internal' is returned SEPARATELY because it
+// is not a product — it is the staff flag, and the form must not present it as one more checkbox in
+// the row.
+router.get('/products/grantable', authMiddleware, superAdminOnly, async (req, res) => {
+  const LABELS = { abiozen: 'Abiozen', golfnex: 'GolfNex', favly: 'Favly', linkabl: 'Linkabl', aros: 'AROS', acbm: 'ACBM' };
+  res.json({
+    products: PRODUCT_KEYS.map(key => ({ key, label: LABELS[key] || key })),
+    internal: {
+      key: 'internal',
+      label: 'Internal staff',
+      warning: 'Platform-wide access: team, settings, agent control, and every alert not attributable to a product. Never grant this to an outside account.',
+    },
+  });
+});
+
+// INVITE — super_admin ONLY, and the products are chosen here.
+// This was adminOnly. It is not any more: inviting a user now decides which products that account can
+// reach, and that decision stays with the person accountable for the boundary. admin keeps everything
+// else on the team page (rename, activate, reset password); it can no longer create an account.
+//
+// The chosen products are PARKED on the row (users.invited_products) and written to user_products on
+// ACCEPT. An invite that is never accepted, or is revoked, therefore leaves no grant behind.
+router.post('/users/invite', authMiddleware, superAdminOnly, async (req, res) => {
   try {
-    const { email, role, github_username, whatsapp_number } = req.body;
+    const { email, role, github_username, whatsapp_number, products } = req.body;
     if (!email || !role) return res.status(400).json({ error: 'Email and role required' });
     const catalog = await getAllRoles();
     if (!catalog[role]) {
       return res.status(400).json({ error: `Unknown role "${role}". Valid roles: ${Object.keys(catalog).join(', ')}` });
+    }
+    // Products: validated against the map's own list. An unknown value is rejected rather than
+    // dropped — silently ignoring it would produce an account that looks granted and is not.
+    if (products !== undefined && !Array.isArray(products)) {
+      return res.status(400).json({ error: 'products must be an array' });
+    }
+    const chosen = [...new Set((products || []).map(p => String(p).trim()).filter(Boolean))];
+    const unknown = chosen.filter(p => !GRANTABLE.includes(p));
+    if (unknown.length) {
+      return res.status(400).json({ error: `Unknown product(s): ${unknown.join(', ')}. Grantable: ${GRANTABLE.join(', ')}` });
     }
     const existing = await query('SELECT id FROM users WHERE email=$1', [email.toLowerCase()]);
     if (existing.rows[0]) return res.status(400).json({ error: 'User already exists' });
     const inviteToken = crypto.randomBytes(32).toString('hex');
     const id = crypto.randomUUID();
     const wa = whatsapp_number ? String(whatsapp_number).trim() : null;
-    await query('INSERT INTO users (id,email,name,role,github_username,whatsapp_number,invite_token,invited_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-      [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, wa, inviteToken, new Date().toISOString()]);
+    await query('INSERT INTO users (id,email,name,role,github_username,whatsapp_number,invite_token,invited_at,invited_products,invited_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+      [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, wa, inviteToken, new Date().toISOString(), chosen, req.user.id]);
+    // Logged plainly, because granting 'internal' to an outside account is the one mistake here that
+    // does not announce itself.
+    console.log(`[invite] ${req.user.email} invited ${email.toLowerCase()} as ${role} with products [${chosen.join(', ') || 'NONE'}]${chosen.includes('internal') ? ' ⚠ INCLUDES internal' : ''}`);
     const baseUrl = process.env.BASE_URL || 'https://playbookos-production.up.railway.app';
     const inviteUrl = `${baseUrl}/#/accept-invite?token=${inviteToken}`;
     sendEmail({ to: email, subject: `You've been invited to PlayNexa`, triggerType: 'invite',
@@ -291,7 +356,7 @@ router.post('/users/invite', authMiddleware, adminOnly, async (req, res) => {
       } catch(e) { whatsapp_status = 'error:' + e.message; }
     }
 
-    res.json({ success: true, message: `Invite sent to ${email}`, inviteUrl, whatsapp_status });
+    res.json({ success: true, message: `Invite sent to ${email}`, inviteUrl, whatsapp_status, products: chosen });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 

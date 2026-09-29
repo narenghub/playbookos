@@ -116,6 +116,7 @@ const INTERNAL = [
   'PUT /api/users/:id/toggle-status', 'POST /api/users/send-onboarding', 'POST /api/users/send-task-nudge',
   'POST /api/admin/users/:user_id/edit-name', 'POST /api/admin/users/:user_id/reset-password',
   'GET /api/admin/adoption', 'GET /api/roles', 'POST /api/roles',
+  'GET /api/products/grantable',
   // company targets + milestones
   'GET /api/targets', 'POST /api/targets', 'GET /api/milestones', 'PUT /api/milestones/:id',
   'DELETE /api/milestones/duplicates',

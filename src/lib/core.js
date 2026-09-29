@@ -44,6 +44,17 @@ function adminOnly(req, res, next) {
   next();
 }
 
+// super_admin ONLY — admin does NOT pass.
+// Used where the action decides what another account can reach: inviting a user and choosing their
+// products. admin is a broad internal role held by several people; granting products is the one
+// decision that must stay with the person accountable for the boundary.
+function superAdminOnly(req, res, next) {
+  if (req.user.role !== 'super_admin') {
+    return res.status(403).json({ error: 'Super admin only' });
+  }
+  next();
+}
+
 // Tier permission middleware. Read/write mode is inferred from the HTTP method
 // (GET/HEAD = read, anything else = write). On success it sets req.tierAccess
 // to the role's grant ('rw'|'r'|'w'|'own') so handlers can apply row-level
@@ -237,4 +248,4 @@ async function scoreTeamMember(userId, date) {
   return { user_id: userId, email: userRow.email, name: userRow.name, role: userRow.role, date, score, blockers, escalated, note };
 }
 
-module.exports = { signToken, verifyToken, authMiddleware, adminOnly, requireTier, requireAnyTier, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, scoreTeamMember, computeScoreForRole, crypto };
+module.exports = { signToken, verifyToken, authMiddleware, adminOnly, superAdminOnly, requireTier, requireAnyTier, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, scoreTeamMember, computeScoreForRole, crypto };

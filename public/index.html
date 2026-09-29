@@ -1927,16 +1927,27 @@ async playbook() {
 
 // ── TEAM MANAGEMENT ───────────────────────────────────────────────────────────
 async team() {
-  const [users, rolesResp] = await Promise.all([API('/users'), API('/roles').catch(() => ({roles:[]}))]);
+  const isSuper = currentUser.role === 'super_admin';
+  // The grantable product list comes from the SERVER's route map, never a copy kept here: a checkbox
+  // for a product the boundary does not know about would grant nothing and look like it granted
+  // something. super_admin only, so for everyone else the fetch is skipped rather than 403ing.
+  const [users, rolesResp, grantable] = await Promise.all([
+    API('/users'),
+    API('/roles').catch(() => ({roles:[]})),
+    isSuper ? API('/products/grantable').catch(e => ({ error: e.message })) : Promise.resolve(null),
+  ]);
   window._roleCatalog = rolesResp.roles || [];
+  window._grantable = grantable;
   document.getElementById('content').innerHTML = `
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div class="card-title" style="margin:0">Team members</div>
-        <button class="btn btn-teal btn-sm" onclick="showInviteModal()">+ Invite member</button>
+        ${isSuper
+          ? '<button class="btn btn-teal btn-sm" onclick="showInviteModal()">+ Invite member</button>'
+          : '<span style="font-size:11px;color:#888">Only a super admin can create an account</span>'}
       </div>
       <table>
-        <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr>
+        <tr><th>Name</th><th>Email</th><th>Role</th><th>Products</th><th>Status</th><th>Actions</th></tr>
         ${users.map(u=>{
           const isSelf = u.id === currentUser.id;
           const isSuper = u.role === 'super_admin';
@@ -1961,10 +1972,20 @@ async team() {
               </div>
             </div>`;
           }
+          // Held grants vs. chosen-but-not-yet-accepted: different things, shown differently. An
+          // account that holds nothing says so — that is a real state (it can reach only the shared
+          // pages), and reading it as "loading" or "all" is how a boundary gap goes unnoticed.
+          const held = u.products || [];
+          const pending = u.invited_products || [];
+          const chip = (p, dim) => `<span class="badge ${p === 'internal' ? 'badge-amber' : 'badge-gray'}"${dim ? ' style="opacity:.5"' : ''}>${p}</span>`;
+          const prodCell = held.length ? held.map(p => chip(p)).join(' ')
+            : (pending.length ? pending.map(p => chip(p, true)).join(' ') + '<div style="font-size:10px;color:#888">on accept</div>'
+                              : '<span style="color:#bbb;font-size:11px">none</span>');
           return `<tr>
           <td><strong>${u.name}</strong></td>
           <td>${u.email}</td>
           <td><span class="badge badge-blue">${u.role}</span></td>
+          <td>${prodCell}</td>
           <td>${statusBadge}</td>
           <td>${action}</td>
         </tr>`;
@@ -1984,6 +2005,14 @@ async team() {
         <div class="form-group">
           <label>WhatsApp number <span style="font-weight:400;color:#666;font-size:11px">(optional, with country code — e.g. +14155551234)</span></label>
           <input id="inv-whatsapp" type="tel" placeholder="+14155551234">
+        </div>
+        <div class="form-group" id="inv-products-group">
+          <label>Products this account can reach</label>
+          <div style="font-size:11px;color:#666;margin:-4px 0 8px">
+            The product boundary checks these on every request, independently of the role. Granted when
+            the invite is <strong>accepted</strong> — nothing is granted if it is never used.
+          </div>
+          <div id="inv-products">Loading…</div>
         </div>
         <div style="display:flex;gap:8px">
           <button class="btn btn-teal" onclick="sendInvite()">Send invite email</button>
@@ -2353,10 +2382,18 @@ async function sendInvite() {
   const email = document.getElementById('inv-email').value;
   const role = document.getElementById('inv-role').value;
   const whatsapp_number = (document.getElementById('inv-whatsapp') || {}).value || '';
+  const products = selectedInviteProducts();
   if (!role) { document.getElementById('invite-msg').innerHTML = '<div class="error-msg">Pick a role</div>'; return; }
+  // One confirmation, for the one grant that cannot be taken back quietly. Everything else about an
+  // invite is reversible by editing the account; handing an outside address the platform-wide flag
+  // means it has already read whatever it read.
+  if (products.includes('internal') &&
+      !confirm(`Grant "Internal staff" to ${email}?\n\nThis gives platform-wide access: team, settings, agent control, and every alert not attributable to a product. Only do this for someone who works here.`)) {
+    return;
+  }
   document.getElementById('invite-msg').innerHTML = '<div style="color:#888;font-size:13px">Sending invite + WhatsApp welcome…</div>';
   const res = await Promise.race([
-    API("/users/invite",{method:"POST",body:JSON.stringify({email, role, whatsapp_number: whatsapp_number.trim()})}),
+    API("/users/invite",{method:"POST",body:JSON.stringify({email, role, whatsapp_number: whatsapp_number.trim(), products})}),
     new Promise((_,r)=>setTimeout(()=>r(new Error("timeout")),15000))
   ]).catch(e=>({error:e.message}));
   if (res.success) {
@@ -2364,7 +2401,10 @@ async function sendInvite() {
     if (res.whatsapp_status === 'sent') waNote = ' — WhatsApp welcome sent.';
     else if (res.whatsapp_status && res.whatsapp_status.startsWith('skipped')) waNote = ' — WhatsApp skipped (Twilio not configured).';
     else if (res.whatsapp_status && res.whatsapp_status.startsWith('error')) waNote = ' — WhatsApp error: ' + res.whatsapp_status.slice(6);
-    document.getElementById('invite-msg').innerHTML = `<div class="success-msg">${res.message}${waNote}</div>`;
+    const prodNote = (res.products && res.products.length)
+      ? ` Products on accept: ${res.products.join(', ')}.`
+      : ' No products granted — the account will reach only its own tasks and profile.';
+    document.getElementById('invite-msg').innerHTML = `<div class="success-msg">${res.message}${waNote}${prodNote}</div>`;
     setTimeout(()=>pages.team(), 2000);
   } else {
     document.getElementById('invite-msg').innerHTML = `<div class="error-msg">${res.error}</div>`;
@@ -2382,6 +2422,41 @@ function showInviteModal() {
       .map(r => `<option value="${r.role_name}">${r.display_name}${r.custom ? ' (custom)' : ''}</option>`)
       .join('');
   }
+  renderInviteProducts();
+}
+
+// Product checkboxes, built from the server's list.
+//
+// 'internal' is NOT rendered in the row with the products, because it is not one. It is the staff
+// flag: it carries the platform-wide routes (team, settings, agent control) and every alert that is
+// not attributable to a product. It is drawn below, separated, unchecked, and labelled with what it
+// means — never pre-ticked, so granting it to an outside account has to be a decision somebody made
+// rather than a default nobody noticed.
+function renderInviteProducts() {
+  const box = document.getElementById('inv-products');
+  if (!box) return;
+  const g = window._grantable;
+  if (!g || g.error) {
+    box.innerHTML = `<div class="error-msg">Could not load the product list${g && g.error ? ': ' + g.error : ''}. ` +
+      `An invite sent now would grant no products — reload before inviting.</div>`;
+    return;
+  }
+  const cb = (key, label, extra) => `<label style="display:inline-flex;align-items:center;gap:6px;margin:0 14px 6px 0;font-weight:400;cursor:pointer">
+      <input type="checkbox" class="inv-product" value="${key}"${extra || ''}> ${label}</label>`;
+  box.innerHTML = `
+    <div>${(g.products || []).map(p => cb(p.key, p.label)).join('')}</div>
+    <div style="margin-top:10px;padding:10px 12px;background:#fff3cd;border:1px solid #ffe08a;border-radius:6px">
+      ${cb(g.internal.key, '<strong>' + g.internal.label + '</strong>')}
+      <div style="font-size:11px;color:#856404;margin-top:2px">${g.internal.warning}</div>
+    </div>
+    <div style="font-size:11px;color:#888;margin-top:8px">
+      Tick nothing and the account can reach only its own tasks, KPIs and profile. That is a valid
+      setup, not an error — it is also what happens if you forget.
+    </div>`;
+}
+
+function selectedInviteProducts() {
+  return Array.from(document.querySelectorAll('#inv-products .inv-product:checked')).map(el => el.value);
 }
 
 async function runAnalysis() {
