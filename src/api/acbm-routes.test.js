@@ -14,8 +14,13 @@ const express = require('express');
 // Every query answers empty. These tests are about the gate, not the payload: a 200 with no rows still
 // proves the request reached the handler, and a 403 proves it did not.
 const db = require('../lib/db');
-db.query = async (sql) => {
+db.query = async (sql, params = []) => {
   if (/UPDATE users SET last_login/i.test(sql)) return { rows: [] };
+  // authMiddleware reads the caller's role from the DATABASE, not the token, so the fake has to answer
+  // this or every request 401s. Ids here are 'u-<role>', which is where the role comes from.
+  if (/^SELECT role, is_active FROM users WHERE id/i.test(sql.trim())) {
+    return { rows: [{ role: String(params[0] || '').replace(/^u-/, ''), is_active: 1 }] };
+  }
   if (/FROM user_products/i.test(sql)) return { rows: [] };
   if (/COUNT\(\*\)/i.test(sql)) return { rows: [{ n: 0, total: 0 }] };
   return { rows: [], rowCount: 0 };

@@ -53,6 +53,13 @@ const db = require('../lib/db');
 db.query = async (sql, params = []) => {
   const s = sql.replace(/\s+/g, ' ').trim();
   if (/UPDATE users SET last_login/i.test(s)) return { rows: [] };
+  // authMiddleware reads role + is_active from the DATABASE, not the token. Ids here are 'u-<role>' for
+  // the synthetic callers and real ids for the fixtures, so both shapes have to answer.
+  if (/^SELECT role, is_active FROM users WHERE id =/i.test(s)) {
+    const known = USERS.find(u => u.id === params[0]);
+    if (known) return { rows: [{ role: known.role, is_active: 1 }] };
+    return { rows: [{ role: String(params[0] || '').replace(/^u-/, ''), is_active: 1 }] };
+  }
   if (/FROM users WHERE id=/i.test(s)) return { rows: USERS.filter(u => u.id === params[0]) };
   if (/COUNT\(\*\)::int n FROM users WHERE role='super_admin'/i.test(s)) {
     return { rows: [{ n: USERS.filter(u => u.role === 'super_admin' && u.is_active === 1).length }] };
@@ -100,6 +107,25 @@ test('every locked route refuses every OTHER role too', async () => {
       const r = await call(method, concrete(path), role, { products: [] });
       assert.equal(r.status, 403, `${method} ${path} must refuse ${role}`);
     }
+  }
+});
+
+test('super_admin still reaches all of them WITH A STALE TOKEN', async () => {
+  // The case that was missing, and the reason the Edit bug shipped. Every test in this file was a
+  // negative — and a stale token is MORE restricted, never less, so all of them passed through the bug.
+  // This one claims the role the account had BEFORE its promotion, which is what naren's browser was
+  // sending: 178 requests on 2026-09-29 carried role 'admin' for an account the database says is
+  // super_admin.
+  const stale = signToken({ id: 'u-super', email: 'naren@abiozen.com', role: 'admin' });
+  for (const [method, path] of LOCKED_ROUTES) {
+    const body = method === 'PUT' && path.endsWith('/products') ? { products: ['abiozen'] }
+      : { role: 'dev_team', name: 'Muni', email: 'new@abiozen.com' };
+    const r = await fetch(base() + concrete(path), {
+      method, headers: { Authorization: 'Bearer ' + stale, 'Content-Type': 'application/json' },
+      body: method === 'GET' ? undefined : JSON.stringify(body),
+    });
+    assert.notEqual(r.status, 403,
+      `${method} ${path} refused a super_admin holding a pre-promotion token (got ${r.status})`);
   }
 });
 

@@ -20,12 +20,67 @@ function verifyToken(token) {
   catch { return null; }
 }
 
-function authMiddleware(req, res, next) {
+// THE ROLE IS READ FROM THE DATABASE, NOT THE TOKEN.
+//
+// It used to be `req.user = payload`, so every gate downstream — adminOnly, superAdminOnly,
+// requireTier, and every handler that looks at req.user.role — trusted a claim baked into a JWT with a
+// SEVEN DAY life. That meant a promotion, a demotion and a deactivation all waited for the token to
+// expire.
+//
+// It was not hypothetical. naren@abiozen.com was promoted to super_admin on 2026-09-28 and had two live
+// sessions: product_shadow_log shows 178 requests on 2026-09-29 carrying `role: admin` and 25 carrying
+// `role: super_admin`. Once user management moved to superAdminOnly, the stale session got
+// "Super admin only" 403s on Edit while the fresh one worked — the same button, working or not depending
+// on which tab it was clicked in.
+//
+// This is the same mistake as putting products in the token, which is why the product boundary reads
+// user_products per request and resolve.js reads the role fresh (its own header says permissions are
+// NEVER read from the JWT). The gates now get the same guarantee: a role change takes effect on the next
+// request.
+//
+// The token remains the AUTHENTICATION (who you are, signed by us). The database is the AUTHORIZATION
+// (what you currently are). Only `id` and `email` are taken from the token now.
+async function authMiddleware(req, res, next) {
   const auth = req.headers.authorization || '';
   const token = auth.replace('Bearer ', '');
   const payload = verifyToken(token);
   if (!payload) return res.status(401).json({ error: 'Unauthorized' });
-  req.user = payload;
+
+  let row = null;
+  try {
+    row = (await query('SELECT role, is_active FROM users WHERE id = $1', [payload.id])).rows[0];
+  } catch (e) {
+    // DB UNREACHABLE. Fall back to the token's claims and say so loudly.
+    //
+    // This is the one place in today's work that deliberately fails OPEN, so the reasoning is written
+    // down. Failing closed here logs every user out during a database blip — and during a DB outage no
+    // route can read data anyway, so the exposure is a role change made within the token's remaining
+    // life, during an outage, which is close to nil. Turning a transient blip into a forced re-login for
+    // the whole company is the larger harm.
+    console.error(`[auth] role lookup FAILED for ${payload.id} — falling back to the token's claims: ${e.message}`);
+    req.user = payload;
+    return next();
+  }
+
+  // The row is gone: the account was deleted while this token was still valid.
+  if (!row) {
+    console.warn(`[auth] token for a user that no longer exists: ${payload.id} (${payload.email})`);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  // Deactivated. Login already refuses is_active=0, but an EXISTING token used to keep working for up to
+  // seven days — so "Set Inactive" did not actually end anyone's session. Now it does.
+  if (!(row.is_active === true || Number(row.is_active) === 1)) {
+    console.warn(`[auth] rejected a deactivated account: ${payload.email}`);
+    return res.status(401).json({ error: 'Account is inactive' });
+  }
+
+  req.user = { id: payload.id, email: payload.email, role: row.role };
+  if (row.role !== payload.role) {
+    // Worth a line: it means somebody is holding a token from before a role change, and the answer they
+    // get now differs from the answer they got an hour ago.
+    console.log(`[auth] role refreshed for ${payload.email}: token said '${payload.role}', database says '${row.role}'`);
+  }
+
   // Fire-and-forget last_login write-through. Throttle baked into the WHERE
   // clause: only writes if last_login is NULL or older than 5 minutes.
   query(

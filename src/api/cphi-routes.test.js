@@ -31,7 +31,13 @@ seed();
 const db = require('../lib/db');
 db.query = async (sql, params = []) => {
   if (/UPDATE users SET last_login/i.test(sql)) return { rows: [] };          // authMiddleware
-  if (/FROM users WHERE id/i.test(sql)) return { rows: [{ id: 1, email: 'a@b.c', role: 'business_dev', is_active: true }] };
+  // authMiddleware reads the role from the DATABASE now, not the token, so this has to answer with the
+  // role of the id being asked about. Returning one hardcoded role made every caller business_dev and
+  // silently turned the read-only case into a write-capable one.
+  if (/FROM users WHERE id/i.test(sql)) {
+    const ROLES = { 1: 'business_dev', 2: 'seo_specialist' };   // matches the RW / RO tokens below
+    return { rows: [{ id: params[0], email: 'a@b.c', role: ROLES[params[0]] || 'business_dev', is_active: true }] };
+  }
 
   // summary
   if (/COUNT\(DISTINCT booth\)/i.test(sql)) {
