@@ -68,6 +68,12 @@ module.exports = {
   "super_admin": {
     label: "Super Admin",
     grants: [
+      'acbm.deals.list',
+      'acbm.packages.list',
+      'acbm.page_acbm_deals.view',
+      'acbm.page_acbm_packages.view',
+      'acbm.page_acbm_prospects.view',
+      'acbm.prospects.list',
       'admin.admin_adoption.list',
       'admin.admin_users.edit_name',
       'admin.admin_users.reset_password',
@@ -316,6 +322,12 @@ module.exports = {
   "admin": {
     label: "Admin",
     grants: [
+      'acbm.deals.list',
+      'acbm.packages.list',
+      'acbm.page_acbm_deals.view',
+      'acbm.page_acbm_packages.view',
+      'acbm.page_acbm_prospects.view',
+      'acbm.prospects.list',
       'admin.admin_adoption.list',
       'admin.admin_users.reset_password',
       'admin.agent_activity.list',

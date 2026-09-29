@@ -2875,6 +2875,92 @@ module.exports = {
     defaultDeny: true,
   },
 
+  // ===================== ACBM — the referral pipeline's three read-only screens (6) =============
+  // Registered so the three routes are GRANTABLE. Until they exist, mapFeatureKey returns null for
+  // them, enforce.js falls through to the route's own gate, and — the part that matters —
+  // user_feature_overrides has no feature key to hang a grant on, so an ACBM user could not be given
+  // these screens by ANY mechanism.
+  //
+  // defaultDeny:false on all six: they are read-only GETs with no spend. defaultDeny is for things
+  // that cost money or write (the 54 in admin's needsExplicitGrant); marking a free list defaultDeny
+  // would mean even a super_admin needed rule 3's bypass to see it.
+  //
+  // NOTE the routes still carry adminOnly today. Registering a feature TIGHTENS, it never loosens —
+  // moving them to a gate an ACBM user can pass is a separate, deliberate step that must come after
+  // the product boundary is enforcing.
+  {
+    key: 'acbm.page_acbm_prospects.view',
+    label: "ACBM Prospects (page)",
+    domain: 'acbm',
+    surface: 'nav_page',
+    ref: "acbm-prospects",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: ['acbm.prospects.list'],
+    defaultDeny: false,
+  },
+  {
+    key: 'acbm.page_acbm_deals.view',
+    label: "ACBM Deals (page)",
+    domain: 'acbm',
+    surface: 'nav_page',
+    ref: "acbm-deals",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: ['acbm.deals.list'],
+    defaultDeny: false,
+  },
+  {
+    key: 'acbm.page_acbm_packages.view',
+    label: "ACBM Packages (page)",
+    domain: 'acbm',
+    surface: 'nav_page',
+    ref: "acbm-packages",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: ['acbm.packages.list'],
+    defaultDeny: false,
+  },
+  {
+    key: 'acbm.prospects.list',
+    label: "List scored ACBM prospects — GET /api/acbm/prospects",
+    domain: 'acbm',
+    surface: 'api_route',
+    ref: "GET /api/acbm/prospects",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: [],
+    defaultDeny: false,
+  },
+  {
+    key: 'acbm.deals.list',
+    label: "List ACBM deals — GET /api/acbm/deals",
+    domain: 'acbm',
+    surface: 'api_route',
+    ref: "GET /api/acbm/deals",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: [],
+    defaultDeny: false,
+  },
+  {
+    key: 'acbm.packages.list',
+    label: "List ACBM packages — GET /api/acbm/packages",
+    domain: 'acbm',
+    surface: 'api_route',
+    ref: "GET /api/acbm/packages",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    implies: [],
+    defaultDeny: false,
+  },
+
     // ===================== AGENT TRIGGERS — mission-control manual runs (9) =====================
   {
     key: 'admin.agent_ceo.run',

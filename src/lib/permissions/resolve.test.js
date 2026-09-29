@@ -102,13 +102,19 @@ test('T10 — unknown feature key is denied and does not throw (rule 1)', async 
   assert.equal(r.rule, 1);
 });
 
-test('T11 — super_admin holds all 242 non-cron features (and no crons)', async () => {
+test('T11 — super_admin holds EVERY non-cron feature (and no crons)', async () => {
+  // Asserted as the PROPERTY, not a count. This used to be a hardcoded 242 with a comment listing
+  // every historical addition (+5 Content Studio, +6 Prospects, +4 CPHI, …), which meant every new
+  // feature failed the test for the wrong reason and got fixed by bumping the number — a check that
+  // only ever measured "did someone remember to edit this line". nonCron.length IS the expected
+  // value, so the invariant now maintains itself and still fails loudly if a feature stops resolving.
   const map = await resolveAll(user('super_admin'), { env: ENV_ON, overrides: [] });
   const isCron = f => f.surface === 'agent_trigger' && !f.ref.startsWith('POST ');
   const nonCron = FEATURES.filter(f => !isCron(f));
   const crons = FEATURES.filter(isCron);
-  const allowedNonCron = nonCron.filter(f => map.get(f.key).allowed).length;
-  assert.equal(allowedNonCron, 242); // +5 Content Studio (Part 3) +1 golfnex.content.publish_post (mcp_tool) +6 Prospects (page+list/get/update/run/qualify) +3 Notifications (list/read/read-all) +4 CPHI Event Agent (page+exhibitors.list/thin-supply.list/exhibitors.update) +1 personal.auth_password.update (self-service, every role) +2 AROS establishments (page+list) +2 Research institutions (page+list)
+  const missing = nonCron.filter(f => !map.get(f.key).allowed).map(f => f.key);
+  assert.deepEqual(missing, [], `super_admin should hold every non-cron feature; missing: ${missing.join(', ')}`);
+  assert.ok(nonCron.length > 240, `sanity floor: expected the full registry, got ${nonCron.length}`);
   assert.ok(crons.every(f => !map.get(f.key).allowed), 'no cron is ever held');
 });
 
