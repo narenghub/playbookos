@@ -7414,19 +7414,51 @@ function cdiReResolve(){
    from the server's shipping_subtypes (which comes from prospecting config.js) on first render, so
    it cannot drift from what the enumerator actually runs. */
 window._apShipping = null;                 // set from facets.shipping_subtypes on first load
+/* WHY THESE SCREENS HAVE THEIR OWN FETCH AND ERROR STATE.
+   The shared API() helper does `.then(r => r.json())`: it discards the HTTP status, and a non-JSON
+   body (a proxy 502, an HTML error page) makes it REJECT. Combined with a render that assumed
+   success, a 403, a 500 and a timeout all looked identical — the screen sat on "Loading…" forever,
+   which is how a broken screen becomes indistinguishable from a slow one. That is exactly how this
+   page shipped broken, so every ACBM screen now goes through apGet() and can fail visibly, with the
+   status and a retry. */
+async function apGet(path){
+  try {
+    const r = await fetch('/api'+path, { headers: token ? { 'Authorization':'Bearer '+token } : {} });
+    const text = await r.text();
+    let data = null, parseError = null;
+    try { data = text ? JSON.parse(text) : null; } catch(e){ parseError = 'response was not JSON'; }
+    if (!r.ok) return { ok:false, status:r.status, error:(data && data.error) || parseError || ('HTTP '+r.status), detail:(data && (data.reason||data.feature_key)) || (parseError ? text.slice(0,140) : null) };
+    if (parseError) return { ok:false, status:r.status, error:parseError, detail:text.slice(0,140) };
+    if (data && data.error) return { ok:false, status:r.status, error:data.error };
+    return { ok:true, status:r.status, data };
+  } catch(e){ return { ok:false, status:0, error:'request failed: '+(e && e.message ? e.message : String(e)) }; }
+}
+/* One error card for all three screens. Names the status, because "Forbidden" and "the server
+   fell over" need different responses from whoever is looking at it. */
+function apErrorCard(title, r, retryFn){
+  const status = r && r.status ? r.status : 0;
+  const hint = status === 401 ? 'Your session may have expired — reload and sign in again.'
+    : status === 403 ? 'The server refused this request. You are signed in, but not permitted to read it.'
+    : status === 0 ? 'The request never completed — network, or the server is not responding.'
+    : status >= 500 ? 'The server errored while building this. The container logs will have the stack.'
+    : 'Unexpected response.';
+  return '<div class="card">'
+    + '<div class="card-title text-section" style="margin:0">'+apEsc(title)+'</div>'
+    + '<p style="color:#dc2626;margin:6px 0 2px"><strong>'+(status ? 'HTTP '+status : 'No response')+'</strong> — '+apEsc(r && r.error ? r.error : 'unknown error')+'</p>'
+    + (r && r.detail ? '<p style="color:var(--text-muted);font-size:12px;margin:0 0 6px">'+apEsc(String(r.detail))+'</p>' : '')
+    + '<p class="text-body" style="margin:0 0 10px">'+hint+'</p>'
+    + '<button onclick="'+retryFn+'" class="btn-secondary" style="padding:5px 12px;font-size:12px">Retry</button>'
+    + '</div>';
+}
 window._apFilters = { subtype:null, region:'', bucket:'', package:'', page:1 };
 window._apState = { total:0, pageSize:50, summary:null, facets:null, open:null };
 const apEsc = (x) => csEsc(x);
 const apDash = '<span style="color:var(--text-muted)">—</span>';
 function apSetFilter(k, v){ window._apFilters[k] = v; window._apFilters.page = 1; pages['acbm-prospects'](); }
-function apResetFilters(){ /* The subtype filter OPENS on the three shipping subtypes and the facet still offers all nine.
-   The other six are the dropped experiment categories and their rows are still in the table:
-   defaulting stops anyone working the wrong list by accident, and keeping them selectable stops
-   anyone finding ~608 orphan rows in six months with no idea what they are. The default is filled
-   from the server's shipping_subtypes (which comes from prospecting config.js) on first render, so
-   it cannot drift from what the enumerator actually runs. */
-window._apShipping = null;                 // set from facets.shipping_subtypes on first load
-window._apFilters = { subtype:null, region:'', bucket:'', package:'', page:1 }; pages['acbm-prospects'](); }
+/* Reset returns to the DEFAULT view (the shipping three), not to everything — the default is the
+   safe list, so "reset" should mean "back to safe", not "show me the retired rows too". */
+function apResetFilters(){ window._apFilters = { subtype:apDefaultSubtype(), region:'', bucket:'', package:'', page:1 }; pages['acbm-prospects'](); }
+function apDefaultSubtype(){ return (window._apShipping && window._apShipping.length) ? window._apShipping.join(',') : ''; }
 function apPage(d){ const st=window._apState, f=window._apFilters;
   const max=Math.max(1,Math.ceil((st.total||0)/(st.pageSize||50))); f.page=Math.min(max,Math.max(1,(f.page||1)+d)); pages['acbm-prospects'](); }
 function apToggle(id){ window._apState.open = (window._apState.open === String(id)) ? null : String(id); pages['acbm-prospects'](); }
@@ -7444,13 +7476,16 @@ pages['acbm-prospects'] = async function(){
   const qs = new URLSearchParams();
   ['subtype','region','bucket','package'].forEach(k => { if (f[k]) qs.set(k, f[k]); });
   qs.set('page', String(f.page||1)); qs.set('pageSize', String(st.pageSize));
-  const res = await API('/acbm/prospects?'+qs.toString()).catch(e => ({ error:e.message }));
-  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">ACBM Prospects</div><p style="color:#dc2626">'+apEsc(res.error)+'</p></div>'; return; }
+  const got = await apGet('/acbm/prospects?'+qs.toString());
+  if (!got.ok) { c.innerHTML = apErrorCard('ACBM Prospects', got, "pages['acbm-prospects']()"); return; }
+  const res = got.data || {};
   const items = res.items || []; st.total = res.total||0; st.summary = res.summary||null; st.facets = res.facets||null;
   // First render: learn the shipping subtypes from the server and re-render with them applied.
   const shipping = (res.facets && res.facets.shipping_subtypes) || [];
   if (shipping.length && !window._apShipping) window._apShipping = shipping;
-  if (f.subtype === null) { f.subtype = apDefaultSubtype(); if (f.subtype) { pages['acbm-prospects'](); return; } f.subtype = ''; }
+  // RETURN the re-render's promise rather than firing and forgetting it: a caller that awaits this
+  // page (and any test) must not see the intermediate loading state as the final one.
+  if (f.subtype === null) { f.subtype = apDefaultSubtype(); if (f.subtype) return pages['acbm-prospects'](); f.subtype = ''; }
   const sm = st.summary || {}, fa = st.facets || { subtypes:[], regions:[], buckets:[], packages:[] };
 
   const header = '<div class="card">'
@@ -7543,8 +7578,9 @@ pages['acbm-prospects'] = async function(){
 pages['acbm-deals'] = async function(){
   const c = document.getElementById('content');
   c.innerHTML = '<p style="color:#888;padding:20px">Loading ACBM deals…</p>';
-  const res = await API('/acbm/deals').catch(e => ({ error:e.message }));
-  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">ACBM Deals</div><p style="color:#dc2626">'+apEsc(res.error)+'</p></div>'; return; }
+  const got = await apGet('/acbm/deals');
+  if (!got.ok) { c.innerHTML = apErrorCard('ACBM Deals', got, "pages['acbm-deals']()"); return; }
+  const res = got.data || {};
   const cols = res.columns || [];
   const header = '<div class="card">'
     + '<div class="card-title text-section" style="margin:0">ACBM Deals</div>'
@@ -7575,8 +7611,9 @@ pages['acbm-deals'] = async function(){
 pages['acbm-packages'] = async function(){
   const c = document.getElementById('content');
   c.innerHTML = '<p style="color:#888;padding:20px">Loading ACBM packages…</p>';
-  const res = await API('/acbm/packages').catch(e => ({ error:e.message }));
-  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">ACBM Packages</div><p style="color:#dc2626">'+apEsc(res.error)+'</p></div>'; return; }
+  const got = await apGet('/acbm/packages');
+  if (!got.ok) { c.innerHTML = apErrorCard('ACBM Packages', got, "pages['acbm-packages']()"); return; }
+  const res = got.data || {};
   const header = '<div class="card">'
     + '<div class="card-title text-section" style="margin:0">ACBM Packages</div>'
     + '<div class="text-body">Read-only. What each package includes <strong>and what it does not</strong> — the exclusions are what stop a client '
@@ -7605,4 +7642,26 @@ pages['acbm-packages'] = async function(){
   }).join('');
   c.innerHTML = header + (list || '<div class="card"><p style="color:var(--text-muted)">No packages configured.</p></div>');
 };
+
+/* A PERMANENT LOADING STATE IS HOW THE NEXT FAILURE HIDES TOO.
+   apGet covers a bad response, but an exception thrown while BUILDING the html would still leave
+   "Loading…" on screen — which is exactly how acbm-prospects shipped broken (a ReferenceError after
+   the loading paint). Wrapping each page guarantees the visible-failure property for every ACBM
+   screen instead of relying on whoever edits one next to remember it. */
+function apGuard(pageId, title, fn){
+  return async function(){
+    try { return await fn.apply(this, arguments); }
+    catch (e) {
+      const msg = (e && e.message) ? e.message : String(e);
+      try { console.error('['+pageId+'] render failed:', e); } catch (_) {}
+      try {
+        document.getElementById('content').innerHTML =
+          apErrorCard(title, { status: 0, error: 'the screen failed to render: ' + msg }, "pages['"+pageId+"']()");
+      } catch (_) { /* nothing left to do if even the error card cannot render */ }
+    }
+  };
+}
+pages['acbm-prospects'] = apGuard('acbm-prospects', 'ACBM Prospects', pages['acbm-prospects']);
+pages['acbm-deals']     = apGuard('acbm-deals',     'ACBM Deals',     pages['acbm-deals']);
+pages['acbm-packages']  = apGuard('acbm-packages',  'ACBM Packages',  pages['acbm-packages']);
 </script>
