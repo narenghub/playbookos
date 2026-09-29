@@ -1437,6 +1437,62 @@ module.exports = {
     ],
     needsExplicitGrant: [],
   },
+  // ── acbm_partner — THE FIRST TEMPLATE FOR SOMEONE WHO DOES NOT WORK HERE ─────
+  // Not derived from anything. Every other template here was generated from a role's tiers and then
+  // adjusted; this one was written by hand and is short on purpose, because the question for an
+  // outside account is not "what does this role normally get" but "what does this account need".
+  //
+  // Four acbm features: Deals and Packages, page + route. acbm.prospects.list and
+  // acbm.page_acbm_prospects.view are ABSENT — that is the second of the three refusals that keep a
+  // referral partner out of our scored lead list (the route's adminOnly is the first, not holding
+  // 'internal' in user_products is unrelated and the product boundary is the third for platform
+  // routes).
+  //
+  // The personal.* entries are the minimum for an account that can log in and change its own
+  // password. Deliberately NOT included, although every internal template has them:
+  //   admin.users.list          the staff directory
+  //   admin.roles.list / targets.list   our roles and our revenue targets
+  //   team.*                    other people's performance
+  //   personal.milestones.list / page_playbook.view   company milestones and the playbook
+  //   personal.page_my_kpis / page_my_performance     scoring an outside account is meaningless
+  //
+  // REMEMBER: this template only decides anything if 'acbm_partner' is in PERMISSIONS_ENFORCE_ROLES.
+  // Without that env entry the resolver is not consulted for this role at all and the route gates are
+  // alone — see enforce.js:82.
+  "acbm_partner": {
+    label: "ACBM Partner",
+    grants: [
+      'acbm.deals.list',
+      'acbm.packages.list',
+      'acbm.page_acbm_deals.view',
+      'acbm.page_acbm_packages.view',
+      // GET /api/roles. It is in the 'admin' domain but it is not an admin capability — it returns the
+      // ROLE CATALOG, which buildNav needs to know this account's tiers. Without it roleTiersFor()
+      // returns null, passesPageReads() falls back to section-only, and the partner would be shown
+      // ACBM Prospects (the API still refuses it — but a link that should not be there is not something
+      // to leave in place). It leaks our role names and tiers to the partner, which is the cost of the
+      // nav being computed client-side; it carries no user or business data.
+      'admin.roles.list',
+      'personal.activity_my.list',
+      'personal.agent_tasks_my.list',
+      'personal.auth_me.list',
+      'personal.auth_password.update',
+      // My KPIs and My Performance are in the OPERATIONS section, which every role sees, so the links
+      // are THERE for this role whether or not the features are granted. A link that 403s is the
+      // failure mode templates.js already warns about, so the two pages and the two reads behind them
+      // (goals/my-week, performance/my — both own-rows-only) are granted. Scoring a referral partner
+      // is meaningless, but a broken link is worse than an empty page.
+      'personal.goals_my_week.list',
+      'personal.page_my_activity.view',
+      'personal.page_my_kpis.view',
+      'personal.page_my_performance.view',
+      'personal.page_my_tasks.view',
+      'personal.performance_my.list',
+      'personal.users_profile.update',
+      'platform.activity.create',
+    ],
+    needsExplicitGrant: [],
+  },
   "support_team": {
     label: "Support Team",
     grants: [

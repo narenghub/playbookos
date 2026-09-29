@@ -54,6 +54,16 @@ function tiersFor(role) {
   return (def && def.tiers) || {};
 }
 
+// Roles that did not exist at the base ref cannot have a parity contract — there is nothing to be
+// identical TO. They are reported as NEW with their nav printed in full, so a deliberately-added role
+// shows what it added instead of failing as a regression, and a role added by accident is still loud.
+const baseRoles = new Set(Object.keys(
+  (() => { try { return require('vm').runInNewContext(
+      execSync(`git show ${BASE_REF}:src/lib/roles.js`, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+        .match(/const BUILT_IN_ROLES = \{[\s\S]*?\n\};/)[0] + '\nBUILT_IN_ROLES;'); }
+    catch (e) { console.warn(`(could not read roles.js at ${BASE_REF}: ${e.message}) — treating every role as pre-existing`); return null; }
+  })() || BUILT_IN_ROLES));
+
 const roles = Object.keys(BUILT_IN_ROLES);
 const before = classicNavFor(execSync(`git show ${BASE_REF}:${FILE}`, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }));
 const after = classicNavFor(require('fs').readFileSync(FILE, 'utf8'));
@@ -61,11 +71,17 @@ const after = classicNavFor(require('fs').readFileSync(FILE, 'utf8'));
 console.log(`Classic nav (PRODUCT_NAV OFF) — ${BASE_REF} vs working tree`);
 console.log(`${roles.length} roles\n`);
 
-let mismatched = 0;
+let mismatched = 0, added = 0;
 for (const role of roles) {
   const t = tiersFor(role);
-  const a = before(role, t);
   const b = after(role, t);
+  if (!baseRoles.has(role)) {
+    added++;
+    const links = [...b.matchAll(/navigate\('([^']+)'\)/g)].map(m => m[1]);
+    console.log(`  NEW        ${role.padEnd(22)} ${b.length} bytes — ${links.length} page(s): ${links.join(', ')}`);
+    continue;
+  }
+  const a = before(role, t);
   const same = a === b;
   if (!same) mismatched++;
   console.log(`  ${same ? 'IDENTICAL' : 'DIFFERENT'}  ${role.padEnd(22)} ${b.length} bytes`);
@@ -77,4 +93,5 @@ for (const role of roles) {
 
 console.log();
 if (mismatched) { console.error(`FAIL — ${mismatched}/${roles.length} roles differ with the flag OFF`); process.exit(1); }
-console.log(`PASS — classic nav is byte-identical for all ${roles.length} roles`);
+console.log(`PASS — classic nav is byte-identical for all ${roles.length - added} pre-existing role(s)` +
+  (added ? `; ${added} new role(s) listed above — read their pages and confirm each one is intended` : ''));

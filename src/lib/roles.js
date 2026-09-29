@@ -9,7 +9,12 @@ const { query } = require('./db');
 //   metrics     activity-log metrics this role tracks
 //   baseline    daily effort baseline for performance scoring
 //
-// API tiers: self, sales, procurement, revenue, technical, intelligence, goals, admin.
+// API tiers: self, sales, procurement, revenue, technical, intelligence, goals, admin, acbm.
+//
+// 'acbm' is the first tier that exists for an OUTSIDE account rather than an internal function. It
+// gates only the ACBM referral surface. It is deliberately narrow and deliberately read-only for the
+// partner role: every acbm route is a GET today, so 'rw' would pre-authorise a write route that does
+// not exist yet — which is how a latent hole gets built.
 // Custom roles (POST /api/roles) extend this set but get no tiers (self-only).
 const ALL_PAGES = [
   'dashboard', 'command-center', 'ai-insights', 'agent-control', 'decision-engine', 'performance',
@@ -24,7 +29,7 @@ const BUILT_IN_ROLES = {
     display_name: 'Super Admin',
     level: 1, domain: 'global', data_scope: 'all',
     pages: '*',
-    tiers: { self: 'rw', sales: 'rw', procurement: 'rw', revenue: 'rw', technical: 'rw', intelligence: 'rw', goals: 'rw', admin: 'rw' },
+    tiers: { self: 'rw', sales: 'rw', procurement: 'rw', revenue: 'rw', technical: 'rw', intelligence: 'rw', goals: 'rw', admin: 'rw', acbm: 'rw' },
     metrics: [],
     baseline: 3,
   },
@@ -32,7 +37,7 @@ const BUILT_IN_ROLES = {
     display_name: 'Admin',
     level: 2, domain: 'global', data_scope: 'all',
     pages: '*',
-    tiers: { self: 'rw', sales: 'rw', procurement: 'rw', revenue: 'rw', technical: 'rw', intelligence: 'rw', goals: 'rw', admin: 'rw' },
+    tiers: { self: 'rw', sales: 'rw', procurement: 'rw', revenue: 'rw', technical: 'rw', intelligence: 'rw', goals: 'rw', admin: 'rw', acbm: 'rw' },
     metrics: ['team_reviews', 'orders_entered'],
     baseline: 3,
   },
@@ -127,6 +132,33 @@ const BUILT_IN_ROLES = {
     tiers: { self: 'rw', intelligence: 'r' },
     metrics: ['keywords_optimized', 'pages_indexed', 'backlinks_built', 'content_published'],
     baseline: 8,
+  },
+  // ── the first OUTSIDE role ───────────────────────────────────────────────────
+  // ACBM is a referral partner, not staff. This role exists so that nothing about an outside account
+  // is inherited from a role designed for someone who works here.
+  //
+  // What it holds: the 'acbm' tier, read-only, and nothing else but 'self'. No sales, no intelligence,
+  // no procurement, no admin. It is not in any NAV family that carries an internal section, and its
+  // permission template lists four features — Deals and Packages, page + route.
+  //
+  // What it does NOT get, and each is a separate refusal:
+  //   ACBM Prospects   the route keeps adminOnly AND the template does not grant the feature. That
+  //                    screen is our scored machine-shop lead list; a referral partner reading it
+  //                    would be reading our pipeline rather than their own deals.
+  //   'internal'       never granted in user_products, so the product boundary refuses every
+  //                    platform-wide route independently of all of the above.
+  //   the bell         notifications need the 'intelligence' tier, which this role has not got, so
+  //                    the bell is simply not rendered (index.html:1016) — the same as sales_team.
+  //
+  // pages is listed explicitly rather than falling through to the default, which includes the company
+  // playbook and milestones.
+  acbm_partner: {
+    display_name: 'ACBM Partner',
+    level: 6, domain: 'partner', data_scope: 'readonly',
+    pages: ['acbm-deals', 'acbm-packages', 'my-tasks', 'my-activity'],
+    tiers: { self: 'rw', acbm: 'r' },
+    metrics: [],
+    baseline: 1,
   },
   support_team: {
     display_name: 'Support Team',

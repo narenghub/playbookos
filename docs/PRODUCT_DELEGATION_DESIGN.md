@@ -92,23 +92,48 @@ everything.
 ## An ACBM account, concretely
 
 ```
+role:      acbm_partner          tiers: { self: 'rw', acbm: 'r' }
 products:  ['acbm']
 NOT:       'internal'
 ```
 
-What that account can reach:
+`acbm_partner` is the first role for somebody who does not work here, so nothing about it is inherited
+from a role designed for staff. It holds the `acbm` tier read-only — every acbm route is a GET today,
+and `rw` would pre-authorise a write route that does not exist yet — and a hand-written permission
+template of 16 features.
 
-- `/api/acbm/*` — the prospects, deals and packages screens (wildcard-classified `acbm`)
-- the `shared` routes: its own tasks, KPIs, activity, profile, notifications
-- notifications **tagged `acbm`** and nothing else. Not another product's agent failures, and not the
-  platform-wide ones (a NULL `product` requires `internal`)
-- `GET /api/prospects/:id` only for rows whose own `product` is `acbm` — resolved by looking the row
-  up (`row:prospects.product`), because that URL carries no product at all and a guessed id would
+**It sees Deals and Packages. It does not see ACBM Prospects.** That screen is our scored machine-shop
+lead list; a referral partner reading it would be reading our pipeline rather than their own deals.
+Three independent refusals, which is the point of having layers:
+
+| Layer | What refuses Prospects |
+|---|---|
+| role | the route keeps `adminOnly` |
+| resolver | `acbm.prospects.list` is not in the template |
+| nav | `NAV_PAGE_REQS['acbm-prospects']` needs the `intelligence` tier, which the role has not got |
+
+What the account *can* reach:
+
+- `GET /api/acbm/deals`, `GET /api/acbm/packages` — gated `requireTier('acbm')`, a tier held by
+  `super_admin`, `admin` and `acbm_partner` and nobody else
+- the `shared` routes: its own tasks, activity, KPIs, performance, profile, password
+- `GET /api/roles` — the role catalog. Not an admin capability: `buildNav()` fetches it on every page
+  load to work out the caller's tiers, and without it the nav falls back to section-only and would draw
+  the ACBM Prospects link it cannot open. It was classified `internal` in the route map, which was
+  wrong the moment a non-internal account existed.
+- notifications tagged `acbm` — although in practice the bell is not rendered for this role at all,
+  because it needs the `intelligence` tier (`index.html:1016`), the same as `sales_team`
+- `GET /api/prospects/:id` only for rows whose own `product` is `acbm` — resolved by looking the row up
+  (`row:prospects.product`), because that URL carries no product at all and a guessed id would
   otherwise read, or `PUT` would modify, another product's row
 
 What it cannot reach, and why it is two separate reasons: `/api/users` and `/api/settings` are
 `internal` in the route map (boundary), *and* gated by `adminOnly`/`superAdminOnly` (role). Either one
 alone would refuse it.
+
+> **`PERMISSIONS_ENFORCE_ROLES` must list `acbm_partner`.** The template above decides nothing
+> otherwise — `enforce.js:82` returns early for a role that is not listed, leaving the route gates
+> alone. Pinned by `src/lib/permissions/acbm-partner.test.js` and `src/api/acbm-routes.test.js`.
 
 ---
 
@@ -177,6 +202,7 @@ within these products" grant, which is the same check written where it can be se
 | `users.invited_products` + `users.invited_by` | `scripts/migrate-invite-products.js` |
 | Invite (super_admin only, products chosen) · accept (grants written) | `src/api/routes.js` |
 | The invite form and the products column | `public/index.html` (`pages.team`, `renderInviteProducts`) |
+| `acbm_partner` — tiers, template, nav family, and what each layer refuses | `src/lib/roles.js`, `src/lib/permissions/templates.js`, `public/index.html` (`NAV_FAMILIES`) |
 
 ### Adding a route
 

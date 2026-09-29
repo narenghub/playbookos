@@ -4598,6 +4598,9 @@ const ACBM_BUCKETS = ['scored', 'no_website', 'dead_site', 'unscannable'];
 // months and wondering what they are. Hiding them is the version that causes the confusion later.
 const acbmShippingSubtypes = () => ((getProspectingConfig('acbm') || {}).subtypes || []).map(s => s.key);
 
+// STAFF ONLY, and it stays that way. This is the scored machine-shop lead list — our pipeline, not
+// the partner's deals. adminOnly is one refusal; acbm_partner's template not granting
+// acbm.prospects.list is a second, independent one.
 router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { findingSentences, agencyNote, pageSpeedNote, bucketOf, BUCKET_LABEL, packageLabel } =
@@ -4683,7 +4686,12 @@ router.get('/acbm/prospects', authMiddleware, adminOnly, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/acbm/deals', authMiddleware, adminOnly, async (req, res) => {
+// Deals and Packages are the COMMERCIAL relationship, so the referral partner sees them. adminOnly is
+// replaced by requireTier('acbm') — a tier held by super_admin, admin and acbm_partner and nobody
+// else. That is a widening of exactly one role, and it is not the only gate: the resolver still has to
+// find the feature in the caller's template, and the product boundary still has to find 'acbm' in
+// their user_products. Three independent refusals for an outside account.
+router.get('/acbm/deals', authMiddleware, requireTier('acbm'), async (req, res) => {
   try {
     const { packageLabel } = require('../lib/agents/prospecting/findings-text');
     const rows = (await query(
@@ -4709,7 +4717,7 @@ router.get('/acbm/deals', authMiddleware, adminOnly, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/acbm/packages', authMiddleware, adminOnly, async (req, res) => {
+router.get('/acbm/packages', authMiddleware, requireTier('acbm'), async (req, res) => {
   try {
     const rows = (await query(
       `SELECT code, name, summary, included, not_included, setup_fee_cents, monthly_cents,

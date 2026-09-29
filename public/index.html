@@ -778,10 +778,12 @@ const NAV_SECTIONS = [
     {id:'team', label:'Team Management', icon:'👥'},
     {id:'agent-control', label:'Agent Control', icon:'⚡'},
   ]},
-  // ACBM referral pipeline. access:['admin'] = admin + super_admin ONLY (there is no 'admin'
-  // family, so every other role fails navSectionVisible). A partner role does not exist yet;
-  // widen deliberately when it does rather than guessing now.
-  {title:'ACBM', access:['admin'], items:[
+  // ACBM referral pipeline. access:['admin','acbm'] — admin + super_admin, plus acbm_partner via the
+  // one-role 'acbm' family. The section being visible is NOT the same as all three pages being
+  // visible: NAV_PAGE_REQS gates ACBM Prospects on the 'intelligence' tier, which acbm_partner has
+  // not got, so the partner sees Deals and Packages only. The route keeps adminOnly regardless —
+  // the nav hiding a link is never the thing that protects it.
+  {title:'ACBM', access:['admin','acbm'], items:[
     {id:'acbm-prospects', label:'ACBM Prospects', icon:'🏭'},
     {id:'acbm-deals', label:'ACBM Deals', icon:'📋'},
     {id:'acbm-packages', label:'ACBM Packages', icon:'📦'},
@@ -804,6 +806,9 @@ const NAV_FAMILIES = {
   // actually run the calendar. Built as a family rather than a one-off so the next event page
   // costs a line in NAV_SECTIONS and nothing else.
   events: ['recruitment_team', 'recruitment_director'],
+  // The referral partner. A family of one, so the ACBM section can widen by one role without
+  // widening anything else — and so the next partner role costs a line here and nothing else.
+  acbm: ['acbm_partner'],
 };
 function navSectionVisible(access, role) {
   if (role === 'admin' || role === 'super_admin') return true; // admin sees all
@@ -817,7 +822,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"acbm-prospects":[["intelligence"]],"acbm-deals":[["acbm"]],"acbm-packages":[["acbm"]]};
 function roleTiersFor(role) {
   const cat = (typeof window !== 'undefined' && window._roleCatalog) || [];
   const row = Array.isArray(cat) ? cat.find(r => r.role_name === role) : null;
@@ -832,6 +837,11 @@ function passesPageReads(pageId, role, tiers) {
   if (role === 'admin' || role === 'super_admin') return true; // admins pass every read
   const reqs = NAV_PAGE_REQS[pageId];
   if (!reqs) return true;                 // no tier-gated implied reads -> always passes
+  // FAIL OPEN, deliberately. `tiers` is null when GET /api/roles failed (buildNav swallows the error),
+  // and returning false there would empty the sidebar on a transient blip — an outage for a UI layer
+  // that guards nothing. What it can do is show a link the API then refuses, so any role whose nav
+  // DEPENDS on this filter must be able to read /api/roles: see admin.roles.list in the acbm_partner
+  // template. The API gate is the boundary; this is the label on the door.
   if (!tiers) return true;                // role catalog not loaded -> fall back to section-only
   return reqs.every(anyOf => anyOf.some(t => roleCanRead(tiers, t)));
 }
