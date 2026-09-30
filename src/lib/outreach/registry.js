@@ -48,7 +48,11 @@ const ENTITIES = {
   study: {
     label: 'Study',
     table: 'clinical_studies',
-    idCast: 'bigint',
+    // TEXT, not bigint — clinical_studies.id is a uuid. I assumed bigint because every other entity table
+    // uses one, and the existence query then cast the uuid and threw, so every study write returned 400.
+    // verify-outreach-live.js now compares every idCast against information_schema, which is the only place
+    // that can catch this: a fake with numeric ids agrees with either answer.
+    idCast: 'text',
     product: 'abiozen',
     pages: ['clinical-demand-intelligence'],
   },

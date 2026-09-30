@@ -36,7 +36,19 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     console.log(`fixtures: prospects ${gn.map(r=>r.id).join(',')} (golfnex), ${sx[0].id} (sitenex), institution ${inst[0].id}`);
     console.log(`people:   ${vin.email} and ${nar.email}\n`);
 
-    console.log('1. WRITE — status + event, product read from the row');
+    console.log('0. THE REGISTRY AGREES WITH THE DATABASE');
+    // Every idCast against the real column type. This is the check that cannot be a unit test: a fake with
+    // numeric ids satisfies 'bigint' and 'text' alike, so the mismatch only shows against Postgres — where
+    // casting a uuid to bigint throws and every write for that entity type returns 400.
+    const { ENTITIES } = require('../src/lib/outreach/registry');
+    for (const [type, def] of Object.entries(ENTITIES)) {
+      const col = (await query(
+        `SELECT data_type FROM information_schema.columns WHERE table_name = $1 AND column_name = 'id'`,
+        [def.table])).rows[0];
+      check(`${type}: ${def.table}.id is ${def.idCast}`, col && col.data_type, def.idCast);
+    }
+
+    console.log('\n1. WRITE — status + event, product read from the row');
     const a = await mark(vin, 'prospect', gn[0].id, 'contacted', 'called, left a message');
     check('a golfnex prospect is recorded', [a.ok, a.from, a.to], [true, 'new', 'contacted']);
     check('and the product came from the row', a.row.product, 'golfnex');
