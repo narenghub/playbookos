@@ -86,12 +86,6 @@ test(UI_RESTORED ? 'the UI is wired' : 'the UI is absent, as expected after the 
   assert.match(page, /res\.silent/, 'the silence is rendered');
 });
 
-test('and outreachPage, when it returns, must NOT be declared inside the pages object', () => {
-  // The actual cause of the outage. spa-parses.test.js checks this structurally for any declaration; this
-  // one names the function, so the next person to move it gets told which one.
-  if (!UI_RESTORED) return;
-  const open = SRC.indexOf('const pages = {');
-  const decl = SRC.indexOf('async function outreachPage()');
-  assert.ok(decl < open || decl === -1,
-    'outreachPage must be declared BEFORE `const pages` and attached with pages[\'outreach\'] = outreachPage');
-});
+// The placement check lives in src/lib/spa-parses.test.js, which owns the structural knowledge of the file
+// (and where the same naive brace-counting bug had to be fixed twice). Duplicating it here meant two copies
+// of a fragile parser, so this file no longer tries.
