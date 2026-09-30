@@ -78,14 +78,19 @@ const ENTITIES = {
   // measure the SAME thing, so a second dropdown beside those buttons is exactly the "recorded in two
   // places" problem that the won → sitenex_deals link exists to avoid.
   //
-  // The three ways forward, none of which should be chosen quietly:
-  //   a. migrate leads.status into outreach and retire the four buttons  — the real fix, a bigger change
-  //   b. write an outreach event when a button moves a lead              — needs a 4 → 8 value mapping, and
-  //      'closed' means won OR lost, so the mapping would be a guess that looks like data
-  //   c. leave it, as now: the API supports lead outreach, the page does not offer it
+  // DECIDED 2026-09-30: leave it unwired. The real fix is migrating leads.status into outreach and retiring
+  // the four buttons, and it is NOT being done now, for two reasons:
   //
-  // (c) until somebody picks. The entity type stays registered so nothing about the design pretends leads
-  // are outside the system, and ui-wiring.test.js records the gap with this reason.
+  //   1. THE 4 → 8 MAPPING IS LOSSY. 'closed' means won or lost and the data cannot say which, so any
+  //      migration would have to guess — and a guess that looks like data is worse than the gap.
+  //   2. NOBODY IS WORKING THIS PIPELINE. leads has 4 rows, all 'new'. So a lossy migration would be
+  //      solving a collision no one is hitting.
+  //
+  // Revisit when somebody actually uses it — at which point there will be real transitions to map, and the
+  // won/lost ambiguity will be answerable by asking them rather than by inference.
+  //
+  // The entity type stays registered so nothing about the design pretends leads are outside the system: the
+  // API accepts lead outreach today, the page simply does not offer a second control.
   lead: {
     label: 'Lead',
     table: 'leads',

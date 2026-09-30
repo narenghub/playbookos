@@ -4832,7 +4832,24 @@ router.get('/sitenex/prospects', authMiddleware, adminOnly, async (req, res) => 
       `SELECT id, name, subtype, address, region, phone, website, site_url, site_score, rating_count,
               recommended_package, site_findings, status, reject_reason, owner_email, owner_source
          FROM prospects WHERE ${where}
-        ORDER BY site_score DESC NULLS LAST, rating_count ASC NULLS FIRST, id
+        -- THE AGENCY SIGNAL IS A TIEBREAK, NOT A SELECTOR.
+        --
+        -- It appears here in the ORDER BY and nowhere in the WHERE, and that placement is the decision:
+        -- the segment is defined by what the SITE says — no website, or a site that scores badly — because
+        -- those are measured directly from the site and mean the same thing in Rockford and in Phoenix.
+        -- "Somebody may already be paid to look after this" is a reason to call it LAST, not a reason to
+        -- exclude it or to include it.
+        --
+        -- It is also deliberately the WEAKEST term, after site_score and before review count: a badly
+        -- scoring agency-tracked site still outranks a decent unmanaged one, because the site is the thing
+        -- we are selling against.
+        --
+        -- NOT to be strengthened by broadening the duda detector. 77 of 114 current signals are duda, so
+        -- "agency-tracked" is largely one reseller platform — chasing more platforms is investing in a
+        -- proxy when site_score and website-absence are the real measurement.
+        ORDER BY site_score DESC NULLS LAST,
+                 (jsonb_array_length(COALESCE(site_findings->'agency_signals','[]'::jsonb)) > 0) ASC,
+                 rating_count ASC NULLS FIRST, id
         LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, params)).rows;
 
     const cityOf = (address, region) => {

@@ -1,7 +1,8 @@
 # Region source for nationwide prospecting — report before any Places call
 
-**Read the last section first.** The region data is settled and cheap. The thing that would waste Wave 1 is
-not the region list; it is that the metric Wave 1 is supposed to compare is not currently measurable.
+**Section 3 is the one that changed the plan.** The region data is settled and cheap; what the experiment
+MEASURES had to be rethought, because the metric it was built on turned out to be a proxy that does not
+travel between states.
 
 ---
 
@@ -81,40 +82,58 @@ resumable background job rather than a pass.
 
 ---
 
-## 3. THE BLOCKER — Wave 1 cannot measure what it is designed to measure
+## 3. What Wave 1 compares — DECIDED 2026-09-30
 
-Wave 1 exists to compare three metrics against Illinois. Two of the three are not currently measurable, and
-the premise of the experiment is already false in Illinois.
+The original plan compared **agency-tracked rate**. That is no longer the comparison, for a reason the
+Illinois data made plain.
 
-**The claim was "machine shops at 0% agency-tracked in Rockford". They are not at 0%.**
+### The agency signal is a tiebreak, not a segment selector
 
 | subtype | rows | scanned | no-website | agency-tracked | avg reviews |
 |---|---|---|---|---|---|
-| machine_shop | 306 | 306 | 24% | **11%** (34/306) | 21 |
-| funeral | 303 | 271 | 5% | **30%** (80/271) | 62 |
-| pharmacy | 307 | **0** | 14% | **unmeasurable** | 103 |
-| combined | 916 | 577 | 14% | 19.8% | 64 |
+| machine_shop | 306 | 306 | 24% | 11% (34/306) | 21 |
+| funeral | 303 | 271 | 5% | 30% (80/271) | 62 |
+| pharmacy | 307 | **0** | 14% | unmeasurable | 103 |
 
-Rockford machine shops specifically: **5 of 66 agency-flagged**, not zero.
+Three things killed it as a primary metric:
 
-Three things follow:
+1. **It was never 0%.** Rockford machine shops are 5 of 66 flagged, not zero. So "0% here vs 20% in
+   Phoenix" had nothing to separate — Illinois funeral homes are already at 30%.
+2. **It is 68% one rule.** 77 of the 114 signals are `reseller_builder`, all duda. "Agency-tracked" means,
+   mostly, "built on duda" — a proxy for an agency relationship, not evidence of one. A state where a
+   different reseller is popular would score low for a reason that has nothing to do with agency density.
+3. **It is not a property of the prospect.** "Somebody may already be paid to look after this" is a reason
+   to call a row *last*. It is not a reason to include or exclude it.
 
-1. **The baseline is 11% and 30%, not 0%.** So "if Phoenix is 20% the finding is regional" no longer
-   separates anything — Illinois funeral homes are already at 30%. The comparison needs restating before
-   it is worth $18.
-2. **Pharmacy has never been scanned.** 0 of 307 rows have site findings, so one of the three shipping
-   subtypes has no baseline at all. Wave 1 would produce a pharmacy number for Ohio with nothing in
-   Illinois to compare it to.
-3. **The metric is 68% one rule.** 77 of the 114 agency signals are `reseller_builder`, all duda. So
-   "agency-tracked" currently means, mostly, "built on duda" — a proxy for an agency relationship, not
-   evidence of one. A state where a different reseller platform is popular would score low for a reason
-   that has nothing to do with agency density.
+**So: the primary selector is what the site says — no website, or a site that scores badly.** Both are
+measured directly from the site, which is exactly why they travel: `website IS NULL` and `site_score` mean
+the same thing in Rockford and in Phoenix. The agency flag now appears in the ORDER BY and nowhere in the
+WHERE, as the weakest term — after `site_score`, before review count — so a badly scoring agency-tracked
+site still outranks a decent unmanaged one. Pinned by
+`src/lib/agents/prospecting/selector.test.js`.
 
-**Recommended order:** finish scoring Illinois first — 947 of 1,524 rows are unscanned and pharmacy is
-entirely unscanned — so there is a complete baseline to compare against. That costs no Places calls at all,
-only fetch time. Then run Wave 1 metro-only for $18 against a baseline that exists.
+**The duda detector is deliberately not being broadened.** Chasing more reseller platforms is investing in
+the proxy when the real measurement already exists.
 
----
+### The Wave 1 comparison
+
+Two metrics, both site-measured:
+
+| metric | Illinois baseline | why it travels |
+|---|---|---|
+| **no-website rate** | machine_shop 24%, funeral 5%, pharmacy 14% | `website IS NULL` is the same fact everywhere |
+| **site_score distribution** | see below, once pharmacy is scanned | a sum of named penalties read off the HTML |
+
+Review count stays as context, not as a test — it is a Places artefact and varies with metro size.
+
+### The one thing still blocking it
+
+**Pharmacy has never been scanned: 0 of 307 rows.** One of the three shipping subtypes has no site_score
+distribution at all, so there is nothing for an Ohio number to be compared against. That scan costs **no
+Places calls** — only fetch time, 263 sites at ~200ms plus fetch — and it is the prerequisite.
+
+The other 608 unscanned Illinois rows are the six dropped experiment categories (auto_repair, dental, legal,
+hvac, plumbing, daycare). They are **not** worth scanning: fetch time for segments nobody ships.
 
 ## 4. Per-state CBSA counts
 
