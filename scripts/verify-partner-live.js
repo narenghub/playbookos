@@ -53,7 +53,13 @@ const hit = async (method, path) => {
     console.log('\nWHAT IT CAN REACH:');
     check('GET /api/sitenex/deals    → allowed', await hit('GET', '/api/sitenex/deals'), { status: 200, layer: 'allowed' });
     check('GET /api/sitenex/packages → allowed', await hit('GET', '/api/sitenex/packages'), { status: 200, layer: 'allowed' });
-    check('GET /api/roles         → allowed (the nav needs it)', await hit('GET', '/api/roles'), { status: 200, layer: 'allowed' });
+    // REFUSED, and that is the fix rather than a regression. buildNav used to `await API('/roles')` inside a
+    // try/catch that swallowed the error, so a failed request WIDENED the nav. Tiers now come from
+    // currentUser via /auth/me — the same call that decides whether the app renders at all — so the nav no
+    // longer depends on this route and a partner has no reason to reach the role catalogue. Asserting the
+    // 403 is what proves the dependency was actually removed rather than merely tidied.
+    check('GET /api/roles         → REFUSED (the nav no longer depends on it)',
+          await hit('GET', '/api/roles'), { status: 403, layer: 'resolver' });
     check('GET /api/auth/me       → allowed', await hit('GET', '/api/auth/me'), { status: 200, layer: 'allowed' });
     check('GET /api/agent/tasks/my → allowed', await hit('GET', '/api/agent/tasks/my'), { status: 200, layer: 'allowed' });
 
