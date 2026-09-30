@@ -15,11 +15,11 @@ const { ENTITIES } = require('./registry');
 const SRC = fs.readFileSync(__dirname + '/../../../public/index.html', 'utf8');
 const count = (re) => (SRC.match(re) || []).length;
 
-// Wired and verified. NOT YET: study (clinical-demand-intelligence), exhibitor (cphi-milan),
-// lead (sales-pipeline) — three renderers that are not plain tables (a detail panel, two tables, and a
-// card layout), deliberately left for their own pass rather than rushed.
-const WIRED = ['prospect', 'institution', 'establishment'];
-const PENDING = ['study', 'exhibitor', 'lead'];
+// Six of six lists now have a control, except `lead`, which is a DECISION rather than a gap: leads.status
+// is already an outreach lifecycle with its own buttons, so a second dropdown beside them would be the
+// "recorded in two places" problem. See the block comment on `lead` in registry.js for the three options.
+const WIRED = ['prospect', 'institution', 'establishment', 'study', 'exhibitor'];
+const PENDING = ['lead'];
 
 test('the wired lists have all three pieces: load, cell, and bar', () => {
   for (const t of WIRED) {
@@ -31,6 +31,17 @@ test('the wired lists have all three pieces: load, cell, and bar', () => {
 
 test('WIRED + PENDING accounts for every entity type — no type is simply forgotten', () => {
   assert.deepEqual([...WIRED, ...PENDING].sort(), Object.keys(ENTITIES).sort());
+});
+
+test('the one unwired type is the one with its OWN lifecycle, and says so', () => {
+  const { ENTITIES } = require('./registry');
+  for (const t of PENDING) {
+    assert.ok(ENTITIES[t].hasOwnLifecycle,
+      `${t} is unwired without a recorded reason — either wire it or say why in registry.js`);
+  }
+  for (const t of WIRED) {
+    assert.ok(!ENTITIES[t].hasOwnLifecycle, `${t} claims its own lifecycle but has a control too`);
+  }
 });
 
 test('a PENDING list really is unwired, so the note cannot go stale', () => {
@@ -92,4 +103,21 @@ test('the Outreach page exists, is reachable, and renders the silence', () => {
   for (const bit of ['By person', 'By list', 'By status moved to']) {
     assert.ok(page.includes(bit), `the page must show "${bit}"`);
   }
+});
+
+// ── the subtype column disappears when the filter pins it to one value ──────────
+test('both prospects tables drop the Subtype column when the filter selects ONE subtype', () => {
+  // A column that repeats the same word on every row is noise, and the value is already named in the filter
+  // box. A comma-separated filter still varies per row — the SiteNex default ships three subtypes — so the
+  // column must survive that case, which is why the check is for a comma and not merely for truthiness.
+  for (const [flag, esc] of [['ppOneSubtype', 'ppEsc'], ['apOneSubtype', 'apEsc']]) {
+    const decl = new RegExp(`const ${flag} = !!\\(f\\.subtype && !String\\(f\\.subtype\\)\\.includes\\(','\\)\\)`);
+    assert.match(SRC, decl, `${flag} must be false for a multi-subtype filter`);
+    // the cell, the header and the colspan all have to move together, or the table shears
+    const uses = (SRC.match(new RegExp(flag, 'g')) || []).length;
+    assert.ok(uses >= 4, `${flag} is used ${uses} times; the cell, header and colspan(s) must all honour it`);
+  }
+  assert.ok(!/<th style="padding:8px">Subtype<\/th>'?\s*\+?\s*'?<th style="padding:8px">City/.test(SRC)
+    || /apOneSubtype \? '' : '<th style="padding:8px">Subtype<\/th>'/.test(SRC),
+    'the SiteNex header must be conditional');
 });

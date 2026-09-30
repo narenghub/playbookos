@@ -4444,6 +4444,9 @@ pages['cphi-milan'] = async function() {
   const exhOpts = [['true','on the floor'],['false','not exhibiting'],['any','everyone checked']].map(
     ([v,l]) => `<option value="${v}"${st.exhibiting===v?' selected':''}>${l}</option>`).join('');
   const items = (res.items || []).filter(i => i.match_tier !== 'token');
+  // Outreach for the exhibitors shown. The denominator is the FILTERED list, not the table: the page
+  // drops 'token' matches, so a total from the table would make 'new' larger than the list.
+  await orLoad('exhibitor', items.map(i => i.id), items.length);
   const rows = items.map((it, i) => `<tr style="border-top:1px solid var(--border)">
       <td style="padding:7px 8px;color:var(--text-muted);font-variant-numeric:tabular-nums">${i+1}</td>
       <td style="padding:7px 8px;font-weight:600">${cmEsc(it.holder)}
@@ -4452,6 +4455,7 @@ pages['cphi-milan'] = async function() {
       <td style="padding:7px 8px;text-align:center;color:var(--text-muted)">${it.hall?cmEsc(it.hall):'—'}</td>
       <td style="padding:7px 8px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${it.molecules_covered}</td>
       <td style="padding:7px 8px">${cmTierBadge(it.match_tier)}</td>
+      <td style="padding:7px 8px">${orCell('exhibitor', it.id)}</td>
     </tr>`).join('');
   const priorityPanel = `<div class="card" style="padding:0">
     <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
@@ -4466,8 +4470,9 @@ pages['cphi-milan'] = async function() {
       <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
         <th style="padding:8px">#</th><th style="padding:8px">Company</th><th style="padding:8px">Booth</th>
         <th style="padding:8px;text-align:center">Hall</th><th style="padding:8px;text-align:right">Molecules</th><th style="padding:8px">Match</th>
+        <th style="padding:8px">Outreach</th>
       </tr></thead>
-      <tbody>${rows || '<tr><td colspan="6" style="padding:16px;color:var(--text-muted)">Nothing matches this filter.</td></tr>'}</tbody>
+      <tbody>${rows || '<tr><td colspan="7" style="padding:16px;color:var(--text-muted)">Nothing matches this filter.</td></tr>'}</tbody>
     </table></div></div>`;
 
   // ── PANEL 3: unverified, collapsed ──
@@ -4495,7 +4500,7 @@ pages['cphi-milan'] = async function() {
     </table></div>` : ''}
   </div>`;
 
-  c.innerHTML = header + summaryRow + thinPanel + priorityPanel + unverifiedPanel;
+  c.innerHTML = header + orBar('exhibitor') + summaryRow + thinPanel + priorityPanel + unverifiedPanel;
 };
 
 function cmSet(k, v){ window._cmState[k] = v; pages['cphi-milan'](); }
@@ -4591,12 +4596,16 @@ pages['prospects'] = async function() {
     <button onclick="ppResetFilters()" class="btn-outline btn-sm" style="font-size:11px">Reset to prime pool</button>
   </div>`;
 
+  // A column that says the same word on every row is nine tenths noise. When the filter pins subtype to ONE
+  // value the column is dropped — the value is already named in the filter box, so nothing is lost. A
+  // comma-separated filter (the SiteNex default ships three) still varies per row, so the column stays.
+  const ppOneSubtype = !!(f.subtype && !String(f.subtype).includes(','));
   const rows = window._ppItems.map(it => {
     const site = it.website ? `<a href="${ppEsc(it.website)}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">↗</a>` : '<span style="color:var(--text-muted)">—</span>';
     return `<tr onclick="ppOpen('${it.id}')" style="cursor:pointer;border-top:1px solid var(--border)">
       <td style="padding:7px 8px;font-weight:600">${ppEsc(it.name)}</td>
       <td style="padding:7px 8px">${ppEsc(ppCity(it.address))||'<span style="color:var(--text-muted)">—</span>'}</td>
-      <td style="padding:7px 8px">${ppEsc(it.subtype)||'—'}</td>
+      ${ppOneSubtype ? '' : `<td style="padding:7px 8px">${ppEsc(it.subtype)||'—'}</td>`}
       <td style="padding:7px 8px;text-align:right">${it.rating!=null?ppEsc(it.rating)+'★':'—'}</td>
       <td style="padding:7px 8px;text-align:right">${(it.rating_count||0).toLocaleString()}</td>
       <td style="padding:7px 8px">${it.booking_platform
@@ -4621,12 +4630,12 @@ pages['prospects'] = async function() {
   const table = `<div class="card" style="padding:0;overflow-x:auto">
     <table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px">
-        <th style="padding:8px">Name</th><th style="padding:8px">City</th><th style="padding:8px">Subtype</th>
+        <th style="padding:8px">Name</th><th style="padding:8px">City</th>${ppOneSubtype ? '' : '<th style="padding:8px">Subtype</th>'}
         <th style="padding:8px;text-align:right">Rating</th><th style="padding:8px;text-align:right">Reviews</th>
         <th style="padding:8px">Platform</th><th style="padding:8px;text-align:center">Site</th><th style="padding:8px">Phone</th><th style="padding:8px">Status</th>
         <th style="padding:8px">Outreach</th>
       </tr></thead>
-      <tbody>${rows || '<tr><td colspan="10" style="padding:16px;color:var(--text-muted)">No prospects match this filter.</td></tr>'}</tbody>
+      <tbody>${rows || `<tr><td colspan="${ppOneSubtype ? 9 : 10}" style="padding:16px;color:var(--text-muted)">No prospects match this filter.</td></tr>`}</tbody>
     </table>${pager}</div>`;
 
   c.innerHTML = header + orBar('prospect') + summaryRow + filters + table + '<div id="pp-detail"></div>';
@@ -7722,6 +7731,9 @@ async function cdiRenderList(c, st){
     return;
   }
   const studies=(res&&res.studies)||[];
+  // Outreach for the studies on this page. res.total_count is the list's own denominator; without it the
+  // bar would report 0 new over 2,587 untouched studies.
+  await orLoad('study', studies.map(x => x.id), res && res.total_count);
   const filterBar=`<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
     <select onchange="cdiSetFilter('phase',this.value)" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
       <option value="">All phases</option>${['Phase 1','Phase 2','Phase 3'].map(p=>`<option value="${p}" ${st.filters.phase===p?'selected':''}>${p}</option>`).join('')}</select>
@@ -7736,7 +7748,7 @@ async function cdiRenderList(c, st){
 
   if(!studies.length){
     const filtered=st.filters.phase||st.filters.therapeutic_area||st.filters.catalog_match_status;
-    c.innerHTML=head+filterBar+`<div class="card"><p style="color:#718096">No studies${filtered?' match these filters':' yet'} — the ingestion cron runs nightly at 2am CST once enabled.${isAdmin&&!filtered?' Or click <strong>Run Now</strong> above.':''}</p></div>`;
+    c.innerHTML=head+orBar('study')+filterBar+`<div class="card"><p style="color:#718096">No studies${filtered?' match these filters':' yet'} — the ingestion cron runs nightly at 2am CST once enabled.${isAdmin&&!filtered?' Or click <strong>Run Now</strong> above.':''}</p></div>`;
     return;
   }
   const rows=studies.map(s=>`<tr style="cursor:pointer" onclick="cdiOpen('${cdiEsc(s.id)}')">
@@ -7748,15 +7760,16 @@ async function cdiRenderList(c, st){
     <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${cdiEsc(s.disease)}">${cdiEsc(s.disease||'—')}</td>
     <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;text-align:center">${s.molecule_count||0}</td>
     <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;text-align:center">${s.sourcing_opportunity_count>0?`<span class="badge badge-amber">${s.sourcing_opportunity_count}</span>`:'0'}</td>
-    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;white-space:nowrap">${cdiEsc(s.last_update_post_date||'—')}</td></tr>`).join('');
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0;font-size:12px;white-space:nowrap">${cdiEsc(s.last_update_post_date||'—')}</td>
+    <td style="padding:7px 10px;border-bottom:1px solid #e2e8f0" onclick="event.stopPropagation()">${orCell('study', s.id)}</td></tr>`).join('');
   const table=`<div class="card"><div style="overflow-x:auto"><table style="border-collapse:collapse;width:100%;font-size:13px">
-    <tr style="background:#f8fafc"><th style="padding:7px 10px;text-align:left">NCT</th><th style="padding:7px 10px;text-align:left">Title</th><th style="padding:7px 10px;text-align:left">Phase</th><th style="padding:7px 10px;text-align:left">Sponsor</th><th style="padding:7px 10px;text-align:left">TA</th><th style="padding:7px 10px;text-align:left">Disease</th><th style="padding:7px 10px;text-align:center">Mol</th><th style="padding:7px 10px;text-align:center">Opps</th><th style="padding:7px 10px;text-align:left">Updated</th></tr>
+    <tr style="background:#f8fafc"><th style="padding:7px 10px;text-align:left">NCT</th><th style="padding:7px 10px;text-align:left">Title</th><th style="padding:7px 10px;text-align:left">Phase</th><th style="padding:7px 10px;text-align:left">Sponsor</th><th style="padding:7px 10px;text-align:left">TA</th><th style="padding:7px 10px;text-align:left">Disease</th><th style="padding:7px 10px;text-align:center">Mol</th><th style="padding:7px 10px;text-align:center">Opps</th><th style="padding:7px 10px;text-align:left">Updated</th><th style="padding:7px 10px;text-align:left">Outreach</th></tr>
     ${rows}</table></div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
       <button onclick="cdiPage(-1)" class="btn-outline" style="padding:6px 14px;font-size:13px" ${st.offset<=0?'disabled':''}>← Prev</button>
       <span style="font-size:12px;color:#718096">Showing ${st.offset+1}–${st.offset+studies.length} of ${res.total_count}</span>
       <button onclick="cdiPage(1)" class="btn-outline" style="padding:6px 14px;font-size:13px" ${res.has_more?'':'disabled'}>Next →</button></div></div>`;
-  c.innerHTML=head+filterBar+table;
+  c.innerHTML=head+orBar('study')+filterBar+table;
 }
 
 async function cdiRenderDetail(c, st){
@@ -8101,12 +8114,15 @@ pages['sitenex-prospects'] = async function(){
     + sel('package','package: any', [{v:'P2',l:'P2 · Renew'},{v:'P1',l:'P1 · Launch'},{v:'none',l:'no package'}])
     + '<button onclick="apResetFilters()" class="btn-outline btn-sm" style="font-size:11px">Reset</button></div>';
 
+  // Same rule as the other prospects table: one subtype in the filter means one word repeated down the
+  // column, so it goes. The SiteNex DEFAULT is three subtypes joined by commas, so by default it stays.
+  const apOneSubtype = !!(f.subtype && !String(f.subtype).includes(','));
   const rows = items.map(it => {
     const isOpen = !!(st.openRows && st.openRows[String(it.id)]);
     const site = it.site_url || it.website;
     const main = '<tr id="ap-row-'+it.id+'" onclick="apToggle(\''+it.id+'\')" style="cursor:pointer;border-top:1px solid var(--border)'+(isOpen?';background:var(--light)':'')+'">'
       + '<td style="padding:7px 8px;font-weight:600"><span id="ap-caret-'+it.id+'">'+(isOpen?'▾':'▸')+'</span> '+apEsc(it.name)+'</td>'
-      + '<td style="padding:7px 8px">'+apEsc((it.subtype||'').replace(/_/g,' '))+'</td>'
+      + (apOneSubtype ? '' : '<td style="padding:7px 8px">'+apEsc((it.subtype||'').replace(/_/g,' '))+'</td>')
       + '<td style="padding:7px 8px">'+(apEsc(it.city)||apDash)+'</td>'
       + '<td style="padding:7px 8px">'+(it.phone?'<a href="tel:'+apEsc(String(it.phone).replace(/[^0-9+]/g,''))+'" onclick="event.stopPropagation()">'+apEsc(it.phone)+'</a>':apDash)+'</td>'
       /* Email is never silently blank: without an address the cell says WHY, because "none
@@ -8124,7 +8140,7 @@ pages['sitenex-prospects'] = async function(){
     // than a re-render. Everything it shows is already in the list payload — there is nothing to
     // fetch on expand.
     const lines = (it.findings||[]).map(x => '<li style="margin:3px 0">'+apEsc(x)+'</li>').join('') || '<li style="color:var(--text-muted)">no findings recorded</li>';
-    const detail = '<tr id="ap-det-'+it.id+'"'+(isOpen?'':' style="display:none"')+'><td colspan="10" style="background:var(--light);padding:10px 14px 14px 22px">'
+    const detail = '<tr id="ap-det-'+it.id+'"'+(isOpen?'':' style="display:none"')+'><td colspan="'+(apOneSubtype?9:10)+'" style="background:var(--light);padding:10px 14px 14px 22px">'
       + '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:4px">What&rsquo;s wrong with it</div>'
       + '<ul style="margin:0 0 8px 16px;padding:0;font-size:13px">'+lines+'</ul>'
       + (it.agency_note ? '<div style="font-size:12px;color:#d97706;margin-bottom:6px">⚠ Careful: '+apEsc(it.agency_note)+'</div>' : '')
@@ -8146,11 +8162,11 @@ pages['sitenex-prospects'] = async function(){
 
   const table = '<div class="card" style="padding:0;overflow-x:auto">'
     + '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">'
-    + '<th style="padding:8px">Business</th><th style="padding:8px">Subtype</th><th style="padding:8px">City</th><th style="padding:8px">Phone</th><th style="padding:8px">Email</th>'
+    + '<th style="padding:8px">Business</th>'+(apOneSubtype ? '' : '<th style="padding:8px">Subtype</th>')+'<th style="padding:8px">City</th><th style="padding:8px">Phone</th><th style="padding:8px">Email</th>'
     + '<th style="padding:8px;text-align:right">Site score</th><th style="padding:8px;text-align:right">Reviews</th><th style="padding:8px">Package</th><th style="padding:8px;text-align:center">Agency</th>'
     + '<th style="padding:8px">Outreach</th>'
     + '</tr></thead><tbody>'
-    + (rows || '<tr><td colspan="10" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
+    + (rows || '<tr><td colspan="'+(apOneSubtype?9:10)+'" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
     + '</tbody></table>'+pager+'</div>';
 
   c.innerHTML = header + orBar('prospect') + summaryRow + filters + table;

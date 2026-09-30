@@ -66,12 +66,29 @@ const ENTITIES = {
     product: 'abiozen',
     pages: ['cphi-milan'],
   },
+  // ── lead: REGISTERED, BUT DELIBERATELY NOT GIVEN A CONTROL ON THE PAGE ──────
+  //
+  // leads.status ALREADY IS an outreach lifecycle — new → contacted → qualified → closed — with its own
+  // buttons on each card in the Sales Pipeline. This is NOT the prospects.status situation: there the two
+  // columns measure different things (qualification vs. conversation) and coexist correctly. Here they
+  // measure the SAME thing, so a second dropdown beside those buttons is exactly the "recorded in two
+  // places" problem that the won → sitenex_deals link exists to avoid.
+  //
+  // The three ways forward, none of which should be chosen quietly:
+  //   a. migrate leads.status into outreach and retire the four buttons  — the real fix, a bigger change
+  //   b. write an outreach event when a button moves a lead              — needs a 4 → 8 value mapping, and
+  //      'closed' means won OR lost, so the mapping would be a guess that looks like data
+  //   c. leave it, as now: the API supports lead outreach, the page does not offer it
+  //
+  // (c) until somebody picks. The entity type stays registered so nothing about the design pretends leads
+  // are outside the system, and ui-wiring.test.js records the gap with this reason.
   lead: {
     label: 'Lead',
     table: 'leads',
     idCast: 'text',                  // leads.id is TEXT
     product: 'abiozen',
     pages: ['sales-pipeline'],
+    hasOwnLifecycle: 'leads.status (new/contacted/qualified/closed) with buttons on the card',
   },
 };
 
