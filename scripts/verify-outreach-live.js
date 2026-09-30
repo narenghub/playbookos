@@ -2,7 +2,7 @@
 //
 // Against the REAL tables, with real prospect ids, two products and two people — because the properties
 // that matter are all about telling things apart: one product's rows from another's, one person's activity
-// from another's, and tracked rows from the 1,524 that are implicitly 'new'.
+// from another's, and tracked rows from the 1,524 that are implicitly 'not_contacted'.
 //
 // Everything written here is deleted in the finally, with a leak check.
 //
@@ -10,7 +10,7 @@
 
 const { query } = require('../src/lib/db');
 const outreach = require('../src/lib/outreach');
-const { STATUSES } = require('../src/lib/outreach/registry');
+const { STATUSES, CHANNELS } = require('../src/lib/outreach/registry');
 
 let fail = 0, touched = [];
 const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
@@ -28,9 +28,12 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     const people = (await query(`SELECT id, email FROM users WHERE is_active=1 ORDER BY email LIMIT 2`)).rows;
     if (people.length < 2) throw new Error('need two real users to tell two people apart');
     const [vin, nar] = people;
-    const mark = async (u, type, id, status, note) => {
-      const r = await outreach.setStatus({ entityType: type, entityId: id, status, note, user: u, held: STAFF });
+    const mark = async (u, type, id, status, note, channel = null) => {
+      const r = await outreach.setStatus({ entityType: type, entityId: id, status, note, channel, user: u, held: STAFF });
       if (r.ok) touched.push([type, String(id)]);
+      // A silently refused write is how this script previously reported nine stale failures and no cause:
+      // it wrote 'interested', the new validation refused it, and every later assertion measured the absence.
+      if (!r.ok) throw new Error(`write refused: ${r.code} — ${r.error}`);
       return r;
     };
     console.log(`fixtures: prospects ${gn.map(r=>r.id).join(',')} (golfnex), ${sx[0].id} (sitenex), institution ${inst[0].id}`);
@@ -50,11 +53,12 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
 
     console.log('\n1. WRITE — status + event, product read from the row');
     const a = await mark(vin, 'prospect', gn[0].id, 'contacted', 'called, left a message');
-    check('a golfnex prospect is recorded', [a.ok, a.from, a.to], [true, 'new', 'contacted']);
+    check('a golfnex prospect is recorded', [a.ok, a.from, a.to], [true, 'not_contacted', 'contacted']);
     check('and the product came from the row', a.row.product, 'golfnex');
     const b = await mark(vin, 'prospect', gn[1].id, 'contacted');
-    const c = await mark(vin, 'prospect', gn[0].id, 'interested', 'wants a quote');
-    check('a second change reports the real transition', [c.from, c.to], ['contacted', 'interested']);
+    const c = await mark(vin, 'prospect', gn[0].id, 'quote_sent', 'wants a quote', 'email');
+    check('a second change reports the real transition', [c.from, c.to], ['contacted', 'quote_sent']);
+    check('  and carries the CHANNEL, on the row and the event', c.channel, 'email');
     const d = await mark(nar, 'prospect', sx[0].id, 'won');
     check('a sitenex prospect too', d.row.product, 'sitenex');
     const e = await mark(nar, 'institution', inst[0].id, 'contacted');
@@ -66,7 +70,9 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     const N = act.people.find(p => p.user_id === nar.id);
     check(`${vin.email}: 3 changes`, V && V.total, 3);
     console.log(`     reported as "${V && V.person}" — activity() uses the display NAME, not the email`);
-    check('  broken down by status', V && V.by_status, { contacted: 2, interested: 1 });
+    check('  broken down by status', V && V.by_status, { contacted: 2, quote_sent: 1 });
+    // channel is a second axis: two of these touches had none recorded, and that is a fact, not a gap.
+    check('  and by CHANNEL, counting the unrecorded', V && V.by_channel, { '(not recorded)': 2, email: 1 });
     check('the second person: 2 changes', N && N.total, 2);
     check('busiest person first', act.people[0].user_id, vin.id);
 
@@ -74,8 +80,11 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     const total = (await query(`SELECT COUNT(*)::int n FROM prospects WHERE product='golfnex'`)).rows[0].n;
     const s = await outreach.summary('prospect', { held: STAFF, totalEntities: total, product: 'golfnex' });
     check('golfnex: 1 contacted', s.counts.contacted, 1);
-    check('golfnex: 1 interested', s.counts.interested, 1);
-    check(`golfnex: the rest of ${total} are new`, s.counts.new, total - 2);
+    check('golfnex: 1 quote_sent', s.counts.quote_sent, 1);
+    // The bar has to read as a funnel, so the ORDER is part of the contract, not a presentation detail.
+    check('the bar comes back in funnel order', Object.keys(s.counts).slice(0, 3),
+          ['not_contacted', 'contacted', 'following_up']);
+    check(`golfnex: the rest of ${total} are not_contacted`, s.counts.not_contacted, total - 2);
     check('every row is accounted for', Object.values(s.counts).reduce((x, y) => x + y, 0), total);
 
     console.log('\n4. SCOPING — inherited, not reinvented');
@@ -90,15 +99,19 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     console.log('\n5. prospects.status UNTOUCHED — it is qualification, not outreach');
     const q = (await query(`SELECT status FROM prospects WHERE id=$1`, [gn[0].id])).rows[0].status;
     check(`prospect ${gn[0].id}.status is still its qualifier verdict`, ['new','qualified','rejected'].includes(q), true);
-    console.log(`     (it reads '${q}', while its outreach status is 'interested')`);
+    console.log(`     (it reads '${q}', while its outreach status is 'quote_sent')`);
 
     console.log('\n6. the vocabulary is a comment, not a constraint');
     const bad = await outreach.setStatus({ entityType: 'prospect', entityId: gn[0].id, status: 'nurture', user: vin, held: STAFF });
     check("'nurture' refused by the API", bad.code, 'unknown_status');
     const comment = (await query(`SELECT col_description('outreach'::regclass, ordinal_position) d
       FROM information_schema.columns WHERE table_name='outreach' AND column_name='status'`)).rows[0].d;
-    check('and documented on the column', /new \| contacted/.test(comment || ''), true);
-    check('all 8 named in it', STATUSES.every(x => comment.includes(x)), true);
+    check('and documented on the column', /not_contacted \| contacted/.test(comment || ''), true);
+    check('all 10 named in it', STATUSES.every(x => comment.includes(x)), true);
+    const chanComment = (await query(`SELECT col_description('outreach'::regclass, a.attnum) d
+      FROM pg_attribute a WHERE a.attrelid='outreach'::regclass AND a.attname='channel'`)).rows[0].d;
+    check('channel is documented separately, as its own axis',
+          CHANNELS.every(x => (chanComment || '').includes(x)), true);
   } catch (err) { fail++; console.error('ERROR:', err.message); }
   finally {
     for (const [type, id] of touched) {
