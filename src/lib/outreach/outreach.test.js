@@ -371,6 +371,19 @@ test('the HTTP surface: read, write, summary, activity, history, vocabulary', as
     const hist = await call('GET', '/api/outreach/history?entity_type=prospect&entity_id=1');
     assert.equal(hist.body.events.length, 1);
 
+    // THE ROUTE MUST PASS `deal` THROUGH. setStatus returns it and the cell renders "deal #N created" from
+    // it; omitting it made the whole won → sitenex_deals link invisible — the deal appeared on the board
+    // with nothing on screen to say so. The module test above cannot see this: it calls setStatus directly.
+    const won = await call('PUT', '/api/outreach', { entity_type: 'prospect', entity_id: 3, status: 'won' });
+    assert.equal(won.status, 200);
+    assert.ok(won.body.deal, 'the response must carry the deal');
+    assert.equal(won.body.deal.created, true);
+    assert.ok(won.body.deal.id, 'with its id, so the cell can name it');
+    const again = await call('PUT', '/api/outreach', { entity_type: 'prospect', entity_id: 3, status: 'won' });
+    assert.equal(again.body.deal.created, false, 'and linked, not duplicated, on a second pass');
+    const noDeal = await call('PUT', '/api/outreach', { entity_type: 'prospect', entity_id: 1, status: 'won' });
+    assert.equal(noDeal.body.deal, null, 'a golfnex win reports no deal rather than omitting the field');
+
     // refusals carry the right status code
     assert.equal((await call('PUT', '/api/outreach', { entity_type: 'prospect', entity_id: 99999, status: 'contacted' })).status, 404);
     assert.equal((await call('PUT', '/api/outreach', { entity_type: 'prospect', entity_id: 1, status: 'nurture' })).status, 400);

@@ -5249,8 +5249,12 @@ router.put('/outreach', authMiddleware, async (req, res) => {
       const code = r.code === 'product_not_held' ? 403 : (r.code === 'entity_not_found' ? 404 : 400);
       return res.status(code).json({ error: r.error, code: r.code });
     }
-    console.log(`[outreach] ${req.user.email} ${entity_type}#${entity_id} ${r.from} → ${r.to}`);
-    res.json({ success: true, from: r.from, to: r.to, changed: r.changed, row: r.row });
+    console.log(`[outreach] ${req.user.email} ${entity_type}#${entity_id} ${r.from} → ${r.to}`
+      + (r.deal ? ` (deal #${r.deal.id} ${r.deal.created ? 'created' : 'linked'})` : ''));
+    // `deal` has to be passed through: setStatus returns it, and the cell says "deal #N created" from it.
+    // It was omitted here, so the whole won → sitenex_deals link worked server-side and was invisible —
+    // the deal appeared on the board with nothing on screen to say it had been made.
+    res.json({ success: true, from: r.from, to: r.to, changed: r.changed, row: r.row, deal: r.deal || null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
