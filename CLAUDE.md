@@ -67,10 +67,15 @@ fixtures, assert, delete in a `finally`, and report leaks. They all exit non-zer
 These scripts run against **production**. Their cleanup is the most dangerous code in the repo, because
 it is the part nobody reads.
 
-1. **A verification script may only delete rows it created, by explicit id.** Never by timestamp, never
-   by pattern, never by "recent". Record each id as you insert it and delete exactly those.
+1. **A verification script may only touch rows it created, by explicit id.** Never by timestamp, never
+   by pattern, never by "recent". Record each id as you insert it and delete exactly those. This covers
+   **writes as well as deletes**: build a fixture and act on that, never on a real account.
 
 2. **Never assert a table is empty.** Assert *"my fixtures are gone"*.
+
+3. **"It will be refused anyway" is a prediction, not a safeguard.** If a script writes somewhere real
+   to prove the write is refused, then the one run where the guard does not fire is the run that mutates
+   production — and that is exactly the run you will not be expecting.
 
 ```js
 // NO — deletes a deal somebody just closed
@@ -94,3 +99,15 @@ Both scripts also asserted their tables end up empty. **That is a statement whic
 moment the product is used**, and when it starts failing the obvious fix is to widen the `DELETE`. A
 test that pressures the next person toward a more destructive cleanup is worse than no test. Where a
 count has to be compared, compare a **delta** against what was already there, not an absolute.
+
+**And the third rule, which cost more than the other two.** `verify-product-revocation-live.js` checked
+"a super admin cannot narrow themselves" by PUTting a narrower product set onto **the live super admin**,
+relying on the expected 403 to make it harmless. On 2026-09-30 it returned 200 and the write landed: the
+account's 7 `user_products` rows had been deliberately removed the day before, so setting one product
+*removed* nothing, which is a widening, which the guard allows by design. The guard was intact; the
+script's expectation had encoded account state that a human had since changed. Nothing was lost only
+because the `super_admin` role bypass makes those rows irrelevant to access.
+
+Guards get verified against **fixtures you create**, including fixture privileged accounts. An
+expectation built from live account state goes stale the moment somebody changes that account, and the
+script finds out by writing.

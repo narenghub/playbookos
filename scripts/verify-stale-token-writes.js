@@ -16,7 +16,7 @@ const { query } = require('../src/lib/db');
 
 const TAG = 'verify-stale-' + Date.now();
 const P = process.env.PORT || 3000;
-let fixture = null, fail = 0;
+let fixture = null, superFx = null, fail = 0;
 
 const check = (label, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
   if (!ok) fail++; console.log(`  ${ok ? '✅' : '❌'} ${label}${ok ? '' : `  → expected ${JSON.stringify(e)}, got ${JSON.stringify(a)}`}`); };
@@ -66,9 +66,20 @@ const check = (label, a, e) => { const ok = JSON.stringify(a) === JSON.stringify
     check('and the grants landed', held, ['abiozen', 'sitenex']);
 
     console.log('\nthe same stale token must still be refused where it should be:');
-    // Its role is now read from the DB, so it is a super_admin — including for the guards.
-    const selfDemote = await hit('PUT', `/api/users/${sup.id}`, stale, { role: 'admin' });
+    // AGAINST A FIXTURE SUPER ADMIN, not the real one. This used to PUT { role: 'admin' } onto the live
+    // super_admin and rely on the expected 403 to keep it harmless. naren@abiozen.com is the ONLY active
+    // super_admin, so the single run where that guard failed to fire would have demoted the account with
+    // nobody left able to restore it. The refusal is what is being tested; it cannot also be the safeguard.
+    superFx = crypto.randomUUID();
+    const superEmail = `verify-stale-super-${Date.now()}@example.invalid`;
+    await query(`INSERT INTO users (id,email,name,role,is_active,joined_at,permissions_version)
+                 VALUES ($1,$2,'Stale Guard Fixture','super_admin',1,NOW(),1)`, [superFx, superEmail]);
+    const fxStale = jwt.sign({ id: superFx, email: superEmail, role: 'super_admin' },
+                             process.env.JWT_SECRET, { expiresIn: '5m' });
+    const selfDemote = await hit('PUT', `/api/users/${superFx}`, fxStale, { role: 'admin' });
     check('cannot demote itself', selfDemote.status, 403);
+    check('  and the role really is untouched',
+      (await query(`SELECT role FROM users WHERE id=$1`, [superFx])).rows[0].role, 'super_admin');
 
     console.log('\nand a token claiming MORE than the database allows is still refused:');
     const adm = (await query(`SELECT id, email FROM users WHERE role='admin' AND is_active=1 LIMIT 1`)).rows[0];
@@ -83,11 +94,16 @@ const check = (label, a, e) => { const ok = JSON.stringify(a) === JSON.stringify
     check('a correct token still works too', freshCheck.status, 200);
   } catch (e) { fail++; console.error('ERROR:', e.message); }
   finally {
-    if (fixture) {
+    for (const fx of [fixture, superFx]) {
+      if (!fx) continue;
       for (const t of ['user_product_grants_log', 'user_products', 'product_shadow_log']) {
-        await query(`DELETE FROM ${t} WHERE user_id=$1`, [fixture]).catch(() => {});
+        await query(`DELETE FROM ${t} WHERE user_id=$1`, [fx]).catch(() => {});
       }
-      await query(`DELETE FROM users WHERE id=$1 AND email LIKE 'verify-stale-%'`, [fixture]).catch(() => {});
+      await query(`DELETE FROM users WHERE id=$1 AND email LIKE 'verify-stale-%'`, [fx]).catch(() => {});
+    }
+    // A leftover ACTIVE super_admin is a privilege leak, so it is named rather than folded into the count.
+    if (superFx && (await query(`SELECT COUNT(*)::int n FROM users WHERE id=$1`, [superFx])).rows[0].n) {
+      fail++; console.error(`❌ the fixture SUPER ADMIN ${superFx} was not removed`);
     }
     const leaked = (await query(`SELECT COUNT(*)::int n FROM users WHERE email LIKE 'verify-stale-%'`)).rows[0].n;
     console.log(`\ncleanup: ${leaked} leaked`);

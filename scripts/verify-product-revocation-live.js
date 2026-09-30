@@ -17,7 +17,7 @@ const { query } = require('../src/lib/db');
 const TAG = 'verify-revocation-' + Date.now();
 const EMAIL = `${TAG}@example.invalid`;
 const PORT = process.env.PORT || 3000;
-let id = null, superUser = null, fail = 0;
+let id = null, superUser = null, superFixtureId = null, fail = 0;
 
 const check = (label, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
   if (!ok) fail++; console.log(`  ${ok ? '✅' : '❌'} ${label}${ok ? '' : `  → expected ${JSON.stringify(e)}, got ${JSON.stringify(a)}`}`); };
@@ -71,22 +71,59 @@ const hit = async (method, path, token, body) => {
     check('and the revoke survives although the user_products row is gone',
       (await query(`SELECT COUNT(*)::int n FROM user_products WHERE user_id=$1`, [id])).rows[0].n, 0);
 
-    console.log('\nguard 1, live:');
-    const selfNarrow = await hit('PUT', `/api/users/${superUser.id}/products`, adminToken, { products: ['abiozen'] });
+    console.log('\nguard 1, live — against a FIXTURE super admin, never the real one:');
+    // THIS USED TO PUT PRODUCTS ONTO THE LIVE SUPER ADMIN and expect a 403 to make it harmless. On
+    // 2026-09-30 it got a 200 and the write landed on naren@abiozen.com, because the 7 rows had been
+    // deliberately removed the day before: with 0 held, setting ['abiozen'] REMOVES nothing, so it is a
+    // widening, which the guard allows by design. The assertion `products are untouched === 7` had encoded
+    // the pre-removal state. Two lessons, and the second is the one that matters:
+    //   • an expectation built from live account state goes stale when somebody changes that account;
+    //   • a verification must not WRITE to rows it did not create, not merely not delete them. "It will be
+    //     refused anyway" is a prediction, and the run where the prediction is wrong is the run that
+    //     mutates a privileged account with no undo.
+    // So guard 1 now runs entirely against a fixture super_admin that this script creates and deletes.
+    superFixtureId = crypto.randomUUID();
+    const superEmail = `${TAG}-super@example.invalid`;
+    await query(`INSERT INTO users (id,email,name,role,is_active,joined_at,permissions_version)
+                 VALUES ($1,$2,'Guard Fixture','super_admin',1,NOW(),1)`, [superFixtureId, superEmail]);
+    for (const p of ['abiozen', 'golfnex']) {
+      await query(`INSERT INTO user_products (user_id, product) VALUES ($1,$2)
+                   ON CONFLICT DO NOTHING`, [superFixtureId, p]);
+    }
+    const fixtureToken = jwt.sign({ id: superFixtureId, email: superEmail, role: 'super_admin' },
+                                  process.env.JWT_SECRET, { expiresIn: '5m' });
+
+    // Narrowing: two held, one requested. This is the case the guard exists for.
+    const selfNarrow = await hit('PUT', `/api/users/${superFixtureId}/products`, fixtureToken, { products: ['abiozen'] });
     check('a super admin cannot narrow themselves', selfNarrow.status, 403);
     check('with the reason named', selfNarrow.body.code, 'self_narrow');
-    const supers = (await query(`SELECT COUNT(*)::int n FROM users WHERE role='super_admin' AND is_active=1`)).rows[0].n;
-    console.log(`     (${supers} active super admin${supers === 1 ? ' — so the last-super-admin guard also applies to this account' : 's'})`);
     check('and their products are untouched',
-      (await query(`SELECT COUNT(*)::int n FROM user_products WHERE user_id=$1`, [superUser.id])).rows[0].n, 7);
+      (await query(`SELECT COUNT(*)::int n FROM user_products WHERE user_id=$1`, [superFixtureId])).rows[0].n, 2);
+
+    // And the boundary case that made the old test pass for the wrong reason: WIDENING yourself is allowed,
+    // so a 200 here is correct behaviour and not a hole in the guard.
+    const selfWiden = await hit('PUT', `/api/users/${superFixtureId}/products`, fixtureToken,
+                                { products: ['abiozen', 'golfnex', 'favly'] });
+    check('but WIDENING yourself is allowed — it is not an escalation', selfWiden.status, 200);
+    check('  and it actually applied',
+      (await query(`SELECT COUNT(*)::int n FROM user_products WHERE user_id=$1`, [superFixtureId])).rows[0].n, 3);
+
+    const supers = (await query(`SELECT COUNT(*)::int n FROM users WHERE role='super_admin' AND is_active=1`)).rows[0].n;
+    console.log(`     (${supers} active super admin(s) while this fixture exists — it is removed below)`);
   } catch (e) { fail++; console.error('ERROR:', e.message); }
   finally {
-    if (id) {
-      await query(`DELETE FROM product_shadow_log WHERE user_id=$1`, [id]).catch(() => {});
-      await query(`DELETE FROM user_product_grants_log WHERE user_id=$1`, [id]).catch(() => {});
-      await query(`DELETE FROM user_products WHERE user_id=$1`, [id]).catch(() => {});
-      await query(`DELETE FROM users WHERE id=$1 AND email LIKE 'verify-revocation-%'`, [id]).catch(() => {});
+    for (const fx of [id, superFixtureId]) {
+      if (!fx) continue;
+      await query(`DELETE FROM product_shadow_log WHERE user_id=$1`, [fx]).catch(() => {});
+      await query(`DELETE FROM user_product_grants_log WHERE user_id=$1`, [fx]).catch(() => {});
+      await query(`DELETE FROM user_products WHERE user_id=$1`, [fx]).catch(() => {});
+      await query(`DELETE FROM users WHERE id=$1 AND email LIKE 'verify-revocation-%'`, [fx]).catch(() => {});
     }
+    // A leftover ACTIVE super_admin would be a real privilege leak, so it is checked by name rather than
+    // folded into the generic count below.
+    const leftSuper = superFixtureId
+      ? (await query(`SELECT COUNT(*)::int n FROM users WHERE id=$1`, [superFixtureId])).rows[0].n : 0;
+    if (leftSuper) { fail++; console.error(`❌ the fixture SUPER ADMIN ${superFixtureId} was not removed`); }
     const leaked = (await query(`SELECT COUNT(*)::int n FROM users WHERE email LIKE 'verify-revocation-%'`)).rows[0].n;
     console.log(`\ncleanup: fixture deleted, ${leaked} leaked`);
     if (leaked) fail++;

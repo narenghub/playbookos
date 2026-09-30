@@ -1,4 +1,4 @@
-// VERIFICATION CLEANUP: only what you created, by id — and never "the table is empty".
+// VERIFICATION SAFETY: touch only what you created, by id — and never "the table is empty".
 //
 //   node --test src/lib/verify-cleanup.test.js
 //
@@ -114,4 +114,56 @@ test('the guard would catch the real regressions, rather than passing over clean
     'an id-pinned delete with a belt-and-braces LIKE is the safest form and must pass');
   const likeOnly = "  await query(`DELETE FROM notifications WHERE title LIKE $1`, [TAG + '%']);";
   assert.ok(flags(likeOnly) && !idPinned(likeOnly), 'a pattern doing the SELECTING must be caught');
+});
+
+// ── and the same rule for WRITES ────────────────────────────────────────────────
+test('no verifier writes to a row it looked up from live data', () => {
+  // verify-product-revocation-live.js proved "a super admin cannot narrow themselves" by PUTting a narrower
+  // product set onto THE LIVE SUPER ADMIN, treating the expected 403 as its safeguard. The guard was
+  // intact, but the account's rows had changed under it, so the request became a widening — allowed by
+  // design — and the write landed on a privileged production account with no undo.
+  //
+  // The shape to catch: an id read out of the database (`SELECT ... FROM users WHERE role='super_admin'`)
+  // being used as the TARGET of a mutating request, rather than a fixture the script inserted.
+  const bad = [];
+  const all = [...new Set(fs.readdirSync(SCRIPTS).filter(x => /^verify-.*\.js$/.test(x)))];
+  for (const f of all) {
+    const src = fs.readFileSync(path.join(SCRIPTS, f), 'utf8');
+    const ls = src.split('\n');
+    // Names bound from a live lookup of a privileged row.
+    const live = new Set();
+    ls.forEach((t) => {
+      const m = /(?:const|let|var)\s+(\w+)\s*=.*SELECT[^`]*FROM\s+users[^`]*WHERE[^`]*role\s*=/i.exec(t);
+      if (m) live.add(m[1]);
+    });
+    if (!live.size) continue;
+    ls.forEach((t, i) => {
+      if (/^\s*(\/\/|\*)/.test(t)) return;
+      // A mutating HTTP call whose path interpolates one of those names.
+      for (const name of live) {
+        if (!new RegExp(`\\$\\{${name}(\\.\\w+)?\\}`).test(t)) continue;
+        if (/'(PUT|POST|PATCH|DELETE)'|method:\s*'(PUT|POST|PATCH|DELETE)'/.test(t)) {
+          bad.push(`${f}:${i + 1}  writes to a live ${name} — ${t.trim()}`);
+        }
+      }
+    });
+  }
+  assert.deepEqual(bad, [],
+    'a guard is verified against a FIXTURE you create, including a fixture privileged account.\n' +
+    '"it will be refused anyway" is a prediction, and the run where it is wrong is the run that\n' +
+    `mutates production:\n${bad.join('\n')}`);
+});
+
+test('that write guard would catch the shape that shipped', () => {
+  const t = "    const r = await hit('PUT', `/api/users/${superUser.id}/products`, tok, { products: ['abiozen'] });";
+  const live = new Set(['superUser']);
+  let caught = false;
+  for (const name of live) {
+    if (new RegExp(`\\$\\{${name}(\\.\\w+)?\\}`).test(t) &&
+        /'(PUT|POST|PATCH|DELETE)'/.test(t)) caught = true;
+  }
+  assert.ok(caught, 'the exact line that mutated the live super admin must be caught');
+  // A read of the same row is fine — the script legitimately needs the super admin to act AS.
+  const read = "    const rs = await hit('GET', '/api/sitenex/deals', adminToken);";
+  assert.ok(!/'(PUT|POST|PATCH|DELETE)'/.test(read), 'reads and acting-as must stay allowed');
 });
