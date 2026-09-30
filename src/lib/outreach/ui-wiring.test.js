@@ -1,16 +1,18 @@
-// THE OUTREACH UI IS CURRENTLY ROLLED BACK. This file records that, and what has to come back.
+// WHAT "WIRED" MEANS for the outreach UI.
 //   node --test src/lib/outreach/ui-wiring.test.js
 //
-// On 2026-09-30 the outreach UI took production down: `async function outreachPage()` was inserted inside
-// the `const pages = { ... }` object literal, so the main inline script failed to parse and the whole SPA
-// rendered nothing. public/index.html was rolled back to ac749f9; everything server-side was kept.
+// HISTORY WORTH KEEPING: on 2026-09-30 this UI took production down. `async function outreachPage()` was
+// inserted INSIDE the `const pages = { ... }` object literal, which is a syntax error, so the main inline
+// script failed to parse and the whole SPA rendered nothing — while /health stayed green and the container
+// logs stayed empty, because a client-side parse failure leaves no server trace. index.html was rolled back,
+// then fixed by declaring the function before the literal and attaching it after with pages['outreach'] =.
 //
-// So the assertions here are inverted on purpose. They assert the SCHEMA AND API are intact (they are, and
-// they are what the fix will attach to) and that the UI is absent — because a test file full of green
-// assertions about controls that are not on the page would be worse than no test at all.
+// For the duration of the rollback this file asserted the UI's ABSENCE rather than going green over controls
+// that were not on the page. UI_RESTORED is still computed from the source rather than hardcoded, so it
+// remains true in either direction: the inverted branch is what runs if the helpers ever disappear again.
 //
-// WHEN THE FIX LANDS: set UI_RESTORED = true and the original assertions come back. They are not deleted,
-// because they are the specification of what "wired" means.
+// The placement check itself lives in src/lib/spa-parses.test.js, which owns the structural knowledge of
+// index.html.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -19,6 +21,21 @@ const { ENTITIES } = require('./registry');
 
 const SRC = fs.readFileSync(__dirname + '/../../../public/index.html', 'utf8');
 const count = (re) => (SRC.match(re) || []).length;
+
+// Every slice of index.html goes through this. A hand-written SRC.slice(indexOf(a), indexOf(b)) returns ''
+// when b appears BEFORE a, and every assertion over the result then passes or fails for a reason that has
+// nothing to do with the code: the channel check asserted "exactly two selects", got 0, and the two selects
+// were right there in the function. orBar is simply defined above orCell. A bound that is wrong must throw,
+// not yield an empty string.
+function between(startNeedle, endNeedle) {
+  const a = SRC.indexOf(startNeedle);
+  assert.notEqual(a, -1, `not found in index.html: ${startNeedle}`);
+  const b = SRC.indexOf(endNeedle, a + startNeedle.length);
+  assert.notEqual(b, -1, `not found after ${startNeedle}: ${endNeedle}`);
+  const slice = SRC.slice(a, b);
+  assert.ok(slice.length > 0, `empty slice between ${startNeedle} and ${endNeedle}`);
+  return slice;
+}
 
 // Flip to true in the commit that restores the UI. Every assertion below reads it.
 const UI_RESTORED = /function heldProductKeys|window\.orSet/.test(SRC) && /function orCell\(/.test(SRC);
@@ -75,15 +92,48 @@ test(UI_RESTORED ? 'the UI is wired' : 'the UI is absent, as expected after the 
   assert.match(SRC, /API\('\/outreach\/vocabulary'\)/, 'the dropdown reads the server vocabulary');
   assert.match(SRC, /window\.orSet = async function orSet\(/, 'orSet must be an explicit global');
   assert.match(SRC, /window\.orNote = async function orNote\(/);
-  const set = SRC.slice(SRC.indexOf('window.orSet = async function'), SRC.indexOf('function orAdjustBar'));
+  const set = between('window.orSet = async function', 'function orAdjustBar');
   assert.ok(!/pages\[/.test(set), 'saving must not re-render the list');
   assert.match(set, /sel\.value = prev/, 'a failed save puts the control back');
   assert.match(set, /res\.error/, "and shows the server's words");
   for (const flag of ['ppOneSubtype', 'apOneSubtype']) {
     assert.ok(count(new RegExp(flag, 'g')) >= 4, `${flag}: cell, header and colspans must all honour it`);
   }
-  const page = SRC.slice(SRC.indexOf('async function outreachPage()'), SRC.indexOf("pages['outreach'] = outreachPage"));
+  const page = between('async function outreachPage()', "pages['outreach'] = outreachPage");
   assert.match(page, /res\.silent/, 'the silence is rendered');
+});
+
+// ── TWO FIELDS means TWO CONTROLS ───────────────────────────────────────────────
+test('every wired row gets a channel control alongside the status one', () => {
+  if (!UI_RESTORED) return;
+  // The split is only real in the UI if channel has its own control. One dropdown whose options mixed
+  // stages and methods is exactly the design this was built to avoid.
+  assert.match(SRC, /window\.orSetChannel = async function orSetChannel\(/,
+    'channel must be an explicit global — an async function declaration in a block is NOT hoisted, which is'
+    + ' the bug that silently broke every Agent Control Run button');
+  assert.match(SRC, /or-chan-\$\{entityType\}-\$\{id\}/, 'the channel control needs its own id per row');
+  const cell = between('function orCell(', 'window.orSet = async function');
+  assert.equal((cell.match(/<select/g) || []).length, 2, 'exactly two selects: the status and the channel');
+  assert.match(cell, /orChannels\(\)/, 'the channel options come from the server vocabulary, not a literal');
+  assert.match(cell, /orStatusKeys\(\)/, 'and so do the status options');
+});
+
+test('setting a channel goes through the SAME write path as a status change', () => {
+  if (!UI_RESTORED) return;
+  // A second endpoint for channel would be a second place to enforce scoping. It re-sends the current
+  // status instead, so one route, one product check, one event.
+  const fn = between('window.orSetChannel = async function orSetChannel(', 'window.orNote = async function orNote(');
+  assert.match(fn, /status/, 'it re-sends the current status');
+  assert.ok(!/fetch\(/.test(fn), 'and uses the shared API helper rather than its own fetch');
+});
+
+test('the funnel bar renders the SERVER order, and shows the empty stages up to the furthest reached', () => {
+  if (!UI_RESTORED) return;
+  const bar = between('function orBar(', 'function orCell(');
+  // "1,522 not contacted · 2 contacted · 0 quote sent · 0 won" only reads as a pipeline if the zeroes
+  // between the live stages are drawn. Dropping them would hide the drop-off, which is the thing to act on.
+  assert.match(bar, /lastLive/, 'the bar tracks the furthest stage reached so the gaps before it still show');
+  assert.ok(!/\.sort\(\)/.test(bar), 'never an alphabetical sort — contacted would come before not_contacted');
 });
 
 // The placement check lives in src/lib/spa-parses.test.js, which owns the structural knowledge of the file
