@@ -126,14 +126,52 @@ Two metrics, both site-measured:
 
 Review count stays as context, not as a test — it is a Places artefact and varies with metro size.
 
-### The one thing still blocking it
+### The Illinois baseline — complete as of 2026-09-30
 
-**Pharmacy has never been scanned: 0 of 307 rows.** One of the three shipping subtypes has no site_score
-distribution at all, so there is nothing for an Ohio number to be compared against. That scan costs **no
-Places calls** — only fetch time, 263 sites at ~200ms plus fetch — and it is the prerequisite.
+Pharmacy is scanned (307 of 307; 307 rows in 485s of fetch time, no Places calls). All three shipping
+subtypes now have a baseline:
 
-The other 608 unscanned Illinois rows are the six dropped experiment categories (auto_repair, dental, legal,
-hvac, plumbing, daycare). They are **not** worth scanning: fetch time for segments nobody ships.
+| subtype | rows | scanned | no-website | blocked | scored | avg score | P1 | P2 | agency |
+|---|---|---|---|---|---|---|---|---|---|
+| machine_shop | 306 | 306 | **72 (24%)** | 27 (9%) | 207 | 16 | 88 | 24 | 34 (11%) |
+| pharmacy | 307 | 307 | 44 (14%) | 26 (8%) | 237 | 8 | 44 | 3 | 45 (15%) |
+| funeral | 303 | 271 | 16 (5%) | **131 (48%)** | 124 | 10 | 24 | 2 | 80 (30%) |
+
+### site_score distribution — the Wave 1 metric
+
+| subtype | 60+ | 40–59 | 20–39 | 0–19 | scored | **≥40 (a real rebuild case)** |
+|---|---|---|---|---|---|---|
+| machine_shop | 11 | 13 | 53 | 130 | 207 | **11.6%** |
+| pharmacy | 0 | 3 | 37 | 197 | 237 | 1.3% |
+| funeral | 0 | 2 | 37 | 85 | 124 | 1.6% |
+
+### What this says: run Wave 1 on MACHINE SHOPS ONLY
+
+| subtype | no-website | site_score ≥40 | sellable pool (P1+P2) |
+|---|---|---|---|
+| **machine_shop** | **23.5%** | **11.6%** | **112 of 306 — 37%** |
+| pharmacy | 14.3% | 1.3% | 47 of 307 — 15% |
+| funeral | 5.3% | 1.6% | 26 of 303 — 9% |
+
+Machine shops are **4.4x** funeral homes on website absence and **7x** on bad-site rate. Pharmacy looks
+mid-range on no-website, but of the 237 with a site only **3** score 40 or above: their sites are fine, so
+the sellable pool is essentially just the 44 with no site at all.
+
+Two more things the full scan showed:
+
+- **48% of funeral home sites block the scanner** (131 of 271). The score distribution for funeral rests on
+  124 of 303 rows, so it is the least trustworthy of the three — and we decided not to evade bot protection,
+  so that will not improve. Machine shops block at 9%, which is why their numbers are the ones to trust.
+- **Agency-tracked runs opposite to sellability**: funeral 30%, pharmacy 15%, machine_shop 11%. The segment
+  with the most agency evidence is the one with the least to sell. That is a further argument for it being a
+  tiebreak and not a selector.
+
+**Recommendation: Wave 1 = machine_shop only, CBSA metro-only, five states.** 69 CBSAs x 1 subtype = 69
+tiles, ~173 calls, **~$6.04**, ~1,600 rows. A third of the cost of the three-subtype run, against the one
+segment with a signal worth generalising, measured on two metrics that travel.
+
+Micropolitan stays open, and machine shops remain the segment most likely to earn it — an unmarketed
+industrial supplier really is likelier in a micro county. Decide after Wave 1, on Wave 1's numbers.
 
 ## 4. Per-state CBSA counts
 
