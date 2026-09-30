@@ -23,6 +23,22 @@ const path = require('path');
 const FILE = path.join(__dirname, '..', '..', 'public', 'index.html');
 const SRC = fs.readFileSync(FILE, 'utf8');
 
+// Where the `pages` object literal starts and ends.
+//
+// NOT by counting braces. The literal is full of template strings containing { and } (and regexes), so a
+// brace walk never balances — it returned "could not find the end" and failed this very test. The file's
+// own structure is the reliable anchor: the literal closes at the first column-0 `};` after it opens.
+function pagesLiteral(src) {
+  const lines = src.split('\n');
+  const open = lines.findIndex(l => l.startsWith('const pages = {'));
+  if (open === -1) return null;
+  let close = -1;
+  for (let i = open + 1; i < lines.length; i++) if (lines[i] === '};') { close = i; break; }
+  if (close === -1) return null;
+  return { open: open + 1, close: close + 1, body: lines.slice(open, close + 1).join('\n') };
+}
+
+
 // Inline scripts only — a <script src=...> is somebody else's file.
 function inlineBlocks(src) {
   return [...src.matchAll(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => ({
@@ -55,23 +71,27 @@ test('the biggest block is the app, and it parses', () => {
 });
 
 test('no function DECLARATION sits inside the pages object literal', () => {
-  // The specific shape of the outage, checked directly: `const pages = {` ... `}` may contain methods
-  // (`async team() {`) but not declarations (`async function x() {`). This is cheaper to read than a parse
-  // error and names the actual mistake.
-  const open = SRC.indexOf('const pages = {');
-  assert.notEqual(open, -1, 'could not find the pages object');
-  // Walk braces to find the literal's end, ignoring strings is unnecessary here because we only need the
-  // first unbalanced close at depth 0 and the object is brace-balanced in practice.
-  let depth = 0, end = -1;
-  for (let i = open; i < SRC.length; i++) {
-    const ch = SRC[i];
-    if (ch === '{') depth++;
-    else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
-  }
-  assert.ok(end > open, 'could not find the end of the pages object');
-  const body = SRC.slice(open, end);
-  const decls = [...body.matchAll(/^\s*(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/gm)].map(m => m[1]);
+  // The exact shape of the 2026-09-30 outage, checked directly: `const pages = {` may contain METHODS
+  // (`async team() {`) but not DECLARATIONS (`async function x() {`). Cheaper to read than a parse error,
+  // and it names the mistake.
+  const lit = pagesLiteral(SRC);
+  assert.ok(lit, 'could not locate the pages object literal');
+  const decls = [...lit.body.matchAll(/^\s*(?:async\s+)?function\s+([A-Za-z0-9_$]+)\s*\(/gm)].map(m => m[1]);
   assert.deepEqual(decls, [],
-    `\nthese are declared INSIDE the pages object literal, which is a syntax error:\n  ` +
-    decls.join('\n  ') + `\n\nDeclare them before \`const pages\` and attach with pages['x'] = fn.\n`);
+    `\nthese are declared INSIDE the pages object literal (lines ${lit.open}-${lit.close}), which is a syntax\n` +
+    `error that kills the whole app:\n  ` + decls.join('\n  ') +
+    `\n\nDeclare them before \`const pages\` and attach with pages['x'] = fn.\n`);
+});
+
+test('outreachPage specifically is declared before the literal and attached after it', () => {
+  // The function that caused the outage, named so a future move gets told which one.
+  const lit = pagesLiteral(SRC);
+  const decl = SRC.split('\n').findIndex(l => l.startsWith('async function outreachPage()')) + 1;
+  if (!decl) return;                                    // not present (e.g. rolled back) — nothing to check
+  assert.ok(decl < lit.open,
+    `outreachPage is declared at line ${decl}, inside or after the pages literal (${lit.open}-${lit.close}). ` +
+    `It must be declared BEFORE it.`);
+  const attach = SRC.split('\n').findIndex(l => l.startsWith("pages['outreach'] = outreachPage")) + 1;
+  assert.ok(attach > lit.close,
+    `the attachment is at line ${attach}; it must come AFTER the literal closes at ${lit.close}`);
 });
