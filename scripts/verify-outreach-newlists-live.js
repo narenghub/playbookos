@@ -28,15 +28,19 @@ const check=(l,a,e)=>{const ok=JSON.stringify(a)===JSON.stringify(e);if(!ok)fail
   const exh=(await query(`SELECT id FROM cphi_exhibitor_matches WHERE match_tier <> 'token' ORDER BY id LIMIT 1`)).rows[0];
   const r1=await hit('PUT','/api/outreach',{entity_type:'study',entity_id:study.id,status:'contacted',note:'sponsor emailed'});
   check('a study records',[r1.status,r1.body.to],[200,'contacted']); if(r1.status===200) made.push(['study',String(study.id)]);
-  const r2=await hit('PUT','/api/outreach',{entity_type:'exhibitor',entity_id:exh.id,status:'in_progress'});
-  check('an exhibitor records',[r2.status,r2.body.to],[200,'in_progress']); if(r2.status===200) made.push(['exhibitor',String(exh.id)]);
+  const r2=await hit('PUT','/api/outreach',{entity_type:'exhibitor',entity_id:exh.id,status:'in_conversation',channel:'in_person'});
+  // in_person is the channel that matters for a trade-show list, and it is exactly the value that would
+  // have had to become a STATUS if the two axes had been folded into one.
+  check('an exhibitor records',[r2.status,r2.body.to,r2.body.channel],[200,'in_conversation','in_person']);
+  if(r2.status===200) made.push(['exhibitor',String(exh.id)]);
 
   console.log('\nthe bars over the real lists');
   const st=(await query(`SELECT COUNT(*)::int n FROM clinical_studies`)).rows[0].n;
   const sb=await hit('GET',`/api/outreach/summary?entity_type=study&total=${st}`);
-  check(`study: 1 contacted, ${st-1} new`,[sb.body.counts.contacted,sb.body.counts.new],[1,st-1]);
+  check(`study: 1 contacted, ${st-1} not_contacted`,[sb.body.counts.contacted,sb.body.counts.not_contacted],[1,st-1]);
   const eb=await hit('GET','/api/outreach/summary?entity_type=exhibitor&total=286');
-  check('exhibitor: 1 in_progress, 285 new',[eb.body.counts.in_progress,eb.body.counts.new],[1,285]);
+  check('exhibitor: 1 in_conversation, 285 not_contacted',
+        [eb.body.counts.in_conversation,eb.body.counts.not_contacted],[1,285]);
 
   console.log('\nthe overview: five lists reachable, lead still silent');
   const o=await hit('GET','/api/outreach/overview?days=7');

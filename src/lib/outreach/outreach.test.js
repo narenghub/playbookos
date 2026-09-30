@@ -280,6 +280,7 @@ test('a SUPPLIED channel outside the vocabulary is refused, and nothing is writt
 
 test('a channel is NOT a status and cannot be passed as one', async () => {
   // The whole point of two fields: 'email' must not be settable as a stage.
+  // vocabulary-guard: deliberate — this writes a channel as a status in order to assert it is refused.
   const r = await set({ entityType: 'prospect', entityId: 1, status: 'email' });
   assert.equal(r.ok, false);
   assert.equal(r.code, 'unknown_status');
