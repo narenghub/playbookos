@@ -12,7 +12,7 @@ const { query } = require('../src/lib/db');
 const outreach = require('../src/lib/outreach');
 const { STATUSES, CHANNELS } = require('../src/lib/outreach/registry');
 
-let fail = 0, touched = [];
+let fail = 0, touched = [], dealIds = [];
 const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
   if (!ok) fail++; console.log(`  ${ok ? '✅' : '❌'} ${l}${ok ? '' : `  → expected ${JSON.stringify(e)}, got ${JSON.stringify(a)}`}`); };
 
@@ -61,6 +61,9 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     check('  and carries the CHANNEL, on the row and the event', c.channel, 'email');
     const d = await mark(nar, 'prospect', sx[0].id, 'won');
     check('a sitenex prospect too', d.row.product, 'sitenex');
+    // 'won' on a sitenex prospect CREATES A DEAL, and this script used to walk away from it: every run
+    // left a fabricated row on the deals board. Recorded so the finally can remove it by id.
+    if (d.deal && d.deal.id) dealIds.push(d.deal.id);
     const e = await mark(nar, 'institution', inst[0].id, 'contacted');
     check('an institution takes its product from the registry', e.row.product, 'abiozen');
 
@@ -124,10 +127,27 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     for (const [type, id] of touched) {
       await query(`DELETE FROM outreach WHERE entity_type=$1 AND entity_id=$2`, [type, id]).catch(() => {});
     }
+    // BY ID, never by a time window. A `created_at > NOW() - INTERVAL '10 minutes'` sweep would delete a
+    // deal a person had just closed, and this runs against production.
+    for (const id of dealIds) {
+      await query(`DELETE FROM sitenex_deals WHERE id = $1`, [id]).catch(() => {});
+    }
+    // Checked as "my own rows are gone", not as "the tables are empty". Emptiness is true today and will
+    // stop being true the first time somebody records real outreach, at which point a script that demands
+    // it fails forever and gets fixed by widening the DELETE — which is how a verification starts deleting
+    // real data.
+    let mine = 0;
+    for (const [type, id] of touched) {
+      mine += (await query(
+        `SELECT COUNT(*)::int n FROM outreach WHERE entity_type=$1 AND entity_id=$2`, [type, id])).rows[0].n;
+    }
+    const leftD = dealIds.length
+      ? (await query(`SELECT COUNT(*)::int n FROM sitenex_deals WHERE id = ANY($1)`, [dealIds])).rows[0].n : 0;
     const leftO = (await query(`SELECT COUNT(*)::int n FROM outreach`)).rows[0].n;
     const leftE = (await query(`SELECT COUNT(*)::int n FROM outreach_events`)).rows[0].n;
-    console.log(`\ncleanup: outreach ${leftO} rows, outreach_events ${leftE} rows (events cascade with their row)`);
-    if (leftO !== 0 || leftE !== 0) fail++;
+    console.log(`\ncleanup: ${touched.length} row(s) and ${dealIds.length} deal(s) removed; ` +
+                `${mine} + ${leftD} of mine remain. Table now holds ${leftO} outreach / ${leftE} events.`);
+    if (mine !== 0 || leftD !== 0) fail++;
     console.log(fail === 0 ? '\n✅ ALL CHECKS PASSED — one outreach system, scoped, with a real event log'
                            : `\n❌ ${fail} CHECK(S) FAILED`);
     process.exit(fail === 0 ? 0 : 1);

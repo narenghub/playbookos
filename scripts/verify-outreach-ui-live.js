@@ -12,7 +12,7 @@
 const jwt=require('jsonwebtoken');
 const {query}=require('../src/lib/db');
 const P=process.env.PORT||3000;
-let fail=0, made=[];
+let fail=0, made=[], dealIds=[];
 const check=(l,a,e)=>{const ok=JSON.stringify(a)===JSON.stringify(e);if(!ok)fail++;
   console.log(`  ${ok?'✅':'❌'} ${l}${ok?'':`  → expected ${JSON.stringify(e)}, got ${JSON.stringify(a)}`}`);};
 (async()=>{
@@ -35,11 +35,13 @@ const check=(l,a,e)=>{const ok=JSON.stringify(a)===JSON.stringify(e);if(!ok)fail
   const r1=await hit('PUT','/api/outreach',{entity_type:'prospect',entity_id:sx[0].id,status:'contacted',note:'live check'});
   check('contacted',[r1.status,r1.body.to],[200,'contacted']); made.push(['prospect',String(sx[0].id)]);
   const inst=(await query(`SELECT id FROM research_institutions ORDER BY id LIMIT 1`)).rows[0];
-  const r2=await hit('PUT','/api/outreach',{entity_type:'institution',entity_id:inst.id,status:'interested'});
-  check('an institution too',r2.status,200); made.push(['institution',String(inst.id)]);
+  const r2=await hit('PUT','/api/outreach',{entity_type:'institution',entity_id:inst.id,status:'following_up',channel:'linkedin'});
+  check('an institution too',[r2.status,r2.body.to,r2.body.channel],[200,'following_up','linkedin']);
+  made.push(['institution',String(inst.id)]);
 
   console.log('\n3. won → a SiteNex deal, created then linked');
   const dealsBefore=(await query(`SELECT COUNT(*)::int n FROM sitenex_deals`)).rows[0].n;
+  const boardBefore=(await hit('GET','/api/sitenex/deals')).body.total;
   const w1=await hit('PUT','/api/outreach',{entity_type:'prospect',entity_id:sx[1].id,status:'won'});
   made.push(['prospect',String(sx[1].id)]);
   check('deal created',[w1.status,w1.body.deal&&w1.body.deal.created],[200,true]);
@@ -47,7 +49,10 @@ const check=(l,a,e)=>{const ok=JSON.stringify(a)===JSON.stringify(e);if(!ok)fail
   const w2=await hit('PUT','/api/outreach',{entity_type:'prospect',entity_id:sx[1].id,status:'won'});
   check('re-marking LINKS, does not duplicate',w2.body.deal.created,false);
   check('exactly one new deal',(await query(`SELECT COUNT(*)::int n FROM sitenex_deals`)).rows[0].n-dealsBefore,1);
-  check('and it shows on the deals board',(await hit('GET','/api/sitenex/deals')).body.total,1);
+  if(w1.body.deal&&w1.body.deal.id) dealIds.push(w1.body.deal.id);
+  // Measured as a DELTA against what the board already held. Asserting the absolute number 1 meant the
+  // check passed only while production had no real deals, and read as a failure the moment one existed.
+  check('and it shows on the deals board',(await hit('GET','/api/sitenex/deals')).body.total-boardBefore,1);
 
   console.log('\n4. THE OVERVIEW again — silence shrinks, people appear');
   const o1=await hit('GET','/api/outreach/overview?days=7');
@@ -64,15 +69,26 @@ const check=(l,a,e)=>{const ok=JSON.stringify(a)===JSON.stringify(e);if(!ok)fail
   const bar=await hit('GET',`/api/outreach/summary?entity_type=prospect&total=${total}&product=sitenex`);
   check('contacted 1',bar.body.counts.contacted,1);
   check('won 1',bar.body.counts.won,1);
-  check(`new = ${total} - 2`,bar.body.counts.new,total-2);
+  check(`not_contacted = ${total} - 2`,bar.body.counts.not_contacted,total-2);
+  // The ORDER is contract: the bar has to read as a funnel over the wire, not be re-sorted by the client.
+  check('the bar arrives in funnel order',bar.body.order.slice(0,3),['not_contacted','contacted','following_up']);
  }catch(e){fail++;console.error('ERR',e.message);}
  finally{
   for(const [ty,id] of made) await query(`DELETE FROM outreach WHERE entity_type=$1 AND entity_id=$2`,[ty,id]).catch(()=>{});
-  await query(`DELETE FROM sitenex_deals WHERE created_at > NOW() - INTERVAL '10 minutes'`).catch(()=>{});
+  // BY ID. This used to delete every deal created in the last ten minutes, which against production would
+  // have taken out a deal somebody had just closed — a cleanup with a blast radius wider than what it made.
+  for(const id of dealIds) await query(`DELETE FROM sitenex_deals WHERE id=$1`,[id]).catch(()=>{});
+  let mine=0;
+  for(const [ty,id] of made) mine+=(await query(
+    `SELECT COUNT(*)::int n FROM outreach WHERE entity_type=$1 AND entity_id=$2`,[ty,id])).rows[0].n;
+  const leftD=dealIds.length?(await query(
+    `SELECT COUNT(*)::int n FROM sitenex_deals WHERE id=ANY($1)`,[dealIds])).rows[0].n:0;
   const o=(await query(`SELECT COUNT(*)::int n FROM outreach`)).rows[0].n;
   const d=(await query(`SELECT COUNT(*)::int n FROM sitenex_deals`)).rows[0].n;
-  console.log(`\ncleanup: outreach ${o}, sitenex_deals ${d}`);
-  if(o||d) fail++;
+  console.log(`\ncleanup: ${mine} of my ${made.length} outreach row(s) and ${leftD} of my ${dealIds.length} deal(s) remain`);
+  console.log(`         tables now hold outreach ${o}, sitenex_deals ${d}`);
+  // Only MY rows. "the table is empty" is a fact about today, not a property of this script.
+  if(mine||leftD) fail++;
   console.log(fail===0?'\n✅ ALL CHECKS PASSED':`\n❌ ${fail} FAILED`);
   process.exit(fail===0?0:1);
  }
