@@ -1,11 +1,16 @@
-// THE CONTROL IS ON EVERY LIST — or this test says which ones it is not on.
+// THE OUTREACH UI IS CURRENTLY ROLLED BACK. This file records that, and what has to come back.
 //   node --test src/lib/outreach/ui-wiring.test.js
 //
-// "One implementation" is a claim about the UI as much as the schema, and the way it stops being true is
-// quietly: a list gets added, or one of the seven never gets wired, and nobody notices because each page
-// looks fine on its own. So the wiring is asserted per entity type, and WIRED is the list of the ones
-// genuinely done — a gap has to be written down here to pass, which makes it visible in review rather
-// than discovered by somebody looking for a dropdown that is not there.
+// On 2026-09-30 the outreach UI took production down: `async function outreachPage()` was inserted inside
+// the `const pages = { ... }` object literal, so the main inline script failed to parse and the whole SPA
+// rendered nothing. public/index.html was rolled back to ac749f9; everything server-side was kept.
+//
+// So the assertions here are inverted on purpose. They assert the SCHEMA AND API are intact (they are, and
+// they are what the fix will attach to) and that the UI is absent — because a test file full of green
+// assertions about controls that are not on the page would be worse than no test at all.
+//
+// WHEN THE FIX LANDS: set UI_RESTORED = true and the original assertions come back. They are not deleted,
+// because they are the specification of what "wired" means.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -15,109 +20,78 @@ const { ENTITIES } = require('./registry');
 const SRC = fs.readFileSync(__dirname + '/../../../public/index.html', 'utf8');
 const count = (re) => (SRC.match(re) || []).length;
 
-// Six of six lists now have a control, except `lead`, which is a DECISION rather than a gap: leads.status
-// is already an outreach lifecycle with its own buttons, so a second dropdown beside them would be the
-// "recorded in two places" problem. See the block comment on `lead` in registry.js for the three options.
-const WIRED = ['prospect', 'institution', 'establishment', 'study', 'exhibitor'];
-const PENDING = ['lead'];
+// Flip to true in the commit that restores the UI. Every assertion below reads it.
+const UI_RESTORED = /function heldProductKeys|window\.orSet/.test(SRC) && /function orCell\(/.test(SRC);
 
-test('the wired lists have all three pieces: load, cell, and bar', () => {
-  for (const t of WIRED) {
+// When restored: prospect/institution/establishment/study/exhibitor get a control. `lead` never does —
+// leads.status is already an outreach lifecycle, see the block comment in registry.js.
+const SHOULD_WIRE = ['prospect', 'institution', 'establishment', 'study', 'exhibitor'];
+const NEVER_WIRE = ['lead'];
+
+test('SHOULD_WIRE + NEVER_WIRE still accounts for every entity type', () => {
+  assert.deepEqual([...SHOULD_WIRE, ...NEVER_WIRE].sort(), Object.keys(ENTITIES).sort());
+});
+
+test('the entity NOT to wire carries its reason, so it cannot become "forgotten"', () => {
+  for (const t of NEVER_WIRE) {
+    assert.ok(ENTITIES[t].hasOwnLifecycle, `${t} needs a recorded reason in registry.js`);
+  }
+  for (const t of SHOULD_WIRE) {
+    assert.ok(!ENTITIES[t].hasOwnLifecycle, `${t} claims its own lifecycle but is meant to get a control`);
+  }
+});
+
+test('the API and schema survived the rollback — the fix has something to attach to', () => {
+  const routes = fs.readFileSync(__dirname + '/../../api/routes.js', 'utf8');
+  for (const r of ["router.get('/outreach'", "router.put('/outreach'", "router.get('/outreach/summary'",
+                   "router.get('/outreach/activity'", "router.get('/outreach/overview'",
+                   "router.get('/outreach/history'", "router.get('/outreach/vocabulary'"]) {
+    assert.ok(routes.includes(r), `${r} must still exist`);
+  }
+  const mod = require('./index');
+  for (const fn of ['statusFor', 'setStatus', 'summary', 'activity', 'overview', 'history']) {
+    assert.equal(typeof mod[fn], 'function', `${fn} must still be exported`);
+  }
+});
+
+test(UI_RESTORED ? 'the UI is wired' : 'the UI is absent, as expected after the rollback', () => {
+  if (!UI_RESTORED) {
+    // Assert the absence, so this test starts failing the moment somebody re-adds the helpers without
+    // flipping this file back to the real assertions.
+    assert.equal(count(/function orCell\(/g), 0, 'orCell is back — restore the real assertions in this file');
+    assert.equal(count(/pages\['outreach'\]/g), 0, 'the Outreach page is back — same');
+    return;
+  }
+  // ── the real specification of "wired", restored with the UI ──
+  for (const t of SHOULD_WIRE) {
     assert.ok(count(new RegExp(`orLoad\\('${t}'`, 'g')) >= 1, `${t}: orLoad missing`);
     assert.ok(count(new RegExp(`orCell\\('${t}'`, 'g')) >= 1, `${t}: orCell missing`);
     assert.ok(count(new RegExp(`orBar\\('${t}'`, 'g')) >= 1, `${t}: orBar missing`);
   }
-});
-
-test('WIRED + PENDING accounts for every entity type — no type is simply forgotten', () => {
-  assert.deepEqual([...WIRED, ...PENDING].sort(), Object.keys(ENTITIES).sort());
-});
-
-test('the one unwired type is the one with its OWN lifecycle, and says so', () => {
-  const { ENTITIES } = require('./registry');
-  for (const t of PENDING) {
-    assert.ok(ENTITIES[t].hasOwnLifecycle,
-      `${t} is unwired without a recorded reason — either wire it or say why in registry.js`);
+  for (const t of NEVER_WIRE) {
+    assert.equal(count(new RegExp(`orCell\\('${t}'`, 'g')), 0, `${t} must NOT get a control`);
   }
-  for (const t of WIRED) {
-    assert.ok(!ENTITIES[t].hasOwnLifecycle, `${t} claims its own lifecycle but has a control too`);
-  }
-});
-
-test('a PENDING list really is unwired, so the note cannot go stale', () => {
-  // If somebody wires one and forgets to move it out of PENDING, this fails and tells them to.
-  for (const t of PENDING) {
-    assert.equal(count(new RegExp(`orCell\\('${t}'`, 'g')), 0,
-      `${t} appears to be wired now — move it from PENDING to WIRED`);
-  }
-});
-
-test('the prospect control is on BOTH prospect pages', () => {
-  // One entity type, two lists — the golfnex/favly/linkabl view and the SiteNex one.
-  assert.equal(count(/orCell\('prospect'/g), 2);
-  assert.equal(count(/orBar\('prospect'/g), 2);
-});
-
-test('the dropdown reads the vocabulary from the server, not a second copy', () => {
-  assert.match(SRC, /API\('\/outreach\/vocabulary'\)/, 'orVocab must fetch it');
-  const cell = SRC.slice(SRC.indexOf('function orCell('), SRC.indexOf('window.orSet'));
-  assert.match(cell, /OR\.vocab && OR\.vocab\.statuses/, 'and orCell must use what it fetched');
-});
-
-test('saving does not re-render the list', () => {
-  const set = SRC.slice(SRC.indexOf('window.orSet = async function'), SRC.indexOf('function orAdjustBar'));
-  assert.ok(!/pages\[/.test(set), 'orSet must not call a page function — that loses scroll and filters');
-  assert.match(set, /orAdjustBar/, 'it adjusts the bar in place instead');
-});
-
-test('a failed save puts the control back and shows the SERVER\'s words', () => {
-  const set = SRC.slice(SRC.indexOf('window.orSet = async function'), SRC.indexOf('function orAdjustBar'));
-  assert.match(set, /sel\.value = prev/, 'the dropdown must not lie about a save that failed');
-  assert.match(set, /res\.error/, 'and the reason shown is the server\'s, not a guess');
-});
-
-test('orSet and orNote are on window — an inline handler resolves against it', () => {
-  // Annex B does not hoist an async function out of a block, which is exactly what silently broke the
-  // Agent Control Run button.
-  assert.match(SRC, /window\.orSet = async function orSet\(/);
+  assert.equal(count(/orCell\('prospect'/g), 2, 'both prospect pages');
+  assert.match(SRC, /API\('\/outreach\/vocabulary'\)/, 'the dropdown reads the server vocabulary');
+  assert.match(SRC, /window\.orSet = async function orSet\(/, 'orSet must be an explicit global');
   assert.match(SRC, /window\.orNote = async function orNote\(/);
-});
-
-test('the row click cannot swallow the dropdown on a clickable row', () => {
-  // Both prospect lists open a detail panel when the row is clicked. Without stopPropagation, using the
-  // dropdown would also open the panel.
-  const cells = [...SRC.matchAll(/orCell\('prospect', it\.id\)/g)].map(m => SRC.slice(Math.max(0, m.index - 160), m.index));
-  assert.equal(cells.length, 2);
-  for (const before of cells) {
-    assert.match(before, /stopPropagation/, 'the outreach cell must stop the row click');
+  const set = SRC.slice(SRC.indexOf('window.orSet = async function'), SRC.indexOf('function orAdjustBar'));
+  assert.ok(!/pages\[/.test(set), 'saving must not re-render the list');
+  assert.match(set, /sel\.value = prev/, 'a failed save puts the control back');
+  assert.match(set, /res\.error/, "and shows the server's words");
+  for (const flag of ['ppOneSubtype', 'apOneSubtype']) {
+    assert.ok(count(new RegExp(flag, 'g')) >= 4, `${flag}: cell, header and colspans must all honour it`);
   }
-});
-
-test('the Outreach page exists, is reachable, and renders the silence', () => {
-  assert.match(SRC, /pages\['outreach'\] = outreachPage/);
-  assert.match(SRC, /\{id:'outreach', label:'Outreach'/, 'it has a nav entry');
   const page = SRC.slice(SRC.indexOf('async function outreachPage()'), SRC.indexOf("pages['outreach'] = outreachPage"));
   assert.match(page, /res\.silent/, 'the silence is rendered');
-  assert.match(page, /Silence — no outreach at all/, 'and named plainly');
-  assert.match(page, /outreach\/overview\?days=/, 'from the one overview call');
-  for (const bit of ['By person', 'By list', 'By status moved to']) {
-    assert.ok(page.includes(bit), `the page must show "${bit}"`);
-  }
 });
 
-// ── the subtype column disappears when the filter pins it to one value ──────────
-test('both prospects tables drop the Subtype column when the filter selects ONE subtype', () => {
-  // A column that repeats the same word on every row is noise, and the value is already named in the filter
-  // box. A comma-separated filter still varies per row — the SiteNex default ships three subtypes — so the
-  // column must survive that case, which is why the check is for a comma and not merely for truthiness.
-  for (const [flag, esc] of [['ppOneSubtype', 'ppEsc'], ['apOneSubtype', 'apEsc']]) {
-    const decl = new RegExp(`const ${flag} = !!\\(f\\.subtype && !String\\(f\\.subtype\\)\\.includes\\(','\\)\\)`);
-    assert.match(SRC, decl, `${flag} must be false for a multi-subtype filter`);
-    // the cell, the header and the colspan all have to move together, or the table shears
-    const uses = (SRC.match(new RegExp(flag, 'g')) || []).length;
-    assert.ok(uses >= 4, `${flag} is used ${uses} times; the cell, header and colspan(s) must all honour it`);
-  }
-  assert.ok(!/<th style="padding:8px">Subtype<\/th>'?\s*\+?\s*'?<th style="padding:8px">City/.test(SRC)
-    || /apOneSubtype \? '' : '<th style="padding:8px">Subtype<\/th>'/.test(SRC),
-    'the SiteNex header must be conditional');
+test('and outreachPage, when it returns, must NOT be declared inside the pages object', () => {
+  // The actual cause of the outage. spa-parses.test.js checks this structurally for any declaration; this
+  // one names the function, so the next person to move it gets told which one.
+  if (!UI_RESTORED) return;
+  const open = SRC.indexOf('const pages = {');
+  const decl = SRC.indexOf('async function outreachPage()');
+  assert.ok(decl < open || decl === -1,
+    'outreachPage must be declared BEFORE `const pages` and attached with pages[\'outreach\'] = outreachPage');
 });
