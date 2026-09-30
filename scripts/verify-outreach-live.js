@@ -106,7 +106,14 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     check("'nurture' refused by the API", bad.code, 'unknown_status');
     const comment = (await query(`SELECT col_description('outreach'::regclass, ordinal_position) d
       FROM information_schema.columns WHERE table_name='outreach' AND column_name='status'`)).rows[0].d;
-    check('and documented on the column', /not_contacted \| contacted/.test(comment || ''), true);
+    // Asserted as the FUNNEL, not as a list: the comment documents each status beside its sort_order, so
+    // the next reader of the column learns the order and not just the vocabulary. A pipe-separated list
+    // (what this used to look for) would satisfy "all 10 are named" while losing the only part that is
+    // hard to rediscover.
+    const { STATUS_DEFS } = require('../src/lib/outreach/registry');
+    const undocumented = STATUS_DEFS.filter(d => !new RegExp(`${d.order}\\s+${d.key}\\b`).test(comment || ''));
+    check('and documented on the column, each status beside its sort_order',
+          undocumented.map(d => d.key), []);
     check('all 10 named in it', STATUSES.every(x => comment.includes(x)), true);
     const chanComment = (await query(`SELECT col_description('outreach'::regclass, a.attnum) d
       FROM pg_attribute a WHERE a.attrelid='outreach'::regclass AND a.attname='channel'`)).rows[0].d;

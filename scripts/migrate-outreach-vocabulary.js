@@ -72,8 +72,9 @@ lifecycle grew, and this list has now grown twice. Validated in src/lib/outreach
 A separate field from status ON PURPOSE — email and phone are methods at the same stage, not stages, so
 folding them in would double the status list for no gain. NULLABLE: a status change is not always a touch
 (disqualifying a chain from the desk), and an unrecorded channel must not be guessed.$c$`);
-    await query(`COMMENT ON COLUMN outreach_events.channel IS $c$The channel of THIS touch, as status is the
-to_status of this touch. Lets "who is calling vs emailing" be answered per person.$c$`);
+    await query(`COMMENT ON COLUMN outreach_events.channel IS $c$The channel of THIS touch, the way to_status
+is the status of THIS touch. Lets "who is calling and who is emailing" be answered per person, which the
+current channel on outreach cannot: that one only remembers the most recent.$c$`);
     console.log('✅ comments (vocabulary + sort_order + why channel is separate)');
 
     // 5. VERIFY.
