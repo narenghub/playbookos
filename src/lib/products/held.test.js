@@ -73,3 +73,33 @@ test('read-all marks only what the caller holds', () => {
   const staffMarked = rowsVisibleTo(['abiozen', 'sitenex', 'internal'], ROWS).map(r => r.id);
   assert.deepEqual(staffMarked, [1, 2, 3], 'still org-wide for staff, but only across what they hold');
 });
+
+// ── THE TWO DEFINITIONS MUST NOT BE MIXED UP ────────────────────────────────────
+//
+// heldProducts reads the table. effectiveProducts adds the super_admin bypass. Once the super admin's 7
+// explicit rows were removed, any handler still calling heldProducts saw [] for him — which silently made
+// the notification feed empty and every outreach write 403 for the one account meant to see everything.
+//
+// Nothing caught it: every test fake returns rows for `FROM user_products`, so both functions agree in a
+// test and disagree only in production. Hence a source-level assertion.
+test('effectiveProducts gives a super admin everything; heldProducts gives him what is in the table', async () => {
+  const { effectiveProducts } = require('./held');
+  const { GRANTABLE } = require('./route-map');
+  const empty = { query: async () => ({ rows: [] }) };
+  assert.deepEqual(await effectiveProducts({ id: 'u', role: 'super_admin' }, empty), GRANTABLE,
+    'the bypass is by ROLE, so no rows are needed');
+  assert.deepEqual(await heldProducts('u', empty), [], 'while the raw read is honest about the table');
+  assert.deepEqual(await effectiveProducts({ id: 'u', role: 'admin' }, empty), [],
+    'and no other role gets the bypass');
+});
+
+test('no route handler scopes data with heldProducts — they must all use effectiveProducts', () => {
+  const routes = require('fs').readFileSync(__dirname + '/../../api/routes.js', 'utf8');
+  const bad = [...routes.matchAll(/heldProducts\(req\.user[^)]*\)/g)].map(m => m[0]);
+  assert.deepEqual(bad, [],
+    `\nthese handlers read the raw user_products table instead of the effective set, so the super admin\n` +
+    `(who holds ZERO rows) gets [] and sees nothing:\n  ${bad.join('\n  ')}\n`);
+  // Non-vacuity: there must actually be scoped handlers to check.
+  assert.ok((routes.match(/effectiveProducts\(req\.user\)/g) || []).length >= 5,
+    'expected several product-scoped handlers');
+});

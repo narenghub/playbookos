@@ -21,7 +21,12 @@ const { runResearchIntelIngest } = require('../lib/agents/research-intelligence'
 const { runContentPipeline } = require('../lib/agents/content');
 const { runProspecting, runQualifyProspects } = require('../lib/agents/prospecting');
 const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/config');
-const { heldProducts, effectiveProducts, productScopeSql } = require('../lib/products/held');
+// effectiveProducts, NOT heldProducts: a handler that reads the raw table gives the super admin [] now
+// that his 7 explicit rows are gone and the bypass lives in the role. Every data scope in this file
+// must use the same definition the product boundary uses, or the two disagree — which is exactly what
+// happened: outreach writes 403'd and the notification feed went empty for the one account that is
+// supposed to see everything.
+const { effectiveProducts, productScopeSql } = require('../lib/products/held');
 const { partnerScopeSql } = require('../lib/products/partner-scope');
 const outreach = require('../lib/outreach');
 const { STATUSES: OUTREACH_STATUSES, ENTITIES: OUTREACH_ENTITIES, isEntityType } = require('../lib/outreach/registry');
@@ -5223,7 +5228,7 @@ router.get('/outreach', authMiddleware, async (req, res) => {
     const entityType = String(req.query.entity_type || '');
     const ids = String(req.query.ids || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 500);
     if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
-    const held = await heldProducts(req.user.id);
+    const held = await effectiveProducts(req.user);
     res.json({ entity_type: entityType, statuses: await outreach.statusFor(entityType, ids, held) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -5235,7 +5240,7 @@ router.put('/outreach', authMiddleware, async (req, res) => {
     if (!entity_type || entity_id == null || !status) {
       return res.status(400).json({ error: 'entity_type, entity_id and status are required' });
     }
-    const held = await heldProducts(req.user.id);
+    const held = await effectiveProducts(req.user);
     const r = await outreach.setStatus({
       entityType: entity_type, entityId: entity_id, status, note,
       nextActionAt: next_action_at || null, user: req.user, held,
@@ -5257,7 +5262,7 @@ router.get('/outreach/summary', authMiddleware, async (req, res) => {
     const entityType = String(req.query.entity_type || '');
     if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
     const total = req.query.total != null && req.query.total !== '' ? Math.max(0, parseInt(req.query.total, 10) || 0) : null;
-    const held = await heldProducts(req.user.id);
+    const held = await effectiveProducts(req.user);
     res.json(await outreach.summary(entityType, { held, totalEntities: total, product: req.query.product || null }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -5265,7 +5270,7 @@ router.get('/outreach/summary', authMiddleware, async (req, res) => {
 // GET /outreach/activity?days=7 — who changed what. The question current status cannot answer.
 router.get('/outreach/activity', authMiddleware, async (req, res) => {
   try {
-    const held = await heldProducts(req.user.id);
+    const held = await effectiveProducts(req.user);
     res.json(await outreach.activity({
       held, sinceDays: req.query.days || 7,
       entityType: req.query.entity_type || null, userId: req.query.user_id || null,
@@ -5279,7 +5284,7 @@ router.get('/outreach/activity', authMiddleware, async (req, res) => {
 // "Who is reaching out and who is not" spans every list, so it cannot be assembled from per-list bars.
 router.get('/outreach/overview', authMiddleware, async (req, res) => {
   try {
-    const held = await heldProducts(req.user.id);
+    const held = await effectiveProducts(req.user);
     res.json(await outreach.overview({ held, sinceDays: req.query.days || 7 }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -5289,7 +5294,7 @@ router.get('/outreach/history', authMiddleware, async (req, res) => {
   try {
     const entityType = String(req.query.entity_type || '');
     if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
-    const held = await heldProducts(req.user.id);
+    const held = await effectiveProducts(req.user);
     res.json({ events: await outreach.history(entityType, req.query.entity_id, held) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -5311,7 +5316,7 @@ router.get('/outreach/vocabulary', authMiddleware, async (req, res) => {
 // unreachable badge count is still a leak, and a number nobody can explain.
 router.get('/notifications', authMiddleware, requireTier('intelligence'), async (req, res) => {
   try {
-    const held = await heldProducts(req.user.id);
+    const held = await effectiveProducts(req.user);
     const scope = productScopeSql(held, '', 1);
     const unreadOnly = req.query.unread === 'true' ? ' AND read_at IS NULL' : '';
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 30));
@@ -5331,7 +5336,7 @@ router.put('/notifications/:id/read', authMiddleware, requireTier('intelligence'
     // Scoped in the WHERE rather than fetched-then-checked: a row whose product the caller does not
     // hold simply does not match, so it reads as 404 — the same answer as a row that does not exist,
     // which is also the right answer to give (it tells a prober nothing).
-    const held = await heldProducts(req.user.id);
+    const held = await effectiveProducts(req.user);
     const scope = productScopeSql(held, '', 2);
     const upd = await query(
       `UPDATE notifications SET read_at = COALESCE(read_at, NOW())
@@ -5348,7 +5353,7 @@ router.post('/notifications/read-all', authMiddleware, requireTier('intelligence
     // everybody's notifications, which is a correctness bug even among staff. Now it marks only the
     // products the caller holds — identical behaviour for the 17 people who hold everything, and
     // automatically contained for anyone who does not.
-    const held = await heldProducts(req.user.id);
+    const held = await effectiveProducts(req.user);
     const scope = productScopeSql(held, '', 1);
     const upd = await query(
       `UPDATE notifications SET read_at = NOW() WHERE read_at IS NULL AND ${scope.sql}`, scope.params);
