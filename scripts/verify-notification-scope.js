@@ -22,7 +22,8 @@ const seen = async (held) => {
       ids.push(r.rows[0].id);
     }
     check('staff (holds everything incl. internal) sees all three',
-      await seen(['abiozen','golfnex','favly','linkabl','aros','sitenex','internal']), ['(null)','sitenex','golfnex']);
+      await seen(['abiozen','golfnex','favly','linkabl','aros','sitenex','internal']),
+      ['(null)','sitenex','golfnex'].sort());
     check('an sitenex-only partner sees ONLY sitenex — no golfnex, no platform-wide',
       await seen(['sitenex']), ['sitenex']);
     check('holding nothing sees nothing', await seen([]), []);
