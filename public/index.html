@@ -650,14 +650,40 @@ function showToast(message, type, duration) {
 // position and the filters, and it is what makes an inline control feel worse than a modal.
 const OR = { vocab: null, status: {}, summary: {} };
 
+// Labels and colours are a FALLBACK only — the real list, its order and its labels come from
+// GET /outreach/vocabulary, so the funnel cannot drift from the server's definition of it. These exist so a
+// failed vocabulary fetch degrades to something readable rather than to raw keys.
 const OR_LABEL = {
-  new: 'New', contacted: 'Contacted', no_response: 'No response', in_progress: 'In progress',
-  interested: 'Interested', not_interested: 'Not interested', won: 'Won', disqualified: 'Disqualified',
+  not_contacted: 'Not contacted', contacted: 'Contacted', following_up: 'Following up',
+  no_response: 'No response', in_conversation: 'In conversation', quote_sent: 'Quote sent',
+  contract_sent: 'Contract sent', won: 'Won', not_interested: 'Not interested', disqualified: 'Disqualified',
 };
+// Cool → warm through the funnel, so the bar reads as progress; the three dead ends are muted.
 const OR_COLOR = {
-  new: '#94a3b8', contacted: '#0D7377', no_response: '#a16207', in_progress: '#1B3A6B',
-  interested: '#1D9E75', not_interested: '#E24B4A', won: '#15803d', disqualified: '#6b7280',
+  not_contacted: '#94a3b8', contacted: '#0D7377', following_up: '#0e7490',
+  no_response: '#a16207', in_conversation: '#1B3A6B', quote_sent: '#7c3aed',
+  contract_sent: '#b45309', won: '#15803d', not_interested: '#E24B4A', disqualified: '#6b7280',
 };
+const OR_CHANNEL_LABEL = { email: 'Email', phone: 'Phone', linkedin: 'LinkedIn', in_person: 'In person', other: 'Other' };
+// The funnel, from the server when we have it. Falls back to the key order above.
+function orStatusKeys() {
+  const v = OR.vocab;
+  if (v && Array.isArray(v.status_keys) && v.status_keys.length) return v.status_keys;
+  if (v && Array.isArray(v.statuses) && v.statuses.length && typeof v.statuses[0] === 'object') {
+    return v.statuses.slice().sort((a, b) => a.order - b.order).map(x => x.key);
+  }
+  return Object.keys(OR_LABEL);
+}
+function orStatusDef(key) {
+  const v = OR.vocab;
+  const defs = (v && Array.isArray(v.statuses) && typeof (v.statuses[0] || 0) === 'object') ? v.statuses : [];
+  return defs.find(d => d.key === key) || null;
+}
+function orChannels() {
+  const v = OR.vocab;
+  if (v && Array.isArray(v.channels)) return v.channels.map(c => (typeof c === 'string' ? { key: c, label: OR_CHANNEL_LABEL[c] || c } : c));
+  return Object.keys(OR_CHANNEL_LABEL).map(k => ({ key: k, label: OR_CHANNEL_LABEL[k] }));
+}
 
 async function orVocab() {
   if (OR.vocab) return OR.vocab;
@@ -681,18 +707,30 @@ async function orLoad(entityType, ids, total) {
 
 function orStatusOf(entityType, id) {
   const row = (OR.status[entityType] || {})[String(id)];
-  return row ? row.status : 'new';          // no row IS 'new'
+  return row ? row.status : 'not_contacted';   // no row IS 'not_contacted'
 }
 
 // The status bar above a list. Zero counts are shown too: "0 contacted" over 1,524 rows is the finding.
+// THE FUNNEL BAR. Ordered by the server's sort_order, and every stage up to the last non-empty one is shown
+// even at zero — because the POINT is the drop-off between adjacent columns, and a bar that hides its empty
+// stages hides exactly that. "1,522 not contacted · 2 contacted · 0 quote sent" is the reading.
 function orBar(entityType) {
   const sum = OR.summary[entityType];
   if (!sum) return '';
-  const order = sum.order || Object.keys(OR_LABEL);
-  const parts = order.filter(st => (sum.counts[st] || 0) > 0 || st === 'new' || st === 'contacted')
-    .map(st => `<span style="white-space:nowrap"><strong style="color:${OR_COLOR[st] || '#475569'}">${sum.counts[st] || 0}</strong> <span style="color:var(--text-muted)">${(OR_LABEL[st] || st).toLowerCase()}</span></span>`);
+  const order = (sum.order && sum.order.length) ? sum.order : orStatusKeys();
+  // Show the funnel down to the furthest stage anyone has reached, plus the dead ends that have rows.
+  const DEAD = ['no_response', 'not_interested', 'disqualified'];
+  const lastLive = order.reduce((acc, st, i) => (!DEAD.includes(st) && (sum.counts[st] || 0) > 0 ? i : acc), 1);
+  const show = order.filter((st, i) => i <= lastLive || (sum.counts[st] || 0) > 0);
+  const parts = show.map(st => {
+    const d = orStatusDef(st);
+    const title = d ? `${d.means} → ${d.next}` : st;
+    return `<span style="white-space:nowrap" title="${String(title).replace(/"/g, '&quot;')}"><strong style="color:${OR_COLOR[st] || '#475569'}">${(sum.counts[st] || 0).toLocaleString()}</strong> <span style="color:var(--text-muted)">${(d && d.label || OR_LABEL[st] || st).toLowerCase()}</span></span>`;
+  });
   // Any status outside the vocabulary still shows — the column has no CHECK, so hiding one would lose rows
   // from a bar whose job is to account for all of them.
+  // A value outside the vocabulary still shows — the column has no CHECK, so hiding one would lose rows from
+  // a bar whose job is to account for all of them.
   for (const [st, n] of Object.entries(sum.counts)) {
     if (!order.includes(st) && n > 0) parts.push(`<span><strong>${n}</strong> ${st}</span>`);
   }
@@ -704,15 +742,31 @@ function orBar(entityType) {
 }
 
 // One cell. A <select> that saves on change, plus an optional note affordance that is clearly secondary.
+// TWO CONTROLS, because they are two fields. Status is the stage; channel is how we last touched them.
+// Putting the method inside the status list would have produced emailed_no_reply vs called_no_reply and
+// doubled the funnel for no gain — so they sit side by side and are saved in one call.
 function orCell(entityType, id) {
   const cur = orStatusOf(entityType, id);
-  const statuses = (OR.vocab && OR.vocab.statuses) || Object.keys(OR_LABEL);
-  const opts = statuses.map(st => `<option value="${st}"${st === cur ? ' selected' : ''}>${OR_LABEL[st] || st}</option>`).join('');
+  const esc = v => String(v).replace(/'/g, "\\'");
+  const opts = orStatusKeys().map(st => {
+    const d = orStatusDef(st);
+    return `<option value="${st}"${st === cur ? ' selected' : ''}>${(d && d.label) || OR_LABEL[st] || st}</option>`;
+  }).join('');
   const row = (OR.status[entityType] || {})[String(id)];
   const note = row && row.note ? String(row.note) : '';
+  const chan = (row && row.channel) || '';
+  // "how" is deliberately optional and unset by default: a status change is not always a touch, and guessing
+  // the channel would make the by-channel breakdown fiction.
+  const chanOpts = `<option value="">how…</option>` + orChannels()
+    .map(c => `<option value="${c.key}"${c.key === chan ? ' selected' : ''}>${c.label}</option>`).join('');
+  const d = orStatusDef(cur);
   return `<span style="display:inline-flex;align-items:center;gap:4px">
-    <select id="or-sel-${entityType}-${id}" onchange="orSet('${entityType}','${String(id).replace(/'/g, "\\'")}',this)"
-      style="font-size:11px;padding:3px 4px;border:1px solid var(--border,#ddd);border-radius:4px;background:#fff;color:${OR_COLOR[cur] || '#334155'};font-weight:${cur === 'new' ? '400' : '600'};cursor:pointer">${opts}</select>
+    <select id="or-sel-${entityType}-${id}" onchange="orSet('${entityType}','${esc(id)}',this)"
+      title="${d ? String(d.means + ' → ' + d.next).replace(/"/g, '&quot;') : ''}"
+      style="font-size:11px;padding:3px 4px;border:1px solid var(--border,#ddd);border-radius:4px;background:#fff;color:${OR_COLOR[cur] || '#334155'};font-weight:${cur === 'not_contacted' ? '400' : '600'};cursor:pointer">${opts}</select>
+    <select id="or-chan-${entityType}-${id}" onchange="orSetChannel('${entityType}','${esc(id)}',this)"
+      title="how we last touched them"
+      style="font-size:11px;padding:3px 3px;border:1px solid var(--border,#ddd);border-radius:4px;background:#fff;color:${chan ? '#334155' : '#94a3b8'};cursor:pointer">${chanOpts}</select>
     <a href="#" id="or-note-${entityType}-${id}" onclick="orNote('${entityType}','${String(id).replace(/'/g, "\\'")}');return false"
       title="${note ? note.replace(/"/g, '&quot;') : 'Add a note'}"
       style="font-size:11px;text-decoration:none;color:${note ? 'var(--teal)' : '#cbd5e1'}">✎</a>
@@ -722,13 +776,18 @@ function orCell(entityType, id) {
 
 // window.orSet, not a bare async declaration: an inline onchange resolves against window, and Annex B does
 // NOT hoist an async function out of a block. That is what silently broke the Agent Control Run button.
-window.orSet = async function orSet(entityType, id, sel, note) {
+window.orSet = async function orSet(entityType, id, sel, note, channel) {
   const msg = document.getElementById(`or-msg-${entityType}-${id}`);
   const prev = orStatusOf(entityType, id);
   const next = sel && sel.value;
+  // Whatever "how" is showing travels with the status change, so one interaction records both. An empty
+  // channel is sent as undefined, never as '' — the server must be able to tell "not recorded" from a value.
+  const chanEl = document.getElementById(`or-chan-${entityType}-${id}`);
+  const chan = channel !== undefined ? channel : (chanEl && chanEl.value) || undefined;
   if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = '…'; }
   const res = await API('/outreach', { method: 'PUT', body: JSON.stringify({
-    entity_type: entityType, entity_id: id, status: next, note: note || undefined }) }).catch(e => ({ error: e.message }));
+    entity_type: entityType, entity_id: id, status: next,
+    channel: chan || undefined, note: note || undefined }) }).catch(e => ({ error: e.message }));
   if (res && res.error) {
     // Put the control back where it was and show the server's own words. Guessing the reason here would be
     // the client computing an authorisation answer it does not own.
@@ -738,8 +797,10 @@ window.orSet = async function orSet(entityType, id, sel, note) {
   }
   OR.status[entityType] = OR.status[entityType] || {};
   OR.status[entityType][String(id)] = Object.assign({}, OR.status[entityType][String(id)] || {},
-    { status: next, note: note != null ? note : (OR.status[entityType][String(id)] || {}).note });
-  if (sel) { sel.style.color = OR_COLOR[next] || '#334155'; sel.style.fontWeight = next === 'new' ? '400' : '600'; }
+    { status: next, channel: chan || (OR.status[entityType][String(id)] || {}).channel,
+      note: note != null ? note : (OR.status[entityType][String(id)] || {}).note });
+  if (sel) { sel.style.color = OR_COLOR[next] || '#334155'; sel.style.fontWeight = next === 'not_contacted' ? '400' : '600'; }
+  if (chanEl && chan) chanEl.style.color = '#334155';
   orAdjustBar(entityType, prev, next);
   if (msg) {
     msg.style.color = '#1D9E75';
@@ -758,6 +819,13 @@ function orAdjustBar(entityType, from, to) {
   const el = document.getElementById(`or-bar-${entityType}`);
   if (el) el.outerHTML = orBar(entityType);
 }
+
+// Changing only "how" re-sends the CURRENT status. It is deliberately the same write path: a channel change
+// IS a touch worth logging, and a second endpoint would be a second place for the rules to drift.
+window.orSetChannel = async function orSetChannel(entityType, id, sel) {
+  const statusEl = document.getElementById(`or-sel-${entityType}-${id}`);
+  await window.orSet(entityType, id, statusEl || { value: orStatusOf(entityType, id) }, undefined, sel.value || '');
+};
 
 window.orNote = async function orNote(entityType, id) {
   const row = (OR.status[entityType] || {})[String(id)] || {};
@@ -1811,7 +1879,10 @@ async function outreachPage() {
   const peopleRows = people.length ? people.map(p => `<tr>
       <td style="padding:6px 8px"><strong>${esc(p.person)}</strong></td>
       <td style="padding:6px 8px;text-align:right"><strong>${p.total}</strong></td>
-      <td style="padding:6px 8px">${Object.entries(p.by_status).sort((a, b) => b[1] - a[1]).map(([st, n]) => chip(st, n)).join('')}</td>
+      <td style="padding:6px 8px">${Object.entries(p.by_status)
+          .sort((a, b) => (keys.indexOf(a[0]) === -1 ? 99 : keys.indexOf(a[0])) - (keys.indexOf(b[0]) === -1 ? 99 : keys.indexOf(b[0])))
+          .map(([st, n]) => chip(st, n)).join('')}</td>
+      <td style="padding:6px 8px;font-size:12px;color:var(--text-muted)">${Object.entries(p.by_channel || {}).sort((a, b) => b[1] - a[1]).map(([ch, n]) => `${n} ${esc(OR_CHANNEL_LABEL[ch] || ch)}`).join(' · ')}</td>
     </tr>`).join('') : `<tr><td colspan="3" style="padding:10px 8px;color:var(--text-muted)">Nobody recorded any outreach in this window.</td></tr>`;
 
   const lists = res.by_list || [];
@@ -1821,7 +1892,12 @@ async function outreachPage() {
       <td style="padding:6px 8px">${(l.pages || []).map(pg => `<a href="#" onclick="navigate('${pg}');return false" style="color:var(--teal);text-decoration:none;font-size:11px;margin-right:8px">${pg}</a>`).join('')}</td>
     </tr>`).join('');
 
-  const byStatus = Object.entries(res.by_status || {}).sort((a, b) => b[1] - a[1]);
+  // Funnel order, not count order: the sequence is the information. Count order would put the biggest column
+  // first and destroy the drop-off reading that the bar exists for.
+  const keys = orStatusKeys();
+  const byStatus = Object.entries(res.by_status || {})
+    .sort((a, b) => (keys.indexOf(a[0]) === -1 ? 99 : keys.indexOf(a[0])) - (keys.indexOf(b[0]) === -1 ? 99 : keys.indexOf(b[0])));
+  const byChannel = Object.entries(res.by_channel || {}).sort((a, b) => b[1] - a[1]);
 
   c.innerHTML = `
     <div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
@@ -1843,7 +1919,7 @@ async function outreachPage() {
       <div class="card-title">By person</div>
       <table style="width:100%;border-collapse:collapse;font-size:13px">
         <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px">
-          <th style="padding:6px 8px">Person</th><th style="padding:6px 8px;text-align:right">Changes</th><th style="padding:6px 8px">What they moved</th>
+          <th style="padding:6px 8px">Person</th><th style="padding:6px 8px;text-align:right">Changes</th><th style="padding:6px 8px">What they moved</th><th style="padding:6px 8px">How</th>
         </tr></thead><tbody>${peopleRows}</tbody>
       </table>
     </div>
@@ -1861,6 +1937,12 @@ async function outreachPage() {
         <div class="card-title">By status moved to</div>
         ${byStatus.length ? byStatus.map(([st, n]) => `<div style="padding:4px 0;font-size:13px">${chip(st, n)}</div>`).join('')
           : '<div style="font-size:13px;color:var(--text-muted)">Nothing moved in this window.</div>'}
+      </div>
+      <div class="card" style="flex:1;min-width:220px">
+        <div class="card-title">By channel</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">How the touches were made. "Not recorded" is a real answer, not a gap to fill in.</div>
+        ${byChannel.length ? byChannel.map(([ch, n]) => `<div style="padding:4px 0;font-size:13px"><strong>${n}</strong> <span style="color:var(--text-muted)">${esc(OR_CHANNEL_LABEL[ch] || ch)}</span></div>`).join('')
+          : '<div style="font-size:13px;color:var(--text-muted)">—</div>'}
       </div>
     </div>`;
 }

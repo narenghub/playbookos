@@ -2,14 +2,14 @@
 //   node --test src/lib/outreach/outreach.test.js
 //
 // The two properties that carry the design:
-//   1. 'new' NEEDS NO ROW, so every count has to ADD the untracked remainder. Reading 'new' out of the
+//   1. 'not_contacted' NEEDS NO ROW, so every count has to ADD the untracked remainder. Reading 'not_contacted' out of the
 //      table reports 0 over a list of 1,524 untouched prospects — the status bar's whole job, wrong.
 //   2. THE EVENTS TABLE IS THE POINT. Current status says 50 rows are 'contacted'; only the log says
 //      Vinitha contacted 50 companies last week. A status change without an event must be unreachable.
 
 const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
-const { STATUSES, DEFAULT_STATUS, ENTITIES, isStatus } = require('./registry');
+const { STATUS_DEFS, STATUSES, DEFAULT_STATUS, CHANNELS, ENTITIES, isStatus, isChannel } = require('./registry');
 const { statusFor, setStatus, summary, activity, history } = require('./index');
 
 // ── a fake that behaves like the table, including the unique constraint ─────────
@@ -50,14 +50,22 @@ const query = async (sql, params = []) => {
     return { rows: r ? [{ id: r.id, status: r.status }] : [] };
   }
   if (/^INSERT INTO outreach \(/.test(s)) {
-    const [entity_type, entity_id, product, status, owner, note, next, touched] = params;
+    const [entity_type, entity_id, product, status, owner, note, next, touched, channel] = params;
+    // The ON CONFLICT behaviour for `channel` is READ OUT OF THE SQL, not reimplemented here. That
+    // distinction is the whole value of this fake: when I modelled COALESCE in JS instead, changing the
+    // real statement to `channel = EXCLUDED.channel` — which erases a known channel on any status change
+    // that supplies none — broke nothing, because the fake preserved it either way. A fake that restates
+    // the semantics agrees with the code whether or not the code is right.
+    const coalesced = /channel = COALESCE\(EXCLUDED\.channel, outreach\.channel\)/.test(s);
     let row = OUTREACH.find(x => x.entity_type === entity_type && x.entity_id === entity_id);
     if (row) {
       Object.assign(row, { status, product, owner_user_id: owner || row.owner_user_id,
+        channel: coalesced && channel == null ? row.channel : (channel || null),
         note: note != null ? note : row.note, next_action_at: next || null,
         last_contacted_at: touched ? 'NOW' : row.last_contacted_at, updated_at: 'NOW' });
     } else {
-      row = { id: SEQ++, entity_type, entity_id, product, status, owner_user_id: owner || null, note: note || null,
+      row = { id: SEQ++, entity_type, entity_id, product, status, channel: channel || null,
+              owner_user_id: owner || null, note: note || null,
               next_action_at: next || null, last_contacted_at: touched ? 'NOW' : null, updated_at: 'NOW' };
       OUTREACH.push(row);
     }
@@ -73,8 +81,9 @@ const query = async (sql, params = []) => {
     return { rows: [d] };
   }
   if (/^INSERT INTO outreach_events/.test(s)) {
-    const [outreach_id, from_status, to_status, by_user_id, by_email, note] = params;
-    EVENTS.push({ id: EVENTS.length + 1, outreach_id, from_status, to_status, by_user_id, by_email, note, created_at: Date.now() });
+    const [outreach_id, from_status, to_status, by_user_id, by_email, note, channel] = params;
+    EVENTS.push({ id: EVENTS.length + 1, outreach_id, from_status, to_status, channel: channel || null,
+                  by_user_id, by_email, note, created_at: Date.now() });
     return { rows: [] };
   }
   if (/FROM outreach o LEFT JOIN users u/.test(s) && /o\.entity_id = ANY/.test(s)) {
@@ -93,9 +102,10 @@ const query = async (sql, params = []) => {
     for (const e of EVENTS) {
       const o = vis.find(x => x.id === e.outreach_id);
       if (!o) continue;
-      const k = `${e.by_email}|${e.to_status}|${o.entity_type}`;
+      const k = `${e.by_email}|${e.to_status}|${e.channel}|${o.entity_type}`;
       if (!out.has(k)) out.set(k, { person: e.by_email, by_user_id: e.by_user_id, by_email: e.by_email,
-                                    to_status: e.to_status, entity_type: o.entity_type, n: 0, last_at: 0 });
+                                    to_status: e.to_status, channel: e.channel,
+                                    entity_type: o.entity_type, n: 0, last_at: 0 });
       const row = out.get(k); row.n++; row.last_at = Math.max(row.last_at, e.created_at);
     }
     return { rows: [...out.values()].sort((a, b) => b.n - a.n) };
@@ -115,17 +125,47 @@ const set = (o) => setStatus({ user: { id: 'u-v', email: 'vinitha@abiozen.com' }
 beforeEach(() => reset());
 
 // ── the vocabulary ──────────────────────────────────────────────────────────────
-test('eight statuses, in lifecycle order, with new as the default', () => {
-  assert.deepEqual(STATUSES, ['new','contacted','no_response','in_progress','interested','not_interested','won','disqualified']);
-  assert.equal(DEFAULT_STATUS, 'new');
-  assert.equal(isStatus('nurture'), false, 'not yet in the vocabulary');
+test('ten statuses, in FUNNEL order, with an explicit sort_order', () => {
+  assert.deepEqual(STATUSES, ['not_contacted', 'contacted', 'following_up', 'no_response', 'in_conversation',
+                              'quote_sent', 'contract_sent', 'won', 'not_interested', 'disqualified']);
+  assert.equal(DEFAULT_STATUS, 'not_contacted');
+  // sort_order is EXPLICIT, not array position: the bar reads as a funnel and array order is easy to disturb.
+  assert.deepEqual(STATUS_DEFS.map(s => s.order), [1,2,3,4,5,6,7,8,9,10]);
+  assert.equal(isStatus('nurture'), false, 'not in the vocabulary');
+  assert.equal(isStatus('interested'), false, 'retired: it was a feeling, not a stage');
+  assert.equal(isStatus('new'), false, 'renamed to not_contacted, which says what it means');
+});
+
+test('the array order and sort_order AGREE, so neither can silently become the odd one out', () => {
+  // Two orderings exist: this array, and the explicit sort_order the bar renders by. They are allowed to be
+  // two things, but they are not allowed to DISAGREE — a reorder of one without the other would make the
+  // funnel read wrong while every other test still passed.
+  const bySortOrder = STATUS_DEFS.slice().sort((a, b) => a.order - b.order).map(s => s.key);
+  assert.deepEqual(STATUSES, bySortOrder);
+});
+
+test('every status earns its place by implying a DIFFERENT next action', () => {
+  // The test for whether a status belongs. Two stages sharing a next action are one stage.
+  const nexts = STATUS_DEFS.map(s => s.next);
+  const dupes = nexts.filter((n, i) => nexts.indexOf(n) !== i && !/^nothing/.test(n));
+  assert.deepEqual(dupes, [], `these stages share a next action, so they are not distinct stages: ${dupes}`);
+  for (const d of STATUS_DEFS) {
+    assert.ok(d.means && d.next && d.label, `${d.key} needs means, next and label`);
+  }
+});
+
+test('CHANNEL is a separate axis, not more statuses', () => {
+  // Folding these into the status list would give emailed_no_reply vs called_no_reply and double it.
+  assert.deepEqual(CHANNELS, ['email', 'phone', 'linkedin', 'in_person', 'other']);
+  for (const c of CHANNELS) assert.equal(isStatus(c), false, `${c} must NOT be a status`);
+  for (const st of STATUSES) assert.equal(isChannel(st), false, `${st} must NOT be a channel`);
 });
 
 test('an unknown status is refused at the edge, since there is no CHECK constraint', async () => {
   const r = await set({ entityType: 'prospect', entityId: 1, status: 'nurture' });
   assert.equal(r.ok, false);
   assert.equal(r.code, 'unknown_status');
-  assert.match(r.error, /One of: new, contacted/);
+  assert.match(r.error, /One of: not_contacted, contacted, following_up/);
   assert.equal(OUTREACH.length, 0);
   assert.equal(EVENTS.length, 0);
 });
@@ -137,27 +177,27 @@ test('the migration must NOT add a CHECK on status', () => {
   assert.match(src, /COMMENT ON COLUMN outreach\.status/, 'the vocabulary lives in a comment instead');
 });
 
-// ── 'new' needs no row ──────────────────────────────────────────────────────────
-test("an untouched entity is 'new' with no row written", async () => {
+// ── 'not_contacted' needs no row ──────────────────────────────────────────────────────────
+test("an untouched entity is 'not_contacted' with no row written", async () => {
   const map = await statusFor('prospect', [1, 2], STAFF, deps);
   assert.deepEqual(map, {}, 'nothing tracked yet');
   assert.equal(OUTREACH.length, 0);
 });
 
-test('the summary ADDS the untracked remainder as new', async () => {
-  // The bug this prevents: reading 'new' out of the table reports 0 over 1,524 untouched prospects.
+test('the summary ADDS the untracked remainder as not_contacted', async () => {
+  // The bug this prevents: reading 'not_contacted' out of the table reports 0 over 1,524 untouched prospects.
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
   const s = await summary('prospect', { held: STAFF, totalEntities: 1524 }, deps);
   assert.equal(s.counts.contacted, 1);
-  assert.equal(s.counts.new, 1523, '1524 total minus the 1 that has a row');
+  assert.equal(s.counts.not_contacted, 1523, '1524 total minus the 1 that has a row');
   assert.equal(s.tracked, 1);
   assert.equal(Object.values(s.counts).reduce((a, b) => a + b, 0), 1524, 'the bar accounts for every row');
 });
 
-test('with no total supplied, new is not invented', async () => {
+test('with no total supplied, the remainder is not invented', async () => {
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
   const s = await summary('prospect', { held: STAFF }, deps);
-  assert.equal(s.counts.new, 0, 'better zero than a wrong number');
+  assert.equal(s.counts.not_contacted, 0, 'better zero than a wrong number');
   assert.equal(s.total, null);
 });
 
@@ -167,25 +207,25 @@ test('a status outside the vocabulary is still COUNTED, not dropped', async () =
   OUTREACH.push({ id: 99, entity_type: 'prospect', entity_id: '2', product: 'golfnex', status: 'nurture' });
   const s = await summary('prospect', { held: STAFF, totalEntities: 10 }, deps);
   assert.equal(s.counts.nurture, 1);
-  assert.equal(s.counts.new, 9);
+  assert.equal(s.counts.not_contacted, 9);
 });
 
 // ── every change is an event ─────────────────────────────────────────────────────
 test('a status change writes the row AND the event, with who and from-what', async () => {
   const r = await set({ entityType: 'prospect', entityId: 1, status: 'contacted', note: 'left a voicemail' });
   assert.equal(r.ok, true);
-  assert.equal(r.from, 'new', 'no row before, so it came from new');
+  assert.equal(r.from, 'not_contacted', 'no row before, so it came from new');
   assert.equal(r.to, 'contacted');
   assert.equal(EVENTS.length, 1);
   assert.deepEqual([EVENTS[0].from_status, EVENTS[0].to_status, EVENTS[0].by_email, EVENTS[0].note],
-    ['new', 'contacted', 'vinitha@abiozen.com', 'left a voicemail']);
+    ['not_contacted', 'contacted', 'vinitha@abiozen.com', 'left a voicemail']);
 });
 
 test('a second change logs the real transition, not new again', async () => {
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
-  await set({ entityType: 'prospect', entityId: 1, status: 'interested' });
+  await set({ entityType: 'prospect', entityId: 1, status: 'quote_sent' });
   assert.equal(OUTREACH.length, 1, 'one row per entity — the unique constraint');
-  assert.deepEqual(EVENTS.map(e => `${e.from_status}→${e.to_status}`), ['new→contacted', 'contacted→interested']);
+  assert.deepEqual(EVENTS.map(e => `${e.from_status}→${e.to_status}`), ['not_contacted→contacted', 'contacted→quote_sent']);
 });
 
 test('re-selecting the SAME status still logs — a second call is a second call', async () => {
@@ -202,6 +242,74 @@ test('last_contacted_at moves only when the change MEANS contact', async () => {
   assert.equal(OUTREACH[0].last_contacted_at, null, 'disqualifying is not contacting');
   await set({ entityType: 'prospect', entityId: 2, status: 'contacted' });
   assert.equal(OUTREACH[1].last_contacted_at, 'NOW');
+});
+
+// ── CHANNEL: the second field ───────────────────────────────────────────────────
+test('channel is written to BOTH the row and the event', async () => {
+  const r = await set({ entityType: 'prospect', entityId: 1, status: 'contacted', channel: 'phone' });
+  assert.equal(r.channel, 'phone');
+  assert.equal(OUTREACH[0].channel, 'phone', 'the row says how we last touched them');
+  assert.equal(EVENTS[0].channel, 'phone', 'the event says how we touched them THAT time');
+});
+
+test('a later status change with NO channel does not erase the last known one', async () => {
+  // "How we last touched them" is not "how we touched them in the most recent status edit". Moving a row
+  // to quote_sent from the desk must not wipe the fact that the last contact was a phone call.
+  await set({ entityType: 'prospect', entityId: 1, status: 'contacted', channel: 'phone' });
+  await set({ entityType: 'prospect', entityId: 1, status: 'quote_sent' });
+  assert.equal(OUTREACH[0].channel, 'phone', 'the row keeps it');
+  assert.equal(EVENTS[1].channel, null, 'but the event records that THIS change had none');
+});
+
+test('channel is OPTIONAL — a status change is not always a touch', async () => {
+  // Disqualifying a chain from the desk has no channel. Inventing 'other' would make by_channel a lie.
+  const r = await set({ entityType: 'prospect', entityId: 1, status: 'disqualified' });
+  assert.equal(r.ok, true);
+  assert.equal(r.channel, null);
+  assert.equal(OUTREACH[0].channel, null, 'NULL, not a guess');
+});
+
+test('a SUPPLIED channel outside the vocabulary is refused, and nothing is written', async () => {
+  const r = await set({ entityType: 'prospect', entityId: 1, status: 'contacted', channel: 'carrier_pigeon' });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'unknown_channel');
+  assert.match(r.error, /One of: email, phone, linkedin, in_person, other/);
+  assert.equal(OUTREACH.length, 0, 'the status change is refused too — not half-applied');
+  assert.equal(EVENTS.length, 0);
+});
+
+test('a channel is NOT a status and cannot be passed as one', async () => {
+  // The whole point of two fields: 'email' must not be settable as a stage.
+  const r = await set({ entityType: 'prospect', entityId: 1, status: 'email' });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'unknown_status');
+});
+
+// ── the summary bar reads as a FUNNEL ───────────────────────────────────────────
+test('the summary returns statuses in funnel order, not alphabetically or by count', async () => {
+  await set({ entityType: 'prospect', entityId: 2, status: 'won', channel: 'in_person' });
+  await set({ entityType: 'prospect', entityId: 1, status: 'contacted', channel: 'email' });
+  const s = await summary('prospect', { held: STAFF, totalEntities: 1524 }, deps);
+  const bySortOrder = STATUS_DEFS.slice().sort((a, b) => a.order - b.order).map(d => d.key);
+  const keys = Object.keys(s.counts).filter(k => isStatus(k));
+  // Asserted against sort_order, NOT against STATUSES — the bar must follow the numbers, and comparing it
+  // to the array would pass even if sort_order were ignored entirely.
+  assert.deepEqual(keys, bySortOrder, 'alphabetical would put contacted before not_contacted');
+  assert.deepEqual(s.order, bySortOrder);
+  // The drop-off between adjacent columns is the thing to act on, so the order has to be the funnel's.
+  assert.deepEqual(s.funnel.map(f => f.key), bySortOrder);
+  assert.ok(s.funnel.every(f => f.label && f.means && f.next), 'the bar gets its tooltips from the registry');
+});
+
+test('activity groups by channel, counting the unrecorded rather than dropping it', async () => {
+  await set({ entityType: 'prospect', entityId: 1, status: 'contacted', channel: 'phone' });
+  await set({ entityType: 'prospect', entityId: 2, status: 'contacted', channel: 'phone' });
+  await set({ entityType: 'prospect', entityId: 1, status: 'quote_sent', channel: 'email' });
+  await set({ entityType: 'prospect', entityId: 2, status: 'disqualified' });        // no channel
+  const a = await activity({ held: STAFF, sinceDays: 7 }, deps);
+  assert.deepEqual(a.people[0].by_channel, { phone: 2, email: 1, '(not recorded)': 1 },
+    'four events, four counted — a NULL channel is a fact, not a row to drop');
+  assert.equal(a.people[0].total, 4);
 });
 
 // ── scoping is inherited, not reinvented ────────────────────────────────────────
@@ -242,7 +350,7 @@ test('a fixed-product entity takes it from the registry', async () => {
 });
 
 test('a TEXT id works as well as a bigint one — that is why entity_id is TEXT', async () => {
-  const r = await set({ entityType: 'lead', entityId: 'lead-a', status: 'in_progress' });
+  const r = await set({ entityType: 'lead', entityId: 'lead-a', status: 'in_conversation' });
   assert.equal(r.ok, true);
   assert.equal(r.row.entity_id, 'lead-a');
 });
@@ -257,14 +365,14 @@ test('a missing or malformed entity is refused, not filed', async () => {
 // ── the question status alone cannot answer ──────────────────────────────────────
 test('activity says WHO contacted how many, which current status cannot', async () => {
   for (const id of [1, 2]) await set({ entityType: 'prospect', entityId: id, status: 'contacted' });
-  await set({ entityType: 'prospect', entityId: 1, status: 'interested' });
+  await set({ entityType: 'prospect', entityId: 1, status: 'quote_sent' });
   await setStatus({ entityType: 'institution', entityId: 10, status: 'contacted',
     user: { id: 'u-n', email: 'naren@abiozen.com' }, held: STAFF }, deps);
 
   const a = await activity({ held: STAFF, sinceDays: 7 }, deps);
   const v = a.people.find(p => p.person === 'vinitha@abiozen.com');
   assert.equal(v.total, 3, 'three changes by Vinitha');
-  assert.deepEqual(v.by_status, { contacted: 2, interested: 1 });
+  assert.deepEqual(v.by_status, { contacted: 2, quote_sent: 1 });
   const n = a.people.find(p => p.person === 'naren@abiozen.com');
   assert.equal(n.total, 1);
   assert.ok(a.people[0].total >= a.people[1].total, 'busiest first');
@@ -348,13 +456,18 @@ test('the HTTP surface: read, write, summary, activity, history, vocabulary', as
   try {
     const vocab = await call('GET', '/api/outreach/vocabulary');
     assert.equal(vocab.status, 200);
-    assert.deepEqual(vocab.body.statuses, STATUSES, 'the dropdown reads the vocabulary, not a second copy');
+    assert.deepEqual(vocab.body.status_keys, STATUSES, 'the dropdown reads the vocabulary, not a second copy');
+    // The client needs sort_order over the wire, or it re-derives the funnel and the two copies drift.
+    assert.deepEqual(vocab.body.statuses.map(x => [x.key, x.order]), STATUS_DEFS.map(x => [x.key, x.order]));
+    assert.ok(vocab.body.statuses.every(x => x.label && x.means && x.next), 'labels and tooltips come from the server');
+    assert.deepEqual(vocab.body.channels.map(c => c.key), CHANNELS, 'channel is its own list, served alongside');
+    assert.ok(vocab.body.channels.every(c => c.label), 'channel labels come from the server too');
     assert.equal(Object.keys(vocab.body.entity_types).length, 6);
 
     const put = await call('PUT', '/api/outreach',
       { entity_type: 'prospect', entity_id: 1, status: 'contacted', note: 'called, left a message' });
     assert.equal(put.status, 200);
-    assert.deepEqual([put.body.from, put.body.to], ['new', 'contacted']);
+    assert.deepEqual([put.body.from, put.body.to], ['not_contacted', 'contacted']);
 
     const get = await call('GET', '/api/outreach?entity_type=prospect&ids=1,2');
     assert.equal(get.body.statuses['1'].status, 'contacted');
@@ -362,7 +475,7 @@ test('the HTTP surface: read, write, summary, activity, history, vocabulary', as
 
     const sum = await call('GET', '/api/outreach/summary?entity_type=prospect&total=1524');
     assert.equal(sum.body.counts.contacted, 1);
-    assert.equal(sum.body.counts.new, 1523, 'the bar gets the real new count, not 0');
+    assert.equal(sum.body.counts.not_contacted, 1523, 'the bar gets the real untouched count, not 0');
 
     const act = await call('GET', '/api/outreach/activity?days=7');
     assert.equal(act.body.people[0].person, 'vinitha@abiozen.com');
@@ -426,7 +539,7 @@ test('won on a NON-sitenex prospect creates no deal', async () => {
 
 test('a non-won status on a sitenex prospect creates no deal', async () => {
   reset();
-  await set({ entityType: 'prospect', entityId: 3, status: 'interested' });
+  await set({ entityType: 'prospect', entityId: 3, status: 'quote_sent' });
   assert.equal(DEALS.length, 0);
 });
 
@@ -435,7 +548,7 @@ test('overview: by person, by list, by status, and the SILENCE', async () => {
   reset();
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
   await set({ entityType: 'prospect', entityId: 2, status: 'contacted' });
-  await set({ entityType: 'institution', entityId: 10, status: 'interested' });
+  await set({ entityType: 'institution', entityId: 10, status: 'quote_sent' });
 
   const o = await require('./index').overview({ held: STAFF, sinceDays: 7 }, deps);
   assert.equal(o.total_events, 3);
@@ -443,7 +556,7 @@ test('overview: by person, by list, by status, and the SILENCE', async () => {
   const byList = Object.fromEntries(o.by_list.map(l => [l.entity_type, l.events]));
   assert.equal(byList.prospect, 2);
   assert.equal(byList.institution, 1);
-  assert.deepEqual(o.by_status, { contacted: 2, interested: 1 });
+  assert.deepEqual(o.by_status, { contacted: 2, quote_sent: 1 });
 
   // THE ROW THAT MATTERS: lists with zero events, named without anyone going looking.
   const silent = o.silent.map(l => l.entity_type).sort();

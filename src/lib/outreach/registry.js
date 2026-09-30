@@ -101,31 +101,75 @@ const ENTITIES = {
   },
 };
 
-// ── THE VOCABULARY ────────────────────────────────────────────────────────────
+// ── THE VOCABULARY: TWO FIELDS, NOT ONE ───────────────────────────────────────
 //
-// Eight values, in lifecycle order. NO CHECK CONSTRAINT: inquiries.status shipped with one and it was
-// dropped (db.js) once the lifecycle outgrew the original six, and this will grow the same way —
-// 'proposal_sent' and 'nurture' are both plausible. The vocabulary lives in a COMMENT on the column and
-// in this array, and the API validates against it so a typo is still rejected at the edge.
+// STATUS is where the conversation IS. CHANNEL is how we last touched them. They are separate because they
+// are different axes, and folding them together is the mistake this design exists to avoid: "emailed" and
+// "called" are not stages, they are methods at the same stage, so combining them produces
+// emailed_no_reply vs called_no_reply and the list doubles for no gain.
 //
-// 'new' NEEDS NO ROW. The absence of an outreach row IS 'new', which is why 1,524 prospects can show as
-// new without writing 1,524 rows. Every count has to account for that — see summary() in index.js.
-const STATUSES = [
-  'new',            // no contact yet — the default, no row needed
-  'contacted',      // reached out, no reply yet
-  'no_response',    // reached out repeatedly, nothing back
-  'in_progress',    // a conversation is happening
-  'interested',     // positive signal, not closed
-  'not_interested', // declined
-  'won',            // signed / now a customer
-  'disqualified',   // wrong fit, chain, out of business
+// THE TEST FOR WHETHER A STATUS EARNS ITS PLACE: does it imply a different NEXT ACTION? That is why
+// following_up and quote_sent are here (chase again vs. follow up the price) and why 'interested' is not —
+// it was never a stage, it was a feeling, and it shared its next action with in_conversation.
+//
+// sort_order is EXPLICIT rather than implied by array position, because the summary bar has to read as a
+// funnel and array order is easy to disturb; a number is not. The bar sorts on it, the client is given it,
+// and drop-off between adjacent columns is the thing to act on.
+//
+// Still NO CHECK CONSTRAINT — inquiries.status shipped with one and it was dropped when the lifecycle grew,
+// and this list has now grown twice. The vocabulary is a COMMENT on the column plus this array, validated at
+// the API edge so a typo is still rejected.
+const STATUS_DEFS = [
+  { key: 'not_contacted',   order: 1,  label: 'Not contacted',   means: 'nobody has touched this yet',              next: 'make first contact' },
+  { key: 'contacted',       order: 2,  label: 'Contacted',       means: 'first outreach made, no reply yet',        next: 'wait, then chase' },
+  { key: 'following_up',    order: 3,  label: 'Following up',    means: 'chased at least once, still no reply',     next: 'chase again or give up' },
+  { key: 'no_response',     order: 4,  label: 'No response',     means: 'gave up after repeated attempts',          next: 'nothing — revisit later' },
+  { key: 'in_conversation', order: 5,  label: 'In conversation', means: 'they replied, a conversation is happening', next: 'qualify and quote' },
+  { key: 'quote_sent',      order: 6,  label: 'Quote sent',      means: 'a price is with them',                     next: 'follow up the price' },
+  { key: 'contract_sent',   order: 7,  label: 'Contract sent',   means: 'paperwork is out',                         next: 'chase the signature' },
+  { key: 'won',             order: 8,  label: 'Won',             means: 'signed, now a customer',                   next: 'hand to delivery' },
+  { key: 'not_interested',  order: 9,  label: 'Not interested',  means: 'they declined',                            next: 'nothing' },
+  { key: 'disqualified',    order: 10, label: 'Disqualified',    means: 'wrong fit, chain, out of business',         next: 'nothing — do not re-enter' },
 ];
-const DEFAULT_STATUS = 'new';
-// Statuses that mean the conversation is over, for the summary bar's grouping.
-const TERMINAL = ['not_interested', 'won', 'disqualified'];
+const STATUSES = STATUS_DEFS.map(s => s.key);
+const STATUS_ORDER = Object.fromEntries(STATUS_DEFS.map(s => [s.key, s.order]));
+const DEFAULT_STATUS = 'not_contacted';
+
+// 'not_contacted' NEEDS NO ROW. The absence of an outreach row IS the default, which is why 1,522 untouched
+// prospects can show in the bar without 1,522 rows existing. Every count has to add that remainder —
+// see summary() in index.js.
+
+// Statuses where the change MEANS we touched them, so last_contacted_at moves. Deciding somebody is
+// disqualified is not contact, and stamping it would make "last contacted" a lie.
+const CONTACT_STATUSES = ['contacted', 'following_up', 'no_response', 'in_conversation',
+                          'quote_sent', 'contract_sent', 'won', 'not_interested'];
+
+// Statuses where the conversation is over, for grouping the funnel's tail.
+const TERMINAL = ['no_response', 'won', 'not_interested', 'disqualified'];
+
+// ── CHANNEL: how we last touched them ─────────────────────────────────────────
+// A separate field set alongside the status, never inside it. Optional: a status change is sometimes not a
+// touch at all (disqualifying a chain from the desk), so channel stays NULL rather than being guessed.
+const CHANNELS = ['email', 'phone', 'linkedin', 'in_person', 'other'];
+const CHANNEL_LABEL = { email: 'Email', phone: 'Phone', linkedin: 'LinkedIn', in_person: 'In person', other: 'Other' };
+
+// ── what the OLD vocabulary maps to ───────────────────────────────────────────
+// Used by scripts/migrate-outreach-vocabulary.js. 'interested' is deliberately ABSENT: it was never a stage
+// and its rows need a human decision, so the migration ABORTS on one rather than guessing. A guess that
+// looks like data is worse than a migration that stops.
+const LEGACY_STATUS_MAP = {
+  new: 'not_contacted',
+  in_progress: 'in_conversation',
+  // interested: → ASK. see the migration.
+};
 
 function entity(type) { return ENTITIES[type] || null; }
 function isEntityType(type) { return Object.prototype.hasOwnProperty.call(ENTITIES, type); }
 function isStatus(s) { return STATUSES.includes(s); }
 
-module.exports = { ENTITIES, STATUSES, DEFAULT_STATUS, TERMINAL, entity, isEntityType, isStatus };
+function isChannel(c) { return CHANNELS.includes(c); }
+function statusOrder(s) { return STATUS_ORDER[s] != null ? STATUS_ORDER[s] : 99; }
+
+module.exports = { ENTITIES, STATUS_DEFS, STATUSES, STATUS_ORDER, DEFAULT_STATUS, TERMINAL,
+  CONTACT_STATUSES, CHANNELS, CHANNEL_LABEL, LEGACY_STATUS_MAP,
+  entity, isEntityType, isStatus, isChannel, statusOrder };

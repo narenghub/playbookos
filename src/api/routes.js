@@ -29,7 +29,8 @@ const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/c
 const { effectiveProducts, productScopeSql } = require('../lib/products/held');
 const { partnerScopeSql } = require('../lib/products/partner-scope');
 const outreach = require('../lib/outreach');
-const { STATUSES: OUTREACH_STATUSES, ENTITIES: OUTREACH_ENTITIES, isEntityType } = require('../lib/outreach/registry');
+const { STATUS_DEFS: OUTREACH_STATUS_DEFS, CHANNELS: OUTREACH_CHANNELS, CHANNEL_LABEL: OUTREACH_CHANNEL_LABEL,
+        ENTITIES: OUTREACH_ENTITIES, isEntityType } = require('../lib/outreach/registry');
 const { PRODUCTS: PRODUCT_KEYS, GRANTABLE } = require('../lib/products/route-map');
 const { checkGrantChange, routeCountsByProduct, describeChange } = require('../lib/products/grants');
 const riResolve = require('../lib/agents/research-intelligence/resolve');
@@ -5253,13 +5254,14 @@ router.get('/outreach', authMiddleware, async (req, res) => {
 // PUT /outreach — record an outcome. One control, one call, no form.
 router.put('/outreach', authMiddleware, async (req, res) => {
   try {
-    const { entity_type, entity_id, status, note, next_action_at } = req.body || {};
+    const { entity_type, entity_id, status, channel, note, next_action_at } = req.body || {};
     if (!entity_type || entity_id == null || !status) {
       return res.status(400).json({ error: 'entity_type, entity_id and status are required' });
     }
     const held = await effectiveProducts(req.user);
+    // channel is optional and validated in setStatus — a status change is not always a touch.
     const r = await outreach.setStatus({
-      entityType: entity_type, entityId: entity_id, status, note,
+      entityType: entity_type, entityId: entity_id, status, channel, note,
       nextActionAt: next_action_at || null, user: req.user, held,
     });
     if (!r.ok) {
@@ -5267,11 +5269,13 @@ router.put('/outreach', authMiddleware, async (req, res) => {
       return res.status(code).json({ error: r.error, code: r.code });
     }
     console.log(`[outreach] ${req.user.email} ${entity_type}#${entity_id} ${r.from} → ${r.to}`
+      + (r.channel ? ` via ${r.channel}` : '')
       + (r.deal ? ` (deal #${r.deal.id} ${r.deal.created ? 'created' : 'linked'})` : ''));
     // `deal` has to be passed through: setStatus returns it, and the cell says "deal #N created" from it.
     // It was omitted here, so the whole won → sitenex_deals link worked server-side and was invisible —
     // the deal appeared on the board with nothing on screen to say it had been made.
-    res.json({ success: true, from: r.from, to: r.to, changed: r.changed, row: r.row, deal: r.deal || null });
+    res.json({ success: true, from: r.from, to: r.to, channel: r.channel, changed: r.changed,
+      row: r.row, deal: r.deal || null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -5320,10 +5324,19 @@ router.get('/outreach/history', authMiddleware, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /outreach/vocabulary — the 8 statuses, so the dropdown is not a second copy of the list.
+// GET /outreach/vocabulary — the 10 statuses WITH their sort_order, and the channels, so neither dropdown
+// is a second copy of the list and the funnel bar does not re-derive its own order.
+// GET /outreach/vocabulary — the two field definitions, so no client keeps a second copy of either list.
+// Statuses carry their sort_order, label and next action: the bar sorts on the order, and the dropdown can
+// say what a stage MEANS rather than just naming it.
 router.get('/outreach/vocabulary', authMiddleware, async (req, res) => {
-  res.json({ statuses: OUTREACH_STATUSES, entity_types: Object.fromEntries(
-    Object.entries(OUTREACH_ENTITIES).map(([k, v]) => [k, { label: v.label, pages: v.pages }])) });
+  res.json({
+    statuses: OUTREACH_STATUS_DEFS,
+    status_keys: OUTREACH_STATUS_DEFS.map(s => s.key),
+    channels: OUTREACH_CHANNELS.map(key => ({ key, label: OUTREACH_CHANNEL_LABEL[key] || key })),
+    entity_types: Object.fromEntries(
+      Object.entries(OUTREACH_ENTITIES).map(([k, v]) => [k, { label: v.label, pages: v.pages }])),
+  });
 });
 
 // ── Notifications — the pnav top-bar bell feed ────────────────────────────────

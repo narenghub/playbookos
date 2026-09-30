@@ -11,7 +11,8 @@
 // "0 new" over a list of 1,524 untouched rows.
 
 const { productScopeSql } = require('../products/held');
-const { STATUSES, DEFAULT_STATUS, ENTITIES, entity, isEntityType, isStatus } = require('./registry');
+const { STATUS_DEFS, STATUSES, DEFAULT_STATUS, CONTACT_STATUSES, CHANNELS, ENTITIES,
+        entity, isEntityType, isStatus, isChannel, statusOrder } = require('./registry');
 
 const q = (deps) => deps.query || require('../db').query;
 
@@ -23,7 +24,7 @@ async function statusFor(entityType, ids, held, deps = {}) {
   if (!isEntityType(entityType) || !ids || !ids.length) return {};
   const scope = productScopeSql(held, 'o', 3);
   const r = await q(deps)(
-    `SELECT o.entity_id, o.status, o.owner_user_id, o.last_contacted_at, o.next_action_at, o.note,
+    `SELECT o.entity_id, o.status, o.channel, o.owner_user_id, o.last_contacted_at, o.next_action_at, o.note,
             o.updated_at, u.name AS owner_name
        FROM outreach o LEFT JOIN users u ON u.id = o.owner_user_id
       WHERE o.entity_type = $1 AND o.entity_id = ANY($2) AND ${scope.sql}`,
@@ -41,11 +42,17 @@ async function statusFor(entityType, ids, held, deps = {}) {
 // The product is NOT taken from the caller. For an entity whose table carries a product it is read from
 // the row; otherwise it is the registry's fixed value. A client-supplied product would let somebody file
 // outreach under a product they hold against a row belonging to one they do not.
-async function setStatus({ entityType, entityId, status, note, nextActionAt, ownerUserId, user, held }, deps = {}) {
+async function setStatus({ entityType, entityId, status, channel, note, nextActionAt, ownerUserId, user, held }, deps = {}) {
   if (!isEntityType(entityType)) return { ok: false, code: 'unknown_entity_type', error: `Unknown entity_type '${entityType}'` };
   if (!isStatus(status)) {
     return { ok: false, code: 'unknown_status', error: `Unknown status '${status}'. One of: ${STATUSES.join(', ')}` };
   }
+  // Channel is OPTIONAL — a status change is not always a touch (disqualifying a chain from the desk) — but
+  // a value that IS supplied has to be one we know, or the field stops being groupable.
+  if (channel != null && channel !== '' && !isChannel(channel)) {
+    return { ok: false, code: 'unknown_channel', error: `Unknown channel '${channel}'. One of: ${CHANNELS.join(', ')}` };
+  }
+  const chan = channel || null;
   const def = entity(entityType);
   const query = q(deps);
   const id = String(entityId);
@@ -82,14 +89,19 @@ async function setStatus({ entityType, entityId, status, note, nextActionAt, own
     const from = before ? before.status : DEFAULT_STATUS;    // no row = 'new'
     // last_contacted_at only moves when the change MEANS contact happened. Marking something
     // disqualified is not contact, and stamping it would make "last contacted" a lie.
-    const touched = ['contacted', 'no_response', 'in_progress', 'interested', 'not_interested', 'won'].includes(status);
+    // CONTACT_STATUSES lives in the registry beside the vocabulary, so adding a stage forces a decision
+    // about whether reaching it means we touched them.
+    const touched = CONTACT_STATUSES.includes(status);
     const up = await c.query(
-      `INSERT INTO outreach (entity_type, entity_id, product, status, owner_user_id, note,
+      `INSERT INTO outreach (entity_type, entity_id, product, status, channel, owner_user_id, note,
                              next_action_at, last_contacted_at, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7, CASE WHEN $8 THEN NOW() ELSE NULL END, NOW(), NOW())
+       VALUES ($1,$2,$3,$4,$9,$5,$6,$7, CASE WHEN $8 THEN NOW() ELSE NULL END, NOW(), NOW())
        ON CONFLICT (entity_type, entity_id) DO UPDATE SET
          status = EXCLUDED.status,
          product = EXCLUDED.product,
+         -- channel is "how we LAST touched them", so it only moves when one is supplied; a status change
+         -- with no channel must not erase the last known one.
+         channel = COALESCE(EXCLUDED.channel, outreach.channel),
          owner_user_id = COALESCE(EXCLUDED.owner_user_id, outreach.owner_user_id),
          note = COALESCE(EXCLUDED.note, outreach.note),
          next_action_at = EXCLUDED.next_action_at,
@@ -97,13 +109,13 @@ async function setStatus({ entityType, entityId, status, note, nextActionAt, own
          updated_at = NOW()
        RETURNING *`,
       [entityType, id, product, status, ownerUserId || (user && user.id) || null,
-       note || null, nextActionAt || null, touched]);
+       note || null, nextActionAt || null, touched, chan]);
     const row = up.rows[0];
     await c.query(
-      `INSERT INTO outreach_events (outreach_id, from_status, to_status, by_user_id, by_email, note)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [row.id, from, status, (user && user.id) || null, (user && user.email) || null, note || null]);
-    result = { ok: true, row, from, to: status, changed: from !== status };
+      `INSERT INTO outreach_events (outreach_id, from_status, to_status, channel, by_user_id, by_email, note)
+       VALUES ($1,$2,$3,$7,$4,$5,$6)`,
+      [row.id, from, status, (user && user.id) || null, (user && user.email) || null, note || null, chan]);
+    result = { ok: true, row, from, to: status, channel: chan, changed: from !== status };
 
     // ── won → a SiteNex deal ──────────────────────────────────────────────────
     // A SiteNex prospect reaching 'won' becomes a deal rather than a fact recorded in two places. Linked
@@ -145,8 +157,12 @@ async function summary(entityType, { held, totalEntities = null, product = null 
     `SELECT o.status, COUNT(*)::int n FROM outreach o
       WHERE o.entity_type = $1 AND ${scope.sql}${extra} GROUP BY 1`, params)).rows;
 
+  // Seeded in FUNNEL order, from sort_order — not from STATUSES' array position. Object key order is what
+  // the bar renders, so if it came from the array then reordering the array would silently reorder the
+  // funnel and sort_order would be decorative. It is the authority; the array is just a list.
+  const funnel = STATUS_DEFS.slice().sort((a, b) => a.order - b.order);
   const counts = {};
-  for (const s of STATUSES) counts[s] = 0;
+  for (const d of funnel) counts[d.key] = 0;
   let tracked = 0;
   for (const r of rows) {
     // A status not in the vocabulary is still counted, under its own name — the column has no CHECK, so
@@ -157,7 +173,10 @@ async function summary(entityType, { held, totalEntities = null, product = null 
   if (totalEntities != null) {
     counts[DEFAULT_STATUS] = Math.max(0, totalEntities - tracked);
   }
-  return { entity_type: entityType, counts, tracked, total: totalEntities, order: STATUSES };
+  // `order` is the FUNNEL — the bar's whole value is that adjacent columns are adjacent stages, so the
+  // drop-off between two of them means something.
+  return { entity_type: entityType, counts, tracked, total: totalEntities,
+           order: funnel.map(s => s.key), funnel };
 }
 
 // ── who did what ──────────────────────────────────────────────────────────────
@@ -172,22 +191,27 @@ async function activity({ held, sinceDays = 7, entityType = null, userId = null 
   if (userId) { extra += ` AND e.by_user_id = $${params.length + 1}`; params.push(userId); }
   const rows = (await q(deps)(
     `SELECT COALESCE(u.name, e.by_email, '(unknown)') AS person, e.by_user_id, e.by_email,
-            e.to_status, o.entity_type, COUNT(*)::int n, MAX(e.created_at) AS last_at
+            e.to_status, e.channel, o.entity_type, COUNT(*)::int n, MAX(e.created_at) AS last_at
        FROM outreach_events e
        JOIN outreach o ON o.id = e.outreach_id
        LEFT JOIN users u ON u.id = e.by_user_id
       WHERE e.created_at > NOW() - ($1 || ' days')::interval AND ${scope.sql}${extra}
-      GROUP BY 1,2,3,4,5
-      ORDER BY 6 DESC`, params)).rows;
+      GROUP BY 1,2,3,4,5,6
+      ORDER BY 7 DESC`, params)).rows;
 
   // Rolled up per person so the view reads as "Vinitha: 50 contacted, 3 interested".
   const byPerson = new Map();
   for (const r of rows) {
     const key = r.by_user_id || r.by_email || r.person;
-    if (!byPerson.has(key)) byPerson.set(key, { person: r.person, user_id: r.by_user_id, total: 0, by_status: {}, last_at: r.last_at });
+    if (!byPerson.has(key)) byPerson.set(key, { person: r.person, user_id: r.by_user_id, total: 0,
+                                                by_status: {}, by_channel: {}, last_at: r.last_at });
     const p = byPerson.get(key);
     p.total += r.n;
     p.by_status[r.to_status] = (p.by_status[r.to_status] || 0) + r.n;
+    // Channel is nullable — a status change is not always a touch — so an unrecorded one is counted as such
+    // rather than being dropped or invented.
+    const ch = r.channel || '(not recorded)';
+    p.by_channel[ch] = (p.by_channel[ch] || 0) + r.n;
     if (r.last_at > p.last_at) p.last_at = r.last_at;
   }
   return { since_days: params[0], people: [...byPerson.values()].sort((a, b) => b.total - a.total), rows };
@@ -206,10 +230,11 @@ async function overview({ held, sinceDays = 7 } = {}, deps = {}) {
   const days = Math.max(1, Math.min(365, Number(sinceDays) || 7));
   const act = await activity({ held, sinceDays: days }, deps);
 
-  const byList = {}, byStatus = {};
+  const byList = {}, byStatus = {}, byChannel = {};
   for (const r of act.rows) {
     byList[r.entity_type] = (byList[r.entity_type] || 0) + r.n;
     byStatus[r.to_status] = (byStatus[r.to_status] || 0) + r.n;
+    byChannel[r.channel || '(not recorded)'] = (byChannel[r.channel || '(not recorded)'] || 0) + r.n;
   }
 
   // Which lists can this viewer see at all? A fixed-product list needs that product; a 'row' list
@@ -228,6 +253,7 @@ async function overview({ held, sinceDays = 7 } = {}, deps = {}) {
     people: act.people,
     by_list: lists,
     by_status: byStatus,
+    by_channel: byChannel,
     // Named separately as well as being derivable, so a client cannot render the page and quietly omit it.
     silent: lists.filter(l => l.events === 0).map(l => ({ entity_type: l.entity_type, label: l.label, pages: l.pages })),
     total_events: act.rows.reduce((a, r) => a + r.n, 0),
@@ -238,7 +264,7 @@ async function overview({ held, sinceDays = 7 } = {}, deps = {}) {
 async function history(entityType, entityId, held, deps = {}) {
   const scope = productScopeSql(held, 'o', 3);
   return (await q(deps)(
-    `SELECT e.created_at, e.from_status, e.to_status, e.note,
+    `SELECT e.created_at, e.from_status, e.to_status, e.channel, e.note,
             COALESCE(u.name, e.by_email) AS by_person
        FROM outreach_events e JOIN outreach o ON o.id = e.outreach_id
        LEFT JOIN users u ON u.id = e.by_user_id
