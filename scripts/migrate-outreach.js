@@ -81,13 +81,37 @@ lifecycle grew. Validated in src/lib/outreach/registry.js instead.$c$`);
     await query(`COMMENT ON TABLE outreach_events IS 'Append-only log of every status change: who, when, from what to what. Answers "how many did X contact last week", which current status cannot.'`);
     console.log('✅ comments (the vocabulary lives here, not in a CHECK)');
 
+    // owner_user_id ON DELETE SET NULL. The default is RESTRICT, which means deleting a user who has ever
+    // recorded outreach FAILS — and DELETE /api/users/:id is a route people use, so that is a 500 waiting
+    // to happen. Setting it null loses nothing that matters: the outreach row survives as unassigned, and
+    // WHO did it is in outreach_events, which keeps a denormalised by_email precisely so the history
+    // outlives the account.
+    const fk = (await query(
+      `SELECT conname, confdeltype FROM pg_constraint
+        WHERE conrelid = 'outreach'::regclass AND contype = 'f' AND conname LIKE '%owner_user_id%'`)).rows[0];
+    if (fk && fk.confdeltype !== 'n') {            // 'n' = SET NULL, 'a' = NO ACTION/RESTRICT
+      await query(`ALTER TABLE outreach DROP CONSTRAINT ${fk.conname}`);
+      await query(`ALTER TABLE outreach ADD CONSTRAINT outreach_owner_user_id_fkey
+                   FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE SET NULL`);
+      console.log('✅ owner_user_id → ON DELETE SET NULL (was RESTRICT: deleting a user would have failed)');
+    } else {
+      console.log('↷ owner_user_id already ON DELETE SET NULL');
+    }
+
     // ── verify ──
     const cols = (await query(`SELECT column_name FROM information_schema.columns WHERE table_name='outreach' ORDER BY ordinal_position`)).rows.map(r => r.column_name);
     console.log(`\noutreach columns: ${cols.join(', ')}`);
     const ev = (await query(`SELECT column_name FROM information_schema.columns WHERE table_name='outreach_events' ORDER BY ordinal_position`)).rows.map(r => r.column_name);
     console.log(`outreach_events:  ${ev.join(', ')}`);
-    const uniq = (await query(`SELECT indexdef FROM pg_indexes WHERE tablename='outreach' AND indexdef LIKE '%UNIQUE%'`)).rows;
-    console.log(`unique constraint: ${uniq.length ? uniq[0].indexdef.replace(/.*USING btree /, '') : 'MISSING'}`);
+    // Specifically (entity_type, entity_id) — the PRIMARY KEY is also a unique index, so matching on
+    // "UNIQUE" and taking the first row reported the pkey and told us nothing. This one is what makes the
+    // upsert work; without it setStatus would insert a duplicate instead of updating.
+    const uniq = (await query(
+      `SELECT pg_get_constraintdef(oid) d FROM pg_constraint
+        WHERE conrelid = 'outreach'::regclass AND contype = 'u'`)).rows.map(r => r.d);
+    const onEntity = uniq.find(d => /UNIQUE \(entity_type, entity_id\)/.test(d));
+    console.log(`unique on (entity_type, entity_id): ${onEntity || 'MISSING'}`);
+    if (!onEntity) { console.error('❌ the upsert has nothing to conflict on — setStatus would duplicate rows'); process.exit(1); }
     const chk = (await query(`SELECT COUNT(*)::int n FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
       WHERE t.relname='outreach' AND c.contype='c'`)).rows[0].n;
     console.log(`CHECK constraints on outreach: ${chk} (must be 0 — the vocabulary is a comment)`);
