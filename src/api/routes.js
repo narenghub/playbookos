@@ -5273,6 +5273,17 @@ router.get('/outreach/activity', authMiddleware, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /outreach/overview?days=7 — the Outreach PAGE. Four views in one call, because they are one glance:
+// by person, by list, by status moved to, and the SILENCE.
+//
+// "Who is reaching out and who is not" spans every list, so it cannot be assembled from per-list bars.
+router.get('/outreach/overview', authMiddleware, async (req, res) => {
+  try {
+    const held = await heldProducts(req.user.id);
+    res.json(await outreach.overview({ held, sinceDays: req.query.days || 7 }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /outreach/history?entity_type=&entity_id= — one entity's trail, for the inline control.
 router.get('/outreach/history', authMiddleware, async (req, res) => {
   try {

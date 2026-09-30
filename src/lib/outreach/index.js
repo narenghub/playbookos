@@ -11,7 +11,7 @@
 // "0 new" over a list of 1,524 untouched rows.
 
 const { productScopeSql } = require('../products/held');
-const { STATUSES, DEFAULT_STATUS, entity, isEntityType, isStatus } = require('./registry');
+const { STATUSES, DEFAULT_STATUS, ENTITIES, entity, isEntityType, isStatus } = require('./registry');
 
 const q = (deps) => deps.query || require('../db').query;
 
@@ -104,6 +104,26 @@ async function setStatus({ entityType, entityId, status, note, nextActionAt, own
        VALUES ($1,$2,$3,$4,$5,$6)`,
       [row.id, from, status, (user && user.id) || null, (user && user.email) || null, note || null]);
     result = { ok: true, row, from, to: status, changed: from !== status };
+
+    // ── won → a SiteNex deal ──────────────────────────────────────────────────
+    // A SiteNex prospect reaching 'won' becomes a deal rather than a fact recorded in two places. Linked
+    // by sitenex_deals.prospect_id, which is the natural key — so no new column, and re-marking 'won'
+    // finds the existing deal instead of making a second one.
+    if (entityType === 'prospect' && product === 'sitenex' && status === 'won') {
+      const existing = (await c.query(
+        `SELECT id, status FROM sitenex_deals WHERE prospect_id = $1::bigint ORDER BY id LIMIT 1`, [id])).rows[0];
+      if (existing) {
+        result.deal = { id: existing.id, created: false, status: existing.status };
+      } else {
+        // 'signed' because that is what won MEANS in this vocabulary ("signed / now a customer"). The deal
+        // board's own lifecycle takes over from here.
+        const made = (await c.query(
+          `INSERT INTO sitenex_deals (prospect_id, status, owner_user_id, created_at, updated_at)
+           VALUES ($1::bigint, 'signed', $2, NOW(), NOW()) RETURNING id, status`,
+          [id, (user && user.id) || null])).rows[0];
+        result.deal = { id: made.id, created: true, status: made.status };
+      }
+    }
   });
   return result;
 }
@@ -173,6 +193,47 @@ async function activity({ held, sinceDays = 7, entityType = null, userId = null 
   return { since_days: params[0], people: [...byPerson.values()].sort((a, b) => b.total - a.total), rows };
 }
 
+// ── THE CROSS-LIST VIEW ───────────────────────────────────────────────────────
+//
+// "Who is reaching out and who is not" spans every list, so a per-list summary cannot answer it — that one
+// tells you how far through SiteNex you are, which is a different question.
+//
+// Four views from one call, because they are one glance: by person, by list, by status moved to, and THE
+// SILENCE — lists with no events at all in the window. The silence is the part that has to arrive without
+// anyone going looking for it, so it is computed from the full set of lists the viewer can see MINUS the
+// ones with events, rather than from the events alone (which by definition cannot mention a silent list).
+async function overview({ held, sinceDays = 7 } = {}, deps = {}) {
+  const days = Math.max(1, Math.min(365, Number(sinceDays) || 7));
+  const act = await activity({ held, sinceDays: days }, deps);
+
+  const byList = {}, byStatus = {};
+  for (const r of act.rows) {
+    byList[r.entity_type] = (byList[r.entity_type] || 0) + r.n;
+    byStatus[r.to_status] = (byStatus[r.to_status] || 0) + r.n;
+  }
+
+  // Which lists can this viewer see at all? A fixed-product list needs that product; a 'row' list
+  // (prospects, whose rows span four products) needs any product at all.
+  const heldSet = new Set(held || []);
+  const visible = Object.entries(ENTITIES).filter(([, def]) =>
+    def.product === 'row' ? heldSet.size > 0 : heldSet.has(def.product));
+
+  const lists = visible.map(([type, def]) => ({
+    entity_type: type, label: def.label, pages: def.pages,
+    events: byList[type] || 0,
+  })).sort((a, b) => b.events - a.events);
+
+  return {
+    since_days: days,
+    people: act.people,
+    by_list: lists,
+    by_status: byStatus,
+    // Named separately as well as being derivable, so a client cannot render the page and quietly omit it.
+    silent: lists.filter(l => l.events === 0).map(l => ({ entity_type: l.entity_type, label: l.label, pages: l.pages })),
+    total_events: act.rows.reduce((a, r) => a + r.n, 0),
+  };
+}
+
 // The full history for one entity, for the inline control's tooltip / detail.
 async function history(entityType, entityId, held, deps = {}) {
   const scope = productScopeSql(held, 'o', 3);
@@ -186,4 +247,4 @@ async function history(entityType, entityId, held, deps = {}) {
     [entityType, String(entityId), ...scope.params])).rows;
 }
 
-module.exports = { statusFor, setStatus, summary, activity, history };
+module.exports = { statusFor, setStatus, summary, activity, overview, history };

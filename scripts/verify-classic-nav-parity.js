@@ -75,13 +75,19 @@ console.log(`${roles.length} roles\n`);
 // off the first time they change the nav on purpose. Each entry names a role and the exact pages it should
 // gain or lose; the run passes if the real diff matches, and FAILS if it differs even slightly — so an
 // intended change does not become cover for an unintended one.
-const EXPECTED = {
-  // 2026-09-29, the final nav model: Platform became super-admin only, and the three pages that had no
-  // nav entry at all (they were listed under the platform product tab but no section, so
-  // pageVisibleToRole returned false) were added to it.
-  super_admin: { gained: ['decision-engine', 'data-pipeline', 'execution-graph'], lost: [] },
-  admin:       { gained: [], lost: ['sku-economics', 'settings'] },
-};
+// It compares against a REF (HEAD by default), so these describe the diff versus THAT — not a running
+// history. Once a change is committed it becomes the baseline and its entry has to come out, or the script
+// expects a diff that is no longer there. That caught me: the Platform entries below were left in after
+// they had already landed, and every role failed.
+//
+// Previously declared and now part of the baseline, kept only as a record of what changed when:
+//   2026-09-29  super_admin +decision-engine +data-pipeline +execution-graph   (Platform got its
+//               three unreachable pages), admin −sku-economics −settings        (Platform → super-admin only)
+const EXPECTED = {};
+// 2026-09-30: the Outreach page went into OPERATIONS (access:'*'), so EVERY role gains exactly that one
+// page. Declared as a default rather than repeated fourteen times; any role whose diff is anything other
+// than this still fails.
+const DEFAULT_EXPECTED = { gained: ['outreach'], lost: [] };
 const linksOf = (html) => [...html.matchAll(/navigate\('([^']+)'\)/g)].map(m => m[1]);
 
 let mismatched = 0, added = 0, accepted = 0;
@@ -102,7 +108,7 @@ for (const role of roles) {
   // anything about what actually changed.
   const gained = linksOf(b).filter(x => !linksOf(a).includes(x));
   const lost = linksOf(a).filter(x => !linksOf(b).includes(x));
-  const exp = EXPECTED[role];
+  const exp = EXPECTED[role] || DEFAULT_EXPECTED;
   const matches = exp && String(exp.gained.slice().sort()) === String(gained.slice().sort())
                       && String(exp.lost.slice().sort()) === String(lost.slice().sort());
   if (matches) {

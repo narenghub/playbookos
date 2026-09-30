@@ -635,6 +635,140 @@ function showToast(message, type, duration) {
   }
   return t;
 }
+// ── OUTREACH STATUS — ONE control, shared by every list ────────────────────────
+//
+// Six lists, one implementation. Each page calls orLoad() with the ids it is already showing, then drops
+// orCell() into a <td> and orBar() above the table. Nothing about the vocabulary or the rules lives here:
+// the statuses come from GET /outreach/vocabulary, so the dropdown cannot drift from the server's list.
+//
+// TWO CLICKS. Open the dropdown, pick a value — that is the whole interaction, and it saves on change. No
+// modal and no form, because a form is a thing nobody fills in during a call. The note is optional and
+// deliberately secondary.
+//
+// SAVING DOES NOT RE-RENDER. The cell updates its own DOM and the bar's counts are adjusted in place, the
+// same lesson as the SiteNex expand toggle: re-rendering a list after every change loses the scroll
+// position and the filters, and it is what makes an inline control feel worse than a modal.
+const OR = { vocab: null, status: {}, summary: {} };
+
+const OR_LABEL = {
+  new: 'New', contacted: 'Contacted', no_response: 'No response', in_progress: 'In progress',
+  interested: 'Interested', not_interested: 'Not interested', won: 'Won', disqualified: 'Disqualified',
+};
+const OR_COLOR = {
+  new: '#94a3b8', contacted: '#0D7377', no_response: '#a16207', in_progress: '#1B3A6B',
+  interested: '#1D9E75', not_interested: '#E24B4A', won: '#15803d', disqualified: '#6b7280',
+};
+
+async function orVocab() {
+  if (OR.vocab) return OR.vocab;
+  OR.vocab = await API('/outreach/vocabulary').catch(() => ({ statuses: Object.keys(OR_LABEL) }));
+  return OR.vocab;
+}
+
+// Load status for the rows a list is showing, plus the summary for its bar. `total` is the list's own row
+// count — the server cannot know it, and without it 'new' would report 0 over 1,524 untouched rows.
+async function orLoad(entityType, ids, total) {
+  await orVocab();
+  const clean = (ids || []).map(String).filter(Boolean);
+  const [st, sum] = await Promise.all([
+    clean.length ? API('/outreach?entity_type=' + encodeURIComponent(entityType) + '&ids=' + encodeURIComponent(clean.join(','))).catch(() => ({ statuses: {} })) : Promise.resolve({ statuses: {} }),
+    API('/outreach/summary?entity_type=' + encodeURIComponent(entityType) + (total != null ? '&total=' + total : '')).catch(() => null),
+  ]);
+  OR.status[entityType] = st.statuses || {};
+  if (sum) OR.summary[entityType] = sum;
+  return OR.status[entityType];
+}
+
+function orStatusOf(entityType, id) {
+  const row = (OR.status[entityType] || {})[String(id)];
+  return row ? row.status : 'new';          // no row IS 'new'
+}
+
+// The status bar above a list. Zero counts are shown too: "0 contacted" over 1,524 rows is the finding.
+function orBar(entityType) {
+  const sum = OR.summary[entityType];
+  if (!sum) return '';
+  const order = sum.order || Object.keys(OR_LABEL);
+  const parts = order.filter(st => (sum.counts[st] || 0) > 0 || st === 'new' || st === 'contacted')
+    .map(st => `<span style="white-space:nowrap"><strong style="color:${OR_COLOR[st] || '#475569'}">${sum.counts[st] || 0}</strong> <span style="color:var(--text-muted)">${(OR_LABEL[st] || st).toLowerCase()}</span></span>`);
+  // Any status outside the vocabulary still shows — the column has no CHECK, so hiding one would lose rows
+  // from a bar whose job is to account for all of them.
+  for (const [st, n] of Object.entries(sum.counts)) {
+    if (!order.includes(st) && n > 0) parts.push(`<span><strong>${n}</strong> ${st}</span>`);
+  }
+  return `<div id="or-bar-${entityType}" class="card" style="padding:10px 14px;display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:12px">
+    <span style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--text-muted)">Outreach</span>
+    ${parts.join('')}
+    <a href="#" onclick="navigate('outreach');return false" style="margin-left:auto;font-size:11px;color:var(--teal);text-decoration:none">who is reaching out →</a>
+  </div>`;
+}
+
+// One cell. A <select> that saves on change, plus an optional note affordance that is clearly secondary.
+function orCell(entityType, id) {
+  const cur = orStatusOf(entityType, id);
+  const statuses = (OR.vocab && OR.vocab.statuses) || Object.keys(OR_LABEL);
+  const opts = statuses.map(st => `<option value="${st}"${st === cur ? ' selected' : ''}>${OR_LABEL[st] || st}</option>`).join('');
+  const row = (OR.status[entityType] || {})[String(id)];
+  const note = row && row.note ? String(row.note) : '';
+  return `<span style="display:inline-flex;align-items:center;gap:4px">
+    <select id="or-sel-${entityType}-${id}" onchange="orSet('${entityType}','${String(id).replace(/'/g, "\\'")}',this)"
+      style="font-size:11px;padding:3px 4px;border:1px solid var(--border,#ddd);border-radius:4px;background:#fff;color:${OR_COLOR[cur] || '#334155'};font-weight:${cur === 'new' ? '400' : '600'};cursor:pointer">${opts}</select>
+    <a href="#" id="or-note-${entityType}-${id}" onclick="orNote('${entityType}','${String(id).replace(/'/g, "\\'")}');return false"
+      title="${note ? note.replace(/"/g, '&quot;') : 'Add a note'}"
+      style="font-size:11px;text-decoration:none;color:${note ? 'var(--teal)' : '#cbd5e1'}">✎</a>
+    <span id="or-msg-${entityType}-${id}" style="font-size:10px;color:var(--text-muted)"></span>
+  </span>`;
+}
+
+// window.orSet, not a bare async declaration: an inline onchange resolves against window, and Annex B does
+// NOT hoist an async function out of a block. That is what silently broke the Agent Control Run button.
+window.orSet = async function orSet(entityType, id, sel, note) {
+  const msg = document.getElementById(`or-msg-${entityType}-${id}`);
+  const prev = orStatusOf(entityType, id);
+  const next = sel && sel.value;
+  if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = '…'; }
+  const res = await API('/outreach', { method: 'PUT', body: JSON.stringify({
+    entity_type: entityType, entity_id: id, status: next, note: note || undefined }) }).catch(e => ({ error: e.message }));
+  if (res && res.error) {
+    // Put the control back where it was and show the server's own words. Guessing the reason here would be
+    // the client computing an authorisation answer it does not own.
+    if (sel) sel.value = prev;
+    if (msg) { msg.style.color = '#E24B4A'; msg.textContent = res.error.slice(0, 60); }
+    return;
+  }
+  OR.status[entityType] = OR.status[entityType] || {};
+  OR.status[entityType][String(id)] = Object.assign({}, OR.status[entityType][String(id)] || {},
+    { status: next, note: note != null ? note : (OR.status[entityType][String(id)] || {}).note });
+  if (sel) { sel.style.color = OR_COLOR[next] || '#334155'; sel.style.fontWeight = next === 'new' ? '400' : '600'; }
+  orAdjustBar(entityType, prev, next);
+  if (msg) {
+    msg.style.color = '#1D9E75';
+    msg.textContent = res.deal ? (res.deal.created ? `✓ deal #${res.deal.id} created` : `✓ deal #${res.deal.id}`) : '✓';
+    setTimeout(() => { if (msg.textContent.startsWith('✓')) msg.textContent = ''; }, res.deal ? 6000 : 1800);
+  }
+};
+
+// Move one count from the old status to the new one, in place. Re-fetching the summary after every change
+// would be a request per click and would still not re-render the bar any more accurately.
+function orAdjustBar(entityType, from, to) {
+  const sum = OR.summary[entityType];
+  if (!sum || from === to) return;
+  sum.counts[from] = Math.max(0, (sum.counts[from] || 0) - 1);
+  sum.counts[to] = (sum.counts[to] || 0) + 1;
+  const el = document.getElementById(`or-bar-${entityType}`);
+  if (el) el.outerHTML = orBar(entityType);
+}
+
+window.orNote = async function orNote(entityType, id) {
+  const row = (OR.status[entityType] || {})[String(id)] || {};
+  const next = prompt('Note for this row (optional):', row.note || '');
+  if (next === null) return;
+  const sel = document.getElementById(`or-sel-${entityType}-${id}`);
+  await window.orSet(entityType, id, sel || { value: orStatusOf(entityType, id) }, next.trim());
+  const a = document.getElementById(`or-note-${entityType}-${id}`);
+  if (a) { a.style.color = next.trim() ? 'var(--teal)' : '#cbd5e1'; a.title = next.trim() || 'Add a note'; }
+};
+
 const pct = (v,t) => t>0 ? Math.round((v/t)*100) : 0;
 const today = () => new Date().toISOString().slice(0,10);
 const thisMonth = () => new Date().toISOString().slice(0,7);
@@ -769,10 +903,14 @@ const NAV_SECTIONS = [
   {title:'AROS SOURCING', access:['admin','procurement','business_dev'], items:[
     {id:'aros-establishments', label:'FDA Establishments', icon:'🏭'},
   ]},
+  // access:'*' — everyone. Outreach lives here rather than under a product because it SPANS products: it
+  // shows the lists the viewer can see, so a partner sees their own events and nothing else, and no
+  // product owns it. It is scoped by the same boundary as everything else, so '*' widens nothing.
   {title:'OPERATIONS', access:'*', items:[
     {id:'my-tasks', label:'My Tasks', icon:'✓'},
     {id:'my-kpis', label:'My KPIs', icon:'📈'},
     {id:'my-performance', label:'My Performance', icon:'🥇'},
+    {id:'outreach', label:'Outreach', icon:'📣'},
   ]},
   {title:'TEAM', access:['admin','director'], items:[
     {id:'team', label:'Team Management', icon:'👥'},
@@ -904,7 +1042,7 @@ const PRODUCTS = [
   // execution-graph, decision-engine, my-activity) — they stay non-navigable and never surface
   // in product mode either (pageVisibleToRole is false for anything not in the classic nav).
   { key:'platform', label:'Platform', icon:'⚙️', kind:'global', pages:['team','agent-control','settings','sku-economics','data-pipeline','execution-graph','decision-engine'] },
-  { key:'me',       label:'Me',       icon:'👤', kind:'global', pages:['my-tasks','my-kpis','my-performance','my-activity'] },
+  { key:'me',       label:'Me',       icon:'👤', kind:'global', pages:['my-tasks','my-kpis','my-performance','my-activity','outreach'] },
 ];
 // DEFAULT ON as of the final nav model. The product shell IS the nav now: held products, plus Platform
 // for a super admin, plus Me.
@@ -1624,7 +1762,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -2003,6 +2141,93 @@ async playbook() {
     `).join('')}
   `;
 },
+
+// ── OUTREACH — who is reaching out, and who is not ─────────────────────────────
+//
+// A cross-list page, not six per-list bars. "How far through SiteNex are we" and "who is reaching out" are
+// different questions, and the second one's answer spans every list — so it cannot be assembled from the
+// bars above each table.
+//
+// THE SILENCE IS THE POINT. A list nobody has touched in a week has to be visible without anyone going
+// looking for it, so it is its own section, rendered first when it is non-empty, and it is computed from
+// the set of lists the viewer can SEE minus the ones with events — never from the events, which by
+// definition cannot mention a list nobody touched.
+async function outreachPage() {
+  const c = document.getElementById('content');
+  const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const days = window._orDays || 7;
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading outreach activity…</p>';
+  const res = await API('/outreach/overview?days=' + days).catch(e => ({ error: e.message }));
+  if (!res || res.error) {
+    c.innerHTML = `<div class="card"><div class="card-title">Outreach</div><p style="color:#dc2626">${esc(res && res.error || 'Could not load')}</p></div>`;
+    return;
+  }
+  const win = [[7, 'this week'], [14, '14 days'], [30, '30 days'], [90, '90 days']]
+    .map(([d, l]) => `<button class="btn btn-sm ${d === days ? 'btn-teal' : 'btn-outline'}" onclick="orDays(${d})">${l}</button>`).join(' ');
+
+  const people = res.people || [];
+  const chip = (st, n) => `<span style="white-space:nowrap;margin-right:12px"><strong style="color:${OR_COLOR[st] || '#475569'}">${n}</strong> <span style="color:var(--text-muted)">${(OR_LABEL[st] || st).toLowerCase()}</span></span>`;
+
+  // BY PERSON. Everyone who touched anything, busiest first. People with zero are not invented here — the
+  // roster is not this page's business — but a person who did nothing shows as absent, which is the answer.
+  const peopleRows = people.length ? people.map(p => `<tr>
+      <td style="padding:6px 8px"><strong>${esc(p.person)}</strong></td>
+      <td style="padding:6px 8px;text-align:right"><strong>${p.total}</strong></td>
+      <td style="padding:6px 8px">${Object.entries(p.by_status).sort((a, b) => b[1] - a[1]).map(([st, n]) => chip(st, n)).join('')}</td>
+    </tr>`).join('') : `<tr><td colspan="3" style="padding:10px 8px;color:var(--text-muted)">Nobody recorded any outreach in this window.</td></tr>`;
+
+  const lists = res.by_list || [];
+  const listRows = lists.map(l => `<tr>
+      <td style="padding:6px 8px">${esc(l.label)}</td>
+      <td style="padding:6px 8px;text-align:right"><strong style="color:${l.events ? '#1a202c' : '#E24B4A'}">${l.events}</strong></td>
+      <td style="padding:6px 8px">${(l.pages || []).map(pg => `<a href="#" onclick="navigate('${pg}');return false" style="color:var(--teal);text-decoration:none;font-size:11px;margin-right:8px">${pg}</a>`).join('')}</td>
+    </tr>`).join('');
+
+  const byStatus = Object.entries(res.by_status || {}).sort((a, b) => b[1] - a[1]);
+
+  c.innerHTML = `
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+      <div><div class="card-title" style="margin:0">Outreach — who is reaching out</div>
+        <div style="font-size:12px;color:var(--text-muted)">${res.total_events} status change${res.total_events === 1 ? '' : 's'} in the last ${res.since_days} days, across every list you can see.</div></div>
+      <div style="display:flex;gap:6px">${win}</div>
+    </div>
+
+    ${(res.silent || []).length ? `<div class="card" style="border-color:#E24B4A">
+      <div class="card-title" style="margin:0 0 6px;color:#E24B4A">Silence — no outreach at all in ${res.since_days} days</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">These lists have had nothing recorded against them. That is either a list nobody is working, or a list nobody is recording.</div>
+      ${res.silent.map(l => `<div style="padding:4px 0;font-size:13px">
+        <strong>${esc(l.label)}</strong>
+        ${(l.pages || []).map(pg => `<a href="#" onclick="navigate('${pg}');return false" style="color:var(--teal);text-decoration:none;font-size:11px;margin-left:8px">open ${pg} →</a>`).join('')}
+      </div>`).join('')}
+    </div>` : `<div class="card" style="border-color:#1D9E75"><div style="font-size:13px;color:#1D9E75">Every list you can see has had outreach recorded in the last ${res.since_days} days.</div></div>`}
+
+    <div class="card">
+      <div class="card-title">By person</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px">
+          <th style="padding:6px 8px">Person</th><th style="padding:6px 8px;text-align:right">Changes</th><th style="padding:6px 8px">What they moved</th>
+        </tr></thead><tbody>${peopleRows}</tbody>
+      </table>
+    </div>
+
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+      <div class="card" style="flex:1;min-width:280px">
+        <div class="card-title">By list</div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px">
+            <th style="padding:6px 8px">List</th><th style="padding:6px 8px;text-align:right">Events</th><th style="padding:6px 8px">Go to</th>
+          </tr></thead><tbody>${listRows}</tbody>
+        </table>
+      </div>
+      <div class="card" style="flex:1;min-width:260px">
+        <div class="card-title">By status moved to</div>
+        ${byStatus.length ? byStatus.map(([st, n]) => `<div style="padding:4px 0;font-size:13px">${chip(st, n)}</div>`).join('')
+          : '<div style="font-size:13px;color:var(--text-muted)">Nothing moved in this window.</div>'}
+      </div>
+    </div>`;
+}
+pages['outreach'] = outreachPage;
+window.orDays = function orDays(d) { window._orDays = d; pages['outreach'](); };
 
 // ── TEAM MANAGEMENT ───────────────────────────────────────────────────────────
 async team() {
@@ -3936,6 +4161,7 @@ pages['research-institutions'] = async function() {
   st.data = res;
   const s = res.summary || {};
   const items = res.items || [];
+  await orLoad('institution', items.map(i => i.id), res.total);
 
   const header = `<div class="card">
     <div class="card-title text-section" style="margin:0">RESEARCH INSTITUTIONS · TRIAL SITES</div>
@@ -3993,6 +4219,7 @@ pages['research-institutions'] = async function() {
       <td style="padding:7px 8px;font-size:12px">
         ${it.contact_name?`<div>${riEsc(it.contact_name)}</div>`:''}
         ${it.contact_email?`<a href="mailto:${riEsc(it.contact_email)}" style="color:var(--awsc-link,#0972d3)">${riEsc(it.contact_email)}</a>`:'<span style="color:var(--text-muted)">—</span>'}</td>
+      <td style="padding:7px 8px">${orCell('institution', it.id)}</td>
     </tr>`).join('');
 
   const table = `<div class="card" style="padding:0">
@@ -4001,11 +4228,12 @@ pages['research-institutions'] = async function() {
         <th style="padding:8px 8px">#</th><th style="padding:8px 8px">Institution</th>
         <th style="padding:8px 8px">Type</th><th style="padding:8px 8px">City</th>
         <th style="padding:8px 8px">Country</th><th style="padding:8px 8px;text-align:right">Trials</th>
-        <th style="padding:8px 8px">Trial-site contact <span style="text-transform:none;font-weight:400">(recruitment, not procurement)</span></th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="7" style="padding:16px;color:var(--text-muted)">No institutions match these filters.</td></tr>'}</tbody>
+        <th style="padding:8px 8px">Trial-site contact <span style="text-transform:none;font-weight:400">(recruitment, not procurement)</span></th>
+        <th style="padding:8px 8px">Outreach</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="8" style="padding:16px;color:var(--text-muted)">No institutions match these filters.</td></tr>'}</tbody>
     </table></div></div>`;
 
-  c.innerHTML = header + caveat + summaryRow + filters + table;
+  c.innerHTML = header + orBar('institution') + caveat + summaryRow + filters + table;
 };
 
 // ── AROS SOURCING — FDA establishment registrations ───────────────────────────
@@ -4049,6 +4277,7 @@ pages['aros-establishments'] = async function() {
   st.data = res;
   const s = res.summary || {};
   const items = res.items || [];
+  await orLoad('establishment', items.map(i => i.id), res.total);
 
   const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
     <div>
@@ -4123,6 +4352,7 @@ pages['aros-establishments'] = async function() {
         ${it.establishment_contact_email?`<a href="mailto:${aeEsc(it.establishment_contact_email)}" style="color:var(--awsc-link,#0972d3)">${aeEsc(it.establishment_contact_email)}</a>`:'<span style="color:var(--text-muted)">—</span>'}
         ${it.is_us_agent?`<div style="font-size:10px;font-weight:700;color:#8a2f2f;margin-top:3px">⚠ US AGENT ON REGISTRANT — use the address above, not the registrant</div>`:''}</td>
       <td style="padding:7px 8px">${aeTierBadge(it.match_tier)}</td>
+      <td style="padding:7px 8px">${orCell('establishment', it.id)}</td>
     </tr>`;
   }).join('');
 
@@ -4132,11 +4362,12 @@ pages['aros-establishments'] = async function() {
         <th style="padding:8px 8px">#</th><th style="padding:8px 8px">Registered firm</th>
         <th style="padding:8px 8px">Country</th><th style="padding:8px 8px">Licensed operations</th>
         <th style="padding:8px 8px;text-align:right">DMFs</th><th style="padding:8px 8px">Establishment contact</th>
-        <th style="padding:8px 8px">Match</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="7" style="padding:16px;color:var(--text-muted)">No establishments match these filters.</td></tr>'}</tbody>
+        <th style="padding:8px 8px">Match</th>
+        <th style="padding:8px 8px">Outreach</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="8" style="padding:16px;color:var(--text-muted)">No establishments match these filters.</td></tr>'}</tbody>
     </table></div></div>`;
 
-  c.innerHTML = header + summaryRow + agentWarn + filters + table;
+  c.innerHTML = header + orBar('establishment') + summaryRow + agentWarn + filters + table;
 };
 
 pages['cphi-milan'] = async function() {
@@ -4303,6 +4534,10 @@ pages['prospects'] = async function() {
   window._ppState.summary = (res && res.summary) || null;
   // The server tells us the polarity for THIS product; it comes from prospecting config.js.
   if (res && res.prime_signal) window._ppPrime = res.prime_signal;
+  // Outreach status for exactly the rows on THIS page, plus the summary for the bar. The total comes from
+  // the list (the server cannot know the filter), and without it 'new' would read 0 over hundreds of
+  // untouched rows.
+  await orLoad('prospect', window._ppItems.map(i => i.id), window._ppState.total);
 
   // NO in-page product switcher: the launcher already asked. The product is named in the
   // heading so the scope is still visible, but it is not a control here.
@@ -4370,6 +4605,7 @@ pages['prospects'] = async function() {
       <td style="padding:7px 8px;text-align:center">${site}</td>
       <td style="padding:7px 8px">${it.phone?ppEsc(it.phone):'<span style="color:var(--text-muted)">—</span>'}</td>
       <td style="padding:7px 8px">${ppStatusBadge(it.status)}</td>
+      <td style="padding:7px 8px" onclick="event.stopPropagation()">${orCell('prospect', it.id)}</td>
     </tr>`;
   }).join('');
   const totalPages = Math.max(1, Math.ceil(window._ppState.total / window._ppState.pageSize));
@@ -4388,11 +4624,12 @@ pages['prospects'] = async function() {
         <th style="padding:8px">Name</th><th style="padding:8px">City</th><th style="padding:8px">Subtype</th>
         <th style="padding:8px;text-align:right">Rating</th><th style="padding:8px;text-align:right">Reviews</th>
         <th style="padding:8px">Platform</th><th style="padding:8px;text-align:center">Site</th><th style="padding:8px">Phone</th><th style="padding:8px">Status</th>
+        <th style="padding:8px">Outreach</th>
       </tr></thead>
-      <tbody>${rows || '<tr><td colspan="9" style="padding:16px;color:var(--text-muted)">No prospects match this filter.</td></tr>'}</tbody>
+      <tbody>${rows || '<tr><td colspan="10" style="padding:16px;color:var(--text-muted)">No prospects match this filter.</td></tr>'}</tbody>
     </table>${pager}</div>`;
 
-  c.innerHTML = header + summaryRow + filters + table + '<div id="pp-detail"></div>';
+  c.innerHTML = header + orBar('prospect') + summaryRow + filters + table + '<div id="pp-detail"></div>';
 };
 
 function ppSetFilter(key, val){ window._ppFilters[key] = val; window._ppFilters.page = 1; pages['prospects'](); }
@@ -7809,6 +8046,7 @@ pages['sitenex-prospects'] = async function(){
   if (!got.ok) { c.innerHTML = apErrorCard('SiteNex Prospects', got, "pages['sitenex-prospects']()"); return; }
   const res = got.data || {};
   const items = res.items || []; st.total = res.total||0; st.summary = res.summary||null; st.facets = res.facets||null;
+  await orLoad('prospect', items.map(i => i.id), st.total);
   // First render: learn the shipping subtypes from the server and re-render with them applied.
   const shipping = (res.facets && res.facets.shipping_subtypes) || [];
   if (shipping.length && !window._apShipping) window._apShipping = shipping;
@@ -7880,12 +8118,13 @@ pages['sitenex-prospects'] = async function(){
       + '<td style="padding:7px 8px;text-align:right">'+(it.rating_count==null?apDash:it.rating_count.toLocaleString())+'</td>'
       + '<td style="padding:7px 8px">'+(it.package_label?apEsc(it.recommended_package):apDash)+'</td>'
       + '<td style="padding:7px 8px;text-align:center">'+(it.agency_flag?'<span title="someone may already be looking after this site" style="color:#d97706">⚠</span>':apDash)+'</td>'
+    + '<td style="padding:7px 8px" onclick="event.stopPropagation()">'+orCell('prospect', it.id)+'</td>'
       + '</tr>';
     // The detail row is ALWAYS rendered, hidden unless open, so apToggle is a display flip rather
     // than a re-render. Everything it shows is already in the list payload — there is nothing to
     // fetch on expand.
     const lines = (it.findings||[]).map(x => '<li style="margin:3px 0">'+apEsc(x)+'</li>').join('') || '<li style="color:var(--text-muted)">no findings recorded</li>';
-    const detail = '<tr id="ap-det-'+it.id+'"'+(isOpen?'':' style="display:none"')+'><td colspan="9" style="background:var(--light);padding:10px 14px 14px 22px">'
+    const detail = '<tr id="ap-det-'+it.id+'"'+(isOpen?'':' style="display:none"')+'><td colspan="10" style="background:var(--light);padding:10px 14px 14px 22px">'
       + '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:4px">What&rsquo;s wrong with it</div>'
       + '<ul style="margin:0 0 8px 16px;padding:0;font-size:13px">'+lines+'</ul>'
       + (it.agency_note ? '<div style="font-size:12px;color:#d97706;margin-bottom:6px">⚠ Careful: '+apEsc(it.agency_note)+'</div>' : '')
@@ -7909,11 +8148,12 @@ pages['sitenex-prospects'] = async function(){
     + '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">'
     + '<th style="padding:8px">Business</th><th style="padding:8px">Subtype</th><th style="padding:8px">City</th><th style="padding:8px">Phone</th><th style="padding:8px">Email</th>'
     + '<th style="padding:8px;text-align:right">Site score</th><th style="padding:8px;text-align:right">Reviews</th><th style="padding:8px">Package</th><th style="padding:8px;text-align:center">Agency</th>'
+    + '<th style="padding:8px">Outreach</th>'
     + '</tr></thead><tbody>'
-    + (rows || '<tr><td colspan="9" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
+    + (rows || '<tr><td colspan="10" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
     + '</tbody></table>'+pager+'</div>';
 
-  c.innerHTML = header + summaryRow + filters + table;
+  c.innerHTML = header + orBar('prospect') + summaryRow + filters + table;
 };
 
 pages['sitenex-deals'] = async function(){

@@ -13,9 +13,9 @@ const { STATUSES, DEFAULT_STATUS, ENTITIES, isStatus } = require('./registry');
 const { statusFor, setStatus, summary, activity, history } = require('./index');
 
 // ── a fake that behaves like the table, including the unique constraint ─────────
-let OUTREACH = [], EVENTS = [], ENTITY_ROWS = {}, SEQ = 1;
+let OUTREACH = [], EVENTS = [], ENTITY_ROWS = {}, SEQ = 1, DEALS = [];
 function reset() {
-  OUTREACH = []; EVENTS = []; SEQ = 1;
+  OUTREACH = []; EVENTS = []; SEQ = 1; DEALS = [];
   ENTITY_ROWS = {
     prospects: [{ id: 1, product: 'golfnex' }, { id: 2, product: 'golfnex' },
                 { id: 3, product: 'sitenex' }, { id: 4, product: null }],
@@ -62,6 +62,15 @@ const query = async (sql, params = []) => {
       OUTREACH.push(row);
     }
     return { rows: [row] };
+  }
+  if (/^SELECT id, status FROM sitenex_deals WHERE prospect_id/.test(s)) {
+    const d = DEALS.find(x => String(x.prospect_id) === String(params[0]));
+    return { rows: d ? [d] : [] };
+  }
+  if (/^INSERT INTO sitenex_deals/.test(s)) {
+    const d = { id: DEALS.length + 100, prospect_id: params[0], status: 'signed', owner_user_id: params[1] };
+    DEALS.push(d);
+    return { rows: [d] };
   }
   if (/^INSERT INTO outreach_events/.test(s)) {
     const [outreach_id, from_status, to_status, by_user_id, by_email, note] = params;
@@ -371,4 +380,83 @@ test('the HTTP surface: read, write, summary, activity, history, vocabulary', as
   } finally {
     server.close(); db.query = realQuery; db.withTransaction = realTxn;
   }
+});
+
+// ── won → a SiteNex deal, rather than the same fact in two places ───────────────
+test("a SiteNex prospect reaching 'won' creates a deal", async () => {
+  reset();
+  const r = await set({ entityType: 'prospect', entityId: 3, status: 'won' });   // id 3 is sitenex
+  assert.equal(r.ok, true);
+  assert.ok(r.deal, 'the response names the deal, so the UI can say which one');
+  assert.equal(r.deal.created, true);
+  assert.equal(r.deal.status, 'signed', "won MEANS signed in this vocabulary");
+  assert.equal(DEALS.length, 1);
+  assert.equal(String(DEALS[0].prospect_id), '3', 'linked by prospect_id — the natural key, no new column');
+});
+
+test('re-marking won LINKS the existing deal instead of making a second', async () => {
+  reset();
+  await set({ entityType: 'prospect', entityId: 3, status: 'won' });
+  const again = await set({ entityType: 'prospect', entityId: 3, status: 'won' });
+  assert.equal(again.deal.created, false, 'found, not created');
+  assert.equal(DEALS.length, 1, 'one deal per prospect');
+  assert.equal(EVENTS.length, 2, 'but the second attempt is still logged');
+});
+
+test('won on a NON-sitenex prospect creates no deal', async () => {
+  reset();
+  const r = await set({ entityType: 'prospect', entityId: 1, status: 'won' });   // golfnex
+  assert.equal(r.ok, true);
+  assert.equal(r.deal, undefined, 'a golfnex win is not a SiteNex deal');
+  assert.equal(DEALS.length, 0);
+});
+
+test('a non-won status on a sitenex prospect creates no deal', async () => {
+  reset();
+  await set({ entityType: 'prospect', entityId: 3, status: 'interested' });
+  assert.equal(DEALS.length, 0);
+});
+
+// ── the cross-list overview, including the silence ──────────────────────────────
+test('overview: by person, by list, by status, and the SILENCE', async () => {
+  reset();
+  await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
+  await set({ entityType: 'prospect', entityId: 2, status: 'contacted' });
+  await set({ entityType: 'institution', entityId: 10, status: 'interested' });
+
+  const o = await require('./index').overview({ held: STAFF, sinceDays: 7 }, deps);
+  assert.equal(o.total_events, 3);
+  assert.equal(o.people[0].total, 3, 'one person did all three');
+  const byList = Object.fromEntries(o.by_list.map(l => [l.entity_type, l.events]));
+  assert.equal(byList.prospect, 2);
+  assert.equal(byList.institution, 1);
+  assert.deepEqual(o.by_status, { contacted: 2, interested: 1 });
+
+  // THE ROW THAT MATTERS: lists with zero events, named without anyone going looking.
+  const silent = o.silent.map(l => l.entity_type).sort();
+  assert.deepEqual(silent, ['establishment', 'exhibitor', 'lead', 'study'],
+    'every list the viewer can see and nobody has touched');
+  assert.ok(o.silent.every(l => l.pages && l.pages.length), 'and each says which page to go to');
+});
+
+test('the silence is computed from the LISTS, not from the events', async () => {
+  // A silent list cannot appear in the event data by definition, so deriving it from events would always
+  // report none. With zero events every visible list must be silent.
+  reset();
+  const o = await require('./index').overview({ held: STAFF, sinceDays: 7 }, deps);
+  assert.equal(o.total_events, 0);
+  assert.equal(o.silent.length, Object.keys(ENTITIES).length, 'all six');
+  assert.deepEqual(o.people, []);
+});
+
+test('overview is product-scoped — a partner sees only their own lists and events', async () => {
+  reset();
+  await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });   // golfnex
+  await set({ entityType: 'prospect', entityId: 3, status: 'won' });         // sitenex
+  const o = await require('./index').overview({ held: ['sitenex'], sinceDays: 7 }, deps);
+  assert.equal(o.total_events, 1, 'only the sitenex event');
+  // A sitenex-only holder sees the prospect list (it has sitenex rows) and no abiozen/aros list at all.
+  const types = o.by_list.map(l => l.entity_type).sort();
+  assert.deepEqual(types, ['prospect'], 'the abiozen and aros lists are not theirs to be silent about');
+  assert.deepEqual(o.silent, [], 'and the one list they can see is not silent');
 });

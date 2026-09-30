@@ -83,13 +83,14 @@
 //   PUT  /api/outreach                     outreach + the entity's own table    YES → scoped, row-checked
 //   GET  /api/outreach/summary             outreach                            YES → scoped
 //   GET  /api/outreach/activity            outreach, outreach_events           YES → scoped
+//   GET  /api/outreach/overview            outreach, outreach_events           YES → scoped
 //   GET  /api/outreach/history             outreach, outreach_events           YES → scoped
 //   GET  /api/outreach/vocabulary          (none — constants)                  —
 //   GET  /api/notifications                notifications                       YES → scoped
 //   PUT  /api/notifications/:id/read       notifications                       YES → scoped
 //   POST /api/notifications/read-all       notifications                       YES → scoped
 //
-// 8 of 25. The other 17 are either user-scoped by `user_id` already or hold no product data at all;
+// 9 of 26. The other 17 are either user-scoped by `user_id` already or hold no product data at all;
 // prospects, content_queue, ingested_events and event_sources appear in no shared handler. The three
 // notification routes stay 'shared' — reclassifying them 'internal' would hide a product's own alerts
 // from the people running that product — and scope their DATA instead, via
@@ -116,7 +117,8 @@ const SHARED = [
   // scoped (src/lib/outreach uses productScopeSql) and the WRITE additionally checks the product of the
   // ROW it is annotating, which the route's own product cannot express.
   'GET /api/outreach', 'PUT /api/outreach', 'GET /api/outreach/summary',
-  'GET /api/outreach/activity', 'GET /api/outreach/history', 'GET /api/outreach/vocabulary',
+  'GET /api/outreach/activity', 'GET /api/outreach/overview', 'GET /api/outreach/history',
+  'GET /api/outreach/vocabulary',
 ];
 
 // ── internal: not one product's, but not for an outside account either ────────
