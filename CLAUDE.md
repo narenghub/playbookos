@@ -61,3 +61,36 @@ One file, several inline `<script>` blocks, no build step. It is the whole front
 
 `railway ssh 'node scripts/<name>.js'`. The live `verify-*.js` scripts are self-cleaning: they create
 fixtures, assert, delete in a `finally`, and report leaks. They all exit non-zero on failure.
+
+## Verification cleanup — delete only what you created, by id
+
+These scripts run against **production**. Their cleanup is the most dangerous code in the repo, because
+it is the part nobody reads.
+
+1. **A verification script may only delete rows it created, by explicit id.** Never by timestamp, never
+   by pattern, never by "recent". Record each id as you insert it and delete exactly those.
+
+2. **Never assert a table is empty.** Assert *"my fixtures are gone"*.
+
+```js
+// NO — deletes a deal somebody just closed
+await query(`DELETE FROM sitenex_deals WHERE created_at > NOW() - INTERVAL '10 minutes'`);
+const n = (await query(`SELECT COUNT(*)::int n FROM sitenex_deals`)).rows[0].n;
+if (n) fail++;                      // "the table is empty" — true only until the product is used
+
+// YES — record what you made, remove exactly that, check only that
+if (res.deal) dealIds.push(res.deal.id);
+for (const id of dealIds) await query(`DELETE FROM sitenex_deals WHERE id = $1`, [id]);
+const mine = (await query(`SELECT COUNT(*)::int n FROM sitenex_deals WHERE id = ANY($1)`, [dealIds])).rows[0].n;
+if (mine) fail++;
+```
+
+**Why both halves matter.** On 2026-09-30 `verify-outreach-ui-live.js` cleaned up with that ten-minute
+`DELETE`. Nothing of value was lost only because no real deals existed yet. It also silently swept a
+leak in `verify-outreach-live.js` — which marked a prospect `won`, creating a deal by design, and never
+cleaned it up — so one bug hid the other for as long as both were wrong.
+
+Both scripts also asserted their tables end up empty. **That is a statement which becomes false the
+moment the product is used**, and when it starts failing the obvious fix is to widen the `DELETE`. A
+test that pressures the next person toward a more destructive cleanup is worse than no test. Where a
+count has to be compared, compare a **delta** against what was already there, not an absolute.

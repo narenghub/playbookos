@@ -54,9 +54,14 @@ const check=(l,a,e)=>{const ok=JSON.stringify(a)===JSON.stringify(e);if(!ok)fail
  }catch(e){fail++;console.error('ERR',e.message);}
  finally{
   for(const [ty,id] of made) await query(`DELETE FROM outreach WHERE entity_type=$1 AND entity_id=$2`,[ty,id]).catch(()=>{});
+  // MY rows, not the table. "outreach is empty" is true only until somebody records real outreach, and a
+  // check that then fails forever invites the next person to widen the DELETE above.
+  let mine=0;
+  for(const [ty,id] of made) mine+=(await query(
+    `SELECT COUNT(*)::int n FROM outreach WHERE entity_type=$1 AND entity_id=$2`,[ty,id])).rows[0].n;
   const n=(await query(`SELECT COUNT(*)::int n FROM outreach`)).rows[0].n;
-  console.log(`\ncleanup: outreach ${n} rows`);
-  if(n) fail++;
+  console.log(`\ncleanup: ${mine} of my ${made.length} row(s) left behind; table now holds ${n}`);
+  if(mine) fail++;
   console.log(fail===0?'\n✅ ALL CHECKS PASSED':`\n❌ ${fail} FAILED`);
   process.exit(fail===0?0:1);
  }

@@ -37,8 +37,11 @@ const seen = async (held) => {
     check("the other two stay unread — one click does not clear the org", stillUnread, 2);
   } catch (e) { fail++; console.error('ERROR:', e.message); }
   finally {
-    await query(`DELETE FROM notifications WHERE title LIKE $1`, [TAG + '%']).catch(() => {});
-    const leaked = (await query(`SELECT COUNT(*)::int n FROM notifications WHERE title LIKE $1`, [TAG + '%'])).rows[0].n;
+    // BY ID — `ids` was already being collected, the cleanup simply was not using it. A title LIKE is a
+    // pattern doing the selecting, and a real notification sharing the prefix would be deleted with ours.
+    for (const id of ids) await query(`DELETE FROM notifications WHERE id = $1`, [id]).catch(() => {});
+    const leaked = ids.length
+      ? (await query(`SELECT COUNT(*)::int n FROM notifications WHERE id = ANY($1)`, [ids])).rows[0].n : 0;
     console.log(`\ncleanup: ${ids.length} fixture row(s) deleted, ${leaked} leaked`);
     if (leaked) fail++;
     console.log(fail === 0 ? '\n✅ ALL CHECKS PASSED against the real notifications table' : `\n❌ ${fail} CHECK(S) FAILED`);

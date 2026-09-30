@@ -11,7 +11,10 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { query } = require('../src/lib/db');
 const P = process.env.PORT || 3000;
-let fail = 0, fixtures = [];
+// Hoisted so the `finally` can delete BY ID. They used to be declared inside the try, which is why the
+// cleanup reached for a timestamp instead — and a ten-minute window against production would have taken
+// out any unassigned deal somebody had just created.
+let fail = 0, fixtures = [], dealIds = [], partnerBId = null;
 const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
   if (!ok) fail++; console.log(`  ${ok ? '✅' : '❌'} ${l}${ok ? '' : `  → expected ${JSON.stringify(e)}, got ${JSON.stringify(a)}`}`); };
 
@@ -53,7 +56,8 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     check('users has partner_id', (await query(`SELECT COUNT(*)::int n FROM information_schema.columns WHERE table_name='users' AND column_name='partner_id'`)).rows[0].n, 1);
 
     console.log('\n4. ROW-LEVEL DEAL SCOPING, with two real partner rows');
-    const pb = (await query(`INSERT INTO partners (name, primary_contact_email) VALUES ('VERIFY Partner B','b@example.invalid') ON CONFLICT (name) DO UPDATE SET status='active' RETURNING id`)).rows[0].id;
+    partnerBId = (await query(`INSERT INTO partners (name, primary_contact_email) VALUES ('VERIFY Partner B','b@example.invalid') ON CONFLICT (name) DO UPDATE SET status='active' RETURNING id`)).rows[0].id;
+    const pb = partnerBId;
     const mk = async (label, partnerId) => {
       const id = crypto.randomUUID();
       await query(`INSERT INTO users (id,email,name,role,is_active,joined_at,permissions_version,partner_id)
@@ -65,7 +69,6 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     const ua = await mk('partnerA', pt[0].id);
     const ub = await mk('partnerB', pb);
     // one deal each, plus a self-sourced one
-    const dealIds = [];
     for (const [pid, note] of [[pt[0].id, 'A'], [pb, 'B'], [null, 'self']]) {
       const r = await query(`INSERT INTO sitenex_deals (status, partner_id, created_at, updated_at)
                              VALUES ('new',$1,NOW(),NOW()) RETURNING id`, [pid]);
@@ -90,14 +93,21 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
       await query(`DELETE FROM user_product_grants_log WHERE user_id=$1`, [id]).catch(() => {});
       await query(`DELETE FROM users WHERE id=$1 AND email LIKE 'verify-%'`, [id]).catch(() => {});
     }
-    await query(`DELETE FROM sitenex_deals WHERE partner_id IN (SELECT id FROM partners WHERE name='VERIFY Partner B') OR (partner_id IS NULL AND status='new' AND created_at > NOW() - INTERVAL '10 minutes')`).catch(() => {});
-    await query(`DELETE FROM sitenex_deals WHERE created_at > NOW() - INTERVAL '10 minutes'`).catch(() => {});
-    await query(`DELETE FROM partners WHERE name='VERIFY Partner B'`).catch(() => {});
+    // BY ID. The three deals this script inserted, and nothing else — the previous version's second clause
+    // (`partner_id IS NULL AND status='new' AND created_at > NOW() - INTERVAL '10 minutes'`) matched any
+    // unassigned new deal in that window, whoever made it.
+    for (const id of dealIds) await query(`DELETE FROM sitenex_deals WHERE id=$1`, [id]).catch(() => {});
+    if (partnerBId) await query(`DELETE FROM partners WHERE id=$1`, [partnerBId]).catch(() => {});
     const leakU = (await query(`SELECT COUNT(*)::int n FROM users WHERE email LIKE 'verify-partner%'`)).rows[0].n;
-    const leakD = (await query(`SELECT COUNT(*)::int n FROM sitenex_deals`)).rows[0].n;
-    const leakP = (await query(`SELECT COUNT(*)::int n FROM partners`)).rows[0].n;
-    console.log(`\ncleanup: ${leakU} user(s) leaked, sitenex_deals back to ${leakD}, partners back to ${leakP}`);
-    if (leakU || leakD !== 0 || leakP !== 1) fail++;
+    // MY rows, not the tables. `sitenex_deals` being empty and `partners` holding exactly 1 are facts about
+    // today; the moment a real deal or a second partner exists, an assertion on those numbers fails forever
+    // and the obvious fix is to widen the DELETE above.
+    const leakD = dealIds.length
+      ? (await query(`SELECT COUNT(*)::int n FROM sitenex_deals WHERE id = ANY($1)`, [dealIds])).rows[0].n : 0;
+    const leakP = partnerBId
+      ? (await query(`SELECT COUNT(*)::int n FROM partners WHERE id = $1`, [partnerBId])).rows[0].n : 0;
+    console.log(`\ncleanup: ${leakU} user(s), ${leakD} of my ${dealIds.length} deal(s), ${leakP} partner row(s) left behind`);
+    if (leakU || leakD || leakP) fail++;
     console.log(fail === 0 ? '\n✅ ALL CHECKS PASSED — rename complete, partners are records, deals are partner-scoped'
                            : `\n❌ ${fail} CHECK(S) FAILED`);
     process.exit(fail === 0 ? 0 : 1);
