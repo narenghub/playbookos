@@ -23,6 +23,8 @@ const { runProspecting, runQualifyProspects } = require('../lib/agents/prospecti
 const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/config');
 const { heldProducts, effectiveProducts, productScopeSql } = require('../lib/products/held');
 const { partnerScopeSql } = require('../lib/products/partner-scope');
+const outreach = require('../lib/outreach');
+const { STATUSES: OUTREACH_STATUSES, ENTITIES: OUTREACH_ENTITIES, isEntityType } = require('../lib/outreach/registry');
 const { PRODUCTS: PRODUCT_KEYS, GRANTABLE } = require('../lib/products/route-map');
 const { checkGrantChange, routeCountsByProduct, describeChange } = require('../lib/products/grants');
 const riResolve = require('../lib/agents/research-intelligence/resolve');
@@ -5202,6 +5204,89 @@ router.put('/events/cphi/exhibitors/:id', authMiddleware, requireTier('intellige
     if (!upd.rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(upd.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── OUTREACH STATUS — one system, every list ───────────────────────────────────
+//
+// Classified 'shared' in the route map, for the same reason the notifications routes are: the ROUTE is
+// safe for anyone with a login, and the TABLE is product-bearing, so the DATA is scoped
+// (productScopeSql, via src/lib/outreach). Visibility follows the product boundary and nothing new is
+// invented here — which was the instruction and is also the only way it stays correct.
+//
+// The WRITE additionally checks the product of the ROW being annotated, not of the route: a caller who
+// holds golfnex must not be able to file outreach against a sitenex prospect just because the route
+// admitted them.
+
+// GET /outreach?entity_type=prospect&ids=1,2,3 — status for the rows a list is already showing.
+router.get('/outreach', authMiddleware, async (req, res) => {
+  try {
+    const entityType = String(req.query.entity_type || '');
+    const ids = String(req.query.ids || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 500);
+    if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
+    const held = await heldProducts(req.user.id);
+    res.json({ entity_type: entityType, statuses: await outreach.statusFor(entityType, ids, held) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT /outreach — record an outcome. One control, one call, no form.
+router.put('/outreach', authMiddleware, async (req, res) => {
+  try {
+    const { entity_type, entity_id, status, note, next_action_at } = req.body || {};
+    if (!entity_type || entity_id == null || !status) {
+      return res.status(400).json({ error: 'entity_type, entity_id and status are required' });
+    }
+    const held = await heldProducts(req.user.id);
+    const r = await outreach.setStatus({
+      entityType: entity_type, entityId: entity_id, status, note,
+      nextActionAt: next_action_at || null, user: req.user, held,
+    });
+    if (!r.ok) {
+      const code = r.code === 'product_not_held' ? 403 : (r.code === 'entity_not_found' ? 404 : 400);
+      return res.status(code).json({ error: r.error, code: r.code });
+    }
+    console.log(`[outreach] ${req.user.email} ${entity_type}#${entity_id} ${r.from} → ${r.to}`);
+    res.json({ success: true, from: r.from, to: r.to, changed: r.changed, row: r.row });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /outreach/summary?entity_type=prospect&total=1524 — the status bar above a list.
+// `total` is how many rows the list has; without it 'new' is reported as 0 rather than invented, because
+// the absence of an outreach row IS 'new' and only the caller knows the denominator.
+router.get('/outreach/summary', authMiddleware, async (req, res) => {
+  try {
+    const entityType = String(req.query.entity_type || '');
+    if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
+    const total = req.query.total != null && req.query.total !== '' ? Math.max(0, parseInt(req.query.total, 10) || 0) : null;
+    const held = await heldProducts(req.user.id);
+    res.json(await outreach.summary(entityType, { held, totalEntities: total, product: req.query.product || null }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /outreach/activity?days=7 — who changed what. The question current status cannot answer.
+router.get('/outreach/activity', authMiddleware, async (req, res) => {
+  try {
+    const held = await heldProducts(req.user.id);
+    res.json(await outreach.activity({
+      held, sinceDays: req.query.days || 7,
+      entityType: req.query.entity_type || null, userId: req.query.user_id || null,
+    }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /outreach/history?entity_type=&entity_id= — one entity's trail, for the inline control.
+router.get('/outreach/history', authMiddleware, async (req, res) => {
+  try {
+    const entityType = String(req.query.entity_type || '');
+    if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
+    const held = await heldProducts(req.user.id);
+    res.json({ events: await outreach.history(entityType, req.query.entity_id, held) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /outreach/vocabulary — the 8 statuses, so the dropdown is not a second copy of the list.
+router.get('/outreach/vocabulary', authMiddleware, async (req, res) => {
+  res.json({ statuses: OUTREACH_STATUSES, entity_types: Object.fromEntries(
+    Object.entries(OUTREACH_ENTITIES).map(([k, v]) => [k, { label: v.label, pages: v.pages }])) });
 });
 
 // ── Notifications — the pnav top-bar bell feed ────────────────────────────────

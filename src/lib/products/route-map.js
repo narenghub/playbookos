@@ -60,7 +60,7 @@
 // which tables does its handler read, and does any of them carry a `product` column?
 //
 // Tables that carry `product`: content_queue, event_sources, ingested_events, notifications,
-// prospects, user_products.
+// outreach, prospects, user_products.
 //
 //   route                                  tables                              product column?
 //   GET  /health                           (none)                              —
@@ -79,11 +79,17 @@
 //   GET  /api/goals/my-week                goals, kpis         (own rows)      no
 //   GET  /api/performance/my               kpis, activity_log  (own rows)      no
 //   PUT  /api/kpis/:id/progress            kpis                                no
+//   GET  /api/outreach                     outreach                            YES → scoped
+//   PUT  /api/outreach                     outreach + the entity's own table    YES → scoped, row-checked
+//   GET  /api/outreach/summary             outreach                            YES → scoped
+//   GET  /api/outreach/activity            outreach, outreach_events           YES → scoped
+//   GET  /api/outreach/history             outreach, outreach_events           YES → scoped
+//   GET  /api/outreach/vocabulary          (none — constants)                  —
 //   GET  /api/notifications                notifications                       YES → scoped
 //   PUT  /api/notifications/:id/read       notifications                       YES → scoped
 //   POST /api/notifications/read-all       notifications                       YES → scoped
 //
-// 3 of 19. The other 16 are either user-scoped by `user_id` already or hold no product data at all;
+// 8 of 25. The other 17 are either user-scoped by `user_id` already or hold no product data at all;
 // prospects, content_queue, ingested_events and event_sources appear in no shared handler. The three
 // notification routes stay 'shared' — reclassifying them 'internal' would hide a product's own alerts
 // from the people running that product — and scope their DATA instead, via
@@ -105,6 +111,12 @@ const SHARED = [
   'GET /api/goals/my-week', 'GET /api/performance/my', 'PUT /api/kpis/:id/progress',
   // own notifications
   'GET /api/notifications', 'PUT /api/notifications/:id/read', 'POST /api/notifications/read-all',
+  // OUTREACH STATUS. Shared for the same reason as notifications: every list has one of these, the route
+  // is safe for anyone with a login, and the `outreach` table carries a product column — so the DATA is
+  // scoped (src/lib/outreach uses productScopeSql) and the WRITE additionally checks the product of the
+  // ROW it is annotating, which the route's own product cannot express.
+  'GET /api/outreach', 'PUT /api/outreach', 'GET /api/outreach/summary',
+  'GET /api/outreach/activity', 'GET /api/outreach/history', 'GET /api/outreach/vocabulary',
 ];
 
 // ── internal: not one product's, but not for an outside account either ────────

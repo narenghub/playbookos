@@ -1,0 +1,189 @@
+// OUTREACH — the one implementation. Read, write, summarise, and who-did-what.
+//
+// SCOPING IS INHERITED, NOT REINVENTED. Every read is narrowed with productScopeSql from
+// products/held.js — the same fragment the notifications feed uses — so a caller sees outreach on the
+// products they hold and nothing else. There are no new access rules here, which was the instruction and
+// is also the only way this stays correct: a second copy of the rules is a second thing to get wrong.
+//
+// 'new' NEEDS NO ROW. That single decision shapes everything below: a list of 1,524 untouched prospects
+// writes nothing, and every count has to ADD the implicit remainder rather than reading it from the table.
+// summary() does that explicitly; forgetting it is the bug that would make the status bar say
+// "0 new" over a list of 1,524 untouched rows.
+
+const { productScopeSql } = require('../products/held');
+const { STATUSES, DEFAULT_STATUS, entity, isEntityType, isStatus } = require('./registry');
+
+const q = (deps) => deps.query || require('../db').query;
+
+// ── read ──────────────────────────────────────────────────────────────────────
+
+// Status for a set of entity ids, as a map { id: row }. Ids missing from the map are 'new'.
+// The caller passes the ids it is already showing, so this never scans the whole table.
+async function statusFor(entityType, ids, held, deps = {}) {
+  if (!isEntityType(entityType) || !ids || !ids.length) return {};
+  const scope = productScopeSql(held, 'o', 3);
+  const r = await q(deps)(
+    `SELECT o.entity_id, o.status, o.owner_user_id, o.last_contacted_at, o.next_action_at, o.note,
+            o.updated_at, u.name AS owner_name
+       FROM outreach o LEFT JOIN users u ON u.id = o.owner_user_id
+      WHERE o.entity_type = $1 AND o.entity_id = ANY($2) AND ${scope.sql}`,
+    [entityType, ids.map(String), ...scope.params]);
+  const out = {};
+  for (const row of r.rows) out[row.entity_id] = row;
+  return out;
+}
+
+// ── write ─────────────────────────────────────────────────────────────────────
+
+// Set a status. Upsert plus an event, in ONE transaction: a status change with no event is the exact gap
+// the events table exists to close, so it must not be reachable.
+//
+// The product is NOT taken from the caller. For an entity whose table carries a product it is read from
+// the row; otherwise it is the registry's fixed value. A client-supplied product would let somebody file
+// outreach under a product they hold against a row belonging to one they do not.
+async function setStatus({ entityType, entityId, status, note, nextActionAt, ownerUserId, user, held }, deps = {}) {
+  if (!isEntityType(entityType)) return { ok: false, code: 'unknown_entity_type', error: `Unknown entity_type '${entityType}'` };
+  if (!isStatus(status)) {
+    return { ok: false, code: 'unknown_status', error: `Unknown status '${status}'. One of: ${STATUSES.join(', ')}` };
+  }
+  const def = entity(entityType);
+  const query = q(deps);
+  const id = String(entityId);
+
+  // 1. Does the entity exist, and which product is it? Read from the row, never from the request.
+  let product = def.product;
+  const idExpr = def.idCast === 'bigint' ? `id = $1::bigint` : `id = $1`;
+  let exists;
+  try {
+    const cols = def.product === 'row' ? 'id, product' : 'id';
+    exists = (await query(`SELECT ${cols} FROM ${def.table} WHERE ${idExpr}`, [id])).rows[0];
+  } catch (e) {
+    // A non-numeric id against a bigint column throws rather than returning nothing.
+    return { ok: false, code: 'bad_entity_id', error: `Not a valid ${def.label} id: ${id}` };
+  }
+  if (!exists) return { ok: false, code: 'entity_not_found', error: `${def.label} ${id} not found` };
+  if (def.product === 'row') {
+    product = exists.product;
+    if (!product) return { ok: false, code: 'entity_has_no_product', error: `${def.label} ${id} has no product` };
+  }
+
+  // 2. The caller must hold that product. This is the same check the boundary makes for the ROUTE, applied
+  //    to the ROW — the route is one product's, the row might not be.
+  if (!(held || []).includes(product)) {
+    return { ok: false, code: 'product_not_held', error: `Forbidden: this ${def.label} belongs to '${product}'` };
+  }
+
+  // 3. Upsert + event, together.
+  const txn = deps.withTransaction || require('../db').withTransaction;
+  let result;
+  await txn(async (c) => {
+    const before = (await c.query(
+      `SELECT id, status FROM outreach WHERE entity_type = $1 AND entity_id = $2`, [entityType, id])).rows[0];
+    const from = before ? before.status : DEFAULT_STATUS;    // no row = 'new'
+    // last_contacted_at only moves when the change MEANS contact happened. Marking something
+    // disqualified is not contact, and stamping it would make "last contacted" a lie.
+    const touched = ['contacted', 'no_response', 'in_progress', 'interested', 'not_interested', 'won'].includes(status);
+    const up = await c.query(
+      `INSERT INTO outreach (entity_type, entity_id, product, status, owner_user_id, note,
+                             next_action_at, last_contacted_at, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7, CASE WHEN $8 THEN NOW() ELSE NULL END, NOW(), NOW())
+       ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+         status = EXCLUDED.status,
+         product = EXCLUDED.product,
+         owner_user_id = COALESCE(EXCLUDED.owner_user_id, outreach.owner_user_id),
+         note = COALESCE(EXCLUDED.note, outreach.note),
+         next_action_at = EXCLUDED.next_action_at,
+         last_contacted_at = CASE WHEN $8 THEN NOW() ELSE outreach.last_contacted_at END,
+         updated_at = NOW()
+       RETURNING *`,
+      [entityType, id, product, status, ownerUserId || (user && user.id) || null,
+       note || null, nextActionAt || null, touched]);
+    const row = up.rows[0];
+    await c.query(
+      `INSERT INTO outreach_events (outreach_id, from_status, to_status, by_user_id, by_email, note)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [row.id, from, status, (user && user.id) || null, (user && user.email) || null, note || null]);
+    result = { ok: true, row, from, to: status, changed: from !== status };
+  });
+  return result;
+}
+
+// ── the summary bar ───────────────────────────────────────────────────────────
+
+// Counts per status for one list, INCLUDING the implicit 'new'.
+//
+// `totalEntities` is how many rows the list has in total (the caller knows it — it is the number already
+// shown). Anything without an outreach row is 'new', so new = total − (rows that have one). Reading 'new'
+// out of the table would report 0 over a list of 1,524 untouched prospects.
+async function summary(entityType, { held, totalEntities = null, product = null } = {}, deps = {}) {
+  if (!isEntityType(entityType)) return null;
+  const scope = productScopeSql(held, 'o', 2);
+  const params = [entityType, ...scope.params];
+  let extra = '';
+  if (product) { extra = ` AND o.product = $${params.length + 1}`; params.push(product); }
+  const rows = (await q(deps)(
+    `SELECT o.status, COUNT(*)::int n FROM outreach o
+      WHERE o.entity_type = $1 AND ${scope.sql}${extra} GROUP BY 1`, params)).rows;
+
+  const counts = {};
+  for (const s of STATUSES) counts[s] = 0;
+  let tracked = 0;
+  for (const r of rows) {
+    // A status not in the vocabulary is still counted, under its own name — the column has no CHECK, so
+    // dropping an unknown value would silently lose rows.
+    counts[r.status] = (counts[r.status] || 0) + r.n;
+    tracked += r.n;
+  }
+  if (totalEntities != null) {
+    counts[DEFAULT_STATUS] = Math.max(0, totalEntities - tracked);
+  }
+  return { entity_type: entityType, counts, tracked, total: totalEntities, order: STATUSES };
+}
+
+// ── who did what ──────────────────────────────────────────────────────────────
+
+// The question current status cannot answer: how many did Vinitha contact last week.
+// Grouped per person per status, over a window, scoped by product like everything else.
+async function activity({ held, sinceDays = 7, entityType = null, userId = null } = {}, deps = {}) {
+  const scope = productScopeSql(held, 'o', 2);
+  const params = [Math.max(1, Math.min(365, Number(sinceDays) || 7)), ...scope.params];
+  let extra = '';
+  if (entityType) { extra += ` AND o.entity_type = $${params.length + 1}`; params.push(entityType); }
+  if (userId) { extra += ` AND e.by_user_id = $${params.length + 1}`; params.push(userId); }
+  const rows = (await q(deps)(
+    `SELECT COALESCE(u.name, e.by_email, '(unknown)') AS person, e.by_user_id, e.by_email,
+            e.to_status, o.entity_type, COUNT(*)::int n, MAX(e.created_at) AS last_at
+       FROM outreach_events e
+       JOIN outreach o ON o.id = e.outreach_id
+       LEFT JOIN users u ON u.id = e.by_user_id
+      WHERE e.created_at > NOW() - ($1 || ' days')::interval AND ${scope.sql}${extra}
+      GROUP BY 1,2,3,4,5
+      ORDER BY 6 DESC`, params)).rows;
+
+  // Rolled up per person so the view reads as "Vinitha: 50 contacted, 3 interested".
+  const byPerson = new Map();
+  for (const r of rows) {
+    const key = r.by_user_id || r.by_email || r.person;
+    if (!byPerson.has(key)) byPerson.set(key, { person: r.person, user_id: r.by_user_id, total: 0, by_status: {}, last_at: r.last_at });
+    const p = byPerson.get(key);
+    p.total += r.n;
+    p.by_status[r.to_status] = (p.by_status[r.to_status] || 0) + r.n;
+    if (r.last_at > p.last_at) p.last_at = r.last_at;
+  }
+  return { since_days: params[0], people: [...byPerson.values()].sort((a, b) => b.total - a.total), rows };
+}
+
+// The full history for one entity, for the inline control's tooltip / detail.
+async function history(entityType, entityId, held, deps = {}) {
+  const scope = productScopeSql(held, 'o', 3);
+  return (await q(deps)(
+    `SELECT e.created_at, e.from_status, e.to_status, e.note,
+            COALESCE(u.name, e.by_email) AS by_person
+       FROM outreach_events e JOIN outreach o ON o.id = e.outreach_id
+       LEFT JOIN users u ON u.id = e.by_user_id
+      WHERE o.entity_type = $1 AND o.entity_id = $2 AND ${scope.sql}
+      ORDER BY e.created_at DESC, e.id DESC LIMIT 50`,
+    [entityType, String(entityId), ...scope.params])).rows;
+}
+
+module.exports = { statusFor, setStatus, summary, activity, history };

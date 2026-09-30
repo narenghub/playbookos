@@ -1,0 +1,105 @@
+// OUTREACH — ONE implementation for every list, and the list of lists.
+//
+// Enumerated from the code, not from memory. Each entry says which table a list is really backed by, how
+// to read an entity's id and product, and what to call a row of it. Adding a list is a line here; that is
+// the whole point of the exercise, because six separate status columns would have drifted within a month.
+//
+// WHAT THE ENUMERATION TURNED UP, beyond the six lists named:
+//   • GolfNex / Favly / Linkabl "prospect lists" are ONE table behind three product filters, so they are
+//     one implementation, not three.
+//   • AROS Establishments, CPHI Milan and Sales Pipeline are also lists of contactable entities and were
+//     not on the list. They are here.
+//   • THREE outreach-ish tables already exist and are deliberately NOT replaced:
+//       research_outreach      generated email DRAFTS per study (subject/body/copied_at) — content, not status
+//       supplier_outreach_log  RFQ emails tied to an rfq_id, with its own replied_at — a send log
+//       linkedin_outreach      per-contact LinkedIn sends, currently empty
+//     None of them is a status tracker for a list, so none of them is what this replaces. Left alone.
+//
+// ── THE CONFLICT WORTH READING BEFORE CHANGING ANYTHING ───────────────────────
+//
+// prospects.status ALREADY EXISTS: new(1,564) / qualified(2,697) / rejected(402). It is NOT an outreach
+// status — it is the QUALIFIER's verdict on whether the row is worth having at all. The two are
+// orthogonal, and collapsing them would be a real loss:
+//
+//     prospects.status   'is this a good target?'    written by the qualifier agent
+//     outreach.status    'where is the conversation?' written by a person after a call
+//
+// A qualified prospect you have contacted is BOTH. If outreach status were written into
+// prospects.status, 'qualified' and 'contacted' would become mutually exclusive and the qualifier's next
+// run would overwrite a human's note. So prospects.status stays exactly as it is, and outreach lives in
+// its own table. Do not "simplify" this into one column.
+
+// product: a literal product key, or 'row' meaning read it from the entity's own product column.
+const ENTITIES = {
+  prospect: {
+    label: 'Prospect',
+    table: 'prospects',
+    idCast: 'bigint',                // prospects.id is BIGSERIAL; entity_id is TEXT, so casts are explicit
+    product: 'row',                  // golfnex / favly / linkabl / sitenex all live in this one table
+    pages: ['prospects', 'sitenex-prospects'],
+  },
+  institution: {
+    label: 'Institution',
+    table: 'research_institutions',
+    idCast: 'bigint',
+    product: 'abiozen',
+    pages: ['research-institutions'],
+  },
+  study: {
+    label: 'Study',
+    table: 'clinical_studies',
+    idCast: 'bigint',
+    product: 'abiozen',
+    pages: ['clinical-demand-intelligence'],
+  },
+  establishment: {
+    label: 'FDA establishment',
+    table: 'fda_establishments',
+    idCast: 'bigint',
+    product: 'aros',
+    pages: ['aros-establishments'],
+  },
+  exhibitor: {
+    label: 'CPHI exhibitor',
+    table: 'cphi_exhibitor_matches',
+    idCast: 'bigint',
+    product: 'abiozen',
+    pages: ['cphi-milan'],
+  },
+  lead: {
+    label: 'Lead',
+    table: 'leads',
+    idCast: 'text',                  // leads.id is TEXT
+    product: 'abiozen',
+    pages: ['sales-pipeline'],
+  },
+};
+
+// ── THE VOCABULARY ────────────────────────────────────────────────────────────
+//
+// Eight values, in lifecycle order. NO CHECK CONSTRAINT: inquiries.status shipped with one and it was
+// dropped (db.js) once the lifecycle outgrew the original six, and this will grow the same way —
+// 'proposal_sent' and 'nurture' are both plausible. The vocabulary lives in a COMMENT on the column and
+// in this array, and the API validates against it so a typo is still rejected at the edge.
+//
+// 'new' NEEDS NO ROW. The absence of an outreach row IS 'new', which is why 1,524 prospects can show as
+// new without writing 1,524 rows. Every count has to account for that — see summary() in index.js.
+const STATUSES = [
+  'new',            // no contact yet — the default, no row needed
+  'contacted',      // reached out, no reply yet
+  'no_response',    // reached out repeatedly, nothing back
+  'in_progress',    // a conversation is happening
+  'interested',     // positive signal, not closed
+  'not_interested', // declined
+  'won',            // signed / now a customer
+  'disqualified',   // wrong fit, chain, out of business
+];
+const DEFAULT_STATUS = 'new';
+// Statuses that mean the conversation is over, for the summary bar's grouping.
+const TERMINAL = ['not_interested', 'won', 'disqualified'];
+
+function entity(type) { return ENTITIES[type] || null; }
+function isEntityType(type) { return Object.prototype.hasOwnProperty.call(ENTITIES, type); }
+function isStatus(s) { return STATUSES.includes(s); }
+
+module.exports = { ENTITIES, STATUSES, DEFAULT_STATUS, TERMINAL, entity, isEntityType, isStatus };

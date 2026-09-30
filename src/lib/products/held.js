@@ -17,7 +17,11 @@
 // 'internal' from the backfill, so this preserves today's behaviour exactly while containing a partner
 // account automatically.
 
-const { query: defaultQuery } = require('../db');
+// Resolved at CALL time, not module load. Destructuring `query` at load captures the function that
+// existed then, so a test that installs a fake afterwards is silently ignored — which is exactly what
+// happened: an HTTP test of the outreach routes got 403 product_not_held because heldProducts was still
+// talking to the real database through a captured reference.
+const defaultQuery = (...args) => require('../db').query(...args);
 const { GRANTABLE } = require('./route-map');
 
 // Products a user holds, as a plain array. Never throws: an empty array is the safe answer, because
