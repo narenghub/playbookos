@@ -544,7 +544,12 @@ router.post('/sitenex/contracts/:id/send', authMiddleware, adminOnly, requireTie
     });
 
     // Logged either way, BEFORE the status move, so a failure is recorded even if nothing else changes.
-    const logSend = async (q, status) => (await q(
+    //
+    // Takes the CLIENT, not a detached query function. `logSend(tx.query, …)` loses `this` and throws
+    // "Cannot read properties of undefined (reading 'connectionParameters')" inside the transaction — which
+    // in production meant the email went and the status never moved. The sent_but_not_recorded branch below
+    // reported that honestly, which is how it was found, but a method is only safe to pass around bound.
+    const logSend = async (client, status) => (await client.query(
       `INSERT INTO sitenex_contract_sends
          (contract_id, contract_no, to_email, cc_email, from_email, subject, file_name, file_size,
           status, provider_id, error, sent_by)
@@ -553,7 +558,7 @@ router.post('/sitenex/contracts/:id/send', authMiddleware, adminOnly, requireTie
        status, sent.id || null, sent.ok ? null : String(sent.error || 'unknown'), req.user.id])).rows[0];
 
     if (!sent.ok) {
-      await logSend(query, 'failed').catch(() => {});
+      await logSend({ query }, 'failed').catch(() => {});
       return res.status(502).json({ code: 'send_failed', error: sent.error || 'the provider refused the send',
         to, note: 'Nothing was marked sent. The attempt is in the send log.' });
     }
@@ -561,7 +566,7 @@ router.post('/sitenex/contracts/:id/send', authMiddleware, adminOnly, requireTie
     let row, logged;
     try {
       await withTransaction(async (tx) => {
-        logged = await logSend(tx.query, 'sent');
+        logged = await logSend(tx, 'sent');
         // ONE transaction for the status and the stamp, so 'sent' with no time cannot exist.
         row = (await tx.query(
           `UPDATE sitenex_contracts SET status = 'sent', sent_at = NOW()

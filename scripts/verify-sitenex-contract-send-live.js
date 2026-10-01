@@ -1,22 +1,29 @@
 // ── Emailing a contract: verified against the real database (self-cleaning) ─────
 //
-// DEFAULT IS A DRY RUN. It exercises everything up to the provider call — the preview, every refusal, the
-// confirmation requirement, the scoping, the status/sent_at transaction and the send log — by substituting
-// the mailer. Nothing leaves the building.
+// ⚠️  THE SEND CANNOT BE STUBBED FROM HERE. This script talks to the running server over HTTP, and that is
+//     a DIFFERENT PROCESS with its own module instances — so replacing mailer.sendEmailDetailed in this
+//     process does nothing to the route. The first version of this file did exactly that, called itself a
+//     dry run, and sent a real email to verify-send-client@example.invalid. Resend accepted it and returned
+//     a message id; `.invalid` cannot resolve, so it bounced rather than reaching a person, but the script
+//     had lied about what it was doing.
 //
-//   railway ssh 'node scripts/verify-sitenex-contract-send-live.js'              # dry run
+//     So there is no pretend send. DEFAULT MODE RUNS ONLY THE PARTS THAT DO NOT SEND — the schema, the
+//     preview, every refusal, the superseded guard and the partner gate — and says plainly which steps it
+//     skipped. The parts that need a send are covered by src/api/sitenex-phase3.test.js, where the mailer
+//     IS in the same process and really is substituted.
+//
+//   railway ssh 'node scripts/verify-sitenex-contract-send-live.js'               # no email is sent
 //   railway ssh 'node scripts/verify-sitenex-contract-send-live.js --send <addr>' # ONE real email
 //
-// The --send form sends exactly one email, to an address given on the command line, and refuses a bare
-// --send with no address. There is no default recipient on purpose: a verification script with a hardcoded
-// address is one edit away from mailing a real client.
+// The --send form sends exactly one real email, to an address given on the command line, and refuses a bare
+// --send. There is no default recipient on purpose: a verification script with a hardcoded address is one
+// edit away from mailing a real client.
 //
 // Cleanup is BY EXPLICIT ID and asserts only that its own rows are gone.
 
 const jwt = require('jsonwebtoken');
 const AdmZip = require('adm-zip');
 const { query } = require('../src/lib/db');
-const mailer = require('../src/lib/mailer');
 
 const PORT = process.env.PORT || 3000;
 const args = process.argv.slice(2);
@@ -31,7 +38,6 @@ if (sendIdx !== -1 && (!REAL_TO || REAL_TO.startsWith('--') || !/@/.test(REAL_TO
 
 let fail = 0;
 const made = { deals: [], contracts: [], partners: [], users: [] };
-const SENT = [];
 
 const check = (label, a, e) => {
   const ok = JSON.stringify(a) === JSON.stringify(e);
@@ -49,25 +55,16 @@ const hit = async (method, path, token, body) => {
   return { status: r.status, body: j || {}, raw: text };
 };
 
-// THE MAILER IS REPLACED unless --send was given. Replaced rather than relying on a missing API key,
-// because the key IS present in production and the whole point of running this there is to use the real
-// database — so the one thing that must not be real is the provider call.
-const realSend = mailer.sendEmailDetailed;
-if (!REAL_TO) {
-  mailer.sendEmailDetailed = async (opts) => {
-    SENT.push(opts);
-    return { ok: true, id: 'dryrun_' + Date.now(), error: null };
-  };
-} else {
-  mailer.sendEmailDetailed = async (opts) => {
-    SENT.push(opts);
-    return realSend(opts);
-  };
-}
+// Deliberately NOT substituting anything. See the header: this process is not the server's, so a
+// substitution here would change nothing except what this script believes about itself.
 
 (async () => {
   try {
-    console.log(REAL_TO ? `MODE: REAL SEND, once, to ${REAL_TO}\n` : 'MODE: dry run — the mailer is substituted, nothing is sent\n');
+    console.log(REAL_TO
+      ? `MODE: REAL SEND — exactly one email, to ${REAL_TO}\n`
+      : 'MODE: no-send — the refusals, the preview and the gates. Steps 4-6 need a real send and are\n'
+        + '        SKIPPED; they are covered by src/api/sitenex-phase3.test.js, which can substitute the\n'
+        + '        mailer because it runs in the same process as the route.\n');
 
     const sup = (await query(`SELECT id, email, role FROM users WHERE role='super_admin' AND is_active=1 LIMIT 1`)).rows[0];
     if (!sup) throw new Error('no active super_admin to act as');
@@ -114,7 +111,10 @@ if (!REAL_TO) {
     ok('  the subject names the contract', (pv.body.subject || '').includes(no), pv.body.subject);
     ok('  the price the note will state', /\$4,500/.test(pv.body.price || ''), pv.body.price);
     check('  can_send', pv.body.can_send, true);
-    check('  and NOTHING was sent by a preview', SENT.length, 0);
+    // Evidenced by the LOG, the only thing this process can see. A preview that sent would have written
+    // a row; SENT.length was a count in this process, which the route never touches.
+    check('  and a preview wrote no send row',
+          (await query(`SELECT COUNT(*)::int n FROM sitenex_contract_sends WHERE contract_id=$1`, [cid])).rows[0].n, 0);
 
     console.log('\n3. THE REFUSALS');
     const noConfirm = await hit('POST', `/api/sitenex/contracts/${cid}/send`, staff, {});
@@ -122,59 +122,58 @@ if (!REAL_TO) {
           [400, 'confirm_mismatch', clientEmail]);
     const wrong = await hit('POST', `/api/sitenex/contracts/${cid}/send`, staff, { confirm_to: 'someone@else.invalid' });
     check('wrong confirm_to → refused', [wrong.status, wrong.body.code], [400, 'confirm_mismatch']);
-    check('  still nothing sent', SENT.length, 0);
     check('  and nothing logged', (await query(`SELECT COUNT(*)::int n FROM sitenex_contract_sends WHERE contract_id=$1`, [cid])).rows[0].n, 0);
     check('  and the contract is untouched',
           (await query(`SELECT status, sent_at FROM sitenex_contracts WHERE id=$1`, [cid])).rows[0].status, 'generated');
 
-    console.log('\n4. THE SEND');
-    const sent = await hit('POST', `/api/sitenex/contracts/${cid}/send`, staff, { confirm_to: clientEmail });
-    check('accepted', sent.status, 200);
-    if (sent.status !== 200) console.log('     body:', JSON.stringify(sent.body));
-    check('  exactly one email', SENT.length, 1);
-    const m = SENT[0] || {};
-    check('  to', m.to, clientEmail);
-    check('  cc', m.cc, 'verify-send-partner@example.invalid');
-    ok('  one attachment, named for the contract', m.attachments && m.attachments.length === 1
-       && String(m.attachments[0].filename).startsWith(no), JSON.stringify(m.attachments && m.attachments[0] && m.attachments[0].filename));
-    // THE ATTACHMENT IS THE STORED DOCUMENT, and it opens.
-    const buf = m.attachments[0].content;
-    ok('  the attachment is the stored .docx', Buffer.isBuffer(buf) && buf.subarray(0, 4).toString('hex') === '504b0304', 'not a zip');
-    const text = new AdmZip(buf).readAsText('word/document.xml').replace(/<[^>]+>/g, ' ');
-    ok('  and it really contains the client and the price',
-       text.includes('VERIFY SEND Client Ltd') && text.includes('4,500'), 'content missing');
-    ok('  the note states the price', /\$4,500/.test(m.html || ''), 'no price in the covering note');
-    ok('  the note asks them to sign and return', /sign and return/i.test(m.html || ''), '');
-    ok('  provider id came back', !!sent.body.provider_id, JSON.stringify(sent.body));
+    if (!REAL_TO) {
+      console.log('\n4-6. THE SEND, THE STAMP AND THE LOG — SKIPPED (they need a real email).');
+      console.log('      Covered by src/api/sitenex-phase3.test.js: the attachment is the stored .docx, the');
+      console.log('      status and sent_at move in one transaction, the log records the provider id, a failed');
+      console.log('      send is logged and marks nothing, and a send that goes but is not recorded says so.');
+      console.log('      To check it for real:  --send <your own address>');
+    } else {
+      console.log('\n4. THE SEND');
+      const sent = await hit('POST', `/api/sitenex/contracts/${cid}/send`, staff, { confirm_to: clientEmail });
+      check('accepted', sent.status, 200);
+      if (sent.status !== 200) console.log('     body:', JSON.stringify(sent.body));
+      ok('  provider id came back', !!sent.body.provider_id, JSON.stringify(sent.body));
+      check('  it reports the recipient it used', sent.body.to, clientEmail);
 
-    console.log('\n5. STATUS AND sent_at, IN ONE TRANSACTION');
-    const after = (await query(`SELECT status, sent_at FROM sitenex_contracts WHERE id=$1`, [cid])).rows[0];
-    check('  status', after.status, 'sent');
-    ok('  sent_at stamped', !!after.sent_at, String(after.sent_at));
+      console.log('\n5. STATUS AND sent_at, IN ONE TRANSACTION');
+      const after = (await query(`SELECT status, sent_at FROM sitenex_contracts WHERE id=$1`, [cid])).rows[0];
+      check('  status', after.status, 'sent');
+      ok('  sent_at stamped', !!after.sent_at, String(after.sent_at));
 
-    console.log('\n6. THE SEND LOG — proof of what went where');
-    const log = (await query(
-      `SELECT to_email, cc_email, from_email, subject, file_name, file_size, status, provider_id, error, sent_by
-         FROM sitenex_contract_sends WHERE contract_id=$1`, [cid])).rows;
-    check('  one row', log.length, 1);
-    const L = log[0] || {};
-    check('  to', L.to_email, clientEmail);
-    check('  cc', L.cc_email, 'verify-send-partner@example.invalid');
-    check('  status', L.status, 'sent');
-    check('  sent_by', L.sent_by, sup.id);
-    ok('  provider id recorded', !!L.provider_id, String(L.provider_id));
-    ok('  subject recorded', (L.subject || '').includes(no), L.subject);
-    ok('  file name and size recorded', !!L.file_name && L.file_size > 5000, `${L.file_name} / ${L.file_size}`);
-    check('  no error on a success', L.error, null);
+      console.log('\n6. THE SEND LOG — proof of what went where');
+      const log = (await query(
+        `SELECT to_email, cc_email, from_email, subject, file_name, file_size, status, provider_id, error, sent_by
+           FROM sitenex_contract_sends WHERE contract_id=$1`, [cid])).rows;
+      check('  one row', log.length, 1);
+      const L = log[0] || {};
+      check('  to', L.to_email, clientEmail);
+      check('  cc', L.cc_email, 'verify-send-partner@example.invalid');
+      check('  status', L.status, 'sent');
+      check('  sent_by', L.sent_by, sup.id);
+      ok('  provider id recorded', !!L.provider_id, String(L.provider_id));
+      ok('  subject recorded', (L.subject || '').includes(no), L.subject);
+      ok('  file name and size recorded', !!L.file_name && L.file_size > 5000, `${L.file_name} / ${L.file_size}`);
+      check('  no error on a success', L.error, null);
+      ok('  and the provider id in the log matches the response', L.provider_id === sent.body.provider_id,
+         `${L.provider_id} vs ${sent.body.provider_id}`);
+    }
 
     console.log('\n7. A SUPERSEDED CONTRACT CANNOT BE SENT');
     const regen = await hit('POST', '/api/sitenex/contracts', staff, { deal_id: dealId });
     if (regen.body.contract) made.contracts.push(regen.body.contract.id);
     check('  regenerated', regen.status, 201);
-    const before = SENT.length;
+    const sendsBefore = (await query(`SELECT COUNT(*)::int n FROM sitenex_contract_sends`)).rows[0].n;
     const stale = await hit('POST', `/api/sitenex/contracts/${cid}/send`, staff, { confirm_to: clientEmail });
     check('  the superseded one refuses', [stale.status, stale.body.code], [400, 'not_current']);
-    check('  and sent nothing', SENT.length, before);
+    // A refused send writes no log row. Measured as a DELTA over the whole table, because this script has no
+    // visibility into the server's mailer and the log is the only evidence available to it.
+    check('  and logged nothing',
+          (await query(`SELECT COUNT(*)::int n FROM sitenex_contract_sends`)).rows[0].n, sendsBefore);
 
     console.log('\n8. SCOPING AND THE GATE');
     const uid = require('crypto').randomUUID();
@@ -187,14 +186,14 @@ if (!REAL_TO) {
     check('  a partner cannot preview', (await hit('GET', `/api/sitenex/contracts/${regen.body.contract.id}/send`, ptok)).status, 403);
     check('  a partner cannot send', (await hit('POST', `/api/sitenex/contracts/${regen.body.contract.id}/send`, ptok, { confirm_to: clientEmail })).status, 403);
     check('  but can still list and download', (await hit('GET', '/api/sitenex/contracts', ptok)).status, 200);
-    check('  and nothing was sent by any of that', SENT.length, before);
+    check('  and none of that wrote a send row',
+          (await query(`SELECT COUNT(*)::int n FROM sitenex_contract_sends`)).rows[0].n, sendsBefore);
 
     if (REAL_TO) {
-      console.log(`\n📧 ONE REAL EMAIL WAS SENT to ${REAL_TO} — check that inbox. Provider id: ${sent.body.provider_id}`);
+      console.log(`\n📧 ONE REAL EMAIL WAS SENT to ${REAL_TO} — check that inbox.`);
     }
   } catch (e) { fail++; console.error('ERROR:', e.message, e.stack ? '\n' + e.stack.split('\n').slice(1, 4).join('\n') : ''); }
   finally {
-    mailer.sendEmailDetailed = realSend;
     for (const id of made.contracts) {
       await query(`DELETE FROM sitenex_contract_sends WHERE contract_id=$1`, [id]).catch(() => {});
       await query(`DELETE FROM sitenex_contracts WHERE id=$1`, [id]).catch(() => {});

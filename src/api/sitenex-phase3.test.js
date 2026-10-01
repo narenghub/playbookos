@@ -220,9 +220,23 @@ db.query = async (sql, params = []) => {
   if (requiresScope(s)) scopeOf(s, params);   // force the leak check even on an unmatched shape
   throw new Error('unexpected SQL in fake: ' + s);
 };
+// The transaction client MIRRORS pg: its `query` is a METHOD that needs `this`. The first version handed
+// out a plain `{ query: db.query }`, where a detached reference works fine — so `logSend(tx.query, …)`
+// passed every test here and threw in production with "Cannot read properties of undefined (reading
+// 'connectionParameters')", leaving an email sent and the status unmoved. A fake whose client is more
+// forgiving than the real one cannot catch a `this` bug.
 db.withTransaction = async (fn) => {
   if (MAIL.throwOnTxn) throw new Error('simulated commit failure');
-  return fn({ query: db.query });
+  const client = {
+    _isClient: true,
+    async query(sql, params) {
+      if (!this || this._isClient !== true) {
+        throw new TypeError("Cannot read properties of undefined (reading 'connectionParameters')");
+      }
+      return db.query(sql, params);
+    },
+  };
+  return fn(client);
 };
 
 // The mailer is replaced, not the network: this file must never be able to send a real email, whatever
