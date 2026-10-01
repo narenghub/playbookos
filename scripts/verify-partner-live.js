@@ -37,7 +37,10 @@ const hit = async (method, path) => {
     : /product boundary/.test(body.error || '') ? 'boundary'
     : /Admin only|Super admin only|lacks|has no/.test(body.error || '') ? 'tier/role'
     : `other(${body.error || r.status})`;
-  return { status: r.status, layer };
+  // The BODY is returned too, since 2026-10-01: prospects is no longer refused but territory-scoped, so the
+  // interesting fact moved from the status code into the payload — reachable AND empty is the assertion, and
+  // a helper that only reports a status cannot make it.
+  return { status: r.status, layer, body };
 };
 
 (async () => {
