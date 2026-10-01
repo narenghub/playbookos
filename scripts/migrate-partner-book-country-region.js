@@ -17,10 +17,14 @@
 // ── 3. prospects.country, DEFAULT 'US' ───────────────────────────────────────
 //
 // THIS default DOES backfill every existing row, and here that is correct rather than a guess — the opposite of
-// the status_changed_at case, which taught the lesson. Every prospect in the table was found by a US Places
-// query against a US state, and `state` is populated and two-letter for all of them. So 'US' is a measurement,
-// and the migration CHECKS that claim before relying on it: if any row has a state that is not a US state
-// abbreviation, it stops rather than stamping a country onto something it cannot vouch for.
+// the status_changed_at case, which taught the lesson. But the FIRST version of this check was wrong about WHY,
+// and the check caught it: it tested `prospects.state`, on the assumption that every row has one. 1,525 do not
+// — `state` was added for SiteNex and the GolfNex/Favly/Linkabl rows predate it — so the migration refused to
+// run, which is the correct behaviour for a claim it could not verify.
+//
+// The evidence that DOES exist is the address: every one of the 4,663 rows carries either a ", XX" US state
+// suffix on its region or a ", XX 00000" US ZIP in its address. That is what is checked now. So 'US' is a
+// measurement after all, just not the measurement I first reached for.
 //
 // ── 5. sitenex_contracts.region — ATTRIBUTION ON THE REGISTER ────────────────
 //
@@ -40,11 +44,17 @@
 
 const { query } = require('../src/lib/db');
 
-// The 50 states plus DC and the territories Places returns. Used only to VERIFY the country backfill, never to
-// derive one — a row whose state is not here is a row we cannot claim is American.
-const US_STATES = ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA',
-  'ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI',
-  'SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC','PR','GU','VI','AS','MP'];
+// A US ADDRESS, as Places writes one. Used only to VERIFY the country backfill, never to derive a value — a row
+// matching neither pattern is a row we cannot claim is American, and the migration stops rather than guess.
+//
+//   region  'Rockford, IL'                       → ', XX' at the end
+//   address '412 W Main St, Rockford, IL 61101'   → ', XX 00000'
+//
+// Deliberately NOT `prospects.state`: that column exists for SiteNex and is NULL on the 1,525 rows that
+// predate it, so a check against it refuses a claim that is in fact true. The address is the thing every row
+// has, which is why it is the thing to check.
+const US_REGION = String.raw`, [A-Z]{2}$`;
+const US_ZIP = String.raw`, [A-Z]{2} [0-9]{5}`;
 
 (async () => {
   try {
@@ -61,20 +71,24 @@ const US_STATES = ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','
       WHERE table_name='prospects' AND column_name='country'`)).rows[0].n > 0;
     if (!already) {
       const odd = (await query(
-        `SELECT COALESCE(state,'(null)') AS state, COUNT(*)::int n FROM prospects
-          WHERE state IS NULL OR state <> ALL($1) GROUP BY 1 ORDER BY 2 DESC LIMIT 10`, [US_STATES])).rows;
-      if (odd.length) {
-        console.error(`\n⛔ ${odd.reduce((s, r) => s + r.n, 0)} prospect(s) have a state that is not a US state:`);
-        odd.forEach(r => console.error(`     ${r.state}: ${r.n}`));
-        console.error(`   DEFAULT 'US' would stamp a country onto rows it cannot vouch for. Decide those rows`);
-        console.error(`   first, or add the column without a default and backfill the ones you can.`);
+        `SELECT id, name, product, region, LEFT(COALESCE(address,''), 70) AS address FROM prospects
+          WHERE NOT (region ~ $1 OR address ~ $2) LIMIT 10`, [US_REGION, US_ZIP])).rows;
+      const oddCount = (await query(
+        `SELECT COUNT(*)::int n FROM prospects WHERE NOT (region ~ $1 OR address ~ $2)`,
+        [US_REGION, US_ZIP])).rows[0].n;
+      if (oddCount) {
+        console.error(`\n⛔ ${oddCount} prospect(s) carry no US state or ZIP in their region or address:`);
+        odd.forEach(r => console.error(`     #${r.id} ${r.product} ${r.name} — ${r.region} / ${r.address}`));
+        console.error(`   DEFAULT 'US' would stamp a country onto rows it cannot vouch for. Give those rows a`);
+        console.error(`   country first, or add the column with no default and backfill the ones you can.`);
         console.error(`   Nothing has been changed.\n`);
         process.exit(1);
       }
-      console.log(`✅ every prospect has a US state, so DEFAULT 'US' is a measurement and not a guess`);
+      const total = (await query(`SELECT COUNT(*)::int n FROM prospects`)).rows[0].n;
+      console.log(`✅ all ${total} prospects carry a US state or ZIP, so DEFAULT 'US' is a measurement, not a guess`);
     }
     await query(`ALTER TABLE prospects ADD COLUMN IF NOT EXISTS country TEXT DEFAULT 'US'`);
-    await query(`COMMENT ON COLUMN prospects.country IS $c$ISO 3166-1 alpha-2, DEFAULT 'US'. A territory dimension, so a partner can be granted a country. The default DOES backfill existing rows, which is correct here and was checked before being relied on: every row was found by a US Places query against a US state. Contrast status_changed_at, where the same ADD COLUMN DEFAULT quietly invented a measurement.$c$`);
+    await query(`COMMENT ON COLUMN prospects.country IS $c$ISO 3166-1 alpha-2, DEFAULT 'US'. A territory dimension, so a partner can be granted a country. The default DOES backfill existing rows, which is correct here and was CHECKED before being relied on: every row carries a US state suffix on its region or a US ZIP in its address. Checked against the address rather than prospects.state, which is NULL on the 1,525 rows that predate it — a check against state refused a claim that was in fact true. Contrast status_changed_at, where the same ADD COLUMN DEFAULT quietly invented a measurement.$c$`);
     await query(`CREATE INDEX IF NOT EXISTS idx_prospects_country ON prospects (country)`);
     console.log(`✅ prospects.country`);
 
