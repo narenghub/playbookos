@@ -77,10 +77,27 @@ async function outreachTasks({ held, partner, staleDays = STALE_DAYS } = {}, dep
             -- (And no backticks in here: this is inside a template literal, which one would close.)
             COALESCE(p.name, i.name, s.brief_title) AS entity_name
        FROM outreach o
+       -- ── THE CAST IS GUARDED BY A PATTERN, NOT BY entity_type ──
+       --
+       -- outreach.entity_id is TEXT because the entities it spans do not agree on a key type: prospects are
+       -- BIGSERIAL, clinical_studies are uuid. Writing the discriminator and the cast side by side in a join
+       -- condition LOOKS guarded and is not — Postgres may evaluate the cast before the discriminator, and in
+       -- production it did: every row was a study with a uuid id and the query died with
+       -- (no backticks in this comment: it lives inside a template literal, which one would close — second
+       --  time today, so it is worth the parenthesis)
+       --   invalid input syntax for type bigint: "4b797daf-34d6-..."
+       --
+       -- A CASE on the TEXT ITSELF is safe, because the regex rules out anything the cast would reject, and it
+       -- still compares against p.id as a bigint so the primary key index is usable. Casting p.id to text
+       -- instead would also be correct and would throw the index away.
        LEFT JOIN prospects p
-              ON o.entity_type = 'prospect' AND p.id = NULLIF(o.entity_id, '')::bigint
+              ON p.id = (CASE WHEN o.entity_type = 'prospect' AND o.entity_id ~ '^[0-9]+$'
+                              THEN o.entity_id::bigint END)
        LEFT JOIN research_institutions i
-              ON o.entity_type = 'institution' AND i.id = NULLIF(o.entity_id, '')::bigint
+              ON i.id = (CASE WHEN o.entity_type = 'institution' AND o.entity_id ~ '^[0-9]+$'
+                              THEN o.entity_id::bigint END)
+       -- clinical_studies.id is TEXT (a uuid), so there is nothing to cast. Assuming bigint here once 400'd
+       -- every study write; the lesson is the same one, from the other direction.
        LEFT JOIN clinical_studies s
               ON o.entity_type = 'study' AND s.id = o.entity_id
       WHERE ${scope.sql} AND ${pt.sql}

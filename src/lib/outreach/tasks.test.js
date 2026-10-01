@@ -36,6 +36,17 @@ const query = async (sql, params = []) => {
     const rows = m ? DEALS.filter(d => String(d.partner_id) === String(params[+m[1] - 1])) : DEALS;
     return { rows: rows.filter(d => ['signed', 'intake', 'building'].includes(d.status) && !d.completed_at) };
   }
+  // AN UNGUARDED CAST ON entity_id IS REFUSED. entity_id is TEXT because prospects are BIGSERIAL and
+  // clinical_studies are uuid, so putting the discriminator beside the cast in a join condition looks guarded
+  // and is not — Postgres may evaluate the cast first, and in production it did: every live row was a study
+  // with a uuid id and the query died. A fake with only numeric fixtures agrees with either form, so the SHAPE
+  // is what it checks.
+  for (const m of sql.matchAll(/o\.entity_id::bigint/g)) {
+    const before = sql.slice(Math.max(0, m.index - 200), m.index);
+    if (!/~ '\^\[0-9\]\+\$'/.test(before)) {
+      throw new Error('UNGUARDED ::bigint cast on entity_id — a uuid study id will throw');
+    }
+  }
   // The outreach read must carry BOTH scopes, like every other one.
   if (!/o\.product = ANY\(\$\d+\)/.test(sql)) throw new Error('not product-scoped: ' + sql);
   if (!/o\.partner_id = \$\d+|AND TRUE|AND FALSE/.test(sql)) throw new Error('not partner-scoped: ' + sql);
@@ -260,4 +271,21 @@ test('a task key is stable for the same fact, so a UI can remember a dismissal w
   const b = (await run()).tasks[0].key;
   assert.equal(a, b);
   assert.equal(a, 'unchased:prospect:42');
+});
+
+test('the entity_id cast is GUARDED BY A PATTERN, not by entity_type', () => {
+  // entity_type in a join condition does not stop Postgres evaluating the cast. The live table held only study
+  // rows with uuid ids and the query died on the first one — a failure no fixture of integers can reproduce,
+  // which is why the fake checks the SQL's shape and this checks it again at the source.
+  const src = require('fs').readFileSync(__dirname + '/tasks.js', 'utf8');
+  const casts = [...src.matchAll(/o\.entity_id::bigint/g)];
+  assert.ok(casts.length >= 1, 'there should still be a cast — the point is that it is guarded');
+  for (const m of casts) {
+    const before = src.slice(Math.max(0, m.index - 220), m.index);
+    assert.match(before, /~ '\^\[0-9\]\+\$'/, 'every cast must be preceded by a numeric-text guard');
+    assert.match(before, /CASE WHEN/, 'and sit inside a CASE, so a non-matching row yields NULL');
+  }
+  // clinical_studies is joined on TEXT, because its id IS text. Assuming bigint there once 400'd every study
+  // write — the same lesson from the other direction.
+  assert.match(src, /clinical_studies s\s*\n\s*ON o\.entity_type = 'study' AND s\.id = o\.entity_id/);
 });
