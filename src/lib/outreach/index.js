@@ -337,4 +337,4 @@ async function history(entityType, entityId, held, partner, deps = {}) {
     [entityType, String(entityId), ...scope.params, ...pt.params])).rows;
 }
 
-module.exports = { statusFor, setStatus, summary, activity, overview, history };
+module.exports = { statusFor, setStatus, summary, activity, overview, history, partnerFragment };

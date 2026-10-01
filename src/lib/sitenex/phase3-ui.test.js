@@ -382,3 +382,45 @@ test('an empty prospects screen EXPLAINS itself', () => {
   assert.ok(!/no territory yet/.test(shellCode),
     'the sentence must come from the server, not be a second copy in the SPA');
 });
+
+// ── MY TASKS: follow-ups derived from outreach ─────────────────────────────────
+
+test('My Tasks fetches the outreach-derived follow-ups alongside the assigned ones', () => {
+  // daily_tasks comes from weekly_kpis via the 8am agent, and a PARTNER HAS NO KPIs — so this page was empty
+  // for them. Fetched in parallel and with a .catch, so a failure here cannot take the assigned tasks down.
+  const page = between(SHELL, "pages['my-tasks'] = async function", 'const followHtml = mtFollowUps');
+  assert.match(page, /API\('\/outreach\/tasks'\)\.catch/);
+  assert.match(SHELL, /const followHtml = mtFollowUps\(follow\)/);
+});
+
+test('the empty state does not talk about the 8am agent when there ARE follow-ups', () => {
+  // "The AI agents assign tasks each morning" is meaningless to a partner: there are no KPIs for it to generate
+  // from. When follow-ups exist, those ARE the task list and no apology is needed.
+  const page = between(SHELL, 'const followHtml = mtFollowUps', "c.innerHTML = toolbar + head + followHtml + tasks");
+  assert.match(page, /followHtml \? '' :/, 'the apology is conditional on there being nothing at all');
+  assert.match(page, /AI agents assign tasks each morning/, 'and still shown when there is genuinely nothing');
+});
+
+test('the follow-ups panel says it is NOT scored, and nothing in it scores', () => {
+  const fn = between(SHELL, 'function mtFollowUps(follow)', "  pages['my-tasks'] = async function");
+  assert.match(fn, /are not scored/, 'said on the panel, because a task list looks like something being measured');
+  assert.match(fn, /acting on one makes it disappear/, 'and why: the task IS the thing not yet done');
+  // No scoring, coaching or escalation anywhere in the renderer.
+  for (const re of [/score\(/, /performance/i, /sendEmail/, /escalat/i, /notify/i]) {
+    assert.doesNotMatch(fn.replace(/are not scored/g, ''), re, `the follow-ups panel must not ${re.source}`);
+  }
+});
+
+test('a day-zero item reads "today", not "0d"', () => {
+  // "0 days" looks like a missing value, which is how a real number gets ignored.
+  const fn = between(SHELL, 'function mtFollowUps(follow)', "  pages['my-tasks'] = async function");
+  assert.match(fn, /days_overdue === 0 \? 'today'/);
+  assert.match(fn, /t\.days_overdue == null \? '' :/, 'and an unknown age shows nothing rather than a zero');
+});
+
+test('every field the panel prints is escaped — a prospect name is typed by somebody', () => {
+  const fn = between(SHELL, 'function mtFollowUps(follow)', "  pages['my-tasks'] = async function");
+  for (const f of ['t.title', 't.detail', 'label', 'age']) {
+    assert.ok(new RegExp(`esc\\(${f.replace('.', '\\.')}\\)`).test(fn), `${f} must go through esc()`);
+  }
+});

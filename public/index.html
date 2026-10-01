@@ -5466,6 +5466,43 @@ if(typeof pages !== 'undefined') {
       <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Hover bars for the daily score.</div>
     </div>`;
   };
+/* ── FOLLOW-UPS, from outreach ──────────────────────────────────────────────────
+   Three derivations, computed on read rather than stored: an overdue next action, a contact nobody has chased,
+   and a deal whose client has not finished intake. Nothing here is scored, emailed or escalated — external
+   roles are excluded from all three as a property of the role, and a task list that fed any of them would put
+   it back by the side door. These are reminders a person reads. */
+function mtFollowUps(follow) {
+  if (!follow || !follow.tasks || !follow.tasks.length) return '';
+  const esc = s => String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const KIND = { overdue: ['Overdue', '#b00020'], unchased: ['Needs chasing', '#9a6700'], intake: ['Intake', '#0a7'] };
+  const row = (t) => {
+    const [label, colour] = KIND[t.kind] || [t.kind, 'var(--text-muted)'];
+    /* The AGE is on the row, because "4 days" is the whole reason an item is on this list. 0 reads as "today"
+       rather than "0 days", which looks like a missing value. */
+    const age = t.days_overdue == null ? '' : (t.days_overdue === 0 ? 'today' : t.days_overdue + 'd');
+    return '<div style="display:flex;gap:9px;align-items:baseline;padding:6px 0;border-top:1px solid var(--border)">'
+      + '<span style="font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:' + colour
+      +   ';min-width:84px">' + esc(label) + '</span>'
+      + '<div style="flex:1"><div style="font-size:13px;font-weight:600">' + esc(t.title) + '</div>'
+      +   '<div style="font-size:11px;color:var(--text-muted)">' + esc(t.detail) + '</div></div>'
+      + '<span style="font-size:11px;color:var(--text-muted);white-space:nowrap">' + esc(age) + '</span>'
+      + '</div>';
+  };
+  const c = follow.counts || {};
+  return '<div class="card">'
+    + '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap">'
+    + '<div class="card-title" style="margin:0">Follow-ups</div>'
+    + '<div style="font-size:11px;color:var(--text-muted)">'
+    +   [c.overdue ? c.overdue + ' overdue' : null, c.unchased ? c.unchased + ' to chase' : null,
+         c.intake ? c.intake + ' awaiting intake' : null].filter(Boolean).join(' · ')
+    + '</div></div>'
+    + '<div class="text-body" style="margin:4px 0 2px;font-size:12px">From your own outreach. These are not '
+    + 'assigned to you and are not scored — acting on one makes it disappear, because the task IS the thing '
+    + 'not yet done.</div>'
+    + follow.tasks.map(row).join('')
+    + '</div>';
+}
+
   pages['my-tasks'] = async function(dateOverride) {
     const c = document.getElementById('content');
     c.innerHTML = '<p style="color:#888;padding:20px">Loading your tasks…</p>';
@@ -5475,9 +5512,15 @@ if(typeof pages !== 'undefined') {
     // Score is fetched alongside the tasks so it re-reads on every render — including
     // the reload taskSave() triggers after a status change, which is what makes the
     // score refresh automatically once a task is marked complete.
-    try { [data, perf] = await Promise.all([
+    // OUTREACH-DERIVED FOLLOW-UPS, fetched alongside. Separate from daily_tasks on purpose: those come from
+    // weekly_kpis via the 8am agent and a PARTNER HAS NO KPIs, so this page was empty for them. The fix is not
+    // to invent KPIs for an account we do not manage — it is to derive a list from what they actually do.
+    // `.catch` so a failure here cannot take the assigned tasks down with it.
+    let follow;
+    try { [data, perf, follow] = await Promise.all([
       API('/agent/tasks/my' + qs),
       API('/performance/my').catch(() => null),
+      API('/outreach/tasks').catch(() => null),
     ]); }
     catch(e) { c.innerHTML = `<div class="card"><div class="card-title">My Tasks</div><p style="color:#dc2626">Failed to load: ${esc(e.message)}</p></div>`; return; }
     if (data && data.error) { c.innerHTML = `<div class="card"><div class="card-title">My Tasks</div><p style="color:#dc2626">${esc(data.error)}</p></div>`; return; }
@@ -5527,11 +5570,16 @@ if(typeof pages !== 'undefined') {
       </div>
       ${previewHtml}
     </div>`;
+    const followHtml = mtFollowUps(follow);
     if (!tasks.length) {
-      c.innerHTML = toolbar + head + '<div class="card"><p style="color:#718096">No tasks for this date. The AI agents assign tasks each morning — an admin can also trigger generation from Agent Control.</p></div>';
+      /* The assigned-task empty state talks about the 8am agent, which is MEANINGLESS to a partner — they have
+         no KPIs for it to generate from. So it is only shown when there is nothing at all; when there are
+         follow-ups, those ARE the task list and no apology is needed. */
+      c.innerHTML = toolbar + head + followHtml
+        + (followHtml ? '' : '<div class="card"><p style="color:#718096">No tasks for this date. The AI agents assign tasks each morning — an admin can also trigger generation from Agent Control.</p></div>');
       return;
     }
-    c.innerHTML = toolbar + head + tasks.map((t, i) => renderTaskCard(t, i)).join('');
+    c.innerHTML = toolbar + head + followHtml + tasks.map((t, i) => renderTaskCard(t, i)).join('');
   };
   pages['employee-activity'] = async function(selUserId) {
     const c = document.getElementById('content');
