@@ -204,3 +204,19 @@ test('staffOnly still exists and is still keyed off the ROLE LIST, for whatever 
   const fn = src.slice(src.indexOf('function staffOnly('), src.indexOf('// super_admin ONLY'));
   assert.match(fn, /isExternalRole/, 'staffOnly must use the shared role list, not a second copy');
 });
+
+test('GET /outreach/tasks is REGISTERED, classified, and partner-scoped', () => {
+  // It was none of those for two commits. The route file edit was skipped by a `node -c && python3` chain whose
+  // first half failed, and the omission surfaced as a 404 in production — after a 403 from the product boundary
+  // for the separate omission of classifying it. Both are the right failures; neither should need a live run.
+  const routes = require('./routes');
+  assert.equal(routes.stack.filter(l => l.route && l.route.path === '/outreach/tasks').length, 1,
+    'the route must be registered on the router');
+  const { ROUTE_PRODUCT } = require('../lib/products/route-map');
+  assert.equal(ROUTE_PRODUCT['GET /api/outreach/tasks'], 'shared',
+    'an unclassified route under /api is FAIL CLOSED, which is a 403 nobody expects');
+  const src = require('fs').readFileSync(__dirname + '/routes.js', 'utf8');
+  const from = src.indexOf("router.get('/outreach/tasks'");
+  const body = src.slice(from, src.indexOf('\n});\n', from));
+  assert.match(body, /partnerScopeSql\(req\.user\)/, 'and it must pass a partner scope like every other read');
+});

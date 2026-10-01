@@ -5382,6 +5382,25 @@ router.get('/outreach/history', authMiddleware, async (req, res) => {
 // GET /outreach/vocabulary — the two field definitions, so no client keeps a second copy of either list.
 // Statuses carry their sort_order, label and next action: the bar sorts on the order, and the dropdown can
 // say what a stage MEANS rather than just naming it.
+// GET /outreach/tasks — MY TASKS, derived from outreach rather than from daily_tasks.
+//
+// daily_tasks comes from weekly_kpis via the 8am agent, and a partner has no KPIs — deliberately, because
+// scoring an outside account is meaningless. So My Tasks was an empty page for a partner, and the fix is not to
+// invent KPIs for somebody we do not manage: it is to derive the list from what they actually do, which is
+// outreach, and which has been partner-scoped since this morning.
+//
+// Nothing is stored. Computed on read, so marking a prospect 'following_up' makes its chase task disappear —
+// because the task WAS the absence of that status. A daily_tasks row could not have that property.
+router.get('/outreach/tasks', authMiddleware, async (req, res) => {
+  try {
+    const held = await effectiveProducts(req.user);
+    const { outreachTasks } = require('../lib/outreach/tasks');
+    res.json(await outreachTasks({
+      held, partner: await partnerScopeSql(req.user), staleDays: req.query.stale_days,
+    }));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // NOT staffOnly: this returns the vocabulary CONSTANTS — ten status keys, five channels, the entity
 // types. No row, no count, nothing about anybody's data. Gating it would only mean a partner's page
 // cannot label its own dropdowns.
