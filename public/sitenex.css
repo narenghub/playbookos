@@ -1,0 +1,321 @@
+/* ── SiteNex design system ─────────────────────────────────────────────────────
+ *
+ * A SEPARATE STYLESHEET, loaded by one <link> in index.html.
+ *
+ * WHY A FILE AND NOT MORE INLINE STYLE. Every SiteNex screen was built out of inline `style="..."`
+ * attributes — about 180 of them across two files. That is why the screens looked assembled rather
+ * than designed: a padding or a grey was whatever the last person typed, so no two panels agreed, and
+ * there was no way to change the look of "a panel" without finding every panel. It also meant the
+ * markup was unreadable, which is its own cost when the next change is a behavioural one.
+ *
+ * The same structural argument as public/sitenex-phase3.js applies: a stylesheet that fails to parse
+ * cannot take the application down, where an edit inside the 500-line inline <style> can — and this
+ * file can be opened, read and changed by somebody who is not willing to edit an 8,600-line HTML file.
+ *
+ * SCOPING. Everything is under `.sn`, which the SiteNex pages put on their outermost element. Nothing
+ * here can reach another product's screens even by accident, which matters because index.html is one
+ * document shared by thirty of them.
+ *
+ * ALWAYS LIGHT. The console has no dark mode (see the note above the --awsc- block in index.html) and
+ * these screens inherit that, so colours are literal rather than paired.
+ *
+ * CONSOLE COMPATIBILITY. With the AWS chrome on (`body.pnav`) panels and tables are squared and
+ * buttons become pills — those rules are broad and deliberately win over this file. Nothing here
+ * fights them: radii are set once on `--sn-r` so being overridden to 0 is a clean result rather than
+ * a half-rounded one.
+ */
+
+.sn {
+  --sn-bg:        #ffffff;
+  --sn-sunken:    #f7f8fa;   /* board columns, table headers, inset panels */
+  --sn-line:      #e4e7ec;   /* every border on these screens */
+  --sn-line-soft: #eef1f4;   /* row separators, which should be quieter than a panel edge */
+  --sn-ink:       #16191f;
+  --sn-ink-2:     #5f6b7a;   /* secondary text */
+  --sn-ink-3:     #8b95a3;   /* labels, metadata, the dash that means "nothing here" */
+  --sn-accent:    #1B3A6B;   /* the house navy, used for emphasis, never for status */
+  --sn-link:      #0972d3;
+  --sn-r:         6px;
+  color: var(--sn-ink);
+}
+
+/* ── page header ───────────────────────────────────────────────────────────────
+ * Title, one sentence of what the screen is, and the actions — on one line at desktop width and
+ * stacked below it. The count sits with the actions rather than under the title: it is a fact about
+ * the data, and putting it in the title line made every heading read as a number.
+ */
+.sn-head { display:flex; align-items:flex-start; justify-content:space-between; gap:16px;
+  flex-wrap:wrap; padding:0 0 12px; border-bottom:1px solid var(--sn-line); margin:0 0 16px; }
+.sn-head h2 { margin:0; font-size:20px; font-weight:650; letter-spacing:-.01em; color:var(--sn-ink); }
+.sn-head .sn-sub { margin:4px 0 0; font-size:13px; line-height:1.5; color:var(--sn-ink-2); max-width:76ch; }
+.sn-head .sn-sub strong { color:var(--sn-ink); font-weight:600; }
+/* IN THE AWS CONSOLE SHELL THE TITLE IS ALREADY ON SCREEN — the chrome draws it above the breadcrumb, at
+   24px, next to the Actions menu. Repeating it here printed "SiteNex Prospects" twice, nine pixels apart.
+   It stays in the markup rather than being conditionally rendered, because with the console flag off
+   (`body:not(.pnav)`) there is no other title on the page and the screen would have none at all. */
+body.pnav .sn .sn-head:not(.is-record) h2 { display:none; }
+/* With the title gone the header is one line of prose, so it needs less room around it than a header that
+   carries a 20px heading. */
+body.pnav .sn .sn-head:not(.is-record) { padding-bottom:10px; margin-bottom:12px; }
+body.pnav .sn .sn-head:not(.is-record) .sn-sub { margin-top:0; }
+/* `.is-record` IS THE EXCEPTION, and it is not cosmetic. On a LIST screen the console's own title says the
+   same words as the h2, so one of them is noise. On a RECORD screen — a deal, a call script — the h2 is
+   the client's NAME and the console title is still the name of the list it came from. Hiding it there left
+   a phone script with the number and the metro on it and no business on it, which is the one fact somebody
+   dialling needs. So record headers keep their heading in both shells. */
+.sn-head-right { display:flex; align-items:center; gap:10px; flex-shrink:0; }
+.sn-count { font-size:12px; color:var(--sn-ink-3); white-space:nowrap; }
+
+/* The toast line. Reserves its height always, so a message appearing does not push the page down —
+   a layout that jumps on every save is how people learn to stop reading the confirmation. */
+.sn-msg { font-size:12.5px; min-height:18px; margin:0 0 10px; font-weight:500; }
+.sn-msg.ok  { color:#067647; }
+.sn-msg.bad { color:#b42318; }
+
+/* ── metric strip ──────────────────────────────────────────────────────────────
+ * One row, one border, divided by rules rather than eight separate boxes. Eight bordered cards is
+ * eight objects to look at; this is one object with eight readings, which is what it actually is.
+ * The figure leads and the label sits under it, because the figures are what get scanned.
+ */
+.sn-stats { display:flex; flex-wrap:wrap; border:1px solid var(--sn-line); border-radius:var(--sn-r);
+  background:var(--sn-bg); margin:0 0 16px; overflow:hidden; }
+.sn-stat { flex:1 1 0; min-width:124px; padding:12px 14px; border-left:1px solid var(--sn-line-soft); }
+.sn-stat:first-child { border-left:0; }
+.sn-stat-v { font-size:21px; font-weight:680; line-height:1.15; letter-spacing:-.02em;
+  color:var(--sn-ink); font-variant-numeric:tabular-nums; }
+.sn-stat-l { margin-top:3px; font-size:10.5px; font-weight:600; letter-spacing:.055em;
+  text-transform:uppercase; color:var(--sn-ink-3); }
+.sn-stat-h { margin-top:2px; font-size:11px; color:var(--sn-ink-3); }
+/* A metric can carry meaning in its figure — but only where the colour IS the point (how many are
+   rejected, how many have an email). Most do not, and a strip where everything is coloured says
+   nothing. */
+.sn-stat.is-good  .sn-stat-v { color:#067647; }
+.sn-stat.is-warn  .sn-stat-v { color:#b54708; }
+.sn-stat.is-bad   .sn-stat-v { color:#b42318; }
+.sn-stat.is-quiet .sn-stat-v { color:var(--sn-ink-2); }
+
+/* ── panel ─────────────────────────────────────────────────────────────────────
+ * The one container. A header strip, and a body that is either padded prose or a flush table.
+ */
+.sn-panel { border:1px solid var(--sn-line); border-radius:var(--sn-r); background:var(--sn-bg);
+  margin:0 0 16px; overflow:hidden; }
+.sn-panel-head { display:flex; align-items:center; justify-content:space-between; gap:12px;
+  flex-wrap:wrap; padding:9px 14px; border-bottom:1px solid var(--sn-line); background:var(--sn-sunken); }
+.sn-panel-head h3 { margin:0; font-size:13px; font-weight:650; color:var(--sn-ink); }
+.sn-panel-head .sn-note { font-size:11.5px; color:var(--sn-ink-3); }
+.sn-panel-body { padding:14px; }
+.sn-panel-body > :first-child { margin-top:0; }
+.sn-panel-body > :last-child  { margin-bottom:0; }
+
+/* A section label used outside a panel — above a board, above a form group. */
+.sn-label { font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+  color:var(--sn-ink-3); margin:0 0 8px; }
+.sn-label.is-alert { color:#b42318; }
+
+/* ── table ─────────────────────────────────────────────────────────────────────
+ * Flush inside a panel (`.sn-panel > .sn-table-wrap`), so the panel border IS the table border and
+ * there is never a line doubled against another line.
+ */
+.sn-table-wrap { overflow-x:auto; }
+.sn-table { width:100%; border-collapse:collapse; font-size:13px; }
+.sn-table thead th { position:sticky; top:0; z-index:1; background:var(--sn-sunken);
+  padding:8px 12px; text-align:left; font-size:10.5px; font-weight:700; letter-spacing:.055em;
+  text-transform:uppercase; color:var(--sn-ink-3); border-bottom:1px solid var(--sn-line);
+  white-space:nowrap; }
+.sn-table td { padding:9px 12px; border-top:1px solid var(--sn-line-soft); vertical-align:top; }
+.sn-table tbody tr:first-child td { border-top:0; }
+.sn-table tbody tr:hover { background:#fbfcfd; }
+.sn-table .num { text-align:right; font-variant-numeric:tabular-nums; }
+/* Controls inside a table size to their CONTENT. Without this the global `select{width:100%}` makes the
+   shared outreach dropdowns fill their cell and then ellipsis their own labels — "Contacted" rendering as
+   "Contacte" in the column whose entire purpose is to say which stage a prospect is at. */
+.sn-table select, .sn-table input { width:auto; max-width:100%; }
+.sn-table .mid { text-align:center; }
+.sn-table .nowrap { white-space:nowrap; }
+.sn-table .sn-strong { font-weight:600; color:var(--sn-ink); }
+/* The second line in a cell — a contact under a company, a monthly under a total. */
+.sn-table .sn-sub2 { display:block; margin-top:2px; font-size:11px; color:var(--sn-ink-3); }
+.sn-table tr.is-dead td { opacity:.5; }
+.sn-mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+.sn-dash { color:var(--sn-ink-3); }
+
+/* ── status pill ───────────────────────────────────────────────────────────────
+ * A dot plus a word. The dot carries the colour so the text stays readable at 11px, and so the
+ * pills do not become a row of coloured blocks — on a board with eight stages that is louder than
+ * the deal names, which are the thing being looked for.
+ *
+ * Underscores are rendered as spaces BY THE PAGES, not here: `proposal_sent` is the wire value and
+ * CSS cannot rewrite text.
+ */
+.sn-pill { display:inline-flex; align-items:center; gap:5px; padding:2px 9px 2px 7px;
+  border:1px solid var(--sn-line); border-radius:11px; background:var(--sn-bg);
+  font-size:11px; font-weight:600; color:var(--sn-ink-2); white-space:nowrap; line-height:1.6; }
+.sn-pill::before { content:''; width:6px; height:6px; border-radius:50%; background:#98a2b3; flex-shrink:0; }
+.sn-pill.s-new::before,       .sn-pill.s-generated::before   { background:#98a2b3; }
+.sn-pill.s-contacted::before, .sn-pill.s-sent::before        { background:#2e90fa; }
+.sn-pill.s-proposal_sent::before                             { background:#6172f3; }
+.sn-pill.s-signed::before                                    { background:#12b76a; }
+.sn-pill.s-intake::before                                    { background:#15b79e; }
+.sn-pill.s-building::before                                  { background:#f79009; }
+.sn-pill.s-live::before                                      { background:#039855; }
+.sn-pill.s-lost::before,      .sn-pill.s-void::before        { background:#f04438; }
+.sn-pill.s-superseded::before                                { background:#d0d5dd; }
+/* Signed and live are the two that are worth reading from across the room. */
+.sn-pill.s-signed, .sn-pill.s-live { color:#067647; border-color:#a6f4c5; background:#f6fef9; }
+.sn-pill.s-lost, .sn-pill.s-void  { color:#b42318; border-color:#fecdca; background:#fffbfa; }
+
+/* The score chip keeps its computed colour (set inline, since the scale is continuous) but gets its
+   shape from here. */
+.sn-chip { display:inline-block; min-width:30px; padding:1px 7px; border-radius:10px;
+  font-size:11px; font-weight:700; text-align:center; font-variant-numeric:tabular-nums; }
+
+/* ── board ─────────────────────────────────────────────────────────────────────
+ * Columns are sunken, cards are raised. That is the whole idea: the column is the container, the
+ * card is the object. Before, both were white rectangles with the same border and the board read as
+ * a grid of boxes.
+ */
+.sn-board { display:flex; gap:12px; overflow-x:auto; padding:2px 2px 6px; }
+.sn-col { flex:1 1 0; min-width:208px; background:var(--sn-sunken); border:1px solid var(--sn-line);
+  border-radius:var(--sn-r); padding:8px; display:flex; flex-direction:column; }
+.sn-col-head { display:flex; align-items:center; gap:7px; padding:2px 4px 9px; }
+.sn-col-dot { width:7px; height:7px; border-radius:50%; background:#98a2b3; flex-shrink:0; }
+.sn-col-name { font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+  color:var(--sn-ink-2); }
+.sn-col-n { margin-left:auto; font-size:11px; font-weight:700; color:var(--sn-ink-2);
+  background:var(--sn-bg); border:1px solid var(--sn-line); border-radius:9px; padding:0 7px;
+  font-variant-numeric:tabular-nums; }
+/* The column's dot matches its stage pill, so a card moved from one column to another keeps the same
+   colour in both places. */
+.sn-col.s-new       .sn-col-dot { background:#98a2b3; }
+.sn-col.s-contacted .sn-col-dot { background:#2e90fa; }
+.sn-col.s-proposal_sent .sn-col-dot { background:#6172f3; }
+.sn-col.s-signed    .sn-col-dot { background:#12b76a; }
+.sn-col.s-intake    .sn-col-dot { background:#15b79e; }
+.sn-col.s-building  .sn-col-dot { background:#f79009; }
+.sn-col.s-live      .sn-col-dot { background:#039855; }
+.sn-col.s-lost      .sn-col-dot { background:#f04438; }
+
+.sn-card { background:var(--sn-bg); border:1px solid var(--sn-line); border-radius:5px;
+  padding:9px 11px; margin-bottom:8px; cursor:pointer;
+  transition:border-color .12s, box-shadow .12s, transform .12s; }
+.sn-card:hover { border-color:#b9c0cc; box-shadow:0 1px 3px rgba(16,24,40,.09); transform:translateY(-1px); }
+.sn-card:last-child { margin-bottom:0; }
+.sn-card-name { font-size:13px; font-weight:620; color:var(--sn-ink); line-height:1.35; }
+.sn-card-name .sn-who { font-weight:400; color:var(--sn-ink-3); }
+.sn-card-money { margin-top:4px; font-size:12px; font-weight:600; color:var(--sn-ink);
+  font-variant-numeric:tabular-nums; }
+.sn-card-meta { margin-top:3px; font-size:11px; color:var(--sn-ink-3); }
+/* An absence is written in the same grey as the metadata and never in red. A board of new deals is
+   not a board of problems. */
+.sn-card-needs { margin-top:5px; font-size:11px; color:var(--sn-ink-3); font-style:italic; }
+.sn-card-flag { margin-top:5px; font-size:11px; font-weight:600; color:#b54708; }
+
+/* ── empty state ───────────────────────────────────────────────────────────────
+ * One shape everywhere, because an empty screen is where somebody decides whether the product is
+ * broken. It gets a sentence, not a dash.
+ */
+.sn-empty { border:1px dashed var(--sn-line); border-radius:var(--sn-r); background:var(--sn-bg);
+  padding:22px 16px; text-align:center; font-size:12.5px; color:var(--sn-ink-3); line-height:1.6; }
+.sn-empty strong { color:var(--sn-ink-2); font-weight:600; display:block; margin-bottom:3px; }
+.sn-col .sn-empty { padding:12px 8px; font-size:11px; background:transparent; }
+
+/* ── toolbar ───────────────────────────────────────────────────────────────────
+ * Filters and small inline forms. One row, wrapping, with controls that are all the same height —
+ * the previous version mixed 4px and 5px padding on adjacent selects, which is visible.
+ */
+.sn-toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  padding:10px 12px; border:1px solid var(--sn-line); border-radius:var(--sn-r);
+  background:var(--sn-bg); margin:0 0 16px; }
+/* NOT scoped to `.sn-toolbar`. It was, and the grant form and the approval queue — neither of which is a
+   toolbar — got a 180px box for a value like "Rockford, IL" with 600px of empty row beside it. `.sn-grow`
+   means "take the rest of the row" wherever a row is laid out with flex. */
+.sn .sn-grow { flex:1 1 180px; min-width:0; }
+/* `width:auto` IS LOAD-BEARING. index.html has a global `input,select,textarea{width:100%}`, so without
+   this every filter in a toolbar takes a full row and the four-control filter bar renders as four stacked
+   full-width boxes. Width comes back only where it is wanted: `.sn-grow` and anything inside `.sn-field`. */
+.sn-input, .sn-select, .sn-textarea {
+  font:inherit; font-size:12.5px; color:var(--sn-ink); background:var(--sn-bg);
+  border:1px solid #cfd4dc; border-radius:5px; padding:5px 8px; height:30px; line-height:18px;
+  width:auto; max-width:100%; }
+.sn-textarea { height:auto; line-height:1.5; }
+.sn-input:focus, .sn-select:focus, .sn-textarea:focus {
+  outline:none; border-color:var(--sn-link); box-shadow:0 0 0 3px rgba(9,114,211,.12); }
+.sn-input::placeholder, .sn-textarea::placeholder { color:#a4abb7; }
+.sn-input:disabled, .sn-select:disabled { background:var(--sn-sunken); color:var(--sn-ink-3); }
+
+/* ── form ──────────────────────────────────────────────────────────────────────
+ * Two columns at desktop width so a ten-field client record is not a ten-row scroll, collapsing to
+ * one on a narrow window. `.wide` spans both for an address or a free-text note.
+ */
+.sn-form { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px 14px; }
+.sn-field { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.sn-field.wide { grid-column:1 / -1; }
+.sn-field > span { font-size:10.5px; font-weight:600; letter-spacing:.045em; text-transform:uppercase;
+  color:var(--sn-ink-3); }
+.sn-field .req { color:#b42318; }
+.sn-field input, .sn-field textarea, .sn-field select { width:100%; }
+.sn-check { display:flex; align-items:flex-start; gap:8px; font-size:12.5px; color:var(--sn-ink-2);
+  line-height:1.5; }
+/* `width:auto` again, and here it was not cosmetic: the global `input{width:100%}` plus `flex-shrink:0`
+   made the checkbox claim the whole row and squeeze its own label out of existence. The grant form
+   rendered a checkbox with no word next to it, so the one control whose meaning is entirely in its label
+   had no label. */
+.sn-check input { margin-top:2px; flex-shrink:0; width:auto; }
+.sn-check strong { color:var(--sn-ink); }
+
+/* The row of actions that closes a form. Separated by a rule so Save is never adjacent to the last
+   field it saves — a button that touches an input gets clicked while somebody is still typing. */
+.sn-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  margin-top:14px; padding-top:12px; border-top:1px solid var(--sn-line-soft); }
+.sn-actions .sn-spacer { flex:1; }
+
+/* ── territory tag ─────────────────────────────────────────────────────────────  */
+.sn-tag { display:inline-flex; align-items:center; gap:6px; padding:2px 4px 2px 9px;
+  border:1px solid var(--sn-line); border-radius:13px; background:var(--sn-sunken);
+  font-size:12px; color:var(--sn-ink); }
+.sn-tag .sn-tag-dim { font-size:10px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+  color:var(--sn-ink-3); }
+.sn-tag .sn-tag-shared { font-size:10px; font-weight:600; color:#b54708; }
+/* The revoke control is quiet until hovered — it is destructive and sits inside a tag somebody is
+   reading, not pressing. */
+.sn-tag .sn-x { width:17px; height:17px; display:inline-flex; align-items:center; justify-content:center;
+  border-radius:50%; color:#c3c9d4; text-decoration:none; font-size:11px; line-height:1; }
+.sn-tag .sn-x:hover { background:#fee4e2; color:#b42318; }
+
+/* ── attention row ─────────────────────────────────────────────────────────────
+ * The approvals queue. The only red surface in SiteNex, and it is red because something is waiting
+ * on a person. If anything else ever becomes red, this stops meaning that.
+ */
+.sn-attn { border:1px solid #fecdca; border-radius:var(--sn-r); background:#fffbfa; overflow:hidden;
+  margin:0 0 16px; }
+.sn-attn-row { padding:10px 13px; border-top:1px solid #fee4e2; }
+.sn-attn-row:first-child { border-top:0; }
+.sn-attn-name { font-size:13px; font-weight:650; color:var(--sn-ink); }
+.sn-attn-meta { margin-top:2px; font-size:11px; color:var(--sn-ink-3); }
+.sn-attn-act { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+
+/* ── call script ───────────────────────────────────────────────────────────────  */
+.sn-cols { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:18px;
+  align-items:start; }
+.sn-script-open { margin:0; font-size:15.5px; line-height:1.5; font-weight:600; color:var(--sn-ink); }
+.sn-list { margin:0; padding-left:19px; font-size:13px; line-height:1.6; color:var(--sn-ink-2); }
+.sn-list li { margin:3px 0; }
+.sn-list li::marker { color:var(--sn-ink-3); }
+.sn-obj { border-top:1px solid var(--sn-line-soft); padding:9px 0; }
+.sn-obj:first-child { border-top:0; padding-top:0; }
+.sn-obj-q { font-size:13px; font-weight:650; color:var(--sn-ink); }
+.sn-obj-a { margin-top:3px; font-size:13px; line-height:1.55; color:var(--sn-ink-2); }
+
+/* ── small print ───────────────────────────────────────────────────────────────  */
+.sn-fine { font-size:11px; color:var(--sn-ink-3); line-height:1.55; }
+.sn-fine.is-bad { color:#b42318; }
+.sn-prose { font-size:13px; line-height:1.6; color:var(--sn-ink-2); margin:0; }
+.sn-prose strong { color:var(--sn-ink); font-weight:600; }
+
+/* ── buttons ───────────────────────────────────────────────────────────────────
+ * The app's own .btn-primary / .btn-secondary carry the colours (and body.pnav restyles them into
+ * console pills). All this adds is a CONSISTENT SMALL SIZE, which is what the inline styles were
+ * doing by hand in eleven slightly different ways.
+ */
+.sn-btn-sm { padding:4px 11px !important; font-size:12px !important; }
+.sn-btn-xs { padding:2px 9px !important; font-size:11px !important; }

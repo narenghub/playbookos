@@ -64,8 +64,16 @@ app.use(express.static(path.join(__dirname, "public"), {
   // would be looking at different HTML, which is how a check comes to lie.
   //
   // The cost is one 30 KB script per hard page load, not per navigation. Cheap, and symmetrical.
+  //
+  // .css IS IN THE SAME SET, for the same reason and not an aesthetic one. public/sitenex.css carries the
+  // class definitions the SiteNex markup references. Cached for an hour while the markup is not, a deploy
+  // that renames a class ships the new HTML to a browser holding the old stylesheet — and the result is a
+  // screen that renders as unstyled text with every control still live. That is harder to diagnose than a
+  // blank page, because nothing errors.
   setHeaders: (res, filePath) => {
-    if (filePath.endsWith('.html') || filePath.endsWith('.js')) res.setHeader('Cache-Control', 'no-store');
+    if (filePath.endsWith('.html') || filePath.endsWith('.js') || filePath.endsWith('.css')) {
+      res.setHeader('Cache-Control', 'no-store');
+    }
   },
 }));
 

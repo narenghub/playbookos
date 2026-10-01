@@ -12,6 +12,10 @@
 <link rel="icon" type="image/png" sizes="256x256" href="/img/playnexa-icon.png">
 <link rel="apple-touch-icon" href="/img/playnexa-icon.png">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<!-- The SiteNex design system. A separate file on purpose: it is scoped entirely under `.sn`, so it
+     cannot reach another product's screens, and a stylesheet that fails to parse cannot take the
+     application down the way an edit inside the inline <style> below can. -->
+<link rel="stylesheet" href="/sitenex.css">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:Arial,sans-serif;background:#f0f2f5;color:#1a1a2e;font-size:14px}
@@ -8223,7 +8227,7 @@ function apErrorCard(title, r, retryFn){
     + '<button onclick="'+retryFn+'" class="btn-secondary" style="padding:5px 12px;font-size:12px">Retry</button>'
     + '</div>';
 }
-window._apFilters = { subtype:null, region:'', bucket:'', package:'', page:1 };
+window._apFilters = { subtype:null, region:'', bucket:'', package:'', q:'', page:1 };
 window._apState = { total:0, pageSize:50, summary:null, facets:null, open:null,
   /* FROM THE SERVER, never computed here: whether this caller may use outreach, and what scoped the
      list. A partner is territory-scoped and outreach is staffOnly, so both have to come from the
@@ -8234,7 +8238,43 @@ const apDash = '<span style="color:var(--text-muted)">—</span>';
 function apSetFilter(k, v){ window._apFilters[k] = v; window._apFilters.page = 1; pages['sitenex-prospects'](); }
 /* Reset returns to the DEFAULT view (the shipping three), not to everything — the default is the
    safe list, so "reset" should mean "back to safe", not "show me the retired rows too". */
-function apResetFilters(){ window._apFilters = { subtype:apDefaultSubtype(), region:'', bucket:'', package:'', page:1 }; pages['sitenex-prospects'](); }
+function apResetFilters(){ window._apFilters = { subtype:apDefaultSubtype(), region:'', bucket:'', package:'', q:'', page:1 }; pages['sitenex-prospects'](); }
+/* ── SEARCH, AND WHY IT IS NOT JUST apSetFilter ────────────────────────────────
+   Typing re-renders the whole page, which destroys the input the typing is going into. So two things
+   happen that a <select> does not need:
+
+     1. DEBOUNCE. One request per keystroke would be eight requests to type "rockford", each re-rendering
+        the table, and the replies can arrive out of order — the list would flicker between prefixes.
+        350ms, which is a pause rather than a gap between letters. Enter searches immediately.
+     2. FOCUS IS PUT BACK, with the caret at the end. Without this the field loses focus mid-word and the
+        next letter goes nowhere, which reads as a broken keyboard rather than a re-render.
+
+   `apSearchPending` guards against a debounce landing AFTER the user cleared the box or hit Enter: the
+   timer is cancelled rather than left to fire with stale text. */
+window._apSearchTimer = null;
+function apSearchNow(v){
+  clearTimeout(window._apSearchTimer); window._apSearchTimer = null;
+  const f = window._apFilters;
+  const next = String(v || '').trim();
+  if (next === (f.q || '')) return;        // Enter on an unchanged box should not refetch
+  f.q = next; f.page = 1;
+  window._apRefocusSearch = true;
+  pages['sitenex-prospects']();
+}
+function apSearchInput(v){
+  clearTimeout(window._apSearchTimer);
+  window._apSearchTimer = setTimeout(() => apSearchNow(v), 350);
+}
+/* Called at the END of the render, so the element it focuses is the new one. */
+function apRestoreSearchFocus(){
+  if (!window._apRefocusSearch) return;
+  window._apRefocusSearch = false;
+  const el = document.getElementById('ap-q');
+  if (!el) return;
+  el.focus();
+  /* setSelectionRange throws on input[type=search] in some browsers; the focus is the part that matters. */
+  try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {}
+}
 function apDefaultSubtype(){ return (window._apShipping && window._apShipping.length) ? window._apShipping.join(',') : ''; }
 function apPage(d){ const st=window._apState, f=window._apFilters;
   const max=Math.max(1,Math.ceil((st.total||0)/(st.pageSize||50))); f.page=Math.min(max,Math.max(1,(f.page||1)+d)); pages['sitenex-prospects'](); }
@@ -8267,7 +8307,7 @@ pages['sitenex-prospects'] = async function(){
   const f = window._apFilters, st = window._apState;
   c.innerHTML = '<p style="color:#888;padding:20px">Loading SiteNex prospects…</p>';
   const qs = new URLSearchParams();
-  ['subtype','region','bucket','package'].forEach(k => { if (f[k]) qs.set(k, f[k]); });
+  ['subtype','region','bucket','package','q'].forEach(k => { if (f[k]) qs.set(k, f[k]); });
   qs.set('page', String(f.page||1)); qs.set('pageSize', String(st.pageSize));
   const got = await apGet('/sitenex/prospects?'+qs.toString());
   if (!got.ok) { c.innerHTML = apErrorCard('SiteNex Prospects', got, "pages['sitenex-prospects']()"); return; }
@@ -8290,33 +8330,45 @@ pages['sitenex-prospects'] = async function(){
   if (f.subtype === null) { f.subtype = apDefaultSubtype(); if (f.subtype) return pages['sitenex-prospects'](); f.subtype = ''; }
   const sm = st.summary || {}, fa = st.facets || { subtypes:[], regions:[], buckets:[], packages:[] };
 
-  const header = '<div class="card">'
-    + '<div class="card-title text-section" style="margin:0">SiteNex Prospects</div>'
-    + '<div class="text-body">Businesses whose website is bad enough to sell a rebuild against, worst site first. '
-    + '<strong>site_score is 0-100 and higher means worse</strong> — it scores how bad the current site is, so the '
-    + 'worst sort to the top. Review count sits beside it deliberately and is NOT part of the score: the score answers '
-    + '&ldquo;how bad is the site&rdquo;, reviews answer &ldquo;do they need customers&rdquo;. An agency flag means '
-    + 'someone may already be paid to look after the site.</div>'
-    + '<div class="text-body" style="margin-top:4px;font-size:12px;color:var(--text-muted)">'
-    +   'Email is read off the site itself (Places does not supply one), so the rows with no website and the '
-    +   'rows whose site blocked the scan can never have one — the column says which. '
+  /* THE HEADER IS ONE SENTENCE NOW. It used to be four paragraphs: what the score means, that reviews are
+     not part of it, where the email comes from, and which subtypes are showing. All true, all worth
+     knowing ONCE — and a reader who opens this screen twenty times a day reads none of it the nineteenth
+     time, which means the paragraph is occupying the top of the screen without being read.
+     The score explanation moved to the column header's tooltip (it is a fact about that column), the email
+     explanation is already in every cell that has no email, and the subtype note moved next to the subtype
+     filter, which is the control it describes. */
+  const header = '<div class="sn-head">'
+    + '<div>'
+    +   '<h2>SiteNex Prospects</h2>'
+    +   '<p class="sn-sub">Businesses whose website is bad enough to sell a rebuild against, '
+    +     '<strong>worst site first</strong>. A higher score is a worse site.</p>'
     + '</div>'
-    + '<div class="text-body" style="margin-top:2px;font-size:12px;color:var(--text-muted)">'
-    +   (f.subtype && f.subtype === apDefaultSubtype()
-          ? 'Showing the three shipping subtypes. The other six are retired experiment categories — still here, still selectable above.'
-          : (f.subtype ? 'Filtered to '+apEsc(f.subtype.replace(/,/g,', ').replace(/_/g,' '))+'.' : 'Showing all nine subtypes, including the six retired experiment categories.'))
+    + '<div class="sn-head-right">'
+    +   '<span class="sn-count">'+(st.total||0).toLocaleString()+' prospect'+(st.total===1?'':'s')+'</span>'
     + '</div></div>';
 
-  const stat = (label,val,color) => '<div style="flex:1;min-width:110px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;text-align:center">'
-    + '<div style="font-size:22px;font-weight:800;color:'+(color||'var(--text-body)')+'">'+((val==null?0:val).toLocaleString())+'</div>'
-    + '<div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">'+label+'</div></div>';
-  const summaryRow = '<div class="card" style="display:flex;gap:10px;flex-wrap:wrap">'
-    + stat('Total', sm.total, '#1B3A6B') + stat('P2 · rebuild', sm.p2, '#d97706') + stat('P1 · new site', sm.p1, '#2563eb')
-    + stat('No website', sm.no_website, '#64748b') + stat('Blocked (not assessed)', sm.unscannable, '#64748b')
-    + stat("Site doesn't load", sm.dead_site, '#64748b') + stat('Rejected', sm.rejected, '#dc2626')
-    + stat('Have an email', sm.with_email, '#1D9E75') + '</div>';
+  /* THE STRIP IS ORDERED BY WHAT IT IS FOR, not by what the SQL returned. The first three are the working
+     numbers — how many there are and how they split by package. The rest are why a row cannot be worked:
+     no site to score, a site that blocked us, a site that does not load. They are muted because they are
+     a denominator, not a target. Rejected and Have-an-email keep their colour because each is a verdict. */
+  const stat = (label, val, cls, hint) =>
+    '<div class="sn-stat'+(cls ? ' '+cls : '')+'">'
+    + '<div class="sn-stat-v">'+((val==null?0:val).toLocaleString())+'</div>'
+    + '<div class="sn-stat-l">'+label+'</div>'
+    + (hint ? '<div class="sn-stat-h">'+hint+'</div>' : '')
+    + '</div>';
+  const summaryRow = '<div class="sn-stats">'
+    + stat('Total', sm.total)
+    + stat('P2 · rebuild', sm.p2, 'is-warn')
+    + stat('P1 · new site', sm.p1)
+    + stat('No website', sm.no_website, 'is-quiet')
+    + stat('Blocked', sm.unscannable, 'is-quiet', 'not assessed')
+    + stat('Dead site', sm.dead_site, 'is-quiet', "doesn't load")
+    + stat('Rejected', sm.rejected, 'is-bad')
+    + stat('Have an email', sm.with_email, 'is-good')
+    + '</div>';
 
-  const sel = (key, blank, opts) => '<select onchange="apSetFilter(\''+key+'\', this.value)" style="font-size:12px;padding:4px">'
+  const sel = (key, blank, opts) => '<select class="sn-select" onchange="apSetFilter(\''+key+'\', this.value)">'
     + '<option value="">'+blank+'</option>'
     + opts.map(o => { const v = o.v!==undefined?o.v:o, l = o.l!==undefined?o.l:o;
         return '<option value="'+apEsc(v)+'"'+(f[key]===v?' selected':'')+'>'+apEsc(l)+'</option>'; }).join('') + '</select>';
@@ -8329,50 +8381,80 @@ pages['sitenex-prospects'] = async function(){
     .concat(['<option value=""'+(f.subtype===''?' selected':'')+'>all subtypes ('+(fa.subtypes||[]).length+')</option>'])
     .concat((fa.subtypes||[]).map(st2 => '<option value="'+apEsc(st2)+'"'+(f.subtype===st2?' selected':'')+'>'
       + apEsc(st2.replace(/_/g,' ')) + (shipSet.has(st2) ? '' : ' · retired') + '</option>'));
-  const filters = '<div class="card" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
-    + '<select onchange="apSetFilter(\'subtype\', this.value)" style="font-size:12px;padding:4px">'+subtypeOpts.join('')+'</select>'
+  /* SEARCH BY NAME, which the server has supported (?q=, name ILIKE) since the deal picker needed it and
+     this screen never offered. With four filters and a pager, finding one business somebody mentioned on
+     the phone meant paging. It is first in the row because it is the one control used from a standing
+     start; the filters narrow a list you are already looking at. */
+  const filters = '<div class="sn-toolbar">'
+    + '<input id="ap-q" class="sn-input sn-grow" type="search" placeholder="Search by business name…" '
+    +   'value="'+apEsc(f.q||'')+'" oninput="apSearchInput(this.value)" '
+    +   'onkeydown="if(event.key===\'Enter\'){apSearchNow(this.value)}">'
+    + '<select class="sn-select" onchange="apSetFilter(\'subtype\', this.value)" '
+    +   'title="The other six subtypes are retired experiment categories. Their rows are still here and still selectable.">'
+    +   subtypeOpts.join('')+'</select>'
     + sel('region','metro: any', fa.regions)
     + sel('bucket','bucket: any', [{v:'scored',l:'scored'},{v:'no_website',l:'no website (P1)'},{v:'dead_site',l:"site doesn't load"},{v:'unscannable',l:'blocked (not assessed)'}])
     + sel('package','package: any', [{v:'P2',l:'P2 · Renew'},{v:'P1',l:'P1 · Launch'},{v:'none',l:'no package'}])
-    + '<button onclick="apResetFilters()" class="btn-outline btn-sm" style="font-size:11px">Reset</button></div>';
+    + '<button onclick="apResetFilters()" class="btn-secondary sn-btn-sm">Reset</button></div>';
 
   // Same rule as the other prospects table: one subtype in the filter means one word repeated down the
   // column, so it goes. The SiteNex DEFAULT is three subtypes joined by commas, so by default it stays.
   const apOneSubtype = !!(f.subtype && !String(f.subtype).includes(','));
+  /* COLUMN COUNT IN ONE PLACE. It was written out as `apOneSubtype?9:10` in two spots and as that
+     expression minus the outreach column in a third, which is three chances to get a colspan wrong — and a
+     wrong colspan on the detail row makes the expanded panel sit under the wrong columns. */
+  const apCols = 8                                           /* business, city, phone, email, score, reviews, package, actions */
+    + (apOneSubtype ? 0 : 1)                                 /* subtype */
+    + (window._apState.canTrackOutreach ? 1 : 0);            /* outreach */
+
   const rows = items.map(it => {
     const isOpen = !!(st.openRows && st.openRows[String(it.id)]);
     const site = it.site_url || it.website;
-    const main = '<tr id="ap-row-'+it.id+'" onclick="apToggle(\''+it.id+'\')" style="cursor:pointer;border-top:1px solid var(--border)'+(isOpen?';background:var(--light)':'')+'">'
-      + '<td style="padding:7px 8px;font-weight:600"><span id="ap-caret-'+it.id+'">'+(isOpen?'▾':'▸')+'</span> '+apEsc(it.name)+'</td>'
-      + (apOneSubtype ? '' : '<td style="padding:7px 8px">'+apEsc((it.subtype||'').replace(/_/g,' '))+'</td>')
-      + '<td style="padding:7px 8px">'+(apEsc(it.city)||apDash)+'</td>'
-      + '<td style="padding:7px 8px">'+(it.phone?'<a href="tel:'+apEsc(String(it.phone).replace(/[^0-9+]/g,''))+'" onclick="event.stopPropagation()">'+apEsc(it.phone)+'</a>':apDash)+'</td>'
+    const main = '<tr id="ap-row-'+it.id+'" onclick="apToggle(\''+it.id+'\')" style="cursor:pointer'+(isOpen?';background:#f7f8fa':'')+'">'
+      + '<td class="sn-strong"><span id="ap-caret-'+it.id+'" class="sn-dash">'+(isOpen?'▾':'▸')+'</span> '+apEsc(it.name)
+      /* The agency warning moved OFF its own column and onto the name, because that is what it is about —
+         a column of dashes with the occasional ⚠ spent a column's width to say nothing 95% of the time. */
+      + (it.agency_flag ? ' <span title="someone may already be paid to look after this site" style="color:#b54708">⚠</span>' : '')
+      + '</td>'
+      + (apOneSubtype ? '' : '<td class="nowrap">'+apEsc((it.subtype||'').replace(/_/g,' '))+'</td>')
+      + '<td class="nowrap">'+(apEsc(it.city)||apDash)+'</td>'
+      + '<td class="nowrap">'+(it.phone?'<a href="tel:'+apEsc(String(it.phone).replace(/[^0-9+]/g,''))+'" onclick="event.stopPropagation()">'+apEsc(it.phone)+'</a>':apDash)+'</td>'
       /* Email is never silently blank: without an address the cell says WHY, because "none
          published" and "we could not load the site" are different facts to a rep. */
-      + '<td style="padding:7px 8px">'+(it.owner_email
+      + '<td>'+(it.owner_email
           ? '<a href="mailto:'+apEsc(it.owner_email)+'" onclick="event.stopPropagation()">'+apEsc(it.owner_email)+'</a>'
-          : '<span style="color:var(--text-muted);font-size:11px">'+apEsc(it.email_absence||'—')+'</span>')+'</td>'
-      + '<td style="padding:7px 8px;text-align:right">'+apScoreChip(it.site_score)+'</td>'
-      + '<td style="padding:7px 8px;text-align:right">'+(it.rating_count==null?apDash:it.rating_count.toLocaleString())+'</td>'
-      + '<td style="padding:7px 8px">'+(it.package_label?apEsc(it.recommended_package):apDash)+'</td>'
-      + '<td style="padding:7px 8px;text-align:center">'+(it.agency_flag?'<span title="someone may already be looking after this site" style="color:#d97706">⚠</span>':apDash)+'</td>'
+          : '<span class="sn-fine">'+apEsc(it.email_absence||'—')+'</span>')+'</td>'
+      + '<td class="num">'+apScoreChip(it.site_score)+'</td>'
+      + '<td class="num">'+(it.rating_count==null?apDash:it.rating_count.toLocaleString())+'</td>'
+      + '<td>'+(it.package_label?apEsc(it.recommended_package):apDash)+'</td>'
+      /* ── THE WAY IN TO THE CALL SCRIPT ──────────────────────────────────────
+         window.snProspectContent has existed since Phase 3 and NOTHING CALLED IT. The per-prospect phone
+         script and email — the feature this screen exists to feed — were built, tested, deployed and
+         unreachable, for the same reason the deal form was: a function on window with no control pointing
+         at it. That is twice now, which is why inline-handlers.test.js asserts the reverse direction as
+         well: every snProspectContent-shaped entry point must have a caller in the markup. */
+      + '<td class="nowrap" onclick="event.stopPropagation()">'
+      +   '<button onclick="apScript('+it.id+',\''+apEsc(it.recommended_package||'')+'\')" '
+      +   'class="btn-secondary sn-btn-xs" title="The phone script and the email for this business">Script</button>'
+      + '</td>'
     /* OMITTED when the server says outreach is not available to this caller. An outreach note is our
        record of what we did, so /api/outreach is staffOnly — drawing the control for a partner would
        give them two dropdowns that 403 on use, which is worse than not offering them. */
     + (window._apState.canTrackOutreach
-        ? '<td style="padding:7px 8px" onclick="event.stopPropagation()">'+orCell('prospect', it.id)+'</td>'
+        ? '<td onclick="event.stopPropagation()">'+orCell('prospect', it.id)+'</td>'
         : '')
       + '</tr>';
     // The detail row is ALWAYS rendered, hidden unless open, so apToggle is a display flip rather
     // than a re-render. Everything it shows is already in the list payload — there is nothing to
     // fetch on expand.
-    const lines = (it.findings||[]).map(x => '<li style="margin:3px 0">'+apEsc(x)+'</li>').join('') || '<li style="color:var(--text-muted)">no findings recorded</li>';
-    const detail = '<tr id="ap-det-'+it.id+'"'+(isOpen?'':' style="display:none"')+'><td colspan="'+(apOneSubtype?9:10)+'" style="background:var(--light);padding:10px 14px 14px 22px">'
-      + '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:4px">What&rsquo;s wrong with it</div>'
-      + '<ul style="margin:0 0 8px 16px;padding:0;font-size:13px">'+lines+'</ul>'
-      + (it.agency_note ? '<div style="font-size:12px;color:#d97706;margin-bottom:6px">⚠ Careful: '+apEsc(it.agency_note)+'</div>' : '')
-      + (it.pagespeed_note ? '<div style="font-size:12px;margin-bottom:6px">'+apEsc(it.pagespeed_note)+'</div>' : '')
-      + '<div style="font-size:12px;color:var(--text-muted)">'
+    const lines = (it.findings||[]).map(x => '<li>'+apEsc(x)+'</li>').join('') || '<li class="sn-dash">no findings recorded</li>';
+    const detail = '<tr id="ap-det-'+it.id+'"'+(isOpen?'':' style="display:none"')+'>'
+      + '<td colspan="'+apCols+'" style="background:#f7f8fa;padding:12px 14px 14px 26px">'
+      + '<div class="sn-label">What&rsquo;s wrong with it</div>'
+      + '<ul class="sn-list" style="margin-bottom:8px">'+lines+'</ul>'
+      + (it.agency_note ? '<div class="sn-fine" style="color:#b54708;margin-bottom:6px">⚠ Careful: '+apEsc(it.agency_note)+'</div>' : '')
+      + (it.pagespeed_note ? '<div class="sn-fine" style="margin-bottom:6px">'+apEsc(it.pagespeed_note)+'</div>' : '')
+      + '<div class="sn-fine">'
       +   'bucket: '+apEsc(it.bucket_label||'—')
       +   (it.builder?' · builder: '+apEsc(it.builder):'')
       +   (it.package_label?' · '+apEsc(it.package_label):'')
@@ -8382,31 +8464,59 @@ pages['sitenex-prospects'] = async function(){
   }).join('');
 
   const maxPage = Math.max(1, Math.ceil(st.total/(st.pageSize||50)));
-  const pager = '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 10px;font-size:12px;color:var(--text-muted)">'
-    + '<span>'+st.total.toLocaleString()+' prospect'+(st.total===1?'':'s')+'</span>'
-    + '<span><button onclick="apPage(-1)" class="btn-outline btn-sm" '+((f.page||1)<=1?'disabled':'')+'>‹</button> '
-    + 'page '+(f.page||1)+' of '+maxPage+' <button onclick="apPage(1)" class="btn-outline btn-sm" '+((f.page||1)>=maxPage?'disabled':'')+'>›</button></span></div>';
+  const pager = '<div class="sn-panel-head" style="border-bottom:0;border-top:1px solid var(--sn-line)">'
+    + '<span class="sn-note">'+st.total.toLocaleString()+' prospect'+(st.total===1?'':'s')
+    +   (f.q ? ' matching “'+apEsc(f.q)+'”' : '')+'</span>'
+    + '<span class="sn-note">'
+    +   '<button onclick="apPage(-1)" class="btn-secondary sn-btn-xs" '+((f.page||1)<=1?'disabled':'')+'>‹</button> '
+    +   'page '+(f.page||1)+' of '+maxPage+' '
+    +   '<button onclick="apPage(1)" class="btn-secondary sn-btn-xs" '+((f.page||1)>=maxPage?'disabled':'')+'>›</button>'
+    + '</span></div>';
 
-  const table = '<div class="card" style="padding:0;overflow-x:auto">'
-    + '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">'
-    + '<th style="padding:8px">Business</th>'+(apOneSubtype ? '' : '<th style="padding:8px">Subtype</th>')+'<th style="padding:8px">City</th><th style="padding:8px">Phone</th><th style="padding:8px">Email</th>'
-    + '<th style="padding:8px;text-align:right">Site score</th><th style="padding:8px;text-align:right">Reviews</th><th style="padding:8px">Package</th><th style="padding:8px;text-align:center">Agency</th>'
-    + (window._apState.canTrackOutreach ? '<th style="padding:8px">Outreach</th>' : '')
+  const emptyCell = '<tr><td colspan="'+apCols+'">'
+    + '<div class="sn-empty" style="border:0">'
+    +   '<strong>'+(f.q ? 'Nothing matches “'+apEsc(f.q)+'”.' : 'No prospects match these filters.')+'</strong>'
+    +   (f.q ? 'Search matches the business name only, not the address or the website.'
+           : 'Reset returns to the three shipping subtypes.')
+    + '</div></td></tr>';
+
+  const table = '<div class="sn-panel"><div class="sn-table-wrap">'
+    + '<table class="sn-table"><thead><tr>'
+    + '<th>Business</th>'+(apOneSubtype ? '' : '<th>Subtype</th>')+'<th>City</th><th>Phone</th><th>Email</th>'
+    + '<th class="num" title="0-100, and HIGHER MEANS WORSE — it scores how bad the current site is, so the worst sort to the top.">Site score</th>'
+    + '<th class="num" title="Not part of the score. The score asks how bad the site is; reviews ask whether they need customers.">Reviews</th>'
+    + '<th>Package</th><th></th>'
+    + (window._apState.canTrackOutreach ? '<th>Outreach</th>' : '')
     + '</tr></thead><tbody>'
-    + (rows || '<tr><td colspan="'+((apOneSubtype?9:10) - (window._apState.canTrackOutreach?0:1))+'" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
-    + '</tbody></table>'+pager+'</div>';
+    + (rows || emptyCell)
+    + '</tbody></table></div>'+pager+'</div>';
 
   /* THE SCOPE SENTENCE. A partner with no granted territory gets an empty screen, which is correct and
      fail-closed — and indistinguishable from a broken one unless it says so. The server supplies the
      wording because the server is what did the scoping. */
   const scopeLine = window._apState.scopeNote
-    ? '<div class="card" style="padding:9px 12px;background:var(--bg-subtle,#f7f7f8)">'
-      + '<div class="text-body" style="margin:0;font-size:12px">'+apEsc(window._apState.scopeNote)+'</div></div>'
+    ? '<div class="sn-panel"><div class="sn-panel-head"><span class="sn-note">'
+      + apEsc(window._apState.scopeNote)+'</span></div></div>'
     : '';
-  c.innerHTML = header + scopeLine
+  /* WRAPPED IN .sn, which is what scopes public/sitenex.css. Without this div every class in the markup
+     above is inert and the screen renders as unstyled text with working controls — so this is the one
+     line of the render that cannot be dropped. apProspectsRendersScoped() in the UI test asserts it. */
+  c.innerHTML = '<div class="sn">' + header + scopeLine
     + (window._apState.canTrackOutreach ? orBar('prospect') : '')
-    + summaryRow + filters + table;
+    + summaryRow + filters + table + '</div>';
+  apRestoreSearchFocus();
 };
+
+/* Opens the phone script and the email for one prospect. A thin wrapper so the table's onclick does not
+   have to know that snProspectContent lives in a separate file loaded later — and so that a missing file
+   SAYS so rather than silently doing nothing, which is exactly how the deal form stayed broken. */
+function apScript(id, pkg){
+  if (typeof snProspectContent !== 'function') {
+    alert('The call script has not loaded yet. Reload the page and try again.');
+    return;
+  }
+  snProspectContent(id, pkg || '');
+}
 
 /* ── NEW DEAL: pick a prospect, create the deal, land in the form ───────────────
    Three steps in one flow because any two of them on their own are useless: a deal with no prospect has
@@ -8415,16 +8525,25 @@ pages['sitenex-prospects'] = async function(){
    endpoint — the bucket definitions and the agency tiebreak live there and a parallel query would drift. */
 window.apNewDeal = async function apNewDeal(){
   const c = document.getElementById('content');
-  c.innerHTML = '<div class="card"><div class="card-title text-section" style="margin:0 0 8px">New SiteNex deal</div>'
-    + '<div class="text-body" style="margin:0 0 10px">Pick the prospect this deal is for. Qualified rows first — '
-    + 'a rejected one cannot be turned into a deal by accident, because the search asks for qualified only.</div>'
-    + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
-    + '<input id="ap-nd-q" placeholder="Search by business name…" oninput="apNewDealSearch()" '
-    + 'style="flex:1;min-width:240px;padding:6px 9px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
-    + '<button onclick="pages[\'sitenex-deals\']()" class="btn-secondary" style="padding:5px 12px;font-size:13px">Cancel</button>'
+  c.innerHTML = '<div class="sn">'
+    /* is-record: the console's title still says "SiteNex Deals" here, so this heading is the only thing
+       that says you are no longer on the board. */
+    + '<div class="sn-head is-record"><div><h2>New SiteNex deal</h2>'
+    +   '<p class="sn-sub">Pick the prospect this deal is for. The search asks for <strong>qualified</strong> '
+    +     'rows only, so a rejected one cannot become a deal by accident.</p></div>'
+    +   '<div class="sn-head-right">'
+    +     '<button onclick="pages[\'sitenex-deals\']()" class="btn-secondary sn-btn-sm">Cancel</button>'
+    +   '</div></div>'
+    + '<div class="sn-toolbar">'
+    +   '<input id="ap-nd-q" class="sn-input sn-grow" type="search" placeholder="Search by business name…" '
+    +     'oninput="apNewDealSearch()">'
     + '</div>'
-    + '<div id="ap-nd-msg" style="font-size:12px;min-height:16px;margin-top:6px"></div>'
-    + '<div id="ap-nd-list" style="margin-top:4px"></div></div>';
+    + '<div id="ap-nd-msg" class="sn-msg"></div>'
+    + '<div id="ap-nd-list"></div></div>';
+  /* Focused, because this screen exists to be typed into. Arriving on a form whose only control has to be
+     clicked first is one unnecessary interaction on the path to every deal. */
+  const box = document.getElementById('ap-nd-q');
+  if (box) box.focus();
   apNewDealSearch();
 };
 
@@ -8454,26 +8573,26 @@ async function apNewDealRun(){
   if (msg) msg.textContent = items.length ? (r.data.total + ' qualified match' + (r.data.total === 1 ? '' : 'es')
     + (items.length < r.data.total ? ' — showing the first ' + items.length : '')) : '';
   list.innerHTML = items.length
-    ? '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--white)">'
-      + items.map(p => '<div onclick="apCreateDeal('+p.id+')" title="Create a deal for this prospect"'
-        + ' style="display:flex;justify-content:space-between;gap:10px;padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer">'
-        + '<div><div style="font-weight:600;font-size:13px">'+apEsc(p.name)+'</div>'
-        + '<div style="font-size:11px;color:var(--text-muted)">'
-        +   apEsc([p.city || p.region, p.subtype && String(p.subtype).replace(/_/g,' '), p.phone].filter(Boolean).join(' · '))
-        + '</div></div>'
-        + '<div style="text-align:right;font-size:11px;color:var(--text-muted);white-space:nowrap">'
+    ? '<div class="sn-panel"><div class="sn-table-wrap"><table class="sn-table"><tbody>'
+      + items.map(p => '<tr onclick="apCreateDeal('+p.id+')" title="Create a deal for this prospect" style="cursor:pointer">'
+        + '<td><span class="sn-strong">'+apEsc(p.name)+'</span>'
+        +   '<span class="sn-sub2">'
+        +     apEsc([p.city || p.region, p.subtype && String(p.subtype).replace(/_/g,' '), p.phone].filter(Boolean).join(' · '))
+        +   '</span></td>'
+        + '<td class="num nowrap sn-fine">'
         +   (p.recommended_package ? apEsc(p.recommended_package) : 'no package')
-        +   (p.bucket_label ? '<div>'+apEsc(p.bucket_label)+'</div>' : '')
-        + '</div></div>').join('')
-      + '</div>'
-    : '<div style="border:1px dashed var(--border);border-radius:8px;padding:14px;text-align:center;font-size:12px;color:var(--text-muted)">'
-      + (q.trim() ? 'No qualified prospect matches “'+apEsc(q.trim())+'”.' : 'No qualified SiteNex prospects yet.')
+        +   (p.bucket_label ? '<span class="sn-sub2">'+apEsc(p.bucket_label)+'</span>' : '')
+        + '</td></tr>').join('')
+      + '</tbody></table></div></div>'
+    : '<div class="sn-empty">'
+      + '<strong>'+(q.trim() ? 'No qualified prospect matches “'+apEsc(q.trim())+'”.' : 'No qualified SiteNex prospects yet.')+'</strong>'
+      + 'Only prospects whose status is <em>qualified</em> can become a deal.'
       + '</div>';
 }
 
 window.apCreateDeal = async function apCreateDeal(prospectId){
   const msg = document.getElementById('ap-nd-msg');
-  if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = 'Creating the deal…'; }
+  if (msg) { msg.className = 'sn-msg'; msg.textContent = 'Creating the deal…'; }
   let r;
   try {
     const resp = await fetch('/api/sitenex/deals', {
@@ -8486,7 +8605,7 @@ window.apCreateDeal = async function apCreateDeal(prospectId){
     r = { ok: resp.ok, status: resp.status, data, error: (data && data.error) || ('HTTP '+resp.status) };
   } catch(e){ r = { ok:false, status:0, error:'request failed: '+(e && e.message ? e.message : String(e)) }; }
   if (!r.ok) {
-    if (msg) { msg.style.color = 'var(--danger,#b00020)'; msg.textContent = r.error; }
+    if (msg) { msg.className = 'sn-msg bad'; msg.textContent = r.error; }
     return;
   }
   /* LAND IN THE FORM. The point of creating the deal was to fill it in; dropping the user back on the
@@ -8523,19 +8642,21 @@ pages['sitenex-deals'] = async function(){
   if (!got.ok) { c.innerHTML = apErrorCard('SiteNex Deals', got, "pages['sitenex-deals']()"); return; }
   const res = got.data || {};
   const cols = res.columns || [];
-  const header = '<div class="card">'
-    + '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
-    + '<div class="card-title text-section" style="margin:0">SiteNex Deals</div>'
+  const header = '<div class="sn-head">'
+    + '<div>'
+    +   '<h2>SiteNex Deals</h2>'
+    +   '<p class="sn-sub">One column per stage. '
+    +     (res.total
+        ? 'Click a card to open its client details, payment schedule and contract.'
+        : 'No deals yet — the columns are here before the rows are, so the shape of the pipeline is visible from the start.')
+    +   '</p>'
+    + '</div>'
+    + '<div class="sn-head-right">'
+    +   '<span class="sn-count">'+(res.total||0)+' deal'+(res.total===1?'':'s')+'</span>'
     /* can_create comes FROM THE SERVER. The board is visible to super_admin, admin and partner, but only
        the first two may POST a deal — and the SPA must not recompute that rule, because a second copy can
        disagree with the gate. A partner therefore sees no button rather than a button that 403s. */
-    + (res.can_create
-      ? '<button onclick="apNewDeal()" class="btn-primary" style="padding:5px 12px;font-size:13px">+ New deal</button>'
-      : '')
-    + '</div>'
-    + '<div class="text-body">One column per deal status. A referral <em>partner</em> is not a billed account — these are the '
-    + 'client deals partners refer. '+(res.total?('<strong>'+res.total+'</strong> deal'+(res.total===1?'':'s')+'.'):'No deals yet: the board shows the pipeline shape, so the columns are here before the rows are.')
-    + ' Click a card to open its client details, payment schedule and contract.'
+    +   (res.can_create ? '<button onclick="apNewDeal()" class="btn-primary sn-btn-sm">+ New deal</button>' : '')
     + '</div></div>';
   /* THE CARD IS THE WAY IN. The deal form — client details, payment schedule, Generate contract — has
      existed on window.snEditDeal since Phase 3 and NOTHING CALLED IT: the board drew cards with no
@@ -8584,33 +8705,41 @@ pages['sitenex-deals'] = async function(){
        deal page calls, so the board and the form cannot disagree about whether a contract can be made.
        Only shown once there is something to block — a brand-new deal is not "blocked", it is empty. */
     const showBlocked = d.contract_ready === false && !missing;
-    return '<div onclick="apOpenDeal(event,'+d.id+')" title="Open this deal"'
-      + ' style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--white);cursor:pointer">'
-      + '<div style="font-weight:600;font-size:13px">'+apEsc(d.company_name || d.prospect_name || ('deal #'+d.id))
-      +   (d.contact_name ? '<span style="font-weight:400;color:var(--text-muted)"> · '+apEsc(d.contact_name)+'</span>' : '')
+    return '<div class="sn-card" onclick="apOpenDeal(event,'+d.id+')" title="Open this deal">'
+      + '<div class="sn-card-name">'+apEsc(d.company_name || d.prospect_name || ('deal #'+d.id))
+      +   (d.contact_name ? '<span class="sn-who"> · '+apEsc(d.contact_name)+'</span>' : '')
       + '</div>'
-      + (commercial ? '<div style="font-size:11px;margin-top:3px">'+commercial+'</div>' : '')
-      + '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">'
-      +   (d.partner_name ? 'via '+apEsc(d.partner_name) : 'direct')
-      + '</div>'
-      + '<div style="font-size:11px;color:var(--text-muted);margin-top:1px">'+apEsc(apDays(d))+'</div>'
-      + (missing ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic">'+apEsc(missing)+'</div>' : '')
+      + (commercial ? '<div class="sn-card-money">'+commercial+'</div>' : '')
+      + '<div class="sn-card-meta">'+(d.partner_name ? 'via '+apEsc(d.partner_name) : 'direct')
+      +   ' · '+apEsc(apDays(d))+'</div>'
+      + (missing ? '<div class="sn-card-needs">'+apEsc(missing)+'</div>' : '')
       /* A deal that has its basics but still cannot produce a contract — an unbalanced schedule, or a
          required field the card does not show. The tooltip carries the server's own list. */
-      + (showBlocked ? '<div style="font-size:11px;color:#8a1f1f;margin-top:4px" title="'
+      + (showBlocked ? '<div class="sn-card-flag" title="'
           + apEsc((d.missing && d.missing.length) ? d.missing.join(', ') : 'open the deal to see what is needed')
           + '">⚠ contract blocked</div>' : '')
       + '</div>';
   };
-  const board = '<div class="card" style="overflow-x:auto"><div style="display:flex;gap:10px;min-width:900px">'
-    + cols.map(col => '<div style="flex:1;min-width:150px">'
-        + '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);padding:0 2px 6px">'
-        +   apEsc(col.status.replace(/_/g,' '))+' <span style="color:var(--text-body);font-weight:700">'+col.deals.length+'</span></div>'
+  /* THE COLUMN IS SUNKEN AND THE CARD IS RAISED. Both used to be white rectangles with the same border, so
+     the board read as a grid of equal boxes and the column boundaries were invisible — you could not see
+     at a glance where one stage ended. The stage colour lives on a 7px dot in the column header and on the
+     matching pill elsewhere, so a deal keeps one colour wherever it is drawn.
+
+     `s-<status>` is the status verbatim, which is why the CSS keys on `s-proposal_sent` with an
+     underscore: the class comes from the wire value, and translating it here would mean two spellings of
+     every stage. Only the LABEL is de-underscored. */
+  const board = '<div class="sn-board">'
+    + cols.map(col => '<div class="sn-col s-'+apEsc(col.status)+'">'
+        + '<div class="sn-col-head">'
+        +   '<span class="sn-col-dot"></span>'
+        +   '<span class="sn-col-name">'+apEsc(col.status.replace(/_/g,' '))+'</span>'
+        +   '<span class="sn-col-n">'+col.deals.length+'</span>'
+        + '</div>'
         + (col.deals.length ? col.deals.map(card).join('')
-            : '<div style="border:1px dashed var(--border);border-radius:8px;padding:12px 8px;text-align:center;font-size:11px;color:var(--text-muted)">empty</div>')
+            : '<div class="sn-empty">empty</div>')
       + '</div>').join('')
-    + '</div></div>';
-  c.innerHTML = header + board;
+    + '</div>';
+  c.innerHTML = '<div class="sn">' + header + board + '</div>';
 };
 
 pages['sitenex-packages'] = async function(){
@@ -8619,33 +8748,45 @@ pages['sitenex-packages'] = async function(){
   const got = await apGet('/sitenex/packages');
   if (!got.ok) { c.innerHTML = apErrorCard('SiteNex Packages', got, "pages['sitenex-packages']()"); return; }
   const res = got.data || {};
-  const header = '<div class="card">'
-    + '<div class="card-title text-section" style="margin:0">SiteNex Packages</div>'
-    + '<div class="text-body">Read-only. What each package includes <strong>and what it does not</strong> — the exclusions are what stop a client '
-    + 'expecting content writing or an App Store account. Prices are not decided yet, so none is shown: a package without a price says so rather than showing $0.</div></div>';
+  const header = '<div class="sn-head">'
+    + '<div>'
+    +   '<h2>SiteNex Packages</h2>'
+    +   '<p class="sn-sub">What each package includes <strong>and what it does not</strong>. The exclusions are '
+    +     'what stop a client expecting content writing or an App Store account — they are on the contract '
+    +     'and in the call script for the same reason. Read-only here.</p>'
+    + '</div>'
+    + '<div class="sn-head-right"><span class="sn-count">'+((res.packages||[]).length)+' package'
+    +   (((res.packages||[]).length)===1?'':'s')+'</span></div></div>';
   const list = (res.packages||[]).map(p => {
-    const inc = (p.included||[]).map(x => '<li style="margin:2px 0">'+apEsc(x)+'</li>').join('');
-    const exc = (p.not_included||[]).map(x => '<li style="margin:2px 0">'+apEsc(x)+'</li>').join('')
-      || '<li style="color:var(--text-muted)">not specified yet</li>';
+    const inc = (p.included||[]).map(x => '<li>'+apEsc(x)+'</li>').join('')
+      || '<li class="sn-dash">not specified yet</li>';
+    const exc = (p.not_included||[]).map(x => '<li>'+apEsc(x)+'</li>').join('')
+      || '<li class="sn-dash">not specified yet</li>';
     /* The null-price contract: REFUSE to render a price rather than print $0. */
     const price = p.priced
-      ? ((p.setup_fee_usd!=null?'$'+p.setup_fee_usd.toLocaleString()+' setup':'')+(p.monthly_usd!=null?(p.setup_fee_usd!=null?' · ':'')+'$'+p.monthly_usd.toLocaleString()+'/mo':''))
-      : '<span style="color:var(--text-muted)">not priced yet</span>';
-    return '<div class="card">'
-      + '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap">'
-      +   '<div class="card-title" style="margin:0">'+apEsc(p.code)+' · '+apEsc(p.name)
-      +     (p.active?'':' <span style="font-size:11px;font-weight:600;color:#d97706;border:1px solid #d9770644;background:#d9770611;border-radius:10px;padding:1px 7px">not sold yet</span>')+'</div>'
-      +   '<div style="font-size:12px">'+price+(p.typical_weeks?' <span style="color:var(--text-muted)">· typically '+p.typical_weeks+' weeks</span>':'')+'</div>'
+      ? '<strong>'+((p.setup_fee_usd!=null?'$'+p.setup_fee_usd.toLocaleString()+' setup':'')+(p.monthly_usd!=null?(p.setup_fee_usd!=null?' · ':'')+'$'+p.monthly_usd.toLocaleString()+'/mo':''))+'</strong>'
+      : '<span class="sn-dash">not priced yet</span>';
+    return '<div class="sn-panel">'
+      + '<div class="sn-panel-head">'
+      +   '<h3>'+apEsc(p.code)+' · '+apEsc(p.name)
+      +     (p.active?'':' <span class="sn-pill s-lost" style="margin-left:6px">not sold yet</span>')+'</h3>'
+      +   '<span class="sn-note">'+price
+      +     (p.typical_weeks?' · typically '+p.typical_weeks+' weeks':'')+'</span>'
       + '</div>'
-      + (p.summary?'<div class="text-body" style="margin-top:2px">'+apEsc(p.summary)+'</div>':'')
-      + '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px">'
-      +   '<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#1D9E75;margin-bottom:3px">Included</div>'
-      +     '<ul style="margin:0 0 0 16px;padding:0;font-size:13px">'+inc+'</ul></div>'
-      +   '<div><div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#dc2626;margin-bottom:3px">Not included</div>'
-      +     '<ul style="margin:0 0 0 16px;padding:0;font-size:13px">'+exc+'</ul></div>'
+      + '<div class="sn-panel-body">'
+      +   (p.summary?'<p class="sn-prose" style="margin-bottom:12px">'+apEsc(p.summary)+'</p>':'')
+      +   '<div class="sn-cols" style="gap:16px">'
+      +     '<div><div class="sn-label" style="color:#067647">Included</div>'
+      +       '<ul class="sn-list">'+inc+'</ul></div>'
+      +     '<div><div class="sn-label" style="color:#b42318">Not included</div>'
+      +       '<ul class="sn-list">'+exc+'</ul></div>'
+      +   '</div>'
       + '</div></div>';
   }).join('');
-  c.innerHTML = header + (list || '<div class="card"><p style="color:var(--text-muted)">No packages configured.</p></div>');
+  c.innerHTML = '<div class="sn">' + header
+    + (list || '<div class="sn-empty"><strong>No packages configured.</strong>'
+      + 'The catalogue is seeded from the server — if this is empty, the seed has not run.</div>')
+    + '</div>';
 };
 
 /* A PERMANENT LOADING STATE IS HOW THE NEXT FAILURE HIDES TOO.

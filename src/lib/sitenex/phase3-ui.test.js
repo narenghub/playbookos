@@ -354,10 +354,10 @@ test('the grant form says the exclusivity rule BEFORE a 409 teaches it', () => {
   const page = between(CODE, 'async function snPartnersPage', 'window.snGrantTerritory');
   assert.match(page, /held by one partner only/);
   assert.match(page, /database refuses the second grant/, 'and that it is the database, not the form');
-  // Matched in halves: the sentence is split across a string concatenation, so a single regex over the
-  // source cannot see it as one phrase even though a browser renders it as one.
-  assert.match(page, /Uncheck /);
-  assert.match(page, /exclusive if two partners are meant to share it/);
+  // ONE REGEX, because the sentence now lives in ONE string literal. It used to be split across a
+  // concatenation and matched in halves — which would have passed on a page that said the two halves in
+  // different places, or in the wrong order, and that is not what the test means to be asserting.
+  assert.match(page, /Uncheck exclusive if two partners are meant to share it/);
   // exclusive is CHECKED by default, matching the column default.
   assert.match(page, /id="sn-t-excl" checked/);
 });
@@ -389,7 +389,10 @@ test('the prospects screen omits the outreach control when the server says so', 
   const shellCode = SHELL.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
   assert.match(shellCode, /window\._apState\.canTrackOutreach\s*\n?\s*\?\s*'<td[^']*'\+orCell\('prospect'/,
     'the cell is conditional');
-  assert.match(shellCode, /canTrackOutreach \? '<th style="padding:8px">Outreach<\/th>' : ''/,
+  /* The header's markup changed with the restyle (the inline padding became a class), so this matches the
+     CONDITION and the word, not the attributes — pinning the style meant a purely visual edit failed a
+     test about table alignment, which is noise in front of a real check. */
+  assert.match(shellCode, /canTrackOutreach \? '<th>Outreach<\/th>' : ''/,
     'and so is its column header, or the table misaligns');
   assert.match(shellCode, /canTrackOutreach \? orBar\('prospect'\) : ''/, 'and the summary bar');
   // The flag comes FROM THE RESPONSE, and only an ABSENT key defaults permissive.
@@ -401,8 +404,19 @@ test('the prospects screen omits the outreach control when the server says so', 
 test('the colspan of the empty row follows the column count', () => {
   // Dropping a column without dropping it from the colspan leaves the "no prospects" message misaligned,
   // which looks like a rendering bug on the screen a partner is most likely to see empty.
+  //
+  // THE COLUMN COUNT IS NOW ONE EXPRESSION, `apCols`. It was written out three times — twice as
+  // `apOneSubtype?9:10` and once as that minus the outreach column — and three copies of a count is three
+  // chances for the detail row to sit under the wrong columns. So this asserts the single definition and
+  // that every colspan refers to it, rather than asserting the arithmetic in one of the three places.
   const shellCode = SHELL.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
-  assert.match(shellCode, /\(apOneSubtype\?9:10\) - \(window\._apState\.canTrackOutreach\?0:1\)/);
+  assert.match(shellCode, /const apCols = 8\s*\n?\s*\+ \(apOneSubtype \? 0 : 1\)/,
+    'the count must be defined once, from the optional columns');
+  assert.match(shellCode, /\+ \(window\._apState\.canTrackOutreach \? 1 : 0\)/,
+    'and the outreach column must be part of it');
+  const spans = [...shellCode.matchAll(/colspan="'\s*\+\s*([A-Za-z_$][\w$]*)/g)].map(m => m[1]);
+  assert.ok(spans.length >= 2, `expected the detail row and the empty row to use a colspan, found ${spans.length}`);
+  for (const s of spans) assert.equal(s, 'apCols', `a colspan computes its own count (${s}) instead of using apCols`);
 });
 
 test('an empty prospects screen EXPLAINS itself', () => {
@@ -455,4 +469,51 @@ test('every field the panel prints is escaped — a prospect name is typed by so
   for (const f of ['t.title', 't.detail', 'label', 'age']) {
     assert.ok(new RegExp(`esc\\(${f.replace('.', '\\.')}\\)`).test(fn), `${f} must go through esc()`);
   }
+});
+
+// ── THE STYLESHEET IS INERT WITHOUT ITS WRAPPER ───────────────────────────────
+//
+// public/sitenex.css is scoped entirely under `.sn`, which each page puts on its outermost element. Drop
+// that one div and every class in the markup stops matching: the screen renders as unstyled text with
+// every control still live and nothing erroring. That is a worse failure than a blank page, because
+// nothing in the console, the logs or any other test says a word about it — it was caught by taking a
+// screenshot, which is not a thing that happens on every commit.
+//
+// So: every SiteNex render must open with the wrapper, and the stylesheet must actually be loaded.
+
+
+test('every SiteNex screen wraps its render in .sn, or the stylesheet does nothing', () => {
+  // Counted rather than matched once each: both files render several screens from the same literal, and a
+  // single match would pass while three other screens had lost theirs.
+  const inShell = (SHELL.match(/c\.innerHTML = '<div class="sn">'/g) || []).length;
+  const inUi    = (CODE.match(/el\.innerHTML = '<div class="sn">'/g) || []).length;
+  assert.ok(inShell >= 4, `index.html has ${inShell} .sn-wrapped renders, expected at least 4 (prospects, deals, packages, new-deal)`);
+  // FIVE: the contracts register has two (the empty state returns early with its own render), plus the
+  // deal form, the call script and the partners page. Counted from what is actually there rather than
+  // rounded down, so losing one is a failure instead of slack.
+  assert.ok(inUi >= 5, `sitenex-phase3.js has ${inUi} .sn-wrapped renders, expected at least 5 (contracts and its empty state, the deal form, the call script, partners)`);
+});
+
+test('the stylesheet those classes need is actually linked', () => {
+  assert.match(SHELL, /<link rel="stylesheet" href="\/sitenex\.css">/,
+    'the markup is full of sn- classes and nothing loads the file that defines them');
+  const css = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '../../../public/sitenex.css'), 'utf8');
+  // The classes the pages lean on hardest. Not exhaustive — a list of every class would be a second copy
+  // of the stylesheet — but enough that a truncated or half-written file fails here.
+  for (const cls of ['.sn-head', '.sn-panel', '.sn-table', '.sn-pill', '.sn-board', '.sn-card',
+                     '.sn-stats', '.sn-empty', '.sn-toolbar', '.sn-field']) {
+    assert.ok(css.includes(cls + ' ') || css.includes(cls + ','), `sitenex.css never defines ${cls}`);
+  }
+});
+
+test('the status pill class carries the WIRE value, underscore and all', () => {
+  // `s-proposal_sent`, not `s-proposal-sent`. The class is built from the status the server sends, so a
+  // kebab-cased stylesheet would silently fail to colour exactly the multi-word stages — the ones in the
+  // middle of the funnel, which are the ones worth seeing.
+  const css = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '../../../public/sitenex.css'), 'utf8');
+  assert.match(CODE, /'<span class="sn-pill s-' \+ snEsc\(status\)/, 'the class comes from the status itself');
+  assert.ok(css.includes('.sn-pill.s-proposal_sent'), 'the stylesheet must key on the underscored value');
+  assert.ok(!css.includes('.sn-pill.s-proposal-sent'), 'and must not have been kebab-cased');
 });

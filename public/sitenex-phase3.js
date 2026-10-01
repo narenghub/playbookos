@@ -57,9 +57,18 @@ async function snSend(method, path, body) {
 function snToast(msg, bad) {
   const el = document.getElementById('sn-msg');
   if (!el) { if (bad) console.error(msg); return; }
-  el.style.color = bad ? 'var(--danger,#b00020)' : 'var(--teal,#0a7)';
+  /* The colour is a CLASS, not an inline style, so the two states are defined once in sitenex.css next to
+     each other and cannot drift into two different reds. The element always reserves its height (.sn-msg
+     has a min-height), so a message appearing never shifts the page under a cursor. */
+  el.className = 'sn-msg ' + (bad ? 'bad' : 'ok');
   el.textContent = msg;
 }
+
+/* A status pill. The CLASS carries the wire value verbatim (`s-proposal_sent`), because that is the only
+   spelling the server uses; only the LABEL is de-underscored. Two spellings of a stage is how a colour
+   ends up applying to seven of eight columns. */
+const snPill = (status) => '<span class="sn-pill s-' + snEsc(status) + '">'
+  + snEsc(String(status || '').replace(/_/g, ' ')) + '</span>';
 
 const SN_CONTRACT_STATUS = ['generated', 'sent', 'signed', 'superseded', 'void'];
 const SN_DEAL_STATUS = ['new', 'contacted', 'proposal_sent', 'signed', 'intake', 'building', 'live', 'lost'];
@@ -116,18 +125,18 @@ window.snDownloadContract = async function snDownloadContract(id, fileName) {
 function snSendLine(pv) {
   if (!pv) return '';
   if (pv.sent_at) {
-    return '<div style="font-size:11px;color:var(--text-muted)">Sent ' + snEsc(snDate(pv.sent_at))
+    return '<div class="sn-fine">Sent ' + snEsc(snDate(pv.sent_at))
          + ' to <strong>' + snEsc(pv.to) + '</strong>'
          + (pv.cc ? ' (cc ' + snEsc(pv.cc) + ')' : '') + '</div>';
   }
   if (!pv.can_send) {
-    return '<div style="font-size:11px;color:#8a1f1f">Cannot email: ' + snEsc(pv.blocked_because) + '</div>';
+    return '<div class="sn-fine is-bad">Cannot email: ' + snEsc(pv.blocked_because) + '</div>';
   }
-  return '<div style="font-size:11px;color:var(--text-muted)">Will email <strong>' + snEsc(pv.to) + '</strong>'
+  return '<div class="sn-fine">Will email <strong>' + snEsc(pv.to) + '</strong>'
        + (pv.cc ? ' and cc <strong>' + snEsc(pv.cc) + '</strong>' : '')
        + ' from ' + snEsc(pv.from) + '</div>'
-       + (pv.price ? '<div style="font-size:11px;color:var(--text-muted)">The note will state: ' + snEsc(pv.price) + '</div>'
-                   : '<div style="font-size:11px;color:#8a1f1f">No price on this contract — the note will say the '
+       + (pv.price ? '<div class="sn-fine">The note will state: ' + snEsc(pv.price) + '</div>'
+                   : '<div class="sn-fine is-bad">No price on this contract — the note will say the '
                      + 'terms are in the document</div>');
 }
 
@@ -179,21 +188,22 @@ window.snEmailContract = async function snEmailContract(id) {
 /* ── the contracts register ────────────────────────────────────────────────────  */
 
 function snTotalsCard(t) {
-  const box = (label, value, hint) =>
-    '<div style="flex:1;min-width:150px;border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--white)">'
-    + '<div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em">' + snEsc(label) + '</div>'
-    + '<div style="font-size:20px;font-weight:650;margin-top:2px">' + value + '</div>'
-    + (hint ? '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + snEsc(hint) + '</div>' : '')
+  const box = (label, value, hint, cls) =>
+    '<div class="sn-stat' + (cls ? ' ' + cls : '') + '">'
+    + '<div class="sn-stat-v">' + value + '</div>'
+    + '<div class="sn-stat-l">' + snEsc(label) + '</div>'
+    + (hint ? '<div class="sn-stat-h">' + snEsc(hint) + '</div>' : '')
     + '</div>';
-  return '<div style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px">'
-    + box('Signed — one-time', snMoney(t.signed_one_time_cents), t.signed_count + ' contract' + (t.signed_count === 1 ? '' : 's'))
-    + box('Signed — monthly', snMoney(t.signed_monthly_cents), 'recurring')
+  return '<div class="sn-stats">'
+    + box('Signed — one-time', snMoney(t.signed_one_time_cents),
+          t.signed_count + ' contract' + (t.signed_count === 1 ? '' : 's'), 'is-good')
+    + box('Signed — monthly', snMoney(t.signed_monthly_cents), 'recurring', 'is-good')
     /* Labelled as a DERIVED figure, not as revenue. One-time plus twelve months of the retainer is an
        arithmetic statement about today's book, not a forecast and not money received. */
     + box('Annualised', snMoney(t.annualised_cents), 'one-time + 12 × monthly')
-    + box('Pipeline', snMoney(t.pipeline_cents), t.pipeline_count + ' generated or sent')
+    + box('Pipeline', snMoney(t.pipeline_cents), t.pipeline_count + ' generated or sent', 'is-quiet')
     + (t.superseded_count
-      ? box('Superseded', String(t.superseded_count), 'excluded from every total above')
+      ? box('Superseded', String(t.superseded_count), 'excluded from every total above', 'is-quiet')
       : '')
     + '</div>';
 }
@@ -203,43 +213,45 @@ function snContractRow(c) {
   const opts = SN_CONTRACT_STATUS
     .filter(s => s !== 'superseded')          /* set by generating a replacement, never by hand */
     .map(s => '<option value="' + s + '"' + (s === c.status ? ' selected' : '') + '>' + s + '</option>').join('');
-  return '<tr style="' + (dead ? 'opacity:.55' : '') + '">'
-    + '<td style="padding:6px 8px;font-family:ui-monospace,monospace;font-size:12px">' + snEsc(c.contract_no) + '</td>'
-    + '<td style="padding:6px 8px">' + snEsc(c.client_company || '')
-      + (c.client_contact ? '<div style="font-size:11px;color:var(--text-muted)">' + snEsc(c.client_contact) + '</div>' : '')
+  return '<tr' + (dead ? ' class="is-dead"' : '') + '>'
+    + '<td class="sn-mono nowrap">' + snEsc(c.contract_no) + '</td>'
+    + '<td><span class="sn-strong">' + snEsc(c.client_company || '') + '</span>'
+      + (c.client_contact ? '<span class="sn-sub2">' + snEsc(c.client_contact) + '</span>' : '')
       + '</td>'
     /* ATTRIBUTION: "ACBM Partners · Rockford, IL". The region is the contract's own SNAPSHOT, so an old row
        keeps the place it was signed for even if the prospect has since been re-enumerated. A contract with no
        region — anything generated before the column existed — renders as just the partner rather than with a
-       dangling separator. */
-    + '<td style="padding:6px 8px">'
-      + (c.partner_name ? snEsc(c.partner_name) : '<span style="color:var(--text-muted)">ours</span>')
-      + (c.region ? '<div style="font-size:11px;color:var(--text-muted)">' + snEsc(c.region) + '</div>' : '')
+       dangling separator.
+       The second line uses .sn-sub2, which is the same treatment the client's contact name gets one column
+       to the left — it is the same KIND of fact (a qualifier under a name) and ought to look like one. */
+    + '<td>'
+      + (c.partner_name ? snEsc(c.partner_name) : '<span class="sn-dash">ours</span>')
+      + (c.region ? '<span class="sn-sub2">' + snEsc(c.region) + '</span>' : '')
       + '</td>'
-    + '<td style="padding:6px 8px;font-size:12px">' + snEsc(c.package_name || c.package_code || '') + '</td>'
-    + '<td style="padding:6px 8px;text-align:right">' + snMoney(c.value_cents)
-      + (c.monthly_cents ? '<div style="font-size:11px;color:var(--text-muted)">+ ' + snMoney(c.monthly_cents) + '/mo</div>' : '')
+    + '<td class="nowrap">' + snEsc(c.package_name || c.package_code || '') + '</td>'
+    + '<td class="num nowrap"><span class="sn-strong">' + snMoney(c.value_cents) + '</span>'
+      + (c.monthly_cents ? '<span class="sn-sub2">+ ' + snMoney(c.monthly_cents) + '/mo</span>' : '')
       + '</td>'
-    + '<td style="padding:6px 8px">'
+    + '<td class="nowrap">'
+      /* A dead contract shows a PILL, not a dropdown. Its status is a fact about the past: superseded is
+         set by generating a replacement and void is terminal, so offering a control that changes neither
+         would be offering a control that lies. */
       + (dead
-        ? '<span style="font-size:11px;color:var(--text-muted)">' + snEsc(c.status)
-          + (c.superseded_by ? ' by #' + snEsc(c.superseded_by) : '') + '</span>'
-        : '<select onchange="snSetContractStatus(' + c.id + ',this)" '
-          + 'style="font-size:11px;padding:3px 4px;border:1px solid var(--border);border-radius:4px;background:#fff">'
-          + opts + '</select>')
+        ? snPill(c.status) + (c.superseded_by ? '<span class="sn-sub2">by #' + snEsc(c.superseded_by) + '</span>' : '')
+        : '<select class="sn-select" style="height:26px;padding:2px 6px;font-size:11px" '
+          + 'onchange="snSetContractStatus(' + c.id + ',this)">' + opts + '</select>')
       + '</td>'
-    + '<td style="padding:6px 8px;font-size:11px;color:var(--text-muted)">' + snDate(c.created_at) + '</td>'
-    + '<td style="padding:6px 8px;font-size:11px;color:var(--text-muted)">' + snEsc(c.template_version || '') + '</td>'
-    + '<td style="padding:6px 8px;white-space:nowrap">'
+    + '<td class="sn-fine nowrap">' + snDate(c.created_at) + '</td>'
+    + '<td class="sn-fine nowrap">' + snEsc(c.template_version || '') + '</td>'
+    + '<td class="nowrap">'
       + '<button onclick="snDownloadContract(' + c.id + ',\'' + snEsc(c.file_name || '').replace(/'/g, "\\'") + '\')" '
-      + 'class="btn-secondary" style="padding:3px 9px;font-size:11px">.docx</button>'
+      + 'class="btn-secondary sn-btn-xs">.docx</button>'
       /* A SEPARATE BUTTON, and only on a contract that is still current. The address it would go to is
-         drawn beneath it by snSendRecipient() once the register has loaded the previews — the point is
+         drawn beneath it by snFillRecipients() once the register has loaded the previews — the point is
          that it is readable without clicking anything. */
       + (dead ? ''
-        : ' <button onclick="snEmailContract(' + c.id + ')" class="btn-secondary" '
-          + 'style="padding:3px 9px;font-size:11px">Email to client</button>')
-      + (dead ? '' : '<div id="sn-to-' + c.id + '" style="margin-top:2px"></div>')
+        : ' <button onclick="snEmailContract(' + c.id + ')" class="btn-secondary sn-btn-xs">Email to client</button>')
+      + (dead ? '' : '<div id="sn-to-' + c.id + '" style="margin-top:3px"></div>')
       + '</td>'
     + '</tr>';
 }
@@ -251,30 +263,33 @@ async function snContractsPage() {
   if (!r.ok) { el.innerHTML = apErrorCard('SiteNex Contracts', r, "pages['sitenex-contracts']()"); return; }
   const d = r.data;
 
-  const head = '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
-    + '<h2 style="margin:0">SiteNex Contracts</h2>'
-    + '<div style="font-size:12px;color:var(--text-muted)">' + d.total + ' in the register · ' + snEsc(d.scope) + '</div>'
+  const head = '<div class="sn-head">'
+    + '<div><h2>SiteNex Contracts</h2>'
+    +   '<p class="sn-sub">Every document generated from a deal, with what it is worth and whether it has '
+    +     'been signed. Generating is reversible — a replacement supersedes the old one. <strong>Emailing is '
+    +     'not</strong>, so it is a separate button and the address is shown before it is pressed.</p></div>'
+    + '<div class="sn-head-right"><span class="sn-count">' + d.total + ' in the register · ' + snEsc(d.scope) + '</span></div>'
     + '</div>'
-    + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 8px"></div>';
+    + '<div id="sn-msg" class="sn-msg"></div>';
 
   if (!d.contracts.length) {
-    el.innerHTML = head
-      + '<div style="border:1px dashed var(--border);border-radius:8px;padding:18px;text-align:center;color:var(--text-muted)">'
-      + 'No contracts yet. Open a deal on the SiteNex Deals board and generate one from there.'
-      + '</div>';
+    el.innerHTML = '<div class="sn">' + head
+      + '<div class="sn-empty">'
+      + '<strong>No contracts yet.</strong>'
+      + 'Open a deal on the SiteNex Deals board and generate one from there — a contract is always made '
+      + 'from a deal, so the client details and the payment schedule can only say one thing.'
+      + '</div></div>';
     return;
   }
 
-  const th = (t, right) => '<th style="padding:6px 8px;text-align:' + (right ? 'right' : 'left')
-    + ';font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;'
-    + 'border-bottom:1px solid var(--border)">' + t + '</th>';
-  el.innerHTML = head + snTotalsCard(d.totals)
-    + '<div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--white)">'
-    + '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+  const th = (t, right) => '<th' + (right ? ' class="num"' : '') + '>' + t + '</th>';
+  el.innerHTML = '<div class="sn">' + head + snTotalsCard(d.totals)
+    + '<div class="sn-panel"><div class="sn-table-wrap">'
+    + '<table class="sn-table">'
     + '<thead><tr>' + th('Contract') + th('Client') + th('Partner') + th('Package') + th('Value', true)
     + th('Status') + th('Generated') + th('Template') + th('') + '</tr></thead>'
     + '<tbody>' + d.contracts.map(snContractRow).join('') + '</tbody>'
-    + '</table></div>';
+    + '</table></div></div></div>';
 
   /* Fill in each row's recipient AFTER the table is on screen. Done as a second pass rather than inside
      the row builder because it is one request per contract, and the register must not wait on them —
@@ -290,7 +305,7 @@ async function snFillRecipients(contracts) {
     const pv = await snGet('/sitenex/contracts/' + encodeURIComponent(c.id) + '/send');
     /* A failed preview says so rather than leaving a blank, which would read as "no recipient needed". */
     slot.innerHTML = pv.ok ? snSendLine(pv.data)
-      : '<div style="font-size:11px;color:var(--text-muted)">could not read the recipient: ' + snEsc(pv.error) + '</div>';
+      : '<div class="sn-fine">could not read the recipient: ' + snEsc(pv.error) + '</div>';
   }));
 }
 
@@ -361,118 +376,145 @@ window.snEditDeal = async function snEditDeal(dealId) {
        without it being silently adopted; seeding the value would mean a legal entity name nobody typed. */
     const hint = (key === 'company_name' && d.prospect_name) ? d.prospect_name : '';
     const common = 'id="sn-f-' + key + '"'
-      + (hint ? ' placeholder="' + snEsc(hint) + ' — check the full legal name"' : '')
-      + ' style="width:100%;padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px"';
+      + (hint ? ' placeholder="' + snEsc(hint) + ' — check the full legal name"' : '');
     const input = kind === 'textarea'
-      ? '<textarea ' + common + ' rows="2">' + snEsc(val) + '</textarea>'
-      : '<input ' + common + ' type="' + (kind === 'money' || kind === 'number' ? 'number' : kind)
+      ? '<textarea class="sn-textarea" ' + common + ' rows="2">' + snEsc(val) + '</textarea>'
+      : '<input class="sn-input" ' + common + ' type="' + (kind === 'money' || kind === 'number' ? 'number' : kind)
         + '" value="' + snEsc(val) + '">';
-    return '<label style="display:block;margin:0 0 8px">'
-      + '<span style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:2px">'
-      + snEsc(label) + (req ? ' <span style="color:#b00020">*</span>' : '') + '</span>' + input + '</label>';
+    /* An address and a free-text note span the grid. Everything else is a short value and sits two to a
+       row, which turns a ten-field scroll into something readable without moving. */
+    const wide = (key === 'client_address' || kind === 'textarea');
+    return '<label class="sn-field' + (wide ? ' wide' : '') + '">'
+      + '<span>' + snEsc(label) + (req ? ' <span class="req">*</span>' : '') + '</span>' + input + '</label>';
   };
 
-  const statusSel = '<select id="sn-f-status" style="padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
-    + SN_DEAL_STATUS.map(s => '<option value="' + s + '"' + (s === d.status ? ' selected' : '') + '>' + s + '</option>').join('')
+  const statusSel = '<select id="sn-f-status" class="sn-select">'
+    + SN_DEAL_STATUS.map(s => '<option value="' + s + '"' + (s === d.status ? ' selected' : '') + '>'
+      + s.replace(/_/g, ' ') + '</option>').join('')
     + '</select>';
 
   const payRows = pays.length
     ? pays.map(p => '<tr>'
-        + '<td style="padding:4px 8px">' + p.seq + '</td>'
-        + '<td style="padding:4px 8px">' + snEsc(p.label) + '</td>'
-        + '<td style="padding:4px 8px;font-size:12px">'
+        + '<td class="sn-dash">' + p.seq + '</td>'
+        + '<td class="sn-strong">' + snEsc(p.label) + '</td>'
+        + '<td class="sn-fine">'
           + snEsc(p.due_date ? String(p.due_date).slice(0, 10)
                  : ((SN_TRIGGERS.find(t => t[0] === p.due_trigger) || [, p.due_trigger || ''])[1])) + '</td>'
-        + '<td style="padding:4px 8px;text-align:right">' + snMoney(p.amount_cents) + '</td>'
-        + '<td style="padding:4px 8px;font-size:12px;color:var(--text-muted)">' + snEsc(p.status) + '</td>'
+        + '<td class="num sn-strong">' + snMoney(p.amount_cents) + '</td>'
+        + '<td class="sn-fine">' + snEsc(p.status) + '</td>'
         + '</tr>').join('')
-    : '<tr><td colspan="5" style="padding:8px;color:var(--text-muted);font-size:12px">'
+    : '<tr><td colspan="5" class="sn-fine" style="padding:12px">'
       + 'No installment schedule. The total is payable on invoice.</td></tr>';
 
   const paySum = pays.reduce((s, p) => s + (p.amount_cents || 0), 0);
   const balanced = !pays.length || paySum === d.value_cents;
 
-  el.innerHTML = '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
-    + '<h2 style="margin:0">' + snEsc(d.company_name || ('Deal #' + d.id)) + '</h2>'
-    + '<button onclick="pages[\'sitenex-deals\']()" class="btn-secondary" style="padding:4px 10px;font-size:12px">Back to the board</button>'
-    + '</div>'
-    + '<div style="font-size:12px;color:var(--text-muted);margin:2px 0 12px">'
-      + 'Deal #' + d.id + ' · ' + (d.partner_name ? 'via ' + snEsc(d.partner_name) : 'self-sourced')
-      + (d.package_label ? ' · ' + snEsc(d.package_label) : '')
-      /* Which prospect this came from, so the form is traceable back to the row somebody picked. */
-      + (d.prospect_name ? ' · from ' + snEsc(d.prospect_name) : '')
-      + (d.prospect_phone ? ' · ' + snEsc(d.prospect_phone) : '') + '</div>'
-    + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 8px"></div>'
-    + '<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start">'
+  el.innerHTML = '<div class="sn">'
+    /* is-record: this heading is the CLIENT'S NAME, not the screen's — see sitenex.css. */
+    + '<div class="sn-head is-record">'
+    + '<div><h2>' + snEsc(d.company_name || ('Deal #' + d.id)) + '</h2>'
+    +   '<p class="sn-sub">Deal #' + d.id + ' · ' + (d.partner_name ? 'via ' + snEsc(d.partner_name) : 'self-sourced')
+    +     (d.package_label ? ' · ' + snEsc(d.package_label) : '')
+        /* Which prospect this came from, so the form is traceable back to the row somebody picked. */
+    +     (d.prospect_name ? ' · from ' + snEsc(d.prospect_name) : '')
+    +     (d.prospect_phone ? ' · ' + snEsc(d.prospect_phone) : '') + '</p></div>'
+    + '<div class="sn-head-right">' + snPill(d.status)
+    +   '<button onclick="pages[\'sitenex-deals\']()" class="btn-secondary sn-btn-sm">Back to the board</button>'
+    + '</div></div>'
+    + '<div id="sn-msg" class="sn-msg"></div>'
+    + '<div class="sn-cols">'
 
-    + '<div style="flex:1;min-width:280px;max-width:460px">'
-      + '<h3 style="font-size:13px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">The client</h3>'
-      + SN_DEAL_FIELDS.map(field).join('')
-      + '<label style="display:flex;align-items:center;gap:7px;margin:4px 0 10px;font-size:13px">'
+    /* ── left: the client ── */
+    + '<div class="sn-panel">'
+      + '<div class="sn-panel-head"><h3>The client</h3>'
+      +   '<span class="sn-note">these go on the contract verbatim</span></div>'
+      + '<div class="sn-panel-body">'
+      + '<div class="sn-form">' + SN_DEAL_FIELDS.map(field).join('') + '</div>'
+      + '<label class="sn-check" style="margin-top:12px">'
         + '<input type="checkbox" id="sn-f-starts_at_intake"' + (d.starts_at_intake === false ? '' : ' checked') + '>'
         /* Default TRUE and stated in words, because the two readings differ by weeks and a contract that
            dates the term from signature while the client has not sent content is a dispute waiting. */
-        + '<span>The term starts when <strong>intake completes</strong> (unchecked: on signature)</span>'
+        + '<span>The term starts when <strong>intake completes</strong> — unchecked, it starts on signature. '
+        + 'The two can differ by weeks.</span>'
         + '</label>'
-      + '<div style="display:flex;gap:8px;align-items:center;margin-top:6px">'
-        + '<span style="font-size:11px;color:var(--text-muted)">Status</span>' + statusSel
-        + '<button onclick="snSaveDeal(' + d.id + ')" class="btn-primary" style="padding:5px 14px;font-size:13px">Save</button>'
+      + '<div class="sn-actions">'
+        + '<span class="sn-field" style="flex-direction:row;align-items:center;gap:7px">'
+        +   '<span>Status</span>' + statusSel + '</span>'
+        + '<span class="sn-spacer"></span>'
+        + '<button onclick="snSaveDeal(' + d.id + ')" class="btn-primary sn-btn-sm">Save</button>'
         + '</div>'
-      + '</div>'
+      + '</div></div>'
 
-    + '<div style="flex:1;min-width:300px">'
-      + '<h3 style="font-size:13px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">Payment schedule</h3>'
-      + '<table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--white)">'
-      + '<tbody>' + payRows + '</tbody></table>'
-      + '<div style="font-size:12px;margin-top:6px;color:' + (balanced ? 'var(--text-muted)' : '#b00020') + '">'
-        + (pays.length
-          ? 'Schedule totals ' + snMoney(paySum) + ' against a deal value of ' + snMoney(d.value_cents)
-            + (balanced ? ' — balanced.' : ' — THESE DO NOT MATCH, so a contract cannot be generated.')
-          : 'No schedule set.')
-        + '</div>'
-      + '<div style="margin-top:8px">'
-        + '<textarea id="sn-sched" rows="3" placeholder="One installment per line:  Deposit | 2250 | on_signature&#10;On launch | 2250 | on_launch" '
-        + 'style="width:100%;padding:6px;font-size:12px;font-family:ui-monospace,monospace;border:1px solid var(--border);border-radius:4px"></textarea>'
-        + '<div style="font-size:11px;color:var(--text-muted);margin:2px 0 6px">'
+    /* ── right: money, then the contract ── */
+    + '<div>'
+      + '<div class="sn-panel">'
+      + '<div class="sn-panel-head"><h3>Payment schedule</h3>'
+      /* THE BALANCE IS IN THE HEADER, not under the textarea. It is the reason a contract will or will not
+         generate, so it belongs where somebody looks before reading the rows, not after. */
+      +   '<span class="sn-note' + (balanced ? '' : '" style="color:#b42318;font-weight:600') + '">'
+      +     (pays.length
+            ? (balanced ? 'balanced at ' + snMoney(paySum)
+                        : snMoney(paySum) + ' vs a deal value of ' + snMoney(d.value_cents))
+            : 'none set')
+      +   '</span></div>'
+      + '<div class="sn-table-wrap"><table class="sn-table"><tbody>' + payRows + '</tbody></table></div>'
+      + '<div class="sn-panel-body" style="border-top:1px solid var(--sn-line)">'
+        + (pays.length && !balanced
+          ? '<div class="sn-fine is-bad" style="margin-bottom:8px">These do not match, so a contract cannot '
+            + 'be generated. Either change the deal value or re-enter the installments below.</div>'
+          : '')
+        + '<textarea id="sn-sched" class="sn-textarea sn-mono" rows="3" style="width:100%" '
+        + 'placeholder="One installment per line:  Deposit | 2250 | on_signature&#10;On launch | 2250 | on_launch"></textarea>'
+        + '<div class="sn-fine" style="margin:4px 0 10px">'
           + 'label | amount in dollars | ' + SN_TRIGGERS.map(t => t[0]).join(' / ')
-          + '. Leave empty and save to clear the schedule.</div>'
-        + '<button onclick="snSaveSchedule(' + d.id + ')" class="btn-secondary" style="padding:4px 11px;font-size:12px">Save schedule</button>'
-        + '</div>'
+          + '. Saved whole — leave it empty and save to clear the schedule.</div>'
+        + '<button onclick="snSaveSchedule(' + d.id + ')" class="btn-secondary sn-btn-sm">Save schedule</button>'
+        + '</div></div>'
 
-      + '<h3 style="font-size:13px;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">Contracts</h3>'
+      + '<div class="sn-panel">'
+      + '<div class="sn-panel-head"><h3>Contract</h3>'
+      +   '<span class="sn-note">' + (contracts.length ? contracts.length + ' generated' : 'none yet') + '</span></div>'
+      + '<div class="sn-panel-body">'
       + (ready.ok === false
-        ? '<div style="font-size:12px;color:#8a1f1f;margin-bottom:8px">Still needed before a contract can be generated: '
-          + snEsc((ready.missing || []).map(m => m.label).join(', ')) + '</div>'
+        ? '<div class="sn-fine is-bad" style="margin-bottom:10px">Still needed before a contract can be '
+          + 'generated: <strong>' + snEsc((ready.missing || []).map(m => m.label).join(', ')) + '</strong></div>'
         : '')
-      + '<button onclick="snGenerateContract(' + d.id + ')" class="btn-primary" style="padding:5px 12px;font-size:12px"'
+      + '<button onclick="snGenerateContract(' + d.id + ')" class="btn-primary sn-btn-sm"'
         + (ready.ok === false ? ' disabled title="Fill in the fields listed above first"' : '') + '>'
         + (contracts.length ? 'Generate a replacement' : 'Generate contract') + '</button>'
       + (contracts.length
-        ? '<div style="margin-top:8px">' + contracts.map(c =>
-            '<div style="padding:5px 0;border-top:1px solid var(--border)'
-            + (c.status === 'superseded' || c.status === 'void' ? ';opacity:.55' : '') + '">'
-            + '<div style="display:flex;align-items:center;gap:8px;font-size:12px">'
-            + '<span style="font-family:ui-monospace,monospace">' + snEsc(c.contract_no) + '</span>'
-            + '<span style="color:var(--text-muted)">' + snEsc(c.status) + '</span>'
+        ? '<div style="margin-top:12px">' + contracts.map(c => {
+            const dead = c.status === 'superseded' || c.status === 'void';
+            return '<div class="sn-obj"' + (dead ? ' style="opacity:.5"' : '') + '>'
+            + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+            + '<span class="sn-mono">' + snEsc(c.contract_no) + '</span>'
+            + snPill(c.status)
             + '<button onclick="snDownloadContract(' + c.id + ',\'' + snEsc(c.file_name || '').replace(/'/g, "\\'") + '\')" '
-            + 'class="btn-secondary" style="padding:2px 8px;font-size:11px">.docx</button>'
+            + 'class="btn-secondary sn-btn-xs">.docx</button>'
             /* TWO SEPARATE BUTTONS. Generating is above and reversible; this one is not, so it is never
                part of the same click and never happens on its own. */
-            + (c.status === 'superseded' || c.status === 'void' ? ''
-              : '<button onclick="snEmailContract(' + c.id + ')" class="btn-secondary" '
-                + 'style="padding:2px 8px;font-size:11px">Email to client</button>')
+            + (dead ? '' : '<button onclick="snEmailContract(' + c.id + ')" class="btn-secondary sn-btn-xs">Email to client</button>')
             + '</div>'
-            + (c.status === 'superseded' || c.status === 'void' ? ''
-              : '<div id="sn-to-' + c.id + '" style="margin-top:2px"></div>')
-            + '</div>').join('') + '</div>'
+            + (dead ? '' : '<div id="sn-to-' + c.id + '" style="margin-top:3px"></div>')
+            + '</div>';
+          }).join('') + '</div>'
         : '')
-      + '</div>'
+      + '</div></div>'
 
-      /* CLIENT INTAKE. An empty container, filled by snIntakePanel after the form is on screen: the deal
-         form is what somebody opened this page for and should not wait on four more queries, and a
-         failure in the panel must leave the form usable rather than replacing it. */
-      + '<h3 style="font-size:13px;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">Client intake</h3>'
-      + '<div id="sn-intake"></div>'
+      + '</div>'
+    + '</div>'
+
+    /* CLIENT INTAKE. An empty container, filled by snIntakePanel after the form is on screen: the deal
+       form is what somebody opened this page for and should not wait on four more queries, and a failure
+       in the panel must leave the form usable rather than replacing it.
+       It sits BELOW the two columns rather than inside the right one: intake is the client's side of the
+       work and runs the full width, and putting it in a column would have wedged a file list into 44% of
+       the page under the contract buttons. */
+    /* The panel's own contents are still inline-styled — it landed while the restyle was in flight and has
+       not been converted. Giving it the container means it at least sits in a card like everything else on
+       this page instead of floating as loose text; converting its insides is a follow-up, and a small one. */
+    + '<div class="sn-panel"><div class="sn-panel-head"><h3>Client intake</h3></div>'
+    + '<div class="sn-panel-body" id="sn-intake"></div></div>'
     + '</div>';
 
   /* The recipient under each button here too — the deal page is where the button was asked for, and the
@@ -547,55 +589,73 @@ window.snProspectContent = async function snProspectContent(prospectId, pkgCode)
   if (!r.ok) { el.innerHTML = apErrorCard('Call script', r, "pages['sitenex-prospects']()"); return; }
   const { prospect, call, email } = r.data;
 
-  const section = (title, inner) => '<h3 style="font-size:12px;margin:16px 0 6px;text-transform:uppercase;'
-    + 'letter-spacing:.04em;color:var(--text-muted)">' + title + '</h3>' + inner;
-  const list = (items) => '<ul style="margin:0;padding-left:18px">'
-    + items.map(x => '<li style="margin:2px 0">' + snEsc(x) + '</li>').join('') + '</ul>';
+  const section = (title, inner) => '<div class="sn-label" style="margin-top:16px">' + title + '</div>' + inner;
+  const list = (items) => '<ul class="sn-list">'
+    + items.map(x => '<li>' + snEsc(x) + '</li>').join('') + '</ul>';
 
-  el.innerHTML = '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
-    + '<h2 style="margin:0">' + snEsc(prospect.name) + '</h2>'
-    + '<button onclick="pages[\'sitenex-prospects\']()" class="btn-secondary" style="padding:4px 10px;font-size:12px">Back</button>'
-    + '</div>'
-    + '<div style="font-size:12px;color:var(--text-muted);margin:2px 0 4px">'
-      + snEsc(prospect.phone || 'no phone listed') + (prospect.region ? ' · ' + snEsc(prospect.region) : '')
-      + ' · ' + snEsc(r.data.package_code) + '</div>'
-    + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 6px"></div>'
-    + '<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">'
+  el.innerHTML = '<div class="sn">'
+    /* is-record: the business being called. A phone script with no business name on it is unusable. */
+    + '<div class="sn-head is-record">'
+    + '<div><h2>' + snEsc(prospect.name) + '</h2>'
+    +   '<p class="sn-sub">' + snEsc(prospect.phone || 'no phone listed')
+    +     (prospect.region ? ' · ' + snEsc(prospect.region) : '')
+    +     ' · ' + snEsc(r.data.package_code) + '</p></div>'
+    + '<div class="sn-head-right">'
+    +   (prospect.phone
+        ? '<a class="btn-primary sn-btn-sm" style="text-decoration:none" href="tel:'
+          + snEsc(String(prospect.phone).replace(/[^0-9+]/g, '')) + '">Call</a>'
+        : '')
+    +   '<button onclick="pages[\'sitenex-prospects\']()" class="btn-secondary sn-btn-sm">Back</button>'
+    + '</div></div>'
+    + '<div id="sn-msg" class="sn-msg"></div>'
+    + '<div class="sn-cols">'
 
-    + '<div style="flex:1;min-width:300px;max-width:560px">'
-      + section('Open with', '<p style="margin:0;font-size:15px;line-height:1.45"><strong>' + snEsc(call.opening) + '</strong></p>')
+    + '<div class="sn-panel"><div class="sn-panel-head"><h3>On the phone</h3>'
+    +   '<span class="sn-note">read down the page</span></div>'
+    +   '<div class="sn-panel-body">'
+      /* The opening is the only thing on this page set bigger than body text. It is the sentence that is
+         actually said out loud in the first four seconds, and on the old screen it was the same size as
+         the bullet list under it. */
+      + '<div class="sn-label" style="margin-top:0">Open with</div>'
+      + '<p class="sn-script-open">' + snEsc(call.opening) + '</p>'
       + section('What they have', list(call.what_they_have))
-      + (call.one_other_thing ? section('If it is going well', '<p style="margin:0">' + snEsc(call.one_other_thing) + '</p>') : '')
+      + (call.one_other_thing ? section('If it is going well', '<p class="sn-prose">' + snEsc(call.one_other_thing) + '</p>') : '')
       + section('What we would do', call.what_wed_do.length ? list(call.what_wed_do)
-        : '<p style="margin:0;color:var(--text-muted)">The package has no scope listed.</p>')
+        : '<p class="sn-prose sn-dash">The package has no scope listed.</p>')
       /* The exclusions are not optional and not a footnote. A caller who cannot say "content writing is
          not in this" is the one who accidentally sells it. */
       + section('What this is NOT', call.what_this_is_not.length ? list(call.what_this_is_not)
-        : '<p style="margin:0;color:var(--text-muted)">No exclusions are stated for this package.</p>')
-      + section('What it costs', '<p style="margin:0">' + snEsc(call.what_it_costs) + '</p>')
-      + '</div>'
+        : '<p class="sn-prose sn-dash">No exclusions are stated for this package.</p>')
+      + section('What it costs', '<p class="sn-prose">' + snEsc(call.what_it_costs) + '</p>')
+      + '</div></div>'
 
-    + '<div style="flex:1;min-width:300px">'
-      + section('If they say…', '<div style="border:1px solid var(--border);border-radius:8px;background:var(--white)">'
+    + '<div>'
+      + '<div class="sn-panel"><div class="sn-panel-head"><h3>If they say…</h3></div>'
+      + '<div class="sn-panel-body">'
         + call.objections.map(o =>
-          '<div style="padding:8px 10px;border-bottom:1px solid var(--border)">'
-          + '<div style="font-weight:600;font-size:13px">' + snEsc(o.they_say) + '</div>'
-          + '<div style="font-size:13px;color:var(--text-body,#333);margin-top:2px">' + snEsc(o.you_say) + '</div>'
-          + '</div>').join('') + '</div>')
-      + section('Email — paste between your own greeting and sign-off',
-        '<div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">Subject: <strong>' + snEsc(email.subject) + '</strong></div>'
-        + '<textarea id="sn-email" rows="14" readonly style="width:100%;padding:8px;font-size:13px;line-height:1.45;'
-        + 'border:1px solid var(--border);border-radius:6px;background:var(--white)">' + snEsc(email.body) + '</textarea>'
-        + '<div style="display:flex;gap:8px;margin-top:6px">'
-        + '<button onclick="snCopyEmail(0)" class="btn-secondary" style="padding:4px 11px;font-size:12px">Copy subject</button>'
-        + '<button onclick="snCopyEmail(1)" class="btn-primary" style="padding:4px 11px;font-size:12px">Copy body</button>'
+          '<div class="sn-obj">'
+          + '<div class="sn-obj-q">' + snEsc(o.they_say) + '</div>'
+          + '<div class="sn-obj-a">' + snEsc(o.you_say) + '</div>'
+          + '</div>').join('')
+      + '</div></div>'
+
+      + '<div class="sn-panel"><div class="sn-panel-head"><h3>The email</h3>'
+      +   '<span class="sn-note">paste between your own greeting and sign-off</span></div>'
+      + '<div class="sn-panel-body">'
+        + '<div class="sn-fine" style="margin-bottom:5px">Subject: <strong>' + snEsc(email.subject) + '</strong></div>'
+        + '<textarea id="sn-email" class="sn-textarea" rows="14" readonly style="width:100%;font-size:13px">'
+        + snEsc(email.body) + '</textarea>'
+        + '<div class="sn-actions" style="margin-top:10px;padding-top:0;border-top:0">'
+        + '<button onclick="snCopyEmail(0)" class="btn-secondary sn-btn-sm">Copy subject</button>'
+        + '<button onclick="snCopyEmail(1)" class="btn-primary sn-btn-sm">Copy body</button>'
         + '</div>'
         /* Said out loud, because somebody will otherwise look for a Send button and conclude it is broken. */
-        + '<div style="font-size:11px;color:var(--text-muted);margin-top:6px">'
+        + '<div class="sn-fine" style="margin-top:8px">'
         + 'There is no send button. This goes out from your own address, under your own name — nothing is '
-        + 'sent from here.</div>')
+        + 'sent from here.</div>'
+      + '</div></div>'
       + '</div>'
-    + '</div>';
+    + '</div></div>';
 
   window._snEmail = { subject: email.subject, body: email.body };
 };
@@ -656,93 +716,89 @@ async function snPartnersPage() {
     byPartner.get(k).rows.push(t);
   }
 
-  const head = '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
-    + '<h2 style="margin:0">SiteNex Partners</h2>'
-    + '<div style="font-size:12px;color:var(--text-muted)">'
-    + byPartner.size + ' partner' + (byPartner.size === 1 ? '' : 's') + ' with a territory · '
-    + snEsc((terr.data && terr.data.scope) || '') + '</div></div>'
+  const head = '<div class="sn-head">'
+    + '<div><h2>SiteNex Partners</h2>'
     /* The model, stated on the screen that could most easily drift from it. */
-    + '<div class="text-body" style="margin:6px 0 14px">One product, many partners. Packages, prices, the '
-    + 'contract template and the revenue tiers are <strong>identical for everyone</strong> — only territory '
-    + 'and achieved volume differ. A partner with no territory sees no prospects at all, which is deliberate: '
-    + 'an ungranted patch means nobody has decided, and that reads as nothing.</div>'
-    + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 8px"></div>';
+    +   '<p class="sn-sub">One product, many partners. Packages, prices, the contract template and the '
+    +     'revenue tiers are <strong>identical for everyone</strong> — only territory and achieved volume '
+    +     'differ. A partner with no territory sees no prospects at all: an ungranted patch means nobody '
+    +     'has decided, and that reads as nothing.</p></div>'
+    + '<div class="sn-head-right"><span class="sn-count">'
+    +   byPartner.size + ' partner' + (byPartner.size === 1 ? '' : 's') + ' with a territory · '
+    +   snEsc((terr.data && terr.data.scope) || '') + '</span></div></div>'
+    + '<div id="sn-msg" class="sn-msg"></div>';
 
   /* ── the queue, first ── */
-  const queue = '<h3 style="font-size:13px;margin:4px 0 8px;text-transform:uppercase;letter-spacing:.04em;'
-    + 'color:' + (pending.length ? '#8a1f1f' : 'var(--text-muted)') + '">'
-    + 'Out-of-territory approvals' + (pending.length ? ' — ' + pending.length + ' waiting' : '') + '</h3>'
+  const queue = '<div class="sn-label' + (pending.length ? ' is-alert' : '') + '">'
+    + 'Out-of-territory approvals' + (pending.length ? ' — ' + pending.length + ' waiting' : '') + '</div>'
     + (pending.length
-      ? '<div style="border:1px solid #f0c0c0;border-radius:8px;background:#fff8f8;margin-bottom:18px">'
+      ? '<div class="sn-attn">'
         + pending.map(r =>
-          '<div style="padding:9px 11px;border-bottom:1px solid #f0d8d8">'
-          + '<div style="font-weight:600;font-size:13px">' + snEsc(r.business_name) + '</div>'
-          + '<div style="font-size:11px;color:var(--text-muted);margin-top:1px">'
+          '<div class="sn-attn-row">'
+          + '<div class="sn-attn-name">' + snEsc(r.business_name) + '</div>'
+          + '<div class="sn-attn-meta">'
           +   snEsc([r.partner_name, r.region || r.state, r.subtype && String(r.subtype).replace(/_/g, ' ')]
                 .filter(Boolean).join(' · '))
           +   ' · registered ' + snEsc(snDate(r.created_at))
           + '</div>'
           /* The reason box sits WITH the reject button, because a rejection without one is refused by the
              server and discovering that after clicking is a worse way to learn it. */
-          + '<div style="display:flex;gap:7px;align-items:center;margin-top:6px;flex-wrap:wrap">'
-          + '<input id="sn-why-' + r.id + '" placeholder="Why — required to reject" '
-          +   'style="flex:1;min-width:200px;padding:4px 7px;font-size:12px;border:1px solid var(--border);border-radius:4px">'
-          + '<button onclick="snDecideLead(' + r.id + ',\'confirmed\')" class="btn-primary" '
-          +   'style="padding:3px 11px;font-size:12px">Approve</button>'
-          + '<button onclick="snDecideLead(' + r.id + ',\'rejected\')" class="btn-secondary" '
-          +   'style="padding:3px 11px;font-size:12px">Reject</button>'
+          + '<div class="sn-attn-act">'
+          + '<input id="sn-why-' + r.id + '" class="sn-input sn-grow" placeholder="Why — required to reject">'
+          + '<button onclick="snDecideLead(' + r.id + ',\'confirmed\')" class="btn-primary sn-btn-sm">Approve</button>'
+          + '<button onclick="snDecideLead(' + r.id + ',\'rejected\')" class="btn-secondary sn-btn-sm">Reject</button>'
           + '</div></div>').join('')
         + '</div>'
-      : '<div style="border:1px dashed var(--border);border-radius:8px;padding:12px;text-align:center;'
-        + 'font-size:12px;color:var(--text-muted);margin-bottom:18px">Nothing waiting. '
+      : '<div class="sn-empty" style="margin-bottom:16px"><strong>Nothing waiting.</strong>'
         + 'Out-of-territory registrations should be rare — this is the backstop, not the path.</div>');
 
   /* ── territories, per partner ── */
-  const grants = '<h3 style="font-size:13px;margin:4px 0 8px;text-transform:uppercase;letter-spacing:.04em;'
-    + 'color:var(--text-muted)">Territories</h3>'
+  const grants = '<div class="sn-label">Territories</div>'
     + (byPartner.size
       ? [...byPartner.values()].map(p =>
-          '<div style="border:1px solid var(--border);border-radius:8px;background:var(--white);padding:9px 11px;margin-bottom:8px">'
-          + '<div style="font-weight:600;font-size:13px">' + snEsc(p.name) + '</div>'
-          + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">'
+          '<div class="sn-panel">'
+          + '<div class="sn-panel-head"><h3>' + snEsc(p.name) + '</h3>'
+          +   '<span class="sn-note">' + p.rows.length + ' granted</span></div>'
+          + '<div class="sn-panel-body" style="display:flex;gap:7px;flex-wrap:wrap">'
           + p.rows.map(t =>
-              '<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 7px;'
-              + 'border:1px solid var(--border);border-radius:12px;background:var(--bg-subtle,#f7f7f8)">'
-              + '<span style="color:var(--text-muted)">' + snEsc(SN_DIMENSION_LABEL[t.dimension] || t.dimension) + '</span>'
+              '<span class="sn-tag">'
+              + '<span class="sn-tag-dim">' + snEsc(SN_DIMENSION_LABEL[t.dimension] || t.dimension) + '</span>'
               + snEsc(t.value)
               /* Exclusivity is shown, because a shared patch is a deliberate and unusual arrangement and
                  ought to be visible without opening anything. */
-              + (t.exclusive ? '' : '<span style="color:var(--text-muted);font-size:10px">shared</span>')
-              + '<a href="#" onclick="snRevokeTerritory(' + t.id + ',\'' + snEsc(String(t.value)).replace(/'/g, "\\'") + '\');return false" '
-              +   'title="Revoke" style="text-decoration:none;color:#cbd5e1">✕</a>'
+              + (t.exclusive ? '' : '<span class="sn-tag-shared">shared</span>')
+              + '<a href="#" class="sn-x" onclick="snRevokeTerritory(' + t.id + ',\'' + snEsc(String(t.value)).replace(/'/g, "\\'") + '\');return false" '
+              +   'title="Revoke">✕</a>'
               + '</span>').join('')
           + '</div></div>').join('')
-      : '<div style="border:1px dashed var(--border);border-radius:8px;padding:12px;text-align:center;'
-        + 'font-size:12px;color:var(--text-muted)">No territories granted yet, so no partner sees any '
-        + 'prospects.</div>');
+      : '<div class="sn-empty"><strong>No territories granted yet, so no partner sees any prospects.</strong>'
+        + 'Grant one below. A region is the usual first grant — it is the patch a partner actually works.</div>');
 
   /* ── granting ── */
   const dims = (terr.data && terr.data.dimensions) || ['region', 'subtype', 'state'];
-  const grantForm = '<h3 style="font-size:13px;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em;'
-    + 'color:var(--text-muted)">Grant a territory</h3>'
-    + '<div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">'
-    + '<input id="sn-t-partner" type="number" placeholder="Partner id" '
-    +   'style="width:100px;padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
-    + '<select id="sn-t-dim" style="padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
+  const grantForm = '<div class="sn-panel" style="margin-top:16px">'
+    + '<div class="sn-panel-head"><h3>Grant a territory</h3>'
+    /* The constraint said out loud, so a 409 is expected rather than surprising.
+       KEPT IN ONE STRING LITERAL. It used to be split across a concatenation, and the test that asserts
+       this sentence exists had to match it in halves — which means the test would pass on a page that
+       said the two halves in different places, or in the wrong order. */
+    +   '<span class="sn-note">an exclusive patch can be held by one partner only — the database refuses the second grant</span></div>'
+    + '<div class="sn-panel-body">'
+    + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    + '<input id="sn-t-partner" class="sn-input" type="number" placeholder="Partner id" style="width:104px">'
+    + '<select id="sn-t-dim" class="sn-select">'
     +   dims.map(d => '<option value="' + d + '">' + snEsc(SN_DIMENSION_LABEL[d] || d) + '</option>').join('')
     + '</select>'
-    + '<input id="sn-t-value" placeholder="Rockford, IL  /  machine_shop  /  IL" '
-    +   'style="flex:1;min-width:220px;padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
-    + '<label style="display:flex;align-items:center;gap:5px;font-size:12px">'
-    +   '<input type="checkbox" id="sn-t-excl" checked> exclusive</label>'
-    + '<button onclick="snGrantTerritory()" class="btn-primary" style="padding:5px 12px;font-size:13px">Grant</button>'
+    + '<input id="sn-t-value" class="sn-input sn-grow" placeholder="Rockford, IL  /  machine_shop  /  IL">'
+    + '<label class="sn-check" style="align-items:center">'
+    +   '<input type="checkbox" id="sn-t-excl" checked><span>exclusive</span></label>'
+    + '<button onclick="snGrantTerritory()" class="btn-primary sn-btn-sm">Grant</button>'
     + '</div>'
-    /* The constraint said out loud, so a 409 is expected rather than surprising. */
-    + '<div style="font-size:11px;color:var(--text-muted);margin-top:5px">'
-    + 'An exclusive patch can be held by one partner only — the database refuses the second grant. Uncheck '
-    + 'exclusive if two partners are meant to share it.</div>';
+    + '<div class="sn-fine" style="margin-top:8px">Uncheck exclusive if two partners are meant to share it. '
+    + 'Revoking a partner’s last territory blinds them to every prospect.</div>'
+    + '</div></div>';
 
-  el.innerHTML = head + queue + grants + grantForm;
+  el.innerHTML = '<div class="sn">' + head + queue + grants + grantForm + '</div>';
 }
 
 window.snGrantTerritory = async function snGrantTerritory() {

@@ -25,6 +25,28 @@ const SHELL = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
 const UI = fs.readFileSync(path.join(ROOT, 'public/sitenex-phase3.js'), 'utf8');
 const ALL = SHELL + '\n' + UI;
 
+/* ── SLICING THE SHELL, WITHOUT ANCHORING ON MARKUP ───────────────────────────
+ * These tests read one function out of an 8,600-line file by slicing between two literals. The end anchor
+ * used to be `  const board = '<div class="card"` — it included the CLASS NAME of the board's wrapper, so
+ * restyling the board (card → sn-board) made indexOf return -1 in NINE tests at once. A slice to -1 is an
+ * empty string, and an empty string satisfies almost every "does not contain" assertion, so the failures
+ * that did appear were the lucky ones; the rest would have passed silently against nothing.
+ *
+ * `cut()` anchors on CODE — a declaration, not its contents — and THROWS when an anchor is gone, so a
+ * renamed function is a loud failure rather than a test quietly grading an empty string.
+ */
+function cut(src, from, to, what) {
+  const a = src.indexOf(from);
+  if (a === -1) throw new Error(`anchor not found: ${from}  — ${what} moved or was renamed; fix this test`);
+  const b = src.indexOf(to, a);
+  if (b === -1) throw new Error(`end anchor not found: ${to}  — ${what} moved or was renamed; fix this test`);
+  return src.slice(a, b);
+}
+const CARD_FROM  = '  const card = (d) =>';
+const DAYS_FROM  = '  const apDays = (d) =>';
+const BOARD_TO   = '  const board = ';          // the declaration, not what it renders
+const DEALS_PAGE = "pages['sitenex-deals'] = async function";
+
 // Handlers named by any rendered on* attribute, across both files. Interpolations are stripped: a
 // `'+esc(x)+'` inside an attribute runs when the HTML is BUILT, not when it is clicked.
 function handlersNamed(src) {
@@ -60,10 +82,67 @@ test('GUARD: the scanner finds handlers at all', () => {
   assert.ok(NAMED.has('apOpenDeal'), 'the board card handler must be found');
 });
 
+/* ── THE SECOND TIME THIS HAPPENED ────────────────────────────────────────────
+ * On 2026-10-01, `window.snProspectContent` — the per-prospect PHONE SCRIPT and EMAIL, the feature the
+ * prospects screen exists to feed — turned out to be in exactly the state snEditDeal had been in: written,
+ * tested, deployed, on window, and called by nothing. Built in Phase 3, unreachable ever since.
+ *
+ * The file above was written for snEditDeal specifically and so could not catch it. This generalises it:
+ * every entry point that is meant to be reachable is NAMED HERE, and a new one is a line in this list.
+ * The list is the point — a test that only knows about the handler somebody already fixed will go on
+ * missing the next one in the same way.
+ */
+/* Computed ONCE as a closure over the whole call graph, not by running reaches() for every pair. The
+ * first version of this did the latter and ran for minutes: reaches() re-reads and re-scans a function
+ * body on every call and explores the same subtrees repeatedly, so seven targets × forty handlers is the
+ * same work thousands of times over. A BFS with a visited set does it once.
+ */
+const REACHED = (() => {
+  const seen = new Set(NAMED), queue = [...NAMED];
+  while (queue.length) {
+    const fn = queue.shift();
+    const pat = new RegExp(`(?:window\\.${fn}\\s*=\\s*(?:async\\s*)?function|(?:async\\s+)?function\\s+${fn})\\b`);
+    const m = pat.exec(ALL);
+    if (!m) continue;
+    const body = ALL.slice(m.index, m.index + 2600);
+    for (const call of body.matchAll(/(?<![.$\w])([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g)) {
+      if (!seen.has(call[1])) { seen.add(call[1]); queue.push(call[1]); }
+    }
+  }
+  return seen;
+})();
+
+test('GUARD: the reachability set is not simply everything', () => {
+  // A set that contains every identifier in both files would pass every test below while proving nothing,
+  // and the BFS above is one over-broad regex away from being exactly that. So: a name that cannot be
+  // reachable must be absent, and the set must be meaningfully smaller than the files it was built from.
+  assert.ok(!REACHED.has('snFunctionThatDoesNotExist'), 'an invented name must not be "reachable"');
+  const allIdentifiers = new Set([...ALL.matchAll(/(?<![.$\w])([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g)].map(m => m[1]));
+  assert.ok(REACHED.size < allIdentifiers.size * 0.9,
+    `the reachable set (${REACHED.size}) is nearly every identifier (${allIdentifiers.size}) — the walk is too broad to mean anything`);
+});
+
+const MUST_BE_REACHABLE = [
+  ['snEditDeal',         'the deal form: client details, payment schedule, Generate contract'],
+  ['snProspectContent',  'the phone script and the email for one prospect'],
+  ['snDownloadContract', 'downloading the generated .docx'],
+  ['snEmailContract',    'emailing a contract to the client'],
+  ['snGenerateContract', 'generating a contract from a deal'],
+  ['snGrantTerritory',   'granting a partner their patch'],
+  ['snDecideLead',       'approving or rejecting an out-of-territory registration'],
+];
+for (const [fn, what] of MUST_BE_REACHABLE) {
+  test(`REACHABLE: ${fn} — ${what}`, () => {
+    assert.ok(REACHED.has(fn),
+      `NOTHING in the rendered markup reaches ${fn}. It is on window, it is tested, and a person cannot `
+      + `get to it — which is how ${what} would ship invisible. Add a control that calls it.`);
+  });
+}
+
 test('a deal board CARD has a handler that reaches snEditDeal', () => {
   // THE EXACT REGRESSION. The board renders one card per deal; if that card carries no handler, the form
   // behind it cannot be opened by anybody.
-  const card = SHELL.slice(SHELL.indexOf('  const card = (d) =>'), SHELL.indexOf("  const board = '<div class=\"card\""));
+  const card = cut(SHELL, CARD_FROM, BOARD_TO, 'the deal card renderer');
   assert.ok(card.length > 100, 'could not find the card renderer — find it before asserting about it');
   const on = [...card.matchAll(/\son(?:click|dblclick)="([^"]*)"/g)].map(m => m[1]);
   assert.ok(on.length > 0,
@@ -72,8 +151,16 @@ test('a deal board CARD has a handler that reaches snEditDeal', () => {
   const names = [...new Set(on.flatMap(a => [...a.matchAll(/(?<![.$\w])([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/g)].map(x => x[1])))];
   assert.ok(names.some(n => reaches(n, 'snEditDeal')),
     `the card's handler(s) [${names.join(', ')}] do not reach snEditDeal`);
-  // And it must LOOK clickable, or it is reachable only by accident.
-  assert.match(card, /cursor:pointer/, 'a clickable card must say so');
+  // AND IT MUST LOOK CLICKABLE, or it is reachable only by accident.
+  //
+  // The cursor used to be an inline style on the card and is now a rule in public/sitenex.css. That is a
+  // better place for it and a worse place to assert it from, because the markup and the rule that styles it
+  // are in different files — so the check follows the class: the card must carry `sn-card`, and `.sn-card`
+  // must set cursor:pointer. Asserting only the markup would pass on a card with no styling at all.
+  assert.match(card, /class="sn-card"/, 'the card must carry the class its styling hangs off');
+  const CSS = fs.readFileSync(path.join(ROOT, 'public/sitenex.css'), 'utf8');
+  const rule = cut(CSS, '.sn-card {', '}', 'the .sn-card rule');
+  assert.match(rule, /cursor:\s*pointer/, 'a clickable card must say so — .sn-card has no cursor:pointer');
 });
 
 test('the card handler does NOT swallow clicks on anything interactive inside it', () => {
@@ -233,8 +320,8 @@ test('with the form script absent it ALERTS rather than doing nothing', () => {
 
 function renderCard(deal) {
   const vm = require('node:vm');
-  const from = SHELL.indexOf('  const apDays = (d) =>');
-  const to = SHELL.indexOf("  const board = '<div class=\"card\"");
+  const from = SHELL.indexOf(DAYS_FROM);
+  const to = SHELL.indexOf(BOARD_TO, from);
   assert.ok(from !== -1 && to > from, 'the card renderer must be findable');
   const sandbox = { apEsc: (x) => String(x == null ? '' : x) };
   vm.runInNewContext(SHELL.slice(from, to) + '\nglobalThis.__card = card;', sandbox);
@@ -248,20 +335,24 @@ const FULL = { id: 41, company_name: 'Bolt & Co', contact_name: 'Jo Smith',
   package_label: 'P2 · Renew (rebuild, 3 weeks)', value_usd: 4500, monthly_usd: 99,
   partner_name: 'ACBM Partners', days_in_stage: 1, contract_ready: true, missing: [] };
 
-test('the card reads: company · contact, then package + value, then partner, then stage age', () => {
+test('the card reads: company · contact, then package + value, then the provenance and the clock', () => {
+  // THE LINE COUNT CHANGED ON PURPOSE in the 2026-10-01 restyle: the partner and the stage age used to be
+  // two lines and are now one, because both are metadata about the same card and a kanban column is narrow.
+  // What this test protects is the ORDER and the fact that the money is second — not how many <div>s the
+  // metadata occupies — so the last two are asserted as one line that contains both.
   const l = linesOf(renderCard(FULL));
   assert.equal(l[0], 'Bolt & Co', 'the company leads');
   assert.equal(l[1], '· Jo Smith', 'the contact sits with it');
   assert.match(l[2], /^P2 · Renew \(rebuild, 3 weeks\) · \$4,500 \+ \$99\/mo$/,
     'package and value share the SECOND line — this is where the money goes');
-  assert.equal(l[3], 'via ACBM Partners');
-  assert.equal(l[4], '1 day in this stage');
-  assert.equal(l.length, 5, `nothing else: ${JSON.stringify(l)}`);
+  assert.match(l[3], /via ACBM Partners/, 'who brought it');
+  assert.match(l[3], /1 day in this stage/, 'and how long it has sat');
+  assert.equal(l.length, 4, `nothing else: ${JSON.stringify(l)}`);
 });
 
 test('a deal with no partner says "direct", not nothing', () => {
   const { partner_name, ...direct } = FULL;
-  assert.ok(linesOf(renderCard(direct)).includes('direct'),
+  assert.ok(linesOf(renderCard(direct)).some(x => /\bdirect\b/.test(x)),
     'an unattributed deal is a fact about it, not an absence to hide');
 });
 
@@ -299,13 +390,16 @@ test('the absence line names only what is actually absent', () => {
 });
 
 test('days in stage: 0 reads as "moved today", and NULL says it is not recorded', () => {
-  const l = (v) => linesOf(renderCard({ ...FULL, days_in_stage: v }));
-  assert.ok(l(0).includes('moved today'), '0 must not read as "0 days", which looks like a missing value');
-  assert.ok(l(1).includes('1 day in this stage'), 'singular');
-  assert.ok(l(12).includes('12 days in this stage'), 'plural');
+  /* `has` rather than `includes`: the clock shares its line with the partner now, so an exact line match
+     would be asserting the layout, which the test above is for. */
+  const has = (v, text) => linesOf(renderCard({ ...FULL, days_in_stage: v })).some(x => x.includes(text));
+  assert.ok(has(0, 'moved today'), '0 must not read as "0 days", which looks like a missing value');
+  assert.ok(has(1, '1 day in this stage'), 'singular');
+  assert.ok(has(12, '12 days in this stage'), 'plural');
   // NULL is "we do not know", and saying so beats showing 0 — which would read as "moved today".
-  assert.ok(l(null).includes('stage age not recorded'));
-  assert.ok(!l(null).some(x => /\bday/.test(x)), 'and it must not claim a number');
+  assert.ok(has(null, 'stage age not recorded'));
+  assert.ok(!/\bday\b/.test(linesOf(renderCard({ ...FULL, days_in_stage: null })).join(' ')),
+    'and it must not claim a number');
 });
 
 test('the BLOCKED marker appears only when the basics are there but a contract still cannot be made', () => {
@@ -336,7 +430,7 @@ test('the blocked marker carries the SERVER\'s own list in its tooltip', () => {
 
 test('contract_ready is read from the SERVER — the card computes no part of it', () => {
   // The board and the form must not be able to disagree about whether a contract can be made.
-  const src = SHELL.slice(SHELL.indexOf('  const apDays = (d) =>'), SHELL.indexOf("  const board = '<div class=\"card\""));
+  const src = cut(SHELL, DAYS_FROM, BOARD_TO, 'the card renderer');
   assert.match(src, /d\.contract_ready === false/, 'the marker is driven by the server flag');
   for (const own of ['checkRenderable', 'client_email', 'duration_weeks', 'amount_cents']) {
     assert.ok(!src.includes(own), `the card must not reimplement readiness (found ${own})`);
@@ -345,7 +439,7 @@ test('contract_ready is read from the SERVER — the card computes no part of it
 
 test('XSS: every field the card prints goes through apEsc', () => {
   // These are a client company name and a contact name typed by a person.
-  const src = SHELL.slice(SHELL.indexOf('  const card = (d) => {'), SHELL.indexOf("  const board = '<div class=\"card\""));
+  const src = cut(SHELL, CARD_FROM, BOARD_TO, 'the deal card renderer');
   for (const f of ['company_name', 'prospect_name', 'contact_name', 'partner_label', 'partner_name']) {
     const uses = [...src.matchAll(new RegExp(`d\\.${f}`, 'g'))];
     if (!uses.length) continue;
