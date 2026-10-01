@@ -999,6 +999,10 @@ const NAV_SECTIONS = [
     {id:'sitenex-deals', label:'SiteNex Deals', icon:'📋'},
     {id:'sitenex-packages', label:'SiteNex Packages', icon:'📦'},
     {id:'sitenex-contracts', label:'SiteNex Contracts', icon:'📄'},
+    // STAFF ONLY, via the 'intelligence' tier the partner role does not hold — the same mechanism that used
+    // to keep Prospects out, now used for the page that GRANTS territory. A partner seeing who else holds
+    // what, or a Grant button, would be the opposite of the point.
+    {id:'sitenex-partners', label:'SiteNex Partners', icon:'🤝'},
   ]},
   // PLATFORM — SUPER ADMIN ONLY. access:['superadmin'] is a family of one; 'admin' would admit every
   // admin, and navSectionVisible's admin short-circuit is what used to let five roles in here.
@@ -1052,7 +1056,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["sitenex"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["sitenex"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]],"sitenex-partners":[["intelligence"]]};
 // The caller's tiers. They arrive on /auth/me and /auth/login WITH the identity, so this needs no
 // fetch of its own and cannot be left unknown by a failed request — a failed /auth/me logs you out
 // rather than showing you a nav computed from nothing.
@@ -1111,7 +1115,7 @@ const PRODUCTS = [
   // NOT listed here — the sitenex rows live in the same table but are read through sitenex-prospects,
   // which filters on site_score rather than the booking-platform 'prime' filter that does not
   // apply to sitenex.
-  { key:'sitenex',     label:'SiteNex',     icon:'🔧', kind:'product', pages:['sitenex-prospects','sitenex-deals','sitenex-packages','sitenex-contracts'] },
+  { key:'sitenex',     label:'SiteNex',     icon:'🔧', kind:'product', pages:['sitenex-prospects','sitenex-deals','sitenex-packages','sitenex-contracts','sitenex-partners'] },
   // global areas (not products). Some listed pages are not in the classic nav (data-pipeline,
   // execution-graph, decision-engine, my-activity) — they stay non-navigable and never surface
   // in product mode either (pageVisibleToRole is false for anything not in the classic nav).
@@ -1836,7 +1840,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -8108,7 +8112,11 @@ function apErrorCard(title, r, retryFn){
     + '</div>';
 }
 window._apFilters = { subtype:null, region:'', bucket:'', package:'', page:1 };
-window._apState = { total:0, pageSize:50, summary:null, facets:null, open:null };
+window._apState = { total:0, pageSize:50, summary:null, facets:null, open:null,
+  /* FROM THE SERVER, never computed here: whether this caller may use outreach, and what scoped the
+     list. A partner is territory-scoped and outreach is staffOnly, so both have to come from the
+     response — the SPA working either out from the role would be a second copy of the rule. */
+  canTrackOutreach:true, scopeNote:null, territories:[] };
 const apEsc = (x) => csEsc(x);
 const apDash = '<span style="color:var(--text-muted)">—</span>';
 function apSetFilter(k, v){ window._apFilters[k] = v; window._apFilters.page = 1; pages['sitenex-prospects'](); }
@@ -8153,7 +8161,15 @@ pages['sitenex-prospects'] = async function(){
   if (!got.ok) { c.innerHTML = apErrorCard('SiteNex Prospects', got, "pages['sitenex-prospects']()"); return; }
   const res = got.data || {};
   const items = res.items || []; st.total = res.total||0; st.summary = res.summary||null; st.facets = res.facets||null;
-  await orLoad('prospect', items.map(i => i.id), st.total);
+  /* READ FROM THE RESPONSE. `can_track_outreach` is false for a partner because /api/outreach is staffOnly,
+     and `scope_note` explains an empty screen. Defaulted to the permissive value only when the key is
+     ABSENT — an older server — rather than when it is false, which is a decision. */
+  st.canTrackOutreach = res.can_track_outreach !== false;
+  st.scopeNote = res.scope_note || null;
+  st.territories = res.territories || [];
+  /* Not even ASKED for when it cannot be used: orLoad would 403 and leave an error in the console on every
+     page load for a partner. */
+  if (st.canTrackOutreach) await orLoad('prospect', items.map(i => i.id), st.total);
   // First render: learn the shipping subtypes from the server and re-render with them applied.
   const shipping = (res.facets && res.facets.shipping_subtypes) || [];
   if (shipping.length && !window._apShipping) window._apShipping = shipping;
@@ -8228,7 +8244,12 @@ pages['sitenex-prospects'] = async function(){
       + '<td style="padding:7px 8px;text-align:right">'+(it.rating_count==null?apDash:it.rating_count.toLocaleString())+'</td>'
       + '<td style="padding:7px 8px">'+(it.package_label?apEsc(it.recommended_package):apDash)+'</td>'
       + '<td style="padding:7px 8px;text-align:center">'+(it.agency_flag?'<span title="someone may already be looking after this site" style="color:#d97706">⚠</span>':apDash)+'</td>'
-    + '<td style="padding:7px 8px" onclick="event.stopPropagation()">'+orCell('prospect', it.id)+'</td>'
+    /* OMITTED when the server says outreach is not available to this caller. An outreach note is our
+       record of what we did, so /api/outreach is staffOnly — drawing the control for a partner would
+       give them two dropdowns that 403 on use, which is worse than not offering them. */
+    + (window._apState.canTrackOutreach
+        ? '<td style="padding:7px 8px" onclick="event.stopPropagation()">'+orCell('prospect', it.id)+'</td>'
+        : '')
       + '</tr>';
     // The detail row is ALWAYS rendered, hidden unless open, so apToggle is a display flip rather
     // than a re-render. Everything it shows is already in the list payload — there is nothing to
@@ -8258,12 +8279,21 @@ pages['sitenex-prospects'] = async function(){
     + '<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:var(--text-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px">'
     + '<th style="padding:8px">Business</th>'+(apOneSubtype ? '' : '<th style="padding:8px">Subtype</th>')+'<th style="padding:8px">City</th><th style="padding:8px">Phone</th><th style="padding:8px">Email</th>'
     + '<th style="padding:8px;text-align:right">Site score</th><th style="padding:8px;text-align:right">Reviews</th><th style="padding:8px">Package</th><th style="padding:8px;text-align:center">Agency</th>'
-    + '<th style="padding:8px">Outreach</th>'
+    + (window._apState.canTrackOutreach ? '<th style="padding:8px">Outreach</th>' : '')
     + '</tr></thead><tbody>'
-    + (rows || '<tr><td colspan="'+(apOneSubtype?9:10)+'" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
+    + (rows || '<tr><td colspan="'+((apOneSubtype?9:10) - (window._apState.canTrackOutreach?0:1))+'" style="padding:18px;text-align:center;color:var(--text-muted)">No prospects match these filters.</td></tr>')
     + '</tbody></table>'+pager+'</div>';
 
-  c.innerHTML = header + orBar('prospect') + summaryRow + filters + table;
+  /* THE SCOPE SENTENCE. A partner with no granted territory gets an empty screen, which is correct and
+     fail-closed — and indistinguishable from a broken one unless it says so. The server supplies the
+     wording because the server is what did the scoping. */
+  const scopeLine = window._apState.scopeNote
+    ? '<div class="card" style="padding:9px 12px;background:var(--bg-subtle,#f7f7f8)">'
+      + '<div class="text-body" style="margin:0;font-size:12px">'+apEsc(window._apState.scopeNote)+'</div></div>'
+    : '';
+  c.innerHTML = header + scopeLine
+    + (window._apState.canTrackOutreach ? orBar('prospect') : '')
+    + summaryRow + filters + table;
 };
 
 /* ── NEW DEAL: pick a prospect, create the deal, land in the form ───────────────

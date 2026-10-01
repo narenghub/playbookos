@@ -144,7 +144,13 @@ test('the register prints the placeholder warning on the PAGE, not only in the d
 
 test('the annualised figure is labelled as derived, never as revenue', () => {
   assert.match(SRC, /one-time \+ 12 × monthly/, 'the arithmetic must be stated beside the number');
-  assert.ok(!/\brevenue\b/i.test(CODE), 'a derived total must not be called revenue');
+  // SCOPED TO THE TOTALS CARD, which is what this protects. The first version banned the word across the
+  // whole file and then failed on the Partners page saying "the revenue tiers are identical for everyone" —
+  // a true sentence about the commercial model, not a label on a computed figure. A prohibition reaching
+  // beyond the thing it protects generates noise, and noise is how a prohibition gets deleted.
+  const card = between(CODE, 'function snTotalsCard', 'function snContractRow');
+  assert.ok(!/\brevenue\b/i.test(card), 'a derived total must not be called revenue');
+  assert.ok(!/\bbooked\b|\bearned\b/i.test(card), 'nor booked, nor earned — it is arithmetic, not money received');
 });
 
 test("the call script shows the exclusions as a section, not a footnote", () => {
@@ -261,4 +267,118 @@ test('the sender is the AUTHORIZED domain, and it is not hardcoded in the UI', (
   // which domain works can own it — a copy in the UI would be a second thing to change.
   assert.ok(!/adificetechnologies|abiozen/.test(CODE),
     'the UI must not name a sender domain; it displays what the server reports');
+});
+
+// ── THE PARTNERS PAGE: territories and the approval queue ─────────────────────
+//
+// Built at the same time as the routes, because "staff approve or reject with a stated reason" describes a
+// person doing something and a person needs a screen. The deal form shipped complete and unreachable once;
+// board-card.test.js exists because of it, and these assertions exist so this page does not repeat it.
+
+test('the Partners page is reachable: a nav item, a page function and a title', () => {
+  assert.match(SHELL, /id:'sitenex-partners'/, 'a nav item');
+  assert.match(SRC, /pages\['sitenex-partners'\]\s*=/, 'a page function, attached by assignment');
+  assert.match(SHELL, /'sitenex-partners':'SiteNex Partners'/, 'and a title');
+  assert.match(SHELL, /"sitenex-partners":\[\["intelligence"\]\]/,
+    'gated on a tier the partner role does not hold — the page GRANTS territory and shows every partner\'s');
+  assert.match(SHELL, /pages:\['sitenex-prospects','sitenex-deals','sitenex-packages','sitenex-contracts','sitenex-partners'\]/,
+    'and listed in the product tab, or it is unreachable in the default shell');
+});
+
+test('PENDING APPROVALS come first — they are the only thing with a clock on it', () => {
+  const page = between(CODE, 'async function snPartnersPage', 'window.snGrantTerritory');
+  const queueAt = page.indexOf('Out-of-territory approvals');
+  const grantsAt = page.indexOf('Territories');
+  assert.ok(queueAt !== -1 && grantsAt !== -1);
+  assert.ok(queueAt < grantsAt, 'the queue must be rendered above the territory list');
+  // And the empty state says the queue being empty is NORMAL, not a failure to load.
+  assert.match(page, /Nothing waiting/);
+  assert.match(page, /backstop, not the path/);
+});
+
+test('the reason box sits WITH the reject button, and is checked before the click', () => {
+  // Discovering "a reason is required" from a 400 after clicking Reject is a worse way to learn it.
+  const page = between(CODE, 'async function snPartnersPage', 'window.snGrantTerritory');
+  assert.match(page, /Why — required to reject/, 'the box says what it is for');
+  assert.ok(page.indexOf('sn-why-') < page.indexOf("snDecideLead(' + r.id + ',\\'rejected\\'"),
+    'the input must be rendered before the button that needs it');
+  const decide = between(CODE, 'window.snDecideLead', 'pages[\'sitenex-partners\']');
+  assert.match(decide, /status === 'rejected' && why\.length < 3/, 'checked client-side too');
+  assert.match(decide, /owed the sentence/);
+  assert.match(decide, /box\.focus\(\)/, 'and it puts the cursor where the answer goes');
+  // An APPROVAL needs no reason — the test for whether the client copy matches the server rule.
+  assert.ok(!/status === 'confirmed' && why/.test(decide), 'an approval must not demand one');
+});
+
+test('revoking a territory confirms, naming the patch', () => {
+  // Revoking the last one silently blinds a partner. The server says so afterwards, but afterwards is late.
+  const fn = between(CODE, 'window.snRevokeTerritory', 'window.snDecideLead');
+  assert.match(fn, /confirm\(/);
+  assert.match(fn, /\+ label \+/, 'the patch is named in the prompt');
+  assert.match(fn, /no prospects at all/, 'and the consequence is stated');
+});
+
+test('the grant form says the exclusivity rule BEFORE a 409 teaches it', () => {
+  const page = between(CODE, 'async function snPartnersPage', 'window.snGrantTerritory');
+  assert.match(page, /held by one partner only/);
+  assert.match(page, /database refuses the second grant/, 'and that it is the database, not the form');
+  // Matched in halves: the sentence is split across a string concatenation, so a single regex over the
+  // source cannot see it as one phrase even though a browser renders it as one.
+  assert.match(page, /Uncheck /);
+  assert.match(page, /exclusive if two partners are meant to share it/);
+  // exclusive is CHECKED by default, matching the column default.
+  assert.match(page, /id="sn-t-excl" checked/);
+});
+
+test('the page states the model it could most easily drift from', () => {
+  const page = between(CODE, 'async function snPartnersPage', 'window.snGrantTerritory');
+  assert.match(page, /One product, many partners/);
+  assert.match(page, /identical for everyone/);
+  // And the fail-closed consequence, said on the screen where somebody might otherwise call it a bug.
+  assert.match(page, /no territory sees no prospects/);
+});
+
+test('dimensions come from the SERVER, with a local label map only for display', () => {
+  const page = between(CODE, 'async function snPartnersPage', 'window.snGrantTerritory');
+  assert.match(page, /terr\.data && terr\.data\.dimensions/, 'the list is the server\'s');
+  // A hardcoded fallback is fine; a hardcoded ONLY list is a second copy that can drift.
+  const labels = between(CODE, 'const SN_DIMENSION_LABEL', 'async function snPartnersPage');
+  assert.match(labels, /region/);
+  assert.match(labels, /subtype/);
+  assert.match(labels, /state/);
+});
+
+// ── the outreach control a partner cannot use ─────────────────────────────────
+
+test('the prospects screen omits the outreach control when the server says so', () => {
+  // A partner holds the prospect list now but /api/outreach is staffOnly, because an outreach note is OUR
+  // record of what we did. Drawing the control anyway would give them two dropdowns that 403 on use, which
+  // is worse than not offering them.
+  const shellCode = SHELL.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+  assert.match(shellCode, /window\._apState\.canTrackOutreach\s*\n?\s*\?\s*'<td[^']*'\+orCell\('prospect'/,
+    'the cell is conditional');
+  assert.match(shellCode, /canTrackOutreach \? '<th style="padding:8px">Outreach<\/th>' : ''/,
+    'and so is its column header, or the table misaligns');
+  assert.match(shellCode, /canTrackOutreach \? orBar\('prospect'\) : ''/, 'and the summary bar');
+  // The flag comes FROM THE RESPONSE, and only an ABSENT key defaults permissive.
+  assert.match(shellCode, /st\.canTrackOutreach = res\.can_track_outreach !== false/);
+  // orLoad is not even CALLED when it cannot be used — otherwise every partner page load logs a 403.
+  assert.match(shellCode, /if \(st\.canTrackOutreach\) await orLoad\('prospect'/);
+});
+
+test('the colspan of the empty row follows the column count', () => {
+  // Dropping a column without dropping it from the colspan leaves the "no prospects" message misaligned,
+  // which looks like a rendering bug on the screen a partner is most likely to see empty.
+  const shellCode = SHELL.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+  assert.match(shellCode, /\(apOneSubtype\?9:10\) - \(window\._apState\.canTrackOutreach\?0:1\)/);
+});
+
+test('an empty prospects screen EXPLAINS itself', () => {
+  // A partner with no granted territory sees nothing, which is correct and fail-closed — and
+  // indistinguishable from broken unless it says so. The wording is the server's, because the server scoped it.
+  const shellCode = SHELL.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+  assert.match(shellCode, /st\.scopeNote = res\.scope_note \|\| null/);
+  assert.match(shellCode, /window\._apState\.scopeNote/);
+  assert.ok(!/no territory yet/.test(shellCode),
+    'the sentence must come from the server, not be a second copy in the SPA');
 });

@@ -3057,6 +3057,20 @@ module.exports = {
     defaultDeny: false,
   },
   {
+    key: 'sitenex.page_sitenex_partners.view',
+    label: "SiteNex Partners (page)",
+    domain: 'sitenex',
+    surface: 'nav_page',
+    ref: "sitenex-partners",
+    cost: 'free',
+    spend: [],
+    dangerous: false,
+    // The queue is the reason this page exists, so the listing reads are what it implies. Granting a
+    // territory is NOT implied — a page you can open is not a thing you can do.
+    implies: ['sitenex.territories.list', 'sitenex.lead_registrations.list'],
+    defaultDeny: false,
+  },
+  {
     key: 'sitenex.territories.list',
     label: "List partner territories — GET /api/sitenex/territories",
     domain: 'sitenex',

@@ -93,8 +93,15 @@ console.log(`${roles.length} roles\n`);
 //
 // The page is not simply opened: territoryScopeSql decides the ROWS and fails closed, so a partner with no
 // granted territory reaches the screen and sees nothing, with a sentence explaining why.
+// And the SiteNex Partners page — the territory admin and the approval queue — which STAFF ONLY gain,
+// because it grants territory and shows every partner's. Gated on the 'intelligence' tier the partner role
+// does not hold: the same mechanism that used to keep Prospects out, now pointed at the page that does the
+// granting. Note how the two changes go in OPPOSITE directions in the same commit, which is the whole
+// argument for declaring them rather than eyeballing a diff.
 const EXPECTED = {
-  partner: { gained: ['sitenex-prospects'], lost: [] },
+  partner:     { gained: ['sitenex-prospects'], lost: [] },
+  super_admin: { gained: ['sitenex-partners'], lost: [] },
+  admin:       { gained: ['sitenex-partners'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and

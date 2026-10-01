@@ -615,3 +615,178 @@ window.snCopyEmail = async function snCopyEmail(which) {
 pages['sitenex-contracts'] = (typeof apGuard === 'function')
   ? apGuard('sitenex-contracts', 'SiteNex Contracts', snContractsPage)
   : snContractsPage;
+
+/* ── SITENEX PARTNERS: territories, and the out-of-territory approval queue ─────
+ *
+ * Built because the alternative is an API nobody can use. "Staff approve or reject with a stated reason"
+ * describes a person doing something, and a person needs a screen — the deal form shipped complete and
+ * unreachable once already, and that is the mistake this page exists not to repeat.
+ *
+ * PENDING APPROVALS COME FIRST. They are the only thing on this page with a clock on it: a partner has
+ * registered a business outside their patch and nobody should start work until somebody here decides.
+ */
+
+const SN_DIMENSION_LABEL = { region: 'Region', subtype: 'Vertical', state: 'State' };
+
+async function snPartnersPage() {
+  const el = document.getElementById('content');
+  el.innerHTML = '<div class="text-body">Loading partners…</div>';
+  const [terr, regs] = await Promise.all([
+    snGet('/sitenex/territories'),
+    snGet('/sitenex/lead-registrations'),
+  ]);
+  if (!terr.ok) { el.innerHTML = apErrorCard('SiteNex Partners', terr, "pages['sitenex-partners']()"); return; }
+  const territories = (terr.data && terr.data.territories) || [];
+  const registrations = (regs.ok && regs.data && regs.data.registrations) || [];
+  const pending = registrations.filter(r => r.status === 'pending_approval');
+
+  /* Grouped by partner, because the question is always "what does this firm hold" and never "who holds
+     Rockford" — and because a partner with NO territory is the thing worth seeing, which a flat list of
+     grants cannot show. */
+  const byPartner = new Map();
+  for (const t of territories) {
+    const k = t.partner_id;
+    if (!byPartner.has(k)) byPartner.set(k, { name: t.partner_name || ('partner #' + k), id: k, rows: [] });
+    byPartner.get(k).rows.push(t);
+  }
+
+  const head = '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
+    + '<h2 style="margin:0">SiteNex Partners</h2>'
+    + '<div style="font-size:12px;color:var(--text-muted)">'
+    + byPartner.size + ' partner' + (byPartner.size === 1 ? '' : 's') + ' with a territory · '
+    + snEsc((terr.data && terr.data.scope) || '') + '</div></div>'
+    /* The model, stated on the screen that could most easily drift from it. */
+    + '<div class="text-body" style="margin:6px 0 14px">One product, many partners. Packages, prices, the '
+    + 'contract template and the revenue tiers are <strong>identical for everyone</strong> — only territory '
+    + 'and achieved volume differ. A partner with no territory sees no prospects at all, which is deliberate: '
+    + 'an ungranted patch means nobody has decided, and that reads as nothing.</div>'
+    + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 8px"></div>';
+
+  /* ── the queue, first ── */
+  const queue = '<h3 style="font-size:13px;margin:4px 0 8px;text-transform:uppercase;letter-spacing:.04em;'
+    + 'color:' + (pending.length ? '#8a1f1f' : 'var(--text-muted)') + '">'
+    + 'Out-of-territory approvals' + (pending.length ? ' — ' + pending.length + ' waiting' : '') + '</h3>'
+    + (pending.length
+      ? '<div style="border:1px solid #f0c0c0;border-radius:8px;background:#fff8f8;margin-bottom:18px">'
+        + pending.map(r =>
+          '<div style="padding:9px 11px;border-bottom:1px solid #f0d8d8">'
+          + '<div style="font-weight:600;font-size:13px">' + snEsc(r.business_name) + '</div>'
+          + '<div style="font-size:11px;color:var(--text-muted);margin-top:1px">'
+          +   snEsc([r.partner_name, r.region || r.state, r.subtype && String(r.subtype).replace(/_/g, ' ')]
+                .filter(Boolean).join(' · '))
+          +   ' · registered ' + snEsc(snDate(r.created_at))
+          + '</div>'
+          /* The reason box sits WITH the reject button, because a rejection without one is refused by the
+             server and discovering that after clicking is a worse way to learn it. */
+          + '<div style="display:flex;gap:7px;align-items:center;margin-top:6px;flex-wrap:wrap">'
+          + '<input id="sn-why-' + r.id + '" placeholder="Why — required to reject" '
+          +   'style="flex:1;min-width:200px;padding:4px 7px;font-size:12px;border:1px solid var(--border);border-radius:4px">'
+          + '<button onclick="snDecideLead(' + r.id + ',\'confirmed\')" class="btn-primary" '
+          +   'style="padding:3px 11px;font-size:12px">Approve</button>'
+          + '<button onclick="snDecideLead(' + r.id + ',\'rejected\')" class="btn-secondary" '
+          +   'style="padding:3px 11px;font-size:12px">Reject</button>'
+          + '</div></div>').join('')
+        + '</div>'
+      : '<div style="border:1px dashed var(--border);border-radius:8px;padding:12px;text-align:center;'
+        + 'font-size:12px;color:var(--text-muted);margin-bottom:18px">Nothing waiting. '
+        + 'Out-of-territory registrations should be rare — this is the backstop, not the path.</div>');
+
+  /* ── territories, per partner ── */
+  const grants = '<h3 style="font-size:13px;margin:4px 0 8px;text-transform:uppercase;letter-spacing:.04em;'
+    + 'color:var(--text-muted)">Territories</h3>'
+    + (byPartner.size
+      ? [...byPartner.values()].map(p =>
+          '<div style="border:1px solid var(--border);border-radius:8px;background:var(--white);padding:9px 11px;margin-bottom:8px">'
+          + '<div style="font-weight:600;font-size:13px">' + snEsc(p.name) + '</div>'
+          + '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:5px">'
+          + p.rows.map(t =>
+              '<span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:2px 7px;'
+              + 'border:1px solid var(--border);border-radius:12px;background:var(--bg-subtle,#f7f7f8)">'
+              + '<span style="color:var(--text-muted)">' + snEsc(SN_DIMENSION_LABEL[t.dimension] || t.dimension) + '</span>'
+              + snEsc(t.value)
+              /* Exclusivity is shown, because a shared patch is a deliberate and unusual arrangement and
+                 ought to be visible without opening anything. */
+              + (t.exclusive ? '' : '<span style="color:var(--text-muted);font-size:10px">shared</span>')
+              + '<a href="#" onclick="snRevokeTerritory(' + t.id + ',\'' + snEsc(String(t.value)).replace(/'/g, "\\'") + '\');return false" '
+              +   'title="Revoke" style="text-decoration:none;color:#cbd5e1">✕</a>'
+              + '</span>').join('')
+          + '</div></div>').join('')
+      : '<div style="border:1px dashed var(--border);border-radius:8px;padding:12px;text-align:center;'
+        + 'font-size:12px;color:var(--text-muted)">No territories granted yet, so no partner sees any '
+        + 'prospects.</div>');
+
+  /* ── granting ── */
+  const dims = (terr.data && terr.data.dimensions) || ['region', 'subtype', 'state'];
+  const grantForm = '<h3 style="font-size:13px;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em;'
+    + 'color:var(--text-muted)">Grant a territory</h3>'
+    + '<div style="display:flex;gap:7px;align-items:center;flex-wrap:wrap">'
+    + '<input id="sn-t-partner" type="number" placeholder="Partner id" '
+    +   'style="width:100px;padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
+    + '<select id="sn-t-dim" style="padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
+    +   dims.map(d => '<option value="' + d + '">' + snEsc(SN_DIMENSION_LABEL[d] || d) + '</option>').join('')
+    + '</select>'
+    + '<input id="sn-t-value" placeholder="Rockford, IL  /  machine_shop  /  IL" '
+    +   'style="flex:1;min-width:220px;padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
+    + '<label style="display:flex;align-items:center;gap:5px;font-size:12px">'
+    +   '<input type="checkbox" id="sn-t-excl" checked> exclusive</label>'
+    + '<button onclick="snGrantTerritory()" class="btn-primary" style="padding:5px 12px;font-size:13px">Grant</button>'
+    + '</div>'
+    /* The constraint said out loud, so a 409 is expected rather than surprising. */
+    + '<div style="font-size:11px;color:var(--text-muted);margin-top:5px">'
+    + 'An exclusive patch can be held by one partner only — the database refuses the second grant. Uncheck '
+    + 'exclusive if two partners are meant to share it.</div>';
+
+  el.innerHTML = head + queue + grants + grantForm;
+}
+
+window.snGrantTerritory = async function snGrantTerritory() {
+  const body = {
+    partner_id: Number((document.getElementById('sn-t-partner') || {}).value),
+    dimension: (document.getElementById('sn-t-dim') || {}).value,
+    value: (document.getElementById('sn-t-value') || {}).value,
+    exclusive: !!(document.getElementById('sn-t-excl') || {}).checked,
+  };
+  if (!body.partner_id || !body.value) { snToast('A partner id and a value are both needed.', true); return; }
+  snToast('Granting…');
+  const r = await snSend('POST', '/sitenex/territories', body);
+  if (!r.ok) {
+    /* The server names who already holds it, which is the only useful version of this refusal. */
+    snToast((r.data && r.data.error) || r.error, true);
+    return;
+  }
+  snToast(r.data.note);
+  await snPartnersPage();
+};
+
+window.snRevokeTerritory = async function snRevokeTerritory(id, label) {
+  /* Confirmed, naming the patch: revoking the last one silently blinds a partner, and the server's reply
+     says so afterwards — but afterwards is late. */
+  if (!confirm('Revoke ' + label + '?\n\nIf it is their last territory they will see no prospects at all.')) return;
+  snToast('Revoking…');
+  const r = await snSend('DELETE', '/sitenex/territories/' + encodeURIComponent(id));
+  if (!r.ok) { snToast((r.data && r.data.error) || r.error, true); return; }
+  snToast(r.data.note);
+  await snPartnersPage();
+};
+
+window.snDecideLead = async function snDecideLead(id, status) {
+  const why = ((document.getElementById('sn-why-' + id) || {}).value || '').trim();
+  /* Checked HERE as well as on the server, so the requirement is visible before the click rather than
+     arriving as a 400. The server is still the one that enforces it. */
+  if (status === 'rejected' && why.length < 3) {
+    snToast('Say why before rejecting — the partner is owed the sentence.', true);
+    const box = document.getElementById('sn-why-' + id);
+    if (box) box.focus();
+    return;
+  }
+  snToast(status === 'confirmed' ? 'Approving…' : 'Rejecting…');
+  const r = await snSend('PUT', '/sitenex/lead-registrations/' + encodeURIComponent(id),
+    { status, decision_reason: why || undefined });
+  if (!r.ok) { snToast((r.data && r.data.error) || r.error, true); return; }
+  snToast(r.data.note);
+  await snPartnersPage();
+};
+
+pages['sitenex-partners'] = (typeof apGuard === 'function')
+  ? apGuard('sitenex-partners', 'SiteNex Partners', snPartnersPage)
+  : snPartnersPage;
