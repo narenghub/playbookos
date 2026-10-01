@@ -121,7 +121,12 @@ router.get('/sitenex/deals', authMiddleware, requireTier('sitenex'), async (req,
     }));
     res.json({ total: rows.length, statuses: DEAL_STATUSES, columns,
       scope: scope.isStaff ? 'all partners' : (scope.failed ? 'none' : 'own partner only'),
-      partner_id: scope.partnerId });
+      partner_id: scope.partnerId,
+      // THE SERVER SAYS WHO MAY WRITE. The board is visible to super_admin, admin and partner (the
+      // 'sitenex' tier) but only the first two may create a deal, and the client must not work that out
+      // for itself — a second copy of the rule in the SPA is a copy that can disagree with the gate.
+      // Reported so a partner gets no dead button, while the gate stays adminOnly on the route.
+      can_create: req.user.role === 'admin' || req.user.role === 'super_admin' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

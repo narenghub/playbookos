@@ -8261,6 +8261,114 @@ pages['sitenex-prospects'] = async function(){
   c.innerHTML = header + orBar('prospect') + summaryRow + filters + table;
 };
 
+/* ── NEW DEAL: pick a prospect, create the deal, land in the form ───────────────
+   Three steps in one flow because any two of them on their own are useless: a deal with no prospect has
+   no client to put on a contract, and a created deal the user is not taken to is a row they have to go and
+   find. The picker reads the EXISTING /sitenex/prospects list (with ?q= and ?status=) rather than a second
+   endpoint — the bucket definitions and the agency tiebreak live there and a parallel query would drift. */
+window.apNewDeal = async function apNewDeal(){
+  const c = document.getElementById('content');
+  c.innerHTML = '<div class="card"><div class="card-title text-section" style="margin:0 0 8px">New SiteNex deal</div>'
+    + '<div class="text-body" style="margin:0 0 10px">Pick the prospect this deal is for. Qualified rows first — '
+    + 'a rejected one cannot be turned into a deal by accident, because the search asks for qualified only.</div>'
+    + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+    + '<input id="ap-nd-q" placeholder="Search by business name…" oninput="apNewDealSearch()" '
+    + 'style="flex:1;min-width:240px;padding:6px 9px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
+    + '<button onclick="pages[\'sitenex-deals\']()" class="btn-secondary" style="padding:5px 12px;font-size:13px">Cancel</button>'
+    + '</div>'
+    + '<div id="ap-nd-msg" style="font-size:12px;min-height:16px;margin-top:6px"></div>'
+    + '<div id="ap-nd-list" style="margin-top:4px"></div></div>';
+  apNewDealSearch();
+};
+
+/* Debounced, because it fires on every keystroke and each one is a query against 1,524 rows. */
+let _apNdTimer = null;
+window.apNewDealSearch = function apNewDealSearch(){
+  clearTimeout(_apNdTimer);
+  _apNdTimer = setTimeout(apNewDealRun, 220);
+};
+
+async function apNewDealRun(){
+  const q = (document.getElementById('ap-nd-q') || {}).value || '';
+  const list = document.getElementById('ap-nd-list');
+  const msg = document.getElementById('ap-nd-msg');
+  if (!list) return;
+  if (msg) msg.textContent = 'Searching…';
+  const r = await apGet('/sitenex/prospects?status=qualified&pageSize=25'
+    + (q.trim() ? '&q=' + encodeURIComponent(q.trim()) : ''));
+  if (!r.ok) {
+    /* The real error, not a generic one: this route is adminOnly, so a 403 here means something about the
+       account and not about the search. */
+    list.innerHTML = apErrorCard('Prospects', r, 'apNewDealRun()');
+    if (msg) msg.textContent = '';
+    return;
+  }
+  const items = (r.data && r.data.items) || [];
+  if (msg) msg.textContent = items.length ? (r.data.total + ' qualified match' + (r.data.total === 1 ? '' : 'es')
+    + (items.length < r.data.total ? ' — showing the first ' + items.length : '')) : '';
+  list.innerHTML = items.length
+    ? '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--white)">'
+      + items.map(p => '<div onclick="apCreateDeal('+p.id+')" title="Create a deal for this prospect"'
+        + ' style="display:flex;justify-content:space-between;gap:10px;padding:7px 10px;border-bottom:1px solid var(--border);cursor:pointer">'
+        + '<div><div style="font-weight:600;font-size:13px">'+apEsc(p.name)+'</div>'
+        + '<div style="font-size:11px;color:var(--text-muted)">'
+        +   apEsc([p.city || p.region, p.subtype && String(p.subtype).replace(/_/g,' '), p.phone].filter(Boolean).join(' · '))
+        + '</div></div>'
+        + '<div style="text-align:right;font-size:11px;color:var(--text-muted);white-space:nowrap">'
+        +   (p.recommended_package ? apEsc(p.recommended_package) : 'no package')
+        +   (p.bucket_label ? '<div>'+apEsc(p.bucket_label)+'</div>' : '')
+        + '</div></div>').join('')
+      + '</div>'
+    : '<div style="border:1px dashed var(--border);border-radius:8px;padding:14px;text-align:center;font-size:12px;color:var(--text-muted)">'
+      + (q.trim() ? 'No qualified prospect matches “'+apEsc(q.trim())+'”.' : 'No qualified SiteNex prospects yet.')
+      + '</div>';
+}
+
+window.apCreateDeal = async function apCreateDeal(prospectId){
+  const msg = document.getElementById('ap-nd-msg');
+  if (msg) { msg.style.color = 'var(--text-muted)'; msg.textContent = 'Creating the deal…'; }
+  let r;
+  try {
+    const resp = await fetch('/api/sitenex/deals', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type':'application/json' }, token ? { 'Authorization':'Bearer '+token } : {}),
+      body: JSON.stringify({ prospect_id: prospectId })
+    });
+    const text = await resp.text();
+    let data = null; try { data = text ? JSON.parse(text) : null; } catch(_) {}
+    r = { ok: resp.ok, status: resp.status, data, error: (data && data.error) || ('HTTP '+resp.status) };
+  } catch(e){ r = { ok:false, status:0, error:'request failed: '+(e && e.message ? e.message : String(e)) }; }
+  if (!r.ok) {
+    if (msg) { msg.style.color = 'var(--danger,#b00020)'; msg.textContent = r.error; }
+    return;
+  }
+  /* LAND IN THE FORM. The point of creating the deal was to fill it in; dropping the user back on the
+     board would mean finding the new card and clicking it. The deal is created with only a prospect_id, so
+     the form opens with every client field empty and the Generate button already telling them what is
+     still needed. */
+  const id = r.data && r.data.deal && r.data.deal.id;
+  if (typeof snEditDeal === 'function' && id) return snEditDeal(id);
+  return pages['sitenex-deals']();
+};
+
+/* Opens the deal form, UNLESS the click was on something interactive inside the card.
+   A whole-card handler that swallowed its own children would make a future button, link, select or
+   checkbox on a card unusable — the click would open the deal instead of doing what it says. So the
+   event target is walked up to the card and anything interactive on the way out claims the click.
+   `closest` is not used on the target alone, because a <span> inside a <button> must still count as the
+   button. */
+function apOpenDeal(ev, id){
+  const t = ev && (ev.target || ev.srcElement);
+  if (t && t.closest && t.closest('a,button,select,input,textarea,label,[onclick]:not([onclick^="apOpenDeal"])')) return;
+  if (typeof snEditDeal !== 'function') {
+    /* The form lives in a separate script. If it has not loaded, say so rather than doing nothing —
+       a card that silently ignores a click is the bug this whole change exists to fix. */
+    alert('The deal form has not loaded yet. Reload the page and try again.');
+    return;
+  }
+  snEditDeal(id);
+}
+
 pages['sitenex-deals'] = async function(){
   const c = document.getElementById('content');
   c.innerHTML = '<p style="color:#888;padding:20px">Loading SiteNex deals…</p>';
@@ -8269,11 +8377,28 @@ pages['sitenex-deals'] = async function(){
   const res = got.data || {};
   const cols = res.columns || [];
   const header = '<div class="card">'
+    + '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
     + '<div class="card-title text-section" style="margin:0">SiteNex Deals</div>'
+    /* can_create comes FROM THE SERVER. The board is visible to super_admin, admin and partner, but only
+       the first two may POST a deal — and the SPA must not recompute that rule, because a second copy can
+       disagree with the gate. A partner therefore sees no button rather than a button that 403s. */
+    + (res.can_create
+      ? '<button onclick="apNewDeal()" class="btn-primary" style="padding:5px 12px;font-size:13px">+ New deal</button>'
+      : '')
+    + '</div>'
     + '<div class="text-body">One column per deal status. A referral <em>partner</em> is not a billed account — these are the '
     + 'client deals partners refer. '+(res.total?('<strong>'+res.total+'</strong> deal'+(res.total===1?'':'s')+'.'):'No deals yet: the board shows the pipeline shape, so the columns are here before the rows are.')
+    + ' Click a card to open its client details, payment schedule and contract.'
     + '</div></div>';
-  const card = (d) => '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--white)">'
+  /* THE CARD IS THE WAY IN. The deal form — client details, payment schedule, Generate contract — has
+     existed on window.snEditDeal since Phase 3 and NOTHING CALLED IT: the board drew cards with no
+     handler, so the whole contract flow was unreachable from the UI while every server-side test passed.
+     That is what a backend-only test suite cannot see, and src/lib/sitenex/board-card.test.js now does.
+
+     snEditDeal lives in public/sitenex-phase3.js, which loads after this inline script. That is fine
+     because an inline onclick resolves against window AT CLICK TIME, by which point the file has run. */
+  const card = (d) => '<div onclick="apOpenDeal(event,'+d.id+')" title="Open this deal"'
+    + ' style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--white);cursor:pointer">'
     + '<div style="font-weight:600;font-size:13px">'+apEsc(d.prospect_name || ('deal #'+d.id))+'</div>'
     + (d.prospect_region?'<div style="font-size:11px;color:var(--text-muted)">'+apEsc(d.prospect_region)+'</div>':'')
     + '<div style="font-size:11px;margin-top:4px">'+(d.package_label?apEsc(d.package_label):'<span style="color:var(--text-muted)">no package</span>')+'</div>'

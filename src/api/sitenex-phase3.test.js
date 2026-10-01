@@ -863,3 +863,33 @@ test('generating does NOT send — they are separate actions', async () => {
   const gen = src.slice(src.indexOf("router.post('/sitenex/contracts',"), src.indexOf("router.get('/sitenex/contracts/:id/file'"));
   assert.ok(!/sendEmail/.test(gen), 'the generate handler must contain no send');
 });
+
+// ── can_create: the server says who may write ─────────────────────────────────
+
+test('the board reports can_create, so the client never computes the rule itself', async () => {
+  // The board is visible to super_admin, admin AND partner (the sitenex tier) but only the first two may
+  // POST a deal. A copy of that rule in the SPA is a copy that can disagree with the gate.
+  for (const who of ['u-admin', 'u-super']) {
+    const r = await call('GET', '/api/sitenex/deals', who);
+    assert.equal(r.body.can_create, true, `${who} may create`);
+  }
+  const p = await call('GET', '/api/sitenex/deals', 'u-pa');
+  assert.equal(p.body.can_create, false, 'a partner may not');
+  // And the FLAG IS NOT THE GATE — the route refuses regardless of what any client was told.
+  assert.equal((await call('POST', '/api/sitenex/deals', 'u-pa', { company_name: 'X' })).status, 403);
+});
+
+test('a deal created from a prospect alone leaves the client fields EMPTY', async () => {
+  // The new-deal flow posts only a prospect_id. company_name is deliberately not seeded from
+  // prospects.name: that is the Google Places listing, frequently abbreviated or stylised, and this field
+  // goes on a contract. The form offers it as a placeholder instead.
+  const r = await call('POST', '/api/sitenex/deals', 'u-admin', { prospect_id: 9001 });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.deal.prospect_id, 9001, 'the link is made');
+  assert.equal(r.body.deal.company_name, undefined, 'and nothing is invented for the contract');
+  assert.equal(r.body.deal.status, 'new');
+  // Which means the contract is correctly NOT yet generatable, and the form will say what is missing.
+  const detail = await call('GET', `/api/sitenex/deals/${r.body.deal.id}`, 'u-admin');
+  assert.equal(detail.body.renderable.ok, false);
+  assert.ok(detail.body.renderable.missing.some(m => m.field === 'client_company'));
+});

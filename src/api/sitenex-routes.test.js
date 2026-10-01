@@ -82,3 +82,22 @@ test('an unknown role reaches nothing (a custom role holds no tiers)', async () 
 test('no token at all → 401, not 403', async () => {
   assert.equal((await fetch(base() + DEALS)).status, 401);
 });
+
+// ── the prospect search the deal picker needs ──────────────────────────────────
+
+test('GET /sitenex/prospects accepts ?q= and ?status=, for the New deal picker', () => {
+  // Added to the EXISTING list rather than as a second lightweight endpoint: the four bucket definitions
+  // and the agency-as-tiebreak ORDER BY live in this handler, and a parallel "list sitenex prospects"
+  // query is exactly the thing that would drift away from them.
+  const fs = require('fs');
+  const src = fs.readFileSync(__dirname + '/routes.js', 'utf8');
+  const from = src.indexOf("router.get('/sitenex/prospects'");
+  assert.notEqual(from, -1);
+  const body = src.slice(from, src.indexOf('\n});\n', from));
+  assert.match(body, /req\.query\.q/, 'a name search');
+  assert.match(body, /name ILIKE/, 'matched on the business name');
+  assert.match(body, /req\.query\.status/, 'and the qualifier verdict, so the picker can ask for qualified only');
+  // Parameterised, not interpolated — this one takes free text from a search box.
+  assert.ok(!/\$\{[^}]*req\.query\.q/.test(body), 'the search term must never be interpolated into SQL');
+  assert.match(body, /params\.push\('%' \+ String\(req\.query\.q\)/, 'it is bound as a parameter');
+});

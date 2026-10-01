@@ -356,7 +356,14 @@ window.snEditDeal = async function snEditDeal(dealId) {
   const field = ([key, label, kind, req]) => {
     const raw = d[key];
     const val = kind === 'money' ? (raw == null ? '' : raw / 100) : (raw == null ? '' : raw);
-    const common = 'id="sn-f-' + key + '" style="width:100%;padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px"';
+    /* The prospect's name is offered as a PLACEHOLDER on company_name, never pre-filled. prospects.name is
+       the Google Places listing and is frequently abbreviated or stylised — "ACME MACHINE" for "Acme
+       Machine Works LLC" — and this field goes on a contract. A placeholder puts it in front of the user
+       without it being silently adopted; seeding the value would mean a legal entity name nobody typed. */
+    const hint = (key === 'company_name' && d.prospect_name) ? d.prospect_name : '';
+    const common = 'id="sn-f-' + key + '"'
+      + (hint ? ' placeholder="' + snEsc(hint) + ' — check the full legal name"' : '')
+      + ' style="width:100%;padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px"';
     const input = kind === 'textarea'
       ? '<textarea ' + common + ' rows="2">' + snEsc(val) + '</textarea>'
       : '<input ' + common + ' type="' + (kind === 'money' || kind === 'number' ? 'number' : kind)
@@ -392,7 +399,10 @@ window.snEditDeal = async function snEditDeal(dealId) {
     + '</div>'
     + '<div style="font-size:12px;color:var(--text-muted);margin:2px 0 12px">'
       + 'Deal #' + d.id + ' · ' + (d.partner_name ? 'via ' + snEsc(d.partner_name) : 'self-sourced')
-      + (d.package_label ? ' · ' + snEsc(d.package_label) : '') + '</div>'
+      + (d.package_label ? ' · ' + snEsc(d.package_label) : '')
+      /* Which prospect this came from, so the form is traceable back to the row somebody picked. */
+      + (d.prospect_name ? ' · from ' + snEsc(d.prospect_name) : '')
+      + (d.prospect_phone ? ' · ' + snEsc(d.prospect_phone) : '') + '</div>'
     + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 8px"></div>'
     + '<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start">'
 

@@ -4816,6 +4816,18 @@ router.get('/sitenex/prospects', authMiddleware, adminOnly, async (req, res) => 
       if (list.length) { params.push(list); clauses.push(`subtype = ANY($${params.length})`); }
     }
     if (req.query.region)  { params.push(req.query.region);  clauses.push(`region = $${params.length}`); }
+    // Name search, for the deal picker. Added here rather than in a second lightweight endpoint: a
+    // separate "list sitenex prospects" query would be a second thing to keep in step with the bucket
+    // definitions and with the agency tiebreak in the sort below, and those are exactly the parts that
+    // would drift apart.
+    if (req.query.q) {
+      params.push('%' + String(req.query.q).trim() + '%');
+      clauses.push(`name ILIKE $${params.length}`);
+    }
+    // status is the QUALIFIER's verdict (new | qualified | rejected), not an outreach state — see the note
+    // in src/lib/outreach/registry.js. The picker asks for 'qualified' so a rejected row cannot be turned
+    // into a deal by accident.
+    if (req.query.status) { params.push(String(req.query.status)); clauses.push(`status = $${params.length}`); }
     if (req.query.package === 'none') clauses.push(`recommended_package IS NULL`);
     else if (req.query.package) { params.push(req.query.package); clauses.push(`recommended_package = $${params.length}`); }
     // Bucket is derived, not stored — express each one as the condition the scorer writes.

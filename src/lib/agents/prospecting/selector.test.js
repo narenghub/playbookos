@@ -18,8 +18,22 @@ const handler = (() => {
   assert.notEqual(i, -1, 'could not find the SiteNex prospects route');
   const rest = ROUTES.slice(i);
   const end = rest.search(/\nrouter\.(get|post|put|patch|delete)\(/);
-  return rest.slice(0, end === -1 ? undefined : end);
+  const body = rest.slice(0, end === -1 ? undefined : end);
+  // JS COMMENTS BLANKED, newlines kept. Every assertion below is about the SQL, and the slices are taken
+  // with indexOf('ORDER BY') — so a JS comment that merely MENTIONS "ORDER BY" truncates the handler at
+  // prose and the whole file starts failing about buckets that are plainly still there. That is what
+  // happened: a note explaining why the name search was added here said "the agency-tiebreak ORDER BY".
+  // SQL's own `--` comments are deliberately left alone; they are part of what this route documents.
+  return body.replace(/(^|[^:'"\\])\/\/[^\n]*/g, (m, p1) => p1 + ' '.repeat(m.length - p1.length))
+             .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
 })();
+
+test('GUARD: the handler slice still contains the SQL these tests are about', () => {
+  // A slice that silently shrinks makes every assertion below pass or fail for the wrong reason.
+  assert.match(handler, /FROM prospects WHERE/, 'the query itself must be in the slice');
+  assert.match(handler, /ORDER BY site_score DESC/, 'and so must the real ORDER BY');
+  assert.ok(handler.length > 2000, `the slice is only ${handler.length} chars — it has been truncated`);
+});
 
 test('the agency signal is in the ORDER BY', () => {
   const order = handler.slice(handler.indexOf('ORDER BY'));
