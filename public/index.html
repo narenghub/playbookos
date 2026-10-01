@@ -985,10 +985,15 @@ const NAV_SECTIONS = [
     {id:'agent-control', label:'Agent Control', icon:'⚡'},
   ]},
   // SiteNex referral pipeline. access:['admin','sitenex'] — admin + super_admin, plus partner via the
-  // one-role 'sitenex' family. The section being visible is NOT the same as all three pages being
-  // visible: NAV_PAGE_REQS gates SiteNex Prospects on the 'intelligence' tier, which partner has
-  // not got, so the partner sees Deals and Packages only. The route keeps adminOnly regardless —
-  // the nav hiding a link is never the thing that protects it.
+  // one-role 'sitenex' family. All FOUR pages are on [["sitenex"]] now, so a partner sees all four.
+  //
+  // Prospects used to be gated on the 'intelligence' tier, which partner has not got, as the nav-layer half
+  // of keeping a referral partner out of our scored lead list. From 2026-10-01 a partner holds a TERRITORY
+  // and sees the prospects in it: territoryScopeSql decides the rows and fails CLOSED, so a partner with no
+  // grant reaches the page and sees nothing, with a sentence saying why.
+  //
+  // The nav was never what protected it and still is not — a link to a page that 403s is a bug, and so is a
+  // page withheld from somebody entitled to open it.
   {title:'SITENEX', access:['admin','sitenex'], items:[
     {id:'sitenex-prospects', label:'SiteNex Prospects', icon:'🏭'},
     {id:'sitenex-deals', label:'SiteNex Deals', icon:'📋'},
@@ -1047,7 +1052,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["intelligence"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["sitenex"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]]};
 // The caller's tiers. They arrive on /auth/me and /auth/login WITH the identity, so this needs no
 // fetch of its own and cannot be left unknown by a failed request — a failed /auth/me logs you out
 // rather than showing you a nav computed from nothing.

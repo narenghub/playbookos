@@ -27,6 +27,9 @@ const PARTNERS = [{ id: PARTNER_A, name: 'Partner A', primary_contact_email: 'a@
                   { id: PARTNER_B, name: 'Partner B', primary_contact_email: 'b@partnerb.example' }];
 const PACKAGES = [{ code: 'P2', name: 'Renew', included: ['content migration', 'redirect map'],
                     not_included: ['content writing', 'photography'] }];
+// Partner A holds Rockford; partner B holds nothing. Two states on purpose: "sees their own" and "sees
+// nothing" are different assertions and only the second can prove the scope fails closed.
+let TERRITORIES;
 
 // EVERY statement the route makes, recorded by the fake itself.
 //
@@ -35,11 +38,15 @@ const PACKAGES = [{ code: 'P2', name: 'Renew', included: ['content migration', '
 // required — which is this fake, set up above. Reassigning db.query inside a test afterwards changes
 // nothing the route can see, and a test that counted queries that way counted zero and passed.
 let SQL_LOG = [];
+let REGS;
 let DEALS, PAYMENTS, CONTRACTS, SENDS, SEQ, DEAL_SEQ, CONTRACT_SEQ, PROSPECTS;
 let MAIL;   // what the fake mailer was asked to send, and what it should answer
 function reset() {
   DEAL_SEQ = 100; CONTRACT_SEQ = 500; SEQ = 0;
   PAYMENTS = []; CONTRACTS = []; SENDS = []; SQL_LOG = [];
+  REGS = [];
+  TERRITORIES = { [PARTNER_A]: [{ dimension: 'region', value: 'Rockford, IL', exclusive: true }],
+                  [PARTNER_B]: [] };
   MAIL = { sent: [], reply: { ok: true, id: 'msg_fake_1', error: null }, throwOnTxn: false };
   DEALS = [
     { id: ++DEAL_SEQ, partner_id: PARTNER_A, owner_user_id: 'u-admin', status: 'new', package_code: 'P2',
@@ -69,9 +76,9 @@ let LOOKUP_FAILS = false;
 
 // Partner-owned tables. A read of one of these without a partner_id predicate is a leak, so the fake
 // refuses rather than quietly returning everything.
-const requiresScope = (s) => /FROM sitenex_deals|FROM sitenex_contracts c/.test(s);
+const requiresScope = (s) => /FROM sitenex_deals|FROM sitenex_contracts c|FROM partner_territories t|FROM sitenex_lead_registrations r/.test(s);
 const scopeOf = (s, params) => {
-  const m = /(?:d|c)\.partner_id = \$(\d+)/.exec(s);
+  const m = /(?:d|c|t|r|x)\.partner_id = \$(\d+)/.exec(s);
   if (m) return { kind: 'partner', id: params[+m[1] - 1] };
   if (/WHERE FALSE|AND FALSE/.test(s)) return { kind: 'none' };
   if (/WHERE TRUE|AND TRUE/.test(s)) return { kind: 'all' };
@@ -111,13 +118,99 @@ db.query = async (sql, params = []) => {
   if (/FROM user_products WHERE user_id/i.test(s)) {
     return { rows: ['sitenex', 'internal'].map(product => ({ product })) };
   }
+  if (/FROM sitenex_packages ORDER BY code/i.test(s)) {
+    return { rows: PACKAGES.map(p => ({ ...p, summary: null, setup_fee_cents: null, monthly_cents: null,
+                                        typical_weeks: 3, active: true })) };
+  }
   if (/FROM sitenex_packages WHERE code/i.test(s)) {
     const p = PACKAGES.find(x => x.code === params[0]);
     return { rows: p ? [p] : [] };
   }
-  if (/FROM prospects WHERE id = \$1::bigint AND product = 'sitenex'/i.test(s)) {
+  // ANCHORED on its exact column list. Unanchored it also matched the COUNT(*) query used after a revoke,
+  // returning territory rows where the handler read `.rows[0].n` — a TypeError surfacing as a 400, which
+  // reads as a validation failure and is nothing of the kind. Same family as the payments SELECT/DELETE
+  // collision earlier in this file.
+  if (/^SELECT dimension, value, exclusive FROM partner_territories WHERE partner_id/i.test(s)) {
+    return { rows: TERRITORIES[params[0]] || [] };
+  }
+  if (/^SELECT COUNT\(\*\)::int n FROM partner_territories WHERE partner_id/.test(s)) {
+    return { rows: [{ n: (TERRITORIES[params[0]] || []).length }] };
+  }
+  // The exclusive-holder lookup, BEFORE the generic listing below: it has no partner_id clause (it is asking
+  // "who holds this", across partners) so the scope guard would have thrown on it.
+  if (/^SELECT p\.name FROM partner_territories t JOIN partners p/.test(s)) {
+    const holder = Object.entries(TERRITORIES).find(([, list]) =>
+      list.some(t => t.dimension === params[0] && t.value === params[1] && t.exclusive));
+    return { rows: holder ? [{ name: (PARTNERS.find(p => p.id === Number(holder[0])) || {}).name }] : [] };
+  }
+  // The listing, with its joins. Scoped like every other partner-owned read, so the fake refuses an
+  // unscoped one rather than quietly returning everybody's grants.
+  if (/FROM partner_territories t/.test(s)) {
+    const all = Object.entries(TERRITORIES).flatMap(([pid, list]) =>
+      list.map((t, i) => ({ id: Number(pid) * 100 + i, partner_id: Number(pid), ...t,
+        created_at: '2026-10-01T00:00:00Z',
+        partner_name: (PARTNERS.find(p => p.id === Number(pid)) || {}).name || null, created_by_name: 'Admin' })));
+    return { rows: visible(s, params, all) };
+  }
+  if (/^INSERT INTO partner_territories/.test(s)) {
+    const [partner_id, dimension, value, exclusive] = params;
+    // ON CONFLICT IS READ OUT OF THE SQL. The constraint lives in the database as a partial unique index, so
+    // modelling it here independently meant adding `ON CONFLICT DO NOTHING` to the real INSERT changed
+    // nothing in these tests — while in production it would SUPPRESS the violation, return no row, and the
+    // handler would read `.id` off undefined. A fake that models a constraint must still obey the statement.
+    const suppressed = /ON CONFLICT/i.test(s);
+    // THE EXCLUSIVITY CONSTRAINT IS MODELLED, because it is the whole reason the table exists and the
+    // handler's 409 branch is unreachable without it. Mirrors the partial unique index: only exclusive rows
+    // collide, so a non-exclusive overlap is allowed.
+    const clash = Object.entries(TERRITORIES).some(([pid, list]) =>
+      Number(pid) !== Number(partner_id) && list.some(t =>
+        t.dimension === dimension && t.value === value && t.exclusive && exclusive));
+    if (clash) {
+      if (suppressed) return { rows: [] };
+      const e = new Error('duplicate key value violates unique constraint');
+      e.code = '23505'; e.constraint = 'uq_partner_territories_exclusive'; throw e;
+    }
+    const mine = TERRITORIES[partner_id] || (TERRITORIES[partner_id] = []);
+    if (mine.some(t => t.dimension === dimension && t.value === value)) {
+      if (suppressed) return { rows: [] };
+      const e = new Error('duplicate key'); e.code = '23505'; e.constraint = 'partner_territories_partner_id_dimension_value_key'; throw e;
+    }
+    mine.push({ dimension, value, exclusive });
+    return { rows: [{ id: ++SEQ, partner_id, dimension, value, exclusive, created_at: 'now' }] };
+  }
+  if (/^DELETE FROM partner_territories WHERE id/.test(s)) {
+    for (const [pid, list] of Object.entries(TERRITORIES)) {
+      const i = list.findIndex((t, idx) => Number(pid) * 100 + idx === Number(params[0]));
+      if (i !== -1) { const [gone] = list.splice(i, 1);
+        return { rows: [{ id: params[0], partner_id: Number(pid), ...gone }] }; }
+    }
+    return { rows: [] };
+  }
+  if (/FROM partners WHERE id = \$1/.test(s)) {
+    const p = PARTNERS.find(x => x.id === Number(params[0]));
+    return { rows: p ? [p] : [] };
+  }
+  // The REGISTRATION's lookup, which is deliberately NOT territory-scoped: it reads the row to learn the
+  // region so it can compute the verdict, and scoping it would make an out-of-territory claim impossible —
+  // which is the entire feature. Distinguished by its column list, not by its prefix.
+  if (/^SELECT id, name, address, region, state, subtype FROM prospects WHERE id = \$1::bigint/.test(s)) {
     const p = PROSPECTS.find(x => String(x.id) === String(params[0]));
     return { rows: p ? [p] : [] };
+  }
+  if (/FROM prospects WHERE id = \$1::bigint AND product = 'sitenex'/i.test(s)) {
+    // THE TERRITORY CLAUSE IS HONOURED, not ignored. The first version of this fake matched on the prefix
+    // and returned the row whatever followed — so the scoped route passed its test while a partner could
+    // have read any prospect by id. A fake that drops the clause under test proves nothing.
+    if (!/AND (TRUE|FALSE|\()/.test(s)) throw new Error('UNSCOPED prospect read: ' + s);
+    if (/AND FALSE/.test(s)) return { rows: [] };
+    const p = PROSPECTS.find(x => String(x.id) === String(params[0]));
+    if (!p) return { rows: [] };
+    if (/AND TRUE/.test(s)) return { rows: [p] };
+    // A real territory: one OR per grant, values bound from params[1] onward.
+    const vals = params.slice(1).map(v => String(v).trim().toLowerCase());
+    const mine = ['region', 'subtype', 'state'].some(c =>
+      p[c] != null && vals.includes(String(p[c]).trim().toLowerCase()));
+    return { rows: mine ? [p] : [] };
   }
 
   // ── deals ──
@@ -174,6 +267,45 @@ db.query = async (sql, params = []) => {
   }
 
   // ── contracts ──
+  if (/^INSERT INTO sitenex_lead_registrations/.test(s)) {
+    const row = { id: ++SEQ, partner_id: params[0], prospect_id: params[1], business_name: params[2],
+                  address: params[3], region: params[4], state: params[5], subtype: params[6],
+                  status: params[7], in_territory: params[8], matched_on: params[9],
+                  registered_by: params[10], decision_reason: null, decided_by: null, decided_at: null,
+                  created_at: '2026-10-01T00:00:00Z' };
+    // The claim constraint: one CONFIRMED registration per prospect.
+    if (row.prospect_id != null && row.status === 'confirmed'
+        && REGS.some(r => String(r.prospect_id) === String(row.prospect_id) && r.status === 'confirmed')) {
+      const e = new Error('duplicate key'); e.code = '23505'; e.constraint = 'uq_sitenex_leadreg_claim'; throw e;
+    }
+    REGS.push(row);
+    return { rows: [{ id: row.id, status: row.status, in_territory: row.in_territory,
+                      matched_on: row.matched_on, business_name: row.business_name, created_at: row.created_at }] };
+  }
+  if (/FROM sitenex_lead_registrations r/.test(s)) {
+    const all = REGS.map(r => ({ ...r,
+      partner_name: (PARTNERS.find(p => p.id === Number(r.partner_id)) || {}).name || null,
+      decided_by_name: null, registered_by_name: 'Someone' }));
+    const vis = visible(s, params, all);
+    const st = params.find(x => typeof x === 'string' && /^(confirmed|pending_approval|rejected)$/.test(x));
+    const rows = st ? vis.filter(r => r.status === st) : vis;
+    return { rows: rows.slice().sort((a, b) => (b.status === 'pending_approval') - (a.status === 'pending_approval') || b.id - a.id) };
+  }
+  if (/SELECT id, status, business_name, partner_id, prospect_id FROM sitenex_lead_registrations WHERE id/.test(s)) {
+    const r = REGS.find(x => String(x.id) === String(params[0]));
+    return { rows: r ? [r] : [] };
+  }
+  if (/^UPDATE sitenex_lead_registrations/.test(s)) {
+    const r = REGS.find(x => String(x.id) === String(params[0]));
+    if (!r) return { rows: [] };
+    Object.assign(r, { status: params[1], decision_reason: params[2], decided_by: params[3], decided_at: 'now' });
+    return { rows: [{ id: r.id, status: r.status, business_name: r.business_name,
+                      decision_reason: r.decision_reason, decided_at: r.decided_at }] };
+  }
+  if (/SELECT p\.name FROM sitenex_lead_registrations r JOIN partners p/.test(s)) {
+    const r = REGS.find(x => String(x.prospect_id) === String(params[0]) && x.status === 'confirmed');
+    return { rows: r ? [{ name: (PARTNERS.find(p => p.id === Number(r.partner_id)) || {}).name }] : [] };
+  }
   if (/nextval\('sitenex_contract_no_seq'\)/.test(s)) return { rows: [{ n: ++CONTRACT_SEQ }] };
   if (/FROM sitenex_contracts WHERE deal_id = \$1 ORDER BY id DESC/.test(s)) {
     return { rows: CONTRACTS.filter(c => String(c.deal_id) === String(params[0])) };
@@ -388,16 +520,54 @@ test('a PARTNER cannot write: every write is adminOnly, decided deliberately', a
   assert.equal((await call('GET', '/api/sitenex/contracts', 'u-pa')).status, 200);
 });
 
-test('every non-GET route in this router carries adminOnly, at the source level', () => {
-  // The HTTP test above can only check the routes it knows about. This one fails when a new write is
-  // added without the gate, which is the case nobody remembers.
+// The ONE write a partner may make, named here so it is a decision and not an omission.
+//
+// Everything else a partner does on SiteNex is a read. Registering a business is the exception, and it has
+// to be: the whole out-of-territory design is that a partner CAN claim something outside their patch and a
+// human then decides. A partner who could not register could not use the system for the thing it is for.
+//
+// It is safe to open because the handler decides the outcome, not the caller: partner_id comes from the
+// caller's own row, the territory verdict is computed server-side from partner_territories, and an
+// out-of-territory claim lands pending_approval where only adminOnly can move it. A partner can create a
+// REQUEST; they cannot create an approval.
+const PARTNER_WRITABLE = ['POST /sitenex/lead-registrations'];
+
+test('every non-GET route carries adminOnly, EXCEPT the one partner write', () => {
+  // The HTTP test above can only check the routes it knows about. This one fails when a new write is added
+  // without the gate, which is the case nobody remembers.
   const src = require('fs').readFileSync(__dirname + '/sitenex-phase3.routes.js', 'utf8');
   const decls = [...src.matchAll(/router\.(get|post|put|patch|delete)\('([^']+)',([^\n]*)/g)];
-  assert.ok(decls.length >= 10, `only ${decls.length} routes found — the scanner has stopped working`);
+  assert.ok(decls.length >= 15, `only ${decls.length} routes found — the scanner has stopped working`);
+  const open = [];
   for (const [, method, path, rest] of decls) {
     if (method === 'get') continue;
-    assert.ok(/adminOnly/.test(rest), `${method.toUpperCase()} ${path} is a write without adminOnly`);
+    const key = `${method.toUpperCase()} ${path}`;
+    if (/adminOnly/.test(rest)) continue;
+    open.push(key);
   }
+  // An ALLOWLIST and not a relaxation: the set must be exactly this, so a second partner write cannot
+  // arrive by being added one line below the first.
+  assert.deepEqual(open.sort(), PARTNER_WRITABLE.slice().sort(),
+    'a non-GET route is open to a partner without being declared in PARTNER_WRITABLE');
+  assert.equal(PARTNER_WRITABLE.length, 1,
+    'if this list grows, the "partners read, staff write" rule has stopped being the rule and the change '
+    + 'needs saying out loud rather than passing as another line here');
+});
+
+test('the one partner write cannot be used to approve anything', () => {
+  // The reason it is safe to open. A partner creates a REQUEST; only adminOnly can turn one into a claim.
+  const src = require('fs').readFileSync(__dirname + '/sitenex-phase3.routes.js', 'utf8');
+  const post = src.slice(src.indexOf("router.post('/sitenex/lead-registrations'"),
+                         src.indexOf("router.get('/sitenex/lead-registrations'"));
+  assert.ok(post.length > 500, 'the handler must be findable');
+  // The status comes from the territory match, never from the body.
+  assert.match(post, /const status = m\.in \? 'confirmed' : 'pending_approval'/);
+  assert.ok(!/b\.status|body\.status/.test(post), 'the caller must not be able to name the status');
+  // And a partner cannot name the partner either.
+  assert.match(post, /scope\.isStaff \? intOrNull\(b\.partner_id\) : scope\.partnerId/);
+  // The decision route IS adminOnly.
+  const decide = src.slice(src.indexOf("router.put('/sitenex/lead-registrations/:id'"));
+  assert.match(decide.slice(0, 200), /adminOnly/);
 });
 
 // ── the deal write path ───────────────────────────────────────────────────────
@@ -1005,4 +1175,283 @@ test('`changed` reports what the CALLER changed, not bookkeeping columns', async
   assert.deepEqual(r.body.changed.sort(), ['status', 'terms_note']);
   assert.ok(!r.body.changed.includes('status_changed_at'));
   assert.ok(!r.body.changed.includes('updated_at'));
+});
+
+// ── TERRITORIES: ONE PRODUCT, MANY PARTNERS ───────────────────────────────────
+
+test('a partner sees the prospect in their territory', async () => {
+  const r = await call('GET', '/api/sitenex/prospects/9001/content', 'u-pa');
+  assert.equal(r.status, 200, 'Rockford is partner A\'s patch');
+});
+
+test('a partner with NO territory sees NOTHING — fail closed, never everything', async () => {
+  // THE ASSERTION THAT MATTERS. An empty grant means nobody decided what this partner may see, and the safe
+  // reading of "undecided" is "nothing". Getting this backwards hands one partner the whole lead list.
+  assert.deepEqual(TERRITORIES[PARTNER_B], [], 'partner B deliberately holds no territory');
+  assert.equal((await call('GET', '/api/sitenex/prospects/9001/content', 'u-pb')).status, 404);
+});
+
+test("and a partner cannot read a prospect OUTSIDE their territory by guessing an id", async () => {
+  // Without this the territory scoping on the list would be cosmetic: increment an integer and read the
+  // script for anything.
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9002, name: 'Peoria Machine', region: 'Peoria, IL' });
+  assert.equal((await call('GET', '/api/sitenex/prospects/9002/content', 'u-pa')).status, 404,
+    'Peoria is not partner A\'s patch');
+  assert.equal((await call('GET', '/api/sitenex/prospects/9002/content', 'u-admin')).status, 200,
+    'but staff see everything');
+});
+
+test('404 is the same answer for "does not exist" and "not your territory"', async () => {
+  // A 403 would confirm the row exists, which is how a list you cannot read gets enumerated anyway.
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9003, name: 'Elsewhere Co', region: 'Nowhere, IL' });
+  const outside = await call('GET', '/api/sitenex/prospects/9003/content', 'u-pa');
+  const absent = await call('GET', '/api/sitenex/prospects/999999/content', 'u-pa');
+  assert.equal(outside.status, absent.status);
+  assert.deepEqual(outside.body, absent.body);
+});
+
+test('a partner sees its OWN territories and not another partner\'s', async () => {
+  // Who holds what is commercially sensitive between partners.
+  const a = await call('GET', '/api/sitenex/territories', 'u-pa');
+  assert.equal(a.status, 200);
+  assert.equal(a.body.scope, 'own partner only');
+  const staff = await call('GET', '/api/sitenex/territories', 'u-admin');
+  assert.equal(staff.body.scope, 'all partners');
+});
+
+test('a partner cannot grant or revoke a territory', async () => {
+  assert.equal((await call('POST', '/api/sitenex/territories', 'u-pa',
+    { partner_id: PARTNER_A, dimension: 'region', value: 'Chicago' })).status, 403);
+  assert.equal((await call('DELETE', '/api/sitenex/territories/1', 'u-pa')).status, 403);
+});
+
+test('an unknown dimension is refused — the column cannot come from a request', async () => {
+  // dimension picks a COLUMN, which a parameter cannot do, so it is a lookup into a known list and anything
+  // else is refused at the edge.
+  for (const d of ['postcode', 'DROP TABLE', '', null]) {
+    const r = await call('POST', '/api/sitenex/territories', 'u-admin',
+      { partner_id: PARTNER_A, dimension: d, value: 'x' });
+    assert.equal(r.status, 400, `dimension '${d}' must be refused`);
+    assert.match(r.body.error, /Unknown dimension/);
+  }
+});
+
+test('the DIMENSION list and the columns it maps to cannot drift apart', () => {
+  const { DIMENSIONS, DIMENSION_COLUMN } = require('../lib/products/territory-scope');
+  assert.deepEqual(DIMENSIONS.sort(), ['region', 'state', 'subtype']);
+  // Every dimension maps to a real prospects column, and nothing maps to something clever.
+  for (const d of DIMENSIONS) {
+    assert.match(DIMENSION_COLUMN[d], /^[a-z_]+$/, `${d} must map to a plain column name`);
+  }
+});
+
+// ── LEAD REGISTRATION ─────────────────────────────────────────────────────────
+
+test('an IN-territory registration confirms immediately', async () => {
+  const r = await call('POST', '/api/sitenex/lead-registrations', 'u-pa', { prospect_id: 9001 });
+  assert.equal(r.status, 201, JSON.stringify(r.body));
+  assert.equal(r.body.registration.status, 'confirmed');
+  assert.equal(r.body.registration.in_territory, true);
+  assert.equal(r.body.registration.matched_on, 'region=Rockford, IL', 'and it records WHICH grant let it through');
+});
+
+test('an OUT-of-territory registration lands pending_approval, not rejected and not confirmed', async () => {
+  // The backstop. A partner may still register it; a human decides before any work is done.
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9010, name: 'Far Away Co', region: 'Peoria, IL' });
+  const r = await call('POST', '/api/sitenex/lead-registrations', 'u-pa', { prospect_id: 9010 });
+  assert.equal(r.status, 201);
+  assert.equal(r.body.registration.status, 'pending_approval');
+  assert.equal(r.body.registration.in_territory, false);
+  assert.match(r.body.note, /OUTSIDE your territory/);
+  assert.match(r.body.note, /Nobody should start work/);
+});
+
+test('the territory verdict is computed SERVER-SIDE from the row, never from the request', async () => {
+  // A partner supplying their own region for a prospect we already hold would be choosing the answer.
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9011, name: 'Claimed Co', region: 'Peoria, IL' });
+  const r = await call('POST', '/api/sitenex/lead-registrations', 'u-pa',
+    { prospect_id: 9011, region: 'Rockford, IL', status: 'confirmed', in_territory: true });
+  assert.equal(r.body.registration.status, 'pending_approval', 'the body cannot name the outcome');
+  assert.equal(r.body.registration.in_territory, false, 'nor the verdict');
+});
+
+test('a partner cannot register on ANOTHER partner\'s behalf', async () => {
+  const r = await call('POST', '/api/sitenex/lead-registrations', 'u-pa',
+    { prospect_id: 9001, partner_id: PARTNER_B });
+  assert.equal(r.status, 201);
+  assert.equal(REGS[REGS.length - 1].partner_id, PARTNER_A, 'partner_id comes from their own row');
+});
+
+test('staff approve or reject, and a REJECTION REQUIRES A REASON', async () => {
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9020, name: 'Pending Co', region: 'Peoria, IL' });
+  const made = await call('POST', '/api/sitenex/lead-registrations', 'u-pa', { prospect_id: 9020 });
+  const id = made.body.registration.id;
+  // No reason, or a token one, is refused.
+  for (const body of [{ status: 'rejected' }, { status: 'rejected', decision_reason: '  ' }, { status: 'rejected', decision_reason: 'no' }]) {
+    const r = await call('PUT', `/api/sitenex/lead-registrations/${id}`, 'u-admin', body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.equal(r.body.code, 'reason_required');
+    assert.match(r.body.error, /owed the sentence/);
+  }
+  const ok = await call('PUT', `/api/sitenex/lead-registrations/${id}`, 'u-admin',
+    { status: 'rejected', decision_reason: 'Already worked by another partner in that county.' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.registration.status, 'rejected');
+  assert.match(ok.body.registration.decision_reason, /Already worked/);
+});
+
+test('an approval needs no reason — the decision speaks for itself', async () => {
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9021, name: 'Approve Co', region: 'Peoria, IL' });
+  const made = await call('POST', '/api/sitenex/lead-registrations', 'u-pa', { prospect_id: 9021 });
+  const r = await call('PUT', `/api/sitenex/lead-registrations/${made.body.registration.id}`, 'u-admin',
+    { status: 'confirmed' });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.registration.status, 'confirmed');
+});
+
+test('a partner cannot decide its own claim', async () => {
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9022, name: 'Self Approve Co', region: 'Peoria, IL' });
+  const made = await call('POST', '/api/sitenex/lead-registrations', 'u-pa', { prospect_id: 9022 });
+  const r = await call('PUT', `/api/sitenex/lead-registrations/${made.body.registration.id}`, 'u-pa',
+    { status: 'confirmed' });
+  assert.equal(r.status, 403, 'approving is adminOnly — a partner creates a request, not an approval');
+});
+
+test('a decided claim is not re-decided', async () => {
+  // The record of what was agreed has to stay what was agreed.
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9023, name: 'Twice Co', region: 'Peoria, IL' });
+  const made = await call('POST', '/api/sitenex/lead-registrations', 'u-pa', { prospect_id: 9023 });
+  const id = made.body.registration.id;
+  await call('PUT', `/api/sitenex/lead-registrations/${id}`, 'u-admin', { status: 'confirmed' });
+  const again = await call('PUT', `/api/sitenex/lead-registrations/${id}`, 'u-admin',
+    { status: 'rejected', decision_reason: 'changed my mind' });
+  assert.equal(again.status, 400);
+  assert.equal(again.body.code, 'already_decided');
+});
+
+test('only the two decision statuses are accepted', async () => {
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9024, name: 'Bad Status Co', region: 'Peoria, IL' });
+  const made = await call('POST', '/api/sitenex/lead-registrations', 'u-pa', { prospect_id: 9024 });
+  for (const st of ['pending_approval', 'maybe', '', null]) {
+    const r = await call('PUT', `/api/sitenex/lead-registrations/${made.body.registration.id}`, 'u-admin',
+      { status: st, decision_reason: 'x' });
+    assert.equal(r.status, 400, `status '${st}' must be refused`);
+  }
+});
+
+test('the pending queue sorts pending first, and a partner sees only its own', async () => {
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9030, name: 'Q Co', region: 'Peoria, IL' });
+  await call('POST', '/api/sitenex/lead-registrations', 'u-pa', { prospect_id: 9001 });   // confirmed
+  await call('POST', '/api/sitenex/lead-registrations', 'u-pa', { prospect_id: 9030 });   // pending
+  const q = await call('GET', '/api/sitenex/lead-registrations', 'u-admin');
+  assert.equal(q.status, 200);
+  assert.equal(q.body.registrations[0].status, 'pending_approval', 'the thing needing a decision is first');
+  assert.ok(q.body.pending >= 1);
+  const mine = await call('GET', '/api/sitenex/lead-registrations', 'u-pb');
+  assert.equal(mine.body.total, 0, "partner B registered nothing, so sees nothing of partner A's");
+});
+
+// ── ONE PRODUCT, MANY PARTNERS ────────────────────────────────────────────────
+
+test('GUARD: nothing is per-partner except territory and volume', () => {
+  // The lead instruction, asserted structurally. Packages, prices, the contract template and the revenue
+  // tiers are identical for everyone; a product per partner would mean a user_products row, a route-map
+  // entry and a nav tab each time somebody signs.
+  const fs = require('fs'), path = require('path');
+  const { PRODUCTS, GRANTABLE } = require('../lib/products/route-map');
+  // No partner name or partner id may appear as a PRODUCT key.
+  // A product key is a plain lowercase word. A partner-specific one would carry a firm's name or a number —
+  // checked by SHAPE rather than by listing firm names, which also keeps a partner's name out of this file
+  // (rename-completeness.test.js polices that, and caught the first version of this line).
+  for (const p of [...PRODUCTS, ...GRANTABLE]) {
+    assert.match(p, /^[a-z]+$/, `product key '${p}' looks partner-specific`);
+    assert.ok(!/\d/.test(p), `'${p}' is numbered, which suggests one product per partner`);
+  }
+  assert.ok(PRODUCTS.includes('sitenex'), 'there is exactly one SiteNex product');
+  assert.equal(PRODUCTS.filter(p => /sitenex|site/.test(p)).length, 1, 'and only one');
+
+  // THE COMMERCIAL SURFACE IS NOT PARTNER-SCOPED. Asserted against the ROUTE and the TEMPLATE rather than
+  // against DDL text: a grep for the packages CREATE TABLE had to name the pre-rename table, which
+  // rename-completeness.test.js forbids and duly caught — and the route is the better subject anyway, since
+  // it is what a partner actually receives.
+  const routes = fs.readFileSync(path.join(__dirname, 'routes.js'), 'utf8');
+  const pkgFrom = routes.indexOf("router.get('/sitenex/packages'");
+  assert.notEqual(pkgFrom, -1, 'the packages route must be findable');
+  const pkgBody = routes.slice(pkgFrom, routes.indexOf('\n});\n', pkgFrom));
+  for (const term of ['partnerScopeSql', 'territoryScopeSql', 'partner_id']) {
+    assert.ok(!pkgBody.includes(term),
+      `the packages catalogue must not be scoped by ${term} — prices and scope are identical for every partner`);
+  }
+  // And the contract template is one document, not one per partner.
+  const tmpl = fs.readFileSync(path.join(__dirname, '../lib/sitenex/contract-template.js'), 'utf8');
+  assert.ok(!/partner_id|per.partner|partnerTemplate/i.test(tmpl),
+    'the contract template is the same document for every partner');
+  // The only partner-specific thing in a contract is WHICH partner introduced the client — a name on a
+  // line, not a term of the agreement.
+  assert.match(tmpl, /Introduced by/);
+  assert.match(tmpl, /is not a party to this agreement/,
+    'and the partner is explicitly not a party, which is what keeps the terms identical');
+});
+
+test('every partner receives the SAME package catalogue', async () => {
+  // The requirement stated as behaviour: identical payloads, whoever asks.
+  const [a, b, staff] = await Promise.all([
+    call('GET', '/api/sitenex/packages', 'u-pa'),
+    call('GET', '/api/sitenex/packages', 'u-pb'),
+    call('GET', '/api/sitenex/packages', 'u-admin'),
+  ]);
+  assert.equal(a.status, 200, JSON.stringify(a.body));
+  assert.deepEqual(a.body, b.body, 'two partners must receive byte-identical packages');
+  assert.deepEqual(a.body, staff.body, 'and the same as staff — one product, many partners');
+});
+
+test('GUARD: a territory is the ONLY thing that differs, and it cannot be a product', () => {
+  const { DIMENSIONS } = require('../lib/products/territory-scope');
+  const { PRODUCTS } = require('../lib/products/route-map');
+  // A dimension value is a place or a vertical, never a product — if 'sitenex' could be a territory value
+  // the two concepts would have started to merge.
+  for (const d of DIMENSIONS) assert.ok(!PRODUCTS.includes(d), `'${d}' is both a dimension and a product`);
+});
+
+test('THE DATABASE refuses the same exclusive territory to two partners', async () => {
+  // The collision this whole design exists to prevent. Two partners both holding 'Rockford' is the same
+  // problem as two partners both seeing a deal, one layer up where it surfaces as an argument about
+  // commission rather than as an error. Enforced by a partial unique index, NOT by the UI.
+  const grant = (partner, value, exclusive) => call('POST', '/api/sitenex/territories', 'u-admin',
+    { partner_id: partner, dimension: 'region', value, exclusive });
+  const first = await grant(PARTNER_A, 'Peoria', true);
+  assert.equal(first.status, 201, JSON.stringify(first.body));
+  const clash = await grant(PARTNER_B, 'Peoria', true);
+  assert.equal(clash.status, 409);
+  assert.equal(clash.body.code, 'territory_taken');
+  assert.match(clash.body.error, /already held exclusively by Partner A/);
+  assert.match(clash.body.error, /revoke theirs first, or add it as non-exclusive/, 'and it says what to do');
+  // A NON-exclusive overlap IS allowed — that is how a shared or trial territory is expressed.
+  assert.equal((await grant(PARTNER_B, 'Joliet', false)).status, 201);
+  assert.equal((await grant(PARTNER_A, 'Joliet', false)).status, 201, 'deliberate overlap is permitted');
+  // And the same partner asking twice is a different, clearer error.
+  const twice = await grant(PARTNER_A, 'Peoria', true);
+  assert.equal(twice.status, 409);
+  assert.equal(twice.body.code, 'already_granted');
+});
+
+test('exclusive is the DEFAULT — a shared territory has to be asked for', async () => {
+  const r = await call('POST', '/api/sitenex/territories', 'u-admin',
+    { partner_id: PARTNER_A, dimension: 'subtype', value: 'funeral' });
+  assert.equal(r.body.territory.exclusive, true, 'omitting it must not silently share the patch');
+  assert.match(r.body.note, /exclusively/);
+});
+
+test('revoking the LAST territory says so — the partner now sees nothing', async () => {
+  // Correct, fail-closed, and the kind of thing somebody should be told they have just done.
+  const list = await call('GET', '/api/sitenex/territories', 'u-admin');
+  const aIds = list.body.territories.filter(t => t.partner_id === PARTNER_A).map(t => t.id);
+  assert.ok(aIds.length >= 1);
+  let last;
+  for (const id of aIds) last = await call('DELETE', `/api/sitenex/territories/${id}`, 'u-admin');
+  assert.equal(last.status, 200);
+  assert.equal(last.body.remaining, 0);
+  assert.match(last.body.note, /LAST territory/);
+  // And now they really do see nothing.
+  assert.equal((await call('GET', '/api/sitenex/prospects/9001/content', 'u-pa')).status, 404);
 });

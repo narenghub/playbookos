@@ -35,8 +35,10 @@
 
 const express = require('express');
 const { query, withTransaction } = require('../lib/db');
-const { authMiddleware, requireTier, adminOnly } = require('../lib/core');
+const { authMiddleware, requireTier, requireTierRead, adminOnly } = require('../lib/core');
 const { partnerScopeSql } = require('../lib/products/partner-scope');
+const { territoryScopeSql, territoriesFor, matchTerritory, DIMENSIONS, isDimension } =
+  require('../lib/products/territory-scope');
 const { packageLabel } = require('../lib/agents/prospecting/findings-text');
 const { renderContract, checkRenderable } = require('../lib/sitenex/contract-render');
 const { callContent, emailContent } = require('../lib/sitenex/outreach-content');
@@ -670,17 +672,267 @@ router.put('/sitenex/contracts/:id', authMiddleware, adminOnly, requireTier('sit
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+// ── TERRITORIES ───────────────────────────────────────────────────────────────
+//
+// ONE PRODUCT, MANY PARTNERS. Nothing here is per-partner commercial terms: packages, prices, the contract
+// template and the revenue tiers are the same for everyone, and only the patch differs. A product per
+// partner would mean a user_products row, a route-map entry and a nav tab each time somebody signs.
+
+const LEAD_REG_STATUSES = ['confirmed', 'pending_approval', 'rejected'];
+
+router.get('/sitenex/territories', authMiddleware, requireTier('sitenex'), async (req, res) => {
+  try {
+    // A partner sees their OWN grants and nobody else's — who else holds what is commercially sensitive
+    // between partners. Staff see all of them, which is the only view in which a gap or an overlap is
+    // visible at all.
+    const scope = await partnerScopeSql(req.user, 't', 1);
+    const rows = (await query(
+      `SELECT t.id, t.partner_id, t.dimension, t.value, t.exclusive, t.created_at,
+              p.name AS partner_name, u.name AS created_by_name
+         FROM partner_territories t
+         LEFT JOIN partners p ON p.id = t.partner_id
+         LEFT JOIN users u ON u.id = t.created_by
+        WHERE ${scope.sql}
+        ORDER BY p.name, t.dimension, t.value`, scope.params)).rows;
+    res.json({ total: rows.length, territories: rows, dimensions: DIMENSIONS,
+      scope: scope.isStaff ? 'all partners' : (scope.failed ? 'none' : 'own partner only'),
+      // Said out loud, because an empty list has two very different meanings and only one is a problem.
+      note: (!rows.length && !scope.isStaff)
+        ? 'You have no territory yet, so no prospects are visible. Ask us to grant one.' : null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/sitenex/territories', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const partnerId = intOrNull(b.partner_id);
+    if (partnerId == null || Number.isNaN(partnerId)) return res.status(400).json({ error: 'partner_id is required' });
+    if (!isDimension(b.dimension)) {
+      return res.status(400).json({ error: `Unknown dimension '${b.dimension}'. One of: ${DIMENSIONS.join(', ')}` });
+    }
+    const value = String(b.value == null ? '' : b.value).trim();
+    if (!value) return res.status(400).json({ error: 'value is required' });
+    // exclusive defaults TRUE, matching the column. A shared territory has to be asked for.
+    const exclusive = !(b.exclusive === false || b.exclusive === 'false');
+
+    const partner = (await query(`SELECT id, name FROM partners WHERE id = $1`, [partnerId])).rows[0];
+    if (!partner) return res.status(404).json({ error: 'Partner not found' });
+
+    let row;
+    try {
+      row = (await query(
+        `INSERT INTO partner_territories (partner_id, dimension, value, exclusive, created_by)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id, partner_id, dimension, value, exclusive, created_at`,
+        [partnerId, b.dimension, value, exclusive, req.user.id])).rows[0];
+    } catch (e) {
+      // 23505 is a unique violation, and WHICH index it was changes the answer entirely. The DATABASE is
+      // what refused — this only turns the refusal into a sentence naming who already holds it, because
+      // "duplicate key value violates unique constraint" tells the reader nothing actionable.
+      if (e.code !== '23505') throw e;
+      if (/uq_partner_territories_exclusive/.test(e.constraint || e.message || '')) {
+        const holder = (await query(
+          `SELECT p.name FROM partner_territories t JOIN partners p ON p.id = t.partner_id
+            WHERE t.dimension = $1 AND t.value = $2 AND t.exclusive LIMIT 1`, [b.dimension, value])).rows[0];
+        return res.status(409).json({ code: 'territory_taken', held_by: holder && holder.name,
+          error: `${b.dimension} '${value}' is already held exclusively by ${(holder && holder.name) || 'another partner'}. `
+               + `Two partners holding the same patch is the collision this constraint exists to prevent — `
+               + `either revoke theirs first, or add it as non-exclusive if the overlap is deliberate.` });
+      }
+      return res.status(409).json({ code: 'already_granted',
+        error: `${partner.name} already has ${b.dimension} '${value}'.` });
+    }
+    // A suppressed conflict returns NO ROW. Guarded explicitly so a future ON CONFLICT on this statement
+    // fails loudly here instead of reading .id off undefined — a 500 at least says something happened,
+    // whereas a silent 201 with an empty territory says a grant was made that was not.
+    if (!row) return res.status(500).json({ error: 'the territory was not written — nothing was granted' });
+    res.status(201).json({ ok: true, territory: { ...row, partner_name: partner.name },
+      note: `${partner.name} now sees prospects matching ${b.dimension} '${value}'`
+          + (exclusive ? ' exclusively.' : ' (shared — other partners may also hold it).') });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+router.delete('/sitenex/territories/:id', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const row = (await query(
+      `DELETE FROM partner_territories WHERE id = $1 RETURNING id, partner_id, dimension, value`,
+      [req.params.id])).rows[0];
+    if (!row) return res.status(404).json({ error: 'Territory not found' });
+    // How many they have LEFT, because revoking the last one makes a partner see nothing — which is correct
+    // and fail-closed, and also the kind of thing somebody should be told they have just done.
+    const left = (await query(
+      `SELECT COUNT(*)::int n FROM partner_territories WHERE partner_id = $1`, [row.partner_id])).rows[0].n;
+    res.json({ ok: true, removed: row, remaining: left,
+      note: left ? `${left} territory remaining.`
+        : 'That was their LAST territory — this partner now sees no prospects at all.' });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// ── LEAD REGISTRATION ─────────────────────────────────────────────────────────
+//
+// A PARTNER WRITE, and the only one. In territory it confirms immediately; out of territory it lands
+// pending_approval and a human decides before any work is done. See the note in permissions/templates.js on
+// why this one key is allowed through a guard that otherwise refuses every partner write.
+// requireTierRead, not requireTier: the partner role holds sitenex:'r' on purpose, so the tier layer refuses
+// every partner write — which is right for all of them except this one, where the "write" creates a REQUEST
+// that only staff can act on. Widening the tier to 'rw' to let this through would have stopped it refusing
+// the others and left adminOnly as the only gate on the deal board.
+router.post('/sitenex/lead-registrations', authMiddleware, requireTierRead('sitenex'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const scope = await partnerScopeSql(req.user, 'x', 1);
+    // Staff may register ON BEHALF of a partner, by naming one. A partner cannot name anybody: their
+    // partner_id comes from their own row, the same rule as everywhere else.
+    const partnerId = scope.isStaff ? intOrNull(b.partner_id) : scope.partnerId;
+    if (scope.failed) return res.status(403).json({ error: 'Your account is not linked to a partner', code: 'no_partner' });
+    if (partnerId == null || Number.isNaN(partnerId)) {
+      return res.status(400).json({ error: 'partner_id is required when registering on a partner\'s behalf' });
+    }
+    const partner = (await query(`SELECT id, name FROM partners WHERE id = $1`, [partnerId])).rows[0];
+    if (!partner) return res.status(404).json({ error: 'Partner not found' });
+
+    // The business, either by prospect_id or described. A prospect_id is preferred because it means we have
+    // already scored the site; a partner may also know a business that is not in our list at all.
+    const prospectId = intOrNull(b.prospect_id);
+    let biz = { business_name: String(b.business_name || '').trim() || null,
+                address: b.address || null, region: b.region || null,
+                state: b.state || null, subtype: b.subtype || null };
+    if (prospectId != null && !Number.isNaN(prospectId)) {
+      const p = (await query(
+        `SELECT id, name, address, region, state, subtype FROM prospects
+          WHERE id = $1::bigint AND product = 'sitenex'`, [prospectId])).rows[0];
+      if (!p) return res.status(404).json({ error: 'Prospect not found' });
+      // READ FROM THE ROW, never from the request. A partner supplying their own region for a prospect we
+      // already hold would be choosing the answer to the territory question.
+      biz = { business_name: p.name, address: p.address, region: p.region, state: p.state, subtype: p.subtype };
+    }
+    if (!biz.business_name) return res.status(400).json({ error: 'business_name is required (or a prospect_id)' });
+
+    const m = await matchTerritory(partnerId, biz);
+    // A lookup failure is NOT treated as out of territory and waved through to a human — it is an error,
+    // because "we could not check" and "we checked and it is outside" are different facts and only the
+    // second should ever reach the approval queue.
+    if (m.failed) return res.status(500).json({ error: 'could not check the territory' });
+    const status = m.in ? 'confirmed' : 'pending_approval';
+
+    let row;
+    try {
+      row = (await query(
+        `INSERT INTO sitenex_lead_registrations
+           (partner_id, prospect_id, business_name, address, region, state, subtype,
+            status, in_territory, matched_on, registered_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         RETURNING id, status, in_territory, matched_on, business_name, created_at`,
+        [partnerId, (prospectId != null && !Number.isNaN(prospectId)) ? prospectId : null,
+         biz.business_name, biz.address, biz.region, biz.state, biz.subtype,
+         status, m.in, m.matched, req.user.id])).rows[0];
+    } catch (e) {
+      if (e.code === '23505' && /uq_sitenex_leadreg_claim/.test(e.constraint || e.message || '')) {
+        const held = (await query(
+          `SELECT p.name FROM sitenex_lead_registrations r JOIN partners p ON p.id = r.partner_id
+            WHERE r.prospect_id = $1 AND r.status = 'confirmed' LIMIT 1`, [prospectId])).rows[0];
+        return res.status(409).json({ code: 'already_claimed', held_by: held && held.name,
+          error: `This business is already registered to ${(held && held.name) || 'another partner'}.` });
+      }
+      throw e;
+    }
+    res.status(201).json({ ok: true, registration: row, partner_name: partner.name,
+      note: m.in
+        ? `Confirmed — ${biz.business_name} is in your territory (${m.matched}).`
+        : `${biz.business_name} is OUTSIDE your territory, so this is waiting for approval. Nobody should `
+          + `start work on it until we have confirmed it.` });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+router.get('/sitenex/lead-registrations', authMiddleware, requireTier('sitenex'), async (req, res) => {
+  try {
+    const scope = await partnerScopeSql(req.user, 'r', 1);
+    const params = [...scope.params];
+    let extra = '';
+    if (req.query.status && LEAD_REG_STATUSES.includes(req.query.status)) {
+      params.push(req.query.status); extra = ` AND r.status = $${params.length}`;
+    }
+    const rows = (await query(
+      `SELECT r.id, r.partner_id, r.prospect_id, r.business_name, r.address, r.region, r.state, r.subtype,
+              r.status, r.in_territory, r.matched_on, r.decision_reason, r.decided_at, r.created_at,
+              p.name AS partner_name, d.name AS decided_by_name, rb.name AS registered_by_name
+         FROM sitenex_lead_registrations r
+         LEFT JOIN partners p ON p.id = r.partner_id
+         LEFT JOIN users d ON d.id = r.decided_by
+         LEFT JOIN users rb ON rb.id = r.registered_by
+        WHERE ${scope.sql}${extra}
+        ORDER BY (r.status = 'pending_approval') DESC, r.id DESC`, params)).rows;
+    res.json({ total: rows.length, registrations: rows, statuses: LEAD_REG_STATUSES,
+      pending: rows.filter(r => r.status === 'pending_approval').length,
+      scope: scope.isStaff ? 'all partners' : (scope.failed ? 'none' : 'own partner only') });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Approve or reject. STAFF ONLY — the whole point of the pending state is that somebody here decides.
+router.put('/sitenex/lead-registrations/:id', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const status = b.status;
+    if (status !== 'confirmed' && status !== 'rejected') {
+      return res.status(400).json({ error: "status must be 'confirmed' or 'rejected'" });
+    }
+    const reason = String(b.decision_reason || '').trim();
+    // A REASON IS REQUIRED ON A REJECTION. "Rejected" with nothing after it is the start of an argument, and
+    // the partner is owed the sentence. Not required on an approval, where the territory match or the
+    // staff decision is self-explanatory.
+    if (status === 'rejected' && reason.length < 3) {
+      return res.status(400).json({ code: 'reason_required',
+        error: 'Say why. A rejection with no reason is the start of an argument, and the partner is owed the sentence.' });
+    }
+    const existing = (await query(
+      `SELECT id, status, business_name, partner_id, prospect_id FROM sitenex_lead_registrations WHERE id = $1`,
+      [req.params.id])).rows[0];
+    if (!existing) return res.status(404).json({ error: 'Registration not found' });
+    if (existing.status !== 'pending_approval') {
+      return res.status(400).json({ code: 'already_decided',
+        error: `This registration is already '${existing.status}'. Decided claims are not re-decided — `
+             + `the record of what was agreed has to stay what was agreed.` });
+    }
+    let row;
+    try {
+      row = (await query(
+        `UPDATE sitenex_lead_registrations
+            SET status = $2, decision_reason = $3, decided_by = $4, decided_at = NOW()
+          WHERE id = $1 RETURNING id, status, business_name, decision_reason, decided_at`,
+        [existing.id, status, reason || null, req.user.id])).rows[0];
+    } catch (e) {
+      if (e.code === '23505' && /uq_sitenex_leadreg_claim/.test(e.constraint || e.message || '')) {
+        return res.status(409).json({ code: 'already_claimed',
+          error: 'Another partner has confirmed this business since the request was made. Reject this one '
+               + 'and say so, rather than having two partners holding the same claim.' });
+      }
+      throw e;
+    }
+    res.json({ ok: true, registration: row,
+      note: status === 'confirmed'
+        ? `Approved — ${row.business_name} is now registered to this partner.`
+        : `Rejected: ${reason}` });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // ── the prospect's call sheet and email, generated ON OPEN ─────────────────────
 //
-// Not partner-scoped: prospects are ours, and SiteNex Prospects is already admin-only elsewhere. This
-// route is requireTier('sitenex') so a partner working a referral can get the script for a row they
-// have been given, which is the whole point of the content existing.
+// NOW TERRITORY-SCOPED, and this was a real gap. The comment here used to read "not partner-scoped:
+// prospects are ours, and SiteNex Prospects is already admin-only elsewhere" — the second half was the load
+// bearing part, and it stopped being true on 2026-10-01. With the list open to partners, a route that takes
+// a prospect id and applies no row check lets a partner read the script for ANY prospect by incrementing an
+// integer, which would make the territory scoping on the list cosmetic.
+//
+// Same helper as the list, so the two cannot disagree about what a partner may see.
 router.get('/sitenex/prospects/:id/content', authMiddleware, requireTier('sitenex'), async (req, res) => {
   try {
+    const terr = await territoryScopeSql(req.user, '', 2);
     const p = (await query(
       `SELECT id, name, website, site_url, site_score, site_findings, recommended_package, subtype,
               region, phone, address
-         FROM prospects WHERE id = $1::bigint AND product = 'sitenex'`, [req.params.id])).rows[0];
+         FROM prospects WHERE id = $1::bigint AND product = 'sitenex' AND ${terr.sql}`,
+      [req.params.id, ...terr.params])).rows[0];
+    // 404 and "outside your territory" are deliberately the same answer: a 403 on a row they may not see
+    // would confirm it exists, which is how a list that cannot be read is enumerated anyway.
     if (!p) return res.status(404).json({ error: 'Prospect not found' });
     const code = req.query.package || p.recommended_package || 'P2';
     const pkg = (await query(
@@ -699,3 +951,4 @@ module.exports.PAYMENT_TRIGGERS = PAYMENT_TRIGGERS;
 module.exports.PAYMENT_STATUSES = PAYMENT_STATUSES;
 module.exports.CONTRACT_STATUSES = CONTRACT_STATUSES;
 module.exports.DEAL_WRITABLE = DEAL_WRITABLE;
+module.exports.LEAD_REG_STATUSES = LEAD_REG_STATUSES;

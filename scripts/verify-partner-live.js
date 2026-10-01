@@ -64,9 +64,14 @@ const hit = async (method, path) => {
     check('GET /api/agent/tasks/my → allowed', await hit('GET', '/api/agent/tasks/my'), { status: 200, layer: 'allowed' });
 
     console.log('\nWHAT IT CANNOT — and WHICH layer says no:');
+    // REVERSED 2026-10-01. Reachable now, and scoped to the partner's granted territory. The fixture has no
+    // partner_territories row, so the honest assertion is 200 WITH NO ROWS — which is the fail-closed
+    // behaviour, and the one that would be a leak if it went the other way.
     const prospects = await hit('GET', '/api/sitenex/prospects');
-    check('GET /api/sitenex/prospects → 403 (our lead list)', prospects.status, 403);
-    console.log(`      refused by: ${prospects.layer}`);
+    check('GET /api/sitenex/prospects → 200 (reachable)', prospects.status, 200);
+    check('  …and EMPTY, because this fixture holds no territory', (prospects.body && prospects.body.total), 0);
+    check('  …and it says so rather than looking broken',
+          /no territory yet/.test((prospects.body && prospects.body.scope_note) || ''), true);
     for (const [m, p] of [['GET', '/api/users'], ['GET', '/api/admin/adoption'], ['GET', '/api/targets'],
                           ['GET', '/api/performance/alerts'], ['GET', '/api/prospects'],
                           ['GET', '/api/products/grantable'], ['GET', '/api/notifications']]) {

@@ -68,10 +68,23 @@ test('the partner holds Deals and Packages — page and route', async () => {
   }
 });
 
-test('the partner does NOT hold SiteNex Prospects — our scored lead list', async () => {
-  assert.equal(await can('sitenex.prospects.list'), false);
-  assert.equal(await can('sitenex.page_sitenex_prospects.view'), false);
+test('the partner DOES hold SiteNex Prospects now — scoped to its territory', async () => {
+  // Was `false` on both, as the second of three refusals keeping a partner out of our scored lead list.
+  // Reversed 2026-10-01: a partner sees the patch we granted them, enforced by territoryScopeSql in the
+  // query rather than by withholding the feature. The feature is the door; the territory is the room.
+  assert.equal(await can('sitenex.prospects.list'), true);
+  assert.equal(await can('sitenex.page_sitenex_prospects.view'), true);
 });
+
+test('but holding the feature is NOT holding the rows — the scope fails closed', () => {
+  // The refusal that replaced the old one, asserted here so the two halves are read together: a partner can
+  // reach the list and still see nothing, because an empty territory grant means nobody decided.
+  const src = require('fs').readFileSync(__dirname + '/../products/territory-scope.js', 'utf8');
+  assert.match(src, /return \{ \.\.\.none\(territories\.length \? 'no usable territory rows' : 'no territories granted'\), partnerId \}/,
+    'no territory rows must yield FALSE, never TRUE');
+  // And a lookup that throws is also FALSE: "I could not tell" is not "show everything".
+  assert.match(src, /catch \(e\) \{ return none\('territory lookup failed'\); \}/);
+}),
 
 test('the partner does not hold anything internal', async () => {
   const mustDeny = [
@@ -114,18 +127,43 @@ test('the partner reaches nothing beyond its listed features', async () => {
     leaked.map(k => '  ' + k).join('\n') + '\n');
 });
 
-test('the template grants nothing that writes outside the account itself', () => {
+// The ONE non-personal write a partner holds, named so it is a decision rather than an omission.
+//
+// The out-of-territory design requires it: a partner CAN claim a business outside their patch, and a human
+// then decides. A partner who could not register could not use the system for what it is for.
+//
+// It is safe to grant because the HANDLER decides the outcome, not the caller — partner_id comes from the
+// caller's own row, the territory verdict is computed server-side from partner_territories, and an
+// out-of-territory claim lands pending_approval where only sitenex.lead_registrations.decide (staff, and
+// adminOnly on the route) can move it. A partner can create a REQUEST; they cannot create an approval.
+const PARTNER_WRITE_EXCEPTIONS = ['sitenex.lead_registrations.create'];
+
+test('the template grants nothing that writes outside the account itself, bar one named exception', () => {
   const byKey = new Map(FEATURES.map(f => [f.key, f]));
+  const writes = [];
   for (const key of TEMPLATES.partner.grants) {
     const f = byKey.get(key);
     assert.ok(f, `${key} is not in the registry`);
-    const isWrite = f.surface === 'api_route' && !/^GET /.test(f.ref);
-    if (isWrite) {
-      assert.match(key, /^(personal|platform)\./,
-        `${key} (${f.ref}) writes and is not personal/platform — an outside account should not hold it`);
+    if (f.surface === 'api_route' && !/^GET /.test(f.ref) && !/^(personal|platform)\./.test(key)) {
+      writes.push(key);
     }
     assert.deepEqual(f.spend || [], [], `${key} can spend money`);
   }
+  // An ALLOWLIST, so a second write cannot arrive by being added one line below the first.
+  assert.deepEqual(writes.sort(), PARTNER_WRITE_EXCEPTIONS.slice().sort(),
+    'a write was granted to an outside account without being declared in PARTNER_WRITE_EXCEPTIONS');
+  assert.equal(PARTNER_WRITE_EXCEPTIONS.length, 1,
+    'if this grows, "partners read, staff write" has stopped being the rule and that needs saying out loud '
+    + 'rather than passing as another line here');
+});
+
+test('the one write exception cannot produce an approval', () => {
+  // Why it is safe. The decision feature is separate and is NOT granted to the partner.
+  assert.ok(!TEMPLATES.partner.grants.includes('sitenex.lead_registrations.decide'),
+    'a partner must not be able to approve its own out-of-territory claim');
+  assert.ok(!TEMPLATES.partner.grants.includes('sitenex.territories.grant'),
+    'nor grant itself a territory');
+  assert.ok(!TEMPLATES.partner.grants.includes('sitenex.territories.revoke'));
 });
 
 // ── layer 3: the product boundary ───────────────────────────────────────────────
@@ -199,11 +237,13 @@ function navFor(role) {
   return ctx.__pages(role, BUILT_IN_ROLES[role].tiers);
 }
 
-test('the partner is shown Deals and Packages, and NOT SiteNex Prospects', () => {
+test('the partner is shown Deals, Packages and now SiteNex Prospects', () => {
   const pages = navFor('partner');
   assert.ok(pages.includes('sitenex-deals'), 'sitenex-deals in the nav');
   assert.ok(pages.includes('sitenex-packages'), 'sitenex-packages in the nav');
-  assert.ok(!pages.includes('sitenex-prospects'), 'sitenex-prospects must NOT be drawn for the partner');
+  // Drawn from 2026-10-01. The screen shows their territory, and shows a sentence explaining itself when
+  // they have none — which is better than a hidden page nobody can ask about.
+  assert.ok(pages.includes('sitenex-prospects'), 'sitenex-prospects is now a partner screen, scoped to territory');
   assert.ok(!pages.includes('team'), 'no team page');
   assert.ok(!pages.includes('settings'), 'no settings page');
 });
@@ -234,9 +274,9 @@ test('a partner sees the SiteNex pages it holds and NOT the prospect list', () =
   for (const id of ['sitenex-deals', 'sitenex-packages', 'sitenex-contracts']) {
     assert.ok(pages.includes(id), `a partner should see ${id}`);
   }
-  // The one that stays out: the scored lead list is ours. Three independent refusals, and the nav is none
-  // of them — but a link to a page that 403s is still a bug.
-  assert.ok(!pages.includes('sitenex-prospects'), 'the scored prospect list is not a partner screen');
+  // Prospects joined this list on 2026-10-01, scoped to territory. The nav was never the thing protecting
+  // it — a link to a page that 403s is a bug, and so is a page withheld from somebody entitled to it.
+  assert.ok(pages.includes('sitenex-prospects'), 'scoped to territory, so it is now theirs to open');
 });
 
 test('every page drawn for the partner is a page it actually holds', () => {

@@ -142,9 +142,9 @@ const BUILT_IN_ROLES = {
   // permission template lists four features — Deals and Packages, page + route.
   //
   // What it does NOT get, and each is a separate refusal:
-  //   SiteNex Prospects   the route keeps adminOnly AND the template does not grant the feature. That
-  //                    screen is our scored machine-shop lead list; a referral partner reading it
-  //                    would be reading our pipeline rather than their own deals.
+  //   (SiteNex Prospects was in this list until 2026-10-01, when territories arrived. A partner now sees
+  //    the prospects in the patch we granted them — territoryScopeSql, which fails CLOSED, so no grant
+  //    means no rows. It left this list because the answer stopped being "none" and became "theirs".)
   //   'internal'       never granted in user_products, so the product boundary refuses every
   //                    platform-wide route independently of all of the above.
   //   the bell         notifications need the 'intelligence' tier, which this role has not got, so
@@ -155,7 +155,11 @@ const BUILT_IN_ROLES = {
   partner: {
     display_name: 'Partner',
     level: 6, domain: 'partner', data_scope: 'readonly',
-    pages: ['sitenex-deals', 'sitenex-packages', 'my-tasks', 'my-activity'],
+    // Kept in step with the nav by partner-role.test.js. sitenex-prospects joined on 2026-10-01 (scoped to
+    // territory) and sitenex-contracts on 2026-09-30; both were missing here while being drawn, which is the
+    // kind of drift a second allowlist invites.
+    pages: ['sitenex-prospects', 'sitenex-deals', 'sitenex-packages', 'sitenex-contracts',
+            'my-tasks', 'my-activity'],
     tiers: { self: 'rw', sitenex: 'r' },
     // external:true is the SWITCH THAT TURNS OFF EVERYTHING WE DO TO OUR OWN STAFF. See
     // EXTERNAL_ROLES below for what it governs and why it is a property of the role rather than a

@@ -79,6 +79,12 @@ module.exports = {
       'sitenex.contracts.file',
       'sitenex.contracts.send_preview',
       'sitenex.contracts.send',
+      'sitenex.territories.list',
+      'sitenex.territories.grant',
+      'sitenex.territories.revoke',
+      'sitenex.lead_registrations.list',
+      'sitenex.lead_registrations.create',
+      'sitenex.lead_registrations.decide',
       'sitenex.prospect_content.read',
       'sitenex.page_sitenex_contracts.view',
       'sitenex.packages.list',
@@ -347,6 +353,12 @@ module.exports = {
       'sitenex.contracts.file',
       'sitenex.contracts.send_preview',
       'sitenex.contracts.send',
+      'sitenex.territories.list',
+      'sitenex.territories.grant',
+      'sitenex.territories.revoke',
+      'sitenex.lead_registrations.list',
+      'sitenex.lead_registrations.create',
+      'sitenex.lead_registrations.decide',
       'sitenex.prospect_content.read',
       'sitenex.page_sitenex_contracts.view',
       'sitenex.packages.list',
@@ -1455,11 +1467,14 @@ module.exports = {
   // adjusted; this one was written by hand and is short on purpose, because the question for an
   // outside account is not "what does this role normally get" but "what does this account need".
   //
-  // Four sitenex features: Deals and Packages, page + route. sitenex.prospects.list and
-  // sitenex.page_sitenex_prospects.view are ABSENT — that is the second of the three refusals that keep a
-  // referral partner out of our scored lead list (the route's adminOnly is the first, not holding
-  // 'internal' in user_products is unrelated and the product boundary is the third for platform
-  // routes).
+  // SiteNex features: Prospects, Deals, Packages and Contracts, page + route, all READ except one.
+  //
+  // sitenex.prospects.list was ABSENT until 2026-10-01 as the second of three refusals keeping a referral
+  // partner out of our scored lead list. Territories replaced that: the partner now holds the feature and
+  // territoryScopeSql decides the ROWS, failing closed on an empty grant. The door is granted; which room
+  // it opens onto is a different question, answered in the query where it belongs.
+  //
+  // Not holding 'internal' in user_products is unrelated and still refuses every platform-wide route.
   //
   // The personal.* entries are the minimum for an account that can log in and change its own
   // password. Deliberately NOT included, although every internal template has them:
@@ -1477,7 +1492,8 @@ module.exports = {
     grants: [
       'sitenex.deals.list',
       'sitenex.deals.read',
-      // READS ONLY. Decided 2026-09-30: every WRITE on SiteNex is staff's. A partner sees its own book,
+      // READS ONLY, with ONE exception added 2026-10-01 (sitenex.lead_registrations.create — see below).
+      // Decided 2026-09-30: every other WRITE on SiteNex is staff's. A partner sees its own book,
       // downloads its own contracts, and logs nothing — generating a contract is a commercial act with
       // our legal terms on it, and a deal record gets logged by whoever here is already talking to the
       // partner. What is lost is convenience; what is kept is that an outside account holds no write
@@ -1485,10 +1501,32 @@ module.exports = {
       // somebody later extends by one more line.
       'sitenex.contracts.list',
       'sitenex.contracts.file',
-      // The call script and the email for ONE prospect they have been given. A different feature from
-      // sitenex.prospects.list, which stays absent: a script for a named row is what a partner needs to
-      // make the call, the full scored list is our lead pool.
+      // ── TERRITORY, from 2026-10-01 ──
+      // Their own grants, so they can see what patch they hold — and so an empty list explains why no
+      // prospects are visible. Not other partners' grants: who holds what is commercially sensitive
+      // between them, and the route scopes it.
+      'sitenex.territories.list',
+      'sitenex.lead_registrations.list',
+      // THE ONE WRITE A PARTNER HOLDS, and the reason the blanket rule below is now an allowlist of one.
+      //
+      // The out-of-territory design requires it: a partner CAN claim a business outside their patch, and a
+      // human then decides. A partner who could not register could not use the system for the thing it is
+      // for. It is safe because the handler decides the outcome and not the caller — partner_id comes from
+      // their own row, the territory verdict is computed server-side, and an out-of-territory claim lands
+      // pending_approval where only sitenex.lead_registrations.decide (staff) can move it. They can create
+      // a REQUEST; they cannot create an approval.
+      'sitenex.lead_registrations.create',
+      // The call script and the email for ONE prospect. Note this is NOT sitenex.prospects.list, which the
+      // partner now also holds but scoped to territory — see the note on that key below.
       'sitenex.prospect_content.read',
+      // ── sitenex.prospects.list, scoped to TERRITORY (added 2026-10-01) ──
+      // This key was deliberately ABSENT until territories existed, because the only two answers available
+      // were "all of our scored leads" or "none", and none was correct. A territory makes the third answer
+      // expressible — they see the patch we granted them — and that is what a referral partner is for.
+      // The route is NOT simply opened: territoryScopeSql fails CLOSED, so a partner with no territory rows
+      // still sees nothing at all.
+      'sitenex.prospects.list',
+      'sitenex.page_sitenex_prospects.view',
       'sitenex.packages.list',
       'sitenex.page_sitenex_deals.view',
       'sitenex.page_sitenex_contracts.view',

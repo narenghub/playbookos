@@ -28,6 +28,7 @@ const { getConfig: getProspectingConfig } = require('../lib/agents/prospecting/c
 // supposed to see everything.
 const { effectiveProducts, productScopeSql } = require('../lib/products/held');
 const { partnerScopeSql } = require('../lib/products/partner-scope');
+const { territoryScopeSql } = require('../lib/products/territory-scope');
 const outreach = require('../lib/outreach');
 const { STATUS_DEFS: OUTREACH_STATUS_DEFS, CHANNELS: OUTREACH_CHANNELS, CHANNEL_LABEL: OUTREACH_CHANNEL_LABEL,
         ENTITIES: OUTREACH_ENTITIES, isEntityType } = require('../lib/outreach/registry');
@@ -4781,8 +4782,10 @@ router.put('/prospects/:id', authMiddleware, requireTier('sales'), async (req, r
 });
 
 // ── SiteNex (sold through referral partners) read-only screens ─────────────────────────────────
-// Three GETs behind adminOnly: super_admin + admin only for now. A partner role does not exist,
-// and nobody else needs these yet — widen deliberately later rather than guess now.
+// Prospects, Deals and Packages. All three are now requireTier('sitenex') — a tier held by super_admin,
+// admin and partner — with the ROWS scoped per caller: deals by partner_id (partnerScopeSql) and prospects
+// by granted territory (territoryScopeSql). Packages are a catalogue and identical for everyone, which is
+// the whole model: ONE PRODUCT, MANY PARTNERS, differing only in territory and achieved volume.
 //
 // Findings are rendered to PLAIN SENTENCES HERE, server-side, by the same findings-text.js the
 // call-sheet generator uses. The browser cannot require that module, so formatting in the client
@@ -4802,10 +4805,21 @@ const SITENEX_BUCKETS = ['scored', 'no_website', 'dead_site', 'unscannable'];
 // months and wondering what they are. Hiding them is the version that causes the confusion later.
 const sitenexShippingSubtypes = () => ((getProspectingConfig('sitenex') || {}).subtypes || []).map(s => s.key);
 
-// STAFF ONLY, and it stays that way. This is the scored machine-shop lead list — our pipeline, not
-// the partner's deals. adminOnly is one refusal; partner's template not granting
-// sitenex.prospects.list is a second, independent one.
-router.get('/sitenex/prospects', authMiddleware, adminOnly, async (req, res) => {
+// ── SCOPED TO TERRITORY, from 2026-10-01. This REPLACES "staff only, and it stays that way". ──
+//
+// It said that because, with no notion of a partner's patch, the only two answers available were "all of
+// our scored leads" or "none", and none was correct. Territories make the third answer expressible — a
+// partner sees the prospects in the patch we granted them — and that is what a referral partner is for.
+//
+// THE REFUSAL IS REPLACED, NOT RELAXED. adminOnly becomes requireTier('sitenex'), a tier held by
+// super_admin, admin and partner and nobody else, and then territoryScopeSql decides the ROWS. It fails
+// CLOSED: a partner with no partner_territories rows gets `FALSE` and sees nothing at all, as does one
+// whose lookup throws. "Nobody has decided what this partner may see" reads as "nothing", never as
+// "everything".
+//
+// Still more than one gate: the resolver must find sitenex.prospects.list in the caller's template, the
+// product boundary must find 'sitenex' in their user_products, and now the territory must match.
+router.get('/sitenex/prospects', authMiddleware, requireTier('sitenex'), async (req, res) => {
   try {
     const { findingSentences, agencyNote, pageSpeedNote, bucketOf, BUCKET_LABEL, packageLabel } =
       require('../lib/agents/prospecting/findings-text');
@@ -4836,6 +4850,16 @@ router.get('/sitenex/prospects', authMiddleware, adminOnly, async (req, res) => 
     else if (bucket === 'unscannable') clauses.push(`site_findings->>'unscannable' = 'true'`);
     else if (bucket === 'dead_site') clauses.push(`site_findings->>'reachable' = 'false' AND site_findings->>'unscannable' IS NULL`);
     else if (bucket === 'scored') clauses.push(`site_score IS NOT NULL AND site_findings->>'unscannable' IS NULL`);
+    // ── TERRITORY. The last clause, and the one that can empty the result entirely. ──
+    //
+    // Scoped on the prospects columns the territory dimensions name. Worth knowing: `region` is the
+    // ENUMERATOR'S TILE LABEL and migrate-prospects.js calls it "NOT authoritative geography", while
+    // `state` is derived from the address and is. A territory granted on a region therefore follows the
+    // tile that found the business, not necessarily where it is — fine for 'Rockford', which is both, and
+    // a thing to know before granting a region that is not a real place name.
+    const terr = await territoryScopeSql(req.user, '', params.length + 1);
+    clauses.push(terr.sql);
+    params.push(...terr.params);
     const where = clauses.join(' AND ');
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 50));
@@ -4915,7 +4939,19 @@ router.get('/sitenex/prospects', authMiddleware, adminOnly, async (req, res) => 
       // duplicated client-side so config.js stays the single source of truth.
       shipping_subtypes: sitenexShippingSubtypes(),
     };
-    res.json({ page, pageSize, total, items, summary, facets });
+    res.json({ page, pageSize, total, items, summary, facets,
+      // WHAT SCOPED THIS, so an empty screen can explain itself instead of looking broken. A partner with
+      // no territory is the commonest cause of "there are no prospects" and is not a bug.
+      scope: terr.isStaff ? 'all prospects' : (terr.failed ? 'none' : 'own territory only'),
+      territories: terr.territories.map(t => `${t.dimension}=${t.value}`),
+      scope_note: terr.isStaff ? null
+        : (terr.failed
+          ? 'You have no territory yet, so no prospects are shown. Ask us to grant one.'
+          : `Showing the prospects in your territory (${terr.territories.map(t => t.value).join(', ')}).`),
+      // Outreach status is INTERNAL — /api/outreach is staffOnly, because an outreach note is our record of
+      // what we did and not a partner's. Reported here so the screen does not draw a control that would
+      // 403 on use; the client must not work this out from the role itself.
+      can_track_outreach: !terr.isStaff ? false : true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

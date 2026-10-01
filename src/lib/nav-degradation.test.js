@@ -76,11 +76,18 @@ test('with tiers unknown, a role still keeps the pages that need no tier at all'
   assert.ok(pages.length > 0, 'not blank');
 });
 
-test('with tiers unknown, the partner is not shown SiteNex Prospects — the original bug', () => {
+test('with tiers UNKNOWN the partner is shown NOTHING tier-gated — including Prospects', () => {
+  // The original bug was that a FAILED tier fetch widened the nav. SiteNex Prospects was the example,
+  // because the partner could not open it; from 2026-10-01 they can, scoped to territory, so the example
+  // had to change shape. The PROPERTY is unchanged and is what this asserts: unknown tiers draw nothing
+  // tier-gated, so a degraded nav is narrower than a healthy one and never wider.
   const ctx = navRenderer();
-  assert.ok(!ctx.__pages('partner', null).includes('sitenex-prospects'));
-  // And with tiers KNOWN, the same — so the test is not passing because tiers are null.
-  assert.ok(!ctx.__pages('partner', BUILT_IN_ROLES.partner.tiers).includes('sitenex-prospects'));
+  assert.ok(!ctx.__pages('partner', null).includes('sitenex-prospects'),
+    'tiers unknown must not draw a tier-gated page');
+  // With tiers KNOWN it IS drawn — which is what makes the line above a statement about degradation rather
+  // than about this page.
+  assert.ok(ctx.__pages('partner', BUILT_IN_ROLES.partner.tiers).includes('sitenex-prospects'),
+    'and with tiers known the partner holds the sitenex tier, so it appears');
 });
 
 test('admin and super_admin are unaffected — they short-circuit before tiers are consulted', () => {

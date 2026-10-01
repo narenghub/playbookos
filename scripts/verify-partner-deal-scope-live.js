@@ -83,8 +83,11 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     check("both report scope 'own partner only'", [ra.body.scope, rb.body.scope], ['own partner only', 'own partner only']);
     const rs = await hit('/api/sitenex/deals', sup);
     check('staff see all three', idsOf(rs.body).length >= 3, true);
-    // a partner must NOT reach prospects — ours, and the route is adminOnly
-    check('a partner is refused SiteNex Prospects', (await hit('/api/sitenex/prospects', ua)).status, 403);
+    // Prospects are now TERRITORY-scoped rather than refused (2026-10-01). This fixture holds no territory,
+    // so it reaches the route and sees nothing — the fail-closed half, which is the half worth checking live.
+    const pr = await hit('/api/sitenex/prospects', ua);
+    check('a partner reaches SiteNex Prospects', pr.status, 200);
+    check('  and sees none, holding no territory', (pr.body && pr.body.total), 0);
   } catch (e) { fail++; console.error('ERROR:', e.message); }
   finally {
     for (const id of fixtures) {

@@ -199,7 +199,7 @@ const AROS = ['GET /api/aros/establishments'];
 const SITENEX = [
   // The SiteNex screens. Wildcarded deliberately: everything under /api/sitenex is SiteNex by
   // construction, and a new route there needs no map edit to be correctly classified.
-  'GET /api/sitenex/*', 'POST /api/sitenex/*', 'PUT /api/sitenex/*',
+  'GET /api/sitenex/*', 'POST /api/sitenex/*', 'PUT /api/sitenex/*', 'DELETE /api/sitenex/*',
 ];
 
 // ── the product is in the request ─────────────────────────────────────────────

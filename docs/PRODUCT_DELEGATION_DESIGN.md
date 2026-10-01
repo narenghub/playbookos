@@ -102,15 +102,41 @@ from a role designed for staff. It holds the `sitenex` tier read-only — every 
 and `rw` would pre-authorise a write route that does not exist yet — and a hand-written permission
 template of 16 features.
 
-**It sees Deals and Packages. It does not see SiteNex Prospects.** That screen is our scored machine-shop
-lead list; a referral partner reading it would be reading our pipeline rather than their own deals.
-Three independent refusals, which is the point of having layers:
+**It sees Deals, Packages, Contracts and — since 2026-10-01 — SiteNex Prospects, scoped to its TERRITORY.**
 
-| Layer | What refuses Prospects |
+Prospects used to be refused outright, with three independent layers saying no. That was right while a
+partner had no defined patch: the only two answers available were "all of our scored leads" or "none", and
+none was correct. **Territories make the third answer expressible**, and it is the one the business wants —
+a partner sees the prospects in the patch we granted them, which is what a referral partner is for.
+
+The refusal was **replaced, not relaxed**:
+
+| Layer | What now decides Prospects |
 |---|---|
-| role | the route keeps `adminOnly` |
-| resolver | `sitenex.prospects.list` is not in the template |
-| nav | `NAV_PAGE_REQS['sitenex-prospects']` needs the `intelligence` tier, which the role has not got |
+| role | `requireTier('sitenex')` — a tier held by super_admin, admin and partner, and nobody else |
+| resolver | `sitenex.prospects.list` IS in the template now |
+| nav | `NAV_PAGE_REQS['sitenex-prospects']` is `[["sitenex"]]` |
+| **rows** | **`territoryScopeSql` — and it FAILS CLOSED** |
+
+The last row is the one carrying the weight. A partner with no `partner_territories` row gets `FALSE` and
+sees nothing at all, as does one whose lookup throws: *"nobody has decided what this partner may see"* reads
+as *nothing*, never as *everything*. The screen says so in a sentence rather than looking broken.
+
+### One product, many partners
+
+Packages, prices, the contract template and the revenue tiers are **identical for every partner**. Only
+territory and achieved volume differ. A product per partner would mean a `user_products` row, a route-map
+entry and a nav tab each time somebody signs — a migration per partner.
+
+`partner_territories` is a generic `(dimension, value)` pair — `region` / `subtype` / `state` — because one
+partner is geographic, another vertical, a third both, and a fourth statewide. A **partial unique index on
+`(dimension, value) WHERE exclusive`** means the *database* refuses to grant the same exclusive patch twice;
+two partners both holding 'Rockford' is the same collision as two both seeing a deal, one layer up where it
+surfaces as an argument about commission rather than as an error.
+
+Out of territory, a partner may still register a business: it lands `pending_approval` and staff approve or
+reject **with a stated reason** before any work is done. That is the one write a partner holds, and it is
+safe because the handler decides the outcome — a partner creates a *request*, never an approval.
 
 What the account *can* reach:
 

@@ -56,8 +56,14 @@ test('the partner reaches Deals and Packages', async () => {
   assert.notEqual(await get(PACKAGES, 'partner'), 403);
 });
 
-test('the partner is REFUSED SiteNex Prospects — the route, not just the link', async () => {
-  assert.equal(await get(PROSPECTS, 'partner'), 403);
+test('the partner REACHES SiteNex Prospects — and sees only its territory', async () => {
+  // REVERSED 2026-10-01, deliberately. This asserted 403 because, with no notion of a partner's patch, the
+  // only answers were "all of our scored leads" or "none". Territories make the third answer expressible.
+  //
+  // The refusal is REPLACED, not relaxed: the route is reachable, and territoryScopeSql decides the rows and
+  // fails CLOSED. The fixture partner here has no partner_territories row, so it reaches the route and gets
+  // nothing — which is the behaviour that matters, and the one that would be a leak if it went the other way.
+  assert.equal(await get(PROSPECTS, 'partner'), 200);
 });
 
 test('no other role reaches any SiteNex screen', async () => {

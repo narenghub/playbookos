@@ -84,14 +84,17 @@ console.log(`${roles.length} roles\n`);
 //   2026-09-29  super_admin +decision-engine +data-pipeline +execution-graph   (Platform got its
 //               three unreachable pages), admin −sku-economics −settings        (Platform → super-admin only)
 //   2026-09-30  EVERY role +outreach  (the Outreach page went into OPERATIONS, access:'*')
+//   2026-09-30  super_admin / admin / partner +sitenex-contracts  (SiteNex Phase 3)
 //
-// 2026-09-30, SiteNex Phase 3: the Contracts page. Gated on NAV_PAGE_REQS "sitenex-contracts":[["sitenex"]],
-// and the sitenex tier is held by exactly super_admin, admin and partner — so these three and no others.
-// A fourth role appearing here would mean the tier grid had changed, which is the thing this script is for.
+// 2026-10-01, multi-partner SiteNex: PARTNER ONLY gains sitenex-prospects, because NAV_PAGE_REQS moved that
+// page from [["intelligence"]] to [["sitenex"]]. Staff already held the intelligence tier and so already saw
+// it — which is why this is one role and not three, and why a second role appearing here would mean the tier
+// grid had changed rather than the nav.
+//
+// The page is not simply opened: territoryScopeSql decides the ROWS and fails closed, so a partner with no
+// granted territory reaches the screen and sees nothing, with a sentence explaining why.
 const EXPECTED = {
-  super_admin: { gained: ['sitenex-contracts'], lost: [] },
-  admin:       { gained: ['sitenex-contracts'], lost: [] },
-  partner:     { gained: ['sitenex-contracts'], lost: [] },
+  partner: { gained: ['sitenex-prospects'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and

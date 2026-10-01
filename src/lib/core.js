@@ -145,6 +145,30 @@ function requireTier(tier) {
   };
 }
 
+// READ access to a tier, whatever the HTTP method.
+//
+// For the rare write whose effect is a REQUEST rather than a change: lodging a lead registration creates a
+// row that only staff can act on, so the thing being asked is "may you look at SiteNex at all", not "may you
+// change SiteNex". requireTier would refuse it, because it infers write from the method and the partner role
+// deliberately holds sitenex:'r'.
+//
+// The alternative was widening the partner's grant to 'rw', which would have stopped the tier layer refusing
+// EVERY other partner write and left adminOnly as the only thing between a partner and the deal board. One
+// narrow middleware on one route is a smaller hole than one broader tier across all of them.
+//
+// Use it only where the handler itself constrains the outcome — and say so where you use it.
+function requireTierRead(tier) {
+  return (req, res, next) => {
+    const access = getRoleTier(req.user.role, tier);
+    if (!access) return res.status(403).json({ error: `Role "${req.user.role}" has no ${tier} access` });
+    if (!(access === 'rw' || access === 'r' || access === 'own')) {
+      return res.status(403).json({ error: `Role "${req.user.role}" lacks read access to ${tier}` });
+    }
+    req.tierAccess = access;
+    next();
+  };
+}
+
 // Grants access if ANY of the listed tiers provides the needed read/write access.
 // For endpoints several departments should reach (e.g. market intel readable by
 // both procurement and intelligence roles). Single-tier callers keep using requireTier.
@@ -320,4 +344,4 @@ async function scoreTeamMember(userId, date) {
   return { user_id: userId, email: userRow.email, name: userRow.name, role: userRow.role, date, score, blockers, escalated, note };
 }
 
-module.exports = { signToken, verifyToken, authMiddleware, adminOnly, superAdminOnly, staffOnly, requireTier, requireAnyTier, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, scoreTeamMember, computeScoreForRole, crypto };
+module.exports = { signToken, verifyToken, authMiddleware, adminOnly, superAdminOnly, staffOnly, requireTier, requireTierRead, requireAnyTier, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, scoreTeamMember, computeScoreForRole, crypto };
