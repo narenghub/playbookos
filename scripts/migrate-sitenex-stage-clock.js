@@ -40,29 +40,29 @@ const { query } = require('../src/lib/db');
     // So: add it empty, backfill what is knowable, and only then set the default for future inserts.
     await query(`ALTER TABLE sitenex_deals ADD COLUMN IF NOT EXISTS status_changed_at TIMESTAMPTZ`);
 
-    // CORRECTIVE, for a database where the first version already ran. status_changed_at can never be LATER
-    // than updated_at, because changing the status IS an update — so any row where it is later was filled by
-    // that ADD COLUMN default and the value is fiction. Cleared, then backfilled by the rule below.
-    const bogus = await query(
-      `UPDATE sitenex_deals SET status_changed_at = NULL WHERE status_changed_at > updated_at`);
-    if (bogus.rowCount) {
-      console.log(`⚠️  cleared ${bogus.rowCount} row(s) whose status_changed_at was later than updated_at — `
-        + `impossible, so it came from the earlier version's column default`);
-    }
-    await query(`COMMENT ON COLUMN sitenex_deals.status_changed_at IS $c$When the status last CHANGED — not when the row was last touched. updated_at is moved by a trigger on every update, so it cannot answer "how long has this been in this stage". Maintained by the write path: set by DEFAULT on insert, moved by PUT only when the status value actually differs. NULL means not recorded, which is the honest answer for a row that predates this column and had already been updated at least once; the board says so rather than showing a number.$c$`);
-    console.log(existed ? '↷  sitenex_deals.status_changed_at already existed' : '✅ sitenex_deals.status_changed_at');
-
-    // The backfill, only where it is a fact. `status_changed_at IS NULL` guards re-runs; a row ADDED with
-    // the DEFAULT already has a value, so this only ever touches rows that predate the column.
-    const back = await query(
-      `UPDATE sitenex_deals SET status_changed_at = created_at
-        WHERE status_changed_at IS NULL AND updated_at = created_at`);
-    // Only NOW is the default set, so it applies to INSERTs from here on and touches no existing row.
-    await query(`ALTER TABLE sitenex_deals ALTER COLUMN status_changed_at SET DEFAULT NOW()`);
-
+    // ── ONE STATEMENT, because the fix and the evidence are the same row ───────
+    //
+    // status_changed_at can never be LATER than updated_at — changing a status IS an update — so any row
+    // where it is later was filled by the earlier version's column default and the value is fiction.
+    //
+    // THIS MUST NOT BE TWO STATEMENTS. Clearing the bogus value first fires trg_sitenex_deals_updated_at,
+    // which moves updated_at — and `updated_at = created_at`, the only evidence that a row has never been
+    // updated and so still holds its creation status, is then destroyed by the very step meant to repair it.
+    // That happened: production deal #38 had never been touched, was cleared in one statement, and the
+    // backfill in the next could no longer tell. Its stage age is unrecoverable and reads as not recorded.
+    //
+    // In a single UPDATE the SET expressions see the PRE-update row, so `updated_at = created_at` is still
+    // the original comparison while the BEFORE trigger moves updated_at afterwards.
+    const repaired = await query(
+      `UPDATE sitenex_deals
+          SET status_changed_at = CASE WHEN updated_at = created_at THEN created_at ELSE NULL END
+        WHERE status_changed_at IS NULL OR status_changed_at > updated_at`);
+    console.log(`✅ examined ${repaired.rowCount} row(s) with no usable stage clock`);
     const unknowable = (await query(
       `SELECT COUNT(*)::int n FROM sitenex_deals WHERE status_changed_at IS NULL`)).rows[0].n;
-    console.log(`✅ backfilled ${back.rowCount} never-updated row(s) from created_at`);
+    const filled = (await query(
+      `SELECT COUNT(*)::int n FROM sitenex_deals WHERE status_changed_at = created_at`)).rows[0].n;
+    console.log(`✅ ${filled} row(s) dated from created_at, which for a never-updated row is a fact`);
     console.log(`${unknowable ? '⚠️ ' : '✅'} ${unknowable} row(s) left NULL — their status may have changed at any `
       + `point between created_at and updated_at, so any value would be a guess`);
 
