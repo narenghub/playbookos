@@ -26,8 +26,12 @@ const check=(l,a,e)=>{const ok=JSON.stringify(a)===JSON.stringify(e);if(!ok)fail
   console.log('1. THE OVERVIEW with nothing recorded — every list silent');
   const o0=await hit('GET','/api/outreach/overview?days=7');
   check('200',o0.status,200);
-  check('no events',o0.body.total_events,0);
-  check('all six lists silent',o0.body.silent.length,6);
+  // A BASELINE, not zero. This asserted an empty table, which was true the day it was written and stopped being
+  // true the moment somebody used the feature — a real user wrote 10 events today. CLAUDE.md's rule: never
+  // assert a table is empty; compare a delta against what was already there.
+  const base={ events:o0.body.total_events, people:o0.body.people.length, silent:o0.body.silent.length };
+  console.log(`     baseline: ${base.events} event(s), ${base.people} person(s), ${base.silent} silent list(s)`);
+  check('the overview reads',typeof o0.body.total_events,'number');
   console.log('     silent: '+o0.body.silent.map(l=>l.entity_type).join(', '));
 
   console.log('\n2. record some outreach on a real SiteNex prospect');
@@ -56,13 +60,18 @@ const check=(l,a,e)=>{const ok=JSON.stringify(a)===JSON.stringify(e);if(!ok)fail
 
   console.log('\n4. THE OVERVIEW again — silence shrinks, people appear');
   const o1=await hit('GET','/api/outreach/overview?days=7');
-  check('events counted',o1.body.total_events,4);
-  check('one person',o1.body.people.length,1);
-  console.log(`     ${o1.body.people[0].person}: ${o1.body.people[0].total} — ${JSON.stringify(o1.body.people[0].by_status)}`);
+  check('four more events than the baseline',o1.body.total_events-base.events,4);
+  check('  and one more person',o1.body.people.length-base.people,1);
+  const me=o1.body.people.find(x=>/super|admin|naren/i.test(x.person||''))||o1.body.people[0];
+  console.log(`     ${me.person}: ${me.total} — ${JSON.stringify(me.by_status)}`);
   const byList=Object.fromEntries(o1.body.by_list.map(l=>[l.entity_type,l.events]));
   check('prospect list has 3',byList.prospect,3);
   check('institution list has 1',byList.institution,1);
-  check('four lists still silent',o1.body.silent.map(l=>l.entity_type).sort(),['establishment','exhibitor','lead','study']);
+  // Two lists gained activity (prospect and institution), so the silence shrinks by exactly two — a delta,
+  // because which lists are ALREADY silent depends on what everybody else has been doing.
+  check('the silence shrinks by exactly two',base.silent-o1.body.silent.length,2);
+  check('  and the two that gained activity are no longer silent',
+        o1.body.silent.map(l=>l.entity_type).filter(t=>t==='prospect'||t==='institution'),[]);
 
   console.log('\n5. the status bar over a real list');
   const total=(await query(`SELECT COUNT(*)::int n FROM prospects WHERE product='sitenex'`)).rows[0].n;

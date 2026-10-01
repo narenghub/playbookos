@@ -81,7 +81,16 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     // channel is a second axis: two of these touches had none recorded, and that is a fact, not a gap.
     check('  and by CHANNEL, counting the unrecorded', V && V.by_channel, { '(not recorded)': 2, email: 1 });
     check('the second person: 2 changes', N && N.total, 2);
-    check('busiest person first', act.people[0].user_id, vin.id);
+    // ORDERED, not FIRST. "Busiest overall" is a claim about everybody's activity, and the table is live now —
+    // a real user wrote 10 events today, which legitimately outranks three fixture touches. The property under
+    // test is that the list is sorted by volume; asserting who tops it was asserting that nobody else works here.
+    const mine = act.people.filter(x => x.user_id === vin.id || x.user_id === nar.id);
+    check('both fixture people appear', mine.length, 2);
+    check('  and the busier of the two is listed first',
+          act.people.findIndex(x => x.user_id === vin.id) < act.people.findIndex(x => x.user_id === nar.id), true);
+    const totals = act.people.map(x => x.total);
+    check('  the whole list is sorted by volume',
+          totals.every((n, i) => i === 0 || totals[i - 1] >= n), true);
 
     console.log('\n3. THE SUMMARY BAR adds the implicit new');
     const total = (await query(`SELECT COUNT(*)::int n FROM prospects WHERE product='golfnex'`)).rows[0].n;
