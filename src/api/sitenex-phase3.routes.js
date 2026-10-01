@@ -377,6 +377,10 @@ async function contractInputFor(deal, contractNo = null, pkgCache = null) {
     client_address: deal.client_address,
     partner_name: deal.partner_name,
     partner_email: deal.partner_email,
+    // WHERE the client is, for the register's attribution line ("ACBM Partners · Rockford, IL"). Taken from
+    // the prospect's region at generation time and snapshot, like every other client detail here: a region can
+    // be re-enumerated and the register must keep saying what the contract said.
+    region: deal.prospect_region || null,
     package_code: deal.package_code,
     package_name: pkg ? `${pkg.code} · ${pkg.name}` : deal.package_code,
     included: pkg ? pkg.included : null,
@@ -397,7 +401,7 @@ router.get('/sitenex/contracts', authMiddleware, requireTier('sitenex'), async (
       `SELECT c.id, c.contract_no, c.deal_id, c.partner_id, c.client_company, c.client_contact,
               c.package_code, c.package_name, c.value_cents, c.monthly_cents, c.duration_weeks,
               c.status, c.superseded_by, c.template_version, c.file_name, c.file_size, c.created_at,
-              c.partner_name, u.name AS generated_by_name,
+              c.partner_name, c.region, c.sent_at, u.name AS generated_by_name,
               d.status AS deal_status
          FROM sitenex_contracts c
          LEFT JOIN users u ON u.id = c.generated_by
@@ -466,8 +470,8 @@ router.post('/sitenex/contracts', authMiddleware, adminOnly, requireTier('sitene
             client_email, client_phone, client_address, partner_name, partner_email,
             package_code, package_name, included, not_included, value_cents, monthly_cents,
             duration_weeks, starts_at_intake, terms_note, payments,
-            template_version, file_name, file_bytes, file_size, status, generated_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,'generated',$26)
+            template_version, file_name, file_bytes, file_size, status, generated_by, region)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,'generated',$26,$27)
          RETURNING id, contract_no, status, file_name, file_size, created_at`,
         [contractNo, deal.id, deal.partner_id, input.client_company, input.client_contact,
          input.client_title, input.client_email, input.client_phone, input.client_address,
@@ -475,7 +479,7 @@ router.post('/sitenex/contracts', authMiddleware, adminOnly, requireTier('sitene
          JSON.stringify(input.included || []), JSON.stringify(input.not_included || []),
          input.value_cents, input.monthly_cents, input.duration_weeks, input.starts_at_intake,
          input.terms_note, JSON.stringify(payments), doc.template_version, doc.file_name,
-         doc.buffer, doc.buffer.length, req.user.id])).rows[0];
+         doc.buffer, doc.buffer.length, req.user.id, input.region])).rows[0];
 
       for (const p of prior) {
         await c.query(`UPDATE sitenex_contracts SET status='superseded', superseded_by=$1 WHERE id=$2`,

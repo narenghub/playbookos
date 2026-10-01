@@ -12,6 +12,11 @@
 // and should not: our scored lead list is not owned by a partner, it is ours, and the question is the
 // different one of whether a given row falls inside the territory we granted them.
 //
+// A PARTNER'S OWN BOOK IS NOT A TERRITORY QUESTION (added 2026-10-01). prospects.source_partner_id names who
+// brought us a business. Theirs is always visible to them; another partner's is never visible to them. Only OUR
+// leads — source_partner_id NULL — are filtered by the granted patch. See the clauses at the end of
+// territoryScopeSql.
+//
 // ── THIS SUPERSEDES AN EARLIER DECISION, DELIBERATELY ─────────────────────────
 //
 // Until 2026-10-01 a partner could not see the prospect list at all — "prospects are ours", with the route
@@ -45,6 +50,7 @@ const DIMENSION_COLUMN = {
   region: 'region',
   subtype: 'subtype',
   state: 'state',
+  country: 'country',
 };
 const DIMENSIONS = Object.keys(DIMENSION_COLUMN);
 const isDimension = (d) => Object.prototype.hasOwnProperty.call(DIMENSION_COLUMN, d);
@@ -93,8 +99,14 @@ async function territoryScopeSql(user, alias = '', startIndex = 1, deps = {}) {
 
   const usable = territories.filter(t => isDimension(t.dimension) && t.value != null && t.value !== '');
   if (!usable.length) {
-    // FAIL CLOSED. No grant means nobody decided, and "undecided" reads as "nothing".
-    return { ...none(territories.length ? 'no usable territory rows' : 'no territories granted'), partnerId };
+    // FAIL CLOSED ON OUR LEADS — no grant means nobody decided, and "undecided" reads as "nothing".
+    //
+    // But their OWN BOOK is still theirs. A partner who has registered businesses and has not yet been granted
+    // a patch would otherwise lose sight of their own introductions, which is a different and worse failure
+    // than seeing none of ours: it is us hiding their work from them.
+    return { sql: `${col('source_partner_id')} = $${startIndex}`, params: [partnerId],
+             nextIndex: startIndex + 1, isStaff: false, partnerId, territories: [], failed: false,
+             reason: territories.length ? 'no usable territory rows' : 'no territories granted' };
   }
 
   // ANY of their territories. One OR per grant, each value bound as a parameter.
@@ -106,8 +118,28 @@ async function territoryScopeSql(user, alias = '', startIndex = 1, deps = {}) {
     params.push(t.value);
     i += 1;
   }
-  return { sql: `(${parts.join(' OR ')})`, params, nextIndex: i, isStaff: false,
-           partnerId, territories: usable, failed: false };
+
+  // ── THEIR OWN BOOK, AND SOMEBODY ELSE'S ──────────────────────────────────────
+  //
+  // Two clauses that territory alone cannot express, and both of them matter more than the territory does:
+  //
+  //   source_partner_id = theirs   → ALWAYS visible, territory or not. A business they brought us is theirs,
+  //                                  and a patch we drew has no business deciding whether they can see it.
+  //   source_partner_id IS NOT NULL AND <> theirs → NEVER visible, territory or not. Another partner's
+  //                                  introduction stays private even where the patches overlap — which a
+  //                                  shared or non-exclusive territory makes a live case, not a hypothetical.
+  //
+  // So the territory OR-list applies ONLY to our own leads. Written as (ours AND territory) OR (theirs),
+  // because the two halves answer different questions and collapsing them would let one leak into the other.
+  const ourLeads = `${col('source_partner_id')} IS NULL`;
+  const theirOwn = `${col('source_partner_id')} = $${i}`;
+  params.push(partnerId);
+  i += 1;
+
+  return {
+    sql: `((${ourLeads} AND (${parts.join(' OR ')})) OR ${theirOwn})`,
+    params, nextIndex: i, isStaff: false, partnerId, territories: usable, failed: false,
+  };
 }
 
 // Does one business fall in a partner's patch? Used by lead registration, where the answer decides whether

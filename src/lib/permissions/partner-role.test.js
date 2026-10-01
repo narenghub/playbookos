@@ -80,9 +80,12 @@ test('but holding the feature is NOT holding the rows — the scope fails closed
   // The refusal that replaced the old one, asserted here so the two halves are read together: a partner can
   // reach the list and still see nothing, because an empty territory grant means nobody decided.
   const src = require('fs').readFileSync(__dirname + '/../products/territory-scope.js', 'utf8');
-  assert.match(src, /return \{ \.\.\.none\(territories\.length \? 'no usable territory rows' : 'no territories granted'\), partnerId \}/,
-    'no territory rows must yield FALSE, never TRUE');
-  // And a lookup that throws is also FALSE: "I could not tell" is not "show everything".
+  // No territory rows → OUR leads are excluded entirely; what remains is their own book, which is theirs by a
+  // different right. The thing that must never appear is a bare TRUE.
+  assert.match(src, /sql: `\$\{col\('source_partner_id'\)\} = \$\$\{startIndex\}`/,
+    'no territory rows must narrow to their own book, never widen to everything');
+  assert.ok(!/no territories granted'\), partnerId \}[\s\S]{0,80}sql: 'TRUE'/.test(src));
+  // And a lookup that throws is FALSE: "I could not tell" is not "show everything".
   assert.match(src, /catch \(e\) \{ return none\('territory lookup failed'\); \}/);
 }),
 

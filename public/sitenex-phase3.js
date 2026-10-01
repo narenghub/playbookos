@@ -208,7 +208,14 @@ function snContractRow(c) {
     + '<td style="padding:6px 8px">' + snEsc(c.client_company || '')
       + (c.client_contact ? '<div style="font-size:11px;color:var(--text-muted)">' + snEsc(c.client_contact) + '</div>' : '')
       + '</td>'
-    + '<td style="padding:6px 8px">' + (c.partner_name ? snEsc(c.partner_name) : '<span style="color:var(--text-muted)">ours</span>') + '</td>'
+    /* ATTRIBUTION: "ACBM Partners · Rockford, IL". The region is the contract's own SNAPSHOT, so an old row
+       keeps the place it was signed for even if the prospect has since been re-enumerated. A contract with no
+       region — anything generated before the column existed — renders as just the partner rather than with a
+       dangling separator. */
+    + '<td style="padding:6px 8px">'
+      + (c.partner_name ? snEsc(c.partner_name) : '<span style="color:var(--text-muted)">ours</span>')
+      + (c.region ? '<div style="font-size:11px;color:var(--text-muted)">' + snEsc(c.region) + '</div>' : '')
+      + '</td>'
     + '<td style="padding:6px 8px;font-size:12px">' + snEsc(c.package_name || c.package_code || '') + '</td>'
     + '<td style="padding:6px 8px;text-align:right">' + snMoney(c.value_cents)
       + (c.monthly_cents ? '<div style="font-size:11px;color:var(--text-muted)">+ ' + snMoney(c.monthly_cents) + '/mo</div>' : '')

@@ -198,19 +198,43 @@ db.query = async (sql, params = []) => {
     return { rows: p ? [p] : [] };
   }
   if (/FROM prospects WHERE id = \$1::bigint AND product = 'sitenex'/i.test(s)) {
-    // THE TERRITORY CLAUSE IS HONOURED, not ignored. The first version of this fake matched on the prefix
-    // and returned the row whatever followed — so the scoped route passed its test while a partner could
-    // have read any prospect by id. A fake that drops the clause under test proves nothing.
-    if (!/AND (TRUE|FALSE|\()/.test(s)) throw new Error('UNSCOPED prospect read: ' + s);
-    if (/AND FALSE/.test(s)) return { rows: [] };
+    // THE TERRITORY CLAUSE IS HONOURED, not ignored. An earlier version matched on the prefix and returned the
+    // row whatever followed — so the scoped route passed while a partner could have read any prospect by id.
     const p = PROSPECTS.find(x => String(x.id) === String(params[0]));
     if (!p) return { rows: [] };
+
+    // ── THE CLAUSES ARE READ OUT OF THE SQL, not reimplemented here ──
+    //
+    // The first version evaluated the own-book rule in JS from the fixture's source_partner_id and the last
+    // parameter. It agreed with the code whichever clause the code actually emitted: changing
+    // `source_partner_id = $n` to `source_partner_id IS NOT NULL` — which makes EVERY partner's book visible
+    // to everyone — broke nothing. A fake that restates a rule cannot test the rule.
+    //
+    // So: find which clauses are present, with which parameters, and evaluate the row against exactly those.
     if (/AND TRUE/.test(s)) return { rows: [p] };
-    // A real territory: one OR per grant, values bound from params[1] onward.
-    const vals = params.slice(1).map(v => String(v).trim().toLowerCase());
-    const mine = ['region', 'subtype', 'state'].some(c =>
-      p[c] != null && vals.includes(String(p[c]).trim().toLowerCase()));
-    return { rows: mine ? [p] : [] };
+    if (/AND FALSE/.test(s)) return { rows: [] };
+
+    const ownBook = /source_partner_id = \$(\d+)/.exec(s);
+    const ownBookAny = /source_partner_id IS NOT NULL/.test(s);
+    const ourLeads = /source_partner_id IS NULL/.test(s);
+    if (!ownBook && !ownBookAny && !ourLeads) throw new Error('UNSCOPED prospect read: ' + s);
+
+    // Their own book, for exactly the partner the SQL names.
+    if (ownBook && p.source_partner_id != null
+        && String(p.source_partner_id) === String(params[+ownBook[1] - 1])) return { rows: [p] };
+    // A clause that admits ANY partner's book is a leak, and the fake must let it through so a test can catch
+    // it rather than quietly behaving correctly.
+    if (ownBookAny && p.source_partner_id != null) return { rows: [p] };
+    // Our own leads, filtered by the territory values the SQL binds. Those are every parameter named inside
+    // the bracketed OR-list, which is the ones that are not the prospect id and not the own-book partner.
+    if (ourLeads && p.source_partner_id == null) {
+      const inList = [...s.matchAll(/(region|subtype|state|country) = \$(\d+)/g)].map(m => params[+m[2] - 1]);
+      const vals = inList.map(v => String(v).trim().toLowerCase());
+      const mine = ['region', 'subtype', 'state', 'country'].some(c =>
+        p[c] != null && vals.includes(String(p[c]).trim().toLowerCase()));
+      return { rows: mine ? [p] : [] };
+    }
+    return { rows: [] };
   }
 
   // ── deals ──
@@ -1184,11 +1208,35 @@ test('a partner sees the prospect in their territory', async () => {
   assert.equal(r.status, 200, 'Rockford is partner A\'s patch');
 });
 
-test('a partner with NO territory sees NOTHING — fail closed, never everything', async () => {
-  // THE ASSERTION THAT MATTERS. An empty grant means nobody decided what this partner may see, and the safe
-  // reading of "undecided" is "nothing". Getting this backwards hands one partner the whole lead list.
+test('a partner with NO territory sees NONE OF OUR LEADS — fail closed, never everything', async () => {
+  // THE ASSERTION THAT MATTERS. An empty grant means nobody decided which of OUR leads they may work, and the
+  // safe reading of "undecided" is "none". Getting this backwards hands one partner the whole lead list.
   assert.deepEqual(TERRITORIES[PARTNER_B], [], 'partner B deliberately holds no territory');
-  assert.equal((await call('GET', '/api/sitenex/prospects/9001/content', 'u-pb')).status, 404);
+  const r = await call('GET', '/api/sitenex/prospects/9001/content', 'u-pb');
+  assert.equal(r.status, 404, JSON.stringify(r.body));
+});
+
+test('…but their OWN BOOK is still theirs, territory or not', async () => {
+  // A different and worse failure than seeing none of ours: us hiding a partner's own work from them. A
+  // business THEY registered is theirs whether or not we have drawn them a patch.
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9500, name: 'B Introduced Co', region: 'Nowhere, IL',
+                   source_partner_id: PARTNER_B });
+  assert.equal((await call('GET', '/api/sitenex/prospects/9500/content', 'u-pb')).status, 200,
+    'B registered it, so B sees it with no territory at all');
+  // And A does NOT, even though A's territory would otherwise be irrelevant — another partner's introduction
+  // is private regardless.
+  assert.equal((await call('GET', '/api/sitenex/prospects/9500/content', 'u-pa')).status, 404);
+});
+
+test("another partner's introduction is invisible EVEN INSIDE your own territory", async () => {
+  // The case a shared or non-exclusive territory makes live. Territory answers "which of OUR leads may you
+  // work"; it has no business answering "may you see the business your competitor brought us".
+  PROSPECTS.push({ ...PROSPECTS[0], id: 9501, name: 'B In A Patch Co', region: 'Rockford, IL',
+                   source_partner_id: PARTNER_B });
+  assert.equal((await call('GET', '/api/sitenex/prospects/9501/content', 'u-pa')).status, 404,
+    "it is in A's patch and it is still not A's to see");
+  assert.equal((await call('GET', '/api/sitenex/prospects/9501/content', 'u-pb')).status, 200);
+  assert.equal((await call('GET', '/api/sitenex/prospects/9501/content', 'u-admin')).status, 200, 'staff see all');
 });
 
 test("and a partner cannot read a prospect OUTSIDE their territory by guessing an id", async () => {
@@ -1238,7 +1286,7 @@ test('an unknown dimension is refused — the column cannot come from a request'
 
 test('the DIMENSION list and the columns it maps to cannot drift apart', () => {
   const { DIMENSIONS, DIMENSION_COLUMN } = require('../lib/products/territory-scope');
-  assert.deepEqual(DIMENSIONS.sort(), ['region', 'state', 'subtype']);
+  assert.deepEqual(DIMENSIONS.slice().sort(), ['country', 'region', 'state', 'subtype']);
   // Every dimension maps to a real prospects column, and nothing maps to something clever.
   for (const d of DIMENSIONS) {
     assert.match(DIMENSION_COLUMN[d], /^[a-z_]+$/, `${d} must map to a plain column name`);
@@ -1452,6 +1500,7 @@ test('revoking the LAST territory says so — the partner now sees nothing', asy
   assert.equal(last.status, 200);
   assert.equal(last.body.remaining, 0);
   assert.match(last.body.note, /LAST territory/);
-  // And now they really do see nothing.
+  // And now they really do see none of OUR leads. Their own book, if they had one, would survive — which is
+  // why the note says "no prospects" rather than "nothing".
   assert.equal((await call('GET', '/api/sitenex/prospects/9001/content', 'u-pa')).status, 404);
 });

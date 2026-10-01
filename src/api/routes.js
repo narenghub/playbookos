@@ -4947,7 +4947,12 @@ router.get('/sitenex/prospects', authMiddleware, requireTier('sitenex'), async (
       scope_note: terr.isStaff ? null
         : (terr.failed
           ? 'You have no territory yet, so no prospects are shown. Ask us to grant one.'
-          : `Showing the prospects in your territory (${terr.territories.map(t => t.value).join(', ')}).`),
+          : (terr.territories.length
+            // Their own book is ALWAYS included, so the sentence says so — otherwise a partner seeing a
+            // business outside their patch would reasonably think the scoping had failed.
+            ? `Showing the prospects in your territory (${terr.territories.map(t => t.value).join(', ')}), `
+              + 'plus every business you registered yourself.'
+            : 'You have no territory yet, so this shows only the businesses you registered yourself.')),
       // TRUE for everyone now (2026-10-01). Outreach was staffOnly while a note could only be ours; a partner
       // working their own territory records their own calls, and outreach.partner_id keeps A's out of B's
       // sight. The flag STAYS, rather than being deleted as always-true: it is the server's answer to "may
