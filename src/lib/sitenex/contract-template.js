@@ -22,9 +22,14 @@ const TEMPLATE_VERSION = 'placeholder-v1';
 // Every field the document can reference. `required: true` means the renderer refuses without it.
 // Deliberately small: a field that is optional in the document must be optional here too, or a deal
 // logged from a phone call can never produce a draft.
+//
+// `system: true` means the GENERATOR supplies it, not the deal — the contract number comes from the
+// sequence at generation time and the date is "today". They are still required of the finished document,
+// but they must not appear in the "what is this deal missing" answer a form shows somebody: telling a
+// user to fill in the contract number is both impossible and alarming.
 const FIELDS = {
-  contract_no:      { required: true,  label: 'Contract number' },
-  contract_date:    { required: true,  label: 'Date' },
+  contract_no:      { required: true,  label: 'Contract number', system: true },
+  contract_date:    { required: true,  label: 'Date', system: true },
   client_company:   { required: true,  label: 'Client company' },
   client_address:   { required: true,  label: 'Client address' },
   client_contact:   { required: true,  label: 'Client contact name' },
@@ -34,11 +39,11 @@ const FIELDS = {
   partner_name:     { required: false, label: 'Partner' },
   package_name:     { required: true,  label: 'Package' },
   duration_weeks:   { required: true,  label: 'Duration (weeks)' },
-  start_basis:      { required: true,  label: 'When the term starts' },
+  start_basis:      { required: true,  label: 'When the term starts', system: true },
   total_value:      { required: true,  label: 'Total value' },
   monthly_value:    { required: false, label: 'Monthly amount' },
   terms_note:       { required: false, label: 'Additional agreed terms' },
-  supplier_name:    { required: true,  label: 'Supplier' },
+  supplier_name:    { required: true,  label: 'Supplier', system: true },
   supplier_address: { required: false, label: 'Supplier address' },
 };
 

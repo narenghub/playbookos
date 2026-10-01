@@ -70,10 +70,16 @@ function fieldsFor(input) {
 }
 
 // What is missing, as a list. Empty means renderable.
-function missingFields(input) {
+//
+// `includeSystem` false asks the different, user-facing question: what is THIS DEAL missing? The
+// contract number and the date are supplied by the generator, so including them made every deal look
+// unready and the UI's "what still needs filling in" list open with "Contract number", which nobody can
+// act on.
+function missingFields(input, { includeSystem = true } = {}) {
   const f = fieldsFor(input);
   return Object.entries(FIELDS)
-    .filter(([name, spec]) => spec.required && (f[name] == null || String(f[name]).trim() === ''))
+    .filter(([, spec]) => spec.required && (includeSystem || !spec.system))
+    .filter(([name]) => f[name] == null || String(f[name]).trim() === '')
     .map(([name, spec]) => ({ field: name, label: spec.label }));
 }
 
@@ -99,8 +105,8 @@ function scheduleImbalance(input) {
 }
 
 // The whole pre-flight, so a caller can ask "would this render?" without rendering.
-function checkRenderable(input) {
-  const missing = missingFields(input);
+function checkRenderable(input, opts = {}) {
+  const missing = missingFields(input, opts);
   const imbalance = scheduleImbalance(input);
   if (missing.length) {
     return { ok: false, code: 'missing_fields', missing,

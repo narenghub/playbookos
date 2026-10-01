@@ -71,7 +71,11 @@ db.query = async (sql, params = []) => {
 
 const { signToken } = require('../lib/core');
 const router = require('./routes');
-const app = express(); app.use(express.json()); app.use('/api', router);
+// BOTH routers, in the same order as server.js. GET /api/sitenex/deals now lives in the Phase 3 router,
+// so mounting only the first one 404s it — and a 404 on a scoping test reads as "no rows visible", which
+// is the shape of a passing scoping assertion. Mounting both is what keeps these tests about scoping.
+const phase3 = require('./sitenex-phase3.routes');
+const app = express(); app.use(express.json()); app.use('/api', router); app.use('/api', phase3);
 const server = app.listen(0);
 const base = () => `http://127.0.0.1:${server.address().port}`;
 after(() => server.close());
@@ -188,8 +192,14 @@ test('prospects are NOT partner-scoped — they are ours', async () => {
   // no partner owns a row in it. If prospects ever grow a partner_id, this test should fail and be read.
   const fs = require('fs');
   const routes = fs.readFileSync(__dirname + '/routes.js', 'utf8');
-  const handler = routes.slice(routes.indexOf("router.get('/sitenex/prospects'"));
-  const body = handler.slice(0, handler.indexOf("\nrouter."));
+  const from = routes.indexOf("router.get('/sitenex/prospects'");
+  assert.notEqual(from, -1, 'the prospects route has moved — find it before asserting about it');
+  // Bounded by the HANDLER'S OWN END (the first column-0 `});`), not by "the next router." — a comment
+  // written between this handler and the following route was being read as part of this handler's body,
+  // and a sentence mentioning partner_id in prose failed a test about a WHERE clause.
+  const end = routes.indexOf('\n});\n', from);
+  assert.notEqual(end, -1, 'could not find the end of the prospects handler');
+  const body = routes.slice(from, end);
   assert.ok(!/partnerScopeSql/.test(body), 'the prospects route must not be partner-scoped');
   assert.ok(!/partner_id/.test(body), 'and must not filter on partner_id');
 });

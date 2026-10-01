@@ -4907,47 +4907,24 @@ router.get('/sitenex/prospects', authMiddleware, adminOnly, async (req, res) => 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Deals and Packages are the COMMERCIAL relationship, so the referral partner sees them. adminOnly is
-// replaced by requireTier('sitenex') — a tier held by super_admin, admin and partner and nobody
-// else. That is a widening of exactly one role, and it is not the only gate: the resolver still has to
-// find the feature in the caller's template, and the product boundary still has to find 'sitenex' in
-// their user_products. Three independent refusals for an outside account.
-router.get('/sitenex/deals', authMiddleware, requireTier('sitenex'), async (req, res) => {
-  try {
-    const { packageLabel } = require('../lib/agents/prospecting/findings-text');
-    // ROW-LEVEL PARTNER SCOPING. Every partner on SiteNex holds the 'sitenex' product, so the product
-    // boundary admits all of them to this route and is right to — WHICH DEALS they may see is a
-    // different question, and the only place to answer it is here. Staff (partner_id NULL) see every
-    // partner's deals; a partner sees their own and nothing else. Scoped in the WHERE, never by a
-    // partner_id the client sends.
-    const scope = await partnerScopeSql(req.user, 'd', 1);
-    const rows = (await query(
-      `SELECT d.id, d.status, d.package_code, d.partner_id, d.proposal_url, d.signed_at,
-              d.value_cents, d.monthly_cents, d.created_at, d.updated_at,
-              pt.name AS partner_name,
-              p.name AS prospect_name, p.phone AS prospect_phone, p.region AS prospect_region,
-              u.name AS owner_name
-         FROM sitenex_deals d
-         LEFT JOIN prospects p ON p.id = d.prospect_id
-         LEFT JOIN users u ON u.id = d.owner_user_id
-         LEFT JOIN partners pt ON pt.id = d.partner_id
-        WHERE ${scope.sql}
-        ORDER BY d.updated_at DESC, d.id DESC`, scope.params)).rows;
-    // One column per sitenex_deals.status, in lifecycle order from the column's own COMMENT. Empty
-    // columns are rendered too — the board's shape is the pipeline, not a reflection of today's rows.
-    const columns = SITENEX_DEAL_STATUSES.map(status => ({
-      status,
-      deals: rows.filter(r => r.status === status).map(r => ({
-        ...r, package_label: packageLabel(r.package_code),
-        value_usd: r.value_cents == null ? null : r.value_cents / 100,
-        monthly_usd: r.monthly_cents == null ? null : r.monthly_cents / 100,
-      })),
-    }));
-    res.json({ total: rows.length, statuses: SITENEX_DEAL_STATUSES, columns,
-      scope: scope.isStaff ? 'all partners' : (scope.failed ? 'none' : 'own partner only'),
-      partner_id: scope.partnerId });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
+// GET /sitenex/deals MOVED to src/api/sitenex-phase3.routes.js, where the write path lives.
+//
+// Not copied — MOVED. It was the same path declared twice, and since routes.js mounts first the new
+// one would have been unreachable dead code while this one kept serving a payload missing every
+// client column the contract generator needs. Two implementations of one path is the drift this
+// codebase has already paid for once.
+//
+// The move is payload-safe: the new handler returns a strict SUPERSET of these columns in the same
+// envelope ({ total, statuses, columns, scope, partner_id }), so the existing board page is unaffected.
+// The path is unchanged, so the permissions registry entry (sitenex.deals.list, ref
+// "GET /api/sitenex/deals") and the /api/sitenex/* product-boundary wildcard both still match.
+//
+// The reasoning that belongs with it, kept here because it is about the GATE and not the query:
+// Deals and Packages are the COMMERCIAL relationship, so the referral partner sees them —
+// requireTier('sitenex') rather than adminOnly, a tier held by super_admin, admin and partner and
+// nobody else. That is a widening of exactly one role, and it is not the only gate: the resolver still
+// has to find the feature in the caller's template, and the product boundary still has to find
+// 'sitenex' in their user_products. Three independent refusals for an outside account.
 
 router.get('/sitenex/packages', authMiddleware, requireTier('sitenex'), async (req, res) => {
   try {

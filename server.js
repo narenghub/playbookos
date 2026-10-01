@@ -136,6 +136,12 @@ app.use(require('./src/lib/products/boundary').productBoundary());
 // API routes
 app.use('/api', routes);
 
+// SiteNex Phase 3 — the deal write path, payment schedules and contracts, in their own router.
+// ONE LINE, and after the two gates above so both still apply: a new surface has no reason to be added
+// to a 5,000-line file where every change makes the next one riskier. Mounted after the main router,
+// which is why no path may be declared in both — the first mount wins and the second becomes dead code.
+app.use('/api', require('./src/api/sitenex-phase3.routes'));
+
 // SPA fallback ('/' now routes here too, since express.static has index:false)
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });

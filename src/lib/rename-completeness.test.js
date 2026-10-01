@@ -95,7 +95,15 @@ test('the registry and templates use sitenex.* keys', () => {
   const { FEATURES } = require('./permissions/registry');
   const { TEMPLATES } = require('./permissions/templates');
   const sitenex = FEATURES.filter(f => f.key.startsWith('sitenex.'));
-  assert.equal(sitenex.length, 6, 'three pages + three routes');
+  // This test is about the RENAME, not about the feature count, so it asserts the SHAPE rather than a
+  // number that every new route has to come back and bump. Phase 3 took it from 6 to 16 and the only
+  // thing that told me was "expected 6, actual 16", which says nothing about acbm.
+  assert.ok(sitenex.length >= 6, `expected the sitenex features to exist, found ${sitenex.length}`);
+  assert.equal(sitenex.filter(f => f.surface === 'nav_page').length,
+               sitenex.filter(f => f.surface === 'nav_page' && /^sitenex-/.test(f.ref)).length,
+               'every sitenex page feature points at a sitenex-* page key');
+  assert.equal(sitenex.filter(f => f.surface === 'api_route' && !/^\w+ \/api\/sitenex\//.test(f.ref)).length, 0,
+               'every sitenex route feature points at /api/sitenex/*');
   assert.equal(FEATURES.filter(f => /acbm/i.test(f.key)).length, 0);
   assert.ok(TEMPLATES.partner, 'the partner template exists under its new name');
   assert.ok(!TEMPLATES.acbm_partner);

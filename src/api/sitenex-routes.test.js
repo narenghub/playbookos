@@ -28,7 +28,11 @@ db.query = async (sql, params = []) => {
 
 const { signToken } = require('../lib/core');
 const router = require('./routes');
-const app = express(); app.use(express.json()); app.use('/api', router);
+// BOTH routers, in the same order as server.js. GET /api/sitenex/deals now lives in the Phase 3 router,
+// so mounting only the first one 404s it — and a 404 on a scoping test reads as "no rows visible", which
+// is the shape of a passing scoping assertion. Mounting both is what keeps these tests about scoping.
+const phase3 = require('./sitenex-phase3.routes');
+const app = express(); app.use(express.json()); app.use('/api', router); app.use('/api', phase3);
 const server = app.listen(0);
 const base = () => `http://127.0.0.1:${server.address().port}`;
 after(() => server.close());

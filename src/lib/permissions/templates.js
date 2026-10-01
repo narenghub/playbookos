@@ -69,6 +69,16 @@ module.exports = {
     label: "Super Admin",
     grants: [
       'sitenex.deals.list',
+      'sitenex.deals.read',
+      'sitenex.deals.create',
+      'sitenex.deals.update',
+      'sitenex.payments.set',
+      'sitenex.contracts.list',
+      'sitenex.contracts.generate',
+      'sitenex.contracts.update',
+      'sitenex.contracts.file',
+      'sitenex.prospect_content.read',
+      'sitenex.page_sitenex_contracts.view',
       'sitenex.packages.list',
       'sitenex.page_sitenex_deals.view',
       'sitenex.page_sitenex_packages.view',
@@ -325,6 +335,16 @@ module.exports = {
     label: "Admin",
     grants: [
       'sitenex.deals.list',
+      'sitenex.deals.read',
+      'sitenex.deals.create',
+      'sitenex.deals.update',
+      'sitenex.payments.set',
+      'sitenex.contracts.list',
+      'sitenex.contracts.generate',
+      'sitenex.contracts.update',
+      'sitenex.contracts.file',
+      'sitenex.prospect_content.read',
+      'sitenex.page_sitenex_contracts.view',
       'sitenex.packages.list',
       'sitenex.page_sitenex_deals.view',
       'sitenex.page_sitenex_packages.view',
@@ -1452,8 +1472,22 @@ module.exports = {
     label: "Partner",
     grants: [
       'sitenex.deals.list',
+      'sitenex.deals.read',
+      // READS ONLY. Decided 2026-09-30: every WRITE on SiteNex is staff's. A partner sees its own book,
+      // downloads its own contracts, and logs nothing — generating a contract is a commercial act with
+      // our legal terms on it, and a deal record gets logged by whoever here is already talking to the
+      // partner. What is lost is convenience; what is kept is that an outside account holds no write
+      // feature at all, which partner-role.test.js asserts as a blanket rule rather than an allowlist
+      // somebody later extends by one more line.
+      'sitenex.contracts.list',
+      'sitenex.contracts.file',
+      // The call script and the email for ONE prospect they have been given. A different feature from
+      // sitenex.prospects.list, which stays absent: a script for a named row is what a partner needs to
+      // make the call, the full scored list is our lead pool.
+      'sitenex.prospect_content.read',
       'sitenex.packages.list',
       'sitenex.page_sitenex_deals.view',
+      'sitenex.page_sitenex_contracts.view',
       'sitenex.page_sitenex_packages.view',
       // NOT 'admin.roles.list'. It was granted here for one reason — buildNav fetched /api/roles to
       // learn this account's tiers, and without it the nav fell back to showing every page in a
