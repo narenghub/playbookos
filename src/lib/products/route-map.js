@@ -86,6 +86,7 @@
 //   GET  /api/outreach/overview            outreach, outreach_events           YES → scoped
 //   GET  /api/outreach/history             outreach, outreach_events           YES → scoped
 //   GET  /api/outreach/vocabulary          (none — constants)                  —
+//   GET  /api/outreach/tasks               outreach, sitenex_deals, sitenex_intake  YES → scoped, partner-scoped
 //   GET  /api/notifications                notifications                       YES → scoped
 //   PUT  /api/notifications/:id/read       notifications                       YES → scoped
 //   POST /api/notifications/read-all       notifications                       YES → scoped
@@ -119,6 +120,9 @@ const SHARED = [
   'GET /api/outreach', 'PUT /api/outreach', 'GET /api/outreach/summary',
   'GET /api/outreach/activity', 'GET /api/outreach/overview', 'GET /api/outreach/history',
   'GET /api/outreach/vocabulary',
+  // My Tasks, derived from the caller's own outreach rows. 'shared' for the same reason as the rest: the route
+  // is safe for anyone with a login and the DATA is scoped by product AND by partner underneath.
+  'GET /api/outreach/tasks',
 ];
 
 // ── internal: not one product's, but not for an outside account either ────────
