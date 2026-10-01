@@ -89,28 +89,35 @@ console.log(`${roles.length} roles\n`);
 //               super_admin / admin +sitenex-partners (the territory admin, gated on 'intelligence',
 //               which the partner role does not hold — the two moved in OPPOSITE directions in one
 //               commit, which is the whole argument for declaring them)
+//   2026-10-01  super_admin / admin / procurement_director / business_dev / seo_specialist
+//               +lab-connect  (the LabConnect directory, INTELLIGENCE section, [["intelligence"]])
 //
-// 2026-10-01, LabConnect: FIVE roles gain `lab-connect` — super_admin, admin, procurement_director,
-// business_dev and seo_specialist. That set is not a choice I made page by page; it is exactly the set
-// that already sees Research Institutions and Clinical Demand Intelligence, because the page sits in the
-// INTELLIGENCE section (access: admin, procurement, seo, business_dev) on [["intelligence"]]. Putting it
-// anywhere else on that shelf would have produced the same five.
+// 2026-10-01, LabConnect Agent: the same FIVE roles gain `lab-connect-agent` — super_admin, admin,
+// procurement_director, business_dev and seo_specialist. That set is not a choice made page by page;
+// it is exactly the set that already sees Research Institutions and Clinical Demand Intelligence,
+// because the page sits in the INTELLIGENCE section (access: admin, procurement, seo, business_dev)
+// on [["intelligence"]]. Any other shelf on that tier produces the same five.
 //
-// WHAT MATTERS IS WHO IS ABSENT. `partner` does NOT gain it, and must not: a SiteNex web partner has no
-// business holding a directory of pharmaceutical testing laboratories. If `partner` ever appears in this
-// list, the page has been moved to a tier the partner role holds and that is a cross-product leak, not a
-// nav tweak.
+// `lab-connect` IS NOT LISTED HERE ANY MORE. It landed in the previous commit, so it is the baseline
+// now, and leaving it in made this script expect a diff that is no longer there — all five roles
+// failed. That is the exact drift the note above describes, and it is recorded in the history block
+// rather than left in EXPECTED.
+//
+// WHAT MATTERS IS WHO IS ABSENT. `partner` does NOT gain either page, and must not: a SiteNex web
+// partner has no business holding a directory of pharmaceutical testing laboratories, still less a
+// list of their prospective clients. If `partner` ever appears here, a page has been moved to a tier
+// the partner role holds and that is a cross-product leak, not a nav tweak.
 const EXPECTED = {
-  super_admin:          { gained: ['lab-connect'], lost: [] },
-  admin:                { gained: ['lab-connect'], lost: [] },
-  procurement_director: { gained: ['lab-connect'], lost: [] },
-  business_dev:         { gained: ['lab-connect'], lost: [] },
-  seo_specialist:       { gained: ['lab-connect'], lost: [] },
+  super_admin:          { gained: ['lab-connect-agent'], lost: [] },
+  admin:                { gained: ['lab-connect-agent'], lost: [] },
+  procurement_director: { gained: ['lab-connect-agent'], lost: [] },
+  business_dev:         { gained: ['lab-connect-agent'], lost: [] },
+  seo_specialist:       { gained: ['lab-connect-agent'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and
 // becomes a wrong expectation the moment one does. EXPECTED[role] REPLACES this rather than merging, so
-// the three entries above must each list their full gained set.
+// the entries above must each list their full gained set.
 const DEFAULT_EXPECTED = { gained: [], lost: [] };
 const linksOf = (html) => [...html.matchAll(/navigate\('([^']+)'\)/g)].map(m => m[1]);
 

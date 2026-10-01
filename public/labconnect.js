@@ -385,3 +385,260 @@ window.lcSaveStatus = async function lcSaveStatus(id) {
 pages['lab-connect'] = (typeof apGuard === 'function')
   ? apGuard('lab-connect', 'LabConnect', lcDirectoryPage)
   : lcDirectoryPage;
+
+/* ── THE LABCONNECT AGENT ──────────────────────────────────────────────────────
+ *
+ * The other half of LabConnect. The directory is the supply side; this is the demand side — who
+ * needs outsourced testing, what to say to them, and the orders that come back.
+ *
+ * THE LIST IS AN INFERENCE AND THE SCREEN SAYS SO. These firms are registered to make product and
+ * not registered for analysis, so their testing goes outside today. None of them has told us they
+ * need anything, and nearly all already have a provider — which makes every approach a displacement
+ * sale. A list this long looks authoritative; the header exists to stop it being read that way.
+ */
+
+window._lcaFilters = { country: '', q: '', page: 1 };
+window._lcaState = { total: 0, pageSize: 50 };
+
+function lcaSet(k, v) { window._lcaFilters[k] = v; window._lcaFilters.page = 1; pages['lab-connect-agent'](); }
+function lcaPage(d) {
+  const f = window._lcaFilters, st = window._lcaState;
+  const max = Math.max(1, Math.ceil((st.total || 0) / (st.pageSize || 50)));
+  f.page = Math.min(max, Math.max(1, (f.page || 1) + d));
+  pages['lab-connect-agent']();
+}
+window._lcaSearchTimer = null;
+function lcaSearchNow(v) {
+  clearTimeout(window._lcaSearchTimer);
+  const f = window._lcaFilters, next = String(v || '').trim();
+  if (next === (f.q || '')) return;
+  f.q = next; f.page = 1; window._lcaRefocus = true;
+  pages['lab-connect-agent']();
+}
+function lcaSearchInput(v) {
+  clearTimeout(window._lcaSearchTimer);
+  window._lcaSearchTimer = setTimeout(() => lcaSearchNow(v), 350);
+}
+
+const LCA_CONF = {
+  name: 'from the name', operations: 'from the register', weak: 'a guess', none: 'unclassified',
+};
+
+async function lcAgentPage() {
+  const c = document.getElementById('content');
+  const f = window._lcaFilters, st = window._lcaState;
+  c.innerHTML = '<p style="color:#888;padding:20px">Loading buyers…</p>';
+
+  const qs = new URLSearchParams();
+  ['country', 'q'].forEach(k => { if (f[k]) qs.set(k, f[k]); });
+  qs.set('page', String(f.page || 1)); qs.set('pageSize', String(st.pageSize));
+  const [got, ord] = await Promise.all([
+    apGet('/labconnect/buyers?' + qs.toString()),
+    apGet('/labconnect/orders'),
+  ]);
+  if (!got.ok) { c.innerHTML = apErrorCard('LabConnect Agent', got, "pages['lab-connect-agent']()"); return; }
+  const res = got.data || {};
+  st.total = res.total || 0;
+  const items = res.items || [];
+  const orders = (ord.ok && ord.data && ord.data.orders) || [];
+  const osum = (ord.ok && ord.data && ord.data.summary) || {};
+
+  const header = '<div class="sn-head">'
+    + '<div><h2>LabConnect Agent</h2>'
+    /* The signal, in the server's own words, at the top. */
+    + '<p class="sn-sub">' + lcEsc(res.signal || '') + '</p></div>'
+    + '<div class="sn-head-right"><span class="sn-count">'
+    +   (st.total).toLocaleString() + ' possible buyer' + (st.total === 1 ? '' : 's') + '</span></div>'
+    + '</div>';
+
+  const stat = (label, val, cls, hint) =>
+    '<div class="sn-stat' + (cls ? ' ' + cls : '') + '">'
+    + '<div class="sn-stat-v">' + ((val == null ? 0 : val).toLocaleString()) + '</div>'
+    + '<div class="sn-stat-l">' + label + '</div>'
+    + (hint ? '<div class="sn-stat-h">' + hint + '</div>' : '') + '</div>';
+  const strip = '<div class="sn-stats">'
+    + stat('Possible buyers', st.total, null, 'make but do not test')
+    + stat('Orders', osum.total, osum.total ? 'is-good' : 'is-quiet')
+    /* UNROUTED IS THE NUMBER TO ACT ON: an order nobody can place is a client waiting. */
+    + stat('Unrouted', osum.unrouted, osum.unrouted ? 'is-bad' : null, 'nobody could take them')
+    + stat('GMP orders', osum.gmp, 'is-quiet')
+    + '</div>';
+
+  const filters = '<div class="sn-toolbar">'
+    + '<input id="lca-q" class="sn-input sn-grow" type="search" placeholder="Search by firm name…" '
+    +   'value="' + lcEsc(f.q || '') + '" oninput="lcaSearchInput(this.value)" '
+    +   'onkeydown="if(event.key===\'Enter\'){lcaSearchNow(this.value)}">'
+    + '<input class="sn-input" style="width:120px" placeholder="country (ISO-3)" '
+    +   'value="' + lcEsc(f.country || '') + '" onchange="lcaSet(\'country\', this.value.toUpperCase())">'
+    + '</div>';
+
+  const rows = items.map(b => '<tr>'
+    + '<td><span class="sn-strong">' + lcEsc(b.firm_name) + '</span>'
+    +   (b.fei_number ? '<span class="sn-sub2">FEI ' + lcEsc(b.fei_number) + '</span>' : '') + '</td>'
+    + '<td class="nowrap">' + lcEsc([b.state, b.country].filter(Boolean).join(', ') || '—')
+    +   (b.region ? '<span class="sn-sub2">' + lcEsc(b.region_label) + '</span>' : '') + '</td>'
+    /* THE CONFIDENCE IS SHOWN NEXT TO THE SEGMENT. The register carries no business model, so a
+       bare MANUFACTURE with an uninformative name is a guess — and the opening line depends on it,
+       so whoever sends the email should see which it is. */
+    + '<td class="nowrap">' + lcEsc(b.segment_label)
+    +   '<span class="sn-sub2">' + lcEsc(LCA_CONF[b.segment_confidence] || b.segment_confidence) + '</span></td>'
+    + '<td>' + (b.contact_email
+        ? '<a href="mailto:' + lcEsc(b.contact_email) + '">' + lcEsc(b.contact_email) + '</a>'
+          + (b.contact_is_registrant
+              ? '<span class="sn-sub2 sn-fine">registrant address — may be a US agent, not the firm</span>'
+              : (b.contact_name ? '<span class="sn-sub2">' + lcEsc(b.contact_name) + '</span>' : ''))
+        : '<span class="sn-fine">no email</span>') + '</td>'
+    + '<td class="sn-fine">' + lcEsc(String(b.operations || '').replace(/;\s*/g, ' · ')) + '</td>'
+    + '<td class="nowrap"><button onclick="lcaContent(' + b.id + ')" class="btn-secondary sn-btn-xs">'
+    +   'What to say</button></td>'
+    + '</tr>').join('');
+
+  const maxPage = Math.max(1, Math.ceil(st.total / (st.pageSize || 50)));
+  const pager = '<div class="sn-panel-head" style="border-bottom:0;border-top:1px solid var(--sn-line)">'
+    + '<span class="sn-note">' + st.total.toLocaleString() + ' possible buyers</span>'
+    + '<span class="sn-note">'
+    + '<button onclick="lcaPage(-1)" class="btn-secondary sn-btn-xs" ' + ((f.page || 1) <= 1 ? 'disabled' : '') + '>‹</button> '
+    + 'page ' + (f.page || 1) + ' of ' + maxPage + ' '
+    + '<button onclick="lcaPage(1)" class="btn-secondary sn-btn-xs" ' + ((f.page || 1) >= maxPage ? 'disabled' : '') + '>›</button>'
+    + '</span></div>';
+
+  const buyers = '<div class="sn-panel"><div class="sn-panel-head"><h3>Possible buyers</h3>'
+    + '<span class="sn-note">firms with no ANALYSIS registration, a laboratory-holding sibling site excluded</span></div>'
+    + '<div class="sn-table-wrap"><table class="sn-table"><thead><tr>'
+    + '<th>Firm</th><th>Where</th><th>Segment</th><th>Contact</th><th>Registered for</th><th></th>'
+    + '</tr></thead><tbody>' + (rows || '<tr><td colspan="6"><div class="sn-empty" style="border:0">'
+      + '<strong>No buyers match.</strong>The signal needs <code>fda_establishments</code> populated '
+      + 'and an <code>operations</code> column that names ANALYSIS.</div></td></tr>')
+    + '</tbody></table></div>' + pager + '</div>';
+
+  const orderRows = orders.length
+    ? orders.slice(0, 20).map(o => '<tr>'
+        + '<td class="sn-mono nowrap">' + lcEsc(o.order_no || ('#' + o.id)) + '</td>'
+        + '<td><span class="sn-strong">' + lcEsc(o.client_company) + '</span>'
+        +   '<span class="sn-sub2">' + lcEsc(o.test_name) + (o.gmp ? ' · GMP' : '') + '</span></td>'
+        + '<td>' + (o.lab_name ? lcEsc(o.lab_name)
+            : '<span class="sn-fine is-bad">not routed — nobody could take it</span>') + '</td>'
+        + '<td class="num nowrap">' + (o.price_cents == null
+            ? '<span class="sn-fine">needs a quote</span>' : lcMoney(o.price_cents)) + '</td>'
+        + '<td class="nowrap"><span class="sn-pill s-' + (o.lab_id ? 'signed' : 'new') + '">'
+        +   lcEsc(o.status) + '</span></td>'
+        + '<td class="sn-fine nowrap">' + (o.considered || 0) + ' considered</td>'
+        + '</tr>').join('')
+    : '<tr><td colspan="6" class="sn-fine" style="padding:14px">No orders yet. An order is created '
+      + 'against a named test and routed in the same step — see POST /api/labconnect/orders.</td></tr>';
+
+  const ordersPanel = '<div class="sn-panel"><div class="sn-panel-head"><h3>Orders</h3>'
+    + '<span class="sn-note">every routing decision keeps the labs it considered and why each was ruled out</span></div>'
+    + '<div class="sn-table-wrap"><table class="sn-table"><thead><tr>'
+    + '<th>Order</th><th>Client</th><th>Routed to</th><th class="num">Lab price</th><th>Status</th><th></th>'
+    + '</tr></thead><tbody>' + orderRows + '</tbody></table></div></div>';
+
+  c.innerHTML = '<div class="lc">' + header + '<div id="lc-msg" class="sn-msg"></div>'
+    + strip + filters + buyers + ordersPanel + '</div>';
+  if (window._lcaRefocus) {
+    window._lcaRefocus = false;
+    const el = document.getElementById('lca-q');
+    if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {} }
+  }
+}
+
+/* ── what to say to one buyer ──────────────────────────────────────────────── */
+
+window.lcaContent = async function lcaContent(id) {
+  const c = document.getElementById('content');
+  c.innerHTML = '<p style="color:#888;padding:20px">Building the approach…</p>';
+  const got = await apGet('/labconnect/buyers/' + encodeURIComponent(id) + '/content');
+  if (!got.ok) { c.innerHTML = apErrorCard('Approach', got, "pages['lab-connect-agent']()"); return; }
+  const d = got.data, b = d.buyer, email = d.email, call = d.call;
+
+  const head = '<div class="sn-head is-record">'
+    + '<div><h2>' + lcEsc(b.firm_name) + '</h2>'
+    + '<p class="sn-sub">' + lcEsc(b.segment_label)
+    +   ' · ' + lcEsc(LCA_CONF[b.segment_confidence] || b.segment_confidence)
+    +   (b.contact_email ? ' · ' + lcEsc(b.contact_email) : ' · no email on file') + '</p></div>'
+    + '<div class="sn-head-right">'
+    + '<button onclick="pages[\'lab-connect-agent\']()" class="btn-secondary sn-btn-sm">Back</button>'
+    + '</div></div><div id="lc-msg" class="sn-msg"></div>';
+
+  /* NOTHING TO OFFER IS A FIRST-CLASS OUTCOME, not an error card. On day one the directory is full
+     of labs nobody has onboarded, so there is genuinely nothing we can place — and the fix is to
+     onboard a lab, which is what the message says. */
+  if (!email.ok) {
+    c.innerHTML = '<div class="lc">' + head
+      + '<div class="sn-attn"><div class="sn-attn-row">'
+      + '<div class="sn-attn-name">There is nothing we can offer this buyer yet</div>'
+      + '<div class="sn-attn-meta">' + lcEsc(email.why) + '</div>'
+      + '</div></div>'
+      + '<div class="sn-empty"><strong>' + d.placeable_tests + ' test(s) have an active lab behind them.</strong>'
+      + 'An email is only generated from tests we can actually place, so that a reply is one we can answer.'
+      + '</div></div>';
+    return;
+  }
+
+  const section = (t, inner) => '<div class="sn-label" style="margin-top:16px">' + t + '</div>' + inner;
+  const list = (xs) => '<ul class="sn-list">' + xs.map(x => '<li>' + lcEsc(x) + '</li>').join('') + '</ul>';
+
+  c.innerHTML = '<div class="lc">' + head
+    /* THE OFF-TOPIC WARNING. When none of this segment's own tests is placeable the copy falls back
+       to a generic opening — which is honest but weak, and usually means a lab needs onboarding for
+       that segment rather than that this buyer should be approached now. */
+    + (email.on_topic ? ''
+      : '<div class="sn-attn"><div class="sn-attn-row">'
+        + '<div class="sn-attn-name">This approach is off-topic for their segment</div>'
+        + '<div class="sn-attn-meta">We cannot place any of the tests a '
+        + lcEsc(b.segment_label.toLowerCase()) + ' usually buys, so the email leads with what we can '
+        + 'place and makes no claim about their specialty. Onboarding a lab for their set would be '
+        + 'worth more than sending this.</div></div></div>')
+    + '<div class="sn-cols">'
+
+    + '<div class="sn-panel"><div class="sn-panel-head"><h3>On the phone</h3>'
+    + '<span class="sn-note">read down the page</span></div><div class="sn-panel-body">'
+    + '<div class="sn-label" style="margin-top:0">Open with</div>'
+    + '<p class="sn-script-open">' + lcEsc(call.opening) + '</p>'
+    + section('What we can place', list(call.what_we_can_place))
+    /* The gaps are not a footnote. A caller who cannot say "we have nobody for that yet" is the one
+       who promises it. */
+    + section('What we CANNOT place', call.what_we_cannot.length
+        ? list(call.what_we_cannot)
+        : '<p class="sn-prose sn-dash">Nothing in their usual set is missing.</p>')
+    + section('Why a second source', '<p class="sn-prose">' + lcEsc(call.why_second_source) + '</p>')
+    + section('How pricing works', '<p class="sn-prose">' + lcEsc(call.how_pricing_works) + '</p>')
+    + section('If they say…', call.objections.map(o => '<div class="sn-obj">'
+        + '<div class="sn-obj-q">' + lcEsc(o.they_say) + '</div>'
+        + '<div class="sn-obj-a">' + lcEsc(o.you_say) + '</div></div>').join(''))
+    + '</div></div>'
+
+    + '<div><div class="sn-panel"><div class="sn-panel-head"><h3>The email</h3>'
+    + '<span class="sn-note">' + email.offered.length + ' test(s) offered — all placeable today</span></div>'
+    + '<div class="sn-panel-body">'
+    + '<div class="sn-fine" style="margin-bottom:5px">Subject: <strong>' + lcEsc(email.subject) + '</strong></div>'
+    + '<textarea id="lca-email" class="sn-textarea" rows="20" readonly style="width:100%;font-size:13px">'
+    + lcEsc(email.body) + '</textarea>'
+    + '<div class="sn-actions" style="margin-top:10px;padding-top:0;border-top:0">'
+    + '<button onclick="lcaCopy(0)" class="btn-secondary sn-btn-sm">Copy subject</button>'
+    + '<button onclick="lcaCopy(1)" class="btn-primary sn-btn-sm">Copy body</button>'
+    + '</div>'
+    + '<div class="sn-fine" style="margin-top:8px">There is no send button. This goes out from your '
+    + 'own address, under your own name — nothing is sent from here.</div>'
+    + '</div></div></div>'
+    + '</div></div>';
+
+  window._lcaEmail = { subject: email.subject, body: email.body };
+};
+
+window.lcaCopy = async function lcaCopy(which) {
+  const e = window._lcaEmail || {};
+  const text = which ? (e.body || '') : (e.subject || '');
+  try {
+    await navigator.clipboard.writeText(text);
+    lcToast(which ? 'Body copied' : 'Subject copied');
+  } catch (_) {
+    const ta = document.getElementById('lca-email');
+    if (which && ta) { ta.focus(); ta.select(); lcToast('Selected — press Cmd/Ctrl+C', true); }
+    else lcToast('Could not copy automatically — select the text and copy it', true);
+  }
+};
+
+pages['lab-connect-agent'] = (typeof apGuard === 'function')
+  ? apGuard('lab-connect-agent', 'LabConnect Agent', lcAgentPage)
+  : lcAgentPage;
