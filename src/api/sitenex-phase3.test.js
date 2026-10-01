@@ -28,11 +28,18 @@ const PARTNERS = [{ id: PARTNER_A, name: 'Partner A', primary_contact_email: 'a@
 const PACKAGES = [{ code: 'P2', name: 'Renew', included: ['content migration', 'redirect map'],
                     not_included: ['content writing', 'photography'] }];
 
+// EVERY statement the route makes, recorded by the fake itself.
+//
+// It has to be here and not in a wrapper a test installs: the router does
+// `const { query } = require('../lib/db')` at MODULE LOAD, so it captures whatever db.query was when it was
+// required — which is this fake, set up above. Reassigning db.query inside a test afterwards changes
+// nothing the route can see, and a test that counted queries that way counted zero and passed.
+let SQL_LOG = [];
 let DEALS, PAYMENTS, CONTRACTS, SENDS, SEQ, DEAL_SEQ, CONTRACT_SEQ, PROSPECTS;
 let MAIL;   // what the fake mailer was asked to send, and what it should answer
 function reset() {
   DEAL_SEQ = 100; CONTRACT_SEQ = 500; SEQ = 0;
-  PAYMENTS = []; CONTRACTS = []; SENDS = [];
+  PAYMENTS = []; CONTRACTS = []; SENDS = []; SQL_LOG = [];
   MAIL = { sent: [], reply: { ok: true, id: 'msg_fake_1', error: null }, throwOnTxn: false };
   DEALS = [
     { id: ++DEAL_SEQ, partner_id: PARTNER_A, owner_user_id: 'u-admin', status: 'new', package_code: 'P2',
@@ -89,6 +96,7 @@ const realQuery = db.query, realTxn = db.withTransaction;
 
 db.query = async (sql, params = []) => {
   const s = sql.replace(/\s+/g, ' ').trim();
+  SQL_LOG.push(s);
 
   if (/UPDATE users SET last_login/i.test(s)) return { rows: [] };
   if (/^SELECT role, is_active FROM users WHERE id =/i.test(s)) {
@@ -139,6 +147,19 @@ db.query = async (sql, params = []) => {
   // ANCHORED on ^SELECT. Unanchored, this branch also matched `DELETE FROM sitenex_deal_payments WHERE
   // deal_id = $1` — so the delete returned rows and deleted nothing, and the two tests that depend on a
   // schedule being CLEARED failed in ways that pointed at the route instead of at the fake.
+  // The BOARD batches: WHERE deal_id = ANY($1). A different shape from the single-deal read, and the fake
+  // modelled only the latter — so the board saw no payments at all, believed every schedule balanced, and
+  // reported a deal as contract-ready that the form correctly called unbalanced. The board/form agreement
+  // test is what surfaced it.
+  if (/^SELECT deal_id, seq, label, amount_cents, due_trigger, due_date, status FROM sitenex_deal_payments WHERE deal_id = ANY/.test(s)) {
+    const ids = (params[0] || []).map(String);
+    return { rows: PAYMENTS.filter(p => ids.includes(String(p.deal_id)))
+      .sort((a, b) => (a.deal_id - b.deal_id) || (a.seq - b.seq)) };
+  }
+  if (/^SELECT code, name, included, not_included FROM sitenex_packages WHERE code = ANY/.test(s)) {
+    const codes = params[0] || [];
+    return { rows: PACKAGES.filter(x => codes.includes(x.code)) };
+  }
   if (/^SELECT .* FROM sitenex_deal_payments WHERE deal_id/.test(s)) {
     return { rows: PAYMENTS.filter(p => String(p.deal_id) === String(params[0])).sort((a, b) => a.seq - b.seq) };
   }
@@ -892,4 +913,96 @@ test('a deal created from a prospect alone leaves the client fields EMPTY', asyn
   const detail = await call('GET', `/api/sitenex/deals/${r.body.deal.id}`, 'u-admin');
   assert.equal(detail.body.renderable.ok, false);
   assert.ok(detail.body.renderable.missing.some(m => m.field === 'client_company'));
+});
+
+// ── the board and the form must give the SAME answer about a contract ──────────
+
+test('contract_ready on the board EQUALS renderable.ok on the deal page, deal for deal', () => {
+  // Not asserted by inspection but by comparison, over deals in deliberately different states. If the board
+  // ever grows its own cheaper "is this ready" predicate, this is what fails.
+  return (async () => {
+    // A deal with everything.
+    const whole = await call('POST', '/api/sitenex/deals', 'u-admin', {
+      company_name: 'Whole Co', contact_name: 'A Person', contact_email: 'a@whole.example',
+      client_address: '1 Whole St, Chicago, IL', package_code: 'P2', duration_weeks: 3, value_cents: 100000 });
+    // A deal with nothing but a prospect.
+    const bare = await call('POST', '/api/sitenex/deals', 'u-admin', { prospect_id: 9001 });
+    // A deal that looks complete but has an unbalanced schedule.
+    const unbal = await call('POST', '/api/sitenex/deals', 'u-admin', {
+      company_name: 'Unbalanced Co', contact_name: 'B Person', contact_email: 'b@u.example',
+      client_address: '2 Odd St, Chicago, IL', package_code: 'P2', duration_weeks: 3, value_cents: 500000 });
+    PAYMENTS.push({ id: 999, deal_id: unbal.body.deal.id, seq: 1, label: 'Part', amount_cents: 1000, status: 'due' });
+
+    const board = await call('GET', '/api/sitenex/deals', 'u-admin');
+    const flat = (board.body.columns || []).flatMap(c => c.deals);
+    assert.ok(flat.length >= 3, 'the fixtures must be on the board');
+
+    for (const card of flat) {
+      const detail = await call('GET', `/api/sitenex/deals/${card.id}`, 'u-admin');
+      assert.equal(card.contract_ready, detail.body.renderable.ok,
+        `deal ${card.id}: the board says contract_ready=${card.contract_ready} and the form says ` +
+        `renderable.ok=${detail.body.renderable.ok} — they must be the same answer`);
+      if (!card.contract_ready) {
+        assert.equal(card.blocked_reason, detail.body.renderable.code, `deal ${card.id}: and the same reason`);
+        assert.deepEqual(card.missing, (detail.body.renderable.missing || []).map(m => m.label),
+          `deal ${card.id}: and the same list`);
+      }
+    }
+    // And the three states really were different, or the comparison proved nothing.
+    const byId = Object.fromEntries(flat.map(c => [c.id, c]));
+    assert.equal(byId[whole.body.deal.id].contract_ready, true, 'the complete deal is ready');
+    assert.equal(byId[bare.body.deal.id].contract_ready, false, 'the bare one is not');
+    assert.equal(byId[bare.body.deal.id].blocked_reason, 'missing_fields');
+    assert.equal(byId[unbal.body.deal.id].contract_ready, false, 'nor the unbalanced one');
+    assert.equal(byId[unbal.body.deal.id].blocked_reason, 'unbalanced_schedule',
+      'and an unbalanced schedule is reported as THAT, not as a missing field');
+  })();
+});
+
+test('the board computes readiness for every deal WITHOUT a query per deal', async () => {
+  // N+1 on a board is how a screen gets slow quietly. The package and payment lookups are batched, so the
+  // count must not grow with the number of deals.
+  const countFor = async (n) => {
+    reset();
+    for (let i = 0; i < n; i++) {
+      DEALS.push({ id: 900 + i, partner_id: null, owner_user_id: 'u-admin', status: 'new', package_code: 'P2',
+                   company_name: 'Co ' + i, value_cents: 1000, duration_weeks: 3 });
+    }
+    await call('GET', '/api/sitenex/deals', 'u-admin');
+    // Counted from the fake's own log, because the route captured db.query at require time.
+    return SQL_LOG.filter(q => /sitenex_deal_payments|sitenex_packages|sitenex_deals/.test(q)).length;
+  };
+  const few = await countFor(2);
+  const many = await countFor(20);
+  assert.equal(few, many,
+    `the query count grew with the number of deals (${few} for 2, ${many} for 20) — the lookups are not batched`);
+});
+
+// ── the stage clock ───────────────────────────────────────────────────────────
+
+test('status_changed_at moves on a REAL status change and on nothing else', async () => {
+  // updated_at already answers "when was this last touched". Treating the two as the same thing is how
+  // "days in current stage" becomes "days since somebody fixed a typo".
+  const updates = () => SQL_LOG.filter(q => /^UPDATE sitenex_deals SET/.test(q));
+  SQL_LOG = [];
+  await call('PUT', `/api/sitenex/deals/${A_DEAL}`, 'u-admin', { status: 'proposal_sent' });
+  assert.ok(updates().some(q => /status_changed_at = NOW\(\)/.test(q)), 'a status change must move the clock');
+  SQL_LOG = [];
+  await call('PUT', `/api/sitenex/deals/${A_DEAL}`, 'u-admin', { terms_note: 'a typo fix' });
+  assert.ok(updates().length > 0, 'the edit itself must have happened');
+  assert.ok(!updates().some(q => /status_changed_at/.test(q)), 'editing another field must NOT move it');
+  SQL_LOG = [];
+  // Re-selecting the SAME status is not a move either.
+  await call('PUT', `/api/sitenex/deals/${A_DEAL}`, 'u-admin', { status: 'proposal_sent' });
+  assert.ok(updates().length > 0, 'the update still ran');
+  assert.ok(!updates().some(q => /status_changed_at/.test(q)), 're-selecting the same status is not a change');
+});
+
+test('`changed` reports what the CALLER changed, not bookkeeping columns', async () => {
+  // It is shown to the user as "Saved: …". Naming status_changed_at there claims the system did something
+  // it was not asked to; updated_at was never listed either, so this keeps the two consistent.
+  const r = await call('PUT', `/api/sitenex/deals/${A_DEAL}`, 'u-admin', { status: 'contacted', terms_note: 'x' });
+  assert.deepEqual(r.body.changed.sort(), ['status', 'terms_note']);
+  assert.ok(!r.body.changed.includes('status_changed_at'));
+  assert.ok(!r.body.changed.includes('updated_at'));
 });

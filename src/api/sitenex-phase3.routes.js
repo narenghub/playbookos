@@ -78,7 +78,11 @@ const DEAL_SELECT = `
   d.id, d.status, d.package_code, d.partner_id, d.prospect_id, d.proposal_url, d.signed_at,
   d.value_cents, d.monthly_cents, d.company_name, d.contact_name, d.contact_title, d.contact_email,
   d.contact_phone, d.client_address, d.duration_weeks, d.starts_at_intake, d.terms_note,
-  d.created_at, d.updated_at,
+  d.created_at, d.updated_at, d.status_changed_at,
+  -- Computed in SQL so "days" is measured against the DATABASE's clock, not the container's. Floor of whole
+  -- days, so a deal that moved four hours ago reads 0 and not 1.
+  CASE WHEN d.status_changed_at IS NULL THEN NULL
+       ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - d.status_changed_at)) / 86400))::int END AS days_in_stage,
   pt.name AS partner_name, pt.primary_contact_email AS partner_email,
   p.name AS prospect_name, p.phone AS prospect_phone, p.region AS prospect_region,
   u.name AS owner_name`;
@@ -104,6 +108,38 @@ async function paymentsFor(dealId) {
        FROM sitenex_deal_payments WHERE deal_id = $1 ORDER BY seq`, [dealId])).rows;
 }
 
+// Renderability for MANY deals, in three queries rather than two per deal.
+//
+// Routed through the SAME contractInputFor + checkRenderable the single-deal page calls, with
+// includeSystem:false, so the board's marker and the form's list of missing fields cannot disagree. A
+// second, cheaper "is this deal ready" predicate on the board would be a second definition of ready, and
+// the first time they drifted the board would be quietly wrong about a contract.
+async function renderableFor(deals) {
+  if (!deals.length) return new Map();
+  const codes = [...new Set(deals.map(d => d.package_code).filter(Boolean))];
+  const pkgCache = new Map();
+  if (codes.length) {
+    const rows = (await query(
+      `SELECT code, name, included, not_included FROM sitenex_packages WHERE code = ANY($1)`, [codes])).rows;
+    for (const r of rows) pkgCache.set(r.code, r);
+  }
+  const payRows = (await query(
+    `SELECT deal_id, seq, label, amount_cents, due_trigger, due_date, status
+       FROM sitenex_deal_payments WHERE deal_id = ANY($1) ORDER BY deal_id, seq`,
+    [deals.map(d => d.id)])).rows;
+  const pays = new Map();
+  for (const r of payRows) {
+    if (!pays.has(r.deal_id)) pays.set(r.deal_id, []);
+    pays.get(r.deal_id).push(r);
+  }
+  const out = new Map();
+  for (const d of deals) {
+    const input = await contractInputFor(d, null, pkgCache);
+    out.set(d.id, checkRenderable({ ...input, payments: pays.get(d.id) || [] }, { includeSystem: false }));
+  }
+  return out;
+}
+
 // ── deals ─────────────────────────────────────────────────────────────────────
 
 // GET /sitenex/deals — the board. MOVED here from routes.js rather than duplicated: routes.js mounts
@@ -116,8 +152,17 @@ router.get('/sitenex/deals', authMiddleware, requireTier('sitenex'), async (req,
     const rows = (await query(
       `SELECT ${DEAL_SELECT} ${DEAL_FROM} WHERE ${scope.sql}
         ORDER BY d.updated_at DESC, d.id DESC`, scope.params)).rows;
+    const ready = await renderableFor(rows);
     const columns = DEAL_STATUSES.map(status => ({
-      status, deals: rows.filter(r => r.status === status).map(dealShape),
+      status, deals: rows.filter(r => r.status === status).map(r => {
+        const rr = ready.get(r.id) || { ok: true };
+        return { ...dealShape(r),
+          // The SAME answer the deal page gives. `blocked_reason` is the code, so the card can show a
+          // marker without restating the server's sentence, and `missing` is there for its tooltip.
+          contract_ready: rr.ok === true,
+          blocked_reason: rr.ok ? null : rr.code,
+          missing: rr.ok ? [] : (rr.missing || []).map(m => m.label) };
+      }),
     }));
     res.json({ total: rows.length, statuses: DEAL_STATUSES, columns,
       scope: scope.isStaff ? 'all partners' : (scope.failed ? 'none' : 'own partner only'),
@@ -137,10 +182,12 @@ router.get('/sitenex/deals/:id', authMiddleware, requireTier('sitenex'), async (
     const contracts = (await query(
       `SELECT id, contract_no, status, template_version, file_name, file_size, created_at, superseded_by
          FROM sitenex_contracts WHERE deal_id = $1 ORDER BY id DESC`, [deal.id])).rows;
+    // Through renderableFor, the same function the board uses, so the two cannot drift. includeSystem:false
+    // lives inside it — the answer is "what does this DEAL still need", and the contract number is the
+    // generator's to supply, not something to tell a user to fill in.
+    const ready = await renderableFor([deal]);
     res.json({ deal: dealShape(deal), payments: await paymentsFor(deal.id), contracts,
-               // includeSystem:false — the answer is "what does this DEAL still need", and the
-               // contract number is the generator's to supply.
-               renderable: checkRenderable(await contractInputFor(deal), { includeSystem: false }) });
+               renderable: ready.get(deal.id) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -189,7 +236,7 @@ router.put('/sitenex/deals/:id', authMiddleware, adminOnly, requireTier('sitenex
     if (b.status && !DEAL_STATUSES.includes(b.status)) {
       return res.status(400).json({ error: `Unknown status '${b.status}'. One of: ${DEAL_STATUSES.join(', ')}` });
     }
-    const sets = [], vals = [];
+    const sets = [], vals = [], changed = [];
     for (const c of DEAL_WRITABLE) {
       if (!(c in b)) continue;
       let v = b[c];
@@ -199,8 +246,14 @@ router.put('/sitenex/deals/:id', authMiddleware, adminOnly, requireTier('sitenex
       }
       if (c === 'starts_at_intake') v = !(v === false || v === 'false');
       vals.push(v); sets.push(`${c} = $${vals.length}`);
+      changed.push(c);
     }
     if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+
+    // THE STAGE CLOCK MOVES ONLY ON A REAL STATUS CHANGE. Not on every update — that is what updated_at
+    // already does, and treating the two as the same thing is how "days in current stage" becomes "days
+    // since somebody fixed a typo". Re-selecting the same status is not a move either.
+    if ('status' in b && b.status !== existing.status) sets.push('status_changed_at = NOW()');
 
     // CHANGING value_cents CAN UNBALANCE AN EXISTING SCHEDULE. Refused rather than silently leaving a
     // deal whose installments no longer add up — which would then block contract generation with an
@@ -221,8 +274,11 @@ router.put('/sitenex/deals/:id', authMiddleware, adminOnly, requireTier('sitenex
     vals.push(existing.id);
     await query(`UPDATE sitenex_deals SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${vals.length}`, vals);
     const deal = await dealFor(req.user, existing.id);
-    res.json({ ok: true, deal: dealShape(deal), payments: await paymentsFor(existing.id),
-               changed: sets.map(s => s.split(' = ')[0]) });
+    // `changed` is what the CALLER changed, not every column the statement touched. Deriving it from the
+    // SET clause meant the UI reported "Saved: status, status_changed_at, terms_note" — naming a bookkeeping
+    // column the user neither sent nor set, which reads as the system having done something it was not asked
+    // to. updated_at never appeared there either, for the same reason; this keeps the two consistent.
+    res.json({ ok: true, deal: dealShape(deal), payments: await paymentsFor(existing.id), changed });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
@@ -300,11 +356,14 @@ router.put('/sitenex/deals/:id/payments', authMiddleware, adminOnly, requireTier
 // What the renderer needs, assembled from the deal plus the package catalogue. The package's scope is
 // read HERE and snapshot into the contract row, so a later catalogue edit cannot change what an old
 // contract says it included.
-async function contractInputFor(deal, contractNo = null) {
-  const pkg = deal.package_code
-    ? (await query(`SELECT code, name, included, not_included FROM sitenex_packages WHERE code = $1`,
-                   [deal.package_code])).rows[0]
-    : null;
+async function contractInputFor(deal, contractNo = null, pkgCache = null) {
+  // pkgCache lets the BOARD compute this for every deal without one package query each. It is the same
+  // function either way on purpose: the board's "blocked" marker and the form's "still needed" list have to
+  // be the same answer, and the only way to guarantee that is for there to be one implementation.
+  const pkg = !deal.package_code ? null
+    : (pkgCache ? (pkgCache.get(deal.package_code) || null)
+                : (await query(`SELECT code, name, included, not_included FROM sitenex_packages WHERE code = $1`,
+                               [deal.package_code])).rows[0]);
   return {
     contract_no: contractNo,
     contract_date: new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }),

@@ -8397,21 +8397,64 @@ pages['sitenex-deals'] = async function(){
 
      snEditDeal lives in public/sitenex-phase3.js, which loads after this inline script. That is fine
      because an inline onclick resolves against window AT CLICK TIME, by which point the file has run. */
-  const card = (d) => '<div onclick="apOpenDeal(event,'+d.id+')" title="Open this deal"'
-    + ' style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--white);cursor:pointer">'
-    + '<div style="font-weight:600;font-size:13px">'+apEsc(d.prospect_name || ('deal #'+d.id))+'</div>'
-    + (d.prospect_region?'<div style="font-size:11px;color:var(--text-muted)">'+apEsc(d.prospect_region)+'</div>':'')
-    + '<div style="font-size:11px;margin-top:4px">'+(d.package_label?apEsc(d.package_label):'<span style="color:var(--text-muted)">no package</span>')+'</div>'
-    /* Value is shown ONLY when it exists. Pricing is not set, and printing $0 for an unpriced
-       deal is the specific failure the packages screen also guards against. */
-    + (d.value_usd!=null?'<div style="font-size:11px;margin-top:2px">$'+d.value_usd.toLocaleString()+(d.monthly_usd!=null?' + $'+d.monthly_usd.toLocaleString()+'/mo':'')+'</div>':'')
-    + (d.owner_name?'<div style="font-size:11px;color:var(--text-muted);margin-top:2px">'+apEsc(d.owner_name)+'</div>':'')
-    /* partner_name, not referred_by. referred_by was DROPPED by the sitenex rename and replaced by the
-       partner_id FK, so this line read an undefined property and the "via <partner>" credit never
-       rendered at all — silently, because `undefined ? ... : ''` is a working expression. The API has
-       returned partner_name since that migration. */
-    + (d.partner_name?'<div style="font-size:10px;color:var(--text-muted);margin-top:2px">via '+apEsc(d.partner_name)+'</div>':'')
-    + '</div>';
+  /* THE CARD, in the order a person reads it:
+       company (bold) · contact
+       package + value, or ONE muted line saying what is missing
+       partner, or "direct"
+       days in current stage
+
+     WHAT WAS WRONG: "no package" occupied the line where the money goes, so the second thing read on every
+     unfinished deal was an absence. A board of new deals read as a list of problems rather than a list of
+     deals. Absences now group into one quiet line at the bottom; the money line simply is not drawn when
+     there is no money. An empty row says less than a row that announces its emptiness. */
+  const apDays = (d) => {
+    /* days_in_stage comes from the server (SQL NOW(), whole days floored). NULL means the stage clock was
+       never recorded for this row — its status could have changed at any point between created_at and
+       updated_at — so it says so instead of showing 0, which would read as "moved today". */
+    if (d.days_in_stage == null) return 'stage age not recorded';
+    if (d.days_in_stage === 0) return 'moved today';
+    return d.days_in_stage + ' day' + (d.days_in_stage === 1 ? '' : 's') + ' in this stage';
+  };
+  const apMissingLine = (d) => {
+    /* ONE line, quiet, at the bottom. Built from what is actually absent, so it names the next thing to do
+       rather than listing every empty field — the form does that properly when they open it. */
+    const bits = [];
+    if (!d.package_label) bits.push('a package');
+    if (d.value_usd == null) bits.push('a price');
+    if (!d.company_name) bits.push('the client name');
+    if (!bits.length) return '';
+    const last = bits.pop();
+    return 'needs ' + (bits.length ? bits.join(', ') + ' and ' + last : last);
+  };
+  const card = (d) => {
+    const money = d.value_usd != null
+      ? '$' + d.value_usd.toLocaleString() + (d.monthly_usd != null ? ' + $' + d.monthly_usd.toLocaleString() + '/mo' : '')
+      : null;
+    /* Package and value share a line when both exist — they are one fact about the deal, not two. */
+    const commercial = [d.package_label ? apEsc(d.package_label) : null, money].filter(Boolean).join(' · ');
+    const missing = apMissingLine(d);
+    /* The contract marker uses contract_ready from the SERVER, computed by the same renderable check the
+       deal page calls, so the board and the form cannot disagree about whether a contract can be made.
+       Only shown once there is something to block — a brand-new deal is not "blocked", it is empty. */
+    const showBlocked = d.contract_ready === false && !missing;
+    return '<div onclick="apOpenDeal(event,'+d.id+')" title="Open this deal"'
+      + ' style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;background:var(--white);cursor:pointer">'
+      + '<div style="font-weight:600;font-size:13px">'+apEsc(d.company_name || d.prospect_name || ('deal #'+d.id))
+      +   (d.contact_name ? '<span style="font-weight:400;color:var(--text-muted)"> · '+apEsc(d.contact_name)+'</span>' : '')
+      + '</div>'
+      + (commercial ? '<div style="font-size:11px;margin-top:3px">'+commercial+'</div>' : '')
+      + '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">'
+      +   (d.partner_name ? 'via '+apEsc(d.partner_name) : 'direct')
+      + '</div>'
+      + '<div style="font-size:11px;color:var(--text-muted);margin-top:1px">'+apEsc(apDays(d))+'</div>'
+      + (missing ? '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic">'+apEsc(missing)+'</div>' : '')
+      /* A deal that has its basics but still cannot produce a contract — an unbalanced schedule, or a
+         required field the card does not show. The tooltip carries the server's own list. */
+      + (showBlocked ? '<div style="font-size:11px;color:#8a1f1f;margin-top:4px" title="'
+          + apEsc((d.missing && d.missing.length) ? d.missing.join(', ') : 'open the deal to see what is needed')
+          + '">⚠ contract blocked</div>' : '')
+      + '</div>';
+  };
   const board = '<div class="card" style="overflow-x:auto"><div style="display:flex;gap:10px;min-width:900px">'
     + cols.map(col => '<div style="flex:1;min-width:150px">'
         + '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);padding:0 2px 6px">'

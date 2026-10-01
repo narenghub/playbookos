@@ -224,3 +224,135 @@ test('with the form script absent it ALERTS rather than doing nothing', () => {
   assert.equal(alerts.length, 1, 'it must say something — a silent click is the original bug in miniature');
   assert.match(alerts[0], /not loaded/i);
 });
+
+// ── WHAT THE CARD SAYS, and in what order ─────────────────────────────────────
+//
+// Executed, not read. The complaint was about READING ORDER — "no package" sat where the money goes, so the
+// second thing read on every unfinished deal was an absence — and reading order is a property of the
+// rendered string, which only running the function can show.
+
+function renderCard(deal) {
+  const vm = require('node:vm');
+  const from = SHELL.indexOf('  const apDays = (d) =>');
+  const to = SHELL.indexOf("  const board = '<div class=\"card\"");
+  assert.ok(from !== -1 && to > from, 'the card renderer must be findable');
+  const sandbox = { apEsc: (x) => String(x == null ? '' : x) };
+  vm.runInNewContext(SHELL.slice(from, to) + '\nglobalThis.__card = card;', sandbox);
+  return sandbox.__card(deal);
+}
+// The visible text, in order, one entry per rendered line.
+const linesOf = (html) => html
+  .replace(/<[^>]+>/g, '\n').split('\n').map(x => x.trim()).filter(Boolean);
+
+const FULL = { id: 41, company_name: 'Bolt & Co', contact_name: 'Jo Smith',
+  package_label: 'P2 · Renew (rebuild, 3 weeks)', value_usd: 4500, monthly_usd: 99,
+  partner_name: 'ACBM Partners', days_in_stage: 1, contract_ready: true, missing: [] };
+
+test('the card reads: company · contact, then package + value, then partner, then stage age', () => {
+  const l = linesOf(renderCard(FULL));
+  assert.equal(l[0], 'Bolt & Co', 'the company leads');
+  assert.equal(l[1], '· Jo Smith', 'the contact sits with it');
+  assert.match(l[2], /^P2 · Renew \(rebuild, 3 weeks\) · \$4,500 \+ \$99\/mo$/,
+    'package and value share the SECOND line — this is where the money goes');
+  assert.equal(l[3], 'via ACBM Partners');
+  assert.equal(l[4], '1 day in this stage');
+  assert.equal(l.length, 5, `nothing else: ${JSON.stringify(l)}`);
+});
+
+test('a deal with no partner says "direct", not nothing', () => {
+  const { partner_name, ...direct } = FULL;
+  assert.ok(linesOf(renderCard(direct)).includes('direct'),
+    'an unattributed deal is a fact about it, not an absence to hide');
+});
+
+test('ABSENCES GROUP INTO ONE QUIET LINE AT THE BOTTOM — never the second thing read', () => {
+  // THE EXACT COMPLAINT. "no package" used to occupy the line where the value goes, so a board of new deals
+  // read as a list of problems.
+  const bare = { id: 38, prospect_name: 'Hopkins Machine', days_in_stage: 0,
+                 contract_ready: false, missing: ['Client company', 'Total value'] };
+  const l = linesOf(renderCard(bare));
+  assert.equal(l[0], 'Hopkins Machine', 'it still leads with a name');
+  assert.ok(!/needs|no package|missing/i.test(l[1] || ''),
+    `the SECOND line must not be an absence, got: ${JSON.stringify(l[1])}`);
+  // Exactly one line carries everything missing, and it is last.
+  const needs = l.filter(x => /^needs /.test(x));
+  assert.equal(needs.length, 1, `one absence line, got ${JSON.stringify(needs)}`);
+  assert.equal(l[l.length - 1], needs[0], 'and it is at the bottom');
+  assert.equal(needs[0], 'needs a package, a price and the client name', 'read as a sentence, not a list of fields');
+});
+
+test('the money line is simply ABSENT when there is no money — not "no package"', () => {
+  const l = linesOf(renderCard({ id: 39, company_name: 'X Ltd', days_in_stage: 2, contract_ready: false, missing: [] }));
+  assert.ok(!l.some(x => /no package|\$|unpriced|—/.test(x)),
+    `an empty row should say nothing at all, got ${JSON.stringify(l)}`);
+  // Which is the standing rule for SiteNex prices: never print a figure for an unpriced thing.
+  assert.ok(!/\$0/.test(renderCard({ id: 39, company_name: 'X', days_in_stage: 1 })), 'and never $0');
+});
+
+test('the absence line names only what is actually absent', () => {
+  const l = (d) => linesOf(renderCard(d)).find(x => /^needs /.test(x));
+  assert.equal(l({ id: 1, company_name: 'A', package_label: 'P2', days_in_stage: 1 }), 'needs a price');
+  assert.equal(l({ id: 1, company_name: 'A', value_usd: 100, days_in_stage: 1 }), 'needs a package');
+  assert.equal(l({ id: 1, package_label: 'P2', value_usd: 100, days_in_stage: 1, prospect_name: 'P' }),
+               'needs the client name');
+  assert.equal(l(FULL), undefined, 'a complete deal gets no absence line at all');
+});
+
+test('days in stage: 0 reads as "moved today", and NULL says it is not recorded', () => {
+  const l = (v) => linesOf(renderCard({ ...FULL, days_in_stage: v }));
+  assert.ok(l(0).includes('moved today'), '0 must not read as "0 days", which looks like a missing value');
+  assert.ok(l(1).includes('1 day in this stage'), 'singular');
+  assert.ok(l(12).includes('12 days in this stage'), 'plural');
+  // NULL is "we do not know", and saying so beats showing 0 — which would read as "moved today".
+  assert.ok(l(null).includes('stage age not recorded'));
+  assert.ok(!l(null).some(x => /\bday/.test(x)), 'and it must not claim a number');
+});
+
+test('the BLOCKED marker appears only when the basics are there but a contract still cannot be made', () => {
+  // Otherwise it duplicates the absence line: a deal with no price is not "blocked", it is empty.
+  const blocked = linesOf(renderCard({ id: 42, company_name: 'Rivet Inc', package_label: 'P1 · Launch',
+    value_usd: 3000, days_in_stage: 12, contract_ready: false, missing: ['Client address'] }));
+  assert.ok(blocked.some(x => /contract blocked/.test(x)), 'it must be marked');
+  assert.ok(!blocked.some(x => /^needs /.test(x)), 'and not alongside an absence line');
+
+  const empty = linesOf(renderCard({ id: 38, prospect_name: 'H', days_in_stage: 0,
+    contract_ready: false, missing: ['Client company'] }));
+  assert.ok(!empty.some(x => /contract blocked/.test(x)),
+    'a brand-new deal is empty, not blocked — the absence line already says what it needs');
+
+  const ready = linesOf(renderCard(FULL));
+  assert.ok(!ready.some(x => /blocked/.test(x)), 'a ready deal is not marked');
+});
+
+test('the blocked marker carries the SERVER\'s own list in its tooltip', () => {
+  const html = renderCard({ id: 42, company_name: 'R', package_label: 'P1', value_usd: 3000,
+    days_in_stage: 1, contract_ready: false, missing: ['Client address', 'Client email'] });
+  assert.match(html, /title="Client address, Client email"/, 'the reason comes from the server, not a guess');
+  // And a blocked deal with no list still explains itself rather than showing a bare glyph.
+  const vague = renderCard({ id: 42, company_name: 'R', package_label: 'P1', value_usd: 3000,
+    days_in_stage: 1, contract_ready: false, missing: [] });
+  assert.match(vague, /title="open the deal to see what is needed"/);
+});
+
+test('contract_ready is read from the SERVER — the card computes no part of it', () => {
+  // The board and the form must not be able to disagree about whether a contract can be made.
+  const src = SHELL.slice(SHELL.indexOf('  const apDays = (d) =>'), SHELL.indexOf("  const board = '<div class=\"card\""));
+  assert.match(src, /d\.contract_ready === false/, 'the marker is driven by the server flag');
+  for (const own of ['checkRenderable', 'client_email', 'duration_weeks', 'amount_cents']) {
+    assert.ok(!src.includes(own), `the card must not reimplement readiness (found ${own})`);
+  }
+});
+
+test('XSS: every field the card prints goes through apEsc', () => {
+  // These are a client company name and a contact name typed by a person.
+  const src = SHELL.slice(SHELL.indexOf('  const card = (d) => {'), SHELL.indexOf("  const board = '<div class=\"card\""));
+  for (const f of ['company_name', 'prospect_name', 'contact_name', 'partner_label', 'partner_name']) {
+    const uses = [...src.matchAll(new RegExp(`d\\.${f}`, 'g'))];
+    if (!uses.length) continue;
+    // Every print site (as opposed to a truthiness test) must be wrapped.
+    const printed = new RegExp(`apEsc\\(d\\.${f}`).test(src) || new RegExp(`apEsc\\([^)]*d\\.${f}`).test(src);
+    assert.ok(printed, `d.${f} is printed without apEsc`);
+  }
+  // And the numbers are formatted, not concatenated from the body.
+  assert.match(src, /toLocaleString\(\)/);
+});
