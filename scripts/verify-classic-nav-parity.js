@@ -83,11 +83,21 @@ console.log(`${roles.length} roles\n`);
 // Previously declared and now part of the baseline, kept only as a record of what changed when:
 //   2026-09-29  super_admin +decision-engine +data-pipeline +execution-graph   (Platform got its
 //               three unreachable pages), admin −sku-economics −settings        (Platform → super-admin only)
-const EXPECTED = {};
-// 2026-09-30: the Outreach page went into OPERATIONS (access:'*'), so EVERY role gains exactly that one
-// page. Declared as a default rather than repeated fourteen times; any role whose diff is anything other
-// than this still fails.
-const DEFAULT_EXPECTED = { gained: ['outreach'], lost: [] };
+//   2026-09-30  EVERY role +outreach  (the Outreach page went into OPERATIONS, access:'*')
+//
+// 2026-09-30, SiteNex Phase 3: the Contracts page. Gated on NAV_PAGE_REQS "sitenex-contracts":[["sitenex"]],
+// and the sitenex tier is held by exactly super_admin, admin and partner — so these three and no others.
+// A fourth role appearing here would mean the tier grid had changed, which is the thing this script is for.
+const EXPECTED = {
+  super_admin: { gained: ['sitenex-contracts'], lost: [] },
+  admin:       { gained: ['sitenex-contracts'], lost: [] },
+  partner:     { gained: ['sitenex-contracts'], lost: [] },
+};
+// Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
+// role to gain a page it already has — which is harmless only while no role's nav differs at all, and
+// becomes a wrong expectation the moment one does. EXPECTED[role] REPLACES this rather than merging, so
+// the three entries above must each list their full gained set.
+const DEFAULT_EXPECTED = { gained: [], lost: [] };
 const linksOf = (html) => [...html.matchAll(/navigate\('([^']+)'\)/g)].map(m => m[1]);
 
 let mismatched = 0, added = 0, accepted = 0;

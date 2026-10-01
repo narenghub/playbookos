@@ -116,9 +116,17 @@ test('the registry and templates use sitenex.* keys', () => {
 
 test('the SPA page ids are sitenex-*', () => {
   const src = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
-  for (const id of ['sitenex-prospects', 'sitenex-deals', 'sitenex-packages']) {
-    assert.ok(src.includes(`pages['${id}']`), `${id} page function`);
-    assert.ok(src.includes(`id:'${id}'`), `${id} nav item`);
+  // The UI is no longer one file, so a page function may be attached from an external script. Both
+  // sources are read; otherwise a page moved out of index.html looks like a page that stopped existing.
+  const external = [...src.matchAll(/<script[^>]*\ssrc=["'](\/[^"']+\.js)["']/g)]
+    .map(m => path.join(ROOT, 'public', m[1].replace(/^\//, '')))
+    .filter(f => fs.existsSync(f))
+    .map(f => fs.readFileSync(f, 'utf8'))
+    .join('\n');
+  const all = src + '\n' + external;
+  for (const id of ['sitenex-prospects', 'sitenex-deals', 'sitenex-packages', 'sitenex-contracts']) {
+    assert.ok(all.includes(`pages['${id}']`), `${id} page function`);
+    assert.ok(src.includes(`id:'${id}'`), `${id} nav item`);   // the nav itself stays in the shell
   }
-  assert.ok(!/acbm-(prospects|deals|packages)/.test(src), 'no acbm-* page id survives');
+  assert.ok(!/acbm-(prospects|deals|packages|contracts)/.test(all), 'no acbm-* page id survives');
 });

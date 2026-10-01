@@ -208,13 +208,35 @@ test('the partner is shown Deals and Packages, and NOT SiteNex Prospects', () =>
   assert.ok(!pages.includes('settings'), 'no settings page');
 });
 
-test('staff still see all three SiteNex pages', () => {
+// Derived from the registry rather than listed, so a new SiteNex page is covered the moment it exists.
+// The hardcoded three-id version silently stopped covering anything new — Phase 3 added a fourth page and
+// every assertion here stayed green.
+const SITENEX_PAGE_IDS = FEATURES
+  .filter(f => f.surface === 'nav_page' && f.domain === 'sitenex')
+  .map(f => f.ref);
+
+test('the SiteNex page list is derived from the registry, not hand-listed', () => {
+  assert.ok(SITENEX_PAGE_IDS.length >= 4, `expected 4+ sitenex pages, found ${SITENEX_PAGE_IDS.join(', ')}`);
+  assert.ok(SITENEX_PAGE_IDS.includes('sitenex-contracts'), 'the Contracts page must be registered');
+});
+
+test('staff see EVERY SiteNex page', () => {
   for (const role of ['admin', 'super_admin']) {
     const pages = navFor(role);
-    for (const id of ['sitenex-prospects', 'sitenex-deals', 'sitenex-packages']) {
+    for (const id of SITENEX_PAGE_IDS) {
       assert.ok(pages.includes(id), `${role} must still see ${id}`);
     }
   }
+});
+
+test('a partner sees the SiteNex pages it holds and NOT the prospect list', () => {
+  const pages = navFor('partner');
+  for (const id of ['sitenex-deals', 'sitenex-packages', 'sitenex-contracts']) {
+    assert.ok(pages.includes(id), `a partner should see ${id}`);
+  }
+  // The one that stays out: the scored lead list is ours. Three independent refusals, and the nav is none
+  // of them — but a link to a page that 403s is still a bug.
+  assert.ok(!pages.includes('sitenex-prospects'), 'the scored prospect list is not a partner screen');
 });
 
 test('every page drawn for the partner is a page it actually holds', () => {

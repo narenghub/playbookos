@@ -29,8 +29,13 @@ const ENTRY_POINTS = [
 ];
 
 function inlineBlocks(src) {
-  return [...src.matchAll(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => ({
-    code: m[1], line: src.slice(0, m.index).split('\n').length, chars: m[1].length,
+  // HTML COMMENTS ARE BLANKED FIRST, keeping the line count so reported line numbers stay right.
+  // Writing the word <script> inside an explanatory comment made this checker treat the rest of the
+  // comment as JavaScript and FAIL with "Unexpected identifier 'take'" — a false failure that points at
+  // the wrong thing entirely. A commented-out script does not run, so skipping it is also correct.
+  const scrubbed = src.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '));
+  return [...scrubbed.matchAll(/<script(?![^>]*src=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => ({
+    code: m[1], line: scrubbed.slice(0, m.index).split('\n').length, chars: m[1].length,
   }));
 }
 

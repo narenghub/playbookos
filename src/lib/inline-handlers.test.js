@@ -18,8 +18,43 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 
-const SRC = fs.readFileSync(__dirname + '/../../public/index.html', 'utf8');
+const path = require('path');
+
+const PUBLIC = path.join(__dirname, '../../public');
+const SRC = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
 const LINES = SRC.split('\n');
+
+// ── FOLLOW <script src> ───────────────────────────────────────────────────────
+//
+// The UI is no longer one file. Scanning only index.html made this test blind in BOTH directions: it
+// collected neither the handlers an external file declares nor the onclicks that file generates, so a new
+// page could ship with every one of its buttons dead and every assertion here still green.
+//
+// Protocol-relative and absolute URLs are skipped — a CDN script is not ours to check and cannot be read
+// from disk. A LOCAL src that does not resolve to a file is a FAILURE, not a skip: a missing script is a
+// page whose handlers are all undefined, which is the loudest possible version of this bug and the easiest
+// to cause with a typo in a path.
+function externalScripts(html) {
+  // Comments blanked first, so a <script src> written inside an explanatory comment is not chased.
+  const scrubbed = html.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '));
+  return [...scrubbed.matchAll(/<script[^>]*\ssrc=["']([^"']+)["']/g)].map(m => m[1]);
+}
+
+const EXTERNAL = [];
+const SKIPPED = [];
+for (const src of externalScripts(SRC)) {
+  if (/^(https?:)?\/\//.test(src)) { SKIPPED.push(src); continue; }
+  const rel = src.replace(/^\//, '').split('?')[0];
+  const full = path.join(PUBLIC, rel);
+  assert.ok(fs.existsSync(full),
+    `index.html loads <script src="${src}"> but ${full} does not exist — every handler in it would be ` +
+    `undefined and every button it draws would silently do nothing`);
+  EXTERNAL.push({ src, file: full, code: fs.readFileSync(full, 'utf8') });
+}
+
+// Every source that can DECLARE a global or NAME a handler.
+const ALL_SOURCES = [{ src: 'index.html', code: SRC, inline: true },
+                     ...EXTERNAL.map(e => ({ ...e, inline: false }))];
 
 // NOTE ON THE REGEX: use [ \t]+, never \s+. `\s` matches a NEWLINE, so /^\s+async function/ with the m
 // flag happily starts at one line's beginning, eats the line break, and matches an UNINDENTED declaration
@@ -38,7 +73,10 @@ test('no async function is declared INDENTED — it would be block-scoped, not g
 test('every function named by an inline handler is declared at the top level or on window', () => {
   // Collect the identifiers actually invoked from on*="..." attributes.
   const called = new Set();
-  for (const m of SRC.matchAll(/\son(?:click|change|input|submit|keydown|keyup|blur|focus|mouseover|mouseout)="([^"]*)"/g)) {
+  // From EVERY source, not just index.html — an external file's handlers are named inside the HTML strings
+  // it builds, so scanning only the shell finds none of them.
+  const allHandlerText = ALL_SOURCES.map(x => x.code).join('\n');
+  for (const m of allHandlerText.matchAll(/\son(?:click|change|input|submit|keydown|keyup|blur|focus|mouseover|mouseout)="([^"]*)"/g)) {
     // Two things are deliberately excluded:
     //   ${...}  — a template interpolation is evaluated when the HTML is BUILT, in the enclosing function's
     //             scope, so `onclick="f('${esc(x)}')"` calls esc at render time and only f on click.
@@ -53,6 +91,17 @@ test('every function named by an inline handler is declared at the top level or 
   for (const m of SRC.matchAll(/^(?:async )?function ([A-Za-z0-9_$]+)/gm)) globals.add(m[1]);
   for (const m of SRC.matchAll(/^(?:const|let|var) ([A-Za-z0-9_$]+)/gm)) globals.add(m[1]);
   for (const m of SRC.matchAll(/window\.([A-Za-z0-9_$]+)\s*=/g)) globals.add(m[1]);
+
+  // AN EXTERNAL FILE CONTRIBUTES ONLY window.* AND COLUMN-0 DECLARATIONS. Deliberately TIGHTER than the
+  // rules for the inline script: the Annex B allowance below (an indented plain `function` hoisting to the
+  // enclosing var scope) is not extended to these files, because a file that wraps itself in an IIFE —
+  // which a separate file reasonably might — has a var scope that is NOT global, and its internals must
+  // still read as unreachable. Column-0 in a non-IIFE file is global, so both halves stay honest.
+  for (const e of EXTERNAL) {
+    for (const m of e.code.matchAll(/^(?:async )?function ([A-Za-z0-9_$]+)/gm)) globals.add(m[1]);
+    for (const m of e.code.matchAll(/^(?:const|let|var) ([A-Za-z0-9_$]+)/gm)) globals.add(m[1]);
+    for (const m of e.code.matchAll(/window\.([A-Za-z0-9_$]+)\s*=/g)) globals.add(m[1]);
+  }
   // A PLAIN function declared inside a block IS reachable globally — Annex B hoists it into the enclosing
   // var scope, which for this script is global. That is exactly why acTab worked and mcTrigger did not,
   // and why the first test above is specifically about async declarations.

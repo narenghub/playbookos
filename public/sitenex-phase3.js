@@ -1,0 +1,493 @@
+/* ── SiteNex Phase 3 UI — Contracts register, deal editing, call script ─────────
+ *
+ * A SEPARATE FILE, loaded by one <script src> at the end of index.html.
+ *
+ * THIS STRUCTURALLY CANNOT REPEAT THE 30 SEPTEMBER OUTAGE. That outage was
+ * `async function outreachPage()` inserted INSIDE the `const pages = { ... }` object literal — a
+ * syntax error that killed the whole inline script, so the SPA rendered nothing while /health stayed
+ * green and the container logs stayed empty. The hazard is specific to editing inside that literal.
+ * Here there is no literal to be inside: `const pages` is declared at the top level of the inline
+ * script, so by the time this file runs it is simply a visible global, and pages are attached with
+ * `pages['x'] = fn` from outside. A syntax error in THIS file also cannot take the app down with it —
+ * a separate <script> that fails to parse leaves every other script running.
+ *
+ * Two rules it still has to obey:
+ *   • HANDLERS GO ON window. An inline onclick resolves against the global object, and Annex B does
+ *     not hoist an async function out of a block, so a bare `async function f()` inside one throws
+ *     ReferenceError on click and the control silently does nothing. Every handler here is assigned to
+ *     window explicitly, under its own name.
+ *     (Described rather than shown on purpose: inline-handlers.test.js reads window assignments out of
+ *     this file to decide what is reachable, and it does not know a comment from code — so an EXAMPLE of
+ *     the syntax registers a global that does not exist, which is exactly what makes a guard pass over a
+ *     genuinely missing handler. Two different placeholder names did it before this sentence replaced
+ *     them.)
+ *   • A DOWNLOAD MUST FETCH WITH THE Authorization HEADER AND CLICK A BLOB ANCHOR. A bare href gets a
+ *     401: the browser sends no header on a plain navigation, and the contract routes are gated.
+ */
+
+/* ── helpers ───────────────────────────────────────────────────────────────────
+ * esc/get/err are taken from the inline script when present (they are — this file loads after it) and
+ * fall back to local definitions so this file can be loaded and unit-tested on its own.
+ */
+const snEsc = (x) => (typeof apEsc === 'function' ? apEsc(x)
+  : String(x == null ? '' : x).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])));
+const snGet = (p) => apGet(p);
+const snDash = '<span style="color:var(--text-muted)">—</span>';
+
+const snMoney = (cents) => cents == null ? snDash
+  : '$' + (cents / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+const snDate = (d) => d ? String(d).slice(0, 10) : snDash;
+
+/* A write. Every one goes through here so the Authorization header, the JSON parsing and the error
+   shape are in one place rather than repeated per handler. */
+async function snSend(method, path, body) {
+  try {
+    const r = await fetch('/api' + path, {
+      method,
+      headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await r.text();
+    let data = null; try { data = text ? JSON.parse(text) : null; } catch (_) {}
+    if (!r.ok) return { ok: false, status: r.status, error: (data && data.error) || ('HTTP ' + r.status), data };
+    return { ok: true, status: r.status, data };
+  } catch (e) { return { ok: false, status: 0, error: 'request failed: ' + (e && e.message ? e.message : String(e)) }; }
+}
+
+function snToast(msg, bad) {
+  const el = document.getElementById('sn-msg');
+  if (!el) { if (bad) console.error(msg); return; }
+  el.style.color = bad ? 'var(--danger,#b00020)' : 'var(--teal,#0a7)';
+  el.textContent = msg;
+}
+
+const SN_CONTRACT_STATUS = ['generated', 'sent', 'signed', 'superseded', 'void'];
+const SN_DEAL_STATUS = ['new', 'contacted', 'proposal_sent', 'signed', 'intake', 'building', 'live', 'lost'];
+const SN_TRIGGERS = [['on_signature', 'On signature'], ['on_intake_complete', 'On intake complete'],
+  ['on_first_draft', 'On first draft'], ['on_launch', 'On launch'], ['monthly', 'Monthly'], ['date', 'On a date']];
+
+/* ── the download ──────────────────────────────────────────────────────────────
+ *
+ * A BARE href 401s. The contract routes require the Authorization header, and a browser sends none on
+ * a plain navigation or an <a download>. So: fetch with the header, turn the bytes into a blob, click a
+ * synthetic anchor, and revoke the URL. The revoke is deferred because Safari cancels an in-flight
+ * download when the object URL goes away immediately.
+ */
+window.snDownloadContract = async function snDownloadContract(id, fileName) {
+  snToast('Preparing ' + (fileName || 'the document') + '…');
+  try {
+    const r = await fetch('/api/sitenex/contracts/' + encodeURIComponent(id) + '/file',
+      { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (!r.ok) {
+      let msg = 'HTTP ' + r.status;
+      try { const j = await r.json(); if (j && j.error) msg = j.error; } catch (_) {}
+      snToast('Could not download it: ' + msg, true);
+      return;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName || ('contract-' + id + '.docx');
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    snToast('Downloaded ' + a.download);
+  } catch (e) {
+    snToast('Could not download it: ' + (e && e.message ? e.message : String(e)), true);
+  }
+};
+
+/* ── the contracts register ────────────────────────────────────────────────────  */
+
+function snTotalsCard(t) {
+  const box = (label, value, hint) =>
+    '<div style="flex:1;min-width:150px;border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--white)">'
+    + '<div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em">' + snEsc(label) + '</div>'
+    + '<div style="font-size:20px;font-weight:650;margin-top:2px">' + value + '</div>'
+    + (hint ? '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + snEsc(hint) + '</div>' : '')
+    + '</div>';
+  return '<div style="display:flex;gap:10px;flex-wrap:wrap;margin:0 0 14px">'
+    + box('Signed — one-time', snMoney(t.signed_one_time_cents), t.signed_count + ' contract' + (t.signed_count === 1 ? '' : 's'))
+    + box('Signed — monthly', snMoney(t.signed_monthly_cents), 'recurring')
+    /* Labelled as a DERIVED figure, not as revenue. One-time plus twelve months of the retainer is an
+       arithmetic statement about today's book, not a forecast and not money received. */
+    + box('Annualised', snMoney(t.annualised_cents), 'one-time + 12 × monthly')
+    + box('Pipeline', snMoney(t.pipeline_cents), t.pipeline_count + ' generated or sent')
+    + (t.superseded_count
+      ? box('Superseded', String(t.superseded_count), 'excluded from every total above')
+      : '')
+    + '</div>';
+}
+
+function snContractRow(c) {
+  const dead = c.status === 'superseded' || c.status === 'void';
+  const opts = SN_CONTRACT_STATUS
+    .filter(s => s !== 'superseded')          /* set by generating a replacement, never by hand */
+    .map(s => '<option value="' + s + '"' + (s === c.status ? ' selected' : '') + '>' + s + '</option>').join('');
+  return '<tr style="' + (dead ? 'opacity:.55' : '') + '">'
+    + '<td style="padding:6px 8px;font-family:ui-monospace,monospace;font-size:12px">' + snEsc(c.contract_no) + '</td>'
+    + '<td style="padding:6px 8px">' + snEsc(c.client_company || '')
+      + (c.client_contact ? '<div style="font-size:11px;color:var(--text-muted)">' + snEsc(c.client_contact) + '</div>' : '')
+      + '</td>'
+    + '<td style="padding:6px 8px">' + (c.partner_name ? snEsc(c.partner_name) : '<span style="color:var(--text-muted)">ours</span>') + '</td>'
+    + '<td style="padding:6px 8px;font-size:12px">' + snEsc(c.package_name || c.package_code || '') + '</td>'
+    + '<td style="padding:6px 8px;text-align:right">' + snMoney(c.value_cents)
+      + (c.monthly_cents ? '<div style="font-size:11px;color:var(--text-muted)">+ ' + snMoney(c.monthly_cents) + '/mo</div>' : '')
+      + '</td>'
+    + '<td style="padding:6px 8px">'
+      + (dead
+        ? '<span style="font-size:11px;color:var(--text-muted)">' + snEsc(c.status)
+          + (c.superseded_by ? ' by #' + snEsc(c.superseded_by) : '') + '</span>'
+        : '<select onchange="snSetContractStatus(' + c.id + ',this)" '
+          + 'style="font-size:11px;padding:3px 4px;border:1px solid var(--border);border-radius:4px;background:#fff">'
+          + opts + '</select>')
+      + '</td>'
+    + '<td style="padding:6px 8px;font-size:11px;color:var(--text-muted)">' + snDate(c.created_at) + '</td>'
+    + '<td style="padding:6px 8px;font-size:11px;color:var(--text-muted)">' + snEsc(c.template_version || '') + '</td>'
+    + '<td style="padding:6px 8px">'
+      + '<button onclick="snDownloadContract(' + c.id + ',\'' + snEsc(c.file_name || '').replace(/'/g, "\\'") + '\')" '
+      + 'class="btn-secondary" style="padding:3px 9px;font-size:11px">.docx</button>'
+      + '</td>'
+    + '</tr>';
+}
+
+async function snContractsPage() {
+  const el = document.getElementById('content');
+  el.innerHTML = '<div class="text-body">Loading contracts…</div>';
+  const r = await snGet('/sitenex/contracts');
+  if (!r.ok) { el.innerHTML = apErrorCard('SiteNex Contracts', r, "pages['sitenex-contracts']()"); return; }
+  const d = r.data;
+
+  const head = '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
+    + '<h2 style="margin:0">SiteNex Contracts</h2>'
+    + '<div style="font-size:12px;color:var(--text-muted)">' + d.total + ' in the register · ' + snEsc(d.scope) + '</div>'
+    + '</div>'
+    /* The template is a placeholder and the register says so on every visit, not only inside the file.
+       A notice that lives only in the document is a notice nobody reads before sending it. */
+    + '<div style="margin:10px 0 14px;padding:8px 10px;border:1px solid #f0c0c0;background:#fff6f6;border-radius:6px;'
+    + 'font-size:12px;color:#8a1f1f">'
+    + '<strong>The contract template has not been reviewed by an attorney.</strong> '
+    + 'Clause text is placeholder content so the system can be built and tested. Do not send a generated '
+    + 'document to a client until the wording has been replaced.'
+    + '</div>'
+    + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 8px"></div>';
+
+  if (!d.contracts.length) {
+    el.innerHTML = head
+      + '<div style="border:1px dashed var(--border);border-radius:8px;padding:18px;text-align:center;color:var(--text-muted)">'
+      + 'No contracts yet. Open a deal on the SiteNex Deals board and generate one from there.'
+      + '</div>';
+    return;
+  }
+
+  const th = (t, right) => '<th style="padding:6px 8px;text-align:' + (right ? 'right' : 'left')
+    + ';font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;'
+    + 'border-bottom:1px solid var(--border)">' + t + '</th>';
+  el.innerHTML = head + snTotalsCard(d.totals)
+    + '<div style="overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--white)">'
+    + '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+    + '<thead><tr>' + th('Contract') + th('Client') + th('Partner') + th('Package') + th('Value', true)
+    + th('Status') + th('Generated') + th('Template') + th('') + '</tr></thead>'
+    + '<tbody>' + d.contracts.map(snContractRow).join('') + '</tbody>'
+    + '</table></div>';
+}
+
+window.snSetContractStatus = async function snSetContractStatus(id, sel) {
+  const next = sel && sel.value;
+  snToast('Saving…');
+  const r = await snSend('PUT', '/sitenex/contracts/' + encodeURIComponent(id), { status: next });
+  if (!r.ok) { snToast(r.error, true); await snContractsPage(); return; }
+  snToast('Contract ' + r.data.contract.contract_no + ' is now ' + r.data.contract.status);
+  /* Re-read rather than patch the row in place: the status change moves money between the totals above,
+     and a card that disagrees with the totals beside it is worse than a redraw. */
+  await snContractsPage();
+};
+
+/* ── generating a contract, from a deal ───────────────────────────────────────── */
+
+window.snGenerateContract = async function snGenerateContract(dealId) {
+  snToast('Generating…');
+  const r = await snSend('POST', '/sitenex/contracts', { deal_id: dealId });
+  if (!r.ok) {
+    /* The server names every missing field at once. Shown as a list, because "Cannot generate" with one
+       field named means three more round trips. */
+    const d = r.data || {};
+    if (d.code === 'missing_fields' && Array.isArray(d.missing)) {
+      snToast('Cannot generate yet — still needed: ' + d.missing.map(m => m.label).join(', '), true);
+    } else {
+      snToast(r.error, true);
+    }
+    return;
+  }
+  snToast(r.data.note || 'Generated.');
+  if (typeof pages !== 'undefined' && pages['sitenex-deals']) await pages['sitenex-deals']();
+};
+
+/* ── editing a deal ────────────────────────────────────────────────────────────
+ *
+ * Opened from the deals board. One form, saved whole, because the client details are only useful
+ * together: a contract needs all of them or none of them.
+ */
+
+const SN_DEAL_FIELDS = [
+  ['company_name', 'Client company', 'text', true],
+  ['contact_name', 'Contact name', 'text', true],
+  ['contact_title', 'Contact title', 'text', false],
+  ['contact_email', 'Contact email', 'email', true],
+  ['contact_phone', 'Contact phone', 'text', false],
+  ['client_address', 'Client address', 'text', true],
+  ['duration_weeks', 'Duration (weeks)', 'number', true],
+  ['value_cents', 'Total value ($)', 'money', false],
+  ['monthly_cents', 'Monthly ($)', 'money', false],
+  ['terms_note', 'Additional agreed terms', 'textarea', false],
+];
+
+window.snEditDeal = async function snEditDeal(dealId) {
+  const el = document.getElementById('content');
+  el.innerHTML = '<div class="text-body">Loading deal…</div>';
+  const r = await snGet('/sitenex/deals/' + encodeURIComponent(dealId));
+  if (!r.ok) { el.innerHTML = apErrorCard('SiteNex Deal', r, "pages['sitenex-deals']()"); return; }
+  const d = r.data.deal, pays = r.data.payments || [], contracts = r.data.contracts || [];
+  const ready = r.data.renderable || {};
+
+  const field = ([key, label, kind, req]) => {
+    const raw = d[key];
+    const val = kind === 'money' ? (raw == null ? '' : raw / 100) : (raw == null ? '' : raw);
+    const common = 'id="sn-f-' + key + '" style="width:100%;padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px"';
+    const input = kind === 'textarea'
+      ? '<textarea ' + common + ' rows="2">' + snEsc(val) + '</textarea>'
+      : '<input ' + common + ' type="' + (kind === 'money' || kind === 'number' ? 'number' : kind)
+        + '" value="' + snEsc(val) + '">';
+    return '<label style="display:block;margin:0 0 8px">'
+      + '<span style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:2px">'
+      + snEsc(label) + (req ? ' <span style="color:#b00020">*</span>' : '') + '</span>' + input + '</label>';
+  };
+
+  const statusSel = '<select id="sn-f-status" style="padding:5px 7px;font-size:13px;border:1px solid var(--border);border-radius:4px">'
+    + SN_DEAL_STATUS.map(s => '<option value="' + s + '"' + (s === d.status ? ' selected' : '') + '>' + s + '</option>').join('')
+    + '</select>';
+
+  const payRows = pays.length
+    ? pays.map(p => '<tr>'
+        + '<td style="padding:4px 8px">' + p.seq + '</td>'
+        + '<td style="padding:4px 8px">' + snEsc(p.label) + '</td>'
+        + '<td style="padding:4px 8px;font-size:12px">'
+          + snEsc(p.due_date ? String(p.due_date).slice(0, 10)
+                 : ((SN_TRIGGERS.find(t => t[0] === p.due_trigger) || [, p.due_trigger || ''])[1])) + '</td>'
+        + '<td style="padding:4px 8px;text-align:right">' + snMoney(p.amount_cents) + '</td>'
+        + '<td style="padding:4px 8px;font-size:12px;color:var(--text-muted)">' + snEsc(p.status) + '</td>'
+        + '</tr>').join('')
+    : '<tr><td colspan="5" style="padding:8px;color:var(--text-muted);font-size:12px">'
+      + 'No installment schedule. The total is payable on invoice.</td></tr>';
+
+  const paySum = pays.reduce((s, p) => s + (p.amount_cents || 0), 0);
+  const balanced = !pays.length || paySum === d.value_cents;
+
+  el.innerHTML = '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
+    + '<h2 style="margin:0">' + snEsc(d.company_name || ('Deal #' + d.id)) + '</h2>'
+    + '<button onclick="pages[\'sitenex-deals\']()" class="btn-secondary" style="padding:4px 10px;font-size:12px">Back to the board</button>'
+    + '</div>'
+    + '<div style="font-size:12px;color:var(--text-muted);margin:2px 0 12px">'
+      + 'Deal #' + d.id + ' · ' + (d.partner_name ? 'via ' + snEsc(d.partner_name) : 'self-sourced')
+      + (d.package_label ? ' · ' + snEsc(d.package_label) : '') + '</div>'
+    + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 8px"></div>'
+    + '<div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start">'
+
+    + '<div style="flex:1;min-width:280px;max-width:460px">'
+      + '<h3 style="font-size:13px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">The client</h3>'
+      + SN_DEAL_FIELDS.map(field).join('')
+      + '<label style="display:flex;align-items:center;gap:7px;margin:4px 0 10px;font-size:13px">'
+        + '<input type="checkbox" id="sn-f-starts_at_intake"' + (d.starts_at_intake === false ? '' : ' checked') + '>'
+        /* Default TRUE and stated in words, because the two readings differ by weeks and a contract that
+           dates the term from signature while the client has not sent content is a dispute waiting. */
+        + '<span>The term starts when <strong>intake completes</strong> (unchecked: on signature)</span>'
+        + '</label>'
+      + '<div style="display:flex;gap:8px;align-items:center;margin-top:6px">'
+        + '<span style="font-size:11px;color:var(--text-muted)">Status</span>' + statusSel
+        + '<button onclick="snSaveDeal(' + d.id + ')" class="btn-primary" style="padding:5px 14px;font-size:13px">Save</button>'
+        + '</div>'
+      + '</div>'
+
+    + '<div style="flex:1;min-width:300px">'
+      + '<h3 style="font-size:13px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">Payment schedule</h3>'
+      + '<table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid var(--border);border-radius:6px;background:var(--white)">'
+      + '<tbody>' + payRows + '</tbody></table>'
+      + '<div style="font-size:12px;margin-top:6px;color:' + (balanced ? 'var(--text-muted)' : '#b00020') + '">'
+        + (pays.length
+          ? 'Schedule totals ' + snMoney(paySum) + ' against a deal value of ' + snMoney(d.value_cents)
+            + (balanced ? ' — balanced.' : ' — THESE DO NOT MATCH, so a contract cannot be generated.')
+          : 'No schedule set.')
+        + '</div>'
+      + '<div style="margin-top:8px">'
+        + '<textarea id="sn-sched" rows="3" placeholder="One installment per line:  Deposit | 2250 | on_signature&#10;On launch | 2250 | on_launch" '
+        + 'style="width:100%;padding:6px;font-size:12px;font-family:ui-monospace,monospace;border:1px solid var(--border);border-radius:4px"></textarea>'
+        + '<div style="font-size:11px;color:var(--text-muted);margin:2px 0 6px">'
+          + 'label | amount in dollars | ' + SN_TRIGGERS.map(t => t[0]).join(' / ')
+          + '. Leave empty and save to clear the schedule.</div>'
+        + '<button onclick="snSaveSchedule(' + d.id + ')" class="btn-secondary" style="padding:4px 11px;font-size:12px">Save schedule</button>'
+        + '</div>'
+
+      + '<h3 style="font-size:13px;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">Contracts</h3>'
+      + (ready.ok === false
+        ? '<div style="font-size:12px;color:#8a1f1f;margin-bottom:8px">Still needed before a contract can be generated: '
+          + snEsc((ready.missing || []).map(m => m.label).join(', ')) + '</div>'
+        : '')
+      + '<button onclick="snGenerateContract(' + d.id + ')" class="btn-primary" style="padding:5px 12px;font-size:12px"'
+        + (ready.ok === false ? ' disabled title="Fill in the fields listed above first"' : '') + '>'
+        + (contracts.length ? 'Generate a replacement' : 'Generate contract') + '</button>'
+      + (contracts.length
+        ? '<div style="margin-top:8px">' + contracts.map(c =>
+            '<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0'
+            + (c.status === 'superseded' ? ';opacity:.55' : '') + '">'
+            + '<span style="font-family:ui-monospace,monospace">' + snEsc(c.contract_no) + '</span>'
+            + '<span style="color:var(--text-muted)">' + snEsc(c.status) + '</span>'
+            + '<button onclick="snDownloadContract(' + c.id + ',\'' + snEsc(c.file_name || '').replace(/'/g, "\\'") + '\')" '
+            + 'class="btn-secondary" style="padding:2px 8px;font-size:11px">.docx</button>'
+            + '</div>').join('') + '</div>'
+        : '')
+      + '</div>'
+    + '</div>';
+};
+
+const snVal = (key) => { const e = document.getElementById('sn-f-' + key); return e ? e.value : undefined; };
+
+window.snSaveDeal = async function snSaveDeal(dealId) {
+  const body = { status: snVal('status') };
+  for (const [key, , kind] of SN_DEAL_FIELDS) {
+    const raw = snVal(key);
+    if (raw === undefined) continue;
+    if (kind === 'money') {
+      /* Dollars in the form, cents on the wire. '' means "clear it", not zero — a blank price field must
+         not become $0, which is the same mistake the packages screen already refuses to make. */
+      body[key] = raw === '' ? null : Math.round(Number(raw) * 100);
+    } else if (kind === 'number') {
+      body[key] = raw === '' ? null : Number(raw);
+    } else {
+      body[key] = raw === '' ? null : raw;
+    }
+  }
+  const cb = document.getElementById('sn-f-starts_at_intake');
+  if (cb) body.starts_at_intake = !!cb.checked;
+  snToast('Saving…');
+  const r = await snSend('PUT', '/sitenex/deals/' + encodeURIComponent(dealId), body);
+  if (!r.ok) { snToast(r.error, true); return; }
+  snToast('Saved: ' + (r.data.changed || []).join(', '));
+  await window.snEditDeal(dealId);
+};
+
+/* Parses the textarea into a schedule. Plain text rather than a row-adding widget because the invariant
+   is about the SET — it has to sum to the deal value — so it is edited and saved whole. */
+function snParseSchedule(text) {
+  const rows = [], bad = [];
+  String(text || '').split('\n').map(l => l.trim()).filter(Boolean).forEach((line, i) => {
+    const parts = line.split('|').map(x => x.trim());
+    if (parts.length < 2) { bad.push('line ' + (i + 1) + ': needs at least "label | amount"'); return; }
+    const amount = Number(parts[1]);
+    if (!Number.isFinite(amount) || amount <= 0) { bad.push('line ' + (i + 1) + ': "' + parts[1] + '" is not a positive amount'); return; }
+    const row = { label: parts[0], amount_cents: Math.round(amount * 100) };
+    if (parts[2]) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(parts[2])) { row.due_trigger = 'date'; row.due_date = parts[2]; }
+      else row.due_trigger = parts[2];
+    }
+    rows.push(row);
+  });
+  return { rows, bad };
+}
+
+window.snSaveSchedule = async function snSaveSchedule(dealId) {
+  const el = document.getElementById('sn-sched');
+  const { rows, bad } = snParseSchedule(el ? el.value : '');
+  if (bad.length) { snToast(bad.join('; '), true); return; }
+  snToast('Saving the schedule…');
+  const r = await snSend('PUT', '/sitenex/deals/' + encodeURIComponent(dealId) + '/payments', { payments: rows });
+  if (!r.ok) { snToast(r.error, true); return; }
+  snToast(rows.length ? rows.length + ' installment(s) totalling ' + snMoney(r.data.total_cents) : 'Schedule cleared');
+  await window.snEditDeal(dealId);
+};
+
+/* ── the call script and the email, for one prospect ──────────────────────────── */
+
+window.snProspectContent = async function snProspectContent(prospectId, pkgCode) {
+  const el = document.getElementById('content');
+  el.innerHTML = '<div class="text-body">Building the script…</div>';
+  const q = pkgCode ? '?package=' + encodeURIComponent(pkgCode) : '';
+  const r = await snGet('/sitenex/prospects/' + encodeURIComponent(prospectId) + '/content' + q);
+  if (!r.ok) { el.innerHTML = apErrorCard('Call script', r, "pages['sitenex-prospects']()"); return; }
+  const { prospect, call, email } = r.data;
+
+  const section = (title, inner) => '<h3 style="font-size:12px;margin:16px 0 6px;text-transform:uppercase;'
+    + 'letter-spacing:.04em;color:var(--text-muted)">' + title + '</h3>' + inner;
+  const list = (items) => '<ul style="margin:0;padding-left:18px">'
+    + items.map(x => '<li style="margin:2px 0">' + snEsc(x) + '</li>').join('') + '</ul>';
+
+  el.innerHTML = '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">'
+    + '<h2 style="margin:0">' + snEsc(prospect.name) + '</h2>'
+    + '<button onclick="pages[\'sitenex-prospects\']()" class="btn-secondary" style="padding:4px 10px;font-size:12px">Back</button>'
+    + '</div>'
+    + '<div style="font-size:12px;color:var(--text-muted);margin:2px 0 4px">'
+      + snEsc(prospect.phone || 'no phone listed') + (prospect.region ? ' · ' + snEsc(prospect.region) : '')
+      + ' · ' + snEsc(r.data.package_code) + '</div>'
+    + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 6px"></div>'
+    + '<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start">'
+
+    + '<div style="flex:1;min-width:300px;max-width:560px">'
+      + section('Open with', '<p style="margin:0;font-size:15px;line-height:1.45"><strong>' + snEsc(call.opening) + '</strong></p>')
+      + section('What they have', list(call.what_they_have))
+      + (call.one_other_thing ? section('If it is going well', '<p style="margin:0">' + snEsc(call.one_other_thing) + '</p>') : '')
+      + section('What we would do', call.what_wed_do.length ? list(call.what_wed_do)
+        : '<p style="margin:0;color:var(--text-muted)">The package has no scope listed.</p>')
+      /* The exclusions are not optional and not a footnote. A caller who cannot say "content writing is
+         not in this" is the one who accidentally sells it. */
+      + section('What this is NOT', call.what_this_is_not.length ? list(call.what_this_is_not)
+        : '<p style="margin:0;color:var(--text-muted)">No exclusions are stated for this package.</p>')
+      + section('What it costs', '<p style="margin:0">' + snEsc(call.what_it_costs) + '</p>')
+      + '</div>'
+
+    + '<div style="flex:1;min-width:300px">'
+      + section('If they say…', '<div style="border:1px solid var(--border);border-radius:8px;background:var(--white)">'
+        + call.objections.map(o =>
+          '<div style="padding:8px 10px;border-bottom:1px solid var(--border)">'
+          + '<div style="font-weight:600;font-size:13px">' + snEsc(o.they_say) + '</div>'
+          + '<div style="font-size:13px;color:var(--text-body,#333);margin-top:2px">' + snEsc(o.you_say) + '</div>'
+          + '</div>').join('') + '</div>')
+      + section('Email — paste between your own greeting and sign-off',
+        '<div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">Subject: <strong>' + snEsc(email.subject) + '</strong></div>'
+        + '<textarea id="sn-email" rows="14" readonly style="width:100%;padding:8px;font-size:13px;line-height:1.45;'
+        + 'border:1px solid var(--border);border-radius:6px;background:var(--white)">' + snEsc(email.body) + '</textarea>'
+        + '<div style="display:flex;gap:8px;margin-top:6px">'
+        + '<button onclick="snCopyEmail(0)" class="btn-secondary" style="padding:4px 11px;font-size:12px">Copy subject</button>'
+        + '<button onclick="snCopyEmail(1)" class="btn-primary" style="padding:4px 11px;font-size:12px">Copy body</button>'
+        + '</div>'
+        /* Said out loud, because somebody will otherwise look for a Send button and conclude it is broken. */
+        + '<div style="font-size:11px;color:var(--text-muted);margin-top:6px">'
+        + 'There is no send button. This goes out from your own address, under your own name — nothing is '
+        + 'sent from here.</div>')
+      + '</div>'
+    + '</div>';
+
+  window._snEmail = { subject: email.subject, body: email.body };
+};
+
+window.snCopyEmail = async function snCopyEmail(which) {
+  const e = window._snEmail || {};
+  const text = which ? (e.body || '') : (e.subject || '');
+  try {
+    await navigator.clipboard.writeText(text);
+    snToast(which ? 'Body copied' : 'Subject copied');
+  } catch (_) {
+    /* Clipboard access can be refused, and silently doing nothing would look like a dead button. */
+    const ta = document.getElementById('sn-email');
+    if (which && ta) { ta.focus(); ta.select(); snToast('Selected — press Cmd/Ctrl+C', true); }
+    else snToast('Could not copy automatically — select the text and copy it', true);
+  }
+};
+
+/* ── attach ────────────────────────────────────────────────────────────────────
+ * `pages` is a top-level const in the inline script, so it is a visible global here. Attached from
+ * OUTSIDE the object literal, which is the whole structural point of this file.
+ */
+pages['sitenex-contracts'] = (typeof apGuard === 'function')
+  ? apGuard('sitenex-contracts', 'SiteNex Contracts', snContractsPage)
+  : snContractsPage;
