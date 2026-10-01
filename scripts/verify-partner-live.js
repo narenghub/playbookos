@@ -37,10 +37,22 @@ const hit = async (method, path) => {
     : /product boundary/.test(body.error || '') ? 'boundary'
     : /Admin only|Super admin only|lacks|has no/.test(body.error || '') ? 'tier/role'
     : `other(${body.error || r.status})`;
-  // The BODY is returned too, since 2026-10-01: prospects is no longer refused but territory-scoped, so the
-  // interesting fact moved from the status code into the payload — reachable AND empty is the assertion, and
-  // a helper that only reports a status cannot make it.
-  return { status: r.status, layer, body };
+  // RETURNS { status, layer } AND NOTHING ELSE. Every check in this file compares this object whole against
+  // an expected literal, so adding a third key — I added `body` — makes all of them fail on the extra
+  // property while reporting nothing about what changed. The one place that needs the payload uses hitBody
+  // below instead.
+  return { status: r.status, layer };
+};
+
+// The same request, returning the payload. For the assertion that moved out of the status code: prospects is
+// no longer REFUSED but territory-scoped, so "reachable AND empty, and it says why" is the claim, and that
+// lives in the body.
+const hitBody = async (method, path) => {
+  const token = jwt.sign({ id, email: EMAIL, role: 'partner' }, process.env.JWT_SECRET, { expiresIn: '2m' });
+  const r = await fetch(`http://127.0.0.1:${PORT}${path}`, { method, headers: { Authorization: 'Bearer ' + token } });
+  let body = {};
+  try { body = JSON.parse(await r.text()); } catch (_) {}
+  return { status: r.status, body };
 };
 
 (async () => {
@@ -70,7 +82,7 @@ const hit = async (method, path) => {
     // REVERSED 2026-10-01. Reachable now, and scoped to the partner's granted territory. The fixture has no
     // partner_territories row, so the honest assertion is 200 WITH NO ROWS — which is the fail-closed
     // behaviour, and the one that would be a leak if it went the other way.
-    const prospects = await hit('GET', '/api/sitenex/prospects');
+    const prospects = await hitBody('GET', '/api/sitenex/prospects');
     check('GET /api/sitenex/prospects → 200 (reachable)', prospects.status, 200);
     check('  …and EMPTY, because this fixture holds no territory', (prospects.body && prospects.body.total), 0);
     check('  …and it says so rather than looking broken',
