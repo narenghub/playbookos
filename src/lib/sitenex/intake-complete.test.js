@@ -346,3 +346,16 @@ test('all four callers use it, so they cannot drift apart', () => {
       `${f} still computes "missing" itself — there must be exactly one definition`);
   }
 });
+
+test('the brief is told the contact is already on the task, not that it is missing', () => {
+  // The FIRST live brief ended with "Who is the main point of contact for questions during the build?"
+  // on a task whose third line is that person's email address. The model was right about what it was
+  // given; the prompt was wrong about what it needed to say. Withholding data silently makes the model
+  // report a gap that is ours, not the client's.
+  const { SYSTEM, promptFor } = require('./intake-brief');
+  assert.match(SYSTEM, /already on the task/i);
+  assert.match(SYSTEM, /[Nn]ever ask for them/);
+  const p = promptFor({ deal: { company_name: 'X' }, intake: { fields: {}, required: [] }, files: [] });
+  assert.match(p, /deliberately not included here/i,
+    'the prompt body must say it too — a rule in the system prompt and silence next to the data is a contradiction');
+});

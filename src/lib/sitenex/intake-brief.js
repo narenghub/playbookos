@@ -53,6 +53,7 @@ Rules:
 - Base every statement on the intake below. If something is not there, say it is not there — under "What is unclear" or "Ask them" — and never fill the gap with a plausible guess. A fabricated detail in a brief becomes a wrong assumption in a built site.
 - "Ask them" is a short list of specific questions, each one answerable in a sentence. No generic discovery questions.
 - Do not invent a budget, a deadline, a competitor, or a traffic or revenue figure. None of those are in the intake.
+- The client's name, email and phone are NOT below and are not missing — they are already on the task this brief is attached to, and were withheld from you because a brief has no use for them. Never list them as unclear and never ask for them.
 - At most 450 words.`;
 
 // What goes to the model, and what deliberately does not.
@@ -68,6 +69,10 @@ function promptFor({ deal, intake, files }) {
   if (deal.subtype) lines.push(`Trade: ${deal.subtype}`);
   if (deal.site_url) lines.push(`Existing site: ${deal.site_url}`);
 
+  // Stated beside the data, not only in the system prompt. The first live brief asked the developer to
+  // find out "who is the main point of contact" on a task whose third line is that person's email — the
+  // model correctly observed an absence that is an absence only in what we chose to send it.
+  lines.push('', '(The contact name, email and phone are deliberately not included here. They are already on the task.)');
   lines.push('', 'What the client wrote in the intake form:');
   const answered = Object.keys(fields).filter(k => fields[k] != null && fields[k] !== '');
   if (!answered.length) lines.push('(they filled in nothing — only uploads)');
