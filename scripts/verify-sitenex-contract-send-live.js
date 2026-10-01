@@ -82,9 +82,14 @@ const hit = async (method, path, token, body) => {
     }
 
     console.log('\n1. A DEAL AND A CONTRACT, with a partner on it');
+    // In --send mode the PARTNER email is the real address too, so the cc does not go to a non-resolving
+    // domain. A deliberate bounce is a small, permanent cost to sender reputation, and this script would
+    // generate one every run. In no-send mode it stays .invalid, where nothing is delivered anyway.
+    const partnerEmail = REAL_TO || 'verify-send-partner@example.invalid';
     const pid = (await query(
-      `INSERT INTO partners (name, primary_contact_email) VALUES ('VERIFY SEND Partner','verify-send-partner@example.invalid')
-       ON CONFLICT (name) DO UPDATE SET status='active' RETURNING id`)).rows[0].id;
+      `INSERT INTO partners (name, primary_contact_email) VALUES ('VERIFY SEND Partner',$1)
+       ON CONFLICT (name) DO UPDATE SET status='active', primary_contact_email=$1 RETURNING id`,
+      [partnerEmail])).rows[0].id;
     made.partners.push(pid);
     const clientEmail = REAL_TO || 'verify-send-client@example.invalid';
     const dealId = (await query(
@@ -106,7 +111,7 @@ const hit = async (method, path, token, body) => {
     const pv = await hit('GET', `/api/sitenex/contracts/${cid}/send`, staff);
     check('preview reads', pv.status, 200);
     check('  to = the snapshotted client email', pv.body.to, clientEmail);
-    check('  cc = the partner on the contract', pv.body.cc, 'verify-send-partner@example.invalid');
+    check('  cc = the partner on the contract', pv.body.cc, partnerEmail);
     ok('  from is the AUTHORIZED domain', /adificetechnologies\.com/.test(pv.body.from || ''), pv.body.from);
     ok('  the subject names the contract', (pv.body.subject || '').includes(no), pv.body.subject);
     ok('  the price the note will state', /\$4,500/.test(pv.body.price || ''), pv.body.price);
@@ -152,7 +157,7 @@ const hit = async (method, path, token, body) => {
       check('  one row', log.length, 1);
       const L = log[0] || {};
       check('  to', L.to_email, clientEmail);
-      check('  cc', L.cc_email, 'verify-send-partner@example.invalid');
+      check('  cc', L.cc_email, partnerEmail);
       check('  status', L.status, 'sent');
       check('  sent_by', L.sent_by, sup.id);
       ok('  provider id recorded', !!L.provider_id, String(L.provider_id));
