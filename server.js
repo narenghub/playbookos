@@ -189,6 +189,11 @@ app.use('/api', routes);
 // which is why no path may be declared in both — the first mount wins and the second becomes dead code.
 app.use('/api', require('./src/api/sitenex-phase3.routes'));
 
+// LabConnect — the QC testing lab directory, under the abiozen product. Same argument for its own
+// router, same ordering constraint: no path may be declared both here and in routes.js, because the
+// first mount wins and the second silently becomes dead code.
+app.use('/api', require('./src/api/labconnect.routes'));
+
 // SPA fallback ('/' now routes here too, since express.static has index:false)
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });

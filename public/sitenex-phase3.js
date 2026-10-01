@@ -57,7 +57,7 @@ async function snSend(method, path, body) {
 function snToast(msg, bad) {
   const el = document.getElementById('sn-msg');
   if (!el) { if (bad) console.error(msg); return; }
-  /* The colour is a CLASS, not an inline style, so the two states are defined once in sitenex.css next to
+  /* The colour is a CLASS, not an inline style, so the two states are defined once in console.css next to
      each other and cannot drift into two different reds. The element always reserves its height (.sn-msg
      has a min-height), so a message appearing never shifts the page under a cursor. */
   el.className = 'sn-msg ' + (bad ? 'bad' : 'ok');
@@ -410,7 +410,7 @@ window.snEditDeal = async function snEditDeal(dealId) {
   const balanced = !pays.length || paySum === d.value_cents;
 
   el.innerHTML = '<div class="sn">'
-    /* is-record: this heading is the CLIENT'S NAME, not the screen's — see sitenex.css. */
+    /* is-record: this heading is the CLIENT'S NAME, not the screen's — see console.css. */
     + '<div class="sn-head is-record">'
     + '<div><h2>' + snEsc(d.company_name || ('Deal #' + d.id)) + '</h2>'
     +   '<p class="sn-sub">Deal #' + d.id + ' · ' + (d.partner_name ? 'via ' + snEsc(d.partner_name) : 'self-sourced')

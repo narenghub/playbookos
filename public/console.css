@@ -1,6 +1,15 @@
-/* ── SiteNex design system ─────────────────────────────────────────────────────
+/* ── The console design system ─────────────────────────────────────────────────
  *
  * A SEPARATE STYLESHEET, loaded by one <link> in index.html.
+ *
+ * NAMED console.css, NOT sitenex.css. It started as SiteNex's and LabConnect is the second product
+ * to use it, so the file carrying one product's name was going to be wrong for whichever product
+ * read it next. The COMPONENT classes are still `sn-*`: renaming 200 of them across two large files
+ * for tidiness is a change with real regression surface and no user-visible benefit, so it is a
+ * follow-up. Read `sn-` as "console", not as "SiteNex".
+ *
+ * TWO SCOPE CLASSES. The token block below answers to `.sn` and `.lc`, so a page declares which
+ * product it belongs to on its wrapper and inherits the same tokens either way.
  *
  * WHY A FILE AND NOT MORE INLINE STYLE. Every SiteNex screen was built out of inline `style="..."`
  * attributes — about 180 of them across two files. That is why the screens looked assembled rather
@@ -12,9 +21,9 @@
  * cannot take the application down, where an edit inside the 500-line inline <style> can — and this
  * file can be opened, read and changed by somebody who is not willing to edit an 8,600-line HTML file.
  *
- * SCOPING. Everything is under `.sn`, which the SiteNex pages put on their outermost element. Nothing
- * here can reach another product's screens even by accident, which matters because index.html is one
- * document shared by thirty of them.
+ * SCOPING. The tokens live on `.sn` and `.lc`, which a page puts on its outermost element. Nothing
+ * here can reach a page that declares neither, which matters because index.html is one document
+ * shared by thirty of them.
  *
  * ALWAYS LIGHT. The console has no dark mode (see the note above the --awsc- block in index.html) and
  * these screens inherit that, so colours are literal rather than paired.
@@ -25,7 +34,7 @@
  * a half-rounded one.
  */
 
-.sn {
+.sn, .lc {
   --sn-bg:        #ffffff;
   --sn-sunken:    #f7f8fa;   /* board columns, table headers, inset panels */
   --sn-line:      #e4e7ec;   /* every border on these screens */
@@ -53,11 +62,14 @@
    24px, next to the Actions menu. Repeating it here printed "SiteNex Prospects" twice, nine pixels apart.
    It stays in the markup rather than being conditionally rendered, because with the console flag off
    (`body:not(.pnav)`) there is no other title on the page and the screen would have none at all. */
-body.pnav .sn .sn-head:not(.is-record) h2 { display:none; }
+body.pnav .sn .sn-head:not(.is-record) h2,
+body.pnav .lc .sn-head:not(.is-record) h2 { display:none; }
 /* With the title gone the header is one line of prose, so it needs less room around it than a header that
    carries a 20px heading. */
-body.pnav .sn .sn-head:not(.is-record) { padding-bottom:10px; margin-bottom:12px; }
-body.pnav .sn .sn-head:not(.is-record) .sn-sub { margin-top:0; }
+body.pnav .sn .sn-head:not(.is-record),
+body.pnav .lc .sn-head:not(.is-record) { padding-bottom:10px; margin-bottom:12px; }
+body.pnav .sn .sn-head:not(.is-record) .sn-sub,
+body.pnav .lc .sn-head:not(.is-record) .sn-sub { margin-top:0; }
 /* `.is-record` IS THE EXCEPTION, and it is not cosmetic. On a LIST screen the console's own title says the
    same words as the h2, so one of them is noise. On a RECORD screen — a deal, a call script — the h2 is
    the client's NAME and the console title is still the name of the list it came from. Hiding it there left
@@ -229,7 +241,7 @@ body.pnav .sn .sn-head:not(.is-record) .sn-sub { margin-top:0; }
 /* NOT scoped to `.sn-toolbar`. It was, and the grant form and the approval queue — neither of which is a
    toolbar — got a 180px box for a value like "Rockford, IL" with 600px of empty row beside it. `.sn-grow`
    means "take the rest of the row" wherever a row is laid out with flex. */
-.sn .sn-grow { flex:1 1 180px; min-width:0; }
+.sn .sn-grow, .lc .sn-grow { flex:1 1 180px; min-width:0; }
 /* `width:auto` IS LOAD-BEARING. index.html has a global `input,select,textarea{width:100%}`, so without
    this every filter in a toolbar takes a full row and the four-control filter bar renders as four stacked
    full-width boxes. Width comes back only where it is wanted: `.sn-grow` and anything inside `.sn-field`. */

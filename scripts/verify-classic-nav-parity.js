@@ -85,23 +85,27 @@ console.log(`${roles.length} roles\n`);
 //               three unreachable pages), admin −sku-economics −settings        (Platform → super-admin only)
 //   2026-09-30  EVERY role +outreach  (the Outreach page went into OPERATIONS, access:'*')
 //   2026-09-30  super_admin / admin / partner +sitenex-contracts  (SiteNex Phase 3)
+//   2026-10-01  partner +sitenex-prospects (NAV_PAGE_REQS moved it to [["sitenex"]]),
+//               super_admin / admin +sitenex-partners (the territory admin, gated on 'intelligence',
+//               which the partner role does not hold — the two moved in OPPOSITE directions in one
+//               commit, which is the whole argument for declaring them)
 //
-// 2026-10-01, multi-partner SiteNex: PARTNER ONLY gains sitenex-prospects, because NAV_PAGE_REQS moved that
-// page from [["intelligence"]] to [["sitenex"]]. Staff already held the intelligence tier and so already saw
-// it — which is why this is one role and not three, and why a second role appearing here would mean the tier
-// grid had changed rather than the nav.
+// 2026-10-01, LabConnect: FIVE roles gain `lab-connect` — super_admin, admin, procurement_director,
+// business_dev and seo_specialist. That set is not a choice I made page by page; it is exactly the set
+// that already sees Research Institutions and Clinical Demand Intelligence, because the page sits in the
+// INTELLIGENCE section (access: admin, procurement, seo, business_dev) on [["intelligence"]]. Putting it
+// anywhere else on that shelf would have produced the same five.
 //
-// The page is not simply opened: territoryScopeSql decides the ROWS and fails closed, so a partner with no
-// granted territory reaches the screen and sees nothing, with a sentence explaining why.
-// And the SiteNex Partners page — the territory admin and the approval queue — which STAFF ONLY gain,
-// because it grants territory and shows every partner's. Gated on the 'intelligence' tier the partner role
-// does not hold: the same mechanism that used to keep Prospects out, now pointed at the page that does the
-// granting. Note how the two changes go in OPPOSITE directions in the same commit, which is the whole
-// argument for declaring them rather than eyeballing a diff.
+// WHAT MATTERS IS WHO IS ABSENT. `partner` does NOT gain it, and must not: a SiteNex web partner has no
+// business holding a directory of pharmaceutical testing laboratories. If `partner` ever appears in this
+// list, the page has been moved to a tier the partner role holds and that is a cross-product leak, not a
+// nav tweak.
 const EXPECTED = {
-  partner:     { gained: ['sitenex-prospects'], lost: [] },
-  super_admin: { gained: ['sitenex-partners'], lost: [] },
-  admin:       { gained: ['sitenex-partners'], lost: [] },
+  super_admin:          { gained: ['lab-connect'], lost: [] },
+  admin:                { gained: ['lab-connect'], lost: [] },
+  procurement_director: { gained: ['lab-connect'], lost: [] },
+  business_dev:         { gained: ['lab-connect'], lost: [] },
+  seo_specialist:       { gained: ['lab-connect'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and

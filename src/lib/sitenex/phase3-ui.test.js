@@ -473,7 +473,7 @@ test('every field the panel prints is escaped — a prospect name is typed by so
 
 // ── THE STYLESHEET IS INERT WITHOUT ITS WRAPPER ───────────────────────────────
 //
-// public/sitenex.css is scoped entirely under `.sn`, which each page puts on its outermost element. Drop
+// public/console.css is scoped entirely under `.sn`, which each page puts on its outermost element. Drop
 // that one div and every class in the markup stops matching: the screen renders as unstyled text with
 // every control still live and nothing erroring. That is a worse failure than a blank page, because
 // nothing in the console, the logs or any other test says a word about it — it was caught by taking a
@@ -495,15 +495,18 @@ test('every SiteNex screen wraps its render in .sn, or the stylesheet does nothi
 });
 
 test('the stylesheet those classes need is actually linked', () => {
-  assert.match(SHELL, /<link rel="stylesheet" href="\/sitenex\.css">/,
+  // console.css, not sitenex.css: the file was renamed when LabConnect became the second product to
+  // use it. The escaped dot in the old pattern is why a blanket rename of the string "sitenex.css"
+  // across this file did not reach here — worth knowing the next time a path is renamed.
+  assert.match(SHELL, /<link rel="stylesheet" href="\/console\.css">/,
     'the markup is full of sn- classes and nothing loads the file that defines them');
   const css = require('node:fs').readFileSync(
-    require('node:path').join(__dirname, '../../../public/sitenex.css'), 'utf8');
+    require('node:path').join(__dirname, '../../../public/console.css'), 'utf8');
   // The classes the pages lean on hardest. Not exhaustive — a list of every class would be a second copy
   // of the stylesheet — but enough that a truncated or half-written file fails here.
   for (const cls of ['.sn-head', '.sn-panel', '.sn-table', '.sn-pill', '.sn-board', '.sn-card',
                      '.sn-stats', '.sn-empty', '.sn-toolbar', '.sn-field']) {
-    assert.ok(css.includes(cls + ' ') || css.includes(cls + ','), `sitenex.css never defines ${cls}`);
+    assert.ok(css.includes(cls + ' ') || css.includes(cls + ','), `console.css never defines ${cls}`);
   }
 });
 
@@ -512,7 +515,7 @@ test('the status pill class carries the WIRE value, underscore and all', () => {
   // kebab-cased stylesheet would silently fail to colour exactly the multi-word stages — the ones in the
   // middle of the funnel, which are the ones worth seeing.
   const css = require('node:fs').readFileSync(
-    require('node:path').join(__dirname, '../../../public/sitenex.css'), 'utf8');
+    require('node:path').join(__dirname, '../../../public/console.css'), 'utf8');
   assert.match(CODE, /'<span class="sn-pill s-' \+ snEsc\(status\)/, 'the class comes from the status itself');
   assert.ok(css.includes('.sn-pill.s-proposal_sent'), 'the stylesheet must key on the underscored value');
   assert.ok(!css.includes('.sn-pill.s-proposal-sent'), 'and must not have been kebab-cased');

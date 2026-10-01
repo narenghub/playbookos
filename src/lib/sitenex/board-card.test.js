@@ -153,12 +153,12 @@ test('a deal board CARD has a handler that reaches snEditDeal', () => {
     `the card's handler(s) [${names.join(', ')}] do not reach snEditDeal`);
   // AND IT MUST LOOK CLICKABLE, or it is reachable only by accident.
   //
-  // The cursor used to be an inline style on the card and is now a rule in public/sitenex.css. That is a
+  // The cursor used to be an inline style on the card and is now a rule in public/console.css. That is a
   // better place for it and a worse place to assert it from, because the markup and the rule that styles it
   // are in different files — so the check follows the class: the card must carry `sn-card`, and `.sn-card`
   // must set cursor:pointer. Asserting only the markup would pass on a card with no styling at all.
   assert.match(card, /class="sn-card"/, 'the card must carry the class its styling hangs off');
-  const CSS = fs.readFileSync(path.join(ROOT, 'public/sitenex.css'), 'utf8');
+  const CSS = fs.readFileSync(path.join(ROOT, 'public/console.css'), 'utf8');
   const rule = cut(CSS, '.sn-card {', '}', 'the .sn-card rule');
   assert.match(rule, /cursor:\s*pointer/, 'a clickable card must say so — .sn-card has no cursor:pointer');
 });

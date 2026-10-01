@@ -203,6 +203,10 @@ const ABIOZEN = [
   // Abiozen's own store SEO and LinkedIn presence
   'GET /api/seo/*', 'POST /api/seo/*',
   'GET /api/linkedin/*', 'POST /api/linkedin/*', 'PUT /api/linkedin/*',
+  // LabConnect: the QC testing lab directory and each lab's own price list. Abiozen's product, on
+  // the same shelf as market intelligence and research institutions — NOT a SiteNex surface, which
+  // is why it is here and not in the sitenex list.
+  'GET /api/labconnect/*', 'POST /api/labconnect/*', 'PUT /api/labconnect/*',
 ];
 
 // ── per-product ───────────────────────────────────────────────────────────────
