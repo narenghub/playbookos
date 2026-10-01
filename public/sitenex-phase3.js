@@ -475,11 +475,18 @@ window.snEditDeal = async function snEditDeal(dealId) {
             + '</div>').join('') + '</div>'
         : '')
       + '</div>'
+
+      /* CLIENT INTAKE. An empty container, filled by snIntakePanel after the form is on screen: the deal
+         form is what somebody opened this page for and should not wait on four more queries, and a
+         failure in the panel must leave the form usable rather than replacing it. */
+      + '<h3 style="font-size:13px;margin:18px 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">Client intake</h3>'
+      + '<div id="sn-intake"></div>'
     + '</div>';
 
   /* The recipient under each button here too — the deal page is where the button was asked for, and the
      address being visible before the click is the property, not a feature of one screen. */
   await snFillRecipients(contracts.map(c => ({ id: c.id, status: c.status })));
+  await snIntakePanel(d.id);
 };
 
 const snVal = (key) => { const e = document.getElementById('sn-f-' + key); return e ? e.value : undefined; };
@@ -797,3 +804,261 @@ window.snDecideLead = async function snDecideLead(id, status) {
 pages['sitenex-partners'] = (typeof apGuard === 'function')
   ? apGuard('sitenex-partners', 'SiteNex Partners', snPartnersPage)
   : snPartnersPage;
+
+/* ══ (6) CLIENT INTAKE — the staff panel on the deal page ═══════════════════════
+
+   Issuing the link, seeing what came back, naming the developer, and reading the brief.
+
+   LOADED SEPARATELY from the deal, into a container the deal page renders empty. The deal form is what
+   somebody opened this screen for; it should not wait on four more queries to appear, and a failure here
+   must leave the form usable rather than replacing it with an error card.
+
+   WHAT THIS SCREEN MAY DO comes from the server (can_manage), not from a role check here. `currentUser`
+   is script-scoped inside index.html's inline script and is NOT on window, so reading it from this file
+   returns undefined and every user falls into the same branch — the bug that comment exists to prevent. */
+
+const snBytes = (b) => {
+  b = Number(b || 0);
+  return b < 1024 ? b + ' B' : b < 1048576 ? Math.round(b / 1024) + ' KB'
+    : (Math.round((b / 1048576) * 10) / 10) + ' MB';
+};
+
+window.snIntakePanel = async function snIntakePanel(dealId) {
+  const box = document.getElementById('sn-intake');
+  if (!box) return;
+  box.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">Loading intake…</div>';
+  const r = await snGet('/sitenex/deals/' + encodeURIComponent(dealId) + '/intake');
+  if (!r.ok) {
+    /* Not apErrorCard: that replaces the whole page, and the deal form above is still perfectly usable. */
+    box.innerHTML = '<div style="font-size:12px;color:#8a1f1f">Could not load the intake: '
+      + snEsc(r.error || 'unknown error') + '</div>';
+    return;
+  }
+  const d = r.data, link = d.live_link, ik = d.intake, files = d.files || [], proj = d.project;
+  const q = d.quota || { used_bytes: 0, limit_bytes: 1, remaining_bytes: 0 };
+  const pct = Math.min(100, Math.round((q.used_bytes / q.limit_bytes) * 100));
+  const manage = !!d.can_manage;
+  const done = !!(ik && ik.completed_at);
+  const h = [];
+
+  /* ── the link ─────────────────────────────────────────────────────────────── */
+  h.push('<div style="font-size:12px;margin-bottom:8px">');
+  if (done) {
+    h.push('<span style="color:#1a6b3c;font-weight:600">Intake complete</span> '
+      + '<span style="color:var(--text-muted)">' + snDate(ik.completed_at)
+      + ' — the link was switched off automatically.</span>');
+  } else if (link) {
+    const days = Math.ceil((new Date(link.expires_at) - Date.now()) / 86400000);
+    h.push('<span style="color:#1a6b3c;font-weight:600">Link live</span>'
+      + ' <span style="color:var(--text-muted)">ending <span style="font-family:ui-monospace,monospace">'
+      + snEsc(link.token_tail) + '</span>'
+      + ', expires in ' + days + ' day' + (days === 1 ? '' : 's')
+      + (link.last_used_at ? ', last used ' + snDate(link.last_used_at) : ', not opened yet')
+      + ' (' + link.request_count + ' request' + (link.request_count === 1 ? '' : 's') + ')</span>');
+  } else {
+    h.push('<span style="color:var(--text-muted)">No live link'
+      + (d.links && d.links.length ? ' — ' + d.links.length + ' previously issued' : '') + '.</span>');
+  }
+  h.push('</div>');
+
+  if (manage && !done) {
+    h.push('<div style="display:flex;gap:6px;align-items:center;margin-bottom:10px">');
+    h.push('<button onclick="snIssueIntakeLink(' + dealId + ',' + (link ? 'true' : 'false') + ')" '
+      + 'class="btn-' + (link ? 'secondary' : 'primary') + '" style="padding:4px 11px;font-size:12px">'
+      + (link ? 'Issue a new link' : 'Issue intake link') + '</button>');
+    if (link) {
+      h.push('<button onclick="snRevokeIntakeLink(' + dealId + ')" class="btn-secondary" '
+        + 'style="padding:4px 11px;font-size:12px">Revoke</button>');
+    }
+    h.push('</div>');
+    /* WHERE THE TOKEN APPEARS, once. Nothing reads it back — it is not stored. */
+    h.push('<div id="sn-intake-url"></div>');
+  }
+
+  /* ── what they have sent ──────────────────────────────────────────────────── */
+  if (ik) {
+    const answered = Object.keys(ik.fields || {}).filter(k => {
+      const v = ik.fields[k];
+      return v != null && v !== '' && !(Array.isArray(v) && !v.length);
+    });
+    h.push('<div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">'
+      + answered.length + ' answer' + (answered.length === 1 ? '' : 's') + ' · '
+      + files.length + ' file' + (files.length === 1 ? '' : 's') + ' · '
+      + snBytes(q.used_bytes) + ' of ' + snBytes(q.limit_bytes) + '</div>');
+    h.push('<div style="height:4px;background:var(--border);border-radius:99px;overflow:hidden;margin-bottom:8px">'
+      + '<div style="height:100%;width:' + pct + '%;background:'
+      + (pct > 90 ? '#8a1f1f' : 'var(--accent, #1f6feb)') + '"></div></div>');
+
+    if ((ik.missing || []).length) {
+      h.push('<div style="font-size:12px;color:#8a5a00;margin-bottom:8px">Still outstanding: '
+        + snEsc(ik.missing.join(', ')) + '</div>');
+    }
+    if (answered.length) {
+      h.push('<div style="margin-bottom:8px">' + answered.map(k => {
+        const v = ik.fields[k];
+        const text = Array.isArray(v) ? v.join(', ') : String(v);
+        return '<div style="font-size:12px;padding:3px 0;border-top:1px solid var(--border)">'
+          + '<span style="color:var(--text-muted)">' + snEsc(k) + '</span> '
+          + snEsc(text.length > 240 ? text.slice(0, 240) + '…' : text) + '</div>';
+      }).join('') + '</div>');
+    }
+    if (files.length) {
+      h.push('<div style="margin-bottom:8px">' + files.map(f =>
+        '<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0;border-top:1px solid var(--border)">'
+        + '<span style="flex:1">' + snEsc(f.file_name)
+        + (f.field ? ' <span style="color:var(--text-muted)">(' + snEsc(f.field) + ')</span>' : '') + '</span>'
+        + '<span style="color:var(--text-muted)">' + snBytes(f.file_size) + '</span>'
+        + '<button onclick="snDownloadIntakeFile(' + f.id + ',\'' + snEsc(f.file_name).replace(/'/g, "\\'") + '\')" '
+        + 'class="btn-secondary" style="padding:2px 8px;font-size:11px">Download</button>'
+        + '</div>').join('') + '</div>');
+    }
+  } else {
+    h.push('<div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">'
+      + 'Nothing sent yet.</div>');
+  }
+
+  if (manage && !done && ik) {
+    h.push('<button onclick="snCompleteIntake(' + dealId + ')" class="btn-secondary" '
+      + 'style="padding:4px 11px;font-size:12px;margin-bottom:10px">Mark intake complete</button>');
+  }
+
+  /* ── the developer, and the brief ─────────────────────────────────────────── */
+  if (proj) {
+    h.push('<div style="border-top:1px solid var(--border);margin-top:10px;padding-top:10px">');
+    h.push('<div style="font-size:12px;margin-bottom:6px">'
+      + '<span style="color:var(--text-muted)">Developer</span> '
+      + (proj.assigned_to_name
+        ? '<strong>' + snEsc(proj.assigned_to_name) + '</strong>'
+        /* NO ALGORITHM CHOSE THIS and none ever will — capacity is the constraint and nothing in the
+           database knows it. Said plainly so nobody waits for an assignment that is not coming. */
+        : '<span style="color:#8a5a00">nobody yet — this is a decision, not something we can infer</span>')
+      + '</div>');
+    if (manage && (d.developers || []).length) {
+      h.push('<div style="display:flex;gap:6px;align-items:center;margin-bottom:8px">'
+        + '<select id="sn-dev" style="padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:4px">'
+        + '<option value="">— nobody —</option>'
+        + d.developers.map(u => '<option value="' + snEsc(u.id) + '"'
+            + (u.id === proj.assigned_to ? ' selected' : '') + '>' + snEsc(u.name) + '</option>').join('')
+        + '</select>'
+        + '<button onclick="snAssignDeveloper(' + proj.id + ',' + dealId + ')" class="btn-secondary" '
+        + 'style="padding:4px 11px;font-size:12px">Assign</button></div>');
+    }
+    if (proj.brief) {
+      h.push('<details style="font-size:12px"><summary style="cursor:pointer;color:var(--text-muted)">'
+        + 'Brief (' + snEsc(proj.brief_model || 'generated') + ', ' + snDate(proj.brief_generated_at) + ')</summary>'
+        + '<div style="white-space:pre-wrap;margin-top:6px;padding:8px;background:var(--bg-subtle,#f6f7f9);'
+        + 'border-radius:6px">' + snEsc(proj.brief) + '</div></details>');
+    } else if (proj.brief_error) {
+      /* SHOWN, not swallowed. A failed brief is a missing convenience, never a missing handover — the
+         task carries the raw intake either way — but somebody should be able to see that it failed and
+         press the button again rather than wonder where it went. */
+      h.push('<div style="font-size:12px;color:#8a1f1f">The brief could not be generated: '
+        + snEsc(proj.brief_error) + '</div>');
+    }
+    if (manage && done) {
+      h.push('<button onclick="snRegenerateBrief(' + dealId + ')" class="btn-secondary" '
+        + 'style="padding:3px 10px;font-size:11px;margin-top:6px">'
+        + (proj.brief ? 'Regenerate brief' : 'Generate brief') + '</button>');
+    }
+    h.push('</div>');
+  }
+
+  box.innerHTML = h.join('');
+};
+
+/* ISSUING INVALIDATES THE PREVIOUS LINK, so the confirmation says so.
+
+   A client who is halfway through uploading photos loses their link the moment somebody presses this,
+   and the only symptom they see is a page that stops working. That is not something to discover from a
+   support email, so the destructive half of the action is named before the click and not after. */
+window.snIssueIntakeLink = async function snIssueIntakeLink(dealId, replacing) {
+  if (replacing && !confirm(
+      'Issue a NEW intake link?\n\n'
+    + 'The link this client already has will stop working immediately — if they are part way through '
+    + 'uploading, they will need the new one.\n\n'
+    + 'Only do this if the old link is lost or has expired.')) return;
+
+  const r = await snSend('POST', '/sitenex/deals/' + encodeURIComponent(dealId) + '/intake-link');
+  if (!r.ok) { snToast(r.error, true); return; }
+
+  /* SHOWN ONCE, in a selectable box, with the reason it cannot be shown again. We store a hash, not the
+     token — so "copy this now" is a real constraint and not an interface affectation. */
+  const el = document.getElementById('sn-intake-url');
+  if (el) {
+    el.innerHTML = '<div style="border:1px solid #c8a84a;background:#fffbeb;border-radius:6px;padding:9px;margin-bottom:10px">'
+      + '<div style="font-size:11px;font-weight:600;color:#8a5a00;margin-bottom:4px">'
+      + 'COPY THIS NOW — it cannot be shown again</div>'
+      + '<input id="sn-intake-url-input" readonly value="' + snEsc(r.data.url) + '" '
+      + 'style="width:100%;padding:5px 7px;font-size:12px;font-family:ui-monospace,monospace;'
+      + 'border:1px solid var(--border);border-radius:4px;background:#fff">'
+      + '<div style="font-size:11px;color:#8a5a00;margin-top:4px">' + snEsc(r.data.note) + '</div>'
+      + '<button onclick="snCopyIntakeUrl()" class="btn-secondary" style="padding:3px 10px;font-size:11px;margin-top:6px">Copy link</button>'
+      + '</div>';
+    const input = document.getElementById('sn-intake-url-input');
+    if (input) { input.focus(); input.select(); }
+  }
+  snToast('Link issued. Copy it before you leave this page.');
+};
+
+window.snCopyIntakeUrl = async function snCopyIntakeUrl() {
+  const input = document.getElementById('sn-intake-url-input');
+  if (!input) return;
+  input.select();
+  try { await navigator.clipboard.writeText(input.value); snToast('Copied.'); }
+  catch (e) { snToast('Copy it by hand — the browser refused clipboard access.', true); }
+};
+
+window.snRevokeIntakeLink = async function snRevokeIntakeLink(dealId) {
+  if (!confirm('Revoke this intake link?\n\nThe client will not be able to upload anything until you issue a new one.')) return;
+  const r = await snSend('DELETE', '/sitenex/deals/' + encodeURIComponent(dealId) + '/intake-link');
+  if (!r.ok) { snToast(r.error, true); return; }
+  snToast(r.data.message || 'Revoked.');
+  await snIntakePanel(dealId);
+};
+
+window.snCompleteIntake = async function snCompleteIntake(dealId) {
+  if (!confirm('Mark this intake complete?\n\nThis switches the client\'s upload link off and creates the build task.')) return;
+  const r = await snSend('POST', '/sitenex/deals/' + encodeURIComponent(dealId) + '/intake/complete');
+  if (!r.ok) { snToast(r.error, true); return; }
+  snToast(r.data.already ? 'It was already complete.'
+    : 'Intake complete — the task went to ' + (r.data.assignee && r.data.assignee.rule || 'the deal owner') + '.');
+  await snIntakePanel(dealId);
+};
+
+window.snAssignDeveloper = async function snAssignDeveloper(projectId, dealId) {
+  const sel = document.getElementById('sn-dev');
+  if (!sel) return;
+  const r = await snSend('PUT', '/sitenex/projects/' + encodeURIComponent(projectId),
+    { assigned_to: sel.value || null });
+  if (!r.ok) { snToast(r.error, true); return; }
+  snToast(sel.value ? 'Assigned.' : 'Unassigned.');
+  await snIntakePanel(dealId);
+};
+
+window.snRegenerateBrief = async function snRegenerateBrief(dealId) {
+  snToast('Generating the brief…');
+  const r = await snSend('POST', '/sitenex/deals/' + encodeURIComponent(dealId) + '/brief');
+  if (!r.ok) { snToast(r.error, true); return; }
+  snToast('Brief generated.');
+  await snIntakePanel(dealId);
+};
+
+/* A bare href would 401: these bytes need the Authorization header, so the file is fetched and clicked
+   as a blob — the same arrangement as the contract download above. */
+window.snDownloadIntakeFile = async function snDownloadIntakeFile(id, fileName) {
+  try {
+    const res = await fetch('/api/sitenex/intake-files/' + encodeURIComponent(id),
+      { headers: { Authorization: 'Bearer ' + localStorage.getItem('token') } });
+    if (!res.ok) {
+      let msg = 'Download failed (' + res.status + ')';
+      try { const j = await res.json(); if (j && j.error) msg = j.error; } catch (e) {}
+      snToast(msg, true); return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fileName || ('intake-file-' + id);
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  } catch (e) { snToast('Download failed: ' + e.message, true); }
+};

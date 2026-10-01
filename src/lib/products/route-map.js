@@ -104,6 +104,17 @@
 const SHARED = [
   // app shell + infrastructure
   'GET /health', 'GET /sitemap.xml', 'GET *',
+  // THE CLIENT'S INTAKE PAGE, and the one route here that is PUBLIC rather than merely login-safe: a
+  // client holding an emailed link has no account at all. Classified explicitly because absence must
+  // never mean neutral, and 'shared' for the same reason POST /api/auth/login is — the page itself
+  // carries no data, and the token is checked on every API call the page makes.
+  //
+  // The /api/intake/* routes it calls are deliberately NOT in this map. They are mounted ABOVE this
+  // gate in server.js (they have to be — there is no req.user to resolve a product from), so a
+  // classification here would be a statement about routes the boundary never sees. What guards them is
+  // src/lib/sitenex/intake-mount.test.js, which asserts the mount order and that every path in that
+  // router begins with /intake.
+  'GET /intake',
   // authentication and own account
   'POST /api/auth/login', 'POST /api/auth/accept-invite', 'GET /api/auth/me', 'PUT /api/auth/password',
   'PUT /api/users/profile',

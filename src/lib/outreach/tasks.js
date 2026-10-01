@@ -27,6 +27,7 @@
 const { productScopeSql } = require('../products/held');
 const { partnerFragment } = require('./index');
 const { TERMINAL } = require('./registry');
+const { missingItems } = require('../sitenex/intake-required');
 
 // How long 'contacted' may sit before it is a thing to chase.
 //
@@ -140,7 +141,12 @@ async function outreachTasks({ held, partner, staleDays = STALE_DAYS } = {}, dep
       : { sql: 'FALSE', params: [] };
   const intake = (await q(deps)(
     `SELECT d.id, d.company_name, d.status, d.updated_at,
-            x.completed_at, x.fields, x.required
+            x.completed_at, x.fields, x.required,
+            -- WHICH REQUIRED ITEMS ARRIVED AS A FILE rather than as a typed answer. Without this, a
+            -- client who uploaded their logo is told the logo is still outstanding — see
+            -- src/lib/sitenex/intake-required.js, which this feeds.
+            COALESCE((SELECT array_agg(DISTINCT f.field) FROM sitenex_intake_files f
+                       WHERE f.deal_id = d.id AND f.field IS NOT NULL), '{}') AS uploaded_fields
        FROM sitenex_deals d
        LEFT JOIN sitenex_intake x ON x.deal_id = d.id
       WHERE ${dealScope.sql}
@@ -185,10 +191,11 @@ async function outreachTasks({ held, partner, staleDays = STALE_DAYS } = {}, dep
 // What is still missing, from the intake row's own `required` list. Named rather than counted, because
 // "3 items outstanding" sends somebody to another screen to find out which.
 function x_detail(d) {
-  const have = d.fields && typeof d.fields === 'object' ? d.fields : {};
   const need = Array.isArray(d.required) ? d.required : [];
-  const missing = need.filter(k => have[k] == null || have[k] === '' ||
-    (Array.isArray(have[k]) && !have[k].length));
+  // ONE definition of missing, shared with the client's page, the developer's task and the brief. An
+  // uploaded file counts as the item it was tagged with.
+  const missing = missingItems(need, d.fields,
+    (Array.isArray(d.uploaded_fields) ? d.uploaded_fields : []).map(f => ({ field: f })));
   if (!d.completed_at && !need.length) return 'Intake has not been started.';
   if (!missing.length) return 'Everything is in — mark the intake complete.';
   return `Still needed: ${missing.slice(0, 6).join(', ')}${missing.length > 6 ? ` and ${missing.length - 6} more` : ''}.`;

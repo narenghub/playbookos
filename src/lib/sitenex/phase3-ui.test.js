@@ -79,15 +79,44 @@ test('the download FETCHES with the Authorization header and clicks a blob ancho
     'a bare href to the file route would 401 — it must go through fetch');
 });
 
+// The DECLARED exceptions to "everything goes through snSend".
+//
+// A binary download cannot: snSend parses JSON, and these routes return bytes. So the rule is not "one
+// fetch" — counting them only worked while there was one exception — it is that EVERY raw fetch is named
+// here and EVERY raw fetch carries the Authorization header. Adding a third download means adding a line
+// to this list, which is a decision; forgetting the header is not possible without failing below.
+const RAW_FETCH_OK = [
+  'window.snDownloadContract',    // the .docx
+  'window.snDownloadIntakeFile',  // a client's upload
+];
+
 test('every write goes through one helper that carries the header', () => {
   // Rather than a fetch() per handler, each of which could forget it.
   const fetches = [...SRC.matchAll(/fetch\(/g)];
-  assert.equal(fetches.length, 2,
-    `expected exactly two fetch() calls — snSend and the download — found ${fetches.length}. ` +
-    'Every other write must go through snSend so the header cannot be forgotten.');
+  // snSend, plus one per declared binary download.
+  assert.equal(fetches.length, 1 + RAW_FETCH_OK.length,
+    `expected ${1 + RAW_FETCH_OK.length} fetch() calls — snSend plus the declared downloads ` +
+    `(${RAW_FETCH_OK.join(', ')}) — found ${fetches.length}. Every other write must go through snSend ` +
+    'so the header cannot be forgotten; a new binary download must be added to RAW_FETCH_OK in this test.');
   const send = between(SRC, 'async function snSend', 'function snToast');
   assert.match(send, /Authorization.*Bearer/s);
   assert.match(send, /'Content-Type': 'application\/json'/);
+});
+
+test('every declared raw fetch carries the Authorization header itself', () => {
+  // The point of naming them: an exception from snSend is an exception from the one place the header is
+  // guaranteed, so each one has to prove it sends the header on its own.
+  for (const name of RAW_FETCH_OK) {
+    const i = SRC.indexOf(name);
+    assert.notEqual(i, -1, `${name} is declared in RAW_FETCH_OK but no longer exists in the file`);
+    // The function body, to the next top-level window.* handler or the end of the file.
+    const next = SRC.indexOf('\nwindow.', i + name.length);
+    const body = SRC.slice(i, next === -1 ? SRC.length : next);
+    assert.match(body, /fetch\(/, `${name} is listed as a raw fetch but does not call fetch`);
+    assert.match(body, /Authorization.*Bearer/s, `${name} fetches without the Authorization header — it will 401`);
+    assert.match(body, /URL\.createObjectURL/, `${name} must click a blob anchor, not navigate`);
+    assert.match(body, /revokeObjectURL/, `${name} must release the object URL`);
+  }
 });
 
 // ── the structural rules ──────────────────────────────────────────────────────

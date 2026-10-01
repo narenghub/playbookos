@@ -949,6 +949,273 @@ router.get('/sitenex/prospects/:id/content', authMiddleware, requireTier('sitene
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ═══ (6) TOKENISED CLIENT INTAKE — the STAFF side ══════════════════════════════
+//
+// The client's side is src/api/sitenex-intake.routes.js, mounted above the gates with no authentication
+// at all. This is the other half: issuing a link, revoking one, reading what came back, and naming the
+// developer.
+//
+// ── WHO MAY ISSUE AND REVOKE: adminOnly ──────────────────────────────────────
+//
+// Issuing a link MINTS A CREDENTIAL that writes to our database without an account, so it is held to the
+// same bar as every other SiteNex write and NOT extended to partners. PARTNER_WRITABLE stays at exactly
+// one entry.
+//
+// Chosen rather than merely inherited. The alternative — the deal owner, who can be a partner — is
+// defensible, and if a partner is running their own client's intake they will need it. But it would take
+// the partner write allowlist from one route to two, and the second route would be the one that creates
+// bearer tokens: the worst possible candidate for a permission granted on the assumption that it can be
+// tightened later. Granting it afterwards is one line and an allowlist entry; discovering that partners
+// have been minting upload credentials for three months is not recoverable.
+const { newToken, expiryFrom, LIFETIME_DAYS, MAX_FILE_BYTES, MAX_DEAL_BYTES } =
+  require('../lib/sitenex/intake-token');
+const { completeIntake } = require('../lib/sitenex/intake-complete');
+const { generateBrief } = require('../lib/sitenex/intake-brief');
+
+const INTAKE_BASE = () => process.env.BASE_URL || 'https://playbook.abiozen.com';
+// The fragment is the point: a token after '#' is never sent to a server, so it is absent from access
+// logs and from Referer. public/intake.html reads it and sends it as X-Intake-Token.
+const intakeUrl = (token) => `${INTAKE_BASE()}/intake#${token}`;
+
+// The link WITHOUT the credential. Everything a register needs and nothing that grants access.
+const linkShape = (r) => r && ({
+  id: r.id, deal_id: r.deal_id, token_tail: r.token_tail,
+  expires_at: r.expires_at, revoked_at: r.revoked_at, created_at: r.created_at,
+  last_used_at: r.last_used_at, issued_by: r.issued_by, issued_by_name: r.issued_by_name || null,
+  request_count: r.request_count, bytes_uploaded: Number(r.bytes_uploaded || 0),
+  live: !r.revoked_at && new Date(r.expires_at).getTime() > Date.now(),
+});
+
+// ── POST /sitenex/deals/:id/intake-link — issue (and invalidate the previous) ──
+router.post('/sitenex/deals/:id/intake-link', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'bad deal id' });
+    // Partner-scoped even though this is adminOnly, because adminOnly admits an admin and the row scope
+    // is a separate question from the role.
+    const deal = await dealFor(req.user, id);
+    if (!deal) return res.status(404).json({ error: 'deal not found' });
+
+    const { token, hash, tail } = newToken();
+    const expires = expiryFrom(new Date(), LIFETIME_DAYS);
+
+    const link = await withTransaction(async (client) => {
+      // RE-ISSUING INVALIDATES THE PREVIOUS TOKEN, and in the same transaction as the insert — which is
+      // what makes the partial unique index (deal_id) WHERE revoked_at IS NULL satisfiable. If this
+      // UPDATE were a separate request the index would reject the insert, which is the correct failure
+      // and not one we want to rely on.
+      await client.query(
+        `UPDATE sitenex_intake_links SET revoked_at = NOW(), revoked_by = $2
+          WHERE deal_id = $1 AND revoked_at IS NULL`, [id, req.user.id]);
+      return (await client.query(
+        `INSERT INTO sitenex_intake_links (deal_id, token_hash, token_tail, expires_at, issued_by)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, deal_id, token_tail, expires_at, revoked_at, created_at, last_used_at,
+                   issued_by, request_count, bytes_uploaded`,
+        [id, hash, tail, expires, req.user.id])).rows[0];
+    });
+
+    // THE ONLY TIME THE TOKEN EXISTS OUTSIDE THE CLIENT'S EMAIL. It is not stored and cannot be read
+    // back — a second GET returns token_tail and nothing more. Said in the payload so the UI can say it
+    // too, because "copy this now" is only credible if the page explains why.
+    res.json({
+      link: linkShape(link),
+      url: intakeUrl(token),
+      token_shown_once: true,
+      note: `This link works for ${LIFETIME_DAYS} days and can be used as often as the client needs. ` +
+            `We do not store it, so it cannot be shown again — issue a new one if it is lost, which ` +
+            `switches the old one off.`,
+      limits: { per_file_mb: Math.round(MAX_FILE_BYTES / 1048576),
+                per_deal_mb: Math.round(MAX_DEAL_BYTES / 1048576), video: 'refused' },
+    });
+  } catch (e) {
+    // The partial unique index is the one failure worth naming, because its message would otherwise be
+    // an opaque constraint violation.
+    if (/uniq_sitenex_intake_link_live/.test(e.message || '')) {
+      return res.status(409).json({ error: 'a live link already exists for this deal and was not revoked — this is a bug, not a state you can fix from here' });
+    }
+    console.error('issue intake link:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── DELETE /sitenex/deals/:id/intake-link — revoke, immediately ───────────────
+router.delete('/sitenex/deals/:id/intake-link', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'bad deal id' });
+    const deal = await dealFor(req.user, id);
+    if (!deal) return res.status(404).json({ error: 'deal not found' });
+    // Revoked, never deleted: who issued a link and when is part of the record even after it is dead.
+    const r = await query(
+      `UPDATE sitenex_intake_links SET revoked_at = NOW(), revoked_by = $2
+        WHERE deal_id = $1 AND revoked_at IS NULL`, [id, req.user.id]);
+    res.json({ revoked: r.rowCount, message: r.rowCount ? 'The link no longer works.' : 'There was no live link.' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /sitenex/deals/:id/intake — the staff view ────────────────────────────
+//
+// requireTier, so a partner can see their own client's intake — and partner-scoped through dealFor, so
+// only their own. No token is returned from here by any path.
+router.get('/sitenex/deals/:id/intake', authMiddleware, requireTier('sitenex'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'bad deal id' });
+    const deal = await dealFor(req.user, id);
+    if (!deal) return res.status(404).json({ error: 'deal not found' });
+
+    const links = (await query(
+      `SELECT l.id, l.deal_id, l.token_tail, l.expires_at, l.revoked_at, l.created_at, l.last_used_at,
+              l.issued_by, u.name AS issued_by_name, l.request_count, l.bytes_uploaded
+         FROM sitenex_intake_links l LEFT JOIN users u ON u.id = l.issued_by
+        WHERE l.deal_id = $1 ORDER BY l.created_at DESC`, [id])).rows.map(linkShape);
+    const intake = (await query(
+      `SELECT fields, required, completed_at, nudge_count, last_nudge_at
+         FROM sitenex_intake WHERE deal_id = $1`, [id])).rows[0] || null;
+    const files = (await query(
+      `SELECT id, field, file_name, content_type, file_size, uploaded_at
+         FROM sitenex_intake_files WHERE deal_id = $1 ORDER BY uploaded_at`, [id])).rows;
+    const project = (await query(
+      `SELECT p.id, p.status, p.assigned_to, u.name AS assigned_to_name, p.target_launch, p.launched_at,
+              p.notes, p.brief, p.brief_model, p.brief_generated_at, p.brief_error
+         FROM sitenex_projects p LEFT JOIN users u ON u.id = p.assigned_to
+        WHERE p.deal_id = $1`, [id])).rows[0] || null;
+
+    const fields = (intake && intake.fields && typeof intake.fields === 'object') ? intake.fields : {};
+    const required = Array.isArray(intake && intake.required) ? intake.required : [];
+    const used = files.reduce((n, f) => n + Number(f.file_size || 0), 0);
+
+    // WHAT THIS CALLER MAY DO, decided server-side.
+    //
+    // The UI cannot work this out for itself: `currentUser` is script-scoped inside index.html's inline
+    // script and is NOT on window, so an external file reading window.currentUser gets undefined and
+    // every user falls into the same branch. Sending the capability is also the correct shape — the
+    // server already knows, and a client-side role check is a second copy of the rule that can drift
+    // from the middleware without anything failing.
+    const canManage = req.user.role === 'admin' || req.user.role === 'super_admin';
+
+    // Candidate developers, for the HUMAN assignment decision. Internal and active only — the same
+    // condition PUT /sitenex/projects/:id enforces, because an external account in daily_tasks is the
+    // thing item 4 exists to prevent. Only sent to somebody who can act on it.
+    const developers = canManage ? (await query(
+      `SELECT id, name, email, role FROM users WHERE is_active = 1 ORDER BY name`)).rows
+      .filter(u => !require('../lib/roles').isExternalRole(u.role))
+      .map(u => ({ id: u.id, name: u.name, role: u.role })) : [];
+
+    res.json({
+      can_manage: canManage,
+      developers,
+      deal: { id: deal.id, company_name: deal.company_name, status: deal.status },
+      live_link: links.find(l => l.live) || null,
+      links,
+      intake: intake ? { ...intake,
+        missing: require('../lib/sitenex/intake-required').missingItems(required, fields, files) } : null,
+      files: files.map(f => ({ ...f, file_size: Number(f.file_size) })),
+      quota: { used_bytes: used, limit_bytes: MAX_DEAL_BYTES,
+               remaining_bytes: Math.max(0, MAX_DEAL_BYTES - used) },
+      project,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET /sitenex/intake-files/:id — download one upload ───────────────────────
+//
+// Scoped through the DEAL, not by the file id: the join to the partner scope is what stops one partner
+// reading another's client's logo by guessing an integer.
+router.get('/sitenex/intake-files/:id', authMiddleware, requireTier('sitenex'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'bad id' });
+    const scope = await partnerScopeSql(req.user, 'd', 2);
+    const f = (await query(
+      `SELECT f.file_name, f.content_type, f.file_bytes, f.storage_key
+         FROM sitenex_intake_files f JOIN sitenex_deals d ON d.id = f.deal_id
+        WHERE f.id = $1 AND ${scope.sql}`, [id, ...scope.params])).rows[0];
+    if (!f) return res.status(404).json({ error: 'file not found' });
+    if (!f.file_bytes) return res.status(409).json({ error: 'this file is in object storage and the bucket is not wired up yet', storage_key: f.storage_key });
+    // ALWAYS an attachment and ALWAYS nosniff: these bytes came from an unauthenticated endpoint, and
+    // serving client-supplied content inline on our own origin is how a stored XSS gets its origin.
+    res.set('Content-Type', 'application/octet-stream');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.set('Content-Disposition', `attachment; filename="${String(f.file_name).replace(/[^\w.\- ]/g, '_')}"`);
+    res.send(f.file_bytes);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /sitenex/deals/:id/intake/complete — staff marks it done ─────────────
+router.post('/sitenex/deals/:id/intake/complete', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'bad deal id' });
+    const deal = await dealFor(req.user, id);
+    if (!deal) return res.status(404).json({ error: 'deal not found' });
+    const r = await withTransaction(async (client) =>
+      completeIntake((sql, params) => client.query(sql, params), { dealId: id, by: req.user.id }));
+    if (!r.ok) return res.status(400).json({ error: r.message });
+    if (!r.already) require('../lib/sitenex/intake-brief').fireBrief({ dealId: id, taskId: r.task_id });
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── PUT /sitenex/projects/:id — name the developer ────────────────────────────
+//
+// THE HUMAN DECISION, and the only way assigned_to is ever set. There is deliberately no algorithm
+// anywhere in this feature: capacity is the constraint, nothing in the database knows it, and a
+// round-robin would produce a confident wrong answer that somebody then has to undo.
+router.put('/sitenex/projects/:id', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'bad project id' });
+    const scope = await partnerScopeSql(req.user, 'd', 2);
+    const proj = (await query(
+      `SELECT p.id, p.deal_id FROM sitenex_projects p JOIN sitenex_deals d ON d.id = p.deal_id
+        WHERE p.id = $1 AND ${scope.sql}`, [id, ...scope.params])).rows[0];
+    if (!proj) return res.status(404).json({ error: 'project not found' });
+
+    const sets = [], params = [];
+    if ('assigned_to' in req.body) {
+      const to = req.body.assigned_to || null;
+      if (to) {
+        // An EXTERNAL account cannot be the developer. Not a formality: the task lands in daily_tasks,
+        // which the 8am agent scores and the coaching emails are written from, and item 4 exists
+        // precisely so that an external role is never in there.
+        const u = (await query(`SELECT id, role, is_active FROM users WHERE id = $1`, [to])).rows[0];
+        if (!u || !u.is_active) return res.status(400).json({ error: 'no such active user' });
+        if (require('../lib/roles').isExternalRole(u.role)) {
+          return res.status(400).json({ error: 'a developer must be an internal account — an external role would be put into the scored task list' });
+        }
+      }
+      params.push(to); sets.push(`assigned_to = $${params.length + 1}`);
+    }
+    for (const col of ['status', 'target_launch', 'notes']) {
+      if (col in req.body) { params.push(req.body[col] || null); sets.push(`${col} = $${params.length + 1}`); }
+    }
+    if (!sets.length) return res.status(400).json({ error: 'nothing to update' });
+    const row = (await query(
+      `UPDATE sitenex_projects SET ${sets.join(', ')} WHERE id = $1 RETURNING *`, [id, ...params])).rows[0];
+    res.json({ project: row });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST /sitenex/deals/:id/brief — regenerate, ON EXPLICIT REQUEST ONLY ──────
+//
+// The spend control for item 7 is this route's existence: one call happens automatically at completion,
+// and every further call is somebody pressing a button. Awaited here, unlike the automatic path, because
+// the person pressing it is waiting for the result and can be shown the error.
+router.post('/sitenex/deals/:id/brief', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id < 1) return res.status(400).json({ error: 'bad deal id' });
+    const deal = await dealFor(req.user, id);
+    if (!deal) return res.status(404).json({ error: 'deal not found' });
+    const r = await generateBrief({ dealId: id, force: true });
+    if (!r.ok) return res.status(502).json({ error: r.error });
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
 module.exports.DEAL_STATUSES = DEAL_STATUSES;
 module.exports.PAYMENT_TRIGGERS = PAYMENT_TRIGGERS;

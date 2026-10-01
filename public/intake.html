@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Send us your website materials</title>
+<!--
+  THE CLIENT'S PAGE. Standalone on purpose — index.html calls checkAuth and would bounce somebody with
+  no account to a login screen, and a client will never have an account.
+
+  THE TOKEN LIVES IN THE URL FRAGMENT. location.hash is never sent to a server, so the credential is
+  absent from Railway's access logs, from any proxy in front of us, and from the Referer header if the
+  client clicks a link on this page. It is read here and sent as the X-Intake-Token header; the API
+  accepts it ONLY from that header, because a path-based fallback would put it straight back into the
+  logs this arrangement exists to keep it out of.
+-->
+<style>
+  :root {
+    --bg:#f6f7f9; --card:#fff; --ink:#15181d; --muted:#6b7280; --line:#e3e6ea;
+    --accent:#1f6feb; --ok:#15803d; --bad:#b42318; --warn:#92400e;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:680px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; }
+  .card h2 { font-size:15px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 12px; }
+  label { display:block; font-weight:600; font-size:14px; margin:14px 0 4px; }
+  .hint { font-weight:400; color:var(--muted); font-size:13px; }
+  input[type=text], textarea { width:100%; padding:10px 12px; border:1px solid var(--line);
+    border-radius:8px; font:inherit; background:#fff; color:inherit; }
+  textarea { min-height:96px; resize:vertical; }
+  button { font:inherit; font-weight:600; padding:11px 18px; border-radius:8px; border:1px solid transparent;
+    background:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--ink); border-color:var(--line); }
+  button[disabled] { opacity:.55; cursor:default; }
+  .drop { border:2px dashed var(--line); border-radius:10px; padding:26px 16px; text-align:center;
+    color:var(--muted); background:#fcfcfd; }
+  .drop.over { border-color:var(--accent); background:#f0f6ff; color:var(--ink); }
+  ul.files { list-style:none; margin:12px 0 0; padding:0; }
+  ul.files li { display:flex; align-items:center; gap:10px; padding:8px 0; border-top:1px solid var(--line); font-size:14px; }
+  ul.files li span.nm { flex:1; word-break:break-word; }
+  ul.files li span.sz { color:var(--muted); font-size:13px; }
+  ul.files li button { background:none; border:none; color:var(--bad); font-size:13px; padding:4px 6px; }
+  .msg { padding:11px 14px; border-radius:8px; font-size:14px; margin:12px 0 0; }
+  .msg.err { background:#fff1f0; color:var(--bad); border:1px solid #ffd9d6; }
+  .msg.ok  { background:#f0fdf4; color:var(--ok);  border:1px solid #cdebd6; }
+  .msg.info{ background:#fffbeb; color:var(--warn);border:1px solid #fde8c3; }
+  .bar { height:6px; background:var(--line); border-radius:99px; overflow:hidden; margin-top:8px; }
+  .bar i { display:block; height:100%; background:var(--accent); width:0; transition:width .2s; }
+  .chip { display:inline-block; font-size:12px; padding:2px 8px; border-radius:99px; background:#eef1f5; color:var(--muted); }
+  .foot { color:var(--muted); font-size:13px; text-align:center; margin-top:28px; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#101215; --card:#181b20; --ink:#e8eaed; --muted:#9aa2ad; --line:#2a2f36; }
+    input[type=text], textarea { background:#13161a; }
+    .drop { background:#13161a; } button.ghost { background:#181b20; }
+    .msg.err{background:#2a1513;border-color:#4a211d} .msg.ok{background:#11201a;border-color:#1f3d2c}
+    .msg.info{background:#241d10;border-color:#463718} .chip{background:#23272e}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">Send us your website materials</h1>
+  <p class="sub" id="sub">Checking your link…</p>
+  <div id="app" hidden></div>
+  <div id="gate"></div>
+  <p class="foot">Adifice Technologies · SiteNex. Trouble with this page? Reply to the email that sent you here.</p>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── the credential ─────────────────────────────────────────────────────────
+  // Taken from the fragment and then REMOVED from the address bar, so it does not sit in the browser's
+  // history or in a screenshot of a shared screen. It stays in this closure for the session.
+  var TOKEN = (location.hash || '').replace(/^#/, '').trim();
+  if (TOKEN) {
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
+  }
+
+  var $ = function (id) { return document.getElementById(id); };
+  var state = null;
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c];
+    });
+  }
+  var mb = function (b) { return Math.round((b / 1048576) * 10) / 10; };
+  var kb = function (b) { return b < 1048576 ? Math.max(1, Math.round(b / 1024)) + ' KB' : mb(b) + ' MB'; };
+
+  // Every call carries the token in the header and nothing in the URL.
+  function api(method, path, body, isForm) {
+    var opt = { method: method, headers: { 'X-Intake-Token': TOKEN } };
+    if (isForm) { opt.body = body; }
+    else if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+    return fetch('/api/intake' + path, opt).then(function (r) {
+      return r.text().then(function (t) {
+        var j = {}; try { j = JSON.parse(t); } catch (e) {}
+        return { status: r.status, body: j };
+      });
+    });
+  }
+
+  function gate(cls, html) { $('gate').innerHTML = '<div class="msg ' + cls + '">' + html + '</div>'; }
+
+  function load() {
+    if (!TOKEN) {
+      $('sub').textContent = '';
+      return gate('err', '<strong>This link is incomplete.</strong><br>Please open the full link from our email — ' +
+        'copying only part of it will drop the code at the end.');
+    }
+    api('GET', '').then(function (r) {
+      if (r.status !== 200) {
+        $('sub').textContent = '';
+        return gate('err', esc(r.body.error || 'This link is not valid.'));
+      }
+      state = r.body;
+      render();
+    }).catch(function () {
+      $('sub').textContent = '';
+      gate('err', 'We could not reach our server. Please check your connection and reload.');
+    });
+  }
+
+  // Labels for the required items. A key we do not recognise is shown as itself rather than hidden —
+  // the package list is edited by hand and a missing label must never mean a missing question.
+  var LABELS = {
+    logo: ['Your logo', 'A PNG if you have one. If all you have is a photo of your sign, send that.'],
+    photos: ['Photos', 'Your premises, your team, your work. Real photos beat stock every time.'],
+    copy: ['About your business', 'A few sentences we can work from. Plain words are fine.'],
+    services: ['What you offer', 'List your services — one per line is perfect.'],
+    hours: ['Opening hours', ''],
+    contact: ['The phone and email to show on the site', ''],
+    address: ['The address to show on the site', ''],
+    social: ['Social pages', 'Facebook, Instagram, anything you want linked.'],
+    domain: ['Your domain name', 'If you already own one. If not, leave this and we will advise.'],
+    notes: ['Anything else', 'Sites you like, colours you hate, anything we should know.']
+  };
+  var TEXTAREA = { copy:1, services:1, notes:1, hours:1 };
+
+  function render() {
+    $('gate').innerHTML = '';
+    $('app').hidden = false;
+    var who = state.company_name ? esc(state.company_name) : 'your business';
+    $('title').textContent = 'Website materials for ' + (state.company_name || 'your business');
+
+    if (state.complete) {
+      $('sub').textContent = '';
+      $('app').innerHTML = '<div class="card"><div class="msg ok"><strong>All done — thank you.</strong><br>' +
+        'We have everything we need for ' + who + ' and your project is with our build team. ' +
+        'There is nothing more to do here.</div></div>';
+      return;
+    }
+
+    $('sub').innerHTML = 'Everything here is saved as you go, so you can close this page and come back. ' +
+      '<span class="chip">' + mb(state.quota.remaining_bytes) + ' MB of ' + mb(state.quota.limit_bytes) + ' MB left</span>';
+
+    var keys = (state.required && state.required.length) ? state.required : ['copy', 'services', 'logo', 'photos', 'notes'];
+    var textKeys = keys.filter(function (k) { return k !== 'logo' && k !== 'photos'; });
+
+    var h = '';
+    h += '<div class="card"><h2>Tell us about the business</h2><form id="f">';
+    textKeys.forEach(function (k) {
+      var L = LABELS[k] || [k, ''];
+      var v = state.fields && state.fields[k] != null ? state.fields[k] : '';
+      if (Array.isArray(v)) v = v.join('\n');
+      h += '<label for="fld-' + esc(k) + '">' + esc(L[0]) +
+           (L[1] ? ' <span class="hint">— ' + esc(L[1]) + '</span>' : '') + '</label>';
+      h += TEXTAREA[k]
+        ? '<textarea id="fld-' + esc(k) + '" data-k="' + esc(k) + '">' + esc(v) + '</textarea>'
+        : '<input type="text" id="fld-' + esc(k) + '" data-k="' + esc(k) + '" value="' + esc(v) + '">';
+    });
+    h += '<div style="margin-top:16px"><button type="submit" id="save">Save what I have written</button></div>';
+    h += '<div id="savemsg"></div></form></div>';
+
+    h += '<div class="card"><h2>Files</h2>';
+    h += '<div class="drop" id="drop"><strong>Choose files</strong> or drag them here<br>' +
+         '<span class="hint">Photos, your logo, PDFs and documents. Up to ' + mb(state.quota.per_file_bytes) +
+         ' MB each.<br>We cannot take video here — send us a link to it instead.</span><br><br>' +
+         '<button class="ghost" type="button" id="pick">Choose files</button>' +
+         '<input type="file" id="file" multiple hidden></div>';
+    h += '<div class="bar" id="bar" hidden><i></i></div><div id="upmsg"></div>';
+    h += '<ul class="files" id="list"></ul></div>';
+
+    h += '<div class="card"><h2>When you are ready</h2>' +
+         '<p class="hint" style="margin-top:0">Press this once you have sent everything. It tells our build team to ' +
+         'start, and it closes this page — so only press it when you are finished.</p>' +
+         (state.missing && state.missing.length
+            ? '<div class="msg info">Still outstanding: ' + esc(state.missing.join(', ')) +
+              '. You can finish anyway and we will ask about the rest.</div>' : '') +
+         '<div style="margin-top:14px"><button id="done">I have sent everything</button></div>' +
+         '<div id="donemsg"></div></div>';
+
+    $('app').innerHTML = h;
+    renderFiles();
+    wire();
+  }
+
+  function renderFiles() {
+    var ul = $('list'); if (!ul) return;
+    if (!state.files.length) { ul.innerHTML = '<li><span class="nm hint">Nothing sent yet.</span></li>'; return; }
+    ul.innerHTML = state.files.map(function (f) {
+      return '<li><span class="nm">' + esc(f.name) + '</span><span class="sz">' + kb(f.size) + '</span>' +
+             '<button type="button" data-del="' + f.id + '">Remove</button></li>';
+    }).join('');
+    Array.prototype.forEach.call(ul.querySelectorAll('[data-del]'), function (b) {
+      b.addEventListener('click', function () { del(b.getAttribute('data-del'), b); });
+    });
+  }
+
+  function wire() {
+    $('f').addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      var patch = {};
+      Array.prototype.forEach.call(document.querySelectorAll('[data-k]'), function (el) {
+        patch[el.getAttribute('data-k')] = el.value;
+      });
+      var b = $('save'); b.disabled = true; b.textContent = 'Saving…';
+      api('POST', '/fields', patch).then(function (r) {
+        b.disabled = false; b.textContent = 'Save what I have written';
+        if (r.status !== 200) return ($('savemsg').innerHTML = '<div class="msg err">' + esc(r.body.error || 'Could not save.') + '</div>');
+        $('savemsg').innerHTML = '<div class="msg ok">Saved.</div>';
+        if (r.body.company_name !== undefined) { state = r.body; renderFiles(); }
+        setTimeout(function () { var m = $('savemsg'); if (m) m.innerHTML = ''; }, 2500);
+      });
+    });
+
+    $('pick').addEventListener('click', function () { $('file').click(); });
+    $('file').addEventListener('change', function () { queue(this.files); this.value = ''; });
+
+    var d = $('drop');
+    ['dragenter', 'dragover'].forEach(function (e) {
+      d.addEventListener(e, function (ev) { ev.preventDefault(); d.classList.add('over'); });
+    });
+    ['dragleave', 'drop'].forEach(function (e) {
+      d.addEventListener(e, function (ev) { ev.preventDefault(); d.classList.remove('over'); });
+    });
+    d.addEventListener('drop', function (ev) {
+      if (ev.dataTransfer && ev.dataTransfer.files) queue(ev.dataTransfer.files);
+    });
+
+    // No window.confirm here — a native dialog on a page the client was emailed is exactly the shape
+    // that makes somebody close the tab. The copy on the button does the work instead.
+    $('done').addEventListener('click', function () {
+      var b = $('done'); b.disabled = true; b.textContent = 'Sending…';
+      api('POST', '/complete').then(function (r) {
+        if (r.status !== 200 || r.body.error) {
+          b.disabled = false; b.textContent = 'I have sent everything';
+          return ($('donemsg').innerHTML = '<div class="msg err">' + esc(r.body.error || 'Could not finish.') + '</div>');
+        }
+        state.complete = true; render();
+      });
+    });
+  }
+
+  // ONE AT A TIME, in sequence. Not for politeness: each upload is counted against a per-link rate
+  // limit, and firing eight in parallel is the surest way to make a client's own upload look like an
+  // attack. Sequential also means a refusal names the file it refused.
+  function queue(list) {
+    var files = Array.prototype.slice.call(list);
+    if (!files.length) return;
+    $('bar').hidden = false;
+    var i = 0, errs = [];
+    (function next() {
+      if (i >= files.length) {
+        $('bar').hidden = true; $('bar').querySelector('i').style.width = '0';
+        $('upmsg').innerHTML = errs.length
+          ? '<div class="msg err">' + errs.map(esc).join('<br>') + '</div>'
+          : '<div class="msg ok">' + files.length + (files.length === 1 ? ' file sent.' : ' files sent.') + '</div>';
+        return;
+      }
+      var f = files[i++];
+      $('bar').querySelector('i').style.width = Math.round((i / files.length) * 100) + '%';
+      var fd = new FormData(); fd.append('file', f, f.name);
+      api('POST', '/files', fd, true).then(function (r) {
+        if (r.status !== 200 || r.body.error) errs.push(f.name + ': ' + (r.body.error || 'upload failed'));
+        else if (r.body.company_name !== undefined) { state = r.body; renderFiles(); updateQuota(); }
+        next();
+      }).catch(function () { errs.push(f.name + ': upload failed'); next(); });
+    })();
+  }
+
+  function updateQuota() {
+    $('sub').innerHTML = 'Everything here is saved as you go, so you can close this page and come back. ' +
+      '<span class="chip">' + mb(state.quota.remaining_bytes) + ' MB of ' + mb(state.quota.limit_bytes) + ' MB left</span>';
+  }
+
+  function del(id, btn) {
+    btn.disabled = true; btn.textContent = '…';
+    api('DELETE', '/files/' + encodeURIComponent(id)).then(function (r) {
+      if (r.status !== 200) { btn.disabled = false; btn.textContent = 'Remove'; return; }
+      state = r.body; renderFiles(); updateQuota();
+    });
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>

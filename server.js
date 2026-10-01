@@ -125,6 +125,31 @@ app.get('/sitemap.xml', async (req, res) => {
   }
 });
 
+// ── TOKENISED CLIENT INTAKE — mounted HERE, above all three gates, on purpose ──
+//
+// This is the one unauthenticated write surface in the application: a client holding an emailed link
+// uploads their logo and copy against one deal, with no account. It MUST sit above the permissions
+// resolver, the permissions enforcer and the product boundary, because all three decide from req.user
+// and there is no req.user — the boundary would find /api/intake/* unclassifiable and fail it closed,
+// which is right for an authenticated route and a 403 for every client we send a link to.
+//
+// The token is the authorisation, and it is checked on every single request in that router. The order
+// of these four lines is therefore load-bearing, and src/lib/sitenex/intake-scope.test.js asserts it
+// by reading this file — along with the thing that would actually be catastrophic, which is somebody
+// declaring a path other than /intake/* inside that router and bypassing authentication entirely.
+app.use('/api', require('./src/api/sitenex-intake.routes'));
+
+// The client's page. A STANDALONE file, not the SPA: index.html calls checkAuth and would bounce a
+// client with no account to a login screen. Served here rather than relying on express.static so the
+// link can be BASE_URL/intake with no .html, and so the token can live in the URL FRAGMENT — which is
+// never sent to a server, keeping the credential out of access logs and Referer headers.
+app.get('/intake', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('X-Robots-Tag', 'noindex, nofollow');
+  res.sendFile(path.join(__dirname, 'public', 'intake.html'));
+});
+
 // Permission resolver SHADOW MODE — observes gate-vs-resolver disagreements after each
 // request finishes. Off by default (PERMISSIONS_SHADOW_ENABLED); when off it mounts no
 // middleware, so zero shadow code runs per request. Never enforces, never alters responses.
