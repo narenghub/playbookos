@@ -11,6 +11,10 @@
 const { query } = require('../src/lib/db');
 const outreach = require('../src/lib/outreach');
 const { STATUSES, CHANNELS } = require('../src/lib/outreach/registry');
+// WHOSE VIEW THIS IS. The module THROWS without it rather than defaulting, which is how it caught this
+// script: every read here is staff's, and saying so is one word per call against a partner seeing
+// another partner's notes.
+const OURS = { isStaff: true };
 
 let fail = 0, touched = [], dealIds = [];
 const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
@@ -68,7 +72,7 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     check('an institution takes its product from the registry', e.row.product, 'abiozen');
 
     console.log('\n2. THE EVENT LOG answers the question status cannot');
-    const act = await outreach.activity({ held: STAFF, sinceDays: 1 });
+    const act = await outreach.activity({ held: STAFF, partner: OURS, sinceDays: 1 });
     const V = act.people.find(p => p.user_id === vin.id);
     const N = act.people.find(p => p.user_id === nar.id);
     check(`${vin.email}: 3 changes`, V && V.total, 3);
@@ -81,7 +85,7 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
 
     console.log('\n3. THE SUMMARY BAR adds the implicit new');
     const total = (await query(`SELECT COUNT(*)::int n FROM prospects WHERE product='golfnex'`)).rows[0].n;
-    const s = await outreach.summary('prospect', { held: STAFF, totalEntities: total, product: 'golfnex' });
+    const s = await outreach.summary('prospect', { held: STAFF, partner: OURS, totalEntities: total, product: 'golfnex' });
     check('golfnex: 1 contacted', s.counts.contacted, 1);
     check('golfnex: 1 quote_sent', s.counts.quote_sent, 1);
     // The bar has to read as a funnel, so the ORDER is part of the contract, not a presentation detail.
@@ -91,12 +95,12 @@ const check = (l, a, e) => { const ok = JSON.stringify(a) === JSON.stringify(e);
     check('every row is accounted for', Object.values(s.counts).reduce((x, y) => x + y, 0), total);
 
     console.log('\n4. SCOPING — inherited, not reinvented');
-    const gnOnly = await outreach.statusFor('prospect', [gn[0].id, sx[0].id], ['golfnex']);
+    const gnOnly = await outreach.statusFor('prospect', [gn[0].id, sx[0].id], ['golfnex'], OURS);
     check('a golfnex-only holder cannot see the sitenex row', Object.keys(gnOnly), [String(gn[0].id)]);
     const refused = await outreach.setStatus({ entityType: 'prospect', entityId: sx[0].id, status: 'contacted',
       user: vin, held: ['golfnex'] });
     check('and cannot write to it either', refused.code, 'product_not_held');
-    const actScoped = await outreach.activity({ held: ['golfnex'], sinceDays: 1 });
+    const actScoped = await outreach.activity({ held: ['golfnex'], partner: OURS, sinceDays: 1 });
     check('activity is scoped too', actScoped.people.reduce((x, p) => x + p.total, 0), 3);
 
     console.log('\n5. prospects.status UNTOUCHED — it is qualification, not outreach');

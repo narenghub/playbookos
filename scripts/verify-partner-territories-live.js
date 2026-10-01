@@ -46,7 +46,11 @@ const ck = (l,a,e) => { const ok = JSON.stringify(a)===JSON.stringify(e); if(!ok
     ck('reachable', before.status, 200);
     ck('  and EMPTY — no territory means nothing, never everything', before.body.total, 0);
     ck('  and it says why', /no territory yet/.test(before.body.scope_note||''), true);
-    ck('  outreach is reported unusable, so the screen draws no dead control', before.body.can_track_outreach, false);
+    // TRUE since 2026-10-01: outreach is partner-scoped now, so a partner records their own calls and
+    // outreach.partner_id keeps A's out of B's sight. This asserted FALSE while outreach was staffOnly, and the
+    // flag survives rather than being deleted — it is the server's answer to "may this caller use outreach",
+    // and the screen already asks.
+    ck('  outreach is reported usable now that it is partner-scoped', before.body.can_track_outreach, true);
 
     console.log('\n2. GRANT a real region, from real data');
     const region = (await query(`SELECT region, COUNT(*)::int n FROM prospects
