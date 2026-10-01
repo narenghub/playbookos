@@ -40,6 +40,12 @@ const { partnerScopeSql } = require('../lib/products/partner-scope');
 const { packageLabel } = require('../lib/agents/prospecting/findings-text');
 const { renderContract, checkRenderable } = require('../lib/sitenex/contract-render');
 const { callContent, emailContent } = require('../lib/sitenex/outreach-content');
+const { contractEmail, contractFrom } = require('../lib/sitenex/contract-email');
+// Deliberately NOT destructured at module load. Resolved at call time so a test can replace it — and
+// more to the point, so a test CANNOT FAIL TO replace it: a destructured reference is captured when this
+// file is required, before any test runs, and would then send a real email to whatever address the fixture
+// happened to carry if RESEND_API_KEY is present in the environment.
+const mailer = () => require('../lib/mailer');
 
 const router = express.Router();
 
@@ -432,6 +438,145 @@ router.get('/sitenex/contracts/:id/file', authMiddleware, requireTier('sitenex')
     res.setHeader('Content-Disposition', `attachment; filename="${row.file_name}"`);
     res.setHeader('Content-Length', String(row.file_size));
     res.send(row.file_bytes);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GET the send preview ──────────────────────────────────────────────────────
+//
+// So the button can SHOW THE ADDRESS BEFORE IT IS CLICKED. A contract sent to the wrong address cannot be
+// unsent, and an address the user never saw is one they cannot check. The recipient is read from the
+// contract's own snapshot, which is also what the send will use — so what is displayed is what will
+// happen, not an independent guess that could disagree.
+router.get('/sitenex/contracts/:id/send', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const scope = await partnerScopeSql(req.user, 'c', 2);
+    const c = (await query(
+      `SELECT c.id, c.contract_no, c.client_company, c.client_contact, c.client_email, c.partner_email,
+              c.package_name, c.package_code, c.value_cents, c.monthly_cents, c.status, c.sent_at,
+              c.file_name, c.file_size
+         FROM sitenex_contracts c WHERE c.id = $1 AND ${scope.sql}`, [req.params.id, ...scope.params])).rows[0];
+    if (!c) return res.status(404).json({ error: 'Contract not found' });
+    const mail = contractEmail(c);
+    const sends = (await query(
+      `SELECT to_email, cc_email, status, provider_id, sent_at, error
+         FROM sitenex_contract_sends WHERE contract_id = $1 ORDER BY id DESC LIMIT 10`, [c.id])).rows;
+    res.json({
+      contract_no: c.contract_no,
+      to: c.client_email || null,
+      cc: c.partner_email || null,
+      from: contractFrom(),
+      subject: mail.subject,
+      price: mail.price,
+      file_name: c.file_name,
+      file_size: c.file_size,
+      status: c.status,
+      sent_at: c.sent_at,
+      // Refusals the client should learn about BEFORE clicking, not as an error after.
+      can_send: !!c.client_email && c.status !== 'superseded' && c.status !== 'void',
+      blocked_because: !c.client_email ? 'this contract has no client email address on it'
+        : (c.status === 'superseded' ? 'this contract has been superseded by a newer one'
+        : (c.status === 'void' ? 'this contract is void' : null)),
+      previous_sends: sends,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── POST the send ─────────────────────────────────────────────────────────────
+//
+// SEPARATE FROM GENERATE, and never automatic. Generating a document is reversible — regenerate and the
+// old one is superseded. Sending one is not: a wrong address or a wrong price has reached a real business
+// and cannot be recalled. So the two are different buttons, different routes, and this one requires the
+// caller to echo back the address it is about to send to.
+//
+// ── THE ORDER OF OPERATIONS, which is the whole difficulty ─────────────────────
+//
+// The email cannot be inside the database transaction: an HTTP call to Resend is not rollback-able, so a
+// COMMIT that failed after a successful send would leave a contract in the client's inbox and no record
+// of it here. And the reverse order is worse: marking it 'sent' first and then failing to send claims
+// something that did not happen.
+//
+// So: send FIRST, then record, and record EVERY outcome including the failure. If the DB write after a
+// successful send fails, the send log insert is attempted on its own and the response says plainly that
+// the email went but the status did not move — a visible inconsistency beats a silent one. The status
+// move and the sent_at stamp ARE in one transaction with each other, so the register can never hold a
+// 'sent' contract with no time or a time with no status.
+router.post('/sitenex/contracts/:id/send', authMiddleware, adminOnly, requireTier('sitenex'), async (req, res) => {
+  try {
+    const scope = await partnerScopeSql(req.user, 'c', 2);
+    const c = (await query(
+      `SELECT c.id, c.contract_no, c.client_company, c.client_contact, c.client_email, c.partner_email,
+              c.package_name, c.package_code, c.value_cents, c.monthly_cents, c.status,
+              c.file_name, c.file_size, c.file_bytes
+         FROM sitenex_contracts c WHERE c.id = $1 AND ${scope.sql}`, [req.params.id, ...scope.params])).rows[0];
+    if (!c) return res.status(404).json({ error: 'Contract not found' });
+
+    if (!c.client_email) {
+      return res.status(400).json({ code: 'no_recipient',
+        error: 'This contract has no client email address on it. It is snapshot at generation time, so add '
+             + 'the address to the deal and regenerate — editing the deal alone will not change this document.' });
+    }
+    if (c.status === 'superseded' || c.status === 'void') {
+      return res.status(400).json({ code: 'not_current',
+        error: `This contract is ${c.status}. Send the current one instead — a client receiving a superseded `
+             + 'document has no way to know it is not the agreement.' });
+    }
+    // THE CONFIRMATION, server-side. The UI asks too, but a confirm() dialog is not a safeguard: it lives
+    // in the client and is one devtools line away. Requiring the address to be echoed back means a request
+    // built by anything other than the screen that displayed it cannot send to an address nobody saw.
+    const confirmTo = String((req.body || {}).confirm_to || '').trim().toLowerCase();
+    if (confirmTo !== String(c.client_email).trim().toLowerCase()) {
+      return res.status(400).json({ code: 'confirm_mismatch', to: c.client_email,
+        error: `Confirm the recipient: this would send to ${c.client_email}. Re-send the request with `
+             + 'confirm_to set to exactly that address.' });
+    }
+    if (!c.file_bytes || !c.file_bytes.length) {
+      return res.status(500).json({ code: 'no_document', error: 'the stored document is empty — regenerate it' });
+    }
+
+    const mail = contractEmail(c);
+    const from = contractFrom();
+    const to = c.client_email;
+    const cc = c.partner_email || null;
+
+    const sent = await mailer().sendEmailDetailed({
+      to, cc, from, replyTo: from, subject: mail.subject, html: mail.html,
+      attachments: [{ filename: c.file_name || `${c.contract_no}.docx`, content: c.file_bytes }],
+    });
+
+    // Logged either way, BEFORE the status move, so a failure is recorded even if nothing else changes.
+    const logSend = async (q, status) => (await q(
+      `INSERT INTO sitenex_contract_sends
+         (contract_id, contract_no, to_email, cc_email, from_email, subject, file_name, file_size,
+          status, provider_id, error, sent_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, sent_at`,
+      [c.id, c.contract_no, to, cc, from, mail.subject, c.file_name, c.file_size,
+       status, sent.id || null, sent.ok ? null : String(sent.error || 'unknown'), req.user.id])).rows[0];
+
+    if (!sent.ok) {
+      await logSend(query, 'failed').catch(() => {});
+      return res.status(502).json({ code: 'send_failed', error: sent.error || 'the provider refused the send',
+        to, note: 'Nothing was marked sent. The attempt is in the send log.' });
+    }
+
+    let row, logged;
+    try {
+      await withTransaction(async (tx) => {
+        logged = await logSend(tx.query, 'sent');
+        // ONE transaction for the status and the stamp, so 'sent' with no time cannot exist.
+        row = (await tx.query(
+          `UPDATE sitenex_contracts SET status = 'sent', sent_at = NOW()
+            WHERE id = $1 RETURNING id, contract_no, status, sent_at`, [c.id])).rows[0];
+      });
+    } catch (e) {
+      // The email HAS gone. Say so loudly rather than returning an error that reads as "it did not send".
+      return res.status(500).json({ code: 'sent_but_not_recorded', sent: true, to, provider_id: sent.id,
+        error: `The email WAS sent to ${to} (provider id ${sent.id}), but recording it failed: ${e.message}. `
+             + `The contract is still showing as '${c.status}' — set it to 'sent' by hand and tell somebody.` });
+    }
+
+    res.json({ ok: true, to, cc, from, subject: mail.subject, provider_id: sent.id,
+      contract: row, send_id: logged && logged.id,
+      note: `Sent to ${to}${cc ? ` (cc ${cc})` : ''}. Marked sent.` });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

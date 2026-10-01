@@ -36,6 +36,20 @@ const SRC = fs.readFileSync(FILE, 'utf8');
 const CODE = SRC.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
                 .replace(/(^|[^:'"\\])\/\/[^\n]*/g, (m, p1) => p1 + ' '.repeat(m.length - p1.length));
 
+// Every slice goes through this. A hand-written slice(indexOf(a), indexOf(b)) returns '' when b appears
+// BEFORE a, and every assertion over the result then passes or fails for a reason unrelated to the code —
+// which it did here: snTotalsCard is defined after the function being sliced, so "it asks the server"
+// failed while the request was plainly on the line below. Same fix as ui-wiring.test.js.
+function between(hay, startNeedle, endNeedle) {
+  const a = hay.indexOf(startNeedle);
+  assert.notEqual(a, -1, `not found: ${startNeedle}`);
+  const b = endNeedle ? hay.indexOf(endNeedle, a + startNeedle.length) : hay.length;
+  assert.notEqual(b, -1, `not found after ${startNeedle}: ${endNeedle}`);
+  const out = hay.slice(a, b);
+  assert.ok(out.length > 0, `empty slice between ${startNeedle} and ${endNeedle}`);
+  return out;
+}
+
 test('it parses — a dead page is better than a dead app, but neither is acceptable', () => {
   // Checked the same way scripts/check-spa-parse.js checks the inline blocks.
   new (require('vm').Script)(SRC, { filename: 'sitenex-phase3.js' });
@@ -54,7 +68,7 @@ test('it is loaded AFTER the inline script, so `pages` exists when it runs', () 
 // ── the download ──────────────────────────────────────────────────────────────
 
 test('the download FETCHES with the Authorization header and clicks a blob anchor', () => {
-  const fn = SRC.slice(SRC.indexOf('window.snDownloadContract'), SRC.indexOf('/* ── the contracts register'));
+  const fn = between(SRC, 'window.snDownloadContract', '/* ── emailing a contract');
   assert.ok(fn.length > 200, 'snDownloadContract must be findable');
   assert.match(fn, /Authorization.*Bearer/s, 'without the header the request is a 401');
   assert.match(fn, /URL\.createObjectURL/, 'the bytes become a blob');
@@ -71,7 +85,7 @@ test('every write goes through one helper that carries the header', () => {
   assert.equal(fetches.length, 2,
     `expected exactly two fetch() calls — snSend and the download — found ${fetches.length}. ` +
     'Every other write must go through snSend so the header cannot be forgotten.');
-  const send = SRC.slice(SRC.indexOf('async function snSend'), SRC.indexOf('function snToast'));
+  const send = between(SRC, 'async function snSend', 'function snToast');
   assert.match(send, /Authorization.*Bearer/s);
   assert.match(send, /'Content-Type': 'application\/json'/);
 });
@@ -144,7 +158,7 @@ test('the email panel says there is no send button, because somebody will look f
 });
 
 test('a blank money field clears the value rather than becoming $0', () => {
-  const save = SRC.slice(SRC.indexOf('window.snSaveDeal'), SRC.indexOf('function snParseSchedule'));
+  const save = between(SRC, 'window.snSaveDeal', 'function snParseSchedule');
   assert.match(save, /raw === ''\s*\?\s*null/, "'' must mean clear, not zero");
 });
 
@@ -173,4 +187,78 @@ test('the schedule parser rejects a bad line instead of guessing', () => {
   const mixed = p('Good | 100\nBad');
   assert.equal(mixed.rows.length, 1);
   assert.equal(mixed.bad.length, 1);
+});
+
+// ── THE EMAIL BUTTON ──────────────────────────────────────────────────────────
+//
+// The one irreversible control in these screens, so what is asserted is the three properties that make it
+// safe: it is a SEPARATE button, the address is on screen BEFORE the click, and the confirmation NAMES the
+// address.
+
+test('Email to client is a SEPARATE button from Generate, and never automatic', () => {
+  assert.match(CODE, /Email to client/, 'the button must exist');
+  assert.match(CODE, /onclick="snEmailContract\(/, 'with its own handler');
+  // The generate handler must not send. Two buttons, two routes, two decisions.
+  const gen = between(CODE, 'window.snGenerateContract', 'const SN_DEAL_FIELDS');
+  assert.ok(!/snEmailContract|contracts\/.*\/send/.test(gen), 'generating must not trigger a send');
+  // And nothing calls the send handler on load.
+  assert.ok(!/snEmailContract\(\s*\)/.test(CODE), 'the send handler is never invoked without an id');
+});
+
+test('the RECIPIENT is rendered beside the button, before anything is clicked', () => {
+  // A tooltip would not count: nobody hovers before pressing a button they already meant to press.
+  assert.match(CODE, /function snSendLine/, 'there must be a line that states the recipient');
+  const line = between(CODE, 'function snSendLine', 'window.snEmailContract');
+  assert.match(line, /Will email/, 'it says what will happen, in words');
+  assert.match(line, /pv\.to/, 'and names the address');
+  assert.match(line, /pv\.cc/, 'and the cc');
+  assert.match(line, /pv\.price/, 'and the price the note will state — a wrong price cannot be unsent either');
+  // It is actually placed in the DOM for each row, on both screens.
+  assert.ok((CODE.match(/id="sn-to-'/g) || []).length >= 2, 'a slot per row, on the register and the deal page');
+  assert.match(CODE, /snFillRecipients/, 'and something fills them');
+});
+
+test('the preview is read from the SERVER, not assembled in the browser', () => {
+  // What is displayed must be what will be sent. A client-side guess at the recipient could disagree with
+  // the snapshot the server will actually use, and then the address shown is not the address used.
+  const fill = between(CODE, 'async function snFillRecipients', 'window.snSetContractStatus');
+  assert.match(fill, /\/sitenex\/contracts\/.*\/send/, 'it asks the server');
+  // A failed preview says so rather than leaving a blank, which would read as "no recipient needed".
+  assert.match(fill, /could not read the recipient/);
+});
+
+test('the confirmation NAMES the address, the price and the attachment', () => {
+  const fn = between(CODE, 'window.snEmailContract', 'function snTotalsCard');
+  assert.match(fn, /confirm\(/, 'it must block on a confirmation');
+  assert.match(fn, /d\.to/, 'the address goes in the prompt');
+  assert.match(fn, /d\.from/);
+  assert.match(fn, /d\.price/);
+  assert.match(fn, /d\.file_name/);
+  assert.match(fn, /cannot be unsent/, 'and it says what is at stake');
+  // A repeat send is a different decision from a first one.
+  assert.match(fn, /ALREADY been emailed/);
+  // The server is still asked to confirm independently — the dialog is a courtesy, not the safeguard.
+  assert.match(fn, /confirm_to: d\.to/);
+});
+
+test('"sent but not recorded" must NOT read as a failure', () => {
+  // If it did, somebody would press the button again and a second copy would reach the client.
+  const fn = between(CODE, 'window.snEmailContract', 'function snTotalsCard');
+  assert.match(fn, /sent_but_not_recorded/, 'the case must be handled explicitly');
+  const branch = fn.slice(fn.indexOf('sent_but_not_recorded'));
+  assert.match(branch.slice(0, 400), /return/, 'and it must stop, not fall through to a generic error');
+});
+
+test('a superseded contract offers no Email button', () => {
+  // A client receiving a superseded document has no way to know it is not the agreement.
+  const row = between(CODE, 'function snContractRow', 'async function snContractsPage');
+  assert.match(row, /dead \? ''/, 'the button is omitted for a dead contract');
+  assert.match(row, /const dead = c\.status === 'superseded' \|\| c\.status === 'void'/);
+});
+
+test('the sender is the AUTHORIZED domain, and it is not hardcoded in the UI', () => {
+  // abiozen.com 403s on this Resend key. The address belongs server-side, where the one place that knows
+  // which domain works can own it — a copy in the UI would be a second thing to change.
+  assert.ok(!/adificetechnologies|abiozen/.test(CODE),
+    'the UI must not name a sender domain; it displays what the server reports');
 });

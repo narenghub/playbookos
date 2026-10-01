@@ -126,3 +126,85 @@ test('cleanup: the real fetch is restored', () => {
   global.fetch = realFetch;
   assert.equal(typeof global.fetch, 'function');
 });
+
+// ── ATTACHMENTS, and the detailed result ──────────────────────────────────────
+
+test('attachments: a Buffer is base64-encoded for the raw API', () => {
+  const { encodeAttachments } = require('./mailer');
+  const buf = Buffer.from('PK\x03\x04 pretend docx');
+  const r = encodeAttachments([{ filename: 'c.docx', content: buf }]);
+  assert.equal(r.ok, true);
+  assert.equal(r.list.length, 1);
+  assert.equal(r.list[0].filename, 'c.docx');
+  // THE BUG THIS PREVENTS: Resend's SDK takes a Buffer, the raw JSON endpoint does not. Passing one
+  // through JSON.stringify yields {"0":80,"1":75,...}, which arrives as a file that will not open.
+  assert.equal(typeof r.list[0].content, 'string');
+  assert.equal(Buffer.from(r.list[0].content, 'base64').toString(), buf.toString(), 'round trips exactly');
+});
+
+test('attachments: a base64 string is passed through unchanged, not double-encoded', () => {
+  const { encodeAttachments } = require('./mailer');
+  const b64 = Buffer.from('hello').toString('base64');
+  const r = encodeAttachments([{ filename: 'a.txt', content: b64 }]);
+  assert.equal(r.list[0].content, b64, 'double-encoding would arrive as the literal base64 text');
+});
+
+test('attachments: the shapes that are refused', () => {
+  const { encodeAttachments, MAX_ATTACH_BYTES } = require('./mailer');
+  assert.deepEqual(encodeAttachments(undefined), { ok: true, list: null }, 'no attachments is fine');
+  assert.equal(encodeAttachments('nope').ok, false);
+  assert.match(encodeAttachments([{ content: Buffer.from('x') }]).error, /needs a filename/);
+  assert.match(encodeAttachments([{ filename: 'a' }]).error, /needs a filename and content/);
+  assert.match(encodeAttachments([{ filename: 'a', content: Buffer.alloc(0) }]).error, /is empty/,
+    'an empty attachment means a client receives a 0-byte file');
+  const big = encodeAttachments([{ filename: 'big', content: Buffer.alloc(MAX_ATTACH_BYTES + 1) }]);
+  assert.equal(big.ok, false);
+  assert.match(big.error, /over the \d+ MB limit/, 'refused here, because the provider error arrives after the upload');
+});
+
+test('attachments reach the request body, base64, under `attachments`', async () => {
+  const { sendEmailDetailed } = require('./mailer');
+  let sentBody = null;
+  const realFetch = global.fetch;
+  global.fetch = async (url, opts) => { sentBody = JSON.parse(opts.body); return { json: async () => ({ id: 'msg_1' }) }; };
+  try {
+    const r = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h',
+      attachments: [{ filename: 'SN-2026-0001.docx', content: Buffer.from('PK\x03\x04x') }] });
+    assert.equal(r.ok, true);
+    assert.equal(r.id, 'msg_1', 'the provider id is returned, so a caller can prove what it sent');
+    assert.equal(sentBody.attachments.length, 1);
+    assert.equal(sentBody.attachments[0].filename, 'SN-2026-0001.docx');
+    assert.equal(Buffer.from(sentBody.attachments[0].content, 'base64').toString(), 'PK\x03\x04x');
+  } finally { global.fetch = realFetch; }
+});
+
+test('sendEmail KEEPS its boolean contract — 55 callers depend on it', async () => {
+  // Returning an object instead would make every `if (await sendEmail(...))` unconditionally true and
+  // every failure path in the codebase go quiet, which is the exact shape of the eight-week outage this
+  // file documents. So the detailed result is a SECOND function.
+  const { sendEmail, sendEmailDetailed } = require('./mailer');
+  const realFetch = global.fetch;
+  global.fetch = async () => ({ json: async () => ({ id: 'msg_2' }) });
+  try {
+    assert.strictEqual(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h' }), true);
+  } finally { global.fetch = realFetch; }
+  global.fetch = async () => ({ json: async () => ({ message: 'nope' }) });
+  try {
+    assert.strictEqual(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h' }), false);
+    const d = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h' });
+    assert.deepEqual([d.ok, d.id, d.error], [false, null, 'nope']);
+  } finally { global.fetch = realFetch; }
+});
+
+test('a refused attachment is logged and sends NOTHING', async () => {
+  const { sendEmailDetailed } = require('./mailer');
+  const realFetch = global.fetch;
+  let called = false;
+  global.fetch = async () => { called = true; return { json: async () => ({ id: 'x' }) }; };
+  try {
+    const r = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h',
+      attachments: [{ filename: 'empty.docx', content: Buffer.alloc(0) }] });
+    assert.equal(r.ok, false);
+    assert.equal(called, false, 'the request must not be made at all');
+  } finally { global.fetch = realFetch; }
+});

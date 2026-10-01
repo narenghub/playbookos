@@ -99,6 +99,83 @@ window.snDownloadContract = async function snDownloadContract(id, fileName) {
   }
 };
 
+/* ── emailing a contract to the client ─────────────────────────────────────────
+ *
+ * A SEPARATE BUTTON FROM GENERATE, never automatic, and THE ADDRESS IS ON SCREEN BEFORE IT IS CLICKED.
+ * Generating is reversible — regenerate and the old one is superseded. Sending is not: a wrong address or
+ * a wrong price has reached a real business and cannot be recalled.
+ *
+ * So the flow is: fetch the preview (which the server builds from the contract's own snapshot, so what is
+ * shown is what will be sent), render the recipient beside the button, and on click confirm with the
+ * address IN THE PROMPT. The confirm() is a courtesy, not the safeguard — the server independently
+ * requires the address to be echoed back, because a dialog in the browser is one devtools line away.
+ */
+
+/* Drawn next to the button so the address is visible without any interaction at all. A tooltip would not
+   count: nobody hovers before clicking a button they already intended to press. */
+function snSendLine(pv) {
+  if (!pv) return '';
+  if (pv.sent_at) {
+    return '<div style="font-size:11px;color:var(--text-muted)">Sent ' + snEsc(snDate(pv.sent_at))
+         + ' to <strong>' + snEsc(pv.to) + '</strong>'
+         + (pv.cc ? ' (cc ' + snEsc(pv.cc) + ')' : '') + '</div>';
+  }
+  if (!pv.can_send) {
+    return '<div style="font-size:11px;color:#8a1f1f">Cannot email: ' + snEsc(pv.blocked_because) + '</div>';
+  }
+  return '<div style="font-size:11px;color:var(--text-muted)">Will email <strong>' + snEsc(pv.to) + '</strong>'
+       + (pv.cc ? ' and cc <strong>' + snEsc(pv.cc) + '</strong>' : '')
+       + ' from ' + snEsc(pv.from) + '</div>'
+       + (pv.price ? '<div style="font-size:11px;color:var(--text-muted)">The note will state: ' + snEsc(pv.price) + '</div>'
+                   : '<div style="font-size:11px;color:#8a1f1f">No price on this contract — the note will say the '
+                     + 'terms are in the document</div>');
+}
+
+window.snEmailContract = async function snEmailContract(id) {
+  snToast('Checking who this would go to…');
+  const pv = await snGet('/sitenex/contracts/' + encodeURIComponent(id) + '/send');
+  if (!pv.ok) { snToast(pv.error, true); return; }
+  const d = pv.data;
+  if (!d.can_send) { snToast('Cannot email this contract: ' + d.blocked_because, true); return; }
+
+  /* THE ADDRESS IS IN THE PROMPT. "Send this contract?" is a question somebody answers yes to without
+     reading; naming the recipient and the price is the only version that can be checked. The previous-send
+     count is included because a second copy to the same client needs a different decision from a first. */
+  const already = (d.previous_sends || []).filter(x => x.status === 'sent').length;
+  const lines = [
+    'Email contract ' + d.contract_no + ' to:',
+    '',
+    '    ' + d.to,
+    d.cc ? '    cc ' + d.cc : null,
+    '',
+    'From: ' + d.from,
+    'Price stated in the note: ' + (d.price || '(none — the note will point at the document)'),
+    'Attachment: ' + d.file_name,
+    already ? '\nThis contract has ALREADY been emailed ' + already + ' time(s).' : null,
+    '',
+    'A contract sent to the wrong address cannot be unsent.',
+  ].filter(x => x !== null).join('\n');
+
+  /* confirm() blocks the page, which is the point here: this is the one action in these screens that
+     cannot be undone, so it should not be possible to click past it by accident. */
+  if (!confirm(lines)) { snToast('Not sent.'); return; }
+
+  snToast('Sending…');
+  const r = await snSend('POST', '/sitenex/contracts/' + encodeURIComponent(id) + '/send', { confirm_to: d.to });
+  if (!r.ok) {
+    const body = r.data || {};
+    if (body.code === 'sent_but_not_recorded') {
+      /* The email HAS gone. This must not read as "it failed", or somebody will press it again. */
+      snToast(body.error, true);
+      return;
+    }
+    snToast(body.error || r.error, true);
+    return;
+  }
+  snToast(r.data.note + ' (provider id ' + r.data.provider_id + ')');
+  if (typeof pages !== 'undefined' && pages['sitenex-contracts']) await pages['sitenex-contracts']();
+};
+
 /* ── the contracts register ────────────────────────────────────────────────────  */
 
 function snTotalsCard(t) {
@@ -146,9 +223,16 @@ function snContractRow(c) {
       + '</td>'
     + '<td style="padding:6px 8px;font-size:11px;color:var(--text-muted)">' + snDate(c.created_at) + '</td>'
     + '<td style="padding:6px 8px;font-size:11px;color:var(--text-muted)">' + snEsc(c.template_version || '') + '</td>'
-    + '<td style="padding:6px 8px">'
+    + '<td style="padding:6px 8px;white-space:nowrap">'
       + '<button onclick="snDownloadContract(' + c.id + ',\'' + snEsc(c.file_name || '').replace(/'/g, "\\'") + '\')" '
       + 'class="btn-secondary" style="padding:3px 9px;font-size:11px">.docx</button>'
+      /* A SEPARATE BUTTON, and only on a contract that is still current. The address it would go to is
+         drawn beneath it by snSendRecipient() once the register has loaded the previews — the point is
+         that it is readable without clicking anything. */
+      + (dead ? ''
+        : ' <button onclick="snEmailContract(' + c.id + ')" class="btn-secondary" '
+          + 'style="padding:3px 9px;font-size:11px">Email to client</button>')
+      + (dead ? '' : '<div id="sn-to-' + c.id + '" style="margin-top:2px"></div>')
       + '</td>'
     + '</tr>';
 }
@@ -192,6 +276,23 @@ async function snContractsPage() {
     + th('Status') + th('Generated') + th('Template') + th('') + '</tr></thead>'
     + '<tbody>' + d.contracts.map(snContractRow).join('') + '</tbody>'
     + '</table></div>';
+
+  /* Fill in each row's recipient AFTER the table is on screen. Done as a second pass rather than inside
+     the row builder because it is one request per contract, and the register must not wait on them —
+     a slow preview should delay the address appearing, never the register itself. */
+  await snFillRecipients(d.contracts);
+}
+
+async function snFillRecipients(contracts) {
+  const live = contracts.filter(c => c.status !== 'superseded' && c.status !== 'void');
+  await Promise.all(live.map(async (c) => {
+    const slot = document.getElementById('sn-to-' + c.id);
+    if (!slot) return;
+    const pv = await snGet('/sitenex/contracts/' + encodeURIComponent(c.id) + '/send');
+    /* A failed preview says so rather than leaving a blank, which would read as "no recipient needed". */
+    slot.innerHTML = pv.ok ? snSendLine(pv.data)
+      : '<div style="font-size:11px;color:var(--text-muted)">could not read the recipient: ' + snEsc(pv.error) + '</div>';
+  }));
 }
 
 window.snSetContractStatus = async function snSetContractStatus(id, sel) {
@@ -339,16 +440,29 @@ window.snEditDeal = async function snEditDeal(dealId) {
         + (contracts.length ? 'Generate a replacement' : 'Generate contract') + '</button>'
       + (contracts.length
         ? '<div style="margin-top:8px">' + contracts.map(c =>
-            '<div style="display:flex;align-items:center;gap:8px;font-size:12px;padding:3px 0'
-            + (c.status === 'superseded' ? ';opacity:.55' : '') + '">'
+            '<div style="padding:5px 0;border-top:1px solid var(--border)'
+            + (c.status === 'superseded' || c.status === 'void' ? ';opacity:.55' : '') + '">'
+            + '<div style="display:flex;align-items:center;gap:8px;font-size:12px">'
             + '<span style="font-family:ui-monospace,monospace">' + snEsc(c.contract_no) + '</span>'
             + '<span style="color:var(--text-muted)">' + snEsc(c.status) + '</span>'
             + '<button onclick="snDownloadContract(' + c.id + ',\'' + snEsc(c.file_name || '').replace(/'/g, "\\'") + '\')" '
             + 'class="btn-secondary" style="padding:2px 8px;font-size:11px">.docx</button>'
+            /* TWO SEPARATE BUTTONS. Generating is above and reversible; this one is not, so it is never
+               part of the same click and never happens on its own. */
+            + (c.status === 'superseded' || c.status === 'void' ? ''
+              : '<button onclick="snEmailContract(' + c.id + ')" class="btn-secondary" '
+                + 'style="padding:2px 8px;font-size:11px">Email to client</button>')
+            + '</div>'
+            + (c.status === 'superseded' || c.status === 'void' ? ''
+              : '<div id="sn-to-' + c.id + '" style="margin-top:2px"></div>')
             + '</div>').join('') + '</div>'
         : '')
       + '</div>'
     + '</div>';
+
+  /* The recipient under each button here too — the deal page is where the button was asked for, and the
+     address being visible before the click is the property, not a feature of one screen. */
+  await snFillRecipients(contracts.map(c => ({ id: c.id, status: c.status })));
 };
 
 const snVal = (key) => { const e = document.getElementById('sn-f-' + key); return e ? e.value : undefined; };

@@ -28,10 +28,12 @@ const PARTNERS = [{ id: PARTNER_A, name: 'Partner A', primary_contact_email: 'a@
 const PACKAGES = [{ code: 'P2', name: 'Renew', included: ['content migration', 'redirect map'],
                     not_included: ['content writing', 'photography'] }];
 
-let DEALS, PAYMENTS, CONTRACTS, SEQ, DEAL_SEQ, CONTRACT_SEQ, PROSPECTS;
+let DEALS, PAYMENTS, CONTRACTS, SENDS, SEQ, DEAL_SEQ, CONTRACT_SEQ, PROSPECTS;
+let MAIL;   // what the fake mailer was asked to send, and what it should answer
 function reset() {
   DEAL_SEQ = 100; CONTRACT_SEQ = 500; SEQ = 0;
-  PAYMENTS = []; CONTRACTS = [];
+  PAYMENTS = []; CONTRACTS = []; SENDS = [];
+  MAIL = { sent: [], reply: { ok: true, id: 'msg_fake_1', error: null }, throwOnTxn: false };
   DEALS = [
     { id: ++DEAL_SEQ, partner_id: PARTNER_A, owner_user_id: 'u-admin', status: 'new', package_code: 'P2',
       company_name: 'Acme Machine Works LLC', contact_name: 'Dale Prentice', contact_title: 'Owner',
@@ -161,14 +163,39 @@ db.query = async (sql, params = []) => {
   }
   if (/^INSERT INTO sitenex_contracts/.test(s)) {
     const row = { id: ++SEQ, contract_no: params[0], deal_id: params[1], partner_id: params[2],
-                  client_company: params[3], client_contact: params[4], package_code: params[11],
-                  package_name: params[12], value_cents: params[15], monthly_cents: params[16],
-                  duration_weeks: params[17], template_version: params[21], file_name: params[22],
+                  client_company: params[3], client_contact: params[4], client_title: params[5],
+                  client_email: params[6], client_phone: params[7], client_address: params[8],
+                  partner_name: params[9], partner_email: params[10],
+                  package_code: params[11], package_name: params[12], value_cents: params[15],
+                  monthly_cents: params[16], duration_weeks: params[17],
+                  template_version: params[21], file_name: params[22],
                   file_bytes: params[23], file_size: params[24], status: 'generated', generated_by: params[25],
-                  superseded_by: null, created_at: '2026-09-30T00:00:00Z' };
+                  superseded_by: null, sent_at: null, created_at: '2026-09-30T00:00:00Z' };
     CONTRACTS.push(row);
     return { rows: [{ id: row.id, contract_no: row.contract_no, status: row.status,
                       file_name: row.file_name, file_size: row.file_size, created_at: row.created_at }] };
+  }
+  // ── the send log + sent_at ──
+  if (/^SELECT c\.id, c\.contract_no, c\.client_company/.test(s)) {
+    const rows = visible(s, params, CONTRACTS).filter(c => String(c.id) === String(params[0]));
+    return { rows };
+  }
+  if (/FROM sitenex_contract_sends WHERE contract_id/.test(s)) {
+    return { rows: SENDS.filter(x => String(x.contract_id) === String(params[0])).slice().reverse() };
+  }
+  if (/^INSERT INTO sitenex_contract_sends/.test(s)) {
+    const row = { id: ++SEQ, contract_id: params[0], contract_no: params[1], to_email: params[2],
+                  cc_email: params[3], from_email: params[4], subject: params[5], file_name: params[6],
+                  file_size: params[7], status: params[8], provider_id: params[9], error: params[10],
+                  sent_by: params[11], sent_at: '2026-09-30T12:00:00Z' };
+    SENDS.push(row);
+    return { rows: [{ id: row.id, sent_at: row.sent_at }] };
+  }
+  if (/^UPDATE sitenex_contracts SET status = 'sent', sent_at = NOW\(\)/.test(s)) {
+    const c = CONTRACTS.find(x => String(x.id) === String(params[0]));
+    if (!c) return { rows: [] };
+    c.status = 'sent'; c.sent_at = '2026-09-30T12:00:00Z';
+    return { rows: [{ id: c.id, contract_no: c.contract_no, status: c.status, sent_at: c.sent_at }] };
   }
   if (/^UPDATE sitenex_contracts SET status='superseded'/.test(s)) {
     const c = CONTRACTS.find(x => String(x.id) === String(params[1]));
@@ -193,7 +220,17 @@ db.query = async (sql, params = []) => {
   if (requiresScope(s)) scopeOf(s, params);   // force the leak check even on an unmatched shape
   throw new Error('unexpected SQL in fake: ' + s);
 };
-db.withTransaction = async (fn) => fn({ query: db.query });
+db.withTransaction = async (fn) => {
+  if (MAIL.throwOnTxn) throw new Error('simulated commit failure');
+  return fn({ query: db.query });
+};
+
+// The mailer is replaced, not the network: this file must never be able to send a real email, whatever
+// RESEND_API_KEY happens to be set to in the environment it runs in.
+const mailer = require('../lib/mailer');
+const realSend = mailer.sendEmailDetailed;
+mailer.sendEmailDetailed = async (opts) => { MAIL.sent.push(opts); return MAIL.reply; };
+after(() => { mailer.sendEmailDetailed = realSend; });
 after(() => { db.query = realQuery; db.withTransaction = realTxn; });
 
 const { signToken } = require('../lib/core');
@@ -613,4 +650,202 @@ test('no path is declared in BOTH routers — the second mount would be dead cod
   const a = pathsOf('routes.js'), b = pathsOf('sitenex-phase3.routes.js');
   const both = [...b].filter(p => a.has(p));
   assert.deepEqual(both, [], `declared in both routers, so the Phase 3 one never runs: ${both.join(', ')}`);
+});
+
+// ── EMAILING A CONTRACT ───────────────────────────────────────────────────────
+//
+// The one irreversible action in these screens. A wrong address or a wrong price has reached a real
+// business and cannot be recalled, so the refusals are tested harder than the happy path.
+//
+// Nothing here can send a real email: the mailer is replaced above, and a test asserts the route resolves
+// it at call time rather than capturing it at require time — which is what would make that replacement
+// silently ineffective.
+
+async function makeSendableContract() {
+  const made = await call('POST', '/api/sitenex/contracts', 'u-admin', { deal_id: A_DEAL });
+  const c = CONTRACTS.find(x => x.id === made.body.contract.id);
+  c.client_email = 'dale@acme.example';
+  c.partner_email = 'a@partnera.example';
+  return c;
+}
+
+test('the PREVIEW names the recipient, the cc, the sender and the price before anything is sent', async () => {
+  const c = await makeSendableContract();
+  const r = await call('GET', `/api/sitenex/contracts/${c.id}/send`, 'u-admin');
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.to, 'dale@acme.example');
+  assert.equal(r.body.cc, 'a@partnera.example', 'the partner on the contract is cc’d');
+  assert.match(r.body.from, /naren@adificetechnologies\.com/, 'the AUTHORIZED domain — abiozen.com 403s');
+  assert.match(r.body.subject, /SN-\d{4}-\d{4} — agreement for Acme Machine Works LLC/);
+  assert.match(r.body.price, /\$4,500/);
+  assert.equal(r.body.can_send, true);
+  assert.equal(MAIL.sent.length, 0, 'a PREVIEW must not send anything');
+});
+
+test('the preview says WHY it cannot send, rather than offering a button that fails', async () => {
+  const c = await makeSendableContract();
+  c.client_email = null;
+  let r = await call('GET', `/api/sitenex/contracts/${c.id}/send`, 'u-admin');
+  assert.equal(r.body.can_send, false);
+  assert.match(r.body.blocked_because, /no client email/);
+  c.client_email = 'dale@acme.example';
+  c.status = 'superseded';
+  r = await call('GET', `/api/sitenex/contracts/${c.id}/send`, 'u-admin');
+  assert.equal(r.body.can_send, false);
+  assert.match(r.body.blocked_because, /superseded/);
+});
+
+test('a send REQUIRES the address to be echoed back', async () => {
+  // The browser confirm() is a courtesy, not the safeguard — it is one devtools line away. Requiring the
+  // address means a request built by anything other than the screen that displayed it cannot send to an
+  // address nobody saw.
+  const c = await makeSendableContract();
+  for (const body of [{}, { confirm_to: '' }, { confirm_to: 'someone@else.example' }]) {
+    const r = await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-admin', body);
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.equal(r.body.code, 'confirm_mismatch');
+    assert.equal(r.body.to, 'dale@acme.example', 'and it names the real address so the caller can correct it');
+  }
+  assert.equal(MAIL.sent.length, 0, 'nothing was sent');
+  // Case and surrounding space do not count as a mismatch — that would be a confusing refusal, not a safe one.
+  const ok = await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-admin', { confirm_to: '  DALE@Acme.Example ' });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+});
+
+test('a successful send attaches the stored .docx, base64, with the right name', async () => {
+  const c = await makeSendableContract();
+  const r = await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-admin', { confirm_to: 'dale@acme.example' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(MAIL.sent.length, 1);
+  const m = MAIL.sent[0];
+  assert.equal(m.to, 'dale@acme.example');
+  assert.equal(m.cc, 'a@partnera.example');
+  assert.match(m.from, /naren@adificetechnologies\.com/);
+  assert.equal(m.replyTo, m.from, 'a reply must come back to a real person, not to no-reply');
+  assert.equal(m.attachments.length, 1);
+  assert.equal(m.attachments[0].filename, c.file_name);
+  // The BYTES from the register, not a regeneration — the client must receive the document the register
+  // holds, or the two disagree about what was sent.
+  assert.ok(Buffer.isBuffer(m.attachments[0].content));
+  assert.equal(m.attachments[0].content.subarray(0, 4).toString('hex'), '504b0304');
+  assert.equal(m.attachments[0].content.length, c.file_size);
+  // The covering note is short and states the price.
+  assert.match(m.html, /\$4,500/);
+  assert.match(m.html, /sign and return/i);
+  assert.ok(m.html.length < 1600, `the note should be short, got ${m.html.length} chars`);
+});
+
+test('a successful send sets status AND sent_at — not one without the other', async () => {
+  // Otherwise the register's "sent" count depends on somebody remembering to change a dropdown, which
+  // they will not, and the register is then quietly wrong about what has reached a client.
+  const c = await makeSendableContract();
+  assert.equal(c.status, 'generated');
+  assert.equal(c.sent_at, null);
+  const r = await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-admin', { confirm_to: 'dale@acme.example' });
+  assert.equal(r.body.contract.status, 'sent');
+  assert.ok(r.body.contract.sent_at, 'sent_at must be stamped');
+  assert.equal(c.status, 'sent');
+  assert.ok(c.sent_at);
+});
+
+test('the send is LOGGED with everything needed to prove what went where', async () => {
+  const c = await makeSendableContract();
+  const r = await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-admin', { confirm_to: 'dale@acme.example' });
+  assert.equal(SENDS.length, 1);
+  const log = SENDS[0];
+  assert.equal(log.contract_id, c.id);
+  assert.equal(log.contract_no, c.contract_no, 'snapshot, so the log reads without a join');
+  assert.equal(log.to_email, 'dale@acme.example');
+  assert.equal(log.cc_email, 'a@partnera.example');
+  assert.match(log.from_email, /adificetechnologies\.com/);
+  assert.match(log.subject, /agreement for/);
+  assert.equal(log.status, 'sent');
+  assert.equal(log.provider_id, 'msg_fake_1', "the provider's id, which is the only external proof");
+  assert.equal(log.sent_by, 'u-admin');
+  assert.ok(log.sent_at);
+  assert.equal(r.body.provider_id, 'msg_fake_1', 'and it comes back to the caller');
+});
+
+test('a FAILED send is logged too, and marks nothing as sent', async () => {
+  // "We tried twice and both bounced" is exactly the question this log exists to answer.
+  const c = await makeSendableContract();
+  MAIL.reply = { ok: false, id: null, error: 'Resend said no' };
+  const r = await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-admin', { confirm_to: 'dale@acme.example' });
+  assert.equal(r.status, 502);
+  assert.equal(r.body.code, 'send_failed');
+  assert.match(r.body.error, /Resend said no/);
+  assert.equal(SENDS.length, 1, 'the attempt is recorded');
+  assert.equal(SENDS[0].status, 'failed');
+  assert.equal(SENDS[0].error, 'Resend said no');
+  assert.equal(SENDS[0].provider_id, null);
+  assert.equal(c.status, 'generated', 'and the contract is NOT marked sent');
+  assert.equal(c.sent_at, null);
+});
+
+test('if the email goes but the DB write fails, it says SO — loudly', async () => {
+  // The hardest case. An HTTP call to a provider cannot be rolled back, so a COMMIT failing after a
+  // successful send would otherwise return an error that reads as "it did not send" — and somebody would
+  // press the button again, sending a second copy to a client.
+  const c = await makeSendableContract();
+  MAIL.throwOnTxn = true;
+  const r = await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-admin', { confirm_to: 'dale@acme.example' });
+  assert.equal(r.status, 500);
+  assert.equal(r.body.code, 'sent_but_not_recorded');
+  assert.equal(r.body.sent, true, 'the response must assert the email DID go');
+  assert.equal(r.body.provider_id, 'msg_fake_1');
+  assert.match(r.body.error, /WAS sent to dale@acme\.example/);
+  assert.match(r.body.error, /by hand/, 'and says what to do about it');
+  assert.equal(MAIL.sent.length, 1, 'exactly one email left');
+});
+
+test('a superseded or void contract cannot be emailed', async () => {
+  const c = await makeSendableContract();
+  for (const status of ['superseded', 'void']) {
+    c.status = status;
+    const r = await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-admin', { confirm_to: 'dale@acme.example' });
+    assert.equal(r.status, 400);
+    assert.equal(r.body.code, 'not_current');
+    assert.match(r.body.error, /no way to know it is not the agreement/);
+  }
+  assert.equal(MAIL.sent.length, 0);
+});
+
+test('a contract with no client email refuses, and says regeneration is the fix', async () => {
+  // The address is SNAPSHOT at generation, so editing the deal does not change this document.
+  const c = await makeSendableContract();
+  c.client_email = null;
+  const r = await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-admin', { confirm_to: 'x@y.example' });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.code, 'no_recipient');
+  assert.match(r.body.error, /regenerate/);
+});
+
+test('sending is adminOnly and partner-scoped', async () => {
+  const c = await makeSendableContract();
+  // A partner cannot send at all — it is a write.
+  assert.equal((await call('POST', `/api/sitenex/contracts/${c.id}/send`, 'u-pa', { confirm_to: 'dale@acme.example' })).status, 403);
+  assert.equal((await call('GET', `/api/sitenex/contracts/${c.id}/send`, 'u-pa')).status, 403);
+  assert.equal(MAIL.sent.length, 0);
+  // And a staff account cannot send a contract outside its scope — scope is TRUE for staff here, so the
+  // meaningful half is that the route reads through the same scoped SELECT as everything else.
+  assert.equal((await call('POST', '/api/sitenex/contracts/999999/send', 'u-admin', { confirm_to: 'x@y.example' })).status, 404);
+});
+
+test('the route resolves the mailer at CALL time, so a test cannot fail to replace it', () => {
+  // A destructured `const { sendEmailDetailed } = require('../lib/mailer')` is captured when the module
+  // loads, before any test runs — so replacing it afterwards does nothing and the suite would send real
+  // email to whatever address a fixture carried, if RESEND_API_KEY happened to be set.
+  const src = require('fs').readFileSync(__dirname + '/sitenex-phase3.routes.js', 'utf8');
+  assert.ok(!/const\s*\{[^}]*sendEmailDetailed[^}]*\}\s*=\s*require/.test(src),
+    'the mailer must not be destructured at module load');
+  assert.match(src, /mailer\(\)\.sendEmailDetailed\(/, 'it must be resolved at call time');
+});
+
+test('generating does NOT send — they are separate actions', async () => {
+  // Never automatic. Generating is reversible; sending is not.
+  await makeSendableContract();
+  assert.equal(MAIL.sent.length, 0, 'POST /contracts must not email anybody');
+  const src = require('fs').readFileSync(__dirname + '/sitenex-phase3.routes.js', 'utf8');
+  const gen = src.slice(src.indexOf("router.post('/sitenex/contracts',"), src.indexOf("router.get('/sitenex/contracts/:id/file'"));
+  assert.ok(!/sendEmail/.test(gen), 'the generate handler must contain no send');
 });
