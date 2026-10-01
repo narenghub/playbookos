@@ -8280,7 +8280,11 @@ pages['sitenex-deals'] = async function(){
        deal is the specific failure the packages screen also guards against. */
     + (d.value_usd!=null?'<div style="font-size:11px;margin-top:2px">$'+d.value_usd.toLocaleString()+(d.monthly_usd!=null?' + $'+d.monthly_usd.toLocaleString()+'/mo':'')+'</div>':'')
     + (d.owner_name?'<div style="font-size:11px;color:var(--text-muted);margin-top:2px">'+apEsc(d.owner_name)+'</div>':'')
-    + (d.referred_by?'<div style="font-size:10px;color:var(--text-muted);margin-top:2px">via '+apEsc(d.referred_by)+'</div>':'')
+    /* partner_name, not referred_by. referred_by was DROPPED by the sitenex rename and replaced by the
+       partner_id FK, so this line read an undefined property and the "via <partner>" credit never
+       rendered at all — silently, because `undefined ? ... : ''` is a working expression. The API has
+       returned partner_name since that migration. */
+    + (d.partner_name?'<div style="font-size:10px;color:var(--text-muted);margin-top:2px">via '+apEsc(d.partner_name)+'</div>':'')
     + '</div>';
   const board = '<div class="card" style="overflow-x:auto"><div style="display:flex;gap:10px;min-width:900px">'
     + cols.map(col => '<div style="flex:1;min-width:150px">'

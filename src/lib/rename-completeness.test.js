@@ -36,7 +36,11 @@ const ALLOWED_LINE = [
   /acbm@acbmpartners\.com/,           // their shared mailbox
   /not about ACBM/,                   // the comment in partner-deal-scope.test.js saying exactly that
   /'acbm'/,                           // a literal being renamed FROM, in a migration or a comment about one
-  /referred_by/,                      // prose about the free-text column the FK replaced
+  // referred_by, but ONLY IN PROSE. The unrestricted form of this entry hid a live bug for a day: the
+  // deals board read `d.referred_by`, a column the rename DROPPED, so the "via <partner>" credit never
+  // rendered — silently, because `undefined ? x : ''` is a perfectly good expression. Restricting it to
+  // comment lines means the next read of a dropped column is an offender again.
+  /^\s*(\/\/|\/\*|\*)[^\n]*referred_by/,
   /\/api\/acbm\//,                    // a check that the OLD routes are gone has to name them
 ];
 

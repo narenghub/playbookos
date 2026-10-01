@@ -3,7 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { query } = require('./db');
 const { sendEmail } = require('./mailer');
-const { getRoleTier } = require('./roles');
+const { getRoleTier, isExternalRole } = require('./roles');
 const { callClaude } = require('./llm');
 
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -95,6 +95,23 @@ async function authMiddleware(req, res, next) {
 function adminOnly(req, res, next) {
   if (req.user.role !== 'admin' && req.user.role !== 'super_admin') {
     return res.status(403).json({ error: 'Admin only' });
+  }
+  next();
+}
+
+// STAFF ONLY — every external role is refused, by ROLE and not by a list somebody maintains.
+//
+// For routes that are safe for anyone who works here but have no business being reachable by an outside
+// account. The product boundary cannot express this: a route classified 'shared' is admitted to everyone
+// with a login, and a route classified 'sitenex' is admitted to a partner BECAUSE they hold sitenex.
+// Neither answers "is this person one of ours".
+//
+// Not left to the permissions resolver: enforce.js consults a template only for roles named in
+// PERMISSIONS_ENFORCE_ROLES, so a template that grants a partner nothing decides nothing until that env
+// var is set. This holds either way.
+function staffOnly(req, res, next) {
+  if (isExternalRole(req.user && req.user.role)) {
+    return res.status(403).json({ error: 'Not available to external accounts', code: 'external_role' });
   }
   next();
 }
@@ -303,4 +320,4 @@ async function scoreTeamMember(userId, date) {
   return { user_id: userId, email: userRow.email, name: userRow.name, role: userRow.role, date, score, blockers, escalated, note };
 }
 
-module.exports = { signToken, verifyToken, authMiddleware, adminOnly, superAdminOnly, requireTier, requireAnyTier, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, scoreTeamMember, computeScoreForRole, crypto };
+module.exports = { signToken, verifyToken, authMiddleware, adminOnly, superAdminOnly, staffOnly, requireTier, requireAnyTier, sendEmail, fetchGitHubStats, syncGitHubForUser, runClaudeAnalysis, analyzeTeamProgress, scoreTeamMember, computeScoreForRole, crypto };

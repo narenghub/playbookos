@@ -127,13 +127,29 @@ async function setStatus({ entityType, entityId, status, channel, note, nextActi
       if (existing) {
         result.deal = { id: existing.id, created: false, status: existing.status };
       } else {
-        // 'signed' because that is what won MEANS in this vocabulary ("signed / now a customer"). The deal
-        // board's own lifecycle takes over from here.
+        // ── TWO FIXES HERE, both found before ACBM Partners had a login (2026-09-30) ──
+        //
+        // 1. partner_id IS SET FROM THE ACTING USER. It was NULL, and a NULL partner_id means
+        //    SELF-SOURCED — so the deal the partner had just created by marking a prospect won was
+        //    invisible to that partner, because partnerScopeSql filters on partner_id = theirs. They
+        //    would have recorded a win and watched nothing appear on their board.
+        //
+        // 2. STATUS IS 'new', NOT 'signed'. 'won' in the OUTREACH vocabulary means "they said yes" —
+        //    the point at which a conversation becomes a deal. 'signed' in the DEAL vocabulary means
+        //    paperwork is executed, which is three columns further along and has not happened: there is
+        //    no contract yet, no schedule, and signed_at is NULL. Creating the deal at 'signed' skipped
+        //    proposal_sent and made the board claim an executed agreement that did not exist, which is
+        //    also what the contract register would then have been counting.
+        //
+        // Read from the DB, not from the token, for the same reason every other partner lookup is:
+        // a stale token must not decide which book a deal lands in.
+        const pid = (await c.query(`SELECT partner_id FROM users WHERE id = $1`,
+                                   [(user && user.id) || null])).rows[0];
         const made = (await c.query(
-          `INSERT INTO sitenex_deals (prospect_id, status, owner_user_id, created_at, updated_at)
-           VALUES ($1::bigint, 'signed', $2, NOW(), NOW()) RETURNING id, status`,
-          [id, (user && user.id) || null])).rows[0];
-        result.deal = { id: made.id, created: true, status: made.status };
+          `INSERT INTO sitenex_deals (prospect_id, status, owner_user_id, partner_id, created_at, updated_at)
+           VALUES ($1::bigint, 'new', $2, $3, NOW(), NOW()) RETURNING id, status, partner_id`,
+          [id, (user && user.id) || null, (pid && pid.partner_id) || null])).rows[0];
+        result.deal = { id: made.id, created: true, status: made.status, partner_id: made.partner_id };
       }
     }
   });

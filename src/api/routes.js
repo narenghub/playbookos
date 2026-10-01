@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
-const { signToken, authMiddleware, adminOnly, superAdminOnly, requireTier, requireAnyTier, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis } = require('../lib/core');
+const { signToken, authMiddleware, adminOnly, superAdminOnly, requireTier, requireAnyTier, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis, staffOnly } = require('../lib/core');
 const { query, withTransaction } = require('../lib/db');
 const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
@@ -5218,7 +5218,22 @@ router.put('/events/cphi/exhibitors/:id', authMiddleware, requireTier('intellige
 // admitted them.
 
 // GET /outreach?entity_type=prospect&ids=1,2,3 — status for the rows a list is already showing.
-router.get('/outreach', authMiddleware, async (req, res) => {
+// ── staffOnly ON EVERY OUTREACH ROUTE (added 2026-09-30, before ACBM Partners get a login) ──
+//
+// These are classified 'shared' in the route map, which is correct — every list has outreach status and
+// the route is safe for anyone who works here. But 'shared' means "admitted to everyone with a login",
+// and the DATA scoping underneath is by PRODUCT: a partner holding 'sitenex' therefore saw every SiteNex
+// outreach row and could set a status on a prospect they had never worked, including overwriting a note
+// somebody here had just made after a call.
+//
+// Product scoping cannot fix that — they legitimately hold the product. Partner scoping cannot either:
+// outreach rows have no partner_id, and giving them one would mean deciding that an outreach note belongs
+// to a partner rather than to us, which is the opposite of true.
+//
+// So the answer is the role. Outreach is an INTERNAL record of what we did; an external account has no
+// business reading or writing it. Enforced by middleware rather than by the permissions template, because
+// a template decides nothing for a role that is not in PERMISSIONS_ENFORCE_ROLES.
+router.get('/outreach', authMiddleware, staffOnly, async (req, res) => {
   try {
     const entityType = String(req.query.entity_type || '');
     const ids = String(req.query.ids || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 500);
@@ -5229,7 +5244,7 @@ router.get('/outreach', authMiddleware, async (req, res) => {
 });
 
 // PUT /outreach — record an outcome. One control, one call, no form.
-router.put('/outreach', authMiddleware, async (req, res) => {
+router.put('/outreach', authMiddleware, staffOnly, async (req, res) => {
   try {
     const { entity_type, entity_id, status, channel, note, next_action_at } = req.body || {};
     if (!entity_type || entity_id == null || !status) {
@@ -5259,7 +5274,7 @@ router.put('/outreach', authMiddleware, async (req, res) => {
 // GET /outreach/summary?entity_type=prospect&total=1524 — the status bar above a list.
 // `total` is how many rows the list has; without it 'new' is reported as 0 rather than invented, because
 // the absence of an outreach row IS 'new' and only the caller knows the denominator.
-router.get('/outreach/summary', authMiddleware, async (req, res) => {
+router.get('/outreach/summary', authMiddleware, staffOnly, async (req, res) => {
   try {
     const entityType = String(req.query.entity_type || '');
     if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
@@ -5270,7 +5285,7 @@ router.get('/outreach/summary', authMiddleware, async (req, res) => {
 });
 
 // GET /outreach/activity?days=7 — who changed what. The question current status cannot answer.
-router.get('/outreach/activity', authMiddleware, async (req, res) => {
+router.get('/outreach/activity', authMiddleware, staffOnly, async (req, res) => {
   try {
     const held = await effectiveProducts(req.user);
     res.json(await outreach.activity({
@@ -5284,7 +5299,7 @@ router.get('/outreach/activity', authMiddleware, async (req, res) => {
 // by person, by list, by status moved to, and the SILENCE.
 //
 // "Who is reaching out and who is not" spans every list, so it cannot be assembled from per-list bars.
-router.get('/outreach/overview', authMiddleware, async (req, res) => {
+router.get('/outreach/overview', authMiddleware, staffOnly, async (req, res) => {
   try {
     const held = await effectiveProducts(req.user);
     res.json(await outreach.overview({ held, sinceDays: req.query.days || 7 }));
@@ -5292,7 +5307,7 @@ router.get('/outreach/overview', authMiddleware, async (req, res) => {
 });
 
 // GET /outreach/history?entity_type=&entity_id= — one entity's trail, for the inline control.
-router.get('/outreach/history', authMiddleware, async (req, res) => {
+router.get('/outreach/history', authMiddleware, staffOnly, async (req, res) => {
   try {
     const entityType = String(req.query.entity_type || '');
     if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
@@ -5306,6 +5321,9 @@ router.get('/outreach/history', authMiddleware, async (req, res) => {
 // GET /outreach/vocabulary — the two field definitions, so no client keeps a second copy of either list.
 // Statuses carry their sort_order, label and next action: the bar sorts on the order, and the dropdown can
 // say what a stage MEANS rather than just naming it.
+// NOT staffOnly: this returns the vocabulary CONSTANTS — ten status keys, five channels, the entity
+// types. No row, no count, nothing about anybody's data. Gating it would only mean a partner's page
+// cannot label its own dropdowns.
 router.get('/outreach/vocabulary', authMiddleware, async (req, res) => {
   res.json({
     statuses: OUTREACH_STATUS_DEFS,

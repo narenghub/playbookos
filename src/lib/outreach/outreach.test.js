@@ -13,9 +13,9 @@ const { STATUS_DEFS, STATUSES, DEFAULT_STATUS, CHANNELS, ENTITIES, isStatus, isC
 const { statusFor, setStatus, summary, activity, history } = require('./index');
 
 // ── a fake that behaves like the table, including the unique constraint ─────────
-let OUTREACH = [], EVENTS = [], ENTITY_ROWS = {}, SEQ = 1, DEALS = [];
+let OUTREACH = [], EVENTS = [], ENTITY_ROWS = {}, SEQ = 1, DEALS = [], FIXTURE_PARTNER_ID = 7;
 function reset() {
-  OUTREACH = []; EVENTS = []; SEQ = 1; DEALS = [];
+  OUTREACH = []; EVENTS = []; SEQ = 1; DEALS = []; FIXTURE_PARTNER_ID = 7;
   ENTITY_ROWS = {
     prospects: [{ id: 1, product: 'golfnex' }, { id: 2, product: 'golfnex' },
                 { id: 3, product: 'sitenex' }, { id: 4, product: null }],
@@ -71,12 +71,21 @@ const query = async (sql, params = []) => {
     }
     return { rows: [row] };
   }
+  // The partner lookup the won-hook now does, so the deal lands in the right book. Modelled on the
+  // USERS fixture rather than stubbed to null, so the test below can assert the id actually travels.
+  if (/^SELECT partner_id FROM users WHERE id = \$1$/.test(s)) {
+    return { rows: [{ partner_id: FIXTURE_PARTNER_ID }] };
+  }
   if (/^SELECT id, status FROM sitenex_deals WHERE prospect_id/.test(s)) {
     const d = DEALS.find(x => String(x.prospect_id) === String(params[0]));
     return { rows: d ? [d] : [] };
   }
   if (/^INSERT INTO sitenex_deals/.test(s)) {
-    const d = { id: DEALS.length + 100, prospect_id: params[0], status: 'signed', owner_user_id: params[1] };
+    // status is read out of the SQL rather than hardcoded: the literal is the thing under test, and a
+    // fake that asserts its own copy of it would agree with the code whichever value the code used.
+    const status = (/VALUES \(\$1::bigint, '(\w+)'/.exec(s) || [])[1] || null;
+    const d = { id: DEALS.length + 100, prospect_id: params[0], status,
+                owner_user_id: params[1], partner_id: params[2] === undefined ? null : params[2] };
     DEALS.push(d);
     return { rows: [d] };
   }
@@ -516,9 +525,26 @@ test("a SiteNex prospect reaching 'won' creates a deal", async () => {
   assert.equal(r.ok, true);
   assert.ok(r.deal, 'the response names the deal, so the UI can say which one');
   assert.equal(r.deal.created, true);
-  assert.equal(r.deal.status, 'signed', "won MEANS signed in this vocabulary");
+  // 'new', NOT 'signed'. 'won' in the OUTREACH vocabulary means "they said yes" — the moment a
+  // conversation becomes a deal. 'signed' in the DEAL vocabulary means paperwork is executed, which is
+  // three columns further along and has not happened: there is no contract, no schedule, and signed_at is
+  // NULL. Creating it at 'signed' skipped proposal_sent and made the board claim an executed agreement
+  // that did not exist — and the contract register's "signed value" would then have been counting it.
+  assert.equal(r.deal.status, 'new', 'a deal starts at the beginning of the DEAL lifecycle');
   assert.equal(DEALS.length, 1);
   assert.equal(String(DEALS[0].prospect_id), '3', 'linked by prospect_id — the natural key, no new column');
+  // And it lands in the ACTING USER'S BOOK. partner_id was NULL, which means self-sourced, so the deal a
+  // partner had just created by marking a prospect won was invisible to that partner.
+  assert.equal(r.deal.partner_id, 7, "the partner's own id, read from the DB and not from the token");
+  assert.equal(DEALS[0].partner_id, 7);
+});
+
+test('a STAFF member marking won creates a self-sourced deal, which is what NULL means', async () => {
+  reset();
+  FIXTURE_PARTNER_ID = null;          // staff hold no partner_id
+  const r = await set({ entityType: 'prospect', entityId: 3, status: 'won' });
+  assert.equal(r.deal.partner_id, null, 'NULL is correct HERE — it means ours');
+  assert.equal(r.deal.status, 'new');
 });
 
 test('re-marking won LINKS the existing deal instead of making a second', async () => {
