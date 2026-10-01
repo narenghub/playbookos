@@ -1850,7 +1850,71 @@ function navigate(page) {
   if (hr) hr.textContent = (currentUser && currentUser.role) || '—';
   const content = document.getElementById('content');
   content.innerHTML = '<p style="color:#888;padding:20px">Loading...</p>';
-  pages[page]();
+
+  /* ── GUARDED. An unregistered page id used to throw into nothing. ──
+   *
+   * `pages[page]()` on a missing key throws TypeError AFTER the "Loading..." paint, so the screen sat on
+   * "Loading..." for ever with an error only in the console — the same silent-failure shape as the 30 Sep
+   * outage, reached a different way. The realistic cause is a cache skew: the nav and the page function can
+   * ship in one commit and arrive in a browser minutes apart, so the nav names a page the loaded scripts
+   * have not registered. (The .js cache header that allowed that is fixed in server.js; this is the backstop
+   * for when something else causes it.)
+   *
+   * A thrown render is also caught, for the same reason apGuard exists: an exception while BUILDING the html
+   * leaves "Loading..." on screen, and a page that fails visibly can be reported while one that hangs cannot.
+   */
+  const fn = pages[page];
+  if (typeof fn !== 'function') {
+    content.innerHTML = navMissingPage(page);
+    try { console.error('[navigate] no page function registered for', page); } catch (_) {}
+    return;
+  }
+  try {
+    const out = fn();
+    /* Most pages are async. A rejected promise is as invisible as a thrown error, so it gets the same card. */
+    if (out && typeof out.catch === 'function') {
+      out.catch(e => {
+        try { console.error('[navigate]', page, 'failed:', e); } catch (_) {}
+        content.innerHTML = navPageFailed(page, e);
+      });
+    }
+  } catch (e) {
+    try { console.error('[navigate]', page, 'threw:', e); } catch (_) {}
+    content.innerHTML = navPageFailed(page, e);
+  }
+}
+
+/* Names the page id, because "something went wrong" cannot be reported and "sitenex-partners did not load"
+   can. Reload is the right advice for the cache-skew case, which is the likely one. */
+function navMissingPage(page) {
+  const safe = String(page == null ? '' : page).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  return '<div class="card" style="max-width:560px">'
+    + '<div class="card-title text-section" style="margin:0 0 6px">This page did not load</div>'
+    + '<p class="text-body" style="margin:0 0 10px">The screen <strong>' + safe + '</strong> is in the menu but '
+    + 'its code is not loaded. That usually means the browser is holding an older copy of the app than the '
+    + 'menu it is showing.</p>'
+    + '<p class="text-body" style="margin:0 0 10px"><strong>Reload the page</strong> and try again. If it keeps '
+    + 'happening, the page is genuinely missing and somebody needs to know — say which one.</p>'
+    + '<button onclick="location.reload()" class="btn-primary" style="padding:5px 12px;font-size:13px">Reload</button>'
+    + '</div>';
+}
+
+function navPageFailed(page, e) {
+  const nEsc = (x) => String(x == null ? '' : x).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  /* Escaped ONCE into a variable, so the onclick attribute contains `' + id + '` and not a function call.
+     A call inside an attribute is evaluated when the HTML is BUILT, not when it is clicked — but
+     inline-handlers.test.js reads attributes to find click-time handlers and cannot tell the difference
+     through the escaped quotes, so it reported `esc` as an unreachable handler. Hoisting it is clearer for
+     a reader too: the attribute now shows what it will contain. */
+  const id = nEsc(page);
+  return '<div class="card" style="max-width:560px">'
+    + '<div class="card-title text-section" style="margin:0 0 6px">' + id + ' failed to render</div>'
+    + '<p class="text-body" style="margin:0 0 10px">' + nEsc((e && e.message) || String(e)) + '</p>'
+    + '<button onclick="navigate(\'' + id + '\')" class="btn-secondary" style="padding:5px 12px;font-size:13px">Try again</button>'
+    + ' <button onclick="location.reload()" class="btn-primary" style="padding:5px 12px;font-size:13px">Reload</button>'
+    + '</div>';
 }
 
 // ── PAGES ─────────────────────────────────────────────────────────────────────

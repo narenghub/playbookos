@@ -28,16 +28,11 @@ const SRC = fs.readFileSync(FILE, 'utf8');
 // NOT by counting braces. The literal is full of template strings containing { and } (and regexes), so a
 // brace walk never balances — it returned "could not find the end" and failed this very test. The file's
 // own structure is the reliable anchor: the literal closes at the first column-0 `};` after it opens.
-function pagesLiteral(src) {
-  const lines = src.split('\n');
-  const open = lines.findIndex(l => l.startsWith('const pages = {'));
-  if (open === -1) return null;
-  let close = -1;
-  for (let i = open + 1; i < lines.length; i++) if (lines[i] === '};') { close = i; break; }
-  if (close === -1) return null;
-  return { open: open + 1, close: close + 1, body: lines.slice(open, close + 1).join('\n') };
-}
-
+// pagesLiteral MOVED to src/lib/spa-source.js, which is now the one home for structural knowledge about
+// index.html. There were four copies of the brace-counting it replaces — in an edit script and in two tests —
+// and two of them were wrong in the same way. nav-targets.test.js needed it next, which was the fourth time
+// of asking.
+const { pagesLiteral } = require('./spa-source');
 
 // Inline scripts only — a <script src=...> is somebody else's file.
 function inlineBlocks(src) {

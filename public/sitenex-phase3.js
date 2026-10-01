@@ -8,7 +8,7 @@
  * green and the container logs stayed empty. The hazard is specific to editing inside that literal.
  * Here there is no literal to be inside: `const pages` is declared at the top level of the inline
  * script, so by the time this file runs it is simply a visible global, and pages are attached with
- * `pages['x'] = fn` from outside. A syntax error in THIS file also cannot take the app down with it —
+ * an assignment from outside the literal. A syntax error in THIS file also cannot take the app down —
  * a separate <script> that fails to parse leaves every other script running.
  *
  * Two rules it still has to obey:

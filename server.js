@@ -47,12 +47,26 @@ app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(express.static(path.join(__dirname, "public"), {
   maxAge: "1h", etag: true,
   // index:false so '/' is NOT auto-served here — it falls through to serveShell(), which can
-  // inject the PlayNexa flag. (Other static assets keep the 1h cache.)
+  // inject the PlayNexa flag. (Images and fonts keep the 1h cache.)
   index: false,
-  // Never cache the SPA HTML shell — otherwise a front-end deploy can lag up to an
-  // hour behind (stale index.html served from browser/edge cache). Other static
-  // assets keep the 1h cache.
-  setHeaders: (res, filePath) => { if (filePath.endsWith('.html')) res.setHeader('Cache-Control', 'no-store'); },
+  // ── THE SPA'S OWN CODE IS NEVER CACHED: .html AND .js ──────────────────────
+  //
+  // index.html was already no-store, so a front-end deploy cannot lag behind. .js was NOT, and that gap was
+  // a live bug: public/sitenex-phase3.js came back `max-age=3600` while the shell came back `no-store`, so a
+  // commit that adds a nav entry AND its page function ships them to a browser UP TO AN HOUR APART. The nav
+  // arrives immediately and points at a page the cached script has not registered — the same silent-failure
+  // shape as the 30 Sep outage, reached by a different route.
+  //
+  // THE ALTERNATIVE WAS A VERSION QUERY (?v=<commit sha>) on the script src, which would have kept the hour
+  // of caching. Not taken, because the injection would have to happen in serveShell — and `/index.html`
+  // requested directly is served by THIS static middleware, not by serveShell, so that path would get an
+  // unversioned src. That path is the one scripts/smoke-deployed.sh fetches, so the checker and the browser
+  // would be looking at different HTML, which is how a check comes to lie.
+  //
+  // The cost is one 30 KB script per hard page load, not per navigation. Cheap, and symmetrical.
+  setHeaders: (res, filePath) => {
+    if (filePath.endsWith('.html') || filePath.endsWith('.js')) res.setHeader('Cache-Control', 'no-store');
+  },
 }));
 
 // Serve the SPA shell, injecting window.PRODUCT_NAV_ENABLED=true when PRODUCT_NAV_ENABLED is set
