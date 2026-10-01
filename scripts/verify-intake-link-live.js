@@ -24,6 +24,10 @@
 // IN THIS PROCESS instead, which runs the same function against the same database and does not fire it —
 // fireBrief is called by the route, not by completeIntake.
 //
+// With --brief it DOES make one real Anthropic call, to prove the model id and the two writes the brief
+// performs. Opt-in and off by default, because a verification that costs money every time it runs is a
+// verification somebody stops running.
+//
 // It does not push 50MB through the loopback to test the per-deal cap. file_size is declared on a fixture
 // row and the cap reads SUM(file_size), so the CHECK is exercised honestly; the bytes are not.
 
@@ -238,6 +242,33 @@ const SECRETS = {
     check('source_kpi is NULL — a handover is not a performance measure', task.source_kpi, null);
     const stamped = (await query(`SELECT completed_at FROM sitenex_intake WHERE deal_id = $1`, [dealId])).rows[0];
     ok('completed_at is stamped', !!stamped.completed_at);
+
+    // ── 7. the brief, ONLY with --brief ─────────────────────────────────────
+    //
+    // One real Anthropic call. What this proves that no unit test can: that MODEL is an id the API
+    // accepts, and that the two writes land. A wrong model id would be swallowed into brief_error by
+    // design, so it would present as "the brief sometimes fails" rather than as a configuration error.
+    if (process.argv.includes('--brief')) {
+      console.log('\n7. THE BRIEF (one real Anthropic call)');
+      const { generateBrief } = require('../src/lib/sitenex/intake-brief');
+      const before = (await query(`SELECT task_description FROM daily_tasks WHERE id = $1`, [done.task_id])).rows[0].task_description;
+      const b = await generateBrief({ dealId, taskId: done.task_id });
+      ok('generateBrief → ok', b.ok === true, b.error);
+      if (b.ok) {
+        const proj = (await query(`SELECT brief, brief_model, brief_generated_at, brief_error FROM sitenex_projects WHERE deal_id = $1`, [dealId])).rows[0];
+        ok('the brief is stored on the project', !!proj.brief && proj.brief.length > 50);
+        check('  …with no error recorded', proj.brief_error, null);
+        ok('  …and the model it came from', !!proj.brief_model, proj.brief_model);
+        const after = (await query(`SELECT task_description FROM daily_tasks WHERE id = $1`, [done.task_id])).rows[0].task_description;
+        ok('the task was APPENDED to, not rewritten', after.startsWith(before));
+        ok('  …and the brief is on it', /── BRIEF ──/.test(after));
+        console.log(`\n      cost: $${b.cost_usd == null ? '?' : b.cost_usd.toFixed(4)}  model: ${b.model}`);
+        console.log('      ── the brief it wrote ──');
+        console.log(proj.brief.split('\n').map(l => '      ' + l).join('\n'));
+      }
+    } else {
+      console.log('\n7. THE BRIEF — skipped. Pass --brief to make one real Anthropic call.');
+    }
 
   } catch (e) {
     fail++; console.error('ERROR:', e.message, '\n', e.stack);
