@@ -39,10 +39,20 @@ function inlineBlocks(src) {
   }));
 }
 
+// LOCAL <script src> tags, which are now part of the application. A page can have every inline block
+// parse perfectly and still be dead because a separate file 404s or throws a SyntaxError — and that file
+// holds the handlers, so the symptom is buttons that do nothing rather than a blank screen. Protocol and
+// absolute URLs are skipped: a CDN script is not ours to vouch for.
+function externalSrcs(html) {
+  const scrubbed = html.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, ' '));
+  return [...scrubbed.matchAll(/<script[^>]*\ssrc=["']([^"']+)["']/g)]
+    .map(m => m[1]).filter(u => !/^(https?:)?\/\//.test(u));
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const urlIdx = args.indexOf('--url');
-  let src, label;
+  let src, label, origin = null;
   if (urlIdx !== -1) {
     const url = args[urlIdx + 1];
     if (!url) { console.error('--url needs a URL'); process.exit(2); }
@@ -50,6 +60,7 @@ async function main() {
     if (!r.ok) { console.error(`FAIL  could not fetch ${url}: ${r.status} ${r.statusText || ''}`); process.exit(1); }
     src = await r.text();
     label = url;
+    origin = new URL(url).origin;
   } else {
     const file = args[0] || path.join(__dirname, '..', 'public', 'index.html');
     if (!fs.existsSync(file)) { console.error(`FAIL  no such file: ${file}`); process.exit(2); }
@@ -73,12 +84,49 @@ async function main() {
     else { console.log(`  FAIL  MISSING entry point: ${ep.what}`); failures.push(`missing ${ep.what}`); }
   }
 
+  // ── and every local script the page loads ──────────────────────────────────
+  for (const rel of externalSrcs(src)) {
+    let code = null, where = rel;
+    if (origin) {
+      // Fetched from the DEPLOYED origin, which is the only way to learn that the file is actually being
+      // served. A unit test cannot: it reads the file off disk, where it always exists.
+      where = origin + (rel.startsWith('/') ? rel : '/' + rel);
+      const r = await fetch(where).catch(e => ({ ok: false, status: 0, statusText: e.message }));
+      if (!r.ok) {
+        console.log(`  FAIL  ${rel} — ${r.status} ${r.statusText || ''}`);
+        failures.push(`${rel} is loaded by the page but not served (${r.status})`);
+        continue;
+      }
+      code = await r.text();
+      // A 200 is not enough: the SPA fallback returns index.html for an unknown path, so a typo'd src
+      // yields HTML with a cheerful 200 and "parses" only because HTML is not JavaScript — it does not.
+      if (/^\s*<(!doctype|html)/i.test(code)) {
+        console.log(`  FAIL  ${rel} — served HTML, not JavaScript (the SPA fallback caught it)`);
+        failures.push(`${rel} resolves to the SPA fallback, so the real file is not there`);
+        continue;
+      }
+    } else {
+      const f = path.join(__dirname, '..', 'public', rel.replace(/^\//, ''));
+      if (!fs.existsSync(f)) {
+        console.log(`  FAIL  ${rel} — no such file`);
+        failures.push(`${rel} is loaded by index.html but does not exist`);
+        continue;
+      }
+      code = fs.readFileSync(f, 'utf8');
+    }
+    try { new Function(code); console.log(`  ok    ${rel}  ${code.length} chars`); }
+    catch (e) {
+      console.log(`  FAIL  ${rel} — ${e.message}`);
+      failures.push(`${rel} — ${e.message}`);
+    }
+  }
+
   if (failures.length) {
     console.error(`\nFAIL — ${failures.length} problem(s). The application will not render.`);
     failures.forEach(f => console.error(`  ${f}`));
     process.exit(1);
   }
-  console.log('\nPASS — every inline block parses and every entry point is present');
+  console.log('\nPASS — every script parses (inline and external) and every entry point is present');
   process.exit(0);
 }
 main().catch(e => { console.error('FAIL  ' + (e && e.message)); process.exit(1); });
