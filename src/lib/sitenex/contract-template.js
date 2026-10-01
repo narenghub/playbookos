@@ -1,11 +1,13 @@
 // ── THE CONTRACT, AS DATA ─────────────────────────────────────────────────────
 //
-// ⚠️  PLACEHOLDER. THIS HAS NOT BEEN REVIEWED BY AN ATTORNEY. It is a structurally complete document
-//     with plausible commercial clauses, written so the generator, the register and the download can be
-//     built and tested end to end. The clause TEXT is not legal advice and must be replaced before any
-//     of it is sent to a real business. `TEMPLATE_VERSION` says so, every generated document carries
-//     that version in the register, and the document itself prints the notice — so a placeholder cannot
-//     be mistaken for the real thing after the fact.
+// v1 — the short standard-terms document, deliberately about one page. This is the shape a web
+// developer actually sends: the deal on the front, fourteen one-sentence terms, two signatures. It is
+// NOT a negotiated instrument and it is not attorney-reviewed; it is the standard form we offer on a
+// take-it basis, the same way a hosting company publishes its terms. A client who wants their counsel
+// to mark it up is a client we handle as a one-off, outside the generator.
+//
+// `TEMPLATE_VERSION` is stamped on every generated document and stored in the register, so when the
+// wording changes we can still tell which text a given client signed. Bump it on any change to BLOCKS.
 //
 // WHY THIS IS DATA AND NOT CODE: an attorney has to be able to read, mark up and replace the clauses
 // without touching the renderer, and we have to be able to swap the whole document without a code
@@ -17,7 +19,7 @@
 // missing required field rather than emitting `{{client_company}}` into a document going to a real
 // business, which is the one failure mode that would be visible to the client and invisible to us.
 
-const TEMPLATE_VERSION = 'placeholder-v1';
+const TEMPLATE_VERSION = 'v1';
 
 // Every field the document can reference. `required: true` means the renderer refuses without it.
 // Deliberately small: a field that is optional in the document must be optional here too, or a deal
@@ -68,122 +70,59 @@ const SUPPLIER = {
 //   { notice: 'text' }                   a boxed warning, used for the placeholder notice
 //   { pagebreak: true }
 const BLOCKS = [
-  { notice: 'DRAFT — THIS TEMPLATE HAS NOT BEEN REVIEWED BY AN ATTORNEY. '
-          + 'Clause text is placeholder content for system testing and is not legal advice. '
-          + 'Do not send to a client until it has been replaced with reviewed wording.' },
-
   { title: 'Website Development Agreement' },
-  { p: 'Contract {{contract_no}}, dated {{contract_date}}.' },
+  { p: 'Contract {{contract_no}}, dated {{contract_date}}. This agreement is between '
+     + '{{supplier_name}} ("we") and {{client_company}} ("you"), and covers the work described below.' },
 
   { kv: [
-    ['Supplier', '{{supplier_name}}'],
     ['Client', '{{client_company}}'],
-    ['Client address', '{{client_address}}'],
-    ['Client contact', '{{client_contact}}'],
+    ['Address', '{{client_address}}'],
+    ['Contact', '{{client_contact}}'],
     ['Email', '{{client_email}}'],
     ['Telephone', '{{client_phone}}'],
     ['Introduced by', '{{partner_name}}'],
     ['Package', '{{package_name}}'],
-    ['Duration', '{{duration_weeks}} weeks'],
-    ['Term begins', '{{start_basis}}'],
     ['Total', '{{total_value}}'],
-    ['Monthly', '{{monthly_value}}'],
+    ['Monthly, from launch', '{{monthly_value}}'],
+    ['Duration', '{{duration_weeks}} weeks, beginning {{start_basis}}'],
   ] },
 
-  { h: 'What the Supplier will do' },
-  { p: 'The Supplier will deliver the following as part of the {{package_name}} package:' },
+  { h: 'What we will build' },
   { scope: 'included' },
 
-  { h: 'What is not included' },
-  { p: 'The following are expressly outside the scope of this agreement. They may be purchased '
-     + 'separately, under a separate written agreement:' },
+  { h: 'Not included' },
+  { p: 'These are outside this agreement and are quoted separately if you want them. Anything not '
+     + 'listed under "What we will build" is not included, whether or not it appears here.' },
   { scope: 'not_included' },
-  { p: 'Anything not listed in "What the Supplier will do" is not included, whether or not it appears '
-     + 'in the list above.' },
 
-  { h: 'Duration' },
-  { p: 'The expected duration is {{duration_weeks}} weeks. The term begins {{start_basis}}.' },
-  { p: 'The duration assumes the Client supplies content, approvals and access when requested. Delay '
-     + 'by the Client extends the duration by the length of that delay, and the Supplier will confirm '
-     + 'any such change in writing.' },
-
-  { h: 'Fees and payment' },
-  { p: 'The total fee for this agreement is {{total_value}}, payable as set out below.' },
+  { h: 'Payment' },
   { payments: true },
-  { p: 'Invoices are payable within 14 days of issue. Where a payment is tied to a milestone, the '
-     + 'invoice issues on the Supplier reaching that milestone, not on the Client approving it.' },
 
-  { h: "The Client's responsibilities" },
-  { p: 'The Client will:' },
-  { bullets: [
-    'provide text, images and any other content the Supplier needs, and confirm it has the right to use them',
-    'name one person who can give approvals, and tell the Supplier if that person changes',
-    'respond to requests for approval within five working days',
-    'provide access to any existing domain, hosting or analytics account that is to be reused',
-  ] },
-  { p: 'The Supplier is not responsible for delay caused by any of the above not happening.' },
-
-  { h: 'Intellectual property' },
-  { p: 'On payment in full, the Client owns the finished website, its content and its design. Until '
-     + 'payment in full, the Supplier retains ownership of the work in progress.' },
-  { p: 'The Supplier retains ownership of any pre-existing framework, library or component used to '
-     + 'build the site, and grants the Client a perpetual licence to use it as part of the site.' },
-  { p: 'Third-party components keep their own licences. The Supplier will tell the Client about any '
-     + 'component that carries an ongoing fee before it is used.' },
-
-  { h: 'Changes' },
-  { p: 'A change to the scope set out above is agreed in writing, with its effect on the fee and the '
-     + 'duration stated at the time. Work does not begin on a change before that is agreed.' },
-
-  { h: 'Warranty and defects' },
-  { p: 'For 30 days after launch the Supplier will correct, at no charge, any defect in the work it '
-     + 'delivered. A defect is the work not doing what this agreement says it does.' },
-  { p: 'A change of mind, a new requirement, or a fault in something the Client supplied or in a '
-     + 'third-party service is not a defect.' },
-  { p: 'The Supplier does not warrant any particular commercial result from the website.' },
-
-  { h: 'Hosting and ongoing costs' },
-  { p: 'Domain registration, hosting and third-party service fees are the Client\'s, and are passed '
-     + 'through at cost unless this agreement says otherwise.' },
-
-  { h: 'Confidentiality' },
-  { p: 'Each party will keep confidential anything the other marks as confidential, or that is '
-     + 'obviously confidential, and will use it only to perform this agreement.' },
-
-  { h: 'Liability' },
-  { p: 'Neither party excludes liability for death, personal injury, or fraud.' },
-  { p: 'Otherwise, each party\'s total liability under this agreement is limited to the total fee '
-     + 'paid or payable under it, and neither party is liable for loss of profit, loss of business, or '
-     + 'any indirect or consequential loss.' },
-
-  { h: 'Ending this agreement' },
-  { p: 'Either party may end this agreement by 14 days\' written notice. On ending, the Client pays '
-     + 'for work done up to that date, and the Supplier delivers that work in the state it is in.' },
-  { p: 'Either party may end this agreement immediately if the other is in material breach and has '
-     + 'not corrected it within 14 days of being told about it in writing.' },
-
-  { h: 'Referral partner' },
-  { p: 'Where this agreement names a partner under "Introduced by", that partner introduced the '
-     + 'Client to the Supplier and is not a party to this agreement. The partner has no authority to '
-     + 'vary it, to accept notice under it, or to bind the Supplier.' },
-
-  { h: 'General' },
+  { h: 'Terms' },
   { numbered: [
-    'This agreement is the whole agreement between the parties about this work, and replaces anything said or written before it.',
-    'A waiver of one breach is not a waiver of any other.',
-    'If any clause is unenforceable, the rest of the agreement continues in force.',
-    'Neither party may assign this agreement without the other\'s written consent.',
-    'This agreement is governed by the law of the State of Illinois, and the courts of that State have exclusive jurisdiction.',
+    'The {{duration_weeks}}-week timeline begins {{start_basis}} — not when this is signed. If you are late sending content, approvals or access, the delivery date moves by the same amount, and we will confirm the new date in writing.',
+    'You will give us your text, images, logo, opening hours and access to your domain and any existing site, and you confirm you have the right to use what you send us. Please name one person who can approve things.',
+    'Two rounds of revisions are included. A revision round is one consolidated set of changes. Anything beyond that, or outside the scope above, is quoted and agreed in writing before we start it.',
+    'If we do not hear back on something we have sent for approval within five working days, we treat it as approved, so the project does not stall.',
+    'Each invoice is payable within 14 days. We may pause work on anything more than 14 days overdue, and the delivery date moves accordingly.',
+    'When you have paid in full, the finished site, its content and its design are yours. We keep ownership of the frameworks and components underneath it, and you get a perpetual licence to use them as part of your site. Your domain is yours throughout.',
+    'The monthly fee covers hosting, security updates, backups and the content changes listed above. Either of us can end it with 30 days’ notice, and if it ends we will give you an export of your site so you can host it elsewhere.',
+    'Domain registration, third-party licences and plugin fees are yours and are passed through at cost.',
+    'For 30 days after launch we will fix, free, anything that does not do what this agreement says it does. A change of mind, a new requirement, or a fault in something you supplied or in a third-party service is not covered by that.',
+    'We cannot promise any particular search ranking, amount of traffic, or number of enquiries, and we have not done so.',
+    'Either of us can end this agreement with 14 days’ written notice, or immediately if the other is in material breach and has not fixed it within 14 days of being told. If it ends, you pay for the work done and we hand it over as it stands.',
+    'Except for death, personal injury or fraud, neither of us is liable for loss of profit or business or any indirect loss, and our total liability is limited to the fees paid under this agreement.',
+    'Where a partner is named under "Introduced by", they introduced us and are not a party to this agreement. They cannot vary it or agree anything on our behalf.',
+    'This is the whole agreement about this work and replaces anything said before it. Changes are in writing, signed by both of us. If one clause is unenforceable the rest still stands. It is governed by the law of the State of Illinois.',
   ] },
 
-  // BOTH blocks carry omit_if_empty, so an absent note drops the heading with its body rather than
-  // leaving a numbered clause containing nothing.
   { h: 'Additional agreed terms', omit_if_empty: 'terms_note' },
   { p: '{{terms_note}}', omit_if_empty: 'terms_note' },
 
   { h: 'Signed' },
-  { p: 'Each party confirms the person signing is authorised to do so.' },
   { signatures: [
+    // `for:` is a fixed label, NOT merged — the renderer's sweep refuses the document if a
+    // {{placeholder}} is left here, which is how this was caught.
     { for: 'For the Supplier', name: '{{supplier_name}}', title: null },
     { for: 'For the Client', name: '{{client_contact}}', title: '{{client_title}}' },
   ] },

@@ -121,16 +121,17 @@ test('the rendered file is a real .docx and contains NO surviving placeholder', 
   assert.ok(!/undefined|\[object Object\]|NaN|null/.test(text), `leaked a JS value: ${text.slice(0, 200)}`);
 });
 
-test('and it carries the PLACEHOLDER NOTICE, so a draft cannot be mistaken for reviewed wording', async () => {
-  const { buffer } = await renderContract(FULL);
-  const text = textOf(buffer);
-  assert.match(text, /NOT BEEN REVIEWED BY AN ATTORNEY/);
-  assert.match(text, /not legal advice/);
-  // The template version is printed in the document AND returned for the register, so a file found
-  // later can be traced to the wording that produced it.
+test('every document is stamped with the template version that produced it', async () => {
+  // This replaced a test that asserted a PLACEHOLDER NOTICE in the document. The notice came out with v1,
+  // because the document now goes to real clients. What survives is the part that matters afterwards: a
+  // signed file on somebody's disk in a year's time must say which wording they agreed to, because the
+  // terms will have changed by then and the register alone cannot prove which text a given client saw.
+  const r = await renderContract(FULL);
+  const text = textOf(r.buffer);
   assert.ok(text.includes(TEMPLATE_VERSION), 'the document must name its template version');
-  assert.equal((await renderContract(FULL)).template_version, TEMPLATE_VERSION);
-  assert.match(TEMPLATE_VERSION, /placeholder/, 'while the template is unreviewed, its version must say so');
+  assert.equal(r.template_version, TEMPLATE_VERSION, 'and return it for the register');
+  assert.doesNotMatch(text, /NOT BEEN REVIEWED BY AN ATTORNEY|not legal advice|placeholder/i,
+    'a document sent to a client must not warn the client about itself');
 });
 
 test('every supplied value actually reaches the document', async () => {

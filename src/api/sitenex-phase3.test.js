@@ -1437,7 +1437,9 @@ test('GUARD: nothing is per-partner except territory and volume', () => {
   // The only partner-specific thing in a contract is WHICH partner introduced the client — a name on a
   // line, not a term of the agreement.
   assert.match(tmpl, /Introduced by/);
-  assert.match(tmpl, /is not a party to this agreement/,
+  // (is|are): v1 says "they ... are not a party". The guard is about the CLAUSE existing, not its number,
+  // and pinning the verb meant a grammatical rewrite read as a missing clause.
+  assert.match(tmpl, /(is|are) not a party to this agreement/,
     'and the partner is explicitly not a party, which is what keeps the terms identical');
 });
 

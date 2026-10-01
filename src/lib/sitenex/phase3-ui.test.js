@@ -166,9 +166,12 @@ test('the page is wrapped so a render failure is VISIBLE, not a blank screen', (
 
 // ── the content it renders ────────────────────────────────────────────────────
 
-test('the register prints the placeholder warning on the PAGE, not only in the document', () => {
-  // A notice that lives only inside the .docx is a notice nobody reads before sending it.
-  assert.match(SRC, /has not been reviewed by an attorney/i);
+test('the register no longer warns about a placeholder template', () => {
+  // Retired with v1: the template is the real standard form now and the banner came off. Kept as an
+  // ASSERTION OF ABSENCE rather than deleted, because a warning left on screen after the thing it warned
+  // about was fixed teaches everyone to ignore banners — and this one sat above a register partners read.
+  assert.doesNotMatch(SRC, /has not been reviewed by an attorney/i);
+  assert.doesNotMatch(SRC, /placeholder content/i);
 });
 
 test('the annualised figure is labelled as derived, never as revenue', () => {

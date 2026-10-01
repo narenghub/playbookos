@@ -255,14 +255,6 @@ async function snContractsPage() {
     + '<h2 style="margin:0">SiteNex Contracts</h2>'
     + '<div style="font-size:12px;color:var(--text-muted)">' + d.total + ' in the register · ' + snEsc(d.scope) + '</div>'
     + '</div>'
-    /* The template is a placeholder and the register says so on every visit, not only inside the file.
-       A notice that lives only in the document is a notice nobody reads before sending it. */
-    + '<div style="margin:10px 0 14px;padding:8px 10px;border:1px solid #f0c0c0;background:#fff6f6;border-radius:6px;'
-    + 'font-size:12px;color:#8a1f1f">'
-    + '<strong>The contract template has not been reviewed by an attorney.</strong> '
-    + 'Clause text is placeholder content so the system can be built and tested. Do not send a generated '
-    + 'document to a client until the wording has been replaced.'
-    + '</div>'
     + '<div id="sn-msg" style="font-size:12px;min-height:16px;margin:0 0 8px"></div>';
 
   if (!d.contracts.length) {

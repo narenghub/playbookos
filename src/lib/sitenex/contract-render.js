@@ -268,11 +268,37 @@ async function renderContract(input) {
            + `These names are referenced by the template but are not declared in FIELDS.` };
   }
 
+  // TWO THINGS THAT ARE ONLY VISIBLE IF YOU LOOK AT THE FILE, and neither is caught by a test that
+  // reads the text:
+  //
+  //   1. The heading styles are overridden to BLACK. The `docx` default for Heading 1/2 is Word's
+  //      accent blue, which is the colour of a document nobody styled. On a contract going to a
+  //      machine shop that reads as a template somebody downloaded, which is the opposite of the
+  //      impression the thing is for.
+  //   2. The page is LETTER, not A4. The library defaults to A4; every client this goes to is in the
+  //      United States, and A4 is the one page size that is wrong in a way the client's printer
+  //      discovers rather than we do.
   const doc = new Document({
     creator: SUPPLIER.supplier_name,
     title: `Website Development Agreement — ${fields.client_company}`,
     description: `${fields.contract_no} (template ${TEMPLATE_VERSION})`,
-    sections: [{ properties: { page: { margin: { top: 1000, bottom: 1000, left: 1000, right: 1000 } } }, children }],
+    styles: {
+      paragraphStyles: [
+        { id: 'Heading1', name: 'Heading 1', basedOn: 'Normal', next: 'Normal', quickFormat: true,
+          run: { size: 30, bold: true, color: '000000' }, paragraph: { spacing: { before: 0, after: 220 } } },
+        { id: 'Heading2', name: 'Heading 2', basedOn: 'Normal', next: 'Normal', quickFormat: true,
+          run: { size: 22, bold: true, color: '000000' }, paragraph: { spacing: { before: 280, after: 120 } } },
+      ],
+    },
+    sections: [{
+      properties: {
+        page: {
+          size: { width: 12240, height: 15840 },           // US Letter, in DXA
+          margin: { top: 1000, bottom: 1000, left: 1000, right: 1000 },
+        },
+      },
+      children,
+    }],
   });
   const buffer = await Packer.toBuffer(doc);
 
