@@ -4948,10 +4948,11 @@ router.get('/sitenex/prospects', authMiddleware, requireTier('sitenex'), async (
         : (terr.failed
           ? 'You have no territory yet, so no prospects are shown. Ask us to grant one.'
           : `Showing the prospects in your territory (${terr.territories.map(t => t.value).join(', ')}).`),
-      // Outreach status is INTERNAL — /api/outreach is staffOnly, because an outreach note is our record of
-      // what we did and not a partner's. Reported here so the screen does not draw a control that would
-      // 403 on use; the client must not work this out from the role itself.
-      can_track_outreach: !terr.isStaff ? false : true });
+      // TRUE for everyone now (2026-10-01). Outreach was staffOnly while a note could only be ours; a partner
+      // working their own territory records their own calls, and outreach.partner_id keeps A's out of B's
+      // sight. The flag STAYS, rather than being deleted as always-true: it is the server's answer to "may
+      // this caller use outreach", and the day that stops being yes for somebody, the screen already asks.
+      can_track_outreach: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -5266,33 +5267,37 @@ router.put('/events/cphi/exhibitors/:id', authMiddleware, requireTier('intellige
 // admitted them.
 
 // GET /outreach?entity_type=prospect&ids=1,2,3 — status for the rows a list is already showing.
-// ── staffOnly ON EVERY OUTREACH ROUTE (added 2026-09-30, before ACBM Partners get a login) ──
+// ── PARTNER-SCOPED, from 2026-10-01. This REPLACES staffOnly on every outreach route. ──
 //
-// These are classified 'shared' in the route map, which is correct — every list has outreach status and
-// the route is safe for anyone who works here. But 'shared' means "admitted to everyone with a login",
-// and the DATA scoping underneath is by PRODUCT: a partner holding 'sitenex' therefore saw every SiteNex
-// outreach row and could set a status on a prospect they had never worked, including overwriting a note
-// somebody here had just made after a call.
+// staffOnly was added a day earlier with the reasoning: "outreach rows have no partner_id, and giving them one
+// would mean deciding that an outreach note belongs to a partner rather than to us, which is the opposite of
+// true." That was right while a partner could not work a prospect.
 //
-// Product scoping cannot fix that — they legitimately hold the product. Partner scoping cannot either:
-// outreach rows have no partner_id, and giving them one would mean deciding that an outreach note belongs
-// to a partner rather than to us, which is the opposite of true.
+// They can now — a partner holds a territory and sees the prospects in it — and a partner who rings a business
+// and cannot record the call keeps that record somewhere we never see. So an outreach note CAN belong to a
+// partner, outreach.partner_id says whose it is, and the question became keeping A's out of B's sight.
 //
-// So the answer is the role. Outreach is an INTERNAL record of what we did; an external account has no
-// business reading or writing it. Enforced by middleware rather than by the permissions template, because
-// a template decides nothing for a role that is not in PERMISSIONS_ENFORCE_ROLES.
-router.get('/outreach', authMiddleware, staffOnly, async (req, res) => {
+// THREE LAYERS, all still in force:
+//   product   productScopeSql — is this row's product one they hold
+//   PARTNER   partnerScopeSql → the module's partnerFragment — is this row THEIRS
+//   row       the WRITE still reads the annotated entity's own product, never the request's
+//
+// The partner scope FAILS CLOSED and the module THROWS if a caller omits it, because the two softer shapes —
+// an optional parameter defaulting to no filter, or defaulting to staff — both hand a partner everybody's
+// notes when somebody forgets. A 500 is visible; a missing WHERE clause is not.
+router.get('/outreach', authMiddleware, async (req, res) => {
   try {
     const entityType = String(req.query.entity_type || '');
     const ids = String(req.query.ids || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 500);
     if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
     const held = await effectiveProducts(req.user);
-    res.json({ entity_type: entityType, statuses: await outreach.statusFor(entityType, ids, held) });
+    res.json({ entity_type: entityType,
+      statuses: await outreach.statusFor(entityType, ids, held, await partnerScopeSql(req.user)) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // PUT /outreach — record an outcome. One control, one call, no form.
-router.put('/outreach', authMiddleware, staffOnly, async (req, res) => {
+router.put('/outreach', authMiddleware, async (req, res) => {
   try {
     const { entity_type, entity_id, status, channel, note, next_action_at } = req.body || {};
     if (!entity_type || entity_id == null || !status) {
@@ -5322,22 +5327,23 @@ router.put('/outreach', authMiddleware, staffOnly, async (req, res) => {
 // GET /outreach/summary?entity_type=prospect&total=1524 — the status bar above a list.
 // `total` is how many rows the list has; without it 'new' is reported as 0 rather than invented, because
 // the absence of an outreach row IS 'new' and only the caller knows the denominator.
-router.get('/outreach/summary', authMiddleware, staffOnly, async (req, res) => {
+router.get('/outreach/summary', authMiddleware, async (req, res) => {
   try {
     const entityType = String(req.query.entity_type || '');
     if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
     const total = req.query.total != null && req.query.total !== '' ? Math.max(0, parseInt(req.query.total, 10) || 0) : null;
     const held = await effectiveProducts(req.user);
-    res.json(await outreach.summary(entityType, { held, totalEntities: total, product: req.query.product || null }));
+    res.json(await outreach.summary(entityType, { held, partner: await partnerScopeSql(req.user),
+      totalEntities: total, product: req.query.product || null }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /outreach/activity?days=7 — who changed what. The question current status cannot answer.
-router.get('/outreach/activity', authMiddleware, staffOnly, async (req, res) => {
+router.get('/outreach/activity', authMiddleware, async (req, res) => {
   try {
     const held = await effectiveProducts(req.user);
     res.json(await outreach.activity({
-      held, sinceDays: req.query.days || 7,
+      held, partner: await partnerScopeSql(req.user), sinceDays: req.query.days || 7,
       entityType: req.query.entity_type || null, userId: req.query.user_id || null,
     }));
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -5347,20 +5353,22 @@ router.get('/outreach/activity', authMiddleware, staffOnly, async (req, res) => 
 // by person, by list, by status moved to, and the SILENCE.
 //
 // "Who is reaching out and who is not" spans every list, so it cannot be assembled from per-list bars.
-router.get('/outreach/overview', authMiddleware, staffOnly, async (req, res) => {
+router.get('/outreach/overview', authMiddleware, async (req, res) => {
   try {
     const held = await effectiveProducts(req.user);
-    res.json(await outreach.overview({ held, sinceDays: req.query.days || 7 }));
+    res.json(await outreach.overview({ held, partner: await partnerScopeSql(req.user),
+      sinceDays: req.query.days || 7 }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /outreach/history?entity_type=&entity_id= — one entity's trail, for the inline control.
-router.get('/outreach/history', authMiddleware, staffOnly, async (req, res) => {
+router.get('/outreach/history', authMiddleware, async (req, res) => {
   try {
     const entityType = String(req.query.entity_type || '');
     if (!isEntityType(entityType)) return res.status(400).json({ error: `Unknown entity_type '${entityType}'` });
     const held = await effectiveProducts(req.user);
-    res.json({ events: await outreach.history(entityType, req.query.entity_id, held) });
+    res.json({ events: await outreach.history(entityType, req.query.entity_id, held,
+      await partnerScopeSql(req.user)) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

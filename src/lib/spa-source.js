@@ -1,4 +1,4 @@
-// ── READING public/index.html AS A STRUCTURE ───────────────────────────────────
+// ── READING OUR OWN SOURCE AS A STRUCTURE ──────────────────────────────────────
 //
 // The SPA is one HTML file with several inline scripts plus a couple of external ones, and a surprising
 // number of tests and checkers need to ask structural questions about it: where does the `pages` literal
@@ -98,4 +98,21 @@ function navPageIds(shellHtml) {
   return ids;
 }
 
-module.exports = { pagesLiteral, blankHtmlComments, externalScriptPaths, registeredPages, navPageIds };
+// JS COMMENTS BLANKED, line count preserved.
+//
+// For any test that asks "does this CODE do X" about a file that also EXPLAINS X. Four separate tests have
+// been broken by this exact thing: a comment saying "must not filter on partner_id" failed a check for
+// `partner_id`, a note mentioning `ORDER BY` truncated a handler slice taken at `indexOf('ORDER BY')`, a
+// comment showing `window.NAME =` registered a global that does not exist, and one saying "never called
+// revenue" failed a ban on "revenue". A checker cannot tell prose from code unless it is made to.
+//
+// Deliberately NOT a parser: a `//` inside a string literal is left alone by the lookbehind, which is enough
+// for source-reading tests and wrong for anything that needs to execute the result.
+function stripJsComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:'"\\])\/\/[^\n]*/g, (m, p1) => p1 + ' '.repeat(m.length - p1.length));
+}
+
+module.exports = { pagesLiteral, blankHtmlComments, stripJsComments, externalScriptPaths,
+                   registeredPages, navPageIds };

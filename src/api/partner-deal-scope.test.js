@@ -187,9 +187,11 @@ test('staff get TRUE and a partner gets a comparison — never a silently absent
   assert.match((await partnerScopeSql(asUser('u-pa'), 'd', 1, { query: db.query })).sql, /^d\.partner_id = \$1$/);
 });
 
-test('prospects are NOT partner-scoped — they are ours', async () => {
-  // Stated as a test because it is a decision, not an omission: the prospect list is our lead list, and
-  // no partner owns a row in it. If prospects ever grow a partner_id, this test should fail and be read.
+test('prospects are scoped by TERRITORY, never by partner ownership', async () => {
+  // A decision, not an omission, and the distinction survived the 2026-10-01 reversal: a partner now SEES
+  // prospects, but no partner OWNS one. The list is our lead list and the question is which rows fall inside
+  // the patch we granted them — territoryScopeSql — not whose row it is. If prospects ever grow a partner_id
+  // this test should fail and be read, because that would be a different claim about who the leads belong to.
   const fs = require('fs');
   const routes = fs.readFileSync(__dirname + '/routes.js', 'utf8');
   const from = routes.indexOf("router.get('/sitenex/prospects'");
@@ -199,7 +201,12 @@ test('prospects are NOT partner-scoped — they are ours', async () => {
   // and a sentence mentioning partner_id in prose failed a test about a WHERE clause.
   const end = routes.indexOf('\n});\n', from);
   assert.notEqual(end, -1, 'could not find the end of the prospects handler');
-  const body = routes.slice(from, end);
+  // COMMENTS BLANKED. The handler now explains, in prose, why outreach carries a partner_id — and a check
+  // for the string `partner_id` duly failed on the explanation. Fourth time a comment has broken a
+  // source-reading test here, hence the shared stripper.
+  const body = require('../lib/spa-source').stripJsComments(routes.slice(from, end));
   assert.ok(!/partnerScopeSql/.test(body), 'the prospects route must not be partner-scoped');
-  assert.ok(!/partner_id/.test(body), 'and must not filter on partner_id');
+  assert.ok(!/partner_id/.test(body), 'and must not filter on partner_id — a prospect is not owned by a partner');
+  // What it IS scoped by, asserted positively so "not partner-scoped" cannot be satisfied by being unscoped.
+  assert.match(body, /territoryScopeSql/, 'it must be territory-scoped');
 });

@@ -10,12 +10,14 @@
 const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const { STATUS_DEFS, STATUSES, DEFAULT_STATUS, CHANNELS, ENTITIES, isStatus, isChannel } = require('./registry');
-const { statusFor, setStatus, summary, activity, history } = require('./index');
+const { statusFor, setStatus, summary, activity, overview, history } = require('./index');
 
 // ── a fake that behaves like the table, including the unique constraint ─────────
-let OUTREACH = [], EVENTS = [], ENTITY_ROWS = {}, SEQ = 1, DEALS = [], FIXTURE_PARTNER_ID = 7;
+// The ACTING USER's partner. NULL = staff, which is the default because most of this file is about
+// behaviour that has nothing to do with partners; a test that is about one says so.
+let OUTREACH = [], EVENTS = [], ENTITY_ROWS = {}, SEQ = 1, DEALS = [], FIXTURE_PARTNER_ID = null;
 function reset() {
-  OUTREACH = []; EVENTS = []; SEQ = 1; DEALS = []; FIXTURE_PARTNER_ID = 7;
+  OUTREACH = []; EVENTS = []; SEQ = 1; DEALS = []; FIXTURE_PARTNER_ID = null;
   ENTITY_ROWS = {
     prospects: [{ id: 1, product: 'golfnex' }, { id: 2, product: 'golfnex' },
                 { id: 3, product: 'sitenex' }, { id: 4, product: null }],
@@ -30,9 +32,29 @@ const scopeOf = (sql, params) => {
   if (!m) throw new Error('outreach read is not product-scoped: ' + sql);
   return { held: params[+m[1] - 1] || [], nulls: /o\.product IS NULL/.test(sql) };
 };
+
+// THE PARTNER CLAUSE IS REQUIRED AND HONOURED. Required, because a read that omits it would otherwise pass
+// every test here while letting partner A see partner B's notes — the same reason the module throws. Honoured,
+// because a fake that accepts the clause and then ignores it is worse than one that refuses it: the scoping
+// tests would be green and meaningless.
+const partnerOf = (sql, params) => {
+  if (/o\.partner_id = \$(\d+)/.test(sql)) {
+    const n = +/o\.partner_id = \$(\d+)/.exec(sql)[1];
+    return { kind: 'partner', id: params[n - 1] };
+  }
+  if (/AND FALSE/.test(sql)) return { kind: 'none' };
+  if (/AND TRUE/.test(sql)) return { kind: 'all' };
+  throw new Error('outreach read is not partner-scoped: ' + sql);
+};
+
 const visible = (sql, params, rows) => {
   const s = scopeOf(sql, params);
-  return rows.filter(r => s.held.includes(r.product) || (r.product === null && s.nulls));
+  const p = partnerOf(sql, params);
+  return rows
+    .filter(r => s.held.includes(r.product) || (r.product === null && s.nulls))
+    .filter(r => p.kind === 'all' ? true
+      : p.kind === 'none' ? false
+      : (r.partner_id != null && String(r.partner_id) === String(p.id)));
 };
 
 const query = async (sql, params = []) => {
@@ -46,7 +68,12 @@ const query = async (sql, params = []) => {
     return { rows: row ? [row] : [] };
   }
   if (/^SELECT id, status FROM outreach WHERE entity_type/.test(s)) {
-    const r = OUTREACH.find(x => x.entity_type === params[0] && x.entity_id === params[1]);
+    // Scoped by partner, like the real query: a partner's first touch of a prospect we had already contacted
+    // must read "from not_contacted", not "from contacted" off our row.
+    if (!/COALESCE\(partner_id, 0\) = COALESCE/.test(s)) throw new Error('the before-read is not partner-scoped: ' + s);
+    const want = params[2] == null ? 0 : params[2];
+    const r = OUTREACH.find(x => x.entity_type === params[0] && x.entity_id === params[1]
+      && (x.partner_id == null ? 0 : x.partner_id) === want);
     return { rows: r ? [{ id: r.id, status: r.status }] : [] };
   }
   if (/^INSERT INTO outreach \(/.test(s)) {
@@ -57,7 +84,11 @@ const query = async (sql, params = []) => {
     // that supplies none — broke nothing, because the fake preserved it either way. A fake that restates
     // the semantics agrees with the code whether or not the code is right.
     const coalesced = /channel = COALESCE\(EXCLUDED\.channel, outreach\.channel\)/.test(s);
-    let row = OUTREACH.find(x => x.entity_type === entity_type && x.entity_id === entity_id);
+    // KEYED ON (entity_type, entity_id, partner_id), mirroring the expression index. Keying on the first two
+    // alone is the OLD constraint, and a fake that kept it would make a partner's write overwrite ours.
+    const partner_id = params[9] === undefined ? null : params[9];
+    let row = OUTREACH.find(x => x.entity_type === entity_type && x.entity_id === entity_id
+      && String(x.partner_id == null ? 0 : x.partner_id) === String(partner_id == null ? 0 : partner_id));
     if (row) {
       Object.assign(row, { status, product, owner_user_id: owner || row.owner_user_id,
         channel: coalesced && channel == null ? row.channel : (channel || null),
@@ -65,7 +96,7 @@ const query = async (sql, params = []) => {
         last_contacted_at: touched ? 'NOW' : row.last_contacted_at, updated_at: 'NOW' });
     } else {
       row = { id: SEQ++, entity_type, entity_id, product, status, channel: channel || null,
-              owner_user_id: owner || null, note: note || null,
+              partner_id, owner_user_id: owner || null, note: note || null,
               next_action_at: next || null, last_contacted_at: touched ? 'NOW' : null, updated_at: 'NOW' };
       OUTREACH.push(row);
     }
@@ -128,6 +159,12 @@ const query = async (sql, params = []) => {
 };
 const withTransaction = async (fn) => fn({ query });
 const deps = { query, withTransaction };
+// EVERY READ NOW NEEDS A PARTNER SCOPE, and the module THROWS without one — which is why this file broke in
+// eleven places the moment partner scoping landed. That is the fail-closed design working: an optional
+// parameter defaulting to "no filter" would have left every one of these tests green while a partner could
+// read everybody's notes.
+const OURS = { isStaff: true };                 // staff: sees every partner's rows
+const PA = { partnerId: 11 }, PB = { partnerId: 22 };
 const STAFF = ['abiozen', 'golfnex', 'favly', 'linkabl', 'aros', 'sitenex', 'internal'];
 const set = (o) => setStatus({ user: { id: 'u-v', email: 'vinitha@abiozen.com' }, held: STAFF, ...o }, deps);
 
@@ -188,7 +225,7 @@ test('the migration must NOT add a CHECK on status', () => {
 
 // ── 'not_contacted' needs no row ──────────────────────────────────────────────────────────
 test("an untouched entity is 'not_contacted' with no row written", async () => {
-  const map = await statusFor('prospect', [1, 2], STAFF, deps);
+  const map = await statusFor('prospect', [1, 2], STAFF, OURS, deps);
   assert.deepEqual(map, {}, 'nothing tracked yet');
   assert.equal(OUTREACH.length, 0);
 });
@@ -196,7 +233,7 @@ test("an untouched entity is 'not_contacted' with no row written", async () => {
 test('the summary ADDS the untracked remainder as not_contacted', async () => {
   // The bug this prevents: reading 'not_contacted' out of the table reports 0 over 1,524 untouched prospects.
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
-  const s = await summary('prospect', { held: STAFF, totalEntities: 1524 }, deps);
+  const s = await summary('prospect', { held: STAFF, partner: OURS, totalEntities: 1524 }, deps);
   assert.equal(s.counts.contacted, 1);
   assert.equal(s.counts.not_contacted, 1523, '1524 total minus the 1 that has a row');
   assert.equal(s.tracked, 1);
@@ -205,7 +242,7 @@ test('the summary ADDS the untracked remainder as not_contacted', async () => {
 
 test('with no total supplied, the remainder is not invented', async () => {
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
-  const s = await summary('prospect', { held: STAFF }, deps);
+  const s = await summary('prospect', { held: STAFF, partner: OURS }, deps);
   assert.equal(s.counts.not_contacted, 0, 'better zero than a wrong number');
   assert.equal(s.total, null);
 });
@@ -214,7 +251,7 @@ test('a status outside the vocabulary is still COUNTED, not dropped', async () =
   // The column has no CHECK, so a value could arrive from SQL. Dropping it would silently lose rows from
   // a bar that is supposed to account for all of them.
   OUTREACH.push({ id: 99, entity_type: 'prospect', entity_id: '2', product: 'golfnex', status: 'nurture' });
-  const s = await summary('prospect', { held: STAFF, totalEntities: 10 }, deps);
+  const s = await summary('prospect', { held: STAFF, partner: OURS, totalEntities: 10 }, deps);
   assert.equal(s.counts.nurture, 1);
   assert.equal(s.counts.not_contacted, 9);
 });
@@ -299,7 +336,7 @@ test('a channel is NOT a status and cannot be passed as one', async () => {
 test('the summary returns statuses in funnel order, not alphabetically or by count', async () => {
   await set({ entityType: 'prospect', entityId: 2, status: 'won', channel: 'in_person' });
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted', channel: 'email' });
-  const s = await summary('prospect', { held: STAFF, totalEntities: 1524 }, deps);
+  const s = await summary('prospect', { held: STAFF, partner: OURS, totalEntities: 1524 }, deps);
   const bySortOrder = STATUS_DEFS.slice().sort((a, b) => a.order - b.order).map(d => d.key);
   const keys = Object.keys(s.counts).filter(k => isStatus(k));
   // Asserted against sort_order, NOT against STATUSES — the bar must follow the numbers, and comparing it
@@ -316,7 +353,7 @@ test('activity groups by channel, counting the unrecorded rather than dropping i
   await set({ entityType: 'prospect', entityId: 2, status: 'contacted', channel: 'phone' });
   await set({ entityType: 'prospect', entityId: 1, status: 'quote_sent', channel: 'email' });
   await set({ entityType: 'prospect', entityId: 2, status: 'disqualified' });        // no channel
-  const a = await activity({ held: STAFF, sinceDays: 7 }, deps);
+  const a = await activity({ held: STAFF, partner: OURS, sinceDays: 7 }, deps);
   assert.deepEqual(a.people[0].by_channel, { phone: 2, email: 1, '(not recorded)': 1 },
     'four events, four counted — a NULL channel is a fact, not a row to drop');
   assert.equal(a.people[0].total, 4);
@@ -326,9 +363,9 @@ test('activity groups by channel, counting the unrecorded rather than dropping i
 test('reads are product-scoped — the fake THROWS if the fragment is missing', async () => {
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });   // golfnex
   await set({ entityType: 'prospect', entityId: 3, status: 'won' });         // sitenex
-  const golfnexOnly = await statusFor('prospect', [1, 2, 3], ['golfnex'], deps);
+  const golfnexOnly = await statusFor('prospect', [1, 2, 3], ['golfnex'], OURS, deps);
   assert.deepEqual(Object.keys(golfnexOnly), ['1'], 'the sitenex row is not visible');
-  const both = await statusFor('prospect', [1, 2, 3], ['golfnex', 'sitenex'], deps);
+  const both = await statusFor('prospect', [1, 2, 3], ['golfnex', 'sitenex'], OURS, deps);
   assert.deepEqual(Object.keys(both).sort(), ['1', '3']);
 });
 
@@ -379,7 +416,7 @@ test('activity says WHO contacted how many, which current status cannot', async 
   await setStatus({ entityType: 'institution', entityId: 10, status: 'contacted',
     user: { id: 'u-n', email: 'naren@abiozen.com' }, held: STAFF }, deps);
 
-  const a = await activity({ held: STAFF, sinceDays: 7 }, deps);
+  const a = await activity({ held: STAFF, partner: OURS, sinceDays: 7 }, deps);
   const v = a.people.find(p => p.person === 'vinitha@abiozen.com');
   assert.equal(v.total, 3, 'three changes by Vinitha');
   assert.deepEqual(v.by_status, { contacted: 2, quote_sent: 1 });
@@ -391,14 +428,14 @@ test('activity says WHO contacted how many, which current status cannot', async 
 test('activity is product-scoped like everything else', async () => {
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });   // golfnex
   await set({ entityType: 'prospect', entityId: 3, status: 'contacted' });   // sitenex
-  const a = await activity({ held: ['golfnex'], sinceDays: 7 }, deps);
+  const a = await activity({ held: ['golfnex'], partner: OURS, sinceDays: 7 }, deps);
   assert.equal(a.people.reduce((s, p) => s + p.total, 0), 1, 'only the golfnex event is counted');
 });
 
 test('the per-entity history reads back newest first', async () => {
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
   await set({ entityType: 'prospect', entityId: 1, status: 'won' });
-  const h = await history('prospect', 1, STAFF, deps);
+  const h = await history('prospect', 1, STAFF, OURS, deps);
   assert.deepEqual(h.map(x => x.to_status), ['won', 'contacted']);
 });
 
@@ -521,6 +558,7 @@ test('the HTTP surface: read, write, summary, activity, history, vocabulary', as
 // ── won → a SiteNex deal, rather than the same fact in two places ───────────────
 test("a SiteNex prospect reaching 'won' creates a deal", async () => {
   reset();
+  FIXTURE_PARTNER_ID = 7;          // acting AS a partner, which is the point of the partner_id assertion below
   const r = await set({ entityType: 'prospect', entityId: 3, status: 'won' });   // id 3 is sitenex
   assert.equal(r.ok, true);
   assert.ok(r.deal, 'the response names the deal, so the UI can say which one');
@@ -577,7 +615,7 @@ test('overview: by person, by list, by status, and the SILENCE', async () => {
   await set({ entityType: 'prospect', entityId: 2, status: 'contacted' });
   await set({ entityType: 'institution', entityId: 10, status: 'quote_sent' });
 
-  const o = await require('./index').overview({ held: STAFF, sinceDays: 7 }, deps);
+  const o = await require('./index').overview({ held: STAFF, partner: OURS, sinceDays: 7 }, deps);
   assert.equal(o.total_events, 3);
   assert.equal(o.people[0].total, 3, 'one person did all three');
   const byList = Object.fromEntries(o.by_list.map(l => [l.entity_type, l.events]));
@@ -596,7 +634,7 @@ test('the silence is computed from the LISTS, not from the events', async () => 
   // A silent list cannot appear in the event data by definition, so deriving it from events would always
   // report none. With zero events every visible list must be silent.
   reset();
-  const o = await require('./index').overview({ held: STAFF, sinceDays: 7 }, deps);
+  const o = await require('./index').overview({ held: STAFF, partner: OURS, sinceDays: 7 }, deps);
   assert.equal(o.total_events, 0);
   assert.equal(o.silent.length, Object.keys(ENTITIES).length, 'all six');
   assert.deepEqual(o.people, []);
@@ -606,10 +644,160 @@ test('overview is product-scoped — a partner sees only their own lists and eve
   reset();
   await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });   // golfnex
   await set({ entityType: 'prospect', entityId: 3, status: 'won' });         // sitenex
-  const o = await require('./index').overview({ held: ['sitenex'], sinceDays: 7 }, deps);
+  const o = await require('./index').overview({ held: ['sitenex'], partner: OURS, sinceDays: 7 }, deps);
   assert.equal(o.total_events, 1, 'only the sitenex event');
   // A sitenex-only holder sees the prospect list (it has sitenex rows) and no abiozen/aros list at all.
   const types = o.by_list.map(l => l.entity_type).sort();
   assert.deepEqual(types, ['prospect'], 'the abiozen and aros lists are not theirs to be silent about');
   assert.deepEqual(o.silent, [], 'and the one list they can see is not silent');
+});
+
+// ── PARTNER SCOPING: A must never see B's status, notes or events ──────────────
+//
+// The gate everything else rests on. Until 2026-10-01 outreach was staffOnly, on the grounds that a note
+// could only be ours — which stopped being true when partners began working their own territories. The
+// refusal is REPLACED by a scope, and the thing to prove is that the scope is airtight in both directions.
+
+// Two partners write on the SAME prospect, which territory exclusivity makes rare and non-exclusive
+// territories make possible. One row per (entity, partner) is what lets that happen at all.
+async function twoPartnersTouch() {
+  reset();
+  FIXTURE_PARTNER_ID = 11;
+  await set({ entityType: 'prospect', entityId: 1, status: 'contacted', note: 'A rang them', channel: 'phone' });
+  FIXTURE_PARTNER_ID = 22;
+  await set({ entityType: 'prospect', entityId: 1, status: 'quote_sent', note: 'B emailed a price', channel: 'email' });
+  FIXTURE_PARTNER_ID = null;
+  await set({ entityType: 'prospect', entityId: 2, status: 'won', note: 'ours' });
+}
+
+test('ONE ROW PER (entity, partner) — a second partner does not overwrite the first', async () => {
+  await twoPartnersTouch();
+  const onOne = OUTREACH.filter(r => r.entity_id === '1');
+  assert.equal(onOne.length, 2, 'both partners hold a record on the same prospect');
+  assert.deepEqual(onOne.map(r => r.partner_id).sort(), [11, 22]);
+  assert.deepEqual(onOne.map(r => r.status).sort(), ['contacted', 'quote_sent']);
+  // The OLD key was UNIQUE (entity_type, entity_id): B's write would have become A's row, so A's status and
+  // note would silently change under them.
+  assert.notEqual(onOne[0].note, onOne[1].note);
+});
+
+test('a partner reads ONLY their own status', async () => {
+  await twoPartnersTouch();
+  const a = await statusFor('prospect', [1, 2], STAFF, PA, deps);
+  const b = await statusFor('prospect', [1, 2], STAFF, PB, deps);
+  assert.equal(a['1'].status, 'contacted', "A sees A's");
+  assert.equal(b['1'].status, 'quote_sent', "B sees B's");
+  assert.equal(a['1'].note, 'A rang them');
+  assert.equal(b['1'].note, 'B emailed a price', "and NOT A's note");
+  // Neither sees our row on prospect 2.
+  assert.equal(a['2'], undefined);
+  assert.equal(b['2'], undefined);
+});
+
+test('staff see every partner\'s rows AND ours', async () => {
+  await twoPartnersTouch();
+  const all = await statusFor('prospect', [1, 2], STAFF, OURS, deps);
+  // statusFor keys by entity_id, so two rows on prospect 1 collapse to one — staff see A or B, not both, from
+  // this call. The count that matters is that prospect 2 (ours) IS there, which no partner can see.
+  assert.ok(all['2'], 'ours is visible to us');
+  assert.ok(all['1'], 'and a partner row is too');
+});
+
+test('a partner\'s EVENTS are theirs alone', async () => {
+  await twoPartnersTouch();
+  const a = await history('prospect', 1, STAFF, PA, deps);
+  const b = await history('prospect', 1, STAFF, PB, deps);
+  assert.equal(a.length, 1);
+  assert.equal(b.length, 1);
+  assert.equal(a[0].note, 'A rang them');
+  assert.equal(b[0].note, 'B emailed a price');
+  // The events table has no partner_id of its own — it is scoped through the outreach row it hangs off, which
+  // is the only place the answer is stored. Asserted because a future "optimisation" that queried
+  // outreach_events directly would lose the scope entirely.
+  assert.ok(!a.some(e => /B emailed/.test(e.note || '')), "A must not see B's event");
+});
+
+test("a partner's ACTIVITY counts only their own touches", async () => {
+  await twoPartnersTouch();
+  const a = await activity({ held: STAFF, partner: PA, sinceDays: 7 }, deps);
+  const b = await activity({ held: STAFF, partner: PB, sinceDays: 7 }, deps);
+  const all = await activity({ held: STAFF, partner: OURS, sinceDays: 7 }, deps);
+  assert.equal(a.rows.reduce((n, r) => n + r.n, 0), 1, 'A made one touch');
+  assert.equal(b.rows.reduce((n, r) => n + r.n, 0), 1, 'B made one');
+  assert.equal(all.rows.reduce((n, r) => n + r.n, 0), 3, 'and staff see all three');
+});
+
+test("a partner's SUMMARY bar counts only their own rows", async () => {
+  await twoPartnersTouch();
+  const a = await summary('prospect', { held: STAFF, partner: PA, totalEntities: 100 }, deps);
+  assert.equal(a.counts.contacted, 1);
+  assert.equal(a.counts.quote_sent, 0, "B's row must not appear in A's funnel");
+  assert.equal(a.counts.won, 0, 'nor ours');
+  assert.equal(a.tracked, 1);
+  assert.equal(a.counts.not_contacted, 99, 'and the remainder is computed from THEIR tracked count');
+});
+
+test("the OVERVIEW is scoped, because it is activity rolled up", async () => {
+  await twoPartnersTouch();
+  const a = await overview({ held: STAFF, partner: PA, sinceDays: 7 }, deps);
+  assert.equal(a.total_events, 1, "A's own events only");
+});
+
+// ── FAIL CLOSED ───────────────────────────────────────────────────────────────
+
+test('a read with NO partner scope THROWS — it does not default', async () => {
+  // The whole design. An optional parameter defaulting to "no filter" would have left every test in this file
+  // green while a partner read everybody's notes; defaulting to staff does the same thing. A 500 is visible.
+  await twoPartnersTouch();
+  const cases = [
+    () => statusFor('prospect', [1], STAFF, undefined, deps),
+    () => statusFor('prospect', [1], STAFF, null, deps),
+    () => summary('prospect', { held: STAFF, totalEntities: 10 }, deps),
+    () => activity({ held: STAFF, sinceDays: 7 }, deps),
+    () => overview({ held: STAFF, sinceDays: 7 }, deps),
+    () => history('prospect', 1, STAFF, undefined, deps),
+  ];
+  for (const fn of cases) {
+    await assert.rejects(fn, /partner scope is required/,
+      'omitting the partner scope must throw, not quietly return everything');
+  }
+});
+
+test('a FAILED partner lookup shows nothing, not everything', async () => {
+  // partnerScopeSql returns { failed: true } when it cannot tell whose view this is. "I could not tell" is not
+  // "show everything" — the same choice every other scope in this codebase makes.
+  await twoPartnersTouch();
+  const r = await statusFor('prospect', [1, 2], STAFF, { failed: true }, deps);
+  assert.deepEqual(r, {}, 'no rows');
+  const s = await summary('prospect', { held: STAFF, partner: { failed: true }, totalEntities: 10 }, deps);
+  assert.equal(s.tracked, 0);
+});
+
+test('a scope that is neither staff nor a known partner shows nothing', async () => {
+  await twoPartnersTouch();
+  assert.deepEqual(await statusFor('prospect', [1, 2], STAFF, {}, deps), {},
+    'an empty object is not "staff" — it is a caller who did not say');
+  assert.deepEqual(await statusFor('prospect', [1, 2], STAFF, { partnerId: null }, deps), {});
+});
+
+test('the WRITE takes partner_id from the acting user, never from the arguments', async () => {
+  reset();
+  FIXTURE_PARTNER_ID = 11;
+  // There is no partner_id parameter to pass, which is the point — but an attempt to smuggle one through the
+  // options object must change nothing either.
+  const r = await set({ entityType: 'prospect', entityId: 1, status: 'contacted', partner_id: 22, partnerId: 22 });
+  assert.equal(r.ok, true);
+  assert.equal(OUTREACH[0].partner_id, 11, "the acting user's partner, not the one asked for");
+});
+
+test("a partner's first touch reads 'from not_contacted', not from OUR row", async () => {
+  // The before-read is partner-scoped too. Unscoped, a partner's first contact on a prospect we had already
+  // contacted would log "contacted → contacted" and report unchanged — telling them they had done nothing.
+  reset();
+  FIXTURE_PARTNER_ID = null;
+  await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
+  FIXTURE_PARTNER_ID = 11;
+  const r = await set({ entityType: 'prospect', entityId: 1, status: 'contacted' });
+  assert.equal(r.from, 'not_contacted', 'their own history starts empty');
+  assert.equal(r.changed, true, 'and it reads as a change, because for them it is one');
 });
