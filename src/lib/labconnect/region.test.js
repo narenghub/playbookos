@@ -13,6 +13,56 @@ const { regionFor, regionLabel, isRegion, stateFromAddress, US_ZONE, US_ZONES, E
 
 // ── the address parse ─────────────────────────────────────────────────────────
 
+// THE TEST THAT WOULD HAVE CAUGHT THE WHOLE THING, and the reason it is written this way.
+//
+// Every assertion below about a "real FDA address" was hand-written from what I assumed the file
+// looked like — ", Rockford, IL 61108" — and every one of them passed while the parser matched
+// nothing in production. The authentic row was sitting in src/lib/fda/establishments.test.js the
+// entire time, and the two files never had to agree.
+//
+// Now they do. This drives the ACTUAL fixture through the ACTUAL FDA parser and asks regionFor for
+// a region, so the only way to get a green suite with a broken parse is to change the fixture — at
+// which point the FDA parser's own tests fail too. A format assumption that is not pinned to a real
+// row is not a tested assumption.
+test('GUARD: the register’s own fixture row gets a region, parser to parser', () => {
+  const { parseDecrs } = require('../fda/establishments');
+  const HEADER = ' FEI_NUMBER\tDUNS_NUMBER\tFIRM_NAME\tADDRESS\tEXPIRATION_DATE\tOPERATIONS\t'
+    + 'ESTABLISHMENT_CONTACT_NAME\tESTABLISHMENT_CONTACT_EMAIL\tAGENT_DETAILS\tREGISTRANT_NAME\t'
+    + 'REGISTRANT_DUNS\tREGISTRANT_CONTACT_NAME\tREGISTRANT_CONTACT_EMAIL\tEXCLUSION_FLAG';
+  const ROW_DOMESTIC = '1419498\t123456789\tRising Pharma Holdings, Inc.\t'
+    + '1222 West Grand Ave, Decatur, Illinois (IL) 62522, United States (USA)\t12/31/2026\t'
+    + 'ANALYSIS; MANUFACTURE; PACK\tJane Roe\tjane.roe@risingpharma.com\t\t'
+    + 'Rising Pharma Holdings\t123456789\tJohn Doe\tjohn.doe@risingpharma.com\tN\t';
+
+  const [row] = parseDecrs([HEADER, ROW_DOMESTIC].join('\n'));
+  assert.equal(row.country, 'USA', 'a DOMESTIC row carries (USA) — it is not null, as I had assumed');
+  const r = regionFor(row);
+  assert.equal(r.state, 'IL', 'the state is "Illinois (IL) 62522", not ", IL 62522"');
+  assert.equal(r.region, 'us_central');
+  assert.equal(r.country, 'USA');
+  assert.equal(r.country_inferred, false, 'nothing is inferred: the register said USA');
+  // And the foreign fixture must still not acquire a US state from its own five-digit-ish tail.
+  const ROW_FOREIGN = '0000000360\t271408412\tDSP\tRue Grands Navoirs, Chauny,  F-02300, France (FRA)\t'
+    + '12/31/2026\tAPI MANUFACTURE\tSylvie Proisy\tsylvie.proisy@dupont.com\t'
+    + '139242874 - Registrar Corp - drugs@registrarcorp.com\tDSP\t271408412\tDavid Lennarz\t'
+    + 'drugs@registrarcorp.com\tN\t';
+  const [fr] = parseDecrs([HEADER, ROW_FOREIGN].join('\n'));
+  assert.equal(regionFor(fr).region, 'eu_fra');
+  assert.equal(regionFor(fr).state, null);
+});
+
+test('the parenthesised state form — what the file actually writes', () => {
+  assert.equal(stateFromAddress('1222 West Grand Ave, Decatur, Illinois (IL) 62522, United States (USA)'), 'IL');
+  assert.equal(stateFromAddress('105 Church Rd, North Wales, Pennsylvania (PA) 19454, United States (USA)'), 'PA');
+  assert.equal(stateFromAddress('1 Loop, Cupertino, California (CA) 95014-2083, United States (USA)'), 'CA');
+  // The three-letter country tail cannot be read as a state, which is the whole reason the code
+  // is constrained to two letters AND must be followed by a ZIP.
+  assert.notEqual(stateFromAddress('Rue Grands Navoirs, Chauny, F-02300, France (FRA)'), 'FR');
+  assert.equal(stateFromAddress('Rue Grands Navoirs, Chauny, F-02300, France (FRA)'), null);
+  // A parenthesised code with no ZIP after it is not a state either.
+  assert.equal(stateFromAddress('Unit 4, Dublin, Leinster (LE), Ireland (IRL)'), null);
+});
+
 test('the state comes out of a real FDA address tail', () => {
   assert.equal(stateFromAddress('2810 Charles St, Rockford, IL 61108'), 'IL');
   assert.equal(stateFromAddress('1333 Barclay Blvd, Suite 1333, Buffalo Grove, IL 60089'), 'IL');
@@ -62,15 +112,17 @@ test('a US lab lands in its zone, with the state kept alongside', () => {
     { region: 'us_mountain', state: 'NM', country: 'USA', country_inferred: false, reason: null });
 });
 
-test('A NULL COUNTRY FALLS THROUGH TO THE US ADDRESS — this is where the US labs were lost', () => {
-  // THE BUG. `fda_establishments.country` is parsed from a trailing "(DEU)", which the FDA file
-  // writes on FOREIGN addresses only. Every US establishment therefore has country NULL, and the
-  // first version of regionFor refused on that — so the entire domestic directory, which is the
-  // point of the product, landed in "region not determined":
+test('a null country falls through to the US address — a fallback, not the main path', () => {
+  // WHAT THIS IS AND IS NOT. It was added as "the fix" on the belief that the register writes its
+  // "(XXX)" tail on foreign addresses only, leaving every US row with country NULL. That belief was
+  // wrong — see the fixture guard at the top of this file, where a domestic row carries (USA) — and
+  // the real fault was in stateFromAddress. The census said so plainly and I had to be shown it:
   //
-  //     (undetermined) region not determined        1,159
-  //     row_ind        IND                            568
-  //   … and no US row anywhere in the list.
+  //     no region could be determined      1,159
+  //     country inferred from a US tail        0   ← this branch was never taken
+  //
+  // It stays because a row with a mangled tail and a good street address should still be placeable.
+  // Its counter reading 0 in production is the EXPECTED result, not a symptom.
   const r = regionFor({ country: null, address: '105 Church Rd, North Wales, PA 19454' });
   assert.equal(r.region, 'us_east');
   assert.equal(r.state, 'PA');

@@ -75,17 +75,44 @@ const EUROPE = ['GBR', 'CHE', 'NOR', 'ISL', 'LIE',
 const EUROPE_SET = new Set(EUROPE);
 
 /**
- * The US state out of an address tail: "..., Rockford, IL 61108" → "IL".
+ * The US state out of an FDA address.
  *
- * Anchored on a two-letter code FOLLOWED BY A 5-DIGIT ZIP, which is what stops it matching a
- * street abbreviation ("...123 N ST, Chicago..."). Returns null rather than guessing: a wrong
- * state puts a lab in the wrong half of the country, which is worse than an unassigned one that
- * shows up in the directory's "region not determined" bucket and gets looked at.
+ * ── THE FORMAT THIS REGISTER ACTUALLY USES ───────────────────────────────────
+ *
+ * A domestic row in drls_reg.txt looks like this — the fixture is in
+ * src/lib/fda/establishments.test.js and has been there since the ingest was written:
+ *
+ *     1222 West Grand Ave, Decatur, Illinois (IL) 62522, United States (USA)
+ *
+ * The state is the FULL NAME followed by a PARENTHESISED code, and the ZIP follows the closing
+ * paren with no comma between them. The first version of this function looked for ", IL 62522" —
+ * a form that does not occur — so it matched nothing, and every US lab in the register fell out
+ * with "no state in address":
+ *
+ *     no region could be determined      1,159
+ *     country inferred from a US tail        0
+ *     ── region-wise ──
+ *       (undetermined) region not determined        1,159
+ *     … and no US zone anywhere in the list.
+ *
+ * Both forms are accepted now: the parenthesised one because it is what the file writes, and the
+ * comma one because it costs a single alternation and the register is not uniform.
+ *
+ * In both, the code must be FOLLOWED BY A 5-DIGIT ZIP. That is what stops a street abbreviation
+ * ("123 N ST, Chicago") or the country tail from being read as a state. "(USA)" is three letters
+ * and cannot match. Returns null rather than guessing: a wrong state puts a lab in the wrong half
+ * of the country, which is worse than an unassigned one sitting visibly in the directory's "region
+ * not determined" bucket where somebody will fix the address.
  */
 function stateFromAddress(address) {
   if (!address) return null;
-  const m = /,\s*([A-Z]{2})\s+\d{5}(?:-\d{4})?\s*(?:,|$)/.exec(String(address).toUpperCase());
-  return m ? m[1] : null;
+  const s = String(address).toUpperCase();
+  // "Illinois (IL) 62522" — the canonical form in this file.
+  const paren = /\(([A-Z]{2})\)\s*(\d{5})(?:-\d{4})?(?!\d)/.exec(s);
+  if (paren) return paren[1];
+  // "..., Rockford, IL 61108" — the plain postal form.
+  const comma = /,\s*([A-Z]{2})\s+\d{5}(?:-\d{4})?\s*(?:,|$)/.exec(s);
+  return comma ? comma[1] : null;
 }
 
 /**
@@ -102,27 +129,25 @@ function stateFromAddress(address) {
  * cannot be assessed for. The directory shows those rows under their own heading so somebody can
  * fix the address.
  *
- * ── WHY A NULL COUNTRY IS NOT THE END OF THE QUESTION ────────────────────────
+ * ── WHERE THE US LABS WERE ACTUALLY LOST, AND THE WRONG DIAGNOSIS FIRST ──────
  *
- * `fda_establishments.country` is parsed from a trailing "(DEU)" on the address, and the FDA file
- * writes that suffix on FOREIGN addresses only. A domestic one is "105 Church Rd, North Wales, PA
- * 19454" with nothing after it — so every US establishment in the register has country NULL.
+ * A domestic row DOES carry a country code. The register writes the country tail on every address,
+ * domestic included: "1222 West Grand Ave, Decatur, Illinois (IL) 62522, United States (USA)".
+ * So `country` is 'USA' on US rows, not NULL.
  *
- * The first version of this function refused on a null country, and the result was that the US
- * labs — the entire domestic directory, which is the point of the product — all landed in "region
- * not determined":
+ * The first attempt at this fix was built on the opposite belief — that the "(XXX)" suffix appeared
+ * on foreign addresses only and every US row therefore had a null country. It added the fall-through
+ * below and changed nothing, because the branch it added was never the one being taken: the census
+ * reported `country inferred from a US tail  0` while 1,159 rows stayed undetermined. The real
+ * failure was one layer down in `stateFromAddress`, which was matching a ", IL 62522" form the file
+ * does not write. See that function.
  *
- *     ── region-wise ──
- *       (undetermined) region not determined        1,159
- *       row_ind        IND                            568
- *       row_chn        CHN                            261
- *     … and no US row anywhere in the list.
- *
- * So a null country falls through to the US address parse. That is an inference, and it is a safe
- * one for two reasons together: `stateFromAddress` requires a two-letter code followed by a 5-digit
- * ZIP, and the code must then be a REAL US state in US_ZONE. A German address ("Berlin, BE 10115")
- * passes the first and fails the second. A foreign address that passed both would have carried its
- * own "(XXX)" and never reached here.
+ * The fall-through for a null country is kept anyway, because a row with no parseable tail but a
+ * real US address should still be placeable. It is an inference, and a safe one for two reasons
+ * together: `stateFromAddress` requires a two-letter code followed by a 5-digit ZIP, and the code
+ * must then be a REAL US state in US_ZONE. A German address ("Berlin, BE 10115") passes the first
+ * and fails the second. It is now a fallback rather than the main path, so `country_inferred`
+ * being 0 is the expected reading and not evidence of anything.
  *
  * ── AND `is_us_agent` NO LONGER SUPPRESSES THE REGION ────────────────────────
  *

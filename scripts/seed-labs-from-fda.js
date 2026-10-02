@@ -121,9 +121,13 @@ async function main() {
   const stats = {
     excluded: 0, us_agent: 0, api_mfr: 0, analysis_only: 0,
     no_region: 0, with_email: 0, importable: 0, country_inferred: 0,
+    // Why each unregioned row was unregioned, and a handful of the actual addresses.
+    _reasons: null,
   };
   const byRegion = new Map();
   const excludedFirms = [];
+  const noRegionReason = new Map();
+  const noRegionSamples = [];
   const candidates = [];
 
   for (const r of rows) {
@@ -136,13 +140,23 @@ async function main() {
     if (r.is_api_manufacturer) stats.api_mfr += 1;
     if (/^\s*ANALYSIS\s*$/i.test(r.operations || '')) stats.analysis_only += 1;
 
-    // `country` comes BACK from regionFor, not straight off the register row. A US establishment
-    // has country NULL in `fda_establishments` — the parser only fills it from a trailing "(XXX)",
-    // which the FDA file writes on foreign addresses only — and regionFor infers 'USA' from a US
-    // address tail. Storing the register's NULL instead would leave every US lab unfilterable by
-    // country in the directory, and unroutable for any order that restricts to one.
-    const { region, state, country: resolvedCountry, country_inferred } = regionFor(r);
-    if (!region) stats.no_region += 1;
+    // `country` comes BACK from regionFor rather than straight off the register row, because
+    // regionFor can infer 'USA' from a US address when the tail is missing. Storing the register's
+    // value blindly would leave an inferred lab unfilterable by country in the directory and
+    // unroutable for any order that restricts to one. Most rows carry their own "(XXX)" — domestic
+    // ones included — so the inference is a fallback and its counter is usually 0.
+    const { region, state, country: resolvedCountry, country_inferred, reason } = regionFor(r);
+    if (!region) {
+      stats.no_region += 1;
+      noRegionReason.set(reason || '(no reason given)', (noRegionReason.get(reason || '(no reason given)') || 0) + 1);
+      // THE DIAGNOSTIC THIS REPORT WAS MISSING. 1,159 rows sat in "no region could be determined"
+      // across three separate runs, and the number alone could not distinguish "these addresses are
+      // genuinely unusable" from "the parser is looking for a format this file does not write" —
+      // which is what it was. One real address printed next to the reason would have ended it
+      // immediately, so the rule from the exclusion_flag bug applies here too: when a filter drops
+      // rows, show what it dropped, not just how many.
+      if (noRegionSamples.length < 8) noRegionSamples.push(`${reason || '?'}  ·  ${r.address || '(no address)'}`);
+    }
     if (country_inferred) stats.country_inferred += 1;
     const key = region || '(undetermined)';
     byRegion.set(key, (byRegion.get(key) || 0) + 1);
@@ -180,6 +194,17 @@ async function main() {
   if (excludedFirms.length) {
     console.log('\n  excluded firms (first few):');
     for (const f of excludedFirms) console.log(`    ${f}`);
+  }
+
+  if (stats.no_region) {
+    head('why those rows have no region — WITH THE ADDRESSES');
+    for (const [reason, n] of [...noRegionReason.entries()].sort((a, b) => b[1] - a[1])) {
+      console.log(`  ${pad(reason, 44)} ${num(n).padStart(7)}`);
+    }
+    console.log('\n  a few of the actual addresses, verbatim:');
+    for (const s of noRegionSamples) console.log(`    ${s}`);
+    console.log('\n  Read these before concluding the addresses are bad. If they look parseable to you,');
+    console.log('  the parser is wrong, not the data — src/lib/labconnect/region.js, stateFromAddress.');
   }
 
   head('region-wise');

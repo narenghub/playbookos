@@ -102,6 +102,22 @@ test('the import PRINTS the exclusion_flag vocabulary before filtering on it', (
     'the vocabulary must be printed BEFORE the rows are filtered');
 });
 
+test('the census PRINTS the addresses it could not place, not just the count', () => {
+  // THE SECOND TIME THE SAME LESSON COST A DAY. The exclusion_flag bug taught "show a filter's
+  // values before filtering on them". The region bug was the same failure one layer along: 1,159
+  // rows sat under `no region could be determined` for three runs, and a bare count cannot tell
+  // "these addresses are unusable" from "stateFromAddress is matching a format this file never
+  // writes" — which was the answer. The register writes "Decatur, Illinois (IL) 62522, United
+  // States (USA)"; the parser wanted ", IL 62522".
+  //
+  // So the report now prints the reason breakdown AND a few verbatim addresses. One line of real
+  // data would have ended it in a glance.
+  assert.match(SEED, /why those rows have no region/);
+  assert.match(SEED, /noRegionSamples/, 'and real addresses must be collected, not just tallied');
+  assert.match(SEED, /r\.address \|\| '\(no address\)'/, 'the sample must be the address itself');
+  assert.match(SEED, /noRegionReason/, 'with the reason each one was refused');
+});
+
 test('the import refuses to run when its central assumption is wrong', () => {
   // The filter is `operations ILIKE '%ANALYSIS%'`, and ANALYSIS being the token for analytical
   // testing is an inference. If it is absent the import would write nothing and report success,
