@@ -13,9 +13,12 @@
 // In:  establishments whose `operations` names analytical testing.
 // Out, each for a reason that would otherwise put a bad row in front of the agent:
 //
-//   • US-AGENT ROWS. The address on those is the agent's — a law office — not the lab's. They are
-//     imported but get region NULL, because filing one by its address would place a lab in
-//     Hyderabad in the US Eastern zone and route it East Coast work.
+//   • US-AGENT ROWS are imported normally and DO get a region. The flag describes the registrant's
+//     mailbox (REGISTRANT_CONTACT_EMAIL belongs to a compliance intermediary), not the address —
+//     the establishment's own address is in ADDRESS and the agent has its own AGENT_DETAILS column.
+//     An earlier version suppressed the region for these on the opposite belief; it is carried on
+//     the CONTACT instead, where it belongs, since an approach reads differently when it is going
+//     to an intermediary rather than the plant.
 //   • EXCLUDED FIRMS, where the flag AFFIRMATIVELY says so. The first version of this treated any
 //     non-empty `exclusion_flag` as an exclusion and discarded all 3,437 laboratories in the
 //     register — Catalent and Glenmark among them — while reporting it as diligence. The column is
@@ -117,7 +120,7 @@ async function main() {
 
   const stats = {
     excluded: 0, us_agent: 0, api_mfr: 0, analysis_only: 0,
-    no_region: 0, with_email: 0, importable: 0,
+    no_region: 0, with_email: 0, importable: 0, country_inferred: 0,
   };
   const byRegion = new Map();
   const excludedFirms = [];
@@ -133,8 +136,14 @@ async function main() {
     if (r.is_api_manufacturer) stats.api_mfr += 1;
     if (/^\s*ANALYSIS\s*$/i.test(r.operations || '')) stats.analysis_only += 1;
 
-    const { region, state } = regionFor(r);
+    // `country` comes BACK from regionFor, not straight off the register row. A US establishment
+    // has country NULL in `fda_establishments` — the parser only fills it from a trailing "(XXX)",
+    // which the FDA file writes on foreign addresses only — and regionFor infers 'USA' from a US
+    // address tail. Storing the register's NULL instead would leave every US lab unfilterable by
+    // country in the directory, and unroutable for any order that restricts to one.
+    const { region, state, country: resolvedCountry, country_inferred } = regionFor(r);
     if (!region) stats.no_region += 1;
+    if (country_inferred) stats.country_inferred += 1;
     const key = region || '(undetermined)';
     byRegion.set(key, (byRegion.get(key) || 0) + 1);
 
@@ -147,7 +156,8 @@ async function main() {
       name: r.firm_name,
       name_normalized: normalize(r.firm_name),
       fei_number: r.fei_number, duns_number: r.duns_number,
-      address: r.address, city: cityFromAddress(r.address), state, country: r.country, region,
+      address: r.address, city: cityFromAddress(r.address), state,
+      country: resolvedCountry, country_inferred: !!country_inferred, region,
       contact_name: r.establishment_contact_name || null,
       contact_email: email,
       // A manufacturer with an ANALYSIS registration is testing its OWN product. Flagged in the
@@ -162,8 +172,9 @@ async function main() {
   console.log(`  importable                      ${num(stats.importable).padStart(8)}`);
   console.log(`  ANALYSIS and nothing else       ${num(stats.analysis_only).padStart(8)}   ← the contract labs`);
   console.log(`  also an API manufacturer        ${num(stats.api_mfr).padStart(8)}   ← probably testing its own product`);
-  console.log(`  address is a US agent           ${num(stats.us_agent).padStart(8)}   ← imported, but no region`);
+  console.log(`  contact is a US agent           ${num(stats.us_agent).padStart(8)}   ← an intermediary, not the plant`);
   console.log(`  no region could be determined   ${num(stats.no_region).padStart(8)}`);
+  console.log(`  country inferred from a US tail ${num(stats.country_inferred).padStart(8)}   ← the domestic labs`);
   console.log(`  a contactable email             ${num(stats.with_email).padStart(8)}   ← what the agent can actually work`);
   console.log(`  EXCLUDED, not imported          ${num(stats.excluded).padStart(8)}   ← FDA exclusion flag`);
   if (excludedFirms.length) {

@@ -92,38 +92,78 @@ function stateFromAddress(address) {
  * The region for one establishment row.
  *
  *   regionFor({ country: 'USA', address: '...IL 61108' })  → { region: 'us_central', state: 'IL' }
+ *   regionFor({ country: null,  address: '...IL 61108' })  → { region: 'us_central', state: 'IL' }
  *   regionFor({ country: 'DEU' })                          → { region: 'eu_deu',     state: null }
  *   regionFor({ country: 'IND' })                          → { region: 'row_ind',    state: null }
- *   regionFor({ country: null })                           → { region: null,         state: null }
+ *   regionFor({ country: null,  address: 'No. 9 Jianguo' }) → { region: null,         state: null }
  *
  * `region: null` means UNDETERMINED and is deliberately not a bucket of its own — a lab with no
  * usable location must not be silently filed anywhere, because routing would then send it work it
  * cannot be assessed for. The directory shows those rows under their own heading so somebody can
  * fix the address.
  *
- * `us_agent: true` forces null. A US-agent row carries the AGENT'S address — a law office in
- * Washington or New Jersey — not the lab's. Those rows are contactable and their geography is
- * fiction, so filing one by its address would put a Chinese lab in the Eastern zone.
+ * ── WHY A NULL COUNTRY IS NOT THE END OF THE QUESTION ────────────────────────
+ *
+ * `fda_establishments.country` is parsed from a trailing "(DEU)" on the address, and the FDA file
+ * writes that suffix on FOREIGN addresses only. A domestic one is "105 Church Rd, North Wales, PA
+ * 19454" with nothing after it — so every US establishment in the register has country NULL.
+ *
+ * The first version of this function refused on a null country, and the result was that the US
+ * labs — the entire domestic directory, which is the point of the product — all landed in "region
+ * not determined":
+ *
+ *     ── region-wise ──
+ *       (undetermined) region not determined        1,159
+ *       row_ind        IND                            568
+ *       row_chn        CHN                            261
+ *     … and no US row anywhere in the list.
+ *
+ * So a null country falls through to the US address parse. That is an inference, and it is a safe
+ * one for two reasons together: `stateFromAddress` requires a two-letter code followed by a 5-digit
+ * ZIP, and the code must then be a REAL US state in US_ZONE. A German address ("Berlin, BE 10115")
+ * passes the first and fails the second. A foreign address that passed both would have carried its
+ * own "(XXX)" and never reached here.
+ *
+ * ── AND `is_us_agent` NO LONGER SUPPRESSES THE REGION ────────────────────────
+ *
+ * It used to, on the stated grounds that "a US-agent row carries the AGENT'S address — a law office
+ * — not the lab's". That is wrong about this dataset, and the parser that produces the column says
+ * so: `isUsAgent` reads REGISTRANT_CONTACT_EMAIL, the agent's MAILBOX. The establishment's own
+ * address is in ADDRESS, and the agent has a separate AGENT_DETAILS column entirely. The flag
+ * describes who answers the email, not where the laboratory is.
+ *
+ * It never bit, only because the branch was unreachable while every US row had a null country —
+ * which is the kind of luck worth naming rather than relying on. What the flag DOES mean is carried
+ * forward on the contact, where it belongs: an approach reads differently when it is going to a
+ * compliance intermediary rather than the plant.
  */
 function regionFor(row) {
   const country = row && row.country ? String(row.country).trim().toUpperCase() : null;
-  if (!country) return { region: null, state: null, reason: 'no country' };
 
-  if (country === 'USA') {
-    if (row.is_us_agent) return { region: null, state: null, reason: 'address is a US agent' };
-    const state = stateFromAddress(row.address);
-    if (!state) return { region: null, state: null, reason: 'no state in address' };
+  if (!country || country === 'USA') {
+    const state = stateFromAddress(row && row.address);
+    if (!state) {
+      return { region: null, state: null, country: country || null,
+               reason: country ? 'no state in address' : 'no country and no US state in the address' };
+    }
     const region = US_ZONE[state];
-    if (!region) return { region: null, state, reason: `unmapped state ${state}` };
-    return { region, state, reason: null };
+    if (!region) {
+      // A two-letter code with a US-shaped ZIP that is not a US state. Refused rather than
+      // bucketed: this is exactly the shape a foreign address takes when its country code is
+      // missing, and guessing would file it in the wrong hemisphere.
+      return { region: null, state: null, country: country || null, reason: `'${state}' is not a US state` };
+    }
+    return { region, state, country: 'USA', country_inferred: !country, reason: null };
   }
 
-  if (EUROPE_SET.has(country)) return { region: 'eu_' + country.toLowerCase(), state: null, reason: null };
+  if (EUROPE_SET.has(country)) {
+    return { region: 'eu_' + country.toLowerCase(), state: null, country, reason: null };
+  }
 
   // Everything else keeps its country rather than being lumped into one "rest of world": the
   // register has labs in India, China, Japan and Canada, and a bucket that merges them is useless
   // the first time somebody asks which country a lab is in.
-  return { region: 'row_' + country.toLowerCase(), state: null, reason: null };
+  return { region: 'row_' + country.toLowerCase(), state: null, country, reason: null };
 }
 
 /** Human label for a region key, for the directory's filter and column. */

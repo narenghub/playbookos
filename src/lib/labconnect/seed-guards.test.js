@@ -153,3 +153,25 @@ test('a lab price may be NULL and must never be rendered as zero', () => {
   assert.ok(!/NOT NULL/.test(col), 'price_cents must be nullable');
   assert.ok(!/DEFAULT\s+0/.test(col), 'and must not default to zero');
 });
+
+test('the seed stores the RESOLVED country, not the register’s null', () => {
+  // A US establishment has country NULL in fda_establishments — the parser fills it only from a
+  // trailing "(XXX)", which the FDA file writes on foreign addresses. regionFor infers 'USA' from a
+  // US address tail, and storing the register's NULL instead would leave every domestic lab
+  // unfilterable by country in the directory and unroutable for any order restricted to one.
+  assert.match(SEED, /country: resolvedCountry/,
+    'the import must store the country regionFor resolved, not r.country');
+  assert.ok(!/country: r\.country/.test(SEED),
+    'the raw register value is back, and it is NULL for every US lab');
+  assert.match(SEED, /country_inferred/, 'and the inference must be recorded as one');
+});
+
+test('a US-agent row is imported WITH a region', () => {
+  // The corrected premise. is_us_agent reads REGISTRANT_CONTACT_EMAIL — the agent's mailbox — while
+  // the establishment's own address is in ADDRESS and the agent has a separate AGENT_DETAILS
+  // column. An earlier version suppressed the region on the opposite belief.
+  const { regionFor } = require('./region');
+  const r = regionFor({ country: 'USA', address: '105 Church Rd, North Wales, PA 19454', is_us_agent: true });
+  assert.equal(r.region, 'us_east', 'the lab is where its address says, whoever answers the email');
+  assert.ok(!/imported, but no region/.test(SEED), 'the old claim must be gone from the report too');
+});
