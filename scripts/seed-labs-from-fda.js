@@ -16,9 +16,11 @@
 //   • US-AGENT ROWS. The address on those is the agent's — a law office — not the lab's. They are
 //     imported but get region NULL, because filing one by its address would place a lab in
 //     Hyderabad in the US Eastern zone and route it East Coast work.
-//   • EXCLUDED FIRMS. A non-empty `exclusion_flag` is the FDA saying something about this firm.
-//     Counted, named in the output, and NOT imported. Onboarding one would be a serious error and
-//     it must not be a row the agent can email.
+//   • EXCLUDED FIRMS, where the flag AFFIRMATIVELY says so. The first version of this treated any
+//     non-empty `exclusion_flag` as an exclusion and discarded all 3,437 laboratories in the
+//     register — Catalent and Glenmark among them — while reporting it as diligence. The column is
+//     populated on nearly every row. See src/lib/fda/exclusion.js for the rule and why it errs the
+//     way it does.
 //   • ESTABLISHMENTS WITH NO OPERATIONS AT ALL. Invisible to the filter. Counted and reported,
 //     because a census that silently drops rows overstates its own completeness — some of those
 //     are labs and they need a different discovery route.
@@ -36,6 +38,7 @@
 
 const { initDB, query } = require('../src/lib/db');
 const { regionFor, regionLabel } = require('../src/lib/labconnect/region');
+const { isExcluded } = require('../src/lib/fda/exclusion');
 
 const WRITE = process.argv.includes('--write');
 
@@ -87,6 +90,20 @@ async function main() {
       WHERE operations IS NULL OR btrim(operations) = ''`)).rows[0].n;
   console.log(`\n  ${pad('(no operations recorded — invisible to this import)', 44)} ${num(noOps).padStart(8)}`);
 
+  // ── the exclusion_flag vocabulary ────────────────────────────────────────────
+  // PRINTED, NOT ASSUMED. The previous version of this script inferred the meaning of this column
+  // and silently dropped the whole dataset. Any column a filter depends on gets its values shown
+  // before the filter is applied, the same way the operations tokens are.
+  head('exclusion_flag values, as they actually appear');
+  const flags = (await query(
+    `SELECT COALESCE(NULLIF(btrim(exclusion_flag), ''), '(empty)') AS flag, COUNT(*)::int n
+       FROM fda_establishments GROUP BY 1 ORDER BY n DESC LIMIT 12`)).rows;
+  for (const f of flags) {
+    console.log(`  ${pad(f.flag, 44)} ${num(f.n).padStart(8)}  ${isExcluded(f.flag === '(empty)' ? null : f.flag) ? '← treated as EXCLUDED' : ''}`);
+  }
+  console.log('\n  Only a value that affirmatively says so is treated as an exclusion. If a real');
+  console.log('  exclusion marker is in that list and is NOT flagged, add it to EXCLUDED_VALUES.');
+
   // ── the candidates ───────────────────────────────────────────────────────────
   const rows = (await query(
     `SELECT id, firm_name, address, country, operations, is_api_manufacturer, is_us_agent,
@@ -107,7 +124,7 @@ async function main() {
   const candidates = [];
 
   for (const r of rows) {
-    if (r.exclusion_flag && String(r.exclusion_flag).trim()) {
+    if (isExcluded(r.exclusion_flag)) {
       stats.excluded += 1;
       if (excludedFirms.length < 10) excludedFirms.push(`${r.firm_name} (${r.country || '??'})`);
       continue;                                   // never importable

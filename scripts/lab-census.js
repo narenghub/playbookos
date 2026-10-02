@@ -19,6 +19,7 @@
 // loudly in words.
 
 const { initDB, query } = require('../src/lib/db');
+const { excludedSql } = require('../src/lib/fda/exclusion');
 
 // EU/EEA + UK + CH/NO/IS/LI, as ISO-3. Copied deliberately rather than imported from routes.js:
 // that list (AROS_US_EU) exists for a different purpose — the AROS ideal-customer slice — and a
@@ -116,13 +117,13 @@ async function main() {
     `SELECT COUNT(*) FILTER (WHERE establishment_contact_email IS NOT NULL)::int est_email,
             COUNT(*) FILTER (WHERE registrant_contact_email IS NOT NULL)::int reg_email,
             COUNT(*) FILTER (WHERE is_us_agent)::int via_us_agent,
-            COUNT(*) FILTER (WHERE exclusion_flag IS NOT NULL
-                             AND btrim(exclusion_flag) <> '')::int excluded
+            COUNT(*) FILTER (WHERE ${excludedSql()})::int excluded
        FROM fda_establishments WHERE ${ANALYSIS_SQL}`)).rows[0];
   console.log(`  a named person at the firm   ${num(contact.est_email).padStart(8)}`);
   console.log(`  registrant email only        ${num(contact.reg_email).padStart(8)}`);
   console.log(`  address is a US AGENT        ${num(contact.via_us_agent).padStart(8)}  ← geography unusable`);
-  console.log(`  carries an exclusion flag    ${num(contact.excluded).padStart(8)}  ← do not onboard`);
+  console.log(`  affirmatively EXCLUDED       ${num(contact.excluded).padStart(8)}  ← do not onboard`);
+  console.log('  (a populated flag is NOT an exclusion — the column is set on nearly every row)');
 
   // ── 5. region-wise, which is the thing being asked for ───────────────────────
   head('5. US labs by state');

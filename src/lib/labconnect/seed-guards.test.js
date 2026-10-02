@@ -71,14 +71,35 @@ test('everything is imported as discovered — nothing arrives pre-approved', ()
   }
 });
 
-test('excluded firms are counted and NOT imported', () => {
-  // A non-empty exclusion_flag is the FDA saying something about the firm. It must not become a
-  // row the agent can email, and it must not disappear silently either — a count nobody sees is
-  // how an excluded firm ends up in an outreach list six months later.
-  assert.match(SEED, /exclusion_flag/);
+test('excluded firms are counted and NOT imported — but only AFFIRMATIVELY excluded ones', () => {
+  // THE BUG THIS NOW GUARDS. The first version treated any non-empty `exclusion_flag` as an
+  // exclusion. That column is populated on nearly every row, so the first real run discarded all
+  // 3,437 analytical laboratories in the register — Catalent and Glenmark among them — and reported
+  // it as diligence:
+  //
+  //     importable                             0
+  //     EXCLUDED, not imported             3,437   ← FDA exclusion flag
+  //
+  // The rule now lives in src/lib/fda/exclusion.js and is shared by the import, the census and the
+  // buyers route, so those three cannot disagree about who is excluded.
+  assert.match(SEED, /isExcluded\(r\.exclusion_flag\)/,
+    'the import must use the shared rule, not its own test on the column');
+  assert.ok(!/exclusion_flag\s*&&\s*String\(r\.exclusion_flag\)\.trim\(\)/.test(SEED),
+    'the "any non-empty value is an exclusion" check is back, and it empties the directory');
   assert.match(SEED, /stats\.excluded \+= 1/);
   assert.match(SEED, /continue;/, 'an excluded row must skip the candidate list entirely');
   assert.match(SEED, /EXCLUDED, not imported/, 'and the count must be printed');
+});
+
+test('the import PRINTS the exclusion_flag vocabulary before filtering on it', () => {
+  // The diagnostic that would have caught the above in one look, and the general rule it taught:
+  // any column a filter depends on gets its values shown before the filter is applied — the same
+  // treatment the operations tokens already had, which is why THAT assumption was verifiable and
+  // this one was not.
+  assert.match(SEED, /exclusion_flag values, as they actually appear/);
+  assert.match(SEED, /GROUP BY 1 ORDER BY n DESC/, 'with counts, so a value on every row is obvious');
+  assert.ok(SEED.indexOf('exclusion_flag values') < SEED.indexOf('WHERE operations ILIKE'),
+    'the vocabulary must be printed BEFORE the rows are filtered');
 });
 
 test('the import refuses to run when its central assumption is wrong', () => {

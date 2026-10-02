@@ -28,6 +28,7 @@ const { regionFor, regionLabel, isRegion, US_ZONES, EUROPE } = require('../lib/l
 const { outsourcerSql, SIBLING_ANALYSIS_SQL, segmentFor, likelyTests, SEGMENTS } =
   require('../lib/labconnect/buyers');
 const { matchLabs, describeRouting } = require('../lib/labconnect/match');
+const { notExcludedSql } = require('../lib/fda/exclusion');
 const { emailContent, callContent } = require('../lib/labconnect/outreach-content');
 
 const router = express.Router();
@@ -347,8 +348,10 @@ router.get('/labconnect/buyers', authMiddleware, requireTier('intelligence'), as
     if (req.query.contactable !== 'false') {
       clauses.push(`(establishment_contact_email IS NOT NULL OR registrant_contact_email IS NOT NULL)`);
     }
-    // An FDA exclusion flag is the agency saying something about the firm. Never a prospect.
-    clauses.push(`(exclusion_flag IS NULL OR btrim(exclusion_flag) = '')`);
+    // A firm the FDA has affirmatively excluded is never a prospect. NOT "any non-empty flag":
+    // that reading emptied the entire lab directory on its first real run — see
+    // src/lib/fda/exclusion.js.
+    clauses.push(notExcludedSql());
     if (req.query.q) { params.push('%' + String(req.query.q).trim() + '%'); clauses.push(`firm_name ILIKE $${i++}`); }
 
     const where = 'WHERE ' + clauses.join(' AND ');
