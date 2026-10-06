@@ -5017,9 +5017,13 @@ const CPHI_EVENT = 'cphi-milan-2026';
 // the big Indian generics all looked alike because the unrestricted list carries the same long
 // oncology tail. A guard test pins the two together.
 const CPHI_TOP_N = 100;
-// supplier = we buy from them · qc_lab = we recruit it into LabConnect · buyer = we sell testing to
-// it. Must match the CHECK constraint in scripts/migrate-cphi-roles.js.
-const CPHI_ROLES = ['supplier', 'qc_lab', 'buyer'];
+// supplier = we buy from them · platform_partner = it sells our platform to its own clients, the EU
+// repeat of the ACBM Partners model · qc_lab = we recruit it into LabConnect · buyer = we sell testing to it.
+// Must match the CHECK constraint in scripts/migrate-cphi-roles.js.
+const CPHI_ROLES = ['supplier', 'platform_partner', 'qc_lab', 'buyer'];
+// The partner and buyer lists run on both sides of the Atlantic. src/lib/cphi/markets.js owns what
+// each value means and says where the underlying register is blunt.
+const { isMarket: cphiIsMarket } = require('../lib/cphi/markets');
 const { DEMAND_SQL } = require('../lib/dmf/demand');
 // The SAME fold the exhibitor matcher uses. A contact typed on the floor has to collide with the
 // one the seed imported, or the same company ends up in the list twice under two spellings.
@@ -5036,6 +5040,11 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligen
     // carries three different conversations — see scripts/migrate-cphi-roles.js.
     const role = CPHI_ROLES.includes(req.query.role) ? req.query.role : 'supplier';
     params.push(role); clauses.push(`role = $${params.length}`);
+    // 'all' and anything unrecognised mean no market clause. A hand-typed value must widen the list,
+    // never silently empty it — an empty table reads as "nobody from the EU is here", which is a
+    // different and much more damaging statement than "that filter does not exist".
+    const market = cphiIsMarket(req.query.market) && req.query.market !== 'all' ? req.query.market : null;
+    if (market) { params.push(market); clauses.push(`market = $${params.length}`); }
     if (req.query.exhibiting === 'false') clauses.push('exhibiting = false');
     else if (req.query.exhibiting !== 'any') clauses.push('exhibiting = true');
     if (req.query.tier) { params.push(req.query.tier); clauses.push(`match_tier = $${params.length}`); }
@@ -5044,7 +5053,7 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligen
 
     const items = (await query(
       `SELECT id, holder, exhibitor_name, exhibiting, booth, hall, match_tier, review_status,
-              entity_note, molecules_covered, checked_at, role, role_note,
+              entity_note, molecules_covered, checked_at, role, role_note, market,
               met_in_person, linkedin_connected
          FROM cphi_exhibitor_matches ${where}
         ORDER BY molecules_covered DESC, holder`, params)).rows;
@@ -5055,6 +5064,14 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligen
     const roles = (await query(
       `SELECT role, COUNT(*) FILTER (WHERE exhibiting)::int on_floor, COUNT(*)::int checked
          FROM cphi_exhibitor_matches WHERE event_slug = $1 GROUP BY role`, [CPHI_EVENT])).rows;
+
+    // Which markets this role actually has rows for, so the filter offers US/EU only where one
+    // exists rather than offering an option that can only ever return nothing.
+    const markets = (await query(
+      `SELECT market, COUNT(*) FILTER (WHERE exhibiting)::int on_floor, COUNT(*)::int checked
+         FROM cphi_exhibitor_matches
+        WHERE event_slug = $1 AND role = $2 AND market IS NOT NULL
+        GROUP BY market ORDER BY 2 DESC`, [CPHI_EVENT, role])).rows;
 
     const summary = (await query(
       `SELECT COUNT(*) FILTER (WHERE exhibiting)::int exhibiting,
@@ -5071,7 +5088,7 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligen
       `SELECT source_file, MAX(ingested_at) ingested_at, COUNT(*)::int rows
          FROM dmf_holders GROUP BY source_file ORDER BY MAX(ingested_at) DESC LIMIT 1`)).rows[0] || null;
 
-    res.json({ event: CPHI_EVENT, role, roles, items, summary, dmf_source: src });
+    res.json({ event: CPHI_EVENT, role, roles, market: market || 'all', markets, items, summary, dmf_source: src });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

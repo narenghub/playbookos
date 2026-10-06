@@ -1,11 +1,20 @@
 // ── CPHI: WHICH OF OUR LABS AND BUYERS ARE ON THE FLOOR ───────────────────────
 //
-//   node scripts/lookup-cphi-roles.js --role qc_lab              # DRY RUN, first 10
+//   node scripts/lookup-cphi-roles.js --role qc_lab                          # DRY RUN, first 10
 //   node scripts/lookup-cphi-roles.js --role qc_lab --execute
-//   node scripts/lookup-cphi-roles.js --role buyer --execute --limit 200
+//   node scripts/lookup-cphi-roles.js --role platform_partner --market eu --execute
+//   node scripts/lookup-cphi-roles.js --role buyer --market eu --execute --limit 200
 //
 // The supplier lookup asks "is this DMF holder on the floor". This asks the same question of the
-// other two sides of the business, using the same public directory and the same name matcher.
+// other three sides of the business, using the same public directory and the same name matcher.
+//
+//   --role platform_partner   Manufacturers and CDMOs that could hold client relationships locally
+//                   the way ACBM Partners does in the US — the EU repeat of that model. Ordered by breadth of
+//                   registered operations, because a site licensed to do six things serves more
+//                   clients than one licensed to do one. This is the WEAKEST of the four lists and the
+//                   reason is worth carrying onto the floor: there is no register of agencies, so this
+//                   is manufacturers used as a proxy for "company with a local client base". Expect to
+//                   disqualify most of them in the first minute of conversation.
 //
 //   --role qc_lab   Analytical testing laboratories from fda_establishments. These are LabConnect
 //                   RECRUITS, and LabConnect currently has ZERO active labs — so a lab found on
@@ -15,6 +24,10 @@
 //   --role buyer    Manufacturers with no analytical registration of their own — they outsource
 //                   their testing today. See src/lib/labconnect/buyers.js for why that signal is
 //                   the sharpest one available without buying new data, and how it can be wrong.
+//
+//   --market us|eu|all   Applies to platform_partner and buyer, which run on both sides of the
+//                   Atlantic. See src/lib/cphi/markets.js — in particular that this is the US
+//                   register, so "EU" means EU firms with US-facing business, not all EU firms.
 //
 // ── ORDERED BY VALUE, so a partial run is still useful ───────────────────────
 //
@@ -30,10 +43,11 @@ const { query } = require('../src/lib/db');
 const { searchTerms, bestMatch, reviewStatusFor, normalizeCompany } = require('../src/lib/cphi/match-company');
 const { searchExhibitors, hallOf, entityNote, sleep } = require('../src/lib/cphi/directory');
 const { excludedSql } = require('../src/lib/fda/exclusion');
-const { outsourcerSql } = require('../src/lib/labconnect/buyers');
+const { outsourcerSql, MAKER_TOKENS } = require('../src/lib/labconnect/buyers');
+const { marketSql, marketOf, marketLabel, isMarket } = require('../src/lib/cphi/markets');
 
 const EVENT_SLUG = 'cphi-milan-2026';
-const VALID_ROLES = ['qc_lab', 'buyer'];
+const VALID_ROLES = ['platform_partner', 'qc_lab', 'buyer'];
 
 const argv = process.argv.slice(2);
 const EXECUTE = argv.includes('--execute');
@@ -43,6 +57,7 @@ const ROLE = str('--role', null);
 const LIMIT = num('--limit', EXECUTE ? 400 : 10);
 const DELAY_MS = num('--delay', 600);
 const REGION = str('--region', null);   // e.g. eu, us — prefix match on labs.region
+const MARKET = str('--market', 'all');  // us | eu | all — platform_partner and buyer only
 
 const fmt = (n) => Number(n).toLocaleString('en-US');
 const pad = (s, n) => String(s == null ? '' : s).padEnd(n).slice(0, n);
@@ -66,9 +81,47 @@ async function qcLabs(limit) {
   return rows.rows.map(r => ({
     holder: r.holder,
     holder_normalized: normalizeCompany(r.holder),
+    // `labs.region` is already resolved (us_central, eu_ita, row_ind), so the market comes off the
+    // region prefix rather than from the country code — the lab directory's own answer, not a second
+    // opinion about the same row.
+    market: r.region ? String(r.region).split('_')[0] : marketOf(r.country),
     detail: [r.contract_lab ? 'contract lab' : 'also manufactures', r.region || 'no region']
       .filter(Boolean).join(' · '),
-    rank: 0,
+  }));
+}
+
+/**
+ * Candidate PLATFORM partners: the EU repeat of the ACBM Partners model.
+ *
+ * There is no register of agencies, so this uses the thing a register does know — a site licensed to
+ * do several operations serves more clients than a site licensed to do one — as a proxy for "company
+ * with a local client base worth putting a platform behind". Unlike the buyer query this deliberately
+ * does NOT exclude sites with their own laboratory: a firm that both makes and tests is a better
+ * partner, not a worse one, because it can carry LabConnect and SiteNex to the same clients.
+ *
+ * Weak list, honestly ordered. Most will be disqualified in conversation; the ordering is there so
+ * the ones at the top are worth the walk.
+ */
+async function platformPartners(limit) {
+  const m = marketSql(MARKET, 1);
+  const makers = MAKER_TOKENS.map((t, i) => `operations ILIKE $${m.nextIndex + i}`).join(' OR ');
+  const makerParams = MAKER_TOKENS.map(t => '%' + t + '%');
+  const limitIdx = m.nextIndex + MAKER_TOKENS.length;
+  const rows = await query(
+    `SELECT firm_name AS holder, country, operations
+       FROM fda_establishments
+      WHERE ${m.sql}
+        AND operations IS NOT NULL AND btrim(operations) <> ''
+        AND (${makers})
+        AND NOT ${excludedSql()}
+      ORDER BY length(operations) DESC, firm_name
+      LIMIT $${limitIdx}`, [...m.params, ...makerParams, limit]);
+  return rows.rows.map(r => ({
+    holder: r.holder,
+    holder_normalized: normalizeCompany(r.holder),
+    market: marketOf(r.country),
+    detail: [r.country || 'USA', String(r.operations || '').split(';').length + ' operations']
+      .join(' · '),
   }));
 }
 
@@ -78,22 +131,26 @@ async function qcLabs(limit) {
  * buyer is.
  */
 async function buyers(limit) {
-  // outsourcerSql returns { sql, params, nextIndex } — it owns its own placeholders, so the LIMIT
-  // has to take the index it hands back rather than $1.
+  // Both fragments own their own placeholders, so they are chained by index rather than by counting:
+  // outsourcerSql starts at 1 and marketSql picks up where it stopped, and the LIMIT takes whatever
+  // index is free after both. Getting this wrong is silent — the query runs and filters on the wrong
+  // value — which is exactly how the role parameter once landed in the tier filter.
   const o = outsourcerSql(1);
+  const m = marketSql(MARKET, o.nextIndex);
   const rows = await query(
     `SELECT firm_name AS holder, firm_normalized, country, operations
        FROM fda_establishments
       WHERE ${o.sql}
+        AND ${m.sql}
         AND NOT ${excludedSql()}
       ORDER BY length(operations) DESC, firm_name
-      LIMIT $${o.nextIndex}`, [...o.params, limit]);
+      LIMIT $${m.nextIndex}`, [...o.params, ...m.params, limit]);
   return rows.rows.map(r => ({
     holder: r.holder,
     holder_normalized: normalizeCompany(r.holder),
-    detail: [r.country || 'US', String(r.operations || '').split(';').length + ' operations']
+    market: marketOf(r.country),
+    detail: [r.country || 'USA', String(r.operations || '').split(';').length + ' operations']
       .join(' · '),
-    rank: 0,
   }));
 }
 
@@ -103,18 +160,36 @@ async function main() {
     console.error('(suppliers are handled by scripts/lookup-cphi-exhibitors.js)');
     process.exit(1);
   }
+  // Rejected rather than quietly widened to 'all'. A typo in --market on a 400-row --execute run
+  // would otherwise spend an hour checking the wrong continent and report success.
+  if (!isMarket(MARKET)) {
+    console.error(`--market must be one of: us, eu, all   (got "${MARKET}")`);
+    process.exit(1);
+  }
+  if (ROLE === 'qc_lab' && MARKET !== 'all') {
+    console.error('--market does not apply to qc_lab — labs are scoped with --region (eu, us), '
+      + 'because the lab directory resolves its own regions.');
+    process.exit(1);
+  }
 
-  const scope = ROLE === 'qc_lab' ? await qcLabs(LIMIT) : await buyers(LIMIT);
+  const scope = ROLE === 'qc_lab' ? await qcLabs(LIMIT)
+    : ROLE === 'platform_partner' ? await platformPartners(LIMIT)
+    : await buyers(LIMIT);
 
   if (!scope.length) {
-    console.log(`\nNothing to check for role "${ROLE}".`);
+    console.log(`\nNothing to check for role "${ROLE}"${MARKET === 'all' ? '' : ` in ${marketLabel(MARKET)}`}.`);
     if (ROLE === 'qc_lab') {
       console.log('The `labs` table is empty — run scripts/seed-labs-from-fda.js --write first.');
+    } else {
+      console.log('`fda_establishments` has no row matching that market — if this is the EU list, '
+        + 'check that scripts/ingest-establishments.js has been run on the FULL register and not '
+        + 'the domestic extract.');
     }
     process.exit(0);
   }
 
-  console.log(`\n── ${ROLE} against the ${EVENT_SLUG} directory ──────────────────────`);
+  console.log(`\n── ${ROLE}${ROLE === 'qc_lab' ? '' : ` · ${marketLabel(MARKET)}`}`
+    + ` against the ${EVENT_SLUG} directory ──────────────`);
   console.log(`   checking ${fmt(scope.length)}${EXECUTE ? '' : '   (DRY RUN — nothing is written)'}`
     + `   delay ${DELAY_MS}ms   ~${Math.ceil(scope.length * DELAY_MS * 1.6 / 60000)} min\n`);
 
@@ -156,10 +231,12 @@ async function main() {
       await query(
         `INSERT INTO cphi_exhibitor_matches
            (event_slug, role, holder, holder_normalized, exhibiting, exhibitor_name, booth, hall,
-            match_tier, molecules_covered, review_status, searched_terms, entity_note, role_note)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10,$11,$12,$13)
+            match_tier, molecules_covered, review_status, searched_terms, entity_note, role_note,
+            market)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10,$11,$12,$13,$14)
          ON CONFLICT (event_slug, role, holder_normalized) DO UPDATE SET
            holder = EXCLUDED.holder,
+           market = EXCLUDED.market,
            exhibiting = EXCLUDED.exhibiting,
            exhibitor_name = EXCLUDED.exhibitor_name,
            booth = EXCLUDED.booth,
@@ -178,7 +255,7 @@ async function main() {
          best ? best.name : null, best ? best.booth : null, best ? hallOf(best.booth) : null,
          best ? best.tier : 'not_found',
          best ? reviewStatusFor(best.tier) : 'unreviewed',
-         terms.join(' | '), entityNote(h.holder, best), h.detail]);
+         terms.join(' | '), entityNote(h.holder, best), h.detail, h.market || null]);
       written += 1;
     }
   }
@@ -190,7 +267,8 @@ async function main() {
   console.log(`  not exhibiting ${tally.none}   errors ${tally.errors}`);
   console.log(`  The token tier is roughly half wrong and is held back for review, same as suppliers.`);
   if (EXECUTE) {
-    console.log(`\n  wrote ${written} row(s) as role="${ROLE}".`);
+    console.log(`\n  wrote ${written} row(s) as role="${ROLE}"`
+      + `${ROLE === 'qc_lab' ? '' : ` market="${MARKET}"`}.`);
   } else {
     console.log(`\n  DRY RUN — nothing written. Add --execute to write.`);
   }

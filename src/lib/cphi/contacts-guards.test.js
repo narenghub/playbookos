@@ -281,3 +281,56 @@ test('the directory parser lives in ONE place', () => {
     'the role lookup must use the shared parser, not its own copy');
   assert.ok(!/__NEXT_DATA__/.test(look), 'the parse is duplicated into the role lookup');
 });
+
+test('the role list is the SAME list in the route, the migration and the lookup', () => {
+  // Three files have to agree about what a role is, and disagreeing is silent in the worst direction:
+  // the route happily accepts role=platform_partner, returns zero rows, and the page says nobody is
+  // here — while the real cause is a CHECK constraint the migration never widened. This is the same
+  // shape of bug as CPHI_TOP_N drifting from --top, which is why it gets the same kind of guard.
+  const ROUTES = fs.readFileSync(path.join(ROOT, 'src/api/routes.js'), 'utf8');
+  const MIG = fs.readFileSync(path.join(ROOT, 'scripts/migrate-cphi-roles.js'), 'utf8');
+  const LOOK = fs.readFileSync(path.join(ROOT, 'scripts/lookup-cphi-roles.js'), 'utf8');
+
+  const list = (src, name) => {
+    const m = new RegExp('const ' + name + ' = \\[([^\\]]*)\\]').exec(src);
+    assert.ok(m, `${name} not found`);
+    return m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  };
+
+  const routeRoles = list(ROUTES, 'CPHI_ROLES');
+  const migRoles = list(MIG, 'ROLES');
+  assert.deepEqual(routeRoles, migRoles, 'CPHI_ROLES and the migration ROLES must be identical');
+
+  // The CHECK constraint is built FROM that list rather than hand-typed, so this asserts it is not
+  // quietly re-hardcoded later.
+  assert.match(MIG, /CHECK \(role IN \(\$\{ROLES\.map/,
+    'the CHECK must be generated from ROLES, not written out again');
+  // And it must be replaced rather than added-if-missing: widening a CHECK means dropping it first.
+  // An earlier version of this migration added the constraint and swallowed "already exists", which
+  // would have left the three-role version in place and made every platform_partner insert fail.
+  const dropAt = MIG.indexOf('DROP CONSTRAINT IF EXISTS cem_role_valid');
+  const addAt = /ADD CONSTRAINT\s+cem_role_valid/.exec(MIG);
+  assert.ok(dropAt >= 0, 'the role CHECK must be dropped before it is re-added');
+  assert.ok(addAt && dropAt < addAt.index, 'the drop must come before the add');
+  // Comments stripped: this file explains why "add, ignore already exists" was wrong, and the
+  // explanation must not read as the offence.
+  assert.ok(!/already exists/i.test(MIG.replace(/\/\/[^\n]*/g, '')),
+    'the migration must not swallow a constraint conflict');
+
+  // The lookup owns every role EXCEPT supplier, which has its own script.
+  const lookRoles = list(LOOK, 'VALID_ROLES');
+  assert.deepEqual(lookRoles, routeRoles.filter(r => r !== 'supplier'),
+    'the lookup must cover exactly the non-supplier roles');
+});
+
+test('an unrecognised market widens the list instead of emptying it', () => {
+  // A hand-typed market must never produce an empty table. "No EU company is on this floor" is a
+  // far more damaging thing to read at a booth than "that filter does not exist".
+  const ROUTES = fs.readFileSync(path.join(ROOT, 'src/api/routes.js'), 'utf8');
+  assert.match(ROUTES, /cphiIsMarket\(req\.query\.market\)[^\n]*\?[^\n]*:\s*null/,
+    'the market filter must fall back to null (no clause), not to a value');
+  // And the lookup must REJECT rather than widen, because there the cost is an hour of HTTP requests
+  // against the wrong continent reported as a successful run.
+  const LOOK = fs.readFileSync(path.join(ROOT, 'scripts/lookup-cphi-roles.js'), 'utf8');
+  assert.match(LOOK, /if \(!isMarket\(MARKET\)\)[\s\S]{0,200}process\.exit\(1\)/);
+});

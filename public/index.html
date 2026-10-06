@@ -4281,7 +4281,7 @@ window._cmState = { exhibiting: 'true', tier: '', showUnverified: false, data: n
   // The drawer: which company is open, which tab, and the compose box's contents. The draft lives
   // in state rather than only in the textarea, because every re-render replaces the textarea and
   // would otherwise throw away what was typed.
-  hall: '', role: 'supplier',
+  hall: '', role: 'supplier', market: 'all',
   openId: 0, openTab: 'molecules', open: null, openLoading: false,
   composeFor: 0, composeSubject: '', composeBody: '', composeAttach: true };
 
@@ -4561,6 +4561,9 @@ pages['cphi-milan'] = async function(reuse) {
     const qs = new URLSearchParams();
     qs.set('exhibiting', st.exhibiting);
     qs.set('role', st.role);
+    // Sent server-side rather than filtered here, unlike the hall: market lives on the row and the
+    // per-market counts come back from the same query, so the filter and its own count cannot drift.
+    if (st.market && st.market !== 'all') qs.set('market', st.market);
     if (st.tier) qs.set('tier', st.tier);
     [res, thin] = await Promise.all([
       API('/events/cphi/exhibitors?' + qs.toString()).catch(e => ({ error: e.message })),
@@ -4573,12 +4576,14 @@ pages['cphi-milan'] = async function(reuse) {
   const s = res.summary || {};
 
   // ── ROLE TABS ──────────────────────────────────────────────────────────────
-  // One floor, three conversations. A supplier is somebody we BUY from; a QC lab is somebody we
-  // RECRUIT into LabConnect; a buyer is somebody we SELL testing to. The ask at the booth differs
-  // in each case, so the page says which one you are looking at rather than leaving you to recall.
+  // One floor, four conversations in three shapes. A supplier is somebody we BUY from; a partner
+  // sells FOR us, either the platform (the EU repeat of the ACBM Partners model) or testing capacity into
+  // LabConnect; a buyer is somebody we SELL testing to. The ask at the booth differs in each case, so
+  // the page says which one you are looking at rather than leaving you to recall.
   const ROLE_TABS = [
     ['supplier', 'Suppliers', 'API and DMF holders \u2014 we buy'],
-    ['qc_lab', 'QC partners', 'testing labs \u2014 we recruit'],
+    ['platform_partner', 'Partner \u00b7 Platform', 'local client base \u2014 they resell'],
+    ['qc_lab', 'Partner \u00b7 QC', 'testing labs \u2014 we recruit'],
     ['buyer', 'Buyers', 'they outsource testing \u2014 we sell'],
   ];
   const roleCounts = {};
@@ -4597,6 +4602,8 @@ pages['cphi-milan'] = async function(reuse) {
       <div class="card-title text-section" style="margin:0">CPHI MILAN 2026 · 6–8 OCTOBER · FIERA MILANO</div>
       <div class="text-body">${st.role === 'qc_lab'
         ? 'Analytical testing laboratories from the FDA register, and whether they are on this floor. These are LabConnect recruits \u2014 the ask is which tests under GMP, turnaround and price, and the offer is filled capacity.'
+        : st.role === 'platform_partner'
+        ? 'Manufacturers and CDMOs that could hold client relationships locally the way ACBM Partners does in the US. <b>The weakest list on this page, deliberately:</b> no register lists agencies, so these are manufacturers used as a proxy for \u201ccompany with a local client base\u201d, ordered by how many operations each is licensed for. Expect to disqualify most of them in the first minute \u2014 the question that does it is whose products they already handle, and for whom.'
         : st.role === 'buyer'
         ? 'Registered manufacturers with no analytical laboratory of their own, so they outsource their testing today. A displacement sale \u2014 they already have a provider, which is why the opening is capacity and second source, never \u201cdo you need testing?\u201d.'
         : 'API manufacturers holding an active US Type II drug master file for a molecule the trial pipeline needs, and whether they are on the floor. Ranked by how many of those molecules each one covers.'}</div>
@@ -4655,6 +4662,15 @@ pages['cphi-milan'] = async function(reuse) {
     .sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0) || a.localeCompare(b));
   const hallOpts = [['', 'hall: all'], ...halls.map(h => [h, 'hall ' + h])]
     .map(([v, l]) => `<option value="${v}"${st.hall === v ? ' selected' : ''}>${l}</option>`).join('');
+  // Built from the markets the CURRENT ROLE actually has rows for, so the dropdown never offers an
+  // option that can only return nothing — which on a floor reads as "no EU companies are here"
+  // rather than "that list has not been run yet". Suppliers carry no market and get no dropdown.
+  const MARKET_LABEL = { us: 'US', eu: 'EU', row: 'rest of world' };
+  const marketRows = (res.markets || []).filter(m => m.market === 'us' || m.market === 'eu');
+  const marketOpts = marketRows.length
+    ? [['all', 'market: all'], ...marketRows.map(m => [m.market, (MARKET_LABEL[m.market] || m.market) + ' · ' + m.on_floor])]
+      .map(([v, l]) => `<option value="${v}"${(st.market || 'all') === v ? ' selected' : ''}>${l}</option>`).join('')
+    : '';
   const tierOpts = [['','tier: any'],['exact','exact'],['core','core'],['prefix','prefix']].map(
     ([v,l]) => `<option value="${v}"${st.tier===v?' selected':''}>${l}</option>`).join('');
   const exhOpts = [['true','on the floor'],['false','not exhibiting'],['any','everyone checked']].map(
@@ -4686,9 +4702,10 @@ pages['cphi-milan'] = async function(reuse) {
     </tr>`).join('');
   const priorityPanel = `<div class="card" style="padding:0">
     <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-      <div><div class="card-title" style="margin:0">${st.role === 'qc_lab' ? 'QC Partners on the floor' : st.role === 'buyer' ? 'Buyers on the floor' : 'Milan Sourcing Priority'}</div>
-        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${items.length} companies${st.hall ? ' in hall ' + cmEsc(st.hall) : ''}${st.role === 'supplier' ? ', ranked by molecules covered' : ''}.${st.role === 'supplier' ? ' The unverified token tier is excluded — see below.' : ' Nothing is here until a lookup has been run for this role.'}</div></div>
+      <div><div class="card-title" style="margin:0">${st.role === 'qc_lab' ? 'QC Partners on the floor' : st.role === 'platform_partner' ? 'Platform Partner candidates on the floor' : st.role === 'buyer' ? 'Buyers on the floor' : 'Milan Sourcing Priority'}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${items.length} companies${st.market && st.market !== 'all' ? ' in the ' + (MARKET_LABEL[st.market] || st.market) + ' market' : ''}${st.hall ? ' in hall ' + cmEsc(st.hall) : ''}${st.role === 'supplier' ? ', ranked by molecules covered' : ''}.${st.role === 'supplier' ? ' The unverified token tier is excluded — see below.' : ' Nothing is here until a lookup has been run for this role.'}${st.role !== 'supplier' && st.market === 'eu' ? ' This is the US register, so an EU row means an EU firm with US-facing business — not every EU firm.' : ''}</div></div>
       <div style="display:flex;gap:6px">
+        ${marketOpts ? `<select onchange="cmSet('market', this.value)" style="font-size:12px;padding:4px">${marketOpts}</select>` : ''}
         <select onchange="cmSetLocal('hall', this.value)" style="font-size:12px;padding:4px">${hallOpts}</select>
         <select onchange="cmSet('exhibiting', this.value)" style="font-size:12px;padding:4px">${exhOpts}</select>
         <select onchange="cmSet('tier', this.value)" style="font-size:12px;padding:4px">${tierOpts}</select>
@@ -4922,8 +4939,10 @@ function cmSet(k, v){ window._cmState[k] = v; pages['cphi-milan'](); }
 function cmSetLocal(k, v){ const st = window._cmState; st[k] = v; st.openId = 0; st.open = null; pages['cphi-milan'](true); }
 // A role change IS a different question for the server, so it refetches. Hall resets with it: hall
 // 7 may hold labs and no suppliers, and carrying the filter across would show an empty table and
-// read as missing data.
-function cmSetRole(v){ const st = window._cmState; st.role = v; st.hall = ''; st.openId = 0; st.open = null; pages['cphi-milan'](); }
+// read as missing data. Market resets for the same reason, and because suppliers have none: leaving
+// market=eu set while switching to Suppliers would ask for supplier rows with a market, of which
+// there are none, and the sourcing table would come back empty.
+function cmSetRole(v){ const st = window._cmState; st.role = v; st.hall = ''; st.market = 'all'; st.openId = 0; st.open = null; pages['cphi-milan'](); }
 function cmToggleUnverified(){ window._cmState.showUnverified = !window._cmState.showUnverified; pages['cphi-milan'](); }
 async function cmReview(id, verdict){
   try {
