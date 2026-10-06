@@ -46,6 +46,7 @@ const { excludedSql } = require('../src/lib/fda/exclusion');
 const { outsourcerSql, MAKER_TOKENS } = require('../src/lib/labconnect/buyers');
 const { marketSql, marketOf, marketLabel, isMarket } = require('../src/lib/cphi/markets');
 const { looksLikeLabSql, labLookupOrderSql } = require('../src/lib/labconnect/lab-shape');
+const { newCandidates } = require('../src/lib/cphi/resume');
 
 const EVENT_SLUG = 'cphi-milan-2026';
 const VALID_ROLES = ['platform_partner', 'qc_lab', 'buyer'];
@@ -76,15 +77,30 @@ const MARKET = str('--market', 'all');  // us | eu | all — platform_partner an
  * written (see `EXECUTE && !err`), so a failed company is retried rather than skipped, which is the
  * behaviour a resume has to have or an outage quietly becomes a permanent gap.
  *
- * Takes the normalisation as SQL rather than a JS value because the candidate list is what is being
- * filtered: `normalizeCompany` runs in JS, so the comparison has to happen on the fold the WRITE used,
- * and that fold is stored in the table.
+ * ── A COARSE FILTER, DELIBERATELY ────────────────────────────────────────────
+ *
+ * The real key is `holder_normalized`, and that fold is computed by normalizeCompany() in JS — so SQL
+ * cannot reproduce it, and this clause cannot be exact. It is case-insensitive and trim-insensitive
+ * because the first resumed run re-checked "Eurofins BioPharma Product testing Finland" against a
+ * stored "…Product Testing Finland": one letter of case, a whole lookup wasted.
+ *
+ * The EXACT filter happens in JS, in alreadyChecked() below, against the fold the write actually used.
+ * This clause exists only to keep the over-fetch small.
  */
 function notYetChecked(nameExpr) {
   if (!RESUME) return 'TRUE';
   return `NOT EXISTS (SELECT 1 FROM cphi_exhibitor_matches x
                        WHERE x.event_slug = '${EVENT_SLUG}' AND x.role = '${ROLE}'
-                         AND x.holder = ${nameExpr})`;
+                         AND lower(btrim(x.holder)) = lower(btrim(${nameExpr})))`;
+}
+
+/** The holder_normalized values already written for this event and role — the real key, read once. */
+async function checkedFolds() {
+  if (!RESUME) return new Set();
+  const r = await query(
+    `SELECT holder_normalized FROM cphi_exhibitor_matches WHERE event_slug = $1 AND role = $2`,
+    [EVENT_SLUG, ROLE]);
+  return new Set(r.rows.map(x => x.holder_normalized));
 }
 
 const fmt = (n) => Number(n).toLocaleString('en-US');
@@ -235,9 +251,15 @@ async function main() {
     process.exit(1);
   }
 
-  const scope = ROLE === 'qc_lab' ? await qcLabs(LIMIT)
-    : ROLE === 'platform_partner' ? await platformPartners(LIMIT)
-    : await buyers(LIMIT);
+  // OVER-FETCH, then cut to LIMIT on the write's own fold. The SQL filter is coarse (see
+  // notYetChecked), so asking for exactly LIMIT rows would return a short page whenever any of them
+  // turn out to be already checked under a different spelling — and a short page looks like a finished
+  // list. Three times is comfortably enough; the extra rows cost one query, not one HTTP request each.
+  const checked = await checkedFolds();
+  const raw = ROLE === 'qc_lab' ? await qcLabs(LIMIT * 3)
+    : ROLE === 'platform_partner' ? await platformPartners(LIMIT * 3)
+    : await buyers(LIMIT * 3);
+  const scope = newCandidates(raw, checked, LIMIT);
 
   if (!scope.length) {
     console.log(`\nNothing to check for role "${ROLE}"${MARKET === 'all' ? '' : ` in ${marketLabel(MARKET)}`}.`);
@@ -264,9 +286,7 @@ async function main() {
 
   console.log(`\n── ${ROLE}${ROLE === 'qc_lab' ? '' : ` · ${marketLabel(MARKET)}`}`
     + ` against the ${EVENT_SLUG} directory ──────────────`);
-  const already = (await query(
-    `SELECT COUNT(*)::int n FROM cphi_exhibitor_matches WHERE event_slug = $1 AND role = $2`,
-    [EVENT_SLUG, ROLE])).rows[0].n;
+  const already = checked.size;
   console.log(`   checking ${fmt(scope.length)}${EXECUTE ? '' : '   (DRY RUN — nothing is written)'}`
     + (RESUME && already ? `   skipping ${fmt(already)} already checked` : '')
     + `   delay ${DELAY_MS}ms   ~${Math.ceil(scope.length * DELAY_MS * 1.6 / 60000)} min\n`);
