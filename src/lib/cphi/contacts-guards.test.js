@@ -104,3 +104,26 @@ test('the ambiguous cards keep their warning', () => {
   assert.match(SEED, /CONFIRM NAME/, "Hetero's name mismatch must stay flagged");
   assert.match(SEED, /CONFIRM ENTITY/, "Sintaho's domain mismatch must stay flagged");
 });
+
+test('the overview attachment is read from disk, and a missing file refuses the send', () => {
+  // THE FAILURE THIS EXISTS FOR. An email that says "overview attached" and arrives without one is
+  // seen by the supplier; an error on our screen is seen by nobody but us. So a missing file has to
+  // stop the send rather than degrade it. And it is read per send, not cached: a cached copy keeps
+  // sending last month's version after somebody updates the PDF in the repo.
+  const route = ROUTES.slice(ROUTES.indexOf("'/events/cphi/contacts/:id/email'"),
+                             ROUTES.indexOf('OUTREACH STATUS'));
+  assert.match(route, /if \(!fs\.existsSync\(p\)\) return res\.status\(500\)/,
+    'a missing overview PDF must refuse the send, never send without it');
+  assert.match(route, /fs\.readFileSync\(p\)/, 'read per send, so an updated PDF takes effect');
+  assert.ok(!/attachmentCache|OVERVIEW_BUF/.test(route), 'the PDF must not be cached in memory');
+});
+
+test('the supplier overview actually ships with the deploy', () => {
+  // The route refuses to send without it, so the file being absent turns every attached follow-up
+  // into a 500. It is committed rather than generated at build time for exactly that reason.
+  const p = path.join(ROOT, 'public/docs/abiozen-supplier-overview.pdf');
+  assert.ok(fs.existsSync(p), 'public/docs/abiozen-supplier-overview.pdf is missing');
+  const buf = fs.readFileSync(p);
+  assert.equal(buf.slice(0, 5).toString(), '%PDF-', 'that file is not a PDF');
+  assert.ok(buf.length > 20000, 'the overview PDF looks truncated');
+});

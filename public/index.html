@@ -4282,7 +4282,7 @@ window._cmState = { exhibiting: 'true', tier: '', showUnverified: false, data: n
   // in state rather than only in the textarea, because every re-render replaces the textarea and
   // would otherwise throw away what was typed.
   openId: 0, openTab: 'molecules', open: null, openLoading: false,
-  composeFor: 0, composeSubject: '', composeBody: '' };
+  composeFor: 0, composeSubject: '', composeBody: '', composeAttach: true };
 
 function cmEsc(v){ return String(v==null?'':v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function cmTierBadge(t){
@@ -4544,20 +4544,29 @@ pages['aros-establishments'] = async function() {
   c.innerHTML = header + orBar('establishment') + summaryRow + agentWarn + filters + table;
 };
 
-pages['cphi-milan'] = async function() {
+// `reuse` renders from what is already in state instead of re-fetching. Opening the drawer, typing
+// in it and closing it are all VIEW changes — refetching the 286-row exhibitor list and the
+// thin-supply query for each of them put "Loading CPHI Milan…" on the screen twice per tap, which
+// on a venue network reads as "nothing happened" and was the first thing reported from the floor.
+// A filter change still fetches, because that genuinely asks the server a different question.
+pages['cphi-milan'] = async function(reuse) {
   const c = document.getElementById('content');
   const st = window._cmState;
-  c.innerHTML = '<p style="color:#888;padding:20px">Loading CPHI Milan…</p>';
-
-  const qs = new URLSearchParams();
-  qs.set('exhibiting', st.exhibiting);
-  if (st.tier) qs.set('tier', st.tier);
-  const [res, thin] = await Promise.all([
-    API('/events/cphi/exhibitors?' + qs.toString()).catch(e => ({ error: e.message })),
-    API('/events/cphi/thin-supply?max_holders=3&limit=25').catch(e => ({ error: e.message })),
-  ]);
-  if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">CPHI Milan 2026</div><p style="color:#dc2626">'+cmEsc(res.error)+'</p></div>'; return; }
-  st.data = res; st.thin = thin && !thin.error ? thin : { items: [] };
+  let res, thin;
+  if (reuse && st.data) {
+    res = st.data; thin = st.thin || { items: [] };
+  } else {
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading CPHI Milan…</p>';
+    const qs = new URLSearchParams();
+    qs.set('exhibiting', st.exhibiting);
+    if (st.tier) qs.set('tier', st.tier);
+    [res, thin] = await Promise.all([
+      API('/events/cphi/exhibitors?' + qs.toString()).catch(e => ({ error: e.message })),
+      API('/events/cphi/thin-supply?max_holders=3&limit=25').catch(e => ({ error: e.message })),
+    ]);
+    if (res && res.error) { c.innerHTML = '<div class="card"><div class="card-title">CPHI Milan 2026</div><p style="color:#dc2626">'+cmEsc(res.error)+'</p></div>'; return; }
+    st.data = res; st.thin = thin && !thin.error ? thin : { items: [] };
+  }
 
   const s = res.summary || {};
   const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
@@ -4681,6 +4690,15 @@ pages['cphi-milan'] = async function() {
   </div>`;
 
   c.innerHTML = header + orBar('exhibitor') + summaryRow + cmDrawer() + thinPanel + priorityPanel + unverifiedPanel;
+
+  // Bring the drawer into view. It renders near the top; the row that opened it is usually far
+  // down a 286-row table, so without this the panel appears off-screen and the tap looks ignored.
+  // Not while the compose box is focused — scrolling under someone's hands mid-sentence is worse
+  // than leaving them where they are.
+  if (st.openId && st.composeFor === 0) {
+    const d = document.getElementById('cmDrawerAnchor');
+    if (d && d.scrollIntoView) d.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 };
 
 // ── THE DRAWER: the molecule names, and the people ────────────────────────────
@@ -4719,7 +4737,7 @@ function cmDrawer(){
             <span style="font-size:11px;color:var(--text-muted);align-self:center">Paste it into the follow-up email, or read it at the booth.</span>
           </div>`
         : '<div style="padding:14px;color:var(--text-muted)">No confirmed molecule links for this holder. Unconfirmed matches are deliberately excluded — a molecule read aloud at a booth has to be one we can stand behind.</div>');
-    return `<div class="card" style="padding:0;border:2px solid #0972d3">
+    return `<div id="cmDrawerAnchor" class="card" style="padding:0;border:2px solid #0972d3">
       <div style="padding:12px 14px;border-bottom:1px solid var(--border)">${head}</div>${body}</div>`;
   }
 
@@ -4748,7 +4766,7 @@ function cmDrawer(){
       </div>`).join('')
       : '<div style="padding:14px;color:var(--text-muted)">No contacts captured for this company yet.</div>');
 
-  return `<div class="card" style="padding:0;border:2px solid #0972d3">
+  return `<div id="cmDrawerAnchor" class="card" style="padding:0;border:2px solid #0972d3">
     <div style="padding:12px 14px;border-bottom:1px solid var(--border)">${head}</div>${list}</div>`;
 }
 
@@ -4760,6 +4778,10 @@ function cmComposeForm(p){
            style="width:100%;margin-bottom:6px;padding:7px;font-size:13px">
     <textarea id="cmBody" rows="9" placeholder="Write the message. Paste the molecule list in."
            style="width:100%;padding:7px;font-size:13px;font-family:inherit">${cmEsc(st.composeBody || '')}</textarea>
+    <label style="display:flex;gap:6px;align-items:center;margin-top:8px;font-size:12px;cursor:pointer">
+      <input type="checkbox" id="cmAttach" ${st.composeAttach ? 'checked' : ''} style="width:auto;margin:0">
+      Attach the Abiozen supplier overview (PDF, 3 pages)
+    </label>
     <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <button onclick="cmSend(${p.id})" class="btn-primary btn-sm" style="font-size:11px">Send</button>
       <button onclick="cmCompose(0)" class="btn-outline btn-sm" style="font-size:11px">Cancel</button>
@@ -4771,7 +4793,7 @@ window.cmOpen = async function(id, tab){
   const st = window._cmState;
   st.openId = id; st.openTab = tab; st.openLoading = true; st.composeFor = 0;
   st.open = st.open && st.open.id === id ? st.open : { id };
-  await pages['cphi-milan']();
+  await pages['cphi-milan'](true);
   try {
     if (tab === 'molecules') {
       const r = await API('/events/cphi/exhibitors/' + id + '/molecules');
@@ -4788,11 +4810,11 @@ window.cmOpen = async function(id, tab){
     alert('Could not load that: ' + e.message);
   } finally {
     st.openLoading = false;
-    await pages['cphi-milan']();
+    await pages['cphi-milan'](true);
   }
 };
 
-function cmClose(){ const st = window._cmState; st.openId = 0; st.open = null; st.composeFor = 0; pages['cphi-milan'](); }
+function cmClose(){ const st = window._cmState; st.openId = 0; st.open = null; st.composeFor = 0; pages['cphi-milan'](true); }
 
 function cmCopyMolecules(){
   const items = ((window._cmState.open || {}).molecules) || [];
@@ -4808,10 +4830,12 @@ function cmCopyMolecules(){
 function cmCompose(contactId){
   const st = window._cmState;
   const s = document.getElementById('cmSubj'), b = document.getElementById('cmBody');
+  const a = document.getElementById('cmAttach');
   if (s) st.composeSubject = s.value;
   if (b) st.composeBody = b.value;
+  if (a) st.composeAttach = a.checked;
   st.composeFor = contactId;
-  pages['cphi-milan']();
+  pages['cphi-milan'](true);
 }
 
 window.cmSend = async function(contactId){
@@ -4821,10 +4845,11 @@ window.cmSend = async function(contactId){
   if (!confirm('Send this to the contact now?')) return;
   try {
     const html = body.split(/\n{2,}/).map(p => '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('');
+    const a = document.getElementById('cmAttach');
     await API('/events/cphi/contacts/' + contactId + '/email',
-      { method: 'POST', body: JSON.stringify({ subject, html }) });
+      { method: 'POST', body: JSON.stringify({ subject, html, attach_overview: !!(a && a.checked) }) });
     const st = window._cmState;
-    st.composeFor = 0; st.composeSubject = ''; st.composeBody = '';
+    st.composeFor = 0; st.composeSubject = ''; st.composeBody = ''; st.composeAttach = true;
     await cmOpen(st.openId, 'contacts');
     alert('Sent.');
   } catch (e) { alert('Could not send: ' + e.message); }

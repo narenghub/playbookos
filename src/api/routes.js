@@ -5392,13 +5392,26 @@ router.put('/events/cphi/exhibitors/:id/meeting', authMiddleware, requireTier('i
 // invents the words.
 router.post('/events/cphi/contacts/:id/email', authMiddleware, adminOnly, async (req, res) => {
   try {
-    const { subject, html } = req.body || {};
+    const { subject, html, attach_overview } = req.body || {};
     if (!subject || !html) return res.status(400).json({ error: 'subject and html are required' });
 
     const c = (await query(
       `SELECT * FROM cphi_exhibitor_contacts WHERE id = $1`, [req.params.id])).rows[0];
     if (!c) return res.status(404).json({ error: 'Not found' });
     if (!c.email) return res.status(400).json({ error: 'this contact has no email address' });
+
+    // The supplier overview, attached on request. Read from disk per send rather than held in
+    // memory: it is 74 KB, it changes when the file in the repo changes, and a cached copy would
+    // keep sending last month's version after somebody updated it. A MISSING file REFUSES the
+    // send — an email promising an attached overview that arrives without one is worse than an
+    // error on this screen, because the supplier sees the first and nobody sees the second.
+    let attachments;
+    if (attach_overview) {
+      const fs = require('fs'), path = require('path');
+      const p = path.join(__dirname, '../../public/docs/abiozen-supplier-overview.pdf');
+      if (!fs.existsSync(p)) return res.status(500).json({ error: 'the supplier overview PDF is missing from this deploy' });
+      attachments = [{ filename: 'Abiozen-supplier-overview.pdf', content: fs.readFileSync(p) }];
+    }
 
     const { sendEmailDetailed } = require('../lib/mailer');
     const out = await sendEmailDetailed({
@@ -5407,6 +5420,7 @@ router.post('/events/cphi/contacts/:id/email', authMiddleware, adminOnly, async 
       html: sanitizeHtml(html),
       from: process.env.RESEND_FROM || undefined,
       replyTo: req.user && req.user.email ? req.user.email : undefined,
+      attachments,
     });
     if (!out.ok) return res.status(502).json({ error: out.error || 'send failed' });
 
