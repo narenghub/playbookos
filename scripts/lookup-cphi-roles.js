@@ -45,6 +45,7 @@ const { searchExhibitors, hallOf, entityNote, sleep } = require('../src/lib/cphi
 const { excludedSql } = require('../src/lib/fda/exclusion');
 const { outsourcerSql, MAKER_TOKENS } = require('../src/lib/labconnect/buyers');
 const { marketSql, marketOf, marketLabel, isMarket } = require('../src/lib/cphi/markets');
+const { looksLikeLabSql, labLookupOrderSql } = require('../src/lib/labconnect/lab-shape');
 
 const EVENT_SLUG = 'cphi-milan-2026';
 const VALID_ROLES = ['platform_partner', 'qc_lab', 'buyer'];
@@ -64,18 +65,21 @@ const pad = (s, n) => String(s == null ? '' : s).padEnd(n).slice(0, n);
 
 /**
  * LabConnect recruits. Sourced from `labs` when the directory has been populated, because that
- * table carries region, status and the contact a person may have corrected. Contract labs first:
- * a site registered for ANALYSIS and nothing else sells testing, while one that also manufactures
- * is usually testing its own product.
+ * table carries region, status and the contact a person may have corrected.
+ *
+ * ORDERED EU-FIRST, THEN BY WHETHER THE NAME READS AS A TESTING BUSINESS. The first live run checked
+ * ten rows alphabetically from "2seventy bio" and found nothing, because every term in the old
+ * ORDER BY was constant and `name` decided. See src/lib/labconnect/lab-shape.js.
  */
 async function qcLabs(limit) {
   const rows = await query(
     `SELECT name AS holder, name_normalized, region, country, state, contact_email,
-            (notes IS NULL) AS contract_lab
+            (notes IS NOT NULL) AS also_manufactures,
+            ${looksLikeLabSql('name')} AS name_reads_as_lab
        FROM labs
       WHERE status <> 'rejected'
         ${REGION ? "AND region LIKE $2 || '%'" : ''}
-      ORDER BY (notes IS NULL) DESC, (contact_email IS NOT NULL) DESC, name
+      ORDER BY ${labLookupOrderSql()}
       LIMIT $1`,
     REGION ? [limit, REGION] : [limit]);
   return rows.rows.map(r => ({
@@ -85,8 +89,12 @@ async function qcLabs(limit) {
     // region prefix rather than from the country code — the lab directory's own answer, not a second
     // opinion about the same row.
     market: r.region ? String(r.region).split('_')[0] : marketOf(r.country),
-    detail: [r.contract_lab ? 'contract lab' : 'also manufactures', r.region || 'no region']
-      .filter(Boolean).join(' · '),
+    // SAYS WHAT THE REGISTER SAYS, no more. The old label called every row without an
+    // API-manufacturer flag a "contract lab", which put "contract lab" next to 3M Company on screen.
+    // `notes` carries that flag and nothing else, so that is all this reports.
+    detail: [r.name_reads_as_lab ? 'name reads as a lab' : null,
+             r.also_manufactures ? 'also manufactures' : null,
+             r.region || 'no region'].filter(Boolean).join(' · '),
   }));
 }
 
