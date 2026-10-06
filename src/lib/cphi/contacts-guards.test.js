@@ -127,3 +127,36 @@ test('the supplier overview actually ships with the deploy', () => {
   assert.equal(buf.slice(0, 5).toString(), '%PDF-', 'that file is not a PDF');
   assert.ok(buf.length > 20000, 'the overview PDF looks truncated');
 });
+
+test('the drawer checks for an error body — API() does not throw on 4xx/5xx', () => {
+  // THE BUG THIS EXISTS FOR, reported from the floor as:
+  //   "Could not load that: Cannot read properties of undefined (reading 'holder')"
+  // API() is `fetch(...).then(r => r.json())`. It resolves with the parsed body whatever the HTTP
+  // status, so an error response is an ordinary object with an `error` key. The drawer read
+  // `r.exhibitor.holder` straight off it, which threw a TypeError naming a property instead of
+  // showing the server's message — the real fault stayed invisible through two deploys.
+  const html = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+  const open = html.slice(html.indexOf('window.cmOpen = async function'),
+                          html.indexOf('function cmClose()'));
+  assert.ok(open.length > 200, 'could not find cmOpen — this guard needs rewriting');
+  assert.ok(!/r\.exhibitor\.holder/.test(open),
+    'the drawer reads a property off a response body that may be an error object');
+  assert.equal((open.match(/if \(r && r\.error\) throw new Error\(r\.error\)/g) || []).length, 2,
+    'both branches of cmOpen must check for an error body before using the reply');
+
+  const send = html.slice(html.indexOf('window.cmSend = async function'),
+                          html.indexOf('function cmSet('));
+  assert.match(send, /if \(sent && sent\.error\) throw new Error\(sent\.error\)/,
+    'a failed send must not report success — API() resolves on a 502 too');
+});
+
+test('the molecules query has no correlated sub-select over a grouped column', () => {
+  // The first version put the holder count in a SELECT-list subquery referencing an outer column
+  // from a GROUP BY query. It now mirrors the thin-supply query, which has been correct in
+  // production since the briefing was built.
+  const route = ROUTES.slice(ROUTES.indexOf("'/events/cphi/exhibitors/:id/molecules'"),
+                             ROUTES.indexOf("'/events/cphi/contacts'"));
+  assert.match(route, /WITH mine AS/, 'the molecule query should be built from CTEs');
+  assert.ok(!/\(SELECT COUNT\(DISTINCT d2\.holder_normalized\)/.test(route),
+    'the correlated sub-select is back');
+});

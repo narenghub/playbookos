@@ -5280,24 +5280,32 @@ router.get('/events/cphi/exhibitors/:id/molecules', authMiddleware, requireAnyTi
          FROM cphi_exhibitor_matches WHERE id = $1`, [req.params.id])).rows[0];
     if (!m) return res.status(404).json({ error: 'Not found' });
 
-    // Same join the thin-supply query uses: molecule → DMF → holder. Only auto_confirmed matches,
-    // because an unconfirmed molecule-to-DMF link read aloud at a booth is a claim we cannot back.
+    // Built as CTEs rather than a correlated sub-select in the SELECT list: the first version put
+    // the holder count in a subquery that referenced an outer column from a GROUPed query, which is
+    // the fragile shape. This mirrors the thin-supply query, which has been right in production
+    // since the briefing was built. Only auto_confirmed matches — an unconfirmed molecule-to-DMF
+    // link read aloud at a booth is a claim we cannot back.
     const items = (await query(
-      `SELECT MIN(sm.molecule_name) AS molecule,
+      `WITH mine AS (
+         SELECT DISTINCT LOWER(md.molecule_name) AS k
+           FROM molecule_dmf_matches md
+           JOIN dmf_holders dh ON dh.dmf_number = md.dmf_number
+          WHERE dh.holder_normalized = $1
+            AND md.review_status = 'auto_confirmed'),
+       holders AS (
+         SELECT LOWER(m2.molecule_name) AS k, COUNT(DISTINCT d2.holder_normalized)::int AS n
+           FROM molecule_dmf_matches m2
+           JOIN dmf_holders d2 ON d2.dmf_number = m2.dmf_number
+          WHERE m2.review_status = 'auto_confirmed'
+          GROUP BY 1)
+       SELECT MIN(sm.molecule_name) AS molecule,
               COUNT(DISTINCT sm.study_id)::int AS studies,
               COUNT(DISTINCT sm.study_id) FILTER (WHERE cs.phase = 'Phase 3')::int AS ph3,
-              COUNT(DISTINCT md.dmf_number)::int AS dmfs,
-              (SELECT COUNT(DISTINCT d2.holder_normalized)::int
-                 FROM molecule_dmf_matches m2
-                 JOIN dmf_holders d2 ON d2.dmf_number = m2.dmf_number
-                WHERE LOWER(m2.molecule_name) = LOWER(sm.molecule_name)
-                  AND m2.review_status = 'auto_confirmed') AS holder_count
+              COALESCE(MAX(h.n), 0)::int AS holder_count
          FROM study_molecules sm
          JOIN clinical_studies cs ON cs.id = sm.study_id
-         JOIN molecule_dmf_matches md ON LOWER(md.molecule_name) = LOWER(sm.molecule_name)
-         JOIN dmf_holders dh ON dh.dmf_number = md.dmf_number
-        WHERE dh.holder_normalized = $1
-          AND md.review_status = 'auto_confirmed'
+         JOIN mine ON mine.k = LOWER(sm.molecule_name)
+         LEFT JOIN holders h ON h.k = LOWER(sm.molecule_name)
         GROUP BY LOWER(sm.molecule_name)
         ORDER BY 2 DESC, 1`, [m.holder_normalized])).rows;
 

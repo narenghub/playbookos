@@ -4711,15 +4711,20 @@ function cmDrawer(){
   if (!st.openId) return '';
   const d = st.open || {};
   const head = `<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
-      <div><div class="card-title" style="margin:0">${cmEsc(d.holder || 'Loading…')}</div>
+      <div><div class="card-title" style="margin:0">${cmEsc(d.holder || 'This company')}</div>
         <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
           ${d.booth ? 'Booth <b>' + cmEsc(d.booth) + '</b>' : ''}${d.hall ? ' · Hall ' + cmEsc(d.hall) : ''}</div></div>
       <button onclick="cmClose()" class="btn-outline btn-sm" style="font-size:11px">Close</button>
     </div>`;
 
+  const errBox = d.error
+    ? `<div style="padding:12px 14px;border-top:1px solid var(--border);background:#fdecea;color:#8a2f2f;font-size:12.5px">
+         <b>Could not load that.</b> ${cmEsc(d.error)}</div>`
+    : '';
+
   if (st.openTab === 'molecules') {
     const items = d.molecules || [];
-    const body = st.openLoading
+    const body = errBox || (st.openLoading
       ? '<div style="padding:14px;color:var(--text-muted)">Loading molecules…</div>'
       : (items.length
         ? `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
@@ -4736,14 +4741,14 @@ function cmDrawer(){
             <button onclick="cmCopyMolecules()" class="btn-outline btn-sm" style="font-size:11px">Copy the list</button>
             <span style="font-size:11px;color:var(--text-muted);align-self:center">Paste it into the follow-up email, or read it at the booth.</span>
           </div>`
-        : '<div style="padding:14px;color:var(--text-muted)">No confirmed molecule links for this holder. Unconfirmed matches are deliberately excluded — a molecule read aloud at a booth has to be one we can stand behind.</div>');
+        : '<div style="padding:14px;color:var(--text-muted)">No confirmed molecule links for this holder. Unconfirmed matches are deliberately excluded — a molecule read aloud at a booth has to be one we can stand behind.</div>'));
     return `<div id="cmDrawerAnchor" class="card" style="padding:0;border:2px solid #0972d3">
       <div style="padding:12px 14px;border-bottom:1px solid var(--border)">${head}</div>${body}</div>`;
   }
 
   // ── contacts ──
   const cs = d.contacts || [];
-  const list = st.openLoading
+  const list = errBox || (st.openLoading
     ? '<div style="padding:14px;color:var(--text-muted)">Loading contacts…</div>'
     : (cs.length ? cs.map(p => `<div style="padding:11px 14px;border-top:1px solid var(--border)">
         <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">
@@ -4764,7 +4769,7 @@ function cmDrawer(){
         </div>
         ${st.composeFor === p.id ? cmComposeForm(p) : ''}
       </div>`).join('')
-      : '<div style="padding:14px;color:var(--text-muted)">No contacts captured for this company yet.</div>');
+      : '<div style="padding:14px;color:var(--text-muted)">No contacts captured for this company yet.</div>'));
 
   return `<div id="cmDrawerAnchor" class="card" style="padding:0;border:2px solid #0972d3">
     <div style="padding:12px 14px;border-bottom:1px solid var(--border)">${head}</div>${list}</div>`;
@@ -4794,20 +4799,28 @@ window.cmOpen = async function(id, tab){
   st.openId = id; st.openTab = tab; st.openLoading = true; st.composeFor = 0;
   st.open = st.open && st.open.id === id ? st.open : { id };
   await pages['cphi-milan'](true);
+  // The row is already on screen, so the company name and booth come from it rather than from the
+  // response. Two reasons: nothing in the drawer's header then depends on the shape of a reply, and
+  // when a request DOES fail the panel still says which company failed instead of "Loading…".
+  const row = ((st.data && st.data.items) || []).find(x => x.id === id) || {};
+  const base = { id, holder: row.holder || row.exhibitor_name || 'This company',
+                 booth: row.booth, hall: row.hall };
   try {
     if (tab === 'molecules') {
       const r = await API('/events/cphi/exhibitors/' + id + '/molecules');
-      st.open = { id, holder: r.exhibitor.holder, booth: r.exhibitor.booth, hall: r.exhibitor.hall,
-                  molecules: r.items, contacts: (st.open || {}).contacts };
+      // API() resolves with the parsed body whatever the status — it does NOT throw on a 4xx or
+      // 5xx. Reading r.items straight off an error body is what turned a plain server message into
+      // "Cannot read properties of undefined", which said nothing about what actually went wrong.
+      if (r && r.error) throw new Error(r.error);
+      st.open = Object.assign({}, base, { molecules: r.items || [], contacts: (st.open || {}).contacts });
     } else {
       const r = await API('/events/cphi/contacts?exhibitor_id=' + id);
-      const first = (r.items || [])[0] || {};
-      st.open = { id, holder: first.holder || first.company || (st.open || {}).holder,
-                  booth: first.booth, hall: first.hall,
-                  contacts: r.items, molecules: (st.open || {}).molecules };
+      if (r && r.error) throw new Error(r.error);
+      st.open = Object.assign({}, base, { contacts: r.items || [], molecules: (st.open || {}).molecules });
     }
   } catch (e) {
-    alert('Could not load that: ' + e.message);
+    st.open = Object.assign({}, base, { error: e.message,
+      molecules: (st.open || {}).molecules, contacts: (st.open || {}).contacts });
   } finally {
     st.openLoading = false;
     await pages['cphi-milan'](true);
@@ -4846,8 +4859,9 @@ window.cmSend = async function(contactId){
   try {
     const html = body.split(/\n{2,}/).map(p => '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('');
     const a = document.getElementById('cmAttach');
-    await API('/events/cphi/contacts/' + contactId + '/email',
+    const sent = await API('/events/cphi/contacts/' + contactId + '/email',
       { method: 'POST', body: JSON.stringify({ subject, html, attach_overview: !!(a && a.checked) }) });
+    if (sent && sent.error) throw new Error(sent.error);
     const st = window._cmState;
     st.composeFor = 0; st.composeSubject = ''; st.composeBody = ''; st.composeAttach = true;
     await cmOpen(st.openId, 'contacts');
