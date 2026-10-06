@@ -66,3 +66,22 @@ test('the ordering leads with region, not with the alphabet', () => {
   // And the demotion must be ASC — a numbered name sorts true-last, not true-first.
   assert.match(order, /~ '\^\[0-9\]'\) ASC/);
 });
+
+test('the lab lookup asks about each COMPANY once, not each registered site', () => {
+  // `labs` is one row per FDA establishment. The first EU run spent 3 of its 10 lookups on Apotek
+  // Produktion & Laboratorier and 3 on Almac Pharma Services, learning the same booth six times —
+  // and the writes collapse onto one row regardless, because the key is (event, role,
+  // holder_normalized). Duplicates cost HTTP requests and buy nothing.
+  const fs = require('fs');
+  const path = require('path');
+  const LOOK = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'scripts/lookup-cphi-roles.js'), 'utf8');
+  assert.match(LOOK, /DISTINCT ON \(name_normalized\)/, 'the lab scope must dedupe by company');
+  // DISTINCT ON requires its key to lead that query's ORDER BY; the priority ordering therefore has
+  // to be applied OUTSIDE the subquery or Postgres rejects it.
+  assert.match(LOOK, /ORDER BY name_normalized, \(region LIKE 'eu%'\) DESC/,
+    'the inner ORDER BY must lead with the DISTINCT ON key');
+  const inner = LOOK.indexOf('ORDER BY name_normalized');
+  const outer = LOOK.indexOf('ORDER BY ${labLookupOrderSql()}');
+  assert.ok(inner >= 0 && outer > inner, 'the priority ordering must be outside the dedupe');
+});

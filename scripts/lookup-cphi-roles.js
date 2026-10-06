@@ -72,13 +72,29 @@ const pad = (s, n) => String(s == null ? '' : s).padEnd(n).slice(0, n);
  * ORDER BY was constant and `name` decided. See src/lib/labconnect/lab-shape.js.
  */
 async function qcLabs(limit) {
+  // ── ONE ROW PER COMPANY, NOT PER SITE ────────────────────────────────────────
+  //
+  // `labs` holds one row per FDA ESTABLISHMENT, and a company registers each site separately. The
+  // first EU run spent three of its ten lookups on "Apotek Produktion & Laboratorier AB" and three
+  // more on "Almac Pharma Services", learning the same booth six times. On a 400-row --execute run
+  // that is most of the budget, and the writes collapse onto one row anyway because the unique key is
+  // (event, role, holder_normalized) — so the duplicates cost requests and buy nothing.
+  //
+  // DISTINCT ON needs its own key to lead the ORDER BY, so the dedupe happens in a subquery and the
+  // priority ordering is applied outside it. The inner ORDER BY decides WHICH site survives: prefer a
+  // European registration and one carrying an email, since those are the two things the outer ordering
+  // and the follow-up actually use.
   const rows = await query(
-    `SELECT name AS holder, name_normalized, region, country, state, contact_email,
-            (notes IS NOT NULL) AS also_manufactures,
-            ${looksLikeLabSql('name')} AS name_reads_as_lab
-       FROM labs
-      WHERE status <> 'rejected'
-        ${REGION ? "AND region LIKE $2 || '%'" : ''}
+    `SELECT * FROM (
+       SELECT DISTINCT ON (name_normalized)
+              name AS holder, name_normalized, region, country, state, contact_email,
+              (notes IS NOT NULL) AS also_manufactures,
+              ${looksLikeLabSql('name')} AS name_reads_as_lab
+         FROM labs
+        WHERE status <> 'rejected'
+          ${REGION ? "AND region LIKE $2 || '%'" : ''}
+        ORDER BY name_normalized, (region LIKE 'eu%') DESC, (contact_email IS NOT NULL) DESC
+     ) d
       ORDER BY ${labLookupOrderSql()}
       LIMIT $1`,
     REGION ? [limit, REGION] : [limit]);
@@ -231,7 +247,10 @@ async function main() {
     }
     tally[best ? best.tier : 'none'] += 1;
 
-    console.log(`${String(i + 1).padStart(4)}. ${pad(h.holder, 44)} ${pad(h.detail, 26)} `
+    // 26 characters cut "also manufactures" to "also" and ran it into the match column, so a row read
+    // "name reads as a lab · also not exhibiting". A truncated column that forms a different sentence
+    // is worse than a wide one.
+    console.log(`${String(i + 1).padStart(4)}. ${pad(h.holder, 42)} ${pad(h.detail, 52)} `
       + (best ? `${pad(best.tier, 7)}${pad(best.booth || '-', 8)}${best.name}` : 'not exhibiting')
       + (err ? `  ERROR: ${err}` : ''));
 
