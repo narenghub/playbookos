@@ -224,3 +224,21 @@ test('a corrected company name removes the row it superseded — by exact key, a
   assert.ok(!/DELETE FROM cphi_exhibitor_contacts[\s\S]{0,200}NOT EXISTS[\s\S]{0,120}exhibitor_match_id/.test(SEED),
     'a "delete anything without a booth match" sweep would discard the CDMO and intermediate cards');
 });
+
+test('the CPHI page declares `halls` before the option list that reads it', () => {
+  // THE BUG THIS EXISTS FOR, reported from the floor as a render failure:
+  //   "cphi-milan failed to render — Cannot access 'halls' before initialization"
+  // hallOpts is built near the top of the page function; `halls` was computed lower down beside
+  // `items`, leaving hallOpts reading a const still in its temporal dead zone. The whole page threw
+  // and rendered nothing.
+  //
+  // scripts/check-spa-parse.js cannot catch this: it PARSES every inline script and asserts the
+  // entry points exist. A temporal-dead-zone error is valid syntax and only fails when the function
+  // runs, so it passed preflight and reached production.
+  const html = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+  const hallsAt = html.indexOf('const halls = [...new Set((res.items');
+  const optsAt = html.indexOf("const hallOpts = [['', 'hall: all']");
+  assert.ok(hallsAt > 0 && optsAt > 0, 'could not find the hall filter — this guard needs rewriting');
+  assert.ok(hallsAt < optsAt,
+    '`halls` must be declared before hallOpts reads it, or the CPHI page throws on render');
+});

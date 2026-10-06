@@ -4623,16 +4623,16 @@ pages['cphi-milan'] = async function(reuse) {
     </table></div></div>`;
 
   // ── PANEL 1: the priority table ──
+  // Halls present in the data, so the dropdown can never offer one with nothing behind it.
+  const halls = [...new Set((res.items || [])
+    .filter(i => i.match_tier !== 'token' && i.hall).map(i => String(i.hall)))]
+    .sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0) || a.localeCompare(b));
   const hallOpts = [['', 'hall: all'], ...halls.map(h => [h, 'hall ' + h])]
     .map(([v, l]) => `<option value="${v}"${st.hall === v ? ' selected' : ''}>${l}</option>`).join('');
   const tierOpts = [['','tier: any'],['exact','exact'],['core','core'],['prefix','prefix']].map(
     ([v,l]) => `<option value="${v}"${st.tier===v?' selected':''}>${l}</option>`).join('');
   const exhOpts = [['true','on the floor'],['false','not exhibiting'],['any','everyone checked']].map(
     ([v,l]) => `<option value="${v}"${st.exhibiting===v?' selected':''}>${l}</option>`).join('');
-  // Halls present in the data, so the dropdown can never offer one with nothing behind it.
-  const halls = [...new Set((res.items || [])
-    .filter(i => i.match_tier !== 'token' && i.hall).map(i => String(i.hall)))]
-    .sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0) || a.localeCompare(b));
   // Filtered in the browser rather than at the server: every row is already loaded, so a hall
   // change is instant and costs nothing on a venue network.
   const items = (res.items || []).filter(i => i.match_tier !== 'token')
