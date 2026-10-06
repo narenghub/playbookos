@@ -55,10 +55,37 @@ const EXECUTE = argv.includes('--execute');
 const str = (name, dflt) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : dflt; };
 const num = (name, dflt) => { const i = argv.indexOf(name); return i >= 0 ? Number(argv[i + 1]) : dflt; };
 const ROLE = str('--role', null);
-const LIMIT = num('--limit', EXECUTE ? 400 : 10);
+// 400 was too many: `railway ssh` dropped the connection at row 89 of a 400-row partner run with
+// "Connection closed by remote host". The run had written 89 rows and had no way to continue from
+// there. 120 finishes inside about two minutes, which one ssh session survives comfortably — and
+// --resume below makes running it four times equivalent to running it once.
+const LIMIT = num('--limit', EXECUTE ? 120 : 10);
+// Skip holders this event and role already hold a row for. ON by default: a re-run is the normal way
+// to work through a long list, and silently re-checking the first 120 companies every time would mean
+// the 121st is never reached. --no-resume forces a full re-check (e.g. after the directory is rebuilt).
+const RESUME = !argv.includes('--no-resume');
 const DELAY_MS = num('--delay', 600);
 const REGION = str('--region', null);   // e.g. eu, us — prefix match on labs.region
 const MARKET = str('--market', 'all');  // us | eu | all — platform_partner and buyer only
+
+/**
+ * SQL fragment excluding holders already checked for this event and role.
+ *
+ * Correlated on holder_normalized, which is what the unique key uses — so "already checked" means
+ * exactly "a re-run would overwrite this row", no broader. A row whose lookup ERRORED was never
+ * written (see `EXECUTE && !err`), so a failed company is retried rather than skipped, which is the
+ * behaviour a resume has to have or an outage quietly becomes a permanent gap.
+ *
+ * Takes the normalisation as SQL rather than a JS value because the candidate list is what is being
+ * filtered: `normalizeCompany` runs in JS, so the comparison has to happen on the fold the WRITE used,
+ * and that fold is stored in the table.
+ */
+function notYetChecked(nameExpr) {
+  if (!RESUME) return 'TRUE';
+  return `NOT EXISTS (SELECT 1 FROM cphi_exhibitor_matches x
+                       WHERE x.event_slug = '${EVENT_SLUG}' AND x.role = '${ROLE}'
+                         AND x.holder = ${nameExpr})`;
+}
 
 const fmt = (n) => Number(n).toLocaleString('en-US');
 const pad = (s, n) => String(s == null ? '' : s).padEnd(n).slice(0, n);
@@ -87,11 +114,12 @@ async function qcLabs(limit) {
   const rows = await query(
     `SELECT * FROM (
        SELECT DISTINCT ON (name_normalized)
-              name AS holder, name_normalized, region, country, state, contact_email,
+              name, name_normalized, region, country, state, contact_email,
               (notes IS NOT NULL) AS also_manufactures,
               ${looksLikeLabSql('name')} AS name_reads_as_lab
          FROM labs
         WHERE status <> 'rejected'
+          AND ${notYetChecked('name')}
           ${REGION ? "AND region LIKE $2 || '%'" : ''}
         ORDER BY name_normalized, (region LIKE 'eu%') DESC, (contact_email IS NOT NULL) DESC
      ) d
@@ -99,8 +127,8 @@ async function qcLabs(limit) {
       LIMIT $1`,
     REGION ? [limit, REGION] : [limit]);
   return rows.rows.map(r => ({
-    holder: r.holder,
-    holder_normalized: normalizeCompany(r.holder),
+    holder: r.name,
+    holder_normalized: normalizeCompany(r.name),
     // `labs.region` is already resolved (us_central, eu_ita, row_ind), so the market comes off the
     // region prefix rather than from the country code — the lab directory's own answer, not a second
     // opinion about the same row.
@@ -131,18 +159,25 @@ async function platformPartners(limit) {
   const makers = MAKER_TOKENS.map((t, i) => `operations ILIKE $${m.nextIndex + i}`).join(' OR ');
   const makerParams = MAKER_TOKENS.map(t => '%' + t + '%');
   const limitIdx = m.nextIndex + MAKER_TOKENS.length;
+  // Deduped by firm for the same reason the lab scope is: the first EU run spent two lookups each on
+  // ITM Medical Isotopes, Sandoz, Bayer, Roche, Merck Sante, Boehringer and Lek, and three on Aspen
+  // Oss. One company, several registered sites, one booth to learn.
   const rows = await query(
-    `SELECT firm_name AS holder, country, operations
-       FROM fda_establishments
-      WHERE ${m.sql}
-        AND operations IS NOT NULL AND btrim(operations) <> ''
-        AND (${makers})
-        AND NOT ${excludedSql()}
+    `SELECT * FROM (
+       SELECT DISTINCT ON (firm_normalized) firm_name, firm_normalized, country, operations
+         FROM fda_establishments
+        WHERE ${m.sql}
+          AND ${notYetChecked('firm_name')}
+          AND operations IS NOT NULL AND btrim(operations) <> ''
+          AND (${makers})
+          AND NOT ${excludedSql()}
+        ORDER BY firm_normalized, length(operations) DESC
+     ) d
       ORDER BY length(operations) DESC, firm_name
       LIMIT $${limitIdx}`, [...m.params, ...makerParams, limit]);
   return rows.rows.map(r => ({
-    holder: r.holder,
-    holder_normalized: normalizeCompany(r.holder),
+    holder: r.firm_name,
+    holder_normalized: normalizeCompany(r.firm_name),
     market: marketOf(r.country),
     detail: [r.country || 'USA', String(r.operations || '').split(';').length + ' operations']
       .join(' · '),
@@ -162,16 +197,20 @@ async function buyers(limit) {
   const o = outsourcerSql(1);
   const m = marketSql(MARKET, o.nextIndex);
   const rows = await query(
-    `SELECT firm_name AS holder, firm_normalized, country, operations
-       FROM fda_establishments
-      WHERE ${o.sql}
-        AND ${m.sql}
-        AND NOT ${excludedSql()}
+    `SELECT * FROM (
+       SELECT DISTINCT ON (firm_normalized) firm_name, firm_normalized, country, operations
+         FROM fda_establishments
+        WHERE ${o.sql}
+          AND ${m.sql}
+          AND ${notYetChecked('firm_name')}
+          AND NOT ${excludedSql()}
+        ORDER BY firm_normalized, length(operations) DESC
+     ) d
       ORDER BY length(operations) DESC, firm_name
       LIMIT $${m.nextIndex}`, [...o.params, ...m.params, limit]);
   return rows.rows.map(r => ({
-    holder: r.holder,
-    holder_normalized: normalizeCompany(r.holder),
+    holder: r.firm_name,
+    holder_normalized: normalizeCompany(r.firm_name),
     market: marketOf(r.country),
     detail: [r.country || 'USA', String(r.operations || '').split(';').length + ' operations']
       .join(' · '),
@@ -202,6 +241,17 @@ async function main() {
 
   if (!scope.length) {
     console.log(`\nNothing to check for role "${ROLE}"${MARKET === 'all' ? '' : ` in ${marketLabel(MARKET)}`}.`);
+    // DISTINGUISH "nothing matched" FROM "everything already done". With --resume on, an exhausted
+    // list and an empty source table produce the same empty scope, and telling someone to go re-seed
+    // a table that is fine is the kind of advice that costs an hour.
+    const done = (await query(
+      `SELECT COUNT(*)::int n FROM cphi_exhibitor_matches WHERE event_slug = $1 AND role = $2`,
+      [EVENT_SLUG, ROLE])).rows[0].n;
+    if (RESUME && done) {
+      console.log(`${fmt(done)} companies are already checked for this role \u2014 the list is complete.`);
+      console.log('Add --no-resume to check them all again.');
+      process.exit(0);
+    }
     if (ROLE === 'qc_lab') {
       console.log('The `labs` table is empty — run scripts/seed-labs-from-fda.js --write first.');
     } else {
@@ -214,7 +264,11 @@ async function main() {
 
   console.log(`\n── ${ROLE}${ROLE === 'qc_lab' ? '' : ` · ${marketLabel(MARKET)}`}`
     + ` against the ${EVENT_SLUG} directory ──────────────`);
+  const already = (await query(
+    `SELECT COUNT(*)::int n FROM cphi_exhibitor_matches WHERE event_slug = $1 AND role = $2`,
+    [EVENT_SLUG, ROLE])).rows[0].n;
   console.log(`   checking ${fmt(scope.length)}${EXECUTE ? '' : '   (DRY RUN — nothing is written)'}`
+    + (RESUME && already ? `   skipping ${fmt(already)} already checked` : '')
     + `   delay ${DELAY_MS}ms   ~${Math.ceil(scope.length * DELAY_MS * 1.6 / 60000)} min\n`);
 
   const tally = { exact: 0, core: 0, prefix: 0, token: 0, none: 0, errors: 0 };
@@ -296,6 +350,12 @@ async function main() {
   if (EXECUTE) {
     console.log(`\n  wrote ${written} row(s) as role="${ROLE}"`
       + `${ROLE === 'qc_lab' ? '' : ` market="${MARKET}"`}.`);
+    // A run that filled its limit probably left more behind. Saying so is the difference between a
+    // list someone finishes and a list someone believes is finished.
+    if (RESUME && written >= LIMIT) {
+      console.log('  The limit was reached, so there are probably more. Run the same command again');
+      console.log('  \u2014 --resume skips what is already written and carries on from there.');
+    }
   } else {
     console.log(`\n  DRY RUN — nothing written. Add --execute to write.`);
   }
