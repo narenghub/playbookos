@@ -4281,7 +4281,7 @@ window._cmState = { exhibiting: 'true', tier: '', showUnverified: false, data: n
   // The drawer: which company is open, which tab, and the compose box's contents. The draft lives
   // in state rather than only in the textarea, because every re-render replaces the textarea and
   // would otherwise throw away what was typed.
-  hall: '',
+  hall: '', role: 'supplier',
   openId: 0, openTab: 'molecules', open: null, openLoading: false,
   composeFor: 0, composeSubject: '', composeBody: '', composeAttach: true };
 
@@ -4560,6 +4560,7 @@ pages['cphi-milan'] = async function(reuse) {
     c.innerHTML = '<p style="color:#888;padding:20px">Loading CPHI Milan…</p>';
     const qs = new URLSearchParams();
     qs.set('exhibiting', st.exhibiting);
+    qs.set('role', st.role);
     if (st.tier) qs.set('tier', st.tier);
     [res, thin] = await Promise.all([
       API('/events/cphi/exhibitors?' + qs.toString()).catch(e => ({ error: e.message })),
@@ -4570,10 +4571,35 @@ pages['cphi-milan'] = async function(reuse) {
   }
 
   const s = res.summary || {};
+
+  // ── ROLE TABS ──────────────────────────────────────────────────────────────
+  // One floor, three conversations. A supplier is somebody we BUY from; a QC lab is somebody we
+  // RECRUIT into LabConnect; a buyer is somebody we SELL testing to. The ask at the booth differs
+  // in each case, so the page says which one you are looking at rather than leaving you to recall.
+  const ROLE_TABS = [
+    ['supplier', 'Suppliers', 'API and DMF holders \u2014 we buy'],
+    ['qc_lab', 'QC partners', 'testing labs \u2014 we recruit'],
+    ['buyer', 'Buyers', 'they outsource testing \u2014 we sell'],
+  ];
+  const roleCounts = {};
+  for (const r of (res.roles || [])) roleCounts[r.role] = r.on_floor;
+  const roleTabs = `<div class="card" style="padding:0;display:flex;flex-wrap:wrap">
+    ${ROLE_TABS.map(([v, label, sub]) => {
+      const on = st.role === v, n = roleCounts[v];
+      return `<button onclick="cmSetRole('${v}')" style="flex:1 1 180px;text-align:left;padding:11px 14px;background:${on ? 'var(--bg-subtle)' : 'transparent'};border:none;border-bottom:3px solid ${on ? '#0972d3' : 'transparent'};cursor:pointer;font:inherit">
+        <div style="font-weight:${on ? 700 : 600};color:${on ? '#0972d3' : 'var(--text-body)'}">${label}${n == null ? '' : ' <span style="font-weight:400;color:var(--text-muted)">' + n + '</span>'}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:1px">${sub}</div></button>`;
+    }).join('')}
+  </div>`;
+
   const header = `<div class="card" style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
     <div>
       <div class="card-title text-section" style="margin:0">CPHI MILAN 2026 · 6–8 OCTOBER · FIERA MILANO</div>
-      <div class="text-body">API manufacturers holding an active US Type II drug master file for a molecule the trial pipeline needs, and whether they are on the floor. Ranked by how many of those molecules each one covers.</div>
+      <div class="text-body">${st.role === 'qc_lab'
+        ? 'Analytical testing laboratories from the FDA register, and whether they are on this floor. These are LabConnect recruits \u2014 the ask is which tests under GMP, turnaround and price, and the offer is filled capacity.'
+        : st.role === 'buyer'
+        ? 'Registered manufacturers with no analytical laboratory of their own, so they outsource their testing today. A displacement sale \u2014 they already have a provider, which is why the opening is capacity and second source, never \u201cdo you need testing?\u201d.'
+        : 'API manufacturers holding an active US Type II drug master file for a molecule the trial pipeline needs, and whether they are on the floor. Ranked by how many of those molecules each one covers.'}</div>
     </div>
   </div>`;
 
@@ -4646,7 +4672,9 @@ pages['cphi-milan'] = async function(reuse) {
         ${it.entity_note ? `<div style="font-size:11px;color:#8a5a00;margin-top:2px">⚠ Stand reads “${cmEsc(it.exhibitor_name)}” — confirm the entity before contracting</div>` : ''}</td>
       <td style="padding:7px 8px;font-family:ui-monospace,Menlo,monospace">${it.booth?`<span style="background:#0972d3;color:#fff;padding:1px 6px">${cmEsc(it.booth)}</span>`:'<span style="color:var(--text-muted)">—</span>'}</td>
       <td style="padding:7px 8px;text-align:center;color:var(--text-muted)">${it.hall?cmEsc(it.hall):'—'}</td>
-      <td style="padding:7px 8px;text-align:right">${it.molecules_covered
+      <td style="padding:7px 8px;text-align:right">${st.role !== 'supplier'
+        ? `<span style="font-size:11px;color:var(--text-muted)">${cmEsc(it.role_note || '')}</span>`
+        : it.molecules_covered
         ? `<button onclick="cmOpen(${it.id},'molecules')" style="background:none;border:none;padding:0;cursor:pointer;font:inherit;font-weight:700;font-variant-numeric:tabular-nums;color:#0972d3;text-decoration:underline">${it.molecules_covered}</button>`
         : '<span style="color:var(--text-muted)">0</span>'}</td>
       <td style="padding:7px 8px">${cmTierBadge(it.match_tier)}</td>
@@ -4658,8 +4686,8 @@ pages['cphi-milan'] = async function(reuse) {
     </tr>`).join('');
   const priorityPanel = `<div class="card" style="padding:0">
     <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-      <div><div class="card-title" style="margin:0">Milan Sourcing Priority</div>
-        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${items.length} companies${st.hall ? ' in hall ' + cmEsc(st.hall) : ''}, ranked by molecules covered. The unverified token tier is excluded — see below.</div></div>
+      <div><div class="card-title" style="margin:0">${st.role === 'qc_lab' ? 'QC Partners on the floor' : st.role === 'buyer' ? 'Buyers on the floor' : 'Milan Sourcing Priority'}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${items.length} companies${st.hall ? ' in hall ' + cmEsc(st.hall) : ''}${st.role === 'supplier' ? ', ranked by molecules covered' : ''}.${st.role === 'supplier' ? ' The unverified token tier is excluded — see below.' : ' Nothing is here until a lookup has been run for this role.'}</div></div>
       <div style="display:flex;gap:6px">
         <select onchange="cmSetLocal('hall', this.value)" style="font-size:12px;padding:4px">${hallOpts}</select>
         <select onchange="cmSet('exhibiting', this.value)" style="font-size:12px;padding:4px">${exhOpts}</select>
@@ -4669,7 +4697,7 @@ pages['cphi-milan'] = async function(reuse) {
     <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
         <th style="padding:8px">#</th><th style="padding:8px">Company</th><th style="padding:8px">Booth</th>
-        <th style="padding:8px;text-align:center">Hall</th><th style="padding:8px;text-align:right">Molecules</th><th style="padding:8px">Match</th>
+        <th style="padding:8px;text-align:center">Hall</th><th style="padding:8px;text-align:right">${st.role === 'supplier' ? 'Molecules' : 'What they are'}</th><th style="padding:8px">Match</th>
         <th style="padding:8px">Met / contact</th><th style="padding:8px">Outreach</th>
       </tr></thead>
       <tbody>${rows || '<tr><td colspan="8" style="padding:16px;color:var(--text-muted)">Nothing matches this filter.</td></tr>'}</tbody>
@@ -4700,7 +4728,12 @@ pages['cphi-milan'] = async function(reuse) {
     </table></div>` : ''}
   </div>`;
 
-  c.innerHTML = header + orBar('exhibitor') + summaryRow + cmDrawer() + thinPanel + priorityPanel + unverifiedPanel;
+  // Thin Supply is a MOLECULE view — it answers "who can supply this", which is only a question
+  // about suppliers. Under QC partners or Buyers it would be the same table meaning something it
+  // does not.
+  const supplierOnly = st.role === 'supplier';
+  c.innerHTML = roleTabs + header + orBar('exhibitor') + summaryRow + cmDrawer()
+    + (supplierOnly ? thinPanel : '') + priorityPanel + (supplierOnly ? unverifiedPanel : '');
 
   // Bring the drawer into view. It renders near the top; the row that opened it is usually far
   // down a 286-row table, so without this the panel appears off-screen and the tap looks ignored.
@@ -4887,6 +4920,10 @@ function cmSet(k, v){ window._cmState[k] = v; pages['cphi-milan'](); }
 // Hall is filtered in the browser, so it renders from what is already loaded. Going to the server
 // for it would reload 286 rows to show a subset of the rows we are already holding.
 function cmSetLocal(k, v){ const st = window._cmState; st[k] = v; st.openId = 0; st.open = null; pages['cphi-milan'](true); }
+// A role change IS a different question for the server, so it refetches. Hall resets with it: hall
+// 7 may hold labs and no suppliers, and carrying the filter across would show an empty table and
+// read as missing data.
+function cmSetRole(v){ const st = window._cmState; st.role = v; st.hall = ''; st.openId = 0; st.open = null; pages['cphi-milan'](); }
 function cmToggleUnverified(){ window._cmState.showUnverified = !window._cmState.showUnverified; pages['cphi-milan'](); }
 async function cmReview(id, verdict){
   try {

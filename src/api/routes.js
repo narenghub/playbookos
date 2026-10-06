@@ -5017,6 +5017,9 @@ const CPHI_EVENT = 'cphi-milan-2026';
 // the big Indian generics all looked alike because the unrestricted list carries the same long
 // oncology tail. A guard test pins the two together.
 const CPHI_TOP_N = 100;
+// supplier = we buy from them · qc_lab = we recruit it into LabConnect · buyer = we sell testing to
+// it. Must match the CHECK constraint in scripts/migrate-cphi-roles.js.
+const CPHI_ROLES = ['supplier', 'qc_lab', 'buyer'];
 const { DEMAND_SQL } = require('../lib/dmf/demand');
 // The SAME fold the exhibitor matcher uses. A contact typed on the floor has to collide with the
 // one the seed imported, or the same company ends up in the list twice under two spellings.
@@ -5029,6 +5032,10 @@ const CPHI_REVIEW_STATUSES = ['unreviewed', 'auto_confirmed', 'entity_review', '
 router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res) => {
   try {
     const clauses = ['event_slug = $1'], params = [CPHI_EVENT];
+    // Defaults to 'supplier' so every existing caller keeps the list it has always had. The floor
+    // carries three different conversations — see scripts/migrate-cphi-roles.js.
+    const role = CPHI_ROLES.includes(req.query.role) ? req.query.role : 'supplier';
+    params.push(role); clauses.push(`role = $${params.length}`);
     if (req.query.exhibiting === 'false') clauses.push('exhibiting = false');
     else if (req.query.exhibiting !== 'any') clauses.push('exhibiting = true');
     if (req.query.tier) { params.push(req.query.tier); clauses.push(`match_tier = $${params.length}`); }
@@ -5037,12 +5044,18 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligen
 
     const items = (await query(
       `SELECT id, holder, exhibitor_name, exhibiting, booth, hall, match_tier, review_status,
-              entity_note, molecules_covered, checked_at
+              entity_note, molecules_covered, checked_at, role, role_note,
+              met_in_person, linkedin_connected
          FROM cphi_exhibitor_matches ${where}
         ORDER BY molecules_covered DESC, holder`, params)).rows;
 
     // Event-wide summary, independent of the filters above — the header row must not move
     // when someone filters the table.
+    // Per-role totals for the tabs. Event-wide and independent of the filters, like the summary.
+    const roles = (await query(
+      `SELECT role, COUNT(*) FILTER (WHERE exhibiting)::int on_floor, COUNT(*)::int checked
+         FROM cphi_exhibitor_matches WHERE event_slug = $1 GROUP BY role`, [CPHI_EVENT])).rows;
+
     const summary = (await query(
       `SELECT COUNT(*) FILTER (WHERE exhibiting)::int exhibiting,
               COUNT(*)::int checked,
@@ -5050,7 +5063,7 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligen
               COALESCE(SUM(molecules_covered) FILTER (WHERE exhibiting AND review_status IN ('auto_confirmed','entity_review','confirmed')), 0)::int molecule_links,
               COUNT(*) FILTER (WHERE review_status = 'entity_review')::int entity_review,
               COUNT(*) FILTER (WHERE review_status = 'unreviewed' AND match_tier = 'token')::int unverified
-         FROM cphi_exhibitor_matches WHERE event_slug = $1`, [CPHI_EVENT])).rows[0];
+         FROM cphi_exhibitor_matches WHERE event_slug = $1 AND role = $2`, [CPHI_EVENT, role])).rows[0];
 
     // The DMF file the whole page rests on. Surfaced so staleness is visible: the list is
     // quarterly, so by the October show this data is roughly ten weeks old.
@@ -5058,7 +5071,7 @@ router.get('/events/cphi/exhibitors', authMiddleware, requireAnyTier('intelligen
       `SELECT source_file, MAX(ingested_at) ingested_at, COUNT(*)::int rows
          FROM dmf_holders GROUP BY source_file ORDER BY MAX(ingested_at) DESC LIMIT 1`)).rows[0] || null;
 
-    res.json({ event: CPHI_EVENT, items, summary, dmf_source: src });
+    res.json({ event: CPHI_EVENT, role, roles, items, summary, dmf_source: src });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

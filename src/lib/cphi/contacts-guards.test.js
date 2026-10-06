@@ -242,3 +242,42 @@ test('the CPHI page declares `halls` before the option list that reads it', () =
   assert.ok(hallsAt < optsAt,
     '`halls` must be declared before hallOpts reads it, or the CPHI page throws on render');
 });
+
+test('role joins the unique key, or one conversation overwrites the other', () => {
+  // A firm that manufactures AND runs a laboratory is legitimately two rows: a supplier we buy from
+  // and a QC lab we recruit, at the same booth with different asks. Keyed on
+  // (event, holder_normalized) alone, the second lookup would overwrite the first and one of those
+  // conversations would vanish from the floor list without anything failing.
+  // Comments stripped FIRST. The rollback note at the top of that file names both indexes, and
+  // "DROP INDEX IF EXISTS idx_cem_unique" is a prefix of "...idx_cem_unique_role" — so an indexOf
+  // over the raw text matches the comment and the ordering check passes or fails on prose.
+  const MIG = fs.readFileSync(path.join(ROOT, 'scripts/migrate-cphi-roles.js'), 'utf8')
+    .replace(/\/\/[^\n]*/g, '');
+  assert.match(MIG, /CREATE UNIQUE INDEX IF NOT EXISTS idx_cem_unique_role[\s\S]*?\(event_slug, role, holder_normalized\)/);
+  // Created BEFORE the old one is dropped: if two existing rows collide on the new key the create
+  // fails and the table is left protected rather than bare.
+  assert.ok(MIG.indexOf('idx_cem_unique_role') < MIG.indexOf('DROP INDEX IF EXISTS idx_cem_unique`'),
+    'the new index must be created before the old one is dropped');
+  assert.match(MIG, /DEFAULT 'supplier'/, 'existing rows are suppliers, which is what they are');
+});
+
+test('the role lookup aborts rather than grinding on a refusing directory', () => {
+  // Hundreds of serialised HTTP requests. Ten failures in a row is the widget refusing us, not ten
+  // odd company names — and an hour of writing nothing that ends with a summary line looks exactly
+  // like a completed run.
+  const LOOK = fs.readFileSync(path.join(ROOT, 'scripts/lookup-cphi-roles.js'), 'utf8');
+  assert.match(LOOK, /consecutiveErrors >= 10/);
+  assert.match(LOOK, /ABORTED after 10 consecutive errors/);
+  assert.match(LOOK, /const EXECUTE = argv\.includes\('--execute'\)/, 'dry run by default');
+  assert.match(LOOK, /EXECUTE && !err/, 'a row whose lookup errored must not be written as "not exhibiting"');
+});
+
+test('the directory parser lives in ONE place', () => {
+  // CPHI rebuilds this widget every year; two copies of the __NEXT_DATA__ parse means finding out twice.
+  const dir = fs.readFileSync(path.join(ROOT, 'src/lib/cphi/directory.js'), 'utf8');
+  assert.match(dir, /__NEXT_DATA__/);
+  const look = fs.readFileSync(path.join(ROOT, 'scripts/lookup-cphi-roles.js'), 'utf8');
+  assert.match(look, /require\('\.\.\/src\/lib\/cphi\/directory'\)/,
+    'the role lookup must use the shared parser, not its own copy');
+  assert.ok(!/__NEXT_DATA__/.test(look), 'the parse is duplicated into the role lookup');
+});

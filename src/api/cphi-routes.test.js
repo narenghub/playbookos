@@ -14,16 +14,16 @@ function seed() {
   STORE = [
     { id: 1, event_slug: 'cphi-milan-2026', holder: 'TAPI NL BV', holder_normalized: 'tapi nl', exhibiting: true,
       exhibitor_name: 'TAPI NL BV', booth: '3A73', hall: '3', match_tier: 'exact',
-      review_status: 'auto_confirmed', entity_note: null, molecules_covered: 34, checked_at: 1 },
+      review_status: 'auto_confirmed', entity_note: null, molecules_covered: 34, checked_at: 1, role: 'supplier' },
     { id: 2, event_slug: 'cphi-milan-2026', holder: 'UMICORE ARGENTINA SA', holder_normalized: 'umicore argentina', exhibiting: true,
       exhibitor_name: 'UMICORE AG & CO. KG', booth: '8J67', hall: '8', match_tier: 'prefix',
-      review_status: 'entity_review', entity_note: 'Booth is correct, legal entity may differ…', molecules_covered: 5, checked_at: 1 },
+      review_status: 'entity_review', entity_note: 'Booth is correct, legal entity may differ…', molecules_covered: 5, checked_at: 1, role: 'supplier' },
     { id: 3, event_slug: 'cphi-milan-2026', holder: 'AURO PEPTIDES LTD', holder_normalized: 'auro peptides', exhibiting: true,
       exhibitor_name: 'BCN PEPTIDES', booth: '5F21', hall: '5', match_tier: 'token',
-      review_status: 'unreviewed', entity_note: null, molecules_covered: 2, checked_at: 1 },
+      review_status: 'unreviewed', entity_note: null, molecules_covered: 2, checked_at: 1, role: 'supplier' },
     { id: 4, event_slug: 'cphi-milan-2026', holder: 'INTAS PHARMACEUTICALS LTD', holder_normalized: 'intas', exhibiting: false,
       exhibitor_name: null, booth: null, hall: null, match_tier: 'not_found',
-      review_status: 'unreviewed', entity_note: null, molecules_covered: 9, checked_at: 1 },
+      review_status: 'unreviewed', entity_note: null, molecules_covered: 9, checked_at: 1, role: 'supplier' },
   ];
 }
 seed();
@@ -64,12 +64,27 @@ db.query = async (sql, params = []) => {
         holders: [{ holder: 'TAPI NL BV', booth: '3A73', hall: '3', exhibiting: true }] },
     ] };
   }
+  // per-role tab counts
+  if (/GROUP BY role/i.test(sql)) {
+    const by = {};
+    for (const r of STORE.filter(r => r.event_slug === params[0])) {
+      const k = r.role || 'supplier';
+      by[k] = by[k] || { role: k, on_floor: 0, checked: 0 };
+      by[k].checked += 1;
+      if (r.exhibiting) by[k].on_floor += 1;
+    }
+    return { rows: Object.values(by) };
+  }
   // list
   if (/FROM cphi_exhibitor_matches WHERE/i.test(sql) && /ORDER BY molecules_covered/i.test(sql)) {
     let rows = STORE.filter(r => r.event_slug === params[0]);
     if (/exhibiting = false/i.test(sql)) rows = rows.filter(r => !r.exhibiting);
     else if (/exhibiting = true/i.test(sql)) rows = rows.filter(r => r.exhibiting);
+    // PARAMETER ORDER MATTERS HERE. The route pushes role BEFORE tier and review_status, so a fake
+    // that assumed $2 was match_tier read the role into the tier filter and returned nothing. The
+    // indices are walked in the same order the route builds them.
     let pi = 1;
+    if (/role = \$\d/i.test(sql)) { const ro = params[pi++]; rows = rows.filter(r => (r.role || 'supplier') === ro); }
     if (/match_tier = \$\d/i.test(sql)) { const t = params[pi++]; rows = rows.filter(r => r.match_tier === t); }
     if (/review_status = \$\d/i.test(sql)) { const rs = params[pi++]; rows = rows.filter(r => r.review_status === rs); }
     return { rows: rows.sort((a, b) => b.molecules_covered - a.molecules_covered) };
@@ -196,6 +211,37 @@ test('a read-only intelligence tier reads but cannot write a verdict', async () 
   assert.equal(write.status, 403);
 });
 
+test('the role filter defaults to supplier and rejects anything unknown', async () => {
+  // Every caller that existed before roles sends no role at all and must keep the list it had.
+  // And `role` arrives from a query string, so it is user input: interpolating it, or trusting it,
+  // would let a caller ask for a role the CHECK constraint does not allow.
+  seed();
+  const plain = await call('GET', '/api/events/cphi/exhibitors', RO);
+  assert.equal(plain.status, 200);
+  assert.equal(plain.body.role, 'supplier');
+  assert.ok(plain.body.items.length > 0, 'the default list must not come back empty');
+
+  const junk = await call('GET', '/api/events/cphi/exhibitors?role=' + encodeURIComponent('; DROP TABLE cphi_exhibitor_matches'), RO);
+  assert.equal(junk.status, 200);
+  assert.equal(junk.body.role, 'supplier', 'an unknown role must fall back, never be passed through');
+
+  const labs = await call('GET', '/api/events/cphi/exhibitors?role=qc_lab', RO);
+  assert.equal(labs.status, 200);
+  assert.equal(labs.body.role, 'qc_lab');
+  assert.deepEqual(labs.body.items, [], 'no QC rows seeded, so the tab is empty rather than wrong');
+});
+
+test('the tabs get a per-role count, event-wide', async () => {
+  seed();
+  const r = await call('GET', '/api/events/cphi/exhibitors', RO);
+  const sup = (r.body.roles || []).find(x => x.role === 'supplier');
+  assert.ok(sup, 'the roles summary must name supplier');
+  assert.equal(sup.checked, 4);
+  assert.equal(sup.on_floor, 3, 'three of the four fixtures are on the floor');
+});
+
+// NOTE: the test below closes the server, so it must stay LAST in this file. Anything appended
+// after it fails with "fetch failed" rather than an assertion, which reads like a broken route.
 test('no token, no access', async () => {
   const b = await boot();
   const res = await fetch(b + '/api/events/cphi/exhibitors');
