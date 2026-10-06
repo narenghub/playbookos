@@ -62,8 +62,13 @@ test('the molecules endpoint only returns CONFIRMED molecule-to-DMF links', () =
   const route = ROUTES.slice(ROUTES.indexOf("'/events/cphi/exhibitors/:id/molecules'"),
                              ROUTES.indexOf("'/events/cphi/contacts'"));
   assert.ok(route.length > 100, 'could not find the molecules route — these guards need rewriting');
-  assert.match(route, /md\.review_status = 'auto_confirmed'/,
-    'unconfirmed molecule links must be excluded');
+  // Every join onto molecule_dmf_matches in this route must carry the filter; the query has
+  // several aliases, so assert on the count rather than one spelling.
+  const confirmed = (route.match(/review_status = 'auto_confirmed'/g) || []).length;
+  assert.ok(confirmed >= 3,
+    `unconfirmed molecule links must be excluded on every join (found ${confirmed})`);
+  assert.ok(!/review_status <> 'rejected'|review_status != 'rejected'/.test(route),
+    'the filter must be a positive test for auto_confirmed, not an exclusion of rejected');
 });
 
 test('the send route refuses to compose on anybody\'s behalf', () => {
@@ -156,7 +161,66 @@ test('the molecules query has no correlated sub-select over a grouped column', (
   // production since the briefing was built.
   const route = ROUTES.slice(ROUTES.indexOf("'/events/cphi/exhibitors/:id/molecules'"),
                              ROUTES.indexOf("'/events/cphi/contacts'"));
-  assert.match(route, /WITH mine AS/, 'the molecule query should be built from CTEs');
+  assert.match(route, /WITH demand AS/, 'the molecule query should be built from CTEs');
   assert.ok(!/\(SELECT COUNT\(DISTINCT d2\.holder_normalized\)/.test(route),
     'the correlated sub-select is back');
+});
+
+test('the drawer lists the SAME molecules the row count is computed from', () => {
+  // THE INCONSISTENCY REPORTED FROM THE FLOOR: tapping 23 on Dr Reddy's produced a far longer
+  // list, and every big Indian generic looked alike. `molecules_covered` counts only the TOP-N
+  // molecules by clinical demand (scripts/lookup-cphi-exhibitors.js --top); the drawer query had
+  // no such restriction, so it added a long tail those firms all share. The number you tap and the
+  // rows you get have to come from one definition.
+  assert.match(ROUTES, /const CPHI_TOP_N = 100;/,
+    'CPHI_TOP_N must exist and match --top in the lookup script');
+  const lookup = fs.readFileSync(path.join(ROOT, 'scripts/lookup-cphi-exhibitors.js'), 'utf8');
+  const m = /flag\('--top',\s*(\d+)\)/.exec(lookup);
+  assert.ok(m, 'could not read --top from the lookup script');
+  assert.equal(Number(m[1]), 100,
+    'the lookup script\'s --top changed; CPHI_TOP_N in routes.js must change with it');
+
+  const route = ROUTES.slice(ROUTES.indexOf("'/events/cphi/exhibitors/:id/molecules'"),
+                             ROUTES.indexOf("'/events/cphi/contacts'"));
+  assert.match(route, /LIMIT \$2/, 'the drawer query must be bounded by the same top-N');
+  assert.match(route, /sourceable AS/, 'and must use the same demand/sourceable shape as the count');
+});
+
+test('the drawer finds its row by STRING id — bigint comes back as a string', () => {
+  // node-postgres returns BIGSERIAL as a string; the onclick passes a number literal. `===` between
+  // them is always false, so the drawer header fell back to "This company" on every open.
+  const html = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
+  const open = html.slice(html.indexOf('window.cmOpen = async function'),
+                          html.indexOf('function cmClose()'));
+  assert.match(open, /String\(x\.id\) === String\(id\)/);
+  assert.ok(!/find\(x => x\.id === id\)/.test(open), 'the strict id comparison is back');
+});
+
+test("TAPI is tied to the register's name, not the card's", () => {
+  // The card reads TAPI; the register and the CPHI stand read TAPI NL BV. The fold cannot bridge a
+  // different legal name, so without this the largest DMF bench on the list has no booth and no
+  // molecules against it.
+  assert.match(SEED, /company: 'TAPI NL BV'/,
+    "TAPI must seed under the register's holder name or it ties to nothing");
+  assert.match(SEED, /Card reads "TAPI"/, 'and the card name must survive in the note');
+});
+
+test('a corrected company name removes the row it superseded — by exact key, and only after', () => {
+  // Changing a card's company changes the unique key (event, company fold, lower(name)), so the
+  // upsert inserts a SECOND row and orphans the first. TAPI hit it: 'tapi' and 'tapi nl' are
+  // different folds, so a re-run would have left two Quyen Nguyens, one of them booth-less.
+  //
+  // The cleanup is narrow on purpose. This script runs against production, and the repo's rule for
+  // anything that deletes there is: remove exactly what you know you replaced, by key, never by
+  // pattern and never "anything unmatched".
+  assert.match(SEED, /const SUPERSEDED = \[/);
+  assert.match(SEED, /was: 'TAPI', now: 'TAPI NL BV', name: 'Quyen Nguyen'/);
+  const del = SEED.slice(SEED.indexOf('DELETE FROM cphi_exhibitor_contacts'),
+                         SEED.indexOf('RETURNING id'));
+  assert.match(del, /company_normalized = \$2/, 'the delete must be keyed on the exact old fold');
+  assert.match(del, /lower\(name\) = lower\(\$3\)/, 'and on the exact person');
+  assert.match(del, /EXISTS \(SELECT 1 FROM cphi_exhibitor_contacts k/,
+    'the old row may only go once the replacement exists, or the card is lost outright');
+  assert.ok(!/DELETE FROM cphi_exhibitor_contacts[\s\S]{0,200}NOT EXISTS[\s\S]{0,120}exhibitor_match_id/.test(SEED),
+    'a "delete anything without a booth match" sweep would discard the CDMO and intermediate cards');
 });

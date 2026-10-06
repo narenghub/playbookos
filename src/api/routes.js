@@ -5010,6 +5010,14 @@ router.get('/sitenex/packages', authMiddleware, requireTier('sitenex'), async (r
 // scripts populate (scripts/ingest-dmf.js -> match-dmf-molecules.js -> lookup-cphi-exhibitors.js).
 // Nothing here calls FDA, CPHI or an LLM, so no route can spend.
 const CPHI_EVENT = 'cphi-milan-2026';
+// MUST MATCH scripts/lookup-cphi-exhibitors.js --top. `molecules_covered` on each row is a count of
+// how many of the TOP-N molecules by clinical demand that holder covers, so a drawer listing every
+// molecule tied to the holder shows a different number of rows than the number you tapped. The
+// first version did exactly that: Dr Reddy's showed 23 on the row and a far longer list inside, and
+// the big Indian generics all looked alike because the unrestricted list carries the same long
+// oncology tail. A guard test pins the two together.
+const CPHI_TOP_N = 100;
+const { DEMAND_SQL } = require('../lib/dmf/demand');
 // The SAME fold the exhibitor matcher uses. A contact typed on the floor has to collide with the
 // one the seed imported, or the same company ends up in the list twice under two spellings.
 const { normalizeCompany: cphiNormalizeCompany } = require('../lib/cphi/match-company');
@@ -5280,34 +5288,40 @@ router.get('/events/cphi/exhibitors/:id/molecules', authMiddleware, requireAnyTi
          FROM cphi_exhibitor_matches WHERE id = $1`, [req.params.id])).rows[0];
     if (!m) return res.status(404).json({ error: 'Not found' });
 
-    // Built as CTEs rather than a correlated sub-select in the SELECT list: the first version put
-    // the holder count in a subquery that referenced an outer column from a GROUPed query, which is
-    // the fragile shape. This mirrors the thin-supply query, which has been right in production
-    // since the briefing was built. Only auto_confirmed matches — an unconfirmed molecule-to-DMF
-    // link read aloud at a booth is a claim we cannot back.
+    // The SAME demand set the count is computed from — see CPHI_TOP_N. Only auto_confirmed
+    // molecule-to-DMF links: a molecule read aloud at a booth is a claim we have to be able to back.
     const items = (await query(
-      `WITH mine AS (
-         SELECT DISTINCT LOWER(md.molecule_name) AS k
-           FROM molecule_dmf_matches md
-           JOIN dmf_holders dh ON dh.dmf_number = md.dmf_number
-          WHERE dh.holder_normalized = $1
-            AND md.review_status = 'auto_confirmed'),
+      `WITH demand AS (
+         SELECT LOWER(sm.molecule_name) AS k, MIN(sm.molecule_name) AS molecule,
+                COUNT(DISTINCT sm.study_id) AS studies,
+                SUM(COALESCE(cs.enrollment_count, 0)) AS patients,
+                COUNT(DISTINCT sm.study_id) FILTER (WHERE cs.phase = 'Phase 3') AS ph3,
+                COUNT(DISTINCT sm.study_id) FILTER (WHERE cs.phase = 'Phase 2') AS ph2
+           FROM study_molecules sm
+           JOIN clinical_studies cs ON cs.id = sm.study_id
+          GROUP BY 1),
+       sourceable AS (
+         SELECT d.* FROM demand d WHERE EXISTS (
+           SELECT 1 FROM molecule_dmf_matches m
+            WHERE LOWER(m.molecule_name) = d.k AND m.review_status = 'auto_confirmed')),
+       top AS (
+         SELECT k, molecule, studies, ph3 FROM sourceable
+          ORDER BY ${DEMAND_SQL} DESC, studies DESC LIMIT $2),
        holders AS (
          SELECT LOWER(m2.molecule_name) AS k, COUNT(DISTINCT d2.holder_normalized)::int AS n
            FROM molecule_dmf_matches m2
            JOIN dmf_holders d2 ON d2.dmf_number = m2.dmf_number
           WHERE m2.review_status = 'auto_confirmed'
           GROUP BY 1)
-       SELECT MIN(sm.molecule_name) AS molecule,
-              COUNT(DISTINCT sm.study_id)::int AS studies,
-              COUNT(DISTINCT sm.study_id) FILTER (WHERE cs.phase = 'Phase 3')::int AS ph3,
-              COALESCE(MAX(h.n), 0)::int AS holder_count
-         FROM study_molecules sm
-         JOIN clinical_studies cs ON cs.id = sm.study_id
-         JOIN mine ON mine.k = LOWER(sm.molecule_name)
-         LEFT JOIN holders h ON h.k = LOWER(sm.molecule_name)
-        GROUP BY LOWER(sm.molecule_name)
-        ORDER BY 2 DESC, 1`, [m.holder_normalized])).rows;
+       SELECT t.molecule, t.studies::int AS studies, t.ph3::int AS ph3,
+              COALESCE(h.n, 0)::int AS holder_count
+         FROM top t
+         JOIN molecule_dmf_matches m ON LOWER(m.molecule_name) = t.k AND m.review_status = 'auto_confirmed'
+         JOIN dmf_holders d ON d.dmf_number = m.dmf_number
+         LEFT JOIN holders h ON h.k = t.k
+        WHERE d.holder_normalized = $1
+        GROUP BY t.molecule, t.studies, t.ph3, h.n
+        ORDER BY t.studies DESC, t.molecule`, [m.holder_normalized, CPHI_TOP_N])).rows;
 
     res.json({ exhibitor: m, count: items.length, items });
   } catch (e) { res.status(500).json({ error: e.message }); }

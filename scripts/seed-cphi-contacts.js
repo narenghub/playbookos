@@ -23,9 +23,14 @@ const EVENT = 'cphi-milan-2026';
 const WRITE = process.argv.includes('--write');
 
 const CARDS = [
-  { company: 'TAPI', name: 'Quyen Nguyen', title: 'Associate Director of Key Accounts, NA',
+  // ALIAS. The card says TAPI; the FDA register and the CPHI stand both say TAPI NL BV, and the
+  // name fold cannot bridge those — it is a different legal name, not a spelling variant. So the
+  // register's name is what this row ties on, and the card's name is kept in the note. This is the
+  // ONE place a human-supplied alias is legitimate; a hand-written company-to-booth map is not,
+  // because it goes stale at the next quarterly re-run and this does not.
+  { company: 'TAPI NL BV', name: 'Quyen Nguyen', title: 'Associate Director of Key Accounts, NA',
     email: 'quyen.nguyen@tapi.com', office: '+1 973-307-5179', source: 'card',
-    note: 'Only US-based contact collected on day 1.' },
+    note: 'Card reads "TAPI"; the register and the stand read TAPI NL BV. Teva\'s API arm, booth 3A73. Sole US DMF holder for gemcitabine hydrochloride — the strongest single conversation on this list.' },
 
   { company: "Dr. Reddy's Laboratories Ltd", name: 'Ashish Rana', title: 'Head, API — US & Canada',
     email: 'rashish@drreddys.com', mobile: '+1 609-819-6840', office: '+91 40 4900 2900',
@@ -111,6 +116,20 @@ const CARDS = [
     note: 'CONFIRM ENTITY: email domain polymedt.com does not match the trading name on the card.' },
 ];
 
+// ── CARDS WHOSE COMPANY NAME WE CORRECTED AFTER THE FIRST IMPORT ─────────────
+//
+// The unique key is (event, company fold, lower(name)), so changing a card's company changes its
+// key — the upsert then INSERTS a second row and leaves the original orphaned with no booth. TAPI
+// hit exactly that: 'tapi' and 'tapi nl' are different folds.
+//
+// Each entry names the superseded fold EXACTLY and the person it belonged to. Deliberately not a
+// pattern or a "delete anything without a match": this file runs against production, and the rule
+// here is the same as every verification script in the repo — remove precisely what you know you
+// replaced, by key, and nothing else.
+const SUPERSEDED = [
+  { was: 'TAPI', now: 'TAPI NL BV', name: 'Quyen Nguyen' },
+];
+
 const pad = (s, n) => String(s == null ? '' : s).padEnd(n).slice(0, n);
 
 async function main() {
@@ -190,10 +209,29 @@ async function main() {
         WHERE id = ANY($1)`, [ids]);
   }
 
+  // Remove the rows a corrected company name left behind — by exact key, one person at a time.
+  let removed = 0;
+  for (const r of SUPERSEDED) {
+    const del = await query(
+      `DELETE FROM cphi_exhibitor_contacts
+        WHERE event_slug = $1 AND company_normalized = $2 AND lower(name) = lower($3)
+          AND EXISTS (SELECT 1 FROM cphi_exhibitor_contacts k
+                       WHERE k.event_slug = $1 AND k.company_normalized = $4
+                         AND lower(k.name) = lower($3))
+        RETURNING id`,
+      [EVENT, normalizeCompany(r.was), r.name, normalizeCompany(r.now)]);
+    // The EXISTS clause means the old row only goes once the new one is actually there. A delete
+    // that ran before the insert would lose the card entirely.
+    if (del.rows.length) {
+      removed += del.rows.length;
+      console.log(`  superseded: removed "${r.was}" row for ${r.name} (now under "${r.now}")`);
+    }
+  }
+
   const total = (await query(
     `SELECT COUNT(*)::int n FROM cphi_exhibitor_contacts WHERE event_slug = $1`, [EVENT])).rows[0].n;
   console.log('── writing ─────────────────────────────────────────────────────────────────');
-  console.log(`  inserted ${inserted}, updated ${updated}`);
+  console.log(`  inserted ${inserted}, updated ${updated}${removed ? `, superseded rows removed ${removed}` : ''}`);
   console.log(`  ${ids.length} exhibitor row(s) marked met_in_person`);
   console.log(`  contacts for ${EVENT}: ${total}\n`);
 }

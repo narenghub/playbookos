@@ -4281,6 +4281,7 @@ window._cmState = { exhibiting: 'true', tier: '', showUnverified: false, data: n
   // The drawer: which company is open, which tab, and the compose box's contents. The draft lives
   // in state rather than only in the textarea, because every re-render replaces the textarea and
   // would otherwise throw away what was typed.
+  hall: '',
   openId: 0, openTab: 'molecules', open: null, openLoading: false,
   composeFor: 0, composeSubject: '', composeBody: '', composeAttach: true };
 
@@ -4622,11 +4623,20 @@ pages['cphi-milan'] = async function(reuse) {
     </table></div></div>`;
 
   // ── PANEL 1: the priority table ──
+  const hallOpts = [['', 'hall: all'], ...halls.map(h => [h, 'hall ' + h])]
+    .map(([v, l]) => `<option value="${v}"${st.hall === v ? ' selected' : ''}>${l}</option>`).join('');
   const tierOpts = [['','tier: any'],['exact','exact'],['core','core'],['prefix','prefix']].map(
     ([v,l]) => `<option value="${v}"${st.tier===v?' selected':''}>${l}</option>`).join('');
   const exhOpts = [['true','on the floor'],['false','not exhibiting'],['any','everyone checked']].map(
     ([v,l]) => `<option value="${v}"${st.exhibiting===v?' selected':''}>${l}</option>`).join('');
-  const items = (res.items || []).filter(i => i.match_tier !== 'token');
+  // Halls present in the data, so the dropdown can never offer one with nothing behind it.
+  const halls = [...new Set((res.items || [])
+    .filter(i => i.match_tier !== 'token' && i.hall).map(i => String(i.hall)))]
+    .sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0) || a.localeCompare(b));
+  // Filtered in the browser rather than at the server: every row is already loaded, so a hall
+  // change is instant and costs nothing on a venue network.
+  const items = (res.items || []).filter(i => i.match_tier !== 'token')
+    .filter(i => !st.hall || String(i.hall) === st.hall);
   // Outreach for the exhibitors shown. The denominator is the FILTERED list, not the table: the page
   // drops 'token' matches, so a total from the table would make 'new' larger than the list.
   await orLoad('exhibitor', items.map(i => i.id), items.length);
@@ -4649,8 +4659,9 @@ pages['cphi-milan'] = async function(reuse) {
   const priorityPanel = `<div class="card" style="padding:0">
     <div style="padding:12px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div><div class="card-title" style="margin:0">Milan Sourcing Priority</div>
-        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${items.length} companies, ranked by molecules covered. The unverified token tier is excluded — see below.</div></div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${items.length} companies${st.hall ? ' in hall ' + cmEsc(st.hall) : ''}, ranked by molecules covered. The unverified token tier is excluded — see below.</div></div>
       <div style="display:flex;gap:6px">
+        <select onchange="cmSetLocal('hall', this.value)" style="font-size:12px;padding:4px">${hallOpts}</select>
         <select onchange="cmSet('exhibiting', this.value)" style="font-size:12px;padding:4px">${exhOpts}</select>
         <select onchange="cmSet('tier', this.value)" style="font-size:12px;padding:4px">${tierOpts}</select>
       </div>
@@ -4802,7 +4813,10 @@ window.cmOpen = async function(id, tab){
   // The row is already on screen, so the company name and booth come from it rather than from the
   // response. Two reasons: nothing in the drawer's header then depends on the shape of a reply, and
   // when a request DOES fail the panel still says which company failed instead of "Loading…".
-  const row = ((st.data && st.data.items) || []).find(x => x.id === id) || {};
+  // String compare, NOT ===. cphi_exhibitor_matches.id is BIGSERIAL and node-postgres returns a
+  // bigint as a STRING, while the onclick passes a number literal — so `x.id === id` was comparing
+  // "412" to 412 and never matched. That is why the drawer header read "This company".
+  const row = ((st.data && st.data.items) || []).find(x => String(x.id) === String(id)) || {};
   const base = { id, holder: row.holder || row.exhibitor_name || 'This company',
                  booth: row.booth, hall: row.hall };
   try {
@@ -4870,6 +4884,9 @@ window.cmSend = async function(contactId){
 };
 
 function cmSet(k, v){ window._cmState[k] = v; pages['cphi-milan'](); }
+// Hall is filtered in the browser, so it renders from what is already loaded. Going to the server
+// for it would reload 286 rows to show a subset of the rows we are already holding.
+function cmSetLocal(k, v){ const st = window._cmState; st[k] = v; st.openId = 0; st.open = null; pages['cphi-milan'](true); }
 function cmToggleUnverified(){ window._cmState.showUnverified = !window._cmState.showUnverified; pages['cphi-milan'](); }
 async function cmReview(id, verdict){
   try {
