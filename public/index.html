@@ -4277,7 +4277,12 @@ function ppStatusBadge(s){ const cls={ new:'badge-gray', qualified:'badge-blue',
 // the priority table (who to visit), thin supply (the sharper commercial list — this is
 // the one that matters, so it gets the visual weight), and the unverified token tier,
 // collapsed because roughly half of it is wrong and it needs a human before it is acted on.
-window._cmState = { exhibiting: 'true', tier: '', showUnverified: false, data: null, thin: null };
+window._cmState = { exhibiting: 'true', tier: '', showUnverified: false, data: null, thin: null,
+  // The drawer: which company is open, which tab, and the compose box's contents. The draft lives
+  // in state rather than only in the textarea, because every re-render replaces the textarea and
+  // would otherwise throw away what was typed.
+  openId: 0, openTab: 'molecules', open: null, openLoading: false,
+  composeFor: 0, composeSubject: '', composeBody: '' };
 
 function cmEsc(v){ return String(v==null?'':v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function cmTierBadge(t){
@@ -4622,8 +4627,14 @@ pages['cphi-milan'] = async function() {
         ${it.entity_note ? `<div style="font-size:11px;color:#8a5a00;margin-top:2px">⚠ Stand reads “${cmEsc(it.exhibitor_name)}” — confirm the entity before contracting</div>` : ''}</td>
       <td style="padding:7px 8px;font-family:ui-monospace,Menlo,monospace">${it.booth?`<span style="background:#0972d3;color:#fff;padding:1px 6px">${cmEsc(it.booth)}</span>`:'<span style="color:var(--text-muted)">—</span>'}</td>
       <td style="padding:7px 8px;text-align:center;color:var(--text-muted)">${it.hall?cmEsc(it.hall):'—'}</td>
-      <td style="padding:7px 8px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${it.molecules_covered}</td>
+      <td style="padding:7px 8px;text-align:right">${it.molecules_covered
+        ? `<button onclick="cmOpen(${it.id},'molecules')" style="background:none;border:none;padding:0;cursor:pointer;font:inherit;font-weight:700;font-variant-numeric:tabular-nums;color:#0972d3;text-decoration:underline">${it.molecules_covered}</button>`
+        : '<span style="color:var(--text-muted)">0</span>'}</td>
       <td style="padding:7px 8px">${cmTierBadge(it.match_tier)}</td>
+      <td style="padding:7px 8px;white-space:nowrap">
+        ${it.met_in_person ? '<span title="met in person" style="color:#1D9E75;font-weight:700">✓ met</span>' : ''}
+        <button onclick="cmOpen(${it.id},'contacts')" class="btn-outline btn-sm" style="font-size:11px;margin-left:${it.met_in_person?'6px':'0'}">Contacts</button>
+      </td>
       <td style="padding:7px 8px">${orCell('exhibitor', it.id)}</td>
     </tr>`).join('');
   const priorityPanel = `<div class="card" style="padding:0">
@@ -4639,9 +4650,9 @@ pages['cphi-milan'] = async function() {
       <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
         <th style="padding:8px">#</th><th style="padding:8px">Company</th><th style="padding:8px">Booth</th>
         <th style="padding:8px;text-align:center">Hall</th><th style="padding:8px;text-align:right">Molecules</th><th style="padding:8px">Match</th>
-        <th style="padding:8px">Outreach</th>
+        <th style="padding:8px">Met / contact</th><th style="padding:8px">Outreach</th>
       </tr></thead>
-      <tbody>${rows || '<tr><td colspan="7" style="padding:16px;color:var(--text-muted)">Nothing matches this filter.</td></tr>'}</tbody>
+      <tbody>${rows || '<tr><td colspan="8" style="padding:16px;color:var(--text-muted)">Nothing matches this filter.</td></tr>'}</tbody>
     </table></div></div>`;
 
   // ── PANEL 3: unverified, collapsed ──
@@ -4669,7 +4680,154 @@ pages['cphi-milan'] = async function() {
     </table></div>` : ''}
   </div>`;
 
-  c.innerHTML = header + orBar('exhibitor') + summaryRow + thinPanel + priorityPanel + unverifiedPanel;
+  c.innerHTML = header + orBar('exhibitor') + summaryRow + cmDrawer() + thinPanel + priorityPanel + unverifiedPanel;
+};
+
+// ── THE DRAWER: the molecule names, and the people ────────────────────────────
+//
+// Rendered ABOVE the tables rather than as an expanded row. On a phone or an iPad held at a booth
+// an inline expansion pushes the row you tapped off the screen; a panel at the top is where the
+// eye already is. It also keeps the table markup untouched, which matters in this file.
+function cmDrawer(){
+  const st = window._cmState;
+  if (!st.openId) return '';
+  const d = st.open || {};
+  const head = `<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+      <div><div class="card-title" style="margin:0">${cmEsc(d.holder || 'Loading…')}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">
+          ${d.booth ? 'Booth <b>' + cmEsc(d.booth) + '</b>' : ''}${d.hall ? ' · Hall ' + cmEsc(d.hall) : ''}</div></div>
+      <button onclick="cmClose()" class="btn-outline btn-sm" style="font-size:11px">Close</button>
+    </div>`;
+
+  if (st.openTab === 'molecules') {
+    const items = d.molecules || [];
+    const body = st.openLoading
+      ? '<div style="padding:14px;color:var(--text-muted)">Loading molecules…</div>'
+      : (items.length
+        ? `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+            <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+              <th style="padding:7px 9px">Molecule</th><th style="padding:7px 9px;text-align:right">Studies</th>
+              <th style="padding:7px 9px;text-align:right">Phase 3</th><th style="padding:7px 9px;text-align:center">DMF holders</th></tr></thead>
+            <tbody>${items.map(m => `<tr style="border-top:1px solid var(--border)">
+              <td style="padding:7px 9px;font-weight:600">${cmEsc(m.molecule)}</td>
+              <td style="padding:7px 9px;text-align:right;font-variant-numeric:tabular-nums">${m.studies}</td>
+              <td style="padding:7px 9px;text-align:right;font-variant-numeric:tabular-nums">${m.ph3}</td>
+              <td style="padding:7px 9px;text-align:center;font-weight:700;color:${m.holder_count===1?'#8a2f2f':'var(--text-body)'}">${m.holder_count}${m.holder_count===1?' <span style="font-size:9px">SOLE</span>':''}</td>
+            </tr>`).join('')}</tbody></table></div>
+          <div style="padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px;flex-wrap:wrap">
+            <button onclick="cmCopyMolecules()" class="btn-outline btn-sm" style="font-size:11px">Copy the list</button>
+            <span style="font-size:11px;color:var(--text-muted);align-self:center">Paste it into the follow-up email, or read it at the booth.</span>
+          </div>`
+        : '<div style="padding:14px;color:var(--text-muted)">No confirmed molecule links for this holder. Unconfirmed matches are deliberately excluded — a molecule read aloud at a booth has to be one we can stand behind.</div>');
+    return `<div class="card" style="padding:0;border:2px solid #0972d3">
+      <div style="padding:12px 14px;border-bottom:1px solid var(--border)">${head}</div>${body}</div>`;
+  }
+
+  // ── contacts ──
+  const cs = d.contacts || [];
+  const list = st.openLoading
+    ? '<div style="padding:14px;color:var(--text-muted)">Loading contacts…</div>'
+    : (cs.length ? cs.map(p => `<div style="padding:11px 14px;border-top:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">
+          <div>
+            <div style="font-weight:700">${cmEsc(p.name)}</div>
+            <div style="font-size:12px;color:var(--text-muted)">${cmEsc(p.title || '')}</div>
+            <div style="font-size:12px;margin-top:4px">
+              ${p.email ? `<a href="mailto:${cmEsc(p.email)}">${cmEsc(p.email)}</a>` : '<span style="color:var(--text-muted)">no email on the card</span>'}
+              ${p.phone_mobile ? ` · <a href="tel:${cmEsc(p.phone_mobile)}">${cmEsc(p.phone_mobile)}</a>` : ''}
+              ${p.phone_office ? ` · ${cmEsc(p.phone_office)}` : ''}
+            </div>
+            ${p.note ? `<div style="font-size:11px;color:#8a5a00;margin-top:4px">⚠ ${cmEsc(p.note)}</div>` : ''}
+            ${p.last_emailed_at ? `<div style="font-size:11px;color:#1D9E75;margin-top:3px">emailed ${cmEsc(String(p.last_emailed_at).slice(0,10))}</div>` : ''}
+          </div>
+          <div style="white-space:nowrap">
+            ${p.email ? `<button onclick="cmCompose(${p.id})" class="btn-primary btn-sm" style="font-size:11px">Compose</button>` : ''}
+          </div>
+        </div>
+        ${st.composeFor === p.id ? cmComposeForm(p) : ''}
+      </div>`).join('')
+      : '<div style="padding:14px;color:var(--text-muted)">No contacts captured for this company yet.</div>');
+
+  return `<div class="card" style="padding:0;border:2px solid #0972d3">
+    <div style="padding:12px 14px;border-bottom:1px solid var(--border)">${head}</div>${list}</div>`;
+}
+
+function cmComposeForm(p){
+  const st = window._cmState;
+  return `<div style="margin-top:10px;padding:11px;border:1px solid var(--border);border-radius:8px;background:var(--bg-subtle)">
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">To ${cmEsc(p.email)} · replies come back to you</div>
+    <input id="cmSubj" placeholder="Subject" value="${cmEsc(st.composeSubject || '')}"
+           style="width:100%;margin-bottom:6px;padding:7px;font-size:13px">
+    <textarea id="cmBody" rows="9" placeholder="Write the message. Paste the molecule list in."
+           style="width:100%;padding:7px;font-size:13px;font-family:inherit">${cmEsc(st.composeBody || '')}</textarea>
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button onclick="cmSend(${p.id})" class="btn-primary btn-sm" style="font-size:11px">Send</button>
+      <button onclick="cmCompose(0)" class="btn-outline btn-sm" style="font-size:11px">Cancel</button>
+      <span style="font-size:11px;color:var(--text-muted)">Nothing is sent until you press Send.</span>
+    </div></div>`;
+}
+
+window.cmOpen = async function(id, tab){
+  const st = window._cmState;
+  st.openId = id; st.openTab = tab; st.openLoading = true; st.composeFor = 0;
+  st.open = st.open && st.open.id === id ? st.open : { id };
+  await pages['cphi-milan']();
+  try {
+    if (tab === 'molecules') {
+      const r = await API('/events/cphi/exhibitors/' + id + '/molecules');
+      st.open = { id, holder: r.exhibitor.holder, booth: r.exhibitor.booth, hall: r.exhibitor.hall,
+                  molecules: r.items, contacts: (st.open || {}).contacts };
+    } else {
+      const r = await API('/events/cphi/contacts?exhibitor_id=' + id);
+      const first = (r.items || [])[0] || {};
+      st.open = { id, holder: first.holder || first.company || (st.open || {}).holder,
+                  booth: first.booth, hall: first.hall,
+                  contacts: r.items, molecules: (st.open || {}).molecules };
+    }
+  } catch (e) {
+    alert('Could not load that: ' + e.message);
+  } finally {
+    st.openLoading = false;
+    await pages['cphi-milan']();
+  }
+};
+
+function cmClose(){ const st = window._cmState; st.openId = 0; st.open = null; st.composeFor = 0; pages['cphi-milan'](); }
+
+function cmCopyMolecules(){
+  const items = ((window._cmState.open || {}).molecules) || [];
+  const text = items.map(m => m.molecule).join('\n');
+  if (navigator.clipboard) navigator.clipboard.writeText(text).then(
+    () => alert(items.length + ' molecule name(s) copied.'),
+    () => alert('Could not copy. The names are listed above.'));
+  else alert('Copying is not available here — the names are listed above.');
+}
+
+// Read the fields back out of the DOM BEFORE re-rendering: a re-render replaces the textarea, and
+// anything typed into the old one is gone with it.
+function cmCompose(contactId){
+  const st = window._cmState;
+  const s = document.getElementById('cmSubj'), b = document.getElementById('cmBody');
+  if (s) st.composeSubject = s.value;
+  if (b) st.composeBody = b.value;
+  st.composeFor = contactId;
+  pages['cphi-milan']();
+}
+
+window.cmSend = async function(contactId){
+  const s = document.getElementById('cmSubj'), b = document.getElementById('cmBody');
+  const subject = s ? s.value.trim() : '', body = b ? b.value.trim() : '';
+  if (!subject || !body) return alert('A subject and a message are both required.');
+  if (!confirm('Send this to the contact now?')) return;
+  try {
+    const html = body.split(/\n{2,}/).map(p => '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('');
+    await API('/events/cphi/contacts/' + contactId + '/email',
+      { method: 'POST', body: JSON.stringify({ subject, html }) });
+    const st = window._cmState;
+    st.composeFor = 0; st.composeSubject = ''; st.composeBody = '';
+    await cmOpen(st.openId, 'contacts');
+    alert('Sent.');
+  } catch (e) { alert('Could not send: ' + e.message); }
 };
 
 function cmSet(k, v){ window._cmState[k] = v; pages['cphi-milan'](); }

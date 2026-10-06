@@ -5010,6 +5010,9 @@ router.get('/sitenex/packages', authMiddleware, requireTier('sitenex'), async (r
 // scripts populate (scripts/ingest-dmf.js -> match-dmf-molecules.js -> lookup-cphi-exhibitors.js).
 // Nothing here calls FDA, CPHI or an LLM, so no route can spend.
 const CPHI_EVENT = 'cphi-milan-2026';
+// The SAME fold the exhibitor matcher uses. A contact typed on the floor has to collide with the
+// one the seed imported, or the same company ends up in the list twice under two spellings.
+const { normalizeCompany: cphiNormalizeCompany } = require('../lib/cphi/match-company');
 const CPHI_REVIEW_STATUSES = ['unreviewed', 'auto_confirmed', 'entity_review', 'confirmed', 'rejected'];
 
 // GET /events/cphi/exhibitors — the priority table, ranked by molecules covered.
@@ -5257,6 +5260,159 @@ router.put('/events/cphi/exhibitors/:id', authMiddleware, requireTier('intellige
        req.params.id]);
     if (!upd.rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(upd.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── CPHI: THE MOLECULE NAMES BEHIND THE NUMBER ────────────────────────────────
+//
+// THE QUESTION EVERY SUPPLIER ASKED ON THE FLOOR, which the page could not answer: "which
+// molecules do you want from us?" The priority table carries `molecules_covered`, a COUNT, so
+// standing at a booth the honest answer was "eleven" and not which eleven.
+//
+// A SEPARATE ENDPOINT, not extra columns on the list. The list is the first thing that loads on
+// a venue network and it already carries 300-odd rows; attaching every molecule name to every row
+// would multiply that payload for data nobody reads until they tap one company. This fires on the
+// tap instead.
+router.get('/events/cphi/exhibitors/:id/molecules', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res) => {
+  try {
+    const m = (await query(
+      `SELECT id, holder, holder_normalized, booth, hall, molecules_covered
+         FROM cphi_exhibitor_matches WHERE id = $1`, [req.params.id])).rows[0];
+    if (!m) return res.status(404).json({ error: 'Not found' });
+
+    // Same join the thin-supply query uses: molecule → DMF → holder. Only auto_confirmed matches,
+    // because an unconfirmed molecule-to-DMF link read aloud at a booth is a claim we cannot back.
+    const items = (await query(
+      `SELECT MIN(sm.molecule_name) AS molecule,
+              COUNT(DISTINCT sm.study_id)::int AS studies,
+              COUNT(DISTINCT sm.study_id) FILTER (WHERE cs.phase = 'Phase 3')::int AS ph3,
+              COUNT(DISTINCT md.dmf_number)::int AS dmfs,
+              (SELECT COUNT(DISTINCT d2.holder_normalized)::int
+                 FROM molecule_dmf_matches m2
+                 JOIN dmf_holders d2 ON d2.dmf_number = m2.dmf_number
+                WHERE LOWER(m2.molecule_name) = LOWER(sm.molecule_name)
+                  AND m2.review_status = 'auto_confirmed') AS holder_count
+         FROM study_molecules sm
+         JOIN clinical_studies cs ON cs.id = sm.study_id
+         JOIN molecule_dmf_matches md ON LOWER(md.molecule_name) = LOWER(sm.molecule_name)
+         JOIN dmf_holders dh ON dh.dmf_number = md.dmf_number
+        WHERE dh.holder_normalized = $1
+          AND md.review_status = 'auto_confirmed'
+        GROUP BY LOWER(sm.molecule_name)
+        ORDER BY 2 DESC, 1`, [m.holder_normalized])).rows;
+
+    res.json({ exhibitor: m, count: items.length, items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── CPHI: THE PEOPLE YOU MET ──────────────────────────────────────────────────
+// Contacts hang off the EVENT and link to a match when one exists — a CDMO or an intermediate
+// maker holds no DMF and would otherwise be dropped. See scripts/migrate-cphi-contacts.js.
+router.get('/events/cphi/contacts', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res) => {
+  try {
+    const params = [CPHI_EVENT];
+    let where = 'c.event_slug = $1';
+    if (req.query.exhibitor_id) { params.push(req.query.exhibitor_id); where += ` AND c.exhibitor_match_id = $${params.length}`; }
+    const items = (await query(
+      `SELECT c.*, x.holder, x.booth, x.hall, x.molecules_covered
+         FROM cphi_exhibitor_contacts c
+         LEFT JOIN cphi_exhibitor_matches x ON x.id = c.exhibitor_match_id
+        WHERE ${where}
+        ORDER BY c.company, c.name`, params)).rows;
+    res.json({ event: CPHI_EVENT, count: items.length, items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Add a contact met on the floor. Typed on a phone between booths, so only name + company are
+// required — everything else can be filled in later, and a half-captured card beats a lost one.
+router.post('/events/cphi/contacts', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!b.name || !b.company) return res.status(400).json({ error: 'name and company are required' });
+    const norm = cphiNormalizeCompany(b.company);
+    const row = (await query(
+      `INSERT INTO cphi_exhibitor_contacts
+         (event_slug, exhibitor_match_id, company, company_normalized, name, title, email,
+          phone_mobile, phone_office, website, address, source, note, linkedin_connected)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       ON CONFLICT (event_slug, company_normalized, lower(name)) DO UPDATE
+          SET exhibitor_match_id = COALESCE(EXCLUDED.exhibitor_match_id, cphi_exhibitor_contacts.exhibitor_match_id),
+              title = COALESCE(EXCLUDED.title, cphi_exhibitor_contacts.title),
+              email = COALESCE(EXCLUDED.email, cphi_exhibitor_contacts.email),
+              phone_mobile = COALESCE(EXCLUDED.phone_mobile, cphi_exhibitor_contacts.phone_mobile),
+              phone_office = COALESCE(EXCLUDED.phone_office, cphi_exhibitor_contacts.phone_office),
+              website = COALESCE(EXCLUDED.website, cphi_exhibitor_contacts.website),
+              address = COALESCE(EXCLUDED.address, cphi_exhibitor_contacts.address),
+              note = COALESCE(EXCLUDED.note, cphi_exhibitor_contacts.note),
+              linkedin_connected = EXCLUDED.linkedin_connected,
+              updated_at = NOW()
+       RETURNING *`,
+      [CPHI_EVENT, b.exhibitor_match_id || null, b.company, norm, b.name, b.title || null,
+       b.email || null, b.phone_mobile || null, b.phone_office || null, b.website || null,
+       b.address || null, b.source || 'typed', b.note || null, !!b.linkedin_connected])).rows[0];
+
+    if (b.exhibitor_match_id) {
+      await query(
+        `UPDATE cphi_exhibitor_matches
+            SET met_in_person = TRUE, met_at = COALESCE(met_at, NOW())
+          WHERE id = $1`, [b.exhibitor_match_id]);
+    }
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Meeting state for a booth — what day 2 and day 3 filter on.
+router.put('/events/cphi/exhibitors/:id/meeting', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const { met_in_person, linkedin_connected, meeting_note } = req.body || {};
+    if (met_in_person === undefined && linkedin_connected === undefined && meeting_note === undefined) {
+      return res.status(400).json({ error: 'nothing to update' });
+    }
+    const upd = await query(
+      `UPDATE cphi_exhibitor_matches
+          SET met_in_person = COALESCE($1, met_in_person),
+              met_at = CASE WHEN $1 IS TRUE AND met_at IS NULL THEN NOW() ELSE met_at END,
+              linkedin_connected = COALESCE($2, linkedin_connected),
+              meeting_note = COALESCE($3, meeting_note)
+        WHERE id = $4 RETURNING *`,
+      [met_in_person === undefined ? null : !!met_in_person,
+       linkedin_connected === undefined ? null : !!linkedin_connected,
+       meeting_note === undefined ? null : meeting_note, req.params.id]);
+    if (!upd.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(upd.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── CPHI: SEND THE FOLLOW-UP ──────────────────────────────────────────────────
+//
+// adminOnly, and the BODY IS REQUIRED. This route sends mail from the company domain to a named
+// person at a supplier, and the platform's rule is that nothing outbound leaves without a human
+// releasing it. A person typing the body and pressing send IS that release; an endpoint that would
+// compose and send in one call would not be, however convenient, so there is no path here that
+// invents the words.
+router.post('/events/cphi/contacts/:id/email', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { subject, html } = req.body || {};
+    if (!subject || !html) return res.status(400).json({ error: 'subject and html are required' });
+
+    const c = (await query(
+      `SELECT * FROM cphi_exhibitor_contacts WHERE id = $1`, [req.params.id])).rows[0];
+    if (!c) return res.status(404).json({ error: 'Not found' });
+    if (!c.email) return res.status(400).json({ error: 'this contact has no email address' });
+
+    const { sendEmailDetailed } = require('../lib/mailer');
+    const out = await sendEmailDetailed({
+      to: c.email,
+      subject,
+      html: sanitizeHtml(html),
+      from: process.env.RESEND_FROM || undefined,
+      replyTo: req.user && req.user.email ? req.user.email : undefined,
+    });
+    if (!out.ok) return res.status(502).json({ error: out.error || 'send failed' });
+
+    await query(`UPDATE cphi_exhibitor_contacts SET last_emailed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [c.id]);
+    res.json({ ok: true, id: out.id, to: c.email });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
