@@ -201,7 +201,7 @@ const ABIOZEN = [
   'GET /api/events/cphi/exhibitors', 'GET /api/events/cphi/thin-supply', 'PUT /api/events/cphi/exhibitors/:id',
   // The floor work: which molecules sit behind a holder's count, who was met, and the follow-up.
   // Abiozen, like the rest of the CPHI surface — the event is an Abiozen sourcing trip.
-  'GET /api/events/cphi/exhibitors/:id/molecules',
+  'GET /api/events/cphi/exhibitors/:id/molecules', 'GET /api/events/cphi/molecule-search',
   'GET /api/events/cphi/contacts', 'POST /api/events/cphi/contacts',
   'PUT /api/events/cphi/exhibitors/:id/meeting', 'POST /api/events/cphi/contacts/:id/email',
   'POST /api/algolia/sync', 'POST /api/algolia/sync-abiozen',

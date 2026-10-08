@@ -183,3 +183,66 @@ test('the page survives a response missing the fields the server does not always
   const html = await render(baseState({ role: 'buyer' }), res);
   assert.ok(html.length > 500);
 });
+
+// ── MOLECULE SEARCH ──────────────────────────────────────────────────────────
+// Three different findings have to read as three different sentences, because at a booth they lead
+// to three different things to say. A single "no results" for all of them is the failure mode.
+
+test('the search box renders on every role tab', async () => {
+  for (const role of ['supplier', 'platform_partner', 'qc_lab', 'buyer']) {
+    const html = await render(baseState({ role }), fakeResponse(role));
+    assert.match(html, /id="cmQ"/, `no search box on ${role}`);
+    assert.match(html, /cmSearch\(event\)/);
+  }
+});
+
+test('a sole holder is called out, not just counted', async () => {
+  const st = baseState({ mq: 'cabazitaxel' });
+  st.mres = { q: 'cabazitaxel', items: [{
+    molecule: 'Cabazitaxel', studies: 9, ph3: 3, ph2: 2, patients: 1400, holder_count: 1,
+    on_floor: 1, holders: [{ holder: 'Firm 1', booth: '101', hall: '10', exhibiting: true }] }] };
+  const html = await render(st, fakeResponse('supplier'));
+  assert.match(html, /SOLE holder worldwide/);
+  assert.match(html, /Cabazitaxel/);
+  assert.match(html, /101/, 'the booth must be shown — it is the reason to walk somewhere');
+  assert.match(html, /9 studies, 3 in phase 3/);
+});
+
+test('demand with no legal supply is the loudest row, not an empty one', async () => {
+  // holder_count 0 would be falsy in a naive template and render as nothing at all.
+  const st = baseState({ mq: 'orphanol' });
+  st.mres = { q: 'orphanol', items: [{
+    molecule: 'Orphanol', studies: 4, ph3: 1, ph2: 1, patients: 220, holder_count: 0,
+    on_floor: 0, holders: [] }] };
+  const html = await render(st, fakeResponse('supplier'));
+  assert.match(html, /No DMF holder at all/);
+  assert.match(html, /no legal US supply/);
+});
+
+test('a molecule nobody is studying says so, instead of showing a blank', async () => {
+  const st = baseState({ mq: 'paracetamol' });
+  st.mres = { q: 'paracetamol', items: [{
+    molecule: 'Paracetamol', studies: null, ph3: null, ph2: null, patients: null,
+    holder_count: 42, on_floor: 0, holders: [{ holder: 'Firm 9', booth: null, hall: null, exhibiting: false }] }] };
+  const html = await render(st, fakeResponse('supplier'));
+  assert.match(html, /No trial demand recorded/);
+  assert.match(html, /42 holders worldwide/);
+  assert.match(html, /none exhibiting here/);
+});
+
+test('an unknown name explains itself and suggests the next move', async () => {
+  const st = baseState({ mq: 'zzzz' });
+  st.mres = { q: 'zzzz', items: [] };
+  const html = await render(st, fakeResponse('supplier'));
+  assert.match(html, /Nothing by that name/);
+  // The register is quarterly, so "we don't have it" is not the same as "it does not exist".
+  assert.match(html, /quarterly/);
+});
+
+test('a failed search shows the reason and keeps the floor list', async () => {
+  const st = baseState({ mq: 'x', merror: 'Search failed: boom' });
+  const html = await render(st, fakeResponse('supplier'));
+  assert.match(html, /Search failed: boom/);
+  // The table underneath must survive — a failed search is not a failed page.
+  assert.match(html, /Milan Sourcing Priority/);
+});

@@ -4282,6 +4282,8 @@ window._cmState = { exhibiting: 'true', tier: '', showUnverified: false, data: n
   // in state rather than only in the textarea, because every re-render replaces the textarea and
   // would otherwise throw away what was typed.
   hall: '', role: 'supplier', market: 'all',
+  // Molecule search: the typed term, the last result, and its two transient states.
+  mq: '', mres: null, mloading: false, merror: '',
   openId: 0, openTab: 'molecules', open: null, openLoading: false,
   composeFor: 0, composeSubject: '', composeBody: '', composeAttach: true };
 
@@ -4610,6 +4612,61 @@ pages['cphi-milan'] = async function(reuse) {
     </div>
   </div>`;
 
+  // ── MOLECULE SEARCH ────────────────────────────────────────────────────────
+  // Sits above everything because of when it is used: a supplier says a molecule name out loud and
+  // the answer is worth something for about three seconds. Submitted rather than typed-as-you-go —
+  // on a venue network a keystroke-per-request search is slower than one deliberate Enter, and it
+  // spends the connection on requests whose answers nobody reads.
+  const mq = st.mq || '';
+  const mres = st.mres;
+  const searchBox = `<div class="card" style="padding:12px 14px">
+    <form onsubmit="cmSearch(event)" style="display:flex;gap:8px;align-items:center">
+      <input id="cmQ" value="${cmEsc(mq)}" placeholder="Molecule name — e.g. cabazitaxel"
+        autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="search"
+        style="flex:1;min-width:0;font-size:16px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-subtle);color:var(--text-body)">
+      <button type="submit" class="btn-outline btn-sm" style="padding:10px 14px;font-size:13px;white-space:nowrap">Search</button>
+      ${mq ? `<button type="button" onclick="cmClearSearch()" class="btn-outline btn-sm" style="padding:10px 12px;font-size:13px">Clear</button>` : ''}
+    </form>
+    ${st.mloading ? '<div style="font-size:12px;color:var(--text-muted);margin-top:8px">Searching…</div>' : ''}
+    ${st.merror ? `<div style="font-size:12px;color:#dc2626;margin-top:8px">${cmEsc(st.merror)}</div>` : ''}
+  </div>`;
+
+  // Results. Each of the three cases gets its own sentence, because "no DMF holder" and "no trials"
+  // and "we have never heard of this" are three different things to say to the person in front of you.
+  let searchPanel = '';
+  if (mres && !st.mloading) {
+    const rows = (mres.items || []).map(m => {
+      const hs = (m.holders || []);
+      const floor = hs.filter(h => h.exhibiting && h.booth);
+      const chips = floor.map(h => `<span style="white-space:nowrap;display:inline-block;margin:2px 4px 2px 0">
+          <b>${cmEsc(h.holder)}</b> <span style="font-family:ui-monospace,Menlo,monospace;background:#0972d3;color:#fff;padding:0 5px;border-radius:3px">${cmEsc(h.booth)}</span></span>`).join('');
+      const off = hs.length - floor.length;
+      const n = m.holder_count;
+      const supply = n === 0
+        ? '<span style="color:#8a2f2f;font-weight:700">No DMF holder at all</span> — demand with no legal US supply.'
+        : n === 1 ? '<span style="color:#8a2f2f;font-weight:700">SOLE holder worldwide.</span>'
+        : n <= 3 ? `<span style="color:#8a5a00;font-weight:700">Thin — ${n} holders worldwide.</span>`
+        : `${n} holders worldwide — competitive, low leverage.`;
+      const dem = m.studies
+        ? `${m.studies} stud${m.studies === 1 ? 'y' : 'ies'}${m.ph3 ? `, ${m.ph3} in phase 3` : ''}${m.patients ? ` · ${Number(m.patients).toLocaleString()} patients` : ''}`
+        : '<span style="color:var(--text-muted)">No trial demand recorded — nobody in our pipeline is studying this.</span>';
+      return `<div style="border-top:1px solid var(--border);padding:12px 14px">
+        <div style="font-weight:700;font-size:15px">${cmEsc(m.molecule)}</div>
+        <div style="font-size:13px;margin-top:3px">${supply}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${dem}</div>
+        ${chips ? `<div style="font-size:12px;margin-top:7px"><span style="color:var(--text-muted)">On this floor:</span> ${chips}</div>` : ''}
+        ${!chips && n ? `<div style="font-size:12px;color:var(--text-muted);margin-top:7px">${n} holder${n===1?'':'s'}, none exhibiting here.</div>` : ''}
+        ${chips && off > 0 ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px">+${off} more holder${off===1?'':'s'} not on the floor.</div>` : ''}
+      </div>`;
+    }).join('');
+    searchPanel = `<div class="card" style="padding:0;border:2px solid #0972d3">
+      <div style="padding:11px 14px;background:var(--bg-subtle);border-bottom:1px solid var(--border)">
+        <div class="card-title" style="margin:0">${(mres.items || []).length} match${(mres.items||[]).length===1?'':'es'} for “${cmEsc(mres.q || mq)}”</div>
+      </div>
+      ${rows || `<div style="padding:16px;color:var(--text-muted);font-size:13px">Nothing by that name in the demand set or the DMF register. Say so — then write it on their card and check properly tonight; the register is quarterly and a new filing may not be in it yet.</div>`}
+    </div>`;
+  }
+
   const stat = (label, val, color) => `<div style="flex:1;min-width:120px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;text-align:center">
     <div style="font-size:22px;font-weight:800;color:${color||'var(--text-body)'}">${(val==null?0:val).toLocaleString()}</div>
     <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">${label}</div></div>`;
@@ -4749,7 +4806,11 @@ pages['cphi-milan'] = async function(reuse) {
   // about suppliers. Under QC partners or Buyers it would be the same table meaning something it
   // does not.
   const supplierOnly = st.role === 'supplier';
-  c.innerHTML = roleTabs + header + orBar('exhibitor') + summaryRow + cmDrawer()
+  // Search sits above the tabs: it answers a question about a molecule, not about a role, so it
+  // must not look like it belongs to whichever tab happens to be open. Its results push the rest
+  // of the page down rather than replacing anything — the floor list stays where it was, because
+  // the next thing after a search is usually walking to a booth on it.
+  c.innerHTML = searchBox + searchPanel + roleTabs + header + orBar('exhibitor') + summaryRow + cmDrawer()
     + (supplierOnly ? thinPanel : '') + priorityPanel + (supplierOnly ? unverifiedPanel : '');
 
   // Bring the drawer into view. It renders near the top; the row that opened it is usually far
@@ -4932,6 +4993,38 @@ window.cmSend = async function(contactId){
     alert('Sent.');
   } catch (e) { alert('Could not send: ' + e.message); }
 };
+
+// ── MOLECULE SEARCH ──────────────────────────────────────────────────────────
+// Reads the box at submit time rather than tracking every keystroke in state. The field is a plain
+// uncontrolled input between renders, so there is nothing to re-render while someone is typing a
+// long molecule name on a phone — which is where a re-render would eat the caret.
+window.cmSearch = async function cmSearch(ev){
+  if (ev) ev.preventDefault();
+  const st = window._cmState;
+  const box = document.getElementById('cmQ');
+  const q = (box ? box.value : '').trim();
+  st.mq = q; st.merror = '';
+  if (q.length < 2) { st.mres = null; st.mloading = false; pages['cphi-milan'](true); return; }
+  st.mloading = true; st.mres = null;
+  pages['cphi-milan'](true);
+  try {
+    const r = await API('/events/cphi/molecule-search?q=' + encodeURIComponent(q));
+    // API() resolves with {error} on a 4xx/5xx rather than throwing. Checked here because not
+    // checking it is what put "Cannot read properties of undefined" on the floor once already.
+    if (r && r.error) throw new Error(r.error);
+    st.mres = r;
+  } catch (e) {
+    st.merror = 'Search failed: ' + e.message;
+  } finally {
+    st.mloading = false;
+    pages['cphi-milan'](true);
+  }
+};
+function cmClearSearch(){
+  const st = window._cmState;
+  st.mq = ''; st.mres = null; st.merror = ''; st.mloading = false;
+  pages['cphi-milan'](true);
+}
 
 function cmSet(k, v){ window._cmState[k] = v; pages['cphi-milan'](); }
 // Hall is filtered in the browser, so it renders from what is already loaded. Going to the server

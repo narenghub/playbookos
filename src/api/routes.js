@@ -5276,6 +5276,83 @@ router.get('/events/cphi/thin-supply', authMiddleware, requireAnyTier('intellige
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /events/cphi/molecule-search?q= — THE BOOTH QUESTION, ANSWERED IN THREE SECONDS.
+//
+// A supplier says "we make cabazitaxel". The useful reply is either "only two companies in the
+// world hold a DMF for that — what is your lead time?" or nothing at all, and which one it is has
+// to be known before the sentence ends. Everything else on this page is a ranked list you browse;
+// this is the one place you arrive already knowing the word.
+//
+// ── WHY IT IS A FULL OUTER MATCH, NOT THE THIN-SUPPLY QUERY WITH A FILTER ────
+//
+// thin-supply starts at `demand` and inner-joins holders, so it can only ever return a molecule
+// that has BOTH trials and a DMF holder. At a booth that is the wrong shape three ways:
+//
+//   • A molecule with holders and no trials must come back saying "nobody is studying this",
+//     which is a real answer and a reason to move the conversation on.
+//   • A molecule with trials and no holder is the most interesting row on the page — demand with
+//     no legal supply — and an inner join hides it.
+//   • A name we hold nothing for at all has to say so, rather than return an empty list that reads
+//     the same as a network failure.
+//
+// So the two sides are unioned on the molecule key and joined back as LEFT, and every count can be
+// null. The UI renders each of those three cases as its own sentence.
+router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res) => {
+  try {
+    const term = String(req.query.q || '').trim().toLowerCase();
+    // Two characters is the floor: one would scan every molecule in the register to tell you
+    // nothing, and at a venue that is several seconds of nothing.
+    if (term.length < 2) return res.json({ q: term, items: [], hint: 'Type at least two letters.' });
+
+    const items = (await query(
+      `WITH demand AS (
+         SELECT LOWER(sm.molecule_name) k, MIN(sm.molecule_name) molecule,
+                COUNT(DISTINCT sm.study_id) studies,
+                SUM(COALESCE(cs.enrollment_count,0)) patients,
+                COUNT(DISTINCT sm.study_id) FILTER (WHERE cs.phase='Phase 3') ph3,
+                COUNT(DISTINCT sm.study_id) FILTER (WHERE cs.phase='Phase 2') ph2
+           FROM study_molecules sm JOIN clinical_studies cs ON cs.id = sm.study_id
+          GROUP BY 1),
+       holders AS (
+         SELECT LOWER(m.molecule_name) k, MIN(m.molecule_name) molecule,
+                d.holder_normalized, MIN(d.holder) holder
+           FROM molecule_dmf_matches m JOIN dmf_holders d ON d.dmf_number = m.dmf_number
+          WHERE m.review_status = 'auto_confirmed'
+          GROUP BY 1, 3),
+       counted AS (SELECT k, COUNT(*)::int n FROM holders GROUP BY 1),
+       keys AS (
+         SELECT k, molecule FROM demand  WHERE k LIKE '%' || $2 || '%'
+         UNION
+         SELECT k, molecule FROM holders WHERE k LIKE '%' || $2 || '%')
+       SELECT kk.molecule,
+              dm.studies::int, dm.ph3::int, dm.ph2::int, dm.patients::int,
+              COALESCE(c.n, 0)::int AS holder_count,
+              COALESCE(json_agg(DISTINCT jsonb_build_object(
+                         'holder', h.holder, 'booth', x.booth, 'hall', x.hall,
+                         'exhibiting', COALESCE(x.exhibiting, false)))
+                       FILTER (WHERE h.holder IS NOT NULL), '[]') AS holders,
+              COUNT(*) FILTER (WHERE x.exhibiting)::int AS on_floor
+         FROM (SELECT k, MIN(molecule) molecule FROM keys GROUP BY k) kk
+         LEFT JOIN demand  dm ON dm.k = kk.k
+         LEFT JOIN counted c  ON c.k  = kk.k
+         LEFT JOIN holders h  ON h.k  = kk.k
+         LEFT JOIN cphi_exhibitor_matches x
+                ON x.holder_normalized = h.holder_normalized
+               AND x.event_slug = $1 AND x.role = 'supplier'
+        GROUP BY kk.k, kk.molecule, dm.studies, dm.ph3, dm.ph2, dm.patients, c.n
+        -- Exact name first, then whoever is actually standing on this floor, then thin benches,
+        -- then demand. At a booth the first row is the only one usually read.
+        ORDER BY (kk.k = $2) DESC,
+                 COUNT(*) FILTER (WHERE x.exhibiting) DESC,
+                 COALESCE(c.n, 999) ASC,
+                 COALESCE(dm.studies, 0) DESC,
+                 kk.molecule
+        LIMIT 25`, [CPHI_EVENT, term])).rows;
+
+    res.json({ q: term, count: items.length, items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // PUT /events/cphi/exhibitors/:id — a human verdict on a match. This is the whole point of
 // the review gate: the token tier is roughly half wrong, so nothing acts on it until someone
 // says so here. Writes are the same tier as reads and cost nothing.
