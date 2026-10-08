@@ -30,6 +30,10 @@ echo "── preflight"
 step "test suite" env JWT_SECRET=preflight node --test $(find src scripts -name '*.test.js')
 step "SPA parses (local file)" node scripts/check-spa-parse.js
 step "classic nav parity" node scripts/verify-classic-nav-parity.js
+# Executes the shipped molecule-search SQL on a real Postgres. The parsers above cannot tell whether
+# a query RUNS — `column "name" does not exist` shipped past all of them once. SKIPs cleanly (exit 0)
+# where no server is available, so this never blocks a laptop without Postgres installed.
+step "molecule search runs on Postgres" node scripts/check-molecule-search-sql.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2

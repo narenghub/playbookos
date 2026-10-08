@@ -4671,6 +4671,7 @@ pages['cphi-milan'] = async function(reuse) {
       if (m.cas_number) money.push('CAS ' + cmEsc(m.cas_number));
       return `<div style="border-top:1px solid var(--border);padding:12px 14px">
         <div style="font-weight:700;font-size:15px">${cmEsc(m.molecule)}</div>
+        ${(m.filed_as || []).length > 1 ? `<div style="font-size:11px;color:var(--text-muted);margin-top:1px">Filed as ${(m.filed_as || []).map(cmEsc).join(' · ')} — counted as one substance.</div>` : ''}
         <div style="font-size:13px;margin-top:3px">${supply}</div>
         <div style="font-size:12px;margin-top:3px">${grade}</div>
         <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${dem}</div>
@@ -4685,8 +4686,10 @@ pages['cphi-milan'] = async function(reuse) {
     searchPanel = `<div class="card" style="padding:0;border:2px solid #0972d3">
       <div style="padding:11px 14px;background:var(--bg-subtle);border-bottom:1px solid var(--border)">
         <div class="card-title" style="margin:0">${(mres.items || []).length} match${(mres.items||[]).length===1?'':'es'} for “${cmEsc(mres.q || mq)}”</div>
+        ${(mres.searched_as || []).length > 1 ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px">
+          Also searched <b>${(mres.searched_as || []).slice(1).map(cmEsc).join('</b>, <b>')}</b> — the US register files this substance under a different name than the one you typed.</div>` : ''}
       </div>
-      ${rows || `<div style="padding:16px;color:var(--text-muted);font-size:13px">Nothing by that name in the demand set or the DMF register. Say so — then write it on their card and check properly tonight; the register is quarterly and a new filing may not be in it yet.</div>`}
+      ${rows || `<div style="padding:16px;color:var(--text-muted);font-size:13px">Nothing by that name in the demand set or the DMF register${(mres.searched_as || []).length > 1 ? ', under any of its names' : ''}. Say so — then write it on their card and check properly tonight; the register is quarterly and a new filing may not be in it yet.</div>`}
     </div>`;
   }
 

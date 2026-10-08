@@ -4409,12 +4409,18 @@ router.get('/research-intelligence/studies', authMiddleware, requireTier('intell
     // ── WHO IS STUDYING THIS MOLECULE ─────────────────────────────────────────
     // The question a supplier asks across a booth: "who actually uses leuprorelin?" Same EXISTS
     // shape as catalog_match_status above, so there is one way to ask about a study's molecules
-    // rather than two. Substring, because the register writes "Leuprolide Acetate" where a person
-    // says "leuprorelin" — a prefix match would miss half of them.
+    // rather than two.
+    //
+    // This comment used to end "substring, because the register writes 'Leuprolide Acetate' where a
+    // person says 'leuprorelin'" — naming the exact failure and then not fixing it. A substring
+    // cannot cross a name change; `leuprorelin` is not inside `leuprolide acetate`. So the term is
+    // expanded to every legal name for the substance first, and the LIKE runs against all of them.
     if (req.query.molecule && String(req.query.molecule).trim().length >= 2) {
-      params.push('%' + String(req.query.molecule).trim().toLowerCase() + '%');
+      const mexp = expandMolecule(req.query.molecule);
+      params.push(likePatterns(mexp.terms));
       where.push(`EXISTS (SELECT 1 FROM study_molecules sm
-                           WHERE sm.study_id = cs.id AND LOWER(sm.molecule_name) LIKE $${params.length})`);
+                           WHERE sm.study_id = cs.id
+                             AND ${moleculeLikeSql('LOWER(sm.molecule_name)', params.length)})`);
     }
     // ── THE BUYING-INTENT FILTER ──────────────────────────────────────────────
     // The single most useful column on this table for a commercial question, and the reason the
@@ -5048,7 +5054,15 @@ const { DEMAND_SQL } = require('../lib/dmf/demand');
 // The SAME fold the exhibitor matcher uses. A contact typed on the floor has to collide with the
 // one the seed imported, or the same company ends up in the list twice under two spellings.
 const { normalizeCompany: cphiNormalizeCompany } = require('../lib/cphi/match-company');
-const CPHI_REVIEW_STATUSES = ['unreviewed', 'auto_confirmed', 'entity_review', 'confirmed', 'rejected'];
+// One substance, several legal names. A customer at CPHI Milan asked for LEUPRORELIN (the INN) and
+// got nothing, because every holder is filed under LEUPROLIDE (the USAN). src/lib/molecules/synonyms.js
+// owns the equivalence table and the salt-stripping, and says why each is needed.
+const { expandMolecule, moleculeLikeSql, likePatterns } = require('../lib/molecules/synonyms');
+// And one substance must come back as ONE row. The register files Leuprolide, Leuprolide Acetate and
+// Leuprorelin separately, which splits the holders three ways and makes the page print "SOLE holder
+// worldwide" over a substance three companies hold. src/lib/molecules/merge.js recounts.
+const { mergeMoleculeRows } = require('../lib/molecules/merge');
+const CPHI_REVIEW_STATUSES =['unreviewed', 'auto_confirmed', 'entity_review', 'confirmed', 'rejected'];
 
 // GET /events/cphi/exhibitors — the priority table, ranked by molecules covered.
 // Defaults to exhibiting-only because that is what the page opens on; pass exhibiting=false
@@ -5324,6 +5338,11 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
     // nothing, and at a venue that is several seconds of nothing.
     if (term.length < 2) return res.json({ q: term, items: [], hint: 'Type at least two letters.' });
 
+    // EVERY name for this substance, not just the one that was typed. The register is American and
+    // half the floor is European, so the typed name is often not the filed name.
+    const expansion = expandMolecule(term);
+    const terms = expansion.terms;
+
     const items = (await query(
       `WITH demand AS (
          SELECT LOWER(sm.molecule_name) k, MIN(sm.molecule_name) molecule,
@@ -5340,15 +5359,18 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
           WHERE m.review_status = 'auto_confirmed'
           GROUP BY 1, 3),
        counted AS (SELECT k, COUNT(*)::int n FROM holders GROUP BY 1),
+       -- $2 is EVERY name for the substance, as LIKE patterns — the typed one plus its INN/USAN
+       -- counterpart and its de-salted base. One array parameter rather than per-term placeholders,
+       -- so the same set matches in all three branches without index arithmetic.
        keys AS (
-         SELECT k, molecule FROM demand  WHERE k LIKE '%' || $2 || '%'
+         SELECT k, molecule FROM demand  WHERE ${moleculeLikeSql('k', 2)}
          UNION
-         SELECT k, molecule FROM holders WHERE k LIKE '%' || $2 || '%'
+         SELECT k, molecule FROM holders WHERE ${moleculeLikeSql('k', 2)}
          UNION
          -- A molecule we have PRICED but that has neither a trial nor a US DMF holder still has to
          -- be findable: that is exactly the research-grade catalogue.
          SELECT LOWER(molecule_name), molecule_name FROM molecule_pricing
-          WHERE active = 1 AND LOWER(molecule_name) LIKE '%' || $2 || '%')
+          WHERE active = 1 AND ${moleculeLikeSql('LOWER(molecule_name)', 2)})
        SELECT kk.molecule,
               dm.studies::int, dm.ph3::int, dm.ph2::int, dm.patients::int,
               COALESCE(c.n, 0)::int AS holder_count,
@@ -5382,14 +5404,28 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
         GROUP BY kk.k, kk.molecule, dm.studies, dm.ph3, dm.ph2, dm.patients, c.n
         -- Exact name first, then whoever is actually standing on this floor, then thin benches,
         -- then demand. At a booth the first row is the only one usually read.
-        ORDER BY (kk.k = $2) DESC,
+        -- $3 is the same names UNPATTERNED: an exact hit on any of them sorts first, so typing the
+        -- INN still puts the substance itself above every molecule that merely contains the string.
+        ORDER BY (kk.k = ANY($3)) DESC,
                  COUNT(*) FILTER (WHERE x.exhibiting) DESC,
                  COALESCE(c.n, 999) ASC,
                  COALESCE(dm.studies, 0) DESC,
                  kk.molecule
-        LIMIT 25`, [CPHI_EVENT, term])).rows;
+        LIMIT 25`, [CPHI_EVENT, likePatterns(terms), terms])).rows;
 
-    res.json({ q: term, count: items.length, items });
+    // Collapse the alias rows and RECOUNT the holders. Done after the LIMIT, so the merged list can
+    // be shorter than 25 — which is correct: 25 substances would have needed a larger LIMIT, and
+    // merging first would need the synonym table inside the query.
+    const merged = mergeMoleculeRows(items);
+
+    // searched_as lets the page say "also searched leuprolide" when the INN was typed. Without it a
+    // correct result looks like the wrong molecule and gets distrusted at the exact moment it matters.
+    res.json({
+      q: term,
+      count: merged.length,
+      searched_as: expansion.expanded ? terms : null,
+      items: merged,
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
