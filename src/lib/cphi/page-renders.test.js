@@ -35,6 +35,15 @@ function extractPage(name) {
     const ch = HTML[i];
     if (inStr) {
       if (ch === inStr && prev !== '\\') inStr = null;
+    } else if (ch === '/' && HTML[i + 1] === '/') {
+      // SKIP LINE COMMENTS. An apostrophe in prose — "the supplier's own claim" — otherwise opens a
+      // string that never closes, the brace depth desyncs, and every test in this file fails with
+      // "braces never balanced" while the page itself is perfectly fine. Cost an hour once.
+      const nl = HTML.indexOf('\n', i);
+      if (nl < 0) break;
+      i = nl;
+      prev = '';
+      continue;
     } else if (ch === '"' || ch === "'" || ch === '`') {
       inStr = ch;
     } else if (ch === '{') depth++;
@@ -245,4 +254,58 @@ test('a failed search shows the reason and keeps the floor list', async () => {
   assert.match(html, /Search failed: boom/);
   // The table underneath must survive — a failed search is not a failed page.
   assert.match(html, /Milan Sourcing Priority/);
+});
+
+// ── GRADE, STATED WITH ITS BASIS ─────────────────────────────────────────────
+// "Is this GMP" has no single flag in the data. Three different situations must read as three
+// different claims, because a supplier's own assertion and a regulatory filing are not the same
+// thing and a customer will know the difference.
+
+test('a supplier GMP claim is labelled as the supplier saying so', async () => {
+  const st = baseState({ mq: 'x' });
+  st.mres = { q: 'x', items: [{ molecule: 'Leuprorelin', holder_count: 2, holders: [],
+    gmp_certified: true, gmp_grade: 'USP', price_per_kg_usd: 42000, min_quantity_g: 10,
+    lead_time_days: 45, sample_available: true, sample_price_usd: 350, cas_number: '53714-56-0' }] };
+  const html = await render(st, fakeResponse('supplier'));
+  assert.match(html, /GMP · USP/);
+  assert.match(html, /supplier's own price list/);
+  assert.match(html, /\$42,000\/kg/);
+  assert.match(html, /MOQ 10 g/);
+  assert.match(html, /sample \$350/);
+});
+
+test('a DMF is evidence of capability and is NOT called a certificate', async () => {
+  const st = baseState({ mq: 'x' });
+  st.mres = { q: 'x', items: [{ molecule: 'Amlodipine', holder_count: 7, holders: [],
+    gmp_certified: false }] };
+  const html = await render(st, fakeResponse('supplier'));
+  assert.match(html, /GMP capability/);
+  assert.match(html, /not a certificate/);
+  assert.ok(!/supplier's own price list/.test(html));
+});
+
+test('no DMF and no claim reads as research grade, not as GMP', async () => {
+  const st = baseState({ mq: 'x' });
+  st.mres = { q: 'x', items: [{ molecule: 'Oddity', holder_count: 0, holders: [], gmp_certified: false }] };
+  const html = await render(st, fakeResponse('supplier'));
+  assert.match(html, /Research grade/);
+  assert.ok(!/GMP capability/.test(html));
+});
+
+test('a controlled substance is flagged before anyone quotes it', async () => {
+  const st = baseState({ mq: 'x' });
+  st.mres = { q: 'x', items: [{ molecule: 'Ketamine', holder_count: 3, holders: [],
+    controlled_substance: true }] };
+  const html = await render(st, fakeResponse('supplier'));
+  assert.match(html, /CONTROLLED SUBSTANCE/);
+  assert.match(html, /licensing applies/);
+});
+
+test('a molecule with no price row shows no price, not a zero', async () => {
+  const st = baseState({ mq: 'x' });
+  st.mres = { q: 'x', items: [{ molecule: 'Unpriced', holder_count: 2, holders: [],
+    price_per_kg_usd: null, min_quantity_g: null, lead_time_days: null }] };
+  const html = await render(st, fakeResponse('supplier'));
+  assert.ok(!/\$0/.test(html), 'a null price must not render as $0');
+  assert.ok(!/MOQ 0/.test(html));
 });

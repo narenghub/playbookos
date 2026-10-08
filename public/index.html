@@ -4650,10 +4650,33 @@ pages['cphi-milan'] = async function(reuse) {
       const dem = m.studies
         ? `${m.studies} stud${m.studies === 1 ? 'y' : 'ies'}${m.ph3 ? `, ${m.ph3} in phase 3` : ''}${m.patients ? ` · ${Number(m.patients).toLocaleString()} patients` : ''}`
         : '<span style="color:var(--text-muted)">No trial demand recorded — nobody in our pipeline is studying this.</span>';
+      // ── GRADE, SAID HONESTLY ───────────────────────────────────────────────
+      // There is no single "is this GMP" flag in the data, and inventing one would be worse than
+      // saying nothing. Two different things are true and each is stated with its basis:
+      //   • a price row marked gmp_certified is the SUPPLIER'S OWN claim on their price list;
+      //   • an active Type II DMF means the holder supplies a regulated market under GMP, which is
+      //     what a DMF is for — evidence of capability, not a certificate.
+      // Everything else is research grade by absence, which is also worth saying plainly.
+      const grade = m.gmp_certified
+        ? `<span style="color:#1D9E75;font-weight:700">GMP${m.gmp_grade ? ' · ' + cmEsc(m.gmp_grade) : ''}</span> <span style="color:var(--text-muted)">(supplier's own price list)</span>`
+        : n > 0
+        ? `<span style="color:#1D9E75;font-weight:600">GMP capability</span> <span style="color:var(--text-muted)">(holds an active Type II DMF — not a certificate)</span>`
+        : `<span style="color:#8a5a00;font-weight:600">Research grade</span> <span style="color:var(--text-muted)">(no DMF, no GMP claim on file)</span>`;
+      const money = [];
+      if (m.price_per_kg_usd) money.push(`$${Number(m.price_per_kg_usd).toLocaleString()}/kg`);
+      if (m.min_quantity_g) money.push(`MOQ ${Number(m.min_quantity_g).toLocaleString()} g`);
+      if (m.lead_time_days) money.push(`${m.lead_time_days} day lead`);
+      if (m.sample_available) money.push(m.sample_price_usd ? `sample $${Number(m.sample_price_usd).toLocaleString()}` : 'sample available');
+      if (m.purity) money.push(cmEsc(m.purity));
+      if (m.cas_number) money.push('CAS ' + cmEsc(m.cas_number));
       return `<div style="border-top:1px solid var(--border);padding:12px 14px">
         <div style="font-weight:700;font-size:15px">${cmEsc(m.molecule)}</div>
         <div style="font-size:13px;margin-top:3px">${supply}</div>
+        <div style="font-size:12px;margin-top:3px">${grade}</div>
         <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${dem}</div>
+        ${money.length ? `<div style="font-size:12px;margin-top:4px;font-variant-numeric:tabular-nums">${money.join(' · ')}</div>` : ''}
+        ${m.controlled_substance ? '<div style="font-size:11px;color:#8a2f2f;font-weight:700;margin-top:4px">CONTROLLED SUBSTANCE — licensing applies before any quote</div>' : ''}
+        ${m.regulatory_status ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${cmEsc(m.regulatory_status)}</div>` : ''}
         ${chips ? `<div style="font-size:12px;margin-top:7px"><span style="color:var(--text-muted)">On this floor:</span> ${chips}</div>` : ''}
         ${!chips && n ? `<div style="font-size:12px;color:var(--text-muted);margin-top:7px">${n} holder${n===1?'':'s'}, none exhibiting here.</div>` : ''}
         ${chips && off > 0 ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px">+${off} more holder${off===1?'':'s'} not on the floor.</div>` : ''}
@@ -8258,7 +8281,13 @@ if(typeof pages !== 'undefined') {
 /* ── Clinical Demand Intelligence (Step 9) ─────────────────────────────────── */
 function cdiEsc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 const CDI_TAS = ['Oncology','Metabolic/Endocrine','Cardiovascular','Neurology/CNS','Infectious Disease','Immunology/Inflammation','Respiratory','Dermatology','Rare Disease','Other'];
-function cdiState(){ if(!window._cdi) window._cdi={view:'list',detail:null,offset:0,limit:25,filters:{phase:'',therapeutic_area:'',catalog_match_status:''},running:false}; return window._cdi; }
+function cdiState(){ if(!window._cdi) window._cdi={view:'list',detail:null,offset:0,limit:25,filters:{phase:'',therapeutic_area:'',catalog_match_status:'',molecule:'',sponsor_type:''},running:false}; return window._cdi; }
+// Submitted, not typed-as-you-go: each keystroke would be a request against a table of thousands
+// of studies, and nobody reads the answers in between.
+function cdiSearch(ev){ if(ev) ev.preventDefault();
+  const box=document.getElementById('cdi-q');
+  cdiSetFilter('molecule', box ? box.value.trim() : ''); }
+function cdiClearSearch(){ cdiSetFilter('molecule',''); }
 function cdiPhaseBadge(p){ return p?`<span class="badge badge-blue">${cdiEsc(p)}</span>`:'<span style="color:#a0aec0">—</span>'; }
 function cdiMatchBadge(s){ const m={catalog_match:'badge-green',sourcing_opportunity:'badge-amber',unknown:'badge-gray'}; return `<span class="badge ${m[s]||'badge-gray'}">${cdiEsc((s||'unknown').replace(/_/g,' '))}</span>`; }
 function cdiTypeBadge(t){ return `<span class="badge badge-blue">${cdiEsc(t||'other')}</span>`; }
@@ -8296,6 +8325,8 @@ async function cdiRenderList(c, st){
   if(st.filters.phase) qs.set('phase', st.filters.phase);
   if(st.filters.therapeutic_area) qs.set('therapeutic_area', st.filters.therapeutic_area);
   if(st.filters.catalog_match_status) qs.set('catalog_match_status', st.filters.catalog_match_status);
+  if(st.filters.molecule) qs.set('molecule', st.filters.molecule);
+  if(st.filters.sponsor_type) qs.set('sponsor_type', st.filters.sponsor_type);
   let res; try{ res=await API('/research-intelligence/studies?'+qs.toString()); }catch(e){ res={error:e.message}; }
   const isAdmin = typeof currentUser!=='undefined' && currentUser && (currentUser.role==='admin'||currentUser.role==='super_admin');
   const runBar = isAdmin ? `<div style="margin-left:auto;display:flex;align-items:center;gap:10px">
@@ -8314,7 +8345,30 @@ async function cdiRenderList(c, st){
   // Outreach for the studies on this page. res.total_count is the list's own denominator; without it the
   // bar would report 0 new over 2,587 untouched studies.
   await orLoad('study', studies.map(x => x.id), res && res.total_count);
+  // ── WHO IS STUDYING THIS MOLECULE ──────────────────────────────────────────
+  // The reason this page exists commercially: a supplier names a molecule and the useful answer is
+  // which companies are running studies that consume it. Above the filters because it is the
+  // question, not a refinement of one.
+  const searchCard=`<div class="card" style="padding:12px 14px">
+    <form onsubmit="cdiSearch(event)" style="display:flex;gap:8px;align-items:center">
+      <input id="cdi-q" value="${cdiEsc(st.filters.molecule||'')}" placeholder="Molecule name — who is studying it?"
+        autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="search"
+        style="flex:1;min-width:0;font-size:16px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-subtle);color:var(--text-body)">
+      <button type="submit" class="btn-outline btn-sm" style="padding:10px 14px;font-size:13px;white-space:nowrap">Search</button>
+      ${st.filters.molecule?`<button type="button" onclick="cdiClearSearch()" class="btn-outline btn-sm" style="padding:10px 12px;font-size:13px">Clear</button>`:''}
+    </form>
+    ${st.filters.molecule?`<div style="font-size:12px;color:var(--text-muted);margin-top:8px">Studies whose molecule list mentions \u201c${cdiEsc(st.filters.molecule)}\u201d.</div>`:''}
+    ${st.filters.sponsor_type==='INDUSTRY'?`<div style="font-size:12px;color:#1D9E75;margin-top:6px"><b>Industry sponsors only</b> — companies developing something, so they buy API. Academic and hospital sponsors are hidden; they study approved products and buy from a pharmacy.</div>`:''}
+  </div>`;
+
   const filterBar=`<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+    <select onchange="cdiSetFilter('sponsor_type',this.value)" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px;font-weight:600">
+      <option value="">Any sponsor</option>
+      <option value="INDUSTRY" ${st.filters.sponsor_type==='INDUSTRY'?'selected':''}>Industry — likely API buyer</option>
+      <option value="OTHER" ${st.filters.sponsor_type==='OTHER'?'selected':''}>Academic / hospital</option>
+      <option value="NIH" ${st.filters.sponsor_type==='NIH'?'selected':''}>NIH</option>
+      <option value="OTHER_GOV" ${st.filters.sponsor_type==='OTHER_GOV'?'selected':''}>Government</option>
+      <option value="NETWORK" ${st.filters.sponsor_type==='NETWORK'?'selected':''}>Network</option></select>
     <select onchange="cdiSetFilter('phase',this.value)" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
       <option value="">All phases</option>${['Phase 1','Phase 2','Phase 3'].map(p=>`<option value="${p}" ${st.filters.phase===p?'selected':''}>${p}</option>`).join('')}</select>
     <select onchange="cdiSetFilter('therapeutic_area',this.value)" style="padding:6px 8px;border:1px solid var(--border);border-radius:4px;font-size:13px">
@@ -8327,8 +8381,8 @@ async function cdiRenderList(c, st){
     <span style="margin-left:auto;font-size:12px;color:#718096">${res.total_count} total</span></div>`;
 
   if(!studies.length){
-    const filtered=st.filters.phase||st.filters.therapeutic_area||st.filters.catalog_match_status;
-    c.innerHTML=head+orBar('study')+filterBar+`<div class="card"><p style="color:#718096">No studies${filtered?' match these filters':' yet'} — the ingestion cron runs nightly at 2am CST once enabled.${isAdmin&&!filtered?' Or click <strong>Run Now</strong> above.':''}</p></div>`;
+    const filtered=st.filters.phase||st.filters.therapeutic_area||st.filters.catalog_match_status||st.filters.molecule||st.filters.sponsor_type;
+    c.innerHTML=head+searchCard+orBar('study')+filterBar+`<div class="card"><p style="color:#718096">No studies${filtered?' match these filters':' yet'} — the ingestion cron runs nightly at 2am CST once enabled.${isAdmin&&!filtered?' Or click <strong>Run Now</strong> above.':''}</p></div>`;
     return;
   }
   const rows=studies.map(s=>`<tr style="cursor:pointer" onclick="cdiOpen('${cdiEsc(s.id)}')">
@@ -8349,7 +8403,7 @@ async function cdiRenderList(c, st){
       <button onclick="cdiPage(-1)" class="btn-outline" style="padding:6px 14px;font-size:13px" ${st.offset<=0?'disabled':''}>← Prev</button>
       <span style="font-size:12px;color:#718096">Showing ${st.offset+1}–${st.offset+studies.length} of ${res.total_count}</span>
       <button onclick="cdiPage(1)" class="btn-outline" style="padding:6px 14px;font-size:13px" ${res.has_more?'':'disabled'}>Next →</button></div></div>`;
-  c.innerHTML=head+orBar('study')+filterBar+table;
+  c.innerHTML=head+searchCard+orBar('study')+filterBar+table;
 }
 
 async function cdiRenderDetail(c, st){

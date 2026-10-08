@@ -4406,6 +4406,26 @@ router.get('/research-intelligence/studies', authMiddleware, requireTier('intell
       params.push(req.query.catalog_match_status);
       where.push(`EXISTS (SELECT 1 FROM study_molecules sm WHERE sm.study_id = cs.id AND sm.catalog_match_status = $${params.length})`);
     }
+    // ── WHO IS STUDYING THIS MOLECULE ─────────────────────────────────────────
+    // The question a supplier asks across a booth: "who actually uses leuprorelin?" Same EXISTS
+    // shape as catalog_match_status above, so there is one way to ask about a study's molecules
+    // rather than two. Substring, because the register writes "Leuprolide Acetate" where a person
+    // says "leuprorelin" — a prefix match would miss half of them.
+    if (req.query.molecule && String(req.query.molecule).trim().length >= 2) {
+      params.push('%' + String(req.query.molecule).trim().toLowerCase() + '%');
+      where.push(`EXISTS (SELECT 1 FROM study_molecules sm
+                           WHERE sm.study_id = cs.id AND LOWER(sm.molecule_name) LIKE $${params.length})`);
+    }
+    // ── THE BUYING-INTENT FILTER ──────────────────────────────────────────────
+    // The single most useful column on this table for a commercial question, and the reason the
+    // raw study count misleads. An INDUSTRY sponsor is a company DEVELOPING something, so it buys
+    // API. A university or hospital running a Phase 4 of an approved drug buys commercial product
+    // from a pharmacy and will never be a customer. Metformin has thousands of studies and almost
+    // no API demand for exactly this reason; leuprorelin has far fewer and several real buyers.
+    if (req.query.sponsor_type) {
+      params.push(req.query.sponsor_type);
+      where.push(`cs.sponsor_type = $${params.length}`);
+    }
     const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
     const total = Number((await query(`SELECT COUNT(*)::int AS c FROM clinical_studies cs ${whereSql}`, params)).rows[0].c);
@@ -5323,7 +5343,12 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
        keys AS (
          SELECT k, molecule FROM demand  WHERE k LIKE '%' || $2 || '%'
          UNION
-         SELECT k, molecule FROM holders WHERE k LIKE '%' || $2 || '%')
+         SELECT k, molecule FROM holders WHERE k LIKE '%' || $2 || '%'
+         UNION
+         -- A molecule we have PRICED but that has neither a trial nor a US DMF holder still has to
+         -- be findable: that is exactly the research-grade catalogue.
+         SELECT LOWER(molecule_name), molecule_name FROM molecule_pricing
+          WHERE active = 1 AND LOWER(molecule_name) LIKE '%' || $2 || '%')
        SELECT kk.molecule,
               dm.studies::int, dm.ph3::int, dm.ph2::int, dm.patients::int,
               COALESCE(c.n, 0)::int AS holder_count,
@@ -5331,7 +5356,21 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
                          'holder', h.holder, 'booth', x.booth, 'hall', x.hall,
                          'exhibiting', COALESCE(x.exhibiting, false)))
                        FILTER (WHERE h.holder IS NOT NULL), '[]') AS holders,
-              COUNT(*) FILTER (WHERE x.exhibiting)::int AS on_floor
+              COUNT(*) FILTER (WHERE x.exhibiting)::int AS on_floor,
+              -- From molecule_pricing, which is where a supplier's price list lands. Every field is
+              -- nullable because most molecules have no price row yet; the UI says "no price on file"
+              -- rather than implying a zero.
+              MIN(pr.gmp_grade) AS gmp_grade,
+              BOOL_OR(pr.gmp_certified = 1) AS gmp_certified,
+              MIN(pr.cas_number) AS cas_number,
+              MIN(pr.purity) AS purity,
+              MIN(pr.price_per_kg_usd) AS price_per_kg_usd,
+              MIN(pr.min_quantity_g) AS min_quantity_g,
+              MIN(pr.lead_time_days) AS lead_time_days,
+              BOOL_OR(pr.sample_available = 1) AS sample_available,
+              MIN(pr.sample_price_usd) AS sample_price_usd,
+              MIN(pr.regulatory_status) AS regulatory_status,
+              BOOL_OR(pr.controlled_substance = 1) AS controlled_substance
          FROM (SELECT k, MIN(molecule) molecule FROM keys GROUP BY k) kk
          LEFT JOIN demand  dm ON dm.k = kk.k
          LEFT JOIN counted c  ON c.k  = kk.k
@@ -5339,6 +5378,7 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
          LEFT JOIN cphi_exhibitor_matches x
                 ON x.holder_normalized = h.holder_normalized
                AND x.event_slug = $1 AND x.role = 'supplier'
+         LEFT JOIN molecule_pricing pr ON LOWER(pr.molecule_name) = kk.k AND pr.active = 1
         GROUP BY kk.k, kk.molecule, dm.studies, dm.ph3, dm.ph2, dm.patients, c.n
         -- Exact name first, then whoever is actually standing on this floor, then thin benches,
         -- then demand. At a booth the first row is the only one usually read.
