@@ -102,26 +102,58 @@ async function main() {
     console.log(`    products      ${prods.length ? prods.join(', ') : 'NONE ← cannot see any product surface'}`);
   }
 
-  // ── What they would be looking for: is there anything to see? ────
-  console.log('\n\nsitenex data, by owner:');
-  for (const [label, sql] of [
-    ['prospects', `SELECT partner_id, COUNT(*)::int n FROM outreach_prospects GROUP BY 1 ORDER BY 1 NULLS FIRST`],
-    ['deals',     `SELECT partner_id, COUNT(*)::int n FROM sitenex_deals     GROUP BY 1 ORDER BY 1 NULLS FIRST`],
-  ]) {
-    try {
-      const rows = (await query(sql)).rows;
-      if (!rows.length) { console.log(`  ${label.padEnd(10)} no rows at all`); continue; }
-      for (const r of rows) {
-        const who = r.partner_id == null ? 'NULL (self-sourced, ours)' : `partner ${r.partner_id}`;
-        console.log(`  ${label.padEnd(10)} ${String(r.n).padStart(5)} rows · ${who}`);
-      }
-    } catch (e) {
-      console.log(`  ${label.padEnd(10)} could not read (${e.message})`);
+  // ── What they would be looking for, and the two DIFFERENT rules that govern it ────
+  //
+  // DEALS carry partner_id and are scoped by ownership (layer 4, partner-scope.js).
+  // PROSPECTS carry source_partner_id and are scoped by TERRITORY (layer 5, territory-scope.js) —
+  // our lead list is not owned by a partner, so the question is whether a row falls inside the
+  // patch granted to them. Using the deals rule for prospects is a mistake I made once already and
+  // it produced a confident wrong answer, so the two are printed apart and labelled.
+  console.log('\n\nsitenex DEALS — scoped by ownership (partner_id):');
+  try {
+    const rows = (await query(
+      `SELECT partner_id, COUNT(*)::int n FROM sitenex_deals GROUP BY 1 ORDER BY 1 NULLS FIRST`)).rows;
+    if (!rows.length) console.log('  no rows at all');
+    for (const r of rows) {
+      const who = r.partner_id == null ? 'NULL (self-sourced, ours — invisible to any partner)' : `partner ${r.partner_id}`;
+      console.log(`  ${String(r.n).padStart(5)} · ${who}`);
     }
-  }
-  console.log('\n  A partner sees ONLY rows whose partner_id equals theirs. Rows with partner_id NULL');
-  console.log('  are self-sourced and deliberately invisible to them — so even once the link is');
-  console.log('  fixed, a partner with no referred rows correctly sees an empty board.');
+  } catch (e) { console.log(`  could not read (${e.message})`); }
+
+  console.log('\nsitenex PROSPECTS — scoped by TERRITORY, not ownership:');
+  try {
+    const rows = (await query(
+      `SELECT source_partner_id, COUNT(*)::int n FROM outreach_prospects GROUP BY 1 ORDER BY 1 NULLS FIRST`)).rows;
+    if (!rows.length) console.log('  no rows at all');
+    for (const r of rows) {
+      const who = r.source_partner_id == null
+        ? 'OUR leads (source_partner_id NULL) — visible only inside a granted territory'
+        : `referred by partner ${r.source_partner_id} — always visible to them`;
+      console.log(`  ${String(r.n).padStart(5)} · ${who}`);
+    }
+  } catch (e) { console.log(`  could not read (${e.message})`); }
+
+  console.log('\npartner_territories — what each partner may see of OUR leads:');
+  try {
+    const rows = (await query(
+      `SELECT p.id, p.name, t.dimension, t.value, t.exclusive
+         FROM partners p LEFT JOIN partner_territories t ON t.partner_id = p.id
+        ORDER BY p.id, t.dimension, t.value`)).rows;
+    const byPartner = new Map();
+    for (const r of rows) {
+      if (!byPartner.has(r.id)) byPartner.set(r.id, { name: r.name, grants: [] });
+      if (r.dimension) byPartner.get(r.id).grants.push(`${r.dimension}=${r.value}${r.exclusive ? ' (exclusive)' : ''}`);
+    }
+    for (const [id, p] of byPartner) {
+      if (!p.grants.length) {
+        console.log(`  id=${id} ${p.name}: NO TERRITORY → sees none of our leads (fail-closed, by design)`);
+        console.log(`        → grant one on the SiteNex Partners page, or linking partner_id gives them`);
+        console.log(`          partner status with nothing to look at.`);
+      } else {
+        console.log(`  id=${id} ${p.name}: ${p.grants.join(', ')}`);
+      }
+    }
+  } catch (e) { console.log(`  could not read (${e.message})`); }
 
   console.log('\n── nothing was written.');
 }

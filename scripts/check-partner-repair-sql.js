@@ -83,7 +83,14 @@ CREATE TABLE user_products (
 CREATE TABLE user_product_grants_log (
   id BIGSERIAL PRIMARY KEY, user_id TEXT, user_email TEXT, product TEXT,
   action TEXT, actor_id TEXT, source TEXT, at TIMESTAMPTZ DEFAULT NOW());
-CREATE TABLE outreach_prospects (id BIGSERIAL PRIMARY KEY, partner_id INTEGER);
+-- source_partner_id, NOT partner_id. The first version of this fixture invented a partner_id
+-- column on prospects, which made the repair script's count query look correct here while it threw
+-- in production and had its error swallowed by a .catch() that returned 0. A fixture that models a
+-- column the real schema does not have is worse than no fixture.
+CREATE TABLE outreach_prospects (id BIGSERIAL PRIMARY KEY, source_partner_id INTEGER);
+CREATE TABLE partner_territories (
+  id SERIAL PRIMARY KEY, partner_id INTEGER REFERENCES partners(id),
+  dimension TEXT, value TEXT, exclusive BOOLEAN DEFAULT FALSE, created_by TEXT);
 
 INSERT INTO partners (name, status) VALUES ('ACBM Partners', 'active');
 -- The live account's exact shape: a password, NO joined_at, no partner_id, products parked.
@@ -206,6 +213,40 @@ INSERT INTO users (id, email, role, password_hash, joined_at, invited_by)
       ['u-partner'])).rows;
     if (revLog.length !== 1) bad('a revocation is audited like a grant', JSON.stringify(revLog));
     else ok('a revocation is audited too — the one event that must not be missing from the history');
+
+    // ── THE QUERIES THAT REPORT WHAT A PARTNER WILL SEE ────
+    //
+    // These are the ones that were silently wrong: a count against a partner_id column that
+    // prospects do not have, inside a .catch() that returned 0. Run them for real so a missing
+    // column is a FAILURE here rather than a confident zero in front of the person waiting on it.
+    try {
+      await client.query(
+        `SELECT COUNT(*)::int n FROM outreach_prospects WHERE source_partner_id = $1`, [1]);
+      ok('the prospect count uses source_partner_id — the column that exists');
+    } catch (e) {
+      bad('the prospect count runs against the real schema', e.message);
+    }
+    try {
+      await client.query(
+        `SELECT dimension, value, exclusive FROM partner_territories
+          WHERE partner_id = $1 ORDER BY dimension, value`, [1]);
+      ok('the territory read runs');
+    } catch (e) {
+      bad('the territory read runs', e.message);
+    }
+    // And prove the OLD query really was broken, so it cannot quietly come back.
+    try {
+      await client.query(`SELECT COUNT(*) FROM outreach_prospects WHERE partner_id = $1`, [1]);
+      bad('prospects still have NO partner_id column',
+        'the query SUCCEEDED — if prospects have grown a partner_id, the territory-scope decision ' +
+        'about who owns a lead has changed and src/lib/products/territory-scope.js must be re-read');
+    } catch (e) {
+      if (/column .*partner_id.* does not exist/i.test(e.message)) {
+        ok('prospects have no partner_id — the old count was querying nothing, as suspected');
+      } else {
+        bad('the old query fails for the EXPECTED reason', e.message);
+      }
+    }
 
     // Replay: the script may be run twice by someone unsure whether it worked.
     await client.query(UPDATE, [1, new Date().toISOString(), 'u-partner']);

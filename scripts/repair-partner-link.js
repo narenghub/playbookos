@@ -161,13 +161,57 @@ async function main() {
     await query(`UPDATE users SET invited_products = NULL WHERE id = $1`, [u.id]);
   }
 
-  const visible = (await query(
-    `SELECT COUNT(*)::int n FROM outreach_prospects WHERE partner_id = $1`, [pid]).catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n;
-  console.log(`\n  They can now see ${visible} prospect row(s) — the ones carrying partner_id=${pid}.`);
-  if (!visible) {
-    console.log('  That is ZERO, and it is correct rather than broken: rows with a NULL partner_id are');
-    console.log('  self-sourced and deliberately invisible to a partner. Until deals are referred BY');
-    console.log('  this partner, or existing rows are assigned to them, their board is empty.');
+  // ── WHAT THEY WILL ACTUALLY SEE. FIVE LAYERS, AND partner_id IS ONLY THE FOURTH. ────
+  //
+  // The first version of this counted `outreach_prospects WHERE partner_id = $1` inside a .catch()
+  // that returned 0. That column DOES NOT EXIST — prospects carry source_partner_id — so the query
+  // threw, the catch swallowed it, and the script printed a confident "0 prospect rows" with an
+  // explanation that was the DEALS rule (layer 4) applied to a table governed by TERRITORY
+  // (layer 5). A silently caught error reporting a plausible zero is worse than a crash.
+  //
+  // src/lib/products/territory-scope.js is the authority:
+  //   source_partner_id = theirs                → ALWAYS visible, territory or not
+  //   source_partner_id = another partner's      → NEVER visible
+  //   source_partner_id NULL (our own leads)     → visible only INSIDE their granted territory
+  //   no territory rows at all                   → FALSE → nothing
+  //
+  // So fixing partner_id makes them a partner. It does NOT give them a prospect list. No throwaway
+  // catch here: if a query fails, say so, because that is a different answer from zero.
+  let terr = null;
+  try {
+    terr = (await query(
+      `SELECT dimension, value, exclusive FROM partner_territories
+        WHERE partner_id = $1 ORDER BY dimension, value`, [pid])).rows;
+  } catch (e) {
+    console.log(`\n  ⚠ could not read partner_territories: ${e.message}`);
+  }
+  let own = null;
+  try {
+    own = (await query(
+      `SELECT COUNT(*)::int n FROM outreach_prospects WHERE source_partner_id = $1`, [pid])).rows[0].n;
+  } catch (e) {
+    console.log(`  ⚠ could not count their referred prospects: ${e.message}`);
+  }
+
+  console.log('\n  WHAT THEY WILL SEE');
+  console.log(`    their own referred prospects   ${own == null ? 'unknown (query failed)' : own}`);
+  if (terr == null) {
+    console.log('    granted territory              unknown (query failed)');
+  } else if (!terr.length) {
+    console.log('    granted territory              NONE  ← so NONE of our own leads are visible');
+    console.log('\n  Prospects are scoped by TERRITORY, not by partner ownership — a prospect is OUR lead,');
+    console.log('  and the question is whether it falls inside the patch granted to them. With no');
+    console.log('  territory rows the scope is FALSE and they see nothing of ours. That is fail-closed');
+    console.log('  by design, not a bug: "nobody decided what this partner may see" safely reads as');
+    console.log('  "nothing" rather than "our whole lead list".');
+    console.log('\n  → Grant a territory on the SiteNex Partners page. Until then, linking partner_id');
+    console.log('    has made them a partner but given them nothing to look at.');
+  } else {
+    console.log(`    granted territory              ${terr.length} grant(s):`);
+    for (const t of terr) {
+      console.log(`      ${t.dimension} = ${t.value}${t.exclusive ? '  (exclusive)' : ''}`);
+    }
+    console.log('\n  Our own leads inside those grants are visible to them, plus anything they referred.');
   }
 }
 
