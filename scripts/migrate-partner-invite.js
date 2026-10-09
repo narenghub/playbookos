@@ -16,6 +16,7 @@
 'use strict';
 
 const { query, initDB } = require('../src/lib/db');
+const { isExternalRole } = require('../src/lib/roles');
 
 async function migrate() {
   await initDB();
@@ -43,10 +44,14 @@ async function migrate() {
   console.log(`\npartners available to invite against (${partners.length}):`);
   for (const p of partners) console.log(`   id=${String(p.id).padEnd(3)} ${String(p.name).padEnd(24)} ${p.status}`);
 
+  // isExternalRole, NOT excluded_from_scoring. The first version of this used the column as a proxy
+  // and reported three accounts needing a partner link — but two of them, a super_admin and a
+  // recruitment_team member, are STAFF: excluded_from_scoring is set for its own reasons and is not
+  // a synonym for "outside the company". A warning that names people who are fine is how a warning
+  // stops being read, and the repair script beside it used the real check and listed exactly one.
   const stuck = (await query(
-    `SELECT email, role FROM users
-      WHERE partner_id IS NULL AND excluded_from_scoring IS TRUE
-      ORDER BY email`)).rows;
+    `SELECT email, role FROM users WHERE partner_id IS NULL ORDER BY email`))
+    .rows.filter((u) => isExternalRole(u.role));
   if (stuck.length) {
     console.log(`\n⚠ ${stuck.length} external account(s) have NO partner_id and therefore see no rows:`);
     for (const u of stuck) console.log(`   ${u.email}  (${u.role})`);

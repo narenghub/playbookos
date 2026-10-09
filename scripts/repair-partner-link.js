@@ -94,6 +94,30 @@ async function main() {
     console.log('    partner\'s rows they can see. Make sure that is intended.');
   }
 
+  // ── THE THIRD CONSEQUENCE OF BYPASSING accept-invite ────
+  //
+  // That route writes three things: the password, joined_at, and the PRODUCT GRANTS. An account
+  // with a password but no joined_at got its credentials some other way, which means its grants
+  // were never written either — and with no row in user_products it cannot see a product surface
+  // at all, so fixing partner_id alone would leave it still showing nothing.
+  //
+  // The grants applied here come ONLY from invited_products: the choice a super admin already made
+  // when the invite was sent. Nothing is invented, and if that column is empty this prints and
+  // grants nothing rather than guessing at a sensible default — guessing is how an outside account
+  // ends up holding a product somebody would not have given it.
+  const held = (await query(
+    `SELECT product FROM user_products WHERE user_id = $1 ORDER BY product`, [u.id])).rows.map((r) => r.product);
+  const authorised = Array.isArray(u.invited_products) ? u.invited_products : [];
+  const toGrant = authorised.filter((p) => !held.includes(p));
+  console.log(`  products     ${held.length ? held.join(', ') : 'NONE ← cannot see any product surface'}`);
+  if (toGrant.length) {
+    console.log(`               → grant ${toGrant.join(', ')}  (chosen at invite time, never applied)`);
+  } else if (!held.length && !authorised.length) {
+    console.log('               ⚠ and the invite recorded no product choice either, so there is');
+    console.log('                 nothing to apply. Grant the products from Team Management, or');
+    console.log('                 this account will log in and see an empty shell.');
+  }
+
   if (!EXECUTE) { console.log('\n  DRY RUN — nothing written. Add --execute.'); return; }
 
   // By id, one row, explicitly. Never by role, domain or pattern.
@@ -112,6 +136,21 @@ async function main() {
   const check = (await query(
     `SELECT COUNT(*)::int n FROM users WHERE id = $1 AND partner_id = $2`, [u.id, pid])).rows[0].n;
   if (check !== 1) throw new Error('the write did not stick — investigate before telling the partner to log in');
+
+  // Apply the grants the invite authorised, and log them the same way accept-invite does, so every
+  // route by which a grant comes into being lands in one audit table.
+  for (const product of toGrant) {
+    await query(`INSERT INTO user_products (user_id, product, granted_by) VALUES ($1,$2,$3)
+                 ON CONFLICT (user_id, product) DO NOTHING`, [u.id, product, u.invited_by || null]);
+    await query(
+      `INSERT INTO user_product_grants_log (user_id, user_email, product, action, actor_id, source)
+       VALUES ($1,$2,$3,'grant',$4,'repair_partner_link')`,
+      [u.id, u.email, product, u.invited_by || null]);
+    console.log(`  ✅ granted ${product}`);
+  }
+  if (toGrant.length) {
+    await query(`UPDATE users SET invited_products = NULL WHERE id = $1`, [u.id]);
+  }
 
   const visible = (await query(
     `SELECT COUNT(*)::int n FROM outreach_prospects WHERE partner_id = $1`, [pid]).catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n;
