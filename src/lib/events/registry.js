@@ -69,8 +69,14 @@ const EVENTS = [
     roles: [
       { key: 'abiozen',  label: 'Abiozen', basis: 'demand',
         note: 'Runs clinical trials, so it buys molecules and the QC testing around them. Ranked by the studies we can see it sponsoring.' },
-      { key: 'aros',     label: 'AROS',    basis: 'demand',
-        note: 'Clinical operations teams who would buy an AROS subscription. Ranked by trial volume as a proxy for operational load — we hold no data on what they use today.' },
+      // NOT 'demand', deliberately. Ranking this tab by trial volume would rank the wrong thing:
+      // the companies on SCOPE's sponsor list are mostly eClinical PLATFORMS — Medidata, Suvoda,
+      // Viedoc, Florence, CRIO, Zelta — which are AROS's competitors, not its customers. A score
+      // over a competitor map is a number that means nothing, and a full-looking list that converts
+      // at zero is worse than a short honest one. The real AROS buyers are clinical ops teams among
+      // the 800 attendees, and that list is not published.
+      { key: 'aros',     label: 'AROS',    basis: 'none',
+        note: 'Mostly AROS COMPETITORS, not prospects — the eClinical platforms exhibiting here sell into the same budget. Treat this as a competitor map: no ranking signal, so the list is alphabetical. The real buyers are clinical ops teams among the attendees, which SCOPE does not publish.' },
       { key: 'linkable', label: 'LinkAble', basis: 'none',
         note: 'Recruiting agencies and site networks who would buy the LinkAble platform. We hold no ranking signal for these yet, so the list is alphabetical — working it is what turns it into a ranking.' },
     ],

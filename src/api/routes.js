@@ -5080,6 +5080,45 @@ router.get('/events', authMiddleware, requireAnyTier('intelligence', 'procuremen
   });
 });
 
+// GET /events/:slug/exhibitors?role=linkable — the worked list for a role with no ranking signal.
+//
+// Separate from /sponsors because the two answer different questions. /sponsors ranks OUR OWN trial
+// data and uses the floor as a bonus; this returns the published exhibitor list itself, which for
+// the AROS and LinkAble tabs IS the list. Alphabetical, because there is no signal to rank by, and
+// inventing an order would imply one. Free: one indexed read.
+//
+// `next()` on an unknown slug, NOT 404. This pattern shadows the literal /events/cphi/* routes
+// below — Express matches in registration order and `:slug` happily captures "cphi" — so a 404 here
+// meant GET /events/cphi/exhibitors returned "Unknown event: cphi" and the live CPHI page went
+// blank. Falling through lets the specific route answer, and leaves Express to 404 a slug nothing
+// claims. Caught by src/api/cphi-routes.test.js, which is the only reason it is not in production.
+router.get('/events/:slug/exhibitors', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res, next) => {
+  try {
+    const slug = String(req.params.slug || '');
+    const ev = eventRegistry.getEvent(slug);
+    if (!ev) return next();
+    const role = eventRegistry.isRoleOf(slug, req.query.role) ? req.query.role : eventRegistry.rolesFor(slug)[0];
+    const def = eventRegistry.roleDef(slug, role);
+
+    const items = (await query(
+      `SELECT id, holder, exhibitor_name, exhibiting, booth, hall, match_tier, review_status,
+              entity_note, role, role_note, market, checked_at, met_in_person, linkedin_connected
+         FROM cphi_exhibitor_matches
+        WHERE event_slug = $1 AND role = $2
+        ORDER BY holder`, [slug, role])).rows;
+
+    res.json({
+      event: { slug: ev.slug, name: ev.name, city: ev.city, starts: ev.starts, ends: ev.ends },
+      role, role_label: def ? def.label : role, role_note: def ? def.note : null,
+      basis: def ? def.basis : null,
+      ranked: false,
+      count: items.length,
+      on_floor: items.filter((r) => r.exhibiting).length,
+      items,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /events/:slug/sponsors?role=abiozen — the SCOPE Europe target list.
 //
 // This is the route the CPHI `buyer` tab should have been. That tab asked the FDA establishment
@@ -5089,11 +5128,12 @@ router.get('/events', authMiddleware, requireAnyTier('intelligence', 'procuremen
 //
 // Ranking, exclusions and the show-floor tie-in all live in src/lib/events/sponsor-rank.js, which
 // explains why the score weights what it does. Free: reads our own tables only.
-router.get('/events/:slug/sponsors', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res) => {
+// Same next()-on-unknown-slug rule as /exhibitors above, for the same reason.
+router.get('/events/:slug/sponsors', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res, next) => {
   try {
     const slug = String(req.params.slug || '');
     const ev = eventRegistry.getEvent(slug);
-    if (!ev) return res.status(404).json({ error: `Unknown event: ${slug}` });
+    if (!ev) return next();
 
     const role = eventRegistry.isRoleOf(slug, req.query.role) ? req.query.role : eventRegistry.rolesFor(slug)[0];
     const def = eventRegistry.roleDef(slug, role);

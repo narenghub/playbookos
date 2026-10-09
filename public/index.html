@@ -972,6 +972,9 @@ const NAV_SECTIONS = [
   ]},
   {title:'EVENT AGENT', access:['admin','procurement','business_dev','events'], items:[
     {id:'cphi-milan', label:'CPHI Milan 2026', icon:'🧪'},
+    // A DEMAND floor, unlike CPHI. Same section and therefore the same access, so adding it grants
+    // nobody anything they did not already have for the event surface.
+    {id:'scope-europe', label:'SCOPE Europe 2026', icon:'🧬'},
   ]},
   // AROS's own section. Access is deliberately IDENTICAL to EVENT AGENT's, so moving the page
   // between sections moves no one's access and the template grants are unchanged.
@@ -1063,7 +1066,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"lab-connect":[["intelligence"]],"lab-connect-agent":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["sitenex"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]],"sitenex-partners":[["intelligence"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"lab-connect":[["intelligence"]],"lab-connect-agent":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"scope-europe":[["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["sitenex"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]],"sitenex-partners":[["intelligence"]]};
 // The caller's tiers. They arrive on /auth/me and /auth/login WITH the identity, so this needs no
 // fetch of its own and cannot be left unknown by a failed request — a failed /auth/me logs you out
 // rather than showing you a nav computed from nothing.
@@ -5072,6 +5075,184 @@ async function cmReview(id, verdict){
     await pages['cphi-milan']();
   } catch (e) { alert('Could not save that verdict: ' + e.message); }
 }
+
+// ── SCOPE EUROPE 2026 · BARCELONA · 13-14 OCTOBER ────────────────────────────
+//
+// Same shape as the CPHI page on purpose, and a different page on purpose. CPHI is a SUPPLY floor
+// ranked by what a company can sell us. SCOPE is a DEMAND floor: everyone there runs clinical
+// trials, so the three tabs are what the company buys FROM US — Abiozen (molecules and the QC
+// testing around them), AROS (a platform subscription), LinkAble (a recruiting agency).
+//
+// The one thing this page must not do is flatter the data. Two of the three tabs are not what they
+// look like, and the page says so in the tab header rather than leaving it to be discovered at a
+// booth:
+//
+//   AROS       25 rows that are mostly COMPETITORS. Medidata, Suvoda, Viedoc, Florence, CRIO. A
+//              full-looking list that converts at zero. Shown as a competitor map, labelled.
+//   LinkAble   16 genuine recruitment firms and site networks — the strongest tab on the list.
+//   Abiozen    6 exhibitors, which is honest: a molecule buyer is a company DEVELOPING a drug, and
+//              at SCOPE those are the 800 ATTENDEES, not the 65 booths. So this tab leads with the
+//              RANKED list from our own clinical_studies, where the floor flag is a bonus rather
+//              than the point.
+//
+// window._seState, not a closure: every handler below is reachable from an inline onclick, and an
+// async function in a block is not Annex-B hoisted — see CLAUDE.md.
+window._seState = { slug: 'scope-europe-2026', role: 'abiozen', data: null, loading: false, openId: 0 };
+
+function seEsc(v){ return cmEsc(v); }
+
+// A row's category came from reading the company name, not from SCOPE. Anything below an exact,
+// reviewed match says so, because "we think this is a recruitment firm" and "this is a recruitment
+// firm" are different claims and the second one is not ours to make yet.
+function seGate(row){
+  if (!row || row.review_status === 'confirmed') return '';
+  const t = row.match_tier;
+  if (t && t !== 'exact') {
+    return '<span style="font-size:10px;padding:1px 5px;border:1px solid #8a5a0033;background:#fff7e6;color:#8a5a00;white-space:nowrap">'
+      + seEsc(t) + ' match — confirm the entity</span>';
+  }
+  return '<span style="font-size:10px;padding:1px 5px;border:1px solid #5f6b7a33;background:var(--bg-subtle);color:var(--text-muted);white-space:nowrap">category unreviewed</span>';
+}
+
+pages['scope-europe'] = async function(reuse) {
+  const c = document.getElementById('content');
+  const st = window._seState;
+  let res;
+  if (reuse && st.data) {
+    res = st.data;
+  } else {
+    c.innerHTML = '<p style="color:#888;padding:20px">Loading SCOPE Europe…</p>';
+    const qs = new URLSearchParams();
+    qs.set('role', st.role);
+    // Two endpoints, because the tabs answer different questions. `abiozen` RANKS our own trial
+    // data and treats the floor as a bonus — the buyers are attendees, not exhibitors. `aros` and
+    // `linkable` ARE the published exhibitor list, so they read it directly and stay alphabetical.
+    const path = st.role === 'abiozen' ? '/sponsors' : '/exhibitors';
+    // API() resolves with {error} rather than throwing on 4xx/5xx — see CLAUDE.md. Checked, not caught.
+    res = await API('/events/' + encodeURIComponent(st.slug) + path + '?' + qs.toString())
+            .catch(e => ({ error: e.message }));
+    if (res && res.error) {
+      c.innerHTML = '<div class="card"><div class="card-title">SCOPE Europe 2026</div><p style="color:#dc2626">'
+        + seEsc(res.error) + '</p></div>';
+      return;
+    }
+    st.data = res;
+  }
+
+  const ev = res.event || {};
+  const items = res.items || [];
+
+  // ── HOW MANY DAYS. The page opens on a countdown because a two-day floor four days out is a
+  // different object from a list you browse. Computed from the event's own dates, not hardcoded.
+  const today = new Date().toISOString().slice(0, 10);
+  const days = Math.round((new Date(ev.starts + 'T00:00:00Z') - new Date(today + 'T00:00:00Z')) / 86400000);
+  const when = days > 1 ? `in ${days} days` : days === 1 ? 'tomorrow' : days === 0 ? 'today' : 'finished';
+
+  const tabs = (res.all_roles || st.roles || []).length ? (res.all_roles || st.roles) : null;
+
+  const header = `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
+      <div>
+        <div class="card-title" style="margin:0">${seEsc(ev.name || 'SCOPE Europe 2026')}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:3px">
+          ${seEsc(ev.city || 'Barcelona')} · ${seEsc(ev.starts || '')} to ${seEsc(ev.ends || '')}
+          <b style="color:${days >= 0 && days <= 4 ? '#8a5a00' : 'var(--text-muted)'}">· ${when}</b>
+        </div>
+      </div>
+      <button onclick="seReload()" class="btn-outline btn-sm" style="font-size:12px">Refresh</button>
+    </div>
+  </div>`;
+
+  const ROLE_TABS = [
+    ['abiozen',  'Abiozen'],
+    ['aros',     'AROS'],
+    ['linkable', 'LinkAble'],
+  ];
+  const tabRow = `<div class="card" style="display:flex;gap:6px;flex-wrap:wrap;padding:10px 12px">
+    ${ROLE_TABS.map(([k, label]) => `<button onclick="seSetRole('${k}')"
+        class="${st.role === k ? 'btn-primary' : 'btn-outline'} btn-sm"
+        style="font-size:13px;padding:7px 13px">${label}</button>`).join('')}
+  </div>`;
+
+  // The role's own note, straight from the registry. This is where a tab admits what it is.
+  const noteCard = res.role_note ? `<div class="card" style="padding:11px 14px;background:var(--bg-subtle)">
+    <div style="font-size:12.5px;line-height:1.5;color:var(--text-body)">${seEsc(res.role_note)}</div>
+    ${res.ranked === false && res.hint ? `<div style="font-size:11.5px;color:var(--text-muted);margin-top:5px">${seEsc(res.hint)}</div>` : ''}
+  </div>` : '';
+
+  let body;
+  if (!items.length) {
+    body = `<div class="card"><div style="padding:14px;font-size:13px;color:var(--text-muted)">
+      Nothing in this tab yet. ${res.ranked === false
+        ? 'This role is worked from the exhibitor list rather than computed, so it fills when the list is seeded.'
+        : 'No industry sponsor in our clinical_studies data met the threshold — which is a statement about our data, not about the floor.'}
+    </div></div>`;
+  } else if (res.ranked) {
+    // ── THE RANKED TAB. Molecules first: the score picks the booth, the molecules are the sentence.
+    body = `<div class="card" style="padding:0">
+      <div style="padding:11px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">
+        <div><b>${items.length}</b> ${items.length === 1 ? 'company' : 'companies'} running trials${res.on_floor ? `, <b style="color:#0972d3">${res.on_floor}</b> of them exhibiting` : ''}</div>
+        ${res.exhibitor_list_loaded === false
+          ? '<span style="font-size:11.5px;color:#8a5a00">No exhibitor list loaded for this role — an empty floor column is missing data, not an empty floor.</span>'
+          : ''}
+      </div>
+      ${items.map(r => {
+        const mols = r.molecule_list || [];
+        const quotable = mols.filter(m => m.sourceable);
+        return `<div style="border-top:1px solid var(--border);padding:12px 14px">
+          <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
+            <div style="font-weight:700;font-size:14.5px">${seEsc(r.sponsor)}</div>
+            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+              ${r.exhibiting
+                ? `<span style="font-size:11px;font-family:ui-monospace,Menlo,monospace;background:#0972d3;color:#fff;padding:1px 6px">${r.booth ? seEsc(r.booth) : 'ON FLOOR'}</span>`
+                : '<span style="font-size:11px;color:var(--text-muted)">not on the exhibitor list</span>'}
+              ${r.exhibiting ? seGate(r) : ''}
+            </div>
+          </div>
+          <div style="font-size:12.5px;color:var(--text-muted);margin-top:3px;font-variant-numeric:tabular-nums">
+            ${r.studies} stud${r.studies === 1 ? 'y' : 'ies'}${r.recruiting ? ` · ${r.recruiting} recruiting` : ''}${r.ph3 ? ` · ${r.ph3} Phase 3` : ''}${r.patients ? ` · ${Number(r.patients).toLocaleString()} patients` : ''}
+          </div>
+          ${quotable.length
+            ? `<div style="font-size:12.5px;margin-top:6px">
+                 <span style="color:#1D9E75;font-weight:700">We can quote ${quotable.length} of ${mols.length}:</span>
+                 ${quotable.map(m => `<span style="display:inline-block;margin:2px 5px 2px 0;padding:1px 6px;border:1px solid #1D9E7533;background:#1D9E750f">${seEsc(m.molecule)}${m.has_price ? ' · priced' : ' · DMF'}</span>`).join('')}
+               </div>`
+            : `<div style="font-size:12.5px;margin-top:6px;color:#8a5a00">None of its ${mols.length} molecule${mols.length === 1 ? '' : 's'} is quotable yet — demand we cannot serve.</div>`}
+          ${r.unsourced ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px">+${r.unsourced} molecule${r.unsourced === 1 ? '' : 's'} with no DMF and no price on file.</div>` : ''}
+        </div>`;
+      }).join('')}
+    </div>`;
+  } else {
+    // ── THE WORKED TABS. Alphabetical, because there is no ranking signal and pretending otherwise
+    // is the exact mistake the CPHI buyer tab made.
+    body = `<div class="card" style="padding:0">
+      <div style="padding:11px 14px;border-bottom:1px solid var(--border)">
+        <b>${items.length}</b> ${items.length === 1 ? 'company' : 'companies'} on the published sponsor list
+      </div>
+      ${items.map(r => `<div style="border-top:1px solid var(--border);padding:11px 14px">
+        <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
+          <div style="font-weight:650;font-size:14px">${seEsc(r.holder || r.sponsor)}</div>
+          ${seGate(r)}
+        </div>
+        ${r.role_note ? `<div style="font-size:12px;color:var(--text-muted);margin-top:3px;line-height:1.45">${seEsc(r.role_note)}</div>` : ''}
+      </div>`).join('')}
+    </div>`;
+  }
+
+  c.innerHTML = header + tabRow + noteCard + body;
+};
+
+window.seSetRole = function(role){
+  const st = window._seState;
+  if (st.role === role) return;
+  st.role = role; st.data = null; st.openId = 0;
+  pages['scope-europe']();
+};
+
+window.seReload = function(){
+  window._seState.data = null;
+  pages['scope-europe']();
+};
 
 pages['prospects'] = async function() {
   const c = document.getElementById('content');

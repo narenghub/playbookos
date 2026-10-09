@@ -92,6 +92,12 @@ console.log(`${roles.length} roles\n`);
 //   2026-10-01  super_admin / admin / procurement_director / business_dev / seo_specialist
 //               +lab-connect  (the LabConnect directory, INTELLIGENCE section, [["intelligence"]])
 //
+//   2026-10-01  super_admin / admin / procurement_director / business_dev / seo_specialist
+//               +lab-connect-agent  (same five as lab-connect, same INTELLIGENCE shelf — now baseline)
+//
+// The LabConnect Agent note that used to sit here, kept because it is the clearest statement of why
+// a declared set is a rule and not a list:
+//
 // 2026-10-01, LabConnect Agent: the same FIVE roles gain `lab-connect-agent` — super_admin, admin,
 // procurement_director, business_dev and seo_specialist. That set is not a choice made page by page;
 // it is exactly the set that already sees Research Institutions and Clinical Demand Intelligence,
@@ -107,12 +113,26 @@ console.log(`${roles.length} roles\n`);
 // partner has no business holding a directory of pharmaceutical testing laboratories, still less a
 // list of their prospective clients. If `partner` ever appears here, a page has been moved to a tier
 // the partner role holds and that is a cross-product leak, not a nav tweak.
+// 2026-10-09, SCOPE Europe 2026: SEVEN roles gain `scope-europe`. That set is not a choice either —
+// it is EXACTLY the set that already sees `cphi-milan`, because the page sits in the same EVENT
+// AGENT section on the same gate, [["intelligence","procurement"]], matching the route's
+// requireAnyTier('intelligence','procurement'). Verified role by role rather than assumed.
+//
+// The first version of this page had NO NAV_PAGE_REQS entry at all, which fails OPEN: it showed to
+// anyone holding the section, gated by nothing. It happened to produce the same seven, but by
+// accident rather than by rule, and the next page added that way would not be so lucky.
+//
+// WHO IS ABSENT still matters most. `partner` does not gain it and must not — a SiteNex web partner
+// has no business holding a pharmaceutical event's target list. `sales_team` and `support_team` are
+// also correctly out.
 const EXPECTED = {
-  super_admin:          { gained: ['lab-connect-agent'], lost: [] },
-  admin:                { gained: ['lab-connect-agent'], lost: [] },
-  procurement_director: { gained: ['lab-connect-agent'], lost: [] },
-  business_dev:         { gained: ['lab-connect-agent'], lost: [] },
-  seo_specialist:       { gained: ['lab-connect-agent'], lost: [] },
+  super_admin:          { gained: ['scope-europe'], lost: [] },
+  admin:                { gained: ['scope-europe'], lost: [] },
+  recruitment_director: { gained: ['scope-europe'], lost: [] },
+  procurement_director: { gained: ['scope-europe'], lost: [] },
+  business_dev:         { gained: ['scope-europe'], lost: [] },
+  recruitment_team:     { gained: ['scope-europe'], lost: [] },
+  procurement_team:     { gained: ['scope-europe'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and

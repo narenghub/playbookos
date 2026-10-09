@@ -212,7 +212,7 @@ const ABIOZEN = [
   // These must be listed BEFORE any broader '/api/events/*' pattern would be considered, and they
   // are listed concretely because an unclassified route 403s for every user under enforce — which
   // is exactly what the completeness guard caught when these were first mounted.
-  'GET /api/events', 'GET /api/events/:slug/sponsors',
+  'GET /api/events', 'GET /api/events/:slug/sponsors', 'GET /api/events/:slug/exhibitors',
   'POST /api/algolia/sync', 'POST /api/algolia/sync-abiozen',
   // Abiozen's own store SEO and LinkedIn presence
   'GET /api/seo/*', 'POST /api/seo/*',
