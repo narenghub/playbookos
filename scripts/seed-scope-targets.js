@@ -71,10 +71,18 @@ const EXHIBITORS = {
     ['Syngene International',           'Indian CRO/CDMO with real API and analytical capability. Could be SUPPLIER as much as buyer — worth both conversations.'],
     ['Centre for Human Drug Research',  'Phase 1 unit in Leiden. Runs early-phase studies, so it buys research-grade material and analytical work.'],
   ],
-  // Employment / staffing agencies. The honest list is almost empty, and that is the finding.
-  linkable: [
-    ['Stefanini', 'IT services group with a staffing and recruitment arm. The only name on the published list that plausibly buys a recruiting OS — and even this one needs confirming before it is pitched.'],
-  ],
+  // Employment / staffing agencies. EMPTY, and that is the researched answer rather than a gap.
+  //
+  // Stefanini was here on the strength of its name. Researched 9 Oct against its own material: it is
+  // a global IT services group that SELLS IT resource augmentation — so it competes with LinkAble
+  // rather than subscribing to it. Removed. Nothing else on the 61-company list places a single
+  // person into a single job.
+  //
+  // SCOPE Europe is a clinical operations conference. Its exhibitors sell software, data, logistics,
+  // consulting and laboratory services TO trial sponsors. Employment agencies are not in that room,
+  // so this tab is worked from the ATTENDEE list — 800 executives from 300 organisations, all of whom
+  // have jobs to fill — and not from the floor.
+  linkable: [],
   // aros is NOT seeded from exhibitors. Its buyers are sponsors, which come from clinical_studies
   // below. The 25 eClinical platforms that used to sit here are competitors and are removed.
 };
@@ -88,8 +96,46 @@ const WRONG_TAB = {
          'Research Grid', 'Wemedoo', 'Zelta'],
   linkable: ['Trialbee', 'Care Access', 'Clariness', 'Cuttsy', 'Emvenio', 'Inato', 'Mural Health',
              'mytomorrows', 'RWS', 'TrialFlow', 'TrialX', 'WCG', 'Langland', 'MDgroup',
-             'Naru Healthcare', 'Scout'],
+             'Naru Healthcare', 'Scout',
+             // Sells IT staffing itself — a LinkAble competitor, not a subscriber. See above.
+             'Stefanini'],
 };
+
+// ── THE 14 I COULD NOT READ FROM A NAME, NOW RESEARCHED ────
+//
+// Naresh asked whether six Abiozen companies could really be all of them. It was a fair challenge:
+// six was my own categorisation, and 14 names were parked because I could not identify them. Those
+// 14 were researched against their own material on 9 Oct 2026. The answer is that six IS the number —
+// NONE of the 14 would buy an API or analytical testing — and four of my guesses were wrong in a way
+// that mattered, which is the argument for having looked rather than reasoning from the names.
+//
+//   Labcorp            Central Laboratory Services — SELLS the testing we sell. LabConnect peer or
+//                      competitor, never a buyer. (My "qc_peer" park was right.)
+//   ACM                ACM Global Laboratories — also a central lab that SELLS testing. Same.
+//   Adamas             ADAMAS *Consulting*: GCP audit and inspection readiness. NOT Adamas
+//                      Pharmaceuticals, which would have been a genuine sponsor. The name collision
+//                      is exactly the trap.
+//   Transcom           tran-s.com: translation and linguistic validation for trials. NOT the Swedish
+//                      CX/BPO firm of the same name, which is what I had guessed.
+//   Replior            Swedish eClinical EDC/ePRO suite. I had guessed "possibly clinical supply".
+//   TRI                TriTrials — risk-based quality management software.
+//   TrueTechnologies   TruTechnologies — live trial execution software (TruLab, TruDose).
+//   Credible Planning  Trial planning SaaS: country selection, site activation, enrolment forecasts.
+//   Ercules            Ercules Comunicazioni — patient education and comms. Recruitment-adjacent,
+//                      which the LinkAble definition explicitly excludes.
+//   Marken             UPS Healthcare's clinical supply chain. A logistics conversation about OUR
+//                      shipping, not a sale.
+//   MaxCyte            Cell-engineering tools vendor. The closest near-miss: it makes GMP consumables
+//                      and runs assays, so it might buy testing — but it develops no drug product.
+//                      A soft probe at most.
+//   ZS Associates      Management consulting. Channel partner at best.
+//   Stefanini          IT services; sells staffing. Moved OUT of linkable, see WRONG_TAB.
+//   Tiomics            UNIDENTIFIED. No company of that exact name found; possibly a mislabelled
+//                      logo for Triomics (oncology trial matching). Left unplaced deliberately —
+//                      an honest unknown beats a plausible wrong pitch at a booth.
+//
+// The pattern underneath: SCOPE's exhibitors sell TO trial sponsors. They are the same side of the
+// table as us. The buyers are the attendees.
 
 const SPONSOR_SQL = `
   WITH ind AS (
@@ -220,9 +266,11 @@ async function main() {
   console.log(`   abiozen  = ${EXHIBITORS.abiozen.length} CRO/CDMO exhibitors + ${sponsors.length} sponsors (the buyers are attendees, not booths)`);
   console.log(`   aros     = ${sponsors.length} sponsors, ranked by regulatory load. The 25 eClinical`);
   console.log(`              platforms previously here are COMPETITORS and are removed.`);
-  console.log(`   linkable = ${EXHIBITORS.linkable.length} staffing firm(s). SCOPE is a clinical-ops conference, so`);
-  console.log(`              employment agencies are barely represented. That is the honest number,`);
-  console.log(`              not a bug — work LinkAble from the attendee list, not the floor.`);
+  console.log(`   linkable = ${EXHIBITORS.linkable.length} staffing firm(s) — ZERO, and researched rather than assumed.`);
+  console.log(`              All 61 sponsors were checked: not one places people into jobs. SCOPE's`);
+  console.log(`              exhibitors sell software, data, logistics and lab services TO sponsors.`);
+  console.log(`              Work LinkAble from the ATTENDEE list — 800 executives from 300`);
+  console.log(`              organisations, every one of them with jobs to fill — not from the floor.`);
   console.log();
 
   const toRemove = [];
