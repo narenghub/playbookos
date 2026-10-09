@@ -174,7 +174,18 @@ router.post('/auth/accept-invite', authLimiter, async (req, res) => {
     // nobody would think to check. ON CONFLICT DO NOTHING makes a replayed token harmless.
     const chosen = Array.isArray(user.invited_products) ? user.invited_products : [];
     await withTransaction(async (c) => {
-      await c.query('UPDATE users SET password_hash=$1, name=$2, invite_token=NULL, joined_at=$3, invited_products=NULL WHERE id=$4',
+      // partner_id is set HERE, from invited_partner_id, in the same transaction as the password —
+      // for the same reason the product grants are. An account that can log in but is scoped to no
+      // partner sees an empty board and looks like a permissions bug, which is exactly what
+      // happened to the ACBM Partners account: it accepted, the password worked, and every partner-scoped
+      // query returned FALSE because nothing had ever written this column.
+      await c.query(
+        `UPDATE users
+            SET password_hash = $1, name = $2, invite_token = NULL, joined_at = $3,
+                invited_products = NULL,
+                partner_id = COALESCE(invited_partner_id, partner_id),
+                invited_partner_id = NULL
+          WHERE id = $4`,
         [hash, name, new Date().toISOString(), user.id]);
       for (const product of chosen) {
         // granted_by is the super_admin who sent the invite, carried through from the row — so the
@@ -452,11 +463,42 @@ router.get('/users/:id/products', authMiddleware, superAdminOnly, async (req, re
 // ACCEPT. An invite that is never accepted, or is revoked, therefore leaves no grant behind.
 router.post('/users/invite', authMiddleware, superAdminOnly, async (req, res) => {
   try {
-    const { email, role, github_username, whatsapp_number, products } = req.body;
+    const { email, role, github_username, whatsapp_number, products, partner_id } = req.body;
     if (!email || !role) return res.status(400).json({ error: 'Email and role required' });
     const catalog = await getAllRoles();
     if (!catalog[role]) {
       return res.status(400).json({ error: `Unknown role "${role}". Valid roles: ${Object.keys(catalog).join(', ')}` });
+    }
+    // ── WHICH PARTNER THIS ACCOUNT BELONGS TO ────
+    //
+    // An EXTERNAL role with no partner_id is an account that can log in and see nothing:
+    // partnerScopeSql returns FALSE for exactly that combination, by design, because the only
+    // alternative is showing one partner every other partner's pipeline. That protection was intact
+    // and the invite had no way to say which partner — so the ACBM Partners account accepted, worked, and
+    // showed an empty board. Required for an external role now, rather than defaulting to
+    // something: a wrong partner_id leaks another partner's rows, which is worse than an error.
+    const extRole = isExternalRole(role);
+    let partnerId = null;
+    if (partner_id !== undefined && partner_id !== null && String(partner_id).trim() !== '') {
+      const n = parseInt(partner_id, 10);
+      if (!Number.isInteger(n)) return res.status(400).json({ error: 'partner_id must be an integer' });
+      const p = await query('SELECT id, name, status FROM partners WHERE id = $1', [n]);
+      if (!p.rows.length) return res.status(400).json({ error: `No partner with id ${n}` });
+      if (p.rows[0].status !== 'active') {
+        return res.status(400).json({ error: `Partner "${p.rows[0].name}" is ${p.rows[0].status}, not active` });
+      }
+      partnerId = n;
+    }
+    if (extRole && partnerId === null) {
+      const avail = (await query(`SELECT id, name FROM partners WHERE status = 'active' ORDER BY id`)).rows;
+      return res.status(400).json({
+        error: `Role "${role}" is an external role, so partner_id is required — without it the ` +
+               `account can log in but every partner-scoped query returns nothing. Active partners: ` +
+               (avail.map((p) => `${p.id}=${p.name}`).join(', ') || 'none — create one first'),
+      });
+    }
+    if (!extRole && partnerId !== null) {
+      return res.status(400).json({ error: `Role "${role}" is internal — do not set partner_id on staff, it would scope them to one partner's rows` });
     }
     // Products: validated against the map's own list. An unknown value is rejected rather than
     // dropped — silently ignoring it would produce an account that looks granted and is not.
@@ -477,9 +519,12 @@ router.post('/users/invite', authMiddleware, superAdminOnly, async (req, res) =>
     // agents actually check (src/lib/roles.js excludeExternalSql), so this is redundant by design: it
     // keeps the column truthful for the handful of older queries that filter on it, and it makes the
     // exclusion visible to anyone reading the row instead of only to anyone reading roles.js.
-    const external = isExternalRole(role);
-    await query('INSERT INTO users (id,email,name,role,github_username,whatsapp_number,invite_token,invited_at,invited_products,invited_by,excluded_from_scoring) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)',
-      [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, wa, inviteToken, new Date().toISOString(), chosen, req.user.id, external]);
+    const external = extRole;
+    // invited_partner_id, not partner_id: the link becomes real only on ACCEPT, the same rule the
+    // product grants follow. An invite that is never accepted must leave nothing behind that a
+    // scoping query could read.
+    await query('INSERT INTO users (id,email,name,role,github_username,whatsapp_number,invite_token,invited_at,invited_products,invited_by,excluded_from_scoring,invited_partner_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',
+      [id, email.toLowerCase(), email.split('@')[0], role, github_username || null, wa, inviteToken, new Date().toISOString(), chosen, req.user.id, external, partnerId]);
     // Logged plainly, because granting 'internal' to an outside account is the one mistake here that
     // does not announce itself.
     console.log(`[invite] ${req.user.email} invited ${email.toLowerCase()} as ${role} with products [${chosen.join(', ') || 'NONE'}]${chosen.includes('internal') ? ' ⚠ INCLUDES internal' : ''}`);
