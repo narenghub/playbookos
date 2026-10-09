@@ -89,6 +89,24 @@ async function main() {
     console.log('  ⚠ joined_at left NULL: there is no password on this account, so it cannot log in.');
     console.log('    Marking it Active would be a lie. Re-send the invite instead.');
   }
+  // ── A LIVE INVITE TOKEN ON AN ACCOUNT THAT ALREADY HAS A PASSWORD ────
+  //
+  // Found on the real account: password set, joined_at NULL, AND invite_token still present. That
+  // combination is a STANDING CREDENTIAL. /auth/accept-invite looks an account up by token and sets
+  // a password on it with no other check, so anyone holding that invite URL — a forwarded email, a
+  // mailing-list archive, a shared inbox — can reset the partner's password at any time. It is
+  // rate-limited, not authenticated.
+  //
+  // Once a password exists the invite is spent, so the token has no remaining purpose and clearing
+  // it cannot lock anybody out. accept-invite clears it on the path it owns; nothing cleared it on
+  // whatever path this account actually took.
+  const clearToken = !!(u.password_hash && u.invite_token);
+  if (clearToken) {
+    console.log('  invite_token STILL PRESENT alongside a password  →  will be CLEARED');
+    console.log('    That token is a live password-reset link for this account: accept-invite takes a');
+    console.log('    token and sets a password, with no other check. The invite is already spent, so');
+    console.log('    clearing it removes a standing credential and locks nobody out.');
+  }
   if (u.partner_id != null && u.partner_id !== pid) {
     console.log(`  ⚠ this account is ALREADY linked to partner ${u.partner_id}. Changing it moves which`);
     console.log('    partner\'s rows they can see. Make sure that is intended.');
@@ -132,14 +150,19 @@ async function main() {
   const joinedAt = willSetJoined ? new Date().toISOString() : null;
   const res = await query(
     `UPDATE users
-        SET partner_id = $1,
-            joined_at  = COALESCE(joined_at, $2)
+        SET partner_id   = $1,
+            joined_at    = COALESCE(joined_at, $2),
+            invite_token = CASE WHEN $4 THEN NULL ELSE invite_token END
       WHERE id = $3
-      RETURNING id, email, role, partner_id, joined_at`,
-    [pid, joinedAt, u.id]);
+      RETURNING id, email, role, partner_id, joined_at, (invite_token IS NULL) AS token_cleared`,
+    [pid, joinedAt, u.id, clearToken]);
 
   const after = res.rows[0];
   console.log(`\n  ✅ ${after.email}: partner_id=${after.partner_id}, joined_at=${after.joined_at}`);
+  if (clearToken) {
+    if (!after.token_cleared) throw new Error('the invite token was NOT cleared — it is still a live password-reset link');
+    console.log('  ✅ invite token cleared — that standing credential is gone');
+  }
 
   // Verify the one row we changed, and only that one.
   const check = (await query(
@@ -188,7 +211,8 @@ async function main() {
   let own = null;
   try {
     own = (await query(
-      `SELECT COUNT(*)::int n FROM outreach_prospects WHERE source_partner_id = $1`, [pid])).rows[0].n;
+      `SELECT COUNT(*)::int n FROM prospects WHERE product = 'sitenex' AND source_partner_id = $1`,
+      [pid])).rows[0].n;
   } catch (e) {
     console.log(`  ⚠ could not count their referred prospects: ${e.message}`);
   }

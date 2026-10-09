@@ -87,7 +87,7 @@ CREATE TABLE user_product_grants_log (
 -- column on prospects, which made the repair script's count query look correct here while it threw
 -- in production and had its error swallowed by a .catch() that returned 0. A fixture that models a
 -- column the real schema does not have is worse than no fixture.
-CREATE TABLE outreach_prospects (id BIGSERIAL PRIMARY KEY, source_partner_id INTEGER);
+CREATE TABLE prospects (id BIGSERIAL PRIMARY KEY, product TEXT, source_partner_id INTEGER);
 CREATE TABLE partner_territories (
   id SERIAL PRIMARY KEY, partner_id INTEGER REFERENCES partners(id),
   dimension TEXT, value TEXT, exclusive BOOLEAN DEFAULT FALSE, created_by TEXT);
@@ -99,6 +99,13 @@ INSERT INTO users (id, email, role, password_hash, joined_at, invited_products, 
 -- An account that already joined: its join date must never be overwritten.
 INSERT INTO users (id, email, role, password_hash, joined_at, invited_by)
   VALUES ('u-old', 'old@example.test', 'partner', 'hash', '2026-01-01T00:00:00.000Z', 'u-super');
+-- The live account's actual state: password set AND invite_token still present. That token is a
+-- standing password-reset link, because accept-invite takes a token and sets a password.
+INSERT INTO users (id, email, role, password_hash, joined_at, invite_token, invited_by)
+  VALUES ('u-tok', 'tok@example.test', 'partner', 'hash', NULL, 'live-token-1', 'u-super');
+-- And one legitimately still waiting: no password, token must SURVIVE or they cannot accept.
+INSERT INTO users (id, email, role, password_hash, joined_at, invite_token, invited_by)
+  VALUES ('u-pending', 'pending@example.test', 'partner', NULL, NULL, 'live-token-2', 'u-super');
 `;
 
 (async () => {
@@ -221,8 +228,8 @@ INSERT INTO users (id, email, role, password_hash, joined_at, invited_by)
     // column is a FAILURE here rather than a confident zero in front of the person waiting on it.
     try {
       await client.query(
-        `SELECT COUNT(*)::int n FROM outreach_prospects WHERE source_partner_id = $1`, [1]);
-      ok('the prospect count uses source_partner_id — the column that exists');
+        `SELECT COUNT(*)::int n FROM prospects WHERE product = 'sitenex' AND source_partner_id = $1`, [1]);
+      ok('the prospect count uses prospects.source_partner_id — the real table and column');
     } catch (e) {
       bad('the prospect count runs against the real schema', e.message);
     }
@@ -236,17 +243,46 @@ INSERT INTO users (id, email, role, password_hash, joined_at, invited_by)
     }
     // And prove the OLD query really was broken, so it cannot quietly come back.
     try {
-      await client.query(`SELECT COUNT(*) FROM outreach_prospects WHERE partner_id = $1`, [1]);
+      await client.query(`SELECT COUNT(*) FROM prospects WHERE partner_id = $1`, [1]);
       bad('prospects still have NO partner_id column',
         'the query SUCCEEDED — if prospects have grown a partner_id, the territory-scope decision ' +
         'about who owns a lead has changed and src/lib/products/territory-scope.js must be re-read');
     } catch (e) {
       if (/column .*partner_id.* does not exist/i.test(e.message)) {
-        ok('prospects have no partner_id — the old count was querying nothing, as suspected');
+        ok('prospects have no partner_id — ownership is not how a lead is scoped');
       } else {
         bad('the old query fails for the EXPECTED reason', e.message);
       }
     }
+
+    // ── THE TOKEN CLEAR. A live invite token on an account with a password is a credential. ────
+    const tokRes = await client.query(
+      `UPDATE users
+          SET partner_id   = $1,
+              joined_at    = COALESCE(joined_at, $2),
+              invite_token = CASE WHEN $4 THEN NULL ELSE invite_token END
+        WHERE id = $3
+        RETURNING (invite_token IS NULL) AS token_cleared`,
+      [1, new Date().toISOString(), 'u-tok', true]);
+    if (!tokRes.rows.length) bad('the token-clearing UPDATE found its row', 'no row returned');
+    else if (!tokRes.rows[0].token_cleared) {
+      bad('a live invite token is cleared when a password already exists',
+        'it survived — accept-invite looks an account up BY TOKEN and sets a password with no other ' +
+        'check, so that URL stays a password-reset link for this account');
+    } else ok('a live invite token is cleared once a password exists — no standing credential left');
+
+    // And an account still legitimately waiting on its invite must KEEP its token.
+    const keepRes = await client.query(
+      `UPDATE users
+          SET partner_id   = $1,
+              joined_at    = COALESCE(joined_at, $2),
+              invite_token = CASE WHEN $4 THEN NULL ELSE invite_token END
+        WHERE id = $3
+        RETURNING invite_token`,
+      [1, null, 'u-pending', false]);
+    if (keepRes.rows[0].invite_token !== 'live-token-2') {
+      bad('an UNACCEPTED invite keeps its token', 'clearing it would lock that person out of accepting');
+    } else ok('an unaccepted invite keeps its token — clearing it would lock them out');
 
     // Replay: the script may be run twice by someone unsure whether it worked.
     await client.query(UPDATE, [1, new Date().toISOString(), 'u-partner']);

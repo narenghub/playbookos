@@ -120,10 +120,15 @@ async function main() {
     }
   } catch (e) { console.log(`  could not read (${e.message})`); }
 
+  // The table is `prospects`, with a `product` column — NOT `outreach_prospects`, which does not
+  // exist. The first version of this guessed the name from a module called `outreach` and reported
+  // "could not read (relation does not exist)" on the live database. That honest failure is the
+  // whole point of having removed the .catch() that used to turn it into a confident zero.
   console.log('\nsitenex PROSPECTS — scoped by TERRITORY, not ownership:');
   try {
     const rows = (await query(
-      `SELECT source_partner_id, COUNT(*)::int n FROM outreach_prospects GROUP BY 1 ORDER BY 1 NULLS FIRST`)).rows;
+      `SELECT source_partner_id, COUNT(*)::int n FROM prospects
+        WHERE product = 'sitenex' GROUP BY 1 ORDER BY 1 NULLS FIRST`)).rows;
     if (!rows.length) console.log('  no rows at all');
     for (const r of rows) {
       const who = r.source_partner_id == null
