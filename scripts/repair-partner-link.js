@@ -121,13 +121,22 @@ async function main() {
   if (!EXECUTE) { console.log('\n  DRY RUN — nothing written. Add --execute.'); return; }
 
   // By id, one row, explicitly. Never by role, domain or pattern.
+  //
+  // COALESCE with a parameter, NOT `CASE WHEN $2 THEN NOW() ELSE joined_at END`. That version
+  // failed on the live database with "CASE types text and timestamp with time zone cannot be
+  // matched": users.joined_at is TEXT — /auth/accept-invite writes new Date().toISOString() into
+  // it — so NOW() in the other branch is a type mismatch Postgres refuses. Passing the timestamp as
+  // an ISO string, the same shape accept-invite uses, keeps both sides text and keeps the two
+  // routes writing the same format. COALESCE also expresses the intent more directly: set it only
+  // if it is not already set, never overwrite a real join date.
+  const joinedAt = willSetJoined ? new Date().toISOString() : null;
   const res = await query(
     `UPDATE users
         SET partner_id = $1,
-            joined_at = CASE WHEN $2 THEN NOW() ELSE joined_at END
+            joined_at  = COALESCE(joined_at, $2)
       WHERE id = $3
       RETURNING id, email, role, partner_id, joined_at`,
-    [pid, !!willSetJoined, u.id]);
+    [pid, joinedAt, u.id]);
 
   const after = res.rows[0];
   console.log(`\n  ✅ ${after.email}: partner_id=${after.partner_id}, joined_at=${after.joined_at}`);

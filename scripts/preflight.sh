@@ -38,6 +38,10 @@ step "molecule search runs on Postgres" node scripts/check-molecule-search-sql.j
 # numeric cast — every one of those parses and then fails. It also asserts the RANKING, because the
 # score decides which booth gets walked to first on a two-day floor.
 step "sponsor ranking runs on Postgres" node scripts/check-sponsor-rank-sql.js
+# A one-off ops script is where a type mismatch bites hardest: it runs once, under pressure, against
+# production. `joined_at = CASE WHEN $2 THEN NOW() ELSE joined_at END` passed node --check and the
+# whole unit suite, then failed on the live database because joined_at is TEXT.
+step "partner repair SQL runs on Postgres" node scripts/check-partner-repair-sql.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
