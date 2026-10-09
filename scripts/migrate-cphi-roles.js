@@ -56,6 +56,15 @@ async function migrate() {
     ALTER TABLE cphi_exhibitor_matches
       ADD COLUMN IF NOT EXISTS role      TEXT NOT NULL DEFAULT 'supplier',
       ADD COLUMN IF NOT EXISTS role_note TEXT,
+      -- SCOPE is a DEMAND floor, so what makes a row worth walking to is its trial activity, not
+      -- the molecule count that ranks a CPHI supplier. Nullable: a row seeded from an exhibitor
+      -- list has no trial data, and 0 would read as "runs no trials" rather than "we do not know".
+      ADD COLUMN IF NOT EXISTS studies_count  INTEGER,
+      ADD COLUMN IF NOT EXISTS patients_count INTEGER,
+      -- For a CRO row: the sponsors whose trials it runs, from clinical_studies.collaborators.
+      -- JSON text rather than a join table — it is display-only, read whole, and never queried by
+      -- sponsor, so a table would be ceremony.
+      ADD COLUMN IF NOT EXISTS sponsors       TEXT,
       ADD COLUMN IF NOT EXISTS market    TEXT;
   `);
 

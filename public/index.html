@@ -5200,6 +5200,8 @@ pages['scope-europe'] = async function(reuse) {
                 ${r.booth ? `<span style="font-size:11px;font-family:ui-monospace,Menlo,monospace;background:#0972d3;color:#fff;padding:1px 6px;margin-left:5px">${seEsc(r.booth)}</span>` : ''}
                 ${!r.exhibiting ? '<span style="font-size:11px;color:var(--text-muted);margin-left:5px">not exhibiting</span>' : ''}
               </div>
+              ${r.studies_count != null ? `<div style="font-size:12px;margin-top:2px;font-variant-numeric:tabular-nums">
+                <b>${r.studies_count}</b> stud${r.studies_count === 1 ? 'y' : 'ies'}${r.patients_count ? ` · <b>${Number(r.patients_count).toLocaleString()}</b> patients` : ''}${r.molecules_covered ? ` · <span style="color:#1D9E75;font-weight:700">${r.molecules_covered} quotable</span>` : ''}</div>` : ''}
               ${r.role_note ? `<div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;line-height:1.4">${seEsc(r.role_note)}</div>` : ''}
               ${r.meeting_note ? `<div style="font-size:11.5px;color:#1D9E75;margin-top:2px">Note: ${seEsc(r.meeting_note)}</div>` : ''}
             </div>

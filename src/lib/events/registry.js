@@ -68,17 +68,19 @@ const EVENTS = [
     kind: 'demand',
     roles: [
       { key: 'abiozen',  label: 'Abiozen', basis: 'demand',
-        note: 'Runs clinical trials, so it buys molecules and the QC testing around them. Ranked by the studies we can see it sponsoring.' },
-      // NOT 'demand', deliberately. Ranking this tab by trial volume would rank the wrong thing:
-      // the companies on SCOPE's sponsor list are mostly eClinical PLATFORMS — Medidata, Suvoda,
-      // Viedoc, Florence, CRIO, Zelta — which are AROS's competitors, not its customers. A score
-      // over a competitor map is a number that means nothing, and a full-looking list that converts
-      // at zero is worse than a short honest one. The real AROS buyers are clinical ops teams among
-      // the 800 attendees, and that list is not published.
-      { key: 'aros',     label: 'AROS',    basis: 'none',
-        note: 'Mostly AROS COMPETITORS, not prospects — the eClinical platforms exhibiting here sell into the same budget. Treat this as a competitor map: no ranking signal, so the list is alphabetical. The real buyers are clinical ops teams among the attendees, which SCOPE does not publish.' },
+        note: 'Buys molecules and the QC testing around them. The CRO/CDMO names are on the floor; the sponsors behind them are attendees, and each row carries the studies and patients it is running so the opening line is theirs, not ours.' },
+      // AROS is the Autonomous Regulatory Operating System — regulatory and compliance tracking.
+      // Its buyers are therefore SPONSOR COMPANIES, who carry the FDA regulatory file for their own
+      // trials. An earlier version of this seeded the 25 eClinical platforms exhibiting at SCOPE,
+      // which was wrong twice over: they are competitors, and they are not who carries a regulatory
+      // burden. `demand` is right here because trial volume IS the compliance surface.
+      { key: 'aros',     label: 'AROS',    basis: 'demand',
+        note: 'Sponsor companies that carry their own FDA regulatory and compliance file. More trials, more countries and later phase means more compliance surface — which is the pitch and also the ranking. Not the eClinical platforms exhibiting here: those are competitors.' },
+      // EMPLOYMENT agencies — firms that place people into jobs — not patient-recruitment firms,
+      // which enrol patients into trials. Adjacent words, different business, and seeding the second
+      // kind here filled the tab with 16 companies that would never buy a recruiting OS.
       { key: 'linkable', label: 'LinkAble', basis: 'none',
-        note: 'Recruiting agencies and site networks who would buy the LinkAble platform. We hold no ranking signal for these yet, so the list is alphabetical — working it is what turns it into a ranking.' },
+        note: 'Staffing and employment agencies that would subscribe to the recruiting OS — find client companies, their open jobs, and matching candidates. SCOPE is a clinical-operations conference, so very few are exhibiting: a short list here is the honest answer, and this tab is worked from the attendee list rather than the floor. No ranking signal, so it is alphabetical. The sponsors and CROs on the other tabs are LinkAble\'s DEMAND side — they have the jobs — not its subscribers.' },
     ],
   },
 ];

@@ -200,6 +200,27 @@ test('an empty tab says it is missing data, not an empty floor', async () => {
   assert.ok(/missing data, not an empty floor/i.test(out));
 });
 
+test('a sponsor row shows the studies and patients it is running', async () => {
+  // What Naresh asked for: the sponsor behind the CRO, with how many studies and how many
+  // patients. That line is what makes the first sentence at a booth theirs rather than ours.
+  const { out } = await render(response({
+    items: [{ id: '20', holder: 'Takeda', exhibiting: false, booth: null, role: 'abiozen',
+              role_note: 'Sponsor · 12 studies, 5 recruiting', met_in_person: false,
+              linkedin_connected: false, contact_count: 0,
+              studies_count: 12, patients_count: 4200, molecules_covered: 3 }],
+  }));
+  assert.ok(/12<\/b> studies/.test(out), 'the study count is missing');
+  assert.ok(/4,200<\/b> patients/.test(out), 'the patient count must be present and thousands-separated');
+  assert.ok(/3 quotable/.test(out), 'how many of their molecules we can quote must show');
+});
+
+test('a row with no trial data shows no counts rather than zeros', async () => {
+  // studies_count is nullable on purpose: 0 reads as "runs no trials", null as "we do not know",
+  // and an exhibitor row seeded from a sponsor list genuinely does not know.
+  const { out } = await render(response());
+  assert.ok(!/<b>0<\/b> stud/.test(out), 'a null study count rendered as zero');
+});
+
 test('a row with no booth is marked not exhibiting rather than left ambiguous', async () => {
   const { out } = await render(response());
   assert.ok(/not exhibiting/.test(out));
