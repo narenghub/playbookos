@@ -6,8 +6,9 @@
 // — and a page that throws renders nothing at all, with an empty container and no server trace.
 // That is the outage this whole class of test exists because of.
 //
-// Same vm approach as src/lib/cphi/page-renders.test.js, including its brace-counting extractor's
-// line-comment skip: an apostrophe in a prose comment otherwise opens a string that never closes.
+// The page is a WORKING list, not a report: mark met, connect on LinkedIn, capture the card, follow
+// up next week. All three tabs read the same exhibitor rows for exactly that reason — every one of
+// those actions needs a row id. So these tests are mostly about whether the loop is intact.
 const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
@@ -17,10 +18,9 @@ const vm = require('vm');
 const ROOT = path.join(__dirname, '../../..');
 const HTML = fs.readFileSync(path.join(ROOT, 'public/index.html'), 'utf8');
 
-function extractPage(name) {
-  const needle = `pages['${name}'] = async function`;
-  const start = HTML.indexOf(needle);
-  assert.ok(start >= 0, `${needle} not found — did the page get renamed?`);
+function extractFn(decl) {
+  const start = HTML.indexOf(decl);
+  assert.ok(start >= 0, `${decl} not found — did it get renamed?`);
   const open = HTML.indexOf('{', HTML.indexOf(')', start));
   let depth = 0, i = open, inStr = null, prev = '';
   for (; i < HTML.length; i++) {
@@ -28,6 +28,8 @@ function extractPage(name) {
     if (inStr) {
       if (ch === inStr && prev !== '\\') inStr = null;
     } else if (ch === '/' && HTML[i + 1] === '/') {
+      // SKIP LINE COMMENTS. An apostrophe in prose otherwise opens a string that never closes, the
+      // brace depth desyncs, and every test here fails while the page is perfectly fine.
       const nl = HTML.indexOf('\n', i);
       if (nl < 0) break;
       i = nl; prev = ''; continue;
@@ -37,59 +39,39 @@ function extractPage(name) {
     else if (ch === '}') { depth--; if (!depth) break; }
     prev = prev === '\\' ? '' : ch;
   }
-  assert.ok(depth === 0, 'braces never balanced — extraction is wrong, not the page');
+  assert.ok(depth === 0, `braces never balanced for ${decl} — extraction is wrong, not the page`);
   return HTML.slice(HTML.indexOf('(', start), i + 1);
 }
 
-// Shaped like the real /sponsors response: ranked, with molecules.
-function rankedResponse(over = {}) {
+// Shaped like the real /events/:slug/exhibitors response.
+function response(over = {}) {
   return Object.assign({
     event: { slug: 'scope-europe-2026', name: 'SCOPE Europe 2026', city: 'Barcelona',
              starts: '2026-10-13', ends: '2026-10-14' },
     role: 'abiozen', role_label: 'Abiozen',
     role_note: 'Runs clinical trials, so it buys molecules and the QC testing around them.',
-    basis: 'demand', ranked: true, count: 2, on_floor: 1, exhibitor_list_loaded: true,
+    basis: 'demand', ranked: false,
+    count: 2, on_floor: 1, met: 1, connected: 0, cards: 1,
     items: [
-      { sponsor: 'Takeda Development Center Americas, Inc.', studies: 2, ph3: 1, ph2: 1,
-        recruiting: 2, patients: 520, score: '28.04', molecules: 2, sourceable: 2, unsourced: 0,
-        molecule_list: [{ molecule: 'Cabazitaxel', sourceable: true, has_dmf: false, has_price: true },
-                        { molecule: 'Leuprolide Acetate', sourceable: true, has_dmf: true, has_price: false }],
-        exhibiting: true, booth: 'P14', hall: 'Exhibit Hall', exhibitor_name: 'Takeda',
-        match_tier: 'prefix', review_status: 'entity_review' },
-      { sponsor: 'Novo Nordisk A/S', studies: 3, ph3: 2, ph2: 0, recruiting: 2, patients: 1740,
-        score: '22.48', molecules: 2, sourceable: 0, unsourced: 2,
-        molecule_list: [{ molecule: 'Semaglutide', sourceable: false, has_dmf: false, has_price: false }],
-        exhibiting: false, booth: null, hall: null, exhibitor_name: null,
-        match_tier: null, review_status: null },
-    ],
-  }, over);
-}
-
-// Shaped like the real /exhibitors response: worked, alphabetical, no ranking.
-function workedResponse(over = {}) {
-  return Object.assign({
-    event: { slug: 'scope-europe-2026', name: 'SCOPE Europe 2026', city: 'Barcelona',
-             starts: '2026-10-13', ends: '2026-10-14' },
-    role: 'aros', role_label: 'AROS',
-    role_note: 'Mostly AROS COMPETITORS, not prospects — no ranking signal, so the list is alphabetical.',
-    basis: 'none', ranked: false, count: 2, on_floor: 2,
-    items: [
-      { id: '1', holder: 'Medidata', exhibitor_name: 'Medidata', exhibiting: true, booth: null,
-        hall: 'Exhibit Hall', match_tier: 'exact', review_status: 'entity_review',
-        role: 'aros', role_note: 'premier sponsor · COMPETITOR. The incumbent EDC/clinical cloud.' },
-      { id: '2', holder: 'Suvoda', exhibitor_name: 'Suvoda', exhibiting: true, booth: null,
-        hall: 'Exhibit Hall', match_tier: 'exact', review_status: 'entity_review',
-        role: 'aros', role_note: 'corporate sponsor · COMPETITOR. IRT/RTSM and eConsent.' },
+      { id: '11', holder: 'Thermo Fisher', exhibitor_name: 'Thermo Fisher', exhibiting: true,
+        booth: 'P14', hall: 'Exhibit Hall', match_tier: 'exact', review_status: 'entity_review',
+        role: 'abiozen', role_note: 'corporate sponsor · CDMO and analytical services.',
+        met_in_person: false, linkedin_connected: false, meeting_note: null, contact_count: 0 },
+      { id: '12', holder: 'Fortrea', exhibitor_name: 'Fortrea', exhibiting: false,
+        booth: null, hall: null, match_tier: 'exact', review_status: 'entity_review',
+        role: 'abiozen', role_note: 'premier sponsor · Global CRO.',
+        met_in_person: true, linkedin_connected: false, meeting_note: 'Wants a QC quote',
+        contact_count: 1 },
     ],
   }, over);
 }
 
 async function render(res, stateOver = {}) {
   const written = [];
-  const el = () => ({
+  const el = (id) => ({
     set innerHTML(v) { written.push(v); },
     get innerHTML() { return written[written.length - 1] || ''; },
-    scrollIntoView() {}, value: '', style: {}, focus() {},
+    scrollIntoView() {}, value: (stateOver.__inputs || {})[id] || '', style: {}, focus() {},
     addEventListener() {}, querySelector: () => null,
   });
   const sandbox = {
@@ -101,112 +83,145 @@ async function render(res, stateOver = {}) {
     parseInt, encodeURIComponent, alert: () => {},
   };
   const state = Object.assign({
-    slug: 'scope-europe-2026', role: res.role || 'abiozen', data: null, loading: false, openId: 0,
+    slug: 'scope-europe-2026', role: res.role || 'abiozen', data: null,
+    openId: 0, contacts: [], form: {}, formError: '', contactsLoading: false,
   }, stateOver);
   sandbox.window._seState = state;
   sandbox.pages = {};
   vm.createContext(sandbox);
-  // seEsc delegates to cmEsc, which is defined far earlier in the file. Provide it the same way.
-  vm.runInContext(`function seEsc(v){ return cmEsc(v); }
-    function seGate(row){
-      if (!row || row.review_status === 'confirmed') return '';
-      const t = row.match_tier;
-      if (t && t !== 'exact') return '<span>' + seEsc(t) + ' match — confirm the entity</span>';
-      return '<span>category unreviewed</span>';
-    }`, sandbox);
-  const src = extractPage('scope-europe');
-  vm.runInContext(`pages['scope-europe'] = async function ${src};`, sandbox);
+  vm.runInContext('function seEsc(v){ return cmEsc(v); }', sandbox);
+  vm.runInContext(`function seCardPanel ${extractFn('function seCardPanel(row)')}`, sandbox);
+  vm.runInContext(`pages['scope-europe'] = async function ${extractFn("pages['scope-europe'] = async function(reuse)")};`, sandbox);
   await sandbox.pages['scope-europe']();
-  return written.join('\n');
+  return { out: written.join('\n'), state, sandbox };
 }
 
-// ── IT RENDERS AT ALL ────
+// ── IT RENDERS, AND IT RENDERS THE LOOP ────
 
-test('the ranked tab renders without throwing', async () => {
-  const out = await render(rankedResponse());
-  assert.ok(out.length > 200, 'rendered almost nothing');
+test('the page renders without throwing', async () => {
+  const { out } = await render(response());
+  assert.ok(out.length > 300, 'rendered almost nothing');
   assert.ok(out.includes('SCOPE Europe 2026'));
   assert.ok(out.includes('Barcelona'));
 });
 
-test('the worked tab renders without throwing', async () => {
-  const out = await render(workedResponse(), { role: 'aros' });
-  assert.ok(out.includes('Medidata'));
-  assert.ok(out.includes('Suvoda'));
+test('every company row carries the three floor actions', async () => {
+  // Met, LinkedIn, card. This IS the CPHI format, and a row missing one of them is a row that
+  // cannot be worked at a booth.
+  const { out } = await render(response());
+  assert.ok(/seToggle\('11','met_in_person'/.test(out), 'no Met toggle');
+  assert.ok(/seToggle\('11','linkedin_connected'/.test(out), 'no LinkedIn toggle');
+  assert.ok(/seCards\('11'\)/.test(out), 'no card capture');
 });
+
+test('a toggle sends the OPPOSITE of the current state', async () => {
+  // Thermo Fisher has met_in_person false, Fortrea true. A button that always sends true cannot
+  // undo a mis-tap, and mis-taps happen on a phone between booths.
+  const { out } = await render(response());
+  assert.ok(/seToggle\('11','met_in_person',true\)/.test(out), 'an unmet row must offer to set true');
+  assert.ok(/seToggle\('12','met_in_person',false\)/.test(out), 'a met row must offer to set false');
+});
+
+test('a met company is visually distinct and sorts as done', async () => {
+  const { out } = await render(response());
+  assert.ok(out.includes('✓ Met'), 'a met row must read as met');
+  assert.ok(/Wants a QC quote/.test(out), 'the meeting note must be visible');
+});
+
+test('the card count shows when cards exist and invites one when none do', async () => {
+  const { out } = await render(response());
+  assert.ok(/1 card/.test(out), 'a company with a card must show the count');
+  assert.ok(/\+ Card/.test(out), 'a company with none must invite one');
+});
+
+test('the summary counts progress, not ranking', async () => {
+  const { out } = await render(response());
+  for (const label of ['Companies', 'On floor', 'Met', 'LinkedIn', 'Cards']) {
+    assert.ok(out.includes(label), `the ${label} stat is missing`);
+  }
+});
+
+test('there is NO hall filter', async () => {
+  // One hall at SCOPE. A filter that can only ever return everything is a control that teaches
+  // the user it does nothing.
+  const { out } = await render(response());
+  assert.ok(!/hall.*<select|<select[^>]*hall/i.test(out), 'a hall filter crept back in');
+  assert.ok(/one hall/i.test(out), 'the page should say why there is no hall filter');
+});
+
+// ── THE CARD DRAWER ────
+
+test('opening a company shows the capture form', async () => {
+  const { out } = await render(response(), { openId: '11' });
+  for (const id of ['se-name', 'se-title', 'se-email', 'se-phone', 'se-note']) {
+    assert.ok(out.includes(id), `the ${id} field is missing`);
+  }
+  assert.ok(/seSaveCard\('11'\)/.test(out), 'no save handler');
+});
+
+test('the drawer lists cards already captured for that company only', async () => {
+  const { out } = await render(response(), {
+    openId: '12',
+    contacts: [
+      { exhibitor_match_id: '12', name: 'Ana Ruiz', title: 'BD Director', email: 'ana@example.com' },
+      { exhibitor_match_id: '99', name: 'Someone Else', title: 'Wrong company' },
+    ],
+  });
+  assert.ok(out.includes('Ana Ruiz'), 'the matching card is missing');
+  assert.ok(!out.includes('Someone Else'), 'a card from another company leaked into this drawer');
+});
+
+test('the drawer says a save also marks them met', async () => {
+  // Otherwise it is a surprise, and a surprise in a progress counter reads as a bug.
+  const { out } = await render(response(), { openId: '11' });
+  assert.ok(/also marks them met/i.test(out));
+});
+
+test('a half-typed card is preserved so a failed save loses nothing', async () => {
+  const { out } = await render(response(), {
+    openId: '11', form: { name: 'Ana Ruiz', email: 'ana@example.com' }, formError: 'name and company are required',
+  });
+  assert.ok(out.includes('Ana Ruiz'), 'the typed name was dropped on re-render');
+  assert.ok(out.includes('ana@example.com'));
+  assert.ok(out.includes('name and company are required'), 'the error must be shown');
+});
+
+// ── FAILURE SHAPES ────
 
 test('an API error renders a message, not a blank page', async () => {
   // API() resolves with {error} rather than throwing. A page that only try/catches shows nothing.
-  const out = await render({ error: 'tier required' });
-  assert.ok(out.includes('tier required'), 'the error text must reach the page');
-  assert.ok(out.includes('SCOPE Europe'), 'and the page must still identify itself');
+  const { out } = await render({ error: 'tier required' });
+  assert.ok(out.includes('tier required'));
+  assert.ok(out.includes('SCOPE Europe'), 'the page must still identify itself');
 });
 
-test('an empty list says why it is empty', async () => {
-  const ranked = await render(rankedResponse({ items: [], count: 0, on_floor: 0 }));
-  assert.ok(/statement about our data/i.test(ranked),
-    'an empty ranked tab must distinguish "our data is thin" from "the floor is empty"');
-  const worked = await render(workedResponse({ items: [], count: 0 }), { role: 'aros' });
-  assert.ok(/worked from the exhibitor list|fills when the list is seeded/i.test(worked));
-});
-
-// ── THE THINGS THE PAGE MUST NOT OVERSTATE ────
-
-test('a sponsor we can supply shows WHICH molecules, not just a score', async () => {
-  const out = await render(rankedResponse());
-  assert.ok(out.includes('Leuprolide Acetate'), 'the molecule is the sentence said at the booth');
-  assert.ok(out.includes('Cabazitaxel'));
-  assert.ok(/We can quote 2 of 2/.test(out), 'quotable count must be explicit');
-});
-
-test('a sponsor we cannot supply says so instead of showing a bare score', async () => {
-  const out = await render(rankedResponse());
-  assert.ok(/None of its .* molecule/i.test(out),
-    'Novo Nordisk has nothing quotable and the page must say that, not just rank it lower');
-});
-
-test('a prefix match is shown as needing entity confirmation', async () => {
-  // "Takeda Development Center Americas, Inc." matched a stand reading "Takeda". Right stand,
-  // possibly wrong legal entity — fine for a conversation, not for a contract.
-  const out = await render(rankedResponse());
-  assert.ok(/prefix match/.test(out), 'the match tier must be visible on the row');
-  assert.ok(/confirm the entity/i.test(out));
-});
-
-test('a sponsor absent from the exhibitor list is marked absent, not omitted', async () => {
-  const out = await render(rankedResponse());
-  assert.ok(out.includes('Novo Nordisk A/S'), 'a high-ranking non-exhibitor must still appear');
-  assert.ok(/not on the exhibitor list/.test(out));
-});
-
-test('the competitor note reaches the page', async () => {
-  const out = await render(workedResponse(), { role: 'aros' });
-  assert.ok(/COMPETITOR/.test(out),
-    'the AROS tab is a competitor map and must not read as a prospect list');
-});
-
-test('a missing exhibitor list is stated, so an empty floor column is not read as an empty floor', async () => {
-  const out = await render(rankedResponse({ exhibitor_list_loaded: false, on_floor: 0 }));
+test('an empty tab says it is missing data, not an empty floor', async () => {
+  const { out } = await render(response({ items: [], count: 0, on_floor: 0, met: 0, connected: 0, cards: 0 }));
   assert.ok(/missing data, not an empty floor/i.test(out));
+});
+
+test('a row with no booth is marked not exhibiting rather than left ambiguous', async () => {
+  const { out } = await render(response());
+  assert.ok(/not exhibiting/.test(out));
 });
 
 // ── HANDLERS MUST BE REACHABLE FROM AN INLINE onclick ────
 
 test('every onclick the page emits names a function assigned to window', async () => {
-  const out = await render(rankedResponse());
+  const { out } = await render(response(), { openId: '11' });
   const names = [...out.matchAll(/onclick="([a-zA-Z_$][\w$]*)\(/g)].map((m) => m[1]);
   assert.ok(names.length, 'the page emitted no handlers at all');
   for (const n of new Set(names)) {
     // Annex B hoists a plain `function` out of a block but NOT an `async function`, so these are
     // assigned as window.<name> = ... . A block-scoped one throws ReferenceError on click and does
     // nothing visible, which is indistinguishable from a dead button.
-    const assigned = new RegExp('window\\.' + n + '\\s*=').test(HTML);
-    assert.ok(assigned, `onclick calls ${n}() but nothing assigns window.${n}`);
+    assert.ok(new RegExp('window\\.' + n + '\\s*=').test(HTML),
+      `onclick calls ${n}() but nothing assigns window.${n}`);
   }
 });
 
-test('the three role tabs are all present and switchable', async () => {
-  const out = await render(rankedResponse());
+test('the three role tabs are present and switchable', async () => {
+  const { out } = await render(response());
   for (const label of ['Abiozen', 'AROS', 'LinkAble']) {
     assert.ok(out.includes(label), `the ${label} tab is missing`);
   }
@@ -218,23 +233,19 @@ test('the three role tabs are all present and switchable', async () => {
 // ── THE COUNTDOWN IS COMPUTED, NOT WRITTEN DOWN ────
 
 test('the days-until figure comes from the event dates, not a literal', async () => {
-  // A hardcoded "in 4 days" is wrong tomorrow. Render with dates far in the future and assert the
-  // page does not claim the real event's distance.
-  const far = rankedResponse({
+  const { out } = await render(response({
     event: { slug: 'x', name: 'SCOPE Europe 2026', city: 'Barcelona',
              starts: '2099-01-10', ends: '2099-01-11' },
-  });
-  const out = await render(far);
+  }));
   assert.ok(/in \d+ days/.test(out), 'no countdown rendered');
   const n = Number(/in (\d+) days/.exec(out)[1]);
-  assert.ok(n > 10000, `countdown reads ${n} days for a 2099 event — it is not computed from the dates`);
+  assert.ok(n > 10000, `countdown reads ${n} days for a 2099 event — it is not computed`);
 });
 
 test('a finished event says finished rather than a negative number', async () => {
-  const past = rankedResponse({
+  const { out } = await render(response({
     event: { slug: 'x', name: 'CPHI Milan 2026', city: 'Milan',
              starts: '2026-10-06', ends: '2026-10-08' },
-  });
-  const out = await render(past);
+  }));
   assert.ok(!/in -\d+ days/.test(out), 'a past event must not render "in -3 days"');
 });

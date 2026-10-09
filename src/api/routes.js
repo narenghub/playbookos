@@ -5080,6 +5080,101 @@ router.get('/events', authMiddleware, requireAnyTier('intelligence', 'procuremen
   });
 });
 
+// ── THE FLOOR WORKFLOW, FOR ANY EVENT ────────────────────────────────────────
+//
+// Meet them → mark met → capture the card → follow up next week. That is the loop the CPHI page was
+// built around and it is the whole reason the page is useful rather than decorative. These three
+// routes are the CPHI ones with the event unhardcoded; `cphi_exhibitor_contacts` is already
+// partitioned by event_slug, so nothing migrates.
+//
+// `next()` on an unknown slug, for the same reason as the routes above: these patterns shadow the
+// literal /events/cphi/* routes below.
+
+// GET /events/:slug/contacts[?exhibitor_id=] — the cards captured at this event.
+router.get('/events/:slug/contacts', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res, next) => {
+  try {
+    const slug = String(req.params.slug || '');
+    if (!eventRegistry.isEvent(slug)) return next();
+    const params = [slug];
+    let where = 'c.event_slug = $1';
+    if (req.query.exhibitor_id) { params.push(req.query.exhibitor_id); where += ` AND c.exhibitor_match_id = $${params.length}`; }
+    const items = (await query(
+      `SELECT c.*, x.holder, x.booth, x.hall, x.role
+         FROM cphi_exhibitor_contacts c
+         LEFT JOIN cphi_exhibitor_matches x ON x.id = c.exhibitor_match_id
+        WHERE ${where}
+        ORDER BY c.company, c.name`, params)).rows;
+    res.json({ event: slug, count: items.length, items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /events/:slug/contacts — add a card. Typed on a phone between booths, so only name and
+// company are required: a half-captured card beats a lost one, and the rest can be filled in later.
+router.post('/events/:slug/contacts', authMiddleware, requireTier('intelligence'), async (req, res, next) => {
+  try {
+    const slug = String(req.params.slug || '');
+    if (!eventRegistry.isEvent(slug)) return next();
+    const b = req.body || {};
+    if (!b.name || !b.company) return res.status(400).json({ error: 'name and company are required' });
+    const norm = cphiNormalizeCompany(b.company);
+    const row = (await query(
+      `INSERT INTO cphi_exhibitor_contacts
+         (event_slug, exhibitor_match_id, company, company_normalized, name, title, email,
+          phone_mobile, phone_office, website, address, source, note, linkedin_connected)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       ON CONFLICT (event_slug, company_normalized, lower(name)) DO UPDATE
+          SET exhibitor_match_id = COALESCE(EXCLUDED.exhibitor_match_id, cphi_exhibitor_contacts.exhibitor_match_id),
+              title = COALESCE(EXCLUDED.title, cphi_exhibitor_contacts.title),
+              email = COALESCE(EXCLUDED.email, cphi_exhibitor_contacts.email),
+              phone_mobile = COALESCE(EXCLUDED.phone_mobile, cphi_exhibitor_contacts.phone_mobile),
+              phone_office = COALESCE(EXCLUDED.phone_office, cphi_exhibitor_contacts.phone_office),
+              website = COALESCE(EXCLUDED.website, cphi_exhibitor_contacts.website),
+              address = COALESCE(EXCLUDED.address, cphi_exhibitor_contacts.address),
+              note = COALESCE(EXCLUDED.note, cphi_exhibitor_contacts.note),
+              linkedin_connected = EXCLUDED.linkedin_connected,
+              updated_at = NOW()
+       RETURNING *`,
+      [slug, b.exhibitor_match_id || null, b.company, norm, b.name, b.title || null,
+       b.email || null, b.phone_mobile || null, b.phone_office || null, b.website || null,
+       b.address || null, b.source || 'typed', b.note || null, !!b.linkedin_connected])).rows[0];
+
+    // Capturing a card IS meeting them. Saves a second tap at a booth, where taps are the scarce
+    // resource — the CPHI page learned this the hard way.
+    if (b.exhibitor_match_id) {
+      await query(
+        `UPDATE cphi_exhibitor_matches
+            SET met_in_person = TRUE, met_at = COALESCE(met_at, NOW())
+          WHERE id = $1`, [b.exhibitor_match_id]);
+    }
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT /events/:slug/exhibitors/:id/meeting — met in person / connected on LinkedIn / a note.
+// Scoped by slug AND id so a row cannot be updated through the wrong event's URL.
+router.put('/events/:slug/exhibitors/:id/meeting', authMiddleware, requireTier('intelligence'), async (req, res, next) => {
+  try {
+    const slug = String(req.params.slug || '');
+    if (!eventRegistry.isEvent(slug)) return next();
+    const { met_in_person, linkedin_connected, meeting_note } = req.body || {};
+    if (met_in_person === undefined && linkedin_connected === undefined && meeting_note === undefined) {
+      return res.status(400).json({ error: 'nothing to update' });
+    }
+    const upd = await query(
+      `UPDATE cphi_exhibitor_matches
+          SET met_in_person = COALESCE($1, met_in_person),
+              met_at = CASE WHEN $1 IS TRUE AND met_at IS NULL THEN NOW() ELSE met_at END,
+              linkedin_connected = COALESCE($2, linkedin_connected),
+              meeting_note = COALESCE($3, meeting_note)
+        WHERE id = $4 AND event_slug = $5 RETURNING *`,
+      [met_in_person === undefined ? null : !!met_in_person,
+       linkedin_connected === undefined ? null : !!linkedin_connected,
+       meeting_note === undefined ? null : meeting_note, req.params.id, slug]);
+    if (!upd.rows.length) return res.status(404).json({ error: 'Not found' });
+    res.json(upd.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /events/:slug/exhibitors?role=linkable — the worked list for a role with no ranking signal.
 //
 // Separate from /sponsors because the two answer different questions. /sponsors ranks OUR OWN trial
@@ -5100,12 +5195,21 @@ router.get('/events/:slug/exhibitors', authMiddleware, requireAnyTier('intellige
     const role = eventRegistry.isRoleOf(slug, req.query.role) ? req.query.role : eventRegistry.rolesFor(slug)[0];
     const def = eventRegistry.roleDef(slug, role);
 
+    // The contact count rides along so a row can show "2 cards" without the page fetching per row —
+    // 47 rows would be 47 requests, which at a venue on hotel wifi is a page that never finishes.
     const items = (await query(
-      `SELECT id, holder, exhibitor_name, exhibiting, booth, hall, match_tier, review_status,
-              entity_note, role, role_note, market, checked_at, met_in_person, linkedin_connected
-         FROM cphi_exhibitor_matches
-        WHERE event_slug = $1 AND role = $2
-        ORDER BY holder`, [slug, role])).rows;
+      `SELECT x.id, x.holder, x.exhibitor_name, x.exhibiting, x.booth, x.hall, x.match_tier,
+              x.review_status, x.entity_note, x.role, x.role_note, x.market, x.checked_at,
+              x.met_in_person, x.met_at, x.linkedin_connected, x.meeting_note,
+              x.molecules_covered,
+              COUNT(c.id)::int AS contact_count
+         FROM cphi_exhibitor_matches x
+         LEFT JOIN cphi_exhibitor_contacts c ON c.exhibitor_match_id = x.id
+        WHERE x.event_slug = $1 AND x.role = $2
+        GROUP BY x.id
+        -- Whoever has not been visited yet sorts first: on a one-hall floor the list is a walking
+        -- order, not a ranking, and a row already met is done.
+        ORDER BY (x.met_in_person IS TRUE), x.holder`, [slug, role])).rows;
 
     res.json({
       event: { slug: ev.slug, name: ev.name, city: ev.city, starts: ev.starts, ends: ev.ends },
@@ -5114,6 +5218,9 @@ router.get('/events/:slug/exhibitors', authMiddleware, requireAnyTier('intellige
       ranked: false,
       count: items.length,
       on_floor: items.filter((r) => r.exhibiting).length,
+      met: items.filter((r) => r.met_in_person).length,
+      connected: items.filter((r) => r.linkedin_connected).length,
+      cards: items.reduce((n, r) => n + (r.contact_count || 0), 0),
       items,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }

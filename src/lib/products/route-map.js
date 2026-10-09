@@ -213,6 +213,9 @@ const ABIOZEN = [
   // are listed concretely because an unclassified route 403s for every user under enforce — which
   // is exactly what the completeness guard caught when these were first mounted.
   'GET /api/events', 'GET /api/events/:slug/sponsors', 'GET /api/events/:slug/exhibitors',
+  // The floor workflow: mark met, connect on LinkedIn, capture the card, follow up next week.
+  'GET /api/events/:slug/contacts', 'POST /api/events/:slug/contacts',
+  'PUT /api/events/:slug/exhibitors/:id/meeting',
   'POST /api/algolia/sync', 'POST /api/algolia/sync-abiozen',
   // Abiozen's own store SEO and LinkedIn presence
   'GET /api/seo/*', 'POST /api/seo/*',

@@ -5122,14 +5122,10 @@ pages['scope-europe'] = async function(reuse) {
     res = st.data;
   } else {
     c.innerHTML = '<p style="color:#888;padding:20px">Loading SCOPE Europe…</p>';
-    const qs = new URLSearchParams();
-    qs.set('role', st.role);
-    // Two endpoints, because the tabs answer different questions. `abiozen` RANKS our own trial
-    // data and treats the floor as a bonus — the buyers are attendees, not exhibitors. `aros` and
-    // `linkable` ARE the published exhibitor list, so they read it directly and stay alphabetical.
-    const path = st.role === 'abiozen' ? '/sponsors' : '/exhibitors';
-    // API() resolves with {error} rather than throwing on 4xx/5xx — see CLAUDE.md. Checked, not caught.
-    res = await API('/events/' + encodeURIComponent(st.slug) + path + '?' + qs.toString())
+    // ONE endpoint for all three tabs. The CPHI format is a WORKING list — mark met, connect,
+    // capture the card — and every one of those needs a row id, so every tab reads the same
+    // exhibitor rows. The role-specific intelligence decorates a row; it does not replace it.
+    res = await API('/events/' + encodeURIComponent(st.slug) + '/exhibitors?role=' + encodeURIComponent(st.role))
             .catch(e => ({ error: e.message }));
     if (res && res.error) {
       c.innerHTML = '<div class="card"><div class="card-title">SCOPE Europe 2026</div><p style="color:#dc2626">'
@@ -5142,13 +5138,10 @@ pages['scope-europe'] = async function(reuse) {
   const ev = res.event || {};
   const items = res.items || [];
 
-  // ── HOW MANY DAYS. The page opens on a countdown because a two-day floor four days out is a
-  // different object from a list you browse. Computed from the event's own dates, not hardcoded.
+  // Countdown from the event's own dates. A hardcoded "in 4 days" is wrong tomorrow.
   const today = new Date().toISOString().slice(0, 10);
   const days = Math.round((new Date(ev.starts + 'T00:00:00Z') - new Date(today + 'T00:00:00Z')) / 86400000);
-  const when = days > 1 ? `in ${days} days` : days === 1 ? 'tomorrow' : days === 0 ? 'today' : 'finished';
-
-  const tabs = (res.all_roles || st.roles || []).length ? (res.all_roles || st.roles) : null;
+  const when = days > 1 ? ('in ' + days + ' days') : days === 1 ? 'tomorrow' : days === 0 ? 'today' : 'finished';
 
   const header = `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap">
@@ -5157,101 +5150,189 @@ pages['scope-europe'] = async function(reuse) {
         <div style="font-size:12px;color:var(--text-muted);margin-top:3px">
           ${seEsc(ev.city || 'Barcelona')} · ${seEsc(ev.starts || '')} to ${seEsc(ev.ends || '')}
           <b style="color:${days >= 0 && days <= 4 ? '#8a5a00' : 'var(--text-muted)'}">· ${when}</b>
+          · one hall, so this list is a walking order
         </div>
       </div>
       <button onclick="seReload()" class="btn-outline btn-sm" style="font-size:12px">Refresh</button>
     </div>
   </div>`;
 
-  const ROLE_TABS = [
-    ['abiozen',  'Abiozen'],
-    ['aros',     'AROS'],
-    ['linkable', 'LinkAble'],
-  ];
+  const ROLE_TABS = [['abiozen','Abiozen'],['aros','AROS'],['linkable','LinkAble']];
   const tabRow = `<div class="card" style="display:flex;gap:6px;flex-wrap:wrap;padding:10px 12px">
     ${ROLE_TABS.map(([k, label]) => `<button onclick="seSetRole('${k}')"
         class="${st.role === k ? 'btn-primary' : 'btn-outline'} btn-sm"
         style="font-size:13px;padding:7px 13px">${label}</button>`).join('')}
   </div>`;
 
-  // The role's own note, straight from the registry. This is where a tab admits what it is.
   const noteCard = res.role_note ? `<div class="card" style="padding:11px 14px;background:var(--bg-subtle)">
     <div style="font-size:12.5px;line-height:1.5;color:var(--text-body)">${seEsc(res.role_note)}</div>
-    ${res.ranked === false && res.hint ? `<div style="font-size:11.5px;color:var(--text-muted);margin-top:5px">${seEsc(res.hint)}</div>` : ''}
   </div>` : '';
+
+  // The four numbers that say how the show is going. Progress, not ranking.
+  const stat = (label, val, color) => `<div style="flex:1;min-width:92px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;text-align:center">
+    <div style="font-size:20px;font-weight:800;color:${color || 'var(--text-body)'}">${val == null ? 0 : val}</div>
+    <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">${label}</div></div>`;
+  const summary = `<div class="card" style="display:flex;gap:9px;flex-wrap:wrap">
+    ${stat('Companies', res.count, '#0972d3')}
+    ${stat('On floor', res.on_floor, '#1B3A6B')}
+    ${stat('Met', res.met, '#1D9E75')}
+    ${stat('LinkedIn', res.connected, '#0a66c2')}
+    ${stat('Cards', res.cards, '#8a5a00')}
+  </div>`;
 
   let body;
   if (!items.length) {
     body = `<div class="card"><div style="padding:14px;font-size:13px;color:var(--text-muted)">
-      Nothing in this tab yet. ${res.ranked === false
-        ? 'This role is worked from the exhibitor list rather than computed, so it fills when the list is seeded.'
-        : 'No industry sponsor in our clinical_studies data met the threshold — which is a statement about our data, not about the floor.'}
+      Nothing in this tab yet. It fills when the list for this role is seeded — an empty tab is
+      missing data, not an empty floor.
     </div></div>`;
-  } else if (res.ranked) {
-    // ── THE RANKED TAB. Molecules first: the score picks the booth, the molecules are the sentence.
+  } else {
     body = `<div class="card" style="padding:0">
-      <div style="padding:11px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap">
-        <div><b>${items.length}</b> ${items.length === 1 ? 'company' : 'companies'} running trials${res.on_floor ? `, <b style="color:#0972d3">${res.on_floor}</b> of them exhibiting` : ''}</div>
-        ${res.exhibitor_list_loaded === false
-          ? '<span style="font-size:11.5px;color:#8a5a00">No exhibitor list loaded for this role — an empty floor column is missing data, not an empty floor.</span>'
-          : ''}
-      </div>
       ${items.map(r => {
-        const mols = r.molecule_list || [];
-        const quotable = mols.filter(m => m.sourceable);
-        return `<div style="border-top:1px solid var(--border);padding:12px 14px">
-          <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
-            <div style="font-weight:700;font-size:14.5px">${seEsc(r.sponsor)}</div>
-            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-              ${r.exhibiting
-                ? `<span style="font-size:11px;font-family:ui-monospace,Menlo,monospace;background:#0972d3;color:#fff;padding:1px 6px">${r.booth ? seEsc(r.booth) : 'ON FLOOR'}</span>`
-                : '<span style="font-size:11px;color:var(--text-muted)">not on the exhibitor list</span>'}
-              ${r.exhibiting ? seGate(r) : ''}
+        const open = String(st.openId) === String(r.id);
+        const met = r.met_in_person === true;
+        const li = r.linkedin_connected === true;
+        const n = r.contact_count || 0;
+        return `<div style="border-top:1px solid var(--border);padding:11px 13px;${met ? 'background:#1D9E750a' : ''}">
+          <div style="display:flex;justify-content:space-between;gap:9px;flex-wrap:wrap;align-items:center">
+            <div style="min-width:0">
+              <div style="font-weight:650;font-size:14px">${seEsc(r.holder || r.exhibitor_name)}
+                ${r.booth ? `<span style="font-size:11px;font-family:ui-monospace,Menlo,monospace;background:#0972d3;color:#fff;padding:1px 6px;margin-left:5px">${seEsc(r.booth)}</span>` : ''}
+                ${!r.exhibiting ? '<span style="font-size:11px;color:var(--text-muted);margin-left:5px">not exhibiting</span>' : ''}
+              </div>
+              ${r.role_note ? `<div style="font-size:11.5px;color:var(--text-muted);margin-top:2px;line-height:1.4">${seEsc(r.role_note)}</div>` : ''}
+              ${r.meeting_note ? `<div style="font-size:11.5px;color:#1D9E75;margin-top:2px">Note: ${seEsc(r.meeting_note)}</div>` : ''}
+            </div>
+            <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">
+              <button onclick="seToggle('${r.id}','met_in_person',${met ? 'false' : 'true'})"
+                class="${met ? 'btn-primary' : 'btn-outline'} btn-sm"
+                style="font-size:11.5px;padding:5px 9px;white-space:nowrap">${met ? '✓ Met' : 'Met'}</button>
+              <button onclick="seToggle('${r.id}','linkedin_connected',${li ? 'false' : 'true'})"
+                class="${li ? 'btn-primary' : 'btn-outline'} btn-sm"
+                style="font-size:11.5px;padding:5px 9px;white-space:nowrap">${li ? '✓ LinkedIn' : 'LinkedIn'}</button>
+              <button onclick="seCards('${r.id}')" class="btn-outline btn-sm"
+                style="font-size:11.5px;padding:5px 9px;white-space:nowrap">${n ? n + (n === 1 ? ' card' : ' cards') : '+ Card'}</button>
             </div>
           </div>
-          <div style="font-size:12.5px;color:var(--text-muted);margin-top:3px;font-variant-numeric:tabular-nums">
-            ${r.studies} stud${r.studies === 1 ? 'y' : 'ies'}${r.recruiting ? ` · ${r.recruiting} recruiting` : ''}${r.ph3 ? ` · ${r.ph3} Phase 3` : ''}${r.patients ? ` · ${Number(r.patients).toLocaleString()} patients` : ''}
-          </div>
-          ${quotable.length
-            ? `<div style="font-size:12.5px;margin-top:6px">
-                 <span style="color:#1D9E75;font-weight:700">We can quote ${quotable.length} of ${mols.length}:</span>
-                 ${quotable.map(m => `<span style="display:inline-block;margin:2px 5px 2px 0;padding:1px 6px;border:1px solid #1D9E7533;background:#1D9E750f">${seEsc(m.molecule)}${m.has_price ? ' · priced' : ' · DMF'}</span>`).join('')}
-               </div>`
-            : `<div style="font-size:12.5px;margin-top:6px;color:#8a5a00">None of its ${mols.length} molecule${mols.length === 1 ? '' : 's'} is quotable yet — demand we cannot serve.</div>`}
-          ${r.unsourced ? `<div style="font-size:11px;color:var(--text-muted);margin-top:3px">+${r.unsourced} molecule${r.unsourced === 1 ? '' : 's'} with no DMF and no price on file.</div>` : ''}
+          ${open ? seCardPanel(r) : ''}
         </div>`;
       }).join('')}
     </div>`;
-  } else {
-    // ── THE WORKED TABS. Alphabetical, because there is no ranking signal and pretending otherwise
-    // is the exact mistake the CPHI buyer tab made.
-    body = `<div class="card" style="padding:0">
-      <div style="padding:11px 14px;border-bottom:1px solid var(--border)">
-        <b>${items.length}</b> ${items.length === 1 ? 'company' : 'companies'} on the published sponsor list
-      </div>
-      ${items.map(r => `<div style="border-top:1px solid var(--border);padding:11px 14px">
-        <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:baseline">
-          <div style="font-weight:650;font-size:14px">${seEsc(r.holder || r.sponsor)}</div>
-          ${seGate(r)}
-        </div>
-        ${r.role_note ? `<div style="font-size:12px;color:var(--text-muted);margin-top:3px;line-height:1.45">${seEsc(r.role_note)}</div>` : ''}
-      </div>`).join('')}
-    </div>`;
   }
 
-  c.innerHTML = header + tabRow + noteCard + body;
+  c.innerHTML = header + tabRow + noteCard + summary + body;
 };
 
-window.seSetRole = function(role){
+// The contact drawer. Rendered from state the loader already fetched, so opening it is instant —
+// at a venue a second request per tap is a tap that appears to do nothing.
+function seCardPanel(row) {
+  const st = window._seState;
+  const list = (st.contacts || []).filter(x => String(x.exhibitor_match_id) === String(row.id));
+  const f = st.form || {};
+  return `<div style="margin-top:9px;padding:10px 11px;border:1px solid var(--border);border-radius:8px;background:var(--bg-subtle)">
+    ${st.contactsLoading ? '<div style="font-size:12px;color:var(--text-muted)">Loading cards…</div>' : ''}
+    ${list.length ? list.map(x => `<div style="font-size:12.5px;padding:5px 0;border-bottom:1px solid var(--border)">
+        <b>${seEsc(x.name)}</b>${x.title ? ' · ' + seEsc(x.title) : ''}
+        ${x.email ? `<div style="color:var(--text-muted);font-size:11.5px">${seEsc(x.email)}</div>` : ''}
+        ${x.phone_mobile || x.phone_office ? `<div style="color:var(--text-muted);font-size:11.5px">${seEsc(x.phone_mobile || x.phone_office)}</div>` : ''}
+        ${x.note ? `<div style="color:var(--text-muted);font-size:11.5px">${seEsc(x.note)}</div>` : ''}
+      </div>`).join('')
+      : (st.contactsLoading ? '' : '<div style="font-size:12px;color:var(--text-muted);margin-bottom:7px">No cards captured for this company yet.</div>')}
+    <div style="margin-top:8px;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px">
+      <input id="se-name"  placeholder="Name *"  value="${seEsc(f.name || '')}"  style="font-size:13px;padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text-body)">
+      <input id="se-title" placeholder="Title"   value="${seEsc(f.title || '')}" style="font-size:13px;padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text-body)">
+      <input id="se-email" placeholder="Email"   value="${seEsc(f.email || '')}" autocapitalize="off" style="font-size:13px;padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text-body)">
+      <input id="se-phone" placeholder="Phone"   value="${seEsc(f.phone || '')}" style="font-size:13px;padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text-body)">
+      <input id="se-note"  placeholder="Note — what they asked for" value="${seEsc(f.note || '')}" style="font-size:13px;padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text-body)">
+    </div>
+    <div style="margin-top:7px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <button onclick="seSaveCard('${row.id}')" class="btn-primary btn-sm" style="font-size:12.5px;padding:7px 13px">Save card</button>
+      <button onclick="seCards(0)" class="btn-outline btn-sm" style="font-size:12.5px;padding:7px 11px">Close</button>
+      <span style="font-size:11px;color:var(--text-muted)">Saving a card also marks them met.</span>
+      ${st.formError ? `<span style="font-size:11.5px;color:#dc2626">${seEsc(st.formError)}</span>` : ''}
+    </div>
+  </div>`;
+}
+
+window.seSetRole = async function(role){
   const st = window._seState;
   if (st.role === role) return;
-  st.role = role; st.data = null; st.openId = 0;
-  pages['scope-europe']();
+  st.role = role; st.data = null; st.openId = 0; st.formError = '';
+  await pages['scope-europe']();
 };
 
-window.seReload = function(){
+window.seReload = async function(){
   window._seState.data = null;
-  pages['scope-europe']();
+  await pages['scope-europe']();
+};
+
+// Mark met / connected. Optimistic on the row we hold, then re-read: a toggle that waits for the
+// network before it changes colour reads as a dead button on venue wifi.
+window.seToggle = async function(id, field, value){
+  const st = window._seState;
+  const row = (st.data && st.data.items || []).find(r => String(r.id) === String(id));
+  if (row) {
+    row[field] = value === true || value === 'true';
+    if (st.data) {
+      st.data.met = st.data.items.filter(r => r.met_in_person).length;
+      st.data.connected = st.data.items.filter(r => r.linkedin_connected).length;
+    }
+    await pages['scope-europe'](true);
+  }
+  const body = {}; body[field] = value === true || value === 'true';
+  const r = await API('/events/' + encodeURIComponent(st.slug) + '/exhibitors/' + encodeURIComponent(id) + '/meeting',
+    { method: 'PUT', body: JSON.stringify(body) }).catch(e => ({ error: e.message }));
+  // API() resolves with {error} on 4xx/5xx rather than throwing, so the optimistic change has to be
+  // put back by hand when the write did not land.
+  if (r && r.error) {
+    if (row) { row[field] = !body[field]; await pages['scope-europe'](true); }
+    alert('Could not save that: ' + r.error);
+  }
+};
+
+window.seCards = async function(id){
+  const st = window._seState;
+  st.formError = '';
+  if (!id || String(st.openId) === String(id)) { st.openId = 0; await pages['scope-europe'](true); return; }
+  st.openId = id;
+  st.form = {};
+  st.contactsLoading = true;
+  await pages['scope-europe'](true);
+  const r = await API('/events/' + encodeURIComponent(st.slug) + '/contacts?exhibitor_id=' + encodeURIComponent(id))
+              .catch(e => ({ error: e.message }));
+  st.contactsLoading = false;
+  if (r && !r.error) {
+    const keep = (st.contacts || []).filter(x => String(x.exhibitor_match_id) !== String(id));
+    st.contacts = keep.concat(r.items || []);
+  }
+  await pages['scope-europe'](true);
+};
+
+window.seSaveCard = async function(id){
+  const st = window._seState;
+  const g = (k) => { const el = document.getElementById(k); return el ? String(el.value || '').trim() : ''; };
+  const name = g('se-name');
+  const row = (st.data && st.data.items || []).find(r => String(r.id) === String(id));
+  if (!name) { st.formError = 'A name is required.'; await pages['scope-europe'](true); return; }
+  if (!row) { st.formError = 'That company is no longer on screen — refresh.'; await pages['scope-europe'](true); return; }
+  // Held so a failed save does not lose what was typed between booths.
+  st.form = { name, title: g('se-title'), email: g('se-email'), phone: g('se-phone'), note: g('se-note') };
+  st.formError = '';
+  const r = await API('/events/' + encodeURIComponent(st.slug) + '/contacts', {
+    method: 'POST',
+    body: JSON.stringify({
+      exhibitor_match_id: id,
+      company: row.holder || row.exhibitor_name,
+      name, title: st.form.title || null, email: st.form.email || null,
+      phone_mobile: st.form.phone || null, note: st.form.note || null, source: 'typed',
+    }),
+  }).catch(e => ({ error: e.message }));
+  if (r && r.error) { st.formError = r.error; await pages['scope-europe'](true); return; }
+  st.form = {};
+  // The POST marks them met server-side, so re-read rather than guessing the new counts.
+  st.data = null; st.contacts = (st.contacts || []).filter(x => String(x.exhibitor_match_id) !== String(id));
+  await pages['scope-europe']();
+  await window.seCards(id);
 };
 
 pages['prospects'] = async function() {
