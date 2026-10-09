@@ -38,7 +38,16 @@
 const { initDB, query } = require('../src/lib/db');
 
 // MUST MATCH CPHI_ROLES in src/api/routes.js.
-const ROLES = ['supplier', 'platform_partner', 'qc_lab', 'buyer'];
+// Read from the event registry, which is now the single place a role is defined. Adding a role to
+// an event there and re-running this migration are the only two steps — before this, the list lived
+// here AND in routes.js AND as literals in the front end, and they drifted.
+//
+// SCOPE Europe 2026 adds abiozen / aros / linkable. Those are a different KIND of role: CPHI's four
+// say what we want FROM a company, SCOPE's three say what the company buys FROM US. Same table,
+// because it is already partitioned by event_slug and keyed on (event_slug, role,
+// holder_normalized) — see the note at the top of src/lib/events/registry.js about the name.
+const { allRoleKeys } = require('../src/lib/events/registry');
+const ROLES = allRoleKeys();
 
 async function migrate() {
   await initDB();

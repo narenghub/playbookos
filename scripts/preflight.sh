@@ -34,6 +34,10 @@ step "classic nav parity" node scripts/verify-classic-nav-parity.js
 # a query RUNS — `column "name" does not exist` shipped past all of them once. SKIPs cleanly (exit 0)
 # where no server is available, so this never blocks a laptop without Postgres installed.
 step "molecule search runs on Postgres" node scripts/check-molecule-search-sql.js
+# The SCOPE target list. Four CTEs, a json_agg with an ORDER BY inside it, a SUM(DISTINCT) and a
+# numeric cast — every one of those parses and then fails. It also asserts the RANKING, because the
+# score decides which booth gets walked to first on a two-day floor.
+step "sponsor ranking runs on Postgres" node scripts/check-sponsor-rank-sql.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2

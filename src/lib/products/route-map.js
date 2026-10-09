@@ -204,6 +204,15 @@ const ABIOZEN = [
   'GET /api/events/cphi/exhibitors/:id/molecules', 'GET /api/events/cphi/molecule-search',
   'GET /api/events/cphi/contacts', 'POST /api/events/cphi/contacts',
   'PUT /api/events/cphi/exhibitors/:id/meeting', 'POST /api/events/cphi/contacts/:id/email',
+  // The generalised event surface. `GET /api/events` is the registry (which events exist, their
+  // roles); `/api/events/:slug/sponsors` is the SCOPE Europe target list, ranked from
+  // clinical_studies. Abiozen, like the rest of the event work: the trip is an Abiozen trip, and
+  // the AROS and LinkAble tabs are prospect lists held in PlayNexa, not the AROS product itself.
+  //
+  // These must be listed BEFORE any broader '/api/events/*' pattern would be considered, and they
+  // are listed concretely because an unclassified route 403s for every user under enforce — which
+  // is exactly what the completeness guard caught when these were first mounted.
+  'GET /api/events', 'GET /api/events/:slug/sponsors',
   'POST /api/algolia/sync', 'POST /api/algolia/sync-abiozen',
   // Abiozen's own store SEO and LinkedIn presence
   'GET /api/seo/*', 'POST /api/seo/*',

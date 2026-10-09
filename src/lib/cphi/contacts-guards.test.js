@@ -298,8 +298,24 @@ test('the role list is the SAME list in the route, the migration and the lookup'
   };
 
   const routeRoles = list(ROUTES, 'CPHI_ROLES');
-  const migRoles = list(MIG, 'ROLES');
-  assert.deepEqual(routeRoles, migRoles, 'CPHI_ROLES and the migration ROLES must be identical');
+
+  // The migration no longer declares its own list: it DERIVES it from src/lib/events/registry.js,
+  // which is now the single definition of what a role is. That is a stronger guarantee than two
+  // literals matching, so the guard asserts the derivation rather than the equality — but it has to
+  // assert it, or a future edit re-hardcoding the list here would restore the original drift.
+  assert.match(MIG, /require\('\.\.\/src\/lib\/events\/registry'\)/,
+    'the migration must take its roles from the event registry, not re-declare them');
+  assert.match(MIG, /const ROLES = allRoleKeys\(\)/,
+    'the migration must use allRoleKeys(), so a role added to an event is covered by the CHECK');
+
+  // And the registry must still contain exactly CPHI's four for CPHI, so widening it for a second
+  // event cannot quietly change what the CPHI page accepts.
+  const { rolesFor, allRoleKeys } = require('../events/registry');
+  assert.deepEqual(rolesFor('cphi-milan-2026'), routeRoles,
+    'CPHI_ROLES in routes.js must match the registry for the CPHI event');
+  for (const r of routeRoles) {
+    assert.ok(allRoleKeys().includes(r), `${r} is accepted by the route but not covered by the CHECK`);
+  }
 
   // The CHECK constraint is built FROM that list rather than hand-typed, so this asserts it is not
   // quietly re-hardcoded later.

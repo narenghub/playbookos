@@ -5064,6 +5064,79 @@ const { expandMolecule, moleculeLikeSql, likePatterns } = require('../lib/molecu
 const { mergeMoleculeRows } = require('../lib/molecules/merge');
 const CPHI_REVIEW_STATUSES =['unreviewed', 'auto_confirmed', 'entity_review', 'confirmed', 'rejected'];
 
+// ── Event Agent: THE SECOND EVENT ─────────────────────────────────────────────
+// src/lib/events/registry.js owns what an event and a role are. These routes are additive: the
+// /events/cphi/* routes below are untouched, because CPHI is a live page being used and a
+// generalisation that breaks it to look tidier is a bad trade four days before another show.
+const eventRegistry = require('../lib/events/registry');
+const { sponsorRankSql, attachExhibitors, onlyBuyers } = require('../lib/events/sponsor-rank');
+
+// GET /events — what events exist, their roles and which one a page should open on.
+// Free: a read of a constant. No DB, no LLM.
+router.get('/events', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res) => {
+  res.json({
+    events: eventRegistry.publicEvents(),
+    default_slug: eventRegistry.defaultEventSlug(new Date()),
+  });
+});
+
+// GET /events/:slug/sponsors?role=abiozen — the SCOPE Europe target list.
+//
+// This is the route the CPHI `buyer` tab should have been. That tab asked the FDA establishment
+// register "who is registered to make something", got dairies, poultry and hand sanitizer, and
+// returned 13 on-floor out of 60 with zero exact matches. This asks clinical_studies "who is
+// developing a drug", which is what `sponsor_type = 'INDUSTRY'` means by definition.
+//
+// Ranking, exclusions and the show-floor tie-in all live in src/lib/events/sponsor-rank.js, which
+// explains why the score weights what it does. Free: reads our own tables only.
+router.get('/events/:slug/sponsors', authMiddleware, requireAnyTier('intelligence', 'procurement'), async (req, res) => {
+  try {
+    const slug = String(req.params.slug || '');
+    const ev = eventRegistry.getEvent(slug);
+    if (!ev) return res.status(404).json({ error: `Unknown event: ${slug}` });
+
+    const role = eventRegistry.isRoleOf(slug, req.query.role) ? req.query.role : eventRegistry.rolesFor(slug)[0];
+    const def = eventRegistry.roleDef(slug, role);
+    // A role whose basis is not 'demand' has no sponsor ranking to give. Say so explicitly rather
+    // than returning an empty list, which reads identically to "nobody qualifies".
+    if (!def || def.basis !== 'demand') {
+      return res.json({
+        event: { slug: ev.slug, name: ev.name, city: ev.city, starts: ev.starts, ends: ev.ends },
+        role, role_label: def ? def.label : role, role_note: def ? def.note : null,
+        basis: def ? def.basis : null, ranked: false, count: 0, items: [],
+        hint: 'This role has no ranking signal in our data yet — it is worked from the exhibitor list, not computed.',
+      });
+    }
+
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 300);
+    const minStudies = Math.max(parseInt(req.query.min_studies, 10) || 1, 1);
+
+    const ranked = (await query(sponsorRankSql({ limit, minStudies }))).rows;
+    // Drop government institutes and consortia that ClinicalTrials.gov classes INDUSTRY, THEN tie
+    // to the floor. Order matters: filtering after the match would leave a booth attached to a row
+    // that is about to be discarded.
+    const buyers = onlyBuyers(ranked);
+
+    const exhibitors = (await query(
+      `SELECT id, holder, holder_normalized, exhibitor_name, booth, hall, exhibiting
+         FROM cphi_exhibitor_matches WHERE event_slug = $1 AND role = $2`, [slug, role])).rows;
+
+    const items = attachExhibitors(buyers, exhibitors);
+    const onFloor = items.filter((r) => r.exhibiting).length;
+
+    res.json({
+      event: { slug: ev.slug, name: ev.name, city: ev.city, starts: ev.starts, ends: ev.ends },
+      role, role_label: def.label, role_note: def.note, basis: def.basis,
+      ranked: true,
+      count: items.length,
+      on_floor: onFloor,
+      // Stated plainly so the page can say it: an empty exhibitor table is not an empty floor.
+      exhibitor_list_loaded: exhibitors.length > 0,
+      items,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /events/cphi/exhibitors — the priority table, ranked by molecules covered.
 // Defaults to exhibiting-only because that is what the page opens on; pass exhibiting=false
 // for the "not on the floor" view or exhibiting=any for everything.
