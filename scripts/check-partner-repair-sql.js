@@ -172,6 +172,41 @@ INSERT INTO users (id, email, role, password_hash, joined_at, invited_by)
       bad('the grant is audited with its own source', JSON.stringify(logged));
     } else ok('audited as repair_partner_link — every route to a grant lands in one table');
 
+    // ── THE REVOKE, which runs against a live account and must not over-delete ────
+    await client.query(
+      `INSERT INTO user_products (user_id, product, granted_by) VALUES ($1,$2,$3)
+       ON CONFLICT (user_id, product) DO NOTHING`, ['u-partner', 'internal', 'u-super']);
+    await client.query(
+      `INSERT INTO user_products (user_id, product, granted_by) VALUES ($1,$2,$3)
+       ON CONFLICT (user_id, product) DO NOTHING`, ['u-old', 'internal', 'u-super']);
+
+    const del = await client.query(
+      `DELETE FROM user_products WHERE user_id = $1 AND product = $2`, ['u-partner', 'internal']);
+    if (del.rowCount !== 1) {
+      bad('the revoke deletes EXACTLY one row', `deleted ${del.rowCount} — by (user, product), never by pattern`);
+    } else ok('the revoke deletes exactly one row, by the (user, product) pair');
+
+    const other = (await client.query(
+      `SELECT COUNT(*)::int n FROM user_products WHERE user_id = $1 AND product = 'internal'`,
+      ['u-old'])).rows[0].n;
+    if (other !== 1) bad('another account holding the same product is untouched', `got ${other}`);
+    else ok('another account holding the same product is untouched');
+
+    const kept = (await client.query(
+      `SELECT product FROM user_products WHERE user_id = $1 ORDER BY product`, ['u-partner'])).rows.map((r) => r.product);
+    if (kept.join() !== 'sitenex') bad('the account keeps its other products', JSON.stringify(kept));
+    else ok('the account keeps its other products');
+
+    await client.query(
+      `INSERT INTO user_product_grants_log (user_id, user_email, product, action, actor_id, source)
+       VALUES ($1,$2,$3,'revoke',$4,'revoke_product_script')`,
+      ['u-partner', 'partner@example.test', 'internal', null]);
+    const revLog = (await client.query(
+      `SELECT action FROM user_product_grants_log WHERE user_id = $1 AND action = 'revoke'`,
+      ['u-partner'])).rows;
+    if (revLog.length !== 1) bad('a revocation is audited like a grant', JSON.stringify(revLog));
+    else ok('a revocation is audited too — the one event that must not be missing from the history');
+
     // Replay: the script may be run twice by someone unsure whether it worked.
     await client.query(UPDATE, [1, new Date().toISOString(), 'u-partner']);
     await client.query(
