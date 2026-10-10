@@ -42,6 +42,12 @@ step "sponsor ranking runs on Postgres" node scripts/check-sponsor-rank-sql.js
 # production. `joined_at = CASE WHEN $2 THEN NOW() ELSE joined_at END` passed node --check and the
 # whole unit suite, then failed on the live database because joined_at is TEXT.
 step "partner repair SQL runs on Postgres" node scripts/check-partner-repair-sql.js
+# The SCOPE QC tab. Twice — in two different scripts, a day apart, on the same table — a lab query
+# shipped whose ORDER BY terms were all constant, so it ran ALPHABETICALLY and led with API
+# manufacturers. Both versions were valid SQL returning sixty rows; what was wrong was WHICH sixty,
+# which only a query running against data can show. This check seeds a population rigged against the
+# alphabet, so a third collapse fails here rather than in Barcelona.
+step "SCOPE lab delegates run on Postgres" node scripts/check-lab-delegates-sql.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2

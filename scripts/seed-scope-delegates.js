@@ -39,6 +39,23 @@ const { isRoleOf } = require('../src/lib/events/registry');
 // `country <> 'USA'`, so 80 American hospitals were reported as non-US and stamped market='eu'
 // three days before a show in Barcelona. src/lib/events/country.js now owns both conventions.
 const { marketOfCountry, europeFirstSql, europeFirstParams } = require('../src/lib/events/country');
+// ── THE FIX I BUILT YESTERDAY AND THEN DID NOT USE ────
+//
+// The first version of the lab query ordered by `(region LIKE 'eu%') DESC, (contact_email IS NOT
+// NULL) DESC, name`. All 60 rows were EU with a contact, so both leading terms were CONSTANT and
+// the result was ALPHABETICAL: ACS Dobfar, Aesica, AGC Biologics, Ajinomoto, Albhades, Alexion.
+// That is the identical bug, on the identical table, that produced "2seventy bio" and three
+// numbered Québec companies in the CPHI lab lookup — and src/lib/labconnect/lab-shape.js exists
+// precisely because of it.
+//
+// Worse than the ordering: ACS Dobfar, Aesica, AGC Biologics, Ajinomoto Omnichem and Alexion are
+// API MANUFACTURERS and CDMOs, not analytical laboratories. The labs table is seeded from the FDA
+// establishment register, which does not distinguish "makes drugs" from "tests drugs" — the same
+// register, and the same failure, that filled the CPHI buyer tab with dairies and poultry farms.
+// looksLikeLabSql is the shape test that separates the two.
+// Both lab queries live in src/lib/events/lab-delegates.js so scripts/check-lab-delegates-sql.js
+// can execute the SHIPPED query rather than its own rebuild of it.
+const { labDelegateSql, labShapeAuditSql } = require('../src/lib/events/lab-delegates');
 
 const EVENT = 'scope-europe-2026';
 const EXECUTE = process.argv.includes('--execute');
@@ -72,20 +89,11 @@ const INSTITUTE_SQL = `
             name
    LIMIT ${TOP_INSTITUTES}`;
 
-// ── LABS: the LabConnect recruits ────
+// ── LABS: the QC Partners tab ────
 //
-// EU regions first (the show is in Barcelona), then anyone else with a contact. `status` matters:
-// a lab already 'active' in LabConnect is not a recruitment target, it is a partner — so those are
-// reported and NOT seeded as prospects.
-const LAB_SQL = `
-  SELECT name, city, country, region, status, contact_name, contact_email,
-         research_capable, gmp_capable
-    FROM labs
-   WHERE status NOT IN ('active', 'rejected')
-   ORDER BY (region LIKE 'eu%') DESC,
-            (contact_email IS NOT NULL) DESC,
-            name
-   LIMIT ${TOP_LABS}`;
+// The queries, and the reasoning behind the shape filter, are in src/lib/events/lab-delegates.js.
+const LAB_SQL = labDelegateSql(TOP_LABS);
+const LAB_SHAPE_AUDIT_SQL = labShapeAuditSql();
 
 const FACILITY_LABEL = {
   academic: 'Academic centre', hospital: 'Hospital',
@@ -123,6 +131,9 @@ async function main() {
   catch (e) { problems.push(`research_institutions: ${e.message}`); }
   try { labs = (await query(LAB_SQL)).rows; }
   catch (e) { problems.push(`labs: ${e.message}`); }
+  let labAudit = null;
+  try { labAudit = (await query(LAB_SHAPE_AUDIT_SQL)).rows[0]; }
+  catch (_) { /* the LAB_SQL failure above already says the table is unreadable */ }
 
   if (problems.length) {
     console.log('⚠ could not read a source table:\n');
@@ -232,10 +243,27 @@ async function main() {
                   `${i.contact_email ? '✉' : ' '} ${[i.city, i.country].filter(Boolean).join(', ')}`);
     }
   }
+  if (labAudit) {
+    const dropped = labAudit.eligible - labAudit.reads_like_a_lab;
+    console.log(`\n   the shape test, which is why this list is not alphabetical:`);
+    console.log(`      ${labAudit.eligible} labs eligible by status`);
+    console.log(`      ${labAudit.reads_like_a_lab} read like a testing business (${labAudit.eu_reads_like_a_lab} of those in an EU region)`);
+    console.log(`      ${dropped} dropped — the register does not distinguish "makes drugs" from`);
+    console.log(`      "tests drugs", so an unfiltered list leads with API makers and CDMOs`);
+    if (labAudit.reads_like_a_lab < TOP_LABS) {
+      console.log(`      ⚠ fewer than the ${TOP_LABS} asked for. That is the real supply, not a bug —`);
+      console.log(`        padding it back to 60 would put the CDMOs straight back on the tab.`);
+    }
+  }
   if (labs.length) {
     const eu = labs.filter((l) => l.region && /^eu/.test(l.region)).length;
     const withContact = labs.filter((l) => l.contact_email).length;
     console.log(`\n   labs: ${eu} in an EU region, ${withContact} with a contact on file`);
+    console.log(`   top 8 by lookup rank:`);
+    for (const l of labs.slice(0, 8)) {
+      console.log(`      ${String(l.name).slice(0, 44).padEnd(46)} ${l.contact_email ? '✉' : ' '} ` +
+                  `${[l.city, l.country].filter(Boolean).join(', ')}`);
+    }
     const distinctKeys = new Set(planned.filter((p) => p.role === 'qc_lab').map((p) => p.dedupeKey)).size;
     console.log(`   ${labs.length} labs → ${distinctKeys} distinct rows (city is part of a lab's identity,`);
     console.log(`   so each site keeps its own met flag and its own cards)`);

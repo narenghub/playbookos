@@ -85,3 +85,86 @@ test('the lab lookup asks about each COMPANY once, not each registered site', ()
   const outer = LOOK.indexOf('ORDER BY ${labLookupOrderSql()}');
   assert.ok(inner >= 0 && outer > inner, 'the priority ordering must be outside the dedupe');
 });
+
+// ── THE SAME BUG, THE SAME TABLE, A SECOND SCRIPT ───────────────────────────────
+//
+// This module was written on 2026-10-09 because the CPHI lab lookup ordered by terms that were all
+// constant and so ran alphabetically. On 2026-10-10 scripts/seed-scope-delegates.js did it again on
+// the same table — `(region LIKE 'eu%') DESC, (contact_email IS NOT NULL) DESC, name`, every row EU
+// with a contact, so the SCOPE QC tab was ACS Dobfar, Aesica, AGC Biologics, Ajinomoto, Albhades,
+// Alexion. These tests exist so a third script cannot.
+
+test('the SCOPE delegate query uses this module rather than its own ordering', () => {
+  const { labDelegateSql } = require('../events/lab-delegates');
+  const sql = labDelegateSql(60);
+
+  assert.match(sql, /ORDER BY \(region LIKE 'eu%'\) DESC/,
+    'the ordering must come from labLookupOrderSql, which leads with region');
+  assert.ok(/ORDER BY[\s\S]*LIKE '%LABORATO%'/.test(sql),
+    'the shape test must be part of the ordering, not just the filter');
+  assert.match(sql, /AND \(upper\(name\) LIKE/,
+    'the shape test must also be a WHERE clause — a CDMO on the QC tab is a wrong row, not a late one');
+  // The ordering that collapsed to alphabetical twice: region then contact_email with nothing
+  // between them. If those two ever become adjacent again, `name` decides the list.
+  assert.ok(!/\(region LIKE 'eu%'\) DESC,\s*\(contact_email IS NOT NULL\) DESC/.test(sql),
+    'region immediately followed by contact_email is the ordering that ran alphabetically twice');
+  // And `name` may only ever be the final tiebreak.
+  const order = sql.slice(sql.indexOf('ORDER BY'));
+  assert.ok(order.lastIndexOf('contact_email') < order.lastIndexOf('name'),
+    'name must be the last resort, after every real signal');
+});
+
+test('the seed script does not hand-write the lab SQL any more', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const SEED = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', 'scripts/seed-scope-delegates.js'), 'utf8');
+  assert.match(SEED, /labDelegateSql\(TOP_LABS\)/,
+    'the seed must call the shared builder so the checker executes the shipped query');
+  // A counting query over `labs` is fine — the one that reports how many are already partners.
+  // What must not come back is a hand-written SELECT that RANKS labs, which is how the identical
+  // bug arrived in a second script a day after it was fixed in the first.
+  assert.ok(!/FROM labs[\s\S]{0,400}ORDER BY/.test(SEED),
+    'a second hand-written lab ranking in this script is how the same bug arrived twice');
+});
+
+test('the firms that filled the broken list are rejected by the shape test', () => {
+  // Verbatim from the dry run that exposed it. Every one is an API manufacturer or a CDMO.
+  for (const name of [
+    'ACS Dobfar SpA', 'Aesica Pharmaceuticals GmbH', 'AGC Biologics SPA',
+    'Ajinomoto Omnichem', 'Alexion Pharma International Operations Limited',
+  ]) {
+    assert.ok(!looksLikeLab(name), `"${name}" is a manufacturer and must not read as a lab`);
+  }
+  // Albhades Provence is a genuine French analytical lab and must survive — the test separates the
+  // two kinds of row, it does not simply shorten the list.
+  assert.ok(looksLikeLab('Albhades Provence Laboratoire'), 'a real French lab must pass');
+});
+
+test('the big contract labs pass even though their names do not describe them', () => {
+  // Once the shape test became a WHERE clause, a miss here deleted the largest testing firms in
+  // Europe from the QC tab.
+  for (const name of [
+    'Eurofins Scientific SE', 'Intertek Group plc', 'Labcorp Early Development Laboratories',
+    'Nelson Labs Europe', 'bioMerieux SA', 'Charles River Laboratories Ireland Limited',
+  ]) {
+    assert.ok(looksLikeLab(name), `"${name}" is a contract testing business and must pass`);
+  }
+});
+
+test('clinical CROs are NOT labs — they belong on another tab', () => {
+  for (const name of ['ICON plc', 'Syneos Health', 'Parexel International', 'IQVIA RDS Ireland']) {
+    assert.ok(!looksLikeLab(name), `"${name}" is a clinical CRO, not an analytical laboratory`);
+  }
+});
+
+test('no brand token is short enough to match inside an unrelated word', () => {
+  const { LAB_BRAND_TOKENS, LAB_ALL_TOKENS } = require('./lab-shape');
+  for (const tok of LAB_BRAND_TOKENS) {
+    assert.ok(tok.length >= 4, `brand token "${tok}" is too short for a substring match`);
+  }
+  // SGS and ALS are deliberately absent: three letters cannot be matched as a substring safely.
+  assert.ok(!LAB_ALL_TOKENS.includes('SGS'));
+  assert.ok(!LAB_ALL_TOKENS.includes('ALS'));
+  assert.ok(!looksLikeLab('Pharmaceuticals Ltd'), 'a plain manufacturer must still be rejected');
+});

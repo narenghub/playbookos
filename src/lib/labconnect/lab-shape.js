@@ -57,9 +57,39 @@ const LAB_NAME_TOKENS = [
   'MICROBIOLOG',
 ];
 
+// ── THE FALSE NEGATIVES THE DESCRIBE-YOURSELF TEST CANNOT CATCH ──────────────
+//
+// The tokens above work because a firm selling analysis usually says so on the door. The exception
+// is the firms big enough not to have to: "Eurofins", "Intertek", "Labcorp" and "Nelson Labs" are
+// among the largest contract testing businesses in the world and only one of them ("Labs") trips a
+// token. When the shape test became a WHERE clause for the SCOPE QC tab rather than just an
+// ordering, each of those misses stopped being a demotion and became a deletion — so the brands
+// are named.
+//
+// Deliberately NOT here:
+//   · SGS, ALS — three letters. The substring approach that lets 'LABORATO' span four languages
+//     also makes a three-letter token match inside unrelated words, which is exactly how 'CRO'
+//     matched MICRO and CROWN. A short brand needs an anchored match, and a list of two is not
+//     worth a second matching strategy; they are missed, knowingly.
+//   · ICON, Syneos, Parexel, IQVIA — clinical CROs, not analytical laboratories. They run trials,
+//     which makes them a SCOPE lead on a different tab and a different conversation.
+const LAB_BRAND_TOKENS = [
+  'EUROFINS',
+  'INTERTEK',
+  'LABCORP',
+  'BUREAU VERITAS',
+  'CHARLES RIVER',   // Its testing arm is a genuine contract lab, whatever else the group does.
+  'NELSON LAB',
+  'MERIEUX NUTRISCIENCES',
+  'BIOMERIEUX',
+];
+
+/** Every name token the shape test uses: what a lab calls itself, plus the brands that need not. */
+const LAB_ALL_TOKENS = [...LAB_NAME_TOKENS, ...LAB_BRAND_TOKENS];
+
 /** SQL boolean: does this name column read like a testing business? */
 function looksLikeLabSql(col = 'name') {
-  return '(' + LAB_NAME_TOKENS.map(t => `upper(${col}) LIKE '%${t}%'`).join(' OR ') + ')';
+  return '(' + LAB_ALL_TOKENS.map(t => `upper(${col}) LIKE '%${t}%'`).join(' OR ') + ')';
 }
 
 /** SQL boolean: is this a registry-numbered company, whose registered name can never match? */
@@ -70,7 +100,7 @@ function numberedShellSql(col = 'name') {
 /** JS mirrors, so the ordering can be tested without a database. */
 function looksLikeLab(name) {
   const s = String(name || '').toUpperCase();
-  return LAB_NAME_TOKENS.some(t => s.includes(t));
+  return LAB_ALL_TOKENS.some(t => s.includes(t));
 }
 function isNumberedShell(name) { return /^[0-9]/.test(String(name || '')); }
 
@@ -92,6 +122,6 @@ function labLookupOrderSql() {
 }
 
 module.exports = {
-  LAB_NAME_TOKENS, looksLikeLabSql, numberedShellSql,
+  LAB_NAME_TOKENS, LAB_BRAND_TOKENS, LAB_ALL_TOKENS, looksLikeLabSql, numberedShellSql,
   looksLikeLab, isNumberedShell, labLookupOrderSql,
 };
