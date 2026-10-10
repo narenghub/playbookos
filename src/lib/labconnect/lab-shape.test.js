@@ -108,7 +108,7 @@ test('the SCOPE delegate query uses this module rather than its own ordering', (
     'the shape test must also be a WHERE clause — a CDMO on the QC tab is a wrong row, not a late one');
   assert.match(sql, /notes IS NULL/,
     "the register's own API-manufacturer flag must be respected; two versions dropped it");
-  assert.match(sql, /DISTINCT ON \(name_normalized, LOWER\(COALESCE\(city, ''\)\)\)/,
+  assert.match(sql, /DISTINCT ON \(name_normalized, LOWER\(COALESCE\(city, ''\)\)/,
     'three establishments of one firm in one city must not eat three slots');
   assert.match(sql, /sites DESC/,
     'site count is the only term that VARIES — without it the ordering collapses to the alphabet');
@@ -164,7 +164,7 @@ test('the seed script does not hand-write the lab SQL any more', () => {
   const path = require('path');
   const SEED = fs.readFileSync(
     path.join(__dirname, '..', '..', '..', 'scripts/seed-scope-delegates.js'), 'utf8');
-  assert.match(SEED, /labDelegateSql\(TOP_LABS\)/,
+  assert.match(SEED, /labDelegateSql\(TOP_LABS, MAX_PER_GROUP\)/,
     'the seed must call the shared builder so the checker executes the shipped query');
   // A counting query over `labs` is fine — the one that reports how many are already partners.
   // What must not come back is a hand-written SELECT that RANKS labs, which is how the identical
@@ -212,4 +212,32 @@ test('no brand token is short enough to match inside an unrelated word', () => {
   assert.ok(!LAB_ALL_TOKENS.includes('SGS'));
   assert.ok(!LAB_ALL_TOKENS.includes('ALS'));
   assert.ok(!looksLikeLab('Pharmaceuticals Ltd'), 'a plain manufacturer must still be rejected');
+});
+
+test('one corporate group is one booth', () => {
+  const { groupKey } = require('./lab-shape');
+  // Eurofins operates one stand. Nine legal entities must be one group, or the ranking — which
+  // rewards scale and a strong name, exactly what a large group has — hands it the whole list.
+  const ef = ['Eurofins Amatsi Analytics', 'Eurofins Biolab Srl',
+              'Eurofins BioPharma Product Testing Finland', 'Eurofins Pharma Quality Control'];
+  assert.strictEqual(new Set(ef.map(groupKey)).size, 1, 'all Eurofins entities are one group');
+  assert.strictEqual(groupKey('Charles River Laboratories Germany GmbH'), 'charles river');
+  // The two-word fallback must hold a multi-site firm together without merging unrelated ones.
+  assert.strictEqual(groupKey('Wessling Laboratorien Altenberge'), groupKey('Wessling Laboratorien GmbH'));
+  assert.notStrictEqual(groupKey('Wessling Laboratorien GmbH'), groupKey('Villani Analitica Srl'));
+  // A one-word name must not collapse into a shared key with every other one-word name.
+  assert.notStrictEqual(groupKey('Synlab'), groupKey('Tentamus'));
+});
+
+test('the delegate query caps any one group and keys identity on country too', () => {
+  const { labDelegateSql } = require('../events/lab-delegates');
+  const capped = labDelegateSql(60, 4);
+  assert.match(capped, /rank_in_group <= 4/, 'the per-group cap must be in the SQL');
+  assert.ok(capped.indexOf('rank_in_group') < capped.lastIndexOf('LIMIT'),
+    'the cap must run BEFORE the limit, or capping shrinks the list instead of redistributing it');
+  assert.match(labDelegateSql(60, 0), /^(?!.*rank_in_group <=).*$/s, '0 means no cap');
+  // Both Almac entities have a NULL city and differ only by country. A city-only identity dropped
+  // one of two separate legal entities.
+  assert.match(capped, /DISTINCT ON \(name_normalized, LOWER\(COALESCE\(city, ''\)\), UPPER\(COALESCE\(country, ''\)\)\)/,
+    'country must be part of the row identity');
 });

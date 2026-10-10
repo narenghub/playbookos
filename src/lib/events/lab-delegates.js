@@ -42,6 +42,19 @@
 //     had this signal and mislabelled it on screen as `contract_lab`; attempts (2) and (3) dropped
 //     it entirely. It is a filter here.
 //
+// ── AND THEN THE BEST GROUP CROWDED OUT THE REST ─────────────────────────────
+//
+// With the ordering finally working, the top 8 came back five-eighths Eurofins: Amatsi, Biolab,
+// BioPharma Finland, BioPharma Leiden, BioPharma Sweden, Pharma Quality Control. Each is a real
+// laboratory and the ranking is right — and the list is still wrong, because Eurofins has ONE stand
+// at a trade show. Five rows is five of sixty slots spent on one conversation, and it gets worse as
+// the ranking improves: scale and a strong name are exactly what a large group scores highest on.
+//
+// So the ranking is applied WITHIN each corporate group as well as across the list, and only the
+// top few of any group survive. The cap runs before the LIMIT, so the list is still 60 rows — just
+// 60 across far more firms. `--max-per-group=0` turns it off, which is how the dry run shows what
+// the cap is actually doing rather than asking anyone to trust it.
+//
 // And the duplicates were eating the list: "Almac Pharma Services Limited" appeared three times and
 // "Apotek Produktion & Laboratorier AB" twice, because each is one row per registered establishment.
 // Three rows for one firm in one city is one target spending three of sixty slots. Deduped per
@@ -50,7 +63,7 @@
 'use strict';
 
 const {
-  looksLikeLabSql, strongLabSql, originatorSql, labRankTerms,
+  looksLikeLabSql, strongLabSql, originatorSql, labRankTerms, groupKeySql,
 } = require('../labconnect/lab-shape');
 
 // A lab already 'active' in LabConnect is a partner, not a recruitment target; 'rejected' has been
@@ -76,25 +89,41 @@ function eligibleSql() {
  * because `NULL LIKE 'eu%'` is NULL and a DESC sort puts NULLs FIRST in Postgres — a lab with no
  * region would otherwise have led the list for Barcelona.
  */
-function labDelegateSql(limit = 60) {
+function labDelegateSql(limit = 60, maxPerGroup = 4) {
   const n = Number.isInteger(limit) && limit > 0 ? limit : 60;
+  // 0 or a non-integer means "no cap", which is how the dry run shows what the cap is doing.
+  const cap = Number.isInteger(maxPerGroup) && maxPerGroup > 0 ? maxPerGroup : null;
   return `
   WITH eligible AS (
     SELECT id, name, name_normalized, city, country, region, status,
            contact_name, contact_email, research_capable, gmp_capable,
-           COUNT(*) OVER (PARTITION BY name_normalized)::int AS sites
+           COUNT(*) OVER (PARTITION BY name_normalized)::int AS sites,
+           ${groupKeySql('name_normalized', 'name')} AS group_key
       FROM labs
      WHERE ${eligibleSql()}
   ),
   one_per_site AS (
-    SELECT DISTINCT ON (name_normalized, LOWER(COALESCE(city, ''))) *
+    -- The COUNTRY is part of the identity, not just the city. "Almac Pharma Services Limited" (GBR)
+    -- and "Almac Pharma Services (Ireland) Limited" (IRL) normalise to the same company name and
+    -- BOTH have a NULL city, so a city-only key silently dropped one of two separate legal
+    -- entities — the thirteen-labs-lost failure again, two rows at a time instead of thirteen.
+    SELECT DISTINCT ON (name_normalized, LOWER(COALESCE(city, '')), UPPER(COALESCE(country, ''))) *
       FROM eligible
-     ORDER BY name_normalized, LOWER(COALESCE(city, '')),
+     ORDER BY name_normalized, LOWER(COALESCE(city, '')), UPPER(COALESCE(country, '')),
               (contact_email IS NOT NULL) DESC, id
+  ),
+  ranked AS (
+    SELECT *,
+           ROW_NUMBER() OVER (PARTITION BY group_key
+                                  ORDER BY ${labRankTerms({ sitesColumn: 'sites', capabilityFlags: true })}
+                             )::int AS rank_in_group,
+           COUNT(*) OVER (PARTITION BY group_key)::int AS group_rows
+      FROM one_per_site
   )
   SELECT name, city, country, region, status, contact_name, contact_email,
-         research_capable, gmp_capable, sites
-    FROM one_per_site
+         research_capable, gmp_capable, sites, group_key, group_rows
+    FROM ranked
+   ${cap ? `WHERE rank_in_group <= ${cap}` : ''}
    ORDER BY ${labRankTerms({ sitesColumn: 'sites', capabilityFlags: true })}
    LIMIT ${n}`;
 }

@@ -56,7 +56,7 @@ const { marketOfCountry, europeFirstSql, europeFirstParams } = require('../src/l
 // Both lab queries live in src/lib/events/lab-delegates.js so scripts/check-lab-delegates-sql.js
 // can execute the SHIPPED query rather than its own rebuild of it.
 const { labDelegateSql, labShapeAuditSql } = require('../src/lib/events/lab-delegates');
-const { isStrongLab } = require('../src/lib/labconnect/lab-shape');
+const { isStrongLab, groupKey } = require('../src/lib/labconnect/lab-shape');
 
 const EVENT = 'scope-europe-2026';
 const EXECUTE = process.argv.includes('--execute');
@@ -67,6 +67,10 @@ const num = (flag, dflt) => {
 };
 const TOP_INSTITUTES = num('institutes', 80);
 const TOP_LABS = num('labs', 60);
+// One corporate group may hold at most this many rows. Eurofins took five of the top eight before
+// this existed, and Eurofins has one stand. `--max-per-group=0` disables it, which is how to see
+// what the cap is doing rather than taking its word for it.
+const MAX_PER_GROUP = process.argv.some((a) => a === '--max-per-group=0') ? 0 : num('max-per-group', 4);
 
 // A site last seen in 2013 is not an active lab. Three years is generous for trial data, which
 // lags, but it excludes the long tail of sites that have not run anything in a decade.
@@ -93,7 +97,7 @@ const INSTITUTE_SQL = `
 // ── LABS: the QC Partners tab ────
 //
 // The queries, and the reasoning behind the shape filter, are in src/lib/events/lab-delegates.js.
-const LAB_SQL = labDelegateSql(TOP_LABS);
+const LAB_SQL = labDelegateSql(TOP_LABS, MAX_PER_GROUP);
 const LAB_SHAPE_AUDIT_SQL = labShapeAuditSql();
 
 const FACILITY_LABEL = {
@@ -176,8 +180,20 @@ async function main() {
       //
       // The city joins the identity for a lab, so each site keeps its own row, its own met flag and
       // its own cards. Without it a visit to one site would mark the whole group as met.
-      dedupeKey: `${normalizeCompany(l.name)}${l.city ? ' ' + normalizeCompany(l.city) : ''}`,
-      displayName: l.city && !new RegExp(l.city, 'i').test(l.name) ? `${l.name} — ${l.city}` : l.name,
+      // The country is ALWAYS part of the key, not just the city. "Almac Pharma Services Limited"
+      // (GBR) and "Almac Pharma Services (Ireland) Limited" (IRL) normalise to the same company
+      // name and BOTH have a NULL city, so a city-only key collapsed two separate legal entities
+      // into one row and the second silently overwrote the first — the thirteen-labs-lost failure
+      // in a smaller, harder-to-see form, since the dry run reported it as a collision to "check"
+      // rather than as a loss.
+      dedupeKey: [normalizeCompany(l.name), l.city ? normalizeCompany(l.city) : '',
+                  l.country ? normalizeCompany(l.country) : ''].filter(Boolean).join(' '),
+      // Plain substring, NOT a regex. `new RegExp(l.city)` on "Almac Pharma Services (Ireland)"
+      // style values throws on an unbalanced parenthesis, and a city with a '+' or '.' in it
+      // matches things it should not. The register's city values are not trusted input.
+      displayName: l.city && !String(l.name).toLowerCase().includes(String(l.city).toLowerCase())
+        ? `${l.name} — ${l.city}`
+        : (!l.city && l.country ? `${l.name} — ${l.country}` : l.name),
       studies: null,
       note: `Lab${where ? ` · ${where}` : ''} · ${caps} · status ${l.status}` +
             `${l.contact_email ? ' · contact on file' : ' · no contact on file'}` +
@@ -265,8 +281,21 @@ async function main() {
     console.log(`   top 8 by lookup rank:`);
     for (const l of labs.slice(0, 8)) {
       const sig = isStrongLab(l.name) ? 'sells analysis' : 'name says "lab" only';
-      console.log(`      ${String(l.name).slice(0, 40).padEnd(42)} ${String(l.sites || 1).padStart(2)} site(s)  ` +
-                  `${l.contact_email ? '✉' : ' '} ${[l.city, l.country].filter(Boolean).join(', ').slice(0, 24).padEnd(26)} ${sig}`);
+      console.log(`      ${String(l.name).slice(0, 38).padEnd(40)} ${String(l.sites || 1).padStart(2)} site(s)  ` +
+                  `${l.contact_email ? '✉' : ' '} ${[l.city, l.country].filter(Boolean).join(', ').slice(0, 20).padEnd(22)} ${sig}`);
+    }
+    // ONE GROUP, ONE BOOTH. Before the cap existed this list was five-eighths Eurofins, which is
+    // five slots spent on one conversation. Printed so the concentration is visible either way.
+    const groups = new Map();
+    for (const l of labs) groups.set(groupKey(l.name), (groups.get(groupKey(l.name)) || 0) + 1);
+    const top = [...groups.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+    console.log(`   ${groups.size} corporate group(s) across ${labs.length} rows` +
+                `${MAX_PER_GROUP ? ` · capped at ${MAX_PER_GROUP} rows per group` : ' · NO CAP (--max-per-group=0)'}`);
+    console.log(`      largest: ${top.map(([g, n]) => `${g} ${n}`).join(' · ')}`);
+    if (MAX_PER_GROUP && top.length && top[0][1] > MAX_PER_GROUP) {
+      console.log(`      ⚠ "${top[0][0]}" holds ${top[0][1]} rows, above the cap of ${MAX_PER_GROUP} —`);
+      console.log(`        the cap is applied per corporate group, so this means the group key is`);
+      console.log(`        splitting one firm into several. Check groupKey() against these names.`);
     }
     const distinctKeys = new Set(planned.filter((p) => p.role === 'qc_lab').map((p) => p.dedupeKey)).size;
     console.log(`   ${labs.length} labs → ${distinctKeys} distinct rows (city is part of a lab's identity,`);

@@ -114,6 +114,20 @@ SELECT 'Zenith Analytical Laboratories ' || g, 'zenith analytical laboratories',
        'City ' || g, 'DEU', 'eu-west', 'prospect', 'z@zenith.example'
   FROM generate_series(1, 9) g;
 
+-- 5b. A DOMINANT GROUP. Nine separate Eurofins legal entities, each a real laboratory, each
+--     scoring well on every signal — and one stand at the show. Before the per-group cap these
+--     took five of the top eight.
+INSERT INTO labs (name, name_normalized, city, country, region, status, contact_email)
+SELECT 'Eurofins Division ' || g, 'eurofins division ' || g,
+       'Ville ' || g, 'FRA', 'eu-west', 'prospect', 'e@ef.example'
+  FROM generate_series(1, 9) g;
+
+-- 5c. TWO LEGAL ENTITIES, ONE NORMALISED NAME, NO CITY ON EITHER. GBR and IRL. The seed's own
+--     dedupe key collapsed these into one row and overwrote the first with the second.
+INSERT INTO labs (name, name_normalized, city, country, region, status, contact_email) VALUES
+  ('Almac Pharma Services Limited',          'almac pharma services', NULL,'GBR','eu-west','prospect','a@almac.example'),
+  ('Almac Pharma Services (Ireland) Limited','almac pharma services', NULL,'IRL','eu-west','prospect','a@almac-ie.example');
+
 -- 6. THE BRANDS that describe themselves least and matter most.
 INSERT INTO labs (name, city, country, region, status, contact_email) VALUES
   ('Eurofins BioPharma Product Testing Spain','Madrid','ESP','eu-south','prospect','e@ef.example'),
@@ -255,10 +269,68 @@ const LIMIT = 20;
       bad('a different CITY of the same firm is a different target',
         'the Dundalk site shares name_normalized with Craigavon and must NOT be deduped away');
     } else ok('the same firm in another city keeps its own row');
-    // And the top-20 ranking must not contain the Craigavon duplicate either.
-    const almacTop = names.filter((n) => /Almac Pharma Services Limited/.test(n)).length;
-    if (almacTop > 1) bad('no duplicate survives into the ranked list', `${almacTop} Almac rows in the top ${LIMIT}`);
+    // No row in the ranked list may repeat another's (name, city, country). Counting by NAME alone
+    // was wrong: "Almac Pharma Services Limited" legitimately appears for Craigavon and again for a
+    // register row with no city recorded, and those are not known to be the same site.
+    const ident = rows.map((r) => `${r.name}|${r.city || ''}|${r.country || ''}`);
+    const dupes = ident.filter((v, i) => ident.indexOf(v) !== i);
+    if (dupes.length) bad('no identity repeats in the ranked list', dupes.join('\n'));
     else ok(`no duplicate establishment survives into the ranked top ${LIMIT}`);
+
+    // ── 7b. ONE GROUP MUST NOT CROWD OUT THE REST ────
+    const CAP = 4;
+    const capped = (await client.query(labDelegateSql(LIMIT, CAP))).rows;
+    const uncapped = (await client.query(labDelegateSql(LIMIT, 0))).rows;
+    const tally = (rs) => {
+      const m = new Map();
+      for (const r of rs) m.set(r.group_key, (m.get(r.group_key) || 0) + 1);
+      return m;
+    };
+    const worstUncapped = Math.max(...tally(uncapped).values());
+    if (!(worstUncapped > CAP)) {
+      bad('the fixture must contain a group that OVERFLOWS the cap, or the cap proves nothing',
+        `largest uncapped group is ${worstUncapped}, cap is ${CAP}`);
+    } else ok(`uncapped, one group takes ${worstUncapped} of ${LIMIT} rows — the condition the cap exists for`);
+
+    const worstCapped = Math.max(...tally(capped).values());
+    if (worstCapped > CAP) {
+      bad('no corporate group may exceed the cap',
+        [...tally(capped).entries()].filter(([, n]) => n > CAP).map(([g, n]) => `${g}: ${n}`).join(', '));
+    } else ok(`capped, no group holds more than ${worstCapped} row(s)`);
+
+    // The cap must not SHRINK the list — it runs before the LIMIT, so the slots go to other firms.
+    if (capped.length !== LIMIT) {
+      bad('the cap redistributes slots rather than losing them',
+        `capped list has ${capped.length} rows, expected ${LIMIT}`);
+    } else ok(`the capped list is still ${LIMIT} rows — the slots went to other firms, not nowhere`);
+    if (!(tally(capped).size > tally(uncapped).size)) {
+      bad('the capped list covers MORE distinct firms', `${tally(capped).size} vs ${tally(uncapped).size}`);
+    } else ok(`the capped list covers ${tally(capped).size} groups against ${tally(uncapped).size} uncapped`);
+
+    // And the group key must actually group: nine Eurofins entities are one group, not nine.
+    const efRows = uncapped.filter((r) => /Eurofins/.test(r.name));
+    const efGroups = new Set(efRows.map((r) => r.group_key));
+    if (efRows.length && efGroups.size !== 1) {
+      bad('all Eurofins entities share one group key',
+        `${efRows.length} Eurofins rows carry ${efGroups.size} group keys: ${[...efGroups].join(', ')}`);
+    } else ok('nine Eurofins legal entities resolve to one corporate group');
+    // Unrelated single-word firms must NOT be merged by the two-word fallback.
+    const wess = new Set(uncapped.filter((r) => /Wessling/.test(r.name)).map((r) => r.group_key));
+    const vill = new Set(uncapped.filter((r) => /Villani/.test(r.name)).map((r) => r.group_key));
+    if (wess.size && vill.size && [...wess][0] === [...vill][0]) {
+      bad('the fallback group key must not merge unrelated firms', 'Wessling and Villani share a key');
+    } else ok('unrelated firms keep separate group keys under the two-word fallback');
+
+    // ── 7c. TWO LEGAL ENTITIES WITH THE SAME NAME AND NO CITY ────
+    // Both must survive the SQL dedupe, because the country distinguishes them. This is the row
+    // pair whose seed-side key collapsed them into one.
+    const almacNoCity = uncapped.concat((await client.query(labDelegateSql(500, 0))).rows)
+      .filter((r) => /Almac Pharma Services/.test(r.name) && !r.city);
+    const almacCountries = new Set(almacNoCity.map((r) => r.country));
+    if (almacCountries.size < 2) {
+      bad('two legal entities of one firm in two countries are two targets',
+        `found countries: ${[...almacCountries].join(', ') || 'none'} — one of them was lost`);
+    } else ok('the GBR and IRL Almac entities both survive, distinguished by country');
 
     // ── 8. STATUS STILL EXCLUDES PARTNERS AND DECLINED SITES ────
     if (has('Rigel')) bad("a lab already 'active' is a partner, not a target", 'Rigel came back');

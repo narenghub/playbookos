@@ -129,6 +129,38 @@ function originatorSql(col = 'name') {
   return '(' + ORIGINATOR_TOKENS.map(t => `upper(${col}) LIKE '%${t}%'`).join(' OR ') + ')';
 }
 
+// ── ONE GROUP, ONE BOOTH ─────────────────────────────────────────────────────
+//
+// 2026-10-10: with the ordering finally working, the top 8 of the SCOPE QC list came back as
+// Eurofins Amatsi, Eurofins Biolab, Eurofins BioPharma Finland, Eurofins BioPharma Leiden, Labcorp,
+// Charles River, Eurofins BioPharma Sweden, Eurofins Pharma Quality Control. Correct ranking, and
+// still the wrong list: Eurofins operates one stand at a trade show. Five rows for one group is
+// five of sixty slots spent on a single conversation, and the ranking signals that put them there
+// (sites, strong name) are exactly the ones a large group scores highest on — so the better the
+// ordering gets, the more the biggest group crowds out everyone else.
+//
+// The group key is the brand where there is one, because "eurofins amatsi" and "eurofins biolab"
+// share no leading words beyond the brand. Otherwise the first two words of the normalised name,
+// which holds together "Wessling Laboratorien Altenberge" and "Wessling Laboratorien Münster"
+// without merging unrelated single-word firms.
+function groupKeySql(col = 'name_normalized', nameCol = 'name') {
+  const cases = LAB_BRAND_TOKENS
+    .map(t => `WHEN upper(${nameCol}) LIKE '%${t}%' THEN '${t.toLowerCase()}'`)
+    .join('\n             ');
+  return `CASE ${cases}
+             ELSE btrim(split_part(${col}, ' ', 1) || ' ' || split_part(${col}, ' ', 2))
+           END`;
+}
+
+/** JS mirror, for reporting a planned list without a database. */
+function groupKey(name) {
+  const s = String(name || '').toUpperCase();
+  const brand = LAB_BRAND_TOKENS.find(t => s.includes(t));
+  if (brand) return brand.toLowerCase();
+  const words = String(name || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').split(/\s+/).filter(Boolean);
+  return words.slice(0, 2).join(' ');
+}
+
 /** JS mirrors. */
 function isStrongLab(name) {
   const s = String(name || '').toUpperCase();
@@ -208,6 +240,7 @@ module.exports = {
   LAB_NAME_TOKENS, LAB_BRAND_TOKENS, LAB_ALL_TOKENS,
   STRONG_LAB_TOKENS, ORIGINATOR_TOKENS,
   looksLikeLabSql, numberedShellSql, strongLabSql, originatorSql, labRankTerms,
+  groupKeySql, groupKey,
   isStrongLab, isOriginator,
   looksLikeLab, isNumberedShell, labLookupOrderSql,
 };
