@@ -5182,10 +5182,29 @@ pages['scope-europe'] = async function(reuse) {
 
   let body;
   if (!items.length) {
-    body = `<div class="card"><div style="padding:14px;font-size:13px;color:var(--text-muted)">
-      Nothing in this tab yet. It fills when the list for this role is seeded — an empty tab is
-      missing data, not an empty floor.
-    </div></div>`;
+    // An empty tab means one of TWO different things and the page must not blur them. For most
+    // roles it means nobody has seeded the list yet — missing data. For LinkAble at SCOPE it is the
+    // RESEARCHED ANSWER: all 61 published sponsors were checked and not one is a staffing agency,
+    // because SCOPE is a clinical-operations conference. Telling Naresh that a finding is missing
+    // data would send him looking for a bug in a tab that is already correct.
+    // Built as a plain variable rather than a ternary between two nested template literals. The
+    // page-render harness counts braces to extract this function and a nested backtick desyncs it,
+    // but the better reason is that a multi-line ternary between two templates is simply harder to
+    // read than two assignments.
+    let emptyMsg =
+      'Nothing in this tab yet. It fills when the list for this role is seeded — an empty tab here '
+      + 'is missing data, not an empty floor.';
+    if (st.role === 'linkable') {
+      emptyMsg =
+        '<b style="color:var(--text-body)">Zero is the answer here, not a gap.</b> All 61 published '
+        + 'sponsors were checked: not one places people into jobs. SCOPE is a clinical-operations '
+        + 'conference, so its exhibitors sell software, data, logistics and lab services <i>to</i> '
+        + 'trial sponsors.'
+        + '<div style="margin-top:7px">LinkAble is worked from the <b>attendee</b> list instead — 800 '
+        + 'executives from 300 organisations, every one of them with jobs to fill — and from the other '
+        + 'two tabs, whose companies are LinkAble&rsquo;s demand side rather than its subscribers.</div>';
+    }
+    body = `<div class="card"><div style="padding:14px;font-size:13px;line-height:1.55;color:var(--text-muted)">${emptyMsg}</div></div>`;
   } else {
     body = `<div class="card" style="padding:0">
       ${items.map(r => {

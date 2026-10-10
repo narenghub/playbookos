@@ -39,7 +39,19 @@ function extractFn(decl) {
     else if (ch === '}') { depth--; if (!depth) break; }
     prev = prev === '\\' ? '' : ch;
   }
-  assert.ok(depth === 0, `braces never balanced for ${decl} — extraction is wrong, not the page`);
+  // THIS MESSAGE IS THE FIX FOR A TRAP. The extractor is a brace counter with a naive string
+  // tracker: a backtick flips its in-string state, so a NESTED template literal — ``${c ? `a` : `b`}``
+  // — makes it lose track, desync the depth, and report "braces never balanced" for all 21 tests at
+  // once. That reads as a catastrophically broken page when the page parses perfectly.
+  //
+  // `${x.map(r => `…`)}` happens to survive because the backticks pair up and the parity works out.
+  // A ternary between two templates does not. If every test in this file fails together, suspect the
+  // extractor first and look for a nested backtick added to the page — not the page's logic.
+  assert.ok(depth === 0,
+    `braces never balanced for ${decl} — this is almost certainly the EXTRACTOR, not the page. ` +
+    'Look for a nested template literal (a backtick inside a backtick, e.g. a ternary between two ' +
+    'templates) newly added to that function, and hoist it into a plain variable instead. ' +
+    'Confirm the page itself is fine with: node scripts/check-spa-parse.js');
   return HTML.slice(HTML.indexOf('(', start), i + 1);
 }
 
@@ -198,6 +210,19 @@ test('an API error renders a message, not a blank page', async () => {
 test('an empty tab says it is missing data, not an empty floor', async () => {
   const { out } = await render(response({ items: [], count: 0, on_floor: 0, met: 0, connected: 0, cards: 0 }));
   assert.ok(/missing data, not an empty floor/i.test(out));
+});
+
+test('an empty LinkAble tab says ZERO IS THE ANSWER, not that data is missing', async () => {
+  // The two empty states mean opposite things. All 61 SCOPE sponsors were researched and none is a
+  // staffing agency, so calling that "missing data" would send someone hunting a bug in a tab that
+  // is already correct — the same mistake in reverse as the CPHI buyer tab looking authoritative
+  // while returning dairies.
+  const { out } = await render(
+    response({ role: 'linkable', items: [], count: 0, on_floor: 0, met: 0, connected: 0, cards: 0 }),
+    { role: 'linkable' });
+  assert.ok(/Zero is the answer here, not a gap/i.test(out), 'the finding must be stated as a finding');
+  assert.ok(!/missing data/i.test(out), 'and must NOT be called missing data');
+  assert.ok(/attendee/i.test(out), 'and must say where the tab IS worked from instead');
 });
 
 test('a sponsor row shows the studies and patients it is running', async () => {
