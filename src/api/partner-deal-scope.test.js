@@ -210,3 +210,67 @@ test('prospects are scoped by TERRITORY, never by partner ownership', async () =
   // What it IS scoped by, asserted positively so "not partner-scoped" cannot be satisfied by being unscoped.
   assert.match(body, /territoryScopeSql/, 'it must be territory-scoped');
 });
+
+// ── THE GRANT SCRIPT'S OWN CLAIMS ───────────────────────────────────────────────
+//
+// scripts/grant-partner-territory.js exists because POST /api/sitenex/territories cannot answer
+// the question that matters after a grant — can they now SEE the list — and nobody had run
+// users.partner_id → partner_territories → territoryScopeSql → prospects end to end. These assert
+// the two things the script must not get wrong, because both fail silently in production.
+
+test('the grant script defaults to NON-exclusive, inverting the column default', () => {
+  // partner_territories.exclusive is NOT NULL DEFAULT TRUE and the route only disables it when the
+  // body says so explicitly. The easy path therefore hands over an EXCLUSIVE patch, locked behind a
+  // partial unique index against your own team and every future partner. An exclusive patch is a
+  // contractual commitment and the ACBM Partners agreement's revenue tiers are still blank.
+  const fs = require('fs');
+  const path = require('path');
+  const SRC = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'scripts/grant-partner-territory.js'), 'utf8');
+
+  assert.match(SRC, /const EXCLUSIVE = process\.argv\.includes\('--exclusive'\)/,
+    'exclusivity must be opt-IN on the command line, not inherited from the column default');
+  assert.ok(!/exclusive\s*=\s*true/i.test(SRC.replace(/\/\/[^\n]*/g, '')),
+    'nothing outside a comment may default exclusive to true');
+  // And it must say which it is doing, because the route's own response does not.
+  assert.match(SRC, /NON-EXCLUSIVE/, 'the script must state the exclusivity it is applying');
+});
+
+test('the grant script refuses a territory that matches no prospects', () => {
+  // `state` is blank on all 1,524 SiteNex prospects. `--state=IL` would insert a row, return
+  // success, read back correctly in every listing, and show the partner zero rows forever. A grant
+  // that reaches nothing is indistinguishable from no grant except that it looks done.
+  const fs = require('fs');
+  const path = require('path');
+  const SRC = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'scripts/grant-partner-territory.js'), 'utf8');
+
+  assert.match(SRC, /MATCHES NOTHING/, 'a zero-match grant must be called out');
+  assert.match(SRC, /if \(fatal\)/, 'a zero-match grant must stop the write, not warn and continue');
+  // The reach of several grants is a UNION. Summing two dimensions overstates what is handed over,
+  // because a Chicago machine shop is in both `region` and `subtype`.
+  assert.match(SRC, /a union, not a sum/,
+    'combined reach must be computed as a union — territories are OR\'d and can overlap');
+});
+
+test('the visibility check reads as the real partner account and writes nothing', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const SRC = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'scripts/grant-partner-territory.js'), 'utf8');
+
+  // It must resolve users from users.partner_id rather than constructing a user, or it proves only
+  // that the function works on an object built to make it work.
+  assert.match(SRC, /FROM users WHERE partner_id = \$1/,
+    'the check must run as the accounts actually linked to the firm');
+  assert.match(SRC, /territoryScopeSql\(u, 'p', 1\)/, 'it must use the shipped scoping function');
+  // CLAUDE.md: a verification may only touch rows it created. The honest way to satisfy that when
+  // checking live accounts is to touch none at all.
+  const verify = SRC.slice(SRC.indexOf('async function verifyVisibility'));
+  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b/i.test(verify),
+    'verifyVisibility must contain no write statement — it runs against real accounts');
+  // Granting to a firm with no linked account is a real and silent dead end: the territory is on
+  // the partner, the login is on the person.
+  assert.match(SRC, /no user account is linked/,
+    'a firm with no linked user must be reported, not silently counted as granted');
+});
