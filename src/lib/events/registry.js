@@ -75,15 +75,49 @@ const EVENTS = [
       // which was wrong twice over: they are competitors, and they are not who carries a regulatory
       // burden. `demand` is right here because trial volume IS the compliance surface.
       { key: 'aros',     label: 'AROS',    basis: 'demand',
-        note: 'Sponsor companies that carry their own FDA regulatory and compliance file. More trials, more countries and later phase means more compliance surface — which is the pitch and also the ranking. Not the eClinical platforms exhibiting here: those are competitors.' },
+        note: 'Sponsor companies that carry their own FDA regulatory and compliance file, and would buy an AROS subscription to track it. More trials, more countries and later phase means more compliance surface — which is the pitch and also the ranking. Not the eClinical platforms exhibiting here: those are competitors.' },
       // EMPLOYMENT agencies — firms that place people into jobs — not patient-recruitment firms,
       // which enrol patients into trials. Adjacent words, different business, and seeding the second
       // kind here filled the tab with 16 companies that would never buy a recruiting OS.
+      // ── THE TAB NARESH'S ORLANDO TRIP ARGUED FOR ────
+      //
+      // At SCOPE Orlando he found "so many labs and buyers, clinical institutes who run CRO and
+      // support CRO". Those people are DELEGATES, not exhibitors, which is why the 61-sponsor list
+      // looked so thin — and it is the same reason the Abiozen buyers are attendees.
+      //
+      // A lab is a different conversation from everything else on this page: we are RECRUITING it
+      // into LabConnect, not selling to it. Same meaning as CPHI's qc_lab, so the same key — see
+      // SHARED_ROLE_KEYS below for why sharing one is safe and why the guard that forbade it was
+      // reasoning from the wrong thing.
+      { key: 'qc_lab',   label: 'QC Partners', basis: 'none',
+        note: 'Analytical and QC laboratories to recruit into LabConnect — we are buying their capacity, not selling to them. Sourced from the labs register rather than the sponsor list, because labs attend SCOPE as delegates and barely exhibit. No ranking signal beyond activity and whether we hold a contact, so order is shape, not quality.' },
       { key: 'linkable', label: 'LinkAble', basis: 'none',
         note: 'Staffing and employment agencies that would subscribe to the recruiting OS — find client companies, their open jobs, and matching candidates. SCOPE is a clinical-operations conference, so very few are exhibiting: a short list here is the honest answer, and this tab is worked from the attendee list rather than the floor. No ranking signal, so it is alphabetical. The sponsors and CROs on the other tabs are LinkAble\'s DEMAND side — they have the jobs — not its subscribers.' },
     ],
   },
 ];
+
+// ── ROLE KEYS SHARED BETWEEN EVENTS, DELIBERATELY ────
+//
+// A test used to assert that NO role key appeared in both a supply event and a demand event, on the
+// reasoning that "a shared role would mix sellers into a buyer list". THAT REASONING WAS WRONG, and
+// it is worth recording why rather than quietly deleting the test.
+//
+// Rows are keyed `(event_slug, role, holder_normalized)` and every query filters on event_slug AND
+// role, so CPHI's qc_lab rows and SCOPE's qc_lab rows can never answer each other's question. The
+// partition was already doing the job the guard thought it was doing.
+//
+// The REAL risk is different and the guard could not see it: a key that means one thing on one
+// floor and something else on another. `qc_lab` does not have that problem — a QC laboratory is a
+// LabConnect recruit at both shows, which is exactly why it should be ONE key rather than a second
+// one invented to satisfy a test. Two keys for one concept is the drift this registry exists to end.
+//
+// So sharing is allowed, but only when it is declared here with the reason. An undeclared shared key
+// still fails, because the next one may be the case where the meanings really do diverge.
+const SHARED_ROLE_KEYS = {
+  qc_lab: 'An analytical/QC laboratory is a LabConnect recruit on both floors — we buy its capacity, ' +
+          'never sell to it. One concept, one key; the (event_slug, role) partition keeps the rows apart.',
+};
 
 const BY_SLUG = new Map(EVENTS.map((e) => [e.slug, e]));
 
@@ -143,6 +177,7 @@ function publicEvents() {
 
 module.exports = {
   EVENTS,
+  SHARED_ROLE_KEYS,
   defaultEventSlug,
   getEvent,
   isEvent,

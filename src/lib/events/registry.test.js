@@ -35,8 +35,22 @@ test('defaultEventSlug always returns a real event', () => {
 
 // ── SCOPE'S ROLES ARE NOT CPHI'S RELABELLED ────
 
-test('SCOPE has the three tabs by what the company buys from us', () => {
-  assert.deepStrictEqual(rolesFor('scope-europe-2026'), ['abiozen', 'aros', 'linkable']);
+test('SCOPE has four tabs: three products plus the labs we recruit', () => {
+  // Order is tab order. qc_lab sits before linkable because labs are a real population in that
+  // room and LinkAble, researched, is zero there.
+  assert.deepStrictEqual(rolesFor('scope-europe-2026'), ['abiozen', 'aros', 'qc_lab', 'linkable']);
+});
+
+test('three SCOPE tabs are what a company BUYS, and one is what we buy', () => {
+  // The distinction that earns qc_lab its own tab rather than a row inside Abiozen: on three tabs
+  // money flows towards us, on the fourth it flows away. Mixing those in one list means walking up
+  // to a booth with the pitch pointing the wrong way.
+  for (const key of ['abiozen', 'aros', 'linkable']) {
+    const note = roleDef('scope-europe-2026', key).note;
+    assert.ok(/buy|subscri|purchas/i.test(note), `${key} should describe what they buy: "${note}"`);
+  }
+  assert.match(roleDef('scope-europe-2026', 'qc_lab').note, /recruit/i,
+    'qc_lab is a company we recruit, not one that buys from us');
 });
 
 test('CPHI keeps its four roles untouched', () => {
@@ -44,12 +58,53 @@ test('CPHI keeps its four roles untouched', () => {
     ['supplier', 'platform_partner', 'qc_lab', 'buyer']);
 });
 
-test('no role is shared between a supply event and a demand event', () => {
-  // If a key appeared in both, one event's rows would answer the other's query — the two floors ask
-  // opposite questions, so a shared role would mix sellers into a buyer list.
-  const cphi = new Set(rolesFor('cphi-milan-2026'));
-  for (const r of rolesFor('scope-europe-2026')) {
-    assert.ok(!cphi.has(r), `"${r}" is in both events`);
+test('a role key shared between events must be DECLARED, with a reason', () => {
+  // This test used to forbid sharing outright, reasoning that "one event's rows would answer the
+  // other's query". That was wrong: rows are keyed (event_slug, role, holder_normalized) and every
+  // query filters on both, so the partition already prevents it.
+  //
+  // The real risk is a key that MEANS different things on different floors, which a blanket ban
+  // cannot distinguish from a key that correctly means the same thing — and banning the second kind
+  // forces a duplicate key for one concept, which is the drift this registry exists to end.
+  //
+  // So sharing is allowed when declared in SHARED_ROLE_KEYS with the reason. Undeclared still fails.
+  const { SHARED_ROLE_KEYS } = require('./registry');
+  const seen = new Map();
+  for (const e of EVENTS) {
+    for (const r of e.roles) {
+      if (seen.has(r.key)) {
+        assert.ok(SHARED_ROLE_KEYS[r.key],
+          `"${r.key}" appears in both ${seen.get(r.key)} and ${e.slug} but is not declared in ` +
+          'SHARED_ROLE_KEYS. If the two floors mean the same thing by it, declare it there with ' +
+          'the reason. If they mean different things, it needs two keys.');
+        assert.ok(SHARED_ROLE_KEYS[r.key].length > 40,
+          `the reason given for sharing "${r.key}" is too short to be a reason`);
+      }
+      seen.set(r.key, e.slug);
+    }
+  }
+});
+
+test('every declared shared key is actually shared', () => {
+  // The drift that bit verify-classic-nav-parity.js twice: an entry left behind after the thing it
+  // described was removed, so the file documents a situation that no longer exists.
+  const { SHARED_ROLE_KEYS } = require('./registry');
+  for (const key of Object.keys(SHARED_ROLE_KEYS)) {
+    const events = EVENTS.filter((e) => e.roles.some((r) => r.key === key)).map((e) => e.slug);
+    assert.ok(events.length >= 2,
+      `"${key}" is declared as shared but appears only in ${events.join(', ') || 'no event'} — ` +
+      'remove the declaration rather than leaving it to describe a situation that has gone.');
+  }
+});
+
+test('qc_lab is the shared key, and it means the same on both floors', () => {
+  assert.ok(rolesFor('cphi-milan-2026').includes('qc_lab'));
+  assert.ok(rolesFor('scope-europe-2026').includes('qc_lab'));
+  // Both notes must describe RECRUITING a lab, never selling to it. A lab we sell testing to is a
+  // different role (CPHI's `buyer`), and conflating them is the pitch arriving backwards at a booth.
+  for (const slug of ['cphi-milan-2026', 'scope-europe-2026']) {
+    const note = roleDef(slug, 'qc_lab').note;
+    assert.match(note, /recruit/i, `${slug}/qc_lab must describe recruiting the lab`);
   }
 });
 

@@ -5157,7 +5157,10 @@ pages['scope-europe'] = async function(reuse) {
     </div>
   </div>`;
 
-  const ROLE_TABS = [['abiozen','Abiozen'],['aros','AROS'],['linkable','LinkAble']];
+  // Four tabs. qc_lab sits third because labs are a real population in that room, and LinkAble —
+  // researched — is zero there. Three of these are companies that buy from us; QC Partners is the
+  // one where the money goes the other way, so the row styling marks it.
+  const ROLE_TABS = [['abiozen','Abiozen'],['aros','AROS'],['qc_lab','QC Partners'],['linkable','LinkAble']];
   const tabRow = `<div class="card" style="display:flex;gap:6px;flex-wrap:wrap;padding:10px 12px">
     ${ROLE_TABS.map(([k, label]) => `<button onclick="seSetRole('${k}')"
         class="${st.role === k ? 'btn-primary' : 'btn-outline'} btn-sm"
@@ -5172,9 +5175,12 @@ pages['scope-europe'] = async function(reuse) {
   const stat = (label, val, color) => `<div style="flex:1;min-width:92px;padding:9px 11px;border:1px solid var(--border);border-radius:8px;text-align:center">
     <div style="font-size:20px;font-weight:800;color:${color || 'var(--text-body)'}">${val == null ? 0 : val}</div>
     <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">${label}</div></div>`;
+  // "On floor" is the wrong word for a delegate list. Most rows on every tab are people in the
+  // room without a booth — 750+ participants against roughly 65 stands — so the stat is labelled
+  // for what it counts and a tab where it is zero is not thereby an empty tab.
   const summary = `<div class="card" style="display:flex;gap:9px;flex-wrap:wrap">
     ${stat('Companies', res.count, '#0972d3')}
-    ${stat('On floor', res.on_floor, '#1B3A6B')}
+    ${stat('Exhibiting', res.on_floor, '#1B3A6B')}
     ${stat('Met', res.met, '#1D9E75')}
     ${stat('LinkedIn', res.connected, '#0a66c2')}
     ${stat('Cards', res.cards, '#8a5a00')}
@@ -5217,7 +5223,8 @@ pages['scope-europe'] = async function(reuse) {
             <div style="min-width:0">
               <div style="font-weight:650;font-size:14px">${seEsc(r.holder || r.exhibitor_name)}
                 ${r.booth ? `<span style="font-size:11px;font-family:ui-monospace,Menlo,monospace;background:#0972d3;color:#fff;padding:1px 6px;margin-left:5px">${seEsc(r.booth)}</span>` : ''}
-                ${!r.exhibiting ? '<span style="font-size:11px;color:var(--text-muted);margin-left:5px">not exhibiting</span>' : ''}
+                ${!r.exhibiting ? `<span style="font-size:11px;color:var(--text-muted);margin-left:5px">${st.role === 'qc_lab' || r.studies_count != null ? 'delegate — no booth' : 'not exhibiting'}</span>` : ''}
+                ${st.role === 'qc_lab' ? '<span style="font-size:10px;padding:1px 5px;margin-left:4px;border:1px solid #8a5a0033;background:#fff7e6;color:#8a5a00;white-space:nowrap">we recruit</span>' : ''}
               </div>
               ${r.studies_count != null ? `<div style="font-size:12px;margin-top:2px;font-variant-numeric:tabular-nums">
                 <b>${r.studies_count}</b> stud${r.studies_count === 1 ? 'y' : 'ies'}${r.patients_count ? ` · <b>${Number(r.patients_count).toLocaleString()}</b> patients` : ''}${r.molecules_covered ? ` · <span style="color:#1D9E75;font-weight:700">${r.molecules_covered} quotable</span>` : ''}</div>` : ''}

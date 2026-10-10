@@ -148,9 +148,31 @@ test('the card count shows when cards exist and invites one when none do', async
 
 test('the summary counts progress, not ranking', async () => {
   const { out } = await render(response());
-  for (const label of ['Companies', 'On floor', 'Met', 'LinkedIn', 'Cards']) {
+  // "Exhibiting", not "On floor": most rows on every tab are DELEGATES without a booth — 750+
+  // participants against roughly 65 stands — so a tab showing zero exhibiting is not an empty tab,
+  // and the label has to say which of the two it is counting.
+  for (const label of ['Companies', 'Exhibiting', 'Met', 'LinkedIn', 'Cards']) {
     assert.ok(out.includes(label), `the ${label} stat is missing`);
   }
+});
+
+test('four tabs, and QC Partners is marked as a company WE recruit', async () => {
+  const { out } = await render(response({ role: 'qc_lab', items: [
+    { id: '30', holder: 'Eurofins Barcelona', exhibiting: false, booth: null, role: 'qc_lab',
+      role_note: 'Lab · Barcelona, ESP · research + GMP · status discovered · RECRUIT into LabConnect',
+      met_in_person: false, linkedin_connected: false, contact_count: 0 },
+  ] }), { role: 'qc_lab' });
+  assert.ok(/we recruit/i.test(out), 'the QC tab must mark the direction money flows');
+  assert.ok(/delegate — no booth/.test(out), 'a lab without a booth is a delegate, not "not exhibiting"');
+  assert.ok(out.includes('QC Partners'), 'the QC Partners tab label is missing');
+  assert.ok(/seSetRole\('qc_lab'\)/.test(out), 'no switch handler for qc_lab');
+});
+
+test('a sponsor row is NOT marked "we recruit"', async () => {
+  // The badge exists to stop the pitch arriving backwards. If it leaked onto the buyer tabs it
+  // would do the opposite of its job.
+  const { out } = await render(response());
+  assert.ok(!/we recruit/i.test(out), 'the recruit badge leaked onto a tab where they buy from us');
 });
 
 test('there is NO hall filter', async () => {
