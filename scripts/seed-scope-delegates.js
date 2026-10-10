@@ -57,6 +57,7 @@ const { marketOfCountry, europeFirstSql, europeFirstParams } = require('../src/l
 // can execute the SHIPPED query rather than its own rebuild of it.
 const { labDelegateSql, labShapeAuditSql } = require('../src/lib/events/lab-delegates');
 const { isStrongLab, groupKey } = require('../src/lib/labconnect/lab-shape');
+const { staleRows } = require('../src/lib/events/stale-rows');
 
 const EVENT = 'scope-europe-2026';
 const EXECUTE = process.argv.includes('--execute');
@@ -319,23 +320,15 @@ async function main() {
   // no met flag, no cards — and KEEP anything a human has worked, because a met flag is somebody's
   // Tuesday and no script gets to throw that away. Named individually, never deleted by pattern.
   const plannedKeys = new Set(planned.filter((p) => p.role === 'qc_lab').map((p) => p.dedupeKey));
-  let stale = [];
+  let stale = [], removable = [], keepers = [];
   try {
-    stale = (await query(
-      `SELECT x.id, x.holder, x.holder_normalized, x.met_in_person, x.linkedin_connected,
-              COUNT(c.id)::int AS cards
-         FROM cphi_exhibitor_matches x
-         LEFT JOIN cphi_exhibitor_contacts c ON c.exhibitor_match_id = x.id
-        WHERE x.event_slug = $1 AND x.role = 'qc_lab'
-        GROUP BY x.id
-        ORDER BY x.holder`, [EVENT])).rows
-      .filter((r) => !plannedKeys.has(r.holder_normalized));
+    // One definition, in src/lib/events/stale-rows.js. The second hand-written copy of this query
+    // named a `contact_cards` column that does not exist — a contact card is a ROW in
+    // cphi_exhibitor_contacts — and it would have thrown on the first --execute.
+    ({ stale, removable, keepers } = await staleRows(query, EVENT, 'qc_lab', plannedKeys));
   } catch (e) {
     console.log(`\n   ⚠ could not check for stale rows: ${e.message}`);
   }
-  const removable = stale.filter((r) => !r.met_in_person && !r.linkedin_connected && !r.cards);
-  const keepers = stale.filter((r) => r.met_in_person || r.linkedin_connected || r.cards);
-
   if (stale.length) {
     console.log(`\n   ${stale.length} qc_lab row(s) carry a key this run no longer produces:`);
     console.log(`      ${removable.length} untouched → will be removed (they are duplicates of the new rows)`);

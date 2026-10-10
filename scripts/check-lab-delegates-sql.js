@@ -25,6 +25,7 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const { labDelegateSql, labShapeAuditSql } = require('../src/lib/events/lab-delegates');
+const { STALE_ROWS_SQL, isUntouched } = require('../src/lib/events/stale-rows');
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -152,6 +153,27 @@ INSERT INTO labs (name, city, country, region, status, contact_email) VALUES
   ('Quasar Testing Services',          'Porto',  'PRT','eu-south','rejected','q@quasar.example'),
   ('9231-9110 Quebec Inc Laboratoire', 'Quebec', 'CAN','na-east', 'prospect','n@num.example'),
   ('Pacific Analytical Laboratories',  'Seattle','USA','na-west', 'prospect','p@pac.example');
+
+-- The two event tables the stale-row query joins. A contact card is a ROW here, not a column on
+-- the match — which is what the second hand-written copy of that query got wrong.
+CREATE TABLE cphi_exhibitor_matches (
+  id BIGSERIAL PRIMARY KEY, event_slug TEXT, holder TEXT, holder_normalized TEXT,
+  exhibitor_name TEXT, exhibiting BOOLEAN, booth TEXT, hall TEXT, role TEXT, role_note TEXT,
+  review_status TEXT, match_tier TEXT, market TEXT, studies_count INT, patients_count INT,
+  molecules_covered INT, met_in_person BOOLEAN, linkedin_connected BOOLEAN, checked_at TIMESTAMPTZ);
+CREATE TABLE cphi_exhibitor_contacts (
+  id BIGSERIAL PRIMARY KEY, exhibitor_match_id BIGINT REFERENCES cphi_exhibitor_matches(id));
+
+-- One row this run still produces, one it does not, and one it does not but somebody WORKED.
+INSERT INTO cphi_exhibitor_matches (event_slug, holder, holder_normalized, role, met_in_person, linkedin_connected) VALUES
+  ('scope-europe-2026','Still Produced','still produced','qc_lab', false, false),
+  ('scope-europe-2026','Gone Stale','gone stale','qc_lab', false, false),
+  ('scope-europe-2026','Worked By Hand','worked by hand','qc_lab', false, false),
+  ('scope-europe-2026','Met In Person','met in person','qc_lab', true,  false),
+  ('scope-europe-2026','Other Role','other role','abiozen', false, false);
+-- "Worked By Hand" carries a contact card, which is the signal that lives in the OTHER table.
+INSERT INTO cphi_exhibitor_contacts (exhibitor_match_id)
+SELECT id FROM cphi_exhibitor_matches WHERE holder_normalized = 'worked by hand';
 
 -- name_normalized is NOT NULL in the real schema and is the dedupe key; fill the ones left blank.
 UPDATE labs SET name_normalized = lower(regexp_replace(name, '[^a-zA-Z0-9 ]', '', 'g'))
@@ -361,6 +383,42 @@ const LIMIT = 20;
     if (!(audit.kept_eu_companies < audit.kept_eu)) {
       bad('the audit shows duplicate establishments', `companies=${audit.kept_eu_companies}, rows=${audit.kept_eu}`);
     } else ok(`audit: ${audit.kept_eu} European rows are ${audit.kept_eu_companies} distinct companies`);
+
+    // ── 11. THE STALE-ROW QUERY RUNS, AND NEVER DELETES SOMEBODY'S WORK ────
+    // This query was hand-written a second time with `jsonb_array_length(contact_cards)`. There is
+    // no such column — a contact card is a row in cphi_exhibitor_contacts — so it parsed, passed
+    // node --check, and would have thrown on the first --execute against production.
+    let staleRowsResult;
+    try {
+      staleRowsResult = (await client.query(STALE_ROWS_SQL, ['scope-europe-2026', 'qc_lab'])).rows;
+      ok(`STALE_ROWS_SQL runs — ${staleRowsResult.length} qc_lab row(s), cards counted by join`);
+    } catch (e) {
+      bad('execute STALE_ROWS_SQL', e.message + (e.position ? ` (position ${e.position})` : ''));
+      staleRowsResult = [];
+    }
+
+    if (staleRowsResult.length) {
+      // Scoped to ONE role. A role-wide sweep would delete the sponsor rows a different script owns.
+      if (staleRowsResult.some((r) => r.holder === 'Other Role')) {
+        bad('the stale query is scoped to one role', 'an abiozen row came back from a qc_lab query');
+      } else ok('scoped to one role — the abiozen row is not returned');
+
+      const card = staleRowsResult.find((r) => r.holder === 'Worked By Hand');
+      if (!card || card.cards !== 1) {
+        bad('a contact card is counted from cphi_exhibitor_contacts',
+          `cards=${card ? card.cards : 'row missing'} — this is the column that did not exist`);
+      } else ok('a contact card is counted by the join, not read off a non-existent column');
+
+      // The partition: only untouched rows are removable.
+      const planned = new Set(['still produced']);
+      const stale = staleRowsResult.filter((r) => !planned.has(r.holder_normalized));
+      const removable = stale.filter(isUntouched).map((r) => r.holder).sort();
+      if (removable.join('|') !== 'Gone Stale') {
+        bad('only an UNTOUCHED row is removable',
+          `removable = ${removable.join(', ') || 'none'} — a met flag or a card is somebody's work ` +
+          'and a changed key is never a reason to delete the only record of a conversation');
+      } else ok('only "Gone Stale" is removable — the met row and the carded row are kept');
+    }
 
     console.log('');
     console.log(fail
