@@ -253,24 +253,49 @@ test('the grant script refuses a territory that matches no prospects', () => {
     'combined reach must be computed as a union — territories are OR\'d and can overlap');
 });
 
-test('the visibility check reads as the real partner account and writes nothing', () => {
+test('the visibility check reads real accounts and writes nothing', () => {
   const fs = require('fs');
   const path = require('path');
   const SRC = fs.readFileSync(
     path.join(__dirname, '..', '..', 'scripts/grant-partner-territory.js'), 'utf8');
 
-  // It must resolve users from users.partner_id rather than constructing a user, or it proves only
-  // that the function works on an object built to make it work.
-  assert.match(SRC, /FROM users WHERE partner_id = \$1/,
-    'the check must run as the accounts actually linked to the firm');
+  // NOTE ON WHAT THIS TEST CAN AND CANNOT DO. Its first version asserted that the source matched
+  // /FROM users WHERE partner_id = \$1/ and called that proof the check "reads as the real partner
+  // account". The source did match. The column list in it named `status`, which does not exist on
+  // users, so the live run granted both territories and then threw. A grep proves the words are
+  // present; only execution proves the statement runs — scripts/check-territory-grant-sql.js does
+  // that, against the real column sets, and is where a guessed column now fails.
+  //
+  // What is left here is the part that IS a source property: no write statement.
   assert.match(SRC, /territoryScopeSql\(u, 'p', 1\)/, 'it must use the shipped scoping function');
-  // CLAUDE.md: a verification may only touch rows it created. The honest way to satisfy that when
-  // checking live accounts is to touch none at all.
   const verify = SRC.slice(SRC.indexOf('async function verifyVisibility'));
   assert.ok(!/\b(INSERT|UPDATE|DELETE)\b/i.test(verify),
     'verifyVisibility must contain no write statement — it runs against real accounts');
-  // Granting to a firm with no linked account is a real and silent dead end: the territory is on
-  // the partner, the login is on the person.
   assert.match(SRC, /no user account is linked/,
     'a firm with no linked user must be reported, not silently counted as granted');
+  // And it must never name a column that is not on users. The guess cost a blind production write.
+  const userCols = ['id', 'email', 'name', 'role', 'github_username', 'invite_token', 'invited_at',
+                    'joined_at', 'password_hash', 'is_active', 'created_at', 'partner_id',
+                    'invited_partner_id'];
+  const sel = /SELECT ([^`]*?)\s+FROM users WHERE partner_id/.exec(SRC);
+  assert.ok(sel, 'the partner-account lookup could not be found');
+  for (const c of sel[1].split(',').map((x) => x.trim()).filter(Boolean)) {
+    assert.ok(userCols.includes(c), `"${c}" is not a column on users — \`status\` was the first guess`);
+  }
+});
+
+test('a grant that succeeded is never reported as a failure because the CHECK broke', () => {
+  // What actually happened: both rows committed, then the verification threw, and the script exited
+  // non-zero having fully succeeded. A completed write reported as a failure invites a re-run.
+  const fs = require('fs');
+  const path = require('path');
+  const SRC = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'scripts/grant-partner-territory.js'), 'utf8');
+  // Anchored on the insert loop, not on a phrase built inside a template expression — my first
+  // anchor was 'territories granted', which never appears literally because the line reads
+  // `territor${written === 1 ? 'y' : 'ies'} granted`.
+  const after = SRC.slice(SRC.indexOf('INSERT INTO partner_territories'));
+  assert.match(after, /try \{\s*\n\s*await verifyVisibility/,
+    'the post-write check must be wrapped, so its failure cannot mask a completed grant');
+  assert.match(after, /ARE written/, 'and it must say the rows are written when the check fails');
 });

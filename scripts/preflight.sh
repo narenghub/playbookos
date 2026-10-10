@@ -48,6 +48,12 @@ step "partner repair SQL runs on Postgres" node scripts/check-partner-repair-sql
 # which only a query running against data can show. This check seeds a population rigged against the
 # alphabet, so a third collapse fails here rather than in Barcelona.
 step "SCOPE lab delegates run on Postgres" node scripts/check-lab-delegates-sql.js
+# The territory grant. Its first live run granted both of the first partner's territories, then died on
+# `column "status" does not exist` — I guessed a users column, so the write landed and the
+# verification that was the whole point never ran. The test I had written for it PASSED, because it
+# grepped the source for the query text: a grep proves the words are there, never that the statement
+# runs. This executes every query against the real column sets and asserts the patch scopes.
+step "territory grant runs on Postgres" node scripts/check-territory-grant-sql.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2

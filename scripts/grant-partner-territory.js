@@ -173,7 +173,16 @@ async function main() {
   }
   console.log(`\n   ✅ ${written} territor${written === 1 ? 'y' : 'ies'} granted.\n`);
 
-  await verifyVisibility(partner, 'AFTER the grant');
+  // The grant is DONE at this point. A bug in the check must not make a completed write look like a
+  // failed one — which is what happened on the first live run: `column "status" does not exist`
+  // threw after both rows were committed, so the script exited non-zero having fully succeeded.
+  try {
+    await verifyVisibility(partner, 'AFTER the grant');
+  } catch (e) {
+    console.log(`   ⚠ the visibility CHECK failed: ${e.message}`);
+    console.log(`     The ${written} territory row(s) above ARE written — this is the check breaking,`);
+    console.log(`     not the grant. Re-run without --execute to retry the check alone.\n`);
+  }
 }
 
 // ── THE PART THE ROUTE CANNOT DO ─────────────────────────────────────────────
@@ -187,8 +196,14 @@ async function main() {
 async function verifyVisibility(partner, when) {
   console.log(`   ── can they actually see it, ${when} ────`);
 
+  // The real columns. `status` does not exist on users — I guessed it, the grant wrote, and this
+  // function died immediately afterwards, which is precisely the failure it was written to catch.
+  // is_active is INTEGER DEFAULT 1; invite_token NOT NULL means the invite was never accepted, which
+  // is the exact state ACBM Partners was stuck in when their account showed "invited" and saw
+  // no data.
   const users = (await query(
-    `SELECT id, email, role, status FROM users WHERE partner_id = $1 ORDER BY email`, [partner.id])).rows;
+    `SELECT id, email, role, is_active, invite_token, joined_at
+       FROM users WHERE partner_id = $1 ORDER BY email`, [partner.id])).rows;
   if (!users.length) {
     console.log(`   ⚠ no user account is linked to ${partner.name} (users.partner_id = ${partner.id}).`);
     console.log(`     The territory is granted to the FIRM; a person still needs an account bound to it.`);
@@ -197,13 +212,17 @@ async function verifyVisibility(partner, when) {
   }
 
   for (const u of users) {
+    const state = [
+      u.is_active ? 'active' : 'INACTIVE',
+      u.invite_token ? 'INVITE NOT ACCEPTED' : (u.joined_at ? 'joined' : 'no joined_at'),
+    ].join(', ');
     const scope = await territoryScopeSql(u, 'p', 1);
     if (scope.isStaff) {
       console.log(`   ⚠ ${u.email} resolves as STAFF — it would see every prospect, not a territory.`);
       continue;
     }
     if (scope.failed) {
-      console.log(`   ✗ ${u.email} (${u.role}, ${u.status}) → BLOCKED: ${scope.reason}`);
+      console.log(`   ✗ ${u.email} (${u.role}, ${state}) → BLOCKED: ${scope.reason}`);
       continue;
     }
     const n = (await query(
@@ -211,7 +230,7 @@ async function verifyVisibility(partner, when) {
       scope.params)).rows[0].n;
     const note = scope.reason ? ` [${scope.reason}]` : '';
     const verdict = n > 0 ? '✓' : '✗';
-    console.log(`   ${verdict} ${u.email} (${u.role}, ${u.status}) → ${n} prospect(s) visible` +
+    console.log(`   ${verdict} ${u.email} (${u.role}, ${state}) → ${n} prospect(s) visible` +
                 ` across ${scope.territories.length} territor${scope.territories.length === 1 ? 'y' : 'ies'}${note}`);
     if (n === 0) {
       console.log(`       A real login would show an empty list. That is the state ACBM Partners is in now.`);
