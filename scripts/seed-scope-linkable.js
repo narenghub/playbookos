@@ -75,8 +75,8 @@ const FIRMS = [
     why: 'Scientific, clinical and regulatory placement including Biometrics. Covent Garden, London.',
     source: 'agencycentral.co.uk clinical trials directory', strength: 'strong' },
   { name: 'EPM Scientific', country: null, city: null,
-    why: 'Permanent and multi-hire life sciences recruitment in R&D, market launch and pharmacovigilance, with a dedicated Swiss pharmaceutical desk. Part of Phaidon International.',
-    source: 'epmscientific.com/en-ch/request-talent/pharmaceutical-recruitment', strength: 'strong' },
+    why: 'Permanent and multi-hire life sciences recruitment in R&D, market launch and pharmacovigilance, with dedicated Swiss and German clinical-research desks and a Berlin office. Part of Phaidon International.',
+    source: 'epmscientific.com en-ch and en-de clinical-research pages', strength: 'strong' },
   { name: 'Chromosome Recruitment', country: 'GBR', city: 'London',
     why: 'Life sciences recruitment including Clinical Operations and Biometry. Poplar, London.',
     source: 'agencycentral.co.uk clinical trials directory', strength: 'medium' },
@@ -98,6 +98,39 @@ const FIRMS = [
   { name: 'Thema Group', country: null, city: null,
     why: 'European life sciences recruitment group.',
     source: 'themagroup.eu', strength: 'weak' },
+  // ── CONTINENTAL EUROPE ────
+  //
+  // Added after the first dry run, which exposed a bias rather than a market fact: every one of the
+  // eight published head offices came back GBR, because the directory the first pass drew from is a
+  // UK directory. The show is in Barcelona. A list with no firm headquartered in Germany,
+  // Switzerland, Benelux or Iberia is a thin list for that room, whatever its UK coverage.
+  { name: 'ageneo Life Science Experts GmbH', country: 'DEU', city: 'Munich',
+    why: 'Permanent staffing, outsourcing and freelance placement of professional and executive personnel across pharma, medical devices, diagnostics and biotechnology. Munich.',
+    source: 'ageneo.de/en', strength: 'strong' },
+  // The second rebrand this list has caught. Hobson Prior is a name Naresh may well recognise; it
+  // is now R&D Partners, and walking up to a stand asking for Hobson Prior would land badly.
+  { name: 'R&D Partners (formerly Hobson Prior)', country: null, city: null,
+    why: 'Biometrics, Clinical Development and Clinical Operations, PVG and drug safety, regulatory. Permanent recruitment, contingent staffing, executive search and RPO. Registered office in London; German offices in Munich and Frankfurt. NOTE: formerly Hobson Prior — confirm the name before approaching.',
+    source: 'r-dpartners.com/countries/germany', strength: 'strong' },
+  { name: 'Kontrast Personalberatung GmbH', country: 'DEU', city: 'Hamburg',
+    why: 'Places engineers, medical professionals and scientists into R&D, QA/RA, clinical and medical affairs, production and product management, from senior specialist to executive. Hamburg, with a Berlin office.',
+    source: 'kontrast-gmbh.de/en/headhunter/medtech-life-science', strength: 'strong' },
+  // Spain matters more than its size here: the show is in Barcelona, and a Spanish-registered firm
+  // is the one most likely to be in the room for local reasons rather than conference reasons.
+  { name: 'Morgan Philips Hudson España SLU', country: 'ESP', city: 'Madrid',
+    why: 'Executive search and specialist recruitment across medical/scientific, clinical studies, quality and regulatory, market access, biodata and commercial. Clients include pharma, biotech, CROs and medical device firms. Registered office Madrid; part of Morgan Philips Group.',
+    source: 'es.morganphilips.com/en/life-sciences', strength: 'strong' },
+  { name: 'Panda International', country: null, city: null,
+    why: 'Life sciences recruitment across biotechnology, pharmaceuticals, medical devices and health tech, plus a data and AI desk. Positioned on the Netherlands market, though no head office is published.',
+    source: 'panda-int.com', strength: 'medium' },
+  // Deliberately flagged rather than dropped. SIRE describes itself as project management,
+  // consultancy and SECONDMENT — placing consultants into client projects — which is closer to
+  // "staff a trial as delivery" than to "place employees into jobs", and that is exactly the
+  // distinction Naresh drew when he corrected the LinkAble definition. It also runs a job board and
+  // an MSP/VMS staffing-supplier page, so it may well be both. Worth a conversation, not an assumption.
+  { name: 'SIRE Life Sciences', country: null, city: null,
+    why: 'Project management, consultancy and secondment in life sciences, in the Netherlands, plus a job board and an MSP/VMS staffing-supplier offering. VERIFY: secondment of consultants is a different business from placing employees into jobs — ask which one is the bulk of their revenue before pitching.',
+    source: 'sire-search.com', strength: 'verify' },
   // Worth a row BECAUSE of the finding rather than in spite of it: ckgroup.co.uk now 302-redirects
   // to talentmark.co.uk, so CK Group appears to have rebranded or been absorbed. Approaching it
   // under the old name would land badly, and nobody would find that out until the conversation.
@@ -152,7 +185,22 @@ async function main() {
   console.log(`      ${byStrength.strong || 0} strong fit · ${byStrength.medium || 0} medium · ` +
               `${byStrength.weak || 0} thin · ${byStrength.verify || 0} to verify first`);
   console.log(`      ${placeable} with a published head office, ${planned.length - placeable} without`);
-  console.log(`   NOT ONE is a confirmed attendee. This is a list to walk in with, not a floor plan.\n`);
+  console.log(`   NOT ONE is a confirmed attendee. This is a list to walk in with, not a floor plan.`);
+
+  // THE CHECK THE FIRST DRY RUN FAILED BY EYE. Its eight published head offices were all GBR,
+  // because the source directory was a UK directory — a bias in the research, not a fact about the
+  // European market, on a list for a show in Barcelona. Counted now so the next gap is a number.
+  const countries = FIRMS.filter((f) => f.country).reduce((a, f) => {
+    a[f.country] = (a[f.country] || 0) + 1; return a;
+  }, {});
+  const spread = Object.entries(countries).sort((a, b) => b[1] - a[1]);
+  const stated = spread.reduce((a, [, n]) => a + n, 0);
+  console.log(`   published head offices: ${spread.map(([c, n]) => `${c} ${n}`).join(' · ')}`);
+  if (spread.length && spread[0][1] / stated > 0.75) {
+    console.log(`   ⚠ ${spread[0][1]} of ${stated} stated head offices are ${spread[0][0]} — that is a`);
+    console.log(`     bias in the SOURCES, not in the market. The show is in Barcelona.`);
+  }
+  console.log();
   for (const f of FIRMS) {
     console.log(`      ${f.name.padEnd(34)} ${(f.city || '—').padEnd(13)} ${f.country || '—'}`);
   }
