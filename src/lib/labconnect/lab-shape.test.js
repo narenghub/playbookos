@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const {
   looksLikeLab, isNumberedShell, looksLikeLabSql, numberedShellSql, labLookupOrderSql,
+  labRankTerms,
 } = require('./lab-shape');
 
 test('the names that actually sell testing are recognised, across languages', () => {
@@ -61,7 +62,10 @@ test('the ordering leads with region, not with the alphabet', () => {
   // The bug was an ORDER BY whose every term was constant, leaving `name` to decide. Region first,
   // and `name` last as a tiebreak only.
   const order = labLookupOrderSql();
-  assert.ok(order.startsWith("(region LIKE 'eu%') DESC"), 'region must be the FIRST ordering term');
+  // COALESCEd since 2026-10-10: NULL LIKE 'eu%' is NULL and DESC sorts NULLs first, so a lab with
+  // no region led a list ordered for Barcelona.
+  assert.ok(order.startsWith("(COALESCE(region, '') LIKE 'eu%') DESC"),
+    'region must be the FIRST ordering term, and COALESCEd');
   assert.ok(order.lastIndexOf('name') > order.indexOf('contact_email'), 'name must be the last resort');
   // And the demotion must be ASC — a numbered name sorts true-last, not true-first.
   assert.match(order, /~ '\^\[0-9\]'\) ASC/);
@@ -98,20 +102,61 @@ test('the SCOPE delegate query uses this module rather than its own ordering', (
   const { labDelegateSql } = require('../events/lab-delegates');
   const sql = labDelegateSql(60);
 
-  assert.match(sql, /ORDER BY \(region LIKE 'eu%'\) DESC/,
-    'the ordering must come from labLookupOrderSql, which leads with region');
-  assert.ok(/ORDER BY[\s\S]*LIKE '%LABORATO%'/.test(sql),
-    'the shape test must be part of the ordering, not just the filter');
+  assert.match(sql, /ORDER BY \(COALESCE\(region, ''\) LIKE 'eu%'\) DESC/,
+    'the ordering must come from labRankTerms, which leads with region');
   assert.match(sql, /AND \(upper\(name\) LIKE/,
     'the shape test must also be a WHERE clause — a CDMO on the QC tab is a wrong row, not a late one');
-  // The ordering that collapsed to alphabetical twice: region then contact_email with nothing
-  // between them. If those two ever become adjacent again, `name` decides the list.
-  assert.ok(!/\(region LIKE 'eu%'\) DESC,\s*\(contact_email IS NOT NULL\) DESC/.test(sql),
-    'region immediately followed by contact_email is the ordering that ran alphabetically twice');
-  // And `name` may only ever be the final tiebreak.
-  const order = sql.slice(sql.indexOf('ORDER BY'));
-  assert.ok(order.lastIndexOf('contact_email') < order.lastIndexOf('name'),
-    'name must be the last resort, after every real signal');
+  assert.match(sql, /notes IS NULL/,
+    "the register's own API-manufacturer flag must be respected; two versions dropped it");
+  assert.match(sql, /DISTINCT ON \(name_normalized, LOWER\(COALESCE\(city, ''\)\)\)/,
+    'three establishments of one firm in one city must not eat three slots');
+  assert.match(sql, /sites DESC/,
+    'site count is the only term that VARIES — without it the ordering collapses to the alphabet');
+});
+
+test('`name` is never the only non-constant term in the ranking', () => {
+  // The whole three-bug history in one assertion. A ranking made entirely of booleans will collapse
+  // the moment a filter makes those booleans constant across the survivors, and `name` decides.
+  const order = labLookupOrderSql();
+  const terms = order.split(/,\s*(?![^()]*\))/);
+  assert.strictEqual(terms[terms.length - 1].trim(), 'name', 'name must be the last resort');
+  // Every other term is a boolean over the row's own columns. At least one continuous term has to be
+  // available to callers, or there is nothing to break a tie with.
+  const withSites = labRankTerms({ sitesColumn: 'sites' });
+  assert.match(withSites, /sites DESC/);
+  assert.ok(withSites.indexOf('sites DESC') < withSites.lastIndexOf('name'),
+    'the varying term must rank ABOVE name, or it cannot break the tie');
+});
+
+test('a NULL region does not lead a list ordered for Barcelona', () => {
+  // `NULL LIKE 'eu%'` is NULL, and Postgres sorts NULLs FIRST on a DESC sort — so the un-COALESCEd
+  // version put every lab with no region at all at the top of a European list.
+  assert.match(labLookupOrderSql(), /COALESCE\(region, ''\) LIKE 'eu%'/,
+    'region must be COALESCEd before the LIKE, or NULL regions sort first');
+});
+
+test('strong signals outrank weak ones, and Abbott is not a contract lab', () => {
+  const { isStrongLab, isOriginator } = require('./lab-shape');
+  // "Abbott Laboratories GmbH" led the third broken list. It passes the weak shape test by design —
+  // it really does contain "Laboratories" — and is excluded by name, not by shape.
+  assert.ok(looksLikeLab('Abbott Laboratories GmbH'), 'it genuinely contains a lab token');
+  assert.ok(!isStrongLab('Abbott Laboratories GmbH'), 'but it does not claim to sell analysis');
+  assert.ok(isOriginator('Abbott Laboratories GmbH'), 'and it is a named originator, so it is excluded');
+  for (const n of ['AbbVie Deutschland', 'Takeda Austria GmbH', 'Alexion Pharma Laboratories']) {
+    assert.ok(isOriginator(n), `${n} is an originator`);
+  }
+  // Strong means "sells analysis". Weak is kept, just ranked lower.
+  assert.ok(isStrongLab('Villani Analitica Srl'));
+  assert.ok(isStrongLab('Eurofins Biolab Srl'));
+  assert.ok(!isStrongLab('Wessling Laboratorien GmbH'), 'weak, but still a real lab and still kept');
+  assert.ok(looksLikeLab('Wessling Laboratorien GmbH'));
+  // And no originator token may be short or common enough to swallow a real lab.
+  const { ORIGINATOR_TOKENS } = require('./lab-shape');
+  for (const t of ORIGINATOR_TOKENS) assert.ok(t.length >= 5, `originator token "${t}" is too short`);
+  for (const n of ['Rochester Analytical Labs', 'Bayerische Landesanstalt Laboratorium',
+                   'Microbac Laboratories', 'Nelson Labs Europe']) {
+    assert.ok(!isOriginator(n), `"${n}" is a real lab and must not match an originator token`);
+  }
 });
 
 test('the seed script does not hand-write the lab SQL any more', () => {

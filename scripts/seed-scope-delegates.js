@@ -56,6 +56,7 @@ const { marketOfCountry, europeFirstSql, europeFirstParams } = require('../src/l
 // Both lab queries live in src/lib/events/lab-delegates.js so scripts/check-lab-delegates-sql.js
 // can execute the SHIPPED query rather than its own rebuild of it.
 const { labDelegateSql, labShapeAuditSql } = require('../src/lib/events/lab-delegates');
+const { isStrongLab } = require('../src/lib/labconnect/lab-shape');
 
 const EVENT = 'scope-europe-2026';
 const EXECUTE = process.argv.includes('--execute');
@@ -244,15 +245,17 @@ async function main() {
     }
   }
   if (labAudit) {
-    const dropped = labAudit.eligible - labAudit.reads_like_a_lab;
-    console.log(`\n   the shape test, which is why this list is not alphabetical:`);
-    console.log(`      ${labAudit.eligible} labs eligible by status`);
-    console.log(`      ${labAudit.reads_like_a_lab} read like a testing business (${labAudit.eu_reads_like_a_lab} of those in an EU region)`);
-    console.log(`      ${dropped} dropped — the register does not distinguish "makes drugs" from`);
-    console.log(`      "tests drugs", so an unfiltered list leads with API makers and CDMOs`);
-    if (labAudit.reads_like_a_lab < TOP_LABS) {
-      console.log(`      ⚠ fewer than the ${TOP_LABS} asked for. That is the real supply, not a bug —`);
-      console.log(`        padding it back to 60 would put the CDMOs straight back on the tab.`);
+    const a = labAudit;
+    console.log(`\n   how the QC list is narrowed, stage by stage:`);
+    console.log(`      ${a.eligible} labs eligible by status`);
+    console.log(`      ${a.reads_like_a_lab} read like a testing business`);
+    console.log(`      −${a.api_manufacturer_flag} the FDA register flags as also an API manufacturer (notes)`);
+    console.log(`      −${a.originator} are originator pharma whose "Laboratories" is historical (Abbott, AbbVie…)`);
+    console.log(`      = ${a.kept} kept · ${a.kept_strong} of those SELL analysis by name, the rest just say "Laboratories"`);
+    console.log(`      ${a.kept_eu} European rows → ${a.kept_eu_companies} distinct companies (one row per firm per city)`);
+    if (a.kept_eu_companies < TOP_LABS) {
+      console.log(`      ⚠ fewer European companies than the ${TOP_LABS} asked for. That is the real`);
+      console.log(`        supply; padding it back would put the manufacturers straight back on the tab.`);
     }
   }
   if (labs.length) {
@@ -261,8 +264,9 @@ async function main() {
     console.log(`\n   labs: ${eu} in an EU region, ${withContact} with a contact on file`);
     console.log(`   top 8 by lookup rank:`);
     for (const l of labs.slice(0, 8)) {
-      console.log(`      ${String(l.name).slice(0, 44).padEnd(46)} ${l.contact_email ? '✉' : ' '} ` +
-                  `${[l.city, l.country].filter(Boolean).join(', ')}`);
+      const sig = isStrongLab(l.name) ? 'sells analysis' : 'name says "lab" only';
+      console.log(`      ${String(l.name).slice(0, 40).padEnd(42)} ${String(l.sites || 1).padStart(2)} site(s)  ` +
+                  `${l.contact_email ? '✉' : ' '} ${[l.city, l.country].filter(Boolean).join(', ').slice(0, 24).padEnd(26)} ${sig}`);
     }
     const distinctKeys = new Set(planned.filter((p) => p.role === 'qc_lab').map((p) => p.dedupeKey)).size;
     console.log(`   ${labs.length} labs → ${distinctKeys} distinct rows (city is part of a lab's identity,`);

@@ -87,6 +87,58 @@ const LAB_BRAND_TOKENS = [
 /** Every name token the shape test uses: what a lab calls itself, plus the brands that need not. */
 const LAB_ALL_TOKENS = [...LAB_NAME_TOKENS, ...LAB_BRAND_TOKENS];
 
+// ── STRONG VERSUS WEAK, BECAUSE "LABORATORIES" PROVES ALMOST NOTHING ─────────
+//
+// 2026-10-10, third attempt: the filtered list still led with "Abbott Laboratories GmbH". Abbott is
+// an originator pharma company whose name has said "Laboratories" since 1900. 'LABORATO' and 'LABS'
+// are weak — they appear in originators, in hospital pharmacies and in state institutes. A name
+// containing ANALYTICAL, BIOANALYSIS, TESTING or QUALITY CONTROL is a firm SELLING analysis, which
+// is a far stronger claim about what it does.
+//
+// Weak is still kept, because ALS Laboratories and Wessling Laboratorien are real contract labs
+// that use only the weak word. Weak means "ranks below strong", not "excluded".
+const STRONG_LAB_TOKENS = [
+  'ANALYTIC', 'ANALITIC', 'BIOANALY', 'TESTING', 'QUALITY CONTROL', 'MICROBIOLOG',
+  ...LAB_BRAND_TOKENS,
+];
+
+// ── THE ORIGINATORS, WHOSE "LABORATORIES" IS HISTORICAL ──────────────────────
+//
+// An originator's own site never sells QC testing to anyone — it tests its own product, which is
+// precisely what the register's API-manufacturer note describes. These names trip a lab token and
+// have to be named to be excluded.
+//
+// Deliberately NOT here, because each would match inside an unrelated word: ROCHE (Rochester),
+// BAYER (Bayerische — a Bavarian state institute could be a genuine lab), UCB, MSD, GSK. The
+// substring approach that lets 'LABORATO' span four languages is the same thing that makes a short
+// or common fragment unsafe, and the rule from 'CRO' matching MICRO holds here too.
+const ORIGINATOR_TOKENS = [
+  'ABBOTT', 'ABBVIE', 'PFIZER', 'NOVARTIS', 'SANOFI', 'ASTRAZENECA', 'BOEHRINGER',
+  'GLAXO', 'JANSSEN', 'SERVIER', 'RECORDATI', 'CHIESI', 'MENARINI', 'ALMIRALL',
+  'NOVO NORDISK', 'ELI LILLY', 'BRISTOL-MYERS', 'AMGEN', 'BIOGEN', 'ALEXION',
+  'GILEAD', 'VERTEX', 'TAKEDA', 'ASTELLAS', 'DAIICHI', 'OTSUKA',
+];
+
+/** SQL boolean: does the name claim to SELL analysis, rather than merely contain "laboratories"? */
+function strongLabSql(col = 'name') {
+  return '(' + STRONG_LAB_TOKENS.map(t => `upper(${col}) LIKE '%${t}%'`).join(' OR ') + ')';
+}
+
+/** SQL boolean: is this an originator pharma company whose own site is never a QC vendor? */
+function originatorSql(col = 'name') {
+  return '(' + ORIGINATOR_TOKENS.map(t => `upper(${col}) LIKE '%${t}%'`).join(' OR ') + ')';
+}
+
+/** JS mirrors. */
+function isStrongLab(name) {
+  const s = String(name || '').toUpperCase();
+  return STRONG_LAB_TOKENS.some(t => s.includes(t));
+}
+function isOriginator(name) {
+  const s = String(name || '').toUpperCase();
+  return ORIGINATOR_TOKENS.some(t => s.includes(t));
+}
+
 /** SQL boolean: does this name column read like a testing business? */
 function looksLikeLabSql(col = 'name') {
   return '(' + LAB_ALL_TOKENS.map(t => `upper(${col}) LIKE '%${t}%'`).join(' OR ') + ')';
@@ -112,16 +164,50 @@ function isNumberedShell(name) { return /^[0-9]/.test(String(name || '')); }
  * the lookup, so it ranks below both — then name, for a stable order across runs.
  */
 function labLookupOrderSql() {
-  return [
-    `(region LIKE 'eu%') DESC`,
+  return labRankTerms();
+}
+
+/**
+ * THE one ranking for labs, in one place, because this ordering has now been written wrong three
+ * times (see the history in src/lib/events/lab-delegates.js). Callers add the terms their query can
+ * supply rather than hand-writing the whole list, which is how the second and third collapses
+ * happened.
+ *
+ * `COALESCE(region, '')` matters: `NULL LIKE 'eu%'` is NULL, and a DESC sort puts NULLs FIRST in
+ * Postgres, so a lab with no region at all would have led a list ordered for Barcelona.
+ *
+ *   sitesColumn      — a column holding how many registered sites the firm has. The ONLY continuous
+ *                      signal on this table, and the term that stops the ordering collapsing to the
+ *                      alphabet once every boolean is constant across the survivors.
+ *   capabilityFlags  — include the human-set gmp/research flags (present on `labs`, not on a
+ *                      lookup's narrower projection).
+ */
+function labRankTerms(opts = {}) {
+  const terms = [
+    `(COALESCE(region, '') LIKE 'eu%') DESC`,
+    // Strong before weak: a firm that says ANALYTICAL or TESTING sells analysis; one that merely
+    // says "Laboratories" might be Abbott.
+    `${strongLabSql('name')} DESC`,
     `${looksLikeLabSql('name')} DESC`,
-    `${numberedShellSql('name')} ASC`,
+  ];
+  if (opts.sitesColumn) terms.push(`${opts.sitesColumn} DESC`);
+  if (opts.capabilityFlags) {
+    terms.push(`(COALESCE(gmp_capable, false) OR COALESCE(research_capable, false)) DESC`);
+  }
+  terms.push(
     `(contact_email IS NOT NULL) DESC`,
+    `${numberedShellSql('name')} ASC`,
+    // `name` is the last resort and must never be the only non-constant term. If it decides the
+    // list, the ordering has collapsed — which is the bug this whole module exists for.
     `name`,
-  ].join(', ');
+  );
+  return terms.join(', ');
 }
 
 module.exports = {
-  LAB_NAME_TOKENS, LAB_BRAND_TOKENS, LAB_ALL_TOKENS, looksLikeLabSql, numberedShellSql,
+  LAB_NAME_TOKENS, LAB_BRAND_TOKENS, LAB_ALL_TOKENS,
+  STRONG_LAB_TOKENS, ORIGINATOR_TOKENS,
+  looksLikeLabSql, numberedShellSql, strongLabSql, originatorSql, labRankTerms,
+  isStrongLab, isOriginator,
   looksLikeLab, isNumberedShell, labLookupOrderSql,
 };

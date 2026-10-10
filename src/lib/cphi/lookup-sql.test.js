@@ -63,6 +63,11 @@ function projectedNames(list) {
 const SQL_WORDS = new Set([
   'asc', 'desc', 'nulls', 'first', 'last', 'like', 'ilike', 'is', 'not', 'null', 'and', 'or',
   'upper', 'lower', 'length', 'btrim', 'case', 'when', 'then', 'else', 'end', 'true', 'false',
+  // Added 2026-10-10 with COALESCE(region, '') in labRankTerms. A function name is not a column
+  // reference; without this the check reports "coalesce is not projected", which is noise that
+  // would pressure the next person into removing the COALESCE — and the COALESCE is there because
+  // NULL LIKE 'eu%' is NULL and DESC sorts NULLs first.
+  'coalesce',
 ]);
 function referencedNames(order) {
   const stripped = order.replace(/'[^']*'/g, "''");
