@@ -108,12 +108,21 @@ async function main() {
     console.log(`      card name   ${r.name}`);
     console.log(`      greeting    "Hi ${p.name}"${r.greeting_name ? `   (was "Hi ${r.greeting_name}")` : ''}`);
 
-    // A greeting that is not part of the name on the card is worth stopping for. It is usually a
-    // transposition — the family name typed where the given name goes — and that is the exact
-    // mistake this column exists to prevent.
-    const tokens = r.name.split(/\s+/).map((t) => t.replace(/[.,]/g, '').toLowerCase());
-    if (!tokens.includes(p.name.toLowerCase())) {
-      console.log(`      ⚠ "${p.name}" is not one of the tokens in "${r.name}" — check the card.`);
+    // A greeting containing a word that is NOT on the card is worth stopping for: it is usually a
+    // transposition, the family name typed where the given name goes, which is the exact mistake
+    // this column exists to prevent.
+    //
+    // Compared word by word, because a given name can be compound. The first version of this check
+    // compared the whole greeting against single tokens and so warned on "Udaya Sagar" (card:
+    // "Udaya Sagar G.") — a correct greeting. A warning that fires on correct input is worse than
+    // no warning at all, because it teaches the reader to ignore the next one.
+    const bare = (s) => s.replace(/[.,]/g, '').toLowerCase();
+    const cardTokens = r.name.split(/\s+/).map(bare).filter(Boolean);
+    const unknown = p.name.split(/\s+/).map(bare).filter(Boolean)
+      .filter((w) => !cardTokens.includes(w));
+    if (unknown.length) {
+      console.log(`      ⚠ ${unknown.map((w) => `"${w}"`).join(', ')} `
+        + `${unknown.length > 1 ? 'are' : 'is'} not on the card ("${r.name}") — check it.`);
     }
     if (!r.role) console.log(`      ⚠ no role, so still no campaign — scripts/set-contact-role.js`);
     if (!r.email) console.log(`      ⚠ no email address, so still nothing to send`);
