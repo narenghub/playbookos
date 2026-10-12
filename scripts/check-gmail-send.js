@@ -28,8 +28,8 @@
 // this says which one it got.
 'use strict';
 
-const { google } = require('googleapis');
-const { SCOPES, getGoogleAccessToken, serviceAccountCreds } = require('../src/lib/google-auth');
+const { SCOPES, serviceAccountCreds } = require('../src/lib/google-auth');
+const { gmailClientFor, SCOPE_SETS } = require('../src/lib/gmail/client');
 
 const arg = (name, dflt) => {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -37,9 +37,12 @@ const arg = (name, dflt) => {
 };
 const SUBJECT = arg('as', 'naren@abiozen.com');
 
-// Exactly the two powers the follow-up agent needs: send as the subject, and see whether the
-// thread has a reply. Nothing wider.
+// What to ASK for, in preference order — resolved in src/lib/gmail/client.js, which tries the
+// narrow set first and falls back to the one that is actually granted. The 2026-10-12 grant held
+// gmail.modify and not gmail.send, and modify already permits sending, so insisting on send would
+// have cost a console trip for no security gain: the admin grant is the boundary, not the request.
 const NEEDED = [SCOPES.gmailSend, SCOPES.gmailReadonly];
+const GRANT_LINE = [SCOPES.gmailSend, SCOPES.gmailReadonly].join(',');
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -67,7 +70,7 @@ function printAdminSteps() {
   console.log('                       → Manage Domain Wide Delegation → Add new');
   console.log(`      Client ID:  ${creds.client_id || '(client_id is missing from the service account JSON)'}`);
   console.log('      OAuth scopes (paste as one comma-separated line):');
-  console.log(`      ${NEEDED.join(',')}`);
+  console.log(`      ${GRANT_LINE}`);
   console.log('      You must be a Workspace super admin on the domain. Allow a few minutes to');
   console.log('      propagate — if it still fails immediately, wait and re-run.');
   console.log('');
@@ -97,58 +100,49 @@ async function main() {
   for (const s of NEEDED) console.log(`      ${s}`);
   console.log();
 
-  const tok = await getGoogleAccessToken({ subject: SUBJECT, scopes: NEEDED });
-  if (tok.error) {
-    bad('mint an access token for the Gmail scopes', tok.error);
-    if (/unauthorized_client/i.test(tok.error)) {
-      console.log('\n   "unauthorized_client" is the specific signature of domain-wide delegation');
-      console.log('   not being granted for these scopes. The service account exists and its key is');
-      console.log('   valid; Workspace is refusing to let it impersonate anyone for Gmail.');
+  const res = await gmailClientFor(SUBJECT);
+  if (res.error) {
+    bad(`act as ${SUBJECT}`, [res.error, ...(res.tried || []).map((t) => `tried ${t}`)].join('\n'));
+    const all = (res.tried || []).join(' ');
+    if (/unauthorized_client/i.test(all)) {
+      console.log('\n   "unauthorized_client" means Workspace is refusing to let this service');
+      console.log('   account impersonate anyone for the scopes asked for. Either delegation is not');
+      console.log('   granted, or the granted list does not contain them.');
+    }
+    if (/has not been used in project|is disabled/i.test(all)) {
+      console.log('\n   The Gmail API is not enabled in the service account\'s Cloud project. That is');
+      console.log('   step 1 below, and delegation cannot work around it.');
+    }
+    if (/insufficient authentication scopes/i.test(all)) {
+      console.log('\n   A token minted but carries no Gmail scope — the Search-Console refresh token.');
+      console.log('   Delegation is what fixes this; a fresh consent would too, less durably.');
     }
     printAdminSteps();
-    console.log(`\nFAIL  cannot act as ${SUBJECT} — the follow-up agent cannot run on this path\n`);
+    console.log(`\nFAIL  cannot act as ${SUBJECT} — the follow-up agent must not be enabled\n`);
     process.exit(1);
   }
 
-  ok(`token minted via ${tok.via}`);
-  if (tok.via !== 'service_account') {
+  ok(`token minted via ${res.via}, on the "${res.scopeSet}" scope set`);
+  if (res.scopeSet === 'modify+readonly') {
+    console.log('   note  gmail.send is not in the grant, so this is sending via gmail.modify,');
+    console.log('         which permits it. Nothing to fix: modify is already delegated and is');
+    console.log('         needed anyway by meet-agent and inquiry-agent to drop the UNREAD label.');
+  }
+  if (res.via !== 'service_account') {
     console.log(`   ⚠ This came from the OAuth REFRESH TOKEN, not the service account.`);
-    console.log(`     That token was minted for Search Console; if the Gmail calls below still`);
-    console.log(`     work, it has Gmail scopes too — but a refresh token can be revoked or expire,`);
-    console.log(`     and an agent that must keep running for two weeks should not depend on one.`);
-    console.log(`     Enable domain-wide delegation and this flips to service_account by itself.`);
+    console.log(`     It works, but a refresh token can be revoked or expire — and if the OAuth app`);
+    console.log(`     is still in "Testing" status it expires after SEVEN DAYS, which would strand`);
+    console.log(`     the sequence mid-trip. Delegation has no token to expire.`);
     printAdminSteps();
   }
 
   // ── WHOSE MAILBOX DID WE ACTUALLY GET? ────
-  // The decisive check. A token can mint and still be for the wrong identity — and sending a warm
-  // follow-up from the wrong address is worse than not sending it.
-  const auth = new google.auth.OAuth2();
-  auth.setCredentials({ access_token: tok.access_token });
-  const gmail = google.gmail({ version: 'v1', auth });
-
-  let profile;
-  try {
-    profile = (await gmail.users.getProfile({ userId: 'me' })).data;
-  } catch (e) {
-    const msg = (e && e.message) || String(e);
-    bad('read the mailbox profile', msg);
-    if (/insufficient|scope|403/i.test(msg)) {
-      console.log('\n   The token exists but does not carry the Gmail scopes. If this came via');
-      console.log('   refresh_token, that is expected — it was minted for Search Console and adding');
-      console.log('   a scope means a fresh consent. Domain-wide delegation avoids that entirely.');
-      printAdminSteps();
-    }
-    console.log(`\nFAIL  cannot act as ${SUBJECT}\n`);
-    process.exit(1);
-  }
-
-  if (String(profile.emailAddress || '').toLowerCase() !== SUBJECT.toLowerCase()) {
-    bad(`the mailbox is ${profile.emailAddress}, not ${SUBJECT}`,
-      'Sending a warm follow-up from the wrong address is worse than not sending it.');
-  } else {
-    ok(`the mailbox IS ${profile.emailAddress} — ${profile.messagesTotal} messages, ${profile.threadsTotal} threads`);
-  }
+  // Already proven by the resolver, which refuses a token for the wrong identity — a token can be
+  // valid and be the wrong person, and a warm follow-up from the wrong address is worse than none.
+  const profile = res.profile || {};
+  ok(`the mailbox IS ${profile.emailAddress} — ${profile.messagesTotal} messages, ${profile.threadsTotal} threads`);
+  const gmail = res.gmail;
+  const tok = { access_token: res.access_token, via: res.via };
 
   // ── CAN WE SEE REPLIES? ────
   // Stop-on-reply is what keeps the agent from emailing somebody who already answered. It needs
