@@ -10,6 +10,14 @@ const { google } = require('googleapis');
 const SCOPES = {
   gmailReadonly: 'https://www.googleapis.com/auth/gmail.readonly',
   gmailModify: 'https://www.googleapis.com/auth/gmail.modify',
+  // SENDING. Added 2026-10-12 for the warm post-show follow-ups, which go from Naresh's own
+  // mailbox rather than through a sequencer — the recipients met him in person and agreed a model,
+  // and a tracking redirect plus an unsubscribe footer is the signal that it was generated.
+  //
+  // gmail.send on its own is deliberate: gmail.modify would also permit sending, and a great deal
+  // more. The follow-up agent needs exactly two powers — send as the subject, and see whether the
+  // thread has been replied to — so it gets gmailSend + gmailReadonly and nothing wider.
+  gmailSend: 'https://www.googleapis.com/auth/gmail.send',
   calendarReadonly: 'https://www.googleapis.com/auth/calendar.readonly',
   driveReadonly: 'https://www.googleapis.com/auth/drive.readonly',
   webmastersReadonly: 'https://www.googleapis.com/auth/webmasters.readonly',
