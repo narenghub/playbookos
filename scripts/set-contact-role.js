@@ -90,7 +90,9 @@ async function main() {
   const targets = EMAILS.length ? EMAILS : [EMAIL];
   if (targets.length > 1) {
     const results = [];
-    for (const addr of targets) results.push(await setOne(addr));
+    for (const addr of targets) {
+      results.push(await setOne({ email: addr, role: ROLE, event: EVENT, execute: EXECUTE }));
+    }
     const ok = results.filter((r) => r.ok).length;
     const failed = results.filter((r) => !r.ok);
     // A dry run that reports "15 of 15 SET" is a lie, and it reads especially badly directly above
@@ -107,7 +109,7 @@ async function main() {
     // somebody ends up thinking the list is clear when it is not.
     process.exit(failed.length ? 1 : 0);
   }
-  const r = await setOne(targets[0]);
+  const r = await setOne({ email: targets[0], role: ROLE, event: EVENT, execute: EXECUTE });
   if (!r.ok) process.exit(1);
   const remaining = (await query(
     `SELECT COUNT(*)::int n FROM cphi_exhibitor_contacts c
@@ -118,7 +120,13 @@ async function main() {
 
 // One contact. Returns { ok, email, why } so a batch can report per-address rather than dying on
 // the first problem and leaving the rest unprocessed and unexplained.
-async function setOne(EMAIL) {
+//
+// Exported, and taking its parameters explicitly rather than reading the module-level CLI
+// constants, because classify-by-supplier-list.js decides a role from evidence and then needs to
+// WRITE it. A second write path would be a second set of guards — the already-emailed warning, the
+// duplicate-address refusal, the read-back through the export's own join — and the one that got
+// copied is always the one that goes stale.
+async function setOne({ email: EMAIL, role: ROLE, event: EVENT, execute: EXECUTE }) {
   const contacts = (await query(
     `SELECT c.id, c.company, c.company_normalized, c.name, c.email, c.exhibitor_match_id,
             x.role AS current_role, x.holder AS current_holder
@@ -187,7 +195,13 @@ async function setOne(EMAIL) {
   return { ok: true, email: EMAIL };
 }
 
-main().then(() => process.exit(0)).catch((e) => {
-  console.error('set-contact-role failed:', e && e.message ? e.message : e);
-  process.exit(1);
-});
+// Only when run directly. Requiring this file must not parse argv, must not query, and above all
+// must not exit the process on behalf of its caller.
+if (require.main === module) {
+  main().then(() => process.exit(0)).catch((e) => {
+    console.error('set-contact-role failed:', e && e.message ? e.message : e);
+    process.exit(1);
+  });
+}
+
+module.exports = { setOne };

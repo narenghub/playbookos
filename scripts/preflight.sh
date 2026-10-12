@@ -54,6 +54,12 @@ step "SCOPE lab delegates run on Postgres" node scripts/check-lab-delegates-sql.
 # grepped the source for the query text: a grep proves the words are there, never that the statement
 # runs. This executes every query against the real column sets and asserts the patch scopes.
 step "territory grant runs on Postgres" node scripts/check-territory-grant-sql.js
+# The supplier cross-check reads three tables it does not own — dmf_holders, suppliers,
+# cphi_exhibitor_matches — and its output decides which of three emails a contact receives. It also
+# has to distinguish "searched and found nothing" from "could not search": GP-Pharm's brand core is
+# "gp", which canAnchor refuses, so a name search returns nothing and reading that as "not a
+# supplier" would file a drug-product maker as a buyer on a search that never ran.
+step "supplier cross-check runs on Postgres" node scripts/check-supplier-classify-sql.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
