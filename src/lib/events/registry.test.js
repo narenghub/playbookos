@@ -217,3 +217,39 @@ test('SCOPE Europe 2026 is Barcelona, 13-14 October', () => {
   assert.strictEqual(e.ends, '2026-10-14');
   assert.strictEqual(e.kind, 'demand', 'SCOPE attendees run trials — they buy from us, not to us');
 });
+
+// ── A SLUG THAT IS NOT AN EVENT ────────────────────────────────────────────────
+//
+// On 2026-10-12 a seed wrote event_slug = 'cphi'. The event is 'cphi-milan-2026'. Twenty cards
+// landed under a slug nothing else uses — and the export script DEFAULTED TO THE SAME WRONG SLUG,
+// so it found exactly those twenty, printed a clean table, and reported them as the whole list
+// while sixty-one earlier contacts sat invisible. Two mistakes that cancelled into something that
+// looked correct.
+
+test('"cphi" is not an event — the slug is cphi-milan-2026', () => {
+  const { isEvent } = require('./registry');
+  assert.ok(isEvent('cphi-milan-2026'), 'the real slug must resolve');
+  assert.ok(!isEvent('cphi'), 'the abbreviation must NOT resolve, or the bug comes back silently');
+});
+
+test('every script that writes contacts uses a slug the registry knows', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const { isEvent } = require('./registry');
+  const dir = path.join(__dirname, '..', '..', '..', 'scripts');
+  const offenders = [];
+  for (const f of fs.readdirSync(dir)) {
+    if (!/\.js$/.test(f)) continue;
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    if (!/cphi_exhibitor_contacts|cphi_exhibitor_matches/.test(src)) continue;
+    // Any `const EVENT = '...'` literal in a script that writes these tables must be a real event.
+    for (const m of src.matchAll(/const\s+(?:EVENT|TO|FROM)\s*=\s*'([a-z0-9-]+)'/g)) {
+      const slug = m[1];
+      // repair-cphi-event-slug.js names the BAD slug on purpose, to move rows off it.
+      if (f === 'repair-cphi-event-slug.js' && slug === 'cphi') continue;
+      if (!isEvent(slug)) offenders.push(`${f}: "${slug}"`);
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `\nthese scripts write contact rows under a slug that is not an event:\n  ${offenders.join('\n  ')}\n`);
+});

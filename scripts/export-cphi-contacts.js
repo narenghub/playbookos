@@ -29,9 +29,12 @@
 'use strict';
 
 const { initDB, query } = require('../src/lib/db');
+const { EVENTS, isEvent } = require('../src/lib/events/registry');
 
+// 'cphi' is NOT the slug — the registry calls it cphi-milan-2026, and a default of 'cphi' found
+// only the twenty cards mistakenly written under that name and reported them as the whole list.
 const EVENT = process.argv.find((a) => a.startsWith('--event='))
-  ? process.argv.find((a) => a.startsWith('--event=')).split('=')[1] : 'cphi';
+  ? process.argv.find((a) => a.startsWith('--event=')).split('=')[1] : 'cphi-milan-2026';
 const PRINT = process.argv.includes('--print');
 const INCLUDE_EMAILED = process.argv.includes('--include-emailed');
 
@@ -110,6 +113,11 @@ const HEADER = ['First Name', 'Last Name', 'Full Name', 'Email', 'Company', 'Tit
 async function main() {
   await initDB();
 
+  if (!isEvent(EVENT)) {
+    console.log(`✗ "${EVENT}" is not an event. Known events: ${EVENTS.map((e) => e.slug).join(', ')}\n`);
+    process.exit(1);
+  }
+
   const rows = (await query(
     `SELECT c.id, c.company, c.name, c.title, c.email, c.phone_mobile, c.phone_office,
             c.website, c.source, c.note, c.last_emailed_at, c.linkedin_connected,
@@ -121,7 +129,7 @@ async function main() {
 
   console.log(`── ${EVENT} contacts → campaign segments\n`);
   if (!rows.length) {
-    console.log(`   no contacts for event "${EVENT}". Check the slug: --event=cphi\n`);
+    console.log(`   no contacts for event "${EVENT}". Known events: ${EVENTS.map((e) => e.slug).join(', ')}\n`);
     return;
   }
 

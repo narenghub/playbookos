@@ -32,8 +32,19 @@
 
 const { initDB, query } = require('../src/lib/db');
 const { normalizeCompany } = require('../src/lib/cphi/match-company');
+const { isEvent, isRoleOf } = require('../src/lib/events/registry');
 
-const EVENT = 'cphi';
+// ── THE SLUG IS 'cphi-milan-2026', NOT 'cphi' ────────────────────────────────
+//
+// The first version of this script said 'cphi'. That is not an event: the registry calls it
+// cphi-milan-2026, and both earlier contact seeds use that. So twenty cards were written under a
+// slug nothing else uses, isolated from the sixty-one contacts already collected — and the export
+// script, whose default was ALSO 'cphi', would have found exactly those twenty and reported them
+// as the whole list. Two mistakes that cancelled each other into something that looked right.
+//
+// isEvent() below is the fix that matters more than the string: a slug that is not a real event
+// now stops the run instead of quietly creating a phantom one.
+const EVENT = 'cphi-milan-2026';
 const EXECUTE = process.argv.includes('--execute');
 const MET_AT = '2026-10-08';   // the last day of the show, which is when these were collected
 
@@ -185,6 +196,21 @@ const say = (s = '') => console.log(s);
 
 async function main() {
   await initDB();
+
+  // A typo here does not fail — it invents an event. Checked before anything is read or written.
+  if (!isEvent(EVENT)) {
+    console.error(`✗ "${EVENT}" is not an event in src/lib/events/registry.js.`);
+    console.error('  A slug that is not a real event silently creates a phantom one, which is');
+    console.error('  exactly what happened with "cphi" on 2026-10-12.');
+    process.exit(1);
+  }
+  for (const c of CARDS) {
+    if (c.role && !isRoleOf(EVENT, c.role)) {
+      console.error(`✗ "${c.role}" is not a role of ${EVENT} (card: ${c.name})`);
+      process.exit(1);
+    }
+  }
+
   say(`── CPHI Milan · last-day cards · ${CARDS.length} contacts\n`);
 
   // ── TRANSCRIPTION SANITY, BEFORE ANYTHING IS WRITTEN ────
