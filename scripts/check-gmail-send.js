@@ -47,22 +47,48 @@ const bad = (m, d) => { fail++; console.log(`  FAIL  ${m}`); if (d) console.log(
 
 function printAdminSteps() {
   const creds = serviceAccountCreds();
-  console.log('\n   ── TO ENABLE DOMAIN-WIDE DELEGATION ────');
+  console.log('\n   ── TO ENABLE SENDING AS A WORKSPACE USER ────');
   if (!creds) {
     console.log('   GOOGLE_SERVICE_ACCOUNT_JSON is not set or not valid JSON, so there is no');
     console.log('   service account to delegate to. That has to be fixed first.');
     return;
   }
-  console.log('   admin.google.com → Security → Access and data control → API controls');
-  console.log('                    → Manage Domain Wide Delegation → Add new');
+  const project = creds.project_id || '(project unknown)';
+  console.log('   THREE steps, and the first is the one that gets missed.\n');
+  console.log(`   1. ENABLE THE GMAIL API in the service account's own Cloud project.`);
+  console.log(`      console.cloud.google.com → project ${project}`);
+  console.log(`      → APIs & Services → Library → Gmail API → Enable`);
+  console.log(`      This project was created for Search Console, so the Gmail API is almost`);
+  console.log(`      certainly off. Delegation alone does not help while it is: the calls fail with`);
+  console.log(`      "Gmail API has not been used in project ... before or it is disabled".`);
   console.log('');
-  console.log(`   Client ID:  ${creds.client_id || '(client_id is missing from the service account JSON)'}`);
-  console.log(`   OAuth scopes (paste as one comma-separated line):`);
-  console.log(`   ${NEEDED.join(',')}`);
+  console.log('   2. GRANT DOMAIN-WIDE DELEGATION in the Workspace Admin Console.');
+  console.log('      admin.google.com → Security → Access and data control → API controls');
+  console.log('                       → Manage Domain Wide Delegation → Add new');
+  console.log(`      Client ID:  ${creds.client_id || '(client_id is missing from the service account JSON)'}`);
+  console.log('      OAuth scopes (paste as one comma-separated line):');
+  console.log(`      ${NEEDED.join(',')}`);
+  console.log('      You must be a Workspace super admin on the domain. Allow a few minutes to');
+  console.log('      propagate — if it still fails immediately, wait and re-run.');
+  console.log('');
+  console.log('   3. RE-RUN THIS CHECK. It should then say "via service_account".');
   console.log('');
   console.log(`   Service account: ${creds.client_email}`);
-  console.log('   You must be a Workspace super admin on abiozen.com to do this. It takes a few');
-  console.log('   minutes to propagate, so if it still fails immediately, wait and re-run.');
+  console.log('');
+  console.log('   ── WHAT THIS GRANT ACTUALLY GIVES AWAY, SAID PLAINLY ────');
+  console.log('   Domain-wide delegation is DOMAIN-WIDE. It cannot be limited to one mailbox: once');
+  console.log('   granted, that key can read and send mail as ANY user on the domain, and the key');
+  console.log('   currently sits in a Railway environment variable. That is a real blast radius and');
+  console.log('   it is the price of an agent that keeps running while nobody is watching.');
+  console.log('');
+  console.log('   The narrower alternative is an OAuth consent for ONE user, which reaches only that');
+  console.log('   mailbox. Its catch: if the OAuth app\'s publishing status is still "Testing", the');
+  console.log('   refresh token expires after SEVEN DAYS — which is precisely the failure that would');
+  console.log('   strand a follow-up sequence mid-trip. Delegation has no token to expire.');
+  console.log('');
+  console.log('   If the blast radius is the greater worry, the tidier version is a SEPARATE service');
+  console.log('   account for mail, so an SEO credential and a send-as-anyone credential are not the');
+  console.log('   same string. Worth doing, not worth blocking the campaign on.');
 }
 
 async function main() {
