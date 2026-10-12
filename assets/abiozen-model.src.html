@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Abiozen — how the pieces fit</title>
+<style>
+  @page { size: A4; margin: 11mm 13mm; }
+  * { box-sizing: border-box; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    margin: 0; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #15202b; font-size: 9.3pt; line-height: 1.4;
+  }
+  .rule { height: 3px; background: #0b5a6b; margin: 0 0 9px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+  h1 { font-size: 15pt; margin: 0 0 2px; letter-spacing: -0.2px; }
+  .sub { color: #4a5c6a; font-size: 9pt; margin: 0; }
+  .org { text-align: right; font-size: 8.2pt; color: #4a5c6a; line-height: 1.4; white-space: nowrap; }
+  .org b { color: #15202b; display: block; font-size: 10pt; letter-spacing: -0.1px; }
+  .chip {
+    display: inline-block; margin-top: 5px; padding: 2px 8px; border-radius: 10px;
+    background: #0b5a6b; color: #fff; font-size: 7.6pt; letter-spacing: 0.5px;
+    text-transform: uppercase; font-weight: 700;
+  }
+
+  .spine {
+    margin: 10px 0 11px; padding: 8px 11px; background: #f1f6f7;
+    border-left: 3px solid #0b5a6b; font-size: 9.6pt; line-height: 1.45;
+  }
+  .spine b { color: #0b5a6b; }
+
+  h2 {
+    font-size: 8.4pt; text-transform: uppercase; letter-spacing: 0.9px;
+    color: #0b5a6b; margin: 0 0 6px; font-weight: 700;
+  }
+
+  /* ── the diagram ── */
+  .flow { display: flex; align-items: stretch; gap: 7px; margin-bottom: 4px; }
+  .cell { flex: 1; border: 1px solid #d3dde1; border-radius: 3px; padding: 7px 8px; background: #fff; }
+  .cell.mid { background: #fbfdfd; }
+  .cell .tag { font-size: 7.4pt; text-transform: uppercase; letter-spacing: 0.7px; color: #7d8d99; }
+  .cell .name { font-weight: 700; font-size: 9.3pt; margin: 1px 0 3px; }
+  .cell p { margin: 0; font-size: 8.2pt; color: #3d4d5a; line-height: 1.38; }
+  .arrow { align-self: center; color: #9fb0bb; font-size: 13pt; line-height: 1; }
+  .stack { flex: 1.5; display: flex; flex-direction: column; gap: 7px; }
+  .stack .cell { padding: 6px 8px; }
+  .status {
+    display: inline-block; font-size: 7pt; letter-spacing: 0.4px; padding: 1px 5px;
+    border-radius: 2px; background: #fff3d6; color: #7a5a00; border: 1px solid #efd79a;
+    vertical-align: 1px; margin-left: 5px; font-weight: 600;
+  }
+  .status.live { background: #e4f4e8; color: #1d6b32; border-color: #bfe3c8; }
+
+  .cols { display: flex; gap: 16px; margin-top: 11px; }
+  .col { flex: 1; }
+  ul { margin: 0; padding-left: 14px; }
+  li { margin-bottom: 3px; font-size: 8.6pt; line-height: 1.4; }
+  li b { color: #0b5a6b; }
+
+  .ask { margin-top: 10px; padding: 8px 10px; border: 1px solid #d3dde1; border-radius: 3px; }
+  .ask h2 { margin-bottom: 5px; }
+  .ask ol { margin: 0; padding-left: 15px; }
+  .ask li { font-size: 8.6pt; }
+
+  footer { margin-top: 11px; padding-top: 8px; border-top: 2px solid #0b5a6b; }
+  .addr { display: flex; gap: 18px; align-items: flex-end; justify-content: space-between; }
+  .site { font-size: 8.2pt; color: #4a5c6a; line-height: 1.4; }
+  .site .label {
+    font-size: 7pt; text-transform: uppercase; letter-spacing: 0.8px; color: #0b5a6b;
+    font-weight: 700; display: block; margin-bottom: 1px;
+  }
+  .sig { text-align: right; font-size: 8.4pt; color: #4a5c6a; line-height: 1.45; }
+  .sig .who { font-size: 10.5pt; color: #15202b; font-weight: 700; letter-spacing: -0.1px; }
+  .sig .role { color: #0b5a6b; font-size: 8.4pt; }
+  .note {
+    margin-top: 8px; padding-top: 7px; border-top: 1px solid #e3eaed;
+    font-size: 7.4pt; color: #7d8d99; line-height: 1.45;
+  }
+</style>
+</head>
+<body>
+
+<div class="rule"></div>
+<header>
+  <div>
+    <h1>How Abiozen, AROS and the agent layer work together</h1>
+    <p class="sub">The model we discussed at your stand</p>
+    <span class="chip">CPHI Worldwide &middot; Milan &middot; October 2026</span>
+  </div>
+  <div class="org">
+    <b>Abiozen LLC</b>
+    Buffalo Grove &amp; Chicago, Illinois<br>
+    United States
+  </div>
+</header>
+
+<div class="spine">
+  <b>In one sentence:</b> Abiozen supplies the molecule together with its regulatory compliance
+  documentation, and arranges analytical testing validated in the client&rsquo;s own region — for
+  companies running studies from discovery through formulation.
+</div>
+
+<h2>The parts, and what each one is for</h2>
+<div class="flow">
+  <div class="cell">
+    <div class="tag">Where demand starts</div>
+    <div class="name">A study with a need</div>
+    <p>A sponsor, CRO or research group needs material for a programme: a defined molecule, a grade,
+      a quantity, a date, and documentation their reviewers will accept.</p>
+  </div>
+  <div class="arrow">&rarr;</div>
+  <div class="stack">
+    <div class="cell mid">
+      <div class="tag">The molecule</div>
+      <div class="name">Abiozen marketplace <span class="status live">Live</span></div>
+      <p>A pharmaceutical API and molecule marketplace. Suppliers list what they make; we match it to
+        real, specified demand and move the material.</p>
+    </div>
+    <div class="cell mid">
+      <div class="tag">The documentation</div>
+      <div class="name">AROS <span class="status">Early release</span></div>
+      <p>Autonomous Regulatory Operating System — <i>aroscompliance.com</i>. Compliance and regulatory
+        tracking, where one organisation can act as buyer, supplier or both, and material is tracked
+        in and out.</p>
+    </div>
+    <div class="cell mid">
+      <div class="tag">The testing</div>
+      <div class="name">Analytical partners <span class="status">Being onboarded</span></div>
+      <p>Independent laboratories performing release and characterisation testing, validated in the
+        region where the client&rsquo;s own reviewers sit.</p>
+    </div>
+  </div>
+  <div class="arrow">&rarr;</div>
+  <div class="cell">
+    <div class="tag">What ties it together</div>
+    <div class="name">The agent layer</div>
+    <p>Our coordination layer reads demand as it appears, matches it against what our suppliers hold,
+      and routes the sourcing, the documentation and the testing as one piece of work rather than
+      three.</p>
+    <p style="margin-top:4px">It is why a request becomes a specified enquiry rather than a general
+      one — and why the enquiry reaches you with the grade, quantity and timing already attached.</p>
+  </div>
+</div>
+
+<div class="cols">
+  <div class="col">
+    <h2>What this means if you supply material</h2>
+    <ul>
+      <li><b>Qualified enquiries, not catalogue requests.</b> Demand arrives already specified, so the
+        first exchange is about grade, quantity and lead time rather than discovery.</li>
+      <li><b>The documentation burden is shared.</b> Compliance paperwork travels with the molecule
+        instead of landing on you after the order.</li>
+      <li><b>Testing is arranged, not left open.</b> Analysis is validated where the client&rsquo;s
+        reviewers are, which is usually what delays qualification.</li>
+      <li><b>One commercial relationship</b> covering material, documentation and testing, rather
+        than three to coordinate.</li>
+    </ul>
+  </div>
+  <div class="col">
+    <h2>What this means if you buy material</h2>
+    <ul>
+      <li><b>Several hundred products</b> across our supplier network, with sourcing as the thing we
+        are fastest at.</li>
+      <li><b>Short a molecule?</b> A supplier slipping, a qualification falling through, a volume you
+        cannot cover — send it to us and we will say honestly whether we can help, and how quickly.</li>
+      <li><b>Material and paperwork together</b>, so a programme is not held up waiting for
+        documentation that should have arrived with the shipment.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="ask">
+  <h2>What would help us move quickly</h2>
+  <ol>
+    <li><b>Your full product list</b> — the complete catalogue, not only what we discussed. We add
+      demand continuously and would rather match against everything you make.</li>
+    <li><b>Where a DMF is on file</b>, and the grades you can supply today versus on request.</li>
+    <li><b>Indicative lead times</b> and minimum quantities, so we can answer a buyer without coming
+      back to you first.</li>
+  </ol>
+</div>
+
+<footer>
+  <div class="addr">
+    <div class="site">
+      <span class="label">Facility</span>
+      1333 Barclay Blvd<br>
+      Buffalo Grove, IL 60089, USA
+    </div>
+    <div class="site">
+      <span class="label">Corporate</span>
+      155 N Michigan Ave, Suite 334<br>
+      Chicago, IL 60601, USA
+    </div>
+    <div class="sig">
+      <span class="who">Naren Boda</span><br>
+      <span class="role">Chief Executive Officer</span><br>
+      naren@abiozen.com &middot; +1 (773) 964-5150 &middot; abiozen.com
+    </div>
+  </div>
+  <div class="note">
+    Status is stated plainly above: the marketplace is operating, AROS is in early release, and the
+    analytical partner network is being onboarded now. Nothing in this document is an offer or a
+    commitment to supply; grades, quantities, documentation and pricing are confirmed per enquiry.
+  </div>
+</footer>
+
+</body>
+</html>
