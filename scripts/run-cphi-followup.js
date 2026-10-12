@@ -1,359 +1,47 @@
 #!/usr/bin/env node
-// ── SEND THE POST-CPHI FOLLOW-UPS ─────────────────────────────────────────────
+// ── SEND THE POST-CPHI FOLLOW-UPS, BY HAND ────────────────────────────────────
 //
 //   railway ssh 'node scripts/run-cphi-followup.js'                      → what WOULD go, now
 //   railway ssh 'node scripts/run-cphi-followup.js --to=naren@abiozen.com --execute --max=1'
 //   railway ssh 'node scripts/run-cphi-followup.js --execute --max=5'
 //
+// ── THIS IS A FRONT END, NOT THE CAMPAIGN ────────────────────────────────────
+//
+// The send loop lives in src/lib/campaigns/cphi-runner.js, because the hourly cron in server.js
+// runs the same campaign and a second copy of "who is due and what do we send them" would be a
+// second answer that nobody checks. This file parses flags, prints, and sets an exit code.
+//
 // ── SEND ONE TO YOURSELF FIRST ───────────────────────────────────────────────
 //
 // `--to=` redirects every message to one address while rendering the real content for the real
-// contact. Nothing up to this point has put a byte on the wire: the auth check deliberately sends
-// nothing, and the MIME was verified against a parser rather than a mail server. The first send is
-// the only proof that the send scope works, that the attachment survives, that the HTML renders
-// where it lands, and that the name in the greeting is the right one. Do that into Naren's own
-// inbox, not into TAPI's.
-//
-// ── WHAT THIS REFUSES TO DO ──────────────────────────────────────────────────
-//
-// Every one of these would be a worse outcome than sending nothing today:
-//
-//   · send to somebody who has replied            → stop-on-reply, checked immediately before send
-//   · send twice                                   → a UNIQUE claim row, taken before Gmail is called
-//   · send at 2am local                            → the recipient's window, from their dialling code
-//   · greet somebody by the wrong name             → rendering is fatal without a usable first name
-//   · send to a contact with no segment            → no role, no campaign, no message
-//   · send fifteen messages in the same second     → spacing between sends
-//
-// None of those are defaults that can be overridden with a flag. They are the reason this is worth
-// running at all rather than pasting into Gmail by hand.
+// contact. It is the only proof that the send scope works, that the attachment survives, that the
+// HTML renders where it lands, and that the name in the greeting is the right one. Nothing is
+// recorded against the real contact, so they stay due.
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
-const { initDB, query } = require('../src/lib/db');
-const { isEvent } = require('../src/lib/events/registry');
-const { gmailClientFor } = require('../src/lib/gmail/client');
-const { buildMessage } = require('../src/lib/gmail/message');
-const { replyState } = require('../src/lib/gmail/thread');
-const { ensureCampaignLabels, labelThread, labelForCampaign } = require('../src/lib/gmail/labels');
-const { render, stepDef, stepsOf, ROLE_TO_CAMPAIGN } = require('../src/lib/campaigns/cphi-followup');
-const { zoneForContact, withinWindow } = require('../src/lib/campaigns/send-window');
-const { splitName } = require('../src/lib/campaigns/name-split');
+const { initDB } = require('../src/lib/db');
+const { runFollowups } = require('../src/lib/campaigns/cphi-runner');
 
 const arg = (n, d) => {
   const h = process.argv.find((a) => a.startsWith(`--${n}=`));
   return h ? h.split('=').slice(1).join('=') : d;
 };
-const EVENT = arg('event', 'cphi-milan-2026');
-const FROM_MAILBOX = arg('from', 'naren@abiozen.com');
-const REDIRECT_TO = arg('to', null);
-const CAMPAIGN = arg('campaign', null);
-const MAX = parseInt(arg('max', '5'), 10);
-const EXECUTE = process.argv.includes('--execute');
-const IGNORE_WINDOW = process.argv.includes('--ignore-window');
-
-const ATTACHMENT = path.join(__dirname, '..', 'assets', 'abiozen-model.pdf');
-const SIG_NAME = 'Naren Boda';
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const say = (s = '') => console.log(s);
 
 async function main() {
   await initDB();
-  if (!isEvent(EVENT)) { say(`✗ "${EVENT}" is not an event.`); process.exit(1); }
-  if (!Number.isInteger(MAX) || MAX < 1) { say('✗ --max must be a positive integer.'); process.exit(1); }
-
-  say(`── CPHI follow-up · ${EXECUTE ? 'SENDING' : 'dry run'} · max ${MAX}\n`);
-  if (REDIRECT_TO) {
-    say(`   ⚠ EVERY message is redirected to ${REDIRECT_TO}.`);
-    say(`     The content is still rendered for the real contact, so this is a true test of what`);
-    say(`     they would receive — but nobody else gets anything.`);
-    // THE BUG THIS LINE EXISTS BECAUSE OF. The first redirected send recorded itself against the
-    // real contact: Luca Segàla's state said step 1 was sent, and the UNIQUE claim row then
-    // blocked the real send — so the test quietly ensured he would never receive it. A redirected
-    // message is a test of rendering and delivery, not a step in anybody's sequence.
-    say(`     NOTHING IS RECORDED: no claim row, no sequence state, no last_emailed_at. The real`);
-    say(`     contact is untouched and still due.\n`);
-  }
-
-  // The attachment is a real file on disk, read once. A first message that should carry the
-  // one-pager and silently does not is the failure the whole campaign was built around avoiding.
-  let pdf = null;
-  try {
-    pdf = fs.readFileSync(ATTACHMENT);
-    say(`   attachment: ${path.basename(ATTACHMENT)} (${pdf.length.toLocaleString()} bytes)`);
-  } catch (e) {
-    say(`   ✗ the one-pager is missing at ${ATTACHMENT}`);
-    say(`     Step 1 of every sequence attaches it, and every supplier at the show asked the`);
-    say(`     question it answers. Not sending without it.`);
-    process.exit(1);
-  }
-
-  // ── WHO IS DUE ────
-  // A contact is due when they have a role (therefore a campaign), an email, a usable greeting,
-  // and either no sequence yet or a sequence whose next step is due.
-  const rows = (await query(
-    `SELECT c.id, c.company, c.name, c.greeting_name, c.email, c.phone_mobile, c.phone_office,
-            x.role,
-            s.id AS state_id, s.campaign, s.step_sent, s.status, s.next_due_at,
-            s.thread_id, s.last_rfc822_id, s.refs_chain
-       FROM cphi_exhibitor_contacts c
-       JOIN cphi_exhibitor_matches x ON x.id = c.exhibitor_match_id
-       LEFT JOIN cphi_followup_state s
-              ON s.contact_id = c.id AND s.event_slug = c.event_slug
-      WHERE c.event_slug = $1
-        AND c.email IS NOT NULL AND c.email <> ''
-        AND x.role IS NOT NULL
-      ORDER BY c.company, c.name`, [EVENT])).rows;
-
-  const now = new Date();
-  const queue = [];
-  const skipped = { replied: 0, done: 0, notDue: 0, window: 0, noGreeting: 0, noCampaign: 0, halted: 0 };
-  const needGreeting = [];
-
-  for (const r of rows) {
-    const campaign = r.campaign || ROLE_TO_CAMPAIGN[r.role];
-    if (!campaign) { skipped.noCampaign += 1; continue; }
-    if (CAMPAIGN && campaign !== CAMPAIGN) continue;
-    if (r.status === 'replied') { skipped.replied += 1; continue; }
-    if (r.status === 'halted') { skipped.halted += 1; continue; }
-
-    const steps = stepsOf(campaign);
-    const nextStep = (r.step_sent || 0) + 1;
-    if (!steps.includes(nextStep)) { skipped.done += 1; continue; }
-
-    // A greeting we cannot derive is fatal by design. Six names on this list cannot be split, and
-    // "Hi ," to somebody met four days ago is worse than sending nothing.
-    const split = splitName(r.name);
-    const first = (r.greeting_name && r.greeting_name.trim()) || (split.safe ? split.first : null);
-    if (!first) {
-      skipped.noGreeting += 1;
-      needGreeting.push({ ...r, suggestion: split.first, why: split.why });
-      continue;
-    }
-
-    if (r.next_due_at && new Date(r.next_due_at) > now) { skipped.notDue += 1; continue; }
-
-    const zone = zoneForContact(r);
-    const w = withinWindow(now, zone);
-    if (!IGNORE_WINDOW && !w.ok) { skipped.window += 1; continue; }
-
-    queue.push({ ...r, campaign, nextStep, first, zone, local: w.localTime });
-  }
-
-  say(`   ${rows.length} contact(s) with a role and an email`);
-  say(`   ${queue.length} due right now\n`);
-  const skipLine = Object.entries(skipped).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(' · ');
-  if (skipLine) say(`   skipped: ${skipLine}\n`);
-
-  if (needGreeting.length) {
-    say(`   ⚠ ${needGreeting.length} contact(s) are held because the greeting cannot be derived:`);
-    for (const n of needGreeting) {
-      say(`      ${n.name.padEnd(22)} ${n.company}`);
-      say(`         ${n.why}`);
-      say(`         UPDATE cphi_exhibitor_contacts SET greeting_name = '<given name>' WHERE id = ${n.id};`);
-    }
-    say();
-  }
-
-  if (!queue.length) { say('   nothing to send.\n'); return; }
-
-  const batch = queue.slice(0, MAX);
-  say(`   ── the next ${batch.length}:\n`);
-  for (const q of batch) {
-    const def = stepDef(q.campaign, q.nextStep);
-    const out = render(q.campaign, q.nextStep, { first: q.first, company: q.company });
-    say(`      ${q.campaign}/${q.nextStep}  ${q.name} <${REDIRECT_TO || q.email}>`);
-    say(`         ${q.company}  ·  ${q.local || '??'} local${q.zone ? ` (${q.zone.zone})` : ''}`);
-    say(`         "Hi ${q.first}"  ·  ${out.isFollowUp ? 'replies in-thread' : `subject: ${out.subject}`}`
-      + `${def.attach ? '  ·  + one-pager' : ''}`);
-  }
-  say();
-
-  if (!EXECUTE) {
-    say('   DRY RUN — nothing sent. Re-run with --execute.');
-    say(`   First send should go to yourself:  --to=${FROM_MAILBOX} --execute --max=1\n`);
-    return;
-  }
-
-  // ── AUTH ────
-  const g = await gmailClientFor(FROM_MAILBOX);
-  if (g.error) {
-    say(`   ✗ cannot act as ${FROM_MAILBOX}: ${g.error}`);
-    say('     Run scripts/check-gmail-send.js — nothing is sent until that passes.\n');
-    process.exit(1);
-  }
-  say(`   authorised as ${g.profile.emailAddress} via ${g.via} (${g.scopeSet})\n`);
-
-  // ── THE THREE FOLDERS ────
-  // Made now, before anything is sent, so a scope problem is reported once at the top rather than
-  // once per message — and so the sidebar is right even on a run where nothing turns out to be due.
-  const folders = await ensureCampaignLabels(g.gmail, FROM_MAILBOX);
-  if (folders.ok) {
-    const made = Object.values(folders.labels).filter((l) => l.created).map((l) => l.name);
-    say(`   folders: ${Object.values(folders.labels).map((l) => l.name).join(' · ')}`
-      + `${made.length ? `  (created ${made.join(', ')})` : ''}\n`);
-  } else {
-    // Not fatal. An unfiled thread is one drag in the UI; a message not sent because the filing
-    // failed is a contact who shook his hand and heard nothing.
-    say(`   ⚠ the folders could not be set up — messages will send UNFILED:`);
-    for (const e of folders.errors) say(`     ${e}`);
-    say(`     Labels need gmail.modify; this token resolved to ${g.scopeSet}.\n`);
-  }
-
-  let sent = 0, failed = 0;
-  for (const q of batch) {
-    const label = `${q.name} <${REDIRECT_TO || q.email}>`;
-
-    // ── STOP ON REPLY, CHECKED NOW AND NOT EARLIER ────
-    // The queue was built a moment ago; a reply could have arrived since. This is the last
-    // possible moment to find out, so it is where the check belongs.
-    if (q.thread_id) {
-      const rs = await replyState(g.gmail, q.thread_id, FROM_MAILBOX);
-      if (rs.replied === null) {
-        say(`   — ${label}: cannot tell whether they replied (${rs.error}). Skipped.`);
-        continue;
-      }
-      if (rs.replied) {
-        await query(
-          `UPDATE cphi_followup_state SET status='replied', replied_at=NOW(), updated_at=NOW()
-            WHERE id = $1`, [q.state_id]);
-        say(`   ✓ ${label}: REPLIED — sequence stopped.`);
-        continue;
-      }
-      if (rs.autoReplies.length) say(`     (${rs.autoReplies.length} auto-reply seen — not a reply)`);
-    }
-
-    const def = stepDef(q.campaign, q.nextStep);
-    const out = render(q.campaign, q.nextStep, { first: q.first, company: q.company });
-
-    // ── CLAIM THE SLOT BEFORE CALLING GMAIL ────
-    // The UNIQUE constraint is what makes a double-send impossible. If this insert is refused the
-    // step has already been claimed by another run, and we must not send.
-    let claimId = null;
-    if (!REDIRECT_TO) {
-      try {
-        const claim = await query(
-          `INSERT INTO cphi_followup_sends
-             (event_slug, contact_id, campaign, step, to_email, subject)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-          [EVENT, q.id, q.campaign, q.nextStep, q.email, out.subject || '(in-thread)']);
-        claimId = claim.rows[0].id;
-      } catch (e) {
-        if (e.code === '23505') { say(`   — ${label}: step ${q.nextStep} already claimed. Not sending.`); continue; }
-        throw e;
-      }
-    }
-
-    try {
-      const refs = (q.refs_chain || '').split(/\s+/).filter(Boolean);
-      const msg = buildMessage({
-        from: { name: SIG_NAME, email: FROM_MAILBOX },
-        to: { name: q.name, email: REDIRECT_TO || q.email },
-        // A follow-up has no subject of its own: Gmail shows "Re: <original>" when it is threaded.
-        subject: out.subject || `Re: ${(await originalSubject(q)) || 'CPHI Milan'}`,
-        text: out.text, html: out.html,
-        inReplyTo: out.isFollowUp ? q.last_rfc822_id : null,
-        references: out.isFollowUp ? refs : [],
-        attachments: def.attach ? [{ filename: 'abiozen-model.pdf', contentType: 'application/pdf', content: pdf }] : [],
-      });
-
-      const res = await g.gmail.users.messages.send({
-        userId: 'me',
-        requestBody: { raw: msg.raw, ...(q.thread_id ? { threadId: q.thread_id } : {}) },
-      });
-
-      const threadId = res.data.threadId;
-
-      // ── FILE IT ────
-      // After the send, and reported rather than thrown. By this point the message has left: Gmail
-      // cannot unsend it, and the claim row below must record that it went. A label failure treated
-      // as a send failure would leave an unconfirmed claim saying the message "may or may not have
-      // gone" when the truth is that it went and is merely sitting in the inbox unfiled.
-      const folder = labelForCampaign(q.campaign);
-      let filed = null;
-      if (folder) {
-        // The whole thread, not just this message: their reply arrives in the same thread, and
-        // threads.modify is what makes a `label:supplier` search match it too.
-        filed = await labelThread(g.gmail, FROM_MAILBOX, threadId, folder);
-      }
-      const filedNote = folder
-        ? (filed.ok ? `  → ${folder}` : `  ⚠ UNFILED (${filed.error})`)
-        : `  ⚠ UNFILED (no folder for campaign "${q.campaign}")`;
-
-      if (REDIRECT_TO) {
-        sent += 1;
-        say(`   ✅ ${label}  ${q.campaign}/${q.nextStep}${def.attach ? ' + pdf' : ''}  thread ${threadId}${filedNote}`);
-        say(`      (test — ${q.name} is untouched and still due; the test message is filed under`);
-        say(`       ${folder || 'nothing'} so you can see the folder works. Delete it when you have looked.)`);
-        if (batch.indexOf(q) < batch.length - 1) await sleep(5000);
-        continue;
-      }
-      await query(
-        `UPDATE cphi_followup_sends
-            SET gmail_message_id=$2, gmail_thread_id=$3, rfc822_message_id=$4, sent_at=NOW()
-          WHERE id = $1`, [claimId, res.data.id, threadId, msg.messageId]);
-
-      const chain = [...refs, msg.messageId].join(' ');
-      const nextDef = stepDef(q.campaign, q.nextStep + 1);
-      const nextDue = nextDef
-        ? new Date(Date.now() + nextDef.delayDays * 86400000) : null;
-
-      await query(
-        `INSERT INTO cphi_followup_state
-           (event_slug, contact_id, campaign, step_sent, status, next_due_at,
-            thread_id, last_rfc822_id, refs_chain)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-         ON CONFLICT (event_slug, contact_id, campaign) DO UPDATE
-           SET step_sent=EXCLUDED.step_sent, status=EXCLUDED.status,
-               next_due_at=EXCLUDED.next_due_at, thread_id=EXCLUDED.thread_id,
-               last_rfc822_id=EXCLUDED.last_rfc822_id, refs_chain=EXCLUDED.refs_chain,
-               updated_at=NOW()`,
-        [EVENT, q.id, q.campaign, q.nextStep, nextDef ? 'active' : 'completed',
-         nextDue, threadId, msg.messageId, chain]);
-
-      await query(
-        `UPDATE cphi_exhibitor_contacts SET last_emailed_at = NOW(), updated_at = NOW() WHERE id = $1`,
-        [q.id]);
-
-      sent += 1;
-      say(`   ✅ ${label}  ${q.campaign}/${q.nextStep}${def.attach ? ' + pdf' : ''}  thread ${threadId}${filedNote}`);
-    } catch (e) {
-      failed += 1;
-      if (REDIRECT_TO) { say(`   ✗ ${label}: ${(e && e.message) || e}`); continue; }
-      // The claim STAYS, carrying the error. It blocks a blind retry and shows up as a row needing
-      // a human — which is the right side to err on when the question is "did that actually send?"
-      if (claimId) {
-        await query(`UPDATE cphi_followup_sends SET error = $2 WHERE id = $1`,
-          [claimId, (e && e.message) || String(e)]);
-      }
-      say(`   ✗ ${label}: ${(e && e.message) || e}`);
-      say(`     The claim row is kept with the error, so this will not be retried blindly.`);
-    }
-
-    // Fifteen messages leaving one human mailbox in the same second is itself the tell.
-    if (batch.indexOf(q) < batch.length - 1) await sleep(40000 + Math.floor(Math.random() * 50000));
-  }
-
-  say(`\n   ${sent} sent, ${failed} failed.`);
-  const unconfirmed = (await query(
-    `SELECT COUNT(*)::int n FROM cphi_followup_sends WHERE event_slug=$1 AND sent_at IS NULL`,
-    [EVENT])).rows[0].n;
-  if (unconfirmed) {
-    say(`   ⚠ ${unconfirmed} claimed send(s) have no Gmail id — they may or may not have gone.`);
-    say(`     SELECT * FROM cphi_followup_sends WHERE sent_at IS NULL;`);
-  }
-  say();
-}
-
-/** The subject of step 1, so a follow-up can say "Re: <that>" when threading. */
-async function originalSubject(q) {
-  const r = await query(
-    `SELECT subject FROM cphi_followup_sends
-      WHERE event_slug=$1 AND contact_id=$2 AND campaign=$3 AND step=1`,
-    [EVENT, q.id, q.campaign]);
-  return r.rows[0] ? r.rows[0].subject : null;
+  const res = await runFollowups({
+    event: arg('event', 'cphi-milan-2026'),
+    fromMailbox: arg('from', 'naren@abiozen.com'),
+    redirectTo: arg('to', null),
+    campaign: arg('campaign', null),
+    max: parseInt(arg('max', '5'), 10),
+    execute: process.argv.includes('--execute'),
+    ignoreWindow: process.argv.includes('--ignore-window'),
+    log: (s = '') => console.log(s),
+  });
+  // A run where some sends failed exits non-zero: CLAUDE.md — the verdict is the exit status, and
+  // "3 sent, 2 failed" scrolling past in a terminal is not a verdict anybody reads.
+  if (res.failed) process.exit(1);
 }
 
 main().then(() => process.exit(0)).catch((e) => {

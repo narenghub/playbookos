@@ -576,6 +576,52 @@ cron.schedule('0 8 * * 1-5', withAlerts('weekdays-8cst-us-team-briefing', async 
   console.log(`[CRON] US team briefing done — ran: ${r.ran.join(', ') || 'none'}`);
 }), CST);
 
+// ── Every hour, :05, Mon–Fri — CPHI follow-up sender ─────────────────────────
+//
+// WHY HOURLY. Every guard in this campaign is already a hard refusal: a UNIQUE claim row per
+// (contact, campaign, step) makes a double-send impossible rather than unlikely, stop-on-reply is
+// checked immediately before each send, and nobody is mailed outside 09:30–17:00 in their OWN time
+// zone. That last one is why this must be hourly: on the first live run 54 of 72 contacts were
+// skipped for being outside their window, because India, China and Italy are never all at their
+// desks at once. A once-a-day run reaches whoever happens to be awake at that hour and silently
+// never reaches the rest.
+//
+// WHY max 3. A trade-show follow-up should look like a person working through a stack of business
+// cards, which is what it is. Three an hour across business hours is roughly that; it also means a
+// mistake in the rendering reaches three people before the next run, not seventy-two.
+//
+// WHY A FLAG. Deploying code must never be the act that starts mailing 72 people who shook Naren's
+// hand. Setting CPHI_FOLLOWUP_ENABLED=true in Railway is a deliberate, reversible decision, made
+// once, separately from any push — and removing it is how he stops the campaign from his phone
+// without a deploy.
+cron.schedule('5 * * * 1-5', withAlerts('hourly-05-cphi-followup', async () => {
+  if (String(process.env.CPHI_FOLLOWUP_ENABLED).toLowerCase() !== 'true') return;  // silent: hourly
+  const { runFollowups } = require('./src/lib/campaigns/cphi-runner');
+  const lines = [];
+  const r = await runFollowups({
+    event: process.env.CPHI_FOLLOWUP_EVENT || 'cphi-milan-2026',
+    fromMailbox: process.env.CPHI_FOLLOWUP_FROM || 'naren@abiozen.com',
+    max: parseInt(process.env.CPHI_FOLLOWUP_MAX || '3', 10),
+    execute: true,
+    log: (s = '') => lines.push(s),
+  });
+  // Quiet when there is nothing to do — this fires 45 times a week and an hourly "0 sent" buries
+  // the run that actually did something. Noisy the moment it sends or fails.
+  if (r.sent || r.failed || r.unfiled.length) {
+    console.log(`[CRON] CPHI follow-up — ${r.sent} sent, ${r.failed} failed, `
+      + `${r.due} were due of ${r.candidates}${r.unfiled.length ? `, ${r.unfiled.length} UNFILED` : ''}`);
+    console.log(lines.join('\n'));
+  }
+  // withAlerts emails on a throw, so make the two states that need a human into throws: a send that
+  // errored, and a claim row with no Gmail id. The second is the "did that actually send?" case,
+  // and it is worth an email precisely because nobody is watching the logs.
+  if (r.failed) throw new Error(`${r.failed} CPHI follow-up send(s) failed — see cphi_followup_sends.error`);
+  if (r.unconfirmed) {
+    throw new Error(`${r.unconfirmed} claimed CPHI send(s) have no Gmail message id: they may or `
+      + `may not have gone. SELECT * FROM cphi_followup_sends WHERE sent_at IS NULL;`);
+  }
+}), CST);
+
 app.listen(PORT, () => {
   console.log(`
 ╔══════════════════════════════════════════════════╗
