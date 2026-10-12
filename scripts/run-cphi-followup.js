@@ -67,7 +67,13 @@ async function main() {
   if (REDIRECT_TO) {
     say(`   ⚠ EVERY message is redirected to ${REDIRECT_TO}.`);
     say(`     The content is still rendered for the real contact, so this is a true test of what`);
-    say(`     they would receive — but nobody else gets anything.\n`);
+    say(`     they would receive — but nobody else gets anything.`);
+    // THE BUG THIS LINE EXISTS BECAUSE OF. The first redirected send recorded itself against the
+    // real contact: Luca Segàla's state said step 1 was sent, and the UNIQUE claim row then
+    // blocked the real send — so the test quietly ensured he would never receive it. A redirected
+    // message is a test of rendering and delivery, not a step in anybody's sequence.
+    say(`     NOTHING IS RECORDED: no claim row, no sequence state, no last_emailed_at. The real`);
+    say(`     contact is untouched and still due.\n`);
   }
 
   // The attachment is a real file on disk, read once. A first message that should carry the
@@ -208,17 +214,19 @@ async function main() {
     // ── CLAIM THE SLOT BEFORE CALLING GMAIL ────
     // The UNIQUE constraint is what makes a double-send impossible. If this insert is refused the
     // step has already been claimed by another run, and we must not send.
-    let claimId;
-    try {
-      const claim = await query(
-        `INSERT INTO cphi_followup_sends
-           (event_slug, contact_id, campaign, step, to_email, subject)
-         VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-        [EVENT, q.id, q.campaign, q.nextStep, REDIRECT_TO || q.email, out.subject || '(in-thread)']);
-      claimId = claim.rows[0].id;
-    } catch (e) {
-      if (e.code === '23505') { say(`   — ${label}: step ${q.nextStep} already claimed. Not sending.`); continue; }
-      throw e;
+    let claimId = null;
+    if (!REDIRECT_TO) {
+      try {
+        const claim = await query(
+          `INSERT INTO cphi_followup_sends
+             (event_slug, contact_id, campaign, step, to_email, subject)
+           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+          [EVENT, q.id, q.campaign, q.nextStep, q.email, out.subject || '(in-thread)']);
+        claimId = claim.rows[0].id;
+      } catch (e) {
+        if (e.code === '23505') { say(`   — ${label}: step ${q.nextStep} already claimed. Not sending.`); continue; }
+        throw e;
+      }
     }
 
     try {
@@ -240,6 +248,13 @@ async function main() {
       });
 
       const threadId = res.data.threadId;
+      if (REDIRECT_TO) {
+        sent += 1;
+        say(`   ✅ ${label}  ${q.campaign}/${q.nextStep}${def.attach ? ' + pdf' : ''}  thread ${threadId}`);
+        say(`      (test — ${q.name} is untouched and still due)`);
+        if (batch.indexOf(q) < batch.length - 1) await sleep(5000);
+        continue;
+      }
       await query(
         `UPDATE cphi_followup_sends
             SET gmail_message_id=$2, gmail_thread_id=$3, rfc822_message_id=$4, sent_at=NOW()
@@ -271,10 +286,13 @@ async function main() {
       say(`   ✅ ${label}  ${q.campaign}/${q.nextStep}${def.attach ? ' + pdf' : ''}  thread ${threadId}`);
     } catch (e) {
       failed += 1;
+      if (REDIRECT_TO) { say(`   ✗ ${label}: ${(e && e.message) || e}`); continue; }
       // The claim STAYS, carrying the error. It blocks a blind retry and shows up as a row needing
       // a human — which is the right side to err on when the question is "did that actually send?"
-      await query(`UPDATE cphi_followup_sends SET error = $2 WHERE id = $1`,
-        [claimId, (e && e.message) || String(e)]);
+      if (claimId) {
+        await query(`UPDATE cphi_followup_sends SET error = $2 WHERE id = $1`,
+          [claimId, (e && e.message) || String(e)]);
+      }
       say(`   ✗ ${label}: ${(e && e.message) || e}`);
       say(`     The claim row is kept with the error, so this will not be retried blindly.`);
     }
