@@ -36,6 +36,7 @@ const { isEvent } = require('../src/lib/events/registry');
 const { gmailClientFor } = require('../src/lib/gmail/client');
 const { buildMessage } = require('../src/lib/gmail/message');
 const { replyState } = require('../src/lib/gmail/thread');
+const { ensureCampaignLabels, labelThread, labelForCampaign } = require('../src/lib/gmail/labels');
 const { render, stepDef, stepsOf, ROLE_TO_CAMPAIGN } = require('../src/lib/campaigns/cphi-followup');
 const { zoneForContact, withinWindow } = require('../src/lib/campaigns/send-window');
 const { splitName } = require('../src/lib/campaigns/name-split');
@@ -185,6 +186,22 @@ async function main() {
   }
   say(`   authorised as ${g.profile.emailAddress} via ${g.via} (${g.scopeSet})\n`);
 
+  // ── THE THREE FOLDERS ────
+  // Made now, before anything is sent, so a scope problem is reported once at the top rather than
+  // once per message — and so the sidebar is right even on a run where nothing turns out to be due.
+  const folders = await ensureCampaignLabels(g.gmail, FROM_MAILBOX);
+  if (folders.ok) {
+    const made = Object.values(folders.labels).filter((l) => l.created).map((l) => l.name);
+    say(`   folders: ${Object.values(folders.labels).map((l) => l.name).join(' · ')}`
+      + `${made.length ? `  (created ${made.join(', ')})` : ''}\n`);
+  } else {
+    // Not fatal. An unfiled thread is one drag in the UI; a message not sent because the filing
+    // failed is a contact who shook his hand and heard nothing.
+    say(`   ⚠ the folders could not be set up — messages will send UNFILED:`);
+    for (const e of folders.errors) say(`     ${e}`);
+    say(`     Labels need gmail.modify; this token resolved to ${g.scopeSet}.\n`);
+  }
+
   let sent = 0, failed = 0;
   for (const q of batch) {
     const label = `${q.name} <${REDIRECT_TO || q.email}>`;
@@ -248,10 +265,28 @@ async function main() {
       });
 
       const threadId = res.data.threadId;
+
+      // ── FILE IT ────
+      // After the send, and reported rather than thrown. By this point the message has left: Gmail
+      // cannot unsend it, and the claim row below must record that it went. A label failure treated
+      // as a send failure would leave an unconfirmed claim saying the message "may or may not have
+      // gone" when the truth is that it went and is merely sitting in the inbox unfiled.
+      const folder = labelForCampaign(q.campaign);
+      let filed = null;
+      if (folder) {
+        // The whole thread, not just this message: their reply arrives in the same thread, and
+        // threads.modify is what makes a `label:supplier` search match it too.
+        filed = await labelThread(g.gmail, FROM_MAILBOX, threadId, folder);
+      }
+      const filedNote = folder
+        ? (filed.ok ? `  → ${folder}` : `  ⚠ UNFILED (${filed.error})`)
+        : `  ⚠ UNFILED (no folder for campaign "${q.campaign}")`;
+
       if (REDIRECT_TO) {
         sent += 1;
-        say(`   ✅ ${label}  ${q.campaign}/${q.nextStep}${def.attach ? ' + pdf' : ''}  thread ${threadId}`);
-        say(`      (test — ${q.name} is untouched and still due)`);
+        say(`   ✅ ${label}  ${q.campaign}/${q.nextStep}${def.attach ? ' + pdf' : ''}  thread ${threadId}${filedNote}`);
+        say(`      (test — ${q.name} is untouched and still due; the test message is filed under`);
+        say(`       ${folder || 'nothing'} so you can see the folder works. Delete it when you have looked.)`);
         if (batch.indexOf(q) < batch.length - 1) await sleep(5000);
         continue;
       }
@@ -283,7 +318,7 @@ async function main() {
         [q.id]);
 
       sent += 1;
-      say(`   ✅ ${label}  ${q.campaign}/${q.nextStep}${def.attach ? ' + pdf' : ''}  thread ${threadId}`);
+      say(`   ✅ ${label}  ${q.campaign}/${q.nextStep}${def.attach ? ' + pdf' : ''}  thread ${threadId}${filedNote}`);
     } catch (e) {
       failed += 1;
       if (REDIRECT_TO) { say(`   ✗ ${label}: ${(e && e.message) || e}`); continue; }
