@@ -93,7 +93,10 @@ async function main() {
     for (const addr of targets) results.push(await setOne(addr));
     const ok = results.filter((r) => r.ok).length;
     const failed = results.filter((r) => !r.ok);
-    console.log(`\n   ── ${ok} of ${targets.length} set to ${ROLE}`);
+    // A dry run that reports "15 of 15 SET" is a lie, and it reads especially badly directly above
+    // "20 contacts still have no role" — which is the true line. Say which run this was.
+    const verb = EXECUTE ? 'set to' : 'WOULD be set to';
+    console.log(`\n   ── ${ok} of ${targets.length} ${verb} ${ROLE}`);
     for (const f of failed) console.log(`   ✗ ${f.email}: ${f.why}`);
     const left = (await query(
       `SELECT COUNT(*)::int n FROM cphi_exhibitor_contacts c
