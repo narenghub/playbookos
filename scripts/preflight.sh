@@ -60,6 +60,11 @@ step "territory grant runs on Postgres" node scripts/check-territory-grant-sql.j
 # "gp", which canAnchor refuses, so a name search returns nothing and reading that as "not a
 # supplier" would file a drug-product maker as a buyer on a search that never ran.
 step "supplier cross-check runs on Postgres" node scripts/check-supplier-classify-sql.js
+# The one-pager is attached to step 1 of all three sequences, so every CPHI contact reads it. It was
+# first built by hand with no recorded command, which meant the HTML and the PDF could disagree
+# silently — and on 12 Oct the signature title changed to match Naren's business card, which would
+# have left the attachment contradicting the email carrying it.
+step "one-pager PDF matches its source" node scripts/build-one-pager.js --check
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2

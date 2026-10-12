@@ -143,7 +143,7 @@ test('the signature is on the first message of every sequence', () => {
   for (const key of Object.keys(CAMPAIGNS)) {
     const out = render(key, 1, VARS);
     assert.match(out.html, /Naren Boda/);
-    assert.match(out.html, /Chief Executive Officer/);
+    assert.match(out.html, /Director, Abiozen LLC/);   // must match his business card
     assert.match(out.html, /naren@abiozen\.com/);
     assert.match(out.html, /Barclay/, 'the facility address, as asked');
     assert.match(out.text, /Naren Boda/);

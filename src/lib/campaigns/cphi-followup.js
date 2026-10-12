@@ -33,7 +33,10 @@
 'use strict';
 
 const SIG_NAME = 'Naren Boda';
-const SIG_ROLE = 'Chief Executive Officer, Abiozen LLC';
+// Naren's business card says DIRECTOR. The signature has to match the card they are holding —
+// a follow-up four days after a handshake, signed with a different title from the card in their
+// pocket, reads as a different person or a bait-and-switch. The card is the fixed point here.
+const SIG_ROLE = 'Director, Abiozen LLC';
 const SIG_MAIL = 'naren@abiozen.com';
 const SIG_TEL = '+1 (773) 964-5150';
 const ACCENT = '#0b5a6b';
