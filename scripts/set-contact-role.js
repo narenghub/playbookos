@@ -35,6 +35,10 @@ const arg = (name, dflt) => {
 };
 const EVENT = arg('event', 'cphi-milan-2026');
 const EMAIL = arg('email', null);
+// Batch. Fifteen of the twenty roleless contacts were unambiguously suppliers, and fifteen
+// separate ssh round trips is both tedious and a good way to mistype one. Every per-contact guard
+// still runs for each address — this only removes the repetition, not the checking.
+const EMAILS = (arg('emails', '') || '').split(',').map((e) => e.trim()).filter(Boolean);
 const ROLE = arg('role', null);
 const EXECUTE = process.argv.includes('--execute');
 
@@ -71,10 +75,10 @@ async function main() {
     console.log(`✗ "${EVENT}" is not an event.`);
     process.exit(1);
   }
-  if (!EMAIL && !ROLE) { await listUnassigned(); return; }
+  if (!EMAIL && !EMAILS.length && !ROLE) { await listUnassigned(); return; }
 
-  if (!EMAIL || !ROLE) {
-    console.log('✗ both --email= and --role= are required to set a role.');
+  if ((!EMAIL && !EMAILS.length) || !ROLE) {
+    console.log('✗ a role and at least one address are required: --role= with --email= or --emails=');
     process.exit(1);
   }
   if (!isRoleOf(EVENT, ROLE)) {
@@ -83,6 +87,35 @@ async function main() {
     process.exit(1);
   }
 
+  const targets = EMAILS.length ? EMAILS : [EMAIL];
+  if (targets.length > 1) {
+    const results = [];
+    for (const addr of targets) results.push(await setOne(addr));
+    const ok = results.filter((r) => r.ok).length;
+    const failed = results.filter((r) => !r.ok);
+    console.log(`\n   ── ${ok} of ${targets.length} set to ${ROLE}`);
+    for (const f of failed) console.log(`   ✗ ${f.email}: ${f.why}`);
+    const left = (await query(
+      `SELECT COUNT(*)::int n FROM cphi_exhibitor_contacts c
+         LEFT JOIN cphi_exhibitor_matches x ON x.id = c.exhibitor_match_id
+        WHERE c.event_slug = $1 AND x.role IS NULL`, [EVENT])).rows[0].n;
+    console.log(`   ${left} contact(s) still have no role.\n`);
+    // A batch where ANY address failed exits non-zero: a partial run that reports success is how
+    // somebody ends up thinking the list is clear when it is not.
+    process.exit(failed.length ? 1 : 0);
+  }
+  const r = await setOne(targets[0]);
+  if (!r.ok) process.exit(1);
+  const remaining = (await query(
+    `SELECT COUNT(*)::int n FROM cphi_exhibitor_contacts c
+       LEFT JOIN cphi_exhibitor_matches x ON x.id = c.exhibitor_match_id
+      WHERE c.event_slug = $1 AND x.role IS NULL`, [EVENT])).rows[0].n;
+  console.log(`   ${remaining} contact(s) still have no role.\n`);
+}
+
+// One contact. Returns { ok, email, why } so a batch can report per-address rather than dying on
+// the first problem and leaving the rest unprocessed and unexplained.
+async function setOne(EMAIL) {
   const contacts = (await query(
     `SELECT c.id, c.company, c.company_normalized, c.name, c.email, c.exhibitor_match_id,
             x.role AS current_role, x.holder AS current_holder
@@ -90,12 +123,15 @@ async function main() {
        LEFT JOIN cphi_exhibitor_matches x ON x.id = c.exhibitor_match_id
       WHERE c.event_slug = $1 AND lower(c.email) = lower($2)`, [EVENT, EMAIL])).rows;
 
-  if (!contacts.length) { console.log(`✗ no contact with email ${EMAIL} under ${EVENT}.`); process.exit(1); }
+  if (!contacts.length) {
+    console.log(`✗ no contact with email ${EMAIL} under ${EVENT}.`);
+    return { ok: false, email: EMAIL, why: 'no such contact' };
+  }
   if (contacts.length > 1) {
     // One address, two rows is a data problem to look at rather than to pick a winner from.
     console.log(`✗ ${contacts.length} contacts share ${EMAIL}:`);
     for (const c of contacts) console.log(`   ${c.name} — ${c.company}`);
-    process.exit(1);
+    return { ok: false, email: EMAIL, why: `${contacts.length} contacts share this address` };
   }
 
   const c = contacts[0];
@@ -104,7 +140,7 @@ async function main() {
   console.log(`   current role ${c.current_role || '(none — receives nothing)'}`);
   console.log(`   new role     ${ROLE}\n`);
 
-  if (c.current_role === ROLE) { console.log('   already set. Nothing to do.\n'); return; }
+  if (c.current_role === ROLE) { console.log('   already set. Nothing to do.\n'); return { ok: true, email: EMAIL }; }
 
   // Reassigning somebody who has ALREADY been emailed under another role would land them in a
   // second sequence mid-thread. Worth stopping for.
@@ -117,7 +153,7 @@ async function main() {
     if (!EXECUTE) console.log('     Re-run with --execute only if that is genuinely what you want.\n');
   }
 
-  if (!EXECUTE) { console.log('   DRY RUN — nothing written. Re-run with --execute.\n'); return; }
+  if (!EXECUTE) { console.log('   DRY RUN — nothing written. Re-run with --execute.\n'); return { ok: true, email: EMAIL, dry: true }; }
 
   const holderNorm = c.company_normalized || normalizeCompany(c.company);
   const m = await query(
@@ -141,16 +177,11 @@ async function main() {
       WHERE c.id = $1`, [c.id])).rows[0];
   if (!after || after.role !== ROLE) {
     console.log(`   ✗ read-back says role is ${after ? after.role : 'still none'}. Not set.`);
-    process.exit(1);
+    return { ok: false, email: EMAIL, why: 'read-back did not confirm the role' };
   }
   console.log(`   ✅ ${c.name} is now ${after.role} (${after.holder})`
     + `${m.rows[0].created ? ' — new match row' : ''}\n`);
-
-  const left = (await query(
-    `SELECT COUNT(*)::int n FROM cphi_exhibitor_contacts c
-       LEFT JOIN cphi_exhibitor_matches x ON x.id = c.exhibitor_match_id
-      WHERE c.event_slug = $1 AND x.role IS NULL`, [EVENT])).rows[0].n;
-  console.log(`   ${left} contact(s) still have no role.\n`);
+  return { ok: true, email: EMAIL };
 }
 
 main().then(() => process.exit(0)).catch((e) => {
