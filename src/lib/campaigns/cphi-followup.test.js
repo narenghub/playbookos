@@ -194,3 +194,18 @@ test('the partner email opens the commercial conversation, asking rather than pr
       'a printed volume is a commitment, not a conversation');
   }
 });
+
+test('the sender is named exactly ONCE per message', () => {
+  // The HTML sign-off said "Best regards,<br>Naren Boda" and the signature block said "Naren Boda"
+  // again, so every message carried his name twice. Naren caught it minutes before the release.
+  // It is the tell of a template built from two halves that each assumed they owned the sign-off,
+  // and it is exactly the kind of seam that makes a personal email look generated.
+  for (const key of Object.keys(CAMPAIGNS)) {
+    for (const s of CAMPAIGNS[key].steps) {
+      for (const [kind, body] of [['html', s.html(VARS)], ['text', s.text(VARS)]]) {
+        const n = (body.match(/Naren Boda/g) || []).length;
+        assert.strictEqual(n, 1, `${key} step ${s.step} ${kind} names him ${n} time(s)`);
+      }
+    }
+  }
+});

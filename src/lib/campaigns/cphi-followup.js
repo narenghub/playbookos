@@ -41,8 +41,11 @@ const ACCENT = '#0b5a6b';
 // One font stack, one size, one colour. The signature is the only styled element, and it is styled
 // the way a mail client's own signature block is — a rule and smaller grey text.
 function wrap(bodyHtml, { showSignature = true } = {}) {
+  // "Best regards," ONLY — the block below already says who sent it. Naren spotted the name
+  // printed twice, which is the tell of a template assembled from two halves that each thought
+  // they owned the sign-off.
   const sig = showSignature ? `
-    <p style="margin:0 0 4px 0">Best regards,<br>${SIG_NAME}</p>
+    <p style="margin:0 0 4px 0">Best regards,</p>
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin-top:14px">
       <tr><td style="border-top:2px solid ${ACCENT};padding-top:7px;font-size:13px;color:#5a6b78;line-height:1.5">
         <strong style="color:#15202b">${SIG_NAME}</strong> &middot; ${SIG_ROLE}<br>
