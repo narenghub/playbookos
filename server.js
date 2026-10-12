@@ -635,6 +635,30 @@ cron.schedule('5 * * * 1-5', withAlerts('hourly-05-cphi-followup', async () => {
   }
 }), CST);
 
+// ── SAY, AT BOOT, WHAT THE CAMPAIGN WILL ACTUALLY DO ─────────────────────────
+//
+// On 12 Oct the release stalled on something invisible. The code was deployed, the Railway variable
+// was set, and `railway ssh 'node -e "...process.env..."'` printed exactly the right values — so
+// everything looked correct. It was not: that ssh command spawns a FRESH process, which reads the
+// current service config, while the long-running server process captured process.env at launch and
+// never sees a later change. The variable had been added seven minutes after this process started.
+// The cron therefore had the new code and the old environment, and sent one message instead of
+// fifty-three with no error anywhere.
+//
+// A running process cannot be interrogated from outside about its own environment. So it says so
+// itself, once, at boot — where the deploy log puts it next to the commit that produced it.
+(() => {
+  const { windowOverrideActive } = require('./src/lib/campaigns/send-window');
+  const until = process.env.CPHI_FOLLOWUP_IGNORE_WINDOW_UNTIL;
+  const on = String(process.env.CPHI_FOLLOWUP_ENABLED).toLowerCase() === 'true';
+  const override = windowOverrideActive(until);
+  console.log(`[BOOT] CPHI follow-up: ${on ? 'ENABLED' : 'disabled'}`
+    + ` · max ${parseInt(process.env.CPHI_FOLLOWUP_MAX || '3', 10)}/run`
+    + ` · window ${override ? `OVERRIDDEN until ${until} (sends outside recipient-local hours)`
+      : 'enforced (09:30–17:00 recipient-local)'}`
+    + `${until && !override ? ` · CPHI_FOLLOWUP_IGNORE_WINDOW_UNTIL="${until}" is set but NOT active` : ''}`);
+})();
+
 app.listen(PORT, () => {
   console.log(`
 ╔══════════════════════════════════════════════════╗
