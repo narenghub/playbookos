@@ -148,7 +148,9 @@ Good to meet you at CPHI in Milan.
 
 Short and useful rather than a pitch: Abiozen holds several hundred products across our supplier network, and sourcing is the thing we are fastest at. If you are ever short a molecule — a supplier slipping, a qualification falling through, a volume you cannot cover — send it to me and I will tell you honestly whether we can help and how quickly.
 
-I have attached a one-page summary of how we work: the material, its regulatory documentation and analytical testing arranged in your own region, rather than three things to coordinate.
+What we cover: research chemicals and generic APIs, and we are not limited to a single therapeutic area. Where it helps, the material arrives with its regulatory documentation, and analytical testing can be arranged through the partner laboratories we are onboarding — so it is one conversation rather than three.
+
+I have attached a one-page summary of how those pieces fit together.
 
 No obligation and no sales process. Keep my number for the week it is useful.
 
@@ -160,7 +162,8 @@ ${SIG_MAIL} · ${SIG_TEL}`,
         p(`Hi ${first},`),
         p('Good to meet you at CPHI in Milan.'),
         p('Short and useful rather than a pitch: Abiozen holds several hundred products across our supplier network, and sourcing is the thing we are fastest at. If you are ever short a molecule — a supplier slipping, a qualification falling through, a volume you cannot cover — send it to me and I will tell you honestly whether we can help and how quickly.'),
-        p('I have attached a one-page summary of how we work: the material, its regulatory documentation and analytical testing arranged in your own region, rather than three things to coordinate.'),
+        p('What we cover: <strong>research chemicals</strong> and <strong>generic APIs</strong>, and we are not limited to a single therapeutic area. Where it helps, the material arrives with its regulatory documentation, and analytical testing can be arranged through the partner laboratories we are onboarding — so it is one conversation rather than three.'),
+        p('I have attached a one-page summary of how those pieces fit together.'),
         p('No obligation and no sales process. Keep my number for the week it is useful.'),
       ].join('\n')),
     },
@@ -221,7 +224,9 @@ I would like to understand which side of your capability fits what we are buildi
 
 If you do either, I would like to know your accreditations, where the site is, and what turnaround looks like. If you do both, better still.
 
-I have attached a one-page summary of how the pieces fit together. We are onboarding testing and operations partners as working relationships rather than buying one-off services.
+Assuming the capability fits, I would rather have the commercial conversation early than after a pilot: how work would reach you, what volume your site could absorb, how you would want pricing structured, and the form of agreement you normally work under. We are onboarding testing and operations partners as working relationships rather than buying one-off services, so those answers shape what we build around you.
+
+I have attached a one-page summary of how the pieces fit together.
 
 Best regards,
 ${SIG_NAME}
@@ -236,7 +241,8 @@ ${SIG_MAIL} · ${SIG_TEL}`,
           '<strong>Operations</strong> — physical handling of material: controlled storage, repackaging, relabelling, and the documentation that goes with it. This has to be near the material, and our nearest-term need is in Europe.',
         ]),
         p('If you do either, I would like to know your accreditations, where the site is, and what turnaround looks like. If you do both, better still.'),
-        p('I have attached a one-page summary of how the pieces fit together. We are onboarding testing and operations partners as working relationships rather than buying one-off services.'),
+        p('Assuming the capability fits, I would rather have the commercial conversation early than after a pilot: how work would reach you, what volume your site could absorb, how you would want pricing structured, and the form of agreement you normally work under. We are onboarding testing and operations partners as working relationships rather than buying one-off services, so those answers shape what we build around you.'),
+        p('I have attached a one-page summary of how the pieces fit together.'),
       ].join('\n')),
     },
     {

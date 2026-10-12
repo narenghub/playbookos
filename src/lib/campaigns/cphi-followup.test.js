@@ -149,3 +149,48 @@ test('the signature is on the first message of every sequence', () => {
     assert.match(out.text, /Naren Boda/);
   }
 });
+
+// ── WHAT NAREN ASKED EACH SEQUENCE TO SAY, 12 OCT ─────────────────────────────
+//
+// Pinned because these are requirements, not phrasing. He described the three emails as three
+// different conversations, and a later edit that smooths the copy must not quietly drop one.
+
+test('the buyer email says WHAT we cover: research chemicals and generic APIs', () => {
+  // "We will help you what type of molecules you are lacking with. The research chemical, generic
+  // API. Any therapeutic area." A buyer reading "several hundred products" cannot tell whether we
+  // hold the kind of thing they buy.
+  const s = CAMPAIGNS.buyer.steps.find((x) => x.step === 1);
+  for (const body of [s.text(VARS), s.html(VARS)]) {
+    assert.match(body, /research chemicals/i);
+    assert.match(body, /generic APIs/i);
+    assert.match(body, /therapeutic area/i);
+  }
+});
+
+test('the buyer email does not claim labs we do not have', () => {
+  // The analytical network is BEING ONBOARDED — that is what the one-pager says, and the email may
+  // not outrun it. "Analytical testing can be arranged through the partner laboratories we are
+  // onboarding" is true; "our labs in Europe and the US" would not be.
+  const s = CAMPAIGNS.buyer.steps.find((x) => x.step === 1);
+  for (const body of [s.text(VARS), s.html(VARS)]) {
+    assert.match(body, /partner laboratories we are onboarding/i);
+    assert.ok(!/\bour (own )?labs?\b/i.test(body), 'claims labs we do not own');
+    assert.ok(!/end-to-end compliance\b/i.test(body),
+      'compliance is AROS, which is in early release — do not print it as a finished guarantee');
+  }
+});
+
+test('the partner email opens the commercial conversation, asking rather than promising', () => {
+  // "How are we gonna bring the business? How many clients we going to accommodate? We need to
+  // talk about price model, contract." The topic must be raised — and raised as a question, since
+  // a printed client number from the CEO is a commitment a partner will hold him to.
+  const s = CAMPAIGNS.partner.steps.find((x) => x.step === 1);
+  for (const body of [s.text(VARS), s.html(VARS)]) {
+    assert.match(body, /pricing/i);
+    assert.match(body, /agreement|contract/i);
+    assert.match(body, /volume your site could absorb/i);   // their capacity, not our forecast
+    // No number of clients, studies or units anywhere near the commercial paragraph.
+    assert.ok(!/\b\d+\s*(clients?|customers?|studies|orders?)\b/i.test(body),
+      'a printed volume is a commitment, not a conversation');
+  }
+});
