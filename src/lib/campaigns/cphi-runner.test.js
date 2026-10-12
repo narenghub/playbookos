@@ -110,3 +110,17 @@ test('the cron throws on an unconfirmed send, so somebody is told', () => {
   assert.match(body, /if \(r\.unconfirmed\)[\s\S]*throw new Error/);
   assert.match(body, /if \(r\.failed\)[\s\S]*throw new Error/);
 });
+
+test('the cron reads the override from the dated env var, not a boolean', () => {
+  // The window override must reach runFollowups through windowOverrideActive, so that it expires.
+  // A `ignoreWindow: true` hardcoded in server.js, or a plain truthiness check on the env var,
+  // would send at 3am local for the rest of the campaign and nobody would notice until a reply
+  // said so.
+  const server = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+  const block = server.slice(server.indexOf("'hourly-05-cphi-followup'"));
+  const body = block.slice(0, block.indexOf('}), CST;') > 0 ? block.indexOf('}), CST;') : block.indexOf('}), CST)'));
+  assert.match(body, /ignoreWindow:\s*require\([^)]*send-window'\)\s*[\s\S]{0,40}windowOverrideActive\(/,
+    'the cron must call windowOverrideActive');
+  assert.match(body, /CPHI_FOLLOWUP_IGNORE_WINDOW_UNTIL/);
+  assert.ok(!/ignoreWindow:\s*true/.test(body), 'the window must never be hardcoded off');
+});

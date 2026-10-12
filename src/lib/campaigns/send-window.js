@@ -138,4 +138,28 @@ function nextSlot(at, zone, window = DEFAULT_WINDOW) {
   return null;
 }
 
-module.exports = { zoneForPhone, zoneForContact, withinWindow, nextSlot, DEFAULT_WINDOW, DIAL_ZONES };
+
+// ── A WINDOW OVERRIDE THAT EXPIRES BY ITSELF ─────────────────────────────────
+//
+// On 12 Oct Naren wanted the whole CPHI list out the same day: it was Monday, the show had finished
+// the previous week, and a follow-up that waits for people to drift back into their own business
+// hours arrives after the handshake has gone cold. Fifty-one of the seventy-two were in India,
+// China and Europe, hours outside their window.
+//
+// The override is a DATE, never a boolean. A plain on/off flag, set at ten at night on a Monday, is
+// a flag nobody remembers to unset — and the cost of forgetting is mail landing at 3am local for
+// the rest of the campaign, which is the exact tell this whole module exists to avoid. With an
+// expiry, forgetting is harmless: recipient-local hours come back on their own.
+//
+// Anything that is not a future YYYY-MM-DD means NO override, so every failure mode is the safe
+// one. In particular the string "true" does not work, because somebody will try it.
+function windowOverrideActive(value, now = new Date()) {
+  const raw = String(value == null ? '' : value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return false;
+  const until = Date.parse(`${raw}T23:59:59Z`);
+  if (!Number.isFinite(until)) return false;              // e.g. 2026-13-45 matches the shape
+  return now.getTime() <= until;
+}
+
+module.exports = {
+  windowOverrideActive, zoneForPhone, zoneForContact, withinWindow, nextSlot, DEFAULT_WINDOW, DIAL_ZONES };

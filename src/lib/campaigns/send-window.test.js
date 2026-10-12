@@ -150,3 +150,45 @@ test('slots land on a quarter hour, so sends do not all carry :00 seconds', () =
 test('no zone means no schedule — the caller is not handed a fabricated time', () => {
   assert.strictEqual(nextSlot(new Date(), null), null);
 });
+
+// ── THE WINDOW OVERRIDE EXPIRES BY ITSELF ─────────────────────────────────────
+
+const { windowOverrideActive } = require('./send-window');
+const AT = (iso) => new Date(iso);
+
+test('a future date turns the override on', () => {
+  assert.strictEqual(windowOverrideActive('2026-10-13', AT('2026-10-12T20:00:00Z')), true);
+  // Valid through the END of the named day, UTC — "until the 13th" should include the 13th.
+  assert.strictEqual(windowOverrideActive('2026-10-13', AT('2026-10-13T23:59:00Z')), true);
+});
+
+test('it expires on its own, with no action from anybody', () => {
+  // This is the whole point. A boolean flag set at 22:00 on a Monday is a flag nobody unsets, and
+  // forgetting it means mail at 3am local for the rest of the campaign.
+  assert.strictEqual(windowOverrideActive('2026-10-13', AT('2026-10-14T00:00:01Z')), false);
+  assert.strictEqual(windowOverrideActive('2026-10-13', AT('2026-11-01T09:00:00Z')), false);
+});
+
+test('"true" does NOT work — somebody will try it', () => {
+  for (const v of ['true', 'TRUE', '1', 'yes', 'on', 'forever', 'soon']) {
+    assert.strictEqual(windowOverrideActive(v, AT('2026-10-12T20:00:00Z')), false, `"${v}" enabled it`);
+  }
+});
+
+test('absent, empty and malformed values mean NO override', () => {
+  for (const v of [undefined, null, '', '   ', '2026-10', '10-13-2026', '2026/10/13']) {
+    assert.strictEqual(windowOverrideActive(v, AT('2026-10-12T20:00:00Z')), false, `${JSON.stringify(v)} enabled it`);
+  }
+});
+
+test('a date-shaped impossibility is refused, not coerced', () => {
+  // Matches the regex but is not a date. Date.parse gives NaN, and NaN comparisons are false in
+  // both directions — which happens to be safe here, but is asserted so it stays deliberate.
+  assert.strictEqual(windowOverrideActive('2026-13-45', AT('2026-10-12T20:00:00Z')), false);
+  assert.strictEqual(windowOverrideActive('0000-00-00', AT('2026-10-12T20:00:00Z')), false);
+});
+
+test('whitespace around a real date is tolerated', () => {
+  // Pasted into a Railway variable field, a trailing space is likelier than not.
+  assert.strictEqual(windowOverrideActive('  2026-10-13  ', AT('2026-10-12T20:00:00Z')), true);
+});

@@ -603,6 +603,19 @@ cron.schedule('5 * * * 1-5', withAlerts('hourly-05-cphi-followup', async () => {
     fromMailbox: process.env.CPHI_FOLLOWUP_FROM || 'naren@abiozen.com',
     max: parseInt(process.env.CPHI_FOLLOWUP_MAX || '3', 10),
     execute: true,
+    // ── A WINDOW OVERRIDE THAT EXPIRES BY ITSELF ────
+    // On 12 Oct Naren wanted the whole list out the same day: it was Monday, the show finished the
+    // previous week, and a follow-up that waits until people drift back into their own business
+    // hours arrives after the handshake has gone cold. But 51 of the 72 were in India, China and
+    // Europe, hours outside their window, and the manual override could only be run over an ssh
+    // session that kept dying.
+    //
+    // So the override lives here instead — as a DATE, never a boolean. A plain on/off flag set at
+    // 22:00 on a Monday is a flag nobody remembers to unset, and the cost of forgetting is mail
+    // landing at 3am local for the rest of the campaign, which is the exact tell this system exists
+    // to avoid. An expiry means forgetting is harmless: the window comes back on its own.
+    ignoreWindow: require('./src/lib/campaigns/send-window')
+      .windowOverrideActive(process.env.CPHI_FOLLOWUP_IGNORE_WINDOW_UNTIL),
     log: (s = '') => lines.push(s),
   });
   // Quiet when there is nothing to do — this fires 45 times a week and an hourly "0 sent" buries
