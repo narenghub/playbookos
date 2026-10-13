@@ -152,12 +152,18 @@ async function main() {
     const kinds = {};
     for (const { s, b } of failed) kinds[classifyBounce(b).kind] = (kinds[classifyBounce(b).kind] || 0) + 1;
     console.log(`      by cause: ${Object.entries(kinds).map(([k, n]) => `${k} ${n}`).join(' · ')}`);
+    const dataProblems = (kinds.bad_mailbox || 0) + (kinds.no_such_domain || 0) + (kinds.likely_bad_address || 0);
     const senderSide = (kinds.sender_blocked || 0) + (kinds.policy_reject || 0);
+    if (dataProblems) {
+      console.log(`\n      ${dataProblems} of ${failed.length} point at the ADDRESS — re-read those cards.`);
+    }
     if (senderSide >= 2) {
-      console.log(`\n      ⚠ ${senderSide} of ${failed.length} failures are the RECIPIENT'S SERVER`);
-      console.log(`        refusing mail, not a wrong address. Re-typing those addresses will not`);
-      console.log(`        help, and it means the "no failure" group below includes messages that`);
-      console.log(`        were accepted and filed as junk. Run scripts/check-email-auth.js.`);
+      console.log(`\n      ⚠ ${senderSide} are the recipient's server refusing mail rather than a bad`);
+      console.log(`        address. Two or more of those together is worth checking before re-typing`);
+      console.log(`        anything: node scripts/check-email-auth.js`);
+    } else if (senderSide === 1) {
+      console.log(`\n      1 is a sender-side refusal. One in a run of this size is ordinary — a single`);
+      console.log(`        strict tenant, not a pattern. Not worth acting on by itself.`);
     }
     console.log();
   } else {

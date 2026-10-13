@@ -171,9 +171,15 @@ const REAL = [
   ['Baffy Xu',         '5.1.2', "smtp; DNS Error: DNS type 'mx' lookup of ritbio.cn responded with code NXDOMAIN", 'no_such_domain'],
   ['Wu Minnan',        '5.1.2', "smtp; DNS Error: DNS type 'mx' lookup of polymedt.com responded with code NXDOMAIN", 'no_such_domain'],
   ['Nureddin Mansour', '5.7.1', 'smtp; 554 5.7.1 Service unavailable; Sender address [naren@abiozen.com] blocked', 'sender_blocked'],
-  ['Sanjay Joseph',    '5.4.1', 'smtp; 550 5.4.1 Recipient address rejected: Access denied.',                'policy_reject'],
-  ['Sonia Raut',       '5.4.1', 'smtp; 550 5.4.1 Recipient address rejected: Access denied.',                'policy_reject'],
-  ['Eva del Alamo',    '5.7.0', 'smtp; 550 permanent failure for one or more recipients (edelalamo@moehs.es:550 5.4.1 Recipient address rejected: Access denied.)', 'policy_reject'],
+  // These three carry Microsoft's own EXOSmtpErrors link, which is the tell for Exchange Online's
+  // Directory-Based Edge Blocking: the address does not exist in the tenant's directory, and the
+  // error says "Access denied" so that valid addresses cannot be discovered by probing. I first
+  // read all four as abiozen.com being refused on reputation; check-email-auth.js then showed SPF
+  // correct, DKIM published and DMARC aligned, which removes that explanation.
+  ['Sanjay Joseph',    '5.4.1', 'smtp; 550 5.4.1 Recipient address rejected: Access denied. For more information see https://aka.ms/EXOSmtpErrors [SG2PEPF000B66D0.apcprd03.prod.outlook.com]', 'likely_bad_address'],
+  ['Sonia Raut',       '5.4.1', 'smtp; 550 5.4.1 Recipient address rejected: Access denied. For more information see https://aka.ms/EXOSmtpErrors [PN2PEPF00000190.INDPRD01.PROD.OUTLOOK.COM]', 'likely_bad_address'],
+  ['Eva del Alamo',    '5.7.0', 'smtp; 550 permanent failure for one or more recipients (edelalamo@moehs.es:550 5.4.1 Recipient address rejected: Access denied. For more information see https://aka.ms/EXOSm...)', 'likely_bad_address'],
+  // No Microsoft fingerprint, so this one stays a plain policy refusal rather than being swept in.
   ['Swati Thakarda',   '5.7.0', 'smtp; 550 #5.1.0 Address rejected.',                                        'policy_reject'],
 ];
 
@@ -200,12 +206,20 @@ test('a dead domain tells him to check the domain, not the mailbox', () => {
   assert.match(c.advice, /DOMAIN does not exist/);
 });
 
-test('ambiguous really says ambiguous, instead of guessing', () => {
-  // Microsoft returns 5.4.1 Access denied both for a wrong address and for refusing the sender.
-  // The two actions are opposite, so inventing a verdict is worse than naming the uncertainty.
-  const c = classifyBounce({ status: '5.4.1', diagnostic: 'Recipient address rejected: Access denied.' });
+test('an Exchange Online refusal points at the CARD, not at our reputation', () => {
+  const c = classifyBounce({ status: '5.4.1',
+    diagnostic: 'Recipient address rejected: Access denied. see https://aka.ms/EXOSmtpErrors' });
+  assert.strictEqual(c.kind, 'likely_bad_address');
+  assert.match(c.advice, /Re-read the card/);
+  // It must still admit the other possibility rather than swinging to the opposite certainty.
+  assert.match(c.advice, /tenant block/);
+});
+
+test('"access denied" WITHOUT a Microsoft fingerprint stays a policy refusal', () => {
+  // Not every server that says this is Exchange Online, and the Microsoft reading must not be
+  // applied to servers whose words mean what they say.
+  const c = classifyBounce({ status: '5.7.1', diagnostic: 'smtp; 550 access denied by local policy' });
   assert.strictEqual(c.kind, 'policy_reject');
-  assert.match(c.advice, /AMBIGUOUS/);
 });
 
 test('a supplier reply mentioning "blocked" is not read as a sender block', () => {

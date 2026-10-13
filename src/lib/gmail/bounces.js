@@ -179,6 +179,9 @@ const NO_DOMAIN_RE = /NXDOMAIN|DNS type .?mx.? lookup|domain (name )?(not found|
 const SENDER_BLOCKED_RE = /sender address[\s\S]{0,80}?blocked|sender (was |is )?(blocked|denied|rejected|not allowed)|blocked using|rejected due to (spam|policy|reputation)|spam ?(block|filter)/i;
 const BAD_MAILBOX_RE = /user (unknown|not found)|recipient (is )?not exist|no such (user|recipient|mailbox)|verify address failed|mailbox (unavailable|not found)|does not exist/i;
 const FULL_RE = /mailbox (is )?full|over ?quota|insufficient storage/i;
+// EXOSmtpErrors is Microsoft's own help link and is the reliable tell that this came from
+// Exchange Online rather than from a server that means what it says.
+const EXCHANGE_DBEB_RE = /EXOSmtpErrors|aka\.ms\/EXO|\.outlook\.com\b[\s\S]{0,120}access denied|access denied[\s\S]{0,120}\.outlook\.com\b/i;
 const POLICY_RE = /access denied|policy|not authori[sz]ed|relay (denied|access denied)/i;
 
 function classifyBounce(b) {
@@ -204,13 +207,26 @@ function classifyBounce(b) {
     return { kind: 'mailbox_full',
       advice: 'Their mailbox is full. The address is fine and it may clear on its own.' };
   }
-  // 5.7.x and "access denied" without naming the sender: genuinely ambiguous. Say so rather than
-  // picking one, because the two actions are opposite.
-  if (POLICY_RE.test(t) || status.startsWith('5.7') || status === '5.4.1') {
+  // Exchange Online's "5.4.1 Recipient address rejected: Access denied" reads like a sender block
+  // and usually is not one. It is most often Directory-Based Edge Blocking: the address does not
+  // exist in that tenant's directory, and Microsoft returns a deliberately vague "Access denied"
+  // instead of "user unknown" so that nobody can discover valid addresses by probing.
+  //
+  // I had this backwards on 13 Oct. Four CPHI bounces came back this way from Cipla, Zydus, Moehs
+  // and Macleods, and I read them as abiozen.com being refused on reputation — then
+  // check-email-auth.js showed SPF correct, DKIM published and DMARC aligned, which removes that
+  // explanation. The likelier reading is four wrong addresses, which is a cards problem after all.
+  if (EXCHANGE_DBEB_RE.test(t) || (status === '5.4.1' && /access denied/i.test(t))) {
+    return { kind: 'likely_bad_address',
+      advice: 'Exchange Online "Access denied" is USUALLY a non-existent address, obscured on '
+        + 'purpose so valid addresses cannot be probed. Re-read the card. It can also be a tenant '
+        + 'block, so if the card is right, ask your contact to whitelist the domain.' };
+  }
+  // A genuine policy refusal that is not the Exchange pattern.
+  if (POLICY_RE.test(t) || status.startsWith('5.7')) {
     return { kind: 'policy_reject',
-      advice: 'AMBIGUOUS. Microsoft and Google return this both for a wrong address and for '
-        + 'refusing the sender. Check the card — but if several arrive together it is reputation, '
-        + 'not typing.' };
+      advice: 'A policy refusal. Check the card first; if several arrive together from different '
+        + 'companies, look at sender authentication and reputation instead.' };
   }
   return { kind: 'unknown', advice: 'No clear reason given. Read the diagnostic above.' };
 }
