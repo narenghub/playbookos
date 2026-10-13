@@ -155,3 +155,60 @@ test('a malformed address is refused without a lookup', async () => {
   assert.strictEqual((await domainAcceptsMail('', spy)).ok, false);
   assert.strictEqual(called, false);
 });
+
+// ── THE NINE REAL CPHI BOUNCES, 13 OCT ───────────────────────────────────────
+//
+// Pinned from production, verbatim. The first version of the audit told Naren to "re-check the
+// address against the business card" for all nine, and that was wrong for five of them — four
+// ambiguous policy rejections and one explicit sender block. Acting on that advice would have
+// meant re-typing correct addresses and sending to them again from the same blocked domain,
+// burning the contact twice and making the reputation problem worse.
+
+const { classifyBounce } = require('./bounces');
+const REAL = [
+  ['Zhu Yijun',        '5.1.1', 'smtp; 551 5.1.1 recipient is not exist',                                   'bad_mailbox'],
+  ['Phoebe Zhang',     '5.1.1', 'smtp; 550 verify address failed, User not found tijun.zhang@hisunpharm.com','bad_mailbox'],
+  ['Baffy Xu',         '5.1.2', "smtp; DNS Error: DNS type 'mx' lookup of ritbio.cn responded with code NXDOMAIN", 'no_such_domain'],
+  ['Wu Minnan',        '5.1.2', "smtp; DNS Error: DNS type 'mx' lookup of polymedt.com responded with code NXDOMAIN", 'no_such_domain'],
+  ['Nureddin Mansour', '5.7.1', 'smtp; 554 5.7.1 Service unavailable; Sender address [naren@abiozen.com] blocked', 'sender_blocked'],
+  ['Sanjay Joseph',    '5.4.1', 'smtp; 550 5.4.1 Recipient address rejected: Access denied.',                'policy_reject'],
+  ['Sonia Raut',       '5.4.1', 'smtp; 550 5.4.1 Recipient address rejected: Access denied.',                'policy_reject'],
+  ['Eva del Alamo',    '5.7.0', 'smtp; 550 permanent failure for one or more recipients (edelalamo@moehs.es:550 5.4.1 Recipient address rejected: Access denied.)', 'policy_reject'],
+  ['Swati Thakarda',   '5.7.0', 'smtp; 550 #5.1.0 Address rejected.',                                        'policy_reject'],
+];
+
+test('each of the nine real bounces is classified by its actual cause', () => {
+  for (const [who, status, diagnostic, want] of REAL) {
+    const got = classifyBounce({ status, diagnostic, subject: '' }).kind;
+    assert.strictEqual(got, want, `${who}: expected ${want}, got ${got}`);
+  }
+});
+
+test('an explicit sender block is NOT filed as ambiguous', () => {
+  // Olon names our own address. The containing regex must allow dots, because the blocked address
+  // has them — excluding dots put the clearest case in the ambiguous bucket.
+  const c = classifyBounce({ status: '5.7.1',
+    diagnostic: 'smtp; 554 5.7.1 Service unavailable; Sender address [naren@abiozen.com] blocked' });
+  assert.strictEqual(c.kind, 'sender_blocked');
+  assert.match(c.advice, /probably FINE/);
+  assert.match(c.advice, /Re-typing it will not help/);
+});
+
+test('a dead domain tells him to check the domain, not the mailbox', () => {
+  const c = classifyBounce({ status: '5.1.2', diagnostic: "DNS type 'mx' lookup of polymedt.com responded with code NXDOMAIN" });
+  assert.strictEqual(c.kind, 'no_such_domain');
+  assert.match(c.advice, /DOMAIN does not exist/);
+});
+
+test('ambiguous really says ambiguous, instead of guessing', () => {
+  // Microsoft returns 5.4.1 Access denied both for a wrong address and for refusing the sender.
+  // The two actions are opposite, so inventing a verdict is worse than naming the uncertainty.
+  const c = classifyBounce({ status: '5.4.1', diagnostic: 'Recipient address rejected: Access denied.' });
+  assert.strictEqual(c.kind, 'policy_reject');
+  assert.match(c.advice, /AMBIGUOUS/);
+});
+
+test('a supplier reply mentioning "blocked" is not read as a sender block', () => {
+  const c = classifyBounce({ status: null, diagnostic: 'Our shipment was blocked at customs', subject: 'Re: CPHI Milan' });
+  assert.strictEqual(c.kind, 'unknown');
+});

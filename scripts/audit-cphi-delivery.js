@@ -30,7 +30,7 @@
 const { initDB, query } = require('../src/lib/db');
 const { isEvent } = require('../src/lib/events/registry');
 const { gmailClientFor } = require('../src/lib/gmail/client');
-const { readBounce, bounceQuery, domainAcceptsMail } = require('../src/lib/gmail/bounces');
+const { readBounce, classifyBounce, bounceQuery, domainAcceptsMail } = require('../src/lib/gmail/bounces');
 const { replyState } = require('../src/lib/gmail/thread');
 
 const arg = (n, d) => {
@@ -140,10 +140,26 @@ async function main() {
       console.log(`         ${b.permanent ? 'PERMANENT' : 'temporary — Gmail keeps retrying'}`
         + `${b.status ? ` · ${b.status}` : ''}`);
       if (b.diagnostic) console.log(`         ${b.diagnostic}`);
-      console.log(`         ${b.permanent ? 'Re-check this address against the business card.'
+      const c = classifyBounce(b);
+      console.log(`         [${c.kind}] ${b.permanent ? c.advice
         : 'No action — a 4.x.x clears itself or becomes a hard bounce later.'}`);
       console.log();
     }
+    // The shape of the failures matters more than the count. Several sender-side rejections at once
+    // is a deliverability problem, and it also means the "no failure" group cannot be trusted:
+    // a server that refuses our mail outright is in the minority — far more will have accepted it
+    // and filed it as junk, silently.
+    const kinds = {};
+    for (const { s, b } of failed) kinds[classifyBounce(b).kind] = (kinds[classifyBounce(b).kind] || 0) + 1;
+    console.log(`      by cause: ${Object.entries(kinds).map(([k, n]) => `${k} ${n}`).join(' · ')}`);
+    const senderSide = (kinds.sender_blocked || 0) + (kinds.policy_reject || 0);
+    if (senderSide >= 2) {
+      console.log(`\n      ⚠ ${senderSide} of ${failed.length} failures are the RECIPIENT'S SERVER`);
+      console.log(`        refusing mail, not a wrong address. Re-typing those addresses will not`);
+      console.log(`        help, and it means the "no failure" group below includes messages that`);
+      console.log(`        were accepted and filed as junk. Run scripts/check-email-auth.js.`);
+    }
+    console.log();
   } else {
     console.log('   ✅ FAILED — none. No bounce came back for any address.\n');
   }

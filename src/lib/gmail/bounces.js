@@ -156,4 +156,63 @@ async function domainAcceptsMail(email, deps = {}) {
   }
 }
 
-module.exports = { readBounce, bounceQuery, domainAcceptsMail, bodyText, allParts, headerOf };
+
+// ── WHY IT BOUNCED DECIDES WHAT TO DO ABOUT IT ───────────────────────────────
+//
+// The first version of the audit printed "Re-check this address against the business card" under
+// every failure. On the real CPHI run that was wrong for four of nine: Olon answered
+//
+//     554 5.7.1 Service unavailable; Sender address [naren@abiozen.com] blocked
+//
+// and Cipla, Zydus and Moehs all answered "5.4.1 Recipient address rejected: Access denied" from
+// Microsoft 365 tenants. None of those is a bad address. Re-typing a correct address off a card and
+// sending to it again from the same blocked domain wastes the contact a second time and makes the
+// reputation problem worse.
+//
+// These are different problems with different owners: a wrong address is a data-entry fix, a dead
+// domain is a data fix, and a blocked sender is a deliverability problem that no amount of
+// card-reading will solve.
+const NO_DOMAIN_RE = /NXDOMAIN|DNS type .?mx.? lookup|domain (name )?(not found|does not exist)|host or domain name not found/i;
+// [\s\S] rather than [^.]: the blocked address itself contains dots, so excluding them meant
+// "Sender address [naren@abiozen.com] blocked" — the clearest case there is — fell through to
+// the ambiguous branch.
+const SENDER_BLOCKED_RE = /sender address[\s\S]{0,80}?blocked|sender (was |is )?(blocked|denied|rejected|not allowed)|blocked using|rejected due to (spam|policy|reputation)|spam ?(block|filter)/i;
+const BAD_MAILBOX_RE = /user (unknown|not found)|recipient (is )?not exist|no such (user|recipient|mailbox)|verify address failed|mailbox (unavailable|not found)|does not exist/i;
+const FULL_RE = /mailbox (is )?full|over ?quota|insufficient storage/i;
+const POLICY_RE = /access denied|policy|not authori[sz]ed|relay (denied|access denied)/i;
+
+function classifyBounce(b) {
+  const t = `${(b && b.diagnostic) || ''} ${(b && b.subject) || ''}`;
+  const status = (b && b.status) || '';
+
+  if (NO_DOMAIN_RE.test(t) || status === '5.1.2') {
+    return { kind: 'no_such_domain',
+      advice: 'The DOMAIN does not exist, so the address cannot be right. Re-read the card and '
+        + "check the company's real mail domain." };
+  }
+  // Before the generic policy case: an explicit mention of the SENDER is unambiguous.
+  if (SENDER_BLOCKED_RE.test(t)) {
+    return { kind: 'sender_blocked',
+      advice: 'The address is probably FINE — their server refused OUR domain. Re-typing it will '
+        + 'not help. This is deliverability: authentication and sender reputation.' };
+  }
+  if (BAD_MAILBOX_RE.test(t) || status === '5.1.1') {
+    return { kind: 'bad_mailbox',
+      advice: 'Their server says this mailbox does not exist. Re-read the card.' };
+  }
+  if (FULL_RE.test(t)) {
+    return { kind: 'mailbox_full',
+      advice: 'Their mailbox is full. The address is fine and it may clear on its own.' };
+  }
+  // 5.7.x and "access denied" without naming the sender: genuinely ambiguous. Say so rather than
+  // picking one, because the two actions are opposite.
+  if (POLICY_RE.test(t) || status.startsWith('5.7') || status === '5.4.1') {
+    return { kind: 'policy_reject',
+      advice: 'AMBIGUOUS. Microsoft and Google return this both for a wrong address and for '
+        + 'refusing the sender. Check the card — but if several arrive together it is reputation, '
+        + 'not typing.' };
+  }
+  return { kind: 'unknown', advice: 'No clear reason given. Read the diagnostic above.' };
+}
+
+module.exports = { readBounce, classifyBounce, bounceQuery, domainAcceptsMail, bodyText, allParts, headerOf };
