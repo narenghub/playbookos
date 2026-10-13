@@ -128,4 +128,44 @@ function readIncoming(msg) {
   };
 }
 
-module.exports = { readIncoming, newText, plainBody, attachmentsOf, looksLikeCatalogue };
+
+// ── PARSING AN ADDRESS LIST WITHOUT BREAKING ON QUOTED COMMAS ────────────────
+//
+// A To or Cc header is comma-separated, except that a display name may itself contain a comma and
+// then it is quoted: `"Rakesh, K" <rakesh@alivus.com>`. Splitting on every comma turns that into
+// two items — one with a broken name and one that is not an address at all. The address survived,
+// but the name became "K", which is the sort of thing a recipient notices in a greeting line.
+//
+// So items are MATCHED rather than split: a run of non-comma characters, or anything inside
+// quotes. Items with no @ are dropped, because a half-parsed fragment is not an address.
+function parseAddressList(value) {
+  const raw = String(value == null ? '' : value);
+  const items = raw.match(/(?:"[^"]*"|[^,])+/g) || [];
+  return items
+    .map((a) => a.trim())
+    .filter(Boolean)
+    .map((a) => {
+      const m = a.match(/^(.*?)\s*<([^>]+)>$/);
+      if (m) return { name: m[1].replace(/^"|"$/g, '').trim(), email: m[2].trim() };
+      return { email: a.replace(/^<|>$/g, '').trim() };
+    })
+    .filter((a) => a.email && a.email.includes('@'));
+}
+
+/**
+ * Everyone on a message other than `self` — the sender's To and Cc.
+ * Used so a reply keeps the colleagues they deliberately brought into the thread.
+ */
+function otherParticipants(payload, self) {
+  const me = String(self || '').toLowerCase();
+  const all = [...parseAddressList(headerOf(payload, 'To')), ...parseAddressList(headerOf(payload, 'Cc'))];
+  const seen = new Set();
+  return all.filter((a) => {
+    const k = a.email.toLowerCase();
+    if (k === me || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+module.exports = { readIncoming, parseAddressList, otherParticipants, newText, plainBody, attachmentsOf, looksLikeCatalogue };

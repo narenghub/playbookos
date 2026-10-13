@@ -124,3 +124,48 @@ test('the sender address is extracted for matching against the contact', () => {
   const m = readIncoming(mk([textPart('ok')], { From: 'Zhu Jiang <Jiang.Zhu@XIANJUPHARM.com>' }));
   assert.strictEqual(m.fromEmail, 'jiang.zhu@xianjupharm.com', 'lowercased so it can be matched');
 });
+
+// ── A REPLY MUST NOT DROP THE PEOPLE THEY ADDED ──────────────────────────────
+
+const { parseAddressList, otherParticipants } = require('./incoming');
+
+test('a quoted display name containing a comma stays one address', () => {
+  // Alivus copied in "Rakesh, K". Splitting on every comma made that two items — one with the
+  // name mangled to "K" and one that was not an address at all.
+  const list = parseAddressList('"Rakesh, K" <rakesh@alivus.com>, apisales@egis.hu');
+  assert.strictEqual(list.length, 2);
+  assert.strictEqual(list[0].name, 'Rakesh, K');
+  assert.strictEqual(list[0].email, 'rakesh@alivus.com');
+  assert.strictEqual(list[1].email, 'apisales@egis.hu');
+});
+
+test('fragments that are not addresses are dropped', () => {
+  assert.deepStrictEqual(parseAddressList('not an address, , <>'), []);
+  assert.deepStrictEqual(parseAddressList(''), []);
+  assert.deepStrictEqual(parseAddressList(null), []);
+});
+
+test('the colleagues they copied in are kept, and we are not', () => {
+  // Egis copied their Head of API Sales; Alivus named Rakesh the primary contact for the product
+  // list. Replying to the sender alone cuts out the person who is going to send the catalogue.
+  const payload = { headers: [
+    { name: 'To', value: 'Naren Boda <naren@abiozen.com>' },
+    { name: 'Cc', value: 'Head of API Sales <apisales@egis.hu>, Rakesh <rakesh@alivus.com>' },
+  ] };
+  const p = otherParticipants(payload, 'naren@abiozen.com');
+  assert.deepStrictEqual(p.map((x) => x.email), ['apisales@egis.hu', 'rakesh@alivus.com']);
+});
+
+test('our own address is removed whatever its case, and duplicates collapse', () => {
+  const payload = { headers: [
+    { name: 'To', value: 'NAREN@ABIOZEN.COM, someone@x.com' },
+    { name: 'Cc', value: 'Someone <SOMEONE@x.com>, other@y.com' },
+  ] };
+  const p = otherParticipants(payload, 'naren@abiozen.com');
+  assert.deepStrictEqual(p.map((x) => x.email), ['someone@x.com', 'other@y.com']);
+});
+
+test('no Cc at all yields an empty list rather than throwing', () => {
+  const p = otherParticipants({ headers: [{ name: 'To', value: 'naren@abiozen.com' }] }, 'naren@abiozen.com');
+  assert.deepStrictEqual(p, []);
+});

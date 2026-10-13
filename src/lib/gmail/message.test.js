@@ -154,3 +154,38 @@ test('missing required fields fail loudly rather than sending something malforme
   assert.throws(() => buildMessage({ ...BASE, html: '' }), /html is required/);
   assert.throws(() => buildMessage({ ...BASE, attachments: [{ filename: 'a.pdf' }] }), /filename and content/);
 });
+
+// ── Cc ───────────────────────────────────────────────────────────────────────
+
+test('Cc is written, deduplicated, and never contains us or the To address', () => {
+  const m = buildMessage({
+    from: { name: 'Naren Boda', email: 'naren@abiozen.com' },
+    to: { name: 'Viktoria Sebők', email: 'sebok.viktoria@egis.hu' },
+    cc: [
+      { name: 'Head of API Sales', email: 'apisales@egis.hu' },
+      'rakesh@alivus.com',
+      'SEBOK.VIKTORIA@egis.hu',     // the To address again, different case
+      'naren@abiozen.com',          // ourselves
+      { name: 'Dup', email: 'APISALES@egis.hu' },
+    ],
+    subject: 'Re: CPHI Milan', text: 'Hi Viktoria,\n\nThanks.', html: '<p>Hi Viktoria,</p>',
+  });
+  const raw = Buffer.from(m.raw.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  const cc = raw.split('\n').find((l) => /^Cc:/i.test(l));
+  assert.ok(cc, 'no Cc header was written');
+  assert.match(cc, /apisales@egis\.hu/);
+  assert.match(cc, /rakesh@alivus\.com/);
+  assert.ok(!/sebok\.viktoria/i.test(cc), 'the To recipient must not also be Cc\'d');
+  assert.ok(!/naren@abiozen\.com/i.test(cc), 'we must never Cc ourselves');
+  assert.strictEqual((cc.match(/@/g) || []).length, 2, 'duplicates must collapse');
+});
+
+test('no Cc means no Cc header at all', () => {
+  const m = buildMessage({
+    from: { name: 'Naren Boda', email: 'naren@abiozen.com' },
+    to: { name: 'Lina', email: 'lina@hrbjxl.cn' },
+    subject: 'Re: CPHI', text: 'Hi Lina,\n\nThanks.', html: '<p>Hi Lina,</p>',
+  });
+  const raw = Buffer.from(m.raw.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  assert.ok(!/^Cc:/im.test(raw), 'an empty Cc header must not be emitted');
+});

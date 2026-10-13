@@ -115,7 +115,7 @@ function boundary(tag) {
  */
 function buildMessage(opts = {}) {
   const {
-    from, to, subject = '', html = '', text = '',
+    from, to, cc = [], subject = '', html = '', text = '',
     inReplyTo = null, references = [], attachments = [], date = new Date(),
   } = opts;
 
@@ -142,6 +142,32 @@ function buildMessage(opts = {}) {
     ['Message-ID', messageId],
     ['MIME-Version', '1.0'],
   ];
+
+  // ── Cc, BECAUSE A REPLY THAT DROPS PEOPLE IS NOT A REPLY ───────────────────
+  //
+  // Added 13 Oct, before the first drafted replies went out. Two of the eight CPHI suppliers had
+  // introduced a colleague ON the thread: Egis copied in their Head of API Sales, and Alivus
+  // copied in Rakesh and named him the primary contact for the product list. Replying to the
+  // sender alone would have silently cut both of them out of the conversation they had just been
+  // brought into — and in Alivus's case cut out the person who was going to send the catalogue.
+  //
+  // Addresses are de-duplicated case-insensitively, and the To recipient and our own mailbox are
+  // removed, so nobody is addressed twice and we never Cc ourselves.
+  const ccList = (Array.isArray(cc) ? cc : [cc])
+    .map((c) => (typeof c === 'string' ? { email: c } : c))
+    .filter((c) => c && c.email)
+    .filter((c) => c.email.toLowerCase() !== String(to.email).toLowerCase())
+    .filter((c) => c.email.toLowerCase() !== String(from.email).toLowerCase());
+  const seen = new Set();
+  const ccUnique = ccList.filter((c) => {
+    const k = c.email.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  if (ccUnique.length) {
+    headers.push(['Cc', ccUnique.map((c) => formatAddress(c.name, c.email)).join(', ')]);
+  }
   if (inReplyTo) {
     headers.push(['In-Reply-To', inReplyTo]);
     // References carries the whole chain, oldest first, and the message being replied to must be

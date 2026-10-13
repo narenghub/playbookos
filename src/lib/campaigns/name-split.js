@@ -18,6 +18,18 @@ const CJK_FAMILY_FIRST = new Set([
   'ma', 'zhu', 'hu', 'guo', 'he', 'lin', 'gao', 'luo', 'zheng', 'liang', 'xie', 'tang', 'han',
   'cao', 'deng', 'feng', 'zeng', 'peng', 'xiao', 'tian', 'dong', 'pan', 'jiang', 'cai', 'yu',
   'kim', 'park', 'choi', 'jeong', 'kang', 'yoon', 'jang', 'shin',
+  // Added 13 Oct after "Xia Xiaoqin" passed as safe and would have been greeted "Hi Xia" — her
+  // family name. Her own address, niexiaoqin@thinheal.com, suggests the card may even read Nie.
+  // The asymmetry decides which way to err: a false positive here costs one greeting to confirm
+  // by hand; a false negative greets a stranger by their surname in the first line of a
+  // follow-up. So the list is generous.
+  'xia', 'nie', 'shen', 'ren', 'ding', 'lv', 'lu', 'wei', 'su', 'cheng', 'ye', 'du', 'jin',
+  'xiong', 'zou', 'liao', 'tan', 'yao', 'shi', 'fan', 'song', 'qian', 'bai', 'cui', 'kong',
+  'mao', 'qiu', 'hou', 'shao', 'meng', 'long', 'duan', 'lei', 'qin', 'wan', 'fu', 'yin',
+  'ni', 'ji', 'qi', 'an', 'chang', 'kang', 'bo', 'mu', 'rao', 'gu', 'geng', 'xue', 'zhan',
+  'ou', 'yan', 'zhuang', 'teng', 'ran', 'tong', 'pang', 'hao', 'guan', 'chu', 'ling',
+  'nguyen', 'tran', 'pham', 'huynh', 'vo', 'dang', 'bui', 'ngo',
+  'tanaka', 'suzuki', 'sato', 'takahashi', 'watanabe', 'ito', 'yamamoto', 'nakamura',
 ]);
 
 // ── NAME SPLITTING, WITH ITS OWN DOUBTS DECLARED ─────────────────────────────

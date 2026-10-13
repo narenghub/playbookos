@@ -24,7 +24,7 @@ const { isEvent } = require('../src/lib/events/registry');
 const { gmailClientFor } = require('../src/lib/gmail/client');
 const { syncReplies } = require('../src/lib/campaigns/reply-sync');
 const { buildMessage } = require('../src/lib/gmail/message');
-const { readIncoming, looksLikeCatalogue } = require('../src/lib/gmail/incoming');
+const { readIncoming, looksLikeCatalogue, otherParticipants } = require('../src/lib/gmail/incoming');
 const { splitName } = require('../src/lib/campaigns/name-split');
 
 const arg = (n, d) => {
@@ -148,6 +148,13 @@ async function main() {
 
     // Thread properly: In-Reply-To and References from THEIR message, so it lands under their
     // reply rather than starting a parallel branch in their client.
+    // ── EVERYONE THEY BROUGHT INTO THE THREAD STAYS IN IT ────
+    // Egis copied in their Head of API Sales. Alivus copied in Rakesh and named him the primary
+    // contact for the product list. Replying to the sender alone cuts those people out of a
+    // conversation they were deliberately added to — and in Alivus's case cuts out the person who
+    // is going to send the catalogue.
+    const participants = otherParticipants(last.raw.payload, FROM_MAILBOX);
+
     const theirId = (last.raw.payload.headers.find((h) => /^message-id$/i.test(h.name)) || {}).value || null;
     const theirRefs = ((last.raw.payload.headers.find((h) => /^references$/i.test(h.name)) || {}).value || '')
       .split(/\s+/).filter(Boolean);
@@ -157,6 +164,9 @@ async function main() {
     console.log(`   ${r.name} — ${r.company}  ${hasCatalogue ? '[catalogue received]' : '[no catalogue yet]'}`);
     if (!EXECUTE) {
       console.log(`      would draft in thread ${r.thread_id}, replying to ${last.parsed.fromEmail}`);
+      if (participants.length) {
+        console.log(`      Cc (they added these people): ${participants.map((a) => a.email).join(', ')}`);
+      }
       console.log(`      "Hi ${first}," · ${text.split('\n').length} lines\n`);
       drafted += 1;
       continue;
@@ -165,6 +175,7 @@ async function main() {
     const msg = buildMessage({
       from: { name: SIG_NAME, email: FROM_MAILBOX },
       to: { name: r.name, email: last.parsed.fromEmail || r.email },
+      cc: participants,
       subject: `Re: ${subject}`,
       text,
       html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;line-height:1.55;color:#15202b;max-width:620px">${
