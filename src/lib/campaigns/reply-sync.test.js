@@ -113,3 +113,48 @@ test('preconditions throw rather than silently doing nothing', async () => {
   await assert.rejects(() => syncReplies({ gmail: h.gmail, event: 'e', query: h.query }), /mailbox is required/);
   await assert.rejects(() => syncReplies({ gmail: h.gmail, event: 'e', fromMailbox: SELF }), /query function/);
 });
+
+test('the UPDATE receives an ISO timestamp, not the email Date header', async () => {
+  // The first real run died here: Postgres rejected "Tue, 13 Oct 2026 09:50:09 +0800
+  // (GMT+08:00)" — an RFC 5322 comment, which plenty of clients send and none of my fixtures had.
+  const threads = {
+    't-cn': [
+      hdr(`Naren Boda <${SELF}>`, 'Following up from CPHI Milan'),
+      { labelIds: [], payload: { headers: [
+        { name: 'From', value: 'Chutian Zhang <chutian@zjpeptide.com>' },
+        { name: 'Subject', value: 'Re: Following up from CPHI Milan' },
+        { name: 'Date', value: 'Tue, 13 Oct 2026 09:50:09 +0800 (GMT+08:00)' },
+      ] } },
+    ],
+  };
+  const rows = [{ id: 7, thread_id: 't-cn', campaign: 'supplier', status: 'active',
+    name: 'Chutian Zhang', company: 'Zhejiang Peptides' }];
+  const h = harness(threads, rows);
+  const r = await syncReplies({ gmail: h.gmail, event: 'e', fromMailbox: SELF, query: h.query,
+    execute: true, log: () => {} });
+
+  assert.strictEqual(r.marked, 1);
+  const upd = h.statements.find((s) => /UPDATE/i.test(s.sql));
+  const passed = upd.params[1];
+  assert.strictEqual(passed, '2026-10-13T01:50:09.000Z');
+  assert.ok(!/\(GMT/.test(String(passed)), 'an RFC 5322 comment reached SQL');
+});
+
+test('an unparseable Date falls back to NULL so COALESCE uses NOW()', async () => {
+  const threads = {
+    't-bad': [
+      hdr(`Naren Boda <${SELF}>`, 'Following up'),
+      { labelIds: [], payload: { headers: [
+        { name: 'From', value: 'Someone <x@y.com>' },
+        { name: 'Subject', value: 'Re: Following up' },
+        { name: 'Date', value: 'whenever' },
+      ] } },
+    ],
+  };
+  const h = harness(threads, [{ id: 8, thread_id: 't-bad', campaign: 'supplier', status: 'active', name: 'X', company: 'Y' }]);
+  const r = await syncReplies({ gmail: h.gmail, event: 'e', fromMailbox: SELF, query: h.query, execute: true, log: () => {} });
+  assert.strictEqual(r.marked, 1, 'a bad date must not stop the reply being recorded');
+  const upd = h.statements.find((s) => /UPDATE/i.test(s.sql));
+  assert.strictEqual(upd.params[1], null);
+  assert.match(upd.sql, /COALESCE\(\$2::timestamptz, NOW\(\)\)/);
+});

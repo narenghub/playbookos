@@ -138,3 +138,44 @@ test('an empty thread is not a reply, but is not an error either', async () => {
   assert.strictEqual(s.replied, false);
   assert.strictEqual(s.messageCount, 0);
 });
+
+// ── AN EMAIL DATE HEADER IS NOT A TIMESTAMP ──────────────────────────────────
+
+const { headerDate } = require('./thread');
+
+test('a Date header with an RFC 5322 comment parses — it killed the first real run', () => {
+  // Postgres answered "invalid input syntax for type timestamp with time zone" on exactly this
+  // string, from the first Chinese supplier in the list. Every date in my own fixtures had been a
+  // tidy +0000, which is why nothing caught it before production.
+  const d = headerDate('Tue, 13 Oct 2026 09:50:09 +0800 (GMT+08:00)');
+  assert.strictEqual(d.toISOString(), '2026-10-13T01:50:09.000Z');
+});
+
+test('the comment forms the real suppliers actually send all parse', () => {
+  const cases = [
+    ['Mon, 12 Oct 2026 17:08:00 +0000', '2026-10-12T17:08:00.000Z'],
+    ['Tue, 13 Oct 2026 02:20:41 +0530 (IST)', '2026-10-12T20:50:41.000Z'],
+    ['Tue, 13 Oct 2026 09:50:09 +0200 (CEST)', '2026-10-13T07:50:09.000Z'],
+    ['13 Oct 2026 09:50:09 +0800', '2026-10-13T01:50:09.000Z'],
+  ];
+  for (const [raw, want] of cases) {
+    const d = headerDate(raw);
+    assert.ok(d, `${raw} did not parse`);
+    assert.strictEqual(d.toISOString(), want, raw);
+  }
+});
+
+test('an unparseable or absent header is NULL, not a guess', () => {
+  // Null rather than "now": the caller may reasonably prefer NOW() and should choose that itself
+  // rather than inherit a fabricated timestamp that looks like evidence.
+  for (const v of ['', '   ', null, undefined, 'not a date', 'Yesterday afternoon']) {
+    assert.strictEqual(headerDate(v), null, String(v));
+  }
+});
+
+test('the value handed to Postgres is an ISO string, never the raw header', () => {
+  // The guard that matters: reply-sync must convert before the UPDATE.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'campaigns', 'reply-sync.js'), 'utf8');
+  assert.match(src, /headerDate\(rs\.repliedAt\)/, 'reply-sync must normalise the header');
+  assert.ok(!/\[r\.id, rs\.repliedAt/.test(src), 'the raw header must not reach SQL');
+});

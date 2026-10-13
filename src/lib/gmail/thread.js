@@ -118,4 +118,34 @@ async function replyState(gmail, threadId, selfEmail, deps = {}) {
   };
 }
 
-module.exports = { replyState, isAutomated, addressOf, AUTO_SUBJECT };
+
+// ── AN EMAIL DATE HEADER IS NOT A TIMESTAMP ──────────────────────────────────
+//
+// `repliedAt` is the raw RFC 5322 Date header, verbatim, because that is what the mailbox said.
+// RFC 5322 permits a comment in parentheses, and plenty of clients use it:
+//
+//     Tue, 13 Oct 2026 09:50:09 +0800 (GMT+08:00)
+//
+// Handed straight to Postgres that is
+//
+//     invalid input syntax for type timestamp with time zone
+//
+// which is exactly how the reply sync died on its first real run — on the first Chinese supplier
+// in the list, because every date in my own tests was a tidy +0000. Anything crossing into SQL
+// goes through here first.
+//
+// Returns a Date, or null when the header cannot be parsed. Null rather than "now", because the
+// caller may reasonably prefer NOW() and should decide that itself rather than inherit a guess.
+function headerDate(value) {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return null;
+  let t = Date.parse(raw);
+  if (Number.isNaN(t)) {
+    // Drop a trailing parenthetical comment and try once more.
+    t = Date.parse(raw.replace(/\s*\([^)]*\)\s*$/, '').trim());
+  }
+  return Number.isNaN(t) ? null : new Date(t);
+}
+
+module.exports = {
+  headerDate, replyState, isAutomated, addressOf, AUTO_SUBJECT };

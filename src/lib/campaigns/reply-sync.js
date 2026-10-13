@@ -21,7 +21,7 @@
 // somebody who already answered, which is the one outcome this campaign is built to prevent.
 'use strict';
 
-const { replyState } = require('../gmail/thread');
+const { replyState, headerDate } = require('../gmail/thread');
 
 /**
  * Walk the active sequences and mark the ones that have been answered.
@@ -70,6 +70,10 @@ async function syncReplies(opts = {}) {
 
     // replied_at comes from the message where possible, so the queue can be ordered by when the
     // person actually wrote rather than by when this job happened to notice.
+    //
+    // Through headerDate, NOT raw: the Date header may carry an RFC 5322 comment —
+    // "+0800 (GMT+08:00)" — which Postgres refuses outright. That killed the first real run.
+    const when = headerDate(rs.repliedAt);
     const res = await query(
       `UPDATE cphi_followup_state
           SET status = 'replied',
@@ -77,7 +81,7 @@ async function syncReplies(opts = {}) {
               updated_at = NOW()
         WHERE id = $1 AND status = 'active'
         RETURNING id`,
-      [r.id, rs.repliedAt || null]);
+      [r.id, when ? when.toISOString() : null]);
     out.marked += res.rowCount;
   }
 
