@@ -175,7 +175,21 @@ async function initDB() {
       [crypto.randomUUID()]);
   }
 
-  console.log('✅ PostgreSQL database ready. Admin:', existing ? existing.email : process.env.ADMIN_EMAIL);
+  // ── WHY THIS LINE SAYS WHAT IT SAYS ───────────────────────────────────────
+  // It used to print `existing.email` — the row from a LIMIT 1 with no ORDER BY, which is an
+  // arbitrary pick among all admins. On 13 Oct it read naren@abiozen.com in the morning and
+  // prasanthi@adificetechnologies.com at night, from the same unchanged data, and that looked
+  // like somebody's account had been altered on a day Naren could not log in. A log line that
+  // invites a false alarm is worse than no log line.
+  //
+  // So: a count, and the super_admin(s) by name — which is the fact somebody actually wants when
+  // they read this during a login problem.
+  const admins = (await query(
+    `SELECT email, role FROM users WHERE role IN ('admin','super_admin') ORDER BY role, email`
+  )).rows;
+  const supers = admins.filter((a) => a.role === 'super_admin').map((a) => a.email);
+  console.log(`✅ PostgreSQL database ready. ${admins.length} admin account(s)`
+    + `; super_admin: ${supers.length ? supers.join(', ') : 'NONE'}`);
 }
 
 async function initPhase2() {
