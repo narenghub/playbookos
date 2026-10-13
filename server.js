@@ -635,6 +635,45 @@ cron.schedule('5 * * * 1-5', withAlerts('hourly-05-cphi-followup', async () => {
   }
 }), CST);
 
+// ── Every hour, :25, every day — find out who has replied ────────────────────
+//
+// On 13 Oct the delivery audit reported eight CPHI suppliers had replied and the reply queue,
+// run a minute later, reported none. Both read honestly: the audit asked Gmail, the queue read
+// cphi_followup_state.status — which the runner only writes at the moment it is about to send
+// somebody's NEXT step, four days away. Gmail knew; PlaybookOS did not.
+//
+// The stop-on-reply guard was never at risk, because that check happens immediately before each
+// send. What was broken is that a reply — the most important event in this system — stayed
+// invisible until a timer fired. A supplier's catalogue sitting unnoticed for four days is the
+// campaign's whole value going stale in an inbox.
+//
+// Every day rather than weekdays: people answer at the weekend, and knowing on Monday morning is
+// worth more than the handful of API calls. No flag gates it, because it only READS Gmail and
+// moves active → replied; it sends nothing and can wake nobody up.
+cron.schedule('25 * * * *', withAlerts('hourly-25-cphi-reply-sync', async () => {
+  const event = process.env.CPHI_FOLLOWUP_EVENT || 'cphi-milan-2026';
+  const mailbox = process.env.CPHI_FOLLOWUP_FROM || 'naren@abiozen.com';
+  const { gmailClientFor } = require('./src/lib/gmail/client');
+  const { syncReplies } = require('./src/lib/campaigns/reply-sync');
+  const { query } = require('./src/lib/db');
+
+  const g = await gmailClientFor(mailbox);
+  if (g.error) throw new Error(`CPHI reply sync cannot act as ${mailbox}: ${g.error}`);
+
+  const r = await syncReplies({ gmail: g.gmail, event, fromMailbox: mailbox, query, execute: true });
+  // Quiet unless something changed: this fires 168 times a week.
+  if (r.marked) {
+    console.log(`[CRON] CPHI reply sync — ${r.marked} newly replied of ${r.checked} active`);
+    for (const x of r.replied) console.log(`[CRON]   ↩ ${x.name} — ${x.company} (${x.campaign})`);
+  }
+  // A thread that cannot be read stays ACTIVE, which is the safe side — but if it persists, the
+  // next send will skip that person rather than risk writing over a reply, so it needs a human.
+  if (r.unknown.length) {
+    console.warn(`[CRON] CPHI reply sync — ${r.unknown.length} thread(s) unreadable: `
+      + r.unknown.map((x) => `${x.company} (${x.why})`).join('; '));
+  }
+}), CST);
+
 // ── SAY, AT BOOT, WHAT THE CAMPAIGN WILL ACTUALLY DO ─────────────────────────
 //
 // On 12 Oct the release stalled on something invisible. The code was deployed, the Railway variable

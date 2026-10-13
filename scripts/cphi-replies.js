@@ -17,6 +17,7 @@
 const { initDB, query } = require('../src/lib/db');
 const { isEvent } = require('../src/lib/events/registry');
 const { gmailClientFor } = require('../src/lib/gmail/client');
+const { syncReplies } = require('../src/lib/campaigns/reply-sync');
 const { readIncoming, looksLikeCatalogue } = require('../src/lib/gmail/incoming');
 
 const arg = (n, d) => {
@@ -26,12 +27,27 @@ const arg = (n, d) => {
 const EVENT = arg('event', 'cphi-milan-2026');
 const FROM_MAILBOX = arg('from', 'naren@abiozen.com');
 const FULL = process.argv.includes('--full');
+const NO_SYNC = process.argv.includes('--no-sync');
 
 const kb = (n) => (n >= 1024 * 1024 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`);
 
 async function main() {
   await initDB();
   if (!isEvent(EVENT)) { console.log(`✗ "${EVENT}" is not an event.`); process.exit(1); }
+
+  console.log(`── ${EVENT} · replies\n`);
+
+  const g = await gmailClientFor(FROM_MAILBOX);
+  if (g.error) { console.log(`   ✗ cannot act as ${FROM_MAILBOX}: ${g.error}`); process.exit(1); }
+
+  // Ask Gmail before reading our own column. The first version of this script read
+  // cphi_followup_state alone and reported "nobody has replied yet" while eight suppliers sat
+  // answered in the mailbox — because that column was only written when a sequence next woke up.
+  // Gmail is the authority on whether somebody replied; the column is a cache of it.
+  if (!NO_SYNC) {
+    await syncReplies({ gmail: g.gmail, event: EVENT, fromMailbox: FROM_MAILBOX, query,
+      execute: true, log: () => {} });
+  }
 
   const rows = (await query(
     `SELECT st.id AS state_id, st.campaign, st.thread_id, st.replied_at, st.step_sent,
@@ -41,14 +57,11 @@ async function main() {
       WHERE st.event_slug = $1 AND st.status = 'replied' AND st.thread_id IS NOT NULL
       ORDER BY st.replied_at`, [EVENT])).rows;
 
-  console.log(`── ${EVENT} · replies  (read-only)\n`);
   if (!rows.length) {
-    console.log('   nobody has replied yet.\n');
+    console.log('   nobody has replied yet.');
+    console.log('   (Gmail was just asked directly, so this is current — not a stale column.)\n');
     return;
   }
-
-  const g = await gmailClientFor(FROM_MAILBOX);
-  if (g.error) { console.log(`   ✗ cannot act as ${FROM_MAILBOX}: ${g.error}`); process.exit(1); }
 
   const entries = [];
   for (const r of rows) {

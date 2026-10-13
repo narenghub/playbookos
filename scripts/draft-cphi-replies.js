@@ -22,6 +22,7 @@
 const { initDB, query } = require('../src/lib/db');
 const { isEvent } = require('../src/lib/events/registry');
 const { gmailClientFor } = require('../src/lib/gmail/client');
+const { syncReplies } = require('../src/lib/campaigns/reply-sync');
 const { buildMessage } = require('../src/lib/gmail/message');
 const { readIncoming, looksLikeCatalogue } = require('../src/lib/gmail/incoming');
 const { splitName } = require('../src/lib/campaigns/name-split');
@@ -33,6 +34,7 @@ const arg = (n, d) => {
 const EVENT = arg('event', 'cphi-milan-2026');
 const FROM_MAILBOX = arg('from', 'naren@abiozen.com');
 const EXECUTE = process.argv.includes('--execute');
+const NO_SYNC = process.argv.includes('--no-sync');
 
 const SIG_NAME = 'Naren Boda';
 const SIG_ROLE = 'Director, Abiozen LLC';
@@ -97,6 +99,15 @@ async function main() {
 
   const g = await gmailClientFor(FROM_MAILBOX);
   if (g.error) { console.log(`   ✗ cannot act as ${FROM_MAILBOX}: ${g.error}`); process.exit(1); }
+
+  // Ask Gmail before reading our own column. The first version of this script read
+  // cphi_followup_state alone and reported "nobody has replied yet" while eight suppliers sat
+  // answered in the mailbox — because that column was only written when a sequence next woke up.
+  // Gmail is the authority on whether somebody replied; the column is a cache of it.
+  if (!NO_SYNC) {
+    await syncReplies({ gmail: g.gmail, event: EVENT, fromMailbox: FROM_MAILBOX, query,
+      execute: true, log: () => {} });
+  }
 
   let drafted = 0;
   const skipped = [];

@@ -83,8 +83,16 @@ test('the CLI and the cron both go through runFollowups', () => {
   assert.match(cli, /runFollowups/, 'the CLI must call the shared runner');
   assert.match(server, /runFollowups/, 'the cron must call the shared runner');
   // And neither may re-implement the due-query, which is where the slug and the role join live.
-  assert.ok(!/cphi_followup_state/.test(cli), 'the CLI must not query campaign state itself');
-  assert.ok(!/cphi_followup_state/.test(server), 'server.js must not query campaign state itself');
+  //
+  // Matched as SQL, not as a bare table name: the first version failed on a COMMENT in server.js
+  // explaining why the reply-sync cron exists, which mentions cphi_followup_state.status in prose.
+  // A test that forbids naming a table in a comment pressures the next person to delete the
+  // explanation rather than the duplication — so it checks for a statement touching the table.
+  const stateSql = /(FROM|JOIN|UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+cphi_followup_state/i;
+  assert.ok(!stateSql.test(cli), 'the CLI must not query campaign state itself');
+  assert.ok(!stateSql.test(server), 'server.js must not query campaign state itself');
+  // Guard against a vacuous pass: the pattern has to be able to fire.
+  assert.ok(stateSql.test('SELECT 1 FROM cphi_followup_state WHERE x'), 'the pattern itself is broken');
 });
 
 // ── THE CRON CANNOT START MAILING BY BEING DEPLOYED ──────────────────────────
