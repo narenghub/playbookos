@@ -130,6 +130,32 @@ async function profile() {
         ${taClause}
       ORDER BY last_update_post_date DESC NULLS LAST`, params)).rows;
 
+  // ── AS A RECRUITING SITE ────
+  // The join that institution-profile could not make before study_sites existed. Oxford is the PI
+  // affiliation or sponsor on 4 trials and a RECRUITING SITE on 46 — and the 42 are the
+  // commercially interesting ones, because they name the sponsor Oxford is running trials for.
+  // Anonymised placeholders are excluded here: "Novartis Investigative Site" is not an institution.
+  let siteStudies = [];
+  let siteTableMissing = false;
+  try {
+    const sp = [`%${NAME}%`];
+    let sTa = '';
+    if (TA) { sp.push(`%${TA}%`); sTa = ` AND cs.therapeutic_area ILIKE $${sp.length}`; }
+    siteStudies = (await query(
+      `SELECT DISTINCT cs.nct_id, cs.brief_title, cs.phase, cs.overall_status, cs.therapeutic_area,
+              cs.lead_sponsor_name, cs.sponsor_type, cs.last_update_post_date,
+              ss.facility, ss.city, ss.country, ss.status AS site_status
+         FROM study_sites ss
+         JOIN clinical_studies cs ON cs.nct_id = ss.nct_id
+        WHERE ss.anonymised = FALSE
+          AND (ss.facility ILIKE $1 OR ss.facility_normalized ILIKE $1)
+          ${sTa}
+        ORDER BY cs.last_update_post_date DESC NULLS LAST`, sp)).rows;
+  } catch (e) {
+    // The table may not exist yet. That is a state to report, not to crash on.
+    if (/study_sites/.test((e && e.message) || '')) siteTableMissing = true; else throw e;
+  }
+
   console.log(`\n── ${NAME}${TA ? ` · ${TA}` : ''}\n`);
 
   if (sites.length) {
@@ -186,6 +212,35 @@ async function profile() {
 
   show('countries the trials run in', tally(studies, (s) => parseList(s.locations_countries)));
   console.log();
+
+  // ── THE SITE VIEW ────
+  if (siteTableMissing) {
+    console.log(`   study_sites does not exist yet — the "as a recruiting site" view is unavailable.`);
+    console.log(`     node scripts/migrate-study-sites.js && node scripts/backfill-study-sites.js --execute\n`);
+  } else if (!siteStudies.length) {
+    console.log(`   as a RECRUITING SITE: no trials found. If study_sites has not been backfilled,`);
+    console.log(`   run:  node scripts/backfill-study-sites.js --execute\n`);
+  } else {
+    console.log(`── as a RECRUITING SITE: ${siteStudies.length} trial(s)`);
+    console.log(`   (vs ${studies.length} where the name is the PI's affiliation, sponsor or collaborator)\n`);
+    show('sponsors running trials AT this institution', tally(siteStudies, (r) => [r.lead_sponsor_name]));
+    console.log();
+    show('sponsor type', tally(siteStudies, (r) => [r.sponsor_type || '(not stated)']), 6);
+    console.log();
+    show('therapeutic areas, as a site', tally(siteStudies, (r) => [r.therapeutic_area || '(unclassified)']));
+    console.log();
+    show('the facility names it appears under', tally(siteStudies, (r) => [r.facility]), 12);
+    console.log();
+    const recruitingNow = siteStudies.filter((r) => /RECRUIT/i.test(r.site_status || ''));
+    if (recruitingNow.length) {
+      console.log(`   ${recruitingNow.length} of those are RECRUITING at this site right now:`);
+      for (const r of recruitingNow.slice(0, 10)) {
+        console.log(`      ${r.nct_id}  ${r.phase || 'phase n/a'}  ${r.lead_sponsor_name || ''}`);
+        console.log(`         ${(r.brief_title || '').slice(0, 76)}`);
+      }
+      console.log();
+    }
+  }
 
   // ── WHAT THIS CANNOT TELL HIM ────
   console.log(`   ⚠ WHAT IS NOT HERE, AND WHY`);
