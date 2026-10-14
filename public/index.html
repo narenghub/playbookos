@@ -4369,6 +4369,15 @@ window.riBack = async function riBack(){
   window._riState.mode = 'search'; window._riState.profile = null;
   await pages['research-institutions']();
 };
+// A sibling is opened by index into the profile's own related list, for the same reason riOpen
+// takes an index: the key is arbitrary text and must never be interpolated into an attribute.
+window.riOpenRelated = async function riOpenRelated(i){
+  const st = window._riState;
+  const row = ((st.profile && st.profile.related) || [])[i];
+  if (!row) return;
+  st.profile = null; st.pendingKey = row.key; st.pendingCountry = row.country;
+  await pages['research-institutions']();
+};
 const RI_TYPE_LABEL = { academic:'Academic', hospital:'Hospital', cancer_centre:'Cancer centre', institute:'Institute' };
 function riTypeBadge(t){
   const c = { cancer_centre:'#8a2f2f', academic:'#0972d3', hospital:'#1D9E75', institute:'#8a5a00' }[t] || '#64748b';
@@ -4556,7 +4565,33 @@ function riProfileView(st, p){
       <tbody>${studyRows || '<tr><td colspan="7" style="padding:14px;color:var(--text-muted)">No trials recorded.</td></tr>'}</tbody>
     </table></div></div>`;
 
-  return head + stats + gap + contactCard + sponsorsCard + mix + collabCard + studiesCard;
+  // ── THE SIBLINGS, SHOWN RATHER THAN MERGED ────
+  // Oxford University Hospitals publishes under six spellings; the normaliser folds three and
+  // deliberately leaves the Churchill and the John Radcliffe alone, because merging a named
+  // hospital into its parent trust is a real-world judgement the data cannot make. The honest
+  // alternative to merging is this: name them, keep each one's own count, and say plainly that some
+  // may be unrelated — Oxford Health is a different trust and GenesisCare is a private chain.
+  const relRows = (p.related||[]).map((r,i)=>`<tr style="border-top:1px solid var(--border);cursor:pointer" onclick="riOpenRelated(${i})">
+      <td style="padding:6px 8px;font-weight:600;color:var(--awsc-link,#0972d3)">${riEsc(r.name)}</td>
+      <td style="padding:6px 8px;font-size:12px">${riEsc(r.city||'—')}</td>
+      <td style="padding:6px 8px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${riNum(r.trials)}</td>
+    </tr>`).join('');
+  const relatedCard = (p.related||[]).length ? `<div class="card" style="padding:0">
+    <div style="padding:9px 12px;border-bottom:1px solid var(--border)">
+      <div class="text-section" style="font-size:11px">POSSIBLY THE SAME ORGANISATION · ${(p.related||[]).length}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">
+        Other institutions in ${riEsc(p.country||'this country')} whose published name shares a distinctive word with this one${(p.related_tokens||[]).length?` (&ldquo;${(p.related_tokens||[]).map(riEsc).join('&rdquo;, &ldquo;')}&rdquo;)`:''}.
+        Some will be the same body under another spelling, or a named hospital inside it; others are genuinely different organisations that happen to share a word.
+        <b>Nothing here is merged</b> — each row is its own count — because deciding which of these is one customer is your call, not the registry's. Click through to read any of them.
+      </div>
+    </div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+        <th style="padding:7px 8px">Institution</th><th style="padding:7px 8px">City</th><th style="padding:7px 8px;text-align:right">Trials</th></tr></thead>
+      <tbody>${relRows}</tbody>
+    </table></div></div>` : '';
+
+  return head + stats + gap + relatedCard + contactCard + sponsorsCard + mix + collabCard + studiesCard;
 }
 
 pages['research-institutions'] = async function() {

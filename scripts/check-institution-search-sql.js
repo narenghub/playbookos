@@ -103,6 +103,12 @@ const STUDIES = [
   ['NCT9002', 'NCI study two', 'RECRUITING', 'Phase 2', 'National Cancer Institute', 'NIH', '[]', 'Oncology', '2026-09-10'],
   // A trial whose site publishes no country.
   ['NCT5001', 'Nowhere study', 'RECRUITING', 'Phase 1', 'Sponsor Without A Country', 'INDUSTRY', '[]', 'Oncology', '2026-05-01'],
+  // The sibling sites. Their sponsors differ from the trust's so a leak between them is visible.
+  ['NCT0005', 'Churchill study', 'RECRUITING', 'Phase 2', 'BeOne Medicines', 'INDUSTRY', '[]', 'Oncology', '2026-04-01'],
+  ['NCT0006', 'GenesisCare study', 'RECRUITING', 'Phase 3', 'Cytokinetics', 'INDUSTRY', '[]', 'Cardiovascular', '2026-03-01'],
+  ['NCT0007', 'Oxford Health study', 'RECRUITING', 'Phase 2', 'Oxford Health NHS Foundation Trust', 'OTHER', '[]', 'Neurology/CNS', '2026-02-01'],
+  ['NCT0008', 'Marsden study', 'RECRUITING', 'Phase 1', 'Royal Marsden', 'OTHER', '[]', 'Oncology', '2026-01-15'],
+  ['NCT0009', 'Oxfordshire study', 'RECRUITING', 'Phase 1', 'Oxfordshire CDP', 'OTHER', '[]', 'Other', '2026-01-10'],
 ];
 
 const SITES = [
@@ -113,6 +119,18 @@ const SITES = [
   ['NCT0004', OX_UK_3, 'Oxford', 'United Kingdom', 'COMPLETED'],
   // The same trial listing the same hospital twice across amendments: must not double-count.
   ['NCT0001', OX_UK_2, 'Oxford', 'United Kingdom', 'COMPLETED'],
+  // ── THE SIBLINGS THE STRICT KEY SPLITS OFF ────
+  // All real spellings from production. The Churchill sits in Headington, not Oxford, which is why
+  // the related lookup cannot be scoped to one city. GenesisCare is a private chain and Oxford
+  // Health is a different NHS trust — both must appear (they look related) without anything in the
+  // system claiming they are the same body.
+  ['NCT0005', 'Churchill Hospital, Oxford University Hospitals NHS Foundation Trust', 'Headington', 'United Kingdom', 'RECRUITING'],
+  ['NCT0006', 'GenesisCare - Oxford ( Site 2607)', 'Oxford', 'United Kingdom', 'RECRUITING'],
+  ['NCT0007', 'Oxford Health NHS Foundation Trust (OHFT)', 'Oxford', 'United Kingdom', 'RECRUITING'],
+  // Same country, no shared distinctive word: must NOT be called related.
+  ['NCT0008', 'Royal Marsden Hospital', 'London', 'United Kingdom', 'RECRUITING'],
+  // Shares "oxford" as a SUBSTRING only. A substring match would wrongly pull this in.
+  ['NCT0009', 'Oxfordshire Community Diagnostics Partnership', 'Banbury', 'United Kingdom', 'RECRUITING'],
   // Mississippi.
   ['NCT9001', OX_US, 'Oxford', 'United States', 'RECRUITING'],
   ['NCT9002', OX_US, 'Oxford', 'United States', 'RECRUITING'],
@@ -157,7 +175,10 @@ const SITES = [
     const hits = await run('SEARCH_SQL', Q.SEARCH_SQL, ['Oxford', '', 50]);
     ok(`SEARCH_SQL runs — ${hits.length} institution(s) for "Oxford"`);
 
-    const uk = hits.filter((h) => h.country === 'United Kingdom');
+    // The trust's own row, found by KEY — "the UK row" is no longer unique now that the siblings
+    // are in the fixture, which is the whole point of the related lookup below.
+    const OX_KEY = normalizeFacility(OX_UK);
+    const uk = hits.filter((h) => h.country === 'United Kingdom' && h.key === OX_KEY);
     const us = hits.filter((h) => h.country === 'United States');
 
     if (uk.length !== 1 || us.length !== 1) {
@@ -275,6 +296,54 @@ const SITES = [
     if (!iqvia || iqvia.kind !== 'cro' || !parexel || parexel.kind !== 'cro') {
       bad('collaborators parse out of the JSON column and label as CROs', JSON.stringify(collab));
     } else ok('collaborators parsed from the JSON column and labelled: IQVIA, Parexel → cro');
+
+    // ── RELATED INSTITUTIONS: THE SIBLINGS THE STRICT KEY SPLITS OFF ────
+    const tokens = Q.distinctiveTokens(key);
+    if (tokens.length !== 1 || tokens[0] !== 'oxford') {
+      bad('the trust reduces to one distinctive token', JSON.stringify(tokens));
+    } else ok('distinctive tokens for the trust: ["oxford"]');
+
+    const related = await run('RELATED_SQL', Q.RELATED_SQL, [key, 'United Kingdom', tokens]);
+    ok(`RELATED_SQL runs — ${related.length} related institution(s)`);
+    const relNames = (related || []).map((r) => r.name);
+
+    // The Churchill is in HEADINGTON, not Oxford. If this lookup were scoped to the city it would
+    // miss the one sibling most obviously part of the same trust.
+    if (!relNames.some((n) => /Churchill/i.test(n))) {
+      bad('a sibling in a neighbouring town is still found', JSON.stringify(relNames));
+    } else ok('the Churchill (Headington, not Oxford) is found — the lookup is not city-scoped');
+    if (!relNames.some((n) => /GenesisCare/i.test(n)) || !relNames.some((n) => /Oxford Health/i.test(n))) {
+      bad('all plausibly related institutions are offered', JSON.stringify(relNames));
+    } else ok('GenesisCare and Oxford Health both offered — related, not merged');
+
+    // The institution must never appear in its own related list.
+    if (related.some((r) => r.key === key)) bad('the institution appears in its own related list');
+    else ok('the institution is excluded from its own related list');
+
+    // No shared distinctive word: not related, however close geographically.
+    if (relNames.some((n) => /Marsden/i.test(n))) {
+      bad('an unrelated hospital in the same country must not be called related', JSON.stringify(relNames));
+    } else ok('Royal Marsden excluded — no shared distinctive word');
+
+    // THE SUBSTRING TRAP. "Oxfordshire Community Diagnostics Partnership" contains "oxford" as a
+    // substring and is a different organisation. \m\M word boundaries are what keep it out, and a
+    // regex that silently fails to anchor would let it in.
+    if (relNames.some((n) => /Oxfordshire/i.test(n))) {
+      bad('a substring match leaked in — the \\m \\M word boundaries are not anchoring',
+        JSON.stringify(relNames));
+    } else ok('"Oxfordshire …" excluded — the word boundaries anchor, so no substring match');
+
+    // Each sibling keeps its own count rather than being folded into the parent.
+    const churchill = related.find((r) => /Churchill/i.test(r.name));
+    if (churchill && Number(churchill.trials) !== 1) {
+      bad('a related row carries its OWN trial count', `Churchill trials=${churchill.trials}, expected 1`);
+    } else ok('each related row carries its own trial count, not the parent\'s');
+
+    // A generic name must not trigger the lookup at all: "hospital" as a match term would return
+    // every hospital in the country under the heading "related".
+    if (Q.distinctiveTokens('university hospital').length !== 0) {
+      bad('a wholly generic name yields no match terms');
+    } else ok('a wholly generic name yields no match terms, so the lookup is skipped');
 
     // ── THE FILTER FEED AND THE CENSUS ────
     const countries = await run('COUNTRIES_SQL', Q.COUNTRIES_SQL, []);

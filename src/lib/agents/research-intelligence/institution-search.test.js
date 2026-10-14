@@ -4,9 +4,10 @@ const test = require('node:test');
 const assert = require('node:assert');
 
 const {
-  classifyOrg, parseCollaborators, collaboratorRanking,
+  classifyOrg, parseCollaborators, collaboratorRanking, distinctiveTokens,
   SEARCH_SQL, PROFILE_NAMES_SQL, PROFILE_TOTALS_SQL, PROFILE_SPONSORS_SQL,
   PROFILE_AREAS_SQL, PROFILE_PHASES_SQL, PROFILE_STUDIES_SQL, COUNTRIES_SQL, CENSUS_SQL,
+  RELATED_SQL,
 } = require('./institution-search');
 
 const ALL_SQL = { SEARCH_SQL, PROFILE_NAMES_SQL, PROFILE_TOTALS_SQL, PROFILE_SPONSORS_SQL,
@@ -146,6 +147,59 @@ test('trial counts are distinct on nct_id', () => {
   }
   // The study list returns one row per trial for the same reason.
   assert.match(PROFILE_STUDIES_SQL, /DISTINCT ON \(ss\.nct_id\)/);
+});
+
+// ── RELATED INSTITUTIONS ─────────────────────────────────────────────────────
+
+test('distinctiveTokens keeps the identifying words and drops the generic ones', () => {
+  assert.deepEqual(distinctiveTokens('oxford university hospital nhs trust'), ['oxford']);
+  // "memorial" stays: it is part of the proper name ("Baptist Memorial", "Memorial Hermann"), not a
+  // generic descriptor like "hospital". It matches more widely than "sloan" does, which is handled
+  // by ranking on the NUMBER of shared tokens rather than by discarding the word — a real sibling
+  // shares two and sorts above anything sharing only "memorial".
+  assert.deepEqual(distinctiveTokens('memorial sloan kettering cancer center'), ['memorial', 'sloan', 'kettering']);
+  assert.deepEqual(distinctiveTokens('charite universitatsmedizin berlin'), ['charite', 'universitatsmedizin', 'berlin']);
+});
+
+// Without this, "hospital" becomes a match term and every hospital in the country is reported as
+// related to every other.
+test('distinctiveTokens returns nothing when the name is entirely generic', () => {
+  assert.deepEqual(distinctiveTokens('university hospital'), []);
+  assert.deepEqual(distinctiveTokens('national cancer centre'), []);
+  assert.deepEqual(distinctiveTokens('research site'), []);
+  assert.deepEqual(distinctiveTokens(''), []);
+  assert.deepEqual(distinctiveTokens(null), []);
+});
+
+// Two-letter fragments and bare numbers match far too much to be identifying.
+test('distinctiveTokens drops short fragments and bare numbers', () => {
+  assert.deepEqual(distinctiveTokens('st jude children research hospital'), ['jude']);
+  assert.deepEqual(distinctiveTokens('hospital 12 de octubre'), ['octubre']);
+});
+
+// A long name would otherwise send a dozen match terms to a regex over 84,608 rows, and the tail
+// tokens are the least identifying ones anyway.
+test('distinctiveTokens is capped', () => {
+  assert.equal(distinctiveTokens('alpha bravo charlie delta echo foxtrot').length, 4);
+  assert.equal(distinctiveTokens('alpha bravo charlie delta echo foxtrot', 2).length, 2);
+});
+
+test('RELATED_SQL excludes the institution itself and stays in one country', () => {
+  assert.match(RELATED_SQL, /ss\.facility_normalized <> \$1/);
+  assert.match(RELATED_SQL, /COALESCE\(ss\.country, ''\) = \$2/);
+  assert.match(RELATED_SQL, /ss\.anonymised = FALSE/);
+  assert.match(RELATED_SQL, /COUNT\(DISTINCT nct_id\)/);
+  assert.match(RELATED_SQL, /LIMIT 12/);
+});
+
+// A substring match would make "oxford" hit "oxfordshire" and, worse, make a short token match
+// inside unrelated words. \m and \M are Postgres word boundaries.
+test('RELATED_SQL matches whole words, not substrings', () => {
+  // The SQL string must contain a single backslash before m and M — Postgres word boundaries. The
+  // source writes '\\m' in a template literal, which is '\m' in the string, so this regex looks for
+  // one literal backslash.
+  assert.match(RELATED_SQL, /'\\m' \|\| tok\.t \|\| '\\M'/);
+  assert.ok(RELATED_SQL.includes("'\\m'"), 'the \\m boundary must survive into the SQL string');
 });
 
 // The site's own status is the one that answers "is Oxford recruiting today". The trial's overall

@@ -5498,6 +5498,21 @@ router.get('/institutions/profile', authMiddleware, requireTier('intelligence'),
     // Labelled rather than filtered: a wrong guess should mis-tag a row, never hide one.
     const sponsorsLabelled = sponsors.map((s) => ({ ...s, kind: INST.classifyOrg(s.sponsor) }));
 
+    // The siblings the strict key splits off. Oxford University Hospitals publishes under six
+    // spellings and the normaliser folds three; the Churchill and the John Radcliffe stay separate
+    // because merging a named hospital into its parent trust is a hierarchy decision, not a string
+    // operation. So they are SHOWN rather than merged — each with its own count — and the caller
+    // decides what counts as one customer.
+    //
+    // A wholly generic name ("University Hospital") yields no distinctive tokens, and then the
+    // lookup is skipped entirely rather than matching on the word "hospital".
+    const tokens = INST.distinctiveTokens(key);
+    let related = [];
+    if (tokens.length) {
+      try { related = (await query(INST.RELATED_SQL, [key, country, tokens])).rows; }
+      catch (_) { /* a profile without its siblings is still a profile */ }
+    }
+
     // The published trial-site contact, where the curated table has one. It is a patient-enquiry
     // address belonging to a trials coordinator, which the page states plainly — treating it as the
     // buyer is how you get redirected, or reported.
@@ -5528,6 +5543,8 @@ router.get('/institutions/profile', authMiddleware, requireTier('intelligence'),
       phases,
       studies,
       collaborators: INST.collaboratorRanking(studies),
+      related,
+      related_tokens: tokens,
       contact,
       // Stated in the payload, not only in the page, so any other caller inherits the caveat.
       not_available: ['which CRO the sponsor contracted', 'which EDC, eTMF or CTMS the trial uses'],

@@ -227,6 +227,85 @@ SELECT COALESCE(ss.country, '') AS country,
  HAVING COALESCE(ss.country, '') <> ''
  ORDER BY institutions DESC, country`;
 
+// ── THE SIBLINGS A STRICT KEY HIDES ──────────────────────────────────────────
+//
+// Oxford University Hospitals publishes under at least six spellings, and normalizeFacility folds
+// only three of them. It deliberately will not fold "Churchill Hospital, Oxford University
+// Hospitals NHS Foundation Trust" or "… - John Radcliffe Hospital" into the parent, because those
+// are named hospitals INSIDE the trust and merging a child into its parent is a real-world
+// hierarchy decision rather than a string operation — guess it wrong and one hospital's trials are
+// attributed to another.
+//
+// The cost of that correctness is that the trust's own row reads 8 trials when the Oxford footprint
+// is nearer 25, with Churchill, John Radcliffe, GenesisCare and the OCMR sitting in separate rows
+// that give no sign of being the same place. So instead of merging them, the profile SHOWS them:
+// other institutions in the same country whose name shares a distinctive word with this one, each
+// keeping its own count and its own link.
+//
+// That is the honest shape. The system does not claim they are one organisation — Oxford Health NHS
+// Foundation Trust is a different trust and GenesisCare is a private chain — it says "these look
+// related, you decide", which is a judgement Naren can make and the data cannot.
+//
+// MATCHING IS ON A DISTINCTIVE WORD, NOT A SHARED ONE. Without the stop list, every token in
+// "Oxford University Hospitals NHS Foundation Trust" is a match term and "hospital" alone would
+// return every hospital in the United Kingdom under the heading "related".
+const NAME_STOPWORDS = new Set(['hospital', 'hospitals', 'university', 'universities', 'college',
+  'school', 'clinic', 'clinical', 'clinics', 'centre', 'center', 'centres', 'centers', 'nhs',
+  'trust', 'trusts', 'medical', 'medicine', 'institute', 'institutes', 'institution', 'research',
+  'foundation', 'health', 'healthcare', 'care', 'cancer', 'general', 'regional', 'national',
+  'children', 'childrens', 'womens', 'department', 'dept', 'division', 'science', 'sciences',
+  'service', 'services', 'system', 'group', 'site', 'unit', 'trial', 'trials', 'study', 'studies',
+  'of', 'the', 'and', 'for', 'at', 'in', 'de', 'la', 'el', 'du', 'des', 'der', 'die', 'das',
+  'saint', 'st', 'dr', 'prof', 'ltd', 'inc', 'llc', 'gmbh']);
+
+/**
+ * The words in a normalised institution name that could identify an organisation.
+ *
+ * Returns [] when nothing distinctive is left — "University Hospital", "National Cancer Centre" —
+ * and the caller must then skip the related lookup entirely rather than match on a generic word.
+ */
+function distinctiveTokens(normalizedName, max = 4) {
+  return String(normalizedName == null ? '' : normalizedName)
+    .split(/\s+/)
+    .map((t) => t.replace(/[^a-z0-9]/g, ''))
+    .filter((t) => t.length >= 3 && !NAME_STOPWORDS.has(t) && !/^\d+$/.test(t))
+    .slice(0, max);
+}
+
+// $1 = this institution's key (excluded), $2 = country, $3 = text[] of distinctive tokens.
+// \m and \M are Postgres word boundaries, so "oxford" cannot match "oxfordshire-something" as a
+// substring. Tokens arrive from distinctiveTokens(), which strips everything but [a-z0-9], so
+// there is nothing in them that can act as regex metacharacter.
+const RELATED_SQL = `
+WITH tok AS (SELECT DISTINCT unnest($3::text[]) AS t),
+cand AS (
+  SELECT ss.facility_normalized AS key, COALESCE(ss.country, '') AS country,
+         ss.facility, ss.city, ss.nct_id
+    FROM study_sites ss
+   WHERE ${VISIBLE}
+     AND COALESCE(ss.country, '') = $2
+     AND ss.facility_normalized <> $1
+     AND EXISTS (SELECT 1 FROM tok WHERE ss.facility_normalized ~ ('\\m' || tok.t || '\\M'))
+),
+g AS (SELECT key, country, COUNT(DISTINCT nct_id)::int AS trials FROM cand GROUP BY 1, 2),
+nm AS (
+  SELECT DISTINCT ON (key, country) key, country, facility AS name, city
+    FROM (SELECT key, country, facility, city, COUNT(*) AS n FROM cand GROUP BY 1, 2, 3, 4) q
+   ORDER BY key, country, n DESC, length(facility) DESC
+),
+sh AS (
+  SELECT c.key, c.country, COUNT(DISTINCT t.t)::int AS shared
+    FROM (SELECT DISTINCT key, country FROM cand) c
+    JOIN tok t ON c.key ~ ('\\m' || t.t || '\\M')
+   GROUP BY 1, 2
+)
+SELECT g.key, g.country, nm.name, nm.city, g.trials, sh.shared
+  FROM g
+  JOIN nm ON nm.key = g.key AND nm.country = g.country
+  JOIN sh ON sh.key = g.key AND sh.country = g.country
+ ORDER BY sh.shared DESC, g.trials DESC, nm.name
+ LIMIT 12`;
+
 const CENSUS_SQL = `
 SELECT COUNT(*)::int AS site_rows,
        COUNT(*) FILTER (WHERE anonymised = FALSE)::int AS named_rows,
@@ -264,6 +343,9 @@ module.exports = {
   classifyOrg,
   parseCollaborators,
   collaboratorRanking,
+  distinctiveTokens,
+  NAME_STOPWORDS,
+  RELATED_SQL,
   SEARCH_SQL,
   PROFILE_NAMES_SQL,
   PROFILE_TOTALS_SQL,
