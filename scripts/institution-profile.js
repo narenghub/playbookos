@@ -44,6 +44,16 @@ const TOP = Math.max(1, Math.min(100, parseInt(arg('top', '15'), 10) || 15));
 const CRO_HINT = /\b(cro|contract research|clinical research|quintiles|iqvia|parexel|icon plc|syneos|covance|labcorp|ppd\b|medpace|fortrea|thermo fisher|charles river|wuxi|novotech|veristat|emmes|rho\b|worldwide clinical)\b/i;
 const ACADEMIC_HINT = /\b(universit|college|institut|hospital|clinic|school|centre|center|trust|nhs|foundation|academy|cancer cent)/i;
 
+
+// A DATE column arrives as a JS Date, and interpolating it raw printed
+// "Fri Sep 26 2014 00:00:00 GMT+0000 (Coordinated Universal Time)" in a table of site activity.
+// Nobody reads a profile for the timezone.
+const day = (v) => {
+  if (!v) return '?';
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  return String(v).slice(0, 10);
+};
+
 const parseList = (v) => {
   if (!v) return [];
   if (Array.isArray(v)) return v.filter(Boolean);
@@ -84,7 +94,7 @@ async function countryList() {
     console.log(`   ${String(r.study_count).padStart(4)} studies  ${r.name}`);
     console.log(`              ${[r.city, r.country].filter(Boolean).join(', ') || '(location unknown)'}`
       + ` · ${r.facility_type}`
-      + ` · ${r.first_seen || '?'} → ${r.last_seen || '?'}`
+      + ` · ${day(r.first_seen)} → ${day(r.last_seen)}`
       + ` · ${r.has_contact ? 'contact on file' : 'no contact'}`);
   }
   const agg = (await query(
@@ -128,7 +138,7 @@ async function profile() {
       console.log(`      ${s.name}`);
       console.log(`         ${[s.city, s.state, s.country].filter(Boolean).join(', ') || '(location unknown)'}`
         + ` · ${s.facility_type} · ${s.study_count} studies on file`);
-      console.log(`         active ${s.first_seen || '?'} → ${s.last_seen || '?'}`
+      console.log(`         active ${day(s.first_seen)} → ${day(s.last_seen)}`
         + ` · ${s.contact_email ? `contact: ${s.contact_name || 'unnamed'}` : 'no contact on file'}`);
     }
     console.log();
