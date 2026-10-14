@@ -65,6 +65,13 @@ step "supplier cross-check runs on Postgres" node scripts/check-supplier-classif
 # silently — and on 12 Oct the signature title changed to match Naren's business card, which would
 # have left the attachment contradicting the email carrying it.
 step "one-pager PDF matches its source" node scripts/build-one-pager.js --check
+# The institution search is five CTEs with two DISTINCT ON picks, FILTER aggregates and three LEFT
+# JOINs on a composite key — and its answer decides what a lead-data prospect is told. The failure
+# it guards is not a crash: searching "Oxford" merged the English hospital with Baptist Memorial in
+# Oxford, MISSISSIPPI, so 20 of 35 trials and every NCI sponsor belonged to the wrong hemisphere.
+# Valid SQL, plausible output, wrong institution. The fixture seeds both Oxfords, so dropping
+# country from the group key fails here rather than in front of a vendor.
+step "institution search runs on Postgres" node scripts/check-institution-search-sql.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2

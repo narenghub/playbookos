@@ -4313,19 +4313,296 @@ function cmFileAge(src){
 // buy research chemicals. Parsed from clinical_studies.raw_json, which already holds the
 // registry's full record — no external source and no enrichment step, which is why this list
 // exists at all when Places and Apollo could not produce one.
-window._riState = window._riState || { scope:'contactable', country:'', type:'', has_email:'', data:null };
+window._riState = window._riState || { mode:'search', q:'', sq:'', scountry:'', search:null, profile:null,
+  scope:'contactable', country:'', type:'', has_email:'', data:null };
 function riEsc(s){ return cmEsc(s); }
 function riSet(k,v){ window._riState[k]=v; pages['research-institutions'](); }
 function riScope(v){ window._riState.scope=v; pages['research-institutions'](); }
+function riMode(v){ window._riState.mode=v; pages['research-institutions'](); }
+
+// A DATE column arrives as a Date and interpolates as "Fri Sep 26 2014 00:00:00 GMT+0000
+// (Coordinated Universal Time)". Nobody reads an institution profile for the timezone.
+function riDay(v){ if(!v) return '—'; const s=String(v); return s.length>=10?s.slice(0,10):s; }
+function riNum(v){ return (v==null?0:Number(v)).toLocaleString(); }
+
+// What an organisation looks like. A label on a row a human is reading — never a filter, because a
+// wrong guess should mis-tag a row rather than hide it.
+const RI_KIND = { cro:['CRO','#8a2f2f'], industry:['Industry','#0972d3'], academic:['Academic','#1D9E75'],
+  government:['Government','#8a5a00'], unknown:['—','#64748b'] };
+function riKindBadge(k){
+  const [label,colour] = RI_KIND[k] || RI_KIND.unknown;
+  return `<span style="font-size:10px;font-weight:700;color:${colour};border:1px solid ${colour};padding:1px 5px;border-radius:3px;white-space:nowrap">${riEsc(label)}</span>`;
+}
+
+// ── SEARCH ────────────────────────────────────────────────────────────────────
+// Enter searches. The value is read from the DOM rather than kept in state on every keystroke,
+// because this page re-renders by replacing innerHTML and a keystroke-driven re-render would throw
+// away the caret mid-word.
+window.riSearch = async function riSearch(){
+  const el = document.getElementById('ri-q');
+  window._riState.q = el ? el.value : '';
+  window._riState.mode = 'search';
+  window._riState.search = null;      // force a refetch; the old result set is for the old query
+  await pages['research-institutions']();
+};
+window.riSearchKey = function riSearchKey(e){ if (e && e.key === 'Enter') window.riSearch(); };
+window.riCountry = async function riCountry(v){
+  window._riState.scountry = v; window._riState.search = null;
+  await pages['research-institutions']();
+};
+window.riClear = async function riClear(){
+  window._riState.q = ''; window._riState.scountry = ''; window._riState.search = null;
+  await pages['research-institutions']();
+};
+
+// Opened by INDEX into the result set, not by name. The key and country are arbitrary text —
+// apostrophes, quotes, non-ASCII — and interpolating them into an onclick attribute is both a
+// quoting bug waiting to happen and an injection point.
+window.riOpen = async function riOpen(i){
+  const st = window._riState;
+  const row = ((st.search && st.search.items) || [])[i];
+  if (!row) return;
+  st.mode = 'profile'; st.profile = null; st.pendingKey = row.key; st.pendingCountry = row.country;
+  await pages['research-institutions']();
+};
+window.riBack = async function riBack(){
+  window._riState.mode = 'search'; window._riState.profile = null;
+  await pages['research-institutions']();
+};
 const RI_TYPE_LABEL = { academic:'Academic', hospital:'Hospital', cancer_centre:'Cancer centre', institute:'Institute' };
 function riTypeBadge(t){
   const c = { cancer_centre:'#8a2f2f', academic:'#0972d3', hospital:'#1D9E75', institute:'#8a5a00' }[t] || '#64748b';
   return `<span style="font-size:10px;font-weight:700;color:${c};border:1px solid ${c};padding:1px 5px;border-radius:3px;white-space:nowrap">${riEsc(RI_TYPE_LABEL[t]||t)}</span>`;
 }
 
+// The two views share one header so it is always obvious which dataset is on screen. The curated
+// list and the site search disagree on trial counts by design — one counts sponsorship and PI
+// affiliation, the other counts recruiting sites — and a reader comparing them needs to be told
+// that rather than left to assume one is broken.
+function riTabs(st){
+  const tab = (id,label) => `<button onclick="riMode('${id}')" class="${st.mode===id?'btn-primary':'btn-outline'} btn-sm" style="font-size:12px">${label}</button>`;
+  return `<div class="card" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+    ${tab('search','Search all institutions')}
+    ${tab('curated','Contactable list')}
+    <span style="font-size:11px;color:var(--text-muted);margin-left:8px">Search reads every parsed trial <b>site</b>. The contactable list is the older sponsor-and-affiliation table, which carries published contacts — so trial counts differ between the two, and the search ones are higher.</span>
+  </div>`;
+}
+
+function riSearchView(st, res){
+  const cs = res.census || {};
+  const items = res.items || [];
+  const countryOpts = ['<option value="">every country</option>'].concat(
+    (res.countries||[]).map(x=>`<option value="${riEsc(x.country)}"${st.scountry===x.country?' selected':''}>${riEsc(x.country)} (${riNum(x.institutions)})</option>`)).join('');
+
+  const box = `<div class="card">
+    <div class="card-title text-section" style="margin:0 0 8px 0">SEARCH INSTITUTIONS · ${riNum(cs.institutions)} across ${riNum(cs.countries)} COUNTRIES</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input id="ri-q" value="${riEsc(st.q||'')}" onkeydown="riSearchKey(event)" placeholder="Institution name — Oxford, Charité, Mayo, Tata Memorial…"
+        style="flex:1;min-width:260px;font-size:14px;padding:8px 10px">
+      <select onchange="riCountry(this.value)" style="font-size:12px;padding:6px;width:auto;min-width:190px">${countryOpts}</select>
+      <button onclick="riSearch()" class="btn-primary btn-sm" style="font-size:12px">Search</button>
+      ${(st.q||st.scountry)?`<button onclick="riClear()" class="btn-outline btn-sm" style="font-size:12px">Clear</button>`:''}
+    </div>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:6px">
+      ${riNum(cs.named_rows)} named trial sites parsed from ${riNum(cs.trials)} trials${Number(cs.site_rows||0)>Number(cs.named_rows||0)?` · ${riNum(Number(cs.site_rows||0)-Number(cs.named_rows||0))} sponsor placeholders excluded`:''} · spelling variants and per-trial site ids are folded together
+    </div>
+  </div>`;
+
+  // THE CONFLATION WARNING, above the table rather than under it. Searching "Oxford" returns the
+  // English hospital AND Baptist Memorial in Oxford, Mississippi — 20 of 35 trials in the wrong
+  // hemisphere. The country column is the answer, so the reader is told to read it before reading
+  // the numbers, not after.
+  const sameName = {};
+  for (const it of items) { const k=(it.name||'').toLowerCase(); sameName[k]=(sameName[k]||0)+1; }
+  const dupes = Object.values(sameName).filter(n=>n>1).length;
+  const warn = items.length > 1 ? `<div class="card" style="padding:10px 12px;border:2px solid #8a5a00;background:#fdf3e0">
+    <div style="font-weight:700;color:#7a4f00">⚠ Read the country column before the numbers</div>
+    <div style="font-size:12px;color:#7a4f00;margin-top:3px">An institution is a name <b>and a place</b>. &ldquo;Oxford&rdquo; matches Oxford in England and Oxford, Mississippi; Richmond, Cambridge and Columbia all exist on both sides of the Atlantic. Each row below is one institution in one country${dupes?` — and ${dupes} name${dupes===1?'':'s'} here appear${dupes===1?'s':''} in more than one country`:''}.</div>
+  </div>` : '';
+
+  const rows = items.map((it,i)=>`<tr style="border-top:1px solid var(--border);cursor:pointer" onclick="riOpen(${i})">
+      <td style="padding:7px 8px;color:var(--text-muted);font-variant-numeric:tabular-nums">${i+1}</td>
+      <td style="padding:7px 8px;font-weight:600;color:var(--awsc-link,#0972d3)">${riEsc(it.name)}</td>
+      <td style="padding:7px 8px">${riEsc(it.city||'—')}</td>
+      <td style="padding:7px 8px;white-space:nowrap"><b>${riEsc(it.country||'not stated')}</b></td>
+      <td style="padding:7px 8px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${riNum(it.trials)}</td>
+      <td style="padding:7px 8px;text-align:right;font-variant-numeric:tabular-nums">${riNum(it.industry_trials)}</td>
+      <td style="padding:7px 8px;text-align:right;font-variant-numeric:tabular-nums">${it.recruiting>0?`<b style="color:#1D9E75">${riNum(it.recruiting)}</b>`:'0'}</td>
+    </tr>`).join('');
+
+  const table = `<div class="card" style="padding:0">
+    <div style="padding:8px 12px;font-size:11px;color:var(--text-muted);border-bottom:1px solid var(--border)">
+      ${items.length} institution${items.length===1?'':'s'}${res.capped?' — capped, narrow the search':''}${st.q?` matching &ldquo;${riEsc(st.q)}&rdquo;`:''} · click a row for its sponsors and trials
+    </div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+        <th style="padding:8px">#</th><th style="padding:8px">Institution</th><th style="padding:8px">City</th>
+        <th style="padding:8px">Country</th><th style="padding:8px;text-align:right">Trials</th>
+        <th style="padding:8px;text-align:right">Industry</th><th style="padding:8px;text-align:right">Recruiting now</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="7" style="padding:16px;color:var(--text-muted)">Nothing matches${st.q?` &ldquo;${riEsc(st.q)}&rdquo;`:''}. Try a shorter fragment — the name is matched anywhere, so &ldquo;sloan&rdquo; finds Memorial Sloan Kettering.</td></tr>`}</tbody>
+    </table></div></div>`;
+
+  return box + warn + table;
+}
+
+function riProfileView(st, p){
+  const t = p.totals || {};
+  const countries = [...new Set((p.names||[]).map(n=>n.city).filter(Boolean))];
+  const stat = (label, val, colour) => `<div style="flex:1;min-width:110px;padding:10px 12px;border:1px solid var(--border);border-radius:8px;text-align:center">
+    <div style="font-size:22px;font-weight:800;color:${colour||'var(--text-body)'}">${val}</div>
+    <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px;margin-top:2px">${label}</div></div>`;
+
+  const head = `<div class="card">
+    <button onclick="riBack()" class="btn-outline btn-sm" style="font-size:12px;margin-bottom:8px">← back to search</button>
+    <div style="font-size:19px;font-weight:800">${riEsc(p.name)}</div>
+    <div style="font-size:13px;color:var(--text-muted);margin-top:2px">
+      ${riEsc(countries.join(' · ')||'city not stated')} · <b>${riEsc(p.country||'country not stated')}</b>
+    </div>
+    ${(p.names||[]).length>1?`<div style="font-size:11px;color:var(--text-muted);margin-top:6px">
+      Merged from ${p.names.length} published spellings: ${p.names.map(n=>riEsc(n.name)).join(' · ')}</div>`:''}
+    ${countries.length>1?`<div style="font-size:11px;color:#8a5a00;margin-top:4px">⚠ These sites are in ${countries.length} different cities under one name. If they are different hospitals, the numbers below cover all of them.</div>`:''}
+  </div>`;
+
+  const stats = `<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:stretch">
+    ${stat('Trials at this site', riNum(t.trials), '#1B3A6B')}
+    ${stat('Industry-sponsored', riNum(t.industry_trials), '#0972d3')}
+    ${stat('Recruiting here now', riNum(t.recruiting_here), '#1D9E75')}
+    ${stat('Distinct sponsors', riNum(t.sponsors), '#8a5a00')}
+    ${stat('Therapeutic areas', riNum(t.areas), '#64748b')}
+    <div style="flex:1.4;min-width:170px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
+      <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Activity</div>
+      <div style="font-size:12px;margin-top:4px">first trial started ${riDay(t.first_start)}</div>
+      <div style="font-size:12px">last registry update ${riDay(t.last_update)}</div>
+    </div>
+  </div>`;
+
+  // WHAT THE REGISTRY DOES NOT PUBLISH. Stated here because both of these were promised at SCOPE
+  // and neither can be delivered: a sponsor is not required to disclose its CRO and most do not,
+  // and no field anywhere records which eClinical software a trial runs on.
+  const gap = `<div class="card" style="padding:10px 12px;border:1px solid var(--border);background:var(--bg-subtle)">
+    <div style="font-size:12px"><b>Not in the registry:</b> which CRO the sponsor contracted, and which EDC / eTMF / CTMS the trial uses. Neither is a published field. Where a CRO is visible below it is because it was named as a <b>collaborator</b> — that is a floor, never a count.</div>
+  </div>`;
+
+  const sponsorRows = (p.sponsors||[]).map(s=>`<tr style="border-top:1px solid var(--border)">
+      <td style="padding:6px 8px;font-weight:600">${riEsc(s.sponsor)}</td>
+      <td style="padding:6px 8px">${riKindBadge(s.kind)}</td>
+      <td style="padding:6px 8px;font-size:11px;color:var(--text-muted)">${riEsc(s.sponsor_type||'—')}</td>
+      <td style="padding:6px 8px;text-align:right;font-weight:700;font-variant-numeric:tabular-nums">${riNum(s.trials)}</td>
+      <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums">${s.recruiting>0?`<b style="color:#1D9E75">${riNum(s.recruiting)}</b>`:'0'}</td>
+      <td style="padding:6px 8px;font-size:11px">${riDay(s.last_update)}</td>
+    </tr>`).join('');
+  const sponsorsCard = `<div class="card" style="padding:0">
+    <div style="padding:9px 12px;border-bottom:1px solid var(--border)">
+      <div class="text-section" style="font-size:11px">WHO THEY RUN TRIALS FOR · ${(p.sponsors||[]).length} sponsors</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">The sponsor funding each trial at this site. This is the relationship worth knowing: it names the companies already working with this institution.</div>
+    </div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+        <th style="padding:7px 8px">Sponsor</th><th style="padding:7px 8px">Looks like</th><th style="padding:7px 8px">Registry class</th>
+        <th style="padding:7px 8px;text-align:right">Trials</th><th style="padding:7px 8px;text-align:right">Recruiting</th><th style="padding:7px 8px">Last update</th></tr></thead>
+      <tbody>${sponsorRows || '<tr><td colspan="6" style="padding:14px;color:var(--text-muted)">No sponsor recorded.</td></tr>'}</tbody>
+    </table></div></div>`;
+
+  const chip = (label,n,colour) => `<span style="display:inline-block;font-size:12px;padding:3px 8px;margin:0 5px 5px 0;border:1px solid ${colour||'var(--border)'};border-radius:12px">${riEsc(label)} <b>${riNum(n)}</b></span>`;
+  const mix = `<div class="card">
+    <div class="text-section" style="font-size:11px">THERAPEUTIC AREAS</div>
+    <div style="margin-top:6px">${(p.areas||[]).map(a=>chip(a.area,a.trials,'#0972d3')).join('')||'<span style="color:var(--text-muted)">none recorded</span>'}</div>
+    <div class="text-section" style="font-size:11px;margin-top:10px">PHASES</div>
+    <div style="margin-top:6px">${(p.phases||[]).map(a=>chip(a.phase,a.trials)).join('')||'<span style="color:var(--text-muted)">none recorded</span>'}</div>
+  </div>`;
+
+  const collabRows = (p.collaborators||[]).map(x=>`<tr style="border-top:1px solid var(--border)">
+      <td style="padding:6px 8px">${riEsc(x.name)}</td>
+      <td style="padding:6px 8px">${riKindBadge(x.kind)}</td>
+      <td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums">${riNum(x.trials)}</td>
+    </tr>`).join('');
+  const collabCard = (p.collaborators||[]).length ? `<div class="card" style="padding:0">
+    <div style="padding:9px 12px;border-bottom:1px solid var(--border)">
+      <div class="text-section" style="font-size:11px">CO-SPONSORS AND PARTNERS · ${(p.collaborators||[]).length}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Organisations named as collaborators on these trials — the partnership graph, and the only place a CRO becomes visible.</div>
+    </div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+        <th style="padding:7px 8px">Organisation</th><th style="padding:7px 8px">Looks like</th><th style="padding:7px 8px;text-align:right">Trials</th></tr></thead>
+      <tbody>${collabRows}</tbody>
+    </table></div></div>` : '';
+
+  const contactCard = p.contact ? `<div class="card" style="padding:10px 12px;border:2px solid #8a5a00;background:#fdf3e0">
+    <div style="font-weight:700;color:#7a4f00">Published contact — patient recruitment, not procurement</div>
+    <div style="font-size:12px;color:#7a4f00;margin-top:3px">The registry publishes this address so <b>patients</b> can ask about enrolling. It belongs to a trials coordinator, not to whoever buys reagents. Treat it as a way into the institution and expect to be redirected.</div>
+    <div style="font-size:13px;margin-top:6px">
+      ${p.contact.contact_name?`${riEsc(p.contact.contact_name)} · `:''}<a href="mailto:${riEsc(p.contact.contact_email)}" style="color:var(--awsc-link,#0972d3)">${riEsc(p.contact.contact_email)}</a>
+    </div>
+  </div>` : '';
+
+  const studyRows = (p.studies||[]).map(s=>`<tr style="border-top:1px solid var(--border)">
+      <td style="padding:6px 8px;white-space:nowrap"><a href="https://clinicaltrials.gov/study/${riEsc(s.nct_id)}" target="_blank" rel="noopener" style="color:var(--awsc-link,#0972d3)">${riEsc(s.nct_id)}</a></td>
+      <td style="padding:6px 8px">${riEsc((s.brief_title||'').slice(0,120))}</td>
+      <td style="padding:6px 8px;white-space:nowrap;font-size:11px">${riEsc(s.phase||'—')}</td>
+      <td style="padding:6px 8px;white-space:nowrap;font-size:11px">${/RECRUIT/i.test(s.site_status||'')?`<b style="color:#1D9E75">${riEsc(s.site_status)}</b>`:riEsc(s.site_status||'—')}</td>
+      <td style="padding:6px 8px;font-size:12px">${riEsc(s.lead_sponsor_name||'—')}</td>
+      <td style="padding:6px 8px;font-size:11px">${riEsc(s.therapeutic_area||'—')}</td>
+      <td style="padding:6px 8px;font-size:11px;white-space:nowrap">${riDay(s.last_update_post_date)}</td>
+    </tr>`).join('');
+  const studiesCard = `<div class="card" style="padding:0">
+    <div style="padding:9px 12px;border-bottom:1px solid var(--border)">
+      <div class="text-section" style="font-size:11px">TRIALS AT THIS SITE · ${(p.studies||[]).length}${(p.studies||[]).length===400?' (capped)':''}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Status is <b>this site's</b> status, not the trial's — a trial can be recruiting elsewhere while this hospital has closed.</div>
+    </div>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="text-align:left;color:var(--text-muted);font-size:10px;text-transform:uppercase;letter-spacing:.5px;background:var(--bg-subtle)">
+        <th style="padding:7px 8px">NCT</th><th style="padding:7px 8px">Trial</th><th style="padding:7px 8px">Phase</th>
+        <th style="padding:7px 8px">Status here</th><th style="padding:7px 8px">Sponsor</th><th style="padding:7px 8px">Area</th><th style="padding:7px 8px">Updated</th></tr></thead>
+      <tbody>${studyRows || '<tr><td colspan="7" style="padding:14px;color:var(--text-muted)">No trials recorded.</td></tr>'}</tbody>
+    </table></div></div>`;
+
+  return head + stats + gap + contactCard + sponsorsCard + mix + collabCard + studiesCard;
+}
+
 pages['research-institutions'] = async function() {
   const c = document.getElementById('content');
   const st = window._riState;
+
+  // ── THE SITE SEARCH ────
+  if (st.mode === 'search') {
+    if (!st.search) {
+      c.innerHTML = riTabs(st) + '<p style="color:#888;padding:20px">Searching institutions…</p>';
+      const qs = new URLSearchParams();
+      if (st.q) qs.set('q', st.q);
+      if (st.scountry) qs.set('country', st.scountry);
+      qs.set('limit', '100');
+      const r = await API('/institutions/search?' + qs.toString()).catch(e => ({ error: e.message }));
+      if (r && r.error) {
+        c.innerHTML = riTabs(st) + '<div class="card"><div class="card-title">Search</div><p style="color:#dc2626">'+riEsc(r.error)+'</p></div>';
+        return;
+      }
+      st.search = r;
+    }
+    c.innerHTML = riTabs(st) + riSearchView(st, st.search);
+    // Put the caret back. innerHTML discards the focused element, so without this a second search
+    // means clicking into the box again every time.
+    const el = document.getElementById('ri-q');
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    return;
+  }
+
+  // ── ONE INSTITUTION ────
+  if (st.mode === 'profile') {
+    if (!st.profile) {
+      c.innerHTML = '<p style="color:#888;padding:20px">Loading institution…</p>';
+      const qs = new URLSearchParams({ key: st.pendingKey || '', country: st.pendingCountry || '' });
+      const r = await API('/institutions/profile?' + qs.toString()).catch(e => ({ error: e.message }));
+      if (r && r.error) {
+        c.innerHTML = '<div class="card"><button onclick="riBack()" class="btn-outline btn-sm" style="font-size:12px">← back to search</button>'
+          + '<p style="color:#dc2626;margin-top:8px">'+riEsc(r.error)+'</p></div>';
+        return;
+      }
+      st.profile = r;
+    }
+    c.innerHTML = riProfileView(st, st.profile);
+    return;
+  }
+
   c.innerHTML = '<p style="color:#888;padding:20px">Loading research institutions…</p>';
 
   const qs = new URLSearchParams();
@@ -4413,7 +4690,7 @@ pages['research-institutions'] = async function() {
       <tbody>${rows || '<tr><td colspan="8" style="padding:16px;color:var(--text-muted)">No institutions match these filters.</td></tr>'}</tbody>
     </table></div></div>`;
 
-  c.innerHTML = header + orBar('institution') + caveat + summaryRow + filters + table;
+  c.innerHTML = riTabs(st) + header + orBar('institution') + caveat + summaryRow + filters + table;
 };
 
 // ── AROS SOURCING — FDA establishment registrations ───────────────────────────

@@ -5452,6 +5452,89 @@ router.get('/institutions', authMiddleware, requireTier('intelligence'), async (
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── INSTITUTION SEARCH — "if I enter Oxford, I see all of this" ───────────────
+// Reads study_sites (the parsed trial sites) rather than the curated research_institutions table
+// above. The difference is the point: as a PI affiliation or sponsor, Oxford is on 4 trials; as a
+// recruiting SITE it is on 18, and the extra 14 name the sponsors it runs trials for.
+//
+// Both routes group on (facility_normalized, country). An institution is a name PLUS A PLACE —
+// searching "Oxford" merged the English hospital with Baptist Memorial in Oxford, Mississippi, and
+// 20 of 35 trials belonged to the wrong hemisphere. The SQL and the reasoning live in
+// src/lib/agents/research-intelligence/institution-search.js; scripts/check-institution-search-sql.js
+// executes every statement against a Postgres seeded with both Oxfords.
+const INST = require('../lib/agents/research-intelligence/institution-search');
+
+router.get('/institutions/search', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    const country = String(req.query.country || '').trim();
+    const limit = Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50));
+    const items = (await query(INST.SEARCH_SQL, [q, country, limit])).rows;
+    const countries = (await query(INST.COUNTRIES_SQL)).rows;
+    const census = (await query(INST.CENSUS_SQL)).rows[0];
+    res.json({ items, countries, census, q, country, limit, capped: items.length === limit });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/institutions/profile', authMiddleware, requireTier('intelligence'), async (req, res) => {
+  try {
+    const key = String(req.query.key || '').trim();
+    if (!key) return res.status(400).json({ error: 'key is required (the normalised facility key from /institutions/search)' });
+    // '' is a real country value here — it is what a site with no published country groups under —
+    // so an absent parameter cannot be defaulted to anything else.
+    const country = String(req.query.country == null ? '' : req.query.country);
+    const p = [key, country];
+
+    const [names, totals, sponsors, areas, phases, studies] = await Promise.all([
+      query(INST.PROFILE_NAMES_SQL, p).then((r) => r.rows),
+      query(INST.PROFILE_TOTALS_SQL, p).then((r) => r.rows[0] || {}),
+      query(INST.PROFILE_SPONSORS_SQL, p).then((r) => r.rows),
+      query(INST.PROFILE_AREAS_SQL, p).then((r) => r.rows),
+      query(INST.PROFILE_PHASES_SQL, p).then((r) => r.rows),
+      query(INST.PROFILE_STUDIES_SQL, p).then((r) => r.rows),
+    ]);
+    if (!names.length) return res.status(404).json({ error: 'no institution with that key in that country' });
+
+    // Labelled rather than filtered: a wrong guess should mis-tag a row, never hide one.
+    const sponsorsLabelled = sponsors.map((s) => ({ ...s, kind: INST.classifyOrg(s.sponsor) }));
+
+    // The published trial-site contact, where the curated table has one. It is a patient-enquiry
+    // address belonging to a trials coordinator, which the page states plainly — treating it as the
+    // buyer is how you get redirected, or reported.
+    //
+    // Matched on the normalised key OR on any verbatim spelling. research_institutions was
+    // populated before study_sites existed and its normalized_name follows its own rule, so the
+    // two keys cannot be assumed to agree — keying on it alone would quietly return no contact for
+    // every institution rather than failing visibly.
+    let contact = null;
+    try {
+      contact = (await query(
+        `SELECT name, contact_name, contact_email, facility_type
+           FROM research_institutions
+          WHERE COALESCE(country, '') = $2
+            AND contact_email IS NOT NULL
+            AND (normalized_name = $1 OR name = ANY($3))
+          ORDER BY study_count DESC LIMIT 1`, [key, country, names.map((n) => n.name)])).rows[0] || null;
+    } catch (_) { /* the curated table is optional here; a profile without a contact is still a profile */ }
+
+    res.json({
+      key,
+      country,
+      name: names[0].name,
+      names,
+      totals,
+      sponsors: sponsorsLabelled,
+      areas,
+      phases,
+      studies,
+      collaborators: INST.collaboratorRanking(studies),
+      contact,
+      // Stated in the payload, not only in the page, so any other caller inherits the caveat.
+      not_available: ['which CRO the sponsor contracted', 'which EDC, eTMF or CTMS the trial uses'],
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── AROS sourcing: DMF holders joined to FDA establishment registrations ───────
 // The seed for an AROS target list. Every field here is regulator-published — firm name,
 // registered address, what the site is licensed to do, and a named contact — which is why

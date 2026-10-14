@@ -195,7 +195,8 @@ const ABIOZEN = [
   'GET /api/market/*', 'POST /api/market/*', 'PUT /api/market/*',
   'GET /api/research/*', 'POST /api/research/*', 'PUT /api/research/*',
   'GET /api/research-intelligence/*', 'POST /api/research-intelligence/*',
-  'GET /api/institutions', 'GET /api/growth/intelligence', 'POST /api/growth/analyze',
+  'GET /api/institutions', 'GET /api/institutions/search', 'GET /api/institutions/profile',
+  'GET /api/growth/intelligence', 'POST /api/growth/analyze',
   // supply side: procurement, suppliers, CPHI, Algolia sync of the Abiozen catalogue
   'GET /api/procurement/*', 'POST /api/procurement/*', 'PUT /api/procurement/*',
   'GET /api/events/cphi/exhibitors', 'GET /api/events/cphi/thin-supply', 'PUT /api/events/cphi/exhibitors/:id',
