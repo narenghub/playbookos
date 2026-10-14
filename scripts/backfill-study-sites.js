@@ -38,6 +38,8 @@ const SINCE = arg('since', null);
 const LIMIT = parseInt(arg('limit', '0'), 10) || 0;
 const BATCH = Math.max(50, Math.min(1000, parseInt(arg('batch', '250'), 10) || 250));
 const MAX_SECONDS = Math.max(10, Math.min(600, parseInt(arg('max-seconds', '60'), 10) || 60));
+// Studies between progress lines. Small on purpose: this is a keep-alive as much as a report.
+const PROGRESS_EVERY = Math.max(1, Math.min(200, parseInt(arg('progress-every', '20'), 10) || 20));
 
 async function main() {
   await initDB();
@@ -57,7 +59,8 @@ async function main() {
   console.log(`   ${total} still to read${SINCE ? ` (updated since ${SINCE})` : ''}`);
   console.log(`   stopping after ${MAX_SECONDS}s so the ssh tunnel cannot kill it mid-write\n`);
   if (!total) { console.log('   nothing left to do.\n'); return; }
-  const deadline = Date.now() + MAX_SECONDS * 1000;
+  const started = Date.now();
+  const deadline = started + MAX_SECONDS * 1000;
 
   let read = 0, sites = 0, anon = 0, named = 0, written = 0, studiesWithNone = 0;
   const facilities = new Set();
@@ -106,9 +109,19 @@ async function main() {
            VALUES ${ph.join(',')} ON CONFLICT DO NOTHING`, vals);
       });
       written += 1;
+
+      // ── KEEP TALKING, OR THE TUNNEL HANGS UP ────
+      // A --max-seconds=550 run was killed before it printed anything at all, while the 60-second
+      // runs had been fine. The difference is not the duration, it is the SILENCE: progress was
+      // printed once per 250-study page, roughly once a minute, and `railway ssh` closes a session
+      // that produces no output for less than that. So the heartbeat is per-study-count, not
+      // per-page, and a long run stays visibly alive.
+      if (read % PROGRESS_EVERY === 0) {
+        const secs = Math.round((Date.now() - started) / 1000);
+        console.log(`   …${read}/${total}  ${sites} site rows  ${secs}s`);
+      }
     }
 
-    console.log(`   …${read}/${total}  (${sites} site rows)`);
     if (LIMIT && read >= LIMIT) break;
     if (Date.now() > deadline) { console.log(`\n   time budget reached — stopping cleanly.`); break; }
   }
