@@ -25,9 +25,19 @@ const arg = (n, d) => {
   return h ? h.split('=').slice(1).join('=') : d;
 };
 const EXECUTE = process.argv.includes('--execute');
+// ── RESUMABLE AND TIME-BOXED, BECAUSE THE TUNNEL DIES ────
+// The first live run printed its header and was killed by "Connection to ssh.railway.com closed by
+// remote host — broken pipe". `railway ssh` tears down the exec session and kills the process
+// group, and nohup does not survive that (tried; the log file was never even created). A job that
+// writes 86,000 rows therefore cannot live on the end of that tunnel.
+//
+// So each invocation does a slice and returns: studies already parsed are skipped, and the run
+// stops cleanly after --max-seconds and reports how many remain. Run it until it says 0.
+const FORCE = process.argv.includes('--force');
 const SINCE = arg('since', null);
 const LIMIT = parseInt(arg('limit', '0'), 10) || 0;
 const BATCH = Math.max(50, Math.min(1000, parseInt(arg('batch', '250'), 10) || 250));
+const MAX_SECONDS = Math.max(10, Math.min(600, parseInt(arg('max-seconds', '60'), 10) || 60));
 
 async function main() {
   await initDB();
@@ -35,22 +45,33 @@ async function main() {
   const params = [];
   let where = 'raw_json IS NOT NULL';
   if (SINCE) { params.push(SINCE); where += ` AND last_update_post_date >= $${params.length}`; }
+  // Already-parsed studies are skipped so the job can be resumed after the pipe drops. --force
+  // re-parses everything, which is what to use after a change to the parsing rules.
+  if (!FORCE) where += ` AND NOT EXISTS (SELECT 1 FROM study_sites ss WHERE ss.nct_id = clinical_studies.nct_id)`;
 
   const total = (await query(`SELECT COUNT(*)::int n FROM clinical_studies WHERE ${where}`, params)).rows[0].n;
-  console.log(`── backfill study_sites · ${EXECUTE ? 'WRITING' : 'dry run'}\n`);
-  console.log(`   ${total} study record(s) to read${SINCE ? ` (updated since ${SINCE})` : ''}\n`);
+  const already = (await query(`SELECT COUNT(DISTINCT nct_id)::int n FROM study_sites`)).rows[0].n;
+  console.log(`── backfill study_sites · ${EXECUTE ? 'WRITING' : 'dry run'}`
+    + `${FORCE ? ' · FORCE (re-parsing everything)' : ''}\n`);
+  if (already && !FORCE) console.log(`   ${already} study record(s) already parsed — skipping those`);
+  console.log(`   ${total} still to read${SINCE ? ` (updated since ${SINCE})` : ''}`);
+  console.log(`   stopping after ${MAX_SECONDS}s so the ssh tunnel cannot kill it mid-write\n`);
+  if (!total) { console.log('   nothing left to do.\n'); return; }
+  const deadline = Date.now() + MAX_SECONDS * 1000;
 
   let read = 0, sites = 0, anon = 0, named = 0, written = 0, studiesWithNone = 0;
   const facilities = new Set();
   const countries = new Set();
-  let offset = 0;
+  // Paged by nct_id, NOT by OFFSET: the NOT EXISTS clause means the result set shrinks as rows are
+  // written, so an OFFSET would skip studies it had never read. A keyset page cannot.
+  let after = '';
 
   for (;;) {
     const page = (await query(
-      `SELECT nct_id, raw_json FROM clinical_studies WHERE ${where}
-        ORDER BY nct_id LIMIT ${BATCH} OFFSET ${offset}`, params)).rows;
+      `SELECT nct_id, raw_json FROM clinical_studies WHERE ${where} AND nct_id > $${params.length + 1}
+        ORDER BY nct_id LIMIT ${BATCH}`, [...params, after])).rows;
     if (!page.length) break;
-    offset += page.length;
+    after = page[page.length - 1].nct_id;
 
     for (const s of page) {
       read += 1;
@@ -67,23 +88,29 @@ async function main() {
 
       // Replace this study's sites as one unit: a half-written study is never visible, and a
       // re-run cannot duplicate. Scoped to this nct_id and nothing else.
+      // ONE multi-row insert per study rather than one statement per site. A trial with 300 sites
+      // was 300 round trips, and 86,000 of those is the difference between minutes and an hour.
+      const vals = [];
+      const ph = [];
+      rows.forEach((r, i) => {
+        const b = i * 9;
+        ph.push(`($${b + 1},$${b + 2},$${b + 3},$${b + 4},$${b + 5},$${b + 6},$${b + 7},$${b + 8},$${b + 9})`);
+        vals.push(s.nct_id, r.facility, r.facility_normalized, r.anonymised,
+          r.city, r.state, r.country, r.zip, r.status);
+      });
       await withTransaction(async (client) => {
         await client.query(`DELETE FROM study_sites WHERE nct_id = $1`, [s.nct_id]);
-        for (const r of rows) {
-          await client.query(
-            `INSERT INTO study_sites
-               (nct_id, facility, facility_normalized, anonymised, city, state, country, zip, status)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-             ON CONFLICT DO NOTHING`,
-            [s.nct_id, r.facility, r.facility_normalized, r.anonymised,
-             r.city, r.state, r.country, r.zip, r.status]);
-        }
+        await client.query(
+          `INSERT INTO study_sites
+             (nct_id, facility, facility_normalized, anonymised, city, state, country, zip, status)
+           VALUES ${ph.join(',')} ON CONFLICT DO NOTHING`, vals);
       });
       written += 1;
     }
 
-    if (read % 1000 < BATCH) console.log(`   …${read}/${total}`);
+    console.log(`   …${read}/${total}  (${sites} site rows)`);
     if (LIMIT && read >= LIMIT) break;
+    if (Date.now() > deadline) { console.log(`\n   time budget reached — stopping cleanly.`); break; }
   }
 
   console.log(`\n   read                ${read} studies`);
@@ -110,7 +137,14 @@ async function main() {
     console.log(`   ⚠ ${sites - inDb} fewer rows than parsed — duplicates collapsed by the unique index,`);
     console.log(`     which is expected where a trial lists the same hospital twice.`);
   }
-  console.log(`\n   Then:  node scripts/institution-profile.js --name=Oxford\n`);
+  const left = (await query(`SELECT COUNT(*)::int n FROM clinical_studies WHERE ${where}`, params)).rows[0].n;
+  if (left) {
+    console.log(`\n   ${left} study record(s) still to parse. Run the same command again —`);
+    console.log(`   it skips what is done, so repeat until this says 0.\n`);
+  } else {
+    console.log(`\n   ✅ nothing left to parse.`);
+    console.log(`   Then:  node scripts/institution-profile.js --name=Oxford\n`);
+  }
 }
 
 main().then(() => process.exit(0)).catch((e) => {
