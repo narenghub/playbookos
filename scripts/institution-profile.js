@@ -141,15 +141,23 @@ async function profile() {
     const sp = [`%${NAME}%`];
     let sTa = '';
     if (TA) { sp.push(`%${TA}%`); sTa = ` AND cs.therapeutic_area ILIKE $${sp.length}`; }
+    // ── COUNTRY, BECAUSE A NAME IS NOT AN INSTITUTION ────
+    // "Oxford" returned 35 trials, and 20 of them were Baptist Memorial Hospital and Cancer
+    // Center-Oxford — in Oxford, MISSISSIPPI. A substring search merges unrelated hospitals on
+    // opposite sides of the Atlantic, and the merged total reads as one institution's activity.
+    // The NCI trials in that list belong to the Mississippi site; the Roche, Pfizer, Janssen and
+    // argenx trials belong to the English one. Reporting them together is worse than useless.
+    let sCountry = '';
+    if (COUNTRY) { sp.push(`%${COUNTRY}%`); sCountry = ` AND ss.country ILIKE $${sp.length}`; }
     siteStudies = (await query(
       `SELECT DISTINCT cs.nct_id, cs.brief_title, cs.phase, cs.overall_status, cs.therapeutic_area,
               cs.lead_sponsor_name, cs.sponsor_type, cs.last_update_post_date,
-              ss.facility, ss.city, ss.country, ss.status AS site_status
+              ss.facility, ss.facility_normalized, ss.city, ss.country, ss.status AS site_status
          FROM study_sites ss
          JOIN clinical_studies cs ON cs.nct_id = ss.nct_id
         WHERE ss.anonymised = FALSE
           AND (ss.facility ILIKE $1 OR ss.facility_normalized ILIKE $1)
-          ${sTa}
+          ${sTa}${sCountry}
         ORDER BY cs.last_update_post_date DESC NULLS LAST`, sp)).rows;
   } catch (e) {
     // The table may not exist yet. That is a state to report, not to crash on.
@@ -221,8 +229,21 @@ async function profile() {
     console.log(`   as a RECRUITING SITE: no trials found. If study_sites has not been backfilled,`);
     console.log(`   run:  node scripts/backfill-study-sites.js --execute\n`);
   } else {
-    console.log(`── as a RECRUITING SITE: ${siteStudies.length} trial(s)`);
+    console.log(`── as a RECRUITING SITE: ${siteStudies.length} trial(s)`
+      + `${COUNTRY ? ` · ${COUNTRY} only` : ''}`);
     console.log(`   (vs ${studies.length} where the name is the PI's affiliation, sponsor or collaborator)\n`);
+
+    // FIRST, before any sponsor list: is this one institution or several that share a word?
+    const byPlace = tally(siteStudies, (r) => [`${r.country || '?'}${r.city ? ` — ${r.city}` : ''}`]);
+    if (byPlace.length > 1 && !COUNTRY) {
+      console.log(`   ⚠ "${NAME}" matches sites in ${byPlace.length} different places. These are`);
+      console.log(`     probably NOT one institution, and the totals below merge them:`);
+      for (const [place, n] of byPlace.slice(0, 8)) console.log(`        ${String(n).padStart(4)}  ${place}`);
+      console.log(`     Narrow it:  --country="United Kingdom"\n`);
+    } else {
+      show('where', byPlace, 8);
+      console.log();
+    }
     show('sponsors running trials AT this institution', tally(siteStudies, (r) => [r.lead_sponsor_name]));
     console.log();
     show('sponsor type', tally(siteStudies, (r) => [r.sponsor_type || '(not stated)']), 6);
