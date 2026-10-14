@@ -216,6 +216,37 @@ async function main() {
     }
   }
 
+  // ── THE LIVE CONSTRAINT, CHECKED IN THE DRY RUN ──────────────────────────
+  //
+  // A role is legal in two places and they are not the same place: src/lib/events/registry.js, and
+  // a CHECK constraint on cphi_exhibitor_matches in the database. Adding `demand_intel` to the
+  // registry and running this script produced a clean dry run listing all twenty rows, followed by
+  // `violates check constraint "cem_role_valid"` on the FIRST write — because the migration that
+  // builds the CHECK from the registry had not been re-run against production.
+  //
+  // The dry run's whole job is to answer "will the write work", and it answered yes to a write that
+  // could not succeed. Printing rows is not a rehearsal. So the constraint is now read from the
+  // live database and compared against the roles this file actually uses, BEFORE anything is
+  // printed — which costs one query and makes the dry run mean what it says.
+  const needed = [...new Set(CARDS.map((c) => c.role).filter(Boolean))];
+  const def = (await query(
+    `SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conname = 'cem_role_valid'`
+  )).rows[0];
+  if (def && def.def) {
+    const missing = needed.filter((r) => !def.def.includes(`'${r}'`));
+    if (missing.length) {
+      say(`✗ the database does not accept ${missing.length === 1 ? 'this role' : 'these roles'}: ${missing.join(', ')}`);
+      say(`   The CHECK constraint on cphi_exhibitor_matches is built from the registry, and it`);
+      say(`   has not been re-run since ${missing.join(' and ')} ${missing.length === 1 ? 'was' : 'were'} added.`);
+      say(`   Live constraint: ${def.def}`);
+      say('');
+      say(`   Run this first, then this script again:`);
+      say(`      railway ssh 'node scripts/migrate-cphi-roles.js'`);
+      say('');
+      process.exit(1);
+    }
+  }
+
   say(`── SCOPE Europe 2026 · Barcelona · ${CARDS.length} contacts\n`);
 
   // ── TRANSCRIPTION SANITY, BEFORE ANYTHING IS WRITTEN ────
