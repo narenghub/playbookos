@@ -35,17 +35,24 @@ test('defaultEventSlug always returns a real event', () => {
 
 // ── SCOPE'S ROLES ARE NOT CPHI'S RELABELLED ────
 
-test('SCOPE has four tabs: three products plus the labs we recruit', () => {
-  // Order is tab order. qc_lab sits before linkable because labs are a real population in that
-  // room and LinkAble, researched, is zero there.
-  assert.deepStrictEqual(rolesFor('scope-europe-2026'), ['abiozen', 'aros', 'qc_lab', 'linkable']);
+test('SCOPE has five tabs: four products plus the labs we recruit', () => {
+  // Order is tab order. The three tabs where money flows TOWARDS us sit together, then qc_lab,
+  // where it flows away, then linkable — a real population of labs is in that room and LinkAble,
+  // researched rather than taken off the floor, is zero there.
+  //
+  // demand_intel was added on 14 Oct from the Barcelona floor: 12 of the first 20 booths took a
+  // card for a lead subscription. It is deliberately NOT folded into aros, whose note says the
+  // eClinical platforms are competitors — they are competitors for that product and customers for
+  // this one, and one key cannot mean both.
+  assert.deepStrictEqual(rolesFor('scope-europe-2026'),
+    ['abiozen', 'aros', 'demand_intel', 'qc_lab', 'linkable']);
 });
 
-test('three SCOPE tabs are what a company BUYS, and one is what we buy', () => {
-  // The distinction that earns qc_lab its own tab rather than a row inside Abiozen: on three tabs
+test('four SCOPE tabs are what a company BUYS, and one is what we buy', () => {
+  // The distinction that earns qc_lab its own tab rather than a row inside Abiozen: on four tabs
   // money flows towards us, on the fourth it flows away. Mixing those in one list means walking up
   // to a booth with the pitch pointing the wrong way.
-  for (const key of ['abiozen', 'aros', 'linkable']) {
+  for (const key of ['abiozen', 'aros', 'demand_intel', 'linkable']) {
     const note = roleDef('scope-europe-2026', key).note;
     assert.ok(/buy|subscri|purchas/i.test(note), `${key} should describe what they buy: "${note}"`);
   }

@@ -89,6 +89,25 @@ const EVENTS = [
       // into LabConnect, not selling to it. Same meaning as CPHI's qc_lab, so the same key — see
       // SHARED_ROLE_KEYS below for why sharing one is safe and why the guard that forbade it was
       // reasoning from the wrong thing.
+      // ── THE ROLE THE FLOOR CREATED ────
+      //
+      // Naresh worked 20 of the 68 booths on day one and 12 took his card for a lead subscription:
+      // clinical demand intelligence — which trials are new or newly changed, by therapeutic area
+      // and territory, with sponsor, phase, status and patient numbers. The buyers are the vendors
+      // who sell INTO trial sponsors: eClinical platforms, eCOA and RBQM software, biostatistics,
+      // patient payments and travel, ancillary supply, site networks, IRB and regulatory services.
+      //
+      // IT IS NOT THE SAME LIST AS AROS, AND THE DIFFERENCE MATTERS. AROS is sold to sponsor
+      // companies that carry their own regulatory file, and the registry note on that role says
+      // plainly that the eClinical platforms are COMPETITORS there. They are not competitors here —
+      // here they are customers, because what they buy is the demand signal, not the compliance
+      // product. One firm can therefore be a competitor on one tab and a prospect on this one, which
+      // is exactly why this needs its own key rather than being folded into an existing tab.
+      //
+      // basis 'none' because there is no ranking signal: these rows come off a card, not out of a
+      // register, and whether somebody is a good prospect is what he saw at the stand.
+      { key: 'demand_intel', label: 'Demand Intelligence', basis: 'none',
+        note: 'Vendors selling services or software TO trial sponsors, who would subscribe to clinical demand intelligence — the weekly feed of new and newly-changed trials by therapeutic area and territory. Collected by hand at the booths rather than derived from a register, so there is no ranking signal and no computed order — every row carries the reason it was classified. What can honestly be sold to them is the SIGNAL (sponsor, phase, status, patient numbers, dates, refreshed daily); the named-contact layer is not sellable — see claude/demand-intel-site-layer.md for why.' },
       { key: 'qc_lab',   label: 'QC Partners', basis: 'none',
         note: 'Analytical and QC laboratories to recruit into LabConnect — we are buying their capacity, not selling to them. Sourced from the labs register rather than the sponsor list, because labs attend SCOPE as delegates and barely exhibit. No ranking signal beyond activity and whether we hold a contact, so order is shape, not quality.' },
       { key: 'linkable', label: 'LinkAble', basis: 'none',
