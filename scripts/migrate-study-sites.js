@@ -59,6 +59,27 @@ async function main() {
     CREATE INDEX IF NOT EXISTS idx_ss_city    ON study_sites (country, city);
   `);
 
+  // ── RECORD THE ATTEMPT, NOT THE OUTCOME ────
+  // The backfill originally skipped work by asking "does this study already have rows in
+  // study_sites?". 275 of 3,287 studies have NO sites published at all, so they never produce a
+  // row, so they were never skipped — they would be re-read on every run forever and the
+  // remaining-count could never reach zero. "Run it again until it says 0" was unachievable.
+  //
+  // Parsing is an event that happened whether or not it found anything, so it is recorded on the
+  // study.
+  await query(`
+    ALTER TABLE clinical_studies ADD COLUMN IF NOT EXISTS sites_parsed_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_cs_sites_parsed ON clinical_studies (sites_parsed_at)
+      WHERE sites_parsed_at IS NULL;
+  `);
+
+  // Studies already parsed under the old rule keep their work: mark them rather than redo them.
+  const marked = await query(`
+    UPDATE clinical_studies cs SET sites_parsed_at = NOW()
+     WHERE sites_parsed_at IS NULL
+       AND EXISTS (SELECT 1 FROM study_sites ss WHERE ss.nct_id = cs.nct_id)`);
+  if (marked.rowCount) console.log(`   marked ${marked.rowCount} already-parsed study record(s)`);
+
   await query(`
     COMMENT ON COLUMN study_sites.anonymised IS
       $c$TRUE where the published facility name is a sponsor placeholder — "Novartis Investigative

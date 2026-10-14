@@ -49,10 +49,15 @@ async function main() {
   if (SINCE) { params.push(SINCE); where += ` AND last_update_post_date >= $${params.length}`; }
   // Already-parsed studies are skipped so the job can be resumed after the pipe drops. --force
   // re-parses everything, which is what to use after a change to the parsing rules.
-  if (!FORCE) where += ` AND NOT EXISTS (SELECT 1 FROM study_sites ss WHERE ss.nct_id = clinical_studies.nct_id)`;
+  //
+  // Keyed on sites_parsed_at — the ATTEMPT — and not on "has rows in study_sites". 275 studies
+  // publish no sites at all, so an outcome-based check never skipped them: they were re-read on
+  // every run and the remaining-count could never reach zero.
+  if (!FORCE) where += ` AND sites_parsed_at IS NULL`;
 
   const total = (await query(`SELECT COUNT(*)::int n FROM clinical_studies WHERE ${where}`, params)).rows[0].n;
-  const already = (await query(`SELECT COUNT(DISTINCT nct_id)::int n FROM study_sites`)).rows[0].n;
+  const already = (await query(
+    `SELECT COUNT(*)::int n FROM clinical_studies WHERE sites_parsed_at IS NOT NULL`)).rows[0].n;
   console.log(`── backfill study_sites · ${EXECUTE ? 'WRITING' : 'dry run'}`
     + `${FORCE ? ' · FORCE (re-parsing everything)' : ''}\n`);
   if (already && !FORCE) console.log(`   ${already} study record(s) already parsed — skipping those`);
@@ -79,7 +84,12 @@ async function main() {
     for (const s of page) {
       read += 1;
       const rows = sitesOf(s.raw_json);
-      if (!rows.length) { studiesWithNone += 1; continue; }
+      if (!rows.length) {
+        studiesWithNone += 1;
+        // Mark it attempted. A study with no published sites is a finished study, not a pending one.
+        if (EXECUTE) await query(`UPDATE clinical_studies SET sites_parsed_at = NOW() WHERE nct_id = $1`, [s.nct_id]);
+        continue;
+      }
       sites += rows.length;
       for (const r of rows) {
         if (r.anonymised) anon += 1; else named += 1;
@@ -107,6 +117,9 @@ async function main() {
           `INSERT INTO study_sites
              (nct_id, facility, facility_normalized, anonymised, city, state, country, zip, status)
            VALUES ${ph.join(',')} ON CONFLICT DO NOTHING`, vals);
+        // Inside the same transaction: the mark and the rows commit together, so a crash can
+        // never leave a study marked parsed with no rows written.
+        await client.query(`UPDATE clinical_studies SET sites_parsed_at = NOW() WHERE nct_id = $1`, [s.nct_id]);
       });
       written += 1;
 
@@ -155,7 +168,11 @@ async function main() {
     console.log(`\n   ${left} study record(s) still to parse. Run the same command again —`);
     console.log(`   it skips what is done, so repeat until this says 0.\n`);
   } else {
+    const noSites = (await query(
+      `SELECT COUNT(*)::int n FROM clinical_studies cs WHERE cs.sites_parsed_at IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM study_sites ss WHERE ss.nct_id = cs.nct_id)`)).rows[0].n;
     console.log(`\n   ✅ nothing left to parse.`);
+    if (noSites) console.log(`      (${noSites} of those publish no sites at all — parsed, nothing to store.)`);
     console.log(`   Then:  node scripts/institution-profile.js --name=Oxford\n`);
   }
 }
