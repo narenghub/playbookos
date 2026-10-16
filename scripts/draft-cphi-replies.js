@@ -136,6 +136,27 @@ async function main() {
     const last = theirs[theirs.length - 1];
     const hasCatalogue = theirs.some((x) => x.parsed.attachments.some(looksLikeCatalogue));
 
+    // ── ALREADY ANSWERED? THEN THERE IS NOTHING TO DRAFT ────
+    //
+    // The draft check below catches a reply that is still sitting unsent. It does NOT catch one
+    // that was sent — sending removes the draft, so a second run sees a clean thread and writes a
+    // fresh reply into a conversation that has already moved on. Naren would then have two of our
+    // messages in a row in front of a supplier, the second one re-asking for a catalogue he has
+    // already acknowledged.
+    //
+    // The test is positional, not merely "did we ever write here": every one of these threads
+    // begins with OUR follow-up, so our presence proves nothing. What matters is whether anything
+    // of ours comes AFTER their latest message.
+    const lastInboundAt = msgs.indexOf(last.raw);
+    const weRepliedAfter = msgs.slice(lastInboundAt + 1).some((m) => {
+      const from = readIncoming(m).fromEmail;
+      return from && from === String(FROM_MAILBOX).toLowerCase();
+    });
+    if (weRepliedAfter) {
+      skipped.push({ r, why: 'already answered — our message sits after their latest one' });
+      continue;
+    }
+
     // A draft already sitting in this thread means somebody has been here. Do not add a second.
     let existing = [];
     try {
