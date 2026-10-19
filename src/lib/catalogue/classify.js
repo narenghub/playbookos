@@ -76,6 +76,23 @@ function useClass(row, ctx = {}) {
   const n = norm((row && row.name) || '');
   if (!n) return { use_class: 'unknown', listing_notice: RUO_NOTICE };
 
+  // ── A DMF DOES NOT CLEAR A PATENT ────
+  //
+  // Found in the first --execute run: Semaglutide came back use_class 'commercial' with no
+  // listing notice, because it IS on the DMF register — Chinese and Indian manufacturers file
+  // DMFs for the GLP-1s while the patent is still live. The `hold` decision saved it that day,
+  // but a hold that somebody later approves would have reached the marketplace with no
+  // restriction attached, which is the precise failure this column exists to prevent.
+  //
+  // So the restricted list is checked FIRST and overrides every other signal. Sinopep's own
+  // brochure makes the point: their line reads "Tirzepatide*  US", the asterisk doing the work a
+  // listing has to do explicitly.
+  for (const [re, why] of RESTRICTED) {
+    if (re.test(String((row && row.name) || ''))) {
+      return { use_class: 'rnd_only', listing_notice: RUO_NOTICE, patent_check: why };
+    }
+  }
+
   const inTrials = (ctx.trialNames || new Set()).has(n);
   const inDmf = (ctx.dmfNames || new Set()).has(n);
   const inCatalogue = (ctx.catalogueNames || new Set()).has(n);

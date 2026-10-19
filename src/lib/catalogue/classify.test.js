@@ -222,3 +222,32 @@ test('the restriction survives a hold — an approved hold must not lose it', ()
   assert.equal(r.use_class, 'rnd_only');
   assert.equal(r.listing_notice, RUO_NOTICE);
 });
+
+// ── A DMF DOES NOT CLEAR A PATENT ───────────────────────────────────────────
+//
+// Found in the first --execute run against production: Semaglutide came back use_class
+// 'commercial' with listing_notice null, because it IS on the DMF register — manufacturers file
+// DMFs for the GLP-1s while the patent is still live. The hold saved it that day; a hold somebody
+// later approved would have reached the marketplace unrestricted.
+test('a restricted molecule stays restricted even when it is on the DMF register', () => {
+  const onRegister = { dmfNames: new Set(['semaglutide', 'tirzepatide', 'fentanyl citrate']) };
+  for (const n of ['Semaglutide', 'Tirzepatide', 'Fentanyl Citrate']) {
+    const u = useClass({ name: n }, onRegister);
+    assert.equal(u.use_class, 'rnd_only', `${n} must stay restricted`);
+    assert.equal(u.listing_notice, RUO_NOTICE, `${n} must carry the notice`);
+  }
+});
+
+test('…and the restriction survives into the classified row', () => {
+  const r = classifyRow(row({ name: 'Semaglutide', cas: null, dictionary: true }),
+    { dmfNames: new Set(['semaglutide']) });
+  assert.equal(r.decision, 'hold');
+  assert.equal(r.use_class, 'rnd_only');
+  assert.equal(r.listing_notice, RUO_NOTICE);
+});
+
+// The override must not sweep up everything on the register.
+test('an ordinary molecule on the register is still commercial', () => {
+  assert.equal(useClass({ name: 'Allopurinol' }, { dmfNames: new Set(['allopurinol']) }).use_class,
+    'commercial');
+});
