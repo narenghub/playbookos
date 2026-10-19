@@ -47,6 +47,59 @@ const COSMETIC = /\bcosmetic\b|\bskin\s*care\b|\banti[-\s]?aging\b|\bacetyl\s+he
 
 const norm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
+// ── RESEARCH USE, OR COMMERCIAL SUPPLY ───────────────────────────────────────
+//
+// The first live run ranked Orforglipron, Inclisiran, Nusinersen, Elacestrant, Abemaciclib,
+// Acalabrutinib and Adagrasib at the top of the "list first" pile. Every one of those is under
+// patent, and Orforglipron is not even approved — it is in Lilly's phase 3.
+//
+// That is not a bug in the ranking; it is what the ranking MEASURES. A molecule shows up in the
+// clinical-trials data precisely because somebody is developing it, and active development
+// usually means live patent protection. So evidenced demand and freedom to operate pull in
+// opposite directions, and the demand signal points at the riskiest rows first.
+//
+// These brochures are generic-API PIPELINES: Chinese and Indian manufacturers develop molecules
+// ahead of patent expiry and sell research quantities meanwhile. That is legitimate and it is
+// close to Abiozen's own positioning — research-grade material for research use. What is not
+// legitimate is listing them as commercially available APIs in a territory where the patent
+// subsists.
+//
+// The heuristic, and its limits: a molecule named in active trials AND absent from the DMF
+// register is treated as research-use-only. A DMF is filed when a manufacturer intends commercial
+// supply, so its presence is real evidence the molecule is open; its absence is weaker evidence
+// that it is not. This DOES NOT determine patent status, which is a legal question about a
+// specific molecule in a specific territory on a specific date. It decides which listings carry
+// the restriction and which need a freedom-to-operate check before anyone quotes.
+const RUO_NOTICE = 'For research and development use. Not offered for commercial supply in territories where patent protection subsists — confirm freedom to operate before quoting.';
+
+function useClass(row, ctx = {}) {
+  const n = norm((row && row.name) || '');
+  if (!n) return { use_class: 'unknown', listing_notice: RUO_NOTICE };
+
+  const inTrials = (ctx.trialNames || new Set()).has(n);
+  const inDmf = (ctx.dmfNames || new Set()).has(n);
+  const inCatalogue = (ctx.catalogueNames || new Set()).has(n);
+
+  // Already sold on abiozen.com, or on the DMF register: commercial supply is already the premise.
+  if (inDmf || inCatalogue) return { use_class: 'commercial', listing_notice: null };
+
+  if (inTrials) {
+    return {
+      use_class: 'rnd_only',
+      listing_notice: RUO_NOTICE,
+      patent_check: 'named in active clinical trials and absent from the DMF register — likely still under patent',
+    };
+  }
+
+  // Neither in trials nor on the register. Nothing suggests it is restricted, and nothing
+  // confirms it is open, so it gets the restriction until somebody checks.
+  return {
+    use_class: 'rnd_only',
+    listing_notice: RUO_NOTICE,
+    patent_check: 'no DMF on the register — status unverified, so the research-use restriction applies until checked',
+  };
+}
+
 /**
  * Decide what to do with one extracted row.
  *
@@ -60,10 +113,13 @@ function classifyRow(row, ctx = {}) {
   const r = row || {};
   const name = r.name || '';
   const text = `${name} ${r.grade || ''} ${r.line || ''}`;
+  // Every outcome carries it, including hold and reject: a row that later gets approved must not
+  // arrive at the marketplace without its restriction.
+  const use = useClass(r, ctx);
 
   // ── NOT LISTABLE AT ALL ────
   if (!name) {
-    return { decision: 'reject', reason: 'no product name could be read next to this CAS number', priority: 0 };
+    return { ...use, decision: 'reject', reason: 'no product name could be read next to this CAS number', priority: 0 };
   }
   // ── A MISSING CAS IS NOT THE SAME AS AN UNIDENTIFIED MOLECULE ────
   //
@@ -75,8 +131,7 @@ function classifyRow(row, ctx = {}) {
   // matching a molecule the platform already knows. A name that matched nothing and carries no CAS
   // is still held, because that is a genuinely unknown string.
   if (!r.cas && !r.dictionary) {
-    return {
-      decision: 'hold',
+    return { ...use, decision: 'hold',
       reason: 'no CAS number and the name matches no molecule we know — ask the supplier to confirm what this is',
       priority: 0,
     };
@@ -84,18 +139,16 @@ function classifyRow(row, ctx = {}) {
 
   // ── STOP AND ASK A HUMAN ────
   for (const [re, why] of RESTRICTED) {
-    if (re.test(name)) return { decision: 'hold', reason: why, priority: 0 };
+    if (re.test(name)) return { ...use, decision: 'hold', reason: why, priority: 0 };
   }
   if (COSMETIC.test(text)) {
-    return {
-      decision: 'hold',
+    return { ...use, decision: 'hold',
       reason: 'cosmetic grade — abiozen.com has not decided whether it carries cosmetics',
       priority: 0,
     };
   }
   if (r.confidence === 'low') {
-    return {
-      decision: 'hold',
+    return { ...use, decision: 'hold',
       reason: `name was read from ${r.name_source || 'a neighbouring line'}, so the pairing is uncertain — check the source line`,
       priority: 0,
     };
@@ -105,15 +158,13 @@ function classifyRow(row, ctx = {}) {
   const cat = ctx.catalogueCas || new Set();
   const catNames = ctx.catalogueNames || new Set();
   if (r.cas && cat.has(r.cas)) {
-    return {
-      decision: 'second_source',
+    return { ...use, decision: 'second_source',
       reason: 'already on abiozen.com — this is a second supplier for an existing product, which is a price lever rather than a new listing',
       priority: 90,
     };
   }
   if (catNames.has(norm(name))) {
-    return {
-      decision: 'second_source',
+    return { ...use, decision: 'second_source',
       reason: 'name matches an existing product (CAS differs or is absent) — confirm it is the same molecule, then treat as a second source',
       priority: 70,
     };
@@ -123,8 +174,13 @@ function classifyRow(row, ctx = {}) {
   // A name match is a weaker identification than a checksum, so an otherwise identical row ranks
   // below one carrying a CAS number — and the reason says so, because the reviewer should know
   // which rows would benefit from asking the supplier for CAS numbers.
+  // Two things make a row less immediately useful, and both are subtracted from the rank rather
+  // than hidden: identification by name alone, and a research-use restriction. A molecule that can
+  // be supplied commercially is worth more today than one that needs a freedom-to-operate opinion
+  // first, so Allopurinol surfaces above Orforglipron even when both show evidenced demand.
   const noCas = !r.cas;
-  const less = (p) => (noCas ? Math.max(1, p - 15) : p);
+  const ruo = use.use_class === 'rnd_only' ? 25 : 0;
+  const less = (p) => Math.max(1, p - (noCas ? 15 : 0) - ruo);
   const note = (why) => (noCas ? `${why} — identified by name only, no CAS on the document` : why);
 
   const demand = ctx.demandCas || new Set();
@@ -133,8 +189,7 @@ function classifyRow(row, ctx = {}) {
   const regulated = (r.markers || []).some((m) => m === 'DMF' || m === 'CEP');
 
   if (wanted) {
-    return {
-      decision: 'list',
+    return { ...use, decision: 'list',
       reason: note(regulated
         ? 'evidenced demand AND a filed DMF/CEP — list this first'
         : 'evidenced demand — somebody is already looking for this molecule'),
@@ -142,14 +197,12 @@ function classifyRow(row, ctx = {}) {
     };
   }
   if (regulated) {
-    return {
-      decision: 'list',
+    return { ...use, decision: 'list',
       reason: note('a filed DMF or CEP, which is what a buyer asks for second after price'),
       priority: less(60),
     };
   }
-  return {
-    decision: 'list',
+  return { ...use, decision: 'list',
     reason: note('new product, no demand signal yet — list it, but it is not the one to lead with'),
     priority: less(30),
   };
@@ -164,4 +217,4 @@ function classifyAll(rows, ctx = {}) {
   return { rows: out, counts };
 }
 
-module.exports = { classifyRow, classifyAll, RESTRICTED, COSMETIC };
+module.exports = { classifyRow, classifyAll, useClass, RESTRICTED, COSMETIC, RUO_NOTICE };

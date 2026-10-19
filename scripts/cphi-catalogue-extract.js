@@ -67,6 +67,9 @@ async function loadContext() {
   const ctx = {
     catalogueCas: new Set(), catalogueNames: new Set(),
     demandCas: new Set(), demandNames: new Set(),
+    // Kept APART from demandNames: which set a molecule is in decides whether it can be sold
+    // commercially or only for research. See useClass() in lib/catalogue/classify.js.
+    dmfNames: new Set(), trialNames: new Set(),
     notes: [],
   };
 
@@ -101,7 +104,10 @@ async function loadContext() {
     const r = await query(
       `SELECT DISTINCT molecule_name FROM molecule_dmf_matches WHERE review_status = 'auto_confirmed'`);
     for (const x of r.rows) {
-      if (x.molecule_name) ctx.demandNames.add(String(x.molecule_name).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+      if (!x.molecule_name) continue;
+      const n = String(x.molecule_name).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      ctx.demandNames.add(n);
+      ctx.dmfNames.add(n);
     }
     ctx.notes.push(`${r.rows.length} confirmed DMF molecule(s)`);
   } catch (_) { ctx.notes.push('molecule_dmf_matches unreadable'); }
@@ -109,7 +115,10 @@ async function loadContext() {
   try {
     const r = await query(`SELECT DISTINCT molecule_name FROM study_molecules LIMIT 5000`);
     for (const x of r.rows) {
-      if (x.molecule_name) ctx.demandNames.add(String(x.molecule_name).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+      if (!x.molecule_name) continue;
+      const n = String(x.molecule_name).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      ctx.demandNames.add(n);
+      ctx.trialNames.add(n);
     }
     ctx.notes.push(`${r.rows.length} molecule(s) named in trials`);
   } catch (_) { ctx.notes.push('study_molecules unreadable'); }
@@ -230,7 +239,7 @@ async function main() {
   if (SHOW && classified.length) {
     say(`   top ${Math.min(SHOW, classified.length)} by priority:`);
     for (const r of classified.slice(0, SHOW)) {
-      say(`      ${String(r.priority).padStart(3)}  ${r.decision.padEnd(14)} ${(r.name || '(no name)').slice(0, 38).padEnd(40)} ${r.cas || ''}`);
+      say(`      ${String(r.priority).padStart(3)}  ${r.decision.padEnd(14)} ${String(r.use_class || '').padEnd(11)} ${(r.name || '(no name)').slice(0, 34).padEnd(36)} ${r.cas || ''}`);
       say(`           ${r.supplier} · ${r.source_file}`);
       say(`           ${r.reason}`);
     }
@@ -256,19 +265,22 @@ async function main() {
       `INSERT INTO supplier_products
          (event_slug, contact_id, supplier, supplier_normalized, product_name, cas, grade,
           markers, confidence, name_source, source_file, source_line,
-          suggested, suggested_reason, priority)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+          suggested, suggested_reason, priority, use_class, listing_notice, patent_check)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        ON CONFLICT (event_slug, supplier_normalized, COALESCE(cas, ''), lower(COALESCE(product_name, '')))
        DO UPDATE SET
          grade = EXCLUDED.grade, markers = EXCLUDED.markers,
          confidence = EXCLUDED.confidence, name_source = EXCLUDED.name_source,
          source_file = EXCLUDED.source_file, source_line = EXCLUDED.source_line,
          suggested = EXCLUDED.suggested, suggested_reason = EXCLUDED.suggested_reason,
-         priority = EXCLUDED.priority, updated_at = NOW()
+         priority = EXCLUDED.priority, use_class = EXCLUDED.use_class,
+         listing_notice = EXCLUDED.listing_notice, patent_check = EXCLUDED.patent_check,
+         updated_at = NOW()
        RETURNING (xmax = 0) AS created`,
       [EVENT, r.contact_id || null, r.supplier, normalizeCompany(r.supplier || ''),
        r.name, r.cas, r.grade, JSON.stringify(r.markers || []), r.confidence, r.name_source,
-       r.source_file, r.line, r.decision, r.reason, r.priority]);
+       r.source_file, r.line, r.decision, r.reason, r.priority,
+       r.use_class || null, r.listing_notice || null, r.patent_check || null]);
     if (res.rows[0].created) inserted += 1; else refreshed += 1;
   }
 

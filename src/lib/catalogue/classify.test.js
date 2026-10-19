@@ -15,10 +15,14 @@ test('a new product with no signal is listable but not a priority', () => {
   assert.ok(r.priority < 50);
 });
 
+// COM is a context in which the molecule may be supplied commercially, so these test the demand
+// and regulatory signals rather than the research-use penalty, which has its own tests below.
+const COM = { dmfNames: new Set(['paracetamol']) };
+
 test('a filed DMF or CEP raises it', () => {
-  assert.ok(classifyRow(row({ markers: ['DMF'] })).priority >
-            classifyRow(row()).priority);
-  assert.ok(classifyRow(row({ markers: ['CEP'] })).priority > 50);
+  assert.ok(classifyRow(row({ markers: ['DMF'] }), COM).priority >
+            classifyRow(row(), COM).priority);
+  assert.ok(classifyRow(row({ markers: ['CEP'] }), COM).priority > 50);
 });
 
 // ── THE OUTCOME THAT MATTERS MOST COMMERCIALLY ──────────────────────────────
@@ -39,16 +43,17 @@ test('a name match with no CAS match is a second source to confirm', () => {
 });
 
 test('evidenced demand beats everything else', () => {
-  const wanted = classifyRow(row(), { demandCas: new Set(['103-90-2']) });
+  const ctx = { ...COM, demandCas: new Set(['103-90-2']) };
+  const wanted = classifyRow(row(), ctx);
   assert.equal(wanted.decision, 'list');
-  assert.ok(wanted.priority > classifyRow(row({ markers: ['DMF'] })).priority);
+  assert.ok(wanted.priority > classifyRow(row({ markers: ['DMF'] }), COM).priority);
 
-  const both = classifyRow(row({ markers: ['DMF'] }), { demandCas: new Set(['103-90-2']) });
-  assert.equal(both.priority, 100, 'demand plus a DMF is the top of the list');
+  const both = classifyRow(row({ markers: ['DMF'] }), ctx);
+  assert.equal(both.priority, 100, 'demand plus a DMF, commercially supplyable, is the top');
 });
 
 test('demand can be matched on the name when the CAS differs', () => {
-  const r = classifyRow(row({ cas: '51-21-8' }), { demandNames: new Set(['paracetamol']) });
+  const r = classifyRow(row({ cas: '51-21-8' }), { ...COM, demandNames: new Set(['paracetamol']) });
   assert.equal(r.decision, 'list');
   assert.ok(r.priority >= 85);
 });
@@ -152,4 +157,68 @@ test('the holds still hold when identified only by name', () => {
   const r = classifyRow(row({ name: 'Semaglutide', cas: null, dictionary: true }));
   assert.equal(r.decision, 'hold');
   assert.match(r.reason, /GLP-1/);
+});
+
+// ── COMMERCIAL SUPPLY vs RESEARCH USE ───────────────────────────────────────
+//
+// The first live run ranked Orforglipron, Inclisiran, Nusinersen and Abemaciclib at the top of
+// the "list first" pile. All are under patent and Orforglipron is not yet approved. That is not a
+// bug in the ranking — it is what the ranking measures, because a molecule appears in the trials
+// data precisely when somebody is actively developing it.
+const { useClass, RUO_NOTICE } = require('./classify');
+
+const CTX = {
+  trialNames: new Set(['orforglipron', 'abemaciclib', 'allopurinol']),
+  dmfNames: new Set(['allopurinol', 'ezetimibe']),
+  catalogueNames: new Set(['paracetamol']),
+  demandNames: new Set(['orforglipron', 'abemaciclib', 'allopurinol', 'ezetimibe']),
+};
+
+test('a molecule in active trials with no DMF is research-use only', () => {
+  const u = useClass({ name: 'Orforglipron' }, CTX);
+  assert.equal(u.use_class, 'rnd_only');
+  assert.equal(u.listing_notice, RUO_NOTICE);
+  assert.match(u.patent_check, /clinical trials/);
+});
+
+test('a molecule on the DMF register may be supplied commercially', () => {
+  const u = useClass({ name: 'Allopurinol' }, CTX);
+  assert.equal(u.use_class, 'commercial');
+  assert.equal(u.listing_notice, null);
+});
+
+test('something already sold on the marketplace is commercial', () => {
+  assert.equal(useClass({ name: 'Paracetamol' }, CTX).use_class, 'commercial');
+});
+
+// The safe default is the restricted one.
+test('an unrecognised molecule is restricted until somebody checks', () => {
+  const u = useClass({ name: 'Mystery Compound' }, CTX);
+  assert.equal(u.use_class, 'rnd_only');
+  assert.match(u.patent_check, /unverified/);
+});
+
+test('every outcome carries a use class, including hold and reject', () => {
+  for (const over of [{ name: 'Semaglutide' }, { name: null }, { name: 'Fentanyl' },
+    { name: 'Orforglipron', cas: null, dictionary: false }]) {
+    const r = classifyRow(row(over), CTX);
+    assert.ok(r.use_class, `${over.name} came back with no use_class`);
+  }
+});
+
+// A row that can be sold today is worth more than one needing a legal opinion first.
+test('a commercially supplyable molecule outranks a restricted one', () => {
+  const ok = classifyRow(row({ name: 'Allopurinol', cas: null, dictionary: true }), CTX);
+  const ruo = classifyRow(row({ name: 'Orforglipron', cas: null, dictionary: true }), CTX);
+  assert.equal(ok.use_class, 'commercial');
+  assert.equal(ruo.use_class, 'rnd_only');
+  assert.ok(ok.priority > ruo.priority,
+    `commercial ${ok.priority} should outrank research-use ${ruo.priority}`);
+});
+
+test('the restriction survives a hold — an approved hold must not lose it', () => {
+  const r = classifyRow(row({ name: 'Semaglutide', cas: null, dictionary: true }), CTX);
+  assert.equal(r.decision, 'hold');
+  assert.equal(r.use_class, 'rnd_only');
+  assert.equal(r.listing_notice, RUO_NOTICE);
 });

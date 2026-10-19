@@ -60,6 +60,14 @@ async function main() {
       reviewed_at         TIMESTAMPTZ,
       review_note         TEXT,
 
+      -- ── COMMERCIAL vs RESEARCH USE ────
+      -- The marketplace must never render a listing without this. The first extraction run put
+      -- Orforglipron, Inclisiran and Nusinersen at the top of the "list first" pile; all are under
+      -- patent and one is not yet approved. See useClass() in src/lib/catalogue/classify.js.
+      use_class           TEXT,            -- commercial | rnd_only | unknown
+      listing_notice      TEXT,            -- the restriction the listing must carry, or NULL
+      patent_check        TEXT,            -- why this row was restricted
+
       published_at        TIMESTAMPTZ,
       extracted_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -72,6 +80,16 @@ async function main() {
   await query(`ALTER TABLE supplier_products DROP CONSTRAINT IF EXISTS sp_review_valid`);
   await query(`ALTER TABLE supplier_products ADD CONSTRAINT sp_review_valid
                  CHECK (review_status IN ('pending','approved','rejected','held'))`);
+  // Added after the table shipped, so existing deployments pick them up.
+  await query(`
+    ALTER TABLE supplier_products ADD COLUMN IF NOT EXISTS use_class      TEXT;
+    ALTER TABLE supplier_products ADD COLUMN IF NOT EXISTS listing_notice TEXT;
+    ALTER TABLE supplier_products ADD COLUMN IF NOT EXISTS patent_check   TEXT;
+  `);
+  await query(`ALTER TABLE supplier_products DROP CONSTRAINT IF EXISTS sp_use_valid`);
+  await query(`ALTER TABLE supplier_products ADD CONSTRAINT sp_use_valid
+                 CHECK (use_class IS NULL OR use_class IN ('commercial','rnd_only','unknown'))`);
+
   await query(`ALTER TABLE supplier_products DROP CONSTRAINT IF EXISTS sp_suggested_valid`);
   await query(`ALTER TABLE supplier_products ADD CONSTRAINT sp_suggested_valid
                  CHECK (suggested IS NULL OR suggested IN ('list','second_source','hold','reject'))`);
@@ -94,6 +112,8 @@ async function main() {
       'Set by a human only. The extractor upserts every other column and must never touch this one — re-parsing a PDF would otherwise reset every approval already made.';
     COMMENT ON COLUMN supplier_products.cas IS
       'Checksum-validated at extraction. A value here passed the CAS check digit; it is not merely shaped like one.';
+    COMMENT ON COLUMN supplier_products.listing_notice IS
+      'If present, the marketplace MUST display this on the listing and must not offer a commercial quote without a freedom-to-operate check.';
     COMMENT ON COLUMN supplier_products.source_line IS
       'The verbatim line the row was read from, so a wrong pairing can be checked against the PDF without hunting for it.';
   `);
