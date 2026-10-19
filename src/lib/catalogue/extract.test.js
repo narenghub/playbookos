@@ -206,3 +206,49 @@ test('every row records its source', () => {
   assert.equal(rows[0].supplier, 'Egis');
   assert.match(rows[0].line, /Aspirin/);
 });
+
+// ── THE DICTIONARY PATH ─────────────────────────────────────────────────────
+//
+// Most supplier portfolios carry no CAS numbers at all. Reliance's API list is three columns of
+// molecule name, commercial status and DMF status, and the CAS-anchored extractor found nothing
+// in it. The platform already holds ~3,000 real molecule names, so they are the anchor instead.
+const { matchMolecule } = require('./extract');
+const DICT = new Set(['temozolomide', 'capecitabine', 'bortezomib', 'erlotinib',
+  'alogliptin', 'alogliptin benzoate', 'apixaban']);
+
+test('a known molecule is found on a line with no CAS', () => {
+  const { rows } = rowsFromText('1  Temozolomide  Commercialized  Active', { dictionary: DICT });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].name, 'Temozolomide');
+  assert.equal(rows[0].cas, null);
+  assert.equal(rows[0].confidence, 'medium');
+  assert.equal(rows[0].name_source, 'dictionary');
+  assert.equal(rows[0].dictionary, true);
+});
+
+test('the longest dictionary match wins, because the salt form matters when quoting', () => {
+  assert.equal(matchMolecule('12 Alogliptin Benzoate Scale-up', DICT), 'Alogliptin Benzoate');
+});
+
+test('marketing copy does not match the dictionary', () => {
+  const { rows } = rowsFromText(
+    'We are a leading manufacturer of active pharmaceutical ingredients', { dictionary: DICT });
+  assert.equal(rows.length, 0);
+});
+
+test('without a dictionary the second pass does nothing', () => {
+  assert.equal(rowsFromText('1  Temozolomide  Commercialized').rows.length, 0);
+});
+
+test('a CAS-anchored row is not duplicated by the dictionary pass', () => {
+  const { rows } = rowsFromText('Apixaban  503612-47-3  API', { dictionary: DICT });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].cas, '503612-47-3');
+  assert.equal(rows[0].name_source, 'same-line');
+});
+
+test('a spaced CAS is recovered before the rows are built', () => {
+  const { rows } = rowsFromText('3  Bortezomib KSM - 2  N - t - Butoxycarbonyl  13734 - 34 - 4');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].cas, '13734-34-4');
+});

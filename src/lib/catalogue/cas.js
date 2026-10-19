@@ -27,6 +27,25 @@
 // The boundaries matter: without them "12345-67-89" yields a false "2345-67-8" from the middle.
 const CAS_RE = /(?<![\d-])(\d{2,7})-(\d{2})-(\d)(?![\d-])/g;
 
+// ── A CAS NUMBER WITH SPACES IN IT IS STILL A CAS NUMBER ────────────────────
+//
+// Reliance's KSM list renders every hyphen with spaces around it — "205393 - 21 - 1",
+// "13734 - 34 - 4" — and so does the chemical name beside it: "(1S,2S,3R,5S) - Pinanediol - L -
+// phenylalanine". Whether the typist did that or the designer letter-spaced the table does not
+// matter; the text layer contains the spaces, the pattern below does not match them, and a
+// three-page product list reported ZERO products while appearing to parse cleanly.
+//
+// The collapse is deliberately narrow: a hyphen is only closed up when a DIGIT sits on both sides
+// of it. That catches every CAS number and leaves chemical names alone — "Pinanediol - L -
+// phenylalanine" has letters around its hyphens and is untouched, as is "Bortezomib n - 1".
+function collapseDigitHyphens(text) {
+  // Run twice: in "205393 - 21 - 1" the two hyphens overlap on the digits between them, and a
+  // single pass consumes the first match's trailing digit before the second can use it.
+  let s = String(text == null ? '' : text);
+  for (let i = 0; i < 2; i += 1) s = s.replace(/(\d)\s+-\s+(\d)/g, '$1-$2');
+  return s;
+}
+
 /** Does this string's final digit match the checksum over the others? */
 function validCas(s) {
   const m = /^(\d{2,7})-(\d{2})-(\d)$/.exec(String(s || '').trim());
@@ -61,4 +80,4 @@ function findCas(text) {
   return out;
 }
 
-module.exports = { validCas, findCas, CAS_RE };
+module.exports = { validCas, findCas, collapseDigitHyphens, CAS_RE };

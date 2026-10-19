@@ -80,3 +80,29 @@ test('findCas on empty or junk input returns nothing', () => {
   assert.deepEqual(findCas(null), []);
   assert.deepEqual(findCas('no numbers here at all'), []);
 });
+
+// ── A CAS NUMBER WITH SPACES ROUND ITS HYPHENS ──────────────────────────────
+//
+// Reliance's KSM list renders every hyphen spaced — "205393 - 21 - 1" — and the pattern did not
+// match, so a three-page product list reported zero products while appearing to parse cleanly.
+const { collapseDigitHyphens } = require('./cas');
+
+test('collapseDigitHyphens recovers a spaced CAS number', () => {
+  assert.equal(collapseDigitHyphens('205393 - 21 - 1'), '205393-21-1');
+  assert.equal(collapseDigitHyphens('13734 - 34 - 4'), '13734-34-4');
+  assert.deepEqual(findCas(collapseDigitHyphens('205393 - 21 - 1')).map((x) => x.cas), ['205393-21-1']);
+});
+
+// The collapse must not touch a chemical name, which is full of hyphens with LETTERS round them.
+test('collapseDigitHyphens leaves chemical names alone', () => {
+  const name = '(1S,2S,3R,5S) - Pinanediol - L - phenylalanine - L - leucine';
+  assert.equal(collapseDigitHyphens(name), name);
+  assert.equal(collapseDigitHyphens('Bortezomib n - 1'), 'Bortezomib n - 1');
+  assert.equal(collapseDigitHyphens('N - t - Butoxycarbonyl - L - Phenylalanine'),
+    'N - t - Butoxycarbonyl - L - Phenylalanine');
+});
+
+test('a spaced CAS is found on a line that also carries a hyphenated chemical name', () => {
+  const line = collapseDigitHyphens('N - t - Butoxycarbonyl - L - Phenylalanine  13734 - 34 - 4');
+  assert.deepEqual(findCas(line).map((x) => x.cas), ['13734-34-4']);
+});

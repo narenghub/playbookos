@@ -65,10 +65,19 @@ function classifyRow(row, ctx = {}) {
   if (!name) {
     return { decision: 'reject', reason: 'no product name could be read next to this CAS number', priority: 0 };
   }
-  if (!r.cas) {
+  // ── A MISSING CAS IS NOT THE SAME AS AN UNIDENTIFIED MOLECULE ────
+  //
+  // The first version held every row without a CAS number, and the first live run showed why that
+  // is wrong: Alivus sent a clean spreadsheet of 158 molecule names with no CAS column, and all
+  // 158 were held. "Apixaban" is not ambiguous. Neither is "Temozolomide" on Reliance's list.
+  //
+  // So the test is whether the molecule was IDENTIFIED — by a checksum-valid CAS number, or by
+  // matching a molecule the platform already knows. A name that matched nothing and carries no CAS
+  // is still held, because that is a genuinely unknown string.
+  if (!r.cas && !r.dictionary) {
     return {
       decision: 'hold',
-      reason: 'no CAS number — the molecule cannot be identified with certainty. Ask the supplier.',
+      reason: 'no CAS number and the name matches no molecule we know — ask the supplier to confirm what this is',
       priority: 0,
     };
   }
@@ -111,6 +120,13 @@ function classifyRow(row, ctx = {}) {
   }
 
   // ── NEW, AND RANKED BY WHETHER ANYONE WANTS IT ────
+  // A name match is a weaker identification than a checksum, so an otherwise identical row ranks
+  // below one carrying a CAS number — and the reason says so, because the reviewer should know
+  // which rows would benefit from asking the supplier for CAS numbers.
+  const noCas = !r.cas;
+  const less = (p) => (noCas ? Math.max(1, p - 15) : p);
+  const note = (why) => (noCas ? `${why} — identified by name only, no CAS on the document` : why);
+
   const demand = ctx.demandCas || new Set();
   const demandNames = ctx.demandNames || new Set();
   const wanted = (r.cas && demand.has(r.cas)) || demandNames.has(norm(name));
@@ -119,23 +135,23 @@ function classifyRow(row, ctx = {}) {
   if (wanted) {
     return {
       decision: 'list',
-      reason: regulated
+      reason: note(regulated
         ? 'evidenced demand AND a filed DMF/CEP — list this first'
-        : 'evidenced demand — somebody is already looking for this molecule',
-      priority: regulated ? 100 : 85,
+        : 'evidenced demand — somebody is already looking for this molecule'),
+      priority: less(regulated ? 100 : 85),
     };
   }
   if (regulated) {
     return {
       decision: 'list',
-      reason: 'a filed DMF or CEP, which is what a buyer asks for second after price',
-      priority: 60,
+      reason: note('a filed DMF or CEP, which is what a buyer asks for second after price'),
+      priority: less(60),
     };
   }
   return {
     decision: 'list',
-    reason: 'new product, no demand signal yet — list it, but it is not the one to lead with',
-    priority: 30,
+    reason: note('new product, no demand signal yet — list it, but it is not the one to lead with'),
+    priority: less(30),
   };
 }
 

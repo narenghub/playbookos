@@ -22,7 +22,51 @@
 // extraction is lossy, and a wrong CAS on a pharma listing is a different molecule, not a typo.
 'use strict';
 
-const { findCas, validCas } = require('./cas');
+const { findCas, validCas, collapseDigitHyphens } = require('./cas');
+
+const normWords = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * The longest known molecule name appearing in a line.
+ *
+ * ── WHY A DICTIONARY IS NEEDED AT ALL ───────────────────────────────────────
+ *
+ * The CAS anchor is exact, and most of these documents do not use it. Reliance's API portfolio is
+ * the clearest case: three columns, no CAS anywhere.
+ *
+ *     1  Temozolomide    Commercialized  Active
+ *     2  Capecitabine    Commercialized  Active
+ *
+ * Those are real products and the file yielded nothing. But the platform already holds roughly
+ * three thousand real molecule names — 498 with a confirmed DMF, 2,847 named in clinical trials —
+ * and that is a dictionary. Matching against it is nearly as safe as a checksum, because a
+ * marketing line does not accidentally contain "Temozolomide".
+ *
+ * It also inverts the question usefully. Instead of "what products are in this brochure", it
+ * becomes "which molecules we already know about does this supplier make" — which is the
+ * commercially interesting question, since those are the ones with demand attached.
+ *
+ * Longest match wins: "Alogliptin Benzoate" beats "Alogliptin", and the salt form matters when
+ * quoting.
+ */
+function matchMolecule(line, dict) {
+  if (!dict || !dict.size) return null;
+  const words = normWords(line).split(' ').filter(Boolean);
+  let best = null;
+  for (let i = 0; i < words.length; i += 1) {
+    for (let n = Math.min(5, words.length - i); n >= 1; n -= 1) {
+      const cand = words.slice(i, i + n).join(' ');
+      if (cand.length < 5) continue;               // "urea" and "zinc" match far too much
+      if (!dict.has(cand)) continue;
+      if (!best || cand.length > best.length) best = cand;
+    }
+  }
+  if (!best) return null;
+  // Recover the name as the document spells it, so the review table shows the supplier's wording.
+  const re = new RegExp(best.split(' ').map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[^A-Za-z0-9]+'), 'i');
+  const m = re.exec(line);
+  return m ? m[0].trim() : best;
+}
 
 // Words that mean the line is furniture, not a product.
 const HEADER_WORDS = /^(s\.?\s?no|sr\.?\s?no|no|item|product|products|name|product name|description|cas|cas no|cas number|category|status|remarks?|grade|page|index|contents?|tel|fax|email|address|website)\.?:?$/i;
@@ -111,8 +155,12 @@ const NOISE_LINE = /@|https?:|www\.|\btel\b|\bfax\b|\bemail\b|\bcopyright\b|\bal
  *                human, never treated as products.
  */
 function rowsFromText(text, opts = {}) {
-  const src = String(text == null ? '' : text).replace(/\r\n/g, '\n');
+  // A CAS number rendered with spaces round its hyphens — "205393 - 21 - 1" — is still a CAS
+  // number, and a whole Reliance product list was lost to that. Closed up before anything else
+  // reads the text; see collapseDigitHyphens for why it is safe for chemical names.
+  const src = collapseDigitHyphens(String(text == null ? '' : text).replace(/\r\n/g, '\n'));
   const lines = src.split('\n');
+  const dict = opts.dictionary || null;
 
   const rows = [];
   const seen = new Set();
@@ -167,6 +215,38 @@ function rowsFromText(text, opts = {}) {
         markers: markers(context),
         confidence,
         name_source: nameSource,
+        line: line.trim().slice(0, 300),
+        source_file: opts.file || null,
+        supplier: opts.supplier || null,
+      });
+    }
+  }
+
+  // ── SECOND PASS: KNOWN MOLECULES ON LINES WITH NO CAS ────
+  //
+  // Most of these documents carry no CAS at all. A line naming a molecule the platform already
+  // knows about is a product, and treating it as one is what turns Reliance's portfolio from zero
+  // rows into its actual contents. This is a WEAKER anchor than a checksum, so the rows are marked
+  // medium confidence and carry name_source 'dictionary'; the classifier and the reviewer both see
+  // that.
+  if (dict && dict.size) {
+    for (const line of lines) {
+      if (findCas(line).length) continue;          // already handled, with a stronger anchor
+      if (NOISE_LINE.test(line)) continue;
+      const hit = matchMolecule(line, dict);
+      if (!hit) continue;
+      const name = cleanName(hit) || hit;
+      const key = `${name.toLowerCase()}|`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({
+        name,
+        cas: null,
+        grade: detect(GRADES, line) || detect(GRADES, src.slice(0, 2000)) || null,
+        markers: markers(line),
+        confidence: 'medium',
+        name_source: 'dictionary',
+        dictionary: true,
         line: line.trim().slice(0, 300),
         source_file: opts.file || null,
         supplier: opts.supplier || null,
@@ -258,9 +338,14 @@ function rowsFromSheet(grid, opts = {}) {
     if (seen.has(key)) continue;
     seen.add(key);
 
+    // A spreadsheet column of names with no CAS column is exactly what Alivus sent — 158 real
+    // molecules. Matching them against the dictionary is what stops all 158 being held.
+    const known = !cas && opts.dictionary ? matchMolecule(name || joined, opts.dictionary) : null;
+
     rows.push({
       name,
       cas,
+      dictionary: Boolean(known),
       grade: (cols.grade >= 0 && detect(GRADES, r[cols.grade] || '')) || detect(GRADES, joined) || null,
       markers: markers(joined),
       confidence: name && cas ? 'high' : 'medium',
@@ -286,4 +371,4 @@ function rowsFromSheet(grid, opts = {}) {
   };
 }
 
-module.exports = { rowsFromText, rowsFromSheet, cleanName, markers, detect, GRADES };
+module.exports = { rowsFromText, rowsFromSheet, cleanName, markers, detect, matchMolecule, GRADES };

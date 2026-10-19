@@ -114,6 +114,15 @@ async function loadContext() {
     ctx.notes.push(`${r.rows.length} molecule(s) named in trials`);
   } catch (_) { ctx.notes.push('study_molecules unreadable'); }
 
+  // ── ONE DICTIONARY OF EVERY MOLECULE THE PLATFORM KNOWS ────
+  //
+  // Most supplier portfolios print no CAS numbers, so the names are the anchor. Catalogue names
+  // are included as well as demand names: a supplier listing something we already sell is the
+  // second-source case, and missing it because the row had no CAS would lose the most valuable
+  // outcome in the exercise.
+  ctx.dictionary = new Set([...ctx.demandNames, ...ctx.catalogueNames].filter((n) => n && n.length >= 5));
+  ctx.notes.push(`${ctx.dictionary.size} molecule name(s) in the matching dictionary`);
+
   return ctx;
 }
 
@@ -186,7 +195,7 @@ async function main() {
             say(`      ✗ no text layer (${t.pages} pages) — scanned`);
             continue;
           }
-          res = rowsFromText(t.text, { file: f.filename, supplier: r.company });
+          res = rowsFromText(t.text, { file: f.filename, supplier: r.company, dictionary: ctx.dictionary });
           say(`      ${t.pages} page(s), ${t.chars} chars, ${res.rows.length} product(s), ${res.stats.high_confidence} high confidence`);
           if (DUMP) {
             const lines = t.text.split('\n').filter((l) => l.trim());
@@ -201,7 +210,7 @@ async function main() {
           res = { rows: [], unanchored: [], stats: {} };
           for (const sheet of wb.SheetNames) {
             const grid = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { header: 1, raw: false, defval: '' });
-            const r2 = rowsFromSheet(grid, { file: `${f.filename}#${sheet}`, supplier: r.company });
+            const r2 = rowsFromSheet(grid, { file: `${f.filename}#${sheet}`, supplier: r.company, dictionary: ctx.dictionary });
             res.rows.push(...r2.rows);
           }
           say(`      ${wb.SheetNames.length} sheet(s), ${res.rows.length} product(s)`);

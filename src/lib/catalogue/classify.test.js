@@ -122,3 +122,34 @@ test('classifyAll copes with nothing', () => {
   assert.deepEqual(classifyAll([]).rows, []);
   assert.deepEqual(classifyAll(null).rows, []);
 });
+
+// ── A MISSING CAS IS NOT AN UNIDENTIFIED MOLECULE ───────────────────────────
+//
+// The first live run held all 158 molecules on Alivus's spreadsheet because it has no CAS column.
+// "Apixaban" is not ambiguous. The test is whether the molecule was identified, not whether a CAS
+// was printed.
+test('a molecule identified by name is listable without a CAS', () => {
+  const r = classifyRow(row({ cas: null, dictionary: true, confidence: 'medium', name_source: 'dictionary' }));
+  assert.equal(r.decision, 'list');
+  assert.match(r.reason, /no CAS on the document/);
+});
+
+test('a name matching nothing, with no CAS, is still held', () => {
+  const r = classifyRow(row({ name: 'Unknown Thing 7', cas: null, dictionary: false }));
+  assert.equal(r.decision, 'hold');
+  assert.match(r.reason, /matches no molecule/);
+});
+
+// A name match is a weaker claim than a checksum, and the ranking should say so.
+test('an identical row with a CAS outranks one identified by name alone', () => {
+  const withCas = classifyRow(row({ markers: ['DMF'] }));
+  const byName = classifyRow(row({ cas: null, dictionary: true, markers: ['DMF'] }));
+  assert.ok(withCas.priority > byName.priority);
+  assert.ok(byName.priority > 0);
+});
+
+test('the holds still hold when identified only by name', () => {
+  const r = classifyRow(row({ name: 'Semaglutide', cas: null, dictionary: true }));
+  assert.equal(r.decision, 'hold');
+  assert.match(r.reason, /GLP-1/);
+});
