@@ -76,44 +76,61 @@ function useClass(row, ctx = {}) {
   const n = norm((row && row.name) || '');
   if (!n) return { use_class: 'unknown', listing_notice: RUO_NOTICE };
 
-  // ── A DMF DOES NOT CLEAR A PATENT ────
-  //
-  // Found in the first --execute run: Semaglutide came back use_class 'commercial' with no
-  // listing notice, because it IS on the DMF register — Chinese and Indian manufacturers file
-  // DMFs for the GLP-1s while the patent is still live. The `hold` decision saved it that day,
-  // but a hold that somebody later approves would have reached the marketplace with no
-  // restriction attached, which is the precise failure this column exists to prevent.
-  //
-  // So the restricted list is checked FIRST and overrides every other signal. Sinopep's own
-  // brochure makes the point: their line reads "Tirzepatide*  US", the asterisk doing the work a
-  // listing has to do explicitly.
+  // The named-restriction list always wins. A GLP-1 is restricted whatever else is true of it.
   for (const [re, why] of RESTRICTED) {
     if (re.test(String((row && row.name) || ''))) {
       return { use_class: 'rnd_only', listing_notice: RUO_NOTICE, patent_check: why };
     }
   }
 
+  // ── THE ONLY POSITIVE EVIDENCE WE HAVE IS OUR OWN CATALOGUE ────
+  //
+  // This started as "on the DMF register → commercial", which is wrong, and the first bulk-review
+  // dry run showed exactly how wrong: Orforglipron, Inclisiran, Nusinersen, Elacestrant, Olaparib,
+  // Palbociclib, Ribociclib, Enzalutamide, Ivacaftor, Finerenone, Capivasertib, Encorafenib and
+  // Apalutamide were all cleared as commercially supplyable and queued for approval. Every one is
+  // under patent.
+  //
+  // The error was treating a DMF filing as patent clearance. It is not, for ANY molecule: generic
+  // manufacturers file DMFs years before expiry — that is the whole business model of the
+  // portfolios these rows came from. Patching the GLP-1s by name fixed four molecules and left the
+  // inference that produced them untouched.
+  //
+  // Nothing in this platform can determine patent status. It is a legal question about one
+  // molecule, one territory, one date. So the default is inverted: a row is restricted unless
+  // there is POSITIVE evidence it is open, and the only positive evidence available is that
+  // Abiozen already sells it — a decision a human already made, for that molecule, deliberately.
+  //
+  // Everything else carries the research-use notice until somebody checks. For a research-chemical
+  // marketplace that is the normal posture, not a limitation, and Option B lists the molecules
+  // either way — the notice decides how, not whether.
+  if ((ctx.catalogueNames || new Set()).has(n)) {
+    return { use_class: 'commercial', listing_notice: null };
+  }
+
   const inTrials = (ctx.trialNames || new Set()).has(n);
   const inDmf = (ctx.dmfNames || new Set()).has(n);
-  const inCatalogue = (ctx.catalogueNames || new Set()).has(n);
-
-  // Already sold on abiozen.com, or on the DMF register: commercial supply is already the premise.
-  if (inDmf || inCatalogue) return { use_class: 'commercial', listing_notice: null };
 
   if (inTrials) {
     return {
       use_class: 'rnd_only',
       listing_notice: RUO_NOTICE,
-      patent_check: 'named in active clinical trials and absent from the DMF register — likely still under patent',
+      patent_check: inDmf
+        ? 'in active clinical trials; a DMF exists but a DMF is a filing, not patent clearance — confirm freedom to operate'
+        : 'named in active clinical trials, which usually means live patent protection',
     };
   }
-
-  // Neither in trials nor on the register. Nothing suggests it is restricted, and nothing
-  // confirms it is open, so it gets the restriction until somebody checks.
+  if (inDmf) {
+    return {
+      use_class: 'rnd_only',
+      listing_notice: RUO_NOTICE,
+      patent_check: 'on the DMF register, which is a filing rather than patent clearance — a generic maker may file years before expiry',
+    };
+  }
   return {
     use_class: 'rnd_only',
     listing_notice: RUO_NOTICE,
-    patent_check: 'no DMF on the register — status unverified, so the research-use restriction applies until checked',
+    patent_check: 'no evidence either way — the research-use restriction applies until somebody checks',
   };
 }
 

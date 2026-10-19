@@ -15,14 +15,15 @@ test('a new product with no signal is listable but not a priority', () => {
   assert.ok(r.priority < 50);
 });
 
-// COM is a context in which the molecule may be supplied commercially, so these test the demand
-// and regulatory signals rather than the research-use penalty, which has its own tests below.
-const COM = { dmfNames: new Set(['paracetamol']) };
+// These compare rows that are restricted EQUALLY, so the research-use penalty is constant and
+// cancels out, leaving the signal under test as the only difference. There is no "commercial
+// context" to borrow any more — see the block at the end of this file for why.
+const COM = {};
 
 test('a filed DMF or CEP raises it', () => {
   assert.ok(classifyRow(row({ markers: ['DMF'] }), COM).priority >
             classifyRow(row(), COM).priority);
-  assert.ok(classifyRow(row({ markers: ['CEP'] }), COM).priority > 50);
+  assert.ok(classifyRow(row({ markers: ['CEP'] }), COM).priority > 30);
 });
 
 // ── THE OUTCOME THAT MATTERS MOST COMMERCIALLY ──────────────────────────────
@@ -49,13 +50,15 @@ test('evidenced demand beats everything else', () => {
   assert.ok(wanted.priority > classifyRow(row({ markers: ['DMF'] }), COM).priority);
 
   const both = classifyRow(row({ markers: ['DMF'] }), ctx);
-  assert.equal(both.priority, 100, 'demand plus a DMF, commercially supplyable, is the top');
+  // 100 for demand + DMF, less the 25 every research-use row carries. Nothing scores 100 any more
+  // unless Abiozen already sells it, which is the point of the inversion.
+  assert.equal(both.priority, 75, 'demand plus a DMF is the top of the restricted pile');
 });
 
 test('demand can be matched on the name when the CAS differs', () => {
   const r = classifyRow(row({ cas: '51-21-8' }), { ...COM, demandNames: new Set(['paracetamol']) });
   assert.equal(r.decision, 'list');
-  assert.ok(r.priority >= 85);
+  assert.ok(r.priority >= 60);
 });
 
 // ── THE ONES THAT MUST NEVER LAND IN "LIST" ─────────────────────────────────
@@ -181,21 +184,37 @@ test('a molecule in active trials with no DMF is research-use only', () => {
   assert.match(u.patent_check, /clinical trials/);
 });
 
-test('a molecule on the DMF register may be supplied commercially', () => {
-  const u = useClass({ name: 'Allopurinol' }, CTX);
-  assert.equal(u.use_class, 'commercial');
-  assert.equal(u.listing_notice, null);
+// ── A DMF IS A FILING, NOT PATENT CLEARANCE ────
+//
+// This test asserted the opposite until the first bulk-review dry run, which queued Orforglipron,
+// Inclisiran, Nusinersen, Olaparib, Palbociclib, Ribociclib, Enzalutamide, Ivacaftor and
+// Capivasertib for approval as "commercial". All under patent. Generic manufacturers file DMFs
+// years before expiry — that is the business model of the portfolios these rows came from.
+test('a DMF does NOT clear a molecule for commercial supply', () => {
+  // Ezetimibe, not Allopurinol: Allopurinol is in CTX's trial set too, so it takes the trials
+  // branch and gives a different reason. This needs the DMF-only case to test the DMF-only rule.
+  const u = useClass({ name: 'Ezetimibe' }, CTX);
+  assert.equal(u.use_class, 'rnd_only');
+  assert.match(u.patent_check, /filing rather than patent clearance/);
+
+  // And where both are true, the reason says both.
+  const both = useClass({ name: 'Allopurinol' }, CTX);
+  assert.equal(both.use_class, 'rnd_only');
+  assert.match(both.patent_check, /a DMF is a filing, not patent clearance/);
 });
 
+// The only positive evidence available: Abiozen already sells it, which is a decision a human
+// already made deliberately, for that molecule.
 test('something already sold on the marketplace is commercial', () => {
   assert.equal(useClass({ name: 'Paracetamol' }, CTX).use_class, 'commercial');
+  assert.equal(useClass({ name: 'Paracetamol' }, CTX).listing_notice, null);
 });
 
 // The safe default is the restricted one.
 test('an unrecognised molecule is restricted until somebody checks', () => {
   const u = useClass({ name: 'Mystery Compound' }, CTX);
   assert.equal(u.use_class, 'rnd_only');
-  assert.match(u.patent_check, /unverified/);
+  assert.match(u.patent_check, /no evidence either way/);
 });
 
 test('every outcome carries a use class, including hold and reject', () => {
@@ -208,7 +227,7 @@ test('every outcome carries a use class, including hold and reject', () => {
 
 // A row that can be sold today is worth more than one needing a legal opinion first.
 test('a commercially supplyable molecule outranks a restricted one', () => {
-  const ok = classifyRow(row({ name: 'Allopurinol', cas: null, dictionary: true }), CTX);
+  const ok = classifyRow(row({ name: 'Paracetamol', cas: null, dictionary: true }), CTX);
   const ruo = classifyRow(row({ name: 'Orforglipron', cas: null, dictionary: true }), CTX);
   assert.equal(ok.use_class, 'commercial');
   assert.equal(ruo.use_class, 'rnd_only');
@@ -229,8 +248,8 @@ test('the restriction survives a hold — an approved hold must not lose it', ()
 // 'commercial' with listing_notice null, because it IS on the DMF register — manufacturers file
 // DMFs for the GLP-1s while the patent is still live. The hold saved it that day; a hold somebody
 // later approved would have reached the marketplace unrestricted.
-test('a restricted molecule stays restricted even when it is on the DMF register', () => {
-  const onRegister = { dmfNames: new Set(['semaglutide', 'tirzepatide', 'fentanyl citrate']) };
+test('a restricted molecule stays restricted even when it is in our own catalogue', () => {
+  const onRegister = { catalogueNames: new Set(['semaglutide', 'tirzepatide', 'fentanyl citrate']) };
   for (const n of ['Semaglutide', 'Tirzepatide', 'Fentanyl Citrate']) {
     const u = useClass({ name: n }, onRegister);
     assert.equal(u.use_class, 'rnd_only', `${n} must stay restricted`);
@@ -246,8 +265,10 @@ test('…and the restriction survives into the classified row', () => {
   assert.equal(r.listing_notice, RUO_NOTICE);
 });
 
-// The override must not sweep up everything on the register.
-test('an ordinary molecule on the register is still commercial', () => {
-  assert.equal(useClass({ name: 'Allopurinol' }, { dmfNames: new Set(['allopurinol']) }).use_class,
-    'commercial');
+// The restricted list is not the only thing holding molecules back any more, but it must still
+// produce its OWN reason rather than the generic one.
+test('a named restriction gives its own reason, not the generic one', () => {
+  const u = useClass({ name: 'Semaglutide' }, { dmfNames: new Set(['semaglutide']) });
+  assert.equal(u.use_class, 'rnd_only');
+  assert.match(u.patent_check, /GLP-1/);
 });

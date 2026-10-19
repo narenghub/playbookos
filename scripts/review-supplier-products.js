@@ -36,6 +36,8 @@
 'use strict';
 
 const { initDB, query } = require('../src/lib/db');
+const { RUO_NOTICE } = require('../src/lib/catalogue/classify');
+const RUO_NOTICE_TEXT = RUO_NOTICE;
 
 const arg = (n, d) => {
   const h = process.argv.find((a) => a.startsWith(`--${n}=`));
@@ -46,6 +48,15 @@ const EXECUTE = process.argv.includes('--execute');
 const BY = arg('by', 'naren');
 
 const WANTS = ['approve', 'reject', 'hold'].filter((a) => process.argv.includes(`--${a}`));
+// ── CLEARING A MOLECULE FOR COMMERCIAL SUPPLY ────
+//
+// Nothing in the platform can determine patent status, so use_class defaults to rnd_only for
+// everything Abiozen does not already sell. The only way a row becomes `commercial` is a person
+// saying so, having checked — which is what this does, by id, with the reason recorded.
+//
+// --note is REQUIRED here. "Who cleared this and on what basis" is the question that gets asked
+// when a patent holder writes, and an empty answer is the wrong one.
+const SET_USE = arg('set-use', null);
 const USE = arg('use', null);
 const SUGGESTED = arg('suggested', null);
 const SUPPLIER = arg('supplier', null);
@@ -82,6 +93,43 @@ async function main() {
     say(`      node scripts/review-supplier-products.js --approve --use=commercial --suggested=list`);
     say(`      node scripts/review-supplier-products.js --approve --use=commercial --suggested=second_source\n`);
     say(`   Nothing reaches the marketplace until a row is approved — the export takes --status=approved.\n`);
+    return;
+  }
+
+  // ── --set-use: a human clearing a molecule for commercial supply ────
+  if (SET_USE) {
+    if (!['commercial', 'rnd_only'].includes(SET_USE)) {
+      say(`✗ --set-use must be commercial or rnd_only`); process.exit(1);
+    }
+    if (!IDS.length) {
+      say('✗ --set-use needs explicit --id=1,2,3. Clearing a molecule for commercial supply is a');
+      say('  per-molecule legal judgement and must never be a bulk action.\n');
+      process.exit(1);
+    }
+    if (SET_USE === 'commercial' && !NOTE) {
+      say('✗ --note is required when clearing for commercial supply. Record who checked and on');
+      say('  what basis — that is the question asked when a patent holder writes.\n');
+      process.exit(1);
+    }
+    const look = (await query(
+      `SELECT id, product_name, supplier, use_class, patent_check FROM supplier_products
+        WHERE event_slug = $1 AND id = ANY($2::bigint[])`, [EVENT, IDS])).rows;
+    say(`\n── ${EVENT} · SET use_class = ${SET_USE} · ${EXECUTE ? 'WRITING' : 'dry run'}\n`);
+    for (const r of look) {
+      say(`      ${String(r.id).padStart(5)}  ${(r.product_name || '').slice(0, 34).padEnd(36)} ${String(r.use_class).padEnd(11)} → ${SET_USE}`);
+      if (r.patent_check) say(`             was: ${r.patent_check}`);
+    }
+    if (!look.length) { say('   no rows with those ids.\n'); return; }
+    if (!EXECUTE) { say('\n   DRY RUN — nothing written. Re-run with --execute.\n'); return; }
+    const notice = SET_USE === 'commercial' ? null : RUO_NOTICE_TEXT;
+    const r = await query(
+      `UPDATE supplier_products
+          SET use_class = $3, listing_notice = $4,
+              patent_check = $5, review_note = COALESCE($6, review_note), updated_at = NOW()
+        WHERE event_slug = $1 AND id = ANY($2::bigint[]) RETURNING id`,
+      [EVENT, IDS, SET_USE, notice,
+       SET_USE === 'commercial' ? `cleared by ${BY}: ${NOTE}` : 'restricted by hand', NOTE]);
+    say(`\n   ✅ ${r.rows.length} row(s) set to ${SET_USE} by ${BY}.\n`);
     return;
   }
 

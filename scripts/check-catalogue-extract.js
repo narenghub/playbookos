@@ -154,11 +154,21 @@ const FIX = path.join(__dirname, '..', 'test-fixtures');
         JSON.stringify(abiRuo && [abiRuo.use_class, abiRuo.listing_notice]));
     } else ok('in trials, no DMF → research-use only, with the notice attached');
 
+    // A DMF is a FILING, not patent clearance — generic makers file years before expiry. The
+    // first bulk-review dry run cleared Orforglipron, Inclisiran, Olaparib and Palbociclib as
+    // commercial on exactly this reasoning, so the register no longer clears anything.
     const ibu = cls.find((r) => r.name === 'Ibuprofen');
-    if (!ibu || ibu.use_class !== 'commercial' || ibu.listing_notice) {
-      bad('a molecule on the DMF register is commercially supplyable',
+    if (!ibu || ibu.use_class !== 'rnd_only' || !ibu.listing_notice) {
+      bad('a DMF filing does NOT clear a molecule for commercial supply',
         JSON.stringify(ibu && [ibu.use_class, ibu.listing_notice]));
-    } else ok('on the DMF register → commercial, no restriction');
+    } else ok('on the DMF register → still restricted, because a filing is not clearance');
+
+    // The ONLY route to commercial: Abiozen already sells it — a human decision already made.
+    const inCat = cls.find((r) => r.name === 'Paracetamol');
+    if (!inCat || inCat.use_class !== 'commercial' || inCat.listing_notice) {
+      bad('a molecule already in the catalogue is commercially supplyable',
+        JSON.stringify(inCat && [inCat.use_class, inCat.listing_notice]));
+    } else ok('already in the catalogue → commercial, no restriction');
 
     // ── A PROPERLY CONTROLLED COMPARISON ────
     //
@@ -169,16 +179,16 @@ const FIX = path.join(__dirname, '..', 'test-fixtures');
     // The only way to isolate the variable is to classify THE SAME ROW twice, changing nothing
     // but whether the molecule is on the DMF register.
     const probe = rows.find((r) => r.name === 'Ibuprofen');
-    const asCommercial = classifyAll([probe], { dmfNames: new Set(['ibuprofen']) }).rows[0];
-    const asRestricted = classifyAll([probe], { dmfNames: new Set() }).rows[0];
+    const asCommercial = classifyAll([probe], { catalogueNames: new Set(['ibuprofen']) }).rows[0];
+    const asRestricted = classifyAll([probe], { catalogueNames: new Set() }).rows[0];
     if (asCommercial.use_class !== 'commercial' || asRestricted.use_class !== 'rnd_only') {
-      bad('the probe row changes class with the register',
+      bad('the probe row changes class with the catalogue',
         `${asCommercial.use_class} / ${asRestricted.use_class}`);
     } else if (!(asCommercial.priority > asRestricted.priority)) {
       bad('one row, two contexts: commercial must outrank restricted',
         `${asCommercial.priority} vs ${asRestricted.priority}`);
     } else {
-      ok(`same row, register the only difference — commercial ${asCommercial.priority} > restricted ${asRestricted.priority}`);
+      ok(`same row, catalogue the only difference — commercial ${asCommercial.priority} > restricted ${asRestricted.priority}`);
     }
 
     const sema = cls.find((r) => r.name === 'Semaglutide');
