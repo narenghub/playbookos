@@ -49,9 +49,17 @@ const SEGMENTS = {
   'procurement_ist  (22:30 CST daily)': ['procurement_team', 'procurement_director'],
   'dev_seo_ist      (01:30 CST daily)': ['dev_team', 'seo_specialist'],
   'us_team          (08:00 CST Mon-Fri)': ['sales_team', 'account_manager', 'support_team',
-    'recruitment_team', 'recruitment_director'],
+    'recruitment_team', 'recruitment_director', 'sales_director', 'business_dev'],
 };
 const COVERED = new Set(Object.values(SEGMENTS).flat());
+
+// Roles that are SUPPOSED to receive nothing, so the report can tell "excluded on purpose" from
+// "forgotten". Those two looked identical before — which is how business_dev went unnoticed.
+const EXEMPT = {
+  super_admin: 'gets the 07:00 CEO briefing instead',
+  admin: 'administrative, no KPIs of their own',
+  partner: 'external — we do not set a partner\'s agenda',
+};
 
 const say = (s = '') => console.log(s);
 const pad = (s, n) => String(s == null ? '' : s).padEnd(n);
@@ -78,18 +86,26 @@ async function main() {
   const users = (await query(
     `SELECT id, name, email, role, is_active FROM users WHERE is_active = 1 ORDER BY role, name`)).rows;
 
-  const uncovered = users.filter((u) => !COVERED.has(u.role));
+  const uncovered = users.filter((u) => !COVERED.has(u.role) && !EXEMPT[u.role]);
+  const byDesign = users.filter((u) => !COVERED.has(u.role) && EXEMPT[u.role]);
   say(`   ${users.length} active user(s)\n`);
   say('   SEGMENT COVERAGE');
   for (const [label, roles] of Object.entries(SEGMENTS)) {
     const n = users.filter((u) => roles.includes(u.role)).length;
     say(`      ${pad(label, 38)} ${n} user(s)   [${roles.join(', ')}]`);
   }
+  if (byDesign.length) {
+    say(`\n   ${byDesign.length} user(s) receive no tasks BY DESIGN:`);
+    for (const u of byDesign) say(`        ${pad(u.name, 24)} ${pad(u.role, 20)} ${EXEMPT[u.role]}`);
+  }
   if (uncovered.length) {
     say(`\n   ⚠ ${uncovered.length} active user(s) are in NO segment and can never be assigned a task:`);
     for (const u of uncovered) say(`        ${pad(u.name, 24)} ${pad(u.role, 20)} ${u.email}`);
     say(`      The segment lists in orchestrator.js are allowlists. A role missing from all three`);
-    say(`      produces no error and no task — it is simply never looked at.`);
+    say(`      produces no error and no task — it is simply never looked at. src/lib/agents/`);
+    say(`      task-segment-coverage.test.js now fails at commit time on exactly this.`);
+  } else {
+    say(`\n   ✓ every non-exempt active user is in a segment`);
   }
   say();
 
@@ -155,14 +171,16 @@ async function main() {
   say('   PER PERSON — eligible? has KPIs? got tasks?');
   say(`      ${pad('name', 22)}${pad('role', 20)}${pad('segment', 10)}${pad('kpis wk', 9)}${pad('tasks today', 12)}tasks ${DAYS}d`);
   for (const u of users) {
-    const seg = COVERED.has(u.role) ? 'yes' : 'NO';
+    const seg = COVERED.has(u.role) ? 'yes' : (EXEMPT[u.role] ? 'n/a' : 'NO');
     const k = kpiBy[u.id];
     const kTxt = !kpiTable ? '?' : (k ? `${k.behind}/${k.total}` : '0');
     const t = (await query(
       `SELECT COUNT(*) FILTER (WHERE task_date::date = $2::date)::int today,
-              COUNT(*) FILTER (WHERE task_date::date >= ($2::date - $3::int))::int window
+              -- "window" is a RESERVED WORD in Postgres; as a bare alias it breaks the parse
+              -- with "syntax error at or near FROM", which points at the wrong line entirely.
+              COUNT(*) FILTER (WHERE task_date::date >= ($2::date - $3::int))::int recent
          FROM daily_tasks WHERE user_id = $1`, [u.id, today, DAYS])).rows[0];
-    say(`      ${pad(u.name, 22)}${pad(u.role, 20)}${pad(seg, 10)}${pad(kTxt, 9)}${pad(t.today, 12)}${t.window}`);
+    say(`      ${pad(u.name, 22)}${pad(u.role, 20)}${pad(seg, 10)}${pad(kTxt, 9)}${pad(t.today, 12)}${t.recent}`);
   }
   say();
 

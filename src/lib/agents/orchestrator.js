@@ -52,6 +52,32 @@ async function generateKpiTasks(roles) {
   return { role_users: users.length, tasks_created: created };
 }
 
+// ── WHICH ROLES GET AGENT-ASSIGNED TASKS, AND WHEN ──────────────────────────
+//
+// Declared once, here, because these lists are ALLOWLISTS: a role missing from all of them is
+// never looked at, produces no error, and generates no task. A team member reported that
+// self-assigned tasks "had not worked for a long time"; the system was in fact assigning 20-30
+// tasks a day to 7-11 people, and she was in `business_dev`, which appeared in none of these
+// lists. Nothing was broken. She was invisible.
+//
+// EXEMPT is the other half of the same rule. A role belongs there with a REASON, so that
+// "deliberately excluded" and "forgotten" stop looking identical — which is exactly what
+// business_dev looked like for months. A test asserts every built-in role is in a segment or in
+// EXEMPT, so adding a role to roles.js now forces that decision instead of silently creating
+// another invisible user.
+const SEGMENT_ROLES = {
+  procurement_ist: ['procurement_team', 'procurement_director'],
+  dev_seo_ist: ['dev_team', 'seo_specialist'],
+  us_team: ['sales_team', 'account_manager', 'support_team', 'recruitment_team',
+    'recruitment_director', 'sales_director', 'business_dev'],
+};
+
+const EXEMPT_ROLES = {
+  super_admin: 'gets the CEO briefing at 07:00 CST instead; sets the agenda rather than receiving one',
+  admin: 'administrative rather than operational — no KPIs of their own to advance',
+  partner: 'external. We do not set a partner\'s agenda; excludeExternalSql filters them anyway',
+};
+
 // Run the morning briefing for one segment. Segments:
 //   ceo            — CEO briefing (7am CST)
 //   procurement_ist— procurement team, India morning (9am IST / 10:30pm CST)
@@ -71,15 +97,14 @@ async function runMorningBriefing({ segment = 'all' } = {}) {
   }
   if (segment === 'procurement_ist' || segment === 'all') {
     await safe('procurement', () => runProcurementBriefing());
-    await safe('procurement_tasks', () => generateKpiTasks(['procurement_team', 'procurement_director']));
+    await safe('procurement_tasks', () => generateKpiTasks(SEGMENT_ROLES.procurement_ist));
   }
   if (segment === 'dev_seo_ist' || segment === 'all') {
-    await safe('dev_seo_tasks', () => generateKpiTasks(['dev_team', 'seo_specialist']));
+    await safe('dev_seo_tasks', () => generateKpiTasks(SEGMENT_ROLES.dev_seo_ist));
   }
   if (segment === 'us_team' || segment === 'all') {
     await safe('sales', () => runSalesBriefing());
-    await safe('us_team_tasks', () => generateKpiTasks(
-      ['sales_team', 'account_manager', 'support_team', 'recruitment_team', 'recruitment_director']));
+    await safe('us_team_tasks', () => generateKpiTasks(SEGMENT_ROLES.us_team));
   }
   if ((segment === 'us_team' || segment === 'all') && isMonday) {
     await safe('hr', () => runHRBriefing());
@@ -473,4 +498,4 @@ function workdayStatus(date = new Date()) {
   return { workday: true, reason: 'workday' };
 }
 
-module.exports = { runMorningBriefing, generateKpiTasks, runPerformanceCheck, runEscalationCheck, getDirectorRole, isWorkday, isFederalHoliday, workdayStatus };
+module.exports = { runMorningBriefing, generateKpiTasks, SEGMENT_ROLES, EXEMPT_ROLES, runPerformanceCheck, runEscalationCheck, getDirectorRole, isWorkday, isFederalHoliday, workdayStatus };
