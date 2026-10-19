@@ -71,31 +71,6 @@ const say = (s = '') => console.log(s);
 async function main() {
   await initDB();
 
-  // ── NO ACTION: REPORT WHAT IS WAITING ────
-  if (!WANTS.length) {
-    const rows = (await query(
-      `SELECT review_status, suggested, use_class, COUNT(*)::int c
-         FROM supplier_products WHERE event_slug = $1
-        GROUP BY 1,2,3 ORDER BY 1, 4 DESC`, [EVENT])).rows;
-    const total = rows.reduce((a, r) => a + r.c, 0);
-    say(`\n── ${EVENT} · ${total} extracted product(s)\n`);
-    let last = null;
-    for (const r of rows) {
-      if (r.review_status !== last) { say(`   ${r.review_status.toUpperCase()}`); last = r.review_status; }
-      say(`      ${String(r.suggested || '(none)').padEnd(15)} ${String(r.use_class || '(none)').padEnd(12)} ${r.c}`);
-    }
-    const ready = (await query(
-      `SELECT COUNT(*)::int c FROM supplier_products
-        WHERE event_slug = $1 AND review_status = 'pending'
-          AND suggested IN ('list','second_source') AND use_class = 'commercial'`, [EVENT])).rows[0].c;
-    say(`\n   ${ready} pending row(s) are suggested for listing AND commercially supplyable.`);
-    say(`   That is the obvious first batch:\n`);
-    say(`      node scripts/review-supplier-products.js --approve --use=commercial --suggested=list`);
-    say(`      node scripts/review-supplier-products.js --approve --use=commercial --suggested=second_source\n`);
-    say(`   Nothing reaches the marketplace until a row is approved — the export takes --status=approved.\n`);
-    return;
-  }
-
   // ── --set-use: a human clearing a molecule for commercial supply ────
   if (SET_USE) {
     if (!['commercial', 'rnd_only'].includes(SET_USE)) {
@@ -130,6 +105,35 @@ async function main() {
       [EVENT, IDS, SET_USE, notice,
        SET_USE === 'commercial' ? `cleared by ${BY}: ${NOTE}` : 'restricted by hand', NOTE]);
     say(`\n   ✅ ${r.rows.length} row(s) set to ${SET_USE} by ${BY}.\n`);
+    return;
+  }
+
+  // ── NO ACTION: REPORT WHAT IS WAITING ────
+  //
+  // This returns early, so anything that is an ACTION must be handled above it. --set-use was
+  // originally placed below and was therefore unreachable: running it printed this report and
+  // exited, which looks like the command worked and silently does nothing.
+  if (!WANTS.length) {
+    const rows = (await query(
+      `SELECT review_status, suggested, use_class, COUNT(*)::int c
+         FROM supplier_products WHERE event_slug = $1
+        GROUP BY 1,2,3 ORDER BY 1, 4 DESC`, [EVENT])).rows;
+    const total = rows.reduce((a, r) => a + r.c, 0);
+    say(`\n── ${EVENT} · ${total} extracted product(s)\n`);
+    let last = null;
+    for (const r of rows) {
+      if (r.review_status !== last) { say(`   ${r.review_status.toUpperCase()}`); last = r.review_status; }
+      say(`      ${String(r.suggested || '(none)').padEnd(15)} ${String(r.use_class || '(none)').padEnd(12)} ${r.c}`);
+    }
+    const ready = (await query(
+      `SELECT COUNT(*)::int c FROM supplier_products
+        WHERE event_slug = $1 AND review_status = 'pending'
+          AND suggested IN ('list','second_source') AND use_class = 'commercial'`, [EVENT])).rows[0].c;
+    say(`\n   ${ready} pending row(s) are suggested for listing AND commercially supplyable.`);
+    say(`   That is the obvious first batch:\n`);
+    say(`      node scripts/review-supplier-products.js --approve --use=commercial --suggested=list`);
+    say(`      node scripts/review-supplier-products.js --approve --use=commercial --suggested=second_source\n`);
+    say(`   Nothing reaches the marketplace until a row is approved — the export takes --status=approved.\n`);
     return;
   }
 
