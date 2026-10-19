@@ -44,6 +44,15 @@ const FROM_MAILBOX = arg('from', 'naren@abiozen.com');
 const ONLY = arg('supplier', null);
 const SHOW = Math.max(0, parseInt(arg('show', '12'), 10) || 0);
 const EXECUTE = process.argv.includes('--execute');
+// ── SEE THE TEXT BEFORE BELIEVING A ZERO ────────────────────────────────────
+//
+// The first live run read twelve PDFs that all HAD a text layer and returned zero products from
+// every one of them. Two explanations fit that equally well: these brochures genuinely do not
+// print CAS numbers, or the text came out mangled and the extractor never had a chance.
+//
+// Those lead to opposite fixes — redesign the anchor, or fix the text layer — so guessing between
+// them is how a day gets spent on the wrong one. --dump prints what was actually extracted.
+const DUMP = Math.max(0, parseInt(arg('dump', '0'), 10) || 0);
 
 const say = (s = '') => console.log(s);
 const isPdf = (f) => /\.pdf$/i.test(f.filename) || /pdf/i.test(f.mimeType || '');
@@ -178,7 +187,14 @@ async function main() {
             continue;
           }
           res = rowsFromText(t.text, { file: f.filename, supplier: r.company });
-          say(`      ${t.pages} page(s), ${res.rows.length} product(s), ${res.stats.high_confidence} high confidence`);
+          say(`      ${t.pages} page(s), ${t.chars} chars, ${res.rows.length} product(s), ${res.stats.high_confidence} high confidence`);
+          if (DUMP) {
+            const lines = t.text.split('\n').filter((l) => l.trim());
+            say(`      ── first ${Math.min(DUMP, lines.length)} non-empty line(s) of ${lines.length}:`);
+            for (const l of lines.slice(0, DUMP)) say(`         ${JSON.stringify(l.slice(0, 160))}`);
+            say(`      ── ${res.unanchored.length} line(s) look like product names with no CAS:`);
+            say(`         ${JSON.stringify(res.unanchored.slice(0, 15))}`);
+          }
         } else {
           const XLSX = require('xlsx');
           const wb = XLSX.read(buf, { type: 'buffer' });
