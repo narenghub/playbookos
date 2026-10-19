@@ -72,6 +72,13 @@ step "one-pager PDF matches its source" node scripts/build-one-pager.js --check
 # Valid SQL, plausible output, wrong institution. The fixture seeds both Oxfords, so dropping
 # country from the group key fails here rather than in front of a vendor.
 step "institution search runs on Postgres" node scripts/check-institution-search-sql.js
+# The supplier-catalogue chain, on two PDFs committed to test-fixtures/. The unit tests feed the
+# extractor hand-written strings, which proves the string logic and nothing about the layer that
+# actually broke twice: pdf-parse threw "bad XRef entry" on the first valid PDF it was given, and
+# pdfjs fills column gaps with synthetic whitespace ITEMS, so measuring glyph gaps found nothing
+# and every row number stayed glued to its product name. Both were invisible to every test that
+# did not open a PDF. This opens two, including the awkward layout real brochures use.
+step "catalogue extraction works on real PDFs" node scripts/check-catalogue-extract.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
