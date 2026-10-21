@@ -125,9 +125,14 @@ async function findEmailForPi(pi, orgName) {
   const url = `${EPMC}?query=${encodeURIComponent(q)}`
     + '&format=json&resultType=core&pageSize=25&sort=P_PDATE_D desc';
 
+  // A failure here must NOT read as "this lab has no address". That collapse is what made the
+  // first run report 0% across ten prolific chemists and look like a finding instead of a bug.
   let data;
-  try { data = await getJson(url); } catch (_) { return null; }
+  try { data = await getJson(url); } catch (e) {
+    return { error: e && e.message ? e.message : String(e) };
+  }
   const hits = (data.resultList && data.resultList.result) || [];
+  if (!hits.length) return { empty: 'no papers matched the author+affiliation query' };
 
   for (const h of hits) {
     const authors = ((h.authorList && h.authorList.author) || []).map((a) => ({
@@ -168,7 +173,7 @@ async function findEmailForPi(pi, orgName) {
       }
     }
   }
-  return null;
+  return { empty: `${hits.length} paper(s) matched, none carried an attributable address` };
 }
 
 // ── 3. WHAT THEY WORK ON, against what we can supply ─────────────────────────
@@ -234,7 +239,30 @@ async function main() {
   say(`      ${pad('PI', 26)}${pad('institution', 34)}${pad('dept', 13)}${pad('ends', 11)}email`);
 
   const rows = [];
+  let lookupErrors = 0;
+
+  // One PI, one lookup. Miller held three of the ten awards and Hergenrother three more, so the
+  // first run spent ten network round-trips to enrich five labs and printed each of them three
+  // times. The database deduplicated on write, which hid the waste in the output.
+  const byPi = new Map();
   for (const a of keep) {
+    const pis = a.principal_investigators || [];
+    const pi = pis.find((p) => p.is_contact_pi) || pis[0];
+    const org = a.organization || {};
+    if (!pi) { say(`      (award ${a.project_num} names no PI — skipped)`); continue; }
+    const key = `${normalizePerson(pi.full_name)}|${normalizeInstitution(org.org_name || '')}`;
+    const prev = byPi.get(key);
+    // Keep the award that runs longest: that is the budget still to be spent.
+    if (!prev || String(a.project_end_date || '') > String(prev.project_end_date || '')) {
+      byPi.set(key, a);
+    }
+  }
+  const deduped = [...byPi.values()];
+  if (deduped.length !== keep.length) {
+    say(`      ${keep.length} award(s) → ${deduped.length} distinct lab(s) (same PI, several grants)`);
+  }
+
+  for (const a of deduped) {
     const org = a.organization || {};
     const pis = (a.principal_investigators || []);
     // is_contact_pi marks the person who corresponds for the award. On a multi-PI grant that is
@@ -242,7 +270,9 @@ async function main() {
     const pi = pis.find((p) => p.is_contact_pi) || pis[0];
     if (!pi) { say(`      (award ${a.project_num} names no PI — skipped)`); continue; }
 
-    const found = await findEmailForPi(pi, org.org_name || '');
+    const look = await findEmailForPi(pi, org.org_name || '');
+    const found = look && look.email ? look : null;
+    if (look && look.error) lookupErrors += 1;
     const email = found && !suppressed.has(found.email) ? found.email : null;
     const aff = found && found.affiliation;
 
@@ -256,10 +286,15 @@ async function main() {
     say(`      ${pad(pi.full_name, 26)}${pad(String(org.org_name || '').slice(0, 32), 34)}`
       + `${pad(String(org.dept_type || '').slice(0, 11), 13)}`
       + `${pad(String(a.project_end_date || '').slice(0, 10), 11)}`
-      + (email || (found ? 'suppressed' : '—')));
+      + (email || (found ? 'suppressed'
+        : (look && look.error ? `LOOKUP FAILED: ${look.error}` : '—'))));
     await sleep(350);   // be a good citizen of a free public API
   }
 
+  if (lookupErrors) {
+    say(`\n   ⚠ ${lookupErrors} lookup(s) FAILED rather than came back empty. Those labs are not`);
+    say(`     unreachable — they are unmeasured. Fix the cause before trusting the rate below.`);
+  }
   const reachable = rows.filter((r) => r.found).length;
   say(`\n   ${rows.length} lab(s), ${reachable} with a published address `
     + `(${rows.length ? Math.round((reachable / rows.length) * 100) : 0}%)`);
