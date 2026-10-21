@@ -252,6 +252,7 @@ async function main() {
 
   const rows = [];
   let lookupErrors = 0;
+  let skipped = 0;
 
   // One PI, one lookup. Miller held three of the ten awards and Hergenrother three more, so the
   // first run spent ten network round-trips to enrich five labs and printed each of them three
@@ -274,53 +275,18 @@ async function main() {
     say(`      ${keep.length} award(s) → ${deduped.length} distinct lab(s) (same PI, several grants)`);
   }
 
-  for (const a of deduped) {
-    const org = a.organization || {};
-    const pis = (a.principal_investigators || []);
-    // is_contact_pi marks the person who corresponds for the award. On a multi-PI grant that is
-    // the one to write to; the others are co-investigators.
-    const pi = pis.find((p) => p.is_contact_pi) || pis[0];
-    if (!pi) { say(`      (award ${a.project_num} names no PI — skipped)`); continue; }
-
-    const look = await findEmailForPi(pi, org.org_name || '');
-    const found = look && look.email ? look : null;
-    if (look && look.error) lookupErrors += 1;
-    const email = found && !suppressed.has(found.email) ? found.email : null;
-    const aff = found && found.affiliation;
-
-    rows.push({
-      award: a, org, pi, pis, found: email ? found : null,
-      institution: (aff && institutionFrom(aff)) || org.org_name || null,
-      department: (aff && departmentFrom(aff)) || org.dept_type || null,
-      interests: interestsFrom(a, dict),
-    });
-
-    say(`      ${pad(pi.full_name, 26)}${pad(String(org.org_name || '').slice(0, 32), 34)}`
-      + `${pad(String(org.dept_type || '').slice(0, 11), 13)}`
-      + `${pad(String(a.project_end_date || '').slice(0, 10), 11)}`
-      + (email || (found ? 'suppressed'
-        : (look && look.error ? `LOOKUP FAILED: ${look.error}` : '—'))));
-    await sleep(350);   // be a good citizen of a free public API
-  }
-
-  if (lookupErrors) {
-    say(`\n   ⚠ ${lookupErrors} lookup(s) FAILED rather than came back empty. Those labs are not`);
-    say(`     unreachable — they are unmeasured. Fix the cause before trusting the rate below.`);
-  }
-  const reachable = rows.filter((r) => r.found).length;
-  say(`\n   ${rows.length} lab(s), ${reachable} with a published address `
-    + `(${rows.length ? Math.round((reachable / rows.length) * 100) : 0}%)`);
-  const withInterest = rows.filter((r) => r.interests.some((i) => i.kind === 'molecule')).length;
-  say(`   ${withInterest} lab(s) name a molecule we already know\n`);
-
-  if (!EXECUTE) {
-    say('   DRY RUN — nothing written. Re-run with --execute to persist.\n');
-    process.exit(0);
-  }
-
-  say('   WRITING');
+  // ── PERSIST EACH LAB AS IT IS ENRICHED ────
+  // This used to run after the whole loop. The loop makes one network call per lab with a polite
+  // pause between them, so a 62-lab run holds the connection for minutes — and `railway ssh` drops
+  // it on silence. A run died at lab 42 of 62 and wrote NOTHING, because every insert was waiting
+  // behind the last iteration. Forty-two labs of work discarded by one broken pipe.
+  //
+  // So each lab is written the moment it is known. ON CONFLICT already made this idempotent, which
+  // means an interrupted run is simply a shorter run: start it again and it picks up, skipping the
+  // labs it has already enriched instead of paying for their lookups a second time.
   let labsNew = 0; let peopleNew = 0; let intNew = 0;
-  for (const r of rows) {
+
+  async function persistLab(r) {
     const instName = r.institution || 'unknown';
     const labRes = await query(`
       INSERT INTO research_labs
@@ -374,6 +340,73 @@ async function main() {
         `https://reporter.nih.gov/project-details/${r.award.project_num || ''}`]);
       if (ins.rows[0] && ins.rows[0].inserted) intNew += 1;
     }
+    return true;
+  }
+
+  for (const a of deduped) {
+    const org = a.organization || {};
+    const pis = (a.principal_investigators || []);
+    // is_contact_pi marks the person who corresponds for the award. On a multi-PI grant that is
+    // the one to write to; the others are co-investigators.
+    const pi = pis.find((p) => p.is_contact_pi) || pis[0];
+    if (!pi) { say(`      (award ${a.project_num} names no PI — skipped)`); continue; }
+
+    // RESUME. A lab already holding a contact needs no second lookup — that is what makes an
+    // interrupted run cheap to restart rather than a full repeat.
+    if (!has('refresh')) {
+      const seen = await query(
+        `SELECT 1 FROM research_labs l JOIN research_people p ON p.lab_id = l.id
+          WHERE l.pi_name_normalized = $1 AND l.normalized_name = $2 AND p.email IS NOT NULL
+          LIMIT 1`,
+        [normalizePerson(pi.full_name), normalizeInstitution(org.org_name || '')]);
+      if (seen.rows.length) {
+        skipped += 1;
+        say(`      ${pad(pi.full_name, 26)}${pad(String(org.org_name || '').slice(0, 32), 34)}`
+          + `${pad('', 13)}${pad('', 11)}(already have a contact — skipped)`);
+        continue;
+      }
+    }
+
+    const look = await findEmailForPi(pi, org.org_name || '');
+    const found = look && look.email ? look : null;
+    if (look && look.error) lookupErrors += 1;
+    const email = found && !suppressed.has(found.email) ? found.email : null;
+    const aff = found && found.affiliation;
+
+    rows.push({
+      award: a, org, pi, pis, found: email ? found : null,
+      institution: (aff && institutionFrom(aff)) || org.org_name || null,
+      department: (aff && departmentFrom(aff)) || org.dept_type || null,
+      interests: interestsFrom(a, dict),
+    });
+
+    const row = rows[rows.length - 1];
+    if (EXECUTE) await persistLab(row);   // written now, not at the end
+
+    say(`      ${pad(pi.full_name, 26)}${pad(String(org.org_name || '').slice(0, 32), 34)}`
+      + `${pad(String(org.dept_type || '').slice(0, 11), 13)}`
+      + `${pad(String(a.project_end_date || '').slice(0, 10), 11)}`
+      + (email || (found ? 'suppressed'
+        : (look && look.error ? `LOOKUP FAILED: ${look.error}` : '—')))
+      + (EXECUTE ? '  ✓saved' : ''));
+    await sleep(350);   // be a good citizen of a free public API
+  }
+
+  if (lookupErrors) {
+    say(`\n   ⚠ ${lookupErrors} lookup(s) FAILED rather than came back empty. Those labs are not`);
+    say(`     unreachable — they are unmeasured. Fix the cause before trusting the rate below.`);
+  }
+  const reachable = rows.filter((r) => r.found).length;
+  say(`\n   ${rows.length} lab(s), ${reachable} with a published address `
+    + `(${rows.length ? Math.round((reachable / rows.length) * 100) : 0}%)`);
+  const withInterest = rows.filter((r) => r.interests.some((i) => i.kind === 'molecule')).length;
+  say(`   ${withInterest} lab(s) name a molecule we already know\n`);
+
+  if (skipped) say(`   ${skipped} lab(s) skipped — already had a contact (--refresh to redo them)`);
+
+  if (!EXECUTE) {
+    say('\n   DRY RUN — nothing written. Re-run with --execute to persist.\n');
+    process.exit(0);
   }
 
   const tot = (await query(`
@@ -381,7 +414,7 @@ async function main() {
            (SELECT COUNT(*)::int FROM research_people WHERE email IS NOT NULL) mailable,
            (SELECT COUNT(*)::int FROM research_interests) interests`)).rows[0];
 
-  say(`      +${labsNew} lab(s), +${peopleNew} contact(s), +${intNew} interest(s)`);
+  say(`\n   WROTE  +${labsNew} lab(s), +${peopleNew} contact(s), +${intNew} interest(s)`);
   say(`\n   TOTALS   ${tot.labs} labs · ${tot.mailable} mailable contacts · ${tot.interests} interests\n`);
 }
 
