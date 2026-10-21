@@ -43,7 +43,7 @@
 const { initDB, query } = require('../src/lib/db');
 const {
   extractEmails, institutionFrom, departmentFrom,
-  normalizeInstitution, normalizePerson, attributeEmail,
+  normalizeInstitution, normalizePerson, attributeToPi, orgKeyword,
 } = require('../src/lib/research/affiliation');
 
 const NIH = 'https://api.reporter.nih.gov/v2/projects/search';
@@ -119,9 +119,18 @@ async function findEmailForPi(pi, orgName) {
   const last = pi.last_name || '';
   if (!last) return null;
 
-  // AUTH: restricts to author name. AFF: to the institution. Both, so that a common surname does
-  // not return a stranger at another university who happens to share it.
-  const q = `AUTH:"${last}, ${first}" AND AFF:"${String(orgName).split(',')[0].slice(0, 48)}"`;
+  // ── THE QUERY, AS MEASURED RATHER THAN ASSUMED ────
+  // probe-pi-email.js ran five formulations against the five PIs this originally failed on.
+  // AUTH:"Last, First" AND AFF:"<org verbatim>" — what this used to send — returned ZERO hits for
+  // all five: Europe PMC indexes authors as "Miller SJ", and no paper contains the string
+  // "LOUISIANA STATE UNIV A&M COL BATON ROUGE". The surviving formulation is surname + initials
+  // against the one distinctive institution word, which also kept the hit counts narrow enough
+  // (174, 182, 29) to avoid dragging in namesakes. Dropping AFF is not an option: "Wang Z" alone
+  // returns 193,582 papers.
+  const initials = `${first ? first[0] : ''}${pi.middle_name ? pi.middle_name[0] : ''}`;
+  const kw = orgKeyword(orgName);
+  if (!kw) return { empty: 'no usable affiliation keyword for this institution' };
+  const q = `AUTH:"${last} ${initials}" AND AFF:"${kw}"`;
   const url = `${EPMC}?query=${encodeURIComponent(q)}`
     + '&format=json&resultType=core&pageSize=25&sort=P_PDATE_D desc';
 
@@ -146,10 +155,13 @@ async function findEmailForPi(pi, orgName) {
         .map((x) => x.affiliation).filter(Boolean);
       for (const aff of affs) {
         for (const email of extractEmails(aff)) {
-          const who = attributeEmail(email, [{
+          // attributeToPi, not attributeEmail: the latter only asks whose address this is among
+          // the paper's authors, and answered "Sophie Miller, South Australia" when we were
+          // looking for Scott Miller at Yale.
+          const who = attributeToPi(email, [{
             firstName: a.firstName, lastName: a.lastName, initials: a.initials,
-          }]);
-          if (who && normalizePerson(a.lastName) === normalizePerson(last)) {
+          }], { first, last, middle: pi.middle_name });
+          if (who) {
             return {
               email,
               source_url: `https://europepmc.org/article/${h.source}/${h.id}`,
@@ -162,8 +174,8 @@ async function findEmailForPi(pi, orgName) {
     }
     // Paper-level affiliation: attribution must be earned against the full author list.
     for (const email of extractEmails(h.affiliation || '')) {
-      const who = attributeEmail(email, authors);
-      if (who && normalizePerson(who.lastName) === normalizePerson(last)) {
+      const who = attributeToPi(email, authors, { first, last, middle: pi.middle_name });
+      if (who) {
         return {
           email,
           source_url: `https://europepmc.org/article/${h.source}/${h.id}`,

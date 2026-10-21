@@ -161,3 +161,78 @@ module.exports = {
   cleanEmail, extractEmails, institutionFrom, departmentFrom,
   normalizeInstitution, normalizePerson, attributeEmail,
 };
+
+// ── THE INSTITUTION KEYWORD ──────────────────────────────────────────────────
+// RePORTER writes "LOUISIANA STATE UNIV A&M COL BATON ROUGE". No published paper has ever
+// contained that string, which is why AFF:"<org verbatim>" returned zero hits for all five PIs
+// probed. What a paper DOES contain is the distinctive word: "Louisiana". One word, because the
+// affiliation index holds the publisher's spelling and we cannot predict the rest of it.
+const ORG_STOP = new Set(['university', 'universite', 'of', 'at', 'the', 'college', 'and', 'state',
+  'univ', 'medical', 'center', 'centre', 'school', 'institute', 'hospital', 'health', 'research',
+  'department', 'dept', 'system', 'campus', 'main', 'national', 'general']);
+
+function orgKeyword(org) {
+  const s = String(org == null ? '' : org).toLowerCase()
+    .replace(/\buniv\b/g, 'university').replace(/&/g, ' and ')
+    .replace(/\b(col|coll)\b/g, 'college')
+    .replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const words = s.split(' ').filter((w) => w.length > 3 && !ORG_STOP.has(w));
+  return words[0] || (s.split(' ').find((w) => w.length > 2) || '');
+}
+
+// ── ATTRIBUTION TO A NAMED PERSON, NOT MERELY TO AN AUTHOR ───────────────────
+//
+// attributeEmail answers "whose address is this, among the authors of this paper". That is not the
+// question the ingest asks. The ingest asks "is this the address of the PI who holds the grant",
+// and the gap between those two cost us a near-miss: searching for Scott J Miller at Yale,
+// attributeEmail happily returned sophie.miller@sahmri.com (a different person, in South
+// Australia) and edward.miller@yale.edu (a different person, same university). Both matched on the
+// surname Miller and nothing contradicted them, because nothing was checking the given name.
+//
+// Had that run with --execute and an outreach step behind it, two uninvolved scientists would have
+// received commercial mail about a grant that is not theirs. So the surname is necessary and never
+// sufficient: a full given-name token in the local part must AGREE with the PI's given name, and
+// "sophie" disagreeing with "scott" is a rejection rather than a tiebreak. An initial on its own
+// is not enough to separate Scott from Sophie — both are S.
+function attributeToPi(email, authors, pi) {
+  const e = cleanEmail(email);
+  if (!e || !pi) return null;
+  const tLast = normalizePerson(pi.last || pi.lastName || '').replace(/\s/g, '');
+  const tFirst = normalizePerson(pi.first || pi.firstName || '').replace(/\s/g, '');
+  if (!tLast) return null;
+
+  const who = attributeEmail(e, authors);
+  if (!who) return null;
+  if (normalizePerson(who.lastName || '').replace(/\s/g, '') !== tLast) return null;
+
+  const local = e.split('@')[0];
+  const parts = local.split(/[._-]+/).filter(Boolean);
+
+  // Tokens that are a whole word and are not the surname (nor an initial glued to it, as in
+  // "mrivera") are given names. Any such token must be the PI's given name.
+  for (const p of parts) {
+    if (p.length <= 3) continue;                       // initials cluster: "blp", "gl"
+    if (p === tLast) continue;                         // the surname itself
+    if (p.endsWith(tLast) && p.length - tLast.length <= 2) continue;  // "mrivera"
+    if (tFirst && p === tFirst) continue;              // the PI's given name: agreement
+    if (tFirst && tFirst.startsWith(p) && p.length >= 4) continue;    // "chris" for "christopher"
+    if (tFirst && p.startsWith(tFirst) && tFirst.length >= 4) continue;
+    return null;                                       // a different given name. Decline.
+  }
+
+  // The author record itself must not contradict the PI. Europe PMC gives firstName; where both
+  // are spelled out they must match, and where one is an initial the initials must agree.
+  const aFirst = normalizePerson(who.firstName || '').replace(/\s/g, '');
+  if (aFirst && tFirst) {
+    const bothSpelled = aFirst.length > 2 && tFirst.length > 2;
+    if (bothSpelled) {
+      const agree = aFirst === tFirst
+        || aFirst.startsWith(tFirst) || tFirst.startsWith(aFirst);
+      if (!agree) return null;
+    } else if (aFirst[0] !== tFirst[0]) return null;
+  }
+  return who;
+}
+
+module.exports.orgKeyword = orgKeyword;
+module.exports.attributeToPi = attributeToPi;

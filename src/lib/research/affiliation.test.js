@@ -117,5 +117,60 @@ eq(attributeEmail('not-an-email', [tan]), null, 'invalid address returns null');
 const wend = { firstName: 'Alison', lastName: 'Wendlandt' };
 eq(attributeEmail('wendlandt@mit.edu', [wend, tan]), wend, 'distinctive surname alone suffices');
 
-console.log(`affiliation parsing: ${pass} passed, ${fail} failed`);
+// NOTE: no process.exit here. An early exit in the middle of a test file does not fail — it
+// SKIPS everything below it and reports success, which is how the Miller tests below ran zero
+// times while the suite printed "35 passed, 0 failed". One verdict, at the end of the file.
+
+// ── THE THREE MILLERS ────────────────────────────────────────────────────────
+// Real addresses returned by probe-pi-email.js while searching for Scott J Miller at Yale.
+// attributeEmail accepted all three because each is a genuine author named Miller. Only one is
+// the person we were looking for. Named explicitly so that loosening the rule has to delete a
+// test about two real scientists who would otherwise have been mailed about a stranger's grant.
+const { orgKeyword, attributeToPi } = require('./affiliation');
+
+const SCOTT = { first: 'Scott', last: 'Miller' };
+const paperAuthors = [
+  { firstName: 'Scott', lastName: 'Miller' },
+  { firstName: 'Sophie', lastName: 'Miller' },
+  { firstName: 'Edward', lastName: 'Miller' },
+];
+
+eq(attributeToPi('scott.miller@yale.edu', paperAuthors, SCOTT),
+  { firstName: 'Scott', lastName: 'Miller' }, 'the right Miller is accepted');
+eq(attributeToPi('sophie.miller@sahmri.com', paperAuthors, SCOTT), null,
+  'Sophie Miller (South Australia) rejected — same surname, different person');
+eq(attributeToPi('edward.miller@yale.edu', paperAuthors, SCOTT), null,
+  'Edward Miller (same university!) rejected — surname is not sufficient');
+
+// A shared first initial must not rescue a mismatch: Scott and Sophie are both S.
+eq(attributeToPi('s.miller@yale.edu', [{ firstName: 'Sophie', lastName: 'Miller' }], SCOTT), null,
+  'initial-only local part with a contradicting author record is rejected');
+eq(attributeToPi('s.miller@yale.edu', [{ firstName: 'Scott', lastName: 'Miller' }], SCOTT),
+  { firstName: 'Scott', lastName: 'Miller' }, 'initial + surname accepted when the author agrees');
+
+// Initial glued to surname — the form that actually worked for Rivera.
+eq(attributeToPi('mrivera@lsu.edu', [{ firstName: 'Mario', lastName: 'Rivera' }],
+  { first: 'Mario', last: 'Rivera' }), { firstName: 'Mario', lastName: 'Rivera' },
+'initial+surname concatenated is accepted');
+
+// Diminutives agree; unrelated given names do not.
+eq(attributeToPi('chris.jones@ox.ac.uk', [{ firstName: 'Christopher', lastName: 'Jones' }],
+  { first: 'Christopher', last: 'Jones' }), { firstName: 'Christopher', lastName: 'Jones' },
+'shortened given name agrees');
+eq(attributeToPi('robert.jones@ox.ac.uk', [{ firstName: 'Robert', lastName: 'Jones' }],
+  { first: 'Christopher', last: 'Jones' }), null, 'different given name rejected');
+eq(attributeToPi('x@y.com', paperAuthors, SCOTT), null, 'unmatchable address rejected');
+eq(attributeToPi('scott.miller@yale.edu', paperAuthors, null), null, 'no target PI rejected');
+
+// ── THE AFFILIATION KEYWORD ──────────────────────────────────────────────────
+// AFF:"<RePORTER spelling>" returned 0 hits for all five PIs probed. These are the real strings.
+eq(orgKeyword('LOUISIANA STATE UNIV A&M COL BATON ROUGE'), 'louisiana', 'LSU reduces to louisiana');
+eq(orgKeyword('UNIVERSITY OF ILLINOIS AT URBANA-CHAMPAIGN'), 'illinois', 'Illinois');
+eq(orgKeyword('UNIVERSITY OF PENNSYLVANIA'), 'pennsylvania', 'Penn');
+eq(orgKeyword('YALE UNIVERSITY'), 'yale', 'Yale');
+eq(orgKeyword('MASSACHUSETTS GENERAL HOSPITAL'), 'massachusetts', 'stopwords skipped');
+ok(orgKeyword('UNIVERSITY OF MINNESOTA') === 'minnesota', 'Minnesota');
+ok(orgKeyword('') === '', 'empty org is empty keyword');
+
+console.log(`pi attribution: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
