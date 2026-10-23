@@ -40,7 +40,7 @@ const { gmailClientFor } = require('../gmail/client');
 const { buildMessage } = require('../gmail/message');
 const { replyState } = require('../gmail/thread');
 const { ensureCampaignLabels, labelThread, labelForCampaign } = require('../gmail/labels');
-const { render, stepDef, stepsOf, ROLE_TO_CAMPAIGN } = require('./cphi-followup');
+const { render, stepDef, stepsOf, campaignFor } = require('./cphi-followup');
 const { zoneForContact, withinWindow } = require('./send-window');
 const { splitName } = require('./name-split');
 
@@ -127,11 +127,19 @@ async function runFollowups(opts = {}) {
   const now = new Date();
   const queue = [];
   const skipped = { replied: 0, done: 0, notDue: 0, window: 0, noGreeting: 0, noCampaign: 0, halted: 0 };
+  const noCampaignWho = [];
   const needGreeting = [];
 
   for (const r of rows) {
-    const campaign = r.campaign || ROLE_TO_CAMPAIGN[r.role];
-    if (!campaign) { skipped.noCampaign += 1; continue; }
+    // Per event: a role shared between shows must not inherit another show's copy.
+    const campaign = r.campaign || campaignFor(EVENT, r.role);
+    if (!campaign) {
+      skipped.noCampaign += 1;
+      // NAMED, not just counted. A bare count is how twenty SCOPE contacts sat unsent for a week
+      // while the run reported success.
+      noCampaignWho.push(`${r.name || r.email} <${r.email}> · role ${r.role}`);
+      continue;
+    }
     if (CAMPAIGN && campaign !== CAMPAIGN) continue;
     if (r.status === 'replied') { skipped.replied += 1; continue; }
     if (r.status === 'halted') { skipped.halted += 1; continue; }
@@ -162,6 +170,7 @@ async function runFollowups(opts = {}) {
   out.candidates = rows.length;
   out.due = queue.length;
   out.skipped = skipped;
+  out.noCampaignWho = noCampaignWho;
   out.needGreeting = needGreeting;
 
   say(`   ${rows.length} contact(s) with a role and an email`);

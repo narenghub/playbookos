@@ -227,3 +227,58 @@ test('the sender is named exactly ONCE per message', () => {
     }
   }
 });
+
+// ── A CAMPAIGN MUST NOT NAME A SHOW ITS RECIPIENTS DID NOT ATTEND ────────────
+//
+// Caught one command before sending. Charlotte Perrin of ACM Global Laboratories, met at SCOPE
+// Europe, was first in the batch for "CPHI Milan follow-up — a question about your capabilities",
+// because role→campaign was a single global map and qc_lab exists at both shows. Three more SCOPE
+// contacts were behind her.
+//
+// Every sequence opens by naming where we met, so reachability is the thing to constrain: for each
+// event, every campaign reachable from it must mention that show and no other.
+const { EVENT_ROLE_TO_CAMPAIGN, campaignFor } = require('./cphi-followup');
+
+const SHOW_WORDS = {
+  'cphi-milan-2026': { mine: /\bCPHI\b|\bMilan\b/i, theirs: /\bSCOPE\b/ },
+  'scope-europe-2026': { mine: /\bSCOPE\b/, theirs: /\bCPHI\b|\bMilan\b/i },
+};
+
+test('no campaign names another event\'s trade show', () => {
+  for (const [eventKey, roles] of Object.entries(EVENT_ROLE_TO_CAMPAIGN)) {
+    const words = SHOW_WORDS[eventKey];
+    assert.ok(words, `${eventKey} has no show words declared — add them before mapping roles`);
+    for (const [role, campaignKey] of Object.entries(roles)) {
+      const body = stepDef(campaignKey, 1).text(VARS);
+      assert.ok(!words.theirs.test(body),
+        `${eventKey}/${role} → campaign "${campaignKey}" names a DIFFERENT show. `
+        + 'A shared role key must not mean shared copy.');
+      assert.ok(words.mine.test(body),
+        `${eventKey}/${role} → campaign "${campaignKey}" never names ${eventKey}. `
+        + 'Step 1 opens by saying where we met; if it does not, it is the wrong sequence.');
+    }
+  }
+});
+
+test('an unknown event sends nothing at all', () => {
+  // Fail closed: a typo in --event must send zero mail, not fall back to CPHI.
+  assert.strictEqual(campaignFor('scope-europe-2027', 'demand_intel'), null);
+  assert.strictEqual(campaignFor('', 'supplier'), null);
+  assert.strictEqual(campaignFor(undefined, 'supplier'), null);
+});
+
+test('every campaign is reachable from exactly one event', () => {
+  // An orphan campaign is copy nobody receives; one reachable from two events is the bug above.
+  const seen = new Map();
+  for (const [eventKey, roles] of Object.entries(EVENT_ROLE_TO_CAMPAIGN)) {
+    for (const campaignKey of Object.values(roles)) {
+      const prev = seen.get(campaignKey);
+      assert.ok(!prev || prev === eventKey,
+        `campaign "${campaignKey}" is reachable from both ${prev} and ${eventKey}`);
+      seen.set(campaignKey, eventKey);
+    }
+  }
+  for (const key of Object.keys(CAMPAIGNS)) {
+    assert.ok(seen.has(key), `campaign "${key}" is reachable from no event — nobody will receive it`);
+  }
+});

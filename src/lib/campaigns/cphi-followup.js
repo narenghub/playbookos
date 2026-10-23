@@ -372,16 +372,48 @@ ${SIG_NAME}`,
 const CAMPAIGNS = { supplier, buyer, partner, demand_intel: demandIntel };
 
 /** The CPHI roles that feed each campaign. qc_lab and platform_partner both land in `partner`. */
-const ROLE_TO_CAMPAIGN = {
-  supplier: 'supplier',
-  buyer: 'buyer',
-  qc_lab: 'partner',
-  platform_partner: 'partner',
-  // SCOPE Europe. Its absence here is why the SCOPE follow-up never sent: the runner reads
-  // ROLE_TO_CAMPAIGN[contact.role], finds nothing, and counts the contact in skipped.noCampaign.
-  // Twenty people who were promised a follow-up got silence, and no error was ever raised.
-  demand_intel: 'demand_intel',
+// ── A ROLE KEY IS SHARED BETWEEN EVENTS. CAMPAIGN COPY IS NOT. ───────────────
+//
+// The registry deliberately reuses role keys across shows — qc_lab means the same KIND of company
+// at CPHI and at SCOPE. But every sequence here opens by naming the show where we met, so a role
+// shared between events must NOT imply a campaign shared between events.
+//
+// It did, and the dry run caught it one command before it went out. Charlotte Perrin of ACM Global
+// Laboratories, met at SCOPE Europe, was queued to receive "CPHI Milan follow-up — a question
+// about your capabilities", and she was first in the batch. Four SCOPE qc_lab contacts were on
+// that path. Naming the wrong trade show to someone who stood at your stand is the exact failure
+// the event registry was built to prevent, and a global role→campaign map walked straight into it.
+//
+// So the mapping is per event. A role with no entry for an event has NO COPY WRITTEN YET, which is
+// a real state and an honest one — it is not permission to send that person another event's email.
+const EVENT_ROLE_TO_CAMPAIGN = {
+  'cphi-milan-2026': {
+    supplier: 'supplier',
+    buyer: 'buyer',
+    qc_lab: 'partner',
+    platform_partner: 'partner',
+  },
+  'scope-europe-2026': {
+    demand_intel: 'demand_intel',
+    // qc_lab, linkable, abiozen and aros have no SCOPE copy yet. At SCOPE a qc_lab is a LabConnect
+    // recruitment target — we are buying their capacity, not selling to them — which is a different
+    // letter from the CPHI partner ask, not a reworded one. Until it is written they are skipped
+    // and named in the run's output, rather than quietly handed the Milan sequence.
+  },
 };
+
+/**
+ * The campaign for a contact, or null when no copy exists for that event+role.
+ * Falls back to the CPHI map ONLY for the CPHI event, so an unknown event sends nothing.
+ */
+function campaignFor(eventKey, role) {
+  const m = EVENT_ROLE_TO_CAMPAIGN[eventKey];
+  if (!m) return null;
+  return m[role] || null;
+}
+
+/** Kept for callers that predate the per-event map. CPHI only — do not use for a new event. */
+const ROLE_TO_CAMPAIGN = EVENT_ROLE_TO_CAMPAIGN['cphi-milan-2026'];
 
 /** Render one step for one contact. Throws rather than rendering a placeholder. */
 function render(campaignKey, stepNumber, vars) {
@@ -406,4 +438,4 @@ function render(campaignKey, stepNumber, vars) {
 const stepsOf = (key) => (CAMPAIGNS[key] ? CAMPAIGNS[key].steps.map((s) => s.step) : []);
 const stepDef = (key, n) => (CAMPAIGNS[key] || { steps: [] }).steps.find((s) => s.step === n) || null;
 
-module.exports = { CAMPAIGNS, ROLE_TO_CAMPAIGN, render, stepsOf, stepDef, SIG_NAME, SIG_MAIL };
+module.exports = { CAMPAIGNS, ROLE_TO_CAMPAIGN, EVENT_ROLE_TO_CAMPAIGN, campaignFor, render, stepsOf, stepDef, SIG_NAME, SIG_MAIL };
