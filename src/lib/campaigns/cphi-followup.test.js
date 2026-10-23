@@ -67,8 +67,12 @@ test('step 1 carries the attachment, follow-ups never do', () => {
   // who RUN trials; they do not buy chemicals. A molecule one-pager landing in a clinical-vendor
   // VP's inbox says we did not listen at the booth. The campaigns are named here rather than
   // inferred so that a new campaign has to make this choice on purpose.
+  // THE ONE-PAGER IS ITSELF CPHI-BRANDED. Its header reads "CPHI Worldwide · Milan · October 2026"
+  // and "the model we discussed at your stand". So attaching it to a SCOPE contact reintroduces the
+  // wrong-trade-show bug through the attachment rather than the body — the guard below checks that
+  // too, because a clean email carrying a Milan-branded PDF is no better than a Milan-branded email.
   const ATTACHES = ['supplier', 'buyer', 'partner'];
-  const NO_ATTACHMENT = ['demand_intel'];
+  const NO_ATTACHMENT = ['demand_intel', 'lab_network'];
   assert.deepStrictEqual(
     [...ATTACHES, ...NO_ATTACHMENT].sort(), Object.keys(CAMPAIGNS).sort(),
     'a campaign was added without deciding whether it attaches the one-pager');
@@ -280,5 +284,42 @@ test('every campaign is reachable from exactly one event', () => {
   }
   for (const key of Object.keys(CAMPAIGNS)) {
     assert.ok(seen.has(key), `campaign "${key}" is reachable from no event — nobody will receive it`);
+  }
+});
+
+// ── NO SEQUENCE QUOTES A VOLUME WE CANNOT STAND BEHIND ───────────────────────
+//
+// At CPHI the LabConnect model was pitched at "one or two studies a day, ten to twenty a month".
+// That was an estimate of client need; actual revenue to date is one order. In a partner's inbox
+// it stops being an estimate and becomes a number they plan against, and Thermo Fisher, Labcorp
+// and ACM Global all talk to the people we are selling to.
+//
+// This is the same promise-ahead-of-delivery that cost us the SCOPE contact-data position. A
+// throughput figure belongs in a conversation where it can be qualified, never in a template that
+// goes out unattended.
+test('no sequence promises a volume or a throughput', () => {
+  const NUMBERS = /\b(\d+\s*(to|–|-)\s*\d+|one or two|ten to twenty|a dozen)\b[^.]{0,40}\b(stud(y|ies)|order|sample|lead|client|month|week|day)\b/i;
+  for (const key of Object.keys(CAMPAIGNS)) {
+    for (const s of CAMPAIGNS[key].steps) {
+      const body = s.text(VARS);
+      assert.ok(!NUMBERS.test(body),
+        `${key} step ${s.step} quotes a volume. Say it on a call where it can be qualified, `
+        + 'not in a template that sends itself.');
+    }
+  }
+});
+
+// The attachment carries its own event branding, so reachability constrains it exactly as it
+// constrains the copy. Only CPHI campaigns may attach the CPHI one-pager.
+test('no campaign reachable from another event attaches the CPHI one-pager', () => {
+  for (const [eventKey, roles] of Object.entries(EVENT_ROLE_TO_CAMPAIGN)) {
+    if (eventKey === 'cphi-milan-2026') continue;
+    for (const [role, campaignKey] of Object.entries(roles)) {
+      for (const s of CAMPAIGNS[campaignKey].steps) {
+        assert.ok(!s.attach,
+          `${eventKey}/${role} → "${campaignKey}" step ${s.step} attaches the one-pager, which is `
+          + 'headed "CPHI Worldwide · Milan". Build that event its own attachment first.');
+      }
+    }
   }
 });

@@ -38,6 +38,7 @@ const CAMPAIGN_LABELS = Object.freeze({
   // cosmetic: reply-sync finds replies by walking the campaign's labelled threads, so an unlabelled
   // thread is one whose reply never stops the sequence. The person answers and gets chased anyway.
   demand_intel: 'Demand Intelligence',
+  lab_network: 'Lab Network',
 });
 
 /** The label for a campaign, or null if that campaign has none. Never invents a name. */

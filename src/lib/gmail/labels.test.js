@@ -63,8 +63,9 @@ test('one folder per campaign, and partner covers QC and platform', () => {
   // labelled threads, so an unfiled thread is one whose reply never stops the sequence: the
   // contact answers and gets chased anyway.
   assert.deepStrictEqual(Object.keys(CAMPAIGN_LABELS).sort(),
-    ['buyer', 'demand_intel', 'partner', 'supplier']);
+    ['buyer', 'demand_intel', 'lab_network', 'partner', 'supplier']);
   assert.strictEqual(labelForCampaign('demand_intel'), 'Demand Intelligence');
+  assert.strictEqual(labelForCampaign('lab_network'), 'Lab Network');
   assert.strictEqual(labelForCampaign('supplier'), 'Supplier');
   assert.strictEqual(labelForCampaign('buyer'), 'Buyer');
   // qc_lab and platform_partner both feed the `partner` campaign, so both land in one folder —
@@ -203,10 +204,10 @@ test('ensureCampaignLabels makes every campaign folder even when nothing is due'
   const r = await ensureCampaignLabels(g, SELF);
   assert.strictEqual(r.ok, true);
   assert.deepStrictEqual(Object.keys(r.labels).sort(),
-    ['buyer', 'demand_intel', 'partner', 'supplier']);
+    ['buyer', 'demand_intel', 'lab_network', 'partner', 'supplier']);
   const names = g.labels.map((l) => l.name).sort();
   assert.deepStrictEqual(names,
-    ['Buyer', 'Demand Intelligence', 'Partner', 'Playbook', 'Supplier']);
+    ['Buyer', 'Demand Intelligence', 'Lab Network', 'Partner', 'Playbook', 'Supplier']);
 });
 
 test('ensureCampaignLabels reports a scope problem ONCE, at the top, and is not ok', async () => {

@@ -369,7 +369,80 @@ ${SIG_NAME}`,
   ],
 };
 
-const CAMPAIGNS = { supplier, buyer, partner, demand_intel: demandIntel };
+
+// ── LAB NETWORK · SCOPE EUROPE ───────────────────────────────────────────────
+//
+// Thermo Fisher, Labcorp and ACM Global, met at SCOPE as delegates. These are NOT prospects: we
+// are recruiting their analytical capacity into LabConnect, so the letter asks rather than sells,
+// and it must not read as a pitch to a customer.
+//
+// ── THE NUMBER THAT IS DELIBERATELY NOT IN THIS EMAIL ────────────────────────
+//
+// At CPHI the model was pitched with a volume: roughly one or two studies a day, ten to twenty a
+// month. That figure was an estimate of client need, and total revenue to date is one order. Put
+// it in writing to Thermo Fisher and it becomes a commitment they plan against — and when the
+// studies do not arrive, the partnership is over AND the reputation travels, because these three
+// talk to the same people we are selling to.
+//
+// This is the same promise-ahead-of-delivery that cost us the SCOPE contact-data position, caught
+// earlier this week. So the email says plainly that it is early. A partner who signs up knowing
+// that stays when it is slow; one who signs up on a volume number leaves on the first quiet month.
+const labNetwork = {
+  key: 'lab_network',
+  label: 'Lab network · SCOPE Europe',
+  steps: [
+    {
+      step: 1, delayDays: 0, attach: false,
+      subject: 'Following up from SCOPE — analytical capacity, and a question',
+      text: ({ first }) => `Hi ${first},
+
+Good to meet you at SCOPE Europe.
+
+The reason I wanted to follow up is a question rather than a pitch. We are putting together a network of analytical and QC laboratories, and I am trying to work out whether a unit like yours would want to be part of it.
+
+The shape is simple. We supply the molecule and its regulatory documentation to companies running studies from discovery through formulation. Those clients also need analytical testing validated in their own region — work we do not do ourselves and have no intention of building. So it would be routed to a partner laboratory instead.
+
+I would rather be straight about where this is than quote you a volume I cannot stand behind: it is early. What I can say is that the demand arrives attached to a molecule we are already supplying, which is a different thing from a cold enquiry landing in your sales inbox.
+
+So — is routed work of that kind something your unit would consider in principle, and if so, who handles partnership arrangements on your side?
+
+Best regards,
+${SIG_NAME}
+${SIG_ROLE}
+${SIG_MAIL} · ${SIG_TEL}`,
+      html: ({ first }) => wrap([
+        p(`Hi ${first},`),
+        p('Good to meet you at SCOPE Europe.'),
+        p('The reason I wanted to follow up is a question rather than a pitch. We are putting together a network of <strong>analytical and QC laboratories</strong>, and I am trying to work out whether a unit like yours would want to be part of it.'),
+        p('The shape is simple. We supply the molecule and its regulatory documentation to companies running studies from discovery through formulation. Those clients also need analytical testing validated in their own region — work we do not do ourselves and have no intention of building. So it would be routed to a partner laboratory instead.'),
+        p('I would rather be straight about where this is than quote you a volume I cannot stand behind: it is early. What I can say is that the demand arrives attached to a molecule we are already supplying, which is a different thing from a cold enquiry landing in your sales inbox.'),
+        p('So — is routed work of that kind something your unit would consider in principle, and if so, who handles partnership arrangements on your side?'),
+      ].join('\n')),
+    },
+    {
+      step: 2, delayDays: 6, attach: false,
+      subject: null,
+      text: ({ first }) => `Hi ${first},
+
+Following up once, then I will leave it with you.
+
+The question is only whether analytical work routed from a supply partner is interesting to your unit in principle. If it is, I would like to understand what you would need from us before it could be — qualification, paperwork, minimum volumes, whatever it is.
+
+If it is not, say so and I will stop there.
+
+Best regards,
+${SIG_NAME}`,
+      html: ({ first }) => wrap([
+        p(`Hi ${first},`),
+        p('Following up once, then I will leave it with you.'),
+        p('The question is only whether analytical work routed from a supply partner is interesting to your unit in principle. If it is, I would like to understand what you would need from us before it could be — qualification, paperwork, minimum volumes, whatever it is.'),
+        p('If it is not, say so and I will stop there.'),
+      ].join('\n')),
+    },
+  ],
+};
+
+const CAMPAIGNS = { supplier, buyer, partner, demand_intel: demandIntel, lab_network: labNetwork };
 
 /** The CPHI roles that feed each campaign. qc_lab and platform_partner both land in `partner`. */
 // ── A ROLE KEY IS SHARED BETWEEN EVENTS. CAMPAIGN COPY IS NOT. ───────────────
@@ -395,10 +468,9 @@ const EVENT_ROLE_TO_CAMPAIGN = {
   },
   'scope-europe-2026': {
     demand_intel: 'demand_intel',
-    // qc_lab, linkable, abiozen and aros have no SCOPE copy yet. At SCOPE a qc_lab is a LabConnect
-    // recruitment target — we are buying their capacity, not selling to them — which is a different
-    // letter from the CPHI partner ask, not a reworded one. Until it is written they are skipped
-    // and named in the run's output, rather than quietly handed the Milan sequence.
+    qc_lab: 'lab_network',
+    // linkable, abiozen and aros still have no SCOPE copy. They stay skipped and NAMED in the run
+    // output rather than quietly handed another event's letter.
   },
 };
 
