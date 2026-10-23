@@ -34,6 +34,10 @@ const CAMPAIGN_LABELS = Object.freeze({
   supplier: 'Supplier',
   buyer: 'Buyer',
   partner: 'Partner',
+  // SCOPE Europe. Without this every demand_intel thread sends UNFILED, and filing is not
+  // cosmetic: reply-sync finds replies by walking the campaign's labelled threads, so an unlabelled
+  // thread is one whose reply never stops the sequence. The person answers and gets chased anyway.
+  demand_intel: 'Demand Intelligence',
 });
 
 /** The label for a campaign, or null if that campaign has none. Never invents a name. */

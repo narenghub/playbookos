@@ -176,7 +176,19 @@ async function runFollowups(opts = {}) {
   say(`   ${rows.length} contact(s) with a role and an email`);
   say(`   ${queue.length} due right now\n`);
   const skipLine = Object.entries(skipped).filter(([, n]) => n).map(([k, n]) => `${k} ${n}`).join(' · ');
-  if (skipLine) say(`   skipped: ${skipLine}\n`);
+  if (skipLine) say(`   skipped: ${skipLine}`);
+
+  // NAME the no-copy skips. A counter reading "noCampaign 3" is indistinguishable from a healthy
+  // run at a glance, and that is exactly how twenty SCOPE contacts sat unsent for a week while
+  // every run reported success. These people are waiting on copy that does not exist yet; they
+  // should be impossible to overlook until it does.
+  if (noCampaignWho.length) {
+    say(`\n   ⚠ ${noCampaignWho.length} contact(s) have NO COPY for this event and received nothing:`);
+    for (const who of noCampaignWho) say(`        ${who}`);
+    say('      Not a failure — a sequence nobody has written. Write it, or accept the silence');
+    say('      deliberately. Do NOT hand them another event\'s letter.');
+  }
+  say('');
 
   if (needGreeting.length) {
     say(`   ⚠ ${needGreeting.length} contact(s) are held because the greeting cannot be derived:`);

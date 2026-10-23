@@ -56,8 +56,15 @@ test.beforeEach(() => resetLabelCache());
 
 // ── THE MAPPING HE ASKED FOR ──────────────────────────────────────────────────
 
-test('three folders, and partner covers QC and platform', () => {
-  assert.deepStrictEqual(Object.keys(CAMPAIGN_LABELS).sort(), ['buyer', 'partner', 'supplier']);
+test('one folder per campaign, and partner covers QC and platform', () => {
+  // Four now: SCOPE's demand_intel joined the three CPHI ones. Asserted as a set rather than a
+  // count, because the count is not the property that matters — EVERY campaign having a folder is.
+  // A campaign without one sends UNFILED, and reply-sync finds replies by walking a campaign's
+  // labelled threads, so an unfiled thread is one whose reply never stops the sequence: the
+  // contact answers and gets chased anyway.
+  assert.deepStrictEqual(Object.keys(CAMPAIGN_LABELS).sort(),
+    ['buyer', 'demand_intel', 'partner', 'supplier']);
+  assert.strictEqual(labelForCampaign('demand_intel'), 'Demand Intelligence');
   assert.strictEqual(labelForCampaign('supplier'), 'Supplier');
   assert.strictEqual(labelForCampaign('buyer'), 'Buyer');
   // qc_lab and platform_partner both feed the `partner` campaign, so both land in one folder —
@@ -191,20 +198,24 @@ test('re-labelling is a no-op rather than a second copy — the backfill can re-
 
 // ── ALL THREE, UP FRONT ──────────────────────────────────────────────────────
 
-test('ensureCampaignLabels makes all three even when nothing is due', async () => {
+test('ensureCampaignLabels makes every campaign folder even when nothing is due', async () => {
   const g = fakeGmail([{ id: 'L_1', name: 'Playbook' }]);
   const r = await ensureCampaignLabels(g, SELF);
   assert.strictEqual(r.ok, true);
-  assert.deepStrictEqual(Object.keys(r.labels).sort(), ['buyer', 'partner', 'supplier']);
+  assert.deepStrictEqual(Object.keys(r.labels).sort(),
+    ['buyer', 'demand_intel', 'partner', 'supplier']);
   const names = g.labels.map((l) => l.name).sort();
-  assert.deepStrictEqual(names, ['Buyer', 'Partner', 'Playbook', 'Supplier']);
+  assert.deepStrictEqual(names,
+    ['Buyer', 'Demand Intelligence', 'Partner', 'Playbook', 'Supplier']);
 });
 
 test('ensureCampaignLabels reports a scope problem ONCE, at the top, and is not ok', async () => {
   const g = fakeGmail([], { listThrows: 'insufficient authentication scopes' });
   const r = await ensureCampaignLabels(g, SELF);
   assert.strictEqual(r.ok, false);
-  assert.strictEqual(r.errors.length, 3);
+  // One error per campaign, whatever the campaign count — read from the map, not hardcoded, so
+  // adding a campaign does not fail this test for a reason that has nothing to do with scopes.
+  assert.strictEqual(r.errors.length, Object.keys(CAMPAIGN_LABELS).length);
   assert.deepStrictEqual(r.labels, {});
 });
 
