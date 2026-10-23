@@ -594,6 +594,24 @@ cron.schedule('0 8 * * 1-5', withAlerts('weekdays-8cst-us-team-briefing', async 
 // hand. Setting CPHI_FOLLOWUP_ENABLED=true in Railway is a deliberate, reversible decision, made
 // once, separately from any push — and removing it is how he stops the campaign from his phone
 // without a deploy.
+// ── WHICH EVENTS THE HOURLY JOBS COVER ───────────────────────────────────────
+//
+// Both hourly jobs ran exactly ONE event, read from CPHI_FOLLOWUP_EVENT. That was right when CPHI
+// Milan was the only campaign. It stopped being right the moment SCOPE Europe started sending, and
+// the reply-sync half is the dangerous one: a SCOPE contact who replies is never marked replied,
+// so the sequence does not stop and they are chased anyway, four days after answering. Being
+// chased after a good reply is the one failure that turns a warm lead cold.
+//
+// So the jobs iterate a LIST. CPHI_FOLLOWUP_EVENT still works and still wins if set, which keeps
+// the existing Railway variable meaningful; otherwise every event with campaign copy is covered.
+// A new event added to the registry must be added here too — deliberately, because sending is not
+// something to switch on by side effect.
+function activeCampaignEvents() {
+  const pinned = String(process.env.CPHI_FOLLOWUP_EVENT || '').trim();
+  if (pinned) return [pinned];
+  return ['cphi-milan-2026', 'scope-europe-2026'];
+}
+
 cron.schedule('5 * * * 1-5', withAlerts('hourly-05-cphi-followup', async () => {
   if (String(process.env.CPHI_FOLLOWUP_ENABLED).toLowerCase() !== 'true') return;  // silent: hourly
   const { runFollowups } = require('./src/lib/campaigns/cphi-runner');
@@ -651,7 +669,6 @@ cron.schedule('5 * * * 1-5', withAlerts('hourly-05-cphi-followup', async () => {
 // worth more than the handful of API calls. No flag gates it, because it only READS Gmail and
 // moves active → replied; it sends nothing and can wake nobody up.
 cron.schedule('25 * * * *', withAlerts('hourly-25-cphi-reply-sync', async () => {
-  const event = process.env.CPHI_FOLLOWUP_EVENT || 'cphi-milan-2026';
   const mailbox = process.env.CPHI_FOLLOWUP_FROM || 'naren@abiozen.com';
   const { gmailClientFor } = require('./src/lib/gmail/client');
   const { syncReplies } = require('./src/lib/campaigns/reply-sync');
@@ -660,12 +677,24 @@ cron.schedule('25 * * * *', withAlerts('hourly-25-cphi-reply-sync', async () => 
   const g = await gmailClientFor(mailbox);
   if (g.error) throw new Error(`CPHI reply sync cannot act as ${mailbox}: ${g.error}`);
 
-  const r = await syncReplies({ gmail: g.gmail, event, fromMailbox: mailbox, query, execute: true });
-  // Quiet unless something changed: this fires 168 times a week.
-  if (r.marked) {
-    console.log(`[CRON] CPHI reply sync — ${r.marked} newly replied of ${r.checked} active`);
-    for (const x of r.replied) console.log(`[CRON]   ↩ ${x.name} — ${x.company} (${x.campaign})`);
+  // EVERY event, not one. A reply that is not seen does not stop the sequence.
+  const failures = [];
+  for (const event of activeCampaignEvents()) {
+    let r;
+    try {
+      r = await syncReplies({ gmail: g.gmail, event, fromMailbox: mailbox, query, execute: true });
+    } catch (e) {
+      // One event's failure must not silently cancel the others' sync — collect and raise at the end.
+      failures.push(`${event}: ${e && e.message ? e.message : e}`);
+      continue;
+    }
+    // Quiet unless something changed: this fires 168 times a week.
+    if (r.marked) {
+      console.log(`[CRON] reply sync ${event} — ${r.marked} newly replied of ${r.checked} active`);
+      for (const x of r.replied) console.log(`[CRON]   ↩ ${x.name} — ${x.company} (${x.campaign})`);
+    }
   }
+  if (failures.length) throw new Error(`reply sync failed for ${failures.join(' · ')}`);
   // A thread that cannot be read stays ACTIVE, which is the safe side — but if it persists, the
   // next send will skip that person rather than risk writing over a reply, so it needs a human.
   if (r.unknown.length) {
