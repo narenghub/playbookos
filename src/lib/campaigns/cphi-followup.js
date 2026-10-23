@@ -271,7 +271,105 @@ ${SIG_NAME}`,
   ],
 };
 
-const CAMPAIGNS = { supplier, buyer, partner };
+
+// ── DEMAND INTELLIGENCE · SCOPE EUROPE ───────────────────────────────────────
+//
+// This file is named for CPHI because that is the campaign it was built for. It now also holds
+// the SCOPE Europe sequence, because the signature constants and the html helpers above are
+// shared and the CPHI campaign is mid-flight — splitting them into a common module is the right
+// refactor, but not while a live sequence is sending through it.
+//
+// ── WHY THIS SEQUENCE READS THE WAY IT DOES ──────────────────────────────────
+//
+// Twenty vendors took a card at SCOPE and were told: leads, their contact information, and access
+// to the platform. One of those three is deliverable. The trial feed is real and good. The contact
+// data is not — the registry's own published contacts are patient-recruitment coordinators,
+// published so patients could ask about enrolling, and the Apollo enrichment resolved a German
+// biotech to a Brazilian school. Access is an email with a spreadsheet until somebody pays.
+//
+// So step 1 says what the feed IS with enough precision that nobody can infer contacts from it,
+// and then says plainly that it is not a contact database. That sentence costs a few replies now
+// and saves every renewal. A vendor who buys expecting contacts and receives a trial feed churns
+// in month two and tells the floor; one who buys a trial feed and gets a good one renews.
+//
+// No attachment on any step. The one-pager we have is about molecules and would confuse this
+// audience entirely — they do not buy chemicals, they sell services to the people running trials.
+//
+// The ask is deliberately one question, answerable in four words: which therapeutic area, which
+// region. That answer is also what tells us which areas to prioritise in the ingest.
+const demandIntel = {
+  key: 'demand_intel',
+  label: 'Demand intelligence · SCOPE Europe',
+  steps: [
+    {
+      step: 1, delayDays: 0, attach: false,
+      subject: 'Following up from SCOPE — the trial feed I showed you',
+      text: ({ first }) => `Hi ${first},
+
+Good to meet you at SCOPE Europe. You had a look at the trial intelligence view on my laptop, so here is what it actually is, in plain terms.
+
+It is a weekly feed of clinical trials that are new or have changed. Built on the public registry and refreshed daily. For each trial: the sponsor and sponsor type, phase, status, enrolment target, countries, site count, and the date the record last moved.
+
+What it is not is a contact database. Your team already knows how to find the right person at a sponsor — that is your job and you are good at it. What is genuinely hard to know is which sponsor just started something, where, and when. That is the part this answers, and it is the part that decides whether you are early or late to a conversation.
+
+Tell me one therapeutic area and one region and I will send you that cut as a spreadsheet this week. Real data, no charge, nothing attached to it. Judge it against something you already know and you will see quickly whether it is useful.
+
+Best regards,
+${SIG_NAME}
+${SIG_ROLE}
+${SIG_MAIL} · ${SIG_TEL}`,
+      html: ({ first }) => wrap([
+        p(`Hi ${first},`),
+        p('Good to meet you at SCOPE Europe. You had a look at the trial intelligence view on my laptop, so here is what it actually is, in plain terms.'),
+        p('It is a <strong>weekly feed of clinical trials that are new or have changed</strong>. Built on the public registry and refreshed daily. For each trial: the sponsor and sponsor type, phase, status, enrolment target, countries, site count, and the date the record last moved.'),
+        p('What it is <strong>not</strong> is a contact database. Your team already knows how to find the right person at a sponsor — that is your job and you are good at it. What is genuinely hard to know is which sponsor just started something, where, and when. That is the part this answers, and it is the part that decides whether you are early or late to a conversation.'),
+        p('Tell me one therapeutic area and one region and I will send you that cut as a spreadsheet this week. Real data, no charge, nothing attached to it. Judge it against something you already know and you will see quickly whether it is useful.'),
+      ].join('\n')),
+    },
+    {
+      step: 2, delayDays: 5, attach: false,
+      subject: null,
+      text: ({ first }) => `Hi ${first},
+
+Following up once on this.
+
+The offer still stands and it is genuinely one email of effort on your side: name a therapeutic area and a region, and the sample comes back as a spreadsheet you can open next to your current prospect list.
+
+If the answer is that your pipeline is full and this is not the quarter for it, say so and I will stop — no hard feelings and no sequence.
+
+Best regards,
+${SIG_NAME}`,
+      html: ({ first }) => wrap([
+        p(`Hi ${first},`),
+        p('Following up once on this.'),
+        p('The offer still stands and it is genuinely one email of effort on your side: name a therapeutic area and a region, and the sample comes back as a spreadsheet you can open next to your current prospect list.'),
+        p('If the answer is that your pipeline is full and this is not the quarter for it, say so and I will stop — no hard feelings and no sequence.'),
+      ].join('\n')),
+    },
+    {
+      step: 3, delayDays: 12, attach: false,
+      subject: null,
+      text: ({ first }) => `Hi ${first},
+
+Last one from me, and then I will leave you alone.
+
+The feed keeps running whether or not you take it, so the offer does not expire. If a quarter comes when your team is hunting for which sponsors are starting what, write to me and the sample will be with you the same week.
+
+Good luck with the rest of the year.
+
+Best regards,
+${SIG_NAME}`,
+      html: ({ first }) => wrap([
+        p(`Hi ${first},`),
+        p('Last one from me, and then I will leave you alone.'),
+        p('The feed keeps running whether or not you take it, so the offer does not expire. If a quarter comes when your team is hunting for which sponsors are starting what, write to me and the sample will be with you the same week.'),
+        p('Good luck with the rest of the year.'),
+      ].join('\n')),
+    },
+  ],
+};
+
+const CAMPAIGNS = { supplier, buyer, partner, demand_intel: demandIntel };
 
 /** The CPHI roles that feed each campaign. qc_lab and platform_partner both land in `partner`. */
 const ROLE_TO_CAMPAIGN = {
@@ -279,6 +377,10 @@ const ROLE_TO_CAMPAIGN = {
   buyer: 'buyer',
   qc_lab: 'partner',
   platform_partner: 'partner',
+  // SCOPE Europe. Its absence here is why the SCOPE follow-up never sent: the runner reads
+  // ROLE_TO_CAMPAIGN[contact.role], finds nothing, and counts the contact in skipped.noCampaign.
+  // Twenty people who were promised a follow-up got silence, and no error was ever raised.
+  demand_intel: 'demand_intel',
 };
 
 /** Render one step for one contact. Throws rather than rendering a placeholder. */

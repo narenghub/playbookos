@@ -58,11 +58,29 @@ test('nothing describes how the platform is built', () => {
   }
 });
 
-test('step 1 carries the attachment, follow-ups do not', () => {
-  // The one-pager answers the question every supplier asked on the floor. Sending the ask without
-  // the answer repeats that failure in writing — so it goes on the FIRST message, not a later one.
-  for (const key of Object.keys(CAMPAIGNS)) {
+test('step 1 carries the attachment, follow-ups never do', () => {
+  // The one-pager answers the question every supplier asked on the CPHI floor — "which molecules
+  // do you have". Sending the ask without the answer repeats that failure in writing, so for the
+  // molecule campaigns it goes on the FIRST message, not a later one.
+  //
+  // demand_intel is the deliberate exception. Those twenty contacts sell services to the people
+  // who RUN trials; they do not buy chemicals. A molecule one-pager landing in a clinical-vendor
+  // VP's inbox says we did not listen at the booth. The campaigns are named here rather than
+  // inferred so that a new campaign has to make this choice on purpose.
+  const ATTACHES = ['supplier', 'buyer', 'partner'];
+  const NO_ATTACHMENT = ['demand_intel'];
+  assert.deepStrictEqual(
+    [...ATTACHES, ...NO_ATTACHMENT].sort(), Object.keys(CAMPAIGNS).sort(),
+    'a campaign was added without deciding whether it attaches the one-pager');
+
+  for (const key of ATTACHES) {
     assert.strictEqual(stepDef(key, 1).attach, true, `${key} step 1 must attach the one-pager`);
+  }
+  for (const key of NO_ATTACHMENT) {
+    assert.strictEqual(stepDef(key, 1).attach, false, `${key} must not attach the molecule one-pager`);
+  }
+  // This half is universal: nothing re-attaches on a follow-up, in any campaign.
+  for (const key of Object.keys(CAMPAIGNS)) {
     for (const s of CAMPAIGNS[key].steps.slice(1)) {
       assert.ok(!s.attach, `${key} step ${s.step} must not re-attach`);
     }
