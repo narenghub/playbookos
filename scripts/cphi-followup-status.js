@@ -95,17 +95,37 @@ async function main() {
 
   // ── WHO HAS STILL HAD NOTHING ────
   // The join mirrors the runner's own due-query: a role, an email, and no step-1 send.
+  // A halted contact has had nothing sent, so the send-table test alone calls them "not yet
+  // contacted" — which is true and useless. Paul Diercksen was halted because he is in a live
+  // personal thread, and the report still listed him as outstanding work. A reader acting on that
+  // list sends him the template the halt exists to prevent. Deliberately excluded and simply
+  // pending are different states and must read differently.
   const never = (await query(
-    `SELECT c.name, c.company, x.role
+    `SELECT c.name, c.company, x.role,
+            st.status AS seq_status, st.halted_reason
        FROM cphi_exhibitor_contacts c
        JOIN cphi_exhibitor_matches x ON x.id = c.exhibitor_match_id
+       LEFT JOIN cphi_followup_state st
+              ON st.contact_id = c.id AND st.event_slug = c.event_slug
       WHERE c.event_slug = $1 AND c.email IS NOT NULL AND c.email <> '' AND x.role IS NOT NULL
         AND NOT EXISTS (SELECT 1 FROM cphi_followup_sends s
                          WHERE s.contact_id = c.id AND s.event_slug = c.event_slug)
       ORDER BY x.role, c.company`, [EVENT])).rows;
 
-  console.log(`\n   NOT YET CONTACTED — ${never.length} contact(s) with a role and an email:`);
-  for (const r of never) console.log(`      ${r.role.padEnd(17)} ${r.name} — ${r.company}`);
+  const pending = never.filter((r) => r.seq_status !== 'halted');
+  const held = never.filter((r) => r.seq_status === 'halted');
+
+  console.log(`\n   NOT YET CONTACTED — ${pending.length} contact(s) with a role and an email:`);
+  for (const r of pending) console.log(`      ${r.role.padEnd(17)} ${r.name} — ${r.company}`);
+
+  if (held.length) {
+    console.log(`\n   HELD BACK ON PURPOSE — ${held.length} contact(s), excluded by a human:`);
+    for (const r of held) {
+      console.log(`      ${r.role.padEnd(17)} ${r.name} — ${r.company}`);
+      console.log(`      ${' '.repeat(17)} ${r.halted_reason || '(no reason recorded)'}`);
+    }
+    console.log('      These will receive nothing. Undo with halt-contact.js --resume --execute.');
+  }
 
   // Contacts the campaign can never reach, so the number above is not mistaken for the whole list.
   const unreachable = (await query(
@@ -123,8 +143,16 @@ async function main() {
     }
   }
 
+  // This used to suggest --max=80 --ignore-window, written for the one Monday in October when the
+  // whole CPHI list had to go out the same day. Printed every run since, it is advice to disable
+  // the send window and fire eighty messages at once — from a domain carrying reputation damage,
+  // to people whose local time nobody checked. A default that was right once becomes a standing
+  // recommendation, and nobody re-reads the line they have seen twenty times.
   console.log(`\n   To continue the release:`);
-  console.log(`      node scripts/run-cphi-followup.js --max=80 --ignore-window --execute`);
+  console.log(`      the hourly cron does this by itself, inside each recipient's 09:30-17:00,`);
+  console.log(`      up to CPHI_FOLLOWUP_MAX per event per hour. Nothing needs running by hand.`);
+  console.log(`\n   To send a batch now anyway (stays inside the send window):`);
+  console.log(`      node scripts/run-cphi-followup.js --event=${EVENT} --max=5 --execute`);
   console.log(`   Safe to re-run: the UNIQUE claim per (contact, campaign, step) refuses a second send.\n`);
 }
 
