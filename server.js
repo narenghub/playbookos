@@ -615,9 +615,18 @@ function activeCampaignEvents() {
 cron.schedule('5 * * * 1-5', withAlerts('hourly-05-cphi-followup', async () => {
   if (String(process.env.CPHI_FOLLOWUP_ENABLED).toLowerCase() !== 'true') return;  // silent: hourly
   const { runFollowups } = require('./src/lib/campaigns/cphi-runner');
-  const lines = [];
+  const problems = [];
+  // EVERY event with copy, not one. SCOPE Europe's first touches went out by hand on 23 Oct; the
+  // rest are due Monday at 09:30 in London, Berlin and Rome — which is 03:30 in Chicago. A campaign
+  // that only advances when somebody is awake to type a command is a campaign that stalls, and the
+  // send window already guarantees each message lands inside the recipient's own working hours.
+  //
+  // `max` is PER EVENT, so two events at max 3 is up to six an hour. That is deliberate and small:
+  // the sending domain still carries reputation damage from earlier volume.
+  for (const event of activeCampaignEvents()) {
+  const lines = [];   // per event: one event's log must not be printed under another's heading
   const r = await runFollowups({
-    event: process.env.CPHI_FOLLOWUP_EVENT || 'cphi-milan-2026',
+    event,
     fromMailbox: process.env.CPHI_FOLLOWUP_FROM || 'naren@abiozen.com',
     max: parseInt(process.env.CPHI_FOLLOWUP_MAX || '3', 10),
     execute: true,
@@ -639,18 +648,21 @@ cron.schedule('5 * * * 1-5', withAlerts('hourly-05-cphi-followup', async () => {
   // Quiet when there is nothing to do — this fires 45 times a week and an hourly "0 sent" buries
   // the run that actually did something. Noisy the moment it sends or fails.
   if (r.sent || r.failed || r.unfiled.length) {
-    console.log(`[CRON] CPHI follow-up — ${r.sent} sent, ${r.failed} failed, `
+    console.log(`[CRON] follow-up ${event} — ${r.sent} sent, ${r.failed} failed, `
       + `${r.due} were due of ${r.candidates}${r.unfiled.length ? `, ${r.unfiled.length} UNFILED` : ''}`);
     console.log(lines.join('\n'));
   }
-  // withAlerts emails on a throw, so make the two states that need a human into throws: a send that
-  // errored, and a claim row with no Gmail id. The second is the "did that actually send?" case,
-  // and it is worth an email precisely because nobody is watching the logs.
-  if (r.failed) throw new Error(`${r.failed} CPHI follow-up send(s) failed — see cphi_followup_sends.error`);
+  // withAlerts emails on a throw, so the two states that need a human become throws: a send that
+  // errored, and a claim row with no Gmail id — the "did that actually send?" case, worth an email
+  // precisely because nobody is watching the logs. COLLECTED rather than thrown inside the loop,
+  // because one event's bad hour must not silently cancel the other event's whole send.
+  if (r.failed) problems.push(`${event}: ${r.failed} send(s) failed — see cphi_followup_sends.error`);
   if (r.unconfirmed) {
-    throw new Error(`${r.unconfirmed} claimed CPHI send(s) have no Gmail message id: they may or `
-      + `may not have gone. SELECT * FROM cphi_followup_sends WHERE sent_at IS NULL;`);
+    problems.push(`${event}: ${r.unconfirmed} claimed send(s) have no Gmail message id; they may or `
+      + `may not have gone. SELECT * FROM cphi_followup_sends WHERE sent_at IS NULL`);
   }
+  }
+  if (problems.length) throw new Error(problems.join(' · '));
 }), CST);
 
 // ── Every hour, :25, every day — find out who has replied ────────────────────
