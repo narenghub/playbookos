@@ -89,7 +89,11 @@ async function main() {
     let checked = 0; const bad = [];
     for (const r of rows) {
       let j; try { j = JSON.parse(r.raw_json); } catch (_) { bad.push(`${r.nct_id}: raw_json unparseable`); continue; }
-      const ps = j.protocolSection || j.protocol_section || {};
+      // raw_json IS the protocolSection — clinicaltrials.js stores `raw_protocol: ps`, where ps is
+      // already study.protocolSection. Looking for j.protocolSection was one level too deep, so
+      // every row came back "unreadable" and the most important check in this audit silently did
+      // not run. The fallback chain covers the wrapped shape too, in case an older row has it.
+      const ps = j.protocolSection || j.protocol_section || j;
       const status = (ps.statusModule || {}).overallStatus;
       const enroll = (((ps.designModule || {}).enrollmentInfo) || {}).count;
       const sponsor = (((ps.sponsorCollaboratorsModule || {}).leadSponsor) || {}).name;
