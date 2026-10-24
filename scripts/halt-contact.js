@@ -52,18 +52,26 @@ async function main() {
   }
   await initDB();
 
+  // The role is NOT on the contact. It lives on cphi_exhibitor_matches and reaches the contact
+  // through exhibitor_match_id, which is nullable on purpose — a card from a firm with no register
+  // match is still a card. This join is copied from the runner's own query rather than written
+  // afresh: if the two disagree about who has a role, this script halts the wrong person, or
+  // reports "no campaign" for somebody the Monday run will happily email.
   const c = (await query(
-    `SELECT id, name, company, email, role FROM cphi_exhibitor_contacts
-      WHERE event_slug = $1 AND lower(email) = $2`, [EVENT, EMAIL])).rows[0];
+    `SELECT c.id, c.name, c.company, c.email, x.role
+       FROM cphi_exhibitor_contacts c
+       LEFT JOIN cphi_exhibitor_matches x ON x.id = c.exhibitor_match_id
+      WHERE c.event_slug = $1 AND lower(c.email) = $2`, [EVENT, EMAIL])).rows[0];
 
   if (!c) {
     console.error(`no contact with email ${EMAIL} at event ${EVENT}`);
     process.exit(1);
   }
 
-  const campaign = campaignFor(EVENT, c.role);
+  const campaign = c.role ? campaignFor(EVENT, c.role) : null;
   if (!campaign) {
-    say(`\n   ${c.name} (${c.company}) has role "${c.role}", which has no campaign at ${EVENT}.`);
+    say(`\n   ${c.name} (${c.company}) has role ${c.role ? `"${c.role}"` : '(none)'}, `
+      + `which has no campaign at ${EVENT}.`);
     say('   They receive nothing already — no halt needed.\n');
     process.exit(0);
   }
