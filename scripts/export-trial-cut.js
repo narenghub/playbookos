@@ -60,6 +60,14 @@ const REGION = String(arg('region', '')).toUpperCase();
 const DAYS = Math.max(1, Math.min(365, parseInt(arg('days', '90'), 10) || 90));
 const OUT = arg('out', '');
 const STATUS = arg('status', 'RECRUIT');   // substring of overall_status
+// ── WHY ENROLMENT IS A FILTER AND A SORT ────
+// Therapeutic area is the obvious axis and it is the wrong one for some buyers. Mural Health sells
+// participant payments: their product applies to any trial with people in it, and their revenue
+// scales with HOW MANY. For them the useful cut is not "oncology" but "a thousand participants
+// about to start being paid". Sorting by date answers "what is new"; sorting by enrolment answers
+// "what is worth a call first", which is the question a BD team actually has.
+const MIN_ENROL = Math.max(0, parseInt(arg('min-enrolment', '0'), 10) || 0);
+const SORT = String(arg('sort', 'changed')).toLowerCase();   // changed | enrolment
 
 const esc = (v) => {
   const s = v == null ? '' : String(v);
@@ -90,8 +98,11 @@ async function main() {
      WHERE overall_status ILIKE '%' || $1 || '%'
        AND last_update_post_date >= to_char(NOW() - ($2 || ' days')::interval, 'YYYY-MM-DD')
        AND ($3 = '' OR therapeutic_area ILIKE '%' || $3 || '%')
-     ORDER BY last_update_post_date DESC, lead_sponsor_name`,
-  [STATUS, String(DAYS), AREA])).rows;
+       AND ($4 = 0 OR enrollment_count >= $4)
+     ORDER BY
+       CASE WHEN $5 = 'enrolment' THEN enrollment_count END DESC NULLS LAST,
+       last_update_post_date DESC, lead_sponsor_name`,
+  [STATUS, String(DAYS), AREA, MIN_ENROL, SORT])).rows;
 
   const inRegion = (s) => {
     if (!countries) return true;
@@ -137,9 +148,12 @@ async function main() {
   // quote in the covering email rather than adjectives.
   const sponsors = new Set(kept.map((r) => canonicalSponsor(r.lead_sponsor_name, lookup)));
   const folded = [...lookup.values()].filter((v) => v.variants.length > 1).length;
-  console.error(`\n   ── ${AREA || 'all areas'}${REGION ? ` · ${REGION}` : ''} · last ${DAYS} days · status ~ ${STATUS}`);
+  console.error(`\n   ── ${AREA || 'all areas'}${REGION ? ` · ${REGION}` : ''} · last ${DAYS} days`
+    + ` · status ~ ${STATUS}${MIN_ENROL ? ` · enrolment ≥ ${MIN_ENROL}` : ''} · sorted by ${SORT}`);
   console.error(`      ${kept.length} trial(s)${countries ? ` (of ${rows.length} before the region filter)` : ''}`);
   console.error(`      ${sponsors.size} distinct sponsor(s)${folded ? `, ${folded} folded from multiple spellings` : ''}`);
+  const participants = kept.reduce((a, r) => a + (Number(r.enrollment_count) || 0), 0);
+  console.error(`      ${participants.toLocaleString()} participants across the cut`);
   const low = kept.filter((r) => r.classification_confidence != null && r.classification_confidence < 0.7).length;
   if (low) console.error(`      ${low} row(s) classified with confidence below 0.7 — check these before sending`);
   console.error('');
