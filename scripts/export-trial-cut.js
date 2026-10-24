@@ -79,7 +79,17 @@ async function main() {
     for (const [k, v] of Object.entries(REGIONS)) console.log(`${k.padEnd(8)} ${v.length} countries`);
     process.exit(0);
   }
-  await initDB();
+  // ── KEEP THE DATABASE BANNER OUT OF THE CSV ────
+  // initDB announces itself with console.log ("✅ PostgreSQL database ready. 2 admin account(s);
+  // super_admin: naren@abiozen.com"). This script writes the CSV to stdout so it can be
+  // redirected into a file, so that banner became LINE 1 of a spreadsheet on its way to a
+  // customer — a junk row in Excel, and our admin address published to someone outside the
+  // company. Nothing errored; the file simply had an extra line nobody looked at.
+  //
+  // Anything a library prints during startup belongs on stderr when stdout is the product.
+  const realLog = console.log;
+  console.log = (...a) => console.error(...a);
+  try { await initDB(); } finally { console.log = realLog; }
 
   const countries = REGIONS[REGION] || null;
   if (REGION && !countries) {
