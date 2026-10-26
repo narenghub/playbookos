@@ -53,12 +53,20 @@ const discovery = {
   key: 'discovery',
   label: 'Discovery · synthesis intelligence',
   needsEvidence: true,
+  // ── ACADEMICS ARE ADDRESSED BY TITLE AND SURNAME ────
+  // The dry run opened "Hi Nicholas," to a tenured professor at Pomona. In a cold email from a
+  // stranger that is the wrong register, and in US and European academic correspondence it reads
+  // as someone who does not know the convention — which is the same signal as a wrong fact, from
+  // a reader deciding in two seconds whether this is worth answering.
+  //
+  // This is the only route whose recipients are academics, so it is the only one that sets it.
+  formal: true,
   steps: [
     {
       step: 1,
       delayDays: 0,
       subject: ({ topic }) => `${topic} — structure search`,
-      text: ({ first, evidence }) => `Hi ${first},
+      text: ({ greeting, evidence }) => `${greeting},
 
 ${evidence}
 
@@ -68,8 +76,8 @@ It is most useful when the answer is "nobody sells that" — because then it tel
 
 If you have a structure or a target in mind, send it and I will run it. You get the output whether or not you ever buy a gram from us.
 ${sig}`,
-      html: ({ first, evidence }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting, evidence }) => wrap([
+        p(`${greeting},`),
         p(evidence),
         p('We built a <strong>synthesis intelligence</strong> layer for exactly that kind of problem. Two things it does: given a structure, it finds what is commercially available that matches or comes close, with who supplies it and at what scale. Given a target you cannot name yet, it searches the known chemical space for candidates that fit the constraints you can state.'),
         p('It is most useful when the answer is "nobody sells that" — because then it tells you what the nearest accessible analogue is, and what it would take to make the real one.'),
@@ -80,14 +88,14 @@ ${sig}`,
       step: 2,
       delayDays: 5,
       subject: null,
-      text: ({ first }) => `Hi ${first},
+      text: ({ greeting }) => `${greeting},
 
 One follow-up and then I will leave it.
 
 The offer is unconditional: send a structure or a target and you get the search back. No call, no form, no obligation. We are trying to learn what synthesis groups actually hit walls on, and running searches is how we find out.
 ${sig}`,
-      html: ({ first }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting }) => wrap([
+        p(`${greeting},`),
         p('One follow-up and then I will leave it.'),
         p('The offer is unconditional: send a structure or a target and you get the search back. No call, no form, no obligation. We are trying to learn what synthesis groups actually hit walls on, and running searches is how we find out.'),
       ].join('\n')),
@@ -107,7 +115,7 @@ const clinicalApi = {
       step: 1,
       delayDays: 0,
       subject: ({ topic }) => `API supply for ${topic}`,
-      text: ({ first, evidence }) => `Hi ${first},
+      text: ({ greeting, evidence }) => `${greeting},
 
 ${evidence}
 
@@ -117,8 +125,8 @@ The part worth knowing: we will tell you in 48 hours whether we can hit your dat
 
 If you have material on the critical path right now, send me the molecule, the grade and the date you need it. I will come back with a real answer.
 ${sig}`,
-      html: ({ first, evidence }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting, evidence }) => wrap([
+        p(`${greeting},`),
         p(evidence),
         p('We supply APIs and intermediates for clinical programmes — the quantities a trial needs rather than commercial scale, with CoA, and DMF-backed where the filing requires it.'),
         p('The part worth knowing: <strong>we will tell you in 48 hours whether we can hit your date, including when the answer is no.</strong> A supplier who says yes and then slips is more expensive to a clinical programme than one who declines in week one, and most of the pain we hear about comes from exactly that.'),
@@ -129,14 +137,14 @@ ${sig}`,
       step: 2,
       delayDays: 5,
       subject: null,
-      text: ({ first }) => `Hi ${first},
+      text: ({ greeting }) => `${greeting},
 
 Following up once.
 
 If supply is covered for this programme, the useful thing for us would be knowing who handles API sourcing on your side so I am not writing to the wrong desk. One line is plenty and I will not chase it further.
 ${sig}`,
-      html: ({ first }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting }) => wrap([
+        p(`${greeting},`),
         p('Following up once.'),
         p('If supply is covered for this programme, the useful thing for us would be knowing who handles API sourcing on your side so I am not writing to the wrong desk. One line is plenty and I will not chase it further.'),
       ].join('\n')),
@@ -156,7 +164,7 @@ const customSynthesis = {
       step: 1,
       delayDays: 0,
       subject: ({ topic }) => `${topic} — made to order`,
-      text: ({ first, evidence }) => `Hi ${first},
+      text: ({ greeting, evidence }) => `${greeting},
 
 ${evidence}
 
@@ -166,8 +174,8 @@ Two things that may matter more than the capability itself. We scope before we q
 
 If you have something on the list that nobody will supply, send me the structure or the name. I will tell you whether it is a job for us.
 ${sig}`,
-      html: ({ first, evidence }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting, evidence }) => wrap([
+        p(`${greeting},`),
         p(evidence),
         p('When a compound is not commercially available we make it to order. Milligrams to kilograms, with the route, the analytical package and the timeline agreed before anything starts.'),
         p('Two things that may matter more than the capability itself. <strong>We scope before we quote</strong>, so you get a route and a realistic timeline rather than a number that moves later. And <strong>we decline work we cannot do well</strong> — if a target needs chemistry we are weak in, saying so in week one is worth more to you than a contract.'),
@@ -178,14 +186,14 @@ ${sig}`,
       step: 2,
       delayDays: 6,
       subject: null,
-      text: ({ first }) => `Hi ${first},
+      text: ({ greeting }) => `${greeting},
 
 Last note on this.
 
 If nothing is blocked right now, keep the thread — reply to it whenever a target comes up that nobody will quote, and it reaches me directly rather than a form.
 ${sig}`,
-      html: ({ first }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting }) => wrap([
+        p(`${greeting},`),
         p('Last note on this.'),
         p('If nothing is blocked right now, keep the thread — reply to it whenever a target comes up that nobody will quote, and it reaches me directly rather than a form.'),
       ].join('\n')),
@@ -205,7 +213,7 @@ const catalogueApi = {
       step: 1,
       delayDays: 0,
       subject: ({ topic }) => `${topic} — price and lead time`,
-      text: ({ first, evidence }) => `Hi ${first},
+      text: ({ greeting, evidence }) => `${greeting},
 
 ${evidence}
 
@@ -213,8 +221,8 @@ We can source it. Rather than describe our capabilities, here is the specific of
 
 No minimum that makes a small order awkward, and a straight no where we are not competitive.
 ${sig}`,
-      html: ({ first, evidence }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting, evidence }) => wrap([
+        p(`${greeting},`),
         p(evidence),
         p('We can source it. Rather than describe our capabilities, here is the specific offer: <strong>tell me the quantity and grade and you get a price and a lead time within 48 hours</strong>, from a supplier I will name.'),
         p('No minimum that makes a small order awkward, and a straight no where we are not competitive.'),
@@ -224,14 +232,14 @@ ${sig}`,
       step: 2,
       delayDays: 4,
       subject: null,
-      text: ({ first }) => `Hi ${first},
+      text: ({ greeting }) => `${greeting},
 
 Following up once, then I will stop.
 
 The 48-hour quote stands for anything else on your list too, not only the molecule above.
 ${sig}`,
-      html: ({ first }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting }) => wrap([
+        p(`${greeting},`),
         p('Following up once, then I will stop.'),
         p('The 48-hour quote stands for anything else on your list too, not only the molecule above.'),
       ].join('\n')),
@@ -262,7 +270,7 @@ const referenceStandard = {
       step: 1,
       delayDays: 0,
       subject: ({ topic }) => `${topic} — reference standards and impurities`,
-      text: ({ first, evidence, link }) => `Hi ${first},
+      text: ({ greeting, evidence, link }) => `${greeting},
 
 ${evidence}
 
@@ -272,8 +280,8 @@ That is usually the annoying part. The main compound is easy to buy and a specif
 
 If there is a standard or an impurity you are waiting on, send me the name and I will come back within 48 hours with a price and a lead time, or tell you we cannot get it.${link ? `\n\nOur current listings: ${link}` : ''}
 ${sig}`,
-      html: ({ first, evidence, link }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting, evidence, link }) => wrap([
+        p(`${greeting},`),
         p(evidence),
         p('We are not writing about the API — you locked that years ago. What we supply is the material <em>around</em> it: <strong>reference standards, known and unknown impurities, and comparators</strong>, in the quantities assay validation and stability work actually consume.'),
         p('That is usually the annoying part. The main compound is easy to buy and a specific impurity at 50 mg is not, and it is what holds up a method validation.'),
@@ -285,14 +293,14 @@ ${sig}`,
       step: 2,
       delayDays: 5,
       subject: null,
-      text: ({ first }) => `Hi ${first},
+      text: ({ greeting }) => `${greeting},
 
 One follow-up and I will leave it.
 
 If standards are handled on your side, the useful thing would be knowing who runs analytical procurement so I am not writing to the wrong desk. One line is plenty, and I will not chase it.
 ${sig}`,
-      html: ({ first }) => wrap([
-        p(`Hi ${first},`),
+      html: ({ greeting }) => wrap([
+        p(`${greeting},`),
         p('One follow-up and I will leave it.'),
         p('If standards are handled on your side, the useful thing would be knowing who runs analytical procurement so I am not writing to the wrong desk. One line is plenty, and I will not chase it.'),
       ].join('\n')),
@@ -460,15 +468,29 @@ function shortTopic(raw, max = 58) {
   // De-title-case so the phrase sits inside a sentence. Ordinary Title Case words are lowered;
   // acronyms, hyphenated technical terms and anything carrying a digit are left exactly as filed,
   // because "dna-encoded" and "c-h activation" are wrong and a chemist notices immediately.
+  // ── PUNCTUATION MUST NOT BLOCK THE LOWERCASING ────
+  // The case test is /^[A-Z][a-z]+$/, which "Electrophiles," fails because of the comma. So a
+  // title listing several things came out as "abundant Electrophiles, nucleophiles and radicals"
+  // — one word capitalised mid-sentence, exactly where a reader's eye goes. Each word is split
+  // into its leading punctuation, its core and its trailing punctuation; the rules apply to the
+  // core and the punctuation is put back untouched.
   s = s.split(' ').map((w) => {
-    if (ALWAYS_CAPS.test(w)) return w;
-    if (/\d/.test(w)) return w;
-    if (w === w.toUpperCase() && w.length > 1) return w;      // SELECTIVE -> leave; it is an acronym or shouting
-    if (w.includes('-')) {
-      // Hyphenated: lower only the parts that are plain Title Case words.
-      return w.split('-').map((part) => (/^[A-Z][a-z]{2,}$/.test(part) ? part.toLowerCase() : part)).join('-');
+    const lead = (w.match(/^[^A-Za-z0-9]*/) || [''])[0];
+    const trail = (w.match(/[^A-Za-z0-9]*$/) || [''])[0];
+    const core = w.slice(lead.length, w.length - (trail.length || 0));
+    if (!core) return w;
+
+    const keep = (c) => lead + c + trail;
+    if (ALWAYS_CAPS.test(core)) return keep(core);
+    if (/\d/.test(core)) return keep(core);
+    if (core === core.toUpperCase() && core.length > 1) return keep(core);  // acronym or shouting
+    if (core.includes('-')) {
+      // Hyphenated: lower only the parts that are plain Title Case words, so "DNA-Encoded"
+      // becomes "DNA-encoded" and "Ni-Catalyzed" becomes "Ni-catalyzed".
+      return keep(core.split('-')
+        .map((part) => (/^[A-Z][a-z]{2,}$/.test(part) ? part.toLowerCase() : part)).join('-'));
     }
-    return /^[A-Z][a-z]+$/.test(w) ? w.toLowerCase() : w;
+    return keep(/^[A-Z][a-z]+$/.test(core) ? core.toLowerCase() : core);
   }).join(' ');
 
   return s;
@@ -579,10 +601,21 @@ function renderNeed(needKey, stepNumber, vars) {
   if (!vars || !vars.first || !String(vars.first).trim()) {
     throw new Error('a first name is required to render a greeting');
   }
+  const greeting = c.formal
+    ? `Dear Professor ${String(vars.last || '').trim()}`
+    : `Hi ${String(vars.first).trim()}`;
+  vars = { ...vars, greeting };
   // Step 1 opens with the evidence sentence. An empty one would send a letter whose first line is
   // blank and whose premise is missing — the generic email this module exists to prevent.
   if (c.needsEvidence && stepNumber === 1 && !String(vars.evidence || '').trim()) {
     throw new Error(`need campaign "${needKey}" step 1 requires evidence — route produced none`);
+  }
+  // A formal route needs a surname, and refuses rather than falling back to the first name: a
+  // silent downgrade to "Hi Nicholas" is the defect this exists to stop, and it would be
+  // invisible in the output. Checked after evidence, so the more fundamental failure is reported
+  // first when both are missing.
+  if (c.formal && !String(vars.last || '').trim()) {
+    throw new Error(`need campaign "${needKey}" addresses academics and requires a surname`);
   }
   let subject = typeof s.subject === 'function' ? s.subject(vars) : s.subject;
   if (subject !== null && /\{\{|\bundefined\b/.test(String(subject))) {

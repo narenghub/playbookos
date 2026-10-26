@@ -145,12 +145,54 @@ t('step 1 without evidence throws instead of sending a generic letter', () => {
   }
 });
 
+t('academics are addressed by title and surname, buyers by first name', () => {
+  // The dry run opened "Hi Nicholas," to a tenured professor at Pomona. In a cold email that is
+  // the wrong register and signals, as loudly as a wrong fact, that the sender does not know the
+  // convention.
+  const prof = renderNeed('discovery', 1, {
+    first: 'Nicholas', last: 'Ball', topic: 'carbon-based S(VI) compounds', evidence: 'I came across your work.',
+  });
+  assert.ok(prof.text.startsWith('Dear Professor Ball,'), prof.text.slice(0, 40));
+  assert.ok(prof.html.includes('Dear Professor Ball,'));
+  assert.ok(!/Hi Nicholas/.test(prof.text));
+
+  // A commercial buyer is not a professor, and "Dear Professor" there would be worse.
+  const buyer = renderNeed('catalogue_api', 1, {
+    first: 'Can', last: 'Gundogan', topic: 'Yttrium oxide', evidence: 'You asked about Yttrium oxide.',
+  });
+  assert.ok(buyer.text.startsWith('Hi Can,'), buyer.text.slice(0, 40));
+});
+
+t('a formal route refuses to fall back to a first name', () => {
+  // A silent downgrade to "Hi Nicholas" is exactly the defect this guards, and it would be
+  // invisible in the output.
+  assert.throws(
+    () => renderNeed('discovery', 1, { first: 'Nicholas', topic: 'x', evidence: 'e' }),
+    /surname/,
+  );
+});
+
+t('follow-up steps keep the formal greeting too', () => {
+  const m = renderNeed('discovery', 2, { first: 'Nicholas', last: 'Ball', topic: 'x', evidence: 'e' });
+  assert.ok(/Dear Professor Ball,/.test(m.text), m.text.slice(0, 40));
+});
+
+t('a word with attached punctuation is still de-title-cased', () => {
+  // "Electrophiles," failed /^[A-Z][a-z]+$/ because of the comma, so a title listing several
+  // things came out with one word capitalised mid-sentence — right where the eye goes.
+  const s = shortTopic('Access to Abundant Electrophiles, Nucleophiles and Radicals');
+  assert.ok(!/[A-Z][a-z]+,/.test(s), `capitalised word before a comma: "${s}"`);
+  assert.ok(/electrophiles,/.test(s), s);
+  // And the punctuation itself survives.
+  assert.ok(s.includes(','), s);
+});
+
 t('a missing first name throws', () => {
   assert.throws(() => renderNeed('discovery', 1, { evidence: 'e', topic: 't' }), /first name/);
 });
 
 t('no rendered subject or body carries an uninterpolated placeholder', () => {
-  const vars = { first: 'Sam', topic: 'C–H activation', evidence: 'I came across your work.' };
+  const vars = { first: 'Sam', last: 'Lee', topic: 'C–H activation', evidence: 'I came across your work.' };
   for (const k of Object.keys(NEED_CAMPAIGNS)) {
     for (const n of needStepsOf(k)) {
       const m = renderNeed(k, n, vars);
@@ -166,7 +208,7 @@ t('no rendered subject or body carries an uninterpolated placeholder', () => {
 t('follow-up steps reply in thread rather than opening a new subject', () => {
   for (const k of Object.keys(NEED_CAMPAIGNS)) {
     const steps = needStepsOf(k);
-    const last = renderNeed(k, steps[steps.length - 1], { first: 'Sam', topic: 't', evidence: 'e' });
+    const last = renderNeed(k, steps[steps.length - 1], { first: 'Sam', last: 'Lee', topic: 't', evidence: 'e' });
     assert.strictEqual(last.isFollowUp, true, `${k}'s last step opens a new thread`);
   }
 });
@@ -179,7 +221,7 @@ t('no sequence promises a volume, a throughput or a purity figure', () => {
   const bad = /\b\d+\s*(kg|tonnes?|metric tons?)\b|\b99\.\d+\s*%|\b\d{3,}\s*(suppliers?|products?|customers?|clients?)\b/i;
   for (const k of Object.keys(NEED_CAMPAIGNS)) {
     for (const n of needStepsOf(k)) {
-      const m = renderNeed(k, n, { first: 'Sam', topic: 't', evidence: 'e' });
+      const m = renderNeed(k, n, { first: 'Sam', last: 'Lee', topic: 't', evidence: 'e' });
       assert.ok(!bad.test(m.text), `${k} step ${n} promises a figure: ${m.text.match(bad)}`);
     }
   }
@@ -190,7 +232,7 @@ t('every sequence offers a way out or an honest no', () => {
   // happens when the answer is no, so a reply costs the reader nothing.
   const out = /no obligation|straight no|whether or not|I will (leave it|stop)|not the right|decline|tell you we cannot|including when the answer is no|will not chase|keep the thread/i;
   for (const k of Object.keys(NEED_CAMPAIGNS)) {
-    const all = needStepsOf(k).map((n) => renderNeed(k, n, { first: 'Sam', topic: 't', evidence: 'e' }).text).join('\n');
+    const all = needStepsOf(k).map((n) => renderNeed(k, n, { first: 'Sam', last: 'Lee', topic: 't', evidence: 'e' }).text).join('\n');
     assert.ok(out.test(all), `${k} never offers an easy no`);
   }
 });
@@ -410,7 +452,7 @@ t('a subject never starts with a lowercase letter', () => {
     deptType: 'Department of Chemistry', researchTopic: 'Catalytic Redox Reactions in Synthesis',
     grantNumber: 'R35GM134929',
   });
-  const m = renderNeed('discovery', 1, { first: 'Shannon', topic: r.topic, evidence: r.evidence });
+  const m = renderNeed('discovery', 1, { first: 'Shannon', last: 'Stahl', topic: r.topic, evidence: r.evidence });
   assert.ok(/^[A-Z]/.test(m.subject), `subject starts lowercase: ${m.subject}`);
   // …and the sentence still reads with a lowercase topic inside it.
   assert.ok(/your work on catalytic redox/.test(r.evidence), r.evidence);

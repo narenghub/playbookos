@@ -46,11 +46,29 @@ const clip = (s, n) => { const t = String(s == null ? '' : s); return t.length >
 
 // First name for the greeting. "Scott J Miller" -> "Scott"; an ALL-CAPS filing like
 // "JONATHAN A ELLMAN" -> "Jonathan", because "Hi JONATHAN," reads as a mail merge.
+const titleCase = (t) => (t === t.toUpperCase() ? t.charAt(0) + t.slice(1).toLowerCase() : t);
+
 function firstName(full) {
   const tok = String(full || '').trim().split(/\s+/).filter(Boolean)[0] || '';
-  if (!tok) return '';
-  if (tok === tok.toUpperCase()) return tok.charAt(0) + tok.slice(1).toLowerCase();
-  return tok;
+  return tok ? titleCase(tok) : '';
+}
+
+// ── SURNAME, FOR "DEAR PROFESSOR …" ──────────────────────────────────────────
+// RePORTER files names several ways and all of them are in this table: "Scott J Miller",
+// "JONATHAN A ELLMAN", "Margaret A. Phillips", "Pavel  Nagorny" (two spaces), "Jean-Pierre
+// Vilardaga". The surname is the last token in every one, but the ALL-CAPS filings have to be
+// recased or the letter opens "Dear Professor ELLMAN", and a particle like "van" or "de" belongs
+// with the name that follows it.
+const PARTICLES = new Set(['van', 'von', 'de', 'del', 'della', 'di', 'da', 'dos', 'du', 'la',
+  'le', 'den', 'der', 'ten', 'ter', 'bin', 'al']);
+
+function lastName(full) {
+  const toks = String(full || '').trim().split(/\s+/).filter(Boolean);
+  if (!toks.length) return '';
+  let i = toks.length - 1;
+  // Walk back over particles so "Vy M van Dong" gives "van Dong", not "Dong".
+  while (i > 0 && PARTICLES.has(toks[i - 1].toLowerCase().replace(/[^a-z]/g, ''))) i -= 1;
+  return toks.slice(i).map(titleCase).join(' ');
 }
 
 async function main() {
@@ -205,7 +223,7 @@ async function main() {
   if (SHOW) {
     say('\n   ══ FULL TEXT OF THE FIRST EMAILS ═══════════════════════════════════');
     for (const r of routed.slice(0, SHOW)) {
-      const vars = { first: firstName(r.who), topic: r.route.topic, evidence: r.route.evidence, link: r.link ? r.link.url : null };
+      const vars = { first: firstName(r.who), last: lastName(r.who), topic: r.route.topic, evidence: r.route.evidence, link: r.link ? r.link.url : null };
       let m;
       try { m = renderNeed(r.route.need, 1, vars); } catch (e) {
         say(`\n      ── ${r.who} — WOULD NOT RENDER: ${e.message}`);
@@ -225,7 +243,7 @@ async function main() {
   const broken = [];
   for (const r of routed) {
     try {
-      renderNeed(r.route.need, 1, { first: firstName(r.who), topic: r.route.topic, evidence: r.route.evidence });
+      renderNeed(r.route.need, 1, { first: firstName(r.who), last: lastName(r.who), topic: r.route.topic, evidence: r.route.evidence });
     } catch (e) { broken.push([r, e.message]); }
   }
   if (broken.length) {
