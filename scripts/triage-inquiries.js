@@ -50,13 +50,20 @@ async function main() {
 
   const quoted = rows.filter((r) => r.quotes > 0);
   const unquoted = rows.filter((r) => !r.quotes);
-  say(`   ${rows.length} inquiry(ies) · ${quoted.length} quoted · ${unquoted.length} NOT quoted\n`);
+  const stated = rows.reduce((a, r) => a + (Number(r.order_value_usd) || 0), 0);
+  say(`   ${rows.length} inquiry(ies) · ${quoted.length} quoted · ${unquoted.length} NOT quoted`);
+  if (stated) say(`   $${stated.toLocaleString()} of stated order value across them`);
+  say('');
 
   // ── CAN WE SOURCE IT? ────
   // The supplier catalogue is already parsed and classified, so this is answerable offline. A
   // match here means a quote could be written today without asking anybody anything.
+  // Column names differ between the two tables and that is a trap: inquiries uses molecule_name
+  // and cas_number, supplier_products uses product_name and cas. Aliased here so the matching code
+  // below reads one way, rather than silently comparing fields that do not exist.
   const cat = (await query(`
-    SELECT molecule_name, cas, supplier, use_class, review_status FROM supplier_products`)).rows;
+    SELECT product_name AS molecule_name, cas, supplier, use_class, review_status
+      FROM supplier_products`)).rows;
   const byName = new Map();
   const byCas = new Map();
   for (const p of cat) {
@@ -93,7 +100,8 @@ async function main() {
     const approved = m.some((x) => x.review_status === 'approved');
     say(`      ${pad(`${age(r.created_at)}d`, 6)}${pad(r.molecule_name || '(no molecule named)', 30)}`
       + `${pad(`${r.quantity_requested || '?'} ${r.quantity_unit || ''}`.trim(), 12)}`
-      + `${pad(r.buyer_company || r.buyer_name || '(no company)', 26)}${r.status || ''}`);
+      + `${pad(r.buyer_company || r.buyer_name || '(no company)', 26)}${r.status || ''}`
+      + `${r.order_value_usd ? `  $${Number(r.order_value_usd).toLocaleString()}` : ''}`);
     say(`             ↳ ${m.length} catalogue match(es)`
       + `${sup.length ? ` from ${sup.slice(0, 3).join(', ')}` : ''}`
       + `${approved ? ' · APPROVED for sale' : ' · not yet approved'}`);
@@ -105,7 +113,8 @@ async function main() {
   for (const { r } of cannot.slice(0, 40)) {
     say(`      ${pad(`${age(r.created_at)}d`, 6)}${pad(r.molecule_name || '(no molecule named)', 30)}`
       + `${pad(`${r.quantity_requested || '?'} ${r.quantity_unit || ''}`.trim(), 12)}`
-      + `${pad(r.buyer_company || r.buyer_name || '(no company)', 26)}${r.status || ''}`);
+      + `${pad(r.buyer_company || r.buyer_name || '(no company)', 26)}${r.status || ''}`
+      + `${r.order_value_usd ? `  $${Number(r.order_value_usd).toLocaleString()}` : ''}`);
   }
 
   // ── WHO ARE THESE PEOPLE? ────
