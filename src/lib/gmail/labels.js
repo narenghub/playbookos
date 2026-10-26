@@ -41,9 +41,32 @@ const CAMPAIGN_LABELS = Object.freeze({
   lab_network: 'Lab Network',
 });
 
+// ── NEED-BASED OUTREACH, FILED SEPARATELY ────────────────────────────────────
+//
+// A second family of sequences, routed by what a contact needs rather than by a show they stood
+// at. Kept in its own map for the same reason the campaign→event mapping is per event: these
+// label names are read by reply-sync, and a key colliding across the two families would file a
+// professor's reply in the CPHI supplier folder.
+//
+// Filing is not cosmetic here either. Reply-sync finds replies by walking the labelled threads, so
+// an unlabelled thread is one whose reply never stops the sequence — the person answers, and gets
+// chased anyway.
+const NEED_LABELS = Object.freeze({
+  discovery: 'Discovery',
+  clinical_api: 'Clinical API',
+  custom_synthesis: 'Custom Synthesis',
+  catalogue_api: 'Catalogue',
+  reference_standard: 'Reference Standards',
+});
+
 /** The label for a campaign, or null if that campaign has none. Never invents a name. */
 function labelForCampaign(campaign) {
   return CAMPAIGN_LABELS[String(campaign || '').toLowerCase()] || null;
+}
+
+/** The label for a need, or null. Never invents a name — an unknown need files nowhere. */
+function labelForNeed(need) {
+  return NEED_LABELS[String(need || '').toLowerCase()] || null;
 }
 
 // Resolved label ids, per mailbox. A run of fifty sends should not list the label set fifty times.
@@ -175,8 +198,21 @@ async function ensureCampaignLabels(gmail, subject) {
   return { ok: !errors.length, labels, errors };
 }
 
+/** The same, for the need-based sequences. Returns { ok, labels, errors }. */
+async function ensureNeedLabels(gmail, subject) {
+  const labels = {};
+  const errors = [];
+  for (const [need, name] of Object.entries(NEED_LABELS)) {
+    const r = await ensureLabel(gmail, subject, name);
+    if (r.error) { errors.push(`${need} → "${name}": ${r.error}`); continue; }
+    labels[need] = { name, id: r.id, created: r.created };
+  }
+  return { ok: !errors.length, labels, errors };
+}
+
 module.exports = {
   CAMPAIGN_LABELS, labelForCampaign,
+  NEED_LABELS, labelForNeed, ensureNeedLabels,
   ensureLabel, labelMessage, labelThread, ensureCampaignLabels,
   resetLabelCache,
 };
