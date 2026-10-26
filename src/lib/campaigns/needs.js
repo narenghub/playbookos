@@ -239,11 +239,73 @@ ${sig}`,
   ],
 };
 
+// ── 5. REFERENCE STANDARD ────────────────────────────────────────────────────
+//
+// The strongest route we have, and the least obvious. A sponsor running Phase II already locked
+// their API supply years ago — writing to offer it is a waste of both sides' time, and the obvious
+// version of "you are running a trial on X, we sell X" lands as someone who does not understand
+// how drug development works.
+//
+// What a running trial consumes continuously is REFERENCE STANDARDS, KNOWN IMPURITIES and
+// COMPARATORS: small quantities, needed repeatedly for assay validation and stability work,
+// ordered without a procurement cycle, and a persistent irritation because the catalogue houses
+// are slow on exactly the obscure impurities a specific molecule needs.
+//
+// study_molecules against clinical_studies gives the molecule and the phase, both public and both
+// checkable, which is why this route can open with a sentence that is true and specific.
+const referenceStandard = {
+  key: 'reference_standard',
+  label: 'Clinical · reference standards and impurities',
+  needsEvidence: true,
+  steps: [
+    {
+      step: 1,
+      delayDays: 0,
+      subject: ({ topic }) => `${topic} — reference standards and impurities`,
+      text: ({ first, evidence, link }) => `Hi ${first},
+
+${evidence}
+
+We are not writing about the API — you locked that years ago. What we supply is the material around it: reference standards, known and unknown impurities, and comparators, in the quantities assay validation and stability work actually consume.
+
+That is usually the annoying part. The main compound is easy to buy and a specific impurity at 50 mg is not, and it is what holds up a method validation.
+
+If there is a standard or an impurity you are waiting on, send me the name and I will come back within 48 hours with a price and a lead time, or tell you we cannot get it.${link ? `\n\nOur current listings: ${link}` : ''}
+${sig}`,
+      html: ({ first, evidence, link }) => wrap([
+        p(`Hi ${first},`),
+        p(evidence),
+        p('We are not writing about the API — you locked that years ago. What we supply is the material <em>around</em> it: <strong>reference standards, known and unknown impurities, and comparators</strong>, in the quantities assay validation and stability work actually consume.'),
+        p('That is usually the annoying part. The main compound is easy to buy and a specific impurity at 50 mg is not, and it is what holds up a method validation.'),
+        p('If there is a standard or an impurity you are waiting on, send me the name and I will come back within 48 hours with a price and a lead time, or tell you we cannot get it.'),
+        link ? p(`Our current listings: <a href="${link}">${link}</a>`) : '',
+      ].filter(Boolean).join('\n')),
+    },
+    {
+      step: 2,
+      delayDays: 5,
+      subject: null,
+      text: ({ first }) => `Hi ${first},
+
+One follow-up and I will leave it.
+
+If standards are handled on your side, the useful thing would be knowing who runs analytical procurement so I am not writing to the wrong desk. One line is plenty, and I will not chase it.
+${sig}`,
+      html: ({ first }) => wrap([
+        p(`Hi ${first},`),
+        p('One follow-up and I will leave it.'),
+        p('If standards are handled on your side, the useful thing would be knowing who runs analytical procurement so I am not writing to the wrong desk. One line is plenty, and I will not chase it.'),
+      ].join('\n')),
+    },
+  ],
+};
+
 const NEED_CAMPAIGNS = Object.freeze({
   discovery,
   clinical_api: clinicalApi,
   custom_synthesis: customSynthesis,
   catalogue_api: catalogueApi,
+  reference_standard: referenceStandard,
 });
 
 // ── DETECTION ────────────────────────────────────────────────────────────────
@@ -349,13 +411,31 @@ function needFor(s = {}) {
 
   // 1. A trial on the books is the strongest signal there is: a phase, a date and a budget.
   if (s.trialPhase && PHASE.test(String(s.trialPhase))) {
+    const phase = String(s.trialPhase).trim();
+    const trialMolecule = String(s.trialMolecule || '').trim();
+
+    // ── THE MOLECULE DECIDES WHICH LETTER, AND IT IS NOT THE OBVIOUS ONE ────
+    // Knowing the compound under study does NOT mean offering to supply it: the sponsor locked
+    // that supply years before Phase II, and offering it reads as someone who does not understand
+    // drug development. What a running trial buys repeatedly is the material around the compound
+    // — reference standards, impurities, comparators. So a known molecule routes to the stronger,
+    // narrower offer, and only a trial whose compound we cannot name falls back to general API.
+    if (trialMolecule) {
+      return {
+        need: 'reference_standard',
+        topic: trialMolecule,
+        signal: 'trial_molecule',
+        evidence: `I saw you have ${trialMolecule} in ${phase}.`,
+      };
+    }
+
     const what = String(s.trialTitle || '').trim();
     if (!what) return null;              // no true sentence to open with
     return {
       need: 'clinical_api',
-      topic: String(s.trialPhase).trim(),
+      topic: phase,
       signal: 'trial_phase',
-      evidence: `I saw you are running ${String(s.trialPhase).trim()} on ${what}.`,
+      evidence: `I saw you are running ${phase} on ${what}.`,
     };
   }
 

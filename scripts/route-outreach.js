@@ -29,6 +29,7 @@
 
 const { initDB, query } = require('../src/lib/db');
 const { needFor, renderNeed, needStepsOf, NEED_CAMPAIGNS } = require('../src/lib/campaigns/needs');
+const { resolveProductLink, PATTERN_CONFIGURED } = require('../src/lib/campaigns/product-link');
 
 const argv = process.argv.slice(2);
 const arg = (n, d) => {
@@ -112,7 +113,7 @@ async function main() {
        AND NULLIF(TRIM(i.molecule_name), '') IS NOT NULL
      ORDER BY i.created_at DESC`)).rows;
 
-  const cat = (await query('SELECT product_name, cas FROM supplier_products')).rows;
+  const cat = (await query('SELECT product_name, cas, review_status FROM supplier_products')).rows;
   const names = new Set(cat.map((c) => String(c.product_name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()));
   const cases = new Set(cat.map((c) => String(c.cas || '').trim()).filter(Boolean));
 
@@ -121,14 +122,28 @@ async function main() {
     // Only pass inCatalogue when we have actually checked. Undefined routes nowhere by design.
     const inCatalogue = names.has(key) || (r.cas_number && cases.has(String(r.cas_number).trim()));
     const route = needFor({ moleculeNamed: r.molecule_name, inCatalogue: !!inCatalogue });
+    const approved = inCatalogue && cat.some((c) => String(c.product_name || '').toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ').trim() === key && c.review_status === 'approved');
     rows.push({
       who: r.buyer_name || r.buyer_company,
       email: r.buyer_email,
       org: r.buyer_company,
       src: `inquiry/${r.status || '?'}`,
       route,
+      approved,
       why: route ? null : 'molecule present but unroutable',
     });
+  }
+
+  // ── 3. LINKS, VERIFIED OR ABSENT ────
+  // Resolved here rather than at send time so the dry run shows exactly which contacts would carry
+  // a link and which would not. With no ABIOZEN_PRODUCT_URL configured this resolves nothing and
+  // every email goes out without a link, which is a working state.
+  for (const r of rows) {
+    if (!r.route) continue;
+    const mol = ['catalogue_api', 'custom_synthesis', 'reference_standard'].includes(r.route.need)
+      ? r.route.topic : null;
+    r.link = mol ? await resolveProductLink(mol, { approved: r.approved === true }) : null;
   }
 
   // ── REPORT ────
@@ -149,8 +164,18 @@ async function main() {
   say(`      ${pad('who', 24)}${pad('need', 18)}${pad('signal', 24)}evidence (the first line of their email)`);
   for (const r of routed) {
     say(`      ${pad(clip(r.who, 23), 24)}${pad(r.route.need, 18)}${pad(r.route.signal, 24)}${clip(r.route.evidence, 72)}`);
+    if (r.link) say(`             ↳ link (verified live, page names the molecule): ${r.link.url}`);
   }
   if (!routed.length) say('      (none)');
+
+  const linked = routed.filter((r) => r.link).length;
+  if (!PATTERN_CONFIGURED) {
+    say('\n      No ABIOZEN_PRODUCT_URL set, so no email carries a product link. The letters read');
+    say('      correctly without one — a link is only added where the page can be confirmed live');
+    say('      and about that molecule, because a 404 in a cold email undoes the opening sentence.');
+  } else {
+    say(`\n      ${linked} of ${routed.length} would carry a verified product link.`);
+  }
 
   say('\n   ══ NOT ROUTED — NO EVIDENCE, SO NO EMAIL ═══════════════════════════');
   for (const r of skipped) {
@@ -163,7 +188,7 @@ async function main() {
   if (SHOW) {
     say('\n   ══ FULL TEXT OF THE FIRST EMAILS ═══════════════════════════════════');
     for (const r of routed.slice(0, SHOW)) {
-      const vars = { first: firstName(r.who), topic: r.route.topic, evidence: r.route.evidence };
+      const vars = { first: firstName(r.who), topic: r.route.topic, evidence: r.route.evidence, link: r.link ? r.link.url : null };
       let m;
       try { m = renderNeed(r.route.need, 1, vars); } catch (e) {
         say(`\n      ── ${r.who} — WOULD NOT RENDER: ${e.message}`);

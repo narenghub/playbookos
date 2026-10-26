@@ -80,6 +80,30 @@ t('a funded chemistry lab routes to discovery with its grant in the evidence', (
   assert.ok(/2029-05/.test(r.evidence), r.evidence);
 });
 
+// ── THE TRIAL SPLIT ──────────────────────────────────────────────────────────
+
+t('a trial whose compound we know routes to reference standards, not API supply', () => {
+  const r = needFor({ trialPhase: 'Phase 2', trialTitle: 'a breast cancer study', trialMolecule: 'olaparib' });
+  assert.strictEqual(r.need, 'reference_standard');
+  assert.strictEqual(r.signal, 'trial_molecule');
+  assert.ok(/olaparib/.test(r.evidence) && /Phase 2/.test(r.evidence), r.evidence);
+});
+
+t('the reference-standard letter never offers to supply the trial compound itself', () => {
+  // The sponsor locked API supply years before Phase II. Offering it reads as not understanding
+  // how drug development works, which is the specific credibility failure this route avoids.
+  const m = renderNeed('reference_standard', 1, {
+    first: 'Sam', topic: 'olaparib', evidence: 'I saw you have olaparib in Phase 2.',
+  });
+  assert.ok(/not writing about the API/i.test(m.text), 'missing the disclaimer that makes it credible');
+  assert.ok(/reference standards|impurit/i.test(m.text));
+});
+
+t('a trial with no named compound still falls back to clinical API', () => {
+  const r = needFor({ trialPhase: 'Phase 3', trialTitle: 'a cardiology outcomes study' });
+  assert.strictEqual(r.need, 'clinical_api');
+});
+
 t('a trial beats a molecule when both are present', () => {
   // A sponsor who also named a compound needs the clinical letter: the phase is the stronger fact.
   const r = needFor({
@@ -94,6 +118,7 @@ t('a trial beats a molecule when both are present', () => {
 t('every need a route can return has a campaign defined', () => {
   const routes = [
     needFor({ trialPhase: 'Phase 2', trialTitle: 'x' }),
+    needFor({ trialPhase: 'Phase 2', trialTitle: 'x', trialMolecule: 'olaparib' }),
     needFor({ moleculeNamed: 'm', inCatalogue: true }),
     needFor({ moleculeNamed: 'm', inCatalogue: false }),
     needFor({ deptType: 'CHEMISTRY', researchTopic: 'total synthesis', grantNumber: 'R01GM000000' }),
