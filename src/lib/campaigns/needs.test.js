@@ -225,7 +225,7 @@ const REAL_TITLES = [
 t('real grant titles shorten to exactly these phrases', () => {
   const want = new Map([
     ['CAREER: Catalytic Methods for the Selective Functionalization of Complex Molecular Scaffolds',
-      'catalytic methods'],
+      'catalytic methods for the selective functionalization'],
     ['Chemical Synthesis of Complex Natural Products',
       'chemical synthesis of complex natural products'],
     ['MIRA: New Reactions for Medicinal Chemistry',
@@ -240,6 +240,10 @@ t('real grant titles shorten to exactly these phrases', () => {
       'total synthesis of terpenoid natural products'],
     ['Mechanistic Studies of Transition Metal Catalyzed Cross-Coupling Reactions in Complex Settings',
       'mechanistic studies'],
+    // The cap is 58 rather than 52 because of this one: at 52 it cut to "proton-coupled electron",
+    // and a chemist reads that as someone who does not know the term is "electron transfer".
+    ['Catalyzed Multi-Site Proton-Coupled Electron Transfer',
+      'catalyzed multi-site proton-coupled electron transfer'],
   ]);
   for (const [raw, expected] of want) {
     assert.strictEqual(shortTopic(raw), expected,
@@ -258,7 +262,7 @@ t('no shortened title ends on a dangling article, preposition or conjunction', (
 
 t('a shortened title fits a subject line', () => {
   for (const title of REAL_TITLES) {
-    assert.ok(shortTopic(title).length <= 52, `"${shortTopic(title)}" is too long for a subject`);
+    assert.ok(shortTopic(title).length <= 58, `"${shortTopic(title)}" is too long for a subject`);
   }
 });
 
@@ -353,6 +357,50 @@ t('the real declined labs now route', () => {
   assert.strictEqual(needFor({
     deptType: 'Department of Pharmacology', researchTopic: 'receptor signalling', grantNumber: 'R01',
   }), null);
+});
+
+t('a date string with no year is refused rather than filled in as 2001', () => {
+  // "Sun Mar 31" parses happily and V8 supplies 2001, so three professors were about to be told
+  // their 2030 grant runs to March 2001 — confidently wrong, which is worse than visibly broken.
+  for (const v of ['Sun Mar 31', 'Mar 31', 'March', 'Fri Jun 30']) {
+    assert.strictEqual(formatGrantEnd(v), '', `"${v}" produced a clause`);
+  }
+  // A Date object straight from Postgres still works, which is what the caller now passes.
+  assert.strictEqual(formatGrantEnd(new Date('2030-03-31T00:00:00Z')), 'March 2030');
+});
+
+t('a year outside the plausible grant window produces no clause', () => {
+  assert.strictEqual(formatGrantEnd('2001-03-31'), '');
+  assert.strictEqual(formatGrantEnd('1999-01-01'), '');
+  assert.strictEqual(formatGrantEnd('2099-01-01'), '');
+});
+
+t('a topic made only of grant boilerplate is declined', () => {
+  // Real shortenings from the second dry run. Each is true and tells the professor nothing, which
+  // is what a mail merge sounds like.
+  // Note these are titles whose SHORTENING collapses to filler — "Broadened Access to Chemical
+  // Tools for Biology" survives intact and routes correctly, because "chemical tools for biology"
+  // does say something. The defect is the truncated remainder, not the original.
+  for (const title of ['Broadened Access and Improved Methods for the Preparation of Heterocycles',
+    'Fundamental Studies and Novel Approaches in Synthetic Transformations',
+    'New Methods and Strategies']) {
+    const r = needFor({
+      deptType: 'Department of Chemistry', researchTopic: title, grantNumber: 'R01GM000000',
+    });
+    assert.strictEqual(r, null, `"${title}" -> "${shortTopic(title)}" was sent anyway`);
+  }
+});
+
+t('a specific topic still routes even when padded with boilerplate', () => {
+  for (const title of ['New Methods and Strategies for the Synthesis of Complex Molecules',
+    'Catalytic Redox Reactions',
+    'Expanding the Chemical Probe Development Paradigm',
+    'Site-Selective Catalysis']) {
+    const r = needFor({
+      deptType: 'Department of Chemistry', researchTopic: title, grantNumber: 'R01GM000000',
+    });
+    assert.ok(r, `"${title}" -> "${shortTopic(title)}" was wrongly declined`);
+  }
 });
 
 t('a subject never starts with a lowercase letter', () => {

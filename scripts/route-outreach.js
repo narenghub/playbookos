@@ -79,7 +79,16 @@ async function main() {
       deptType: r.department,
       researchTopic: r.focus,
       grantNumber: r.funding_id,
-      grantEndsOn: r.funding_end ? String(r.funding_end).slice(0, 10) : null,
+      // ── PASS THE VALUE, DO NOT PRE-MANGLE IT ────
+      // This line read String(r.funding_end).slice(0, 10). node-postgres returns DATE as a
+      // JavaScript Date, so that produced "Sun Mar 31" — and V8 parses a date string with no year
+      // as 2001. The letters went from "(running to Sun Mar)" to "(running to March 2001)", which
+      // is worse: the first looks broken, the second looks confidently wrong.
+      //
+      // The formatter already handles Date objects and ISO strings. Mangling the value before
+      // handing it over defeated the fix one layer up, which is what happens whenever a caller
+      // "helps" a function that did not ask for help.
+      grantEndsOn: r.funding_end || null,
     });
     rows.push({
       who: r.full_name || r.pi_name,

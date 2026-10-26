@@ -334,10 +334,23 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
 
 function formatGrantEnd(v) {
   if (!v) return '';
-  const d = v instanceof Date ? v : new Date(String(v));
+  let d;
+  if (v instanceof Date) {
+    d = v;
+  } else {
+    const s = String(v);
+    // ── A STRING WITHOUT A YEAR IS NOT A DATE ────
+    // "Sun Mar 31" parses happily and V8 fills in 2001, so the letter read "(running to March
+    // 2001)" — confidently wrong, which is worse than visibly broken. A caller that hands over a
+    // truncated date gets nothing back rather than a plausible one.
+    if (!/\d{4}/.test(s)) return '';
+    d = new Date(s);
+  }
   if (Number.isNaN(d.getTime())) return '';
   const y = d.getUTCFullYear();
-  if (y < 2000 || y > 2100) return '';          // a parse that technically worked and is nonsense
+  // Grants run from the recent past to roughly a decade out. Anything outside that is a parse
+  // that technically worked and is nonsense.
+  if (y < 2015 || y > 2060) return '';
   return `${MONTHS[d.getUTCMonth()]} ${y}`;
 }
 
@@ -382,7 +395,31 @@ const ALWAYS_CAPS = /^(DNA|RNA|NMR|HIV|CRISPR|PET|MRI|API|GPCR|ATP|NIH|USA|UK|EU
 // Words a phrase must not end on. A truncation that stops here reads as broken automation.
 const TRAILING_STOPWORD = /^(a|an|the|of|for|in|on|to|and|or|with|by|from|at|as|into|via|using|their|its|new|novel|toward|towards)$/i;
 
-function shortTopic(raw, max = 52) {
+// ── A TOPIC OF ONLY GRANT-SPEAK IS NOT A TOPIC ───────────────────────────────
+//
+// The second dry run produced "your work on fundamental studies", "your work on broadened access"
+// and "your work on synthetic and mechanistic studies". Each is literally true and tells the
+// professor nothing — and a stranger opening with a generic phrase about your own research reads
+// exactly like the mail merges they delete. Worse than not writing, because it burns the address.
+//
+// These are the words NIH titles are padded with. A shortened topic made only of them carries no
+// information about that lab, so the route declines and nobody is written to on a vague premise.
+const GRANT_FILLER = new Set(['studies', 'study', 'research', 'development', 'developing',
+  'access', 'approaches', 'approach', 'investigation', 'investigations', 'fundamental',
+  'novel', 'new', 'broadened', 'broadening', 'improved', 'improving', 'advanced', 'advancing',
+  'applications', 'application', 'strategies', 'strategy', 'methods', 'method', 'methodology',
+  'tools', 'program', 'programs', 'project', 'training', 'core', 'center', 'centre', 'support',
+  'expanding', 'expansion', 'optimization', 'optimizing', 'understanding', 'toward', 'towards',
+  'general', 'generation', 'next-generation', 'high-quality', 'efficient', 'scalable', 'enabling',
+  'frontiers', 'paradigm', 'platform', 'science', 'sciences', 'chemistry', 'chemical']);
+
+/** True when the phrase says something specific about this lab rather than grant boilerplate. */
+function hasSubstance(topic) {
+  return String(topic || '').split(/\s+/)
+    .some((w) => w.length >= 4 && !GRANT_FILLER.has(w.toLowerCase().replace(/[^a-z0-9-]/g, '')));
+}
+
+function shortTopic(raw, max = 58) {
   let t = String(raw || '').trim();
   if (!t) return '';
   t = t.replace(MECHANISM_PREFIX, '').trim();
@@ -516,6 +553,8 @@ function needFor(s = {}) {
     // A title that shortens to nothing usable (one stray word, or all punctuation) leaves no
     // sentence worth opening with. Decline rather than send "your work on and".
     if (topic.split(/\s+/).filter(Boolean).length < 2) return null;
+    // Literally true and entirely uninformative is still a bad opening line.
+    if (!hasSubstance(topic)) return null;
     const end = formatGrantEnd(s.grantEndsOn);
     const ends = end ? ` (running to ${end})` : '';
     return {
