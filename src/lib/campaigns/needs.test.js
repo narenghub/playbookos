@@ -3,7 +3,7 @@
 'use strict';
 
 const assert = require('assert');
-const { NEED_CAMPAIGNS, needFor, renderNeed, needStepsOf } = require('./needs');
+const { NEED_CAMPAIGNS, needFor, renderNeed, needStepsOf, shortTopic } = require('./needs');
 
 let pass = 0; const fails = [];
 const t = (name, fn) => { try { fn(); pass++; } catch (e) { fails.push(`${name}: ${e.message}`); } };
@@ -96,7 +96,7 @@ t('every need a route can return has a campaign defined', () => {
     needFor({ trialPhase: 'Phase 2', trialTitle: 'x' }),
     needFor({ moleculeNamed: 'm', inCatalogue: true }),
     needFor({ moleculeNamed: 'm', inCatalogue: false }),
-    needFor({ deptType: 'CHEMISTRY', researchTopic: 't', grantNumber: 'g' }),
+    needFor({ deptType: 'CHEMISTRY', researchTopic: 'total synthesis', grantNumber: 'R01GM000000' }),
   ];
   for (const r of routes) {
     assert.ok(NEED_CAMPAIGNS[r.need], `route returned "${r.need}" with no campaign`);
@@ -165,6 +165,107 @@ t('every sequence offers a way out or an honest no', () => {
   for (const k of Object.keys(NEED_CAMPAIGNS)) {
     const all = needStepsOf(k).map((n) => renderNeed(k, n, { first: 'Sam', topic: 't', evidence: 'e' }).text).join('\n');
     assert.ok(out.test(all), `${k} never offers an easy no`);
+  }
+});
+
+// ── THE GRANT TITLE BECOMES SOMETHING A PERSON WOULD SAY ─────────────────────
+// research_labs.focus is the NIH project title verbatim. These are real ones from the 26 October
+// ingest, and the failure is not a crash: it is an email opening "your work on catalytic methods
+// for the selective", which tells the reader nobody looked at it.
+
+const REAL_TITLES = [
+  'CAREER: Catalytic Methods for the Selective Functionalization of Complex Molecular Scaffolds',
+  'Chemical Synthesis of Complex Natural Products',
+  'MIRA: New Reactions for Medicinal Chemistry',
+  'Catalyst-Controlled Site-Selective Reactions of Polyfunctional Molecules',
+  'Development of DNA-Encoded Library Technology for Drug Discovery',
+  'C-H Activation Approaches to Alkaloid Synthesis',
+  'Total Synthesis of Terpenoid Natural Products and Analogues Thereof',
+  'Mechanistic Studies of Transition Metal Catalyzed Cross-Coupling Reactions in Complex Settings',
+];
+
+// ── WHY THIS IS A GOLDEN TABLE AND NOT A PROPERTY CHECK ──────────────────────
+//
+// The first version of this test asserted only that the result does not END on a stopword. It
+// passed with the phrase-boundary logic disabled, because the bad output was "catalytic methods
+// for the selective" and "selective" is not a stopword — the test was checking a property the
+// defect did not violate, which is the same failure as reading `tail -1` of a checker.
+//
+// There is no cheap property that distinguishes "catalytic methods for the selective" from
+// "development of DNA-encoded library technology". A human can see it instantly and a regex
+// cannot. So the expected strings are written out: each one was read and judged as the sentence
+// the recipient sees, and any change to the shortening has to come back here and be judged again.
+t('real grant titles shorten to exactly these phrases', () => {
+  const want = new Map([
+    ['CAREER: Catalytic Methods for the Selective Functionalization of Complex Molecular Scaffolds',
+      'catalytic methods'],
+    ['Chemical Synthesis of Complex Natural Products',
+      'chemical synthesis of complex natural products'],
+    ['MIRA: New Reactions for Medicinal Chemistry',
+      'new reactions for medicinal chemistry'],
+    ['Catalyst-Controlled Site-Selective Reactions of Polyfunctional Molecules',
+      'catalyst-controlled site-selective reactions'],
+    ['Development of DNA-Encoded Library Technology for Drug Discovery',
+      'development of DNA-encoded library technology'],
+    ['C-H Activation Approaches to Alkaloid Synthesis',
+      'C-H activation approaches to alkaloid synthesis'],
+    ['Total Synthesis of Terpenoid Natural Products and Analogues Thereof',
+      'total synthesis of terpenoid natural products'],
+    ['Mechanistic Studies of Transition Metal Catalyzed Cross-Coupling Reactions in Complex Settings',
+      'mechanistic studies'],
+  ]);
+  for (const [raw, expected] of want) {
+    assert.strictEqual(shortTopic(raw), expected,
+      `\n  title:    ${raw}\n  expected: "${expected}"\n  got:      "${shortTopic(raw)}"`);
+  }
+});
+
+t('no shortened title ends on a dangling article, preposition or conjunction', () => {
+  // Weaker than the table above and kept for titles nobody has written out yet.
+  for (const title of REAL_TITLES) {
+    const s = shortTopic(title);
+    assert.ok(!/\b(a|an|the|of|for|in|on|to|and|or|with|by|from|at|via|using|toward|towards|new|novel)\s*$/i.test(s),
+      `"${title}" -> "${s}" ends mid-phrase`);
+  }
+});
+
+t('a shortened title fits a subject line', () => {
+  for (const title of REAL_TITLES) {
+    assert.ok(shortTopic(title).length <= 52, `"${shortTopic(title)}" is too long for a subject`);
+  }
+});
+
+t('acronyms and hyphenated technical terms keep their case', () => {
+  // "dna-encoded" and "c-h activation" are wrong, and a chemist notices in the first two words.
+  assert.ok(/DNA-encoded/.test(shortTopic('Development of DNA-Encoded Library Technology for Drug Discovery')));
+  assert.ok(/C-H/.test(shortTopic('C-H Activation Approaches to Alkaloid Synthesis')));
+});
+
+t('funding mechanism prefixes are dropped', () => {
+  for (const [raw, gone] of [['CAREER: Catalytic Methods for Synthesis', /career/i],
+    ['MIRA: New Reactions for Medicinal Chemistry', /mira/i]]) {
+    assert.ok(!gone.test(shortTopic(raw)), `prefix survived in "${shortTopic(raw)}"`);
+  }
+});
+
+t('a title with no real subject is declined rather than shortened into nonsense', () => {
+  // "Studies of" reduces to one word, and needFor refuses a one-word topic.
+  assert.strictEqual(needFor({
+    deptType: 'CHEMISTRY', researchTopic: 'Studies of', grantNumber: 'R01GM000000',
+  }), null);
+  assert.strictEqual(needFor({
+    deptType: 'CHEMISTRY', researchTopic: '   ', grantNumber: 'R01GM000000',
+  }), null);
+});
+
+t('every real title produces a readable opening sentence', () => {
+  for (const title of REAL_TITLES) {
+    const r = needFor({
+      deptType: 'CHEMISTRY', researchTopic: title, grantNumber: 'R35GM134809', grantEndsOn: '2029-05-31',
+    });
+    assert.ok(r, `"${title}" was declined`);
+    assert.ok(/^I came across your work on \S+ \S+/.test(r.evidence), r.evidence);
+    assert.ok(!/\s{2,}|\bundefined\b/.test(r.evidence), r.evidence);
   }
 });
 

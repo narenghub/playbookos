@@ -258,6 +258,77 @@ const NEED_CAMPAIGNS = Object.freeze({
 
 const PHASE = /phase\s*(1|2|3|i{1,3})\b/i;
 
+// ── A GRANT TITLE IS NOT A SUBJECT LINE ──────────────────────────────────────
+//
+// research_labs.focus holds the NIH project title verbatim, which is right for the database and
+// wrong for an email. The real ones run like "CAREER: Catalytic Methods for the Selective
+// Functionalization of Complex Molecular Scaffolds" — a fifteen-word subject that wraps on a phone
+// and reads as a mail merge, and inside a sentence it produces "your work on Catalytic Methods for
+// the Selective Functionalization of Complex Molecular Scaffolds", which no human would say.
+//
+// So the title is shortened for display: the funding-mechanism prefix dropped (CAREER:, MIRA:,
+// SBIR Phase I:), capped at a word boundary, and de-title-cased so it sits inside a sentence. The
+// full title is never shown to the recipient, only the part a person would actually say aloud.
+const MECHANISM_PREFIX = /^\s*(career|mira|sbir|sttr|reu|ri|core|conference|collaborative research|eager|raise|phase\s+i{1,2})\s*:\s*/i;
+const ALWAYS_CAPS = /^(DNA|RNA|NMR|HIV|CRISPR|PET|MRI|API|GPCR|ATP|NIH|USA|UK|EU|AI|ML|[IVX]+|[A-Z]-[A-Z])$/;
+// Words a phrase must not end on. A truncation that stops here reads as broken automation.
+const TRAILING_STOPWORD = /^(a|an|the|of|for|in|on|to|and|or|with|by|from|at|as|into|via|using|their|its|new|novel|toward|towards)$/i;
+
+function shortTopic(raw, max = 52) {
+  let t = String(raw || '').trim();
+  if (!t) return '';
+  t = t.replace(MECHANISM_PREFIX, '').trim();
+  // A trailing clause after a colon is usually the specific part; keep the longer half.
+  if (t.includes(':')) {
+    const parts = t.split(':').map((x) => x.trim()).filter(Boolean);
+    if (parts.length > 1) t = parts.sort((a, b) => b.length - a.length)[0];
+  }
+  const words = t.split(/\s+/);
+  const out = [];
+  for (const w of words) {
+    if (out.length && out.join(' ').length + 1 + w.length > max) break;
+    out.push(w);
+  }
+  const truncated = out.length < words.length;
+
+  // ── NEVER END MID-PHRASE ────
+  // Cutting at a length boundary alone produced "catalytic methods for the selective" — an
+  // adjective waiting for the noun that got cut off. In the sentence that becomes "your work on
+  // catalytic methods for the selective", which is visibly broken automation and worse than a
+  // generic line, because it tells the reader nobody looked.
+  //
+  // Dropping trailing stopwords is not enough: "selective" is not one. So when the title was
+  // truncated at all, the phrase falls back to the last PREPOSITION BOUNDARY — everything from the
+  // final "of"/"for"/"the" onward goes, taking the orphaned modifier with it. "catalytic methods"
+  // is shorter and less specific than the full title, and it is a thing a person would say.
+  if (truncated) {
+    let cut = -1;
+    for (let i = out.length - 1; i >= 2; i -= 1) if (TRAILING_STOPWORD.test(out[i])) { cut = i; break; }
+    if (cut >= 2) out.length = cut;
+  }
+  // Popped down to one word if need be: a one-word topic is rejected by needFor(), which is the
+  // correct outcome for a title like "Studies of" that carries no subject at all.
+  while (out.length > 1 && TRAILING_STOPWORD.test(out[out.length - 1])) out.pop();
+
+  let s = out.join(' ').replace(/[,;:.\s]+$/, '');
+
+  // De-title-case so the phrase sits inside a sentence. Ordinary Title Case words are lowered;
+  // acronyms, hyphenated technical terms and anything carrying a digit are left exactly as filed,
+  // because "dna-encoded" and "c-h activation" are wrong and a chemist notices immediately.
+  s = s.split(' ').map((w) => {
+    if (ALWAYS_CAPS.test(w)) return w;
+    if (/\d/.test(w)) return w;
+    if (w === w.toUpperCase() && w.length > 1) return w;      // SELECTIVE -> leave; it is an acronym or shouting
+    if (w.includes('-')) {
+      // Hyphenated: lower only the parts that are plain Title Case words.
+      return w.split('-').map((part) => (/^[A-Z][a-z]{2,}$/.test(part) ? part.toLowerCase() : part)).join('-');
+    }
+    return /^[A-Z][a-z]+$/.test(w) ? w.toLowerCase() : w;
+  }).join(' ');
+
+  return s;
+}
+
 /**
  * Decide what a contact needs, from evidence.
  *
@@ -315,12 +386,16 @@ function needFor(s = {}) {
   const dept = String(s.deptType || '').toUpperCase();
   if (dept.startsWith('CHEMISTRY') || dept.startsWith('BIOCHEMISTR')) {
     if (!topicText || !s.grantNumber) return null;
+    const topic = shortTopic(topicText);
+    // A title that shortens to nothing usable (one stray word, or all punctuation) leaves no
+    // sentence worth opening with. Decline rather than send "your work on and".
+    if (topic.split(/\s+/).filter(Boolean).length < 2) return null;
     const ends = s.grantEndsOn ? ` (running to ${String(s.grantEndsOn).slice(0, 7)})` : '';
     return {
       need: 'discovery',
-      topic: topicText,
+      topic,
       signal: 'funded_chemistry_lab',
-      evidence: `I came across your work on ${topicText} through ${s.grantNumber}${ends}.`,
+      evidence: `I came across your work on ${topic} through ${s.grantNumber}${ends}.`,
     };
   }
 
@@ -358,4 +433,4 @@ function renderNeed(needKey, stepNumber, vars) {
 
 const needStepsOf = (k) => (NEED_CAMPAIGNS[k] ? NEED_CAMPAIGNS[k].steps.map((x) => x.step) : []);
 
-module.exports = { NEED_CAMPAIGNS, needFor, renderNeed, needStepsOf };
+module.exports = { NEED_CAMPAIGNS, needFor, renderNeed, needStepsOf, shortTopic };
