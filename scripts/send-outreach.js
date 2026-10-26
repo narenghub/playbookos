@@ -53,6 +53,7 @@ const arg = (n, d) => {
 const EXECUTE = has('execute');
 const FROM = arg('from', 'sales@abiozen.com');
 const REDIRECT_TO = arg('to', '') || null;
+const REPLY_TO = arg('reply-to', 'naren@abiozen.com');
 const ONLY = arg('need', '');
 const MAX = Math.max(1, Math.min(50, parseInt(arg('max', '8'), 10) || 8));
 // Bounce rate is what damages a warmed domain fastest, and this mailbox took six weeks to warm.
@@ -223,6 +224,9 @@ async function main() {
       const msg = buildMessage({
         from: { name: SIG_NAME, email: FROM },
         to: { name: q.who, email: REDIRECT_TO || q.email },
+        // Sent from the warmed mailbox, answered to Naren's. Receiving needs no warmup, so the
+        // reply lands where he reads it while the send rides the reputation sales@ has built.
+        replyTo: { name: SIG_NAME, email: REPLY_TO },
         subject: m.subject || `Re: ${(firstSubject && firstSubject.subject) || 'our note'}`,
         text: m.text,
         html: m.html,

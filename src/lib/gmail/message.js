@@ -116,6 +116,7 @@ function boundary(tag) {
 function buildMessage(opts = {}) {
   const {
     from, to, cc = [], subject = '', html = '', text = '',
+    replyTo = null,
     inReplyTo = null, references = [], attachments = [], date = new Date(),
   } = opts;
 
@@ -167,6 +168,14 @@ function buildMessage(opts = {}) {
   });
   if (ccUnique.length) {
     headers.push(['Cc', ccUnique.map((c) => formatAddress(c.name, c.email)).join(', ')]);
+  }
+  // ── WHERE THE ANSWER SHOULD LAND ────
+  // Sending and receiving are separate concerns. The outreach goes from sales@abiozen.com because
+  // that is the mailbox with six weeks of warmup behind it, but the person answering is writing to
+  // Naren, and receiving needs no warmup at all. Without this header every reply to a campaign
+  // signed "Naren Boda" arrives in a shared sales inbox instead of his.
+  if (replyTo && replyTo.email) {
+    headers.push(['Reply-To', formatAddress(replyTo.name, replyTo.email)]);
   }
   if (inReplyTo) {
     headers.push(['In-Reply-To', inReplyTo]);
