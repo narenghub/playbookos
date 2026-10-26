@@ -30,6 +30,7 @@
 const { initDB, query } = require('../src/lib/db');
 const { needFor, renderNeed, needStepsOf, NEED_CAMPAIGNS } = require('../src/lib/campaigns/needs');
 const { resolveProductLink, PATTERN_CONFIGURED } = require('../src/lib/campaigns/product-link');
+const { EXTERNAL_SQL } = require('../src/lib/revenue/demand');
 
 const argv = process.argv.slice(2);
 const arg = (n, d) => {
@@ -108,7 +109,14 @@ async function main() {
   const inq = (await query(`
     SELECT i.id, i.buyer_name, i.buyer_email, i.buyer_company, i.molecule_name, i.cas_number, i.status
       FROM inquiries i
-     WHERE COALESCE(i.status,'') NOT IN ('spam')
+     -- ── THE DRY RUN ROUTED FIVE OF OUR OWN TEST RECORDS ────
+     -- "Naren Boda", "Naresh Boda" and "Buyer qa" were queued to receive cold outreach about
+     -- Methylene Blue, Rivaroxaban, Progesterone and Ciprofloxacin — because this query filtered
+     -- only on status='spam' and forgot the other half of the rule that src/lib/revenue/demand.js
+     -- already owns. Sending Naren four sales letters would be embarrassing rather than harmful,
+     -- but it is the same defect that put the wrong trade show in Charlotte Perrin's inbox: a
+     -- second copy of a rule that had already been written once and got out of step.
+     WHERE ${EXTERNAL_SQL}
        AND i.buyer_email IS NOT NULL
        AND NULLIF(TRIM(i.molecule_name), '') IS NOT NULL
      ORDER BY i.created_at DESC`)).rows;

@@ -3,7 +3,9 @@
 'use strict';
 
 const assert = require('assert');
-const { NEED_CAMPAIGNS, needFor, renderNeed, needStepsOf, shortTopic } = require('./needs');
+const {
+  NEED_CAMPAIGNS, needFor, renderNeed, needStepsOf, shortTopic, deptKind, formatGrantEnd,
+} = require('./needs');
 
 let pass = 0; const fails = [];
 const t = (name, fn) => { try { fn(); pass++; } catch (e) { fails.push(`${name}: ${e.message}`); } };
@@ -77,7 +79,7 @@ t('a funded chemistry lab routes to discovery with its grant in the evidence', (
   });
   assert.strictEqual(r.need, 'discovery');
   assert.ok(/R35GM134809/.test(r.evidence), r.evidence);
-  assert.ok(/2029-05/.test(r.evidence), r.evidence);
+  assert.ok(/May 2029/.test(r.evidence), r.evidence);
 });
 
 // ── THE TRIAL SPLIT ──────────────────────────────────────────────────────────
@@ -292,6 +294,78 @@ t('every real title produces a readable opening sentence', () => {
     assert.ok(/^I came across your work on \S+ \S+/.test(r.evidence), r.evidence);
     assert.ok(!/\s{2,}|\bundefined\b/.test(r.evidence), r.evidence);
   }
+});
+
+// ── THE TWO DEFECTS THE FIRST DRY RUN FOUND ──────────────────────────────────
+// Both produced plausible output and no error, which is why they reached a printed letter.
+
+t('a Date object from Postgres formats as a month and year, not "Sun Mar"', () => {
+  // node-postgres returns DATE as a JS Date. String(date).slice(0,7) took the first seven
+  // characters of "Sun Mar 31 2030 00:00:00 GMT…" and printed it to three professors.
+  assert.strictEqual(formatGrantEnd(new Date('2030-03-31T00:00:00Z')), 'March 2030');
+  assert.strictEqual(formatGrantEnd('2029-05-31'), 'May 2029');
+  assert.strictEqual(formatGrantEnd('2031-12-01T00:00:00.000Z'), 'December 2031');
+});
+
+t('an unparseable or nonsense date yields no clause at all', () => {
+  for (const v of [null, undefined, '', 'not a date', '0001-01-01', {}]) {
+    assert.strictEqual(formatGrantEnd(v), '', `${JSON.stringify(v)} produced a clause`);
+  }
+});
+
+t('the grant clause never reaches an email malformed', () => {
+  const r = needFor({
+    deptType: 'Department of Chemistry', researchTopic: 'catalytic redox reactions',
+    grantNumber: '2R35GM134929-06', grantEndsOn: new Date('2030-06-30T00:00:00Z'),
+  });
+  assert.ok(/running to June 2030/.test(r.evidence), r.evidence);
+  assert.ok(!/Sun|Mon|Tue|Wed|Thu|Fri|Sat|GMT|\d{2}:\d{2}/.test(r.evidence), r.evidence);
+});
+
+t('RePORTER department strings are recognised, not just bare keywords', () => {
+  // The first dry run declined 22 of 25 labs — Miller, Stahl, Denmark, Weix — because the check
+  // was startsWith('CHEMISTRY') and RePORTER files "Department of Chemistry". Nothing errored;
+  // the report said "not routed", which reads as a data problem rather than a matching bug.
+  for (const d of ['CHEMISTRY', 'Chemistry', 'Department of Chemistry', 'Dept of Chemistry',
+    'The Department of Chemistry', 'Department of Medicinal Chemistry', 'School of Chemistry']) {
+    assert.strictEqual(deptKind(d), 'CHEMISTRY', `"${d}" -> ${deptKind(d)}`);
+  }
+  for (const d of ['BIOCHEMISTRY', 'Department of Biochemistry', 'Division of Biochemistry']) {
+    assert.strictEqual(deptKind(d), 'BIOCHEMISTRY', `"${d}" -> ${deptKind(d)}`);
+  }
+  assert.strictEqual(deptKind('Department of Pharmacology'), 'PHARMACOLOGY');
+  assert.strictEqual(deptKind(''), '');
+});
+
+t('the real declined labs now route', () => {
+  // Exactly the rows the dry run skipped, with their filed department strings.
+  for (const [who, dept] of [['Scott J Miller', 'Department of Chemistry'],
+    ['Shannon S Stahl', 'Department of Chemistry'],
+    ['Tian Qin', 'Department of Biochemistry'],
+    ['Margaret A. Phillips', 'Department of Biochemistry']]) {
+    const r = needFor({
+      deptType: dept, researchTopic: 'catalytic methods for synthesis',
+      grantNumber: 'R35GM134809', grantEndsOn: '2029-05-31',
+    });
+    assert.ok(r && r.need === 'discovery', `${who} (${dept}) still declined`);
+  }
+  // And pharmacology still does not get the discovery letter — that was deliberate, not a bug.
+  assert.strictEqual(needFor({
+    deptType: 'Department of Pharmacology', researchTopic: 'receptor signalling', grantNumber: 'R01',
+  }), null);
+});
+
+t('a subject never starts with a lowercase letter', () => {
+  // Topics are de-title-cased to sit inside a sentence, which left "catalytic redox reactions —
+  // structure search" in an inbox list, reading as machine output.
+  const r = needFor({
+    deptType: 'Department of Chemistry', researchTopic: 'Catalytic Redox Reactions in Synthesis',
+    grantNumber: 'R35GM134929',
+  });
+  const m = renderNeed('discovery', 1, { first: 'Shannon', topic: r.topic, evidence: r.evidence });
+  assert.ok(/^[A-Z]/.test(m.subject), `subject starts lowercase: ${m.subject}`);
+  // …and the sentence still reads with a lowercase topic inside it.
+  assert.ok(/your work on catalytic redox/.test(r.evidence), r.evidence);
 });
 
 if (fails.length) {

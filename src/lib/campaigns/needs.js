@@ -320,6 +320,52 @@ const NEED_CAMPAIGNS = Object.freeze({
 
 const PHASE = /phase\s*(1|2|3|i{1,3})\b/i;
 
+// ── "(running to Sun Mar)" ───────────────────────────────────────────────────
+//
+// The dry run printed that to three Yale and Wisconsin professors before anything sent. The cause:
+// node-postgres returns a DATE column as a JavaScript Date, not an ISO string, so
+// String(date).slice(0, 7) took the first seven characters of "Sun Mar 31 2030 00:00:00 GMT…".
+// Valid code, no error, and a sentence that tells a reader nobody checked.
+//
+// So the date is parsed rather than sliced, and anything that is not a real date yields no clause
+// at all — the sentence reads perfectly without it, and a wrong date is worse than none.
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'];
+
+function formatGrantEnd(v) {
+  if (!v) return '';
+  const d = v instanceof Date ? v : new Date(String(v));
+  if (Number.isNaN(d.getTime())) return '';
+  const y = d.getUTCFullYear();
+  if (y < 2000 || y > 2100) return '';          // a parse that technically worked and is nonsense
+  return `${MONTHS[d.getUTCMonth()]} ${y}`;
+}
+
+// ── "department is Department of Chemistry" ──────────────────────────────────
+//
+// The same dry run declined 22 of 25 labs — Scott Miller, Shannon Stahl, Scott Denmark, Daniel
+// Weix, the whole good half of the list — because the check was `startsWith('CHEMISTRY')` and
+// RePORTER files the value as "Department of Chemistry". Three labs whose department happened to
+// be stored bare were the only ones that routed.
+//
+// Nothing failed. The report simply said "not routed", which reads as a data problem rather than
+// a matching bug, and would have been believed.
+const DEPT_NOISE = /^(the\s+)?(department|dept\.?|division|school|institute|college)\s+(of\s+)?/i;
+
+function deptKind(raw) {
+  let d = String(raw || '').trim();
+  if (!d) return '';
+  // Strip the organisational prefix, however many times it is nested.
+  let prev;
+  do { prev = d; d = d.replace(DEPT_NOISE, '').trim(); } while (d !== prev);
+  d = d.toUpperCase();
+  if (/^BIOCHEM/.test(d)) return 'BIOCHEMISTRY';
+  if (/^(MEDICINAL\s+)?CHEM/.test(d)) return 'CHEMISTRY';
+  if (/^PHARMACOL/.test(d)) return 'PHARMACOLOGY';
+  if (/^PHARMAC/.test(d)) return 'PHARMACY';
+  return d;
+}
+
 // ── A GRANT TITLE IS NOT A SUBJECT LINE ──────────────────────────────────────
 //
 // research_labs.focus holds the NIH project title verbatim, which is right for the database and
@@ -463,14 +509,15 @@ function needFor(s = {}) {
 
   // 3. A funded synthesis programme. Chemistry departments build molecules; the platform is the
   //    thing they have no equivalent of. Needs the topic AND the grant, so the opening is checkable.
-  const dept = String(s.deptType || '').toUpperCase();
-  if (dept.startsWith('CHEMISTRY') || dept.startsWith('BIOCHEMISTR')) {
+  const dept = deptKind(s.deptType);
+  if (dept === 'CHEMISTRY' || dept === 'BIOCHEMISTRY') {
     if (!topicText || !s.grantNumber) return null;
     const topic = shortTopic(topicText);
     // A title that shortens to nothing usable (one stray word, or all punctuation) leaves no
     // sentence worth opening with. Decline rather than send "your work on and".
     if (topic.split(/\s+/).filter(Boolean).length < 2) return null;
-    const ends = s.grantEndsOn ? ` (running to ${String(s.grantEndsOn).slice(0, 7)})` : '';
+    const end = formatGrantEnd(s.grantEndsOn);
+    const ends = end ? ` (running to ${end})` : '';
     return {
       need: 'discovery',
       topic,
@@ -498,10 +545,14 @@ function renderNeed(needKey, stepNumber, vars) {
   if (c.needsEvidence && stepNumber === 1 && !String(vars.evidence || '').trim()) {
     throw new Error(`need campaign "${needKey}" step 1 requires evidence — route produced none`);
   }
-  const subject = typeof s.subject === 'function' ? s.subject(vars) : s.subject;
+  let subject = typeof s.subject === 'function' ? s.subject(vars) : s.subject;
   if (subject !== null && /\{\{|\bundefined\b/.test(String(subject))) {
     throw new Error(`subject for "${needKey}" did not interpolate: ${subject}`);
   }
+  // Topics are de-title-cased so they read inside a sentence, which left subjects starting
+  // lowercase — "catalytic redox reactions — structure search". That reads as machine output in an
+  // inbox list, so the first letter is restored, leaving acronyms (C-H, DNA) alone.
+  if (subject && /^[a-z]/.test(subject)) subject = subject.charAt(0).toUpperCase() + subject.slice(1);
   return {
     subject,
     text: s.text(vars),
@@ -513,4 +564,4 @@ function renderNeed(needKey, stepNumber, vars) {
 
 const needStepsOf = (k) => (NEED_CAMPAIGNS[k] ? NEED_CAMPAIGNS[k].steps.map((x) => x.step) : []);
 
-module.exports = { NEED_CAMPAIGNS, needFor, renderNeed, needStepsOf, shortTopic };
+module.exports = { NEED_CAMPAIGNS, needFor, renderNeed, needStepsOf, shortTopic, deptKind, formatGrantEnd };
