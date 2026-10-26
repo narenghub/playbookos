@@ -79,6 +79,14 @@ step "institution search runs on Postgres" node scripts/check-institution-search
 # and every row number stayed glued to its product name. Both were invisible to every test that
 # did not open a PDF. This opens two, including the awkward layout real brochures use.
 step "catalogue extraction works on real PDFs" node scripts/check-catalogue-extract.js
+# The demand count, which decides the one number the whole platform is judged by. It read 37 buyers
+# when the table held 20 spam, 4 of our own test rows and 3 real people — a twelvefold flattery
+# nobody would question in a board update. Worse, the first corrected version compared a nullable
+# column directly, so the live Yttrium oxide enquiry (no company filed) evaluated to NULL and
+# vanished from every bucket: not a buyer, not spam, not ours, no error. The fixture is the real
+# October table, senders and all, and asserts the headline is 3 and that the buckets sum to the row
+# count, so a disappearing customer fails here instead of being quietly uncounted.
+step "demand count runs on Postgres" node scripts/check-demand-count-sql.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2

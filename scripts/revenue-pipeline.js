@@ -23,6 +23,7 @@
 'use strict';
 
 const { initDB, query } = require('../src/lib/db');
+const { COUNTS_SQL } = require('../src/lib/revenue/demand');
 
 const say = (s = '') => console.log(s);
 const pad = (s, n) => String(s == null ? '' : s).padEnd(n);
@@ -39,9 +40,10 @@ async function main() {
   // ── DEMAND: the only section that can produce revenue on its own ────
   say('   ══ DEMAND SIDE — buyers with a budget ═══════════════════════════════');
 
-  const inq = await count(`SELECT COUNT(*)::int n,
-      COUNT(*) FILTER (WHERE created_at::text >= to_char(NOW() - INTERVAL '30 days','YYYY-MM-DD'))::int recent
-    FROM inquiries`);
+  // The rule for what counts as a buyer lives in src/lib/revenue/demand.js, imported rather than
+  // written here, so this report and every other one answer "how many buyers" identically — and
+  // so check-demand-count-sql.js can execute the same predicate against a real Postgres.
+  const inq = await count(COUNTS_SQL);
   const quo = await count(`SELECT COUNT(*)::int n,
       COALESCE(SUM(total_price_usd),0)::numeric total FROM inquiry_quotes`);
   const rfq = await count('SELECT COUNT(*)::int n FROM rfq_requests');
@@ -51,7 +53,10 @@ async function main() {
       COALESCE(SUM(estimated_value) FILTER (WHERE status <> 'lost'),0)::numeric pipeline FROM leads`);
   const del = await count('SELECT COUNT(*)::int n FROM lead_deliveries');
 
-  say(`      ${pad('inquiries (someone asked us for a molecule)', 46)} ${n(inq)}   [last 30d: ${n(inq, 'recent')}]`);
+  say(`      ${pad('inquiries — REAL, EXTERNAL', 46)} ${n(inq, 'external')}   [last 30d: ${n(inq, 'external_30d')}]`);
+  say(`      ${pad('  └ excluded: classified spam', 46)} ${n(inq, 'spam')}`);
+  say(`      ${pad('  └ excluded: our own addresses/companies', 46)} ${n(inq, 'ours')}`);
+  say(`      ${pad('  └ rows in the table altogether', 46)} ${n(inq, 'all_rows')}   ← do not quote this one`);
   say(`      ${pad('quotes issued', 46)} ${n(quo)}   [$${Number(n(quo, 'total') || 0).toLocaleString()}]`);
   say(`      ${pad('RFQs raised to suppliers', 46)} ${n(rfq)}`);
   say(`      ${pad('orders', 46)} ${n(ord)}`);
@@ -89,7 +94,7 @@ async function main() {
 
   // ── THE READ ────
   say('\n   ══ WHAT THIS MEANS ══════════════════════════════════════════════════');
-  const inquiries = Number(n(inq)) || 0;
+  const inquiries = Number(n(inq, 'external')) || 0;
   const orders = Number(n(ord)) || 0;
   const quotes = Number(n(quo)) || 0;
 
