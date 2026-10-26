@@ -510,4 +510,4 @@ function render(campaignKey, stepNumber, vars) {
 const stepsOf = (key) => (CAMPAIGNS[key] ? CAMPAIGNS[key].steps.map((s) => s.step) : []);
 const stepDef = (key, n) => (CAMPAIGNS[key] || { steps: [] }).steps.find((s) => s.step === n) || null;
 
-module.exports = { CAMPAIGNS, ROLE_TO_CAMPAIGN, EVENT_ROLE_TO_CAMPAIGN, campaignFor, render, stepsOf, stepDef, SIG_NAME, SIG_MAIL };
+module.exports = { CAMPAIGNS, ROLE_TO_CAMPAIGN, EVENT_ROLE_TO_CAMPAIGN, campaignFor, render, stepsOf, stepDef, SIG_NAME, SIG_ROLE, SIG_MAIL, SIG_TEL };
