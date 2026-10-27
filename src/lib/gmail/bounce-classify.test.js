@@ -13,19 +13,19 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const SRC = fs.readFileSync(path.join(__dirname, '../../../scripts/scan-bounces.js'), 'utf8');
+const SRC = fs.readFileSync(path.join(__dirname, '../agents/outreach-agent.js'), 'utf8');
 
 // The patterns are built from two raw pieces plus a phrase list, so they are evaluated here with
 // those pieces in scope rather than pulled out as a single literal.
 function patterns() {
   const take = (name) => {
     const m = SRC.match(new RegExp(`^const ${name} = String\\.raw\`([^\`]*)\`;$`, 'm'));
-    if (!m) throw new Error(`${name} not found in scan-bounces.js — did it move or get renamed?`);
+    if (!m) throw new Error(`${name} not found in outreach-agent.js — did it move or get renamed?`);
     return m[1];
   };
   const line = (name) => {
     const m = SRC.match(new RegExp(`^const ${name} = new RegExp\\(\`(.*)\`, 'i'\\);$`, 'm'));
-    if (!m) throw new Error(`${name} not found in scan-bounces.js`);
+    if (!m) throw new Error(`${name} not found in outreach-agent.js`);
     return m[1];
   };
   const CODE_HARD = take('CODE_HARD');

@@ -715,6 +715,83 @@ cron.schedule('25 * * * *', withAlerts('hourly-25-cphi-reply-sync', async () => 
   }
 }), CST);
 
+// ── THE OUTREACH AGENT · weekdays 09:10 CST ──────────────────────────────────
+//
+// Finds who is due, checks nobody has replied, sends, files, and emails Naren what it did.
+//
+// WHY 09:10 AND NOT 09:00. Six jobs already fire on the hour. A send that queues behind five
+// other Claude calls drifts unpredictably, and these messages are spaced 45-95s apart over eight
+// recipients — a start time that slides is a batch that lands at lunch.
+//
+// WHY WEEKDAYS. The recipients are university faculty and procurement staff. A cold email that
+// arrives on Sunday is read on Monday with the weekend's backlog, which is the worst slot there
+// is. Follow-ups stay due over the weekend and go out on the Monday.
+//
+// WHY THE BOUNCE SCAN RUNS FIRST, IN THE SAME JOB. The 5% gate in runOutreach reads
+// outreach_bounces. For one batch that table had no writer, so the gate reported 0.0% and would
+// have reported 0.0% if every address had failed. Scanning immediately before sending means the
+// gate is reading something current rather than something stale — and a hard bounce found this
+// morning stops that person's sequence before today's send, not after it.
+//
+// WHY A FLAG. OUTREACH_ENABLED must be set before anything sends. The same process-environment
+// trap described below applies: this is read at fire time, not at boot, but the value comes from
+// the environment this process captured at launch, so a variable added after deploy needs a
+// redeploy to take effect.
+cron.schedule('10 9 * * 1-5', withAlerts('weekday-910cst-outreach-agent', async () => {
+  const { runOutreach, scanBounces } = require('./src/lib/agents/outreach-agent');
+  const { sendOutreachReport } = require('./src/lib/agents/outreach-report');
+
+  const enabled = String(process.env.OUTREACH_ENABLED || '').toLowerCase() === 'true';
+  const max = Math.max(1, Math.min(50, parseInt(process.env.OUTREACH_MAX || '8', 10) || 8));
+  const lines = [];
+  const log = (s = '') => lines.push(s);
+
+  // Read Gmail and record failures first, so the gate below is current.
+  let bounce = null;
+  try {
+    bounce = await scanBounces({ execute: true, days: 14, log });
+  } catch (e) {
+    // A scan that cannot run is not a reason to send blind. Raising here means withAlerts emails,
+    // and nothing goes out on an unmeasured list.
+    throw new Error(`outreach bounce scan failed, so nothing was sent: ${e.message}`);
+  }
+
+  if (!enabled) {
+    console.log('[CRON] outreach agent — OUTREACH_ENABLED is not true, nothing sent. '
+      + `Bounce scan ran: ${bounce.found.length} failure(s) in ${bounce.sent} send(s).`);
+    return;
+  }
+
+  const run = await runOutreach({ execute: true, max, log });
+
+  // Noisy when it did something, quiet otherwise — this fires 5 times a week and a daily
+  // "0 sent" in the log buries the run that mattered.
+  if (run.sent || run.failed || run.repliedNow.length || run.unfiled.length || run.stopped) {
+    console.log(`[CRON] outreach — ${run.sent} sent, ${run.failed} failed, `
+      + `${run.repliedNow.length} replied, ${run.due} due of ${run.routed} routed`
+      + `${run.stopped ? ` · HELD: ${run.stopped}` : ''}`);
+    console.log(lines.join('\n'));
+  }
+
+  // The report goes out even on a quiet day only if something is worth saying; composeOutreachReport
+  // decides. A daily "0 sent" for a fortnight trains the reader to ignore the one that matters.
+  try {
+    await sendOutreachReport({ run, bounce });
+  } catch (e) {
+    console.warn('[CRON] outreach report could not be emailed:', e.message);
+  }
+
+  // The two states that need a human become throws, because nobody is watching the logs: a send
+  // that errored, and a claim row with no Gmail id — the "did that actually send?" case.
+  const problems = [];
+  if (run.failed) problems.push(`${run.failed} send(s) failed`);
+  if (run.unconfirmed) {
+    problems.push(`${run.unconfirmed} claimed send(s) have no Gmail message id; they may or may `
+      + 'not have gone. SELECT * FROM outreach_sends WHERE confirmed = FALSE');
+  }
+  if (problems.length) throw new Error(problems.join(' · '));
+}), CST);
+
 // ── SAY, AT BOOT, WHAT THE CAMPAIGN WILL ACTUALLY DO ─────────────────────────
 //
 // On 12 Oct the release stalled on something invisible. The code was deployed, the Railway variable
