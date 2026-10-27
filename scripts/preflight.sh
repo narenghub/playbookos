@@ -112,6 +112,13 @@ step "rotation snapshot survives a new process" node scripts/check-rotation-snap
 # history. It also MEASURES propagation with the LISTEN accelerator deliberately disabled — a kill
 # switch whose latency is asserted in a comment is a kill switch nobody has timed.
 step "kill switch stops, propagates and audits" node scripts/check-autonomy-stop-db.js
+# One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
+# before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
+# send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither
+# is a crash and neither is reachable from a unit test, because both live in the window between two
+# statements. This races two independent pools for the same claim (and twenty), which is the only
+# way to show it.
+step "a supplier RFQ cannot be sent twice" node scripts/check-supplier-rfq-claim-db.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2

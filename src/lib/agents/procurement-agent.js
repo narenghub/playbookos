@@ -8,6 +8,7 @@ const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
 const { logAgentActivity, enqueueApproval, getCEOUser, parseClaudeJSON, extractClaudeText } = require('../agent-core');
+const rfqClaim = require('../idempotency/supplier-rfq');
 
 const AGENT = 'procurement-agent';
 const PROC_MODEL = 'claude-opus-4-8';
@@ -336,6 +337,24 @@ palash@abiozen.com`;
 // reach REAL external companies — verify contact_email accuracy before enabling.
 async function sendRFQEmails(rfqIds, dryRun = false) {
   const out = { sent: 0, failed: 0, skipped: 0, dryRun, details: [] };
+
+  // ── NO INVARIANT, NO CONSEQUENTIAL ACTION ─────────────────────────────────
+  //
+  // Claim-before-act is only a guarantee while the UNIQUE index exists: without it the claim INSERT
+  // simply succeeds twice and the duplicate send is back. The index cannot be created while the
+  // table holds historical duplicate (rfq_id, supplier_id) pairs, and choosing which of those to
+  // keep is a human decision about real correspondence — so boot reports it rather than guessing.
+  //
+  // Until it is resolved, this refuses to send. Emailing a supplier twice is worse than emailing
+  // them late, and this is the same rule the kill switch applies to an unreadable kill-state.
+  if (!dryRun && !(await rfqClaim.isEnforced(query))) {
+    out.details.push('REFUSED: supplier_outreach_log has no UNIQUE (rfq_id, supplier_id) index, so a '
+      + 'duplicate RFQ to a real supplier cannot be prevented. Resolve the duplicate rows reported '
+      + 'at boot, then re-run.');
+    out.blocked = true;
+    return out;
+  }
+
   const palash = await getPalash();
   const fromLine = `${palash.name || 'Palash Das'} <${palash.email || 'palash@abiozen.com'}>`;
 
@@ -346,25 +365,47 @@ async function sendRFQEmails(rfqIds, dryRun = false) {
     const suppliers = await matchSuppliers({ ...mol, category: null }, 3);
     let anySent = false;
     for (const s of suppliers) {
-      // Skip a supplier already contacted for this RFQ (idempotent).
-      const already = (await query('SELECT id FROM supplier_outreach_log WHERE rfq_id=$1 AND supplier_id=$2', [rfqId, s.id])).rows[0];
-      if (already) { out.skipped++; continue; }
+      // ── CLAIM BEFORE ACT ─────────────────────────────────────────────────
+      //
+      // The claim row goes in BEFORE the email is generated or sent, and a UNIQUE violation on
+      // (rfq_id, supplier_id) means another execution already owns this send. This replaces a
+      // SELECT-then-send check whose window allowed two real duplicates: a send whose record was
+      // lost, and two overlapping runs both reading "not contacted".
+      //
+      // Claiming before generateRFQEmail also means a concurrent run does not pay for a Claude call
+      // it is about to discard.
+      //
+      // A DRY RUN MUST NOT CLAIM. The first draft of this claimed first and checked dryRun after,
+      // which would have let a dry run take the claim and make the next REAL run skip the supplier
+      // — a preview silently cancelling the work it was previewing.
+      if (dryRun) {
+        out.details.push(`${rfq.molecule_name}/${s.name}: would send (dry run, nothing claimed)`);
+        continue;
+      }
+
+      const claimId = await rfqClaim.claim(query, {
+        rfqId, supplierId: s.id, email: s.contact_email,
+      });
+      if (!claimId) { out.skipped++; continue; }   // another execution holds it
+
       const { subject, body, error } = await generateRFQEmail(mol, s, rfqId);
-      if (!body) { out.failed++; out.details.push(`${rfq.molecule_name}/${s.name}: ${error || 'no body'}`); continue; }
+      if (!body) {
+        // The claim is kept and marked failed rather than deleted. Deleting it would reopen the
+        // window; a kept row says "this pair was attempted and did not send", which is a fact.
+        await rfqClaim.markFailed(query, claimId, error || 'no body generated');
+        out.failed++; out.details.push(`${rfq.molecule_name}/${s.name}: ${error || 'no body'}`);
+        continue;
+      }
       const html = `<div style="font-family:Arial;font-size:14px;line-height:1.6;color:#222;white-space:pre-wrap">${esc(body)}</div>`;
-      let status = 'sent';
-      if (!dryRun) {
-        const ok = await sendEmail({ to: s.contact_email, subject, html, from: fromLine, replyTo: palash.email });
-        if (!ok) { out.failed++; out.details.push(`${rfq.molecule_name}/${s.name}: send failed`); status = 'failed'; }
+
+      const ok = await sendEmail({ to: s.contact_email, subject, html, from: fromLine, replyTo: palash.email });
+      if (!ok) {
+        await rfqClaim.markFailed(query, claimId, 'send refused by the mail provider');
+        out.failed++; out.details.push(`${rfq.molecule_name}/${s.name}: send failed`);
+        continue;
       }
-      if (status !== 'failed') {
-        await query(
-          `INSERT INTO supplier_outreach_log (id, rfq_id, supplier_id, email_sent_to, email_subject, email_body, sent_at, status)
-           VALUES ($1,$2,$3,$4,$5,$6,NOW(),'sent')`,
-          [crypto.randomUUID(), rfqId, s.id, s.contact_email, subject, body]
-        );
-        out.sent++; anySent = true;
-      }
+      await rfqClaim.confirm(query, claimId, { subject, body });
+      out.sent++; anySent = true;
     }
     if (anySent) await query(`UPDATE rfq_requests SET status='sent' WHERE id=$1 AND status='pending'`, [rfqId]);
   }
