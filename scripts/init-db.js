@@ -51,7 +51,19 @@ CREATE TABLE IF NOT EXISTS email_log (
 `);
 
 const adminEmail = process.env.ADMIN_EMAIL || 'naren@abiozen.com';
-const adminPass = process.env.ADMIN_PASSWORD || 'Abiozen@2026';
+// ── NO FALLBACK PASSWORD ────
+// This line read `|| '<the live admin password>'`. A default that is also the real production
+// password is a credential published in git history to everyone who has ever cloned the repo,
+// and it stays there after the line is changed — which is why rotation, not editing, is the fix.
+//
+// Refusing is correct rather than inconvenient: a seeding script that silently creates an admin
+// account with a password the operator did not choose is worse than one that stops.
+const adminPass = process.env.ADMIN_PASSWORD;
+if (!adminPass) {
+  console.error('ADMIN_PASSWORD is required — there is deliberately no default.');
+  console.error('  ADMIN_PASSWORD="$(openssl rand -base64 24)" node scripts/init-db.js');
+  process.exit(1);
+}
 const hash = bcrypt.hashSync(adminPass, 10);
 const adminId = crypto.randomUUID();
 

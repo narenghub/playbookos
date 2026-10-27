@@ -18,7 +18,11 @@ This is a larger exposure than anything in the repository, which the audit found
 
 ### S2 — `scripts/init-db.js:54` hard-codes the production admin password · HIGH
 
-`const adminPass = process.env.ADMIN_PASSWORD || 'Abiozen@2026';` — the same string that is the live admin password. The script is legacy (`better-sqlite3`, referenced from no package script or doc) so it is not a live provisioning path, but the password is committed and real, and it is in git history.
+`const adminPass = process.env.ADMIN_PASSWORD || '<REDACTED>';` — the fallback literal is the same string as the live admin password. The script is legacy (`better-sqlite3`, referenced from no package script or doc) so it is not a live provisioning path, but the password is committed and real, and it is in git history.
+
+*(The literal was quoted verbatim in the first draft of this document. That was the same mistake this section is about — writing a live credential into a new committed file while describing the leak. `scripts/check-secrets.js` caught it before it was pushed, which is the argument for having the check at all.)*
+
+`scripts/setup-db.js:113` has the same shape with a weak default rather than the production password.
 
 ### S3 — Agents hold unrestricted database privilege · HIGH
 

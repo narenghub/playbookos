@@ -109,8 +109,16 @@ CREATE TABLE IF NOT EXISTS email_log (
 `);
 
 // Seed admin user
+// No default password. 'admin123' is worse than the production password this script's sibling
+// carried, not better: it is guessable, and an admin account seeded with it on any reachable
+// instance is an open door. Requiring the operator to choose one costs a line.
 const adminId = require('crypto').randomUUID();
-const hash = bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10);
+if (!process.env.ADMIN_PASSWORD) {
+  console.error('ADMIN_PASSWORD is required — there is deliberately no default.');
+  console.error('  ADMIN_PASSWORD="$(openssl rand -base64 24)" node scripts/setup-db.js');
+  process.exit(1);
+}
+const hash = bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10);
 const stmt = db.prepare(`
   INSERT OR IGNORE INTO users (id, email, name, role, password_hash, joined_at)
   VALUES (?, ?, ?, 'admin', ?, datetime('now'))

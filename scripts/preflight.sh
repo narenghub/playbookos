@@ -87,6 +87,13 @@ step "catalogue extraction works on real PDFs" node scripts/check-catalogue-extr
 # October table, senders and all, and asserts the headline is 3 and that the buckets sum to the row
 # count, so a disappearing customer fails here instead of being quietly uncounted.
 step "demand count runs on Postgres" node scripts/check-demand-count-sql.js
+# Committed credentials. The 27 Oct audit found the repo clean of live third-party keys and two
+# hard-coded admin-password fallbacks anyway — one of them the real production password, sitting in
+# git history for everyone who has ever cloned. What the repo had was no check that would catch it.
+# Deliberately narrow: vendor-prefixed tokens, DSNs carrying a password, and `process.env.X_SECRET
+# || 'literal'`. A scanner that fires on anything high-entropy gets muted, and then misses the real
+# one — the same alarm fatigue that let a broken cron send 168 false alerts a week unnoticed.
+step "no committed credentials" node scripts/check-secrets.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
