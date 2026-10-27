@@ -2,11 +2,15 @@
 // ── PROVE THE CREDENTIALS CHANGED, WITHOUT HANDLING EITHER VALUE ─────────────
 //
 //   BEFORE rotating, on the server:
-//     railway ssh 'node scripts/verify-rotation.js --snapshot=/tmp/fp.json'
+//     railway ssh 'node scripts/verify-rotation.js --snapshot'
 //
 //   AFTER rotating and redeploying:
-//     railway ssh 'node scripts/verify-rotation.js --compare=/tmp/fp.json'
+//     railway ssh 'node scripts/verify-rotation.js --compare'
 //     railway ssh 'node scripts/verify-rotation.js --health'
+//
+//   The snapshot is a row in Postgres, because a redeploy — which is REQUIRED for the new values to
+//   take effect — replaces the container and would delete a file in /tmp. --snapshot=<path> and
+//   --compare=<path> still exist for a local run, where nothing is being redeployed.
 //
 // Exit 0 = every credential expected to rotate did. Exit 1 = at least one did not.
 //
@@ -48,6 +52,21 @@ const SNAPSHOT = arg('snapshot', '');
 const COMPARE = arg('compare', '');
 const HEALTH = has('health');
 
+// ── WHERE THE SNAPSHOT LIVES, AND WHY NOT A FILE ─────────────────────────────
+// The file version was wrong for the one step the whole procedure turns on. `/tmp/fp.json` is
+// inside the Railway container; picking up rotated variables requires a redeploy; a redeploy
+// replaces the container. So the before-state was guaranteed to be destroyed between taking it and
+// needing it, and --compare would have reported "nothing to compare against" at the point where
+// there was no longer any before-state left to capture.
+//
+// Postgres survives the redeploy, and it stays reachable after the DSN password rotates because it
+// is the same database. So the default store is a table. The file modes still work for a local run,
+// where nothing is being redeployed.
+const SNAPSHOT_DB = has('snapshot');   // bare --snapshot, no path
+const COMPARE_DB = has('compare');     // bare --compare, no path
+const LABEL = arg('label', 'day0');
+const FORCE = has('force');
+
 // ── REFUSE WHAT YOU DO NOT UNDERSTAND ────────────────────────────────────────
 // On 27 Oct this script's predecessor was asked for --snapshot= twice. It did not have that flag,
 // so argv matched nothing, it fell through to its default mode, and printed a confident fifty-line
@@ -58,7 +77,7 @@ const HEALTH = has('health');
 // ran, and no edit here can fix a file that is not deployed. So every mode also announces the commit
 // it is running from. A stale deploy is then visible in the first line of output rather than inferred
 // afterwards from /health.
-const KNOWN = ['snapshot', 'compare', 'health'];
+const KNOWN = ['snapshot', 'compare', 'health', 'label', 'force'];
 const unknown = argv.filter((a) => a.startsWith('--')
   && !KNOWN.includes(a.replace(/^--/, '').split('=')[0]));
 if (unknown.length) {
@@ -70,9 +89,16 @@ if (unknown.length) {
 }
 
 const COMMIT = String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || 'unknown';
-const modeCount = [SNAPSHOT, COMPARE, HEALTH].filter(Boolean).length;
+const modeCount = [SNAPSHOT || SNAPSHOT_DB, COMPARE || COMPARE_DB, HEALTH].filter(Boolean).length;
 if (modeCount > 1) {
-  console.error('verify-rotation: pick one of --snapshot= / --compare= / --health, not several.');
+  console.error('verify-rotation: pick one of --snapshot / --compare / --health, not several.');
+  process.exit(2);
+}
+// --label and --force only mean anything to a snapshot or a comparison. Accepting them with no mode
+// would land in the inventory report — a different answer than the one asked for, printed as though
+// it were the one asked for, which is the whole reason this file has guards at the top.
+if (modeCount === 0 && (FORCE || argv.some((a) => a.startsWith('--label')))) {
+  console.error('verify-rotation: --label and --force need --snapshot or --compare.');
   process.exit(2);
 }
 
@@ -107,14 +133,67 @@ const CREDENTIALS = [
   ['OPENAI_API_KEY', false, false],
 ];
 
-function snapshot() {
+// Fingerprint everything that is set, under a fresh random salt.
+function take() {
   const salt = crypto.randomBytes(16).toString('hex');
   const out = { takenAt: new Date().toISOString(), salt, fingerprints: {} };
-  let set = 0;
   for (const [name] of CREDENTIALS) {
     const v = process.env[name];
-    if (v && String(v).trim()) { out.fingerprints[name] = fp(v, salt); set += 1; }
+    if (v && String(v).trim()) out.fingerprints[name] = fp(v, salt);
   }
+  return out;
+}
+
+const store = require('../src/lib/rotation-snapshot');
+
+async function snapshotDb() {
+  const { query } = require('../src/lib/db');
+  const res = await store.save(query, { label: LABEL, commit: COMMIT, snap: take(), force: FORCE });
+
+  if (res.refused) {
+    const when = res.takenAt instanceof Date ? res.takenAt.toISOString() : String(res.takenAt);
+    say(`\n   ✗ a snapshot labelled "${LABEL}" already exists, taken ${when}.`);
+    say('     Refusing to overwrite it: if you have since rotated, replacing it would make --compare');
+    say('     report everything unchanged, which reads as "rotation failed" or, worse, as a pass.');
+    say(`\n     To compare against it:   --compare --label=${LABEL}`);
+    say(`     To deliberately restart:  --snapshot --label=${LABEL} --force\n`);
+    process.exit(2);
+  }
+
+  say(`\n   ✓ recorded ${res.count} credential fingerprint(s) in the database, label "${LABEL}"`);
+  say('     Stored in Postgres, not /tmp — a redeploy replaces the container and would have');
+  say('     destroyed a file-based snapshot at exactly the wrong moment.');
+  say('     No secret and no fingerprint is printed, and the row holds salted digests only.');
+  say('\n   Now rotate, redeploy, then:');
+  say(`     railway ssh 'node scripts/verify-rotation.js --compare'`);
+  say('\n   The row is deleted automatically once the comparison passes.\n');
+}
+
+async function compareDb() {
+  const { query } = require('../src/lib/db');
+  const before = await store.load(query, LABEL);
+  if (!before) {
+    say(`\n   ✗ no snapshot labelled "${LABEL}".`);
+    say('     Take one BEFORE rotating — there is nothing to compare against otherwise:');
+    say(`       railway ssh 'node scripts/verify-rotation.js --snapshot'\n`);
+    process.exit(2);
+  }
+  const fail = report(before, `label "${LABEL}", taken ${before.takenAt} on commit ${before.commit || '?'}`);
+  if (fail) {
+    say(`✗ FAIL — ${fail} credential(s) did not rotate or are missing.`);
+    say('  If you rotated in Railway but this still says UNCHANGED: the running process captured');
+    say('  its environment at launch. Redeploy, then run this again.');
+    say('  The snapshot is kept so you can retry.\n');
+    process.exit(1);
+  }
+  await store.remove(query, LABEL);
+  say('✓ PASS — every credential marked for rotation now holds a different value.');
+  say(`  The snapshot row has been deleted; nothing derived from a secret remains stored.\n`);
+}
+
+function snapshot() {
+  const out = take();
+  const set = Object.keys(out.fingerprints).length;
   fs.writeFileSync(SNAPSHOT, JSON.stringify(out), { mode: 0o600 });
   say(`\n   ✓ recorded ${set} credential fingerprint(s) → ${SNAPSHOT}`);
   say('     No secret and no fingerprint is printed. The file is readable only by this user.');
@@ -135,7 +214,22 @@ function compare() {
     process.exit(2);
   }
 
-  say(`\n── rotation check · against a snapshot taken ${before.takenAt}\n`);
+  const fail = report(before, `a snapshot taken ${before.takenAt}`);
+  if (fail) {
+    say(`✗ FAIL — ${fail} credential(s) did not rotate or are missing.`);
+    say('  If you rotated in Railway but this still says UNCHANGED: the running process captured');
+    say('  its environment at launch. Redeploy, then run this again.\n');
+    process.exit(1);
+  }
+  say('✓ PASS — every credential marked for rotation now holds a different value.');
+  say(`  Delete the snapshot: rm -P ${COMPARE}\n`);
+}
+
+// The verdict table. Shared by both stores so a file run and a database run cannot disagree about
+// what counts as rotated — the same mistake that let route-outreach keep its own copy of the
+// "is this one of ours" filter and queue five of Naren's own test records for cold outreach.
+function report(before, sourceLabel) {
+  say(`\n── rotation check · against ${sourceLabel}\n`);
   say(`   ${pad('credential', 32)}${pad('expected', 12)}result`);
   say(`   ${'─'.repeat(70)}`);
 
@@ -161,15 +255,7 @@ function compare() {
 
   say('\n   Nothing above is derived from a secret value. "CHANGED" means the digest differs');
   say('   from the one in the snapshot; neither digest is printed.\n');
-
-  if (fail) {
-    say(`✗ FAIL — ${fail} credential(s) did not rotate or are missing.`);
-    say('  If you rotated in Railway but this still says UNCHANGED: the running process captured');
-    say('  its environment at launch. Redeploy, then run this again.\n');
-    process.exit(1);
-  }
-  say('✓ PASS — every credential marked for rotation now holds a different value.');
-  say(`  Delete the snapshot: rm -P ${COMPARE}\n`);
+  return fail;
 }
 
 async function health() {
@@ -244,6 +330,8 @@ async function main() {
   // you think you are running, and the rest of the output is about a different program.
   say(`\n   [verify-rotation · running from commit ${COMMIT}]`);
 
+  if (SNAPSHOT_DB) return snapshotDb();
+  if (COMPARE_DB) return compareDb();
   if (SNAPSHOT) return snapshot();
   if (COMPARE) return compare();
   if (HEALTH) return health();
@@ -258,10 +346,10 @@ async function main() {
     say(`   ${pad(name, 32)}${pad(isSet ? 'set' : 'NOT SET', 10)}${shouldRotate ? 'to rotate' : ''}`);
   }
   say('\n   No fingerprints are printed here. To prove rotation:');
-  say('     1. before:  --snapshot=/tmp/fp.json');
-  say('     2. rotate in Railway, redeploy');
-  say('     3. after:   --compare=/tmp/fp.json   then   --health');
-  say(`     4. rm -P /tmp/fp.json\n`);
+  say('     1. before:  --snapshot          (stored in Postgres, survives the redeploy)');
+  say('     2. rotate in Railway, then redeploy so the process re-reads its environment');
+  say('     3. after:   --compare           then   --health');
+  say('     The snapshot row is deleted automatically when the comparison passes.\n');
   if (missing) { say(`✗ ${missing} required credential(s) unset.\n`); process.exit(1); }
 }
 

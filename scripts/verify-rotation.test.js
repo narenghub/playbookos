@@ -48,6 +48,17 @@ test('--old= is refused by name, because it is the flag the first version had', 
   assert.strictEqual(r.status, 2);
 });
 
+test('--label or --force without a mode is refused, not answered with the inventory', () => {
+  // A modifier with no mode used to land in the default report: a different answer than the one
+  // asked for, printed as though it were the one asked for.
+  for (const args of [['--force'], ['--label=day0'], ['--label=day0', '--force']]) {
+    const r = run(args);
+    assert.strictEqual(r.status, 2, `${args.join(' ')} must exit 2`);
+    assert.doesNotMatch(`${r.stdout}${r.stderr}`, /DATABASE_URL|credential inventory/,
+      'must not print the inventory');
+  }
+});
+
 test('two modes at once is refused rather than one silently winning', () => {
   const r = run(['--health', `--snapshot=${path.join(os.tmpdir(), 'nope.json')}`]);
   assert.strictEqual(r.status, 2);
@@ -57,14 +68,14 @@ test('two modes at once is refused rather than one silently winning', () => {
 
 test('--snapshot writes a file, prints no fingerprint, and contains no secret value', () => {
   const out = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'vr-')), 'fp.json');
-  const SECRET = 'postgresql://u:a-very-distinctive-password-9f3b@h:5432/db';
-  const r = run([`--snapshot=${out}`], { DATABASE_URL: SECRET, ADMIN_PASSWORD: 'another-distinctive-7c1a' });
+  const SECRET = 'postgresql://u:EXAMPLE-fixture-9f3b@h:5432/db';
+  const r = run([`--snapshot=${out}`], { DATABASE_URL: SECRET, ADMIN_PASSWORD: 'EXAMPLE-fixture-admin-7c1a' });
 
   assert.strictEqual(r.status, 0, r.stderr);
   assert.ok(fs.existsSync(out), 'the snapshot file must exist — its absence was the original defect');
 
   const printed = `${r.stdout}${r.stderr}`;
-  assert.doesNotMatch(printed, /a-very-distinctive-password-9f3b|another-distinctive-7c1a/,
+  assert.doesNotMatch(printed, /EXAMPLE-fixture-9f3b|EXAMPLE-fixture-admin-7c1a/,
     'a secret value must never reach stdout');
   // No bare 12-hex token in the output: that was the fingerprint column, which is a confirmation
   // oracle against a wordlist for a human-chosen password.
@@ -72,7 +83,7 @@ test('--snapshot writes a file, prints no fingerprint, and contains no secret va
     'no fingerprint may be printed, in any mode');
 
   const saved = fs.readFileSync(out, 'utf8');
-  assert.doesNotMatch(saved, /a-very-distinctive-password-9f3b|another-distinctive-7c1a/,
+  assert.doesNotMatch(saved, /EXAMPLE-fixture-9f3b|EXAMPLE-fixture-admin-7c1a/,
     'the snapshot file must hold digests, never values');
   const parsed = JSON.parse(saved);
   assert.ok(parsed.salt && parsed.fingerprints.DATABASE_URL, 'salt and digests recorded');

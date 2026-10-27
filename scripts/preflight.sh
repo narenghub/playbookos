@@ -94,6 +94,16 @@ step "demand count runs on Postgres" node scripts/check-demand-count-sql.js
 # || 'literal'`. A scanner that fires on anything high-entropy gets muted, and then misses the real
 # one — the same alarm fatigue that let a broken cron send 168 false alerts a week unnoticed.
 step "no committed credentials" node scripts/check-secrets.js
+# The pre-rotation snapshot is the only record of what a credential was before it was rotated, and
+# once rotated the before-state cannot be recreated. The first version kept it in /tmp on the
+# Railway container — and the procedure requires a redeploy between writing it and reading it, which
+# replaces the container, so the storage was destroyed by the one step it existed to survive. Both
+# the file write and the file read worked perfectly, so no unit test could see it. This asserts the
+# two things that cost something: a snapshot written by one process is readable by a DIFFERENT one,
+# and a second snapshot is REFUSED rather than silently replacing the before-state with the
+# after-state — which would report every credential unchanged and read as a clean bill of health on
+# a rotation that never happened.
+step "rotation snapshot survives a new process" node scripts/check-rotation-snapshot-db.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
