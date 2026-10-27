@@ -14,6 +14,32 @@ async function sendWhatsApp(to, message, { user_id = null, message_type = 'remin
   }
   if (!to) return { skipped: true, reason: 'no recipient number provided' };
 
+  // ── THE KILL SWITCH ──────────────────────────────────────────────────────
+  // Returns a distinct `stopped_by_policy` shape rather than reusing `skipped`, which already means
+  // "Twilio is not configured". Those are different facts and an escalation report that conflates
+  // them would describe a deliberate halt as a missing integration.
+  try {
+    const { checkStopped, recordRefusal } = require('./autonomy');
+    const blocked = await checkStopped({ capability: 'whatsapp.send' }, { consequential: true });
+    if (blocked) {
+      const reason = `${blocked.scope_type}${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`;
+      console.warn(`[STOPPED_BY_POLICY] whatsapp to ${to}: ${reason}`);
+      recordRefusal({ stop: blocked, what: 'whatsapp.send', detail: { to, message_type } });
+      try {
+        await query(
+          `INSERT INTO whatsapp_log (id, user_id, to_number, message_type, message, status, sent_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+          [crypto.randomUUID(), user_id, to, message_type, message, `stopped_by_policy: ${reason}`.slice(0, 200)],
+        );
+      } catch (_) { /* the refusal is already recorded in autonomy_events */ }
+      return { stopped_by_policy: true, reason };
+    }
+  } catch (e) {
+    const reason = `kill-switch check failed (${e.message})`;
+    console.error(`[STOPPED_BY_POLICY] whatsapp to ${to}: ${reason}`);
+    return { stopped_by_policy: true, reason };
+  }
+
   const normalize = n => {
     const s = String(n).trim();
     return s.startsWith('whatsapp:') ? s : 'whatsapp:' + s;

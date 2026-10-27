@@ -82,6 +82,45 @@ async function gated(spec) {
   };
 
   try {
+    // ── THE KILL SWITCH, BEFORE AUTHORISATION ────────────────────────────────
+    //
+    // No production caller reaches here yet — P0.4 adopts this spine. The check is placed now so
+    // that adoption inherits the switch rather than requiring a second pass over every agent, and
+    // it is placed BEFORE resolve() because a stop is not an authorisation question: a permitted
+    // actor must still be stopped.
+    //
+    // Audited as decision='deny' with its own rule so a stop is never confused with a permissions
+    // denial in the audit table.
+    try {
+      // Injectable, because this file's tests are deliberately hermetic — "no real DB, no real
+      // agent execution, no network". A check that reached for a live connection would make them
+      // fail closed and DENY everything, and the denial would look like correct behaviour rather
+      // than a wiring mistake. That is the whole failure family this week has been about.
+      const { checkStopped, recordRefusal } = deps.autonomy || require('../autonomy');
+      // deps is passed through, so an injected query reaches the switch too. Without it the gate's
+      // own tests would hit the real database, fail closed, and deny everything — and the "fail
+      // closed" would look like correct behaviour rather than a wiring mistake.
+      const blocked = await checkStopped(
+        { company: product, agent: actorAgent || undefined, capability: toolName },
+        { consequential: true, deps },
+      );
+      if (blocked) {
+        const explain = `STOPPED_BY_POLICY: ${blocked.scope_type}`
+          + `${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`;
+        const audit = { ...base, result: null, success: false, error: null, decision: 'deny',
+          decision_rule: 'autonomy_stop', decision_explain: explain };
+        doAudit(q, audit);
+        recordRefusal({ stop: blocked, what: `gate:${toolName}`, detail: { product, actorAgent } });
+        return { allowed: false, output: null, audit, stopped_by_policy: true };
+      }
+    } catch (e) {
+      const explain = `STOPPED_BY_POLICY: kill-switch check failed (${e && e.message ? e.message : e})`;
+      const audit = { ...base, result: null, success: false, error: null, decision: 'deny',
+        decision_rule: 'autonomy_stop', decision_explain: explain };
+      try { doAudit(q, audit); } catch (_) {}
+      return { allowed: false, output: null, audit, stopped_by_policy: true };
+    }
+
     // Authorise (reuse resolve; fail CLOSED on a resolver error — audited, not thrown).
     let decision;
     try { decision = await doResolve(user || {}, featureKey, deps.resolveDeps || {}); }
@@ -155,7 +194,10 @@ async function callAgent(user, agentName, opts = {}) {
       }
     },
   });
-  return { allowed: r.allowed, summary: r.output, audit: r.audit };
+  // stopped_by_policy is propagated, not swallowed. A caller that cannot tell a STOP from a
+  // permissions denial would report a deliberate halt as an access problem, and the run ledger in
+  // P0.3 needs STOPPED_BY_POLICY as its own outcome rather than a generic failure.
+  return { allowed: r.allowed, summary: r.output, audit: r.audit, stopped_by_policy: !!r.stopped_by_policy };
 }
 
 // ── callTool — gate a REMOTE product MCP tool call ──────────────────────────────
@@ -199,7 +241,7 @@ async function callTool(user, opts = {}) {
       return { success: true, output: resp.result };
     },
   });
-  return { allowed: r.allowed, result: r.output, audit: r.audit };
+  return { allowed: r.allowed, result: r.output, audit: r.audit, stopped_by_policy: !!r.stopped_by_policy };
 }
 
 module.exports = { callAgent, callTool, gated, fireAudit, costFrom };

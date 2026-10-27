@@ -33,6 +33,32 @@ async function withTransaction(fn) {
   }
 }
 
+// LISTEN on a dedicated connection, for the kill switch's propagation accelerator.
+//
+// The client is taken from the pool and never returned to it — a connection in LISTEN state must
+// not be handed to an unrelated caller. On error it is DESTROYED rather than released, because a
+// recycled listening connection is worse than no listener at all.
+//
+// Nothing's correctness may depend on this: a dropped LISTEN is silent, so src/lib/autonomy.js
+// keeps a TTL poll as the floor and treats this purely as an accelerator.
+const LISTEN_CHANNEL = /^[a-z_][a-z0-9_]*$/;
+async function listen(channel, onNotify) {
+  if (!LISTEN_CHANNEL.test(channel)) throw new Error(`refusing to LISTEN on a non-identifier channel: ${channel}`);
+  const client = await pool.connect();
+  let dead = false;
+  const destroy = () => { if (dead) return; dead = true; try { client.release(true); } catch (_) {} };
+  client.on('notification', (msg) => { try { onNotify(msg); } catch (_) {} });
+  client.on('error', destroy);
+  client.on('end', destroy);
+  try {
+    await client.query(`LISTEN ${channel}`);
+  } catch (e) {
+    destroy();
+    throw e;
+  }
+  return destroy;
+}
+
 async function initDB() {
   await query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -1102,4 +1128,4 @@ async function migrateResearchIntelligencePhase3() {
   } catch (e) { console.error('Research-intel Phase 3 migration error:', e.message); }
 }
 
-module.exports = { query, withTransaction, initDB, initPhase2, migrateSchemas, migrateResearchIntelligence, migrateResearchIntelligencePhase3 };
+module.exports = { query, withTransaction, listen, initDB, initPhase2, migrateSchemas, migrateResearchIntelligence, migrateResearchIntelligencePhase3 };

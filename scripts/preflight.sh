@@ -104,6 +104,14 @@ step "no committed credentials" node scripts/check-secrets.js
 # after-state — which would report every credential unchanged and read as a clean bill of health on
 # a rotation that never happened.
 step "rotation snapshot survives a new process" node scripts/check-rotation-snapshot-db.js
+# The kill switch (P0.2). The unit tests prove the semantics against a stub; they cannot prove the
+# three things it actually has to do, all of which live in the database: a stop written by one
+# process is seen by ANOTHER with no restart (which is the whole meaning of "no redeploy to stop
+# autonomy"), the STOP/RESUME history is written by a TRIGGER so a break-glass INSERT typed into a
+# console is audited exactly like an API call, and deleting the active stop does not erase that
+# history. It also MEASURES propagation with the LISTEN accelerator deliberately disabled — a kill
+# switch whose latency is asserted in a comment is a kill switch nobody has timed.
+step "kill switch stops, propagates and audits" node scripts/check-autonomy-stop-db.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2

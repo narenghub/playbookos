@@ -109,7 +109,60 @@ function encodeAttachments(attachments) {
 // cannot carry one. Deliberately NOT done by changing sendEmail's return type to an object: every
 // existing `if (await sendEmail(...))` would then be unconditionally true and every failure path in the
 // codebase would go quiet — which is the exact shape of the eight-week outage this file already documents.
-async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments }) {
+async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments, capability = 'email.send' }) {
+  // ── THE KILL SWITCH, BEFORE THE PROVIDER CALL ────────────────────────────
+  //
+  // Placed here rather than at each of the ~37 routes and 37 crons that can cause an email, so
+  // every path is covered and a path added tomorrow is covered by default.
+  //
+  // The return contract is deliberately unchanged: { ok:false, id:null, error }. sendEmail() still
+  // returns false and its 55 callers are untouched — changing the shape here is how the eight-week
+  // outage documented above would be re-created. What makes a policy stop distinguishable from an
+  // ordinary send failure is not the return value but the record: email_log gets
+  // status='stopped_by_policy' where somebody looks for a send, and autonomy_events gets a REFUSED
+  // row that cannot later be read as a provider problem.
+  //
+  // ── ONE EXEMPTION, AND WHY IT IS NOT A LOOPHOLE ──────────────────────────
+  //
+  // `email.alert` — the cron-failure channel — is checked as NON-consequential, which means a
+  // global/company/agent/workflow stop does not silence it, and neither does an unreadable
+  // kill-state. It remains stoppable by an explicit `capability:email.alert` stop.
+  //
+  // Without this the oversight channel dies with the database: Postgres goes down, every cron is
+  // halted fail-closed, the alert explaining that is ALSO refused, and a total outage becomes
+  // silence plus a console line. That is precisely the failure commit 1eba5e9 fixed this morning,
+  // re-created by the safety control.
+  //
+  // It is narrow by construction, not by promise: an alert goes only to ALERT_EMAIL/ADMIN_EMAIL
+  // from a fixed template, so the exemption cannot carry autonomous business email. And it reuses
+  // the approved THINKING-vs-ACTING rule rather than inventing a bypass — telling a human what
+  // broke is observability, in the same class as analysis, not autonomous action.
+  const OBSERVABILITY = new Set(['email.alert']);
+  try {
+    const { checkStopped, recordRefusal } = require('./autonomy');
+    const blocked = await checkStopped({ capability }, { consequential: !OBSERVABILITY.has(capability) });
+    if (blocked) {
+      const reason = `STOPPED_BY_POLICY: ${blocked.scope_type}`
+        + `${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`;
+      console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${reason}`);
+      await logEmail({ to, subject, status: 'stopped_by_policy', errorMessage: reason });
+      recordRefusal({ stop: blocked, what: 'email.send', detail: { to, subject } });
+      return { ok: false, id: null, error: reason, stopped: true };
+    }
+  } catch (e) {
+    // A defect in the switch itself. An alert still goes out — the channel that reports breakage
+    // must not be taken out by breakage — but ordinary outbound email is refused, because it is
+    // exactly the thing not to send while the brakes are of unknown condition.
+    if (OBSERVABILITY.has(capability)) {
+      console.error(`[kill-switch] check failed for ${capability}, sending anyway (observability): ${e.message}`);
+    } else {
+    const reason = `STOPPED_BY_POLICY: kill-switch check failed (${e.message})`;
+    console.error(`[STOPPED_BY_POLICY] email to ${to}: ${reason}`);
+    try { await logEmail({ to, subject, status: 'stopped_by_policy', errorMessage: reason }); } catch (_) {}
+    return { ok: false, id: null, error: reason, stopped: true };
+    }
+  }
+
   const key = process.env.RESEND_API_KEY;
   if (!key) {
     console.log('No RESEND_API_KEY');

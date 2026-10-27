@@ -11,6 +11,11 @@ function capQuery() { const rows = []; const q = (_sql, params) => { rows.push(p
 const allow = (rule = 7, explain = 'ok') => async () => ({ allowed: true, rule, source: null, explain });
 const deny = (rule = 8, explain = 'no rule matched') => async () => ({ allowed: false, rule, source: null, explain });
 const USER = { id: 'u1', email: 'u@x', role: 'admin' };
+// Autonomy injected, keeping these tests hermetic. gated() consults the kill switch before
+// authorising; without a stub it would reach for a live connection, fail closed, and deny every
+// case here — a wiring mistake that would read as correct fail-closed behaviour.
+const NO_STOP = { autonomy: { checkStopped: async () => null, recordRefusal: () => {} } };
+const STOPPED = (stop) => ({ autonomy: { checkStopped: async () => stop, recordRefusal: () => {} } });
 // stub content entry-point (contract's content adapter uses deps.runContentPipeline)
 const contentImpl = (over = {}) => async (product) => ({ product, drafts_created: 2, cost_usd: 0.05, tokens: { input: 100, output: 40 }, ...over });
 
@@ -19,7 +24,7 @@ test('DENY writes an audit row, does NOT execute, and calls fireDenial', async (
   const q = capQuery(); let denials = 0; let ranImpl = false;
   const res = await callAgent(USER, 'content-pipeline', {
     product: 'golfnex',
-    deps: {
+    deps: { ...NO_STOP,
       query: q, resolve: deny(8, 'no'), fireDenial: () => { denials++; },
       runContentPipeline: async () => { ranImpl = true; return {}; },
     },
@@ -42,7 +47,7 @@ test('ALLOW executes, audits, and captures cost/tokens/latency', async () => {
   let seenFeature;
   const res = await callAgent(USER, 'content-pipeline', {
     product: 'golfnex',
-    deps: {
+    deps: { ...NO_STOP,
       query: q,
       resolve: async (u, fk) => { seenFeature = fk; return { allowed: true, rule: 7, explain: 'template' }; },
       runContentPipeline: contentImpl(),
@@ -69,7 +74,7 @@ test('a THROWING agent audits success=false with the error, gate does not throw'
   await assert.doesNotReject(async () => {
     res = await callAgent(USER, 'content-pipeline', {
       product: 'golfnex',
-      deps: { query: q, resolve: allow(), runContentPipeline: async () => { throw new Error('kaboom'); } },
+      deps: { ...NO_STOP, query: q, resolve: allow(), runContentPipeline: async () => { throw new Error('kaboom'); } },
     });
   });
   assert.equal(res.allowed, true, 'it was authorised; execution failed');
@@ -87,7 +92,7 @@ test('a FAILING audit write does not break the agent result', async () => {
   await assert.doesNotReject(async () => {
     res = await callAgent(USER, 'content-pipeline', {
       product: 'golfnex',
-      deps: { query: throwingQ, resolve: allow(), runContentPipeline: contentImpl() },
+      deps: { ...NO_STOP, query: throwingQ, resolve: allow(), runContentPipeline: contentImpl() },
     });
   });
   assert.equal(res.allowed, true);
@@ -98,7 +103,7 @@ test('a REJECTING async audit write does not break the result', async () => {
   const rejectingQ = () => Promise.reject(new Error('audit timeout'));
   let res;
   await assert.doesNotReject(async () => {
-    res = await callAgent(USER, 'content-pipeline', { product: 'golfnex', deps: { query: rejectingQ, resolve: allow(), runContentPipeline: contentImpl() } });
+    res = await callAgent(USER, 'content-pipeline', { product: 'golfnex', deps: { ...NO_STOP, query: rejectingQ, resolve: allow(), runContentPipeline: contentImpl() } });
   });
   assert.equal(res.summary.drafts_created, 2);
 });
@@ -107,13 +112,13 @@ test('a REJECTING async audit write does not break the result', async () => {
 test('product is ALWAYS recorded — ctx.product, entry default, and unknown', async () => {
   const q = capQuery();
   // ctx.product wins
-  let r = await callAgent(USER, 'content-pipeline', { product: 'abiozen', deps: { query: q, resolve: allow(), runContentPipeline: contentImpl() } });
+  let r = await callAgent(USER, 'content-pipeline', { product: 'abiozen', deps: { ...NO_STOP, query: q, resolve: allow(), runContentPipeline: contentImpl() } });
   assert.equal(r.audit.product, 'abiozen');
   // entry default when ctx.product omitted (content default = golfnex)
-  r = await callAgent(USER, 'content-pipeline', { deps: { query: q, resolve: allow(), runContentPipeline: contentImpl() } });
+  r = await callAgent(USER, 'content-pipeline', { deps: { ...NO_STOP, query: q, resolve: allow(), runContentPipeline: contentImpl() } });
   assert.equal(r.audit.product, 'golfnex');
   // unknown agent still records a product ('unknown') and never NULL
-  r = await callAgent(USER, 'nope', { deps: { query: q } });
+  r = await callAgent(USER, 'nope', { deps: { ...NO_STOP, query: q } });
   assert.equal(r.allowed, false);
   assert.equal(r.audit.product, 'unknown');
   assert.ok(r.audit.product, 'product never null');
@@ -123,13 +128,13 @@ test('product is ALWAYS recorded — ctx.product, entry default, and unknown', a
 // ── both registered agents run through the gate ──────────────────────────────
 test('both registered agents run through the gate', async () => {
   const q = capQuery();
-  const c = await callAgent(USER, 'content-pipeline', { product: 'golfnex', deps: { query: q, resolve: allow(), runContentPipeline: contentImpl() } });
+  const c = await callAgent(USER, 'content-pipeline', { product: 'golfnex', deps: { ...NO_STOP, query: q, resolve: allow(), runContentPipeline: contentImpl() } });
   assert.equal(c.allowed, true);
   assert.equal(c.audit.tool_name, 'content-pipeline');
   assert.equal(c.audit.feature_key, 'intelligence.content.run');
 
   const r = await callAgent(USER, 'research-intelligence', {
-    deps: { query: q, resolve: allow(), runResearchIntelIngest: async (o) => ({ studies_new: 3, dry_run: o.dryRun, cost_usd: 0.02, tokens: { input: 10, output: 5 } }) },
+    deps: { ...NO_STOP, query: q, resolve: allow(), runResearchIntelIngest: async (o) => ({ studies_new: 3, dry_run: o.dryRun, cost_usd: 0.02, tokens: { input: 10, output: 5 } }) },
     args: { maxStudies: 5, dryRun: true },
   });
   assert.equal(r.allowed, true);
@@ -145,7 +150,7 @@ test('resolver error fails CLOSED (deny), audited, no execution', async () => {
   const q = capQuery(); let ran = false;
   const res = await callAgent(USER, 'content-pipeline', {
     product: 'golfnex',
-    deps: { query: q, resolve: async () => { throw new Error('resolve boom'); }, runContentPipeline: async () => { ran = true; return {}; } },
+    deps: { ...NO_STOP, query: q, resolve: async () => { throw new Error('resolve boom'); }, runContentPipeline: async () => { ran = true; return {}; } },
   });
   assert.equal(res.allowed, false);
   assert.equal(ran, false);
@@ -161,7 +166,7 @@ test('callTool DENIES without calling out (audit deny + fireDenial, no mcp call)
   const q = capQuery(); let denials = 0; let calledOut = false;
   const res = await callTool(USER, {
     product: 'golfnex', toolName: 'publish_post', args: { draftId: 9 }, tenantId: 't-1',
-    deps: { query: q, resolve: deny(8, 'no'), fireDenial: () => { denials++; }, env: CRED_ENV,
+    deps: { ...NO_STOP, query: q, resolve: deny(8, 'no'), fireDenial: () => { denials++; }, env: CRED_ENV,
       callMcpTool: async () => { calledOut = true; return { result: {} }; } },
   });
   assert.equal(res.allowed, false);
@@ -179,7 +184,7 @@ test('callTool ALLOW audits with product + tenant, passes _meta on_behalf_of, re
   const res = await callTool(USER, {
     product: 'golfnex', server: 'http://gn.internal/mcp', toolName: 'publish_post', args: { draftId: 9 },
     tenantId: 't-1', actorAgent: 'content-pipeline',
-    deps: { query: q, resolve: allow(7, 'granted'), env: CRED_ENV,
+    deps: { ...NO_STOP, query: q, resolve: allow(7, 'granted'), env: CRED_ENV,
       callMcpTool: async ({ credential, meta }) => { seenCred = credential; seenMeta = meta; return { result: { posted: true, id: 'p1' } }; } },
   });
   assert.equal(res.allowed, true);
@@ -200,7 +205,7 @@ test('callTool distinguishes TRANSPORT failure from JSON-RPC tool error (both su
   const q = capQuery();
   const transport = await callTool(USER, {
     product: 'golfnex', server: 'http://x', toolName: 'publish_post', tenantId: 't-1',
-    deps: { query: q, resolve: allow(), env: CRED_ENV, callMcpTool: async () => ({ error: 'request timed out after 15000ms', transport: true, timedOut: true }) },
+    deps: { ...NO_STOP, query: q, resolve: allow(), env: CRED_ENV, callMcpTool: async () => ({ error: 'request timed out after 15000ms', transport: true, timedOut: true }) },
   });
   assert.equal(transport.allowed, true);
   assert.equal(transport.audit.success, false);
@@ -208,7 +213,7 @@ test('callTool distinguishes TRANSPORT failure from JSON-RPC tool error (both su
 
   const toolErr = await callTool(USER, {
     product: 'golfnex', server: 'http://x', toolName: 'publish_post', tenantId: 't-1',
-    deps: { query: q, resolve: allow(), env: CRED_ENV, callMcpTool: async () => ({ error: 'JSON-RPC error -32000: quota exceeded', rpcError: { code: -32000 }, transport: false }) },
+    deps: { ...NO_STOP, query: q, resolve: allow(), env: CRED_ENV, callMcpTool: async () => ({ error: 'JSON-RPC error -32000: quota exceeded', rpcError: { code: -32000 }, transport: false }) },
   });
   assert.equal(toolErr.allowed, true);
   assert.equal(toolErr.audit.success, false);
@@ -218,7 +223,7 @@ test('callTool distinguishes TRANSPORT failure from JSON-RPC tool error (both su
 
 test('callTool unknown remote tool → deny, never calls out', async () => {
   const q = capQuery(); let calledOut = false;
-  const res = await callTool(USER, { product: 'golfnex', toolName: 'nope', deps: { query: q, resolve: allow(), env: CRED_ENV, callMcpTool: async () => { calledOut = true; return {}; } } });
+  const res = await callTool(USER, { product: 'golfnex', toolName: 'nope', deps: { ...NO_STOP, query: q, resolve: allow(), env: CRED_ENV, callMcpTool: async () => { calledOut = true; return {}; } } });
   assert.equal(res.allowed, false);
   assert.equal(calledOut, false);
   assert.match(res.audit.error, /unknown remote tool 'golfnex\/nope'/);
@@ -229,9 +234,50 @@ test('callTool with no credential → allowed but success=false (credential erro
   const q = capQuery();
   const res = await callTool(USER, {
     product: 'golfnex', server: 'http://x', toolName: 'publish_post', tenantId: 't-1',
-    deps: { query: q, resolve: allow(), env: {} /* no OUTBOUND_GOLFNEX_MCP */, callMcpTool: async () => ({ result: {} }) },
+    deps: { ...NO_STOP, query: q, resolve: allow(), env: {} /* no OUTBOUND_GOLFNEX_MCP */, callMcpTool: async () => ({ result: {} }) },
   });
   assert.equal(res.allowed, true);
   assert.equal(res.audit.success, false);
   assert.match(res.audit.error, /^credential: /);
+});
+
+// ── kill switch (P0.2) ───────────────────────────────────────────────────────
+// gated() checks the switch BEFORE resolve(), because a stop is not an authorisation question: a
+// fully permitted actor must still be stopped. No production caller reaches this spine yet — P0.4
+// adopts it — so this exists to guarantee that adoption inherits the switch rather than needing a
+// second pass over every agent.
+test('a STOP denies without executing, and audits as a stop rather than a permissions denial', async () => {
+  const q = capQuery(); let ranImpl = false; let denials = 0;
+  const res = await callAgent(USER, 'content-pipeline', {
+    product: 'golfnex',
+    deps: {
+      ...STOPPED({ scope_type: 'global', scope_key: '', reason: 'CEO emergency stop — outbound misbehaving' }),
+      query: q,
+      resolve: allow(7, 'permitted'),            // deliberately ALLOWED by permissions
+      fireDenial: () => { denials++; },
+      runContentPipeline: async () => { ranImpl = true; return {}; },
+    },
+  });
+  assert.equal(res.allowed, false, 'a stop must deny even when permissions allow');
+  assert.equal(ranImpl, false, 'the agent EXECUTED while autonomy was stopped');
+  assert.equal(res.stopped_by_policy, true);
+  assert.equal(res.audit.decision_rule, 'autonomy_stop',
+    'a stop must be distinguishable from a permissions denial in the audit table');
+  assert.match(res.audit.decision_explain, /^STOPPED_BY_POLICY:/);
+  assert.equal(denials, 0, 'a stop is not a permissions denial and must not fire one');
+});
+
+test('a broken kill-switch check denies rather than proceeding', async () => {
+  const q = capQuery(); let ranImpl = false;
+  const res = await callAgent(USER, 'content-pipeline', {
+    product: 'golfnex',
+    deps: {
+      autonomy: { checkStopped: async () => { throw new Error('autonomy_stops does not exist'); }, recordRefusal: () => {} },
+      query: q, resolve: allow(7, 'permitted'),
+      runContentPipeline: async () => { ranImpl = true; return {}; },
+    },
+  });
+  assert.equal(res.allowed, false);
+  assert.equal(ranImpl, false, 'an agent ran with the brakes in unknown condition');
+  assert.match(res.audit.decision_explain, /kill-switch check failed/);
 });

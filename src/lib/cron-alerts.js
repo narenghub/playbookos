@@ -4,8 +4,58 @@ const { sendEmail } = require('./mailer');
 // to ALERT_EMAIL (fallback ADMIN_EMAIL) and never bubble. Phase 1 only
 // catches throws — soft errors logged via try/catch inside the body
 // are NOT alerted on.
-function withAlerts(name, fn) {
+// `deps` follows the injection pattern already used by src/lib/agents/gate.js: it exists so the
+// kill-switch guard can be tested with a spy proving fn() was never REACHED, rather than inferred
+// from the absence of output. Production calls pass nothing.
+function withAlerts(name, fn, deps = {}) {
   return async () => {
+    // ── THE KILL SWITCH, AT THE ONE PLACE ALL 37 CRONS PASS THROUGH ──────────
+    //
+    // Checked before fn() is called, not inside it: the point is that the body never runs. A cron
+    // is treated as consequential, so an unreadable kill-state halts it — and that is the right
+    // trade, because a cron that cannot read autonomy_stops almost certainly cannot do its own work
+    // either, and the alternative is acting blind.
+    //
+    // STOPPED_BY_POLICY is its own outcome. It must never read as SUCCESS, and it must never read
+    // as a generic failure either — a stop is a decision, and an operator scanning logs after
+    // pulling the switch needs to see it took effect rather than guess from an absence.
+    try {
+      // Only the DB-touching half is injectable. scopesForCron is a pure lookup over a static map,
+      // so taking it from a stub would mean a test could accidentally blank the cron's scopes and
+      // still pass — the guard would then be tested against scopes nothing in production uses.
+      const { scopesForCron } = require('./autonomy');
+      const { checkStopped, recordRefusal } = deps.autonomy || require('./autonomy');
+      const blocked = await checkStopped(scopesForCron(name), { consequential: true, deps });
+      if (blocked) {
+        console.warn(`[STOPPED_BY_POLICY] ${name}: ${blocked.scope_type}`
+          + `${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`);
+        recordRefusal({ stop: blocked, what: `cron:${name}` });
+        // A DELIBERATE stop is silent by design: the operator pulled the switch and does not need
+        // 37 emails telling them so. An UNKNOWN kill-state is the opposite — nobody asked for it,
+        // it halts every scheduled job, and without this it would be visible only in Railway logs.
+        // A database outage would otherwise turn into exactly the kind of quiet that this codebase
+        // has been bitten by all week.
+        if (blocked.unknown) {
+          try {
+            await sendCronAlert(`${name} (HALTED — kill-state unknown)`,
+              new Error(`${blocked.reason}. Every cron is halting fail-closed until the kill switch `
+                + `can be read again. This is not an operator stop.`));
+          } catch (alertErr) {
+            console.error(`[ALERT FAIL] ${name}: ${alertErr.message}`);
+          }
+        }
+        return { stopped_by_policy: true, scope: blocked.scope_type, reason: blocked.reason, unknown: !!blocked.unknown };
+      }
+    } catch (e) {
+      // The switch itself is broken, which is not the same as being stopped. Do not silently run as
+      // though autonomy were permitted, and do not silently halt the platform either: alert, and
+      // halt this run. checkStopped already fails closed on a database problem, so reaching here
+      // means a defect in the switch — which is exactly when a human needs telling.
+      console.error(`[STOPPED_BY_POLICY] ${name}: kill-switch check itself failed: ${e.message}`);
+      try { await sendCronAlert(`${name} (kill-switch check failed)`, e); } catch (_) {}
+      return { stopped_by_policy: true, scope: 'global', reason: `kill-switch check failed: ${e.message}` };
+    }
+
     try {
       await fn();
     } catch (e) {
@@ -59,7 +109,9 @@ async function sendCronAlert(cronName, err) {
   // Thrown, not returned, so withAlerts' own catch logs [ALERT FAIL] with the reason. There is
   // nowhere further to escalate — if email is down, the log is the last channel there is — but a
   // named failure in the log can be found, and a dropped boolean cannot.
-  const ok = await sendEmail({ to, subject, html });
+  // capability 'email.alert' — observability, not autonomy. See the exemption note in mailer.js: a
+  // stop on outbound business email must not silence the channel that reports a cron failing.
+  const ok = await sendEmail({ to, subject, html, capability: 'email.alert' });
   if (ok === false) {
     throw new Error(`alert email for "${cronName}" was refused by the mail provider — `
       + `the cron failure itself is above this line and reached nobody`);

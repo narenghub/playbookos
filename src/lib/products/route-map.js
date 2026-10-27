@@ -140,6 +140,11 @@ const SHARED = [
 // A pseudo-product in user_products. Granted to every internal user by the backfill; a partner
 // account is simply never granted it, so a tier mistake alone cannot expose any of this.
 const INTERNAL = [
+  // The kill-switch control plane (P0.2). 'internal' and not 'param:product': a stop can name a
+  // product in its body, but DECIDING to halt autonomy is platform administration, not work inside
+  // the product being halted — the same reasoning as user product assignment below. Routing it
+  // through a product boundary would also mean a global stop had no product to be checked against.
+  'GET /api/autonomy/stops', 'POST /api/autonomy/stops', 'DELETE /api/autonomy/stops',
   // people, roles, access
   'GET /api/users', 'POST /api/users/invite', 'PUT /api/users/:id', 'DELETE /api/users/:id',
   'PUT /api/users/:id/toggle-status', 'POST /api/users/send-onboarding', 'POST /api/users/send-task-nudge',

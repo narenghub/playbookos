@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { signToken, authMiddleware, adminOnly, superAdminOnly, requireTier, requireAnyTier, syncGitHubForUser, analyzeTeamProgress, runClaudeAnalysis, staffOnly } = require('../lib/core');
 const { query, withTransaction } = require('../lib/db');
+const autonomy = require('../lib/autonomy');
 const { sendEmail } = require('../lib/mailer');
 const { checkMilestoneTriggers } = require('../lib/jobs');
 const { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf } = require('../lib/agents/goal-engine');
@@ -46,6 +47,69 @@ const { syncPlaybookOSSkus, syncAbiozenProducts } = require('../lib/algolia-sync
 const { createDailyTask, logAgentActivity, parseClaudeJSON, businessToday, enqueueApproval, extractClaudeText } = require('../lib/agent-core');
 
 const router = express.Router();
+
+// ── KILL SWITCH HELPERS ──────────────────────────────────────────────────────
+//
+// One helper, used by the three unauthenticated endpoints that can cause autonomous execution.
+// Returns null to proceed, or the body to send with a 503.
+//
+// `detail` carries whatever the request was carrying, so a halt is recoverable rather than lossy: a
+// buyer enquiry refused at 09:10 is replayable from autonomy_events afterwards. A safety control
+// that silently discards real business input would just be a different outage.
+async function autonomyHalt(scopes, what, detail = {}) {
+  let blocked;
+  try {
+    blocked = await autonomy.checkStopped(scopes, { consequential: true });
+  } catch (e) {
+    // checkStopped already fails closed on a database error, so reaching here is a defect in the
+    // switch. Refuse: an unauthenticated endpoint that starts autonomous work is not the place to
+    // proceed on the assumption that the brakes are fine.
+    blocked = { scope_type: 'global', scope_key: '', reason: `kill-switch check failed (${e.message})`, unknown: true };
+  }
+  if (!blocked) return null;
+  console.warn(`[STOPPED_BY_POLICY] ${what}: ${blocked.scope_type}`
+    + `${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`);
+  autonomy.recordRefusal({ stop: blocked, what, detail });
+  return {
+    stopped_by_policy: true,
+    scope: blocked.scope_type,
+    scope_key: blocked.scope_key || null,
+    reason: blocked.reason,
+    note: 'Autonomy is stopped. The request was recorded and can be replayed after resume.',
+  };
+}
+
+// ── KILL SWITCH CONTROL PLANE ────────────────────────────────────────────────
+// adminOnly. The break-glass path is a direct INSERT in the database and deliberately does NOT go
+// through these routes — a control plane cannot be the only way to stop the thing serving it.
+router.get('/autonomy/stops', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const [stops, events] = await Promise.all([autonomy.listStops(), autonomy.history({ limit: req.query.limit })]);
+    res.json({ stops, events, scope_types: autonomy.SCOPE_TYPES, capabilities: autonomy.CAPABILITIES });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/autonomy/stops', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { scope_type, scope_key = '', reason } = req.body || {};
+    const actor = (req.user && (req.user.email || req.user.id)) || 'unknown';
+    const r = await autonomy.stop({ scope_type, scope_key, reason, actor });
+    if (!r.ok) return res.status(400).json({ error: r.error });
+    res.json({ stopped: true, scope_type, scope_key: scope_key || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete('/autonomy/stops', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const scope_type = req.body?.scope_type || req.query.scope_type;
+    const scope_key = req.body?.scope_key ?? req.query.scope_key ?? '';
+    const reason = req.body?.reason || req.query.reason;
+    const actor = (req.user && (req.user.email || req.user.id)) || 'unknown';
+    const r = await autonomy.resume({ scope_type, scope_key, reason, actor });
+    if (!r.ok) return res.status(400).json({ error: r.error });
+    res.json({ resumed: true, removed: r.removed, scope_type, scope_key: scope_key || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // Issue 4c — in-memory multipart handling for the LinkedIn reference-image upload.
 // memoryStorage keeps the file in req.file.buffer (no temp file → nothing to clean
@@ -1187,6 +1251,11 @@ router.post('/triggers/check', async (req, res) => {
     const secret = process.env.TRIGGERS_SECRET;
     const provided = (req.headers.authorization || '').replace('Bearer ', '');
     if (!secret || provided !== secret) return res.status(401).json({ error: 'Unauthorized' });
+    // Kill switch. This endpoint EXECUTES the milestone triggers when the secret is accepted, which
+    // is autonomous consequential work reachable by anyone holding that secret — so the primitives
+    // alone are not enough: the trigger logic mutates state before it ever reaches an email.
+    const halt = await autonomyHalt({ workflow: 'triggers-check', company: 'abiozen' }, 'POST /api/triggers/check');
+    if (halt) return res.status(503).json(halt);
     const result = await checkMilestoneTriggers();
     res.json({ ...result, checked: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -1297,6 +1366,16 @@ router.post('/customers/engagement-event', async (req, res) => {
     if (!contact_email) return res.status(400).json({ error: 'contact_email is required' });
     const valid = ['sent', 'opened', 'clicked', 'replied', 'bounced'];
     if (!valid.includes(event_type)) return res.status(400).json({ error: `event_type must be one of ${valid.join(', ')}` });
+    // Kill switch, per the approved design. NOTE for the record: this handler only RECORDS an
+    // inbound Apollo event, so halting it costs engagement data without stopping any outbound
+    // action — the refusal therefore carries the full payload into autonomy_events.detail so a stop
+    // is recoverable rather than lossy, and the trade is listed under Remaining Risk.
+    const halt = await autonomyHalt(
+      { workflow: 'engagement-event', company: 'abiozen' },
+      'POST /api/customers/engagement-event',
+      { payload: req.body || {} },
+    );
+    if (halt) return res.status(503).json(halt);
     await query(
       `INSERT INTO buyer_engagement (id, contact_email, event_type, event_at, sequence_id, molecule_interest)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -2203,6 +2282,22 @@ router.post('/inquiry/receive', async (req, res) => {
   if (!provided || provided !== secret) return res.status(401).json({ error: 'Invalid or missing X-PlaybookOS-Secret header' });
   const b = req.body || {};
   if (!b.buyer_email || !b.molecule_name) return res.status(400).json({ error: 'buyer_email and molecule_name required' });
+  // ── KILL SWITCH — found by the 27 Oct unauthenticated-endpoint sweep ───────
+  //
+  // This was not in the original P0.2 scope. It returns 202 and then runs receiveInquiry() in the
+  // background: a synchronous Claude call plus an AI first-response email to an external buyer,
+  // with errors going only to console.error. That is fully autonomous outbound action initiated
+  // from outside the system by anyone holding the webhook secret — precisely what a kill switch is
+  // for, and it would have escaped a switch that only covered crons.
+  //
+  // The refusal carries the whole enquiry into autonomy_events.detail, because a halt must not lose
+  // a real buyer. 503 rather than 202 so the storefront can retry.
+  const halt = await autonomyHalt(
+    { workflow: 'inquiry-receive', company: 'abiozen', agent: 'inquiry-agent' },
+    'POST /api/inquiry/receive',
+    { enquiry: b },
+  );
+  if (halt) return res.status(503).json(halt);
   // Respond immediately, then create the inquiry + send the AI first-response in
   // the background. receiveInquiry does a synchronous Claude call (~10s), so
   // blocking on it would time out fast callers (e.g. the storefront forward).

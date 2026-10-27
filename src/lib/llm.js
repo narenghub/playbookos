@@ -48,6 +48,33 @@ async function callClaude({ model, system, prompt, maxTokens, expectJson = false
   if (!model) return { error: 'model is required' };
   if (!apiKey) return { error: 'ANTHROPIC_API_KEY not configured' };
 
+  // ── THE KILL SWITCH — THINKING, NOT ACTING ───────────────────────────────
+  //
+  // Checked as NON-consequential, which has two consequences that are the point of the design:
+  //
+  //   1. A global stop does not halt reasoning. "Stop every external action but keep analysing what
+  //      happened" has to be expressible, and it would not be if a global stop silenced the
+  //      analysis needed to understand the incident that caused it.
+  //   2. Kill-state being unreadable does not halt reasoning either. An LLM call has no effect
+  //      outside this process; refusing it during a database blip would take out diagnosis for no
+  //      safety gain.
+  //
+  // `llm.call` remains independently stoppable, so spend or a misbehaving prompt loop can still be
+  // cut. Spend CEILINGS are P0.9 and deliberately not here.
+  try {
+    const { checkStopped, recordRefusal } = require('./autonomy');
+    const blocked = await checkStopped({ capability: 'llm.call' }, { consequential: false });
+    if (blocked) {
+      const reason = `STOPPED_BY_POLICY: ${blocked.scope_type}`
+        + `${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`;
+      console.warn(`[STOPPED_BY_POLICY] llm.call (${model}): ${reason}`);
+      recordRefusal({ stop: blocked, what: 'llm.call', detail: { model } });
+      return { error: reason, stopped: true };
+    }
+  } catch (_) {
+    // Read-only: a broken switch does not block thinking. Deliberate, and the inverse of mailer.js.
+  }
+
   const reqBody = {
     model,
     max_tokens: maxTokens || 1024,
