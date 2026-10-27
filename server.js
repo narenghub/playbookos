@@ -691,6 +691,18 @@ cron.schedule('25 * * * *', withAlerts('hourly-25-cphi-reply-sync', async () => 
 
   // EVERY event, not one. A reply that is not seen does not stop the sequence.
   const failures = [];
+  // ── WHY THIS IS COLLECTED ACROSS EVENTS AND NOT A LOOP-LOCAL ────
+  // It was `let r` INSIDE the loop, and the unreadable-thread check below read `r` after the loop
+  // closed. `r` is block-scoped, so that line threw `ReferenceError: r is not defined` on EVERY
+  // run — including every successful one. The sync itself completed first, so replies were being
+  // marked correctly and the job then died on its last statement, which withAlerts turned into an
+  // alert email 168 times a week. Alert noise that fires on success is worse than no alert: it
+  // trains the reader to ignore the channel, and a real failure arrives looking identical.
+  //
+  // The warning it was trying to print had therefore never once appeared. An unreadable thread
+  // stays ACTIVE, which is the safe side, but the next send skips that person rather than risk
+  // writing over a reply — so a persistent one silently removes somebody from the campaign.
+  const unknown = [];
   for (const event of activeCampaignEvents()) {
     let r;
     try {
@@ -705,14 +717,13 @@ cron.schedule('25 * * * *', withAlerts('hourly-25-cphi-reply-sync', async () => 
       console.log(`[CRON] reply sync ${event} — ${r.marked} newly replied of ${r.checked} active`);
       for (const x of r.replied) console.log(`[CRON]   ↩ ${x.name} — ${x.company} (${x.campaign})`);
     }
+    for (const u of r.unknown || []) unknown.push({ ...u, event });
+  }
+  if (unknown.length) {
+    console.warn(`[CRON] reply sync — ${unknown.length} thread(s) unreadable: `
+      + unknown.map((x) => `${x.company} (${x.event}: ${x.why})`).join('; '));
   }
   if (failures.length) throw new Error(`reply sync failed for ${failures.join(' · ')}`);
-  // A thread that cannot be read stays ACTIVE, which is the safe side — but if it persists, the
-  // next send will skip that person rather than risk writing over a reply, so it needs a human.
-  if (r.unknown.length) {
-    console.warn(`[CRON] CPHI reply sync — ${r.unknown.length} thread(s) unreadable: `
-      + r.unknown.map((x) => `${x.company} (${x.why})`).join('; '));
-  }
 }), CST);
 
 // ── THE LEAD-FINDING AGENT · Mondays 06:20 CST ───────────────────────────────
