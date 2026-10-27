@@ -86,8 +86,9 @@ async function showRun(runId) {
   const runArg = arg('run');
   if (runArg) { console.log(''); await showRun(runArg); console.log(''); process.exit(0); }
 
+  const canaryDate = arg('date') || new Date().toISOString().slice(0, 10);
   const intent = arg('intent') || (has('canary')
-    ? `cron:daily-8utc-github-sync:${(arg('date') || new Date().toISOString().slice(0, 10))}T08:00`
+    ? `cron:daily-8utc-github-sync:${canaryDate}T08:00`
     : null);
   if (!intent) {
     console.log('usage: --canary | --intent=<key> | --run=<uuid> | --unresolved | --stale');
@@ -97,10 +98,36 @@ async function showRun(runId) {
   console.log(`\n── intent ${intent} · read at commit ${commit}\n`);
   const attempts = await L.attemptsOf(intent);
   if (!attempts.length) {
-    console.log('  NO RUN RECORDED for this intent.');
+    console.log('  NO RUN RECORDED for this intent.\n');
     if (has('canary')) {
-      console.log('  For the canary this means either the occurrence has not happened yet (08:00 UTC),');
-      console.log('  or it did not run. Check the date with --date=YYYY-MM-DD before concluding.');
+      // Say which of the three possibilities this is, rather than leaving a missing row looking
+      // like a failure. The canary fails closed, so "did not record" and "has not happened yet"
+      // have to be distinguishable or a normal morning reads as an incident.
+      const slotAt = new Date(`${canaryDate}T08:00:00Z`);
+      const now = new Date();
+      const anyRuns = await query(`SELECT COUNT(*)::int n FROM agent_runs`);
+      const firstEver = await query(
+        `SELECT MIN(created_at) AS t FROM agent_runs WHERE workflow = 'daily-8utc-github-sync'`);
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 8, 0, 0));
+      if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+
+      if (slotAt > now) {
+        console.log(`  This slot is in the FUTURE (${iso(slotAt)}). Nothing is wrong — it has not fired yet.`);
+      } else if (firstEver.rows[0].t && new Date(firstEver.rows[0].t) > slotAt) {
+        console.log(`  This slot (${iso(slotAt)}) PREDATES the first instrumented run`);
+        console.log(`  (${iso(firstEver.rows[0].t)}), so no record is expected for it.`);
+        console.log(`  The next instrumented occurrence is ${iso(next)}.`);
+      } else if (anyRuns.rows[0].n === 0) {
+        console.log(`  The ledger is empty, so the canary has never recorded anything. If the`);
+        console.log(`  instrumented build was deployed after ${iso(slotAt)}, that is expected.`);
+        console.log(`  The next occurrence is ${iso(next)}.`);
+      } else {
+        console.log(`  The ledger holds other runs but nothing for this slot, and the slot has passed.`);
+        console.log(`  THIS IS WORTH INVESTIGATING: the canary is fail-closed, so a missing row can`);
+        console.log(`  mean the run identity could not be created and the sync was skipped.`);
+        console.log(`  Check the Railway log for [LEDGER FAIL-CLOSED] or [LEDGER DUPLICATE].`);
+      }
+      console.log('');
       process.exit(1);
     }
     process.exit(1);
