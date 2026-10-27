@@ -1366,16 +1366,20 @@ router.post('/customers/engagement-event', async (req, res) => {
     if (!contact_email) return res.status(400).json({ error: 'contact_email is required' });
     const valid = ['sent', 'opened', 'clicked', 'replied', 'bounced'];
     if (!valid.includes(event_type)) return res.status(400).json({ error: `event_type must be one of ${valid.join(', ')}` });
-    // Kill switch, per the approved design. NOTE for the record: this handler only RECORDS an
-    // inbound Apollo event, so halting it costs engagement data without stopping any outbound
-    // action — the refusal therefore carries the full payload into autonomy_events.detail so a stop
-    // is recoverable rather than lossy, and the trade is listed under Remaining Risk.
-    const halt = await autonomyHalt(
-      { workflow: 'engagement-event', company: 'abiozen' },
-      'POST /api/customers/engagement-event',
-      { payload: req.body || {} },
-    );
-    if (halt) return res.status(503).json(halt);
+    // ── DELIBERATELY NOT KILL-SWITCHED ────────────────────────────────────────
+    //
+    // Governing rule: STOP AUTONOMOUS ACTION, PRESERVE INBOUND EVIDENCE.
+    //
+    // This handler only RECORDS an inbound Apollo engagement event — an open, a click, a reply.
+    // It performs no outbound action of its own. It was gated in the first P0.2 implementation and
+    // the gate was removed on 27 Oct by CEO decision, because halting it lost engagement evidence
+    // while stopping nothing: Apollo does not retry, so a stop window became a permanent hole in
+    // the record of what buyers did.
+    //
+    // Anything DOWNSTREAM that acts on this evidence is still protected where it executes —
+    // sendEmail, sendWhatsApp, callClaude, withAlerts, gated(). Recording a fact is not acting on
+    // it, and a kill switch that erases the evidence of what happened during an incident is working
+    // against the person who pulled it.
     await query(
       `INSERT INTO buyer_engagement (id, contact_email, event_type, event_at, sequence_id, molecule_interest)
        VALUES ($1, $2, $3, $4, $5, $6)`,

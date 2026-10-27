@@ -426,3 +426,53 @@ test('D13 — callClaude is NOT stopped by a global stop, but IS by an llm.call 
     assert.match(r.error, /STOPPED_BY_POLICY/);
   });
 });
+
+// ── WHICH ENDPOINTS ARE GATED, AND WHICH MUST NOT BE ─────────────────────────
+//
+// Governing rule: STOP AUTONOMOUS ACTION, PRESERVE INBOUND EVIDENCE.
+//
+// Three unauthenticated endpoints cause autonomous execution and are gated. Three record inbound
+// facts and are deliberately NOT gated, because halting them loses an order, a cross-product event
+// or a Stripe payment confirmation while stopping no outbound action — Apollo and the storefront do
+// not retry indefinitely, so a stop window becomes a permanent hole in the record.
+//
+// WHAT THIS TEST PROVES AND DOES NOT PROVE: it is a STRUCTURAL check over the handler bodies, not a
+// behavioural one. It cannot prove the gate works — that is D5–D13 above and the Postgres check.
+// What it catches is the two edits that would silently change policy: someone removing a gate from
+// an endpoint that executes, or re-adding one to an endpoint that only records.
+
+test('exactly the executing endpoints are gated; the recording endpoints are not', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'api', 'routes.js'), 'utf8');
+
+  // Slice each handler from its router.post(...) to the start of the next route declaration.
+  const handlerFor = (routePath) => {
+    const i = src.indexOf(`router.post('${routePath}'`);
+    assert.notStrictEqual(i, -1, `route ${routePath} not found — has it been renamed?`);
+    const next = src.slice(i + 10).search(/\nrouter\.(get|post|put|patch|delete)\(/);
+    return src.slice(i, next === -1 ? undefined : i + 10 + next);
+  };
+
+  // Executes: runs milestone triggers / a Claude call and an AI email to an external buyer.
+  const MUST_BE_GATED = ['/triggers/check', '/inquiry/receive'];
+  // Records only. engagement-event was gated in the first P0.2 implementation; the gate was removed
+  // on 27 Oct by CEO decision under "stop autonomous action, preserve inbound evidence".
+  const MUST_NOT_BE_GATED = ['/customers/engagement-event', '/orders/webhook', '/inquiry/stripe-webhook'];
+
+  for (const p of MUST_BE_GATED) {
+    assert.match(handlerFor(p), /autonomyHalt\(/,
+      `${p} performs autonomous execution and MUST consult the kill switch`);
+  }
+  for (const p of MUST_NOT_BE_GATED) {
+    assert.doesNotMatch(handlerFor(p), /autonomyHalt\(/,
+      `${p} only records inbound evidence — gating it loses data and stops no outbound action`);
+  }
+});
+
+test('/api/events/ingest is not gated either (inbound cross-product events)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'api', 'routes.js'), 'utf8');
+  const i = src.indexOf("router.post('/events/ingest'");
+  assert.notStrictEqual(i, -1);
+  const body = src.slice(i, i + 700);
+  assert.doesNotMatch(body, /autonomyHalt\(/,
+    'events/ingest records inbound events; halting it loses them with no safety gain');
+});
