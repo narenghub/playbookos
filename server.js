@@ -715,6 +715,54 @@ cron.schedule('25 * * * *', withAlerts('hourly-25-cphi-reply-sync', async () => 
   }
 }), CST);
 
+// ── THE LEAD-FINDING AGENT · Mondays 06:20 CST ───────────────────────────────
+//
+// The outreach agent works the contacts that exist. Something has to find new ones, or the
+// campaign empties itself in three weeks and the daily report quietly reports "0 due" forever —
+// which looks exactly like a healthy, finished run.
+//
+// This runs scripts/ingest-research-labs.js, THE SAME SCRIPT a human runs, as a child process
+// rather than as an imported function. That is deliberate. Extracting 424 lines into a library
+// would create a second path through the same logic, and every defect this campaign has produced
+// came from two copies of one rule drifting apart. Spawning the script means there is exactly one
+// implementation and the cron exercises it.
+//
+// Monday before the week's sends, so a grant awarded last week is in the table by Tuesday.
+//
+// NOT GATED BY A FLAG. It only reads public registries and fills our own tables; nothing it
+// writes can send an email, because that needs OUTREACH_ENABLED. One more flag is one more thing
+// to set and forget, and the cost of forgetting this one would be a campaign that silently runs
+// dry. It is idempotent — labs that already have a contact are skipped — so a repeat run is free.
+cron.schedule('20 6 * * 1', withAlerts('weekly-mon-620cst-research-ingest', async () => {
+  const { execFile } = require('child_process');
+  const path = require('path');
+  const script = path.join(__dirname, 'scripts', 'ingest-research-labs.js');
+  const limit = process.env.RESEARCH_INGEST_LIMIT || '200';
+
+  const out = await new Promise((resolve, reject) => {
+    execFile('node', [script, `--limit=${limit}`, '--execute'],
+      // Generous: it enriches each lab over two external APIs and prints a line per lab, so a
+      // hundred-plus network round trips is normal. maxBuffer because that output is long.
+      { timeout: 25 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error(`${err.message}\n${String(stderr || stdout).slice(-2000)}`));
+        return resolve(String(stdout || ''));
+      });
+  });
+
+  // The last lines carry the WROTE and TOTALS summary; the per-lab lines are noise in a log.
+  const tail = out.trimEnd().split('\n').slice(-6).join('\n');
+  console.log('[CRON] research ingest done\n' + tail);
+
+  // A run that found nothing new is worth knowing about: it means either the registry has nothing
+  // fresh for this topic, or something upstream changed shape. Both need a human eventually, and
+  // neither announces itself.
+  if (/\+0 lab\(s\), \+0 contact\(s\)/.test(out)) {
+    console.warn('[CRON] research ingest added nothing new — worth checking the topic filter '
+      + 'if this repeats for a third week');
+  }
+}), CST);
+
 // ── THE OUTREACH AGENT · weekdays 09:10 CST ──────────────────────────────────
 //
 // Finds who is due, checks nobody has replied, sends, files, and emails Naren what it did.
