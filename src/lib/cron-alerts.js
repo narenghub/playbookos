@@ -43,7 +43,27 @@ async function sendCronAlert(cronName, err) {
     <p style="margin:16px 0 0 0;font-size:11px;color:#888">Check Railway logs for full context.</p>
   </div>
 </div>`;
-  await sendEmail({ to, subject, html });
+  // ── THE ALERT PATH MUST NOT BE SILENT, AND IT WAS ────
+  //
+  // This read `await sendEmail({...})` with the result dropped. sendEmail returns FALSE on failure
+  // and deliberately does not throw (mailer.js) — so the `catch (alertErr)` in withAlerts never
+  // fired for the ordinary case, and a refused alert left a cron failure as nothing but a
+  // console.error line in Railway.
+  //
+  // That is the exact shape mailer.js was written about after 1,113 emails were lost over eight
+  // weeks: "every layer did the right local thing (return false, log the row, do not crash the
+  // caller) and the aggregate was silence." Here it is worse than anywhere else, because this is
+  // the path whose entire job is to break silence. A monitoring system that can fail quietly is a
+  // monitoring system that reports healthy.
+  //
+  // Thrown, not returned, so withAlerts' own catch logs [ALERT FAIL] with the reason. There is
+  // nowhere further to escalate — if email is down, the log is the last channel there is — but a
+  // named failure in the log can be found, and a dropped boolean cannot.
+  const ok = await sendEmail({ to, subject, html });
+  if (ok === false) {
+    throw new Error(`alert email for "${cronName}" was refused by the mail provider — `
+      + `the cron failure itself is above this line and reached nobody`);
+  }
 }
 
 function escapeHtml(s) {
