@@ -48,6 +48,34 @@ const SNAPSHOT = arg('snapshot', '');
 const COMPARE = arg('compare', '');
 const HEALTH = has('health');
 
+// ── REFUSE WHAT YOU DO NOT UNDERSTAND ────────────────────────────────────────
+// On 27 Oct this script's predecessor was asked for --snapshot= twice. It did not have that flag,
+// so argv matched nothing, it fell through to its default mode, and printed a confident fifty-line
+// report answering a question nobody asked — while writing no snapshot file. The deploy carrying
+// this version had not landed, and nothing in the output said so.
+//
+// Two guards, because the flag guard alone would not have caught it: the OLD binary is the one that
+// ran, and no edit here can fix a file that is not deployed. So every mode also announces the commit
+// it is running from. A stale deploy is then visible in the first line of output rather than inferred
+// afterwards from /health.
+const KNOWN = ['snapshot', 'compare', 'health'];
+const unknown = argv.filter((a) => a.startsWith('--')
+  && !KNOWN.includes(a.replace(/^--/, '').split('=')[0]));
+if (unknown.length) {
+  console.error(`verify-rotation: unrecognised argument(s): ${unknown.join(' ')}`);
+  console.error(`  known flags: ${KNOWN.map((k) => `--${k}`).join('  ')}`);
+  console.error('  If you expected one of these to work, the deployed copy of this script is older');
+  console.error('  than the one you are reading. Check /health for the commit, then redeploy.');
+  process.exit(2);
+}
+
+const COMMIT = String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || 'unknown';
+const modeCount = [SNAPSHOT, COMPARE, HEALTH].filter(Boolean).length;
+if (modeCount > 1) {
+  console.error('verify-rotation: pick one of --snapshot= / --compare= / --health, not several.');
+  process.exit(2);
+}
+
 const say = (s = '') => console.log(s);
 const pad = (s, n) => String(s == null ? '' : s).padEnd(n);
 
@@ -212,6 +240,10 @@ async function health() {
 }
 
 async function main() {
+  // First line of every run. If this is not the commit you just pushed, nothing below is the code
+  // you think you are running, and the rest of the output is about a different program.
+  say(`\n   [verify-rotation · running from commit ${COMMIT}]`);
+
   if (SNAPSHOT) return snapshot();
   if (COMPARE) return compare();
   if (HEALTH) return health();
