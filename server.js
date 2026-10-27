@@ -864,6 +864,34 @@ cron.schedule('10 9 * * 1-5', withAlerts('weekday-910cst-outreach-agent', async 
     + `${until && !override ? ` · CPHI_FOLLOWUP_IGNORE_WINDOW_UNTIL="${until}" is set but NOT active` : ''}`);
 })();
 
+// ── THE SAME, FOR THE OUTREACH AGENT ─────────────────────────────────────────
+//
+// Setting OUTREACH_ENABLED in Railway and redeploying LOOKS identical, from outside, to setting it
+// and not redeploying — and the second one sends nothing, for ever, with a healthy-looking cron
+// that reports "0 sent". That is the 12 Oct failure above, and it cost a whole send.
+//
+// There is no way to ask a running process what environment it captured, so it states it here,
+// once, in the deploy log next to the commit. This line is the only place the answer exists.
+(() => {
+  const on = String(process.env.OUTREACH_ENABLED || '').toLowerCase() === 'true';
+  const max = parseInt(process.env.OUTREACH_MAX || '8', 10) || 8;
+  const from = process.env.OUTREACH_FROM || 'sales@abiozen.com';
+  const replyTo = process.env.OUTREACH_REPLY_TO || 'naren@abiozen.com';
+  const reportTo = process.env.OUTREACH_REPORT_TO || 'naren@abiozen.com';
+  console.log(`[BOOT] outreach agent: ${on ? 'ENABLED' : 'DISABLED — nothing will send'}`
+    + ` · weekdays 09:10 CST · max ${max}/run`
+    + ` · from ${from} · replies to ${replyTo} · report to ${reportTo}`);
+  if (!on) {
+    console.log('[BOOT]   OUTREACH_ENABLED is not "true" IN THIS PROCESS. If you just set it in '
+      + 'Railway, the variable only reaches a process started AFTER the change — redeploy, and '
+      + 'this line will say ENABLED.');
+  }
+  // The research ingest is not flag-gated, so say when it runs rather than leaving somebody to
+  // wonder whether it is wired at all.
+  console.log(`[BOOT] research ingest: Mondays 06:20 CST · limit `
+    + `${process.env.RESEARCH_INGEST_LIMIT || '200'} awards · always on (it sends nothing)`);
+})();
+
 app.listen(PORT, () => {
   console.log(`
 ╔══════════════════════════════════════════════════╗
