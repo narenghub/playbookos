@@ -119,6 +119,13 @@ step "kill switch stops, propagates and audits" node scripts/check-autonomy-stop
 # statements. This races two independent pools for the same claim (and twenty), which is the only
 # way to show it.
 step "a supplier RFQ cannot be sent twice" node scripts/check-supplier-rfq-claim-db.js
+# Run identity: at most one ACTIVE execution per intent, unlimited terminal attempts, immutable
+# history. The arbiter is a partial unique index over the active states, not application logic —
+# and each of the two unique indexes is exercised with the OTHER REMOVED, because the first version
+# of these checks passed with either one weakened: the retry trigger's attempt = predecessor + 1
+# rule makes "two active rows with different attempt numbers" unreachable, so neither index was
+# independently necessary for any assertion and the arbiter claim was untested.
+step "run identity invariants hold in Postgres" node scripts/check-run-identity-db.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
