@@ -57,7 +57,20 @@ const autonomy = require('../src/lib/autonomy');
     query = db.query;
     withTransaction = db.withTransaction;
   }
-  const deps = { query, withTransaction };
+  // listen is suppressed for the ENTIRE run, deliberately.
+  //
+  // The first production run reported 208ms and labelled it "no listener". Both halves were true
+  // separately and the combination was false: the baseline call had started a real LISTEN, so the
+  // NOTIFY fired by the raw INSERT invalidated the cache early and 208ms measured the accelerated
+  // path while claiming to measure the floor. A number that good is exactly the kind nobody
+  // questions, which is what made it worth fixing.
+  //
+  // With the listener suppressed throughout, the figure below is the guaranteed worst case: a
+  // process holding a freshly cached "allowed" verdict, waiting out the TTL with nothing to
+  // invalidate it. That is the number the ≤2s target has to be met on. NOTIFY, when it is alive,
+  // does better — but the switch is not allowed to DEPEND on that, so the demonstration does not
+  // measure it.
+  const deps = { query, withTransaction, listen: () => {} };
   const commit = String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || 'local';
 
   console.log(`\n── kill switch · live demonstration · commit ${commit}\n`);
@@ -105,12 +118,12 @@ const autonomy = require('../src/lib/autonomy');
     let observedMs = null;
     while (Date.now() - t0 < 5000) {
       const v = await autonomy.checkStopped({ capability: 'email.send' },
-        { consequential: true, deps: { ...deps, listen: () => {} } });
+        { consequential: true, deps });
       if (v) { observedMs = Date.now() - t0; break; }
       await new Promise((s) => setTimeout(s, 25));
     }
     if (observedMs === null) bad('the stop was never observed within 5s');
-    else if (observedMs <= 2000) ok(`observed in ${observedMs}ms — worst case: a cached 'allowed' verdict, no listener (target ≤2000ms)`);
+    else if (observedMs <= 2000) ok(`observed in ${observedMs}ms — the TTL FLOOR: cached 'allowed' verdict, NOTIFY suppressed (target ≤2000ms)`);
     else bad(`propagation took ${observedMs}ms, above the 2000ms target`);
 
     // 3b. The break-glass write was audited by the TRIGGER, with no application involvement.
@@ -170,7 +183,7 @@ const autonomy = require('../src/lib/autonomy');
 
     autonomy.resetForTests();
     const after = await autonomy.checkStopped({ capability: 'email.send' },
-      { consequential: true, deps: { ...deps, listen: () => {} } });
+      { consequential: true, deps });
     if (after === null) ok('consequential actions are permitted again — with no redeploy at any point');
     else bad('still stopped after the resume', JSON.stringify(after));
 
