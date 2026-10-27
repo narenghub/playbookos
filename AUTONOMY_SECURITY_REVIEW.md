@@ -79,6 +79,33 @@ One $2/day cap exists, on one subsystem. The other 40 crons can spend without bo
 
 ---
 
+---
+
+## Open follow-up: repository history remediation · OPEN · owner: CEO + engineering
+
+**Not a Day 0 item. Rotation and revocation come first, and are sufficient to contain the active risk.**
+
+Once rotation is verified, the leaked values remain in **git history** and in any clone taken before today:
+
+| Where | What |
+|---|---|
+| `scripts/init-db.js` history | the admin password literal, in every commit before `98a0765` |
+| `scripts/setup-db.js` history | a weak default admin password |
+| the handoff document | GitHub PAT, Postgres DSN with password, admin password, three webhook secrets — **outside this repository and not fixable from it** |
+
+**Why this is a follow-up rather than an emergency.** A rotated credential in history is a dead string. The urgency belongs to rotation, not to rewriting. And history rewriting is itself a risk: it invalidates every outstanding clone, breaks commit SHAs that `/health` and `wait-for-deploy.sh` compare against, and on a repository with autodeploy it can trigger a deploy of a rewritten tree.
+
+**Decision needed:** whether to rewrite at all.
+
+- **Do nothing** — defensible once rotation is verified. The strings are worthless. Cost: a future reader finds a real-looking password in history and has to establish it is dead.
+- **Rewrite with `git filter-repo`** — removes the strings. Cost: force-push, every clone re-cloned, autodeploy paused during the operation, and a window where the deployed commit is not in the new history.
+
+**Recommendation: do nothing to history, and fix the source instead.** The handoff document is the larger exposure and the one that keeps being pasted into new sessions. Replace its credential section with pointers to Railway variable names — that removes the live copy people actually read from, which history does not.
+
+**Precondition if rewriting is ever chosen:** pause autodeploy, confirm no in-flight deploy, and re-run `scripts/smoke-deployed.sh` afterwards, because `wait-for-deploy.sh` compares against a commit SHA that will no longer exist.
+
+---
+
 ## Recommended controls, in order
 
 1. **Rotate everything in S1. Today.** Nothing else on this list matters as much, and it costs an afternoon.

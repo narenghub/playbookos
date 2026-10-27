@@ -1,167 +1,239 @@
 #!/usr/bin/env node
-// ── PROVE THE OLD CREDENTIALS ARE DEAD ───────────────────────────────────────
+// ── PROVE THE CREDENTIALS CHANGED, WITHOUT HANDLING EITHER VALUE ─────────────
 //
-//   railway ssh 'node scripts/verify-rotation.js'            # what is set, and its fingerprint
-//   node scripts/verify-rotation.js --old=/tmp/old-creds.json
+//   BEFORE rotating, on the server:
+//     railway ssh 'node scripts/verify-rotation.js --snapshot=/tmp/fp.json'
 //
-// Exit 0 = every credential checked has changed. Exit 1 = at least one is still the leaked value.
+//   AFTER rotating and redeploying:
+//     railway ssh 'node scripts/verify-rotation.js --compare=/tmp/fp.json'
+//     railway ssh 'node scripts/verify-rotation.js --health'
 //
-// ── WHY A SCRIPT AND NOT A CHECKLIST ─────────────────────────────────────────
+// Exit 0 = every credential expected to rotate did. Exit 1 = at least one did not.
 //
-// "Rotate the credentials" has been agreed several times and the old values are still live. The
-// gap between intending to rotate and having rotated is invisible from the outside, and a
-// documentation edit looks identical to a real rotation — the CEO brief says exactly that: "do
-// not merely replace values in documentation."
+// ── WHY THE SNAPSHOT, AND NOT A FILE OF OLD SECRETS ──────────────────────────
 //
-// So this measures it. It compares what the running process actually holds against the values
-// that leaked, and reports PASS or FAIL per credential.
+// The first version of this script took the leaked values in a JSON file and printed a
+// fingerprint column. Two problems, and the second was mine.
 //
-// ── HOW IT AVOIDS EXPOSING ANYTHING ──────────────────────────────────────────
+// It required somebody to assemble the live leaked secrets into a file on disk — the exact
+// material we are trying to retire — in order to prove they were retired.
 //
-// Nothing secret is printed, ever. For each credential it prints a NAME, whether it is SET, and a
-// 12-hex SHA-256 fingerprint — enough to tell two values apart, not enough to recover one.
+// And it PRINTED fingerprints. A 12-hex prefix of SHA-256 is not a secret, but it is an oracle:
+// given a candidate, it confirms a guess offline. For a human-chosen admin password against a
+// wordlist, that is a real weakening, and the output went into a chat transcript.
 //
-// The old values are never passed on the command line and never put in an environment variable,
-// because both end up in shell history, in `ps`, and in Railway's log of the command. They are
-// read from a JSON file you create, which the script tells you to delete when it finishes.
+// So this never takes a secret as input and never emits anything derived from one. It records
+// fingerprints into a file the server writes and reads itself, and the only thing printed is
+// CHANGED or unchanged per name. The fingerprints exist solely to be compared with each other.
 //
-// The file shape (every key optional — only what you supply is checked):
+// ── WHAT A CHANGED FINGERPRINT PROVES, AND WHAT IT DOES NOT ──────────────────
 //
-//   {
-//     "DATABASE_URL":              "<the old one>",
-//     "ADMIN_PASSWORD":            "<the old one>",
-//     "TRIGGERS_SECRET":           "<the old one>",
-//     "PLAYBOOKOS_WEBHOOK_SECRET": "<the old one>",
-//     "ENGAGEMENT_SECRET":         "<the old one>",
-//     "ANTHROPIC_API_KEY":         "<the old one>",
-//     "RESEND_API_KEY":            "<the old one>"
-//   }
-//
-// The GitHub PAT is not in this list because the server does not hold it. Verify that one
-// directly — the runbook at the bottom of this file says how, and the check is a single HTTP
-// status with no secret in the output.
+// Proves: this process now holds a different value than it held before.
+// Does not prove: the old value was revoked at the provider. A GitHub token replaced here and
+// left active at GitHub is still a live credential in whatever document carried it. Revocation
+// is checked at the source; --health prints how.
 'use strict';
 
 const fs = require('fs');
 const crypto = require('crypto');
 
 const argv = process.argv.slice(2);
+const has = (n) => argv.includes(`--${n}`);
 const arg = (n, d) => {
   const h = argv.find((a) => a.startsWith(`--${n}=`));
   return h ? h.split('=').slice(1).join('=') : d;
 };
-const OLD_FILE = arg('old', '');
+
+const SNAPSHOT = arg('snapshot', '');
+const COMPARE = arg('compare', '');
+const HEALTH = has('health');
 
 const say = (s = '') => console.log(s);
 const pad = (s, n) => String(s == null ? '' : s).padEnd(n);
 
-/** A fingerprint, not a hash anyone can attack back to the value in a useful way. */
-const fp = (v) => (v ? crypto.createHash('sha256').update(String(v)).digest('hex').slice(0, 12) : '—');
+// Salted so the stored file is not a rainbow-table oracle on its own. The salt is random per
+// snapshot and lives in the same file, which is fine: its only job is to make the digests
+// meaningless to anyone who does not also hold the file, and the file is deleted after use.
+const fp = (v, salt) => crypto.createHash('sha256').update(`${salt}\u0000${String(v)}`).digest('hex');
 
-// The secrets this process is expected to hold. Names only — this list is safe to commit.
-const EXPECTED = [
-  ['DATABASE_URL', true],
-  ['JWT_SECRET', true],
-  ['ANTHROPIC_API_KEY', true],
-  ['RESEND_API_KEY', true],
-  ['TRIGGERS_SECRET', false],
-  ['PLAYBOOKOS_WEBHOOK_SECRET', false],
-  ['ENGAGEMENT_SECRET', false],
-  ['STRIPE_SECRET_KEY', false],
-  ['STRIPE_WEBHOOK_SECRET', false],
-  ['GOOGLE_CLIENT_SECRET', false],
-  ['GOOGLE_REFRESH_TOKEN', false],
-  ['GOOGLE_SERVICE_ACCOUNT_JSON', false],
-  ['ALGOLIA_API_KEY', false],
-  ['APOLLO_API_KEY', false],
-  ['LINKEDIN_ACCESS_TOKEN', false],
-  ['TWILIO_AUTH_TOKEN', false],
-  ['OPENAI_API_KEY', false],
-  ['ADMIN_PASSWORD', false],
+// Names only. Safe to commit, and the point of the list is that it is reviewable.
+const CREDENTIALS = [
+  // [name, requiredInProduction, expectedToRotateInThisRound]
+  ['DATABASE_URL', true, true],
+  ['ADMIN_PASSWORD', false, true],
+  ['TRIGGERS_SECRET', false, true],
+  ['PLAYBOOKOS_WEBHOOK_SECRET', false, true],
+  ['ENGAGEMENT_SECRET', false, true],
+  ['JWT_SECRET', true, false],
+  ['ANTHROPIC_API_KEY', true, false],
+  ['RESEND_API_KEY', true, false],
+  ['STRIPE_SECRET_KEY', false, false],
+  ['STRIPE_WEBHOOK_SECRET', false, false],
+  ['GOOGLE_CLIENT_SECRET', false, false],
+  ['GOOGLE_REFRESH_TOKEN', false, false],
+  ['GOOGLE_SERVICE_ACCOUNT_JSON', false, false],
+  ['ALGOLIA_API_KEY', false, false],
+  ['APOLLO_API_KEY', false, false],
+  ['LINKEDIN_ACCESS_TOKEN', false, false],
+  ['TWILIO_AUTH_TOKEN', false, false],
+  ['OPENAI_API_KEY', false, false],
 ];
 
-let fail = 0;
-let checked = 0;
-
-function main() {
-  say('\n── credential rotation check');
-  say('   Fingerprints only. No secret value is printed by this script, at any verbosity.\n');
-
-  let old = null;
-  if (OLD_FILE) {
-    try {
-      old = JSON.parse(fs.readFileSync(OLD_FILE, 'utf8'));
-    } catch (e) {
-      say(`   ✗ could not read ${OLD_FILE}: ${e.message}`);
-      process.exit(2);
-    }
+function snapshot() {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const out = { takenAt: new Date().toISOString(), salt, fingerprints: {} };
+  let set = 0;
+  for (const [name] of CREDENTIALS) {
+    const v = process.env[name];
+    if (v && String(v).trim()) { out.fingerprints[name] = fp(v, salt); set += 1; }
   }
-
-  say(`   ${pad('credential', 32)}${pad('set', 6)}${pad('fingerprint', 15)}verdict`);
-  say(`   ${'─'.repeat(78)}`);
-
-  for (const [name, required] of EXPECTED) {
-    const now = process.env[name];
-    const isSet = !!(now && String(now).trim());
-    let verdict = '';
-
-    if (!isSet) {
-      verdict = required ? '⚠ REQUIRED AND UNSET' : 'not set';
-      if (required) fail += 1;
-    } else if (old && Object.prototype.hasOwnProperty.call(old, name)) {
-      checked += 1;
-      if (fp(now) === fp(old[name])) {
-        verdict = '✗ STILL THE LEAKED VALUE';
-        fail += 1;
-      } else {
-        verdict = '✓ rotated';
-      }
-    } else {
-      verdict = old ? 'no old value supplied' : '(supply --old= to compare)';
-    }
-
-    say(`   ${pad(name, 32)}${pad(isSet ? 'yes' : 'no', 6)}${pad(fp(now), 15)}${verdict}`);
-  }
-
-  // ── THE ONE THING A FINGERPRINT CANNOT TELL YOU ────
-  // A rotated value proves the SERVER changed. It does not prove the OLD one was revoked at the
-  // provider — a GitHub token that was replaced here but never deleted there is still a live
-  // credential in a document somebody has.
-  say('\n   ══ WHAT THIS DOES AND DOES NOT PROVE ═══════════════════════════════');
-  say('   PROVES:        this process now holds a different value than the one that leaked.');
-  say('   DOES NOT PROVE: the old value was revoked at the provider. A token replaced here and');
-  say('                   left active at GitHub is still a live credential in a shared document.');
-  say('                   Revoke at the source, then confirm with the checks below.\n');
-
-  if (OLD_FILE) {
-    say(`   ⚠ DELETE ${OLD_FILE} NOW — it contains the leaked values in cleartext.`);
-    say(`     rm -P ${OLD_FILE}      (or: shred -u ${OLD_FILE})\n`);
-  }
-
-  say('   ══ VERIFY AT THE SOURCE — run these yourself ═══════════════════════');
-  say('   GitHub PAT (expect 401):');
-  say('      curl -s -o /dev/null -w \'%{http_code}\\n\' -H "Authorization: token $OLD_PAT" \\');
-  say('        https://api.github.com/user');
-  say('      …then: unset OLD_PAT; history -d $((HISTCMD-2))');
-  say('');
-  say('   Admin password (expect anything but 200):');
-  say('      curl -s -o /dev/null -w \'%{http_code}\\n\' -X POST \\');
-  say('        https://app.playnexa.ai/api/auth/login -H "Content-Type: application/json" \\');
-  say('        -d \'{"email":"naren@abiozen.com","password":"<THE OLD ONE>"}\'');
-  say('');
-  say('   Postgres: rotating the password in Railway invalidates the old DSN by construction.');
-  say('   Webhook secrets: a changed fingerprint above is the evidence; do not fire the endpoints');
-  say('   to test them — /api/triggers/check EXECUTES the triggers when the secret is accepted.\n');
-
-  if (fail) {
-    say(`✗ FAIL — ${fail} credential(s) are unrotated or missing. Rotation is NOT complete.\n`);
-    process.exit(1);
-  }
-  if (!OLD_FILE) {
-    say('ℹ Inventory only. Re-run with --old=<file> to prove the values changed.\n');
-    process.exit(0);
-  }
-  say(`✓ PASS — ${checked} credential(s) compared, all differ from the leaked values.\n`);
+  fs.writeFileSync(SNAPSHOT, JSON.stringify(out), { mode: 0o600 });
+  say(`\n   ✓ recorded ${set} credential fingerprint(s) → ${SNAPSHOT}`);
+  say('     No secret and no fingerprint is printed. The file is readable only by this user.');
+  say('\n   Now rotate, redeploy, then:');
+  say(`     railway ssh 'node scripts/verify-rotation.js --compare=${SNAPSHOT}'`);
+  say(`\n   Delete the snapshot when you are done:  rm -P ${SNAPSHOT}\n`);
 }
 
-main();
+function compare() {
+  let before;
+  try { before = JSON.parse(fs.readFileSync(COMPARE, 'utf8')); } catch (e) {
+    say(`   ✗ could not read ${COMPARE}: ${e.message}`);
+    say('     Take a snapshot BEFORE rotating — there is nothing to compare against otherwise.');
+    process.exit(2);
+  }
+  if (!before.salt || !before.fingerprints) {
+    say(`   ✗ ${COMPARE} is not a snapshot from this script.`);
+    process.exit(2);
+  }
+
+  say(`\n── rotation check · against a snapshot taken ${before.takenAt}\n`);
+  say(`   ${pad('credential', 32)}${pad('expected', 12)}result`);
+  say(`   ${'─'.repeat(70)}`);
+
+  let fail = 0;
+  for (const [name, required, shouldRotate] of CREDENTIALS) {
+    const now = process.env[name];
+    const was = before.fingerprints[name];
+    let result;
+
+    if (!now || !String(now).trim()) {
+      result = required ? '✗ REQUIRED AND NOW UNSET' : 'not set';
+      if (required) fail += 1;
+    } else if (!was) {
+      result = 'newly set (not in snapshot)';
+    } else if (fp(now, before.salt) === was) {
+      result = shouldRotate ? '✗ UNCHANGED — not rotated' : 'unchanged';
+      if (shouldRotate) fail += 1;
+    } else {
+      result = shouldRotate ? '✓ CHANGED' : '✓ changed (not required, fine)';
+    }
+    say(`   ${pad(name, 32)}${pad(shouldRotate ? 'rotate' : '—', 12)}${result}`);
+  }
+
+  say('\n   Nothing above is derived from a secret value. "CHANGED" means the digest differs');
+  say('   from the one in the snapshot; neither digest is printed.\n');
+
+  if (fail) {
+    say(`✗ FAIL — ${fail} credential(s) did not rotate or are missing.`);
+    say('  If you rotated in Railway but this still says UNCHANGED: the running process captured');
+    say('  its environment at launch. Redeploy, then run this again.\n');
+    process.exit(1);
+  }
+  say('✓ PASS — every credential marked for rotation now holds a different value.');
+  say(`  Delete the snapshot: rm -P ${COMPARE}\n`);
+}
+
+async function health() {
+  const base = process.env.APP_URL || 'https://app.playnexa.ai';
+  say('\n── post-rotation health\n');
+  let fail = 0;
+  const ok = (m) => say(`  ok    ${m}`);
+  const bad = (m) => { fail += 1; say(`  FAIL  ${m}`); };
+
+  // 1. The database. A rotated DSN that does not connect is the failure mode that matters most,
+  //    and it shows up here rather than at 09:10 tomorrow.
+  try {
+    const { query } = require('../src/lib/db');
+    const r = await query('SELECT 1 AS n');
+    if (r.rows[0].n === 1) ok('database connects and answers with the rotated credential');
+    else bad('database returned something unexpected');
+  } catch (e) { bad(`database did not connect: ${e.message}`); }
+
+  // 2. The application, not just the server.
+  try {
+    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(15000) });
+    const j = await res.json();
+    if (res.status === 200 && j.db === 'connected') ok(`/health 200, db connected, commit ${String(j.commit).slice(0, 7)}`);
+    else bad(`/health returned ${res.status} db=${j && j.db}`);
+  } catch (e) { bad(`/health unreachable: ${e.message}`); }
+
+  try {
+    const res = await fetch(`${base}/api/auth/me`, { signal: AbortSignal.timeout(15000) });
+    if (res.status === 401) ok('/api/auth/me refuses anonymous access');
+    else bad(`/api/auth/me returned ${res.status}, expected 401`);
+  } catch (e) { bad(`/api/auth/me unreachable: ${e.message}`); }
+
+  // 3. Webhook authentication is still ENFORCED.
+  //    Deliberately tested with a WRONG secret, never a right one: /api/triggers/check EXECUTES
+  //    the milestone triggers when the secret is accepted, so a "does the new secret work" test
+  //    would fire real side effects to prove a configuration detail. A rejection proves the guard
+  //    is active; the --compare run above proves the value changed. Together that is sufficient.
+  for (const [path, label] of [['/api/triggers/check', 'TRIGGERS_SECRET'],
+    ['/api/customers/engagement-event', 'ENGAGEMENT_SECRET']]) {
+    try {
+      const res = await fetch(`${base}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Webhook-Secret': 'deliberately-wrong' },
+        body: JSON.stringify({ probe: true }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (res.status === 401 || res.status === 403) ok(`${label}: a wrong secret is refused (${res.status})`);
+      else if (res.status === 503) bad(`${label}: endpoint reports the secret is UNSET (503)`);
+      else bad(`${label}: a wrong secret returned ${res.status} — expected 401/403`);
+    } catch (e) { bad(`${label}: ${path} unreachable: ${e.message}`); }
+  }
+
+  say('\n   ══ STILL YOURS TO CHECK AT THE SOURCE ═════════════════════════════');
+  say('   Nothing here can prove the OLD GitHub token was revoked — only that this server no');
+  say('   longer uses it. Run this on your own machine, then clear it from history:');
+  say('');
+  say('      curl -s -o /dev/null -w \'%{http_code}\\n\' \\');
+  say('        -H "Authorization: token $OLD_PAT" https://api.github.com/user     # expect 401');
+  say('      unset OLD_PAT');
+  say('');
+  say('   And confirm the old admin password no longer authenticates:');
+  say(`      curl -s -o /dev/null -w '%{http_code}\\n' -X POST ${base}/api/auth/login \\`);
+  say('        -H "Content-Type: application/json" -d \'{"email":"…","password":"<old>"}\'  # not 200');
+  say('');
+
+  if (fail) { say(`✗ FAIL — ${fail} check(s) failed. Production is not verified healthy.\n`); process.exit(1); }
+  say('✓ PASS — database, application and webhook authentication all healthy after rotation.\n');
+}
+
+async function main() {
+  if (SNAPSHOT) return snapshot();
+  if (COMPARE) return compare();
+  if (HEALTH) return health();
+
+  // Default: an inventory of what is SET. No fingerprints, because the first version printed them
+  // and that output is now in a chat transcript.
+  say('\n── credential inventory · names and set/unset only\n');
+  let missing = 0;
+  for (const [name, required, shouldRotate] of CREDENTIALS) {
+    const isSet = !!(process.env[name] && String(process.env[name]).trim());
+    if (required && !isSet) missing += 1;
+    say(`   ${pad(name, 32)}${pad(isSet ? 'set' : 'NOT SET', 10)}${shouldRotate ? 'to rotate' : ''}`);
+  }
+  say('\n   No fingerprints are printed here. To prove rotation:');
+  say('     1. before:  --snapshot=/tmp/fp.json');
+  say('     2. rotate in Railway, redeploy');
+  say('     3. after:   --compare=/tmp/fp.json   then   --health');
+  say(`     4. rm -P /tmp/fp.json\n`);
+  if (missing) { say(`✗ ${missing} required credential(s) unset.\n`); process.exit(1); }
+}
+
+main().then(() => process.exit(0)).catch((e) => {
+  console.error('verify-rotation failed:', e && e.message ? e.message : e);
+  process.exit(1);
+});
