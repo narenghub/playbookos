@@ -286,10 +286,49 @@ cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8utc-seo-agent', async () => {
 }));
 
 // Daily 8 AM: sync GitHub for all dev users
-cron.schedule('0 8 * * *', withAlerts('daily-8utc-github-sync', async () => {
-  console.log('[CRON] GitHub sync starting...');
-  const result = await syncGitHubAllDevs();
-  console.log(`[CRON] GitHub sync done — ${result.users} users for ${result.date}`);
+// ── P0.3 ITEM 5: THE RUN-LEDGER CANARY. THIS CRON ONLY. ──────────────────────
+//
+// The other 36 withAlerts jobs are deliberately untouched. This one was chosen because it has no
+// customer- or supplier-facing action, no email, no WhatsApp, no LLM call, no revenue consequence
+// and no dashboard depending on it: a missed run costs one day of commit statistics. It is where a
+// new fail-closed execution boundary should be proven.
+//
+// `firedAt` is the Date node-cron hands the callback — the MATCHED wall clock in this cron's
+// configured timezone, which is what makes the intent key the scheduled slot rather than whichever
+// minute this container's clock happened to be in when the callback started.
+//
+// The GitHub sync's own behaviour is unchanged. What changes is that the run is now recorded, and
+// that it will NOT run at all if its identity cannot be persisted first.
+cron.schedule('0 8 * * *', withAlerts('daily-8utc-github-sync', async (firedAt) => {
+  const { instrumentedRun } = require('./src/lib/run-ledger');
+  const { sendCronAlert } = require('./src/lib/cron-alerts');
+
+  const out = await instrumentedRun(
+    {
+      workflow: 'daily-8utc-github-sync',
+      product: 'internal',          // platform-level: commit stats belong to no one business
+      trigger: 'cron',
+      triggerDetail: '0 8 * * * (UTC)',
+      firedAt,
+    },
+    async () => {
+      console.log('[CRON] GitHub sync starting...');
+      const result = await syncGitHubAllDevs();
+      console.log(`[CRON] GitHub sync done — ${result.users} users for ${result.date}`);
+      return result;
+    },
+    {
+      // A durability failure must reach a human rather than only Railway's log. This is the
+      // OPERATIONAL class: the work may already have happened, so it does not throw.
+      onDurabilityFailure: (what, err) => {
+        console.error(`[LEDGER DURABILITY] ${what}: ${err && err.message}`);
+        sendCronAlert('daily-8utc-github-sync (ledger write failed)', err).catch(() => {});
+      },
+    },
+  );
+
+  // A declined duplicate is the arbiter working and must not read as a failure.
+  if (!out.ran) console.log(`[CRON] GitHub sync not run — ${out.reason}`);
 }));
 
 // Monday 9 AM: weekly AI analysis + email to admin

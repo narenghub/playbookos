@@ -126,6 +126,13 @@ step "a supplier RFQ cannot be sent twice" node scripts/check-supplier-rfq-claim
 # rule makes "two active rows with different attempt numbers" unreachable, so neither index was
 # independently necessary for any assertion and the arbiter claim was untested.
 step "run identity invariants hold in Postgres" node scripts/check-run-identity-db.js
+# The canary, under controlled failure. The one that matters most is the first: if the durable run
+# identity cannot be created, the body must never be ENTERED — proven with a spy, because "it
+# produced no output" is not evidence. Also proves a duplicate scheduled trigger is DECLINED rather
+# than reported as a failure (a false "workflow failed" alert is worse than the duplicate), and that
+# the three durability classes really do behave differently: CRITICAL throws, OPERATIONAL reports
+# loudly without throwing, TELEMETRY degrades silently.
+step "canary fails closed and never fakes success" node scripts/check-run-canary-db.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
