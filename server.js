@@ -733,6 +733,63 @@ cron.schedule('25 * * * *', withAlerts('hourly-25-cphi-reply-sync', async () => 
 // writes can send an email, because that needs OUTREACH_ENABLED. One more flag is one more thing
 // to set and forget, and the cost of forgetting this one would be a campaign that silently runs
 // dry. It is idempotent — labs that already have a contact are skipped — so a repeat run is free.
+// ── THE DATA ACCURACY REPORT · Mondays 07:00 CST ─────────────────────────────
+//
+// Every diagnostic in this repo needs `railway ssh`, and on 26 and 27 October that gateway failed
+// twice — once on key verification, once on a connection timeout. A measurement nobody can reach
+// is not a measurement, and the accuracy of this data is about to stop being a conversation and
+// become a warranty: the moment somebody pays for lead data, "how accurate is this?" has an
+// answer with money behind it.
+//
+// So it arrives by email instead, after the ingest has run, measuring the data as it stands that
+// week. Monday 07:00, forty minutes after the ingest at 06:20, which is comfortably longer than
+// the ingest takes and before the 09:10 send.
+//
+// It spawns the same script a human runs, for the reason the ingest does: a second path through
+// the same logic is how every defect this month got in.
+cron.schedule('0 7 * * 1', withAlerts('weekly-mon-7cst-data-accuracy', async () => {
+  const { execFile } = require('child_process');
+  const path = require('path');
+  const { sendEmail } = require('./src/lib/mailer');
+
+  const out = await new Promise((resolve, reject) => {
+    execFile('node', [path.join(__dirname, 'scripts', 'audit-data-accuracy.js')],
+      { timeout: 10 * 60 * 1000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error(`${err.message}\n${String(stderr || stdout).slice(-2000)}`));
+        return resolve(String(stdout || ''));
+      });
+  });
+
+  console.log('[CRON] data accuracy audit done');
+
+  // Plain text in a <pre>, deliberately. This report's value is that every number sits beside the
+  // method that produced it, and reformatting it into a tidy summary is how the caveats get lost
+  // — which is the failure the report exists to prevent.
+  const esc = out.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const wrong = (out.match(/WRONG INSTITUTION\s+(\d+)/) || [])[1];
+  const subject = Number(wrong) > 0
+    ? `Data accuracy — ${wrong} address(es) on the WRONG INSTITUTION`
+    : `Data accuracy — ${new Date().toISOString().slice(0, 10)}`;
+
+  await sendEmail({
+    to: process.env.OUTREACH_REPORT_TO || 'naren@abiozen.com',
+    subject,
+    html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:14px;color:#15202b">
+<p style="margin:0 0 12px 0">Measured, not asserted. VERIFIED = checked against the source ·
+UNVERIFIED = cannot be checked from here · WRONG = checked and disagrees.</p>
+<pre style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:1.5;white-space:pre-wrap;background:#f7f8fa;padding:14px;border-radius:6px">${esc}</pre>
+</div>`,
+  });
+
+  // A row whose address belongs to a different institution would send a confident, personalised
+  // letter to a stranger. withAlerts emails on a throw, so that becomes one.
+  if (Number(wrong) > 0) {
+    throw new Error(`${wrong} research address(es) belong to a different institution than the `
+      + 'record says — they must not be emailed until corrected');
+  }
+}), CST);
+
 cron.schedule('20 6 * * 1', withAlerts('weekly-mon-620cst-research-ingest', async () => {
   const { execFile } = require('child_process');
   const path = require('path');
