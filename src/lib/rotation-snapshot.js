@@ -26,6 +26,11 @@ const TABLE_SQL = `CREATE TABLE IF NOT EXISTS rotation_snapshots (
 
 async function ensureTable(query) {
   await query(TABLE_SQL);
+  // Added after the first live run, where --health passed and reported "all healthy after rotation"
+  // while every credential was still the leaked one. A row that records WHEN the comparison passed
+  // is what lets --health refuse to answer before the rotation has actually been proven.
+  await query('ALTER TABLE rotation_snapshots ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ');
+  await query('ALTER TABLE rotation_snapshots ADD COLUMN IF NOT EXISTS verified_commit TEXT');
 }
 
 // Refuses to overwrite unless forced. Taking a second snapshot AFTER rotating would replace the
@@ -34,9 +39,14 @@ async function ensureTable(query) {
 // rotation that never happened. Neither is recoverable, because the original values are gone.
 async function save(query, { label, commit, snap, force = false }) {
   await ensureTable(query);
-  const existing = await query('SELECT taken_at FROM rotation_snapshots WHERE label = $1', [label]);
+  const existing = await query('SELECT taken_at, verified_at FROM rotation_snapshots WHERE label = $1', [label]);
   if (existing.rows.length && !force) {
-    return { saved: false, refused: true, takenAt: existing.rows[0].taken_at };
+    return {
+      saved: false,
+      refused: true,
+      takenAt: existing.rows[0].taken_at,
+      verifiedAt: existing.rows[0].verified_at || null,
+    };
   }
   await query(
     `INSERT INTO rotation_snapshots (label, taken_at, taken_commit, salt, fingerprints)
@@ -53,9 +63,12 @@ async function load(query, label) {
   const r = await query('SELECT * FROM rotation_snapshots WHERE label = $1', [label]);
   if (!r.rows.length) return null;
   const row = r.rows[0];
+  const iso = (v) => (v instanceof Date ? v.toISOString() : (v ? String(v) : null));
   return {
-    takenAt: row.taken_at instanceof Date ? row.taken_at.toISOString() : String(row.taken_at),
+    takenAt: iso(row.taken_at),
     commit: row.taken_commit || null,
+    verifiedAt: iso(row.verified_at),
+    verifiedCommit: row.verified_commit || null,
     salt: row.salt,
     // node-postgres returns jsonb already parsed; a pg version or a driver swap that returns text
     // would otherwise make every fingerprint lookup silently undefined, which reads as "newly set"
@@ -69,4 +82,19 @@ async function remove(query, label) {
   return r.rowCount;
 }
 
-module.exports = { TABLE_SQL, ensureTable, save, load, remove };
+// Marks the comparison as passed WITHOUT deleting the row, and blanks the digests in the same
+// statement so nothing derived from a secret stays stored. The row is then evidence that the
+// rotation was proven and when, which is what --health consults before it is willing to describe
+// production as healthy "after rotation" — the claim it made once while nothing had rotated.
+async function markVerified(query, label, commit) {
+  const r = await query(
+    `UPDATE rotation_snapshots
+        SET verified_at = NOW(), verified_commit = $2, salt = '', fingerprints = '{}'::jsonb
+      WHERE label = $1
+      RETURNING verified_at`,
+    [label, commit || null],
+  );
+  return r.rows.length ? r.rows[0].verified_at : null;
+}
+
+module.exports = { TABLE_SQL, ensureTable, save, load, remove, markVerified };

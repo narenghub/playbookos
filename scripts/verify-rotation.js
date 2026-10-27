@@ -152,7 +152,15 @@ async function snapshotDb() {
 
   if (res.refused) {
     const when = res.takenAt instanceof Date ? res.takenAt.toISOString() : String(res.takenAt);
-    say(`\n   ✗ a snapshot labelled "${LABEL}" already exists, taken ${when}.`);
+    if (res.verifiedAt) {
+      const v = res.verifiedAt instanceof Date ? res.verifiedAt.toISOString() : String(res.verifiedAt);
+      say(`\n   ✗ label "${LABEL}" is a COMPLETED rotation, taken ${when}, verified ${v}.`);
+      say('     Keeping it as the evidence of that round. For a new rotation use a new label,');
+      say('     so the record of the last one is not overwritten:');
+      say(`\n       --snapshot --label=rotation-${new Date().toISOString().slice(0, 10)}\n`);
+      process.exit(2);
+    }
+    say(`\n   ✗ a snapshot labelled "${LABEL}" already exists, taken ${when}, not yet verified.`);
     say('     Refusing to overwrite it: if you have since rotated, replacing it would make --compare');
     say('     report everything unchanged, which reads as "rotation failed" or, worse, as a pass.');
     say(`\n     To compare against it:   --compare --label=${LABEL}`);
@@ -186,9 +194,10 @@ async function compareDb() {
     say('  The snapshot is kept so you can retry.\n');
     process.exit(1);
   }
-  await store.remove(query, LABEL);
+  const at = await store.markVerified(query, LABEL, COMMIT);
   say('✓ PASS — every credential marked for rotation now holds a different value.');
-  say(`  The snapshot row has been deleted; nothing derived from a secret remains stored.\n`);
+  say(`  Recorded as verified at ${at ? at.toISOString() : 'now'}; the digests have been blanked, so`);
+  say('  nothing derived from a secret remains stored. --health will now answer.\n');
 }
 
 function snapshot() {
@@ -260,17 +269,48 @@ function report(before, sourceLabel) {
 
 async function health() {
   const base = process.env.APP_URL || 'https://app.playnexa.ai';
-  say('\n── post-rotation health\n');
+  say('\n── production health\n');
   let fail = 0;
   const ok = (m) => say(`  ok    ${m}`);
   const bad = (m) => { fail += 1; say(`  FAIL  ${m}`); };
+
+  // ── THE GATE THIS FUNCTION WAS MISSING ──────────────────────────────────────
+  // On its first live run this printed "post-rotation health … all healthy after rotation", with
+  // "database connects and answers with the rotated credential" among the ok lines, while all five
+  // credentials were still the leaked values. Nothing was false about the connectivity checks; what
+  // was false was every word implying rotation had happened. A green verdict that reads as
+  // "rotation verified" is worse than no check, because it is the output somebody will screenshot.
+  //
+  // So the rotation state is consulted first, and an unverified snapshot ends the run before any
+  // health claim is printed.
+  let rotationNote = null;
+  try {
+    const { query } = require('../src/lib/db');
+    const snap = await store.load(query, LABEL);
+    if (snap && !snap.verifiedAt) {
+      say(`  STOP  a snapshot labelled "${LABEL}" is outstanding, taken ${snap.takenAt}.`);
+      say('        The rotation has NOT been proven, so nothing here may be called post-rotation');
+      say('        health. Run --compare first; it exits non-zero until every credential marked for');
+      say('        rotation holds a different value.');
+      say('\n✗ FAIL — rotation unverified. Refusing to report health as though rotation were done.\n');
+      process.exit(1);
+    }
+    rotationNote = snap && snap.verifiedAt
+      ? `rotation of label "${LABEL}" verified at ${snap.verifiedAt} on commit ${snap.verifiedCommit || '?'}`
+      : `no rotation record for label "${LABEL}" — the checks below say nothing about rotation`;
+  } catch (e) {
+    // If the database is unreachable the checks below will say so properly. Do not let an inability
+    // to read the rotation state masquerade as a verified rotation.
+    rotationNote = `could not read the rotation record (${e.message}) — treat rotation as unproven`;
+  }
+  say(`  note  ${rotationNote}\n`);
 
   // 1. The database. A rotated DSN that does not connect is the failure mode that matters most,
   //    and it shows up here rather than at 09:10 tomorrow.
   try {
     const { query } = require('../src/lib/db');
     const r = await query('SELECT 1 AS n');
-    if (r.rows[0].n === 1) ok('database connects and answers with the rotated credential');
+    if (r.rows[0].n === 1) ok('database connects and answers with the credential now in the environment');
     else bad('database returned something unexpected');
   } catch (e) { bad(`database did not connect: ${e.message}`); }
 
@@ -322,7 +362,8 @@ async function health() {
   say('');
 
   if (fail) { say(`✗ FAIL — ${fail} check(s) failed. Production is not verified healthy.\n`); process.exit(1); }
-  say('✓ PASS — database, application and webhook authentication all healthy after rotation.\n');
+  say('✓ PASS — database, application and webhook authentication are healthy.');
+  say(`  ${rotationNote}\n`);
 }
 
 async function main() {

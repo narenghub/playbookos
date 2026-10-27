@@ -155,6 +155,35 @@ const SECRET_AFTER = 'postgresql://u:EXAMPLE-fixture-new-9b02@h:5432/db';
       ok('the stored row contains no secret value, only salted digests');
     } else bad('A SECRET VALUE IS STORED IN THE TABLE');
 
+    // 7b. THE SECOND GUARD, and the one that already failed in production. --health printed
+    //     "post-rotation health … all healthy after rotation" while every credential was still the
+    //     leaked value. It now refuses while a snapshot is outstanding, which only works if an
+    //     outstanding snapshot is distinguishable from a verified one.
+    const outstanding = await store.load(rq, 'checkrun');
+    if (outstanding && outstanding.verifiedAt === null) {
+      ok('a snapshot that has not been compared reads as unverified');
+    } else bad('an uncompared snapshot did not read as unverified', JSON.stringify(outstanding));
+
+    const vAt = await store.markVerified(wq, 'checkrun', 'ver9999');
+    const verified = await store.load(rq, 'checkrun');
+    if (vAt && verified && verified.verifiedAt && verified.verifiedCommit === 'ver9999') {
+      ok('markVerified() records when and on which commit the comparison passed');
+    } else bad('markVerified() did not record the verification', JSON.stringify({ vAt, verified }));
+
+    // And the digests must be gone once verified — the row is evidence, not a stored oracle.
+    const blanked = await rq("SELECT salt, fingerprints::text AS f FROM rotation_snapshots WHERE label = 'checkrun'");
+    if (blanked.rows[0].salt === '' && blanked.rows[0].f === '{}') {
+      ok('verification blanks the salt and digests, leaving evidence without an oracle');
+    } else bad('digests survived verification', JSON.stringify(blanked.rows[0]));
+
+    // A verified round must not be silently overwritten by a fresh snapshot either.
+    const reuse = await store.save(wq, {
+      label: 'checkrun', commit: 'zzz',
+      snap: { takenAt: new Date().toISOString(), salt: 's', fingerprints: { DATABASE_URL: 'y' } },
+    });
+    if (reuse.refused && reuse.verifiedAt) ok('a completed round is refused as a snapshot target, and says it is completed');
+    else bad('a completed round was overwritten or did not report itself verified', JSON.stringify(reuse));
+
     // 8. Cleanup is a real delete, and reports what it deleted.
     const n = await store.remove(wq, 'checkrun');
     const gone = await store.load(rq, 'checkrun');
