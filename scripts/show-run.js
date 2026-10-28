@@ -83,6 +83,34 @@ async function showRun(runId) {
     process.exit(0);
   }
 
+  // --recent lists the ledger by time rather than by intent key, which is the only way to tell
+  // "the cron never fired" from "the cron fired and recorded under a different (or null) intent".
+  // A lookup BY intent key cannot distinguish those two, and they have opposite causes.
+  if (has('recent')) {
+    const wf = arg('workflow');
+    const rows = (await query(
+      `SELECT run_id, workflow, trigger, intent_key, attempt, state, created_at, started_at, ended_at
+         FROM agent_runs ${wf ? 'WHERE workflow = $2' : ''}
+        ORDER BY created_at DESC LIMIT $1`,
+      wf ? [Number(arg('limit') || 15), wf] : [Number(arg('limit') || 15)])).rows;
+    console.log(`\n── ${rows.length} most recent run(s)${wf ? ` for ${wf}` : ''}\n`);
+    if (!rows.length) { console.log('  (the ledger is empty)\n'); process.exit(0); }
+    console.log(`  ${pad('created (UTC)', 26)}${pad('state', 12)}${pad('workflow', 34)}intent_key`);
+    console.log(`  ${'─'.repeat(110)}`);
+    for (const r of rows) {
+      console.log(`  ${pad(iso(r.created_at), 26)}${pad(r.state, 12)}${pad(r.workflow || '—', 34)}`
+        + `${r.intent_key === null ? '*** NULL — unprotected against duplicate triggers ***' : r.intent_key}`);
+    }
+    console.log('');
+    const nulls = rows.filter((r) => r.intent_key === null && r.trigger === 'cron');
+    if (nulls.length) {
+      console.log(`  ${nulls.length} CRON run(s) recorded with NO intent key. A cron-triggered run should always`);
+      console.log('  carry its scheduled slot; a null one means the firing context never reached the');
+      console.log('  derivation, so duplicate-trigger protection was not in force for it.\n');
+    }
+    process.exit(0);
+  }
+
   const runArg = arg('run');
   if (runArg) { console.log(''); await showRun(runArg); console.log(''); process.exit(0); }
 
