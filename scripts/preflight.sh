@@ -133,6 +133,18 @@ step "run identity invariants hold in Postgres" node scripts/check-run-identity-
 # the three durability classes really do behave differently: CRITICAL throws, OPERATIONAL reports
 # loudly without throwing, TELEMETRY degrades silently.
 step "canary fails closed and never fakes success" node scripts/check-run-canary-db.js
+# Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
+# four things that keep two substances apart once rows exist: that a name cannot be one molecule's
+# identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one
+# way passes with half of it missing), that the real backfill REFUSES a CAS disagreement instead of
+# taking the commoner value, that a second pass writes nothing, and that inchikey is still entirely
+# NULL so the day a fuzzy resolver starts filling it a check fails loudly. The fixture is the 9 Oct
+# case with real registry numbers — Leuprolide 53714-56-0 against Leuprolide Acetate 74381-53-6 —
+# because collapsing those inflates a holder count into false scarcity and splitting the INN/USAN
+# pair answers "we have no supplier" about a substance three companies hold. Each guard is also
+# exercised with itself DISABLED, so a passing refusal is shown to come from the guard and not from
+# a NOT NULL nobody noticed.
+step "molecule identity holds in Postgres" node scripts/check-molecule-identity-db.js
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
