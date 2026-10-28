@@ -173,6 +173,63 @@ const NO_STOP = { checkStopped: async () => null, recordRefusal: () => {} };
     if (dupRows.rows[0].n === 1) ok('exactly one run row exists for the slot');
     else bad(`${dupRows.rows[0].n} run rows for one slot`);
 
+    // ── 5b. THE REAL PATH: node-cron → withAlerts → instrumentedRun → ledger ──
+    //
+    // THE TEST THAT SHOULD HAVE EXISTED. Every case above calls instrumentedRun directly and
+    // passes firedAt itself, so none of them exercises the integration point that actually
+    // delivers it. On 2026-10-28 the production canary recorded its run with intent_key NULL,
+    // because withAlerts was `return async () => {}` and dropped the argument node-cron passes.
+    // Twenty-four green checks could not have caught that: the verification supplied the input the
+    // real path discards.
+    //
+    // This drives the genuine scheduler. A one-second expression is used so it fires inside a
+    // test, and the assertion is that the intent key derived from node-cron's own matched time
+    // matches the key computed independently from the wall clock it reports.
+    {
+      const cron = require('node-cron');
+      const { withAlerts } = require('../src/lib/cron-alerts');
+      let seen = null;
+      let bodyRuns = 0;
+
+      const wrapped = withAlerts('daily-8utc-github-sync', async (firedAt) => {
+        bodyRuns += 1;
+        seen = await instrumentedRun(
+          { workflow: 'daily-8utc-github-sync', product: 'internal', trigger: 'cron', firedAt },
+          async () => ({ viaScheduler: true }),
+          { query: aq, autonomy: NO_STOP },
+        );
+      }, { query: aq, autonomy: NO_STOP });
+
+      const task = cron.schedule('* * * * * *', wrapped, { timezone: 'America/Chicago' });
+      const started = Date.now();
+      while (seen === null && Date.now() - started < 8000) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      task.stop();
+
+      if (bodyRuns >= 1) ok('REAL PATH: node-cron invoked withAlerts and the body ran');
+      else bad('node-cron never reached the body through withAlerts');
+
+      if (seen && seen.intentKey) {
+        ok(`REAL PATH: the scheduler's firing time reached the derivation (${seen.intentKey})`);
+      } else {
+        bad('REAL PATH: intent key is NULL — withAlerts is dropping node-cron\'s argument',
+          JSON.stringify(seen));
+      }
+      if (seen && seen.intentKey && /^cron:daily-8utc-github-sync:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(seen.intentKey)) {
+        ok('REAL PATH: the derived key has the scheduled-slot shape');
+      } else bad('REAL PATH: the derived key is malformed', seen && seen.intentKey);
+      if (seen && seen.ran && seen.state === 'SUCCEEDED') ok('REAL PATH: the run completed SUCCEEDED through the scheduler');
+      else bad('REAL PATH: the scheduled run did not succeed', JSON.stringify(seen));
+
+      // And the row carries the key, not just the return value.
+      if (seen && seen.runId) {
+        const row = await bq(`SELECT intent_key FROM agent_runs WHERE run_id=$1`, [seen.runId]);
+        if (row.rows[0] && row.rows[0].intent_key) ok('REAL PATH: the intent key is DURABLE on the row');
+        else bad('REAL PATH: the row has no intent key', JSON.stringify(row.rows[0] || null));
+      }
+    }
+
     // ── 6. DURABILITY CLASSES BEHAVE DIFFERENTLY ───────────────────────────
     const L = ledger({ query: aq });
     // CRITICAL: actionAttempted must THROW when it cannot be persisted, so the caller does not act.
@@ -239,8 +296,9 @@ const NO_STOP = { checkStopped: async () => null, recordRefusal: () => {} };
 
     // ── CLEANUP: only what this check created ──────────────────────────────
     const mine = (await aq(
-      `SELECT run_id FROM agent_runs WHERE intent_key LIKE $1 OR intent_key LIKE $2`,
-      [`cron:${WORKFLOW}:2026-10-28T08:%`, 'canary:%'])).rows.map((x) => x.run_id);
+      `SELECT run_id FROM agent_runs
+        WHERE intent_key LIKE $1 OR intent_key LIKE $2 OR intent_key LIKE $3 OR intent_key IS NULL`,
+      [`cron:${WORKFLOW}:2026-10-28T08:%`, 'canary:%', `cron:${WORKFLOW}:%`])).rows.map((x) => x.run_id);
     await aq(`ALTER TABLE agent_run_events DISABLE TRIGGER trg_agent_run_events_append_only`);
     await aq(`DELETE FROM agent_run_events WHERE run_id = ANY($1)`, [mine]);
     await aq(`ALTER TABLE agent_run_events ENABLE TRIGGER trg_agent_run_events_append_only`);

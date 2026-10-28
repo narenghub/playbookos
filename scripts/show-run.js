@@ -95,10 +95,10 @@ async function showRun(runId) {
       wf ? [Number(arg('limit') || 15), wf] : [Number(arg('limit') || 15)])).rows;
     console.log(`\n── ${rows.length} most recent run(s)${wf ? ` for ${wf}` : ''}\n`);
     if (!rows.length) { console.log('  (the ledger is empty)\n'); process.exit(0); }
-    console.log(`  ${pad('created (UTC)', 26)}${pad('state', 12)}${pad('workflow', 34)}intent_key`);
-    console.log(`  ${'─'.repeat(110)}`);
+    console.log(`  ${pad('created (UTC)', 26)}${pad('state', 12)}${pad('run_id', 38)}${pad('workflow', 32)}intent_key`);
+    console.log(`  ${'─'.repeat(150)}`);
     for (const r of rows) {
-      console.log(`  ${pad(iso(r.created_at), 26)}${pad(r.state, 12)}${pad(r.workflow || '—', 34)}`
+      console.log(`  ${pad(iso(r.created_at), 26)}${pad(r.state, 12)}${pad(r.run_id, 38)}${pad(r.workflow || '—', 32)}`
         + `${r.intent_key === null ? '*** NULL — unprotected against duplicate triggers ***' : r.intent_key}`);
     }
     console.log('');
@@ -108,6 +108,28 @@ async function showRun(runId) {
       console.log('  carry its scheduled slot; a null one means the firing context never reached the');
       console.log('  derivation, so duplicate-trigger protection was not in force for it.\n');
     }
+    process.exit(0);
+  }
+
+  // The GitHub sync's OWN result, read from the table it writes. The ledger proves a run was
+  // recorded; it says nothing about whether the sync did its job. Those are separate claims and
+  // conflating them would let an instrumented no-op look like a healthy canary.
+  if (has('github-stats')) {
+    const rows = (await query(
+      `SELECT stat_date, COUNT(*)::int AS users, SUM(commits)::int AS commits,
+              SUM(prs_merged)::int AS prs_merged, MAX(synced_at) AS last_sync
+         FROM github_stats GROUP BY stat_date ORDER BY stat_date DESC LIMIT $1`,
+      [Number(arg('limit') || 7)])).rows;
+    console.log(`\n── github_stats, most recent ${rows.length} day(s)\n`);
+    if (!rows.length) { console.log('  (no rows — the sync has never written)\n'); process.exit(1); }
+    console.log(`  ${pad('stat_date', 14)}${pad('users', 8)}${pad('commits', 10)}${pad('prs_merged', 12)}last_sync`);
+    console.log(`  ${'─'.repeat(78)}`);
+    for (const r of rows) {
+      console.log(`  ${pad(r.stat_date, 14)}${pad(r.users, 8)}${pad(r.commits, 10)}${pad(r.prs_merged, 12)}${iso(r.last_sync)}`);
+    }
+    console.log('\n  The question this answers is whether the sync still produces what it produced');
+    console.log('  before instrumentation — a comparable number of users on recent dates, and a');
+    console.log('  last_sync from the latest run. It is NOT evidence that the ledger recorded it.\n');
     process.exit(0);
   }
 

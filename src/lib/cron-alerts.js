@@ -8,7 +8,18 @@ const { sendEmail } = require('./mailer');
 // kill-switch guard can be tested with a spy proving fn() was never REACHED, rather than inferred
 // from the absence of output. Production calls pass nothing.
 function withAlerts(name, fn, deps = {}) {
-  return async () => {
+  // ── FORWARD THE ARGUMENTS. ───────────────────────────────────────────────
+  //
+  // This read `return async () => {` and called `fn()` with nothing. node-cron invokes the wrapper
+  // with the MATCHED firing time (task.js: `this._execution(now)`), and that argument died here.
+  //
+  // On 2026-10-28 the canary therefore received firedAt = undefined, cronIntentKey correctly
+  // returned null rather than inventing a slot, and the 08:00 run was recorded with NO intent key
+  // — so duplicate-trigger protection was not in force for it. Everything else worked: the cron
+  // fired, the ledger recorded it, the sync succeeded. Only the identity was missing.
+  //
+  // The wrapper must stay transparent: whatever the scheduler passes reaches the body.
+  return async (...args) => {
     // ── THE KILL SWITCH, AT THE ONE PLACE ALL 37 CRONS PASS THROUGH ──────────
     //
     // Checked before fn() is called, not inside it: the point is that the body never runs. A cron
@@ -57,7 +68,7 @@ function withAlerts(name, fn, deps = {}) {
     }
 
     try {
-      await fn();
+      await fn(...args);
     } catch (e) {
       try {
         await sendCronAlert(name, e);
