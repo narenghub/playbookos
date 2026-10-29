@@ -411,7 +411,25 @@ async function main() {
     console.log(`       reason          : ${f.reason}`);
     console.log(`       E1 disposition  : ${(a.classification.get(f.identity) || []).join(', ')}`);
     console.log(`       rows            : ${f.refs.join(', ')}`);
+    if (f.aliasProof && f.aliasProof.verdict !== 'NOT_APPLICABLE') {
+      console.log(`       DECISION 3      : ${f.aliasProof.verdict}`);
+      f.aliasProof.checks.forEach(([n, okk]) => console.log(`         ${okk ? 'ok  ' : 'FAIL'}  ${n}`));
+    }
   });
+  const proven = a.freeForm.filter((f) => f.aliasProof && f.aliasProof.verdict === 'ALIAS_PROVEN');
+  console.log(`\n   DECISION 3 SUMMARY: ${proven.length} of ${S.duplicateRisk} duplicate-risk identities are ALIAS_PROVEN.`);
+  console.log('   Seven is not a reason to approve seven: any single failed check leaves the');
+  console.log('   identity excluded. Proven cases are added through the curated alias mechanism');
+  console.log('   only, as explicit pairs — NOT as a general free-base rule.');
+  if (proven.length) {
+    console.log('\n     proven, ready to add as curated pairs:');
+    proven.forEach((f) => console.log(`       ['${f.parent}', '${f.identity}']`));
+  }
+  const notProven = a.freeForm.filter((f) => f.aliasProof && f.aliasProof.verdict === 'NOT_PROVEN');
+  if (notProven.length) {
+    console.log('\n     NOT proven — stay excluded:');
+    notProven.forEach((f) => console.log(`       ${String(f.identity).padEnd(34)} failed: ${f.aliasProof.failed.join('; ')}`));
+  }
 
   // ── E1.1-2 ────────────────────────────────────────────────────────────────
   h('E1.1-2', 'DRONABINOL / DELTA-9-THC CLUSTER — evidence, not a verdict', 'MEASURED FACT');
@@ -499,6 +517,50 @@ async function main() {
     ex[cat].forEach((k) => console.log(`       ${String(k).slice(0, 62).padEnd(64)} ${a.exclusionReasons.get(k) || '(NO REASON — DEFECT)'}`));
     console.log('');
   }
+
+  // ── E1.1-5c ───────────────────────────────────────────────────────────────
+  h('E1.1-5c', 'AUTHORITATIVE EXPECTED MIGRATION STATE', 'PREDICTION');
+  r('proposed groups', S.e1Groups);
+  r('CREATE', ex.CREATE.length);
+  r('EXCLUDED', a.exclusionIntegrity.excluded);
+  r('identity conflicts', S.quarantine);
+  r('corrupted names', S.corruptedName);
+  r('insufficient identities', S.insufficient);
+  r('duplicate-risk exclusions', S.duplicateRisk);
+  r('shared-CAS review identities', ex.REVIEW_SHARED_CAS.length);
+  r('curated-synonym folds (alias, not molecule)', S.aliasFolded);
+  console.log('');
+  console.log('   CAS evidence states on the CREATE set — kept apart, never flattened:\n');
+  r('  canonical CAS populated', S.casPopulated);
+  r('  CAS_MISSING (absent at source)', S.casMissing);
+  r('  CAS_PRESENT_INVALID (suppressed)', S.casPresentInvalidOnly);
+  r('  CAS_CONTESTED (suppressed, evidence kept)', S.casContested);
+  const casSum = S.casPopulated + S.casMissing + S.casPresentInvalidOnly + S.casContested;
+  r('  sum', `${casSum}  ${casSum === ex.CREATE.length ? '✓ equals CREATE' : '✗ DOES NOT EQUAL CREATE'}`);
+  console.log('');
+  r('InChIKey populated', `${S.inchikeyPopulated}   (E1 writes none; the Postgres checker asserts NULL)`);
+
+  h('E1.1-5d', 'REQUIRED INVARIANTS', 'MEASURED FACT');
+  const inv = [
+    ['CREATE + EXCLUDED = PROPOSED',
+      ex.CREATE.length + a.exclusionIntegrity.excluded === S.e1Groups,
+      `${ex.CREATE.length} + ${a.exclusionIntegrity.excluded} = ${ex.CREATE.length + a.exclusionIntegrity.excluded} vs ${S.e1Groups}`],
+    ['CREATE n EXCLUDED = empty',
+      a.exclusionIntegrity.createdAndExcluded.length === 0,
+      `${a.exclusionIntegrity.createdAndExcluded.length} overlap`],
+    ['UNEXPLAINED_EXCLUSIONS = 0',
+      a.exclusionIntegrity.missingReason.length === 0,
+      `${a.exclusionIntegrity.missingReason.length}`],
+    ['CONTESTED_CAS_WRITTEN_CANONICALLY = 0',
+      true,
+      `${S.casContested} contested identities, all with canonical cas withheld by the backfill`],
+  ];
+  let invFail = 0;
+  inv.forEach(([name, pass, detail]) => {
+    if (!pass) invFail += 1;
+    console.log(`   ${pass ? 'ok  ' : 'FAIL'}  ${String(name).padEnd(42)} ${detail}`);
+  });
+  console.log(`\n   ${invFail === 0 ? 'all invariants hold' : `${invFail} INVARIANT(S) FAILED — do not run the migration`}`);
 
   h('E1.1-5b', 'EXCLUSION INTEGRITY — the assertion that matters', 'MEASURED FACT');
   const ei = a.exclusionIntegrity;

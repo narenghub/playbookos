@@ -25,14 +25,19 @@ test('a base/salt legacy conflict is eliminated, with the split inspectable', ()
   assert.strictEqual(a.summary.eliminatedBySaltForm, 1);
 
   const e = a.eliminated[0];
-  assert.strictEqual(e.legacy, 'leuprolide');
+  assert.strictEqual(e.legacy, 'leuprolide');            // the LEGACY canonicalizer is unchanged
   assert.deepStrictEqual(e.legacyCas.sort(), ['53714-56-0', '74381-53-6']);
   assert.strictEqual(e.splitInto.length, 2);
   // The explanation has to name the mechanism, not assert goodwill.
   assert.match(e.reason, /stripping form tokens/);
-  const salt = e.splitInto.find((p) => p.identity === 'leuprolide acetate');
+  // The E1 keys are the CURATED representatives. Derived rather than hardcoded, because group
+  // order in synonyms.js decides which name is canonical and a future reorder is an editorial
+  // decision that must not break this assertion.
+  const { moleculeKey } = require('./identity');
+  const salt = e.splitInto.find((p) => p.identity === moleculeKey('Leuprolide Acetate'));
   assert.deepStrictEqual(salt.cas, ['74381-53-6']);
-  assert.strictEqual(salt.base, 'leuprolide');
+  assert.strictEqual(salt.base, moleculeKey('Leuprolide'),
+    'the parent pointer must use the same canonical name the parent is filed under');
 });
 
 test('a synonym-folded pair also separates by form', () => {
@@ -98,13 +103,20 @@ test('one CAS under two identities is REVIEW_REQUIRED, never a merge', () => {
   }
 });
 
-test('a shared CAS that a curated synonym explains is labelled as such', () => {
+test('a curated synonym pair folds to ONE molecule, so it is not a shared-CAS finding', () => {
+  // This previously asserted the pair appeared as a shared CAS labelled
+  // `explained_curated_synonym`. Since the grouping moved onto moleculeKey, the pair is one
+  // molecule with an alias — which is both the correct migration outcome and the reason the
+  // preview's CREATE count can now equal the molecules actually created.
   const a = analyze([
     row('Paracetamol', '103-90-2', 13),
     row('Acetaminophen', '103-90-2', 14),
   ]);
-  assert.strictEqual(a.sharedCas.length, 1);
-  assert.strictEqual(a.sharedCas[0].explanation, 'explained_curated_synonym');
+  assert.strictEqual(a.summary.e1Groups, 1, 'a curated synonym pair produced two molecules');
+  assert.strictEqual(a.sharedCas.length, 0);
+  assert.strictEqual(a.summary.aliasFolded, 1, 'the fold was not recorded as evidence');
+  // And therefore nothing is contested: one substance under two names is not a dispute.
+  assert.strictEqual(a.summary.casContested, 0);
 });
 
 test('a shared CAS between two forms of one base is labelled as a form relationship', () => {
@@ -114,7 +126,7 @@ test('a shared CAS between two forms of one base is labelled as a form relations
   ]);
   assert.strictEqual(a.sharedCas.length, 1);
   assert.strictEqual(a.sharedCas[0].explanation, 'explained_form_relationship');
-  // Explained is still not merged: they remain two identities.
+  // Explained is still not merged: they remain two identities (base and salt).
   assert.strictEqual(a.summary.e1Groups, 2);
 });
 
@@ -422,10 +434,13 @@ test('REGRESSION: the sixteen real substances the old heuristic flagged are NOT 
     'n1-acetyltriethylenetetramine', '25-hydroxycholesterol', '4-diazoimidazole-5-carboxamide',
     '5-formyl-2 4-dimethyl-1h-pyrrole-3-carboxylic acid',
   ];
+  const { moleculeKey } = require('./identity');
   for (const n of real) {
     const a = analyze([row(n, '50-78-2', 1)]);
-    const flags = a.classification.get(n.toLowerCase());
-    assert.ok(flags.includes('SAFE_TO_CREATE'), `${n} was wrongly excluded as a fragment`);
+    // Look the identity up by the SAME key the analyser groups on: delta-9-tetrahydrocannabinol
+    // now files under its curated representative, `dronabinol`.
+    const flags = a.classification.get(moleculeKey(n));
+    assert.ok(flags && flags.includes('SAFE_TO_CREATE'), `${n} was wrongly excluded as a fragment`);
   }
   // And a real stereo-prefixed substance survives the locant strip.
   const d = analyze([row('D-2-aminobutyric acid', '1492-24-6', 1)]);

@@ -29,7 +29,7 @@
 const { validCas } = require('../catalogue/cas');
 const { canonicalMolecule, normalize } = require('./synonyms');
 const {
-  identityOf, aliasForms, describeNormalization,
+  identityOf, aliasForms, moleculeKey, describeNormalization,
   GRADE_WORDS, DESCRIPTOR_QUALIFIERS, DESCRIPTOR_PHRASES,
 } = require('./identity');
 
@@ -229,7 +229,13 @@ function analyze(rows) {
 
     const rec = identityOf(r.name);
     const legacyKey = canonicalMolecule(r.name) || normalize(r.name);
-    const e1Key = rec.identity;
+    // The MOLECULE key, not the identity string: curated synonyms fold here so the count equals
+    // the molecules the backfill will create. See moleculeKey in identity.js.
+    const e1Key = moleculeKey(r.name);
+    if (e1Key && rec.identity && e1Key !== rec.identity) {
+      out.aliasFolded = out.aliasFolded || new Map();
+      out.aliasFolded.set(rec.identity, e1Key);
+    }
 
     // Normalization evidence, per row, before anything is grouped.
     const norm = describeNormalization(r.name);
@@ -304,7 +310,10 @@ function analyze(rows) {
   for (const [legacyKey, lg] of out.legacy.groups) {
     if (lg.cas.size <= 1) continue;                       // not a legacy conflict
 
-    const members = [...lg.names].map((n) => identityOf(n).identity).filter(Boolean);
+    // moleculeKey, not identity: the groups are keyed by the curated representative, and looking
+    // them up by the raw identity returns undefined — which would have reported every split as
+    // carrying no CAS at all, making eliminations look unverifiable.
+    const members = [...lg.names].map((n) => moleculeKey(n)).filter(Boolean);
     const e1Keys = [...new Set(members)];
     const parts = e1Keys.map((k) => {
       const g = out.e1.groups.get(k);
@@ -454,9 +463,40 @@ function analyze(rows) {
         + `parent: ${parentCas.join(' | ') || 'no valid CAS'})`;
     }
 
+    // ── DECISION 3: PROVE IT IS AN ALTERNATE NAME, NOT A FORM ──────────────
+    //
+    // Seven is not a reason to approve seven. Each case must exclude every alternative that would
+    // require preservation, and any single failure leaves it excluded. The strongest evidence
+    // available without structures is a shared single registry number — but that alone is not
+    // enough, because a salt sibling carrying the SAME number means the source is not
+    // distinguishing forms at all, and then "free base" cannot be read as merely a name.
+    const checks = [];
+    const myName = key;
+    const bothNames = `${myName} ${parent}`;
+    checks.push(['single shared valid CAS with the parent',
+      myCas.length === 1 && parentCas.length === 1 && myCas[0] === parentCas[0]]);
+    checks.push(['that CAS is not itself contested across substances',
+      !out.sharedCas.some((s) => s.kind === 'DISTINCT_NAMES_SHARED_CAS' && myCas.includes(s.cas))]);
+    checks.push(['no isotopic marker on either name', !ISOTOPE_RE.test(bothNames)]);
+    checks.push(['no stereochemical marker on either name', !STEREO_RE.test(bothNames)]);
+    checks.push(['the name is exactly the parent plus the phrase',
+      myName === `${parent} ${phrase}`]);
+    checks.push(['every salt/ester/hydrate sibling carries a DIFFERENT CAS',
+      !saltCounterparts.some((s) => {
+        const sib = out.e1.groups.get(String(s).replace(/ \([a-z]+\)$/, ''));
+        return sib && [...sib.cas].some((c) => myCas.includes(c));
+      })]);
+    const aliasProven = disposition === 'SAME_NEUTRAL_SUBSTANCE' && checks.every(([, ok]) => ok);
+
     out.freeForm.push({
       identity: key,
       phrase,
+      aliasProof: {
+        verdict: disposition !== 'SAME_NEUTRAL_SUBSTANCE' ? 'NOT_APPLICABLE'
+          : (aliasProven ? 'ALIAS_PROVEN' : 'NOT_PROVEN'),
+        checks,
+        failed: checks.filter(([, ok]) => !ok).map(([n]) => n),
+      },
       sourceNames: [...g.names],
       cas: myCas,
       parent,
@@ -558,6 +598,38 @@ function analyze(rows) {
   // Nothing left to report here: the only fragments the data contains are now caught
   // deterministically, as INSUFFICIENT_IDENTITY, with the stripped core named in the reason.
   out.fragmentSuspects = [];
+
+  // ── DECISION 1: A CONTESTED CAS IS NOT WRITTEN AS CANONICAL ──────────────
+  //
+  //   > A missing canonical CAS is preferable to a registry number known to be
+  //   > contested across distinct proposed substances.
+  //
+  // `selumetinib` and `binimetinib` both carry 606143-89-9 in the source. One of them is wrong,
+  // nothing in the data says which, and writing it to both would put a registry number on a
+  // quotation for the wrong material. So the NAME proceeds and the ATTRIBUTE is withheld: no owner
+  // is chosen, no synonymy inferred, and the source values are preserved as contested evidence
+  // rather than discarded.
+  out.casContested = new Map();
+  for (const s of out.sharedCas) {
+    if (s.kind !== 'DISTINCT_NAMES_SHARED_CAS') continue;
+    for (const id of s.identities) {
+      const seen = out.casContested.get(id) || new Set();
+      seen.add(s.cas);
+      out.casContested.set(id, seen);
+    }
+  }
+
+  // The three evidence states, kept apart. "Absent", "the source asserted something that cannot be
+  // true", and "two substances claim it" are three different facts about a molecule, and collapsing
+  // them into one empty column would destroy the only record of which it was.
+  out.casEvidence = { CAS_POPULATED: [], CAS_MISSING: [], CAS_PRESENT_INVALID: [], CAS_CONTESTED: [] };
+  for (const key of out.executionSet.CREATE) {
+    const g = out.e1.groups.get(key);
+    if (out.casContested.has(key)) out.casEvidence.CAS_CONTESTED.push(key);
+    else if (g.cas.size === 1) out.casEvidence.CAS_POPULATED.push(key);
+    else if (g.invalid && g.invalid.size) out.casEvidence.CAS_PRESENT_INVALID.push(key);
+    else out.casEvidence.CAS_MISSING.push(key);
+  }
   // The assertion that matters: nothing excluded is unexplained, and nothing is both.
   const excluded = [...out.classification.entries()]
     .filter(([, f]) => !f.includes('SAFE_TO_CREATE')).map(([k]) => k);
@@ -596,6 +668,12 @@ function analyze(rows) {
     ambiguousForm: out.executionSet.AMBIGUOUS_FORM.length,
     duplicateRisk: out.executionSet.DUPLICATE_RISK.length,
     fragmentSuspects: out.fragmentSuspects.length,
+    aliasFolded: out.aliasFolded ? out.aliasFolded.size : 0,
+    casPopulated: out.casEvidence.CAS_POPULATED.length,
+    casMissing: out.casEvidence.CAS_MISSING.length,
+    casPresentInvalidOnly: out.casEvidence.CAS_PRESENT_INVALID.length,
+    casContested: out.casEvidence.CAS_CONTESTED.length,
+    inchikeyPopulated: 0,   // E1 writes none; the Postgres checker asserts the column stays NULL
     freeFormCases: out.freeForm.length,
     freeFormSameNeutral: out.freeForm.filter((f) => f.disposition === 'SAME_NEUTRAL_SUBSTANCE').length,
     freeFormDistinct: out.freeForm.filter((f) => f.disposition === 'DISTINCT_FORM').length,

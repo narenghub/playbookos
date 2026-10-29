@@ -33,18 +33,35 @@
 // today's behaviour (the typed term alone), never to a wrong answer.
 'use strict';
 
-// Equivalence groups. Order inside a group does not matter — every member expands to all the others.
+// ── ORDER INSIDE A GROUP NOW MATTERS. IT DID NOT USED TO. ────
+//
+// For SEARCH it still does not: expandMolecule unions the whole group, so every member finds every
+// other regardless of position.
+//
+// For IDENTITY it decides the canonical molecule name. `moleculeKey` in identity.js takes the
+// FIRST member as the group's representative, so that is the name a molecule is filed and quoted
+// under. The first member should therefore be the name the register and our own data use — put the
+// USAN first where FDA filings use it, because a quotation carrying the name nobody files under is
+// a quotation somebody has to translate.
+//
+// A human who disagrees fixes it by moving one name to the front of its line. That is the whole
+// reason the representative is group order rather than alphabetical: alphabetical made
+// `acetylsalicylic acid` the canonical name for aspirin, which is deterministic and useless.
+// Equivalence groups. Every member expands to all the others for search; the FIRST is canonical.
 // Spelling variants live here too, because a British `oe`/`ph`/`y` is the same silent failure as a
 // different name entirely.
 const SYNONYM_GROUPS = [
   // ── peptides and hormone analogues: the class that started this ────
-  ['leuprorelin', 'leuprolide'],
+  // DMF holders are all filed as LEUPROLIDE (the USAN); leuprorelin is what the European
+  // customer types. Register name first, so the molecule is quoted under the filed name.
+  ['leuprolide', 'leuprorelin'],
   ['somatropin', 'somatotropin'],
   ['vasopressin', 'argipressin'],
   ['desmopressin', 'ddavp'],
 
   // ── INN vs USAN, the common ones ────
-  ['paracetamol', 'acetaminophen'],
+  // "Every FDA record says acetaminophen" — recorded 9 Oct. US register name first.
+  ['acetaminophen', 'paracetamol'],
   ['salbutamol', 'albuterol'],
   ['rifampicin', 'rifampin'],
   ['ciclosporin', 'cyclosporine', 'cyclosporin'],
@@ -115,6 +132,21 @@ const SYNONYM_GROUPS = [
   // synonym rows, because `mirvetuximab soravtansine` and `durvalumab` also share a number and
   // are two entirely different drugs.
   ['aspirin', 'acetylsalicylic acid'],
+
+  // ── APPROVED 29 OCT ON THE EVIDENCE, NOT ON THE SHARED CAS ────
+  // Six filed variants all carry CAS 1972-08-3 consistently, and the source wording states the
+  // stereochemistry explicitly — `Dronabinol ((-)-trans-Δ9-tetrahydrocannabinol)`. Dronabinol is
+  // the INN for that specific isomer, so this is an INN/chemical-name divergence of the kind this
+  // table exists for.
+  //
+  // It folds THAT PAIR ONLY. The rest of the THC family keeps its own identities and its own
+  // registry numbers, which is what makes the pair safe to add:
+  //   11-hydroxy-THC             36557-05-8   metabolite
+  //   11-nor-9-carboxy-THC       56354-06-4   metabolite
+  //   thc-d3                     63954-45-0   deuterated standard
+  //   delta-9-thc-d3 deuterated  73491-99-3   deuterated standard
+  // `identity.test.js` asserts none of those collapses into this group.
+  ['dronabinol', 'delta-9-tetrahydrocannabinol'],
 ];
 
 // Trailing words that name a SALT, ESTER, HYDRATE or COUNTER-ION rather than the substance. Stripped

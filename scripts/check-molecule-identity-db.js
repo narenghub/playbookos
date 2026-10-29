@@ -131,10 +131,19 @@ const FIXTURE_TABLES = `
       ('NCT-X', 'Ambiguoustatin', '50-78-2'),
       ('NCT-Y', 'Ambiguoustatin', '58-22-0'),
       ('NCT-Z', 'Ambiguoustatin', '58-22-0')`);
+    // ── THE CONTESTED-CAS CASE, WITH THE TWO HALVES IN DIFFERENT TABLES ────
+    // Deliberately split across study_molecules and supplier_products: a per-table check would
+    // not see that two substances claim one registry number, and that is the case Decision 1 is
+    // about. 606143-89-9 is selumetinib's; one of these two is wrong and the data does not say
+    // which, so neither may carry it as canonical identity.
+    await q(`INSERT INTO study_molecules (study_id, molecule_name, cas_number) VALUES
+      ('NCT-S1', 'Selumetinib', '606143-89-9')`);
     await q(`INSERT INTO research_interests (lab_id, kind, value, cas) VALUES
       (1, 'molecule', 'Leuprorelin Acetate', '74381-53-6'),
       (2, 'molecule', 'Paracetamol', '103-90-2'),
       (3, 'target',   'KRAS G12C', NULL)`);
+    await q(`INSERT INTO supplier_products (product_name, cas) VALUES
+      ('Binimetinib', '606143-89-9')`);
     await q(`INSERT INTO supplier_products (product_name, cas) VALUES
       ('Metformin Hydrochloride', '1115-70-4'), ('Acetaminophen', '103-90-2')`);
 
@@ -209,6 +218,47 @@ const FIXTURE_TABLES = `
     if (unres.rows[0].n === 3) {
       ok('all three conflicting rows say WHY they are unlinked, not merely that they are');
     } else bad(`${unres.rows[0].n} of 3 conflicting rows carry an unresolved reason`);
+
+    // ── 4b. DECISION 1: THE CONTESTED CAS IS NOT WRITTEN AS CANONICAL ─────
+    //
+    // The invariant in one line: a missing canonical CAS is preferable to a registry number known
+    // to be contested across distinct proposed substances. Both NAMES proceed — they are two real
+    // and different MEK inhibitors — and the disputed ATTRIBUTE is withheld from both.
+    const sel = await mol('selumetinib');
+    const bini = await mol('binimetinib');
+    if (sel && bini && sel.id !== bini.id) ok('selumetinib and binimetinib are both created, as distinct molecules');
+    else bad('the contested pair did not produce two distinct molecules', JSON.stringify({ sel: !!sel, bini: !!bini }));
+
+    const bothNull = sel && bini && sel.cas === null && bini.cas === null;
+    if (bothNull) ok('NEITHER carries the disputed 606143-89-9 as canonical cas');
+    else bad('a contested CAS was written as canonical identity', JSON.stringify({ sel: sel && sel.cas, bini: bini && bini.cas }));
+
+    const anyoneClaims = await q(
+      `SELECT normalized_name FROM molecules WHERE cas = '606143-89-9'`);
+    if (anyoneClaims.rowCount === 0) ok('no molecule anywhere claims the contested number');
+    else bad('a molecule claims the contested CAS', JSON.stringify(anyoneClaims.rows));
+
+    // Withheld is not the same as discarded: the source values must still be answerable.
+    if (sel && /^cas_contested:/.test(sel.cas_suppressed_reason || '')
+        && (sel.cas_source_values || '').includes('606143-89-9')) {
+      ok('the suppression reason and the source value are both preserved on the row');
+    } else bad('contested evidence was discarded rather than preserved', JSON.stringify({ r: sel && sel.cas_suppressed_reason, v: sel && sel.cas_source_values }));
+
+    const contestRow = await q(`SELECT * FROM molecule_conflicts WHERE kind = 'cas_contested'`);
+    if (contestRow.rowCount) ok('the contest is recorded in molecule_conflicts as its own kind');
+    else bad('no cas_contested conflict row was written');
+
+    // And the three evidence states stay apart rather than collapsing into one empty column.
+    const states = await q(`
+      SELECT COUNT(*) FILTER (WHERE cas IS NOT NULL)                                      populated,
+             COUNT(*) FILTER (WHERE cas IS NULL AND cas_suppressed_reason LIKE 'cas_contested%') contested,
+             COUNT(*) FILTER (WHERE cas IS NULL AND cas_suppressed_reason = 'cas_missing')       missing,
+             COUNT(*) FILTER (WHERE cas IS NULL AND cas_suppressed_reason = 'cas_present_invalid') invalid
+        FROM molecules`);
+    const st = states.rows[0];
+    if (Number(st.contested) >= 2 && Number(st.populated) > 0) {
+      ok(`CAS evidence states are distinguishable (populated ${st.populated}, contested ${st.contested}, missing ${st.missing}, invalid ${st.invalid})`);
+    } else bad('the CAS evidence states are not distinguishable', JSON.stringify(st));
 
     // ── 5. IDEMPOTENCE, MEASURED ──────────────────────────────────────────
     const second = await quiet(backfill.main)({ query: q, execute: true });

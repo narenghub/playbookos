@@ -299,6 +299,51 @@ test('a bare "standard" is not stripped', () => {
   assert.strictEqual(I.substanceForm('Foobarium standard').identity, 'foobarium standard');
 });
 
+// ── DECISION 2: dronabinol <-> delta-9-tetrahydrocannabinol ─────────────────
+
+test('the approved THC synonym folds that pair and nothing else', () => {
+  assert.ok(I.aliasForms('Dronabinol').aliases.includes('delta-9-tetrahydrocannabinol'));
+  assert.ok(I.aliasForms('Delta-9-tetrahydrocannabinol').aliases.includes('dronabinol'));
+  // One molecule key for both.
+  assert.strictEqual(I.moleculeKey('Dronabinol'), I.moleculeKey('Delta-9-tetrahydrocannabinol'));
+});
+
+test('REGRESSION: the THC synonym does not collapse metabolites, standards or isomers', () => {
+  // Each of these carries its own registry number in the source, and the pair was approved ON
+  // CONDITION that they stay apart. A future widening of the synonym group fails here.
+  const thcKey = I.moleculeKey('Dronabinol');
+  const mustStayDistinct = [
+    '11-hydroxy-THC',                       // metabolite, 36557-05-8
+    '11-nor-9-carboxy-THC',                 // metabolite, 56354-06-4
+    'THC-d3',                               // deuterated standard, 63954-45-0
+    'Delta-9-THC-d3 (deuterated)',          // deuterated standard, 73491-99-3
+    '11-hydroxy-delta-9-THC (11-OH-THC)',
+    '11-nor-9-carboxy-delta-9-THC-d3',
+    '7-hydroxycannabidiol',                 // a different cannabinoid entirely
+    '7-carboxycannabidiol',
+  ];
+  for (const n of mustStayDistinct) {
+    assert.notStrictEqual(I.moleculeKey(n), thcKey, `${n} collapsed into the dronabinol group`);
+    assert.ok(!I.aliasForms('Dronabinol').aliases.includes(I.moleculeKey(n)),
+      `${n} became an alias of dronabinol`);
+  }
+});
+
+test('moleculeKey is deterministic and independent of which name appears first', () => {
+  // The previous behaviour let row order decide which name became canonical, so the same data
+  // loaded in a different order produced a differently-named molecule.
+  for (const [a, b] of [
+    ['Leuprolide', 'Leuprorelin'],
+    ['Paracetamol', 'Acetaminophen'],
+    ['Aspirin', 'Acetylsalicylic acid'],
+    ['Dronabinol', 'Delta-9-tetrahydrocannabinol'],
+  ]) {
+    assert.strictEqual(I.moleculeKey(a), I.moleculeKey(b), `${a}/${b} do not share a key`);
+  }
+  // And a salt is never folded in by this mechanism.
+  assert.notStrictEqual(I.moleculeKey('Leuprolide'), I.moleculeKey('Leuprolide acetate'));
+});
+
 test('aspirin and acetylsalicylic acid are curated synonyms', () => {
   // Found by the shared-CAS detection (both carry 50-78-2), added by hand as one pair.
   assert.ok(I.aliasForms('Aspirin').aliases.includes('acetylsalicylic acid'));

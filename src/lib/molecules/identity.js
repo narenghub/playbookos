@@ -308,6 +308,48 @@ function aliasForms(name) {
   return { identity, aliases };
 }
 
+// ── THE ONE KEY BOTH THE PREVIEW AND THE BACKFILL MUST USE ──────────────────
+//
+// `identity` is the normalized name. It is NOT the molecule key, because two identities can be
+// curated synonyms of one substance: `leuprorelin` and `leuprolide`, `paracetamol` and
+// `acetaminophen`. The backfill resolves the second one through the alias table and creates no
+// second molecule — so counting identities overstates the molecules that will exist.
+//
+// That discrepancy was real and unnoticed until the E1.1 package was being prepared for
+// authorization: the preview reported 2,433 CREATE while the migration would have created fewer,
+// and "actual created = expected CREATE" could never have held. A reconciliation that cannot hold
+// is worse than no reconciliation, because it fails for a reason nobody can distinguish from a
+// genuine defect.
+//
+// The representative is the FIRST MEMBER of the curated group, not the alphabetically first name.
+// Both are deterministic — and the previous behaviour, "whichever name the data listed first", was
+// not: the same rows loaded in a different order produced a differently-named molecule, and a
+// quotable ABZ-Mol reference should not depend on that.
+//
+// Group order wins over alphabetical because it is EDITORIAL. Alphabetical made
+// `acetylsalicylic acid` the canonical name for aspirin, which is deterministic and useless to a
+// buyer; group order makes it `aspirin`, and a human who disagrees fixes it by reordering one line
+// of SYNONYM_GROUPS rather than by renaming rows.
+//
+// The form is carried through unchanged, exactly as in aliasForms: `leuprorelin acetate` and
+// `leuprolide acetate` share a key, while `leuprolide` and `leuprolide acetate` never do.
+function curatedCanonical(base) {
+  for (const group of SYNONYM_GROUPS) {
+    const members = group.map(normalize).filter(Boolean);
+    if (members.includes(base)) return members[0];
+  }
+  return base;
+}
+
+function moleculeKey(name) {
+  const { identity, formTokens, derivedBase } = substanceForm(name);
+  if (!identity) return '';
+  const base = derivedBase || identity;
+  const canon = curatedCanonical(base);
+  if (canon === base) return identity;
+  return formTokens.length ? `${canon} ${formTokens.join(' ')}` : canon;
+}
+
 /**
  * The full identity record for a filed name. Pure — no database, no network, no guessing.
  * `preferredName` keeps the filed spelling for display; `identity` is the key.
@@ -320,7 +362,12 @@ function identityOf(filedName) {
     identity: f.identity,
     form: f.form,
     formTokens: f.formTokens,
-    derivedBase: f.derivedBase,
+    // Canonicalised through the curated table for the same reason the key is: the parent is found
+    // by matching this string against a molecule's normalized_name, and that name is now the
+    // group representative. Left uncanonicalised, `leuprolide acetate` would carry
+    // derived_base_name = "leuprolide" while its parent is filed as "leuprorelin", and the parent
+    // edge would silently never link — a missing relationship with no error anywhere.
+    derivedBase: f.derivedBase ? curatedCanonical(f.derivedBase) : null,
     aliases,
     reason: f.reason,
   };
@@ -341,5 +388,6 @@ module.exports = {
   formClassOf,
   substanceForm,
   aliasForms,
+  moleculeKey,
   identityOf,
 };

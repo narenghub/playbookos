@@ -65,6 +65,16 @@ const DDL_TABLES = `
       -- entirely NULL, so the day something starts writing it, a check fails loudly.
       inchikey           TEXT,
 
+      -- ── DECISION 1: A CONTESTED CAS IS NOT WRITTEN AS CANONICAL ────
+      -- "A missing canonical CAS is preferable to a registry number known to be contested across
+      -- distinct proposed substances." selumetinib and binimetinib both carry 606143-89-9; one is
+      -- wrong and the data does not say which, so cas stays NULL on both while the SOURCE values
+      -- are preserved here. No owner is chosen and nothing is discarded.
+      -- cas_suppressed_reason also distinguishes the three evidence states that an empty cas
+      -- column would otherwise flatten into one: absent, present-but-invalid, and contested.
+      cas_suppressed_reason TEXT,
+      cas_source_values     TEXT,
+
       substance_form     TEXT NOT NULL DEFAULT 'base'
         CHECK (substance_form IN ('base','salt','ester','hydrate','solvate','mixture','other')),
 
@@ -131,7 +141,8 @@ const DDL_TABLES = `
     CREATE TABLE IF NOT EXISTS molecule_conflicts (
       id            BIGSERIAL PRIMARY KEY,
       kind          TEXT NOT NULL
-        CHECK (kind IN ('cas_disagreement','alias_collision','ambiguous_form','unresolvable_name')),
+        CHECK (kind IN ('cas_disagreement','alias_collision','ambiguous_form','unresolvable_name',
+                        'cas_contested','corrupted_name','duplicate_risk')),
       filed_name    TEXT NOT NULL,
       identity_name TEXT,
       detail        TEXT NOT NULL,            -- what disagreed, in words

@@ -33,7 +33,7 @@ const { validCas } = require('../src/lib/catalogue/cas');
 // a checker could accidentally blank the identity rules and still pass — the guard would then be
 // tested against logic nothing in production uses. The same reasoning as scopesForCron in
 // cron-alerts.js: only the DB-touching half is replaceable.
-const { identityOf } = require('../src/lib/molecules/identity');
+const { identityOf, moleculeKey } = require('../src/lib/molecules/identity');
 
 // The database handle. Production uses src/lib/db; scripts/check-molecule-identity-db.js injects a
 // pool pointed at a throwaway cluster so the REAL backfill runs against a real server, rather than
@@ -104,6 +104,42 @@ async function main(deps = {}) {
     process.exit(1);
   }
 
+  // ── PASS 0: WHICH CAS NUMBERS ARE CONTESTED ACROSS SUBSTANCES ─────────────
+  //
+  // Read-only, and done before anything is created, because the answer depends on ALL the tables
+  // at once: `selumetinib` appears in study_molecules and `binimetinib` may appear in
+  // supplier_products, and neither table on its own shows that they claim one registry number.
+  // A per-table check would have missed exactly the case this exists for.
+  const casOwners = new Map();        // cas -> Set(identity)
+  for (const src of SOURCES) {
+    if (!(await tableExists(src.table))) continue;
+    const w = src.where ? `WHERE ${src.where}` : '';
+    const rows = (await Q(`
+      SELECT ${src.nameCol} AS nm, ${src.casCol} AS cas FROM ${src.table} ${w}`)).rows;
+    for (const r of rows) {
+      const id = moleculeKey(r.nm);
+      const c = r.cas && validCas(String(r.cas).trim()) ? String(r.cas).trim() : null;
+      if (!id || !c) continue;
+      const s = casOwners.get(c) || new Set();
+      s.add(id);
+      casOwners.set(c, s);
+    }
+  }
+  // A CAS claimed by two or more distinct molecule keys. Note this is deliberately computed on the
+  // FOLDED key, so a curated synonym pair sharing a number is NOT a contest — that is one
+  // substance under two names, which is the whole point of the alias mechanism.
+  const contested = new Map();        // identity -> [cas, ...]
+  for (const [cas, owners] of casOwners) {
+    if (owners.size < 2) continue;
+    for (const id of owners) {
+      const list = contested.get(id) || [];
+      list.push(cas);
+      contested.set(id, list);
+    }
+  }
+  console.log(`   contested CAS values: ${[...casOwners.values()].filter((s) => s.size > 1).length}`
+    + `, affecting ${contested.size} identities — their canonical cas will be NULL\n`);
+
   // ── PASS 1: one molecule per distinct identity name ─────────────────────────
   //
   // Grouped by identity rather than by filed name, because `Aspirin` and `Aspirin USP` are the same
@@ -123,6 +159,10 @@ async function main(deps = {}) {
     const groups = new Map();
     for (const r of rows) {
       const rec = identityOf(r.nm);
+      // THE SAME KEY THE PREVIEW USES. Imported, not reimplemented: a preview whose CREATE count
+      // cannot equal the molecules created is a reconciliation that fails for a reason nobody can
+      // tell apart from a real defect.
+      rec.identity = moleculeKey(r.nm) || rec.identity;
       if (!rec.identity || rec.identity.length < 3) {
         note('unresolvable_name', String(r.nm || ''), null,
           'name is empty or shorter than 3 characters after normalisation — nothing to resolve',
@@ -184,21 +224,36 @@ async function main(deps = {}) {
         continue;
       }
 
+      // ── DECISION 1 APPLIED AT THE WRITE ────
+      // The name proceeds, the contested attribute does not. Source values are kept in
+      // cas_source_values so nothing is discarded and no owner is chosen.
+      const isContested = contested.has(identity);
+      const casToWrite = isContested ? null : cas;
+      const suppressedReason = isContested
+        ? `cas_contested:${contested.get(identity).join(',')}`
+        : (cas ? null : (g.rows.some((x) => x.cas && !validCas(x.cas))
+          ? 'cas_present_invalid' : 'cas_missing'));
+      const casSourceValues = isContested
+        ? contested.get(identity).join(',')
+        : (cas ? null : [...new Set(g.rows.map((x) => x.cas).filter(Boolean))].join(',') || null);
+
       if (!existing) {
         if (EXECUTE) {
           const ins = await Q(
             `INSERT INTO molecules
                (preferred_name, normalized_name, cas, substance_form, derived_base_name,
-                form_tokens, source, raw_reference, derivation_method, confidence)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                form_tokens, source, raw_reference, derivation_method, confidence,
+                cas_suppressed_reason, cas_source_values)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
              ON CONFLICT (normalized_name) DO NOTHING
              RETURNING id, cas`,
-            [[...g.filed][0], identity, cas, g.rec.form, g.rec.derivedBase,
+            [[...g.filed][0], identity, casToWrite, g.rec.form, g.rec.derivedBase,
               g.rec.formTokens.length ? g.rec.formTokens.join(' ') : null,
               `backfill:${src.table}`, ids.slice(0, 20).join(','),
               // The form is DERIVED from the name; the name and CAS are OBSERVED. Saying so is the
               // P1 rule against silently promoting a derived fact to a sourced one.
-              'name_observed:form_derived', cas ? 'high' : 'medium'],
+              'name_observed:form_derived', casToWrite ? 'high' : 'medium',
+              suppressedReason, casSourceValues],
           );
           if (ins.rowCount) { stats.moleculesCreated += 1; stats.writes += 1; existing = { id: ins.rows[0].id, cas: ins.rows[0].cas }; }
           else existing = await resolveExisting(identity);   // lost a race; adopt the winner
@@ -237,6 +292,21 @@ async function main(deps = {}) {
            VALUES ($1,$2,'inn',$3,'high') ON CONFLICT (alias) DO NOTHING`,
           [existing.id, alias, `backfill:${src.table}`]);
         stats.aliasesCreated += 1; stats.writes += 1;
+      }
+
+      // The contest itself is recorded as evidence, so "why is this cas NULL" is answerable from
+      // the database rather than by re-running the analysis.
+      if (EXECUTE && isContested) {
+        const key = `cas_contested|${identity}|${src.table}|${contested.get(identity).join(',')}`.slice(0, 500);
+        const c = await Q(
+          `INSERT INTO molecule_conflicts
+             (kind, filed_name, identity_name, detail, cas_values, source_table, source_ids, conflict_key)
+           VALUES ('cas_contested',$1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (conflict_key) WHERE resolved_at IS NULL DO NOTHING`,
+          [[...g.filed][0].slice(0, 500), identity,
+            'CAS claimed by more than one distinct molecule key — canonical cas withheld, no owner chosen',
+            contested.get(identity).join(','), src.table, ids.slice(0, 20).join(','), key]);
+        stats.writes += c.rowCount || 0;
       }
 
       // ── LINK THE SOURCE ROWS ────
