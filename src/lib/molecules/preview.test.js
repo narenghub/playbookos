@@ -402,11 +402,43 @@ test('a real compound whose name resembles a class word is NOT excluded', () => 
   }
 });
 
-test('fragment suspects are reported for review but never excluded', () => {
-  const a = analyze([row('pyrrole-3-carboxamide', '50-78-2', 1)]);
-  assert.ok(a.summary.fragmentSuspects >= 1, 'the IUPAC-tail shape was not detected');
-  assert.ok(a.classification.get('pyrrole-3-carboxamide').includes('SAFE_TO_CREATE'),
-    'a review-only flag must not block creation');
+test('a name whose core is a bare class term is a fragment, locant stripped first', () => {
+  // The one true positive on the 29 Oct data, out of 17 the old heuristic flagged.
+  const a = analyze([row('E-2-carboxylic acid', '50-78-2', 1)]);
+  const flags = a.classification.get('e-2-carboxylic acid');
+  assert.ok(flags.includes('INSUFFICIENT_IDENTITY'));
+  assert.ok(!flags.includes('SAFE_TO_CREATE'));
+  assert.match(a.exclusionReasons.get('e-2-carboxylic acid'), /generic_fragment.*carboxylic acid/);
+});
+
+test('REGRESSION: the sixteen real substances the old heuristic flagged are NOT excluded', () => {
+  // A detector that is 94% false positives is the alert-fatigue failure this repo has already
+  // paid for. Every one of these is a real compound and must pass.
+  const real = [
+    '4-hydroxycyclophosphamide', '4-hydroxypropranolol', '6-gingerol', '6-shogaol',
+    '4-hydroperoxycyclophosphamide', 'delta-9-tetrahydrocannabinol',
+    'aic 5-aminoimidazole-4-carboxamide', 'mdma 3 4-methylenedioxymethamphetamine',
+    '4-fluoro-1-naphthol', '6-fluorodopamine', '7-hydroxycannabidiol', '7-carboxycannabidiol',
+    'n1-acetyltriethylenetetramine', '25-hydroxycholesterol', '4-diazoimidazole-5-carboxamide',
+    '5-formyl-2 4-dimethyl-1h-pyrrole-3-carboxylic acid',
+  ];
+  for (const n of real) {
+    const a = analyze([row(n, '50-78-2', 1)]);
+    const flags = a.classification.get(n.toLowerCase());
+    assert.ok(flags.includes('SAFE_TO_CREATE'), `${n} was wrongly excluded as a fragment`);
+  }
+  // And a real stereo-prefixed substance survives the locant strip.
+  const d = analyze([row('D-2-aminobutyric acid', '1492-24-6', 1)]);
+  assert.ok(d.classification.get('d-2-aminobutyric acid').includes('SAFE_TO_CREATE'));
+});
+
+test('fragmentCore strips a leading locant or stereo marker and nothing else', () => {
+  const { fragmentCore } = require('./preview');
+  assert.strictEqual(fragmentCore('e-2-carboxylic acid'), 'carboxylic acid');
+  assert.strictEqual(fragmentCore('4-hydroxypropranolol'), 'hydroxypropranolol');
+  assert.strictEqual(fragmentCore('25-hydroxycholesterol'), 'hydroxycholesterol');
+  assert.strictEqual(fragmentCore('leuprolide'), 'leuprolide');
+  assert.strictEqual(fragmentCore('leuprolide acetate'), 'leuprolide acetate');
 });
 
 test('free base whose CAS disagrees with its parent is DISTINCT_FORM', () => {

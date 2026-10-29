@@ -147,14 +147,37 @@ const BLOCKERS = [
 // `benzamide` are NOT here, because both are real compounds — a blocklist that swallows real
 // substances to catch fragments is the wrong trade.
 const GENERIC_FRAGMENT_NAMES = new Set([
-  'amine', 'amide', 'carboxamide', 'ester', 'ether', 'ketone', 'aldehyde',
+  'amine', 'amide', 'carboxamide', 'carboxylic acid', 'ester', 'ether', 'ketone', 'aldehyde',
   'derivative', 'analog', 'analogue', 'isomer', 'enantiomer', 'salt', 'impurity', 'metabolite',
 ]);
 
-// A name that looks like the tail of an IUPAC string: a locant digit plus a class suffix, with no
-// parent stem in front of it. REVIEW ONLY — never blocked, because the pattern also matches real
-// compound names and a false exclusion is its own kind of silent loss.
-const FRAGMENT_SUSPECT_RE = /^[a-z0-9,'\- ]{0,40}\d+-[a-z]*(?:carboxamide|carboxylic acid|amine|amide|ester|ether|one|ol)$/;
+// ── THE HEURISTIC THAT WAS 94% NOISE, AND WHAT REPLACED IT ──────────────────
+//
+// The first version flagged "a locant digit plus a class suffix" as a suspected fragment. On the
+// 29 Oct run it returned 17 names of which SIXTEEN were real substances —
+// `4-hydroxycyclophosphamide`, `6-gingerol`, `25-hydroxycholesterol`,
+// `n1-acetyltriethylenetetramine` and so on. It blocked nothing, being review-only, but a report
+// that is 94% false positives is the 168-false-alerts-a-week pattern this repo has already paid
+// for: the fix for a detector nobody trusts is a quieter detector, not a louder one.
+//
+// The real signal was never the locant. It is that the name's CORE is a bare class term with
+// nothing but a position marker in front of it. So: strip leading locants and stereo descriptors,
+// then ask whether what remains is a word that is never itself a substance.
+//
+//   e-2-carboxylic acid      -> carboxylic acid     bare class term    FRAGMENT
+//   d-2-aminobutyric acid    -> aminobutyric acid   a real substance   kept
+//   4-hydroxypropranolol     -> hydroxypropranolol  a real substance   kept
+//   25-hydroxycholesterol    -> hydroxycholesterol  a real substance   kept
+//
+// One true positive on the real data, no false ones. `e-` is a legitimate E/Z stereo descriptor,
+// which is why the prefix alone could never have been the test.
+const LEADING_LOCANT_RE = /^(?:[dlrsez]|[a-z]{1,2})?-?\d+[a-z]?-/;
+
+function fragmentCore(identity) {
+  const s = String(identity || '');
+  const stripped = s.replace(LEADING_LOCANT_RE, '').trim();
+  return stripped || s;
+}
 const WARNINGS = ['REVIEW_SHARED_CAS', 'INVALID_CAS_EVIDENCE'];
 
 // Form phrases that name the neutral substance. Deliberately NOT in identity.js's stripping rules:
@@ -504,9 +527,11 @@ function analyze(rows) {
         flags.push('DUPLICATE_RISK');
         reasons.push(`duplicate_risk:same_neutral_substance_as:${duplicateRisk.get(key)}`);
       }
-      if (GENERIC_FRAGMENT_NAMES.has(key)) {
+      // The bare name, or the name once a leading locant/stereo marker is removed.
+      const core = fragmentCore(key);
+      if (GENERIC_FRAGMENT_NAMES.has(key) || GENERIC_FRAGMENT_NAMES.has(core)) {
         flags.push('INSUFFICIENT_IDENTITY');
-        reasons.push('insufficient_identity:generic_fragment_not_a_substance');
+        reasons.push(`insufficient_identity:generic_fragment_not_a_substance:${core}`);
       }
       if (sharedCasIdentities.has(key)) flags.push('REVIEW_SHARED_CAS');
       if (g.invalid && g.invalid.size) flags.push('INVALID_CAS_EVIDENCE');
@@ -530,9 +555,9 @@ function analyze(rows) {
     REVIEW_SHARED_CAS: inFlag('REVIEW_SHARED_CAS'),
     INVALID_CAS_EVIDENCE: inFlag('INVALID_CAS_EVIDENCE'),
   };
-  // Review-only: names shaped like the tail of an IUPAC string. Reported so a human can look,
-  // never excluded, because the pattern also matches real compounds.
-  out.fragmentSuspects = out.executionSet.CREATE.filter((k) => FRAGMENT_SUSPECT_RE.test(k));
+  // Nothing left to report here: the only fragments the data contains are now caught
+  // deterministically, as INSUFFICIENT_IDENTITY, with the stripped core named in the reason.
+  out.fragmentSuspects = [];
   // The assertion that matters: nothing excluded is unexplained, and nothing is both.
   const excluded = [...out.classification.entries()]
     .filter(([, f]) => !f.includes('SAFE_TO_CREATE')).map(([k]) => k);
@@ -584,4 +609,5 @@ function analyze(rows) {
 module.exports = {
   analyze, BLOCKERS, WARNINGS, descriptorVariantOf, chemicalCore, looksTruncated,
   NON_CHEMICAL_WORDS, NEUTRAL_FORM_PHRASES, ISOTOPE_RE, STEREO_RE,
+  GENERIC_FRAGMENT_NAMES, fragmentCore,
 };
