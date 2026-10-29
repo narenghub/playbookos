@@ -475,8 +475,24 @@ function analyze(rows) {
     const bothNames = `${myName} ${parent}`;
     checks.push(['single shared valid CAS with the parent',
       myCas.length === 1 && parentCas.length === 1 && myCas[0] === parentCas[0]]);
-    checks.push(['that CAS is not itself contested across substances',
-      !out.sharedCas.some((s) => s.kind === 'DISTINCT_NAMES_SHARED_CAS' && myCas.includes(s.cas))]);
+    // ── THE SELF-CONTEST TRAP ────
+    //
+    // The first version of this check asked only "is this CAS contested", and the answer was
+    // always yes — because THIS PAIR is the contest. `cabozantinib` and `cabozantinib free base`
+    // share 849217-68-1, "free base" is not a form token, so the pair is itself a
+    // DISTINCT_NAMES_SHARED_CAS finding and the check failed on evidence it generated.
+    //
+    // On the 29 Oct run that produced ALIAS_PROVEN 0 of 7, with six of the seven failing on this
+    // one line. A check that cannot pass for the cases it was written for is not a strict check,
+    // it is a broken one, and it reads as a confident "none of these qualify".
+    //
+    // So a contest counts only when a THIRD substance is involved. `selumetinib free base` still
+    // fails, correctly, because 606143-89-9 is also claimed by binimetinib — a real dispute that
+    // has nothing to do with the free-base pair.
+    checks.push(['that CAS is not contested by a THIRD substance',
+      !out.sharedCas.some((s) => s.kind === 'DISTINCT_NAMES_SHARED_CAS'
+        && myCas.includes(s.cas)
+        && s.identities.some((i) => i !== key && i !== parent))]);
     checks.push(['no isotopic marker on either name', !ISOTOPE_RE.test(bothNames)]);
     checks.push(['no stereochemical marker on either name', !STEREO_RE.test(bothNames)]);
     checks.push(['the name is exactly the parent plus the phrase',

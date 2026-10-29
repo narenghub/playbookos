@@ -394,6 +394,47 @@ test('free base sharing one CAS with its parent is SAME_NEUTRAL_SUBSTANCE and is
   assert.ok(a.classification.get('ketamine').includes('SAFE_TO_CREATE'));
 });
 
+// ── DECISION 3: THE CHECK THAT COULD NOT PASS ───────────────────────────────
+
+test('a free-base pair does not disqualify itself by being its own shared-CAS finding', () => {
+  // The 29 Oct run returned ALIAS_PROVEN 0 of 7, six of them failing "that CAS is not itself
+  // contested". The pair IS the contest: cabozantinib and cabozantinib free base share
+  // 849217-68-1, "free base" is not a form token, so the pair registers as
+  // DISTINCT_NAMES_SHARED_CAS and the check failed on evidence it had generated. A check that
+  // cannot pass for the cases it was written for reads as a confident "none of these qualify".
+  const a = analyze([
+    row('Cabozantinib', '849217-68-1', 1),
+    row('Cabozantinib (free base)', '849217-68-1', 2),
+  ]);
+  assert.strictEqual(a.freeForm[0].aliasProof.verdict, 'ALIAS_PROVEN');
+});
+
+test('a THIRD substance claiming the CAS still disqualifies it', () => {
+  // selumetinib free base must stay excluded: 606143-89-9 is also claimed by binimetinib, a real
+  // dispute with nothing to do with the free-base pair.
+  const a = analyze([
+    row('Selumetinib', '606143-89-9', 1),
+    row('Selumetinib (free base)', '606143-89-9', 2),
+    row('Binimetinib', '606143-89-9', 3),
+  ]);
+  const f = a.freeForm.find((x) => /free base/.test(x.identity));
+  assert.strictEqual(f.aliasProof.verdict, 'NOT_PROVEN');
+  assert.ok(f.aliasProof.failed.some((s) => /THIRD substance/.test(s)));
+});
+
+test('a salt sibling sharing the base CAS still disqualifies it', () => {
+  // If the source files the acetate under the base's number it is not distinguishing forms at
+  // all, and then "free base" cannot be read as merely a name.
+  const a = analyze([
+    row('Octreotide', '83150-76-9', 1),
+    row('Octreotide (free base)', '83150-76-9', 2),
+    row('Octreotide acetate', '83150-76-9', 3),
+  ]);
+  const f = a.freeForm.find((x) => /free base/.test(x.identity));
+  assert.strictEqual(f.aliasProof.verdict, 'NOT_PROVEN');
+  assert.ok(f.aliasProof.failed.some((s) => /sibling/.test(s)));
+});
+
 test('a bare functional-group word is not a substance and is excluded', () => {
   // `amine` reached the 29 Oct execution set as a proposed molecule. It was excluded only because
   // its two CAS numbers disagreed; with one CAS it would have been created.

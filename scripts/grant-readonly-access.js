@@ -44,12 +44,41 @@ async function main() {
   await initDB();
 
   if (REVOKE) {
-    // Order matters: privileges first, then the role itself, or the DROP is refused.
+    const present = await query(`SELECT 1 FROM pg_roles WHERE rolname = $1`, [ROLE]);
+    if (!present.rowCount) {
+      console.log(`\n✅ ${ROLE} does not exist — nothing to revoke.\n`);
+      return;
+    }
+
+    // ── WHY THE FIRST VERSION FAILED ────
+    //
+    //   role "playnexa_ro" cannot be dropped because some objects depend on it
+    //
+    // ALTER DEFAULT PRIVILEGES records a dependency owned by the GRANTOR, and revoking the
+    // explicit table grants does not remove it. DROP OWNED BY removes every privilege and default
+    // ACL referencing the role across the database, which is what the dependency actually is.
+    //
+    // DROP OWNED BY is safe here precisely BECAUSE the role is read-only: it owns no table, no
+    // sequence and no data, so there is nothing of value to drop. On a role that owned objects
+    // this would destroy them, which is why it is paired with the read-only guarantee rather than
+    // reached for generally.
     await query(`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${ROLE}`).catch(() => {});
     await query(`REVOKE ALL ON SCHEMA public FROM ${ROLE}`).catch(() => {});
     await query(`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM ${ROLE}`).catch(() => {});
+    await query(`DROP OWNED BY ${ROLE}`).catch((e) => {
+      console.log(`   DROP OWNED BY reported: ${e.message}`);
+    });
     await query(`DROP ROLE IF EXISTS ${ROLE}`);
-    console.log(`\n✅ ${ROLE} revoked and dropped. Any connection string for it is now dead.\n`);
+
+    // Verified, not assumed. The previous run printed a failure and the role survived; a revoke
+    // that reports success without checking would be worse than one that fails loudly.
+    const left = await query(`SELECT 1 FROM pg_roles WHERE rolname = $1`, [ROLE]);
+    if (left.rowCount) {
+      console.error(`\n✗ ${ROLE} STILL EXISTS — the connection string is still live.\n`);
+      process.exit(1);
+    }
+    console.log(`\n✅ ${ROLE} dropped, confirmed absent from pg_roles.`);
+    console.log('   Any connection string for it is now dead.\n');
     return;
   }
 
