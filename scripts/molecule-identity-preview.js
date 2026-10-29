@@ -34,7 +34,19 @@
 const { initDB, query } = require('../src/lib/db');
 const { analyze } = require('../src/lib/molecules/preview');
 
-const KNOWN = [];
+// ── WHY A SUMMARY MODE EXISTS ───────────────────────────────────────────────
+//
+// The full report is ~2,800 lines, most of it the 2,433-name CREATE listing. On 29 Oct a run over
+// `railway ssh` was CUT OFF at about line 2,100 — and the ssh client still exited 0, because that
+// status belongs to the transport and not to the script. Everything that decides the migration
+// (the expected state, the invariants, the exclusion integrity, the verdict) prints at the END, so
+// a truncated run loses exactly the part worth reading while looking like a success.
+//
+// That is the `| tail -1` outage in a new costume: a verdict inferred from a stream that did not
+// finish. --summary prints the decision sections only, about 120 lines, which crosses the wire
+// intact. The full listings remain available without the flag, for a run that writes to a file.
+const SUMMARY = process.argv.slice(2).includes('--summary');
+const KNOWN = ['--summary'];
 for (const a of process.argv.slice(2)) {
   if (!KNOWN.includes(a)) { console.error(`unknown flag ${a} — this script takes none`); process.exit(2); }
 }
@@ -210,7 +222,7 @@ async function main() {
   console.log('   group splits into two or more identities and every one carries at most one valid');
   console.log('   CAS. A conflict that merely MOVES is reported as surviving, not resolved.\n');
   r('eliminated', S.eliminatedBySaltForm);
-  if (a.eliminated.length) {
+  if (a.eliminated.length && !SUMMARY) {
     console.log('\n   every elimination, with its split — inspect these:\n');
     a.eliminated.forEach((e) => {
       console.log(`     legacy group: ${e.legacy}   had CAS: ${e.legacyCas.join(' | ')}`);
@@ -253,7 +265,7 @@ async function main() {
   console.log('   number stay separate and stay visible.\n');
 
   const ORDER = { DISTINCT_NAMES_SHARED_CAS: 0, DESCRIPTOR_VARIANT: 1, EXPLAINED: 2 };
-  a.sharedCas.sort((x, y) => ORDER[x.kind] - ORDER[y.kind]).forEach((s) => {
+  if (!SUMMARY) a.sharedCas.sort((x, y) => ORDER[x.kind] - ORDER[y.kind]).forEach((s) => {
     console.log(`\n     CAS ${s.cas}   ${s.kind}`);
     console.log(`       identities : ${s.identities.join(' | ')}`);
     console.log(`       filed as   : ${s.sourceNames.join(' | ')}`);
@@ -267,7 +279,7 @@ async function main() {
   console.log('   `mirvetuximab soravtansine` / `durvalumab` share a number and are two different');
   console.log('   drugs. Only a human can tell those apart, so nothing below is acted on.\n');
   r('candidates awaiting a decision', S.synonymCandidates);
-  a.synonymCandidates.slice(0, 60).forEach((c) => {
+  if (!SUMMARY) a.synonymCandidates.slice(0, 60).forEach((c) => {
     console.log(`     CAS ${String(c.cas).padEnd(16)} ${c.identities.join('  <->  ')}`);
   });
   if (a.synonymCandidates.length > 60) console.log(`     … and ${a.synonymCandidates.length - 60} more`);
@@ -400,7 +412,7 @@ async function main() {
   r('  SAME_NEUTRAL_SUBSTANCE', S.freeFormSameNeutral);
   r('  DISTINCT_FORM', S.freeFormDistinct);
   r('  AMBIGUOUS (blocked from creation)', S.freeFormAmbiguous);
-  a.freeForm.forEach((f) => {
+  if (!SUMMARY) a.freeForm.forEach((f) => {
     console.log(`\n     ${f.identity}   [${f.disposition}]`);
     console.log(`       filed as        : ${f.sourceNames.join(' | ')}`);
     console.log(`       CAS             : ${f.cas.join(' | ') || '(none valid)'}`);
@@ -438,7 +450,7 @@ async function main() {
   console.log('   isotopic markers each name does or does not carry, so a human can rule.');
   console.log('   No synonym is added, and a shared CAS is not treated as equivalence.\n');
   r('identities in the cluster', S.thcIdentities);
-  a.thcCluster.forEach((t) => {
+  if (!SUMMARY) a.thcCluster.forEach((t) => {
     console.log(`\n     ${t.identity}`);
     console.log(`       filed as   : ${t.sourceNames.join(' | ')}`);
     console.log(`       CAS        : ${t.cas.join(' | ') || '(none valid)'}`
@@ -473,7 +485,7 @@ async function main() {
   console.log('   collapsing an enriched compound into its natural-abundance form.\n');
   const isotopeIds = [...a.e1.groups.keys()].filter((k) => /enriched|deuterated|\[18f\]|\bd\d\b|-d\d/.test(k));
   r('identities carrying an isotopic marker', isotopeIds.length);
-  isotopeIds.slice(0, 20).forEach((k) => {
+  if (!SUMMARY) isotopeIds.slice(0, 20).forEach((k) => {
     const g = a.e1.groups.get(k);
     console.log(`     ${String(k).padEnd(56)} CAS ${[...g.cas].join(' | ') || '(none valid)'}`);
   });
@@ -496,10 +508,14 @@ async function main() {
   // check WHAT would be created — which is how `amine` sat in the execution set unnoticed. Four
   // per line because this is a list to scan, and railway ssh hangs up on silence rather than on
   // volume.
-  console.log(`\n   CREATE — all ${ex.CREATE.length} identities:\n`);
-  const sorted = ex.CREATE.slice().sort();
-  for (let i = 0; i < sorted.length; i += 4) {
-    console.log(`     ${sorted.slice(i, i + 4).map((s) => String(s).slice(0, 34).padEnd(36)).join('')}`);
+  if (SUMMARY) {
+    console.log(`\n   CREATE — ${ex.CREATE.length} identities (listing suppressed by --summary; run without it for all names)`);
+  } else {
+    console.log(`\n   CREATE — all ${ex.CREATE.length} identities:\n`);
+    const sorted = ex.CREATE.slice().sort();
+    for (let i = 0; i < sorted.length; i += 4) {
+      console.log(`     ${sorted.slice(i, i + 4).map((s) => String(s).slice(0, 34).padEnd(36)).join('')}`);
+    }
   }
 
   if (a.fragmentSuspects.length) {
