@@ -27,7 +27,7 @@
 // "It should be idempotent" is a comment; a second pass that writes zero rows is evidence.
 'use strict';
 
-const { initDB, query } = require('../src/lib/db');
+const { initDB, query, withTransaction } = require('../src/lib/db');
 const { validCas } = require('../src/lib/catalogue/cas');
 // Imported directly and NEVER injectable. identityOf is pure, and taking it from a stub would mean
 // a checker could accidentally blank the identity rules and still pass — the guard would then be
@@ -39,6 +39,20 @@ const { identityOf, moleculeKey } = require('../src/lib/molecules/identity');
 // pool pointed at a throwaway cluster so the REAL backfill runs against a real server, rather than
 // a reimplementation of it being tested instead.
 let Q = query;
+
+// ── PER-IDENTITY ATOMICITY ──────────────────────────────────────────────────
+//
+// Every statement below is independently idempotent, so a crash is already recoverable: the rows
+// keep molecule_id NULL and a re-run links them. But "recoverable" and "never partially applied"
+// are different promises, and the second is the one that was asked for — a failure must not leave
+// an identity partially treated as migrated.
+//
+// So the molecule, its aliases, its contest record and its row links commit together or not at
+// all. Per identity rather than one transaction for all 2,428: a single enormous transaction
+// holds locks across the whole run and turns any failure into a total rollback, which is the
+// opposite of restartable. This way a crash leaves earlier identities finished, later ones
+// untouched, and none half-done.
+let TX = withTransaction;
 
 const args = process.argv.slice(2);
 let EXECUTE = args.includes('--execute');
@@ -90,6 +104,7 @@ async function resolveExisting(identity) {
 
 async function main(deps = {}) {
   if (deps.query) Q = deps.query; else await initDB();
+  if (deps.withTransaction) TX = deps.withTransaction;
   if (deps.execute !== undefined) EXECUTE = deps.execute;
   // Reset the counters so a second pass in the same process reports its OWN writes rather than a
   // running total — the idempotence assertion depends on this being per-pass.
@@ -237,9 +252,14 @@ async function main(deps = {}) {
         ? contested.get(identity).join(',')
         : (cas ? null : [...new Set(g.rows.map((x) => x.cas).filter(Boolean))].join(',') || null);
 
+      // Everything from here to the row link is ONE unit of work for this identity. In EXECUTE
+      // mode it runs inside a transaction so the molecule, its aliases, its contest record and its
+      // links commit together or not at all; `q` is the transaction's client there and the plain
+      // handle otherwise, so the dry-run path reads identically.
+      const applyIdentity = async (q) => {
       if (!existing) {
         if (EXECUTE) {
-          const ins = await Q(
+          const ins = await q(
             `INSERT INTO molecules
                (preferred_name, normalized_name, cas, substance_form, derived_base_name,
                 form_tokens, source, raw_reference, derivation_method, confidence,
@@ -266,7 +286,7 @@ async function main(deps = {}) {
       // ── ALIASES: same substance, other name ────
       for (const alias of g.rec.aliases) {
         if (!EXECUTE) { stats.aliasesCreated += 1; continue; }
-        const taken = await Q(`SELECT molecule_id FROM molecule_aliases WHERE alias = $1`, [alias]);
+        const taken = await q(`SELECT molecule_id FROM molecule_aliases WHERE alias = $1`, [alias]);
         if (taken.rowCount) {
           if (existing && taken.rows[0].molecule_id !== existing.id) {
             note('alias_collision', alias, identity,
@@ -278,7 +298,7 @@ async function main(deps = {}) {
         // A name that is already some molecule's OWN identity must not be forced into an alias —
         // the trigger would refuse it, and a refusal inside a loop would abort the whole pass. So
         // it is detected here and recorded as the conflict it is.
-        const ownedByOther = await Q(`SELECT id FROM molecules WHERE normalized_name = $1`, [alias]);
+        const ownedByOther = await q(`SELECT id FROM molecules WHERE normalized_name = $1`, [alias]);
         if (ownedByOther.rowCount && existing && ownedByOther.rows[0].id !== existing.id) {
           note('alias_collision', alias, identity,
             `"${alias}" is the identity of molecule ${ownedByOther.rows[0].id}; not aliasing it to ${existing.id}`,
@@ -287,7 +307,7 @@ async function main(deps = {}) {
         }
         if (ownedByOther.rowCount) continue;      // it IS this molecule; nothing to add
         if (!existing || !existing.id) continue;
-        await Q(
+        await q(
           `INSERT INTO molecule_aliases (molecule_id, alias, alias_type, source, confidence)
            VALUES ($1,$2,'inn',$3,'high') ON CONFLICT (alias) DO NOTHING`,
           [existing.id, alias, `backfill:${src.table}`]);
@@ -298,7 +318,7 @@ async function main(deps = {}) {
       // the database rather than by re-running the analysis.
       if (EXECUTE && isContested) {
         const key = `cas_contested|${identity}|${src.table}|${contested.get(identity).join(',')}`.slice(0, 500);
-        const c = await Q(
+        const c = await q(
           `INSERT INTO molecule_conflicts
              (kind, filed_name, identity_name, detail, cas_values, source_table, source_ids, conflict_key)
            VALUES ('cas_contested',$1,$2,$3,$4,$5,$6,$7)
@@ -311,13 +331,23 @@ async function main(deps = {}) {
 
       // ── LINK THE SOURCE ROWS ────
       if (EXECUTE && existing && existing.id) {
-        const upd = await Q(
+        const upd = await q(
           `UPDATE ${src.table} SET molecule_id = $1, molecule_unresolved_reason = NULL
             WHERE ${src.idCol} = ANY($2) AND molecule_id IS NULL`,
           [existing.id, ids]);
         if (upd.rowCount) { stats.rowsLinked += upd.rowCount; stats.writes += 1; }
       } else if (!EXECUTE) {
         stats.rowsLinked += g.rows.length;
+      }
+      };  // end applyIdentity
+
+      if (EXECUTE) {
+        // A failure here rolls this identity back entirely and is re-raised, so the run stops
+        // rather than continuing past a half-applied substance. Earlier identities stay committed
+        // and a re-run resumes from them — which is what restartable means.
+        await TX(async (client) => applyIdentity((text, params) => client.query(text, params)));
+      } else {
+        await applyIdentity(Q);
       }
     }
   }

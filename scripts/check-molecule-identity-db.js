@@ -147,7 +147,21 @@ const FIXTURE_TABLES = `
     await q(`INSERT INTO supplier_products (product_name, cas) VALUES
       ('Metformin Hydrochloride', '1115-70-4'), ('Acetaminophen', '103-90-2')`);
 
-    const res = await quiet(backfill.main)({ query: q, execute: true });
+    // A REAL transaction helper, so the path exercised here is the transactional one the migration
+  // uses — not a second code path that happens to produce the same rows.
+  const tx = async (fn) => {
+    const client = await A.connect();
+    try {
+      await client.query('BEGIN');
+      const out = await fn(client);
+      await client.query('COMMIT');
+      return out;
+    } catch (e) {
+      try { await client.query('ROLLBACK'); } catch (_) { /* best effort */ }
+      throw e;
+    } finally { client.release(); }
+  };
+  const res = await quiet(backfill.main)({ query: q, withTransaction: tx, execute: true });
 
     // ── 2. WHAT MUST NOT HAVE MERGED ──────────────────────────────────────
     const mol = async (name) => (await q(`SELECT * FROM molecules WHERE normalized_name = $1`, [name])).rows[0];
@@ -261,7 +275,7 @@ const FIXTURE_TABLES = `
     } else bad('the CAS evidence states are not distinguishable', JSON.stringify(st));
 
     // ── 5. IDEMPOTENCE, MEASURED ──────────────────────────────────────────
-    const second = await quiet(backfill.main)({ query: q, execute: true });
+    const second = await quiet(backfill.main)({ query: q, withTransaction: tx, execute: true });
     if (second.writes === 0) ok('a second pass writes NOTHING — idempotent, measured rather than intended');
     else bad(`the second pass issued ${second.writes} write statement(s)`, JSON.stringify(second));
 
