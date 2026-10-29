@@ -388,6 +388,109 @@ async function main() {
     console.log(`       ${[...uns.names].slice(0, 5).map((n) => JSON.stringify(n)).join(', ')} (${uns.rows} row(s))`);
   }
 
+  // ── E1.1-1 ────────────────────────────────────────────────────────────────
+  h('E1.1-1', 'FREE BASE / FREE ACID, classified against evidence', 'E1 CLASSIFICATION');
+  console.log('   No global stripping rule, and none derived from frequency. Each case is decided');
+  console.log('   on what the source says, and where it says too little the answer is AMBIGUOUS.');
+  console.log('   NOTHING IS MERGED by this census.\n');
+  console.log('   STRUCTURAL EVIDENCE: NONE. No InChIKey, SMILES or molfile exists anywhere in');
+  console.log('   this database (section 6 proves it against the live schema), so every');
+  console.log('   classification below rests on names and registry numbers alone.\n');
+  r('cases found', S.freeFormCases);
+  r('  SAME_NEUTRAL_SUBSTANCE', S.freeFormSameNeutral);
+  r('  DISTINCT_FORM', S.freeFormDistinct);
+  r('  AMBIGUOUS (blocked from creation)', S.freeFormAmbiguous);
+  a.freeForm.forEach((f) => {
+    console.log(`\n     ${f.identity}   [${f.disposition}]`);
+    console.log(`       filed as        : ${f.sourceNames.join(' | ')}`);
+    console.log(`       CAS             : ${f.cas.join(' | ') || '(none valid)'}`);
+    console.log(`       neutral parent  : ${f.parentExists ? `"${f.parent}" EXISTS, CAS ${f.parentCas.join(' | ') || '(none valid)'}` : `"${f.parent}" ABSENT`}`);
+    console.log(`       salt/form kin   : ${f.saltCounterparts.join(', ') || '(none)'}`);
+    console.log(`       shares CAS with : ${f.sharedCasWith.join(', ') || '(nothing)'}`);
+    console.log(`       structural ev.  : ${f.structuralEvidence}`);
+    console.log(`       reason          : ${f.reason}`);
+    console.log(`       E1 disposition  : ${(a.classification.get(f.identity) || []).join(', ')}`);
+    console.log(`       rows            : ${f.refs.join(', ')}`);
+  });
+
+  // ── E1.1-2 ────────────────────────────────────────────────────────────────
+  h('E1.1-2', 'DRONABINOL / DELTA-9-THC CLUSTER — evidence, not a verdict', 'MEASURED FACT');
+  console.log('   Whether a generic THC name stands in for a specific stereoisomer is a judgement');
+  console.log('   about source intent. The records are printed with the stereochemical and');
+  console.log('   isotopic markers each name does or does not carry, so a human can rule.');
+  console.log('   No synonym is added, and a shared CAS is not treated as equivalence.\n');
+  r('identities in the cluster', S.thcIdentities);
+  a.thcCluster.forEach((t) => {
+    console.log(`\n     ${t.identity}`);
+    console.log(`       filed as   : ${t.sourceNames.join(' | ')}`);
+    console.log(`       CAS        : ${t.cas.join(' | ') || '(none valid)'}`
+      + `${t.invalidCas.length ? `   invalid: ${t.invalidCas.join(' | ')}` : ''}`);
+    console.log(`       rows       : ${t.rows}   form=${t.form}`);
+    console.log(`       stereo marker in the name : ${t.hasStereoMarker ? 'YES' : 'no'}`);
+    console.log(`       isotope marker in the name: ${t.hasIsotopeMarker ? 'YES' : 'no'}`);
+    console.log(`       refs       : ${t.refs.join(', ')}`);
+  });
+
+  // ── E1.1-3 ────────────────────────────────────────────────────────────────
+  h('E1.1-3', 'CORRUPTED_NAME_REVIEW_REQUIRED — all detected truncated names', 'MEASURED FACT');
+  console.log('   Upstream ingest defect. NOT repaired from CAS, and NOT created as a molecule:');
+  console.log('   sharing a registry number with the real substance is the fact that makes a');
+  console.log('   corrupted name look resolvable, and it is the fact that makes it dangerous.');
+  console.log('   A name nobody can read is not an identity.\n');
+  r('names detected', S.truncatedNames);
+  r('identities excluded from creation', S.corruptedName);
+  a.truncatedNames.forEach((t) => {
+    console.log(`\n     CORRUPTED_NAME_REVIEW_REQUIRED`);
+    console.log(`       filed : ${t.filed}`);
+    console.log(`       why   : ${t.why}`);
+    console.log(`       row   : ${t.table}#${t.rid}   <- repair the ingest here`);
+  });
+
+  // ── E1.1-4 ────────────────────────────────────────────────────────────────
+  h('E1.1-4', 'ISOTOPE REGRESSION INVARIANT', 'E1 CLASSIFICATION');
+  console.log('   > Commercial and analytical descriptors may normalize away;');
+  console.log('   > isotopic composition must not.\n');
+  console.log('   Asserted in src/lib/molecules/preview.test.js as two regression tests, so a');
+  console.log('   future widening of the descriptor rules fails the suite rather than silently');
+  console.log('   collapsing an enriched compound into its natural-abundance form.\n');
+  const isotopeIds = [...a.e1.groups.keys()].filter((k) => /enriched|deuterated|\[18f\]|\bd\d\b|-d\d/.test(k));
+  r('identities carrying an isotopic marker', isotopeIds.length);
+  isotopeIds.slice(0, 20).forEach((k) => {
+    const g = a.e1.groups.get(k);
+    console.log(`     ${String(k).padEnd(56)} CAS ${[...g.cas].join(' | ') || '(none valid)'}`);
+  });
+
+  // ── E1.1-5 ────────────────────────────────────────────────────────────────
+  h('E1.1-5', 'PROPOSED E1 EXECUTION SET', 'PREDICTION — nothing is executed');
+  const ex = a.executionSet;
+  r('CREATE', ex.CREATE.length);
+  r('QUARANTINE_IDENTITY_CONFLICT', ex.QUARANTINE_IDENTITY_CONFLICT.length);
+  r('QUARANTINE_CORRUPTED_NAME', ex.QUARANTINE_CORRUPTED_NAME.length);
+  r('AMBIGUOUS_FORM', ex.AMBIGUOUS_FORM.length);
+  r('INSUFFICIENT_IDENTITY', ex.INSUFFICIENT_IDENTITY.length);
+  r('REVIEW_SHARED_CAS (advisory, still created)', ex.REVIEW_SHARED_CAS.length);
+  r('INVALID_CAS_EVIDENCE (advisory, still created)', ex.INVALID_CAS_EVIDENCE.length);
+
+  console.log('\n   the excluded identities, in full:\n');
+  for (const cat of ['QUARANTINE_IDENTITY_CONFLICT', 'QUARANTINE_CORRUPTED_NAME',
+    'AMBIGUOUS_FORM', 'INSUFFICIENT_IDENTITY']) {
+    if (!ex[cat].length) continue;
+    console.log(`     ${cat}  (${ex[cat].length})`);
+    ex[cat].forEach((k) => console.log(`       ${String(k).slice(0, 62).padEnd(64)} ${a.exclusionReasons.get(k) || '(NO REASON — DEFECT)'}`));
+    console.log('');
+  }
+
+  h('E1.1-5b', 'EXCLUSION INTEGRITY — the assertion that matters', 'MEASURED FACT');
+  const ei = a.exclusionIntegrity;
+  r('identities excluded from creation', ei.excluded);
+  r('of those, carrying an explicit reason', ei.withReason);
+  r('excluded WITHOUT a reason', ei.missingReason.length === 0 ? '0  ✓' : `${ei.missingReason.length}  ✗ DEFECT`);
+  r('both created AND excluded', ei.createdAndExcluded.length === 0 ? '0  ✓' : `${ei.createdAndExcluded.length}  ✗ DEFECT`);
+  if (ei.missingReason.length) {
+    console.log('\n     ✗ these would be silently skipped — that is the failure mode this phase exists to remove:');
+    ei.missingReason.slice(0, 20).forEach((k) => console.log(`       ${k}`));
+  }
+
   // ── 12 ───────────────────────────────────────────────────────────────────
   h(12, 'RECOMMENDATION', 'HUMAN INTERPRETATION — the decision is yours');
 
@@ -413,15 +516,18 @@ async function main() {
   // merging or duplicating unresolved chemical identities, AND every unresolved case can be
   // excluded deterministically. A remaining descriptor gap fails the first condition, because it
   // means the run would create duplicates of substances it should treat as one.
-  const canExcludeDeterministically = S.insufficient === 0 || S.insufficient > 0; // quarantine path exists
   const wouldDuplicate = S.sharedCasDescriptorVariant > 0;
   const nothingSafe = S.safeToCreate === 0;
+  // An exclusion nobody can explain is an identity silently skipped, which is the failure class
+  // this whole phase exists to remove. It is a hard NO-GO, not a warning.
+  const unexplained = a.exclusionIntegrity.missingReason.length > 0
+    || a.exclusionIntegrity.createdAndExcluded.length > 0;
 
   let rec;
-  if (nothingSafe) rec = 'NO-GO';
-  else if (wouldDuplicate) rec = 'NO-GO';
-  else if (S.e1Conflicts > 0 || S.insufficient > 0) rec = 'GO WITH QUARANTINE';
-  else rec = 'GO';
+  if (nothingSafe || wouldDuplicate || unexplained) rec = 'NO-GO';
+  else if (S.quarantine > 0 || S.corruptedName > 0 || S.ambiguousForm > 0 || S.insufficient > 0) {
+    rec = 'GO WITH QUARANTINE';
+  } else rec = 'GO';
 
   console.log(`   ${rec}\n`);
   if (rec === 'NO-GO' && wouldDuplicate) {
@@ -431,14 +537,33 @@ async function main() {
     console.log('   scarcity claim on 9 Oct. Fix the rule, re-run, then decide.');
   } else if (rec === 'NO-GO') {
     console.log('   nothing is safely creatable — do not migrate.');
+  } else if (rec === 'NO-GO' && unexplained) {
+    console.log(`   ${a.exclusionIntegrity.missingReason.length} identity/identities would be excluded with NO recorded reason`);
+    console.log(`   and ${a.exclusionIntegrity.createdAndExcluded.length} would be both created and excluded. An identity that`);
+    console.log('   disappears without a reason is the silent-skip failure this phase removes.');
   } else if (rec === 'GO WITH QUARANTINE') {
     console.log(`   ${S.safeToCreate} substances are sufficiently evidenced to create, with no remaining`);
     console.log('   descriptor gap — so the run will not silently duplicate a substance.');
-    console.log(`   ${S.e1Conflicts} identity conflict(s) and ${S.insufficient} unnameable group(s) are REFUSED and`);
-    console.log('   recorded rather than decided; every one is excluded deterministically and its');
-    console.log('   rows stay unlinked WITH a reason, so they read as "attempted and refused".');
-    console.log(`   ${S.sharedCasDistinctNames} cross-identity CAS finding(s) and ${S.truncatedNames} truncated name(s) remain`);
-    console.log('   open as review work. They do not block creation and they are not resolved here.');
+    console.log('\n   EXCLUDED, each deterministically and each with a machine-readable reason:');
+    console.log(`     ${S.quarantine} identity conflict(s)      cas_disagreement:<values>`);
+    console.log(`     ${S.corruptedName} corrupted name(s)        corrupted_name:<why>`);
+    console.log(`     ${S.ambiguousForm} ambiguous form(s)        ambiguous_form:<phrase>`);
+    console.log(`     ${S.insufficient} unnameable group(s)      insufficient_identity:name_unusable`);
+    console.log(`   ${a.exclusionIntegrity.withReason} of ${a.exclusionIntegrity.excluded} exclusions carry a reason, and none is also in CREATE.`);
+    console.log('\n   STILL OPEN, and NOT blocking creation:');
+    console.log(`     ${S.sharedCasDistinctNames} cross-identity CAS finding(s) — the NAMES are sound and are created;`);
+    console.log('       what is contested is the CAS attribution on one side of each pair.');
+    console.log('       ** See the residual risk note below before authorising the migration. **');
+    console.log(`     ${S.truncatedNames} truncated name(s) recorded for upstream repair`);
+    console.log(`     ${S.invalidCasOccurrences} invalid CAS occurrence(s), refused as identifiers`);
+    console.log('\n   RESIDUAL RISK, stated rather than buried:');
+    console.log('   An identity in a DISTINCT_NAMES_SHARED_CAS pair is created WITH the contested');
+    console.log('   CAS. For `selumetinib | binimetinib` that means one of the two carries the');
+    console.log('   other\'s registry number, and a quotation drawn from it would name the wrong');
+    console.log('   material. The identity is right; the attribute is not. The narrow fix is to');
+    console.log('   create those molecules with cas = NULL and the contest recorded, so nothing');
+    console.log('   false is stored while the name-level identity still proceeds. That is a change');
+    console.log('   to the backfill, not to normalization, and it is NOT made here.');
   } else {
     console.log('   no blocking condition and no normalization gap found.');
   }

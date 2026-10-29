@@ -313,6 +313,138 @@ test('truncated chemical names are recorded and NOT repaired', () => {
   assert.strictEqual(a.summary.e1Groups, 2);
 });
 
+// ── E1.1 EDGE CASES ─────────────────────────────────────────────────────────
+
+test('ISOTOPE INVARIANT: descriptors normalize away, isotopic composition must not', () => {
+  // The demonstrated case from the 29 Oct run. `reference standard` is commercial; `10b-enriched`
+  // and `natural abundance` are the substance. These must never become one identity.
+  const a = analyze([
+    row('L-boronophenylalanine 10B-enriched (L-BPA)', '76099-46-2', 1),
+    row('L-boronophenylalanine reference standard 10B/natural abundance', '76099-46-2', 2),
+  ]);
+  assert.strictEqual(a.summary.e1Groups, 2,
+    'isotopic enrichment was erased by descriptor normalization');
+  const ids = [...a.e1.groups.keys()];
+  assert.ok(ids.some((i) => /10b-enriched/.test(i)), 'the enriched form lost its marker');
+});
+
+test('ISOTOPE INVARIANT: deuterated and radiolabelled forms stay distinct from the parent', () => {
+  const a = analyze([
+    row('MDMA (3,4-methylenedioxymethamphetamine) hydrochloride', '64057-70-1', 1),
+    row('MDMA-d5 (deuterated internal standard)', '1219794-27-8', 2),
+    row('Fluoromisonidazole [18F]FMISO', '121994-97-2', 3),
+    row('Fluoromisonidazole non-radioactive reference standard', '111986-72-4', 4),
+  ]);
+  const ids = [...a.e1.groups.keys()];
+  assert.ok(ids.includes('mdma-d5 deuterated'), 'the deuterated standard lost its label');
+  assert.ok(ids.some((i) => /18f/.test(i)), 'the radiolabel was erased');
+  assert.ok(ids.includes('fluoromisonidazole non-radioactive'));
+  assert.strictEqual(a.summary.e1Groups, 4);
+});
+
+test('a corrupted name is EXCLUDED from creation, not created because its CAS resolves', () => {
+  // The fact that makes it look resolvable — sharing a CAS with the real substance — is the fact
+  // that makes it dangerous. A name nobody can read is not an identity.
+  const a = analyze([
+    row('pyrimidin-5-yl)ethyl]benzoyl]-L-glutamic Acid', '137281-23-3', 1),
+    row('Pemetrexed', '137281-23-3', 2),
+  ]);
+  const corrupted = [...a.e1.groups.keys()].find((k) => /glutamic acid/.test(k));
+  assert.ok(corrupted, 'the corrupted identity vanished');
+  const flags = a.classification.get(corrupted);
+  assert.ok(flags.includes('QUARANTINE_CORRUPTED_NAME'));
+  assert.ok(!flags.includes('SAFE_TO_CREATE'), 'a corrupted name would have been created');
+  assert.match(a.exclusionReasons.get(corrupted), /^corrupted_name:/);
+  // The real substance is unaffected.
+  assert.ok(a.classification.get('pemetrexed').includes('SAFE_TO_CREATE'));
+});
+
+test('free base sharing one CAS with its parent is SAME_NEUTRAL_SUBSTANCE', () => {
+  const a = analyze([
+    row('Ketamine', '6740-88-1', 1),
+    row('Ketamine free base', '6740-88-1', 2),
+  ]);
+  assert.strictEqual(a.summary.freeFormCases, 1);
+  const f = a.freeForm[0];
+  assert.strictEqual(f.disposition, 'SAME_NEUTRAL_SUBSTANCE');
+  assert.strictEqual(f.parentExists, true);
+  assert.strictEqual(f.structuralEvidence, 'NONE — no InChIKey, SMILES or molfile exists in this database');
+  // Classified, NOT merged: both identities still exist.
+  assert.strictEqual(a.summary.e1Groups, 2);
+});
+
+test('free base whose CAS disagrees with its parent is DISTINCT_FORM', () => {
+  const a = analyze([
+    row('Selumetinib', '606143-89-9', 1),
+    row('Selumetinib free base', '943332-08-9', 2),
+  ]);
+  assert.strictEqual(a.freeForm[0].disposition, 'DISTINCT_FORM');
+  assert.match(a.freeForm[0].reason, /registry disagrees/);
+});
+
+test('free base with no parent, or without registry evidence, is AMBIGUOUS and BLOCKED', () => {
+  const a = analyze([
+    row('Obscurimab free base', '50-78-2', 1),      // no parent identity anywhere
+    row('Octreotide', null, 2),
+    row('Octreotide free base', null, 3),            // parent exists, neither has a valid CAS
+  ]);
+  assert.strictEqual(a.summary.freeFormAmbiguous, 2);
+  for (const f of a.freeForm) {
+    assert.strictEqual(f.disposition, 'AMBIGUOUS');
+    const flags = a.classification.get(f.identity);
+    assert.ok(flags.includes('AMBIGUOUS_FORM'));
+    assert.ok(!flags.includes('SAFE_TO_CREATE'),
+      'an unresolved identity leaked into the creation set');
+    assert.match(a.exclusionReasons.get(f.identity), /^ambiguous_form:/);
+  }
+});
+
+test('salt counterparts are reported as context and do not decide the disposition', () => {
+  const a = analyze([
+    row('Ketamine', '6740-88-1', 1),
+    row('Ketamine free base', '6740-88-1', 2),
+    row('Ketamine hydrochloride', '1867-66-9', 3),
+  ]);
+  const f = a.freeForm[0];
+  assert.ok(f.saltCounterparts.some((s) => /ketamine hydrochloride/.test(s)));
+  // Still decided on registry evidence, not on the salt's presence.
+  assert.strictEqual(f.disposition, 'SAME_NEUTRAL_SUBSTANCE');
+});
+
+test('the THC cluster is gathered as evidence with its stereo markers flagged', () => {
+  const a = analyze([
+    row('Dronabinol ((-)-trans-Δ9-tetrahydrocannabinol)', '1972-08-3', 1),
+    row('Delta-9-tetrahydrocannabinol (THC)', '1972-08-3', 2),
+    row('Dronabinol USP Reference Standard', '1972-08-3', 3),
+  ]);
+  assert.ok(a.summary.thcIdentities >= 2);
+  const stereo = a.thcCluster.find((t) => t.hasStereoMarker);
+  assert.ok(stereo, 'the (-)-trans-Δ9 stereochemistry was not detected');
+  // Nothing is merged by the census.
+  assert.ok(a.summary.thcIdentities >= 2);
+});
+
+test('EXCLUSION INTEGRITY: every excluded identity has a machine-readable reason', () => {
+  const a = analyze([
+    row('Leuprolide', '53714-56-0', 1),
+    row('Norketamine', '22159-41-7', 2),
+    row('Norketamine', '20864-83-9', 3),
+    row('pyrimidin-5-yl)ethyl]benzoyl]-L-glutamic Acid', '137281-23-3', 4),
+    row('Obscurimab free base', '50-78-2', 5),
+    row('()', null, 6),
+  ]);
+  assert.strictEqual(a.exclusionIntegrity.excluded, a.exclusionIntegrity.withReason,
+    `unexplained exclusions: ${a.exclusionIntegrity.missingReason.join(', ')}`);
+  assert.deepStrictEqual(a.exclusionIntegrity.missingReason, []);
+  assert.deepStrictEqual(a.exclusionIntegrity.createdAndExcluded, [],
+    'an identity was both created and excluded');
+  // And the execution set partitions cleanly.
+  const created = new Set(a.executionSet.CREATE);
+  for (const k of a.exclusionReasons.keys()) {
+    assert.ok(!created.has(k), `${k} is excluded and in CREATE`);
+  }
+});
+
 test('every E1 group receives exactly one decision set, and blockers exclude SAFE_TO_CREATE', () => {
   const a = analyze([
     row('Leuprolide', '53714-56-0', 1),

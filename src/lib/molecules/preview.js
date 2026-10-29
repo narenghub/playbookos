@@ -106,8 +106,34 @@ function looksTruncated(name) {
 // applies; warnings coexist with it, because a shared CAS is a reason to review an attribution and
 // not a reason to refuse a substance that is otherwise well evidenced. Reality is not mutually
 // exclusive, so a group can carry several warnings at once.
-const BLOCKERS = ['QUARANTINE_IDENTITY_CONFLICT', 'INSUFFICIENT_IDENTITY'];
+// ── WHY QUARANTINE_CORRUPTED_NAME AND AMBIGUOUS_FORM BLOCK ──────────────────
+//
+// Both were advisory in the previous version and both should not have been.
+//
+// A corrupted name — `pyrimidin-5-yl ethyl]benzoyl]-l-glutamic acid`, a fragment of pemetrexed's
+// IUPAC name with its opening brackets gone — would otherwise be CREATED as a canonical molecule,
+// and once it is a row with an id, something downstream will quote from it. Worse, it shares a CAS
+// with the real substance, so the very fact that makes it look resolvable is the fact that makes
+// it dangerous. A name nobody can read is not an identity.
+//
+// An AMBIGUOUS free-base case is an unresolved identity by definition. Creating it means possibly
+// creating a second row for a substance already present, and duplicates are undone by MERGING —
+// the direction that cost 478 identities in this phase and printed a false scarcity claim in
+// October. Excluding it is reversible: it can be created the moment someone rules on it.
+const BLOCKERS = [
+  'QUARANTINE_IDENTITY_CONFLICT', 'QUARANTINE_CORRUPTED_NAME',
+  'AMBIGUOUS_FORM', 'INSUFFICIENT_IDENTITY',
+];
 const WARNINGS = ['REVIEW_SHARED_CAS', 'INVALID_CAS_EVIDENCE'];
+
+// Form phrases that name the neutral substance. Deliberately NOT in identity.js's stripping rules:
+// they are classified here, case by case, against evidence — never collapsed by a global rule.
+const NEUTRAL_FORM_PHRASES = ['free base', 'free acid'];
+
+// Isotopic and stereochemical markers. Detection only, used to say whether a name carries a
+// distinction that normalization must never erase.
+const ISOTOPE_RE = /(\b|-)(d\d+|1[0-9][a-z]|[0-9]{1,3}[a-z]-(?:enriched|labell?ed)|deuterated|tritiated|\[\s*\d+[a-z]+\s*\]|enriched)(\b|-)/i;
+const STEREO_RE = /\(\s*[-+±]\s*\)|\b(?:trans|cis|rac|racemic|[rs])\b|\(\d+[ar]|δ\d|delta-\d|\b\d+[ar],/i;
 
 /**
  * @param rows [{ table, rid, name, cas }]
@@ -136,6 +162,11 @@ function analyze(rows) {
     descriptorRemovedCounts: {},
     truncatedNames: [],
     synonymCandidates: [],
+    // ── E1.1 edge-case census ────
+    freeForm: [],          // free base / free acid, classified against evidence
+    thcCluster: [],        // the dronabinol / delta-9-THC records, as evidence
+    corruptedIdentities: new Map(),  // identity -> why
+    executionSet: null,
   };
 
   // ── PASS A: the two groupings, built from the same rows in one walk ───────
@@ -160,8 +191,13 @@ function analyze(rows) {
       });
     }
     const trunc = looksTruncated(r.name);
-    if (trunc && out.truncatedNames.length < 100) {
-      out.truncatedNames.push({ filed: String(r.name).trim(), why: trunc, table: r.table, rid: r.rid });
+    if (trunc) {
+      if (out.truncatedNames.length < 100) {
+        out.truncatedNames.push({ filed: String(r.name).trim(), why: trunc, table: r.table, rid: r.rid });
+      }
+      // The identity this corrupted name would become must be excluded from creation. Recorded
+      // against the identity, not the row, because the identity is what would be created.
+      if (e1Key) out.corruptedIdentities.set(e1Key, trunc);
     }
 
     // CAS evidence state. "missing" and "present but invalid" are materially different: the first
@@ -311,19 +347,154 @@ function analyze(rows) {
   const sharedCasIdentities = new Set(
     out.sharedCas.filter((s) => s.kind === 'DISTINCT_NAMES_SHARED_CAS').flatMap((s) => s.identities));
 
+  // ── PASS C2: FREE BASE / FREE ACID, CLASSIFIED AGAINST EVIDENCE ──────────
+  //
+  // No global stripping rule, and none derived from frequency. Each case is decided on what the
+  // source actually says, and where the source says too little the answer is AMBIGUOUS rather
+  // than a guess in either direction.
+  //
+  // THERE IS NO STRUCTURAL EVIDENCE AVAILABLE. No InChIKey, SMILES or molfile exists anywhere in
+  // this database — section 1 of the preview proves it against the live schema. So every
+  // classification below rests on names and registry numbers alone, and that limit is stated on
+  // every row rather than left for a reader to discover.
+  for (const [key, g] of out.e1.groups) {
+    if (g.unresolvable) continue;
+    const phrase = NEUTRAL_FORM_PHRASES.find((p) => key.endsWith(` ${p}`));
+    if (!phrase) continue;
+
+    const parent = key.slice(0, -(phrase.length + 1)).trim();
+    const parentGroup = out.e1.groups.get(parent);
+    const myCas = [...g.cas];
+    const parentCas = parentGroup ? [...parentGroup.cas] : [];
+
+    // Does a salt or ester of the same parent exist? Context for a human, not a decision input:
+    // the presence of `ketamine hydrochloride` says the catalogue distinguishes forms, which makes
+    // `free base` more likely to be meaningful — but "more likely" is not evidence.
+    const saltCounterparts = [...out.e1.groups.entries()]
+      .filter(([k, v]) => !v.unresolvable && v.base === parent && v.form !== 'base' && k !== key)
+      .map(([k, v]) => `${k} (${v.form})`);
+
+    const sharedWith = out.sharedCas
+      .filter((s) => s.identities.includes(key))
+      .flatMap((s) => s.identities.filter((i) => i !== key));
+
+    let disposition; let reason;
+    if (!parentGroup) {
+      disposition = 'AMBIGUOUS';
+      reason = `the neutral parent "${parent}" does not exist as its own identity in this data — `
+        + 'nothing to be the same substance AS';
+    } else if (myCas.length === 1 && parentCas.length === 1 && myCas[0] === parentCas[0]) {
+      // The strongest evidence available without structures: the names differ only by a phrase
+      // that NAMES THE NEUTRAL FORM, and the source gives both the SAME registry number. That
+      // conjunction is much stronger than a shared CAS alone — which, on its own, also links
+      // selumetinib to binimetinib and must never imply synonymy.
+      disposition = 'SAME_NEUTRAL_SUBSTANCE';
+      reason = `identical single valid CAS ${myCas[0]} on both, and the names differ only by `
+        + `"${phrase}", which names the neutral form`;
+    } else if (myCas.length === 1 && parentCas.length === 1) {
+      disposition = 'DISTINCT_FORM';
+      reason = `the registry disagrees: ${myCas[0]} here vs ${parentCas[0]} on "${parent}"`;
+    } else {
+      disposition = 'AMBIGUOUS';
+      reason = `insufficient registry evidence (this: ${myCas.join(' | ') || 'no valid CAS'}; `
+        + `parent: ${parentCas.join(' | ') || 'no valid CAS'})`;
+    }
+
+    out.freeForm.push({
+      identity: key,
+      phrase,
+      sourceNames: [...g.names],
+      cas: myCas,
+      parent,
+      parentExists: !!parentGroup,
+      parentCas,
+      saltCounterparts,
+      sharedCasWith: [...new Set(sharedWith)],
+      refs: g.refs.slice(0, 10),
+      structuralEvidence: 'NONE — no InChIKey, SMILES or molfile exists in this database',
+      disposition,
+      reason,
+    });
+  }
+  const ambiguousForm = new Set(
+    out.freeForm.filter((f) => f.disposition === 'AMBIGUOUS').map((f) => f.identity));
+
+  // ── PASS C3: THE DRONABINOL / DELTA-9-THC CLUSTER, AS EVIDENCE ───────────
+  //
+  // Gathered, not adjudicated. Whether a generic THC name is standing in for a specific
+  // stereoisomer is a chemistry judgement about source intent, and the script's job is to put the
+  // exact records in front of someone who can make it — with the stereochemical and isotopic
+  // markers each name does or does not carry made explicit.
+  for (const [key, g] of out.e1.groups) {
+    if (g.unresolvable) continue;
+    if (!/dronabinol|tetrahydrocannabinol|\bthc\b/i.test(key)) continue;
+    out.thcCluster.push({
+      identity: key,
+      sourceNames: [...g.names],
+      cas: [...g.cas],
+      invalidCas: [...(g.invalid || [])],
+      rows: g.rows,
+      refs: g.refs.slice(0, 10),
+      hasStereoMarker: [...g.names].some((n) => STEREO_RE.test(n)),
+      hasIsotopeMarker: [...g.names].some((n) => ISOTOPE_RE.test(n)),
+      form: g.form,
+    });
+  }
+
   // ── PASS D: the per-molecule decision ────────────────────────────────────
+  // Every exclusion carries a machine-readable reason keyed by identity, so "why was this not
+  // created" is answerable from data rather than by re-deriving the logic.
+  out.exclusionReasons = new Map();
   for (const [key, g] of out.e1.groups) {
     const flags = [];
-    if (g.unresolvable) flags.push('INSUFFICIENT_IDENTITY');
-    else {
-      if (g.cas.size > 1) flags.push('QUARANTINE_IDENTITY_CONFLICT');
+    const reasons = [];
+    if (g.unresolvable) {
+      flags.push('INSUFFICIENT_IDENTITY');
+      reasons.push('insufficient_identity:name_unusable');
+    } else {
+      if (g.cas.size > 1) {
+        flags.push('QUARANTINE_IDENTITY_CONFLICT');
+        reasons.push(`cas_disagreement:${[...g.cas].join(',')}`);
+      }
+      if (out.corruptedIdentities.has(key)) {
+        flags.push('QUARANTINE_CORRUPTED_NAME');
+        reasons.push(`corrupted_name:${out.corruptedIdentities.get(key)}`);
+      }
+      if (ambiguousForm.has(key)) {
+        flags.push('AMBIGUOUS_FORM');
+        const f = out.freeForm.find((x) => x.identity === key);
+        reasons.push(`ambiguous_form:${f ? f.phrase.replace(' ', '_') : 'unknown'}`);
+      }
       if (sharedCasIdentities.has(key)) flags.push('REVIEW_SHARED_CAS');
       if (g.invalid && g.invalid.size) flags.push('INVALID_CAS_EVIDENCE');
     }
     const blocked = flags.some((f) => BLOCKERS.includes(f));
     if (!blocked) flags.unshift('SAFE_TO_CREATE');
+    else out.exclusionReasons.set(key, reasons.join('; '));
     out.classification.set(key, flags);
   }
+
+  // ── THE PROPOSED EXECUTION SET ───────────────────────────────────────────
+  const inFlag = (f) => [...out.classification.entries()]
+    .filter(([, flags]) => flags.includes(f)).map(([k]) => k);
+  out.executionSet = {
+    CREATE: inFlag('SAFE_TO_CREATE'),
+    QUARANTINE_IDENTITY_CONFLICT: inFlag('QUARANTINE_IDENTITY_CONFLICT'),
+    QUARANTINE_CORRUPTED_NAME: inFlag('QUARANTINE_CORRUPTED_NAME'),
+    AMBIGUOUS_FORM: inFlag('AMBIGUOUS_FORM'),
+    INSUFFICIENT_IDENTITY: inFlag('INSUFFICIENT_IDENTITY'),
+    REVIEW_SHARED_CAS: inFlag('REVIEW_SHARED_CAS'),
+    INVALID_CAS_EVIDENCE: inFlag('INVALID_CAS_EVIDENCE'),
+  };
+  // The assertion that matters: nothing excluded is unexplained, and nothing is both.
+  const excluded = [...out.classification.entries()]
+    .filter(([, f]) => !f.includes('SAFE_TO_CREATE')).map(([k]) => k);
+  out.exclusionIntegrity = {
+    excluded: excluded.length,
+    withReason: excluded.filter((k) => out.exclusionReasons.has(k)).length,
+    missingReason: excluded.filter((k) => !out.exclusionReasons.has(k)),
+    createdAndExcluded: out.executionSet.CREATE.filter((k) => excluded.includes(k)),
+  };
 
   out.summary = {
     sourceRows: out.measured.sourceRows,
@@ -349,11 +520,19 @@ function analyze(rows) {
     safeToCreate: [...out.classification.values()].filter((f) => f.includes('SAFE_TO_CREATE')).length,
     quarantine: [...out.classification.values()].filter((f) => f.includes('QUARANTINE_IDENTITY_CONFLICT')).length,
     insufficient: [...out.classification.values()].filter((f) => f.includes('INSUFFICIENT_IDENTITY')).length,
+    corruptedName: out.executionSet.QUARANTINE_CORRUPTED_NAME.length,
+    ambiguousForm: out.executionSet.AMBIGUOUS_FORM.length,
+    freeFormCases: out.freeForm.length,
+    freeFormSameNeutral: out.freeForm.filter((f) => f.disposition === 'SAME_NEUTRAL_SUBSTANCE').length,
+    freeFormDistinct: out.freeForm.filter((f) => f.disposition === 'DISTINCT_FORM').length,
+    freeFormAmbiguous: out.freeForm.filter((f) => f.disposition === 'AMBIGUOUS').length,
+    thcIdentities: out.thcCluster.length,
   };
 
   return out;
 }
 
 module.exports = {
-  analyze, BLOCKERS, WARNINGS, descriptorVariantOf, chemicalCore, looksTruncated, NON_CHEMICAL_WORDS,
+  analyze, BLOCKERS, WARNINGS, descriptorVariantOf, chemicalCore, looksTruncated,
+  NON_CHEMICAL_WORDS, NEUTRAL_FORM_PHRASES, ISOTOPE_RE, STEREO_RE,
 };
