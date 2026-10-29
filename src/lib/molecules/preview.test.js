@@ -359,7 +359,7 @@ test('a corrupted name is EXCLUDED from creation, not created because its CAS re
   assert.ok(a.classification.get('pemetrexed').includes('SAFE_TO_CREATE'));
 });
 
-test('free base sharing one CAS with its parent is SAME_NEUTRAL_SUBSTANCE', () => {
+test('free base sharing one CAS with its parent is SAME_NEUTRAL_SUBSTANCE and is NOT created', () => {
   const a = analyze([
     row('Ketamine', '6740-88-1', 1),
     row('Ketamine free base', '6740-88-1', 2),
@@ -369,8 +369,44 @@ test('free base sharing one CAS with its parent is SAME_NEUTRAL_SUBSTANCE', () =
   assert.strictEqual(f.disposition, 'SAME_NEUTRAL_SUBSTANCE');
   assert.strictEqual(f.parentExists, true);
   assert.strictEqual(f.structuralEvidence, 'NONE — no InChIKey, SMILES or molfile exists in this database');
-  // Classified, NOT merged: both identities still exist.
+  // Classified, NOT merged: both identities still exist as analysis rows.
   assert.strictEqual(a.summary.e1Groups, 2);
+  // But the duplicate is WITHHELD from creation. The 29 Oct run listed all seven of these as
+  // SAFE_TO_CREATE, which would have created a second row for a substance already present.
+  const flags = a.classification.get('ketamine free base');
+  assert.ok(flags.includes('DUPLICATE_RISK'));
+  assert.ok(!flags.includes('SAFE_TO_CREATE'), 'a known duplicate was proposed for creation');
+  assert.strictEqual(a.exclusionReasons.get('ketamine free base'),
+    'duplicate_risk:same_neutral_substance_as:ketamine');
+  // The parent is unaffected.
+  assert.ok(a.classification.get('ketamine').includes('SAFE_TO_CREATE'));
+});
+
+test('a bare functional-group word is not a substance and is excluded', () => {
+  // `amine` reached the 29 Oct execution set as a proposed molecule. It was excluded only because
+  // its two CAS numbers disagreed; with one CAS it would have been created.
+  const a = analyze([row('Amine', '50-78-2', 1)]);
+  const flags = a.classification.get('amine');
+  assert.ok(flags.includes('INSUFFICIENT_IDENTITY'));
+  assert.ok(!flags.includes('SAFE_TO_CREATE'));
+  assert.match(a.exclusionReasons.get('amine'), /generic_fragment/);
+});
+
+test('a real compound whose name resembles a class word is NOT excluded', () => {
+  // urea and benzamide are real substances. A blocklist that swallows them to catch fragments is
+  // the wrong trade.
+  for (const n of ['Urea', 'Benzamide']) {
+    const a = analyze([row(n, '57-13-6', 1)]);
+    const flags = a.classification.get(n.toLowerCase());
+    assert.ok(flags.includes('SAFE_TO_CREATE'), `${n} was wrongly excluded`);
+  }
+});
+
+test('fragment suspects are reported for review but never excluded', () => {
+  const a = analyze([row('pyrrole-3-carboxamide', '50-78-2', 1)]);
+  assert.ok(a.summary.fragmentSuspects >= 1, 'the IUPAC-tail shape was not detected');
+  assert.ok(a.classification.get('pyrrole-3-carboxamide').includes('SAFE_TO_CREATE'),
+    'a review-only flag must not block creation');
 });
 
 test('free base whose CAS disagrees with its parent is DISTINCT_FORM', () => {

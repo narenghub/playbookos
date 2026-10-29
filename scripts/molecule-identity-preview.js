@@ -467,13 +467,33 @@ async function main() {
   r('QUARANTINE_IDENTITY_CONFLICT', ex.QUARANTINE_IDENTITY_CONFLICT.length);
   r('QUARANTINE_CORRUPTED_NAME', ex.QUARANTINE_CORRUPTED_NAME.length);
   r('AMBIGUOUS_FORM', ex.AMBIGUOUS_FORM.length);
+  r('DUPLICATE_RISK', ex.DUPLICATE_RISK.length);
   r('INSUFFICIENT_IDENTITY', ex.INSUFFICIENT_IDENTITY.length);
   r('REVIEW_SHARED_CAS (advisory, still created)', ex.REVIEW_SHARED_CAS.length);
   r('INVALID_CAS_EVIDENCE (advisory, still created)', ex.INVALID_CAS_EVIDENCE.length);
 
+  // ── THE CREATE SET, IN FULL ──────────────────────────────────────────────
+  //
+  // The previous run printed the count and not the identities, so nothing in the report let anyone
+  // check WHAT would be created — which is how `amine` sat in the execution set unnoticed. Four
+  // per line because this is a list to scan, and railway ssh hangs up on silence rather than on
+  // volume.
+  console.log(`\n   CREATE — all ${ex.CREATE.length} identities:\n`);
+  const sorted = ex.CREATE.slice().sort();
+  for (let i = 0; i < sorted.length; i += 4) {
+    console.log(`     ${sorted.slice(i, i + 4).map((s) => String(s).slice(0, 34).padEnd(36)).join('')}`);
+  }
+
+  if (a.fragmentSuspects.length) {
+    console.log(`\n   FRAGMENT_SUSPECT — in CREATE, shaped like the tail of an IUPAC name (${a.fragmentSuspects.length}):`);
+    console.log('   REVIEW ONLY, not excluded: the pattern also matches real compounds, and a');
+    console.log('   false exclusion is its own kind of silent loss.\n');
+    a.fragmentSuspects.forEach((k) => console.log(`     ${k}`));
+  }
+
   console.log('\n   the excluded identities, in full:\n');
   for (const cat of ['QUARANTINE_IDENTITY_CONFLICT', 'QUARANTINE_CORRUPTED_NAME',
-    'AMBIGUOUS_FORM', 'INSUFFICIENT_IDENTITY']) {
+    'AMBIGUOUS_FORM', 'DUPLICATE_RISK', 'INSUFFICIENT_IDENTITY']) {
     if (!ex[cat].length) continue;
     console.log(`     ${cat}  (${ex[cat].length})`);
     ex[cat].forEach((k) => console.log(`       ${String(k).slice(0, 62).padEnd(64)} ${a.exclusionReasons.get(k) || '(NO REASON — DEFECT)'}`));
@@ -525,7 +545,8 @@ async function main() {
 
   let rec;
   if (nothingSafe || wouldDuplicate || unexplained) rec = 'NO-GO';
-  else if (S.quarantine > 0 || S.corruptedName > 0 || S.ambiguousForm > 0 || S.insufficient > 0) {
+  else if (S.quarantine > 0 || S.corruptedName > 0 || S.ambiguousForm > 0
+    || S.duplicateRisk > 0 || S.insufficient > 0) {
     rec = 'GO WITH QUARANTINE';
   } else rec = 'GO';
 
@@ -548,7 +569,8 @@ async function main() {
     console.log(`     ${S.quarantine} identity conflict(s)      cas_disagreement:<values>`);
     console.log(`     ${S.corruptedName} corrupted name(s)        corrupted_name:<why>`);
     console.log(`     ${S.ambiguousForm} ambiguous form(s)        ambiguous_form:<phrase>`);
-    console.log(`     ${S.insufficient} unnameable group(s)      insufficient_identity:name_unusable`);
+    console.log(`     ${S.duplicateRisk} evidenced duplicate(s)   duplicate_risk:same_neutral_substance_as:<parent>`);
+    console.log(`     ${S.insufficient} unnameable group(s)      insufficient_identity:*`);
     console.log(`   ${a.exclusionIntegrity.withReason} of ${a.exclusionIntegrity.excluded} exclusions carry a reason, and none is also in CREATE.`);
     console.log('\n   STILL OPEN, and NOT blocking creation:');
     console.log(`     ${S.sharedCasDistinctNames} cross-identity CAS finding(s) — the NAMES are sound and are created;`);
@@ -567,7 +589,16 @@ async function main() {
   } else {
     console.log('   no blocking condition and no normalization gap found.');
   }
-  if (!canExcludeDeterministically) console.log('   (exclusion path check failed — this line should be unreachable)');
+  // ── THE EXIT CODE IS THE VERDICT ────────────────────────────────────────
+  //
+  // The previous run printed this entire report and then died on a reference I had left behind
+  // after deleting its variable — `canExcludeDeterministically is not defined`, exit 1. A reader
+  // who scrolled to the recommendation saw GO WITH QUARANTINE; a reader who checked `$?` saw a
+  // failure. CLAUDE.md's first rule is that a checker's verdict is its exit status, so a report
+  // that is complete and an exit code that says otherwise is the worst of both.
+  //
+  // Returned rather than printed-and-forgotten, so the caller's exit code reflects the gate.
+  return rec;
   console.log('\n   This preview ran E1 NOWHERE. No table was created, no row written, no conflict');
   console.log('   resolved. The migration is a separate command and is not authorised by this');
   console.log('   output alone.\n');
@@ -576,7 +607,13 @@ async function main() {
 function pct(n, d) { return d ? `${((n / d) * 100).toFixed(1)}%` : 'n/a'; }
 
 if (require.main === module) {
-  main().then(() => process.exit(0)).catch((e) => {
+  main().then((rec) => {
+    // Exit 0 means THE PREVIEW RAN, whatever it recommends: a NO-GO is a finding, not a crash,
+    // and conflating the two is how a verdict gets misread. The recommendation is in the report
+    // and is echoed on the last line so a terminal scrollback shows it without hunting.
+    console.log(`── verdict: ${rec || 'UNKNOWN'} (the preview ran; nothing was written)\n`);
+    process.exit(0);
+  }).catch((e) => {
     console.error(`\n✗ preview could not run: ${e && e.message ? e.message : e}\n`);
     process.exit(1);
   });

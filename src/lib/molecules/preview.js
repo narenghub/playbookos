@@ -120,10 +120,41 @@ function looksTruncated(name) {
 // creating a second row for a substance already present, and duplicates are undone by MERGING —
 // the direction that cost 478 identities in this phase and printed a false scarcity claim in
 // October. Excluding it is reversible: it can be created the moment someone rules on it.
+// ── AND WHY SAME_NEUTRAL_SUBSTANCE BLOCKS TOO ───────────────────────────────
+//
+// The 29 Oct E1.1 run classified 7 identities as SAME_NEUTRAL_SUBSTANCE and then listed every one
+// of them as SAFE_TO_CREATE — `cabozantinib free base` alongside `cabozantinib`, both on CAS
+// 849217-68-1. The census concluded they are one substance and the execution set proposed creating
+// two rows for it. That is a KNOWN duplicate, not a suspected one, and it is the exact thing the
+// 478 avoided duplicates were about.
+//
+// The instruction was not to merge anything automatically, and this does not: it withholds the
+// second row and records why. Creating it later as an alias of its parent is a one-line ruling;
+// un-creating a duplicate afterwards is a merge.
 const BLOCKERS = [
   'QUARANTINE_IDENTITY_CONFLICT', 'QUARANTINE_CORRUPTED_NAME',
-  'AMBIGUOUS_FORM', 'INSUFFICIENT_IDENTITY',
+  'AMBIGUOUS_FORM', 'DUPLICATE_RISK', 'INSUFFICIENT_IDENTITY',
 ];
+
+// ── BARE FUNCTIONAL-GROUP WORDS ARE NOT SUBSTANCES ──────────────────────────
+//
+// `amine` reached the 29 Oct execution set as a proposed molecule, carrying two CAS numbers. It is
+// a fragment of a longer IUPAC name whose brackets happened to balance, so the truncation detector
+// missed it — it was excluded only because its CAS values disagreed. Had they agreed it would have
+// been CREATED, as a molecule called "amine".
+//
+// Deliberately narrow: only words that are never themselves a specific substance. `urea` and
+// `benzamide` are NOT here, because both are real compounds — a blocklist that swallows real
+// substances to catch fragments is the wrong trade.
+const GENERIC_FRAGMENT_NAMES = new Set([
+  'amine', 'amide', 'carboxamide', 'ester', 'ether', 'ketone', 'aldehyde',
+  'derivative', 'analog', 'analogue', 'isomer', 'enantiomer', 'salt', 'impurity', 'metabolite',
+]);
+
+// A name that looks like the tail of an IUPAC string: a locant digit plus a class suffix, with no
+// parent stem in front of it. REVIEW ONLY — never blocked, because the pattern also matches real
+// compound names and a false exclusion is its own kind of silent loss.
+const FRAGMENT_SUSPECT_RE = /^[a-z0-9,'\- ]{0,40}\d+-[a-z]*(?:carboxamide|carboxylic acid|amine|amide|ester|ether|one|ol)$/;
 const WARNINGS = ['REVIEW_SHARED_CAS', 'INVALID_CAS_EVIDENCE'];
 
 // Form phrases that name the neutral substance. Deliberately NOT in identity.js's stripping rules:
@@ -418,6 +449,10 @@ function analyze(rows) {
   }
   const ambiguousForm = new Set(
     out.freeForm.filter((f) => f.disposition === 'AMBIGUOUS').map((f) => f.identity));
+  // Positively evidenced duplicates: the census says this IS the parent substance.
+  const duplicateRisk = new Map(
+    out.freeForm.filter((f) => f.disposition === 'SAME_NEUTRAL_SUBSTANCE')
+      .map((f) => [f.identity, f.parent]));
 
   // ── PASS C3: THE DRONABINOL / DELTA-9-THC CLUSTER, AS EVIDENCE ───────────
   //
@@ -465,6 +500,14 @@ function analyze(rows) {
         const f = out.freeForm.find((x) => x.identity === key);
         reasons.push(`ambiguous_form:${f ? f.phrase.replace(' ', '_') : 'unknown'}`);
       }
+      if (duplicateRisk.has(key)) {
+        flags.push('DUPLICATE_RISK');
+        reasons.push(`duplicate_risk:same_neutral_substance_as:${duplicateRisk.get(key)}`);
+      }
+      if (GENERIC_FRAGMENT_NAMES.has(key)) {
+        flags.push('INSUFFICIENT_IDENTITY');
+        reasons.push('insufficient_identity:generic_fragment_not_a_substance');
+      }
       if (sharedCasIdentities.has(key)) flags.push('REVIEW_SHARED_CAS');
       if (g.invalid && g.invalid.size) flags.push('INVALID_CAS_EVIDENCE');
     }
@@ -482,10 +525,14 @@ function analyze(rows) {
     QUARANTINE_IDENTITY_CONFLICT: inFlag('QUARANTINE_IDENTITY_CONFLICT'),
     QUARANTINE_CORRUPTED_NAME: inFlag('QUARANTINE_CORRUPTED_NAME'),
     AMBIGUOUS_FORM: inFlag('AMBIGUOUS_FORM'),
+    DUPLICATE_RISK: inFlag('DUPLICATE_RISK'),
     INSUFFICIENT_IDENTITY: inFlag('INSUFFICIENT_IDENTITY'),
     REVIEW_SHARED_CAS: inFlag('REVIEW_SHARED_CAS'),
     INVALID_CAS_EVIDENCE: inFlag('INVALID_CAS_EVIDENCE'),
   };
+  // Review-only: names shaped like the tail of an IUPAC string. Reported so a human can look,
+  // never excluded, because the pattern also matches real compounds.
+  out.fragmentSuspects = out.executionSet.CREATE.filter((k) => FRAGMENT_SUSPECT_RE.test(k));
   // The assertion that matters: nothing excluded is unexplained, and nothing is both.
   const excluded = [...out.classification.entries()]
     .filter(([, f]) => !f.includes('SAFE_TO_CREATE')).map(([k]) => k);
@@ -522,6 +569,8 @@ function analyze(rows) {
     insufficient: [...out.classification.values()].filter((f) => f.includes('INSUFFICIENT_IDENTITY')).length,
     corruptedName: out.executionSet.QUARANTINE_CORRUPTED_NAME.length,
     ambiguousForm: out.executionSet.AMBIGUOUS_FORM.length,
+    duplicateRisk: out.executionSet.DUPLICATE_RISK.length,
+    fragmentSuspects: out.fragmentSuspects.length,
     freeFormCases: out.freeForm.length,
     freeFormSameNeutral: out.freeForm.filter((f) => f.disposition === 'SAME_NEUTRAL_SUBSTANCE').length,
     freeFormDistinct: out.freeForm.filter((f) => f.disposition === 'DISTINCT_FORM').length,
