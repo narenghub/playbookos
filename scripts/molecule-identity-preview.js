@@ -282,7 +282,14 @@ async function main() {
   if (!SUMMARY) a.synonymCandidates.slice(0, 60).forEach((c) => {
     console.log(`     CAS ${String(c.cas).padEnd(16)} ${c.identities.join('  <->  ')}`);
   });
-  if (a.synonymCandidates.length > 60) console.log(`     … and ${a.synonymCandidates.length - 60} more`);
+  // Gated with the listing it belongs to. Left ungated, --summary printed "… and 37 more" under a
+  // heading with nothing above it — a continuation of a list the reader was never shown.
+  if (!SUMMARY && a.synonymCandidates.length > 60) {
+    console.log(`     … and ${a.synonymCandidates.length - 60} more`);
+  }
+  if (SUMMARY && a.synonymCandidates.length) {
+    console.log(`     (${a.synonymCandidates.length} candidates; listing suppressed by --summary)`);
+  }
 
   // ── 4c ────────────────────────────────────────────────────────────────────
   h('4c', 'TRUNCATED / UNBALANCED CHEMICAL NAMES', 'MEASURED FACT — upstream defect, not E1\'s');
@@ -557,6 +564,18 @@ async function main() {
   r('InChIKey populated', `${S.inchikeyPopulated}   (E1 writes none; the Postgres checker asserts NULL)`);
 
   h('E1.1-5d', 'REQUIRED INVARIANTS', 'MEASURED FACT');
+
+  // The set of registry numbers two or more distinct substances both claim.
+  const contestedCasValues = new Set(
+    a.sharedCas.filter((s) => s.kind === 'DISTINCT_NAMES_SHARED_CAS').map((s) => s.cas));
+  // Any identity that would be CREATED carrying one of them while NOT being marked contested.
+  const contestedLeak = ex.CREATE.filter((k) => {
+    const g = a.e1.groups.get(k);
+    if (!g) return false;
+    const holdsContested = [...g.cas].some((c) => contestedCasValues.has(c));
+    return holdsContested && !a.casEvidence.CAS_CONTESTED.includes(k);
+  });
+
   const inv = [
     ['CREATE + EXCLUDED = PROPOSED',
       ex.CREATE.length + a.exclusionIntegrity.excluded === S.e1Groups,
@@ -567,9 +586,26 @@ async function main() {
     ['UNEXPLAINED_EXCLUSIONS = 0',
       a.exclusionIntegrity.missingReason.length === 0,
       `${a.exclusionIntegrity.missingReason.length}`],
+    // ── COMPUTED, NOT ASSERTED ────
+    //
+    // This read `true`. A hardcoded invariant reports PASS on something nobody tested, which is
+    // the same failure as reading a checker through `tail -1`: the output says the thing holds
+    // and no code anywhere established that it does.
+    //
+    // What it now checks: every CREATE identity holding a CAS that is contested across distinct
+    // substances must be classified CAS_CONTESTED — never CAS_POPULATED. That classification is
+    // precisely what the backfill acts on when it writes cas = NULL, so a violation here is an
+    // identity that WOULD be written with a disputed registry number.
+    //
+    // The behavioural half — that the backfill actually withholds it — is proven separately in
+    // scripts/check-molecule-identity-db.js against a real Postgres, with selumetinib and
+    // binimetinib seeded in DIFFERENT tables. Two different paths, deliberately: a preview that
+    // graded its own downstream behaviour would be the implementation marking its own homework.
     ['CONTESTED_CAS_WRITTEN_CANONICALLY = 0',
-      true,
-      `${S.casContested} contested identities, all with canonical cas withheld by the backfill`],
+      contestedLeak.length === 0,
+      contestedLeak.length === 0
+        ? `${S.casContested} contested identities, every one classified CAS_CONTESTED (not populated)`
+        : `${contestedLeak.length} would carry a disputed CAS: ${contestedLeak.slice(0, 5).join(', ')}`],
   ];
   let invFail = 0;
   inv.forEach(([name, pass, detail]) => {
@@ -652,18 +688,25 @@ async function main() {
     console.log(`   ${a.exclusionIntegrity.withReason} of ${a.exclusionIntegrity.excluded} exclusions carry a reason, and none is also in CREATE.`);
     console.log('\n   STILL OPEN, and NOT blocking creation:');
     console.log(`     ${S.sharedCasDistinctNames} cross-identity CAS finding(s) — the NAMES are sound and are created;`);
-    console.log('       what is contested is the CAS attribution on one side of each pair.');
-    console.log('       ** See the residual risk note below before authorising the migration. **');
+    console.log(`       their canonical CAS is WITHHELD (${S.casContested} identities), so nothing false is stored.`);
     console.log(`     ${S.truncatedNames} truncated name(s) recorded for upstream repair`);
     console.log(`     ${S.invalidCasOccurrences} invalid CAS occurrence(s), refused as identifiers`);
-    console.log('\n   RESIDUAL RISK, stated rather than buried:');
-    console.log('   An identity in a DISTINCT_NAMES_SHARED_CAS pair is created WITH the contested');
-    console.log('   CAS. For `selumetinib | binimetinib` that means one of the two carries the');
-    console.log('   other\'s registry number, and a quotation drawn from it would name the wrong');
-    console.log('   material. The identity is right; the attribute is not. The narrow fix is to');
-    console.log('   create those molecules with cas = NULL and the contest recorded, so nothing');
-    console.log('   false is stored while the name-level identity still proceeds. That is a change');
-    console.log('   to the backfill, not to normalization, and it is NOT made here.');
+    // ── THIS PARAGRAPH USED TO SAY THE OPPOSITE ────
+    // Before Decision 1 was implemented it warned that a contested identity is created WITH the
+    // disputed CAS, and it was left standing after the behaviour changed — so section 12
+    // contradicted sections 5c and 5d in the same report, and a reader could not tell which was
+    // current. A stale warning is worse than no warning: it spends the attention that a real one
+    // needs. Updated to describe what the code now does, and the invariant above proves it rather
+    // than this text asserting it.
+    console.log('\n   CONTESTED CAS — resolved, not residual:');
+    console.log(`   The ${S.sharedCasDistinctNames} unresolved shared-CAS findings produce ${S.casContested} identities whose`);
+    console.log('   canonical cas is NULL. For `selumetinib | binimetinib`, NEITHER molecule carries');
+    console.log('   606143-89-9: the name proceeds, the disputed attribute does not, no owner is');
+    console.log('   chosen and the source values are preserved in cas_source_values with the');
+    console.log('   contest recorded in molecule_conflicts. Proven two ways — the invariant above');
+    console.log('   computes it from this run, and check-molecule-identity-db.js proves the');
+    console.log('   backfill behaviour against a real Postgres with the pair seeded in DIFFERENT');
+    console.log('   tables, because a per-table check would never have seen the contest at all.');
   } else {
     console.log('   no blocking condition and no normalization gap found.');
   }
