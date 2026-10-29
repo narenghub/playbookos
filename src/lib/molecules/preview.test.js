@@ -170,6 +170,85 @@ test('row and table counts are reported as measured, per table', () => {
   assert.deepStrictEqual(a.measured.rowsByTable, { study_molecules: 1, supplier_products: 2 });
 });
 
+// ── THE SHARED-CAS SPLIT (added after the 29 Oct preview) ───────────────────
+
+test('descriptor variants collapse into ONE identity, so they leave shared-CAS entirely', () => {
+  // The 341-values / 823-identities number was dominated by this shape. After normalization these
+  // are one molecule, so there is nothing left to share a CAS with.
+  const a = analyze([
+    row('Venetoclax', '1257044-40-8', 1),
+    row('Venetoclax reference standard', '1257044-40-8', 2),
+    row('Venetoclax USP Reference Standard', '1257044-40-8', 3),
+    row('Venetoclax USP/EP Reference Standard', '1257044-40-8', 4),
+  ]);
+  assert.strictEqual(a.summary.e1Groups, 1, 'four phrasings of one substance became more than one molecule');
+  assert.strictEqual(a.summary.sharedCas, 0);
+  assert.strictEqual(a.summary.descriptorNormalizedRows > 0, true);
+});
+
+test('a descriptor pattern the rules MISS is reported as a normalization gap, not a conflict', () => {
+  // Deliberately a phrasing identity.js does not strip. It must not be filed as human review work:
+  // the fix is a rule, not an adjudication.
+  const a = analyze([
+    row('Foobarium', '50-78-2', 1),
+    row('Foobarium certified grade', '50-78-2', 2),
+  ]);
+  assert.strictEqual(a.summary.sharedCas, 1);
+  assert.strictEqual(a.sharedCas[0].kind, 'DESCRIPTOR_VARIANT');
+  assert.strictEqual(a.sharedCas[0].explanation, 'normalization_gap_descriptor_only');
+  assert.strictEqual(a.summary.sharedCasDistinctNames, 0);
+  // Advisory only — neither molecule is blocked, and neither is merged.
+  assert.strictEqual(a.summary.e1Groups, 2);
+});
+
+test('two unrelated drugs sharing a CAS stay DISTINCT_NAMES_SHARED_CAS and highly visible', () => {
+  // 1428935-60-7 is attached to both in the real data. They are an ADC and a PD-L1 antibody.
+  // Nothing may normalize these together, and the flag must not be the same one used for a
+  // relabelled reference standard.
+  const a = analyze([
+    row('Mirvetuximab Soravtansine', '1428935-60-7', 1),
+    row('Durvalumab', '1428935-60-7', 2),
+  ]);
+  assert.strictEqual(a.sharedCas[0].kind, 'DISTINCT_NAMES_SHARED_CAS');
+  assert.strictEqual(a.sharedCas[0].explanation, 'REVIEW_REQUIRED');
+  assert.strictEqual(a.summary.sharedCasDistinctNames, 1);
+  assert.strictEqual(a.summary.e1Groups, 2);
+  // Reported as a candidate for a human, never acted on.
+  assert.strictEqual(a.summary.synonymCandidates, 1);
+  assert.match(a.synonymCandidates[0].note, /human decides/);
+});
+
+test('descriptorVariantOf refuses a pair whose tail carries chemical meaning', () => {
+  const { descriptorVariantOf } = require('./preview');
+  assert.strictEqual(descriptorVariantOf('venetoclax', 'venetoclax reference standard'), true);
+  assert.strictEqual(descriptorVariantOf('leuprolide', 'leuprolide acetate'), false);
+  assert.strictEqual(descriptorVariantOf('pemetrexed', 'pemetrexed free acid'), false);
+  assert.strictEqual(descriptorVariantOf('metformin', 'metformin hydrochloride'), false);
+  assert.strictEqual(descriptorVariantOf('aspirin', 'aspirin'), false);
+});
+
+test('a curated synonym pair is EXPLAINED, not flagged for review', () => {
+  const a = analyze([
+    row('Aspirin', '50-78-2', 1),
+    row('Acetylsalicylic acid', '50-78-2', 2),
+  ]);
+  // Now that the pair is curated, these are one substance plus an alias — no shared CAS at all.
+  assert.strictEqual(a.summary.sharedCasDistinctNames, 0);
+});
+
+test('truncated chemical names are recorded and NOT repaired', () => {
+  // A fragment of pemetrexed's IUPAC name with its opening brackets gone. Guessing the missing
+  // half is exactly the plausible invention this refuses; it is an upstream ingest defect.
+  const a = analyze([
+    row('pyrimidin-5-yl)ethyl]benzoyl]-L-glutamic Acid', '137281-23-3', 1),
+    row('Pemetrexed', '137281-23-3', 2),
+  ]);
+  assert.strictEqual(a.summary.truncatedNames, 1);
+  assert.match(a.truncatedNames[0].why, /unbalanced/);
+  // Recorded, and still its own identity — normalization did not absorb it.
+  assert.strictEqual(a.summary.e1Groups, 2);
+});
+
 test('every E1 group receives exactly one decision set, and blockers exclude SAFE_TO_CREATE', () => {
   const a = analyze([
     row('Leuprolide', '53714-56-0', 1),

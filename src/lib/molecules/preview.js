@@ -28,7 +28,52 @@
 
 const { validCas } = require('../catalogue/cas');
 const { canonicalMolecule, normalize } = require('./synonyms');
-const { identityOf, aliasForms } = require('./identity');
+const {
+  identityOf, aliasForms, describeNormalization,
+  GRADE_WORDS, DESCRIPTOR_QUALIFIERS, DESCRIPTOR_PHRASES,
+} = require('./identity');
+
+// ── DETECTION-ONLY VOCABULARY. NOTHING IS STRIPPED WITH THIS. ───────────────
+//
+// Used to answer one question about two identities that share a CAS: does one differ from the
+// other only by trailing words that carry no chemical meaning? If so the normalization MISSED a
+// descriptor pattern, and saying so is more useful than filing it as a human conflict.
+//
+// It is deliberately wider than the stripping lists in identity.js, and deliberately separate from
+// them. Widening what gets REPORTED is free; widening what gets REMOVED changes identity, and a
+// detection set quietly promoted into a stripping set is how `free acid` would end up collapsed.
+const NON_CHEMICAL_WORDS = new Set([
+  ...GRADE_WORDS, ...DESCRIPTOR_QUALIFIERS, ...DESCRIPTOR_PHRASES.flat(),
+  'standard', 'reference', 'grade', 'purity', 'pure', 'assay', 'qualified', 'certified',
+]);
+
+/** Do these two identities differ only by trailing non-chemical words? */
+function descriptorVariantOf(a, b) {
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short === long) return false;
+  const st = short.split(' ');
+  const lt = long.split(' ');
+  if (lt.length <= st.length) return false;
+  for (let i = 0; i < st.length; i += 1) if (st[i] !== lt[i]) return false;
+  // Every remaining word must be non-chemical. One chemical word in the tail and this is a
+  // different substance, not a different label.
+  return lt.slice(st.length).every((w) => NON_CHEMICAL_WORDS.has(w));
+}
+
+// An unbalanced bracket means the source name was cut. `pyrimidin-5-yl ethyl]benzoyl]-l-glutamic
+// acid` is a fragment of pemetrexed's IUPAC name with its opening brackets missing. That is an
+// UPSTREAM ingest defect: it is recorded here and deliberately not repaired by normalization,
+// because guessing the missing half of a chemical name is exactly the kind of plausible invention
+// this project refuses.
+function looksTruncated(name) {
+  const s = String(name == null ? '' : name);
+  const counts = (ch) => (s.match(new RegExp(`\\${ch}`, 'g')) || []).length;
+  if (counts('[') !== counts(']')) return 'unbalanced square brackets';
+  if (counts('(') !== counts(')')) return 'unbalanced parentheses';
+  if (/^[\])}]/.test(s.trim())) return 'begins with a closing bracket';
+  if (/^-|^,/.test(s.trim())) return 'begins with a separator';
+  return null;
+}
 
 // ── DECISION CATEGORIES ─────────────────────────────────────────────────────
 //
@@ -59,6 +104,13 @@ function analyze(rows) {
     eliminated: [],
     surviving: [],
     classification: new Map(),
+    // Deterministic normalization evidence: which filed names were changed by descriptor
+    // stripping, and what was removed. This is how "how much disappears through normalization"
+    // is answered with a list rather than a claim.
+    descriptorNormalized: [],
+    descriptorRemovedCounts: {},
+    truncatedNames: [],
+    synonymCandidates: [],
   };
 
   // ── PASS A: the two groupings, built from the same rows in one walk ───────
@@ -68,6 +120,24 @@ function analyze(rows) {
     const rec = identityOf(r.name);
     const legacyKey = canonicalMolecule(r.name) || normalize(r.name);
     const e1Key = rec.identity;
+
+    // Normalization evidence, per row, before anything is grouped.
+    const norm = describeNormalization(r.name);
+    if (norm.changed) {
+      if (out.descriptorNormalized.length < 400) {
+        out.descriptorNormalized.push({
+          filed: String(r.name).trim(), identity: norm.identity,
+          removed: norm.removed, table: r.table, rid: r.rid,
+        });
+      }
+      norm.removed.forEach((w) => {
+        out.descriptorRemovedCounts[w] = (out.descriptorRemovedCounts[w] || 0) + 1;
+      });
+    }
+    const trunc = looksTruncated(r.name);
+    if (trunc && out.truncatedNames.length < 100) {
+      out.truncatedNames.push({ filed: String(r.name).trim(), why: trunc, table: r.table, rid: r.rid });
+    }
 
     // CAS evidence state. "missing" and "present but invalid" are materially different: the first
     // is an absence, the second is a source asserting something that cannot be true, and only the
@@ -167,25 +237,52 @@ function analyze(rows) {
     // Does an EXISTING curated relationship explain it? Two possibilities, both checkable without
     // chemistry knowledge: the names are in one curated synonym group, or they are forms of one
     // base. Anything else is REVIEW_REQUIRED — and neither explanation is permission to merge.
+    // ── THE SPLIT. One overloaded flag was hiding two different phenomena. ──
+    //
+    // DESCRIPTOR_VARIANT          a normalization gap: the names differ only by words with no
+    //                             chemical meaning. Evidence to fix the rules, not a conflict for
+    //                             a human to adjudicate.
+    // DISTINCT_NAMES_SHARED_CAS   genuinely different names still holding one registry number
+    //                             after descriptor normalization and curated synonym resolution.
+    //                             REVIEW_REQUIRED, and this is where
+    //                             `mirvetuximab soravtansine | durvalumab` has to stay visible.
+    //
+    // CAS equality NEVER implies synonymy. Both labels leave the molecules separate.
+    let kind = 'DISTINCT_NAMES_SHARED_CAS';
     let explanation = 'REVIEW_REQUIRED';
+
     const aliasLinked = ids.some((a) => ids.some((b) => a !== b && aliasForms(a).aliases.includes(b)));
     const bases = ids.map((k) => {
       const g = out.e1.groups.get(k);
       return (g && g.base) || k;
     });
     const sameBase = new Set(bases).size === 1;
-    if (aliasLinked) explanation = 'explained_curated_synonym';
-    else if (sameBase) explanation = 'explained_form_relationship';
+    const descriptorPair = ids.some((a) => ids.some((b) => a !== b && descriptorVariantOf(a, b)));
 
-    out.sharedCas.push({
+    if (descriptorPair) { kind = 'DESCRIPTOR_VARIANT'; explanation = 'normalization_gap_descriptor_only'; }
+    else if (aliasLinked) { kind = 'EXPLAINED'; explanation = 'explained_curated_synonym'; }
+    else if (sameBase) { kind = 'EXPLAINED'; explanation = 'explained_form_relationship'; }
+
+    const entry = {
       cas,
+      kind,
       identities: ids,
-      sourceNames: ids.flatMap((k) => [...(out.e1.groups.get(k).names || [])]),
+      sourceNames: [...new Set(ids.flatMap((k) => [...(out.e1.groups.get(k).names || [])]))],
       refs: ids.flatMap((k) => (out.e1.groups.get(k).refs || []).slice(0, 6)),
       explanation,
-    });
+    };
+    out.sharedCas.push(entry);
+
+    // A candidate is REPORTED for review and never acted on. Bulk-creating synonym rows from a
+    // shared CAS is precisely what the durvalumab case forbids.
+    if (kind === 'DISTINCT_NAMES_SHARED_CAS') {
+      out.synonymCandidates.push({
+        cas, identities: ids, note: 'possible synonym OR source misattribution — human decides',
+      });
+    }
   }
-  const sharedCasIdentities = new Set(out.sharedCas.flatMap((s) => s.identities));
+  const sharedCasIdentities = new Set(
+    out.sharedCas.filter((s) => s.kind === 'DISTINCT_NAMES_SHARED_CAS').flatMap((s) => s.identities));
 
   // ── PASS D: the per-molecule decision ────────────────────────────────────
   for (const [key, g] of out.e1.groups) {
@@ -212,7 +309,14 @@ function analyze(rows) {
     eliminatedBySaltForm: out.eliminated.length,
     surviving: out.surviving.length,
     sharedCas: out.sharedCas.length,
+    sharedCasIdentitiesTotal: new Set(out.sharedCas.flatMap((s) => s.identities)).size,
+    sharedCasDescriptorVariant: out.sharedCas.filter((s) => s.kind === 'DESCRIPTOR_VARIANT').length,
+    sharedCasExplained: out.sharedCas.filter((s) => s.kind === 'EXPLAINED').length,
+    sharedCasDistinctNames: out.sharedCas.filter((s) => s.kind === 'DISTINCT_NAMES_SHARED_CAS').length,
     sharedCasReviewRequired: out.sharedCas.filter((s) => s.explanation === 'REVIEW_REQUIRED').length,
+    descriptorNormalizedRows: Object.values(out.descriptorRemovedCounts).reduce((a, b) => a + b, 0),
+    truncatedNames: out.truncatedNames.length,
+    synonymCandidates: out.synonymCandidates.length,
     invalidCasOccurrences: out.invalidCas.occurrences.length,
     invalidCasDistinct: out.invalidCas.distinct.size,
     safeToCreate: [...out.classification.values()].filter((f) => f.includes('SAFE_TO_CREATE')).length,
@@ -223,4 +327,4 @@ function analyze(rows) {
   return out;
 }
 
-module.exports = { analyze, BLOCKERS, WARNINGS };
+module.exports = { analyze, BLOCKERS, WARNINGS, descriptorVariantOf, looksTruncated, NON_CHEMICAL_WORDS };

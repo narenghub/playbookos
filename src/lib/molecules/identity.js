@@ -53,6 +53,56 @@ const GRADE_WORDS = new Set([
   'anhydrous', 'anhydrate',
 ]);
 
+// ── PURPOSE DESCRIPTORS: THE DEFECT THE 29 OCT PREVIEW FOUND ────────────────
+//
+// The preview reported 341 CAS numbers spanning 823 identities, and the first entry explained the
+// whole number:
+//
+//     CAS 1257044-40-8 -> venetoclax | venetoclax reference standard
+//                       | venetoclax usp reference standard | venetoclax usp/ep reference standard
+//
+// One substance, four identities. `usp` was stripped as a grade and `reference standard` was not,
+// so every phrasing became its own molecule. Carboplatin produced five, aspirin five, cisplatin
+// and oxaliplatin three each. E1 would have created several hundred duplicates of substances it
+// should treat as one — and the remedy afterwards is MERGING, which is the direction that printed
+// "SOLE holder worldwide" over a substance three companies hold. Splitting too eagerly is cheap to
+// prevent here and expensive to undo later.
+//
+// ── THE INVARIANT, AND WHERE IT STOPS ───────────────────────────────────────
+//
+//     Remove grade and purpose nomenclature. Never remove chemical form.
+//
+// A reference standard is the same molecule sold for a different PURPOSE — to calibrate an assay
+// rather than to make a drug. That is a commercial distinction, not a chemical one.
+//
+// So `free acid` and `free base` are NOT here, deliberately. They look like the same kind of
+// phrase and they are not: they name which chemical form you are getting, and `pemetrexed` versus
+// `pemetrexed free acid` may be a real distinction in a catalogue where the salt is the default
+// article. They stay distinct until separately classified and proven safe.
+//
+// Nor is this generic suffix stripping. Each phrase is listed, and `identity.test.js` asserts that
+// every entry actually fires on a representative input — a rule nobody can demonstrate is a rule
+// that might be matching nothing.
+//
+// Two phrases are deliberately absent from the chemical half of their names:
+//   · `fluoromisonidazole non-radioactive reference standard` -> `fluoromisonidazole non-radioactive`
+//     `non-radioactive` distinguishes it from the [18F]-labelled compound, which is a different
+//     substance with its own CAS. Purpose goes, isotope stays.
+//   · `mdma-d5 deuterated internal standard` -> `mdma-d5 deuterated`
+//     Same reasoning: `deuterated` is the molecule, `internal standard` is the job it does.
+const DESCRIPTOR_PHRASES = [
+  ['reference', 'standard'],
+  ['analytical', 'standard'],
+  ['internal', 'standard'],
+];
+
+// Qualifiers that only ever appear attached to one of the phrases above, stripped after it. A bare
+// `standard` is NOT in either list: alone it is too close to ordinary words to remove safely.
+const DESCRIPTOR_QUALIFIERS = new Set([
+  'analytical', 'usp/ep', 'usp/analytical', 'usp/ph.eur.', 'usp/ph.eur',
+  'ph.eur.', 'ph.eur', 'ph.eur..', 'pharmacopoeial',
+]);
+
 // Water of crystallisation.
 const HYDRATE_WORDS = new Set([
   'hydrate', 'hemihydrate', 'monohydrate', 'dihydrate', 'trihydrate', 'tetrahydrate',
@@ -108,16 +158,48 @@ const FORM_WORDS = new Set([
 // so that a human-entered row has somewhere correct to go.
 const SUBSTANCE_FORMS = ['base', 'salt', 'ester', 'hydrate', 'solvate', 'mixture', 'other'];
 
-/** Strip trailing pharmacopoeial/grade words. The result is the SAME substance as the input. */
+/**
+ * Strip trailing grade and purpose nomenclature. The result is the SAME substance as the input.
+ * Returns the identity string; `describeNormalization` returns the same with what it removed, for
+ * the preview's evidence and for proving each rule fires.
+ */
 function normalizeIdentity(name) {
+  return describeNormalization(name).identity;
+}
+
+/** The same strip, with its working shown. */
+function describeNormalization(name) {
   const norm = normalize(name);
-  if (!norm) return '';
+  if (!norm) return { identity: '', removed: [], changed: false };
   let tokens = norm.split(' ');
-  const dropped = [];
-  while (tokens.length > 1 && GRADE_WORDS.has(tokens[tokens.length - 1])) {
-    dropped.unshift(tokens.pop());
+  const removed = [];
+
+  // One loop, because the forms interleave: `usp/ep reference standard` needs the phrase gone
+  // before the qualifier is on the end, and `reference standard usp` needs the reverse.
+  for (;;) {
+    let cut = false;
+
+    for (const phrase of DESCRIPTOR_PHRASES) {
+      const n = phrase.length;
+      if (tokens.length > n
+        && phrase.every((w, i) => tokens[tokens.length - n + i] === w)) {
+        removed.unshift(phrase.join(' '));
+        tokens = tokens.slice(0, -n);
+        cut = true;
+        break;
+      }
+    }
+    if (cut) continue;
+
+    const last = tokens[tokens.length - 1];
+    if (tokens.length > 1 && (GRADE_WORDS.has(last) || DESCRIPTOR_QUALIFIERS.has(last))) {
+      removed.unshift(tokens.pop());
+      continue;
+    }
+    break;
   }
-  return tokens.join(' ');
+
+  return { identity: tokens.join(' '), removed, changed: removed.length > 0 };
 }
 
 /** Which class does a single trailing token belong to? */
@@ -237,6 +319,9 @@ function identityOf(filedName) {
 
 module.exports = {
   GRADE_WORDS,
+  DESCRIPTOR_PHRASES,
+  DESCRIPTOR_QUALIFIERS,
+  describeNormalization,
   HYDRATE_WORDS,
   ESTER_WORDS,
   SALT_FORM_WORDS,

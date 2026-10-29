@@ -205,6 +205,106 @@ test('pharmacopoeial grade and particle size do not create a new substance', () 
   }
 });
 
+// ── PURPOSE DESCRIPTORS (added after the 29 Oct preview) ────────────────────
+
+test('reference-standard phrasing collapses to the underlying substance', () => {
+  // The defect the preview found: CAS 1257044-40-8 was attached to four identities that are one
+  // substance — venetoclax, plus three ways of saying "the reference standard of it".
+  for (const filed of [
+    'Venetoclax reference standard',
+    'Venetoclax USP Reference Standard',
+    'Venetoclax USP/EP Reference Standard',
+    'Venetoclax USP/analytical reference standard',
+    'Venetoclax (USP reference standard)',
+    'Venetoclax analytical standard',
+  ]) {
+    assert.strictEqual(I.substanceForm(filed).identity, 'venetoclax', `${filed} did not collapse`);
+  }
+});
+
+test('a purpose descriptor is stripped WITHOUT losing the chemical form', () => {
+  // The case that would have been the expensive mistake: strip too much and the hydrochloride
+  // becomes the base.
+  const r = I.substanceForm('Gemcitabine hydrochloride USP Reference Standard');
+  assert.strictEqual(r.identity, 'gemcitabine hydrochloride');
+  assert.strictEqual(r.form, 'salt');
+  assert.strictEqual(r.derivedBase, 'gemcitabine');
+});
+
+test('NEGATIVE CONTROL: free acid and free base are NOT stripped', () => {
+  // They look like the same kind of phrase and are not: they name which chemical form you get.
+  // `pemetrexed` and `pemetrexed free acid` stay distinct until separately classified.
+  assert.strictEqual(I.substanceForm('Pemetrexed free acid').identity, 'pemetrexed free acid');
+  assert.strictEqual(I.substanceForm('Naproxen free base').identity, 'naproxen free base');
+  assert.notStrictEqual(I.substanceForm('Pemetrexed free acid').identity,
+    I.substanceForm('Pemetrexed').identity);
+});
+
+test('NEGATIVE CONTROL: isotope and radiolabel words survive descriptor stripping', () => {
+  // `non-radioactive` distinguishes a compound from its [18F]-labelled form — a different
+  // substance with its own CAS. Purpose goes, isotope stays.
+  assert.strictEqual(I.substanceForm('Fluoromisonidazole non-radioactive reference standard').identity,
+    'fluoromisonidazole non-radioactive');
+  assert.strictEqual(I.substanceForm('MDMA-d5 deuterated internal standard').identity,
+    'mdma-d5 deuterated');
+});
+
+test('NEGATIVE CONTROL: no salt, ester or hydrate is collapsed by the descriptor rule', () => {
+  const pairs = [
+    ['Leuprolide acetate', 'Leuprolide'],
+    ['Testosterone enanthate', 'Testosterone'],
+    ['Metformin hydrochloride', 'Metformin'],
+    ['Cyclophosphamide monohydrate', 'Cyclophosphamide'],
+    ['Warfarin sodium', 'Warfarin'],
+    ['Dexamethasone sodium phosphate', 'Dexamethasone'],
+  ];
+  for (const [form, base] of pairs) {
+    assert.notStrictEqual(I.substanceForm(form).identity, I.substanceForm(base).identity,
+      `${form} collapsed into ${base} — this is the quotation error`);
+  }
+});
+
+test('every DESCRIPTOR_PHRASE actually fires — a rule nobody can demonstrate is unproven', () => {
+  for (const phrase of I.DESCRIPTOR_PHRASES) {
+    const filed = `foobarium ${phrase.join(' ')}`;
+    const d = I.describeNormalization(filed);
+    assert.strictEqual(d.identity, 'foobarium', `phrase "${phrase.join(' ')}" did not strip`);
+    assert.ok(d.removed.includes(phrase.join(' ')), `phrase "${phrase.join(' ')}" not reported as removed`);
+  }
+});
+
+test('every DESCRIPTOR_QUALIFIER is reachable', () => {
+  // Reachability, which is weaker than "observed in production" and is the honest claim for a
+  // defensive entry. The preview's own descriptorRemovedCounts reports which ones fire on the
+  // real data, and that is the observed evidence.
+  for (const q of I.DESCRIPTOR_QUALIFIERS) {
+    const d = I.describeNormalization(`foobarium ${q} reference standard`);
+    assert.strictEqual(d.identity, 'foobarium', `qualifier "${q}" did not strip`);
+  }
+});
+
+test('describeNormalization reports exactly what it removed', () => {
+  const d = I.describeNormalization('Carboplatin USP/analytical reference standard');
+  assert.strictEqual(d.identity, 'carboplatin');
+  assert.strictEqual(d.changed, true);
+  assert.ok(d.removed.includes('reference standard'));
+  assert.ok(d.removed.includes('usp/analytical'));
+  const u = I.describeNormalization('Carboplatin');
+  assert.strictEqual(u.changed, false);
+  assert.deepStrictEqual(u.removed, []);
+});
+
+test('a bare "standard" is not stripped', () => {
+  // Alone it is too close to ordinary words. Only the two-word phrases are removed.
+  assert.strictEqual(I.substanceForm('Foobarium standard').identity, 'foobarium standard');
+});
+
+test('aspirin and acetylsalicylic acid are curated synonyms', () => {
+  // Found by the shared-CAS detection (both carry 50-78-2), added by hand as one pair.
+  assert.ok(I.aliasForms('Aspirin').aliases.includes('acetylsalicylic acid'));
+  assert.ok(I.aliasForms('Acetylsalicylic acid').aliases.includes('aspirin'));
+});
+
 test('grade stripping composes with form detection', () => {
   const r = I.substanceForm('Testosterone Enanthate USP');
   assert.strictEqual(r.identity, 'testosterone enanthate');

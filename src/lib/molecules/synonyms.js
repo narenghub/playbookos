@@ -107,6 +107,14 @@ const SYNONYM_GROUPS = [
   ['ciclesonide', 'cyclesonide'],
   ['cefuroxime', 'cephuroxime'],
   ['tranexamic acid', 'tranexaemic acid'],
+
+  // ── FOUND BY THE 29 OCT SHARED-CAS DETECTION, NOT BY GUESSING ────
+  // `aspirin` and `acetylsalicylic acid` both carry CAS 50-78-2 in study_molecules. The chemical
+  // name and the trivial name of one substance is exactly the documented naming divergence this
+  // table is for. Added one pair by hand: a shared CAS is evidence, never licence to bulk-create
+  // synonym rows, because `mirvetuximab soravtansine` and `durvalumab` also share a number and
+  // are two entirely different drugs.
+  ['aspirin', 'acetylsalicylic acid'],
 ];
 
 // Trailing words that name a SALT, ESTER, HYDRATE or COUNTER-ION rather than the substance. Stripped

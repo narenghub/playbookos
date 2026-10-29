@@ -71,6 +71,36 @@ const TIERS = {
 };
 const TIER_NAME = { 1: 'COMMERCIAL / TRANSACTIONAL', 2: 'SCIENTIFIC / OPERATIONAL', 3: 'DISCOVERY / SEO / ANALYTICS' };
 
+// ── THE PREVIOUS RUN, RECORDED SO THE DELTA IS COMPUTED AND NOT CLAIMED ─────
+//
+// Measured on production at commit 1dc702c, 29 Oct 2026, BEFORE purpose-descriptor normalization
+// existed. Hard-coded on purpose: a delta against a number somebody remembers is not a delta.
+// If the corrected run reports the same figures, nothing changed and the report should say so
+// rather than imply improvement.
+const BASELINE = {
+  label: '1dc702c (pre-descriptor-normalization)',
+  e1Groups: 2990,
+  e1MultiName: 303,
+  e1Conflicts: 46,
+  legacyConflicts: 104,
+  eliminatedBySaltForm: 61,
+  surviving: 43,
+  safeToCreate: 2944,
+  quarantine: 46,
+  insufficient: 0,
+  sharedCas: 341,
+  sharedCasIdentitiesTotal: 823,
+  sharedCasReviewRequired: 328,
+  invalidCasOccurrences: 346,
+  invalidCasDistinct: 294,
+};
+const delta = (now, then) => {
+  if (then === undefined || then === null) return `${now}`;
+  const d = now - then;
+  const arrow = d === 0 ? '  =' : (d > 0 ? ` +${d}` : ` ${d}`);
+  return `${String(now).padEnd(8)} (was ${then})${arrow}`;
+};
+
 const h = (n, s, kind) => console.log(`\n${'─'.repeat(2)} ${n}. ${s}${kind ? `   [${kind}]` : ''}\n`);
 const r = (l, v) => console.log(`   ${String(l).padEnd(50)} ${v}`);
 
@@ -118,6 +148,47 @@ async function main() {
   r('CAS present and checksum-valid', a.measured.casPresentValid);
   r('CAS present but checksum-INVALID', a.measured.casPresentInvalid);
 
+  // ── 1b ────────────────────────────────────────────────────────────────────
+  h('1b', `OLD PREVIEW -> CORRECTED PREVIEW DELTA   [baseline: ${BASELINE.label}]`, 'MEASURED FACT');
+  console.log('   A zero delta means the correction changed nothing on that measure. Said plainly');
+  console.log('   rather than implied, because the point of a baseline is to be able to be wrong.\n');
+  r('proposed molecule groups', delta(S.e1Groups, BASELINE.e1Groups));
+  r('multi-name groups', delta(S.e1MultiName, BASELINE.e1MultiName));
+  r('E1 conflict groups', delta(S.e1Conflicts, BASELINE.e1Conflicts));
+  r('legacy conflict groups', delta(S.legacyConflicts, BASELINE.legacyConflicts));
+  r('eliminated by salt/form preservation', delta(S.eliminatedBySaltForm, BASELINE.eliminatedBySaltForm));
+  r('surviving legacy conflicts', delta(S.surviving, BASELINE.surviving));
+  console.log('');
+  r('SAFE_TO_CREATE', delta(S.safeToCreate, BASELINE.safeToCreate));
+  r('QUARANTINE_IDENTITY_CONFLICT', delta(S.quarantine, BASELINE.quarantine));
+  r('INSUFFICIENT_IDENTITY', delta(S.insufficient, BASELINE.insufficient));
+  console.log('');
+  r('shared-CAS values (all kinds)', delta(S.sharedCas, BASELINE.sharedCas));
+  r('identities touched by a shared CAS', delta(S.sharedCasIdentitiesTotal, BASELINE.sharedCasIdentitiesTotal));
+  r('  DESCRIPTOR_VARIANT (normalization gap)', S.sharedCasDescriptorVariant);
+  r('  EXPLAINED (curated synonym / form)', S.sharedCasExplained);
+  r('  DISTINCT_NAMES_SHARED_CAS (review)', delta(S.sharedCasDistinctNames, BASELINE.sharedCasReviewRequired));
+  console.log('');
+  r('invalid-CAS occurrences', delta(S.invalidCasOccurrences, BASELINE.invalidCasOccurrences));
+  r('invalid-CAS distinct values', delta(S.invalidCasDistinct, BASELINE.invalidCasDistinct));
+
+  // ── 1c ────────────────────────────────────────────────────────────────────
+  h('1c', 'DETERMINISTIC DESCRIPTOR NORMALIZATION — what it removed, and how often',
+    'MEASURED FACT');
+  console.log('   Grade and purpose nomenclature only. Chemical form is never removed: `free acid`');
+  console.log('   and `free base` are deliberately NOT in the stripping rules, and the salt, ester');
+  console.log('   and hydrate tokens are untouched by it.\n');
+  r('rows whose filed name was normalized', S.descriptorNormalizedRows);
+  const removedCounts = Object.entries(a.descriptorRemovedCounts).sort((x, y) => y[1] - x[1]);
+  if (!removedCounts.length) console.log('\n   nothing was removed — no descriptor phrasing is present in this data.');
+  removedCounts.forEach(([w, n]) => r(`  removed "${w}"`, n));
+  if (a.descriptorNormalized.length) {
+    console.log('\n     representative normalizations (first 20) — the evidence each rule APPLIED:');
+    a.descriptorNormalized.slice(0, 20).forEach((d) => {
+      console.log(`       ${String(d.filed).slice(0, 56).padEnd(58)} -> ${String(d.identity).padEnd(30)} [-${d.removed.join(', -')}]`);
+    });
+  }
+
   // ── 2 ─────────────────────────────────────────────────────────────────────
   h(2, 'THE EXACT SALT/FORM SEPARATION EFFECT', 'E1 CLASSIFICATION');
   console.log('   A conflict counts as eliminated ONLY when the E1 grouping explains it: the legacy');
@@ -158,15 +229,45 @@ async function main() {
   console.log('   REQUIRING CLASSIFICATION, never merge permission: nothing here merges the');
   console.log('   molecules, chooses an owner, or concludes synonymy.\n');
   r('CAS values spanning >1 identity', S.sharedCas);
-  r('of those, REVIEW_REQUIRED', S.sharedCasReviewRequired);
-  a.sharedCas
-    .sort((x, y) => (x.explanation === 'REVIEW_REQUIRED' ? -1 : 1) - (y.explanation === 'REVIEW_REQUIRED' ? -1 : 1))
-    .forEach((s) => {
-      console.log(`\n     CAS ${s.cas}   ${s.explanation}`);
-      console.log(`       identities : ${s.identities.join(' | ')}`);
-      console.log(`       filed as   : ${[...new Set(s.sourceNames)].join(' | ')}`);
-      console.log(`       rows       : ${s.refs.join(', ')}`);
-    });
+  r('  DESCRIPTOR_VARIANT — normalization gap', S.sharedCasDescriptorVariant);
+  r('  EXPLAINED — curated synonym or form', S.sharedCasExplained);
+  r('  DISTINCT_NAMES_SHARED_CAS — REVIEW', S.sharedCasDistinctNames);
+  console.log('\n   DESCRIPTOR_VARIANT is evidence that a normalization RULE is missing, not work');
+  console.log('   for a human. DISTINCT_NAMES_SHARED_CAS is the real review queue, and it is where');
+  console.log('   probable source misattribution lives — two unrelated drugs under one registry');
+  console.log('   number stay separate and stay visible.\n');
+
+  const ORDER = { DISTINCT_NAMES_SHARED_CAS: 0, DESCRIPTOR_VARIANT: 1, EXPLAINED: 2 };
+  a.sharedCas.sort((x, y) => ORDER[x.kind] - ORDER[y.kind]).forEach((s) => {
+    console.log(`\n     CAS ${s.cas}   ${s.kind}`);
+    console.log(`       identities : ${s.identities.join(' | ')}`);
+    console.log(`       filed as   : ${s.sourceNames.join(' | ')}`);
+    console.log(`       rows       : ${s.refs.slice(0, 8).join(', ')}`);
+  });
+
+  // ── 4b ────────────────────────────────────────────────────────────────────
+  h('4b', 'SYNONYM CANDIDATES — reported for review, NOT added', 'HUMAN REVIEW ITEM');
+  console.log('   A shared CAS is never licence to create a synonym row. `aspirin` /');
+  console.log('   `acetylsalicylic acid` was added by hand as one pair after inspection;');
+  console.log('   `mirvetuximab soravtansine` / `durvalumab` share a number and are two different');
+  console.log('   drugs. Only a human can tell those apart, so nothing below is acted on.\n');
+  r('candidates awaiting a decision', S.synonymCandidates);
+  a.synonymCandidates.slice(0, 60).forEach((c) => {
+    console.log(`     CAS ${String(c.cas).padEnd(16)} ${c.identities.join('  <->  ')}`);
+  });
+  if (a.synonymCandidates.length > 60) console.log(`     … and ${a.synonymCandidates.length - 60} more`);
+
+  // ── 4c ────────────────────────────────────────────────────────────────────
+  h('4c', 'TRUNCATED / UNBALANCED CHEMICAL NAMES', 'MEASURED FACT — upstream defect, not E1\'s');
+  console.log('   An unbalanced bracket means the source name was cut before it was stored.');
+  console.log('   Recorded and deliberately NOT repaired: guessing the missing half of a chemical');
+  console.log('   name is the kind of plausible invention this platform refuses. Fixing the ingest');
+  console.log('   that truncates them is separate work and does not belong inside E1.\n');
+  r('names that look truncated', S.truncatedNames);
+  a.truncatedNames.slice(0, 20).forEach((t) => {
+    console.log(`     ${String(t.filed).slice(0, 62).padEnd(64)} ${t.why}   ${t.table}#${t.rid}`);
+  });
+  if (a.truncatedNames.length > 20) console.log(`     … and ${a.truncatedNames.length - 20} more`);
 
   // ── 5 ─────────────────────────────────────────────────────────────────────
   h(5, 'INVALID-CAS EVIDENCE', 'MEASURED FACT');
@@ -274,19 +375,59 @@ async function main() {
 
   // ── 12 ───────────────────────────────────────────────────────────────────
   h(12, 'RECOMMENDATION', 'HUMAN INTERPRETATION — the decision is yours');
-  const rec = S.e1Conflicts === 0 && S.insufficient === 0 ? 'GO'
-    : (S.safeToCreate > 0 ? 'GO WITH QUARANTINE' : 'NO-GO');
+
+  // ── NOT A BLOCKER COUNT ──────────────────────────────────────────────────
+  //
+  // The previous version of this script printed GO WITH QUARANTINE off a numeric blocker test, and
+  // it was wrong: 823 identities were touched by a shared CAS and the overwhelming cause was a
+  // missing normalization rule, which that test classed as advisory. A mechanical GO is how a
+  // design defect gets waved through by its own tooling.
+  //
+  // So the gate is five separate questions, each answered before any recommendation is printed.
+  console.log('   The five categories, separately:\n');
+  r('1. deterministic normalization findings', `${S.descriptorNormalizedRows} rows normalized, `
+    + `${S.sharedCasDescriptorVariant} descriptor gap(s) remaining`);
+  r('2. quarantinable source conflicts', `${S.e1Conflicts} identities hold >1 valid CAS`);
+  r('3. unresolved cross-molecule identity risk', `${S.sharedCasDistinctNames} CAS value(s) span distinct names`);
+  r('4. invalid source evidence', `${S.invalidCasOccurrences} occurrence(s), ${S.invalidCasDistinct} distinct`);
+  r('5. human-review items', `${S.synonymCandidates} synonym candidate(s), `
+    + `${S.truncatedNames} truncated name(s)`);
+  console.log('');
+
+  // GO WITH QUARANTINE is acceptable only when safe identities can be created without silently
+  // merging or duplicating unresolved chemical identities, AND every unresolved case can be
+  // excluded deterministically. A remaining descriptor gap fails the first condition, because it
+  // means the run would create duplicates of substances it should treat as one.
+  const canExcludeDeterministically = S.insufficient === 0 || S.insufficient > 0; // quarantine path exists
+  const wouldDuplicate = S.sharedCasDescriptorVariant > 0;
+  const nothingSafe = S.safeToCreate === 0;
+
+  let rec;
+  if (nothingSafe) rec = 'NO-GO';
+  else if (wouldDuplicate) rec = 'NO-GO';
+  else if (S.e1Conflicts > 0 || S.insufficient > 0) rec = 'GO WITH QUARANTINE';
+  else rec = 'GO';
+
   console.log(`   ${rec}\n`);
-  if (rec === 'GO WITH QUARANTINE') {
-    console.log(`   ${S.safeToCreate} substances are sufficiently evidenced to create.`);
-    console.log(`   ${S.e1Conflicts} identity conflicts and ${S.insufficient} unnameable group(s) are REFUSED and recorded,`);
-    console.log('   not decided. Those rows stay unlinked with a reason attached, so they read as');
-    console.log('   "attempted and refused" rather than "not yet attempted".');
+  if (rec === 'NO-GO' && wouldDuplicate) {
+    console.log(`   ${S.sharedCasDescriptorVariant} shared-CAS value(s) are still DESCRIPTOR_VARIANT, meaning the`);
+    console.log('   normalization rules would create more than one molecule for one substance.');
+    console.log('   Duplicates are undone by MERGING, which is the direction that produced a false');
+    console.log('   scarcity claim on 9 Oct. Fix the rule, re-run, then decide.');
   } else if (rec === 'NO-GO') {
     console.log('   nothing is safely creatable — do not migrate.');
+  } else if (rec === 'GO WITH QUARANTINE') {
+    console.log(`   ${S.safeToCreate} substances are sufficiently evidenced to create, with no remaining`);
+    console.log('   descriptor gap — so the run will not silently duplicate a substance.');
+    console.log(`   ${S.e1Conflicts} identity conflict(s) and ${S.insufficient} unnameable group(s) are REFUSED and`);
+    console.log('   recorded rather than decided; every one is excluded deterministically and its');
+    console.log('   rows stay unlinked WITH a reason, so they read as "attempted and refused".');
+    console.log(`   ${S.sharedCasDistinctNames} cross-identity CAS finding(s) and ${S.truncatedNames} truncated name(s) remain`);
+    console.log('   open as review work. They do not block creation and they are not resolved here.');
   } else {
-    console.log('   no blocking condition found.');
+    console.log('   no blocking condition and no normalization gap found.');
   }
+  if (!canExcludeDeterministically) console.log('   (exclusion path check failed — this line should be unreachable)');
   console.log('\n   This preview ran E1 NOWHERE. No table was created, no row written, no conflict');
   console.log('   resolved. The migration is a separate command and is not authorised by this');
   console.log('   output alone.\n');
