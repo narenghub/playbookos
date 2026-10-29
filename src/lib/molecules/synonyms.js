@@ -147,6 +147,29 @@ const SYNONYM_GROUPS = [
   //   delta-9-thc-d3 deuterated  73491-99-3   deuterated standard
   // `identity.test.js` asserts none of those collapses into this group.
   ['dronabinol', 'delta-9-tetrahydrocannabinol'],
+
+  // ── DECISION 3, 29 OCT: FOUR OF SEVEN, EACH PROVEN SEPARATELY ────
+  //
+  // Added as explicit pairs, never as a general "free base" rule. Each passed all six checks:
+  // one shared valid CAS with the parent, that CAS not claimed by a third substance, no isotopic
+  // marker, no stereochemical marker, the name exactly the parent plus the phrase, and every
+  // salt/ester/hydrate sibling of the parent carrying a DIFFERENT number.
+  //
+  // Parent first, so the parent name is the canonical one.
+  //
+  // THE THREE THAT FAILED STAY EXCLUDED, and the reasons are worth keeping:
+  //   octreotide free base   its acetate is filed under the base's own number, so the source is
+  //                          not distinguishing forms at all and "free base" cannot be read as
+  //                          merely a name
+  //   selumetinib free base  606143-89-9 is also claimed by binimetinib — a real dispute
+  //   pemetrexed free acid   137281-23-3 is also claimed by a truncated fragment of pemetrexed's
+  //                          own IUPAC name. Arguably not a third SUBSTANCE at all, but we cannot
+  //                          tell a fragment of this molecule from a fragment of another one, so
+  //                          it is left excluded rather than argued past.
+  ['cabozantinib', 'cabozantinib free base'],
+  ['osimertinib', 'osimertinib free base'],
+  ['ketamine', 'ketamine free base'],
+  ['cediranib', 'cediranib free base'],
 ];
 
 // Trailing words that name a SALT, ESTER, HYDRATE or COUNTER-ION rather than the substance. Stripped

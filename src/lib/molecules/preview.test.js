@@ -372,9 +372,12 @@ test('a corrupted name is EXCLUDED from creation, not created because its CAS re
 });
 
 test('free base sharing one CAS with its parent is SAME_NEUTRAL_SUBSTANCE and is NOT created', () => {
+  // An UNCURATED name on purpose. ketamine and cabozantinib were proven on 29 Oct and added as
+  // curated pairs, so they now fold to one molecule and are no longer duplicate-risk cases at
+  // all — which is the point of proving them, and the reason this fixture cannot use them.
   const a = analyze([
-    row('Ketamine', '6740-88-1', 1),
-    row('Ketamine free base', '6740-88-1', 2),
+    row('Obscuritinib', '6740-88-1', 1),
+    row('Obscuritinib free base', '6740-88-1', 2),
   ]);
   assert.strictEqual(a.summary.freeFormCases, 1);
   const f = a.freeForm[0];
@@ -385,13 +388,13 @@ test('free base sharing one CAS with its parent is SAME_NEUTRAL_SUBSTANCE and is
   assert.strictEqual(a.summary.e1Groups, 2);
   // But the duplicate is WITHHELD from creation. The 29 Oct run listed all seven of these as
   // SAFE_TO_CREATE, which would have created a second row for a substance already present.
-  const flags = a.classification.get('ketamine free base');
+  const flags = a.classification.get('obscuritinib free base');
   assert.ok(flags.includes('DUPLICATE_RISK'));
   assert.ok(!flags.includes('SAFE_TO_CREATE'), 'a known duplicate was proposed for creation');
-  assert.strictEqual(a.exclusionReasons.get('ketamine free base'),
-    'duplicate_risk:same_neutral_substance_as:ketamine');
+  assert.strictEqual(a.exclusionReasons.get('obscuritinib free base'),
+    'duplicate_risk:same_neutral_substance_as:obscuritinib');
   // The parent is unaffected.
-  assert.ok(a.classification.get('ketamine').includes('SAFE_TO_CREATE'));
+  assert.ok(a.classification.get('obscuritinib').includes('SAFE_TO_CREATE'));
 });
 
 // ── DECISION 3: THE CHECK THAT COULD NOT PASS ───────────────────────────────
@@ -403,8 +406,8 @@ test('a free-base pair does not disqualify itself by being its own shared-CAS fi
   // DISTINCT_NAMES_SHARED_CAS and the check failed on evidence it had generated. A check that
   // cannot pass for the cases it was written for reads as a confident "none of these qualify".
   const a = analyze([
-    row('Cabozantinib', '849217-68-1', 1),
-    row('Cabozantinib (free base)', '849217-68-1', 2),
+    row('Obscuritinib', '849217-68-1', 1),
+    row('Obscuritinib (free base)', '849217-68-1', 2),
   ]);
   assert.strictEqual(a.freeForm[0].aliasProof.verdict, 'ALIAS_PROVEN');
 });
@@ -525,12 +528,12 @@ test('free base with no parent, or without registry evidence, is AMBIGUOUS and B
 
 test('salt counterparts are reported as context and do not decide the disposition', () => {
   const a = analyze([
-    row('Ketamine', '6740-88-1', 1),
-    row('Ketamine free base', '6740-88-1', 2),
-    row('Ketamine hydrochloride', '1867-66-9', 3),
+    row('Obscuritinib', '6740-88-1', 1),
+    row('Obscuritinib free base', '6740-88-1', 2),
+    row('Obscuritinib hydrochloride', '1867-66-9', 3),
   ]);
   const f = a.freeForm[0];
-  assert.ok(f.saltCounterparts.some((s) => /ketamine hydrochloride/.test(s)));
+  assert.ok(f.saltCounterparts.some((s) => /obscuritinib hydrochloride/.test(s)));
   // Still decided on registry evidence, not on the salt's presence.
   assert.strictEqual(f.disposition, 'SAME_NEUTRAL_SUBSTANCE');
 });
@@ -581,5 +584,35 @@ test('every E1 group receives exactly one decision set, and blockers exclude SAF
     const blocked = flags.includes('QUARANTINE_IDENTITY_CONFLICT') || flags.includes('INSUFFICIENT_IDENTITY');
     assert.strictEqual(flags.includes('SAFE_TO_CREATE'), !blocked,
       `${key}: SAFE_TO_CREATE must be present exactly when no blocker applies`);
+  }
+});
+
+test('a PROVEN free-base pair folds to one molecule and is no longer duplicate-risk', () => {
+  // The four proven on 29 Oct. Once curated they are aliases, not withheld duplicates — so
+  // DUPLICATE_RISK must drop and the parent must still be created exactly once.
+  const { moleculeKey } = require('./identity');
+  for (const [parent, child] of [
+    ['Cabozantinib', 'Cabozantinib (free base)'],
+    ['Osimertinib', 'Osimertinib (free base)'],
+    ['Ketamine', 'Ketamine free base'],
+    ['Cediranib', 'Cediranib free base'],
+  ]) {
+    assert.strictEqual(moleculeKey(parent), moleculeKey(child), `${child} did not fold`);
+    const a = analyze([row(parent, '50-78-2', 1), row(child, '50-78-2', 2)]);
+    assert.strictEqual(a.summary.e1Groups, 1, `${child} produced a second molecule`);
+    assert.strictEqual(a.summary.duplicateRisk, 0);
+    assert.ok(a.classification.get(moleculeKey(parent)).includes('SAFE_TO_CREATE'));
+  }
+});
+
+test('the three UNPROVEN free-base cases stay distinct identities', () => {
+  const { moleculeKey } = require('./identity');
+  for (const [parent, child] of [
+    ['Octreotide', 'Octreotide free base'],
+    ['Selumetinib', 'Selumetinib (free base)'],
+    ['Pemetrexed', 'Pemetrexed free acid'],
+  ]) {
+    assert.notStrictEqual(moleculeKey(parent), moleculeKey(child),
+      `${child} was folded without being proven`);
   }
 });
