@@ -17,7 +17,7 @@
 'use strict';
 
 const { initDB, query, withTransaction } = require('../src/lib/db');
-const { analyze } = require('../src/lib/molecules/preview');
+const { analyze, looksTruncated, fragmentCore, GENERIC_FRAGMENT_NAMES } = require('../src/lib/molecules/preview');
 const { moleculeKey } = require('../src/lib/molecules/identity');
 const { validCas } = require('../src/lib/catalogue/cas');
 const backfill = require('./backfill-molecule-identity');
@@ -51,6 +51,61 @@ async function main() {
   const S = a.summary;
   const expectCreate = new Set(a.executionSet.CREATE);
   const expectExcluded = new Set([...a.exclusionReasons.keys()]);
+
+  // ── --list-unexpected ────────────────────────────────────────────────────
+  //
+  // READ-ONLY. Names every molecule that exists but was not in the authorised CREATE set, with the
+  // reason the analyser excluded it and the source rows now pointing at it. This is the input to a
+  // retraction decision, so it must be a list of ids — not a pattern. Nothing here writes.
+  if (process.argv.includes('--list-unexpected')) {
+    const got = await query(
+      `SELECT id, molecule_ref, normalized_name, canonical_name, cas, substance_form,
+              parent_molecule_id, derived_base_name
+         FROM molecules ORDER BY normalized_name`);
+    const extras = got.rows.filter((m) => !expectCreate.has(m.normalized_name));
+    console.log(`\n── molecules present but NOT in the authorised CREATE set: ${extras.length}\n`);
+    for (const m of extras) {
+      const reason = a.exclusionReasons.get(m.normalized_name) || '(no analyser reason — unaccounted)';
+      let linked = 0;
+      const per = [];
+      for (const s of SOURCES) {
+        const ex = await query(`SELECT to_regclass($1) IS NOT NULL ok`, [s.table]);
+        if (!ex.rows[0].ok) continue;
+        const n = (await query(
+          `SELECT COUNT(*)::int n FROM ${s.table} WHERE molecule_id = $1`, [m.id])).rows[0].n;
+        if (n) { linked += n; per.push(`${s.table}=${n}`); }
+      }
+      const al = (await query(
+        `SELECT COUNT(*)::int n FROM molecule_aliases WHERE molecule_id = $1`, [m.id])).rows[0].n;
+      console.log(`   id=${String(m.id).padEnd(6)} ${m.molecule_ref}  ${m.normalized_name}`);
+      console.log(`          reason   ${reason}`);
+      console.log(`          cas      ${m.cas === null ? '(withheld)' : m.cas}   form=${m.substance_form}` +
+        `${m.parent_molecule_id ? `  parent=${m.parent_molecule_id}` : ''}`);
+      console.log(`          links    ${linked} source row(s)${per.length ? ` [${per.join(' ')}]` : ''}` +
+        `   aliases ${al}`);
+    }
+    console.log(`\n── RETRACTION SET (ids), for review only — nothing was written\n`);
+    console.log(`   ${extras.map((m) => m.id).join(',')}\n`);
+
+    const rs = await query(
+      `SELECT id, normalized_name FROM molecules WHERE normalized_name LIKE '%reference standard%'
+         OR normalized_name LIKE '%analytical standard%' OR normalized_name LIKE '%internal standard%'
+       ORDER BY normalized_name`);
+    console.log(`── names still carrying a descriptor phrase: ${rs.rowCount}\n`);
+    rs.rows.forEach((x) => console.log(`   id=${String(x.id).padEnd(6)} ${x.normalized_name}`));
+    if (!rs.rowCount) console.log('   (none)');
+
+    const alx = await query(`
+      SELECT al.alias, m.normalized_name FROM molecule_aliases al
+        JOIN molecules m ON m.id = al.molecule_id ORDER BY al.alias`);
+    const mism = alx.rows.filter((x) => moleculeKey(x.alias) !== x.normalized_name);
+    console.log(`\n── aliases whose key does not reproduce their molecule: ${mism.length}\n`);
+    mism.forEach((x) => console.log(`   ${x.alias}  ->  ${x.normalized_name}   (key = ${moleculeKey(x.alias) || '(empty)'})`));
+    if (!mism.length) console.log('   (none)');
+
+    console.log('\n   READ-ONLY listing complete. No INSERT, UPDATE or DELETE was issued.\n');
+    return 0;
+  }
 
   // ── 1 ────────────────────────────────────────────────────────────────────
   h(1, 'actual molecules created = expected CREATE');
@@ -216,16 +271,22 @@ async function main() {
     'L-boronophenylalanine 10B-enriched', 'L-boronophenylalanine');
   // Reference-standard normalization: the relabelled name must NOT exist as its own molecule.
   const rsLeak = await query(`
-    SELECT COUNT(*)::int n FROM molecules WHERE normalized_name LIKE '%reference standard%'`);
-  if (rsLeak.rows[0].n === 0) ok('no "reference standard" name survives as its own molecule');
-  else bad(`${rsLeak.rows[0].n} reference-standard names became molecules`);
+    SELECT normalized_name FROM molecules WHERE normalized_name LIKE '%reference standard%'
+       OR normalized_name LIKE '%analytical standard%' OR normalized_name LIKE '%internal standard%'`);
+  if (!rsLeak.rowCount) ok('no descriptor-phrase name survives as its own molecule');
+  else bad(`${rsLeak.rowCount} descriptor-phrase names became molecules`,
+    rsLeak.rows.map((x) => x.normalized_name).join(', '));
   // Truncated and generic fragments must be absent entirely.
-  const fragLeak = await query(`
-    SELECT normalized_name FROM molecules
-     WHERE normalized_name IN ('amine','e-2-carboxylic acid')
-        OR normalized_name LIKE '%]%' OR normalized_name LIKE 'yl %'`);
-  if (!fragLeak.rowCount) ok('no truncated or generic fragment became a molecule');
-  else bad(`${fragLeak.rowCount} fragments were created`, fragLeak.rows.map((x) => x.normalized_name).join(', '));
+  //
+  // This asks the ANALYSER, not a SQL pattern. The previous version matched `normalized_name LIKE
+  // '%]%'`, which flags every isotope label and ring descriptor — [1-13C]pyruvic acid,
+  // [18F]fluoromisonidazole, Kryptofix [8.8.8]hexacosane are all real compounds. A check whose
+  // failures are mostly its own false positives trains you to ignore it, which is worse than absent.
+  const allNames = (await query(`SELECT normalized_name FROM molecules`)).rows.map((x) => x.normalized_name);
+  const fragLeak = allNames.filter(
+    (n) => GENERIC_FRAGMENT_NAMES.has(fragmentCore(n)) || looksTruncated(n));
+  if (!fragLeak.length) ok('no truncated or generic fragment became a molecule');
+  else bad(`${fragLeak.length} fragments were created`, fragLeak.slice(0, 12).join(', '));
   // Contested pair, specifically.
   const sel = await mol(moleculeKey('Selumetinib'));
   const bini = await mol(moleculeKey('Binimetinib'));

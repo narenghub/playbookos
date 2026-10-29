@@ -307,11 +307,14 @@ async function main(deps = {}) {
         }
         if (ownedByOther.rowCount) continue;      // it IS this molecule; nothing to add
         if (!existing || !existing.id) continue;
-        await q(
+        // ON CONFLICT DO NOTHING means the statement can be a no-op. Counting it unconditionally is
+        // what made the idempotency proof report "the re-run wrote 26 times" while created=0 and
+        // linked=0 — a phantom. The row count is the write count.
+        const ins = await q(
           `INSERT INTO molecule_aliases (molecule_id, alias, alias_type, source, confidence)
            VALUES ($1,$2,'inn',$3,'high') ON CONFLICT (alias) DO NOTHING`,
           [existing.id, alias, `backfill:${src.table}`]);
-        stats.aliasesCreated += 1; stats.writes += 1;
+        stats.aliasesCreated += ins.rowCount; stats.writes += ins.rowCount;
       }
 
       // The contest itself is recorded as evidence, so "why is this cas NULL" is answerable from
