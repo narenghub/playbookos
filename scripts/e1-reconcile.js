@@ -33,7 +33,7 @@ const SOURCES = [
   { table: 'supplier_products', idCol: 'id', nameCol: 'product_name', casCol: 'cas', where: null },
 ];
 
-const KNOWN_FLAGS = ['--list-unexpected'];
+const KNOWN_FLAGS = ['--list-unexpected', '--inspect-sources'];
 for (const a of process.argv.slice(2)) {
   if (a.startsWith('--before=')) continue;
   if (!KNOWN_FLAGS.includes(a)) {
@@ -68,6 +68,10 @@ async function main() {
   // retraction decision, so it must be a list of ids — not a pattern. Nothing here writes.
   if (process.argv.includes('--list-unexpected')) {
     await listUnexpected(query, a, expectCreate);
+    return 0;
+  }
+  if (process.argv.includes('--inspect-sources')) {
+    await inspectSources(query, a, expectCreate);
     return 0;
   }
 
@@ -324,7 +328,54 @@ async function listUnexpected(q, a, expectCreate) {
   console.log('\n   READ-ONLY listing complete. No INSERT, UPDATE or DELETE was issued.\n');
 }
 
-module.exports = { listUnexpected };
+// ── WHAT THE SOURCE ROWS ACTUALLY SAID ──────────────────────────────────────
+//
+// READ-ONLY. The listing above gives the molecule as it was created; this gives the raw string it was
+// created from. Both are needed before anything is retracted, for two different reasons.
+//
+// For the corrupted names, the raw string is the evidence that the identity is fabricated: `benzamide`
+// is a real and very common compound (CAS 55-21-0) and this row carries a different number, so either
+// the name or the CAS is wrong — and the source string shows which.
+//
+// For the 34 descriptor-phrase rows the raw string IS the finding. `… internal standard e.g.
+// deuterated or 13c analog` is an analytical requirement, not a nameable substance, and it must not be
+// normalised down to the parent drug code either: an isotopically labelled analog is a DIFFERENT
+// material, which is the isotope invariant E1 already enforces everywhere else.
+async function inspectSources(q, a, expectCreate) {
+  const mols = (await q(
+    `SELECT id, molecule_ref, normalized_name, preferred_name, cas FROM molecules
+      ORDER BY normalized_name`)).rows;
+  const extras = mols.filter((m) => !expectCreate.has(m.normalized_name));
+  const descr = mols.filter((m) => /\b(reference|analytical|internal) standard\b/.test(m.normalized_name));
+
+  const dump = async (title, set) => {
+    console.log(`\n── ${title}: ${set.length}\n`);
+    for (const m of set) {
+      const reason = a.exclusionReasons.get(m.normalized_name) || '(in the authorised CREATE set)';
+      console.log(`   id=${String(m.id).padEnd(6)} ${m.normalized_name}`);
+      console.log(`          reason   ${reason}`);
+      console.log(`          cas held ${m.cas === null ? '(withheld)' : m.cas}`);
+      for (const s of SOURCES) {
+        const ex = await q(`SELECT to_regclass($1) IS NOT NULL ok`, [s.table]);
+        if (!ex.rows[0].ok) continue;
+        const rs = await q(
+          `SELECT ${s.idCol} AS rid, ${s.nameCol} AS nm, ${s.casCol} AS cas
+             FROM ${s.table} WHERE molecule_id = $1 ORDER BY ${s.idCol}`, [m.id]);
+        for (const r0 of rs.rows) {
+          console.log(`          src      ${s.table}#${r0.rid}  cas=${r0.cas === null ? '(null)' : r0.cas}`);
+          console.log(`                   "${r0.nm}"`);
+        }
+      }
+    }
+    if (!set.length) console.log('   (none)');
+  };
+
+  await dump('UNAUTHORISED molecules, with the strings they came from', extras);
+  await dump('DESCRIPTOR-PHRASE molecules — authorised, and not substances', descr);
+  console.log('\n   READ-ONLY. No INSERT, UPDATE or DELETE was issued.\n');
+}
+
+module.exports = { listUnexpected, inspectSources };
 
 // Gated, for the reason the backfill's guards are gated: an importer gets the exported function, not
 // a full reconciliation run against whatever database it happens to be pointed at, followed by this

@@ -420,16 +420,17 @@ const FIXTURE_TABLES = `
     // executes and writes nothing — the retraction decision reads its output, so it has to survive a
     // schema it was not written against.
     try {
-      const { listUnexpected } = require('./e1-reconcile');
+      const { listUnexpected, inspectSources } = require('./e1-reconcile');
       const before = await q(`SELECT COUNT(*)::int n FROM molecules`);
       const quiet = console.log; console.log = () => {};
       await listUnexpected(q, { exclusionReasons: new Map() }, new Set());
+      await inspectSources(q, { exclusionReasons: new Map() }, new Set());
       console.log = quiet;
       const after = await q(`SELECT COUNT(*)::int n FROM molecules`);
-      if (before.rows[0].n === after.rows[0].n) ok('--list-unexpected runs against the real schema and writes nothing');
+      if (before.rows[0].n === after.rows[0].n) ok('--list-unexpected and --inspect-sources run against the real schema and write nothing');
       else bad('the listing changed the molecule count', `${before.rows[0].n} -> ${after.rows[0].n}`);
     } catch (e) {
-      bad('--list-unexpected could not run against the real schema', e && e.message ? e.message : e);
+      bad('a read-only listing could not run against the real schema', e && e.message ? e.message : e);
     }
   } catch (e) {
     bad('threw', e && e.stack ? e.stack : e);
