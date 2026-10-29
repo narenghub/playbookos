@@ -94,13 +94,22 @@ const DESCRIPTOR_PHRASES = [
   ['reference', 'standard'],
   ['analytical', 'standard'],
   ['internal', 'standard'],
+  // `Enzalutamide USP/reference standard` — the qualifier is glued to the phrase's first word, so
+  // neither the phrase nor the qualifier list reaches it on its own.
+  ['usp/reference', 'standard'],
 ];
 
 // Qualifiers that only ever appear attached to one of the phrases above, stripped after it. A bare
 // `standard` is NOT in either list: alone it is too close to ordinary words to remove safely.
+// `grade` is here after the 29 Oct corrected run. All ten remaining DESCRIPTOR_VARIANT findings
+// were one shape — `Apalutamide reference standard (USP/EP grade)`. normalize() turns the
+// parentheses into spaces, leaving `apalutamide reference standard usp/ep grade`: the qualifier
+// trails the PHRASE and ends in `grade`, so the loop broke on the first token and never reached
+// `reference standard`. A trailing `grade` is purpose nomenclature by definition and names no
+// chemical form, so it satisfies the invariant.
 const DESCRIPTOR_QUALIFIERS = new Set([
   'analytical', 'usp/ep', 'usp/analytical', 'usp/ph.eur.', 'usp/ph.eur',
-  'ph.eur.', 'ph.eur', 'ph.eur..', 'pharmacopoeial',
+  'ph.eur.', 'ph.eur', 'ph.eur..', 'pharmacopoeial', 'grade',
 ]);
 
 // Water of crystallisation.

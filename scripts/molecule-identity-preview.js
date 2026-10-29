@@ -78,21 +78,30 @@ const TIER_NAME = { 1: 'COMMERCIAL / TRANSACTIONAL', 2: 'SCIENTIFIC / OPERATIONA
 // If the corrected run reports the same figures, nothing changed and the report should say so
 // rather than imply improvement.
 const BASELINE = {
-  label: '1dc702c (pre-descriptor-normalization)',
-  e1Groups: 2990,
-  e1MultiName: 303,
-  e1Conflicts: 46,
+  label: '240e48f (first descriptor pass — 10 gaps remained, verdict NO-GO)',
+  e1Groups: 2529,
+  e1MultiName: 553,
+  e1Conflicts: 48,
   legacyConflicts: 104,
-  eliminatedBySaltForm: 61,
-  surviving: 43,
-  safeToCreate: 2944,
-  quarantine: 46,
+  eliminatedBySaltForm: 60,
+  surviving: 44,
+  safeToCreate: 2481,
+  quarantine: 48,
   insufficient: 0,
-  sharedCas: 341,
-  sharedCasIdentitiesTotal: 823,
-  sharedCasReviewRequired: 328,
+  sharedCas: 134,
+  sharedCasIdentitiesTotal: 312,
+  sharedCasReviewRequired: 95,
+  sharedCasDescriptorVariant: 10,
   invalidCasOccurrences: 346,
   invalidCasDistinct: 294,
+};
+
+// The run before descriptor normalization existed, kept so the cumulative effect stays visible
+// after BASELINE has moved on. These are the figures the NO-GO was called on.
+const ORIGINAL = {
+  label: '1dc702c (pre-descriptor-normalization)',
+  e1Groups: 2990, safeToCreate: 2944, sharedCas: 341,
+  sharedCasIdentitiesTotal: 823, sharedCasReviewRequired: 328,
 };
 const delta = (now, then) => {
   if (then === undefined || then === null) return `${now}`;
@@ -171,6 +180,12 @@ async function main() {
   console.log('');
   r('invalid-CAS occurrences', delta(S.invalidCasOccurrences, BASELINE.invalidCasOccurrences));
   r('invalid-CAS distinct values', delta(S.invalidCasDistinct, BASELINE.invalidCasDistinct));
+  console.log(`\n   cumulative, against ${ORIGINAL.label}:\n`);
+  r('proposed molecule groups', delta(S.e1Groups, ORIGINAL.e1Groups));
+  r('SAFE_TO_CREATE', delta(S.safeToCreate, ORIGINAL.safeToCreate));
+  r('shared-CAS values', delta(S.sharedCas, ORIGINAL.sharedCas));
+  r('identities touched by a shared CAS', delta(S.sharedCasIdentitiesTotal, ORIGINAL.sharedCasIdentitiesTotal));
+  r('DISTINCT_NAMES_SHARED_CAS (review queue)', delta(S.sharedCasDistinctNames, ORIGINAL.sharedCasReviewRequired));
 
   // ── 1c ────────────────────────────────────────────────────────────────────
   h('1c', 'DETERMINISTIC DESCRIPTOR NORMALIZATION — what it removed, and how often',

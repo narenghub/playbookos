@@ -47,6 +47,31 @@ const NON_CHEMICAL_WORDS = new Set([
   'standard', 'reference', 'grade', 'purity', 'pure', 'assay', 'qualified', 'certified',
 ]);
 
+// ── THE CHEMICAL CORE ───────────────────────────────────────────────────────
+//
+// Every non-chemical word removed, from anywhere in the name rather than only the end. Two
+// identities whose cores are EQUAL differ by labelling alone; two whose cores differ are two
+// different things however similar they look.
+//
+// This replaced a pairwise `some()` test, and the replacement is the point. With `some()`, one
+// benign pair in a group labelled the WHOLE group DESCRIPTOR_VARIANT — and on the 29 Oct corrected
+// run that hid three real findings behind the label I had described as "not human work":
+//
+//   CAS 606143-89-9  selumetinib | binimetinib | selumetinib free base
+//                    two DIFFERENT MEK inhibitors sharing selumetinib's number
+//   CAS 90357-06-5   bicalutamide | hydroxybicalutamide        a metabolite, not a grade
+//   CAS 1972-08-3    dronabinol | delta-9-tetrahydrocannabinol  真 synonym, still masked
+//
+// A benign classification must never be able to conceal a dangerous one, so the rule is now: every
+// identity in the group must share one core, or the group is review work. It errs toward review,
+// which is the direction that costs nothing.
+function chemicalCore(identity) {
+  return String(identity || '')
+    .split(' ')
+    .filter((w) => w && !NON_CHEMICAL_WORDS.has(w))
+    .join(' ');
+}
+
 /** Do these two identities differ only by trailing non-chemical words? */
 function descriptorVariantOf(a, b) {
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
@@ -257,10 +282,12 @@ function analyze(rows) {
       return (g && g.base) || k;
     });
     const sameBase = new Set(bases).size === 1;
-    const descriptorPair = ids.some((a) => ids.some((b) => a !== b && descriptorVariantOf(a, b)));
+    // ALL identities must share one chemical core. Not "some pair matches" — see chemicalCore.
+    const cores = new Set(ids.map(chemicalCore));
+    const allOneCore = cores.size === 1;
 
-    if (descriptorPair) { kind = 'DESCRIPTOR_VARIANT'; explanation = 'normalization_gap_descriptor_only'; }
-    else if (aliasLinked) { kind = 'EXPLAINED'; explanation = 'explained_curated_synonym'; }
+    if (allOneCore) { kind = 'DESCRIPTOR_VARIANT'; explanation = 'normalization_gap_descriptor_only'; }
+    else if (aliasLinked && ids.length === 2) { kind = 'EXPLAINED'; explanation = 'explained_curated_synonym'; }
     else if (sameBase) { kind = 'EXPLAINED'; explanation = 'explained_form_relationship'; }
 
     const entry = {
@@ -327,4 +354,6 @@ function analyze(rows) {
   return out;
 }
 
-module.exports = { analyze, BLOCKERS, WARNINGS, descriptorVariantOf, looksTruncated, NON_CHEMICAL_WORDS };
+module.exports = {
+  analyze, BLOCKERS, WARNINGS, descriptorVariantOf, chemicalCore, looksTruncated, NON_CHEMICAL_WORDS,
+};

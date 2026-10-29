@@ -218,6 +218,70 @@ test('two unrelated drugs sharing a CAS stay DISTINCT_NAMES_SHARED_CAS and highl
   assert.match(a.synonymCandidates[0].note, /human decides/);
 });
 
+// ── A BENIGN LABEL MUST NOT CONCEAL A DANGEROUS ONE ─────────────────────────
+//
+// The 29 Oct corrected run classified these as DESCRIPTOR_VARIANT because ONE pair inside each
+// group was a descriptor variant, and the group inherited the benign label. All three are real.
+
+test('a descriptor variant in the group does NOT mask a genuinely different substance', () => {
+  // selumetinib and binimetinib are two different MEK inhibitors sharing selumetinib's CAS.
+  const a = analyze([
+    row('Selumetinib', '606143-89-9', 1),
+    row('Selumetinib USP/EP reference standard', '606143-89-9', 2),
+    row('Binimetinib', '606143-89-9', 3),
+  ]);
+  const s = a.sharedCas.find((x) => x.cas === '606143-89-9');
+  assert.ok(s, 'the shared CAS vanished');
+  assert.strictEqual(s.kind, 'DISTINCT_NAMES_SHARED_CAS',
+    'a real misattribution was labelled a normalization gap');
+  assert.strictEqual(s.explanation, 'REVIEW_REQUIRED');
+});
+
+test('a metabolite is not a grade variant', () => {
+  const a = analyze([
+    row('Bicalutamide', '90357-06-5', 1),
+    row('Bicalutamide USP Reference Standard', '90357-06-5', 2),
+    row('Hydroxybicalutamide', '90357-06-5', 3),
+  ]);
+  const s = a.sharedCas.find((x) => x.cas === '90357-06-5');
+  assert.strictEqual(s.kind, 'DISTINCT_NAMES_SHARED_CAS');
+});
+
+test('chemicalCore strips non-chemical words from anywhere, not just the end', () => {
+  const { chemicalCore } = require('./preview');
+  assert.strictEqual(chemicalCore('venetoclax reference standard usp/ep grade'), 'venetoclax');
+  assert.strictEqual(chemicalCore('venetoclax'), 'venetoclax');
+  // Chemical words survive, so two substances never share a core.
+  assert.notStrictEqual(chemicalCore('selumetinib'), chemicalCore('binimetinib'));
+  assert.notStrictEqual(chemicalCore('bicalutamide'), chemicalCore('hydroxybicalutamide'));
+  assert.notStrictEqual(chemicalCore('pemetrexed'), chemicalCore('pemetrexed free acid'));
+  assert.notStrictEqual(chemicalCore('leuprolide'), chemicalCore('leuprolide acetate'));
+});
+
+test('the (USP/EP grade) phrasing — all ten remaining gaps — now collapses', () => {
+  const I = require('./identity');
+  for (const filed of [
+    'Apalutamide reference standard (USP/EP grade)',
+    'Pembrolizumab reference standard (USP/analytical grade)',
+    'Niraparib reference standard (USP/Ph.Eur. grade)',
+    'Enzalutamide USP/reference standard',
+    'Alectinib reference standard (USP/EP grade)',
+  ]) {
+    const core = filed.split(' ')[0].toLowerCase();
+    assert.strictEqual(I.substanceForm(filed).identity, core, `${filed} did not collapse`);
+  }
+});
+
+test('the venetoclax group collapses to one molecule and leaves shared-CAS', () => {
+  const a = analyze([
+    row('Venetoclax', '1257044-40-8', 1),
+    row('Venetoclax reference standard (USP/EP grade)', '1257044-40-8', 2),
+    row('Venetoclax USP/analytical reference standard', '1257044-40-8', 3),
+  ]);
+  assert.strictEqual(a.summary.e1Groups, 1);
+  assert.strictEqual(a.summary.sharedCas, 0);
+});
+
 test('descriptorVariantOf refuses a pair whose tail carries chemical meaning', () => {
   const { descriptorVariantOf } = require('./preview');
   assert.strictEqual(descriptorVariantOf('venetoclax', 'venetoclax reference standard'), true);
