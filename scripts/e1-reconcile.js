@@ -33,6 +33,15 @@ const SOURCES = [
   { table: 'supplier_products', idCol: 'id', nameCol: 'product_name', casCol: 'cas', where: null },
 ];
 
+const KNOWN_FLAGS = ['--list-unexpected'];
+for (const a of process.argv.slice(2)) {
+  if (a.startsWith('--before=')) continue;
+  if (!KNOWN_FLAGS.includes(a)) {
+    console.error(`unknown flag ${a}. Known: ${KNOWN_FLAGS.join(', ')}, --before=<path>`);
+    process.exit(2);
+  }
+}
+
 async function main() {
   await initDB();
   const commit = String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || 'unknown';

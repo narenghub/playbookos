@@ -55,18 +55,29 @@ let Q = query;
 let TX = withTransaction;
 
 const args = process.argv.slice(2);
-let EXECUTE = args.includes('--execute');
+// Gated on require.main for the same reason as the flag guard below, but this one is a write hazard
+// rather than an annoyance: imported by a script that happened to be invoked with --execute, this
+// module would default to writing to production. A caller gets execution only by asking for it in
+// deps, never by inheriting the argv of a process it knows nothing about.
+let EXECUTE = require.main === module && args.includes('--execute');
 const ONLY = (args.find((a) => a.startsWith('--table=')) || '').split('=')[1] || null;
 
 // Unknown flags are rejected rather than ignored. The rotation tooling shipped a run where
 // --snapshot silently did nothing because an older script was deployed, and the lesson recorded was
 // that a flag nobody validates is a flag that lies.
+//
+// It runs ONLY as a program. e1-reconcile.js requires this file to re-run main() for the idempotency
+// proof, and a module-scope guard reads the argv of whatever process imported it — so reconcile's own
+// flags were rejected by its dependency, at import, before reconcile's code ran. A library does not
+// get to validate its caller's command line.
 const KNOWN = ['--execute', '--quiet'];
-for (const a of args) {
-  if (a.startsWith('--table=')) continue;
-  if (!KNOWN.includes(a)) {
-    console.error(`unknown flag ${a}. Known: ${KNOWN.join(', ')}, --table=<name>`);
-    process.exit(2);
+if (require.main === module) {
+  for (const a of args) {
+    if (a.startsWith('--table=')) continue;
+    if (!KNOWN.includes(a)) {
+      console.error(`unknown flag ${a}. Known: ${KNOWN.join(', ')}, --table=<name>`);
+      process.exit(2);
+    }
   }
 }
 
