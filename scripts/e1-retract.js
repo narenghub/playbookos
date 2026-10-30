@@ -218,6 +218,8 @@ async function main(deps = {}) {
     unlinked: 0, aliasesDeleted: 0, childrenDetached: 0, moleculesDeleted: 0, writes: 0,
   };
   const skipped = [];
+  // table -> the row ids this run unlinked. The reason-is-set proof is scoped to these.
+  const touched = new Map(SOURCES.map((s) => [s.table, []]));
 
   for (const p of PLAN_IN_USE) {
     const m = (await Q(
@@ -248,9 +250,13 @@ async function main(deps = {}) {
           stats.unlinked += n;
           continue;
         }
+        // RETURNING, so the proof afterwards can name the rows this run touched instead of
+        // asserting something about the whole table.
         const u = await q(
           `UPDATE ${s.table} SET molecule_id = NULL, molecule_unresolved_reason = $1
-            WHERE molecule_id = $2`, [reasonFor(p).slice(0, 500), p.id]);
+            WHERE molecule_id = $2 RETURNING ${s.idCol} AS rid`,
+          [reasonFor(p).slice(0, 500), p.id]);
+        u.rows.forEach((x) => touched.get(s.table).push(x.rid));
         stats.unlinked += u.rowCount || 0;
         stats.writes += u.rowCount || 0;
       }
@@ -352,11 +358,32 @@ async function main(deps = {}) {
     else bad(`${left.rowCount} remain but ${stats.skippedMismatch} were skipped`,
       left.rows.map((x) => `${x.id}:${x.normalized_name}`).join(', '));
 
-    const orphanRows = await Q(`
-      SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NULL
-         AND molecule_unresolved_reason IS NULL`);
-    if (orphanRows.rows[0].n === 0) ok('no source row is unlinked without a reason');
-    else bad(`${orphanRows.rows[0].n} study_molecules rows are unlinked and silent about why`);
+    // ── THE ROWS THIS RUN UNLINKED, AND ONLY THOSE ────────────────────────
+    //
+    // This asked the whole table whether any row was unlinked without a reason, and at 13:50 it
+    // reported 51 and failed the run. None of the 51 were this script's doing: study_molecules grew
+    // overnight — the agents write into it — and new rows are unlinked and silent until a backfill
+    // reaches them, which is the correct state for them to be in.
+    //
+    // CLAUDE.md names this exactly: "Never assert a table is empty. Assert that MY fixtures are
+    // gone." A global absolute in a cleanup script becomes false the moment the product is used,
+    // and the obvious fix to a failing assertion like that is to widen the destructive statement
+    // until it passes. A test that pressures the next person toward a bigger DELETE is worse than
+    // no test. So the question is now about the rows this run unlinked, by id.
+    let silent = 0;
+    const silentExamples = [];
+    for (const [table, ids] of touched) {
+      if (!ids.length) continue;
+      const src = SOURCES.find((x) => x.table === table);
+      const r0 = await Q(
+        `SELECT ${src.idCol} AS rid FROM ${table}
+          WHERE ${src.idCol} = ANY($1) AND molecule_unresolved_reason IS NULL`, [ids]);
+      silent += r0.rowCount;
+      r0.rows.slice(0, 4).forEach((x) => silentExamples.push(`${table}#${x.rid}`));
+    }
+    const totalTouched = [...touched.values()].reduce((a, b) => a + b.length, 0);
+    if (silent === 0) ok(`all ${totalTouched} row(s) this run unlinked carry a reason`);
+    else bad(`${silent} of ${totalTouched} rows this run unlinked are silent about why`, silentExamples.join(', '));
 
     const dangling = await Q(`
       SELECT COUNT(*)::int n FROM molecule_aliases a
