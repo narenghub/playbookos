@@ -224,14 +224,34 @@ async function main() {
 
   // ── 10 ───────────────────────────────────────────────────────────────────
   h(10, 'rerunning E1 creates zero molecules and no duplicate linkage');
-  const before = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
-  const beforeLinks = (await query(`SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
+  // TWO runs, and the proof is about the SECOND.
+  //
+  // One run and "it wrote nothing" was a statement about the clock, not about the code. The agents
+  // write into study_molecules continuously — the 10:30pm and 1:30am briefings among them — so rows
+  // that arrived between the migration step and this command are rows no backfill has reached, and
+  // refusing them is work that genuinely needs doing. Asserting zero writes there fails for a
+  // timing reason and teaches you to ignore the proof.
+  //
+  // So the first run absorbs whatever drifted in, and the second proves idempotence: given a
+  // database this code has just finished with, running it again must change nothing. That is the
+  // property worth having, and it is the one that was being claimed all along.
   const realLog = console.log;
   console.log = () => {};
-  let second;
+  let absorbed; let second; let before; let beforeLinks;
   try {
+    absorbed = await backfill.main({ query, withTransaction, execute: true });
+    // Counted BETWEEN the runs. Taken before the first, a molecule the first pass legitimately
+    // created from a row that arrived overnight would read as the count having moved under the
+    // idempotence proof.
+    before = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
+    beforeLinks = (await query(
+      `SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
     second = await backfill.main({ query, withTransaction, execute: true });
   } finally { console.log = realLog; }
+  const drifted = absorbed && absorbed.writes
+    ? Object.entries(absorbed.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('  ')
+    : null;
+  if (drifted) console.log(`   note  the first pass absorbed ${absorbed.writes} write(s) of drift: ${drifted}`);
   const after = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
   const afterLinks = (await query(`SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
   if (second.writes === 0) ok('the re-run issued ZERO write statements');

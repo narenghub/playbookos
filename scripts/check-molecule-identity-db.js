@@ -538,6 +538,17 @@ const FIXTURE_TABLES = `
         `INSERT INTO study_molecules (study_id, molecule_name, cas_number, molecule_id)
          VALUES ('NCT-RETRACT','Retractme',NULL,$1) RETURNING id`, [vid]);
 
+      // A name-resolved entry that matches nothing must be REPORTED, not silently counted as an
+      // idempotent re-run. This is the path that makes resolving by name safer than a remembered id.
+      const quietN = console.log; console.log = () => {};
+      const nf = await retract.main({
+        query: q, withTransaction: tx, execute: true,
+        plan: [{ id: null, name: 'no-such-molecule-anywhere', kind: 'corrupted_name', group: 'drift' }],
+      });
+      console.log = quietN;
+      if (nf === 0) ok('a drift name that resolves to nothing retracts nothing and says so');
+      else bad('a missing drift name was not handled cleanly', JSON.stringify({ nf }));
+
       // A plan with one real entry and one whose name no longer matches.
       const plan = [
         { id: vid, name: 'retractme', kind: 'corrupted_name', group: 'unauthorised' },

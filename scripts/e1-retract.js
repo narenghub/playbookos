@@ -147,7 +147,34 @@ const REQUIREMENTS = [
   [623, 'zotiraciclib isotope-labeled internal standard e.g. deuterated analog'],
 ];
 
+// ── GROUP C: DRIFT — created legitimately, excluded by later data (1) ──────
+//
+// levoleucovorin was created on 29 Oct holding ONE checksum-valid CAS and was correctly inside the
+// authorised set, which is why it is not among the 72. A study row arriving overnight brought a
+// second number (61246-44-4 vs 80433-71-2), and with no row naming the substance alone it is now the
+// norketamine shape: nothing can link, so the identity is withheld.
+//
+// Its canonical CAS has already been withdrawn under Decision 1 by the backfill. What remains is a
+// molecule the current rules say should not exist, which reconciliation reports as drift.
+//
+// THIS RETRACTION IS REVERSIBLE and that is the point. Both of its source rows stay in
+// study_molecules with a reason. If somebody rules which number is levoleucovorin's and corrects the
+// wrong row, the identity becomes creatable again and the next backfill recreates the molecule. So
+// retracting now does not decide the chemistry — it declines to publish a substance whose evidence
+// contradicts itself, which is what the whole quarantine is for.
+//
+// Identified by NAME, not by id, and deliberately: the 72 are literal ids because those ids are what
+// was read and approved in a listing. levoleucovorin's id was never in front of anybody, and an id
+// written from memory that turns out to be absent would send this script down its idempotent-re-run
+// path — reporting success while the molecule it was pointed at sat untouched. normalized_name is
+// uniquely indexed, so resolving by name is exact, and a name that resolves to nothing is reported
+// rather than passed over.
+const DRIFT = [
+  ['levoleucovorin', 'cas_disagreement'],
+];
+
 const PLAN = [
+  ...DRIFT.map(([name, kind]) => ({ id: null, name, kind, group: 'drift' })),
   ...UNAUTHORISED.map(([id, name, kind]) => ({ id, name, kind, group: 'unauthorised' })),
   ...REQUIREMENTS.map(([id, name]) => ({
     id, name, kind: 'insufficient_identity', group: 'requirement',
@@ -222,6 +249,19 @@ async function main(deps = {}) {
   const touched = new Map(SOURCES.map((s) => [s.table, []]));
 
   for (const p of PLAN_IN_USE) {
+    // An entry with no id is resolved by its uniquely-indexed normalized_name. Everything after this
+    // point is identical, including the name re-check, which for these is trivially true — the point
+    // of resolving by name is that a wrong id cannot quietly become "already gone".
+    if (p.id === null) {
+      const byName = await Q(`SELECT id FROM molecules WHERE normalized_name = $1`, [p.name]);
+      if (!byName.rowCount) {
+        stats.skippedMissing += 1;
+        console.log(`   drift  "${p.name}" is not present — nothing to retract`);
+        continue;
+      }
+      p.id = byName.rows[0].id;
+      console.log(`   drift  "${p.name}" resolved to id ${p.id}`);
+    }
     const m = (await Q(
       `SELECT id, normalized_name, preferred_name FROM molecules WHERE id = $1`, [p.id])).rows[0];
     if (!m) {
@@ -416,7 +456,7 @@ async function main(deps = {}) {
   return 0;
 }
 
-module.exports = { main, PLAN, UNAUTHORISED, REQUIREMENTS };
+module.exports = { main, PLAN, UNAUTHORISED, REQUIREMENTS, DRIFT };
 
 if (require.main === module) {
   main().then((f) => process.exit(f ? 1 : 0)).catch((e) => {
