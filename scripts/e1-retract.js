@@ -41,6 +41,9 @@
 'use strict';
 
 const { initDB, query, withTransaction } = require('../src/lib/db');
+// The quarantine record writes kinds that molecule_conflicts' original CHECK does not list, so the
+// widening is applied here rather than assumed to have happened in an earlier step.
+const { applyConflictKinds } = require('./migrate-molecules');
 
 let Q = query;
 let TX = withTransaction;
@@ -181,6 +184,32 @@ async function main(deps = {}) {
     ? `   authorised set: ${PLAN.length} molecules `
       + `(${UNAUTHORISED.length} unauthorised + ${REQUIREMENTS.length} requirement sentences)\n`
     : `   INJECTED plan: ${PLAN_IN_USE.length} molecule(s) — this is a test, not the authorised set\n`);
+
+  // ── THE SCHEMA THIS RUN DEPENDS ON ──────────────────────────────────────
+  //
+  // The 13:37 run deleted all 72 and then threw on the 7th evidence row, because the quarantine
+  // record writes kind='insufficient_identity' and molecule_conflicts' CHECK predates that
+  // category. The widening lived in migrate-molecules.js, which I had listed as the step AFTER this
+  // one — so the operator did exactly what I wrote and the run half-landed.
+  //
+  // A script that needs a schema change does not get to assume somebody ran it first. In EXECUTE it
+  // applies the widening itself, idempotently. In DRY RUN it reads the live constraint and asserts
+  // every kind this plan will write is accepted, which is the check that would have caught it: the
+  // dry run passed while being blind to the only table it was going to fail on.
+  const kinds = [...new Set(PLAN_IN_USE.map((p) => p.kind))];
+  if (EXECUTE) {
+    await applyConflictKinds(Q, (m) => console.log(m));
+  } else {
+    const def = (await Q(`
+      SELECT pg_get_constraintdef(oid) d FROM pg_constraint
+       WHERE conname = 'molecule_conflicts_kind_check'`)).rows[0];
+    const missing = def ? kinds.filter((k) => !def.d.includes(`'${k}'`)) : kinds;
+    if (!def) bad('molecule_conflicts_kind_check does not exist — run scripts/migrate-molecules.js');
+    else if (missing.length) {
+      bad(`molecule_conflicts.kind rejects ${missing.length} of the kind(s) this plan writes`,
+        `${missing.join(', ')} — run scripts/migrate-molecules.js first, or --execute, which widens it`);
+    } else ok(`molecule_conflicts.kind accepts all ${kinds.length} kind(s) this plan writes`);
+  }
 
   const before = (await Q(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
 

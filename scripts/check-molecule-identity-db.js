@@ -530,6 +530,31 @@ const FIXTURE_TABLES = `
 
       await q(`DELETE FROM study_molecules WHERE id = $1`, [sm.rows[0].id]);
       await q(`DELETE FROM molecules WHERE id = $1`, [kid.rows[0].id]);
+
+      // ── THE DRY RUN MUST SEE THE SCHEMA IT WILL FAIL ON ────────────────
+      //
+      // On 30 Oct at 13:37 the retraction dry run passed, and the --execute run then deleted all 72
+      // molecules and threw on the 7th evidence row: the quarantine record writes
+      // kind='insufficient_identity' and molecule_conflicts' CHECK predated that category. The dry
+      // run was blind to the only table the real run was going to fail on.
+      //
+      // So: drop the constraint, and assert the dry run REFUSES. A dry run that cannot fail is not a
+      // rehearsal, it is a formality.
+      await q(`ALTER TABLE molecule_conflicts DROP CONSTRAINT molecule_conflicts_kind_check`);
+      // NOT VALID: rows the backfill already wrote would fail a narrow CHECK, and
+      // molecule_conflicts is append-only by trigger so they cannot be cleared. New inserts are
+      // still checked, which is the condition being reproduced.
+      await q(`ALTER TABLE molecule_conflicts ADD CONSTRAINT molecule_conflicts_kind_check
+                 CHECK (kind IN ('cas_disagreement')) NOT VALID`);
+      const q2 = console.log; console.log = () => {};
+      const refused = await retract.main({
+        query: q, withTransaction: tx, execute: false,
+        plan: [{ id: -1, name: 'nothing', kind: 'insufficient_identity', group: 'requirement' }],
+      });
+      console.log = q2;
+      if (refused) ok('  …and the DRY RUN refuses when the conflict table rejects a kind it will write');
+      else bad('the dry run passed against a schema that would have failed the real run');
+      await applyConflictKinds(q);
     } catch (e) {
       bad('the retraction could not run against fixtures', e && e.message ? e.message : e);
     }
