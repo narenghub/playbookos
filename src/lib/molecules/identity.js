@@ -249,7 +249,19 @@ function substanceForm(name) {
   // The two guards copied in behaviour from moleculeBase, for the same reasons. A base shorter than
   // MIN_BASE_LENGTH is too generic to be a substance, and a bare mineral stem IS the substance —
   // `potassium chloride` is a drug, not a salt of a drug.
-  if (base.length < MIN_BASE_LENGTH) {
+  //
+  // The floor is a guess made in the ABSENCE of evidence: a 4-character leftover is more likely a
+  // fragment than a drug, so the whole name is kept. A base that appears in a curated synonym group
+  // is not absent of evidence — somebody wrote it down as a name for a known substance.
+  //
+  // `DDAVP acetate` is the case. `ddavp` is 5 characters against a floor of 6, so the acetate was
+  // never recognised as a form and moleculeKey('ddavp acetate') returned itself. The alias
+  // `ddavp acetate -> desmopressin acetate` was therefore correct and simultaneously unverifiable by
+  // the function that produced it, and a future row spelled "DDAVP acetate" would compute an
+  // identity nothing holds, try to create it, and be refused by the alias-collision trigger. A
+  // latent ingest failure, found by the one reconciliation proof that compares an alias against its
+  // own key.
+  if (base.length < MIN_BASE_LENGTH && curatedCanonical(base) === base) {
     out.reason = `stripping would leave "${base}", under the ${MIN_BASE_LENGTH}-char floor — treated as the substance itself`;
     return out;
   }

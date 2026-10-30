@@ -142,7 +142,13 @@ const DDL_TABLES = `
       id            BIGSERIAL PRIMARY KEY,
       kind          TEXT NOT NULL
         CHECK (kind IN ('cas_disagreement','alias_collision','ambiguous_form','unresolvable_name',
-                        'cas_contested','corrupted_name','duplicate_risk')),
+                        'cas_contested','corrupted_name','duplicate_risk',
+                        -- 30 Oct: the analyser's categories, now that it is the sole authority.
+                        'insufficient_identity','cas_contested_within_identity',
+                        -- Not a category: a reason shape the backfill was never taught to map. It
+                        -- is storable ON PURPOSE, so the drift is recorded as a row rather than
+                        -- aborting a migration mid-run — and a check asserts the count is zero.
+                        'unmapped_exclusion_reason')),
       filed_name    TEXT NOT NULL,
       identity_name TEXT,
       detail        TEXT NOT NULL,            -- what disagreed, in words
@@ -288,6 +294,31 @@ const TARGET_TABLES = [
 ];
 
 // Exported so the checker applies THIS, not its own ALTER statements.
+// ── CONSTRAINTS THAT HAVE TO CHANGE ON AN EXISTING TABLE ────────────────────
+//
+// DDL_TABLES uses CREATE TABLE IF NOT EXISTS, which is right for re-running but means a CHECK added
+// to that text never reaches a database where the table already exists. Production already has
+// molecule_conflicts, so widening its `kind` vocabulary in the DDL alone would have left the new
+// kinds rejected at runtime — the backfill would abort mid-identity on a constraint violation, which
+// is exactly how the local checker found this.
+//
+// Dropped and re-added rather than ALTER ... ADD CONSTRAINT, because adding one that already exists
+// errors and adding one under a new name would leave the old narrow check in force.
+const CONFLICT_KINDS = [
+  'cas_disagreement', 'alias_collision', 'ambiguous_form', 'unresolvable_name',
+  'cas_contested', 'corrupted_name', 'duplicate_risk',
+  'insufficient_identity', 'cas_contested_within_identity', 'unmapped_exclusion_reason',
+];
+async function applyConflictKinds(q, log = () => {}) {
+  const exists = await q(`SELECT to_regclass('molecule_conflicts') IS NOT NULL ok`);
+  if (!exists.rows[0].ok) return;
+  const list = CONFLICT_KINDS.map((k) => `'${k}'`).join(',');
+  await q(`ALTER TABLE molecule_conflicts DROP CONSTRAINT IF EXISTS molecule_conflicts_kind_check`);
+  await q(`ALTER TABLE molecule_conflicts
+             ADD CONSTRAINT molecule_conflicts_kind_check CHECK (kind IN (${list}))`);
+  log(`   molecule_conflicts.kind accepts ${CONFLICT_KINDS.length} kinds`);
+}
+
 async function applyTargetColumns(q, log = () => {}) {
   for (const [table, idx] of TARGET_TABLES) {
     const exists = await q(`SELECT to_regclass($1) IS NOT NULL ok`, [table]);
@@ -306,6 +337,7 @@ async function main() {
   await initDB();
   await query(DDL_TABLES);
   await query(DDL_TRIGGERS);
+  await applyConflictKinds(query, (m) => console.log(m));
   await applyTargetColumns(query, (m) => console.log(m));
 
   const counts = (await query(`
@@ -327,7 +359,8 @@ async function main() {
   console.log('   reviewed before any migration is applied there — census to migration is not automatic.\n');
 }
 
-module.exports = { DDL_TABLES, DDL_TRIGGERS, TARGET_TABLES, applyTargetColumns, main };
+module.exports = { DDL_TABLES, DDL_TRIGGERS, TARGET_TABLES, applyTargetColumns,
+  applyConflictKinds, CONFLICT_KINDS, main };
 
 // Only run when invoked directly, so the checker can import the DDL without applying it to
 // whatever DATABASE_URL happens to be set.

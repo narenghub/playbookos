@@ -34,6 +34,8 @@ const { validCas } = require('../src/lib/catalogue/cas');
 // tested against logic nothing in production uses. The same reasoning as scopesForCron in
 // cron-alerts.js: only the DB-touching half is replaceable.
 const { identityOf, moleculeKey } = require('../src/lib/molecules/identity');
+// THE AUTHORITY. Not a second opinion: executionSet.CREATE is the only thing that may be created.
+const { analyze } = require('../src/lib/molecules/preview');
 
 // The database handle. Production uses src/lib/db; scripts/check-molecule-identity-db.js injects a
 // pool pointed at a throwaway cluster so the REAL backfill runs against a real server, rather than
@@ -60,7 +62,12 @@ const args = process.argv.slice(2);
 // module would default to writing to production. A caller gets execution only by asking for it in
 // deps, never by inheriting the argv of a process it knows nothing about.
 let EXECUTE = require.main === module && args.includes('--execute');
-const ONLY = (args.find((a) => a.startsWith('--table=')) || '').split('=')[1] || null;
+
+// --table= IS GONE. It restricted the run to one source table, and a run restricted to one table
+// cannot make a correct decision: identities are grouped across all three, because a CAS conflict in
+// study_molecules has to be visible while supplier_products is being processed. Narrowing the input
+// would narrow the analysis and quietly produce a different answer, which is the defect this whole
+// rewrite exists to remove. It is rejected rather than ignored, so an old invocation fails loudly.
 
 // Unknown flags are rejected rather than ignored. The rotation tooling shipped a run where
 // --snapshot silently did nothing because an older script was deployed, and the lesson recorded was
@@ -73,9 +80,13 @@ const ONLY = (args.find((a) => a.startsWith('--table=')) || '').split('=')[1] ||
 const KNOWN = ['--execute', '--quiet'];
 if (require.main === module) {
   for (const a of args) {
-    if (a.startsWith('--table=')) continue;
+    if (a.startsWith('--table=')) {
+      console.error('--table= is no longer supported: identities are grouped across all source '
+        + 'tables, so restricting the input would change the decision. Run without it.');
+      process.exit(2);
+    }
     if (!KNOWN.includes(a)) {
-      console.error(`unknown flag ${a}. Known: ${KNOWN.join(', ')}, --table=<name>`);
+      console.error(`unknown flag ${a}. Known: ${KNOWN.join(', ')}`);
       process.exit(2);
     }
   }
@@ -113,6 +124,23 @@ async function resolveExisting(identity) {
   return null;
 }
 
+// The analyser reports a reason string; molecule_conflicts.kind is a constrained vocabulary that
+// predates it. Mapping the one onto the other keeps the quarantine queryable by category — "show me
+// every corrupted name" stays a WHERE clause — instead of collapsing five distinct findings into one
+// bucket called "the analyser said no" with the real answer buried in free text.
+function kindOfReason(reason) {
+  const r = String(reason || '');
+  if (r.startsWith('corrupted_name:')) return 'corrupted_name';
+  if (r.startsWith('ambiguous_form:')) return 'ambiguous_form';
+  if (r.startsWith('duplicate_risk:')) return 'duplicate_risk';
+  if (r.startsWith('insufficient_identity:')) return 'insufficient_identity';
+  if (r.startsWith('cas_disagreement:')) return 'cas_disagreement';
+  // A reason shape nobody mapped. Deliberately NOT silently bucketed as something plausible: an
+  // unmapped category means the analyser grew a rule this script has not been taught, and that is
+  // the exact drift that produced the 29 Oct run.
+  return 'unmapped_exclusion_reason';
+}
+
 async function main(deps = {}) {
   if (deps.query) Q = deps.query; else await initDB();
   if (deps.withTransaction) TX = deps.withTransaction;
@@ -130,144 +158,183 @@ async function main(deps = {}) {
     process.exit(1);
   }
 
-  // ── PASS 0: WHICH CAS NUMBERS ARE CONTESTED ACROSS SUBSTANCES ─────────────
+  // ── PASS 0: READ EVERY SOURCE ROW ONCE, THEN ASK THE ANALYSER ─────────────
   //
-  // Read-only, and done before anything is created, because the answer depends on ALL the tables
-  // at once: `selumetinib` appears in study_molecules and `binimetinib` may appear in
-  // supplier_products, and neither table on its own shows that they claim one registry number.
-  // A per-table check would have missed exactly the case this exists for.
-  const casOwners = new Map();        // cas -> Set(identity)
-  for (const src of SOURCES) {
-    if (!(await tableExists(src.table))) continue;
-    const w = src.where ? `WHERE ${src.where}` : '';
-    const rows = (await Q(`
-      SELECT ${src.nameCol} AS nm, ${src.casCol} AS cas FROM ${src.table} ${w}`)).rows;
-    for (const r of rows) {
-      const id = moleculeKey(r.nm);
-      const c = r.cas && validCas(String(r.cas).trim()) ? String(r.cas).trim() : null;
-      if (!id || !c) continue;
-      const s = casOwners.get(c) || new Set();
-      s.add(id);
-      casOwners.set(c, s);
-    }
-  }
-  // A CAS claimed by two or more distinct molecule keys. Note this is deliberately computed on the
-  // FOLDED key, so a curated synonym pair sharing a number is NOT a contest — that is one
-  // substance under two names, which is the whole point of the alias mechanism.
-  const contested = new Map();        // identity -> [cas, ...]
-  for (const [cas, owners] of casOwners) {
-    if (owners.size < 2) continue;
-    for (const id of owners) {
-      const list = contested.get(id) || [];
-      list.push(cas);
-      contested.set(id, list);
-    }
-  }
-  console.log(`   contested CAS values: ${[...casOwners.values()].filter((s) => s.size > 1).length}`
-    + `, affecting ${contested.size} identities — their canonical cas will be NULL\n`);
-
-  // ── PASS 1: one molecule per distinct identity name ─────────────────────────
+  // This replaces a hand-rolled contest computation and a per-table grouping loop, and it is the
+  // whole lesson of the 29 Oct migration.
   //
-  // Grouped by identity rather than by filed name, because `Aspirin` and `Aspirin USP` are the same
-  // substance and must not become two rows. The CAS set is collected across the whole group, which
-  // is what makes a disagreement visible at all: a single row cannot contradict itself.
+  // That run created 2466 molecules where the authorised preview said 2428. The cause was not a bug
+  // in either file: it was that there were TWO implementations of "what may be created". The preview
+  // had five exclusion categories; this script re-derived its own rule from scratch and had one. So
+  // AMBIGUOUS_FORM, DUPLICATE_RISK, QUARANTINE_CORRUPTED_NAME and the generic-fragment rule existed
+  // only in the analyser, and 27 identities the report promised to withhold were created anyway.
+  //
+  // The report described behaviour the code did not have. There is now ONE authority: analyze() over
+  // all rows from all tables, and nothing outside executionSet.CREATE may be created. This script no
+  // longer decides anything — it executes a decision and records the reason for every refusal.
+  const allRows = [];
   for (const src of SOURCES) {
-    if (ONLY && src.table !== ONLY) continue;
     if (!(await tableExists(src.table))) { console.log(`   skip   ${src.table} does not exist`); continue; }
-
     const w = src.where ? `WHERE ${src.where}` : '';
     const rows = (await Q(`
       SELECT ${src.idCol} AS rid, ${src.nameCol} AS nm, ${src.casCol} AS cas
         FROM ${src.table} ${w}`)).rows;
-    stats.rowsSeen += rows.length;
+    rows.forEach((r) => allRows.push({ table: src.table, rid: r.rid, name: r.nm, cas: r.cas }));
+    console.log(`   ${src.table}: ${rows.length} rows`);
+  }
+  stats.rowsSeen = allRows.length;
 
-    // identity -> { rows:[{rid,cas}], filed:Set, rec }
-    const groups = new Map();
-    for (const r of rows) {
-      const rec = identityOf(r.nm);
-      // THE SAME KEY THE PREVIEW USES. Imported, not reimplemented: a preview whose CREATE count
-      // cannot equal the molecules created is a reconciliation that fails for a reason nobody can
-      // tell apart from a real defect.
-      rec.identity = moleculeKey(r.nm) || rec.identity;
-      if (!rec.identity || rec.identity.length < 3) {
-        note('unresolvable_name', String(r.nm || ''), null,
-          'name is empty or shorter than 3 characters after normalisation — nothing to resolve',
-          null, src.table, String(r.rid));
-        continue;
-      }
-      const g = groups.get(rec.identity) || { rows: [], filed: new Set(), rec };
-      g.rows.push({ rid: r.rid, cas: r.cas });
-      g.filed.add(String(r.nm).trim());
-      groups.set(rec.identity, g);
+  const A = analyze(allRows);
+  const CREATE = new Set(A.executionSet.CREATE);
+  const contested = A.casContested;                       // one CAS, several identities
+  const withinIdentity = A.casContestedWithinIdentity;    // one identity, several CAS
+  console.log(`\n   analyser: ${A.e1.groups.size} identities proposed`
+    + `, ${CREATE.size} in CREATE, ${A.exclusionReasons.size} excluded with a reason`);
+  console.log(`   contested CAS values: ${contested.size} identity/ies affected across substances`
+    + `, ${withinIdentity.size} identity/ies holding more than one — canonical cas NULL for both\n`);
+
+  // ── PASS 1: ONE MOLECULE PER IDENTITY, GROUPED ACROSS ALL TABLES ───────────
+  //
+  // Grouped across tables, not within each one. Per-table grouping is how `elacestrant` ended up
+  // both quarantined and created on the same run: its CAS conflict lived in study_molecules, so the
+  // supplier_products pass saw three clean rows with no CAS at all and created it.
+  const groups = new Map();   // identity -> { rows:[{table,rid,cas}], filed:Set, rec }
+  for (const r of allRows) {
+    const rec = identityOf(r.name);
+    // THE SAME KEY THE ANALYSER USES. Imported, not reimplemented.
+    rec.identity = moleculeKey(r.name) || rec.identity;
+    if (!rec.identity || rec.identity.length < 3) {
+      note('unresolvable_name', String(r.name || ''), null,
+        'name is empty or shorter than 3 characters after normalisation — nothing to resolve',
+        null, r.table, String(r.rid));
+      continue;
+    }
+    // The group's record is derived from the CANONICAL identity, not from whichever row happened to
+    // arrive first, and every other spelling seen in the data is collected as an alias.
+    //
+    // Taking it from the first row is what broke paracetamol. identityOf('Paracetamol') reports
+    // aliases ['acetaminophen'] — the canonical name itself — so the alias insert saw "it IS this
+    // molecule, nothing to add" and `paracetamol` never became an alias of anything. Per-table
+    // processing had hidden it: the supplier row spelled 'Acetaminophen', whose alias list is
+    // ['paracetamol'], and that pass created the edge the research_interests pass had missed.
+    // Grouped across tables there is only one record, so it has to be the right one.
+    const key = rec.identity;
+    const g = groups.get(key)
+      || { rows: [], filed: new Set(), rec: identityOf(key), spellings: new Set() };
+    if (rec.identity !== key) g.spellings.add(rec.identity);
+    const own = identityOf(r.name).identity;
+    if (own && own !== key) g.spellings.add(own);
+    g.rows.push({ table: r.table, rid: r.rid, cas: r.cas });
+    g.filed.add(String(r.name).trim());
+    groups.set(key, g);
+  }
+  // Curated synonyms plus every spelling the data actually used, minus the identity itself.
+  for (const [identity, g] of groups) {
+    g.aliases = [...new Set([...(g.rec.aliases || []), ...g.spellings])].filter((x) => x && x !== identity);
+  }
+  console.log(`   ${allRows.length} rows -> ${groups.size} distinct substances (all tables together)\n`);
+
+  // Refusing rows means one UPDATE per source table, since each has its own id column.
+  const byTable = (rows) => {
+    const m = new Map();
+    for (const x of rows) { const l = m.get(x.table) || []; l.push(x.rid); m.set(x.table, l); }
+    return m;
+  };
+  const refuseRows = async (q, rows, reason) => {
+    let n = 0;
+    for (const [table, ids] of byTable(rows)) {
+      const src = SOURCES.find((s) => s.table === table);
+      // IS DISTINCT FROM, so re-running does not rewrite an identical reason. Counted by rowCount.
+      const u = await q(
+        `UPDATE ${table} SET molecule_unresolved_reason = $1
+          WHERE ${src.idCol} = ANY($2) AND molecule_id IS NULL
+            AND molecule_unresolved_reason IS DISTINCT FROM $1`,
+        [reason.slice(0, 500), ids]);
+      n += u.rowCount || 0;
+    }
+    return n;
+  };
+
+  for (const [identity, g] of groups) {
+    const ids = g.rows.map((x) => x.rid);
+
+    // ── THE ONE DECISION, TAKEN ELSEWHERE ────
+    // Not in CREATE means the analyser withheld it and said why. This script does not re-litigate
+    // that and does not have a rule of its own to fall back on.
+    if (!CREATE.has(identity)) {
+      const reason = A.exclusionReasons.get(identity)
+        || 'excluded_by_analyser:classification_without_reason';
+      note(kindOfReason(reason), [...g.filed].join(' | '), identity, reason,
+        null, [...byTable(g.rows).keys()].join('+'), ids.join(','));
+      if (EXECUTE) stats.writes += await refuseRows(Q, g.rows, reason);
+      continue;
     }
 
-    console.log(`   ${src.table}: ${rows.length} rows -> ${groups.size} distinct substances`);
-
-    for (const [identity, g] of groups) {
-      const casSet = new Set(g.rows.map((x) => x.cas).filter((c) => c && validCas(c)).map((c) => String(c).trim()));
-      const ids = g.rows.map((x) => x.rid);
-
-      // ── THE REFUSAL ────
-      // Two checksum-valid CAS numbers under one identity means the registry considers these
-      // different substances while the data files them under one name. Picking either one would
-      // put the wrong material on a quotation, and picking "the most common" would make the error
-      // a majority vote. Refuse, record, move on.
-      if (casSet.size > 1) {
-        note('cas_disagreement', [...g.filed].join(' | '), identity,
-          `${casSet.size} different checksum-valid CAS numbers filed under one identity — refusing to choose`,
-          [...casSet].join(', '), src.table, ids.join(','));
-        if (EXECUTE) {
-          // IS DISTINCT FROM, so re-running does not rewrite an identical reason. Counted by
-          // rowCount for the same reason.
-          const u = await Q(
-            `UPDATE ${src.table} SET molecule_unresolved_reason = $1
-              WHERE ${src.idCol} = ANY($2) AND molecule_id IS NULL
-                AND molecule_unresolved_reason IS DISTINCT FROM $1`,
-            [`cas_disagreement: ${[...casSet].join(', ')}`, ids]);
-          stats.writes += u.rowCount || 0;
-        }
-        continue;
-      }
-
-      const cas = casSet.size === 1 ? [...casSet][0] : null;
-      let existing = await resolveExisting(identity);
-
-      // A molecule already on file whose CAS disagrees with this group's is the same refusal, seen
-      // from the other side — and it is the case that catches a conflict ACROSS tables, which no
-      // single-table query can see.
-      if (existing && existing.cas && cas && existing.cas !== cas) {
-        note('cas_disagreement', [...g.filed].join(' | '), identity,
-          `molecule ${existing.id} is on file as CAS ${existing.cas}; this source says ${cas}`,
-          `${existing.cas}, ${cas}`, src.table, ids.join(','));
-        if (EXECUTE) {
-          const u = await Q(
-            `UPDATE ${src.table} SET molecule_unresolved_reason = $1
-              WHERE ${src.idCol} = ANY($2) AND molecule_id IS NULL
-                AND molecule_unresolved_reason IS DISTINCT FROM $1`,
-            [`cas_disagreement with molecule ${existing.id}: ${existing.cas} vs ${cas}`, ids]);
-          stats.writes += u.rowCount || 0;
-        }
-        continue;
-      }
-
-      // ── DECISION 1 APPLIED AT THE WRITE ────
-      // The name proceeds, the contested attribute does not. Source values are kept in
-      // cas_source_values so nothing is discarded and no owner is chosen.
-      const isContested = contested.has(identity);
-      const casToWrite = isContested ? null : cas;
-      const suppressedReason = isContested
-        ? `cas_contested:${contested.get(identity).join(',')}`
+    // ── DECISION 1 APPLIED AT THE WRITE ────
+    // The name proceeds, the contested attribute does not. Source values are kept in
+    // cas_source_values so nothing is discarded and no owner is chosen. Two shapes of contest reach
+    // this point and both withhold the canonical CAS: one number claimed by several substances, and
+    // one substance filed under several numbers.
+    const casSet = new Set(g.rows.map((x) => x.cas).filter((c) => c && validCas(c)).map((c) => String(c).trim()));
+    const disputed = withinIdentity.get(identity) || null;
+    const isContested = contested.has(identity) || !!disputed;
+    const cas = casSet.size === 1 ? [...casSet][0] : null;
+    const casToWrite = isContested ? null : cas;
+    const contestValues = disputed
+      ? disputed.join(',')
+      : (contested.has(identity) ? [...contested.get(identity)].join(',') : null);
+    const suppressedReason = disputed
+      ? `cas_contested_within_identity:${contestValues}`
+      : (contested.has(identity)
+        ? `cas_contested:${contestValues}`
         : (cas ? null : (g.rows.some((x) => x.cas && !validCas(x.cas))
-          ? 'cas_present_invalid' : 'cas_missing'));
-      const casSourceValues = isContested
-        ? contested.get(identity).join(',')
-        : (cas ? null : [...new Set(g.rows.map((x) => x.cas).filter(Boolean))].join(',') || null);
+          ? 'cas_present_invalid' : 'cas_missing')));
+    const casSourceValues = isContested
+      ? contestValues
+      : (cas ? null : [...new Set(g.rows.map((x) => x.cas).filter(Boolean))].join(',') || null);
 
-      // Everything from here to the row link is ONE unit of work for this identity. In EXECUTE
-      // mode it runs inside a transaction so the molecule, its aliases, its contest record and its
-      // links commit together or not at all; `q` is the transaction's client there and the plain
-      // handle otherwise, so the dry-run path reads identically.
-      const applyIdentity = async (q) => {
+    // ── WHICH ROWS MAY LINK ────
+    // Where one identity holds several valid CAS numbers, the rows carrying a disputed number are
+    // the ones that might have meant a salt rather than the base, so they stay unresolved. A row
+    // that named only the substance committed to nothing it can be wrong about, and links.
+    // Recorded through note() as well as the evidence row below, because `quarantined` is what the
+    // run reports and what the checker asserts. Inserting the evidence row directly and counting
+    // nothing made a fixture built to cause a quarantine report zero — the refusal happened, the
+    // rows were held back, and the summary said all clear.
+    if (disputed) {
+      note('cas_contested_within_identity', [...g.filed].join(' | '), identity,
+        `one substance filed under ${disputed.length} checksum-valid CAS numbers — canonical cas `
+        + 'withheld, and the rows naming a disputed number stay unresolved',
+        disputed.join(','), [...byTable(g.rows).keys()].join('+'), ids.join(','));
+    }
+
+    const disputedSet = new Set(disputed || []);
+    const linkable = disputed
+      ? g.rows.filter((x) => !(x.cas && disputedSet.has(String(x.cas).trim())))
+      : g.rows;
+    const refused = disputed ? g.rows.filter((x) => !linkable.includes(x)) : [];
+
+    let existing = await resolveExisting(identity);
+
+    // A molecule already on file whose CAS disagrees with this group's. On a first run the analyser
+    // has already seen every row, so this can only fire on a RE-RUN against rows added since — which
+    // is exactly when it is worth having.
+    if (existing && existing.cas && cas && existing.cas !== cas) {
+      note('cas_disagreement', [...g.filed].join(' | '), identity,
+        `molecule ${existing.id} is on file as CAS ${existing.cas}; this source says ${cas}`,
+        `${existing.cas}, ${cas}`, [...byTable(g.rows).keys()].join('+'), ids.join(','));
+      if (EXECUTE) {
+        stats.writes += await refuseRows(Q, g.rows,
+          `cas_disagreement with molecule ${existing.id}: ${existing.cas} vs ${cas}`);
+      }
+      continue;
+    }
+
+    // Everything from here to the row link is ONE unit of work for this identity. In EXECUTE mode it
+    // runs inside a transaction so the molecule, its aliases, its contest record and its links
+    // commit together or not at all; `q` is the transaction's client there and the plain handle
+    // otherwise, so the dry-run path reads identically.
+    const applyIdentity = async (q) => {
       if (!existing) {
         if (EXECUTE) {
           const ins = await q(
@@ -280,7 +347,7 @@ async function main(deps = {}) {
              RETURNING id, cas`,
             [[...g.filed][0], identity, casToWrite, g.rec.form, g.rec.derivedBase,
               g.rec.formTokens.length ? g.rec.formTokens.join(' ') : null,
-              `backfill:${src.table}`, ids.slice(0, 20).join(','),
+              `backfill:${[...byTable(g.rows).keys()].join('+')}`, ids.slice(0, 20).join(','),
               // The form is DERIVED from the name; the name and CAS are OBSERVED. Saying so is the
               // P1 rule against silently promoting a derived fact to a sourced one.
               'name_observed:form_derived', casToWrite ? 'high' : 'medium',
@@ -290,19 +357,19 @@ async function main(deps = {}) {
           else existing = await resolveExisting(identity);   // lost a race; adopt the winner
         } else {
           stats.moleculesCreated += 1;
-          existing = { id: null, cas };
+          existing = { id: null, cas: casToWrite };
         }
       }
 
       // ── ALIASES: same substance, other name ────
-      for (const alias of g.rec.aliases) {
+      for (const alias of g.aliases) {
         if (!EXECUTE) { stats.aliasesCreated += 1; continue; }
         const taken = await q(`SELECT molecule_id FROM molecule_aliases WHERE alias = $1`, [alias]);
         if (taken.rowCount) {
           if (existing && taken.rows[0].molecule_id !== existing.id) {
             note('alias_collision', alias, identity,
               `alias already belongs to molecule ${taken.rows[0].molecule_id}, not ${existing.id}`,
-              null, src.table, ids.join(','));
+              null, [...byTable(g.rows).keys()].join('+'), ids.join(','));
           }
           continue;
         }
@@ -313,7 +380,7 @@ async function main(deps = {}) {
         if (ownedByOther.rowCount && existing && ownedByOther.rows[0].id !== existing.id) {
           note('alias_collision', alias, identity,
             `"${alias}" is the identity of molecule ${ownedByOther.rows[0].id}; not aliasing it to ${existing.id}`,
-            null, src.table, ids.join(','));
+            null, [...byTable(g.rows).keys()].join('+'), ids.join(','));
           continue;
         }
         if (ownedByOther.rowCount) continue;      // it IS this molecule; nothing to add
@@ -324,14 +391,18 @@ async function main(deps = {}) {
         const ins = await q(
           `INSERT INTO molecule_aliases (molecule_id, alias, alias_type, source, confidence)
            VALUES ($1,$2,'inn',$3,'high') ON CONFLICT (alias) DO NOTHING`,
-          [existing.id, alias, `backfill:${src.table}`]);
+          [existing.id, alias, `backfill:${[...byTable(g.rows).keys()].join('+')}`]);
         stats.aliasesCreated += ins.rowCount; stats.writes += ins.rowCount;
       }
 
       // The contest itself is recorded as evidence, so "why is this cas NULL" is answerable from
       // the database rather than by re-running the analysis.
-      if (EXECUTE && isContested) {
-        const key = `cas_contested|${identity}|${src.table}|${contested.get(identity).join(',')}`.slice(0, 500);
+      // Only the CROSS-identity contest is written here. The within-identity one went through
+      // note() above and is written by the loop at the end of the run — writing it in both places
+      // produced two rows for one finding, because the two paths build different conflict_keys and
+      // the ON CONFLICT dedupe therefore never saw them as the same thing.
+      if (EXECUTE && contested.has(identity)) {
+        const key = `cas_contested|${identity}|${contestValues}`.slice(0, 500);
         const c = await q(
           `INSERT INTO molecule_conflicts
              (kind, filed_name, identity_name, detail, cas_values, source_table, source_ids, conflict_key)
@@ -339,30 +410,36 @@ async function main(deps = {}) {
            ON CONFLICT (conflict_key) WHERE resolved_at IS NULL DO NOTHING`,
           [[...g.filed][0].slice(0, 500), identity,
             'CAS claimed by more than one distinct molecule key — canonical cas withheld, no owner chosen',
-            contested.get(identity).join(','), src.table, ids.slice(0, 20).join(','), key]);
+            contestValues, [...byTable(g.rows).keys()].join('+'), ids.slice(0, 20).join(','), key]);
         stats.writes += c.rowCount || 0;
       }
 
       // ── LINK THE SOURCE ROWS ────
       if (EXECUTE && existing && existing.id) {
-        const upd = await q(
-          `UPDATE ${src.table} SET molecule_id = $1, molecule_unresolved_reason = NULL
-            WHERE ${src.idCol} = ANY($2) AND molecule_id IS NULL`,
-          [existing.id, ids]);
-        if (upd.rowCount) { stats.rowsLinked += upd.rowCount; stats.writes += 1; }
+        for (const [table, tids] of byTable(linkable)) {
+          const src = SOURCES.find((s) => s.table === table);
+          const upd = await q(
+            `UPDATE ${table} SET molecule_id = $1, molecule_unresolved_reason = NULL
+              WHERE ${src.idCol} = ANY($2) AND molecule_id IS NULL`,
+            [existing.id, tids]);
+          if (upd.rowCount) { stats.rowsLinked += upd.rowCount; stats.writes += upd.rowCount; }
+        }
+        if (refused.length) {
+          stats.writes += await refuseRows(q, refused,
+            `cas_contested_within_identity:${contestValues} — this row names one of the disputed numbers`);
+        }
       } else if (!EXECUTE) {
-        stats.rowsLinked += g.rows.length;
+        stats.rowsLinked += linkable.length;
       }
-      };  // end applyIdentity
+    };  // end applyIdentity
 
-      if (EXECUTE) {
-        // A failure here rolls this identity back entirely and is re-raised, so the run stops
-        // rather than continuing past a half-applied substance. Earlier identities stay committed
-        // and a re-run resumes from them — which is what restartable means.
-        await TX(async (client) => applyIdentity((text, params) => client.query(text, params)));
-      } else {
-        await applyIdentity(Q);
-      }
+    if (EXECUTE) {
+      // A failure here rolls this identity back entirely and is re-raised, so the run stops rather
+      // than continuing past a half-applied substance. Earlier identities stay committed and a
+      // re-run resumes from them — which is what restartable means.
+      await TX(async (client) => applyIdentity((text, params) => client.query(text, params)));
+    } else {
+      await applyIdentity(Q);
     }
   }
 

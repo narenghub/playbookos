@@ -131,10 +131,37 @@ function looksTruncated(name) {
 // The instruction was not to merge anything automatically, and this does not: it withholds the
 // second row and records why. Creating it later as an alias of its parent is a one-line ruling;
 // un-creating a duplicate afterwards is a merge.
+//
+// QUARANTINE_IDENTITY_CONFLICT is NOT a blocker, and the 29 Oct migration is why.
+//
+// It fired when one identity held more than one checksum-valid CAS, and it forbade the substance
+// from existing at all. Eleven real compounds — asciminib, bendamustine, elacestrant, erlotinib,
+// nusinersen, plerixafor, remibrutinib, resmetirom and three salts — were refused on that rule while
+// every one of their supplier rows carried NO CAS whatsoever. The disagreeing values came from other
+// rows in another table, and forbidding `asciminib` because two study rows disagree about its
+// registry number is not a conservative choice, it is a wrong one.
+//
+// Decision 1 already says what to do: "A missing canonical CAS is preferable to a registry number
+// known to be contested across distinct proposed substances." That is a rule about the ATTRIBUTE, so
+// it is applied to the attribute. The identity is created with cas NULL, the source values are kept,
+// the contest is recorded as evidence — and the quarantine moves to the ROWS that actually carry a
+// disputed number, because those are the rows that might have meant the salt rather than the base.
+// A row naming only the substance commits to nothing it can be wrong about; a row naming a CAS does.
 const BLOCKERS = [
-  'QUARANTINE_IDENTITY_CONFLICT', 'QUARANTINE_CORRUPTED_NAME',
+  'QUARANTINE_CORRUPTED_NAME',
   'AMBIGUOUS_FORM', 'DUPLICATE_RISK', 'INSUFFICIENT_IDENTITY',
 ];
+
+// A descriptor phrase SURVIVING in a normalised identity means it was not at the end of the name,
+// because describeNormalization() strips these only as a suffix. What is left is not a substance:
+// "ABBV-1042 (stable isotope-labeled internal standard, e.g., deuterated or 13C analog)" is an
+// analytical requirement written into a molecule_name column by the study agent.
+//
+// It is DETECTED, never stripped. Stripping would resolve it to `abbv-1042`, and an isotopically
+// labelled internal standard is a DIFFERENT MATERIAL from the drug it measures — which is the
+// isotope invariant this file enforces everywhere else ("commercial and analytical descriptors may
+// normalize away; isotopic composition must not"). So it goes to quarantine, unresolved, for a human.
+const REQUIREMENT_PHRASE_RE = /\b(reference|analytical|internal)\s+standard\b/;
 
 // ── BARE FUNCTIONAL-GROUP WORDS ARE NOT SUBSTANCES ──────────────────────────
 //
@@ -291,11 +318,15 @@ function analyze(rows) {
     }
 
     const g = out.e1.groups.get(e1Key)
-      || { names: new Set(), cas: new Set(), invalid: new Set(), rows: 0, refs: [],
+      || { names: new Set(), cas: new Set(), invalid: new Set(), rows: 0, casFreeRows: 0, refs: [],
         form: rec.form, base: rec.derivedBase, formTokens: rec.formTokens, reason: rec.reason };
     g.names.add(String(r.name).trim()); g.rows += 1;
     if (g.refs.length < 25) g.refs.push(`${r.table}#${r.rid}`);
     if (casOk) g.cas.add(casOk);
+    // Rows that name no usable CAS. They decide whether a within-identity contest can be scoped to
+    // rows at all: if EVERY row names a disputed number there is nothing left to link, and creating
+    // the substance would leave a molecule no source row points at.
+    else g.casFreeRows += 1;
     if (!casOk && raw) g.invalid.add(raw);
     out.e1.groups.set(e1Key, g);
   }
@@ -559,6 +590,12 @@ function analyze(rows) {
   // Every exclusion carries a machine-readable reason keyed by identity, so "why was this not
   // created" is answerable from data rather than by re-deriving the logic.
   out.exclusionReasons = new Map();
+  // identity -> the checksum-valid CAS values that disagree UNDER ONE NAME. Distinct from
+  // out.casContested below, which is the opposite shape: one CAS claimed by several identities.
+  // Named apart because the first draft of this reused that name and was silently overwritten by
+  // it — the flag fired, the map came back empty, and the row-scoping would have quarantined
+  // nothing at all.
+  out.casContestedWithinIdentity = new Map();
   for (const [key, g] of out.e1.groups) {
     const flags = [];
     const reasons = [];
@@ -566,9 +603,25 @@ function analyze(rows) {
       flags.push('INSUFFICIENT_IDENTITY');
       reasons.push('insufficient_identity:name_unusable');
     } else {
+      // Non-blocking now. The identity proceeds with cas NULL; the disputed VALUES are published
+      // here so the backfill can refuse exactly the rows that carry one of them.
       if (g.cas.size > 1) {
         flags.push('QUARANTINE_IDENTITY_CONFLICT');
-        reasons.push(`cas_disagreement:${[...g.cas].join(',')}`);
+        out.casContestedWithinIdentity.set(key, [...g.cas]);
+        // Scoping the quarantine to rows only works while some row is still linkable. Norketamine
+        // is the case that proves it: three rows, three different valid registry numbers, nothing
+        // that named the substance alone. Creating it would produce a molecule with no provenance
+        // and no row resolving to it, so here the identity itself is withheld — which is what
+        // QUARANTINE_IDENTITY_CONFLICT meant before, now narrowed to the cases that need it.
+        if (!g.casFreeRows) {
+          flags.push('INSUFFICIENT_IDENTITY');
+          reasons.push(`cas_disagreement:${[...g.cas].join(',')}`);
+        }
+      }
+      const reqPhrase = key.match(REQUIREMENT_PHRASE_RE);
+      if (reqPhrase) {
+        flags.push('INSUFFICIENT_IDENTITY');
+        reasons.push(`insufficient_identity:analytical_requirement_not_a_substance:${reqPhrase[0]}`);
       }
       if (out.corruptedIdentities.has(key)) {
         flags.push('QUARANTINE_CORRUPTED_NAME');
@@ -703,5 +756,5 @@ function analyze(rows) {
 module.exports = {
   analyze, BLOCKERS, WARNINGS, descriptorVariantOf, chemicalCore, looksTruncated,
   NON_CHEMICAL_WORDS, NEUTRAL_FORM_PHRASES, ISOTOPE_RE, STEREO_RE,
-  GENERIC_FRAGMENT_NAMES, fragmentCore,
+  GENERIC_FRAGMENT_NAMES, fragmentCore, REQUIREMENT_PHRASE_RE,
 };

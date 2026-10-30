@@ -36,7 +36,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const { DDL_TABLES, DDL_TRIGGERS, applyTargetColumns } = require('./migrate-molecules');
+const { DDL_TABLES, DDL_TRIGGERS, applyTargetColumns, applyConflictKinds } = require('./migrate-molecules');
 const backfill = require('./backfill-molecule-identity');
 
 let fail = 0;
@@ -109,6 +109,7 @@ const FIXTURE_TABLES = `
     await q(FIXTURE_TABLES);
     await q(DDL_TABLES);
     await q(DDL_TRIGGERS);
+    await applyConflictKinds(q);
     await applyTargetColumns(q);
     ok('the shipped DDL applies to an empty database');
 
@@ -131,6 +132,21 @@ const FIXTURE_TABLES = `
       ('NCT-X', 'Ambiguoustatin', '50-78-2'),
       ('NCT-Y', 'Ambiguoustatin', '58-22-0'),
       ('NCT-Z', 'Ambiguoustatin', '58-22-0')`);
+    // ── THE SAME CONTEST, ONE ROW SHORT OF HOPELESS ───────────────────────
+    //
+    // Every Ambiguoustatin row names a registry number, so there is no row left that named only the
+    // substance — nothing could link, and the identity is withheld. Scopedstatin is the shape that
+    // cost eleven real compounds on 29 Oct: two rows disagree about the number and a THIRD names the
+    // substance alone. That row committed to nothing it can be wrong about, so the substance exists
+    // with cas NULL and the quarantine falls on the two rows that named a disputed number.
+    //
+    // Both fixtures are needed because they now have different outcomes, and a single fixture of
+    // either shape would assert half the rule while reading like all of it. The CAS pair is
+    // asciminib's real one, used nowhere else here so it raises no cross-identity contest.
+    await q(`INSERT INTO study_molecules (study_id, molecule_name, cas_number) VALUES
+      ('NCT-P', 'Scopedstatin', '1492952-26-7'),
+      ('NCT-Q', 'Scopedstatin', '1492952-76-7'),
+      ('NCT-R', 'Scopedstatin', NULL)`);
     // ── THE CONTESTED-CAS CASE, WITH THE TWO HALVES IN DIFFERENT TABLES ────
     // Deliberately split across study_molecules and supplier_products: a per-table check would
     // not see that two substances claim one registry number, and that is the case Decision 1 is
@@ -218,12 +234,54 @@ const FIXTURE_TABLES = `
       ok('paracetamol (a lab interest) and acetaminophen (a supplier product) resolve to one substance');
     } else bad('the same substance under two conventions did not unify across tables');
 
-    // ── 4. THE REFUSAL ────────────────────────────────────────────────────
+    // ── 4. THE REFUSAL, SCOPED TO THE ROWS ────────────────────────────────
+    //
+    // This assertion used to read "the molecule must NOT exist". That rule cost eleven real
+    // compounds on 29 Oct — asciminib, elacestrant, erlotinib, nusinersen, plerixafor, resmetirom
+    // and others were forbidden because two study rows disagreed about a registry number, while
+    // every one of their supplier rows carried no CAS at all.
+    //
+    // Decision 1 is a rule about the ATTRIBUTE, so it now applies to the attribute: the substance
+    // exists, its canonical cas is NULL, the contest is recorded, and the quarantine lands on the
+    // rows that actually name a disputed number — those are the rows that might have meant a salt
+    // rather than the base. Nothing is decided by majority; what changed is WHAT gets withheld.
+    // Shape 1 — nothing left to link, so the identity itself is withheld.
     const amb = await mol('ambiguoustatin');
     const conf = await q(`SELECT * FROM molecule_conflicts WHERE kind = 'cas_disagreement'`);
     if (!amb && conf.rowCount) {
-      ok('two valid CAS numbers under one name was QUARANTINED, not resolved by majority');
-    } else bad('a CAS disagreement was decided rather than refused', JSON.stringify({ created: !!amb, conflicts: conf.rowCount }));
+      ok('every row naming a different CAS: the identity is withheld, not resolved by majority');
+    } else {
+      bad('a hopeless CAS disagreement was decided rather than refused',
+        JSON.stringify({ created: !!amb, conflicts: conf.rowCount }));
+    }
+
+    // Shape 2 — one row named the substance alone, so the substance exists without the number.
+    const sc = await mol('scopedstatin');
+    const scConf = await q(
+      `SELECT * FROM molecule_conflicts WHERE kind = 'cas_contested_within_identity'`);
+    if (sc && sc.cas === null && scConf.rowCount) {
+      ok('one clean row present: the substance exists, its canonical cas does not');
+    } else {
+      bad('a scopeable within-identity contest was not handled as Decision 1 requires',
+        JSON.stringify({ created: !!sc, cas: sc && sc.cas, conflicts: scConf.rowCount }));
+    }
+    if (sc && /^cas_contested_within_identity:/.test(String(sc.cas_suppressed_reason))
+      && String(sc.cas_source_values).split(',').length === 2) {
+      ok('  …and both disputed numbers are preserved on the row, with the reason it holds neither');
+    } else {
+      bad('the contest was not recorded on the molecule itself',
+        JSON.stringify(sc && { r: sc.cas_suppressed_reason, v: sc.cas_source_values }));
+    }
+    // The point of scoping: the clean row links, the two that named a number do not.
+    const scoped = await q(`
+      SELECT
+        COUNT(*) FILTER (WHERE cas_number IS NULL AND molecule_id IS NOT NULL)::int AS linked,
+        COUNT(*) FILTER (WHERE cas_number IS NOT NULL AND molecule_id IS NULL
+                           AND molecule_unresolved_reason IS NOT NULL)::int AS held
+      FROM study_molecules WHERE molecule_name = 'Scopedstatin'`);
+    if (scoped.rows[0].linked === 1 && scoped.rows[0].held === 2) {
+      ok('  …and the quarantine is scoped to rows: 1 linked, 2 held with a reason');
+    } else bad('the row-level scoping did not happen', JSON.stringify(scoped.rows[0]));
 
     const unres = await q(`
       SELECT COUNT(*)::int n FROM study_molecules
@@ -411,6 +469,70 @@ const FIXTURE_TABLES = `
     else bad('a guard is missing or left disabled', JSON.stringify(trg.rows));
 
     if (!res || res.quarantined < 1) bad('the backfill reported no quarantine on a fixture built to cause one');
+
+    // ── 9b. THE RETRACTION, AGAINST FIXTURES ──────────────────────────────
+    //
+    // The authorised plan names 72 production ids, so it cannot run here. What can run here is the
+    // mechanics, which is the part that matters: unlink BEFORE delete (molecule_id is a foreign
+    // key), detach children, remove aliases, and refuse to touch an id whose name has changed.
+    //
+    // That last one is the whole safeguard. CLAUDE.md records a verification script that PUT a
+    // narrower product set onto the live super admin because its expectation encoded account state a
+    // human had since changed, and it found out by writing. A retraction carrying 72 literal ids is
+    // the same hazard with teeth, so the name is re-checked per id and a mismatch is skipped.
+    try {
+      const retract = require('./e1-retract');
+      const vict = await q(
+        `INSERT INTO molecules (preferred_name, normalized_name, source, derivation_method)
+         VALUES ('Retractme','retractme','test','test') RETURNING id`);
+      const vid = vict.rows[0].id;
+      const kid = await q(
+        `INSERT INTO molecules (preferred_name, normalized_name, substance_form,
+                                parent_molecule_id, source, derivation_method)
+         VALUES ('Retractme Acetate','retractme acetate','salt',$1,'test','test') RETURNING id`, [vid]);
+      await q(`INSERT INTO molecule_aliases (molecule_id, alias, source) VALUES ($1,'retractme-alt','test')`, [vid]);
+      const sm = await q(
+        `INSERT INTO study_molecules (study_id, molecule_name, cas_number, molecule_id)
+         VALUES ('NCT-RETRACT','Retractme',NULL,$1) RETURNING id`, [vid]);
+
+      // A plan with one real entry and one whose name no longer matches.
+      const plan = [
+        { id: vid, name: 'retractme', kind: 'corrupted_name', group: 'unauthorised' },
+        { id: kid.rows[0].id, name: 'a name this molecule does not have', kind: 'corrupted_name', group: 'unauthorised' },
+      ];
+      const quiet = console.log; console.log = () => {};
+      const failed = await retract.main({ query: q, withTransaction: tx, execute: true, plan });
+      console.log = quiet;
+
+      const gone = await q(`SELECT COUNT(*)::int n FROM molecules WHERE id = $1`, [vid]);
+      const row = await q(
+        `SELECT molecule_id, molecule_unresolved_reason FROM study_molecules WHERE id = $1`,
+        [sm.rows[0].id]);
+      const al = await q(`SELECT COUNT(*)::int n FROM molecule_aliases WHERE alias = 'retractme-alt'`);
+      const child = await q(
+        `SELECT parent_molecule_id, normalized_name FROM molecules WHERE id = $1`, [kid.rows[0].id]);
+
+      if (gone.rows[0].n === 0) ok('the retraction removed the molecule it was given by id');
+      else bad('the retracted molecule is still there');
+      if (row.rows[0].molecule_id === null && row.rows[0].molecule_unresolved_reason) {
+        ok('  …its source row is unlinked AND says why, rather than silently orphaned');
+      } else bad('the source row was not unlinked with a reason', JSON.stringify(row.rows[0]));
+      if (al.rows[0].n === 0) ok('  …its alias went with it, leaving no dangling name');
+      else bad('an alias outlived its molecule');
+      if (child.rowCount && child.rows[0].parent_molecule_id === null) {
+        ok('  …and the child survives, parentless, rather than being deleted with it');
+      } else bad('the child was not detached', JSON.stringify(child.rows[0]));
+      // The mismatch must have been skipped, which is also why `failed` is non-zero: the script
+      // reports a mismatch as a failed proof instead of proceeding.
+      if (child.rowCount && failed) {
+        ok('  …and an id whose name no longer matches is skipped and reported, not deleted');
+      } else bad('a name mismatch did not stop the delete', JSON.stringify({ failed }));
+
+      await q(`DELETE FROM study_molecules WHERE id = $1`, [sm.rows[0].id]);
+      await q(`DELETE FROM molecules WHERE id = $1`, [kid.rows[0].id]);
+    } catch (e) {
+      bad('the retraction could not run against fixtures', e && e.message ? e.message : e);
+    }
 
     // ── 10. the --list-unexpected listing actually runs ───────────────────
     //

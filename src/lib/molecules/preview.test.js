@@ -581,7 +581,12 @@ test('every E1 group receives exactly one decision set, and blockers exclude SAF
   ]);
   for (const [key, flags] of a.classification) {
     assert.ok(flags.length >= 1, `${key} has no decision`);
-    const blocked = flags.includes('QUARANTINE_IDENTITY_CONFLICT') || flags.includes('INSUFFICIENT_IDENTITY');
+    // Read from the module, not restated here. A local copy of the blocker list passed this test
+    // by coincidence after QUARANTINE_IDENTITY_CONFLICT stopped being one: both fixture rows carry
+    // a valid CAS, so INSUFFICIENT_IDENTITY fired as well and the stale name never mattered. A
+    // group shaped like asciminib — one row naming no CAS — would have failed it.
+    const { BLOCKERS } = require('./preview');
+    const blocked = flags.some((f) => BLOCKERS.includes(f));
     assert.strictEqual(flags.includes('SAFE_TO_CREATE'), !blocked,
       `${key}: SAFE_TO_CREATE must be present exactly when no blocker applies`);
   }
