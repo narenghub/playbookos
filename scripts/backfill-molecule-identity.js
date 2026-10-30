@@ -98,9 +98,14 @@ const SOURCES = [
   { table: 'supplier_products', idCol: 'id', nameCol: 'product_name', casCol: 'cas', where: null },
 ];
 
+// Writes, by what did the writing. Proof 10 reported "the re-run wrote 71 time(s)" with created 0
+// and linked 0, and there was no way to tell which statement was responsible without guessing. A
+// counter that cannot say what it counted turns a failed proof into a research project.
+const WRITE_KINDS = ['molecules', 'aliases', 'conflicts', 'rowReasons', 'rowLinks', 'parents', 'casWithheld'];
 const stats = {
   rowsSeen: 0, moleculesCreated: 0, aliasesCreated: 0, rowsLinked: 0,
   parentsLinked: 0, quarantined: 0, writes: 0,
+  writesBy: Object.fromEntries(WRITE_KINDS.map((k) => [k, 0])),
 };
 const conflicts = [];
 
@@ -147,7 +152,8 @@ async function main(deps = {}) {
   if (deps.execute !== undefined) EXECUTE = deps.execute;
   // Reset the counters so a second pass in the same process reports its OWN writes rather than a
   // running total — the idempotence assertion depends on this being per-pass.
-  Object.keys(stats).forEach((k) => { stats[k] = 0; });
+  Object.keys(stats).forEach((k) => { if (k !== 'writesBy') stats[k] = 0; });
+  WRITE_KINDS.forEach((k) => { stats.writesBy[k] = 0; });
   conflicts.length = 0;
   const commit = String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || 'local';
   console.log(`\n═══ molecule identity backfill · ${EXECUTE ? 'EXECUTE' : 'DRY RUN (writes nothing)'} · ${commit} ═══\n`);
@@ -251,8 +257,42 @@ async function main(deps = {}) {
             AND molecule_unresolved_reason IS DISTINCT FROM $1`,
         [reason.slice(0, 500), ids]);
       n += u.rowCount || 0;
+      stats.writesBy.rowReasons += u.rowCount || 0;
     }
     return n;
+  };
+
+
+  // ── DECISION 1, APPLIED TO A MOLECULE THAT ALREADY EXISTS ────────────────
+  //
+  // Every CAS rule so far fired at INSERT time, which silently assumed an identity's CAS evidence
+  // never changes. It does. levoleucovorin was created on 29 Oct holding one checksum-valid number;
+  // a study row arriving overnight brought a second, and the molecule went on carrying the first as
+  // canonical — a disputed number wearing the authority of a settled one. Nothing checked, because
+  // reconciliation proof 4 only looked at contests BETWEEN identities.
+  //
+  // Decision 1 is a standing rule, not a one-time migration step: "a missing canonical CAS is
+  // preferable to a registry number known to be contested". So it is enforced on every run, against
+  // rows that already exist. By rowCount, so a run that changes nothing reports nothing.
+  const withholdCas = async (q, identity, values, kind) => {
+    const u = await q(
+      `UPDATE molecules
+          SET cas = NULL,
+              cas_suppressed_reason = $2,
+              cas_source_values = COALESCE(cas_source_values, $3),
+              confidence = 'medium'
+        WHERE normalized_name = $1 AND cas IS NOT NULL`,
+      [identity, `${kind}:${values}`.slice(0, 500), values]);
+    if (u.rowCount) {
+      stats.writes += u.rowCount;
+      stats.writesBy.casWithheld += u.rowCount;
+      note(kind === 'cas_contested_within_identity' ? 'cas_contested_within_identity' : 'cas_contested',
+        identity, identity,
+        'this molecule already existed and its CAS has since become contested — canonical cas '
+        + 'withdrawn under Decision 1, source values kept',
+        values, 'existing_molecule', '');
+    }
+    return u.rowCount || 0;
   };
 
   for (const [identity, g] of groups) {
@@ -266,7 +306,15 @@ async function main(deps = {}) {
         || 'excluded_by_analyser:classification_without_reason';
       note(kindOfReason(reason), [...g.filed].join(' | '), identity, reason,
         null, [...byTable(g.rows).keys()].join('+'), ids.join(','));
-      if (EXECUTE) stats.writes += await refuseRows(Q, g.rows, reason);
+      if (EXECUTE) {
+        stats.writes += await refuseRows(Q, g.rows, reason);
+        // An identity excluded over a CAS disagreement may ALREADY be a molecule, created on an
+        // earlier run when the evidence was still consistent. Its canonical CAS is now one side of
+        // a dispute, so it comes off. The molecule is NOT deleted here: deleting is a retraction and
+        // needs authorisation, and reconciliation reports it as drift awaiting a ruling.
+        const m = reason.match(/^cas_disagreement:([^;]+)/);
+        if (m) await withholdCas(Q, identity, m[1], 'cas_contested_within_identity');
+      }
       continue;
     }
 
@@ -316,6 +364,13 @@ async function main(deps = {}) {
 
     let existing = await resolveExisting(identity);
 
+    // Same rule, for an identity that IS creatable but whose contest is new since it was created.
+    if (EXECUTE && isContested && existing && existing.cas) {
+      await withholdCas(Q, identity, contestValues,
+        disputed ? 'cas_contested_within_identity' : 'cas_contested');
+      existing = await resolveExisting(identity);
+    }
+
     // A molecule already on file whose CAS disagrees with this group's. On a first run the analyser
     // has already seen every row, so this can only fire on a RE-RUN against rows added since — which
     // is exactly when it is worth having.
@@ -353,7 +408,7 @@ async function main(deps = {}) {
               'name_observed:form_derived', casToWrite ? 'high' : 'medium',
               suppressedReason, casSourceValues],
           );
-          if (ins.rowCount) { stats.moleculesCreated += 1; stats.writes += 1; existing = { id: ins.rows[0].id, cas: ins.rows[0].cas }; }
+          if (ins.rowCount) { stats.moleculesCreated += 1; stats.writes += 1; stats.writesBy.molecules += 1; existing = { id: ins.rows[0].id, cas: ins.rows[0].cas }; }
           else existing = await resolveExisting(identity);   // lost a race; adopt the winner
         } else {
           stats.moleculesCreated += 1;
@@ -393,6 +448,7 @@ async function main(deps = {}) {
            VALUES ($1,$2,'inn',$3,'high') ON CONFLICT (alias) DO NOTHING`,
           [existing.id, alias, `backfill:${[...byTable(g.rows).keys()].join('+')}`]);
         stats.aliasesCreated += ins.rowCount; stats.writes += ins.rowCount;
+        stats.writesBy.aliases += ins.rowCount;
       }
 
       // The contest itself is recorded as evidence, so "why is this cas NULL" is answerable from
@@ -412,6 +468,7 @@ async function main(deps = {}) {
             'CAS claimed by more than one distinct molecule key — canonical cas withheld, no owner chosen',
             contestValues, [...byTable(g.rows).keys()].join('+'), ids.slice(0, 20).join(','), key]);
         stats.writes += c.rowCount || 0;
+        stats.writesBy.conflicts += c.rowCount || 0;
       }
 
       // ── LINK THE SOURCE ROWS ────
@@ -422,7 +479,8 @@ async function main(deps = {}) {
             `UPDATE ${table} SET molecule_id = $1, molecule_unresolved_reason = NULL
               WHERE ${src.idCol} = ANY($2) AND molecule_id IS NULL`,
             [existing.id, tids]);
-          if (upd.rowCount) { stats.rowsLinked += upd.rowCount; stats.writes += upd.rowCount; }
+          if (upd.rowCount) { stats.rowsLinked += upd.rowCount; stats.writes += upd.rowCount;
+            stats.writesBy.rowLinks += upd.rowCount; }
         }
         if (refused.length) {
           stats.writes += await refuseRows(q, refused,
@@ -459,9 +517,16 @@ async function main(deps = {}) {
       if (!base.rowCount) continue;
       if (base.rows[0].id === m.id) continue;
       if (EXECUTE) {
-        await Q(`UPDATE molecules SET parent_molecule_id = $1 WHERE id = $2 AND parent_molecule_id IS NULL`,
+        // By rowCount, not by having issued the statement. The third instance of this bug: the
+        // alias insert and the conflict insert both had it, and a re-run that changes nothing must
+        // report zero writes or the idempotence proof is unsatisfiable.
+        const u = await Q(
+          `UPDATE molecules SET parent_molecule_id = $1 WHERE id = $2 AND parent_molecule_id IS NULL`,
           [base.rows[0].id, m.id]);
-        stats.writes += 1;
+        stats.writes += u.rowCount || 0;
+        stats.writesBy.parents += u.rowCount || 0;
+        stats.parentsLinked += u.rowCount || 0;
+        continue;
       }
       stats.parentsLinked += 1;
     }
@@ -486,6 +551,7 @@ async function main(deps = {}) {
       // Counted by rowCount, not by having issued the statement: a DO NOTHING changed nothing, and
       // calling it a write would make the idempotence assertion unsatisfiable.
       stats.writes += ins.rowCount || 0;
+      stats.writesBy.conflicts += ins.rowCount || 0;
     }
   }
 
@@ -498,6 +564,8 @@ async function main(deps = {}) {
   r('source rows linked', stats.rowsLinked);
   r('parent edges linked', stats.parentsLinked);
   r('QUARANTINED (refused to decide)', stats.quarantined);
+  const wb = Object.entries(stats.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`);
+  r('writes by kind', wb.length ? wb.join('  ') : '(none)');
   r('write statements issued', EXECUTE ? stats.writes : '0 (dry run)');
 
   if (conflicts.length) {

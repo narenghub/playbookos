@@ -470,6 +470,49 @@ const FIXTURE_TABLES = `
 
     if (!res || res.quarantined < 1) bad('the backfill reported no quarantine on a fixture built to cause one');
 
+    // ── 9a. A MOLECULE WHOSE CAS BECOMES CONTESTED AFTER IT EXISTS ────────
+    //
+    // levoleucovorin, 30 Oct. Created on 29 Oct holding one checksum-valid number; a study row
+    // arriving overnight brought a second, and the molecule went on publishing the first as
+    // canonical. Reconciliation proof 4 only ever checked contests BETWEEN identities, so nothing
+    // looked at it.
+    //
+    // Every CAS rule up to then fired at INSERT, which assumed an identity's evidence never changes.
+    // Decision 1 is a standing rule, so it is enforced against rows that already exist — and this
+    // fixture is a molecule that is already there before the second number shows up.
+    try {
+      await q(
+        `INSERT INTO molecules (preferred_name, normalized_name, cas, source, derivation_method, confidence)
+         VALUES ('Driftstatin','driftstatin','8880000-10-4','test','test','high')`);
+      await q(`INSERT INTO study_molecules (study_id, molecule_name, cas_number) VALUES
+        ('NCT-D1','Driftstatin','8880000-10-4'),
+        ('NCT-D2','Driftstatin','8880000-11-5')`);
+      const quiet0 = console.log; console.log = () => {};
+      const drifted = await backfill.main({ query: q, withTransaction: tx, execute: true });
+      console.log = quiet0;
+      const d = await mol('driftstatin');
+      if (d && d.cas === null) ok('a molecule whose CAS became contested had it withdrawn, not kept');
+      else bad('a disputed CAS is still published as canonical', JSON.stringify(d && d.cas));
+      if (d && /^cas_contested_within_identity:/.test(String(d.cas_suppressed_reason))
+        && String(d.cas_source_values).includes('8880000-10-4')) {
+        ok('  …with the reason recorded and the source values kept, not discarded');
+      } else {
+        bad('the withdrawal left no evidence',
+          JSON.stringify(d && { r: d.cas_suppressed_reason, v: d.cas_source_values }));
+      }
+      if (drifted && drifted.writesBy && drifted.writesBy.casWithheld >= 1) {
+        ok('  …and the write is attributed to casWithheld in the ledger');
+      } else bad('the write ledger did not attribute the withdrawal', JSON.stringify(drifted && drifted.writesBy));
+      // Idempotent: a second pass must not re-write what it already withdrew.
+      const quiet1 = console.log; console.log = () => {};
+      const again = await backfill.main({ query: q, withTransaction: tx, execute: true });
+      console.log = quiet1;
+      if (again && again.writesBy.casWithheld === 0) ok('  …and re-running withdraws nothing a second time');
+      else bad('the withdrawal is not idempotent', JSON.stringify(again && again.writesBy));
+    } catch (e) {
+      bad('the contested-after-creation path threw', e && e.message ? e.message : e);
+    }
+
     // ── 9b. THE RETRACTION, AGAINST FIXTURES ──────────────────────────────
     //
     // The authorised plan names 72 production ids, so it cannot run here. What can run here is the

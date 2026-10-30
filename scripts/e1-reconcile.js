@@ -85,20 +85,54 @@ async function main() {
   const extra = actual.filter((k) => !expectCreate.has(k));
   if (!missing.length) ok('nothing expected is absent');
   else bad(`${missing.length} expected molecules were not created`, missing.slice(0, 8).join(', '));
+  // Two different findings wear the same shape, and conflating them cost an afternoon.
+  //
+  // A molecule outside CREATE whose identity the analyser can EXPLAIN is drift: it was created when
+  // its evidence was consistent, and source data has since changed under it. levoleucovorin is the
+  // case — one valid CAS on 29 Oct, a second arriving in a study row overnight.
+  //
+  // A molecule outside CREATE that the analyser cannot explain at all is the 29 Oct defect: created
+  // by code that had a rule of its own. That one means the two implementations have diverged again.
+  //
+  // BOTH still fail. Production holding a molecule the current rules exclude is not acceptable
+  // either way — but the remedy differs, so the verdict has to name it instead of leaving the next
+  // person to work out which they are looking at.
+  const drift = extra.filter((k) => a.exclusionReasons.has(k));
+  const unexplained = extra.filter((k) => !a.exclusionReasons.has(k));
   if (!extra.length) ok('nothing unexpected was created');
-  else bad(`${extra.length} molecules exist that were not in CREATE`, extra.slice(0, 8).join(', '));
+  else {
+    if (drift.length) {
+      bad(`${drift.length} molecule(s) exist whose identity has SINCE become excluded — drift, needs a ruling`,
+        drift.slice(0, 8).map((k) => `${k} [${a.exclusionReasons.get(k)}]`).join('; '));
+    }
+    if (unexplained.length) {
+      bad(`${unexplained.length} molecule(s) exist that the analyser cannot explain — the two implementations have diverged`,
+        unexplained.slice(0, 8).join(', '));
+    }
+  }
 
   // ── 2 ────────────────────────────────────────────────────────────────────
   h(2, 'no excluded identity was created');
   const leaked = [...expectExcluded].filter((k) => actualSet.has(k));
   if (!leaked.length) ok(`all ${expectExcluded.size} exclusions stayed out`);
-  else bad(`${leaked.length} excluded identities WERE created`, leaked.slice(0, 10).join(', '));
+  else {
+    bad(`${leaked.length} excluded identit(ies) exist as molecules`, leaked.slice(0, 10).join(', '));
+  }
+  // Whatever the remedy, an excluded identity must not be ADVERTISING a disputed CAS while it waits
+  // for one. This is the half that can mislead a quotation, and it is checkable independently.
+  const leakedWithCas = await query(
+    `SELECT normalized_name, cas FROM molecules WHERE cas IS NOT NULL AND normalized_name = ANY($1)`,
+    [leaked.length ? leaked : ['']]);
+  if (!leakedWithCas.rowCount) ok('  …and none of them carries a canonical CAS while excluded');
+  else bad(`${leakedWithCas.rowCount} excluded molecule(s) still carry a canonical CAS`,
+    leakedWithCas.rows.map((x) => `${x.normalized_name}=${x.cas}`).join(', '));
 
   // ── 3 ────────────────────────────────────────────────────────────────────
   h(3, 'every created molecule maps to an expected source identity');
-  const orphanMolecules = actual.filter((k) => !expectCreate.has(k));
-  if (!orphanMolecules.length) ok('every molecule traces to a source identity in the CREATE set');
-  else bad(`${orphanMolecules.length} molecules trace to nothing`, orphanMolecules.slice(0, 8).join(', '));
+  // Only the unexplained ones trace to nothing. A drifted molecule traces to source rows that are
+  // still there and still name it; what changed is the CAS evidence attached to them.
+  if (!unexplained.length) ok('every molecule traces to a source identity the analyser knows about');
+  else bad(`${unexplained.length} molecule(s) trace to nothing`, unexplained.slice(0, 8).join(', '));
 
   // ── 4 ────────────────────────────────────────────────────────────────────
   h(4, 'contested CAS values were suppressed');
@@ -114,6 +148,18 @@ async function main() {
      WHERE cas_suppressed_reason LIKE 'cas_contested%' AND cas_source_values IS NOT NULL`);
   if (kept.rows[0].n >= contestedExpected.size) ok('the source values were preserved, not discarded');
   else bad(`only ${kept.rows[0].n} of ${contestedExpected.size} kept their source CAS as evidence`);
+  // The OTHER contest shape, which proof 4 did not check at all until levoleucovorin.
+  // casContested is one number claimed by several identities; casContestedWithinIdentity is one
+  // identity filed under several numbers. Both withhold the canonical CAS under Decision 1, and only
+  // the first was ever verified — so a molecule that BECAME contested kept publishing its old number.
+  const within = [...a.casContestedWithinIdentity.keys()];
+  const withinWrote = await query(
+    `SELECT normalized_name, cas FROM molecules WHERE cas IS NOT NULL AND normalized_name = ANY($1)`,
+    [within.length ? within : ['']]);
+  if (!withinWrote.rowCount) ok(`${within.length} identit(ies) hold more than one valid CAS, and none carries a canonical one`);
+  else bad(`${withinWrote.rowCount} identit(ies) filed under several CAS numbers still carry one canonically`,
+    withinWrote.rows.slice(0, 6).map((x) => `${x.normalized_name}=${x.cas}`).join(', '));
+
   const contestRows = await query(`SELECT COUNT(*)::int n FROM molecule_conflicts WHERE kind='cas_contested'`);
   if (contestRows.rows[0].n > 0) ok(`${contestRows.rows[0].n} contests recorded in molecule_conflicts`);
   else bad('no cas_contested rows were written');
@@ -189,7 +235,16 @@ async function main() {
   const after = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
   const afterLinks = (await query(`SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
   if (second.writes === 0) ok('the re-run issued ZERO write statements');
-  else bad(`the re-run wrote ${second.writes} time(s)`, JSON.stringify({ created: second.moleculesCreated, linked: second.rowsLinked }));
+  else {
+    // The ledger, so a failure names the statement rather than leaving it to be guessed at. "the
+    // re-run wrote 71 time(s)" alongside created 0 and linked 0 was unactionable on its own, and
+    // the answer turned out to be two unconditional counters and one genuine write.
+    const by = second.writesBy
+      ? Object.entries(second.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('  ')
+      : '(no ledger — an older backfill is deployed)';
+    bad(`the re-run wrote ${second.writes} time(s)`,
+      `${by}  |  created=${second.moleculesCreated} linked=${second.rowsLinked}`);
+  }
   if (after === before) ok(`molecule count unchanged at ${after}`);
   else bad(`molecule count moved ${before} -> ${after}`);
   if (afterLinks === beforeLinks) ok(`linkage unchanged at ${afterLinks}`);
