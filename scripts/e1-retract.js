@@ -209,7 +209,8 @@ async function main(deps = {}) {
   console.log(`\n═══ E1 RETRACTION · ${EXECUTE ? 'EXECUTE' : 'DRY RUN (writes nothing)'} · ${commit} ═══\n`);
   console.log(PLAN_IN_USE === PLAN
     ? `   authorised set: ${PLAN.length} molecules `
-      + `(${UNAUTHORISED.length} unauthorised + ${REQUIREMENTS.length} requirement sentences)\n`
+      + `(${UNAUTHORISED.length} unauthorised + ${REQUIREMENTS.length} requirement sentences`
+      + `${DRIFT.length ? ` + ${DRIFT.length} drift` : ''})\n`
     : `   INJECTED plan: ${PLAN_IN_USE.length} molecule(s) — this is a test, not the authorised set\n`);
 
   // ── THE SCHEMA THIS RUN DEPENDS ON ──────────────────────────────────────
