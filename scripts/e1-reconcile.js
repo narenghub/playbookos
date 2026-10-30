@@ -235,7 +235,24 @@ async function main() {
   // So the first run absorbs whatever drifted in, and the second proves idempotence: given a
   // database this code has just finished with, running it again must change nothing. That is the
   // property worth having, and it is the one that was being claimed all along.
+  // ── A HEARTBEAT, BECAUSE railway ssh TIMES OUT ON SILENCE ────────────────
+  //
+  // The 15:34 run printed proofs 1-9 and then the connection closed mid-proof-10. Nothing failed:
+  // the transport gave up. `railway ssh` drops on silence rather than on duration, and this proof
+  // suppresses the backfill's output so the refusal dump does not bury the verdict — then I doubled
+  // the work done inside that silence by running it twice.
+  //
+  // So the suppressed lines are counted and one real line is emitted periodically. It keeps the
+  // channel alive and, more usefully, means a run that dies here says how far it got instead of
+  // ending mid-heading.
+  // It has to be a TIMER, not a counter of suppressed lines. The backfill is nearly silent during
+  // the per-identity loop — the long part — and dumps its refusal listing at the end, so a heartbeat
+  // keyed to log calls would say nothing through exactly the stretch that drops the connection.
   const realLog = console.log;
+  const started = Date.now();
+  const beat = setInterval(
+    () => realLog(`   …working (${Math.round((Date.now() - started) / 1000)}s)`), 20000);
+  beat.unref?.();
   console.log = () => {};
   let absorbed; let second; let before; let beforeLinks;
   try {
@@ -247,7 +264,7 @@ async function main() {
     beforeLinks = (await query(
       `SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
     second = await backfill.main({ query, withTransaction, execute: true });
-  } finally { console.log = realLog; }
+  } finally { clearInterval(beat); console.log = realLog; }
   const drifted = absorbed && absorbed.writes
     ? Object.entries(absorbed.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('  ')
     : null;
