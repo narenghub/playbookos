@@ -150,6 +150,10 @@ async function main(deps = {}) {
   if (deps.query) Q = deps.query; else await initDB();
   if (deps.withTransaction) TX = deps.withTransaction;
   if (deps.execute !== undefined) EXECUTE = deps.execute;
+  // A progress sink that survives a caller suppressing console.log. e1-reconcile silences this
+  // script so its 400-line refusal dump does not bury the verdict, and the result was a run that
+  // went 23 minutes with nothing on the wire — long enough to look hung and impossible to diagnose.
+  const onProgress = deps.onProgress || (() => {});
   // Reset the counters so a second pass in the same process reports its OWN writes rather than a
   // running total — the idempotence assertion depends on this being per-pass.
   Object.keys(stats).forEach((k) => { if (k !== 'writesBy') stats[k] = 0; });
@@ -295,7 +299,14 @@ async function main(deps = {}) {
     return u.rowCount || 0;
   };
 
+  let seen = 0;
+  const t0 = Date.now();
   for (const [identity, g] of groups) {
+    seen += 1;
+    if (seen % 200 === 0) {
+      onProgress(`${seen}/${groups.size} identities  ${Math.round((Date.now() - t0) / 1000)}s`
+        + `  created=${stats.moleculesCreated} linked=${stats.rowsLinked}`);
+    }
     const ids = g.rows.map((x) => x.rid);
 
     // ── THE ONE DECISION, TAKEN ELSEWHERE ────
@@ -566,6 +577,7 @@ async function main(deps = {}) {
   r('QUARANTINED (refused to decide)', stats.quarantined);
   const wb = Object.entries(stats.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`);
   r('writes by kind', wb.length ? wb.join('  ') : '(none)');
+  r('pass 1 wall time', `${Math.round((Date.now() - t0) / 1000)}s`);
   r('write statements issued', EXECUTE ? stats.writes : '0 (dry run)');
 
   if (conflicts.length) {

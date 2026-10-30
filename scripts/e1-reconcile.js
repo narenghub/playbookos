@@ -224,64 +224,57 @@ async function main() {
 
   // ── 10 ───────────────────────────────────────────────────────────────────
   h(10, 'rerunning E1 creates zero molecules and no duplicate linkage');
-  // TWO runs, and the proof is about the SECOND.
+  // ── ONE pass, and the absolute lives elsewhere ───────────────────────────
   //
-  // One run and "it wrote nothing" was a statement about the clock, not about the code. The agents
-  // write into study_molecules continuously — the 10:30pm and 1:30am briefings among them — so rows
-  // that arrived between the migration step and this command are rows no backfill has reached, and
-  // refusing them is work that genuinely needs doing. Asserting zero writes there fails for a
-  // timing reason and teaches you to ignore the proof.
+  // This ran TWO complete production migrations inside a verification script, to let the first
+  // absorb drift so the second could assert zero writes. At 16:00 it went 23 minutes and had to be
+  // interrupted. The idea was wrong, not just slow: a reconciliation should read the database and
+  // check it, not perform the migration again — twice — against live data that other writers are
+  // touching while it runs.
   //
-  // So the first run absorbs whatever drifted in, and the second proves idempotence: given a
-  // database this code has just finished with, running it again must change nothing. That is the
-  // property worth having, and it is the one that was being claimed all along.
-  // ── A HEARTBEAT, BECAUSE railway ssh TIMES OUT ON SILENCE ────────────────
+  // The claim "running this twice changes nothing" is about the CODE, so it is tested where nothing
+  // else writes: check-molecule-identity-db.js runs the backfill twice against its own fixtures and
+  // asserts the second pass writes nothing. That is a stronger test than this ever was, because a
+  // quiet database is guaranteed there rather than hoped for.
   //
-  // The 15:34 run printed proofs 1-9 and then the connection closed mid-proof-10. Nothing failed:
-  // the transport gave up. `railway ssh` drops on silence rather than on duration, and this proof
-  // suppresses the backfill's output so the refusal dump does not bury the verdict — then I doubled
-  // the work done inside that silence by running it twice.
-  //
-  // So the suppressed lines are counted and one real line is emitted periodically. It keeps the
-  // channel alive and, more usefully, means a run that dies here says how far it got instead of
-  // ending mid-heading.
-  // It has to be a TIMER, not a counter of suppressed lines. The backfill is nearly silent during
-  // the per-identity loop — the long part — and dumps its refusal listing at the end, so a heartbeat
-  // keyed to log calls would say nothing through exactly the stretch that drops the connection.
+  // What remains here are the claims that need the real database, and they are the ones that caught
+  // the 29 Oct defect: the count must not move, linkage must not move, and no duplicate may exist.
+  // Writes are reported, not asserted — the agents write into study_molecules continuously, and a
+  // refusal reason attached to a row that arrived after the migration is work that needed doing.
+  const before = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
+  const beforeLinks = (await query(
+    `SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
   const realLog = console.log;
   const started = Date.now();
-  const beat = setInterval(
-    () => realLog(`   …working (${Math.round((Date.now() - started) / 1000)}s)`), 20000);
-  beat.unref?.();
-  console.log = () => {};
-  let absorbed; let second; let before; let beforeLinks;
+  let second;
   try {
-    absorbed = await backfill.main({ query, withTransaction, execute: true });
-    // Counted BETWEEN the runs. Taken before the first, a molecule the first pass legitimately
-    // created from a row that arrived overnight would read as the count having moved under the
-    // idempotence proof.
-    before = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
-    beforeLinks = (await query(
-      `SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
-    second = await backfill.main({ query, withTransaction, execute: true });
-  } finally { clearInterval(beat); console.log = realLog; }
-  const drifted = absorbed && absorbed.writes
-    ? Object.entries(absorbed.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('  ')
-    : null;
-  if (drifted) console.log(`   note  the first pass absorbed ${absorbed.writes} write(s) of drift: ${drifted}`);
+    console.log = () => {};
+    second = await backfill.main({
+      query, withTransaction, execute: true,
+      onProgress: (m) => realLog(`   …${m}`),
+    });
+  } finally { console.log = realLog; }
+  realLog(`   one pass, ${Math.round((Date.now() - started) / 1000)}s`);
+
+  const by = second.writesBy
+    ? Object.entries(second.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('  ')
+    : '(no ledger)';
+  // STRICT: a re-run may refuse newly-arrived rows, but it must not create a substance, invent an
+  // alias, link a row or add a parent edge. Those are the writes that would mean the authorised set
+  // and the code have diverged again.
+  const strict = ['molecules', 'aliases', 'rowLinks', 'parents'];
+  const offending = second.writesBy
+    ? strict.filter((k) => second.writesBy[k]).map((k) => `${k}=${second.writesBy[k]}`)
+    : [];
+  if (!offending.length) ok(`the re-run created, aliased, linked and parented nothing${by ? `  [${by}]` : ''}`);
+  else bad('the re-run performed structural writes', offending.join('  '));
+  if (second.writes && !offending.length) {
+    realLog(`   note  ${second.writes} write(s), all of them refusals or evidence for rows that`);
+    realLog('         arrived since the migration step. Expected while the agents are running.');
+  }
+
   const after = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
   const afterLinks = (await query(`SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
-  if (second.writes === 0) ok('the re-run issued ZERO write statements');
-  else {
-    // The ledger, so a failure names the statement rather than leaving it to be guessed at. "the
-    // re-run wrote 71 time(s)" alongside created 0 and linked 0 was unactionable on its own, and
-    // the answer turned out to be two unconditional counters and one genuine write.
-    const by = second.writesBy
-      ? Object.entries(second.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('  ')
-      : '(no ledger — an older backfill is deployed)';
-    bad(`the re-run wrote ${second.writes} time(s)`,
-      `${by}  |  created=${second.moleculesCreated} linked=${second.rowsLinked}`);
-  }
   if (after === before) ok(`molecule count unchanged at ${after}`);
   else bad(`molecule count moved ${before} -> ${after}`);
   if (afterLinks === beforeLinks) ok(`linkage unchanged at ${afterLinks}`);
