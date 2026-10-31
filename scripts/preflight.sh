@@ -156,6 +156,15 @@ step "molecule identity holds in Postgres" node scripts/check-molecule-identity-
 # fail is not safety evidence.
 step "a shared CAS cannot price a customer quote" node scripts/check-inquiry-pricing-identity.js
 
+# Does the reconciliation RUN? On 31 Oct it printed every proof and then died on `after is not
+# defined` — a variable left dangling when proof 10's migration pass was removed. node --check
+# parses a file and cannot see an undefined reference, this project has no linter, and nothing here
+# executed main(), so the only thing that could find it was a production run over an SSH connection
+# that had already failed twice that morning. This runs main() against a local database built from
+# the real DDL. It asserts that every line EXECUTES, not what the verdict was — against fixtures the
+# verdict is meaningless.
+step "the reconciliation runs end to end" node scripts/check-reconcile-runs.js
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
   echo "      DO NOT PUSH." >&2

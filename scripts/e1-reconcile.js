@@ -312,16 +312,27 @@ async function main() {
   const resolvedByRun = await query(`SELECT COUNT(*)::int n FROM molecule_conflicts WHERE resolved_at IS NOT NULL`);
   if (resolvedByRun.rows[0].n === 0) ok('the migration resolved no conflict on its own');
   else bad(`${resolvedByRun.rows[0].n} conflicts were resolved — the migration must not rule on these`);
+  // `after` used to be the post-pass molecule count from proof 10. Removing the pass left this
+  // reading a variable that no longer existed, and the 11:14 run reached the last section of the
+  // reconciliation before dying on `after is not defined` — with every proof above it having
+  // already printed. node --check cannot see an undefined reference, and nothing in preflight
+  // executes main(), so only a production run could find it. Counted here instead.
+  const onFile = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
   const seq = await query(`SELECT last_value::int n FROM molecules_id_seq`);
-  if (seq.rows[0].n >= after) ok(`sequence last_value ${seq.rows[0].n} >= ${after} molecules — allocation is sane`);
-  else bad(`sequence ${seq.rows[0].n} is behind the molecule count ${after}`);
+  if (seq.rows[0].n >= onFile) ok(`sequence last_value ${seq.rows[0].n} >= ${onFile} molecules — allocation is sane`);
+  else bad(`sequence ${seq.rows[0].n} is behind the molecule count ${onFile}`);
   // "Complete" is distinguishable from "incomplete" by exactly this: an unlinked row either has a
   // reason (refused) or does not (never reached). The second count being zero is what says the run
   // finished rather than stopped partway.
   const neverReached = await query(`
     SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NULL AND molecule_unresolved_reason IS NULL`);
   if (neverReached.rows[0].n === 0) ok('no row is in the "never attempted" state — the run completed');
-  else bad(`${neverReached.rows[0].n} rows were never reached — the run is INCOMPLETE, re-run it`);
+  else if (missing.length) {
+    console.log(`   LAG   ${neverReached.rows[0].n} row(s) not yet reached, consistent with the `
+      + `${missing.length} authorised identit(ies) still absent — run the backfill`);
+  } else {
+    bad(`${neverReached.rows[0].n} rows were never reached and the backfill has caught up — the run is INCOMPLETE`);
+  }
 
   // ── REPRESENTATIVE HIGH-RISK CASES ───────────────────────────────────────
   h('HR', 'representative high-risk cases, inspected individually');
@@ -370,11 +381,17 @@ async function main() {
   else bad('a contested molecule carries the disputed CAS', `${sel.cas} / ${bini.cas}`);
 
   console.log('');
+  // RETURNS its verdict; it does not exit the process. main() called process.exit(1) here, which
+  // made the function unusable by any caller: check-reconcile-runs.js executes it to prove every
+  // line runs, and was killed mid-report with its own output suppressed — exit 1, nothing printed.
+  // Same class as the require.main defects fixed on 30 Oct: a function that terminates its caller.
+  // The command-line exit code is unchanged, decided by the tail of this file.
   if (fail) {
     console.log(`✗ RECONCILIATION FAILED — ${fail} proof(s) did not hold.\n`);
-    process.exit(1);
+    return fail;
   }
   console.log('✓ RECONCILED — every proof holds. E1 did exactly what the preview said it would.\n');
+  return 0;
 }
 
 // ── THE LISTING, AS A FUNCTION OF ITS QUERY ─────────────────────────────────
@@ -481,14 +498,17 @@ async function inspectSources(q, a, expectCreate) {
   console.log('\n   READ-ONLY. No INSERT, UPDATE or DELETE was issued.\n');
 }
 
-module.exports = { listUnexpected, inspectSources };
+// main is exported so scripts/check-reconcile-runs.js can execute it against a local database and
+// prove every line runs. `after is not defined` reached production because nothing in preflight
+// called this function.
+module.exports = { listUnexpected, inspectSources, main };
 
 // Gated, for the reason the backfill's guards are gated: an importer gets the exported function, not
 // a full reconciliation run against whatever database it happens to be pointed at, followed by this
 // file's process.exit. scripts/check-molecule-identity-db.js requires listUnexpected; ungated, that
 // require would have run main() and exited the checker from inside a dependency.
 if (require.main === module) {
-  main().then(() => process.exit(0)).catch((e) => {
+  main().then((f) => process.exit(f ? 1 : 0)).catch((e) => {
     console.error(`\n✗ reconciliation could not run: ${e && e.message ? e.message : e}\n`);
     process.exit(1);
   });
