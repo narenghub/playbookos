@@ -9,6 +9,9 @@ const { runClaudeAnalysis } = require('../core');
 const { sendEmail } = require('../mailer');
 const { logAgentActivity, enqueueApproval, getCEOUser, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const rfqClaim = require('../idempotency/supplier-rfq');
+// The send-time identity guard. Runs BEFORE the claim; see src/lib/procurement/rfq-identity-guard.js
+// for why a checksum is insufficient at a supplier boundary.
+const rfqGuard = require('../procurement/rfq-identity-guard');
 
 const AGENT = 'procurement-agent';
 const PROC_MODEL = 'claude-opus-4-8';
@@ -304,7 +307,20 @@ async function generateRFQsFromApprovals({ weekStart } = {}) {
 }
 
 // ── Function 3 — RFQ email copy (Claude) ──────────────────────────────────────
+// ── THE GENERATOR CONSUMES AN APPROVED DECISION, IT DOES NOT RE-DERIVE IDENTITY ──
+//
+// `mol` must be the approved facts produced by rfqGuard.guardSend — carrying __approvedByDecision —
+// and NOT the rfq_requests row. Without this check the sequence that reached three suppliers stays
+// available: the guard approves the canonical identity, the renderer reads the stale filed CAS from
+// the RFQ row, and the wrong number leaves the system anyway with a clean decision record behind it.
+// Throwing rather than falling back, because a renderer handed unapproved identity has no safe
+// default. A dry run passes `{ ...mol, __approvedByDecision: 'dry-run' }` so previews still work
+// without claiming or sending.
 async function generateRFQEmail(mol, supplier, rfqId) {
+  if (!mol || mol.__approvedByDecision === undefined || mol.__approvedByDecision === null) {
+    throw new Error('generateRFQEmail requires identity facts approved by rfq-identity-guard; '
+      + 'it must not re-derive identity from the RFQ row');
+  }
   const gmpBlock = mol.gmp_required
     ? '- GMP certificate and DMF availability (this is a GMP-grade requirement)\n' : '';
   const prompt = `Write a professional pharmaceutical procurement RFQ email from a US API distributor to a supplier. Return ONLY the email body as plain text with line breaks (no subject line, no markdown, no preamble).
@@ -361,7 +377,49 @@ async function sendRFQEmails(rfqIds, dryRun = false) {
   for (const rfqId of rfqIds) {
     const rfq = (await query('SELECT * FROM rfq_requests WHERE id=$1', [rfqId])).rows[0];
     if (!rfq) { out.skipped++; continue; }
-    const mol = { molecule_name: rfq.molecule_name, cas_number: rfq.cas_number, target_quantity: rfq.target_quantity, target_purity: rfq.target_purity, gmp_required: rfq.gmp_required };
+
+    // ── IDENTITY BEFORE CLAIM, BEFORE GENERATION, BEFORE SEND ──────────────
+    //
+    // One decision per RFQ, because identity is a property of the request and not of the
+    // supplier pair. It is taken here, ahead of matchSuppliers and ahead of every claim, so a
+    // refusal leaves NO pending supplier_outreach_log row, no Claude call and no email attempt.
+    //
+    // The guard applies to rows that predate it. An RFQ is not grandfathered by its created_at:
+    // the invariant is about the moment of the consequential action, so the four existing
+    // unresolved RFQs become unsendable until their identities are established. That is intended.
+    //
+    // A dry run does not take a decision, because it performs no consequential action and a
+    // persisted `allow` for a send that never happened would be false evidence. It still reports
+    // what the guard WOULD say, so a preview surfaces refusals.
+    const identityCols = { id: rfq.id, molecule_name: rfq.molecule_name, cas_number: rfq.cas_number };
+    let approvedMol;
+    if (dryRun) {
+      const preview = await rfqGuard.decide(query, identityCols);
+      if (preview.decision !== 'allow') {
+        out.details.push(`${rfq.molecule_name}: would be REFUSED (${preview.refusal_reason}) — dry run, nothing claimed`);
+        out.refused = (out.refused || 0) + 1;
+        continue;
+      }
+      approvedMol = { molecule_name: preview.approved_name, cas_number: preview.approved_cas,
+        __approvedByDecision: 'dry-run' };
+    } else {
+      const verdict = await rfqGuard.guardSend(query, identityCols);
+      if (!verdict.allow) {
+        // The RFQ is preserved and is NOT marked sent. It is durably classified as requiring
+        // identity review by the decision row itself; no new ruling surface is invented here.
+        out.details.push(`${rfq.molecule_name}: REFUSED — ${verdict.reason}`
+          + (verdict.persistError ? ` (${verdict.persistError})` : '')
+          + (verdict.decisionId ? ` [decision ${verdict.decisionId}]` : ' [NO DECISION PERSISTED — failed closed]'));
+        out.refused = (out.refused || 0) + 1;
+        continue;
+      }
+      approvedMol = verdict.approved;
+    }
+
+    // Commercial, non-identity fields travel with the approved identity. The identity fields come
+    // ONLY from the decision.
+    const mol = { ...approvedMol, target_quantity: rfq.target_quantity,
+      target_purity: rfq.target_purity, gmp_required: rfq.gmp_required };
     const suppliers = await matchSuppliers({ ...mol, category: null }, 3);
     let anySent = false;
     for (const s of suppliers) {

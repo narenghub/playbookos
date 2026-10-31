@@ -222,6 +222,17 @@ step "one shared SOURCES definition, provably load-bearing" node scripts/check-s
 # meet.
 step "approval provenance distinguishes its cases" node scripts/check-approval-provenance-runs.js
 
+# The supplier RFQ send boundary. On 21 July 2026 an RFQ reached Laurus Labs, Divi's and Dr Reddy's
+# titled "Tramadol Hydrochloride (27203-92-5)" against a canonical 36282-47-0 -- and BOTH numbers
+# pass the CAS checksum, which is exactly why the quote guard's checksum test is insufficient here.
+# A checksum answers "could this be a CAS"; it cannot answer "does this CAS belong to the substance
+# and FORM being requested". The guard runs before rfqClaim.claim, so a refusal leaves no pending
+# supplier_outreach_log row -- the row the evidence tooling reads to decide whether a supplier was
+# contacted. Every refusal asserts zero claims and zero sends, measured with a mail spy rather than
+# inferred from silence. Seven mutations, each proving it changed its target before claiming a
+# failure, and both source files restored by content hash.
+step "no RFQ sends an unsupported CAS" node scripts/check-rfq-identity-guard-db.js
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
   echo "      DO NOT PUSH." >&2
