@@ -57,6 +57,12 @@ for (const a of process.argv.slice(2)) {
 }
 
 async function main() {
+  // Reset per call. `fail` is module-level and main() never cleared it, so a second call counted the
+  // first call's failures too — 2 became 14 across four runs. The command line calls main() once, so
+  // it never showed. It was the negative control in check-reconcile-runs.js that found it, on its
+  // first run, which is the whole argument for having one: a check nobody can invoke twice is a
+  // check nobody can test.
+  fail = 0;
   await initDB();
   const commit = String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || 'unknown';
   console.log(`\n═══ E1 POST-MIGRATION RECONCILIATION · commit ${commit} ═══`);

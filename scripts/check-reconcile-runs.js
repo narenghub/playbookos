@@ -127,15 +127,90 @@ const { query } = require('../src/lib/db');
     } else {
       // Its own output is suppressed: this asserts that it RUNS, not what it concluded. Against
       // fixtures the verdict carries no meaning and reporting it would invite someone to trust it.
-      console.log = () => {};
-      let result;
-      try {
-        result = await reconcile.main();
-      } finally { console.log = realLog; }
-      if (typeof result === 'number') {
-        say(`  ok    the reconciliation ran to completion (${result} fixture proof(s) did not hold, which is expected and asserted nothing)`);
+      // Captured rather than discarded: the negative controls below have to prove the
+      // reconciliation failed FOR THE RIGHT REASON, which means reading what it said.
+      const run = async () => {
+        const lines = [];
+        console.log = (...a) => lines.push(a.map(String).join(' '));
+        try { return { fail: await reconcile.main(), out: lines.join('\n') }; }
+        finally { console.log = realLog; }
+      };
+
+      const base = await run();
+      if (typeof base.fail === 'number') {
+        say(`  ok    the reconciliation ran to completion (${base.fail} fixture proof(s) did not hold, which is expected and asserted nothing)`);
       } else {
         say('  ok    the reconciliation ran to completion');
+      }
+
+      // ── NEGATIVE CONTROL ────────────────────────────────────────────────
+      //
+      // The permanent rule: every reconciliation must have a negative-control test proving it can
+      // detect the defect it claims to detect. At Gate 1 closure this was the one gap in the
+      // evidence framework — check-reconcile-runs proved every line EXECUTED, and nothing proved
+      // the reconciliation could go RED on a planted defect.
+      //
+      // Its detection record was empirical and strong: it caught the 38 unauthorised molecules on
+      // 29 Oct, an 11-proof failure on 31 Oct, the levoleucovorin drift and two more. But history
+      // is not a control. A check that has only ever failed on real defects has not been shown to
+      // fail on demand, and the day it stops detecting is the day nobody finds out.
+      //
+      // Both branches get their own control, because the reconciliation deliberately distinguishes
+      // them and reports different remedies.
+      const planted = [];
+
+      // (a) UNEXPLAINED — a molecule no source row proposes. This is the 29 Oct signature: the
+      //     authorised set and the code having diverged, the condition that produced 38 molecules
+      //     the report promised to withhold.
+      await query(
+        `INSERT INTO molecules (preferred_name, normalized_name, source, derivation_method)
+         VALUES ('Zzz Planted Unauthorised','zzz planted unauthorised','negative-control','test')`);
+      planted.push('zzz planted unauthorised');
+      const unexp = await run();
+      if (unexp.fail > base.fail
+        && unexp.out.includes('zzz planted unauthorised')
+        && /cannot explain/.test(unexp.out)) {
+        say('  ok    NEGATIVE CONTROL: an unexplained molecule makes it RED, named, as a divergence');
+      } else {
+        err('  FAIL  the reconciliation did NOT detect an unauthorised molecule — it cannot prove '
+          + 'what Gate 1 closed on');
+        err(`        fail ${base.fail} -> ${unexp.fail}; named=${unexp.out.includes('zzz planted unauthorised')}`);
+        failed = 1;
+      }
+
+      // (b) DRIFT — an identity the analyser EXCLUDES, present as a molecule. Two study rows with
+      //     two different valid CAS numbers and no row naming the substance alone is the
+      //     norketamine shape: nothing can link, so the identity is withheld.
+      await query(`INSERT INTO study_molecules (study_id, molecule_name, cas_number) VALUES
+        ('NC-D1','Plantedstatin','8880000-10-4'), ('NC-D2','Plantedstatin','8880000-11-5')`);
+      await query(
+        `INSERT INTO molecules (preferred_name, normalized_name, source, derivation_method)
+         VALUES ('Plantedstatin','plantedstatin','negative-control','test')`);
+      planted.push('plantedstatin');
+      const drifted = await run();
+      if (drifted.out.includes('plantedstatin') && /SINCE become excluded/.test(drifted.out)) {
+        say('  ok    NEGATIVE CONTROL: an excluded identity present as a molecule is RED, as drift');
+      } else {
+        err('  FAIL  the reconciliation did NOT detect a drifted identity');
+        err(`        named=${drifted.out.includes('plantedstatin')}`);
+        failed = 1;
+      }
+
+      // ── RESTORATION ─────────────────────────────────────────────────────
+      // Remove the plants and prove the verdict returns to where it started. Without this, a
+      // control that left its fixture behind would make every later assertion suspect.
+      for (const n of planted) await query(`DELETE FROM molecules WHERE normalized_name = $1`, [n]);
+      await query(`DELETE FROM study_molecules WHERE study_id IN ('NC-D1','NC-D2')`);
+      const restored = await run();
+      if (restored.fail === base.fail) {
+        say(`  ok    restored: the verdict is back to its baseline (${base.fail})`);
+      } else {
+        err(`  FAIL  the verdict did not return to baseline: ${base.fail} -> ${restored.fail} — a `
+          + 'negative control left something behind');
+        const was = new Set(base.out.split('\n').filter((l) => /FAIL/.test(l)));
+        restored.out.split('\n').filter((l) => /FAIL/.test(l) && !was.has(l))
+          .slice(0, 12).forEach((l) => err(`        NEW: ${l.trim()}`));
+        failed = 1;
       }
     }
   } catch (e) {
