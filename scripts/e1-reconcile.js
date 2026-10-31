@@ -42,11 +42,10 @@ const ok = (m) => console.log(`  ok    ${m}`);
 const bad = (m, d) => { fail++; console.log(`  FAIL  ${m}`); if (d) console.log(`          ${String(d).slice(0, 400)}`); };
 const h = (n, s) => console.log(`\n── ${n}. ${s}\n`);
 
-const SOURCES = [
-  { table: 'study_molecules', idCol: 'id', nameCol: 'molecule_name', casCol: 'cas_number', where: null },
-  { table: 'research_interests', idCol: 'id', nameCol: 'value', casCol: 'cas', where: `kind = 'molecule'` },
-  { table: 'supplier_products', idCol: 'id', nameCol: 'product_name', casCol: 'cas', where: null },
-];
+// The ONE definition, extracted 31 Oct 2026 (P1). Source membership unchanged by the
+// extraction; see src/lib/molecules/sources.js for why three identical copies were a defect
+// waiting for the next edit — which is Commercial Canonical Intake adding to this list.
+const { SOURCES } = require('../src/lib/molecules/sources');
 
 const KNOWN_FLAGS = ['--list-unexpected', '--inspect-sources'];
 for (const a of process.argv.slice(2)) {
@@ -587,7 +586,9 @@ async function inspectSources(q, a, expectCreate) {
 // main is exported so scripts/check-reconcile-runs.js can execute it against a local database and
 // prove every line runs. `after is not defined` reached production because nothing in preflight
 // called this function.
-module.exports = { listUnexpected, inspectSources, main };
+// SOURCES is exported so check-sources-centralized.js can assert every consumer holds the
+// SAME object, not an equal copy. Structural equality would still pass if the duplication returned.
+module.exports = { listUnexpected, inspectSources, main, SOURCES };
 
 // Gated, for the reason the backfill's guards are gated: an importer gets the exported function, not
 // a full reconciliation run against whatever database it happens to be pointed at, followed by this

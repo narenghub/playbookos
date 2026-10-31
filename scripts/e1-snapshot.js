@@ -20,11 +20,8 @@
 const { initDB, query } = require('../src/lib/db');
 const { analyze } = require('../src/lib/molecules/preview');
 
-const SOURCES = [
-  { table: 'study_molecules', idCol: 'id', nameCol: 'molecule_name', casCol: 'cas_number', where: null },
-  { table: 'research_interests', idCol: 'id', nameCol: 'value', casCol: 'cas', where: `kind = 'molecule'` },
-  { table: 'supplier_products', idCol: 'id', nameCol: 'product_name', casCol: 'cas', where: null },
-];
+// The ONE definition, extracted 31 Oct 2026 (P1). See src/lib/molecules/sources.js.
+const { SOURCES } = require('../src/lib/molecules/sources');
 
 const r = (l, v) => console.log(`   ${String(l).padEnd(46)} ${v}`);
 async function exists(t) {
@@ -126,3 +123,7 @@ main().then(() => process.exit(0)).catch((e) => {
   console.error(`\n✗ snapshot failed: ${e && e.message ? e.message : e}\n`);
   process.exit(1);
 });
+
+// SOURCES is exported so check-sources-centralized.js can assert every consumer holds the
+// SAME object, not an equal copy. Structural equality would still pass if the duplication returned.
+module.exports = { SOURCES };

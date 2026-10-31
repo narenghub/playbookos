@@ -198,6 +198,20 @@ step "a malformed CAS cannot reach a customer quote" node scripts/check-quote-ca
 # is a fourth. It calls the SHIPPED matchSuppliers rather than reimplementing its scoring.
 step "supplier overlap keeps its cases apart" node scripts/check-supplier-overlap-runs.js
 
+# ONE definition of what E1 reads identity from (P1). `SOURCES` was duplicated across five scripts
+# -- I believed three until the extraction found two more -- and identical copies are correct right
+# up until somebody edits one. The very next change to that list is Commercial Canonical Intake
+# ADDING to it, which is exactly the edit that would have diverged: a source added to the backfill
+# but not the reconciliation creates molecules the reconciliation cannot see; added to the
+# reconciliation but not the backfill, every row of an unread table is reported missing. Both look
+# like a reconciliation problem and neither is, and the 29 Oct 38-molecule incident was this same
+# defect in a different place. Asserts object IDENTITY, not equality -- equality would still pass if
+# the duplication came back with the same contents. Includes a mutation control that removes a
+# source at runtime and proves every consumer observes it, and one that plants a reintroduced copy
+# and proves the scan catches it. It runs the reconciliation check as a child, so this step is slow
+# and deliberately self-contained.
+step "one shared SOURCES definition, provably load-bearing" node scripts/check-sources-centralized.js
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
   echo "      DO NOT PUSH." >&2

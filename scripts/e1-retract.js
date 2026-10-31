@@ -63,11 +63,10 @@ if (require.main === module) {
 // a candidate is still excluded — and the analyser reads source rows, not molecules. The shapes match
 // scripts/backfill-molecule-identity.js and scripts/e1-reconcile.js exactly; three copies of this
 // list is two too many, and consolidating it is worth doing when something next touches all three.
-const SOURCES = [
-  { table: 'study_molecules', idCol: 'id', nameCol: 'molecule_name', casCol: 'cas_number', where: null },
-  { table: 'research_interests', idCol: 'id', nameCol: 'value', casCol: 'cas', where: `kind = 'molecule'` },
-  { table: 'supplier_products', idCol: 'id', nameCol: 'product_name', casCol: 'cas', where: null },
-];
+// The ONE definition, extracted 31 Oct 2026 (P1). Source membership unchanged by the
+// extraction; see src/lib/molecules/sources.js for why three identical copies were a defect
+// waiting for the next edit — which is Commercial Canonical Intake adding to this list.
+const { SOURCES } = require('../src/lib/molecules/sources');
 
 // ── GROUP A: unauthorised — created despite an analyser exclusion (38) ──────
 // id, the name it must still have, and the reason it is going.
@@ -624,7 +623,9 @@ async function main(deps = {}) {
   return 0;
 }
 
-module.exports = { main, PLAN, UNAUTHORISED, REQUIREMENTS, DRIFT };
+// SOURCES is exported so check-sources-centralized.js can assert every consumer holds the
+// SAME object, not an equal copy. Structural equality would still pass if the duplication returned.
+module.exports = { main, PLAN, UNAUTHORISED, REQUIREMENTS, DRIFT, SOURCES };
 
 if (require.main === module) {
   main().then((f) => process.exit(f ? 1 : 0)).catch((e) => {

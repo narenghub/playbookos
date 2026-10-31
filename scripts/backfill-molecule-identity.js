@@ -94,11 +94,10 @@ if (require.main === module) {
   }
 }
 
-const SOURCES = [
-  { table: 'study_molecules', idCol: 'id', nameCol: 'molecule_name', casCol: 'cas_number', where: null },
-  { table: 'research_interests', idCol: 'id', nameCol: 'value', casCol: 'cas', where: `kind = 'molecule'` },
-  { table: 'supplier_products', idCol: 'id', nameCol: 'product_name', casCol: 'cas', where: null },
-];
+// The ONE definition, extracted 31 Oct 2026 (P1). Source membership unchanged by the
+// extraction; see src/lib/molecules/sources.js for why three identical copies were a defect
+// waiting for the next edit — which is Commercial Canonical Intake adding to this list.
+const { SOURCES } = require('../src/lib/molecules/sources');
 
 // Writes, by what did the writing. Proof 10 reported "the re-run wrote 71 time(s)" with created 0
 // and linked 0, and there was no way to tell which statement was responsible without guessing. A

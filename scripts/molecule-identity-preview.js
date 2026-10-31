@@ -53,11 +53,8 @@ for (const a of process.argv.slice(2)) {
 
 // The three tables E1 will touch. skus is read for the inventory only and is NOT grouped, because
 // grouping it would propose molecules outside the approved blast radius.
-const SOURCES = [
-  { table: 'study_molecules', idCol: 'id', nameCol: 'molecule_name', casCol: 'cas_number', where: null },
-  { table: 'research_interests', idCol: 'id', nameCol: 'value', casCol: 'cas', where: `kind = 'molecule'` },
-  { table: 'supplier_products', idCol: 'id', nameCol: 'product_name', casCol: 'cas', where: null },
-];
+// The ONE definition, extracted 31 Oct 2026 (P1). See src/lib/molecules/sources.js.
+const { SOURCES } = require('../src/lib/molecules/sources');
 
 // ── HUMAN INTERPRETATION — the tiering, and I may have it wrong ──────────────
 //
@@ -739,3 +736,7 @@ if (require.main === module) {
     process.exit(1);
   });
 }
+
+// SOURCES is exported so check-sources-centralized.js can assert every consumer holds the
+// SAME object, not an equal copy. Structural equality would still pass if the duplication returned.
+module.exports = { SOURCES };
