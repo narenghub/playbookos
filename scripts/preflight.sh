@@ -173,6 +173,14 @@ step "the reconciliation runs end to end" node scripts/check-reconcile-runs.js
 # asserts the "READS ONLY" claim on the tin by measuring row counts either side of a run.
 step "gate 2 identity measurement runs and writes nothing" node scripts/check-gate2-measure-runs.js
 
+# The identity-evidence script answers one question with a commercial consequence -- did an RFQ
+# whose CAS contradicts the canonical identity actually reach a supplier -- in one run against
+# production, over an SSH connection that failed three ways on 31 Oct. The assertion that matters
+# most is that a CLAIM is not a SEND: supplier_outreach_log writes 'pending' BEFORE the email, so
+# reading that row as a send would manufacture a commercial-safety finding out of an attempt. All
+# five verdict classes are exercised, and the "READS ONLY" claim is measured across six tables.
+step "identity evidence tells a send from a claim" node scripts/check-identity-evidence-runs.js
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
   echo "      DO NOT PUSH." >&2
