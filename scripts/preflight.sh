@@ -233,6 +233,17 @@ step "approval provenance distinguishes its cases" node scripts/check-approval-p
 # failure, and both source files restored by content hash.
 step "no RFQ sends an unsupported CAS" node scripts/check-rfq-identity-guard-db.js
 
+# The deployment validator, whose verdict is what closes the interim RFQ guard. Two things about it
+# have to be proven before it is believed. First, IT WRITES NOTHING DURABLE: proving the append-only
+# trigger behaviourally needs a real row (the trigger is FOR EACH ROW, so a zero-row UPDATE succeeds
+# trivially and would be a check passing for an unrelated reason), so it inserts one inside a
+# transaction it deliberately rolls back -- and if that rollback ever failed the row could NOT be
+# removed, because the table is append-only. The rollback is therefore asserted, not assumed.
+# Second, IT CAN GO RED: drop the trigger, drop the table, or "correct" the historical Tramadol CAS,
+# and it fails for that reason. Dropping the trigger must also break the UPDATE/DELETE proofs,
+# otherwise those were never testing the trigger.
+step "the deployment validator can go red and writes nothing" node scripts/check-rfq-guard-validation-runs.js
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
   echo "      DO NOT PUSH." >&2
