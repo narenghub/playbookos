@@ -165,6 +165,14 @@ step "a shared CAS cannot price a customer quote" node scripts/check-inquiry-pri
 # verdict is meaningless.
 step "the reconciliation runs end to end" node scripts/check-reconcile-runs.js
 
+# The Gate 2 identity measurement is a READ-ONLY script that gets exactly one chance to be right:
+# it runs once against production, over an SSH connection that failed three distinct ways on 31 Oct,
+# and its numbers decide the backfill strategy. So every outcome class is exercised here, and above
+# all that a CAS can VETO a name match but never make one — a shared registry number resolving a
+# name is the defect that priced a quote 2.4x out, and as a design input it would be worse. Also
+# asserts the "READS ONLY" claim on the tin by measuring row counts either side of a run.
+step "gate 2 identity measurement runs and writes nothing" node scripts/check-gate2-measure-runs.js
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
   echo "      DO NOT PUSH." >&2
