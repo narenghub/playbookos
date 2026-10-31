@@ -50,7 +50,7 @@
 
 const fs = require('fs');
 const { query } = require('../src/lib/db');
-const { moleculeKey } = require('../src/lib/molecules/identity');
+const { moleculeKey, substanceForm } = require('../src/lib/molecules/identity');
 
 // stdout through fs.writeSync, not console.log. A checker printed nothing and exited 1 on 31 Oct
 // because console.log to a pipe is an async write and process.exit discards what has not drained.
@@ -145,6 +145,86 @@ function classify(row, canonical, cols) {
   };
 }
 
+// ── WHY DIDN'T IT RESOLVE? ──────────────────────────────────────────────────
+//
+// "7 rows unidentified" is not actionable. These three buckets are:
+//
+//   form_token_differs   an existing molecule shares this name's DERIVED BASE and FORM CLASS,
+//                             differing only in which form token was filed. `hcl` and
+//                             `hydrochloride` are both in SALT_FORM_WORDS as separate tokens with
+//                             no equivalence between them, so "Ciprofloxacin HCl" and
+//                             "Ciprofloxacin Hydrochloride" are two identities, and an alias may
+//                             fix it -- a HUMAN act.
+//
+//                             NOT ALL OF THESE ARE SPELLING VARIANTS, and the bucket is named for
+//                             what it measures rather than for the happy case. "Tiotropium Bromide"
+//                             against a catalogue "Tiotropium Chloride" lands here too, and those
+//                             are DIFFERENT SUBSTANCES. Reading this count as "cheap alias fixes"
+//                             would be reading it as the answer rather than the question. The
+//                             filed and catalogue tokens are printed side by side for exactly that
+//                             reason.
+//   base_exists_salt_absent   the derived base exists as a molecule; the filed salt or hydrate does
+//                             not. E1 keeps base and salt deliberately distinct (leuprolide vs
+//                             leuprolide acetate), so this is NOT a resolution -- it is a known
+//                             neighbour.
+//   no_candidate              nothing related exists. A substance E1's sources never mentioned.
+//
+// Only the third bucket means "the canonical universe does not cover buyer demand", and separating
+// it out is the entire point of this diagnosis.
+//
+// ── WHAT THIS DOES NOT DO ───────────────────────────────────────────────────
+//
+// IT NEVER LINKS ANYTHING. It reports candidates and prints the competing form tokens side by side
+// so a person can see whether they are looking at an orthographic variant (hcl / hydrochloride) or
+// at two genuinely different anions (bromide / chloride). Deciding that is a chemistry ruling, and
+// E1 already holds 14 `ambiguous_form` and 3 `duplicate_risk` quarantine rows precisely because
+// form equivalence took evidence per pair to establish. The drift policy classifies `ambiguous_form`
+// as HUMAN_RULING_REQUIRED. Automating it here would be the fuzzy resolution this gate forbids,
+// wearing a measurement's clothes.
+const DIAGNOSES = ['form_token_differs', 'base_exists_salt_absent', 'no_candidate'];
+
+function buildBaseIndex(canonical) {
+  // derived base -> the molecules whose own identity derives from that base.
+  const byBase = new Map();
+  for (const m of new Set(canonical.values())) {
+    const sf = substanceForm(m.normalized_name);
+    const base = sf.derivedBase || sf.identity;
+    if (!byBase.has(base)) byBase.set(base, []);
+    byBase.get(base).push({ molecule: m, form: sf.form, tokens: sf.formTokens || [] });
+  }
+  return byBase;
+}
+
+function diagnoseUnresolved(filed, canonical, byBase) {
+  const sf = substanceForm(String(filed || ''));
+  const base = sf.derivedBase || sf.identity;
+  const neighbours = byBase.get(base) || [];
+
+  // same base AND same form class, but a different token spelling -> an alias candidate
+  const spelling = neighbours.filter((n) => n.form === sf.form
+    && JSON.stringify([...n.tokens].sort()) !== JSON.stringify([...(sf.formTokens || [])].sort()));
+  if (spelling.length) {
+    return {
+      diagnosis: 'form_token_differs',
+      candidates: spelling.map((n) => ({
+        ref: n.molecule.molecule_ref,
+        name: n.molecule.preferred_name,
+        theirTokens: n.tokens,
+        ourTokens: sf.formTokens || [],
+      })),
+    };
+  }
+  // the base itself exists as its own molecule
+  const baseMol = canonical.get(base);
+  if (baseMol && base !== sf.identity) {
+    return {
+      diagnosis: 'base_exists_salt_absent',
+      candidates: [{ ref: baseMol.molecule_ref, name: baseMol.preferred_name, base }],
+    };
+  }
+  return { diagnosis: 'no_candidate', candidates: [] };
+}
+
 // ── SECTIONS 2 AND 3: classify one table ────────────────────────────────────
 async function measureTable(cols, canonical, { samples = 8 } = {}) {
   const extra = cols.activeCol ? `, ${cols.activeCol}` : '';
@@ -161,6 +241,7 @@ async function measureTable(cols, canonical, { samples = 8 } = {}) {
   const examples = {};
   for (const o of OUTCOMES) { counts[o] = 0; examples[o] = []; }
   const resolvedRows = [];
+  const unresolvedNames = new Set();
 
   for (const r of rows) {
     const c = classify(r, canonical, cols);
@@ -172,6 +253,7 @@ async function measureTable(cols, canonical, { samples = 8 } = {}) {
           : JSON.stringify(r[cols.name])
       );
     }
+    if (c.outcome === 'unresolved_no_match') unresolvedNames.add(r[cols.name]);
     if (c.molecule) {
       resolvedRows.push({
         row: r,
@@ -181,7 +263,10 @@ async function measureTable(cols, canonical, { samples = 8 } = {}) {
       });
     }
   }
-  return { table: cols.table, total: rows.length, counts, examples, resolvedRows, cols };
+  return {
+    table: cols.table, total: rows.length, counts, examples, resolvedRows, cols,
+    unresolvedNames: [...unresolvedNames],
+  };
 }
 
 function printTable(m) {
@@ -398,9 +483,11 @@ async function main() {
   const txTotals = {};
   for (const o of OUTCOMES) txTotals[o] = 0;
   let txGrand = 0;
+  const txResults = [];
   for (const cols of TX_TABLES) {
     const m = await measureTable(cols, canonical);
     printTable(m);
+    txResults.push(m);
     if (!m.error) {
       for (const o of OUTCOMES) txTotals[o] += m.counts[o];
       txGrand += m.total;
@@ -410,6 +497,34 @@ async function main() {
   out('   ALL THREE TRANSACTION TABLES');
   for (const o of OUTCOMES) out(`   ${pad(o, 22)} ${num(txTotals[o], 6)}`);
   out(`   ${pad('TOTAL ROWS', 22)} ${num(txGrand, 6)}`);
+
+  // ── 2b. why the unresolved names did not resolve ──
+  const byBase = buildBaseIndex(canonical);
+  const diagTotals = {};
+  for (const d of DIAGNOSES) diagTotals[d] = 0;
+  const allUnresolved = [...new Set(txResults.flatMap((m) => m.unresolvedNames || []))];
+  out('');
+  out('── 2b. WHY THE UNRESOLVED NAMES DID NOT RESOLVE');
+  out('   REPORTS CANDIDATES. LINKS NOTHING. Whether two form tokens are the same anion is a');
+  out('   chemistry ruling, and an alias is a human act.');
+  out('');
+  out('   form_token_differs is NOT a list of cheap fixes. hcl vs hydrochloride is one substance;');
+  out('   bromide vs chloride is two. Both land in that bucket. Read the tokens, not the count.');
+  if (!allUnresolved.length) out('   nothing unresolved');
+  for (const name of allUnresolved) {
+    const d = diagnoseUnresolved(name, canonical, byBase);
+    diagTotals[d.diagnosis] += 1;
+    out('');
+    out(`   ${JSON.stringify(name)}  →  ${d.diagnosis}`);
+    for (const c of d.candidates.slice(0, 5)) {
+      out(c.theirTokens
+        ? `     candidate ${c.ref} ${JSON.stringify(c.name)}  filed=[${c.ourTokens.join(',')}]  catalogue=[${c.theirTokens.join(',')}]`
+        : `     base molecule ${c.ref} ${JSON.stringify(c.name)} exists; the filed form does not`);
+    }
+  }
+  out('');
+  out('   DIAGNOSIS TOTALS (distinct names)');
+  for (const d of DIAGNOSES) out(`   ${pad(d, 26)} ${num(diagTotals[d], 6)}`);
 
   // ── 3. the two lookup tables ──
   out('');
@@ -529,6 +644,9 @@ async function main() {
   out('════ DIGEST ═══════════════════════════════════════════════════════════');
   out(`tx_resolvable=${resolvable} tx_ruling=${txTotals.cas_contradiction} tx_unidentified=${noId} `
     + `tx_none=${txTotals.no_molecule_named} tx_total=${txGrand}`);
+  out(`diag_form_token=${diagTotals.form_token_differs} `
+    + `diag_base_only=${diagTotals.base_exists_salt_absent} `
+    + `diag_absent=${diagTotals.no_candidate}`);
   out(`collisions_pricing=${pc} collisions_skus=${sc} `
     + `rfq_collisions=${rfq.collisions ? rfq.collisions.length : -1}`);
   if (!beh.error) {
@@ -560,5 +678,6 @@ if (require.main === module) {
 
 module.exports = {
   main, classify, loadCanonical, measureTable, collisions, canonicalAnswer, transitionOf,
-  OUTCOMES, TRANSITIONS, TX_TABLES, LOOKUP_TABLES,
+  buildBaseIndex, diagnoseUnresolved,
+  OUTCOMES, TRANSITIONS, DIAGNOSES, TX_TABLES, LOOKUP_TABLES,
 };

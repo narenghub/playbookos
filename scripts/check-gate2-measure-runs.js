@@ -218,6 +218,64 @@ const FIXTURE = `
   expect('a thrown lookup is not a refusal removed',
     t(null, { status: 'answer', row: { id: 'p3' } }, 'p3'), 'refusal_removed');
 
+  // ── 4b. THE UNRESOLVED DIAGNOSIS: three buckets, and no auto-linking ─────
+  //
+  // Fixture names are the ones production actually reported unresolved on 31 Oct, so these
+  // assertions are about real data rather than invented cases.
+  await query(
+    `INSERT INTO molecules (preferred_name, normalized_name, cas, source, derivation_method) VALUES
+       ('Ciprofloxacin Hydrochloride','ciprofloxacin hydrochloride',NULL,'fixture','exact'),
+       ('Tacrolimus','tacrolimus',NULL,'fixture','exact')`);
+  canonical = await measure.loadCanonical();
+  const byBase = measure.buildBaseIndex(canonical);
+  const diag = (n) => measure.diagnoseUnresolved(n, canonical, byBase);
+
+  // "Ciprofloxacin HCl" shares the derived base and the salt form class with
+  // "Ciprofloxacin Hydrochloride" -- only the token spelling differs.
+  const cip = diag('Ciprofloxacin HCl');
+  expect('a differing form token is reported as a candidate',
+    cip.diagnosis, 'form_token_differs');
+  if (cip.candidates.length === 1
+      && cip.candidates[0].ourTokens.join() === 'hcl'
+      && cip.candidates[0].theirTokens.join() === 'hydrochloride') {
+    ok('both competing form tokens are shown side by side for a human to rule on');
+  } else {
+    bad('form tokens not reported for the ruling', JSON.stringify(cip.candidates));
+  }
+
+  // The base exists, the filed hydrate does not. E1 keeps base and hydrate distinct, so this is a
+  // neighbour, never a resolution.
+  expect('a filed hydrate whose base exists is reported as base-only',
+    diag('Tacrolimus Monohydrate').diagnosis, 'base_exists_salt_absent');
+
+  // Nothing related exists. This is the bucket that means the canonical universe does not cover
+  // buyer demand, and it must not be contaminated by the other two.
+  expect('a substance with no relative is reported absent',
+    diag('Yttrium oxide').diagnosis, 'no_candidate');
+  expect('a plain organic with no relative is reported absent',
+    diag('4-Aminopyridine').diagnosis, 'no_candidate');
+
+  // THE ONE THAT MATTERS: a different anion is NOT a spelling variant. If this ever reports
+  // form_token_differs, the diagnosis has started making chemistry calls.
+  await query(
+    `INSERT INTO molecules (preferred_name, normalized_name, cas, source, derivation_method)
+     VALUES ('Tiotropium Chloride','tiotropium chloride',NULL,'fixture','exact')`);
+  canonical = await measure.loadCanonical();
+  const byBase2 = measure.buildBaseIndex(canonical);
+  const tio = measure.diagnoseUnresolved('Tiotropium Bromide', canonical, byBase2);
+  if (tio.diagnosis === 'form_token_differs'
+      && tio.candidates.length === 1
+      && tio.candidates[0].ourTokens.join() === 'bromide'
+      && tio.candidates[0].theirTokens.join() === 'chloride') {
+    ok('a different anion is surfaced for ruling WITH both tokens shown, never linked');
+  } else {
+    bad('a different-anion neighbour was not surfaced with its tokens', JSON.stringify(tio));
+  }
+  // And nothing was written to molecule_aliases by any of it.
+  const aliasesAfter = (await query(`SELECT COUNT(*)::int n FROM molecule_aliases`)).rows[0].n;
+  if (aliasesAfter === 0) ok('the diagnosis created no alias — it reports, it does not link');
+  else bad('the diagnosis WROTE an alias', `molecule_aliases now has ${aliasesAfter} row(s)`);
+
   // ── 5. it executes end to end and returns its verdict ────────────────────
   await query(
     `INSERT INTO skus (id, name, cas_number, units_in_stock, is_active) VALUES
@@ -249,7 +307,7 @@ const FIXTURE = `
             (SELECT COUNT(*)::int FROM molecule_pricing) p,
             (SELECT COALESCE(SUM(price_per_kg_usd),0)::int FROM molecule_pricing) ps,
             (SELECT COUNT(*)::int FROM skus) s`)).rows[0];
-  const before = { i: 9, m: 3, d: 1, c: 0, p: 4, ps: 63000, s: 2 };
+  const before = { i: 9, m: 6, d: 1, c: 0, p: 4, ps: 63000, s: 2 };
   const after = await counts();
   const same = Object.keys(before).every((k) => before[k] === after[k]);
   if (same) {
