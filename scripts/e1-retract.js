@@ -59,10 +59,14 @@ if (require.main === module) {
   }
 }
 
+// Name and CAS columns are here too, because the drift verification has to ask the analyser whether
+// a candidate is still excluded — and the analyser reads source rows, not molecules. The shapes match
+// scripts/backfill-molecule-identity.js and scripts/e1-reconcile.js exactly; three copies of this
+// list is two too many, and consolidating it is worth doing when something next touches all three.
 const SOURCES = [
-  { table: 'study_molecules', idCol: 'id' },
-  { table: 'research_interests', idCol: 'id' },
-  { table: 'supplier_products', idCol: 'id' },
+  { table: 'study_molecules', idCol: 'id', nameCol: 'molecule_name', casCol: 'cas_number', where: null },
+  { table: 'research_interests', idCol: 'id', nameCol: 'value', casCol: 'cas', where: `kind = 'molecule'` },
+  { table: 'supplier_products', idCol: 'id', nameCol: 'product_name', casCol: 'cas', where: null },
 ];
 
 // ── GROUP A: unauthorised — created despite an analyser exclusion (38) ──────
@@ -171,6 +175,18 @@ const REQUIREMENTS = [
 // rather than passed over.
 const DRIFT = [
   ['levoleucovorin', 'cas_disagreement'],
+  // 31 Oct, authorised after the 11:23 reconciliation. Both were legitimately created, later
+  // received a contradictory CAS, and are now excluded under the current rules — canonical CAS
+  // already withdrawn, source rows refused, nothing linked. Inert, but outside the authorised
+  // partition.
+  //
+  // NOT a precedent for deleting any molecule whose evidence later turns contradictory. That is the
+  // POST-CREATION IDENTITY DRIFT POLICY, a Gate 3 design item, and it has to be decided before
+  // Gate 2 makes canonical identity a transaction dependency — because once inquiries,
+  // inquiry_quotes and rfq_requests carry molecule_id, retraction stops being cheap and the policy
+  // gets chosen by a foreign key instead of by a person.
+  ['apatinib mesylate', 'cas_disagreement'],
+  ['n-desmethyl enzalutamide', 'cas_disagreement'],
 ];
 
 const PLAN = [
@@ -180,6 +196,108 @@ const PLAN = [
     id, name, kind: 'insufficient_identity', group: 'requirement',
   })),
 ];
+
+
+// ── INDEPENDENT VERIFICATION BEFORE ANY DELETION ────────────────────────────
+//
+// Required by the 31 Oct authorisation: establish, per candidate, the exact name, the canonical CAS
+// state, accepted source linkage, alias and parent/child references, EVERY other foreign key into
+// molecules within E1 scope, that the analyser currently excludes it, and that the exclusion reason
+// survives on the source evidence. If a candidate has acquired a consequential reference, STOP
+// rather than force the deletion.
+//
+// The foreign keys are enumerated from information_schema, not from a list I wrote. A hand-kept list
+// is exactly how a reference gets missed: it is correct until someone adds a table. This asks the
+// database which tables point at molecules and counts rows in each.
+const SAFE_REFERENCERS = new Set([
+  'study_molecules', 'research_interests', 'supplier_products',  // source rows: unlinked, by design
+  'molecule_aliases',                                            // deleted with the molecule
+  'molecules',                                                   // parent_molecule_id: detached
+]);
+
+async function verifyRetractable(q, p, analysis) {
+  const out = { name: p.name, ok: true, notes: [], blockers: [] };
+  const m = (await q(
+    `SELECT id, normalized_name, preferred_name, cas, cas_suppressed_reason, cas_source_values,
+            substance_form, parent_molecule_id
+       FROM molecules WHERE normalized_name = $1`, [p.name])).rows[0];
+  if (!m) { out.notes.push('not present — nothing to retract'); out.absent = true; return out; }
+  out.id = m.id;
+
+  // 1. exact identity
+  if (m.normalized_name === p.name) out.notes.push(`id ${m.id}, name matches exactly ("${m.preferred_name}")`);
+  else { out.blockers.push(`name mismatch: holds "${m.normalized_name}"`); out.ok = false; }
+
+  // 2. canonical CAS state — must already be withdrawn, or retraction would be destroying evidence
+  if (m.cas === null) {
+    out.notes.push(`canonical cas withdrawn (${m.cas_suppressed_reason || 'no reason recorded'})`);
+    out.notes.push(`source values kept: ${m.cas_source_values || '(none)'}`);
+  } else {
+    out.blockers.push(`still carries a canonical CAS (${m.cas}) — withdraw it before retracting, `
+      + 'so the contest is recorded rather than deleted with the row');
+    out.ok = false;
+  }
+
+  // 3-6. every foreign key into molecules, asked of the database
+  const fks = (await q(`
+    SELECT tc.table_name, kcu.column_name
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON kcu.constraint_name = tc.constraint_name
+      JOIN information_schema.constraint_column_usage ccu
+        ON ccu.constraint_name = tc.constraint_name
+     WHERE tc.constraint_type = 'FOREIGN KEY' AND ccu.table_name = 'molecules'`)).rows;
+  out.notes.push(`${fks.length} foreign key(s) reference molecules`);
+  for (const fk of fks) {
+    const n = (await q(
+      `SELECT COUNT(*)::int n FROM ${fk.table_name} WHERE ${fk.column_name} = $1`, [m.id])).rows[0].n;
+    if (!n) continue;
+    const label = `${fk.table_name}.${fk.column_name} = ${n} row(s)`;
+    if (SAFE_REFERENCERS.has(fk.table_name)) out.notes.push(label);
+    else {
+      out.blockers.push(`${label} — a referencing table the safe-retraction assumptions do not cover`);
+      out.ok = false;
+    }
+  }
+  const al = (await q(`SELECT COUNT(*)::int n FROM molecule_aliases WHERE molecule_id = $1`, [m.id])).rows[0].n;
+  const kids = (await q(`SELECT COUNT(*)::int n FROM molecules WHERE parent_molecule_id = $1`, [m.id])).rows[0].n;
+  out.notes.push(`${al} alias(es), ${kids} child molecule(s)`);
+
+  // 7. the analyser must currently EXCLUDE it. Without this the retraction is deleting a molecule
+  //    the rules would recreate on the next backfill — a loop, not a correction.
+  if (analysis) {
+    const reason = analysis.exclusionReasons.get(p.name);
+    if (reason) out.notes.push(`analyser excludes it: ${reason}`);
+    else if (analysis.createSet.has(p.name)) {
+      out.blockers.push('the analyser currently AUTHORISES this identity — retracting it would be '
+        + 'undone by the next backfill');
+      out.ok = false;
+    } else {
+      out.blockers.push('the analyser neither authorises nor explains this identity — unexplained, '
+        + 'which is the 29 Oct divergence signature, not drift');
+      out.ok = false;
+    }
+  } else out.notes.push('analyser state NOT CHECKED (no analysis supplied)');
+
+  // 8. the exclusion reason must survive on the source evidence
+  let reasoned = 0; let linked = 0;
+  for (const src of SOURCES) {
+    const ex = await q(`SELECT to_regclass($1) IS NOT NULL ok`, [src.table]);
+    if (!ex.rows[0].ok) continue;
+    linked += (await q(
+      `SELECT COUNT(*)::int n FROM ${src.table} WHERE molecule_id = $1`, [m.id])).rows[0].n;
+  }
+  const conf = (await q(
+    `SELECT COUNT(*)::int n FROM molecule_conflicts WHERE identity_name = $1`, [p.name])).rows[0].n;
+  reasoned = conf;
+  out.notes.push(`${linked} accepted source row(s) linked, ${conf} quarantine record(s) on file`);
+  if (!conf) {
+    out.blockers.push('no quarantine record names this identity — the reason would not survive the '
+      + 'retraction, so the evidence for recreating it later would be gone');
+    out.ok = false;
+  }
+  return out;
+}
 
 const ok = (m) => console.log(`  ok    ${m}`);
 let fail = 0;
@@ -239,6 +357,54 @@ async function main(deps = {}) {
     } else ok(`molecule_conflicts.kind accepts all ${kinds.length} kind(s) this plan writes`);
   }
 
+  // ── VERIFY THE DRIFT CANDIDATES BEFORE TOUCHING ANYTHING ────────────────
+  //
+  // Runs in BOTH modes and gates the deletion. A candidate that fails verification is skipped, not
+  // forced: "STOP rather than force deletion" is the authorisation's wording and it is the right
+  // instinct — a molecule that has acquired a reference since this list was written is exactly the
+  // case where a confident script does damage.
+  // Keyed on the entry's own group, not on membership of the DRIFT constant. An injected test plan
+  // can then exercise this path, which matters: the verification is the safety gate, and a gate no
+  // test can reach is a gate nobody has seen work.
+  const driftPlan = PLAN_IN_USE.filter((p) => p.group === 'drift');
+  const blocked = new Set();
+  if (driftPlan.length) {
+    console.log('── independent verification of the drift candidates\n');
+    // The analyser's current view, computed from live source rows — the same analyze() the preview
+    // and the backfill use, so "is it excluded" is answered by the authority rather than by me.
+    let analysis = null;
+    try {
+      const { analyze } = require('../src/lib/molecules/preview');
+      const rows = [];
+      for (const src of SOURCES) {
+        const ex = await Q(`SELECT to_regclass($1) IS NOT NULL ok`, [src.table]);
+        if (!ex.rows[0].ok) continue;
+        const w = src.where ? `WHERE ${src.where}` : '';
+        const got = await Q(`SELECT ${src.nameCol} AS nm, ${src.casCol} AS cas FROM ${src.table} ${w}`);
+        got.rows.forEach((r) => rows.push({ table: src.table, rid: 0, name: r.nm, cas: r.cas }));
+      }
+      const a = analyze(rows);
+      analysis = { exclusionReasons: a.exclusionReasons, createSet: new Set(a.executionSet.CREATE) };
+      console.log(`   analyser: ${a.e1.groups.size} identities, ${analysis.createSet.size} authorised\n`);
+    } catch (e) {
+      console.log(`   analyser state could not be computed: ${e.message}\n`);
+    }
+
+    for (const p of driftPlan) {
+      const v = await verifyRetractable(Q, p, analysis);
+      console.log(`   ${v.name}`);
+      v.notes.forEach((n) => console.log(`       · ${n}`));
+      v.blockers.forEach((b) => console.log(`       ✗ ${b}`));
+      if (v.absent) { console.log('       → nothing to do\n'); continue; }
+      if (v.ok) { console.log('       → verified retractable\n'); }
+      else { blocked.add(p.name); console.log('       → BLOCKED, will not be deleted\n'); }
+    }
+    if (blocked.size) {
+      bad(`${blocked.size} drift candidate(s) failed verification and were NOT deleted`,
+        [...blocked].join(', '));
+    } else ok(`all ${driftPlan.length} drift candidate(s) verified retractable`);
+  }
+
   const before = (await Q(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
 
   const stats = {
@@ -253,6 +419,7 @@ async function main(deps = {}) {
     // An entry with no id is resolved by its uniquely-indexed normalized_name. Everything after this
     // point is identical, including the name re-check, which for these is trivially true — the point
     // of resolving by name is that a wrong id cannot quietly become "already gone".
+    if (blocked.has(p.name)) { stats.skippedMismatch += 1; skipped.push(`${p.name} failed verification`); continue; }
     if (p.id === null) {
       const byName = await Q(`SELECT id FROM molecules WHERE normalized_name = $1`, [p.name]);
       if (!byName.rowCount) {

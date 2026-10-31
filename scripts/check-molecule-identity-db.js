@@ -585,6 +585,33 @@ const FIXTURE_TABLES = `
       await q(`DELETE FROM study_molecules WHERE id = $1`, [sm.rows[0].id]);
       await q(`DELETE FROM molecules WHERE id = $1`, [kid.rows[0].id]);
 
+      // ── A DRIFT CANDIDATE STILL CARRYING A CANONICAL CAS IS BLOCKED ────
+      //
+      // The 31 Oct authorisation requires independent verification before deletion and "STOP rather
+      // than force deletion" when a safe-retraction assumption is false. The most consequential of
+      // those assumptions is that the canonical CAS has already been withdrawn — retracting a
+      // molecule that still publishes a disputed number would delete the contest along with it.
+      //
+      // So: a drift candidate WITH a cas must survive. A gate no test can reach is a gate nobody
+      // has seen work.
+      await q(
+        `INSERT INTO molecules (preferred_name, normalized_name, cas, source, derivation_method)
+         VALUES ('Driftblocked','driftblocked','50-78-2','test','test')`);
+      const quietB = console.log; console.log = () => {};
+      const blockedRun = await retract.main({
+        query: q, withTransaction: tx, execute: true,
+        plan: [{ id: null, name: 'driftblocked', kind: 'cas_disagreement', group: 'drift' }],
+      });
+      console.log = quietB;
+      const survived = await mol('driftblocked');
+      if (survived && blockedRun) {
+        ok('a drift candidate still carrying a canonical CAS is BLOCKED, not deleted');
+      } else {
+        bad('a molecule publishing a disputed CAS was retracted, destroying the contest with it',
+          JSON.stringify({ stillThere: !!survived, failed: blockedRun }));
+      }
+      await q(`DELETE FROM molecules WHERE normalized_name = 'driftblocked'`);
+
       // ── THE DRY RUN MUST SEE THE SCHEMA IT WILL FAIL ON ────────────────
       //
       // On 30 Oct at 13:37 the retraction dry run passed, and the --execute run then deleted all 72
