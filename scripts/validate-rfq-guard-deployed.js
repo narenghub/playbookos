@@ -199,9 +199,12 @@ async function main() {
             decision, refusal_reason, approved_cas, guard_version
        FROM rfq_identity_decisions ORDER BY id DESC LIMIT 25`)).rows;
   if (!nat.length) {
-    out('     none. The guard has not yet been exercised by a real dispatch, which is expected:');
-    out('     RFQ dispatch runs on the procurement schedule and the four existing RFQs are');
-    out('     unresolved, so the first natural decisions will be refusals.');
+    out('     none. The guard has not been exercised by a real dispatch, and may not be for some');
+    out('     time: all six existing RFQs already carry status=sent, so none is pending dispatch.');
+    out('     A natural decision therefore requires a NEW RFQ, which only arrives when an');
+    out('     approval_queue sourcing row is approved. A guard that never runs is a guard whose');
+    out('     live behaviour is never observed, so the Postgres suite remains the behavioural');
+    out('     proof until then.');
   } else {
     for (const d of nat) {
       out(`     [${d.id}] ${d.rfq_id} ${d.decision}${d.refusal_reason ? `/${d.refusal_reason}` : ''} `
