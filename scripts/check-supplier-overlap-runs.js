@@ -82,7 +82,7 @@ const FIXTURE = `
 function runScript() {
   try {
     const stdout = execFileSync(process.execPath, [path.join(__dirname, 'gate2-supplier-overlap.js')],
-      { env: { ...process.env, DATABASE_URL: url, JWT_SECRET: process.env.JWT_SECRET || 'overlap-check' },
+      { env: { ...process.env, DATABASE_URL: url, JWT_SECRET: process.env.JWT_SECRET || 'PLACEHOLDER-test-key' },
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     return { code: 0, stdout };
   } catch (e) {

@@ -529,7 +529,11 @@ async function checkNoResponse({ hours = 48 } = {}) {
   return { flagged_no_response: stale.rowCount };
 }
 
+// parseApproval is exported so scripts/gate2-approval-provenance.js can show what PRODUCTION
+// derives from an approval payload. A pure function, exported only; reimplementing it in the
+// provenance script would answer a different question than the one that was asked.
 module.exports = {
+  parseApproval,
   runProcurementBriefing, seedSupplierDatabase, generateRFQsFromApprovals, generateRFQEmail,
   sendRFQEmails, scoreAndRankSuppliers, runProcurementAgent, checkNoResponse, matchSuppliers,
 };

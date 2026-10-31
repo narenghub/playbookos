@@ -212,6 +212,16 @@ step "supplier overlap keeps its cases apart" node scripts/check-supplier-overla
 # and deliberately self-contained.
 step "one shared SOURCES definition, provably load-bearing" node scripts/check-sources-centralized.js
 
+# Where a CAS entered the workflow that emailed three suppliers. Its answer decides whether the
+# defect is a row or a producer, so what matters most is the line between what it can establish and
+# what it must call UNKNOWN -- an inferred provenance would be used to decide whether to change a
+# producer. Asserts that a structured payload field and a regex scraped out of a sentence are told
+# apart (they point at different culprits), that a CAS found elsewhere is reported WITHOUT claiming
+# direction of travel, and that the SHIPPED parseApproval reproduces the historical extraction: the
+# salt's name and the base's registry number, pulled from one sentence by two regexes that never
+# meet.
+step "approval provenance distinguishes its cases" node scripts/check-approval-provenance-runs.js
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
   echo "      DO NOT PUSH." >&2

@@ -73,7 +73,10 @@ const CONSUMERS = [
 
 // Loading a consumer runs its module body, which for some of these touches the database pool at
 // require time. JWT_SECRET and a DATABASE_URL that is never connected to keep that harmless.
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'sources-check';
+// An obvious placeholder, in the form scripts/check-secrets.js allowlists. Loading a consumer
+// runs its module body and core.js demands this variable; the VALUE is irrelevant because
+// nothing here signs or verifies a token.
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'PLACEHOLDER-test-key';
 process.env.DATABASE_URL = process.env.DATABASE_URL
   || 'postgresql://unused@127.0.0.1:1/unused?sslmode=disable';
 
