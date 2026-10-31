@@ -382,8 +382,13 @@ async function main() {
   console.log('\n   This migration created NO identity mappings. Next:');
   console.log('     node scripts/backfill-molecule-identity.js            (dry run, writes nothing)');
   console.log('     node scripts/backfill-molecule-identity.js --execute\n');
-  console.log('   NOT YET ON PRODUCTION. The census must run first and its CAS-conflict output be');
-  console.log('   reviewed before any migration is applied there — census to migration is not automatic.\n');
+  // Removed on 31 Oct: this used to print "NOT YET ON PRODUCTION — the census must run first".
+  // That was true in October while the census was pending. It printed on a production run AFTER
+  // Gate 1 closed, telling the operator they were somewhere they had left days earlier. A banner
+  // describing a state that no longer exists is the same failure as a report describing behaviour
+  // the code does not have, and it misleads whoever reads it next rather than the person who wrote
+  // it. If a future phase needs a gate here, it gets a check with an exit code, not a sentence.
+  console.log('   Then verify with scripts/e1-reconcile.js — it reads only.\n');
 }
 
 module.exports = { DDL_TABLES, DDL_TRIGGERS, TARGET_TABLES, applyTargetColumns,
