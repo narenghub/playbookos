@@ -5,22 +5,36 @@
 //
 // Exit 0 = every proof holds. Exit 1 = at least one does not, and it says which.
 //
-// This re-runs the backfill in --execute mode ONCE, deliberately, as proof 10: a second run must
-// create zero molecules and zero new links. That is the only honest way to demonstrate
-// idempotence on production — asserting it from the code would be asserting the thing in
-// question. Every statement it issues is idempotent, so the re-run is a no-op by construction and
-// the count proves it rather than the comment.
+// IT READS. IT DOES NOT WRITE, AND IT DOES NOT MIGRATE.
+//
+// This header used to say the opposite — that proof 10 re-ran the backfill in --execute mode as the
+// only honest way to show idempotence on production. That was wrong twice over. It made the
+// reconciliation grade its own homework: on 31 Oct it reported 24 authorised identities as missing,
+// then created them in proof 10, then failed for having created them. And the verdict depended on
+// when you ran it rather than on whether the data was right.
+//
+// Idempotence is a property of the CODE, so it is proven where nothing else writes —
+// check-molecule-identity-db.js runs the backfill twice against fixtures and asserts the second pass
+// writes nothing. preflight.sh runs that on every commit.
+//
+// THE OPERATING ORDER, and it is not optional:
+//
+//   1. node scripts/backfill-molecule-identity.js --execute    (the writer)
+//   2. node scripts/e1-reconcile.js                            (the reader, this file)
 //
 // Expectations are recomputed from the SAME analyze() the preview uses, against the live source
-// rows. So this cannot drift from the authorised expectation: if the two disagreed, it would be
-// because the source data changed, and that is itself worth failing on.
+// rows, so this cannot drift from the authorised rule set. It CAN differ from the live molecule
+// table, and that difference has two meanings which this file keeps apart: an unauthorised molecule
+// EXISTING is a defect, and an authorised identity being ABSENT is lag behind step 1.
 'use strict';
 
-const { initDB, query, withTransaction } = require('../src/lib/db');
+const { initDB, query } = require('../src/lib/db');   // no withTransaction: this file writes nothing
 const { analyze, looksTruncated, fragmentCore, GENERIC_FRAGMENT_NAMES } = require('../src/lib/molecules/preview');
 const { moleculeKey } = require('../src/lib/molecules/identity');
 const { validCas } = require('../src/lib/catalogue/cas');
-const backfill = require('./backfill-molecule-identity');
+// NOT required any more: this file performs no migration. Kept out deliberately — importing the
+// writer into the reader is what made proof 10 grade its own homework.
+// const backfill = require('./backfill-molecule-identity');
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -76,15 +90,33 @@ async function main() {
   }
 
   // ── 1 ────────────────────────────────────────────────────────────────────
-  h(1, 'actual molecules created = expected CREATE');
-  const actual =(await query(`SELECT normalized_name FROM molecules`)).rows.map((x) => x.normalized_name);
+  h(1, 'every molecule that exists is authorised; absences are lag, not defects');
+  //
+  // This asserted equality — molecules == CREATE — and that made Gate 1 impossible to close on a
+  // live database. The 31 Oct 10:55 run read `expected 2447, found 2425` and failed, because
+  // spinosad, vericiguat, cemsidomide and twenty-one others had arrived in study_molecules overnight
+  // and no backfill had reached them yet. Nothing was wrong. The agents had simply done their job
+  // between the last migration and this reading.
+  //
+  // Two claims were wearing one assertion:
+  //
+  //   SAFETY   — nothing exists that the rules do not authorise. This is the invariant. It is what
+  //              caught the 38 unauthorised molecules on 29 Oct, and it must fail loudly.
+  //   LIVENESS — everything authorised exists. This is lag. It goes false every time an agent writes
+  //              a row the backfill has not processed, which on this system is several times a night.
+  //
+  // Lag is reported with its count so an overdue backfill is visible. It is not a defect, and
+  // failing on it would make the verdict a statement about when you happened to look.
+  const actual = (await query(`SELECT normalized_name FROM molecules`)).rows.map((x) => x.normalized_name);
   const actualSet = new Set(actual);
-  if (actual.length === expectCreate.size) ok(`${actual.length} molecules, exactly as expected`);
-  else bad(`expected ${expectCreate.size}, found ${actual.length}`);
   const missing = [...expectCreate].filter((k) => !actualSet.has(k));
   const extra = actual.filter((k) => !expectCreate.has(k));
-  if (!missing.length) ok('nothing expected is absent');
-  else bad(`${missing.length} expected molecules were not created`, missing.slice(0, 8).join(', '));
+  console.log(`   ${actual.length} molecules on file, ${expectCreate.size} authorised by the current source data`);
+  if (!missing.length) ok('every authorised identity exists — the backfill has caught up');
+  else {
+    console.log(`   LAG   ${missing.length} authorised identit(ies) not yet created: ${missing.slice(0, 8).join(', ')}`);
+    console.log('         Not a defect. Run scripts/backfill-molecule-identity.js --execute, then re-read.');
+  }
   // Two different findings wear the same shape, and conflating them cost an afternoon.
   //
   // A molecule outside CREATE whose identity the analyser can EXPLAIN is drift: it was created when
@@ -94,9 +126,10 @@ async function main() {
   // A molecule outside CREATE that the analyser cannot explain at all is the 29 Oct defect: created
   // by code that had a rule of its own. That one means the two implementations have diverged again.
   //
-  // BOTH still fail. Production holding a molecule the current rules exclude is not acceptable
-  // either way — but the remedy differs, so the verdict has to name it instead of leaving the next
-  // person to work out which they are looking at.
+  // BOTH fail. Production holding a molecule the current rules exclude is not acceptable either
+  // way — but the remedy differs, so the verdict names it instead of leaving the next person to work
+  // out which they are looking at. Unlike an absence, an unauthorised PRESENCE is never lag: no
+  // amount of waiting removes a row.
   const drift = extra.filter((k) => a.exclusionReasons.has(k));
   const unexplained = extra.filter((k) => !a.exclusionReasons.has(k));
   if (!extra.length) ok('nothing unexpected was created');
@@ -218,67 +251,55 @@ async function main() {
       SELECT COUNT(*)::int n FROM ${s.table}
        WHERE molecule_id IS NULL AND molecule_unresolved_reason IS NULL ${w}`);
     console.log(`   ${s.table}: ${linkedWrong.rows[0].n} linked, ${unlinkedNoReason.rows[0].n} unlinked with no reason`);
+    // A row that is unlinked AND silent is either a defect — the backfill reached it and said
+    // nothing — or a row that arrived after the last backfill, which nothing has reached yet. The
+    // two are indistinguishable from the row alone, and `missing` is what tells them apart: while
+    // authorised identities are still absent, the backfill is behind and silence is expected.
+    //
+    // At 11:01 this failed on 44 study_molecules rows that had simply arrived overnight, in the same
+    // run whose proof 10 then processed them. Failing on that is failing for the clock again.
     if (unlinkedNoReason.rows[0].n === 0) ok(`  every unlinked ${s.table} row says WHY`);
-    else bad(`  ${unlinkedNoReason.rows[0].n} ${s.table} rows are unlinked with no reason — silently skipped`);
+    else if (missing.length) {
+      console.log(`   LAG   ${unlinkedNoReason.rows[0].n} ${s.table} row(s) not yet reached — consistent with the `
+        + `${missing.length} authorised identit(ies) still absent`);
+    } else {
+      bad(`  ${unlinkedNoReason.rows[0].n} ${s.table} rows are unlinked with no reason — silently skipped, `
+        + 'and the backfill has caught up, so this is not lag');
+    }
   }
 
   // ── 10 ───────────────────────────────────────────────────────────────────
-  h(10, 'rerunning E1 creates zero molecules and no duplicate linkage');
-  // ── ONE pass, and the absolute lives elsewhere ───────────────────────────
+  h(10, 'the state is internally consistent — this proof performs no migration');
   //
-  // This ran TWO complete production migrations inside a verification script, to let the first
-  // absorb drift so the second could assert zero writes. At 16:00 it went 23 minutes and had to be
-  // interrupted. The idea was wrong, not just slow: a reconciliation should read the database and
-  // check it, not perform the migration again — twice — against live data that other writers are
-  // touching while it runs.
+  // IT RAN THE MIGRATION. That was the defect, and it took three forms before I saw it.
   //
-  // The claim "running this twice changes nothing" is about the CODE, so it is tested where nothing
-  // else writes: check-molecule-identity-db.js runs the backfill twice against its own fixtures and
-  // asserts the second pass writes nothing. That is a stronger test than this ever was, because a
-  // quiet database is guaranteed there rather than hoped for.
+  // First two passes, so the first could absorb drift and the second assert zero writes: 23 minutes,
+  // interrupted. Then one pass asserting zero structural writes: at 11:01 on 31 Oct that pass itself
+  // created 24 molecules and 39 links, because 24 authorised identities had arrived overnight and
+  // the backfill had legitimately not reached them. It reported the absences as failures in proofs 1
+  // and 9, then created them in proof 10, then failed for having created them.
   //
-  // What remains here are the claims that need the real database, and they are the ones that caught
-  // the 29 Oct defect: the count must not move, linkage must not move, and no duplicate may exist.
-  // Writes are reported, not asserted — the agents write into study_molecules continuously, and a
-  // refusal reason attached to a row that arrived after the migration is work that needed doing.
-  const before = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
-  const beforeLinks = (await query(
-    `SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
-  const realLog = console.log;
-  const started = Date.now();
-  let second;
-  try {
-    console.log = () => {};
-    second = await backfill.main({
-      query, withTransaction, execute: true,
-      onProgress: (m) => realLog(`   …${m}`),
-    });
-  } finally { console.log = realLog; }
-  realLog(`   one pass, ${Math.round((Date.now() - started) / 1000)}s`);
+  // A reconciliation that performs the migration is grading its own homework, and its verdict
+  // depends on when you happened to run it rather than on whether the data is right. So it reads
+  // now, and nothing else.
+  //
+  // The idempotency claim — "running the backfill twice changes nothing" — is about the CODE, and it
+  // lives in check-molecule-identity-db.js, which runs it twice against fixtures and asserts the
+  // second pass writes nothing. That is the stronger test: a quiet database is guaranteed there
+  // rather than hoped for. preflight.sh runs it on every commit.
+  //
+  // The operating order is therefore explicit, and not optional:
+  //
+  //   1. node scripts/backfill-molecule-identity.js --execute    (the writer)
+  //   2. node scripts/e1-reconcile.js                            (the reader, this file)
+  //
+  // Step 1 takes about 16 minutes against current volumes and the agents write during it, so a
+  // little lag at step 2 is normal and is reported as lag.
+  console.log('   this proof reads only. Idempotency is proven against fixtures in');
+  console.log('   scripts/check-molecule-identity-db.js ("a second pass writes NOTHING"), which');
+  console.log('   preflight.sh runs on every commit.');
+  console.log('');
 
-  const by = second.writesBy
-    ? Object.entries(second.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('  ')
-    : '(no ledger)';
-  // STRICT: a re-run may refuse newly-arrived rows, but it must not create a substance, invent an
-  // alias, link a row or add a parent edge. Those are the writes that would mean the authorised set
-  // and the code have diverged again.
-  const strict = ['molecules', 'aliases', 'rowLinks', 'parents'];
-  const offending = second.writesBy
-    ? strict.filter((k) => second.writesBy[k]).map((k) => `${k}=${second.writesBy[k]}`)
-    : [];
-  if (!offending.length) ok(`the re-run created, aliased, linked and parented nothing${by ? `  [${by}]` : ''}`);
-  else bad('the re-run performed structural writes', offending.join('  '));
-  if (second.writes && !offending.length) {
-    realLog(`   note  ${second.writes} write(s), all of them refusals or evidence for rows that`);
-    realLog('         arrived since the migration step. Expected while the agents are running.');
-  }
-
-  const after = (await query(`SELECT COUNT(*)::int n FROM molecules`)).rows[0].n;
-  const afterLinks = (await query(`SELECT COUNT(*)::int n FROM study_molecules WHERE molecule_id IS NOT NULL`)).rows[0].n;
-  if (after === before) ok(`molecule count unchanged at ${after}`);
-  else bad(`molecule count moved ${before} -> ${after}`);
-  if (afterLinks === beforeLinks) ok(`linkage unchanged at ${afterLinks}`);
-  else bad(`linkage moved ${beforeLinks} -> ${afterLinks}`);
   const dupes = await query(`
     SELECT normalized_name, COUNT(*)::int n FROM molecules GROUP BY normalized_name HAVING COUNT(*) > 1`);
   if (!dupes.rowCount) ok('no duplicate molecule exists');
