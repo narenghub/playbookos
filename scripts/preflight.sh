@@ -146,6 +146,16 @@ step "canary fails closed and never fakes success" node scripts/check-run-canary
 # a NOT NULL nobody noticed.
 step "molecule identity holds in Postgres" node scripts/check-molecule-identity-db.js
 
+# A customer quote must not take its price from a pricing row matched only on a shared CAS.
+# molecule_pricing is unique on LOWER(molecule_name) and unconstrained on cas_number, so the old
+# `OR cas_number=$2` let a buyer who named the right molecule AND gave the right CAS be priced from
+# another substance at 2.4x, decided by physical row order through a LIMIT 1 with no ORDER BY — and
+# the quote auto-sends. This exercises the SHIPPED findPricing, reverses the row order to prove
+# order no longer decides, and includes the negative control: it reproduces the defect with the
+# original SQL and proves the reconciliation goes red, because a green check that cannot be shown to
+# fail is not safety evidence.
+step "a shared CAS cannot price a customer quote" node scripts/check-inquiry-pricing-identity.js
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
   echo "      DO NOT PUSH." >&2

@@ -123,10 +123,45 @@ function classifyBuyer(company, email) {
   if (/research|bio|lab/.test(t)) return 'research_lab';
   return 'other';
 }
-async function findPricing(molecule, cas) {
+// ── CUSTOMER PRICING IS IDENTIFIED BY NAME ONLY ──────────────────────────────
+//
+// `cas` is still accepted — seven call sites pass it and it stays useful as evidence — but it MUST
+// NOT take part in matching. It used to:
+//
+//   AND (LOWER(molecule_name)=LOWER($1) OR (cas_number IS NOT NULL AND cas_number=$2))
+//
+// molecule_pricing has a unique index on LOWER(molecule_name) and NO constraint on cas_number
+// (src/lib/db.js:943), so two differently-priced molecules may legitimately share a registry number
+// — which is the condition E1's Decision 1 exists for. Measured on a local Postgres with the real
+// DDL on 31 Oct, that OR did this:
+//
+//   ask for Selumetinib + its own correct CAS, Binimetinib row inserted first → $22,000/kg
+//   ask for Selumetinib + its own correct CAS, Selumetinib row inserted first →  $9,000/kg
+//
+// The buyer named the molecule correctly and gave the correct CAS, and was priced at another
+// substance's rate, 2.4x out, decided by physical row order through a LIMIT 1 with no ORDER BY. The
+// same expansion priced a name the catalogue has never heard of from whichever row shared its CAS.
+// generateQuote writes that number into inquiry_quotes and sendAndLog emails it; nothing waits for a
+// human (`needsApproval` only fires a WhatsApp notice after the mail has gone, and on quantity, not
+// on pricing confidence).
+//
+// THE INVARIANT: a customer quote never obtains its price from a pricing row identified only by a
+// shared, disputed or otherwise non-unique CAS value.
+//
+// No ORDER BY is added, deliberately. The unique index bounds the exact-name branch at one active
+// row — proven locally, and asserted in inquiry-pricing-identity.test.js — so there is nothing to
+// order. Making an ambiguous lookup deterministic would hide the ambiguity rather than remove it,
+// and the correct answer to ambiguous pricing is no automatic price, which is what returning null
+// gives: generateQuote refuses with 'no pricing for this molecule' and the other call sites omit
+// price language via their existing null fallbacks.
+//
+// Not fixed here, on purpose: this does not make the lookup canonical. A buyer writing
+// "Gemcitabine hydrochloride" against a catalogue row for "Gemcitabine" still gets no price. That is
+// Gate 2 (canonical transaction identity) and is not authorised. Silence is the safe failure.
+async function findPricing(molecule, cas) {   // eslint-disable-line no-unused-vars
   return (await query(
-    `SELECT * FROM molecule_pricing WHERE active=1 AND (LOWER(molecule_name)=LOWER($1) OR (cas_number IS NOT NULL AND cas_number=$2)) LIMIT 1`,
-    [molecule || '', cas || null]
+    `SELECT * FROM molecule_pricing WHERE active=1 AND LOWER(molecule_name)=LOWER($1) LIMIT 1`,
+    [molecule || '']
   )).rows[0] || null;
 }
 // Stock availability from the SKU catalog (units on hand + demand trend). SKU
