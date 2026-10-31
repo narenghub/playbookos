@@ -31,6 +31,7 @@
 const { initDB, query } = require('../src/lib/db');   // no withTransaction: this file writes nothing
 const { analyze, looksTruncated, fragmentCore, GENERIC_FRAGMENT_NAMES } = require('../src/lib/molecules/preview');
 const { moleculeKey } = require('../src/lib/molecules/identity');
+const { parseReason, reversibility } = require('../src/lib/molecules/drift');
 const { validCas } = require('../src/lib/catalogue/cas');
 // NOT required any more: this file performs no migration. Kept out deliberately — importing the
 // writer into the reader is what made proof 10 grade its own homework.
@@ -137,31 +138,107 @@ async function main() {
   // out which they are looking at. Unlike an absence, an unauthorised PRESENCE is never lag: no
   // amount of waiting removes a row.
   const drift = extra.filter((k) => a.exclusionReasons.has(k));
-  const unexplained = extra.filter((k) => !a.exclusionReasons.has(k));
-  if (!extra.length) ok('nothing unexpected was created');
+
+  // ── THE DEPRECATED STATE IS ACCEPTED; ACTIVE-OUTSIDE IS NOT ──────────────
+  //
+  // Post-creation identity drift policy, 31 Oct. A molecule outside the authorised set is accepted
+  // ONLY when every deprecated-state invariant holds. An ACTIVE molecule outside the set remains a
+  // hard failure — that is the invariant that caught the 38 unauthorised molecules on 29 Oct and it
+  // does not move.
+  //
+  // This changes a reconciliation rule so that a previously failing condition can pass, which is the
+  // third time I have proposed something of that shape. The defence is that `deprecated` is not an
+  // exemption: six things must be true for the proof to accept one, and each has a negative control
+  // asserting the proof goes red when it is not. An exemption asserts nothing.
+  const depRows = (await query(`
+    SELECT normalized_name, deprecated_at, deprecated_reason, cas, cas_suppressed_reason
+      FROM molecules WHERE deprecated_at IS NOT NULL`)).rows;
+  const deprecated = new Map(depRows.map((r) => [r.normalized_name, r]));
+  const activeOutside = extra.filter((k) => !deprecated.has(k));
+  const deprecatedOutside = extra.filter((k) => deprecated.has(k));
+
+  if (!activeOutside.length) ok('no ACTIVE molecule exists outside the authorised set');
   else {
-    if (drift.length) {
-      bad(`${drift.length} molecule(s) exist whose identity has SINCE become excluded — drift, needs a ruling`,
-        drift.slice(0, 8).map((k) => `${k} [${a.exclusionReasons.get(k)}]`).join('; '));
+    const aDrift = activeOutside.filter((k) => a.exclusionReasons.has(k));
+    const aUnexp = activeOutside.filter((k) => !a.exclusionReasons.has(k));
+    if (aDrift.length) {
+      bad(`${aDrift.length} ACTIVE molecule(s) have drifted out of the authorised set and are not deprecated`,
+        aDrift.slice(0, 8).map((k) => `${k} [${a.exclusionReasons.get(k)}]`).join('; '));
     }
-    if (unexplained.length) {
-      bad(`${unexplained.length} molecule(s) exist that the analyser cannot explain — the two implementations have diverged`,
-        unexplained.slice(0, 8).join(', '));
+    if (aUnexp.length) {
+      bad(`${aUnexp.length} molecule(s) exist that the analyser cannot explain — the two implementations have diverged`,
+        aUnexp.slice(0, 8).join(', '));
     }
   }
 
+  // Every required invariant on each deprecated molecule outside the set.
+  if (deprecatedOutside.length) {
+    const violations = [];
+    for (const k of deprecatedOutside) {
+      const row = deprecated.get(k);
+      const parsed = parseReason(row.deprecated_reason);
+      const conf = (await query(
+        `SELECT COUNT(*)::int n FROM molecule_conflicts WHERE identity_name = $1`, [k])).rows[0].n;
+      const resolvedAway = (await query(
+        `SELECT COUNT(*)::int n FROM molecule_conflicts
+          WHERE identity_name = $1 AND resolved_at IS NOT NULL`, [k])).rows[0].n;
+      if (!parsed.analyserReason) violations.push(`${k}: no machine-readable reason`);
+      if (!conf) violations.push(`${k}: no quarantine/conflict evidence`);
+      if (resolvedAway) violations.push(`${k}: a conflict was auto-resolved`);
+      // CAS suppression, where the underlying contest requires it.
+      if (/^cas_disagreement/.test(parsed.analyserReason) && row.cas !== null) {
+        violations.push(`${k}: contest requires suppression but canonical cas = ${row.cas}`);
+      }
+      // Not selectable for new linkage: the analyser excludes it, so nothing can resolve to it.
+      if (!a.exclusionReasons.has(k)) violations.push(`${k}: deprecated but the analyser authorises it`);
+      if (!parsed.known) violations.push(`${k}: reason category "${parsed.category}" is unknown to drift.js`);
+    }
+    if (!violations.length) {
+      ok(`${deprecatedOutside.length} deprecated molecule(s) outside the set, every invariant holding`);
+    } else {
+      bad(`${violations.length} deprecated-state invariant violation(s)`, violations.slice(0, 8).join('; '));
+    }
+  } else if (!extra.length) ok('nothing unexpected exists');
+
+  // ── OBSERVABILITY: a growing backlog must be visible ─────────────────────
+  console.log('');
+  console.log(`   active authorised molecules          ${actual.length - depRows.length}`);
+  console.log(`   deprecated molecules                 ${depRows.length}`);
+  console.log(`   active outside the authorised set    ${activeOutside.length}`);
+  if (depRows.length) {
+    const byReason = new Map();
+    let human = 0; let auto = 0;
+    for (const r of depRows) {
+      const parsed = parseReason(r.deprecated_reason);
+      byReason.set(parsed.category, (byReason.get(parsed.category) || 0) + 1);
+      if (parsed.reversibility === 'AUTO_REVERSIBLE') auto += 1; else human += 1;
+    }
+    console.log(`   …AUTO_REVERSIBLE                     ${auto}`);
+    console.log(`   …HUMAN_RULING_REQUIRED               ${human}`);
+    // Broken down by reason, not hidden in a single total.
+    [...byReason.entries()].sort((x, y) => y[1] - x[1])
+      .forEach(([cat, n]) => console.log(`   …by reason: ${String(cat).padEnd(26)} ${n}`));
+  }
+  console.log('');
+
   // ── 2 ────────────────────────────────────────────────────────────────────
   h(2, 'no excluded identity was created');
-  const leaked = [...expectExcluded].filter((k) => actualSet.has(k));
-  if (!leaked.length) ok(`all ${expectExcluded.size} exclusions stayed out`);
-  else {
-    bad(`${leaked.length} excluded identit(ies) exist as molecules`, leaked.slice(0, 10).join(', '));
+  // Only an ACTIVE excluded identity is a leak. A deprecated one is the designed state, and proof 1
+  // has already asserted its six invariants — this proof would otherwise fail for the same condition
+  // under a different name, which is how one finding comes to look like two.
+  const leaked = [...expectExcluded].filter((k) => actualSet.has(k) && !deprecated.has(k));
+  const leakedDeprecated = [...expectExcluded].filter((k) => actualSet.has(k) && deprecated.has(k));
+  if (!leaked.length) {
+    ok(`all ${expectExcluded.size} exclusions stayed out`
+      + (leakedDeprecated.length ? ` (${leakedDeprecated.length} present but deprecated)` : ''));
+  } else {
+    bad(`${leaked.length} excluded identit(ies) exist as ACTIVE molecules`, leaked.slice(0, 10).join(', '));
   }
   // Whatever the remedy, an excluded identity must not be ADVERTISING a disputed CAS while it waits
   // for one. This is the half that can mislead a quotation, and it is checkable independently.
   const leakedWithCas = await query(
     `SELECT normalized_name, cas FROM molecules WHERE cas IS NOT NULL AND normalized_name = ANY($1)`,
-    [leaked.length ? leaked : ['']]);
+    [leaked.concat(leakedDeprecated).length ? leaked.concat(leakedDeprecated) : ['']]);
   if (!leakedWithCas.rowCount) ok('  …and none of them carries a canonical CAS while excluded');
   else bad(`${leakedWithCas.rowCount} excluded molecule(s) still carry a canonical CAS`,
     leakedWithCas.rows.map((x) => `${x.normalized_name}=${x.cas}`).join(', '));
@@ -170,8 +247,11 @@ async function main() {
   h(3, 'every created molecule maps to an expected source identity');
   // Only the unexplained ones trace to nothing. A drifted molecule traces to source rows that are
   // still there and still name it; what changed is the CAS evidence attached to them.
-  if (!unexplained.length) ok('every molecule traces to a source identity the analyser knows about');
-  else bad(`${unexplained.length} molecule(s) trace to nothing`, unexplained.slice(0, 8).join(', '));
+  // Only an ACTIVE molecule the analyser cannot explain traces to nothing. A deprecated one traces
+  // to source rows that are still there and still name it; what changed is the evidence attached.
+  const traceless = activeOutside.filter((k) => !a.exclusionReasons.has(k));
+  if (!traceless.length) ok('every active molecule traces to a source identity the analyser knows about');
+  else bad(`${traceless.length} molecule(s) trace to nothing`, traceless.slice(0, 8).join(', '));
 
   // ── 4 ────────────────────────────────────────────────────────────────────
   h(4, 'contested CAS values were suppressed');

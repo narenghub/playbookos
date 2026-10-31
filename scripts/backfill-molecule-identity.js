@@ -36,6 +36,8 @@ const { validCas } = require('../src/lib/catalogue/cas');
 const { identityOf, moleculeKey } = require('../src/lib/molecules/identity');
 // THE AUTHORITY. Not a second opinion: executionSet.CREATE is the only thing that may be created.
 const { analyze } = require('../src/lib/molecules/preview');
+// Post-creation identity drift. The automatic safe state is DEPRECATION, never deletion.
+const { buildReason, parseReason, restorationDecision, reversibility } = require('../src/lib/molecules/drift');
 
 // The database handle. Production uses src/lib/db; scripts/check-molecule-identity-db.js injects a
 // pool pointed at a throwaway cluster so the REAL backfill runs against a real server, rather than
@@ -101,13 +103,18 @@ const SOURCES = [
 // Writes, by what did the writing. Proof 10 reported "the re-run wrote 71 time(s)" with created 0
 // and linked 0, and there was no way to tell which statement was responsible without guessing. A
 // counter that cannot say what it counted turns a failed proof into a research project.
-const WRITE_KINDS = ['molecules', 'aliases', 'conflicts', 'rowReasons', 'rowLinks', 'parents', 'casWithheld'];
+const WRITE_KINDS = ['molecules', 'aliases', 'conflicts', 'rowReasons', 'rowLinks', 'parents', 'casWithheld',
+  'deprecated', 'restored'];
 const stats = {
   rowsSeen: 0, moleculesCreated: 0, aliasesCreated: 0, rowsLinked: 0,
   parentsLinked: 0, quarantined: 0, writes: 0,
+  deprecatedNow: 0, restoredNow: 0, restorationsRefused: 0,
   writesBy: Object.fromEntries(WRITE_KINDS.map((k) => [k, 0])),
 };
 const conflicts = [];
+// Restorations the evidence did not justify. Reported every run: a refusal nobody sees is a backlog
+// that grows quietly, and Amendment 1 exists precisely because the naive rule was invisible.
+const refusedRestorations = [];
 
 function note(kind, filed, identity, detail, casValues, table, ids) {
   conflicts.push({ kind, filed, identity, detail, casValues, table, ids });
@@ -157,6 +164,7 @@ async function main(deps = {}) {
   // Reset the counters so a second pass in the same process reports its OWN writes rather than a
   // running total — the idempotence assertion depends on this being per-pass.
   Object.keys(stats).forEach((k) => { if (k !== 'writesBy') stats[k] = 0; });
+  refusedRestorations.length = 0;
   WRITE_KINDS.forEach((k) => { stats.writesBy[k] = 0; });
   conflicts.length = 0;
   const commit = String(process.env.RAILWAY_GIT_COMMIT_SHA || '').slice(0, 7) || 'local';
@@ -278,6 +286,76 @@ async function main(deps = {}) {
   // Decision 1 is a standing rule, not a one-time migration step: "a missing canonical CAS is
   // preferable to a registry number known to be contested". So it is enforced on every run, against
   // rows that already exist. By rowCount, so a run that changes nothing reports nothing.
+
+  // ── DEPRECATE / RESTORE ───────────────────────────────────────────────────
+  //
+  // Both transitions take a transaction-scoped advisory lock on the molecule id first. Two workers
+  // observing the same drift then serialise on that identity instead of interleaving, so neither can
+  // see a half-applied state and neither can insert a second molecule while the other restores one.
+  //
+  // What the lock does NOT settle is which worker's EVIDENCE should win when their analyze()
+  // snapshots disagree — the later lock-holder is not necessarily the fresher snapshot. Proving that
+  // needs an evidence version on the row, which is a third column and is not in the approved schema,
+  // so the design is reported rather than added. In today's deployment there is one backfill process
+  // on a cron, so the race cannot occur; this is about not relying on that remaining true.
+  const lockIdentity = async (q, id) => { await q(`SELECT pg_advisory_xact_lock($1)`, [id]); };
+
+  const deprecate = async (identity, molId, analyserReason, rowCount) => {
+    const reason = buildReason(analyserReason, rowCount);
+    // Conditional on deprecated_at IS NULL, so a run that changes nothing writes nothing — and the
+    // recorded reason and timestamp are not churned on every pass, which would make
+    // "newly deprecated this run" meaningless.
+    const u = await TX(async (client) => {
+      const q = (t, pr) => client.query(t, pr);
+      await lockIdentity(q, molId);
+      return q(
+        `UPDATE molecules SET deprecated_at = NOW(), deprecated_reason = $2
+          WHERE id = $1 AND deprecated_at IS NULL`, [molId, reason.slice(0, 1000)]);
+    });
+    if (u.rowCount) {
+      stats.writes += u.rowCount; stats.writesBy.deprecated += u.rowCount; stats.deprecatedNow += u.rowCount;
+      note('identity_deprecated', identity, identity,
+        `deprecated under the post-creation drift policy: ${analyserReason} `
+        + `(${reversibility(analyserReason)}); molecule id ${molId} preserved, references untouched, `
+        + 'new canonical linkage blocked',
+        null, 'drift_policy', String(molId));
+    }
+    return u.rowCount || 0;
+  };
+
+  const tryRestore = async (identity, mol, rowsNow, hasCleanEvidence) => {
+    const d = restorationDecision({
+      storedReason: mol.deprecated_reason,
+      authorisedNow: true,            // only called for identities in CREATE
+      rowsNow,
+      hasCleanEvidence,
+    });
+    if (!d.restore) {
+      stats.restorationsRefused += 1;
+      refusedRestorations.push({ identity, why: d.why, category: d.parsed.category,
+        reversibility: d.parsed.reversibility });
+      return 0;
+    }
+    const u = await TX(async (client) => {
+      const q = (t, pr) => client.query(t, pr);
+      await lockIdentity(q, mol.id);
+      // Re-read inside the lock: the decision was taken on a snapshot, and this is the write that
+      // acts on it. Still conditional, so a concurrent restore makes this a no-op rather than a
+      // second write.
+      return q(
+        `UPDATE molecules SET deprecated_at = NULL, deprecated_reason = NULL
+          WHERE id = $1 AND deprecated_at IS NOT NULL`, [mol.id]);
+    });
+    if (u.rowCount) {
+      stats.writes += u.rowCount; stats.writesBy.restored += u.rowCount; stats.restoredNow += u.rowCount;
+      note('identity_restored', identity, identity,
+        `restored under the post-creation drift policy: ${d.parsed.analyserReason} was `
+        + `AUTO_REVERSIBLE and is positively corrected; SAME molecule id ${mol.id} preserved`,
+        null, 'drift_policy', String(mol.id));
+    }
+    return u.rowCount || 0;
+  };
+
   const withholdCas = async (q, identity, values, kind) => {
     const u = await q(
       `UPDATE molecules
@@ -325,6 +403,16 @@ async function main(deps = {}) {
         // needs authorisation, and reconciliation reports it as drift awaiting a ruling.
         const m = reason.match(/^cas_disagreement:([^;]+)/);
         if (m) await withholdCas(Q, identity, m[1], 'cas_contested_within_identity');
+
+        // ── DRIFT: the identity exists and the rules no longer authorise it ──
+        //
+        // Deprecate, never delete. The molecule id is preserved, every existing reference is
+        // untouched, and new canonical linkage is blocked. Retraction remains a separate, explicitly
+        // authorised operation with its own pre-deletion verification — a newly contradictory source
+        // must not gain the power to delete a canonical molecule.
+        const live = (await Q(
+          `SELECT id, deprecated_at FROM molecules WHERE normalized_name = $1`, [identity])).rows[0];
+        if (live && !live.deprecated_at) await deprecate(identity, live.id, reason, g.rows.length);
       }
       continue;
     }
@@ -374,6 +462,51 @@ async function main(deps = {}) {
     const refused = disputed ? g.rows.filter((x) => !linkable.includes(x)) : [];
 
     let existing = await resolveExisting(identity);
+
+    // ── DRIFT: an authorised identity that is currently DEPRECATED ──────────
+    //
+    // Restoration is not "the analyser authorises it again, so bring it back". That was the first
+    // draft and Amendment 1 rejected it, correctly: `apatinib mesylate` was deprecated because two
+    // rows disagreed about its CAS, and DELETING the erroneous row makes the disagreement vanish —
+    // the analyser would authorise the identity with nothing having established it is correct. A
+    // deletion would have resurrected the molecule.
+    //
+    // So restoration requires POSITIVE correction, judged by drift.js against the evidence signature
+    // recorded at deprecation: the condition must be AUTO_REVERSIBLE, some row must now establish
+    // the identity rather than merely not contradict it, and the source evidence must not have
+    // shrunk. A HUMAN_RULING_REQUIRED condition stays deprecated however the evidence moves, and the
+    // refusal is reported rather than silent.
+    if (EXECUTE) {
+      const dep = (await Q(
+        `SELECT id, deprecated_at, deprecated_reason FROM molecules
+          WHERE normalized_name = $1 AND deprecated_at IS NOT NULL`, [identity])).rows[0];
+      if (dep) {
+        // "Positively establishes the identity": a row naming the substance with no CAS to be wrong
+        // about, or one carrying the single surviving valid CAS. Either is evidence; the absence of a
+        // contradiction is not.
+        const cleanRows = g.rows.filter((x) => !x.cas || !validCas(String(x.cas).trim())
+          || (casSet.size === 1 && String(x.cas).trim() === [...casSet][0]));
+        await tryRestore(identity, dep, g.rows.length, cleanRows.length > 0);
+
+        // Still deprecated means restoration was refused. The identity is authorised by the
+        // analyser but not trusted by the drift policy, and those rows must NOT link: a deprecated
+        // molecule accepting new linkage is the same mistake as a deprecated identity being handed
+        // to a new quote. They are refused with a reason naming the deprecation, so the rows say why
+        // rather than sitting silent — and nothing is created, because the molecule already exists.
+        const after = (await Q(
+          `SELECT id, deprecated_at, deprecated_reason FROM molecules
+            WHERE normalized_name = $1`, [identity])).rows[0];
+        if (after && after.deprecated_at) {
+          const why = `identity_deprecated:${parseReason(after.deprecated_reason).analyserReason}`
+            + ' — new linkage blocked by the post-creation drift policy';
+          note('identity_deprecated', [...g.filed].join(' | '), identity, why,
+            null, [...byTable(g.rows).keys()].join('+'), ids.join(','));
+          stats.writes += await refuseRows(Q, g.rows, why);
+          continue;
+        }
+        existing = await resolveExisting(identity);
+      }
+    }
 
     // Same rule, for an identity that IS creatable but whose contest is new since it was created.
     if (EXECUTE && isContested && existing && existing.cas) {
@@ -575,6 +708,9 @@ async function main(deps = {}) {
   r('source rows linked', stats.rowsLinked);
   r('parent edges linked', stats.parentsLinked);
   r('QUARANTINED (refused to decide)', stats.quarantined);
+  r('identities deprecated this run', stats.deprecatedNow);
+  r('identities restored this run', stats.restoredNow);
+  r('restorations refused', stats.restorationsRefused);
   const wb = Object.entries(stats.writesBy).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`);
   r('writes by kind', wb.length ? wb.join('  ') : '(none)');
   r('pass 1 wall time', `${Math.round((Date.now() - t0) / 1000)}s`);

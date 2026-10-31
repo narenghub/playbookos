@@ -145,6 +145,8 @@ const DDL_TABLES = `
                         'cas_contested','corrupted_name','duplicate_risk',
                         -- 30 Oct: the analyser's categories, now that it is the sole authority.
                         'insufficient_identity','cas_contested_within_identity',
+                        -- 31 Oct: post-creation identity drift policy.
+                        'identity_deprecated','identity_restored',
                         -- Not a category: a reason shape the backfill was never taught to map. It
                         -- is storable ON PURPOSE, so the drift is recorded as a row rather than
                         -- aborting a migration mid-run — and a check asserts the count is zero.
@@ -308,6 +310,7 @@ const CONFLICT_KINDS = [
   'cas_disagreement', 'alias_collision', 'ambiguous_form', 'unresolvable_name',
   'cas_contested', 'corrupted_name', 'duplicate_risk',
   'insufficient_identity', 'cas_contested_within_identity', 'unmapped_exclusion_reason',
+  'identity_deprecated', 'identity_restored',
 ];
 async function applyConflictKinds(q, log = () => {}) {
   const exists = await q(`SELECT to_regclass('molecule_conflicts') IS NOT NULL ok`);
@@ -317,6 +320,29 @@ async function applyConflictKinds(q, log = () => {}) {
   await q(`ALTER TABLE molecule_conflicts
              ADD CONSTRAINT molecule_conflicts_kind_check CHECK (kind IN (${list}))`);
   log(`   molecule_conflicts.kind accepts ${CONFLICT_KINDS.length} kinds`);
+}
+
+// ── POST-CREATION IDENTITY DRIFT: TWO COLUMNS, NO ENUM ──────────────────────
+//
+// Approved 31 Oct 2026. `deprecated_at IS NULL` is an eligible canonical identity; NOT NULL is a
+// deprecated one. Deliberately not a lifecycle enum — `merged` and `superseded` invite states whose
+// transitions nobody has designed, and the authoritative account of WHY remains the source evidence
+// and the quarantine record. `deprecated_reason` is a machine-readable summary of those, parsed by
+// src/lib/molecules/drift.js.
+//
+// ALTER rather than DDL_TABLES text, for the reason the conflict-kind widening taught on 30 Oct:
+// CREATE TABLE IF NOT EXISTS means a column added to that text never reaches a database where the
+// table already exists.
+async function applyDriftColumns(q, log = () => {}) {
+  const exists = await q(`SELECT to_regclass('molecules') IS NOT NULL ok`);
+  if (!exists.rows[0].ok) return;
+  await q(`ALTER TABLE molecules ADD COLUMN IF NOT EXISTS deprecated_at TIMESTAMPTZ`);
+  await q(`ALTER TABLE molecules ADD COLUMN IF NOT EXISTS deprecated_reason TEXT`);
+  // Partial index: the reconciliation and the write boundary both ask "is this deprecated", and the
+  // deprecated set is expected to stay small relative to the table.
+  await q(`CREATE INDEX IF NOT EXISTS idx_molecules_deprecated
+             ON molecules (normalized_name) WHERE deprecated_at IS NOT NULL`);
+  log('   molecules.deprecated_at / deprecated_reason present');
 }
 
 async function applyTargetColumns(q, log = () => {}) {
@@ -338,6 +364,7 @@ async function main() {
   await query(DDL_TABLES);
   await query(DDL_TRIGGERS);
   await applyConflictKinds(query, (m) => console.log(m));
+  await applyDriftColumns(query, (m) => console.log(m));
   await applyTargetColumns(query, (m) => console.log(m));
 
   const counts = (await query(`
@@ -360,7 +387,7 @@ async function main() {
 }
 
 module.exports = { DDL_TABLES, DDL_TRIGGERS, TARGET_TABLES, applyTargetColumns,
-  applyConflictKinds, CONFLICT_KINDS, main };
+  applyConflictKinds, CONFLICT_KINDS, applyDriftColumns, main };
 
 // Only run when invoked directly, so the checker can import the DDL without applying it to
 // whatever DATABASE_URL happens to be set.

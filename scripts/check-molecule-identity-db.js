@@ -36,7 +36,8 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const { DDL_TABLES, DDL_TRIGGERS, applyTargetColumns, applyConflictKinds } = require('./migrate-molecules');
+const { DDL_TABLES, DDL_TRIGGERS, applyTargetColumns, applyConflictKinds,
+  applyDriftColumns } = require('./migrate-molecules');
 const backfill = require('./backfill-molecule-identity');
 
 let fail = 0;
@@ -110,6 +111,7 @@ const FIXTURE_TABLES = `
     await q(DDL_TABLES);
     await q(DDL_TRIGGERS);
     await applyConflictKinds(q);
+    await applyDriftColumns(q);
     await applyTargetColumns(q);
     ok('the shipped DDL applies to an empty database');
 
@@ -469,6 +471,152 @@ const FIXTURE_TABLES = `
     else bad('a guard is missing or left disabled', JSON.stringify(trg.rows));
 
     if (!res || res.quarantined < 1) bad('the backfill reported no quarantine on a fixture built to cause one');
+
+    // ── 9z. POST-CREATION IDENTITY DRIFT: DEPRECATE, BLOCK, RESTORE ──────
+    //
+    // Policy approved 31 Oct: the automatic safe state is DEPRECATION, never deletion. A newly
+    // contradictory source must never gain the power to delete a canonical molecule — the two
+    // producers already known to emit bad identity would otherwise be able to remove real substances
+    // from the catalogue by being wrong.
+    //
+    // Amendment 1 is the one worth testing hardest. The first draft restored any identity the
+    // analyser authorised again, which cannot tell a CORRECTED source row from a DELETED one:
+    // deleting the contradictory row makes the contest vanish and would resurrect the molecule with
+    // nothing having established the identity. Controls 3, 4 and 5 below are that amendment.
+    const drift = require('../src/lib/molecules/drift');
+    const canonical = require('../src/lib/molecules/canonical');
+    const runBf = async () => {
+      const quiet = console.log; console.log = () => {};
+      try { return await backfill.main({ query: q, withTransaction: tx, execute: true }); }
+      finally { console.log = quiet; }
+    };
+    try {
+      // (1) AN IDENTITY THAT DRIFTS OUT IS DEPRECATED, NOT DELETED.
+      //     Two rows, two valid CAS numbers, no row naming the substance alone: nothing can link, so
+      //     the identity leaves the authorised set. It was created before that second row arrived.
+      await q(`INSERT INTO study_molecules (study_id, molecule_name, cas_number)
+               VALUES ('DR-1','Driftstatin Two','8880000-10-4')`);
+      await runBf();
+      const bornActive = await mol('driftstatin two');
+      await q(`INSERT INTO study_molecules (study_id, molecule_name, cas_number)
+               VALUES ('DR-2','Driftstatin Two','8880000-11-5')`);
+      const r1 = await runBf();
+      const nowDep = await mol('driftstatin two');
+      if (bornActive && nowDep && nowDep.id === bornActive.id && nowDep.deprecated_at) {
+        ok('drift: an identity that leaves the authorised set is DEPRECATED, same id, not deleted');
+      } else {
+        bad('drift: the identity was not deprecated in place',
+          JSON.stringify({ born: bornActive && bornActive.id, now: nowDep && nowDep.id,
+            dep: nowDep && !!nowDep.deprecated_at }));
+      }
+      if (r1 && r1.writesBy && r1.writesBy.deprecated >= 1) ok('  …attributed to `deprecated` in the write ledger');
+      else bad('the deprecation was not attributed in the ledger', JSON.stringify(r1 && r1.writesBy));
+      const parsed = drift.parseReason(nowDep && nowDep.deprecated_reason);
+      if (parsed.category === 'cas_disagreement' && parsed.reversibility === 'AUTO_REVERSIBLE'
+        && parsed.rowsAtDeprecation === 2) {
+        ok('  …with a machine-readable reason carrying the evidence signature (rows=2)');
+      } else bad('the deprecation reason is not machine-readable', JSON.stringify(parsed));
+
+      // (2) A DEPRECATED IDENTITY CANNOT RECEIVE NEW SOURCE LINKAGE.
+      //     EXISTING references are preserved — case 5 of the policy: historical study linkage is
+      //     evidence and must not be erased because the identity later became disputed. DR-1 was
+      //     linked before the second row arrived and stays linked. It is the NEW row that must not
+      //     link, and it must carry a reason.
+      //
+      //     My first version of this asserted zero links, which would have demanded erasing a
+      //     historical reference — the test was wrong, not the code.
+      const historical = await q(
+        `SELECT COUNT(*)::int n FROM study_molecules
+          WHERE molecule_id = $1 AND study_id = 'DR-1'`, [nowDep.id]);
+      const newRow = await q(
+        `SELECT molecule_id, molecule_unresolved_reason FROM study_molecules WHERE study_id = 'DR-2'`);
+      if (historical.rows[0].n === 1) {
+        ok('drift: the EXISTING reference is preserved — historical linkage is evidence');
+      } else bad('a historical study reference was erased by deprecation', JSON.stringify(historical.rows[0]));
+      if (newRow.rows[0] && newRow.rows[0].molecule_id === null && newRow.rows[0].molecule_unresolved_reason) {
+        ok('  …and the NEW row did not link, and says why');
+      } else {
+        bad('a new row linked to a deprecated identity, or linked silently',
+          JSON.stringify(newRow.rows[0]));
+      }
+      // And the write boundary refuses it for new consequential use, distinguishing deprecated from
+      // missing rather than letting a caller fall back to name/CAS matching.
+      const res = await canonical.resolveForNewUse(q, 'Driftstatin Two');
+      const miss = await canonical.resolveForNewUse(q, 'Nothing Named This');
+      if (res.status === 'deprecated' && res.review && miss.status === 'not_found') {
+        ok('  …and the write boundary returns `deprecated` (a review outcome), not `not_found`');
+      } else bad('the write boundary conflated deprecated with not_found', JSON.stringify({ res: res.status, miss: miss.status }));
+
+      // (3) A MACHINE-RESOLVABLE CORRECTION RESTORES THE SAME ID.
+      //     The erroneous row is CORRECTED — not removed — so clean evidence establishes the
+      //     substance again and the row count is unchanged.
+      await q(`UPDATE study_molecules SET cas_number = '8880000-10-4'
+                WHERE study_id = 'DR-2' AND molecule_name = 'Driftstatin Two'`);
+      const r2 = await runBf();
+      const restored = await mol('driftstatin two');
+      if (restored && restored.id === bornActive.id && !restored.deprecated_at) {
+        ok('drift: a corrected AUTO_REVERSIBLE identity is restored with the SAME molecule id');
+      } else {
+        bad('restoration did not preserve the identity',
+          JSON.stringify({ id: restored && restored.id, expected: bornActive.id,
+            dep: restored && !!restored.deprecated_at }));
+      }
+      if (r2 && r2.writesBy.restored >= 1) ok('  …attributed to `restored` in the write ledger');
+      else bad('the restoration was not attributed', JSON.stringify(r2 && r2.writesBy));
+      const dupes = await q(
+        `SELECT COUNT(*)::int n FROM molecules WHERE normalized_name = 'driftstatin two'`);
+      if (dupes.rows[0].n === 1) ok('  …and no second molecule was inserted');
+      else bad(`restoration created ${dupes.rows[0].n} molecules`);
+
+      // (4) A HUMAN_RULING_REQUIRED IDENTITY DOES NOT RESTORE.
+      //     `ambiguous_form` is a judgement about what the substance IS, and no arrangement of rows
+      //     answers it. Deprecate it by hand with that reason, then make the analyser authorise the
+      //     name — it must stay deprecated.
+      await q(`INSERT INTO molecules (preferred_name, normalized_name, source, derivation_method)
+               VALUES ('Humanruled','humanruled','test','test')`);
+      await q(`UPDATE molecules SET deprecated_at = NOW(), deprecated_reason = $1
+                WHERE normalized_name = 'humanruled'`,
+      [drift.buildReason('ambiguous_form:free_base', 1)]);
+      await q(`INSERT INTO study_molecules (study_id, molecule_name, cas_number)
+               VALUES ('DR-H','Humanruled',NULL)`);
+      await runBf();
+      const stillDep = await mol('humanruled');
+      if (stillDep && stillDep.deprecated_at) {
+        ok('drift: a HUMAN_RULING_REQUIRED identity does NOT auto-restore, however the evidence moves');
+      } else bad('a human-ruling identity was auto-restored', JSON.stringify(stillDep));
+
+      // (5) DELETING A SOURCE ROW MUST NOT RESURRECT AN IDENTITY.
+      //     THE amendment, in one test. Re-break Driftstatin Two, then DELETE the contradictory row
+      //     instead of fixing it. The contest disappears and the analyser authorises the identity —
+      //     and restoration must still refuse, because the evidence shrank rather than being
+      //     corrected.
+      await q(`UPDATE study_molecules SET cas_number = '8880000-11-5'
+                WHERE study_id = 'DR-2' AND molecule_name = 'Driftstatin Two'`);
+      await runBf();
+      const rebroken = await mol('driftstatin two');
+      await q(`DELETE FROM study_molecules WHERE study_id = 'DR-2' AND molecule_name = 'Driftstatin Two'`);
+      const r3 = await runBf();
+      const afterDelete = await mol('driftstatin two');
+      if (rebroken && rebroken.deprecated_at && afterDelete && afterDelete.deprecated_at) {
+        ok('drift: DELETING the contradictory row does NOT resurrect the molecule');
+      } else {
+        bad('a deleted source row resurrected a deprecated identity',
+          JSON.stringify({ rebroken: rebroken && !!rebroken.deprecated_at,
+            after: afterDelete && !!afterDelete.deprecated_at }));
+      }
+      if (r3 && r3.restorationsRefused >= 1) ok('  …and the refusal is counted and reported, not silent');
+      else bad('the refused restoration was not reported', JSON.stringify(r3 && r3.restorationsRefused));
+
+      // (6) IDEMPOTENCY OF BOTH TRANSITIONS.
+      const r4 = await runBf();
+      if (r4 && r4.writesBy.deprecated === 0 && r4.writesBy.restored === 0) {
+        ok('drift: repeated deprecation and restoration are no-ops — an unchanged run writes neither');
+      } else bad('a drift transition is not idempotent', JSON.stringify(r4 && r4.writesBy));
+
+      await q(`DELETE FROM study_molecules WHERE study_id IN ('DR-1','DR-2','DR-H')`);
+    } catch (e) {
+      bad('the drift policy path threw', e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e);
+    }
 
     // ── 9a. A MOLECULE WHOSE CAS BECOMES CONTESTED AFTER IT EXISTS ────────
     //
