@@ -181,6 +181,23 @@ step "gate 2 identity measurement runs and writes nothing" node scripts/check-ga
 # five verdict classes are exercised, and the "READS ONLY" claim is measured across six tables.
 step "identity evidence tells a send from a claim" node scripts/check-identity-evidence-runs.js
 
+# A checksum-invalid CAS must never be printed as authoritative on a customer quotation. Measured,
+# not hypothetical: the active molecule_pricing row for Semaglutide holds 910463-68-5, which FAILS
+# this repo's own CAS checksum, and createInquiry lets a buyer who gives no CAS inherit the pricing
+# row's -- so a number the buyer never wrote reaches them in the quotation's "CAS Number" row. The
+# control DISABLES the real guard in the shipped file and proves the malformed number gets through,
+# then restores the file and verifies the restoration by content hash. The guard SUPPRESSES and
+# never substitutes the canonical value: printing a well-formed CAS from elsewhere would assert an
+# identity relationship this fix has no authority to invent.
+step "a malformed CAS cannot reach a customer quote" node scripts/check-quote-cas-authority.js
+
+# The supplier-overlap measurement decides whether canonical capability matching is worth building.
+# Coverage of 321 molecules is not value; coverage of molecules somebody has asked to source is.
+# The three resolved-RFQ cases must not collapse into each other -- resolved with a multi-supplier
+# comparison, resolved with one, and resolved with NONE are different facts, and an unresolved RFQ
+# is a fourth. It calls the SHIPPED matchSuppliers rather than reimplementing its scoring.
+step "supplier overlap keeps its cases apart" node scripts/check-supplier-overlap-runs.js
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "FAIL  ${#FAILED[@]} check(s) failed: ${FAILED[*]}" >&2
   echo "      DO NOT PUSH." >&2

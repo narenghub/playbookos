@@ -9,6 +9,9 @@ const { sendWhatsApp } = require('../whatsapp');
 const { logAgentActivity, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth');
 const { classifyInquirySpam } = require('./inquiry-spam');
+// The repository's own CAS checksum validator. Used here to decide whether a registry number may
+// be printed as authoritative on a customer-facing document; see authoritativeCas below.
+const { validCas } = require('../catalogue/cas');
 
 const AGENT = 'inquiry-agent';
 const MODEL = 'claude-opus-4-8';
@@ -236,9 +239,56 @@ function textToHtml(text) {
     .join('') || '<p style="margin:0;font-size:15px;line-height:1.65;color:#334155"></p>';
 }
 
+// ── A CHECKSUM-INVALID CAS IS NOT AN AUTHORITATIVE REGISTRY NUMBER ──────────
+//
+// Authorised narrow commercial-safety correction, 31 Oct 2026. The invariant:
+//
+//   > A checksum-invalid CAS must never be emitted as an authoritative CAS number on a newly
+//   > generated customer quotation.
+//
+// MEASURED, not hypothetical. The active `molecule_pricing` row for Semaglutide holds
+// `910463-68-5`, which FAILS the repository's own CAS checksum (src/lib/catalogue/cas.js); the
+// canonical identity ABZ-Mol-000732 holds `910463-68-2`, which passes. The two differ only in the
+// final check digit, so one of them cannot be a registry number at all.
+//
+// It propagates to the buyer through three hops, none of which validates anything:
+//
+//   createInquiry   `data.cas_number || pricing?.cas_number` -- a buyer who supplies no CAS
+//                   INHERITS the pricing row's, so a number the buyer never wrote becomes part of
+//                   their record
+//   generateQuote   copies inq.cas_number into inquiry_quotes and into the Claude prompt
+//   renderEmail /   prints it as "CAS:" in the email hero and as the quotation's "CAS Number" row
+//   buildSpecsTable
+//
+// ── WHY THE GUARD IS HERE AND NOT ONLY IN generateQuote ────────────────────
+//
+// The ruling names the quotation, and the quotation is the worst case. But `sendAndLog` passes
+// `inquiry.cas_number` to `renderEmail` on EVERY outbound email, so a guard placed only in the
+// quote path would leave the same malformed number reaching the same buyer in the first-response
+// email instead. One rule, applied at the two rendering boundaries, so every present and future
+// caller inherits it.
+//
+// ── SUPPRESS, NEVER SUBSTITUTE ──────────────────────────────────────────────
+//
+// This returns null and the callers fall back to their existing "To be confirmed" text. It does
+// NOT reach for the canonical CAS, even though one exists and is well-formed: asserting that
+// ABZ-Mol-000732 is the substance this buyer asked for is an identity relationship, and inventing
+// that relationship inside a safety fix is exactly what this programme has been avoiding. A
+// canonical CAS may be printed later, through an established canonical identity path, which does
+// not exist yet.
+//
+// An absent CAS stays absent. A valid CAS is untouched.
+function authoritativeCas(value) {
+  const v = value === null || value === undefined ? '' : String(value).trim();
+  if (!v) return null;
+  return validCas(v) ? v : null;
+}
+
 // World-class responsive email shell. `bodyHtml` is the message body; `specsTable`
 // is an optional full <tr>…</tr> spec block (quotes only).
-function renderEmail({ moleculeName, cas, productTypeLabel, bodyHtml, specsTable = '', controlled = false, ctaLabel = 'Reply to Continue &rarr;', ctaUrl = 'mailto:sales@abiozen.com' }) {
+function renderEmail({ moleculeName, cas: filedCas, productTypeLabel, bodyHtml, specsTable = '', controlled = false, ctaLabel = 'Reply to Continue &rarr;', ctaUrl = 'mailto:sales@abiozen.com' }) {
+  // Validated at the boundary, so no caller can print a malformed registry number by forgetting.
+  const cas = authoritativeCas(filedCas);
   const ruo = controlled ? `
 <!-- RUO disclaimer -->
 <tr><td style="padding:0 40px 20px"><p style="margin:0;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:10px 14px;font-size:12px;color:#9a3412">For research use only. Not for human or veterinary use, food, drug, or diagnostic applications.</p></td></tr>` : '';
@@ -298,7 +348,9 @@ ${specsTable}${ruo}
 }
 
 // Quotation specs table (a full <tr>…</tr> block placed after the body).
-function buildSpecsTable({ molecule, cas, grade, purity, quantity, unitPrice, leadTime, docs, total }) {
+function buildSpecsTable({ molecule, cas: filedCas, grade, purity, quantity, unitPrice, leadTime, docs, total }) {
+  // Same rule as the hero. This is the row a buyer would quote back at us in a dispute.
+  const cas = authoritativeCas(filedCas);
   const money = n => '$' + Number(n || 0).toLocaleString();
   return `
 <!-- Specs Table -->
@@ -711,12 +763,17 @@ async function generateQuote(inquiryId) {
   const total = apiTotal + DOC_FEE;
   const validUntil = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
 
+  // The quote is a commercial record whose cas_number feeds the customer-visible document, so a
+  // malformed value is not stored on it as though authoritative. The inquiry keeps the filed value
+  // as evidence, which is what makes a suppression observable: a quote with a NULL CAS whose
+  // inquiry holds a non-null one that fails the checksum is exactly this guard having fired.
+  const quoteCas = authoritativeCas(inq.cas_number);
   const quoteId = crypto.randomUUID();
   await query(
     `INSERT INTO inquiry_quotes (id, inquiry_id, molecule_name, cas_number, quantity_kg, unit_price_usd,
        total_price_usd, lead_time_days, valid_until_date, gmp_docs_included, status, created_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,1,'sent',NOW())`,
-    [quoteId, inquiryId, inq.molecule_name, inq.cas_number, qtyKg, unitPrice, total, pricing.lead_time_days, validUntil]);
+    [quoteId, inquiryId, inq.molecule_name, quoteCas, qtyKg, unitPrice, total, pricing.lead_time_days, validUntil]);
 
   const isResearch = productType(pricing, inq.molecule_name) === 'research_chemical';
   const controlled = !!pricing.controlled_substance;
@@ -729,7 +786,7 @@ async function generateQuote(inquiryId) {
 
 Quote reference: ${ref}
 Buyer: ${inq.buyer_name || 'there'} at ${inq.buyer_company || 'your organization'}
-Molecule: ${inq.molecule_name} (CAS ${inq.cas_number || 'to confirm'}), ${gradeLabel}
+Molecule: ${inq.molecule_name} (CAS ${quoteCas || 'to confirm'}), ${gradeLabel}
 Quantity ${qtyKg} kg · Unit price $${unitPrice.toLocaleString()}/kg · Total $${total.toLocaleString()} (shipping TBD by destination) · Lead time ${pricing.lead_time_days} days · Valid until ${validUntil} (30 days)
 Pricing note: ${discountNote}
 ${isResearch ? 'RESEARCH CHEMICAL (research-use-only) — do NOT reference GMP, DMF, CEP or ICH.' : 'GMP API — referencing GMP documentation and DMF/CEP is appropriate.'}
@@ -742,7 +799,7 @@ ${signatory}`;
   const { text } = await callClaude(prompt, { maxTokens: 1200 });
   const body = text || `Dear ${inq.buyer_name || 'Buyer'},\n\nPlease find quotation ${ref} for ${inq.molecule_name} (${qtyKg} kg) in the specification table below — valid 30 days (until ${validUntil}). ${discountNote} Payment terms: 50% advance, 50% before shipment; shipping is quoted separately by destination. Secure online payment link will be provided upon acceptance.\n\nTo accept this quotation and proceed, simply reply with the word "ACCEPTED".\n\n${signatory}`;
   const specsTable = buildSpecsTable({
-    molecule: inq.molecule_name, cas: inq.cas_number, grade: gradeLabel,
+    molecule: inq.molecule_name, cas: quoteCas, grade: gradeLabel,
     purity: pricing.purity || '98%+', quantity: `${qtyKg} kg`, unitPrice,
     leadTime: pricing.lead_time_days, docs: docsLine, total,
   });
@@ -1294,4 +1351,8 @@ module.exports = {
   pollSalesEmailbox, findStock, findDemand, handleAcceptance, markPaymentReceived, getPipeline,
   handleStripeEvent, createStripePaymentLink,
   moleculeLabel, inquirySubject, moleculePhrase,
+  // Exported for the malformed-CAS safety proof, so the check exercises the SHIPPED render
+  // boundaries rather than a copy of them. A test that reimplements what it tests proves nothing:
+  // on 30 Oct a test of the territory grant passed by grepping the source for its own query text.
+  authoritativeCas, renderEmail, buildSpecsTable,
 };
