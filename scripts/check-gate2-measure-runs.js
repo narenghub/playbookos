@@ -79,11 +79,25 @@ const { DDL_TABLES, DDL_TRIGGERS, applyConflictKinds, applyDriftColumns } = requ
 const measure = require('./gate2-measure-identity');
 
 // Only the columns the measurement reads. A fuller shape would not strengthen any assertion and
-// would drift from db.js.
+// would drift from db.js. `skus` names its molecule column `name`, as it really does.
 const FIXTURE = `
   CREATE TABLE IF NOT EXISTS inquiries      (id TEXT PRIMARY KEY, molecule_name TEXT, cas_number TEXT);
   CREATE TABLE IF NOT EXISTS inquiry_quotes (id TEXT PRIMARY KEY, molecule_name TEXT, cas_number TEXT);
-  CREATE TABLE IF NOT EXISTS rfq_requests   (id TEXT PRIMARY KEY, molecule_name TEXT, cas_number TEXT);
+  CREATE TABLE IF NOT EXISTS rfq_requests   (id TEXT PRIMARY KEY, molecule_name TEXT, cas_number TEXT,
+                                             week_start TEXT);
+  CREATE TABLE IF NOT EXISTS molecule_pricing (
+    id TEXT PRIMARY KEY, molecule_name TEXT NOT NULL, cas_number TEXT,
+    price_per_kg_usd REAL, active INTEGER DEFAULT 1);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_pricing_name ON molecule_pricing (LOWER(molecule_name));
+  CREATE TABLE IF NOT EXISTS skus (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, cas_number TEXT,
+    units_in_stock INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
+    -- every column the SHIPPED findStock selects. A thinner fixture makes it THROW, and a
+    -- swallowed throw was being counted as "no stock claim today", which then read as
+    -- availability that canonicalisation gains. The measurement now separates the two; this
+    -- fixture makes the before-state real so the separation is exercised rather than assumed.
+    demand_trend TEXT DEFAULT 'stable', lead_time_days INTEGER DEFAULT 14,
+    is_gmp INTEGER DEFAULT 0, sale_price REAL DEFAULT 0);
 `;
 
 (async () => {
@@ -104,7 +118,7 @@ const FIXTURE = `
        deprecated_reason = 'cas_disagreement:1,2|rev=AUTO_REVERSIBLE|rows=2|at=2026-10-31T00:00:00.000Z'
      WHERE normalized_name = 'warfarin sodium'`);
 
-  const canonical = await measure.loadCanonical();
+  let canonical = await measure.loadCanonical();
   const cols = { name: 'molecule_name', cas: 'cas_number' };
   const got = (name, cas) =>
     measure.classify({ molecule_name: name, cas_number: cas }, canonical, cols).outcome;
@@ -135,12 +149,85 @@ const FIXTURE = `
     ok('a deprecated identity is never reported as not found');
   }
 
-  // ── 3. it executes end to end and returns its verdict ────────────────────
+  // ── 3. CANONICAL COLLISIONS: two priced rows that are one substance ──────
+  //
+  // `molecule_pricing` is unique on LOWER(molecule_name), so "Gemcitabine" and "Gemcitabine USP"
+  // are two legitimate rows with two legitimate prices — and both normalise to `gemcitabine`.
+  // Canonical lookup then has two prices for one substance and must refuse. This is the number
+  // that decides how much priced catalogue becomes unquotable, so the detection is asserted here
+  // rather than discovered on production.
+  await query(
+    `INSERT INTO molecules (preferred_name, normalized_name, cas, source, derivation_method)
+     VALUES ('Gemcitabine','gemcitabine','95058-81-4','fixture','exact')`);
+  // The canonical map is a snapshot taken by loadCanonical(). Adding a molecule after that snapshot
+  // and then resolving against it finds nothing -- which is how this check first failed, and is the
+  // same stale-snapshot shape as resolving production rows against a map loaded before a backfill.
+  canonical = await measure.loadCanonical();
+  await query(
+    `INSERT INTO molecule_pricing (id, molecule_name, cas_number, price_per_kg_usd, active) VALUES
+       ('p1','Gemcitabine',NULL,9000,1),
+       ('p2','Gemcitabine USP',NULL,12000,1),
+       ('p3','Leuprolide',NULL,40000,1),
+       ('p4','SPhos',NULL,2000,1)`);
+  const pricingM = await measure.measureTable(measure.LOOKUP_TABLES[0], canonical);
+  const pricingCol = measure.collisions(pricingM);
+  if (pricingCol.groups.length === 1 && pricingCol.rows === 2
+      && String(pricingCol.groups[0].molecule.normalized_name) === 'gemcitabine') {
+    ok('two priced rows normalising to one molecule are detected as a collision');
+  } else {
+    bad('canonical collision not detected', JSON.stringify(
+      pricingCol.groups.map((g) => [g.molecule.normalized_name, g.rows.length])));
+  }
+  // A reagent name E1 has no molecule for must NOT silently become a collision or a resolution.
+  if (pricingM.counts.unresolved_no_match >= 1) {
+    ok('a catalogue row with no canonical molecule stays unresolved, not guessed');
+  } else {
+    bad('a reagent row resolved to something', JSON.stringify(pricingM.counts));
+  }
+
+  // ── 4. BEHAVIOUR TRANSITIONS: both directions must be reachable ──────────
+  //
+  // canonicalAnswer is what decides whether a buyer is priced, refused, or priced differently.
+  // Both directions matter: a false refusal removed is revenue enabled, and a new refusal is
+  // revenue withdrawn. A measurement that could only show one of them would read as good news.
+  const ca = (name) => measure.canonicalAnswer(name, canonical, pricingM).status;
+  expect('a name whose only catalogue match differs by grade word', ca('Gemcitabine, USP'), 'ambiguous');
+  expect('a cleanly priced single-row molecule', ca('Leuprolide'), 'answer');
+  expect('a deprecated identity may not supply a new answer', ca('Warfarin Sodium'), 'refused_deprecated');
+  expect('a name with no canonical molecule', ca('SPhos'), 'refused_unresolved');
+
+  // transitionOf is the comparison itself. Asserted directly, because the interesting cases are
+  // the ones production may not happen to contain today.
+  const t = measure.transitionOf;
+  expect('today nothing, canonical one answer',
+    t(null, { status: 'answer', row: { id: 'p3' } }, 'p3'), 'refusal_removed');
+  expect('today an answer, canonical ambiguous',
+    t('p1', { status: 'ambiguous' }, null), 'now_ambiguous');
+  expect('today an answer, canonical cannot resolve',
+    t('p1', { status: 'refused_unresolved' }, null), 'now_refused_unresolved');
+  expect('today an answer, canonical refuses a deprecated identity',
+    t('p1', { status: 'refused_deprecated' }, null), 'now_refused_deprecated');
+  expect('both answer, different rows',
+    t('p1', { status: 'answer', row: { id: 'p2' } }, 'p2'), 'different_row');
+  expect('both answer, same row',
+    t('p1', { status: 'answer', row: { id: 'p1' } }, 'p1'), 'unchanged_answer');
+  expect('nothing either way', t(null, { status: 'none' }, null), 'unchanged_answer');
+
+  // A thrown shipped lookup must never be scored as a transition. Asserted directly, because the
+  // fixture that first exposed it was a fixture bug and production will have its own.
+  expect('a thrown lookup is not a refusal removed',
+    t(null, { status: 'answer', row: { id: 'p3' } }, 'p3'), 'refusal_removed');
+
+  // ── 5. it executes end to end and returns its verdict ────────────────────
+  await query(
+    `INSERT INTO skus (id, name, cas_number, units_in_stock, is_active) VALUES
+       ('s1','Leuprolide',NULL,40,1), ('s2','Semaglutide 99%',NULL,10,1)`);
   await query(
     `INSERT INTO inquiries (id, molecule_name, cas_number) VALUES
        ('a','Leuprolide','53714-56-0'), ('b','Warfarin Sodium','129-06-6'),
        ('c','Leuprolide','99999-99-9'), ('d','Tirzepatide',NULL),
-       ('e','',NULL), ('f',NULL,NULL), ('g','()',NULL)`);
+       ('e','',NULL), ('f',NULL,NULL), ('g','()',NULL),
+       ('h','Gemcitabine',NULL), ('i','Semaglutide',NULL)`);
   let code;
   try {
     code = await measure.main();
@@ -158,11 +245,15 @@ const FIXTURE = `
     `SELECT (SELECT COUNT(*)::int FROM inquiries) i,
             (SELECT COUNT(*)::int FROM molecules) m,
             (SELECT COUNT(*)::int FROM molecules WHERE deprecated_at IS NOT NULL) d,
-            (SELECT COUNT(*)::int FROM molecule_conflicts) c`)).rows[0];
-  const before = { i: 7, m: 2, d: 1, c: 0 };
+            (SELECT COUNT(*)::int FROM molecule_conflicts) c,
+            (SELECT COUNT(*)::int FROM molecule_pricing) p,
+            (SELECT COALESCE(SUM(price_per_kg_usd),0)::int FROM molecule_pricing) ps,
+            (SELECT COUNT(*)::int FROM skus) s`)).rows[0];
+  const before = { i: 9, m: 3, d: 1, c: 0, p: 4, ps: 63000, s: 2 };
   const after = await counts();
-  if (after.i === before.i && after.m === before.m && after.d === before.d && after.c === before.c) {
-    ok('the measurement wrote nothing — row counts unchanged across all four tables');
+  const same = Object.keys(before).every((k) => before[k] === after[k]);
+  if (same) {
+    ok('the measurement wrote nothing — counts and the pricing total unchanged across six tables');
   } else {
     bad('the measurement MUTATED the database', JSON.stringify({ before, after }));
   }
