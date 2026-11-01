@@ -78,6 +78,11 @@ const EXEMPT = new Set([
   path.join('scripts', 'validate-k4-activation-deployed.js'),
   path.join('scripts', 'check-office-governed-ai-db.js'),
   path.join('scripts', 'office-create-first-objective.js'),
+  // Verification independence (Rule 6): these two read the kernel tables in RAW SQL on purpose.
+  // The accessor is the thing under test — reading the evidence back through it would mean the
+  // check and the implementation share every assumption, so a scoping bug would pass both.
+  path.join('scripts', 'office-validate-governed-ai.js'),
+  path.join('scripts', 'check-governed-ai-validator-runs.js'),
 ]);
 
 // Product code may never be exempt. The only permitted exemptions under src/ are the accessor and
