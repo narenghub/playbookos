@@ -399,6 +399,10 @@ function recordRefusal({ stop: s, what, detail = {}, deps = {} }) {
 // company is null where the job is platform-level rather than one business's: halting all of
 // Abiozen should not stop a data-accuracy audit that exists to tell you what the halt did.
 const CRON_SCOPES = {
+  // K4 activation. Platform-level: recovery belongs to no one business, so company/agent are null
+  // and only a global or workflow stop halts it. Registered here so scopesForCron() returns real
+  // scopes AND so K8 accepts `workflow=quarter-hourly-office-recovery` as a stoppable target.
+  'quarter-hourly-office-recovery':          { company: null,      agent: null },
   'daily-0utc-metrics-snapshot':             { company: null,      agent: null },
   'daily-7cst-command-center-briefing':      { company: 'abiozen', agent: null },
   'weekly-mon-8utc-goal-engine':             { company: 'abiozen', agent: null },

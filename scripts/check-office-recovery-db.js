@@ -348,9 +348,28 @@ process.env.DATABASE_URL = url;
     if (await stateOf(willBeStale) !== 'RUNNING') bad('the DRY run modified a row');
     else ok('the dry run changed nothing');
 
+    // excludeRunId: the reaper now runs inside a ledger run of its own, which is CREATED/RUNNING
+    // while it sweeps. Without this it would appear in its own candidate list and — once past its
+    // ceiling — abandon itself mid-flight, then keep writing against a terminal run.
+    const selfRun = await mkRun({ state: 'RUNNING', ageMinutes: 400,
+      workflow: 'quarter-hourly-office-recovery', intentKey: `cron:k4-self:${crypto.randomUUID()}` });
+    const listed = await recovery.candidates({ excludeRunId: selfRun }, deps);
+    if (listed.some((c) => c.run_id === selfRun)) bad('excludeRunId did not remove the run from its own candidate list');
+    else ok('excludeRunId removes the sweeping run from its own candidate list');
+
+    await recovery.reap({ dryRun: false, excludeRunId: selfRun }, deps);
+    if (await stateOf(selfRun) !== 'RUNNING') bad('the reaper ABANDONED ITSELF despite excludeRunId');
+    else ok('an acting reap does not abandon the run it is executing inside');
+
     const wet = await recovery.reap({ dryRun: false }, deps);
     if (!wet.recovered) bad('an explicit non-dry reap recovered nothing');
     else ok(`an explicit reap({dryRun:false}) recovers (${wet.recovered} run(s))`);
+
+    // The library default must stay dry now that an acting caller exists: the cron states
+    // dryRun:false explicitly, and nothing may come to rely on the default flipping.
+    const stillDry = await recovery.reap({}, deps);
+    if (!stillDry.dry_run) bad('reap() no longer defaults to dry — an accidental call would now act');
+    else ok('reap() STILL defaults to dry after activation; the acting caller states dryRun:false');
 
     // ══ 8. MUTATION CONTROLS ═══════════════════════════════════════════════
     note('mutation controls: disable each mechanism, prove the attack then succeeds');

@@ -999,6 +999,71 @@ cron.schedule('10 9 * * 1-5', withAlerts('weekday-910cst-outreach-agent', async 
     + `${process.env.RESEARCH_INGEST_LIMIT || '200'} awards · always on (it sends nothing)`);
 })();
 
+// ── K4 ACTIVATION: THE STALE-RUN REAPER ──────────────────────────────────────
+//
+// Authorized after the production measurement showed non-terminal=0, eligible=0, known_unknown=0 —
+// so activation modifies no existing run. It recovers FUTURE kernel runs only.
+//
+// WHY THIS SHAPE, AND NOT A NEW SCHEDULER:
+//   • node-cron + withAlerts is the existing mechanism all 37 crons use, so the reaper inherits the
+//     kill-switch chokepoint (fail-closed on an unreadable kill state) and the alert-on-throw path.
+//     `workflow=quarter-hourly-office-recovery` is registered in CRON_SCOPES, so an operator can
+//     stop the reaper by name and K8 accepts that key.
+//   • instrumentedRun gives it DURABLE EXECUTION EVIDENCE for free: a run row, RUN_CREATED, a
+//     terminal state. A recovery mechanism with no record of its own firings would be the one
+//     autonomous actor nobody could audit.
+//   • OVERLAP IS PREVENTED TWICE. instrumentedRun derives a per-slot intent key, and
+//     uq_agent_runs_one_active declines a second concurrent reaper outright; and even if two did
+//     run, recoverRun's arbitrated UPDATE means exactly one can own any given recovery. Belt and
+//     braces, because duplicate escalation is the failure that would make the exception queue
+//     untrustworthy.
+//   • ACTING MODE IS EXPLICIT. reap() defaults to dryRun:true as a library and is called here with
+//     dryRun:false deliberately. The default is not relied upon in either direction.
+//   • excludeRunId is its OWN run id, so the reaper cannot appear in its own candidate list and
+//     abandon itself mid-sweep.
+//
+// CADENCE, AND WHY IT DOES NOT DEFINE STALENESS. Every 15 minutes, offset to :07 so it does not
+// land with the hour-boundary crowd. The shortest declared ceiling is 15 minutes
+// (objective-review), so a stale run is noticed within about one ceiling of exceeding it. The
+// cadence only bounds DETECTION LATENCY — eligibility is decided solely by the run's own declared
+// ceiling, so running more or less often can never make a fresh run stale.
+cron.schedule('7,22,37,52 * * * *', withAlerts('quarter-hourly-office-recovery', async (firedAt) => {
+  const { instrumentedRun } = require('./src/lib/run-ledger');
+  const recovery = require('./src/lib/office/recovery');
+
+  const out = await instrumentedRun(
+    {
+      workflow: 'quarter-hourly-office-recovery',
+      product: 'internal',          // platform-level: recovery belongs to no one business
+      trigger: 'cron',
+      triggerDetail: '7,22,37,52 * * * * (UTC)',
+      firedAt,
+    },
+    async ({ runId }) => {
+      // dryRun:false is stated, never defaulted. excludeRunId keeps the sweep off its own run.
+      const r = await recovery.reap({ dryRun: false, limit: 200, excludeRunId: runId });
+      if (r.recovered) {
+        console.log(`[CRON] office recovery: ${r.recovered} run(s) recovered, ${r.skipped} skipped `
+          + `of ${r.inspected} inspected`);
+        for (const x of r.results.filter((y) => y.recovered)) {
+          console.log(`[CRON] office recovery: ${x.run_id} -> ABANDONED (${x.classification}`
+            + `${x.exception_id ? `, exception ${x.exception_id}` : ''})`);
+        }
+      }
+      return r;
+    },
+  );
+
+  if (out.ran === false && out.reason !== 'duplicate_intent' && out.reason !== 'stopped_by_policy') {
+    // A recovery mechanism that silently stops recovering is worse than not having one, because
+    // the deadlock it exists to clear returns unannounced.
+    const { sendCronAlert } = require('./src/lib/cron-alerts');
+    await sendCronAlert('quarter-hourly-office-recovery (did not run)',
+      new Error(`reaper did not execute: ${out.reason}${out.error ? ` — ${out.error}` : ''}`));
+  }
+}));
+
+
 app.listen(PORT, () => {
   console.log(`
 ╔══════════════════════════════════════════════════╗

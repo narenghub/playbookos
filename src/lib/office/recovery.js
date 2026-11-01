@@ -72,6 +72,10 @@ const ACTIVE = ['CREATED', 'RUNNING'];
 // operator records "this work really does take that long" instead of widening a global number.
 const CEILINGS = Object.freeze({
   'objective-review': 15,
+  // The reaper itself. A sweep over a few hundred rows is seconds of work; if it is still going
+  // after 10 minutes it is wedged, and a later sweep should say so. It cannot abandon ITSELF —
+  // see excludeRunId in reap() — but a PREVIOUS wedged reaper is a legitimate candidate.
+  'quarter-hourly-office-recovery': 10,
 });
 
 // A POLICY DEFAULT, NOT AN EVIDENCE-BACKED THRESHOLD. Deliberately generous: with no liveness
@@ -94,7 +98,7 @@ function lazyQuery(deps) {
 // its unresolved-consequential-action count. Changes nothing. This is what must be read BEFORE
 // the reaper is ever pointed at production: "do not let the first production reaper invocation
 // discover its policy by modifying rows."
-async function candidates({ limit = 500 } = {}, deps = {}) {
+async function candidates({ limit = 500, excludeRunId = null } = {}, deps = {}) {
   const query = lazyQuery(deps);
   const r = await query(
     `SELECT r.run_id, r.state, r.workflow, r.agent, r.product, r.intent_key, r.attempt,
@@ -111,9 +115,10 @@ async function candidates({ limit = 500 } = {}, deps = {}) {
             ) AS unresolved
        FROM agent_runs r
       WHERE r.state = ANY($1)
+        AND ($3::uuid IS NULL OR r.run_id <> $3::uuid)
       ORDER BY COALESCE(r.started_at, r.created_at)
       LIMIT $2`,
-    [ACTIVE, Math.min(Math.max(1, limit), 1000)]
+    [ACTIVE, Math.min(Math.max(1, limit), 1000), excludeRunId]
   );
   return r.rows.map((row) => {
     const ceiling = ceilingFor(row);
@@ -232,8 +237,12 @@ async function recoverRun(runId, deps = {}) {
 // dryRun is the default ON PURPOSE. A reaper whose default is to act is one accidental invocation
 // away from abandoning live production work, and the K4 ruling requires the candidate list to be
 // read before anything is changed.
-async function reap({ limit = 100, dryRun = true } = {}, deps = {}) {
-  const all = await candidates({ limit }, deps);
+async function reap({ limit = 100, dryRun = true, excludeRunId = null } = {}, deps = {}) {
+  // excludeRunId exists because the reaper now runs INSIDE a ledger run of its own (K4
+  // activation). That run is CREATED/RUNNING while it works, so without this it would appear in
+  // its own candidate list and — if it ever ran longer than its ceiling — abandon itself mid-flight
+  // and then keep writing against a terminal run. The scheduler passes its own runId.
+  const all = await candidates({ limit, excludeRunId }, deps);
   const eligible = all.filter((c) => c.over_ceiling);
   if (dryRun) {
     return {
@@ -251,7 +260,10 @@ async function reap({ limit = 100, dryRun = true } = {}, deps = {}) {
     };
   }
   const results = [];
-  for (const c of eligible) results.push({ run_id: c.run_id, ...(await recoverRun(c.run_id, deps)) });
+  for (const c of eligible) {
+    if (excludeRunId && c.run_id === excludeRunId) continue;   // belt and braces
+    results.push({ run_id: c.run_id, ...(await recoverRun(c.run_id, deps)) });
+  }
   return {
     dry_run: false,
     inspected: all.length,

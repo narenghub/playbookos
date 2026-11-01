@@ -50,10 +50,16 @@ const ROOT = path.join(__dirname, '..');
 //
 // Two kinds of file may name a kernel table in SQL:
 //   • the accessor itself (it owns the predicate) and the schema (it owns the DDL);
-//   • ISOLATION VALIDATORS, whose job is to attempt writes the accessor cannot express. A
-//     cross-company insert has to be built by hand: the accessor exists precisely to make that
-//     unrepresentable, so a validator routed through it would prove nothing about the
-//     constraints. Those scripts test the database, not the application.
+//   • VALIDATORS AND MEASUREMENT SCRIPTS, whose job is to observe or attack the raw tables in
+//     order to prove something ABOUT them. A cross-company insert has to be built by hand — the
+//     accessor exists precisely to make it unrepresentable, so a validator routed through it would
+//     prove nothing about the constraints — and a global tamper count ("zero recovery exceptions
+//     were manufactured") is not expressible through a company-scoped read at all. These scripts
+//     test the database, not the application.
+//
+//     This category was first written as "isolation validators". It has since taken an activation
+//     proof and a measurement script, so the rule is restated to match the list rather than left
+//     to drift — a stated rule that quietly diverges from what it permits is how a guard rots.
 //
 // NOTHING ELSE. In particular no product code is ever exempt, and that is asserted below rather
 // than left to the reader — an exemption list that nobody checks is how this kind of guard dies:
@@ -69,6 +75,7 @@ const EXEMPT = new Set([
   path.join('scripts', 'check-office-k2-db.js'),
   path.join('scripts', 'validate-k2-deployed.js'),
   path.join('scripts', 'check-office-recovery-db.js'),
+  path.join('scripts', 'validate-k4-activation-deployed.js'),
 ]);
 
 // Product code may never be exempt. The only permitted exemptions under src/ are the accessor and
@@ -138,7 +145,7 @@ if (smuggled.length) {
   bad('product code has been added to the exemption list — company scoping must not move back to call sites',
     smuggled.join('\n'));
 } else {
-  ok(`exemptions are the accessor, the schema and ${EXEMPT.size - ALLOWED_SRC_EXEMPTIONS.size} isolation validator(s) — no product code`);
+  ok(`exemptions are the accessor, the schema and ${EXEMPT.size - ALLOWED_SRC_EXEMPTIONS.size} validator/measurement script(s) — no product code`);
 }
 
 const violations = scan(files);
