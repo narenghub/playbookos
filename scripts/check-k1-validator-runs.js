@@ -119,9 +119,13 @@ const POSITIVES = [
     await migrateOffice(query);
     // Historical runs, unattributed — exactly the production shape the validator must find.
     for (const id of HISTORICAL) {
+      // created_at is set explicitly to a PRE-CUTOVER date. The validator's ruling-7 assertion is
+      // bounded to runs that predate K1 (see its CUTOVER constant), so a fixture created at NOW()
+      // would sit on the post-cutover side and the attribution sabotage below could not turn it
+      // red — the control would pass while testing nothing.
       await query(
-        `INSERT INTO agent_runs (run_id, root_run_id, trigger, product, state)
-         VALUES ($1,$1,'cron','internal','SUCCEEDED') ON CONFLICT DO NOTHING`, [id]);
+        `INSERT INTO agent_runs (run_id, root_run_id, trigger, product, state, created_at)
+         VALUES ($1,$1,'cron','internal','SUCCEEDED','2026-10-01T00:00:00Z') ON CONFLICT DO NOTHING`, [id]);
     }
 
     // ── 1. GREEN, AND NOTHING DURABLE ─────────────────────────────────────
@@ -206,14 +210,27 @@ const POSITIVES = [
         // rather than the constraint.
         await query(`INSERT INTO objectives (id, company_id, objective, priority, autonomy_tier, approval_policy, status, created_by)
                      VALUES ('sab-obj','sab-co','s','P3','none','none','active','sab') ON CONFLICT DO NOTHING`);
-        await query(`UPDATE agent_runs SET company_id='sab-co', objective_id='sab-obj' WHERE run_id=$1`, [HISTORICAL[0]]);
+        // Company identity is immutable after INSERT by design, so a corrupted-production state
+        // has to be staged with the guard off. That the guard blocks this is itself proof it
+        // works; what is under test here is the VALIDATOR's ability to notice the corruption.
+        await query(`ALTER TABLE agent_runs DISABLE TRIGGER trg_office_runs_company_immutable`);
+        try {
+          await query(`UPDATE agent_runs SET company_id='sab-co', objective_id='sab-obj' WHERE run_id=$1`, [HISTORICAL[0]]);
+        } finally {
+          await query(`ALTER TABLE agent_runs ENABLE TRIGGER trg_office_runs_company_immutable`);
+        }
       },
       async () => {
-        await query(`UPDATE agent_runs SET company_id=NULL, objective_id=NULL WHERE run_id=$1`, [HISTORICAL[0]]);
+        await query(`ALTER TABLE agent_runs DISABLE TRIGGER trg_office_runs_company_immutable`);
+        try {
+          await query(`UPDATE agent_runs SET company_id=NULL, objective_id=NULL WHERE run_id=$1`, [HISTORICAL[0]]);
+        } finally {
+          await query(`ALTER TABLE agent_runs ENABLE TRIGGER trg_office_runs_company_immutable`);
+        }
         await query(`DELETE FROM objectives WHERE id='sab-obj'`);
         await query(`DELETE FROM companies WHERE id='sab-co'`);
       },
-      /historical run\(s\) carry a company/);
+      /PRE-CUTOVER run\(s\) carry a company/);
 
     await sabotage('company_id added to a table outside the authorized scope',
       async () => {

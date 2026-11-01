@@ -64,6 +64,17 @@ function ledger({ query, onDurabilityFailure = defaultOnDurabilityFailure } = {}
       product, tenantId = null, objectiveId = null, actorUserId = null,
       intentKey = null, attempt = 1, predecessorRunId = null, retryOverrideReason = null,
       parentRunId = null, rootRunId = null,
+      // K2, and the MINIMUM of K4 that K2's ruled proof requires: a run must be able to reference
+      // exactly one company and one objective. Broad adoption of the ledger by consequential
+      // workflows remains K4 and is not started here.
+      //
+      // THIS IS NOT AN AGENT-SUPPLIED FIELD. The only caller that passes it is
+      // src/lib/office/run.js, which DERIVES it from the objective via
+      // resolveObjectiveContext — an agent does not get to choose which company it acts for. The
+      // database is the backstop, not this comment: company_id and objective_id must arrive
+      // together or MATCH FULL refuses the row, the pair must exist in `objectives`, and the
+      // transition guard freezes both at insert so no later UPDATE can re-point the run.
+      companyId = null,
     } = spec;
 
     if (!trigger) throw new Error('run.trigger is required');
@@ -79,11 +90,21 @@ function ledger({ query, onDurabilityFailure = defaultOnDurabilityFailure } = {}
         `INSERT INTO agent_runs
            (run_id, root_run_id, parent_run_id, trigger, trigger_detail, workflow, agent, product,
             tenant_id, objective_id, actor_user_id, state, intent_key, attempt,
-            predecessor_run_id, retry_override_reason)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-        [runId, root, parentRunId, trigger, triggerDetail, workflow, agent, product,
-          tenantId, objectiveId, actorUserId, CREATED, intentKey, attempt,
-          predecessorRunId, retryOverrideReason],
+            predecessor_run_id, retry_override_reason${companyId === null ? '' : ', company_id'})
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${companyId === null ? '' : ',$17'})`,
+        // company_id is named ONLY when office work is actually being created. agent_runs.company_id
+        // is added by src/lib/office/schema.js, so naming it unconditionally broke every fixture
+        // database where migrateRuns has run without migrateOffice — which is what the run-ledger
+        // and canary checks do, and what happened when this was first written that way. With
+        // companyId null (every pre-existing caller) the statement is byte-identical to before, so
+        // the runs layer stays independent of the office column unless an office caller asks for it.
+        companyId === null
+          ? [runId, root, parentRunId, trigger, triggerDetail, workflow, agent, product,
+            tenantId, objectiveId, actorUserId, CREATED, intentKey, attempt,
+            predecessorRunId, retryOverrideReason]
+          : [runId, root, parentRunId, trigger, triggerDetail, workflow, agent, product,
+            tenantId, objectiveId, actorUserId, CREATED, intentKey, attempt,
+            predecessorRunId, retryOverrideReason, companyId],
       );
     } catch (e) {
       if (e.code === '23505') {

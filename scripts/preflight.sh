@@ -158,6 +158,14 @@ step "kernel tables are reached only through the scoped accessor" node scripts/c
 # a SAVEPOINT per attempt the first refusal makes every later statement fail 25P02 "transaction is
 # aborted" — nine attacks would report success with only the first ever tested.
 step "the K1 production validator can go red and writes nothing" node scripts/check-k1-validator-runs.js
+# K2 — the CEO control object and the Executive Agent. The ruled chain: CEO creates objective ->
+# company identity fixed -> objective durable -> Executive Agent consumes it -> the run references
+# the EXACT objective and company -> cross-company substitution refused. Every guarantee in it is a
+# server-side object, so a stubbed query would accept the substitution and report success. The
+# non-consequential boundary is proven twice over, because "it produced no output" is not evidence
+# that nothing was attempted: the module's require graph must contain no mailer/WhatsApp/LLM/
+# outbound module AT ALL, and a network spy must record zero calls while being shown able to fire.
+step "the CEO control object governs a non-consequential agent" node scripts/check-office-k2-db.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

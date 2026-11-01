@@ -127,6 +127,39 @@ const DDL = [
   //                                  (context.js) and no kernel record can attach to it, since
   //                                  every kernel FK is itself (run_id, company_id) MATCH FULL.
 
+  // K2 — COMPANY AND OBJECTIVE ARE IDENTITY, NOT STATE.
+  //
+  // MATCH FULL governs what may be INSERTED. It does not stop an UPDATE from re-pointing a run at
+  // another company's objective afterwards, and it does not stop a legacy both-NULL run being
+  // PROMOTED into the kernel by a later UPDATE. Either would make "this run executed for exactly
+  // this company against exactly this objective" defeasible after the fact — which is the entire
+  // evidentiary value of the pair.
+  //
+  // IS DISTINCT FROM is deliberate: it refuses NULL -> value as well as value -> other value, so
+  // the INSERT is the only moment company identity can be established, and a legacy run stays
+  // legacy forever.
+  //
+  // THIS LIVES HERE, NOT IN runs.js, AND THAT IS A MEASURED DECISION. It was first written into
+  // agent_runs_transition_guard() in src/lib/runs.js, where it broke three preflight checks: those
+  // checks apply migrateRuns WITHOUT migrateOffice, so agent_runs has no company_id column there
+  // and the trigger body referenced a column that did not exist — every UPDATE failed. The column
+  // is created by this file, so its guard belongs in this file. A second BEFORE UPDATE trigger on
+  // the same table is fine; both fire.
+  `CREATE OR REPLACE FUNCTION office_runs_company_immutable() RETURNS TRIGGER AS $fn$
+   BEGIN
+     IF NEW.company_id IS DISTINCT FROM OLD.company_id
+        OR NEW.objective_id IS DISTINCT FROM OLD.objective_id THEN
+       RAISE EXCEPTION 'company identity is immutable: company_id (% -> %) and objective_id (% -> %) are fixed at INSERT and may never be changed',
+         OLD.company_id, NEW.company_id, OLD.objective_id, NEW.objective_id;
+     END IF;
+     RETURN NEW;
+   END;
+   $fn$ LANGUAGE plpgsql`,
+  `DROP TRIGGER IF EXISTS trg_office_runs_company_immutable ON agent_runs`,
+  `CREATE TRIGGER trg_office_runs_company_immutable
+     BEFORE UPDATE ON agent_runs
+     FOR EACH ROW EXECUTE FUNCTION office_runs_company_immutable()`,
+
   // ---------------------------------------------------------------------------------------
   // Kernel records. company_id NOT NULL from creation — no "null today, populate later". The
   // tool_call_audit.tenant_id precedent produced a column that is still null and still unread.

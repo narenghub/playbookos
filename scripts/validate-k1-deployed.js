@@ -174,38 +174,61 @@ const SENTINEL = '__k1_validation_rollback__';
     // ══ 3. RULING 7 — HISTORICAL EVIDENCE ═════════════════════════════════
     console.log('\n3. Historical agent_runs (ruling 7)\n');
 
+    // THE CUTOVER, AND WHY THIS IS NOT AN ABSOLUTE COUNT.
+    //
+    // The first version asserted "zero runs carry a company" across the whole table. That is true
+    // today and becomes FALSE the moment K2 creates one legitimate office run — and the obvious
+    // fix when it started failing would be to widen or delete the assertion. A check that
+    // pressures the next person toward weakening it is worse than no check (CLAUDE.md), and this
+    // is the same shape as "assert the table is empty".
+    //
+    // The invariant that actually matters is bounded: NO RUN THAT PREDATES K1 MAY EVER CARRY A
+    // COMPANY. Pre-cutover rows are a closed set — nothing new is created in the past — so this
+    // assertion is stable forever, while legitimate post-cutover office runs are counted and
+    // reported rather than failed.
+    const CUTOVER = '2026-11-01T12:00:00Z';   // after the K1 schema deploy (27f46a4, 11:43Z)
+
     historical = (await query(
       `SELECT COUNT(*)::int AS total,
-              COUNT(*) FILTER (WHERE company_id IS NULL)::int AS null_company,
-              COUNT(*) FILTER (WHERE company_id IS NOT NULL)::int AS with_company,
-              COUNT(*) FILTER (WHERE objective_id IS NOT NULL)::int AS with_objective
-         FROM agent_runs`
+              COUNT(*) FILTER (WHERE created_at < $1::timestamptz)::int AS pre_cutover,
+              COUNT(*) FILTER (WHERE created_at < $1::timestamptz AND company_id IS NOT NULL)::int AS pre_attributed,
+              COUNT(*) FILTER (WHERE created_at >= $1::timestamptz AND company_id IS NOT NULL)::int AS post_attributed,
+              COUNT(*) FILTER (WHERE company_id IS NULL)::int AS null_company
+         FROM agent_runs`, [CUTOVER]
     )).rows[0];
-    console.log(`  historical agent_runs total        = ${historical.total}`);
-    console.log(`  company_id IS NULL                 = ${historical.null_company}`);
-    console.log(`  company_id IS NOT NULL             = ${historical.with_company}`);
-    console.log(`  objective_id IS NOT NULL           = ${historical.with_objective}`);
+    console.log(`  agent_runs total                   = ${historical.total}`);
+    console.log(`  created before K1 cutover          = ${historical.pre_cutover}   (${CUTOVER})`);
+    console.log(`  …of those, attributed to a company = ${historical.pre_attributed}   (MUST be 0)`);
+    console.log(`  post-cutover office runs           = ${historical.post_attributed}   (legitimate K2 work)`);
+    console.log(`  company_id IS NULL (any era)       = ${historical.null_company}`);
 
-    if (historical.with_company !== 0) {
-      bad(`${historical.with_company} historical run(s) carry a company — K1 attributed ownership it was not authorized to assign`);
+    if (historical.pre_attributed !== 0) {
+      bad(`${historical.pre_attributed} PRE-CUTOVER run(s) carry a company — ownership was assigned to historical rows, which K1 is not authorized to do`);
     } else {
-      ok('ZERO historical runs were attributed to any company — the NULLs are intact historical truth');
+      ok('ZERO pre-K1 runs are attributed to any company — the NULLs are intact historical truth');
     }
-    if (historical.null_company !== historical.total) {
-      bad('historical run counts do not reconcile: null_company + with_company != total');
-    } else {
-      ok('every existing run is unattributed, as ruled — no NULL was "cleaned up"');
-    }
+    // Immutability makes the above structural rather than merely observed: a legacy run cannot be
+    // promoted by UPDATE, so a pre-cutover row that is NULL today can never become attributed.
+    const immut = (await query(
+      `SELECT tgenabled FROM pg_trigger
+        WHERE tgname = 'trg_office_runs_company_immutable' AND NOT tgisinternal`
+    )).rows[0];
+    if (!immut) bad('trg_office_runs_company_immutable is ABSENT — a legacy run could be promoted into the kernel by a later UPDATE');
+    else if (immut.tgenabled === 'D') bad('trg_office_runs_company_immutable is DISABLED');
+    else ok('company identity is immutable after insert (trigger present and enabled) — a legacy run can never be promoted');
 
     // A stable fingerprint of historical run identity and state, ordered deterministically. This
     // is the baseline for FUTURE comparison. It is NOT a before/after comparison, and this script
     // does not pretend to be one — see the honest limitation printed below.
+    // Checksum over the CLOSED pre-cutover set. An earlier version checksummed every
+    // company-NULL run, which grows every time an ordinary cron runs — so the figure changed
+    // daily and could never be compared to anything. The pre-cutover set cannot grow.
     const fp = (await query(
       `SELECT md5(string_agg(run_id::text || '|' || state || '|' || product || '|' ||
                               COALESCE(trigger,'') || '|' || created_at::text, E'\\n'
                               ORDER BY run_id)) AS checksum,
               COUNT(*)::int AS n
-         FROM agent_runs WHERE company_id IS NULL`
+         FROM agent_runs WHERE created_at < $1::timestamptz`, [CUTOVER]
     )).rows[0];
     console.log(`  historical identity/state checksum = ${fp.checksum || '(no rows)'}  over ${fp.n} run(s)`);
     note('LIMITATION, stated rather than papered over: a true BEFORE snapshot is unobtainable — the');
@@ -363,13 +386,13 @@ const SENTINEL = '__k1_validation_rollback__';
     // ══ 8. HISTORICAL UNCHANGED AFTER VALIDATION ══════════════════════════
     const after = (await query(
       `SELECT COUNT(*)::int AS total,
-              COUNT(*) FILTER (WHERE company_id IS NOT NULL)::int AS with_company
-         FROM agent_runs`
+              COUNT(*) FILTER (WHERE created_at < $1::timestamptz AND company_id IS NOT NULL)::int AS pre_attributed
+         FROM agent_runs`, [CUTOVER]
     )).rows[0];
     if (after.total !== historical.total) bad(`agent_runs count changed during validation: ${historical.total} → ${after.total}`);
     else ok(`agent_runs count unchanged by validation (${after.total})`);
-    if (after.with_company !== 0) bad(`${after.with_company} run(s) now carry a company — validation attributed ownership`);
-    else ok('still ZERO runs attributed to any company');
+    if (after.pre_attributed !== 0) bad(`${after.pre_attributed} pre-cutover run(s) now carry a company — validation attributed historical ownership`);
+    else ok('still ZERO pre-K1 runs attributed to any company');
 
   } catch (e) {
     bad('unexpected error', e.stack || e.message);

@@ -66,6 +66,60 @@ async function bootstrapObjectiveForContext(objectiveId, deps = {}) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// K2 — CEO AUTHORITY. The one place a company is CHOSEN rather than derived.
+//
+// Everything else in this file derives the company from a resolved context, because an AGENT may
+// not choose which company it acts for. The CEO may: picking the company is the substance of
+// setting an objective. So createObjective takes a companyId explicitly, and that is not a
+// loophole in the context rule — it is the human authority the context rule exists to protect.
+//
+// The distinction is enforced by shape rather than by trust: this function takes no context, and
+// every function that takes a context has no company parameter. Neither can impersonate the
+// other. Agent-reachable code paths go through resolveObjectiveContext, which reads the company
+// off the stored objective and cannot be told one.
+//
+// An objective is created 'draft'. It grants no execution context until it is activated —
+// resolveObjectiveContext refuses anything that is not 'active' — so creating an objective is
+// never itself an authorization to execute.
+// ---------------------------------------------------------------------------------------------
+
+async function createObjective(spec, deps = {}) {
+  const {
+    id, companyId, objective, priority, kpiMetric = null, kpiTarget = null,
+    deadline = null, budgetUsd = null, autonomyTier, approvalPolicy, createdBy,
+  } = spec;
+  if (!companyId) throw new Error('createObjective requires a companyId: an objective with no company cannot be executed');
+  if (!createdBy) throw new Error('createObjective requires createdBy: an objective with no author has no authority behind it');
+
+  const res = await q(deps)(
+    `INSERT INTO objectives
+       (id, company_id, objective, priority, kpi_metric, kpi_target, deadline, budget_usd,
+        autonomy_tier, approval_policy, status, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'draft',$11)
+     RETURNING id, company_id, status, autonomy_tier, approval_policy, budget_usd, created_at`,
+    [id, companyId, objective, priority, kpiMetric, kpiTarget, deadline, budgetUsd,
+     autonomyTier, approvalPolicy, createdBy]
+  );
+  return res.rows[0];
+}
+
+// Activation is the CEO's separate, deliberate act — the moment an objective becomes executable.
+// Scoped by company as well as by id so one company's activation cannot reach another's row.
+async function setObjectiveStatus(ctx, { id, status }, deps = {}) {
+  assertContext(ctx);
+  if (!['draft', 'active', 'paused', 'met', 'missed', 'cancelled'].includes(status)) {
+    throw new Error(`bad objective status: ${status}`);
+  }
+  const res = await q(deps)(
+    `UPDATE objectives SET status = $3, updated_at = NOW()
+      WHERE company_id = $1 AND id = $2
+      RETURNING id, status, company_id`,
+    [ctx.companyId, id, status]
+  );
+  return res.rows[0] || null;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Reads. Each one is scoped by the context's company and by nothing the caller passed.
 // ---------------------------------------------------------------------------------------------
 
@@ -237,6 +291,7 @@ async function recordOutcome(ctx, { id, runId, outcome, businessEffect, effectRe
 
 module.exports = {
   bootstrapObjectiveForContext,
+  createObjective, setObjectiveStatus,
   listObjectives, getObjective, listOpenExceptions, listPendingApprovals, spendToday, listOutcomes,
   recordCost, openException, resolveException, requestApproval, decideApproval, recordOutcome,
 };

@@ -262,6 +262,13 @@ const DDL = [
        RAISE EXCEPTION 'run identity is immutable: run_id, attempt, intent_key, predecessor_run_id, root_run_id and created_at may not be changed';
      END IF;
 
+     -- Company/objective immutability is NOT enforced here, deliberately. agent_runs.company_id is
+     -- added by src/lib/office/schema.js, so a clause here referencing it would break every
+     -- UPDATE wherever migrateRuns has run WITHOUT migrateOffice — which is exactly what the
+     -- existing run-ledger checks do, and exactly what happened when it was first written this
+     -- way. The office schema owns that column, so it owns its guard: see
+     -- office_runs_company_immutable() in src/lib/office/schema.js.
+
      RETURN NEW;
    END;
    $fn$ LANGUAGE plpgsql`,
