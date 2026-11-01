@@ -166,6 +166,15 @@ step "the K1 production validator can go red and writes nothing" node scripts/ch
 # that nothing was attempted: the module's require graph must contain no mailer/WhatsApp/LLM/
 # outbound module AT ALL, and a network spy must record zero calls while being shown able to fire.
 step "the CEO control object governs a non-consequential agent" node scripts/check-office-k2-db.js
+# K4 recovery. 33 adversarial cases against a real server, because every mechanism is server-side:
+# a partial unique index, two BEFORE triggers and row-level arbitration. The three that matter most:
+# 20 concurrent reapers must yield exactly ONE transition, ONE durable record and ONE exception —
+# counted, not eyeballed; retry must create a NEW run with the SAME intent, never reopen the prior
+# one, or the attempt history of both is a lie; and a known-unknown (ACTION_ATTEMPTED with no
+# terminal event) must never be auto-retried while still being retryable WITH a recorded human
+# override, because a guard that refuses everything is not a guard. M1 removes the arbitrating
+# state predicate and proves 20 of 20 reapers then all "recover" the same run.
+step "stale runs recover under arbitration, retries are new runs" node scripts/check-office-recovery-db.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

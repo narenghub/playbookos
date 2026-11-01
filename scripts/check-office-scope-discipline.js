@@ -68,6 +68,7 @@ const EXEMPT = new Set([
   path.join('scripts', 'check-k1-validator-runs.js'),
   path.join('scripts', 'check-office-k2-db.js'),
   path.join('scripts', 'validate-k2-deployed.js'),
+  path.join('scripts', 'check-office-recovery-db.js'),
 ]);
 
 // Product code may never be exempt. The only permitted exemptions under src/ are the accessor and

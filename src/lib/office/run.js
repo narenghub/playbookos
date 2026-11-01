@@ -33,7 +33,7 @@ function lazyLedger(deps) {
 // Start a run for an objective. The objective must be ACTIVE: resolveObjectiveContext refuses
 // draft, paused, met, missed and cancelled, so a run cannot be opened against an objective the
 // CEO has not switched on — or has switched off.
-async function beginObjectiveRun({ objectiveId, trigger, triggerDetail = null, workflow = null, agent = null, product = 'internal', intentKey = null }, deps = {}) {
+async function beginObjectiveRun({ objectiveId, trigger, triggerDetail = null, workflow = null, agent = null, product = 'internal', intentKey = null, maxRuntimeMinutes = null }, deps = {}) {
   if (!objectiveId) throw new Error('beginObjectiveRun requires an objectiveId');
   if (!trigger) throw new Error('beginObjectiveRun requires a trigger');
 
@@ -41,8 +41,20 @@ async function beginObjectiveRun({ objectiveId, trigger, triggerDetail = null, w
   const ctx = await resolveObjectiveContext({ objectiveId }, deps);
 
   const L = lazyLedger(deps);
+
+  // K4: an office run gets a STABLE INTENT KEY by default. Without one it is permanently
+  // unretryable — the retry guard requires a non-null intent_key on both the predecessor and the
+  // retry — so recovery could never produce an attempt 2 for it. The day-slot key also makes
+  // uq_agent_runs_one_active decline a second run of the same workflow against the same objective
+  // on the same day, which is the wanted behaviour: two concurrent reviews of one objective are
+  // not two intents. A caller may still supply its own.
+  const key = intentKey
+    || require('../runs').objectiveIntentKey(workflow || 'objective-run', ctx.objectiveId);
+
   const created = await L.createRun({
-    trigger, triggerDetail, workflow, agent, product, intentKey,
+    trigger, triggerDetail, workflow, agent, product,
+    intentKey: key,
+    maxRuntimeMinutes,
     objectiveId: ctx.objectiveId,
     companyId: ctx.companyId,
   });

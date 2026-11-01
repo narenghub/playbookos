@@ -93,6 +93,21 @@ function httpIntentKey(method, path, actor, at = new Date(), explicitKey = null)
 const parentIntentKey = (parentRunId, childWorkflow, ordinal = 0) =>
   `parent:${parentRunId}:${childWorkflow}:${ordinal}`;
 
+// An AI-office run against an objective. Same `<kind>:<identity>:<slot>` shape as the family
+// above, extended rather than replaced.
+//
+// It exists because the RETRY GUARD requires a non-null intent_key on BOTH the predecessor and the
+// retry: without one, a run is permanently unretryable. The Executive Agent's runs had none, so
+// K4 recovery could never have produced an attempt 2 for them. The day slot also means
+// uq_agent_runs_one_active declines a second review of the same objective on the same day, which
+// is the behaviour wanted anyway — two concurrent reviews of one objective are not two intents.
+function objectiveIntentKey(workflow, objectiveId, at = new Date()) {
+  if (!workflow || !objectiveId) return null;
+  const d = at instanceof Date && !Number.isNaN(at.getTime()) ? at : new Date();
+  const slot = `${d.getUTCFullYear()}-${two(d.getUTCMonth() + 1)}-${two(d.getUTCDate())}`;
+  return `office:${workflow}:${objectiveId}:${slot}`;
+}
+
 // ── SCHEMA ───────────────────────────────────────────────────────────────────
 const DDL = [
   `CREATE TABLE IF NOT EXISTS agent_runs (
@@ -127,6 +142,12 @@ const DDL = [
 
   // THE ARBITER. At most one active execution per intent; the slot frees the instant the row goes
   // terminal, so historical attempts are unlimited.
+  // K4: the DECLARED runtime ceiling. A caller states how long this work should take; exceeding it
+  // makes the run ELIGIBLE FOR CLASSIFICATION, not dead. Nullable, because every pre-existing
+  // writer predates it and no historical row is rewritten. See src/lib/office/recovery.js for why
+  // this is a declared ceiling rather than a heartbeat threshold.
+  `ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS max_runtime_minutes INTEGER`,
+
   `CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_runs_one_active
      ON agent_runs (intent_key)
      WHERE intent_key IS NOT NULL AND state IN ('CREATED','RUNNING')`,
@@ -294,5 +315,5 @@ async function migrateRuns(query) {
 module.exports = {
   ACTIVE, TERMINAL, STATES, RETRYABLE, RETRY_NEEDS_OVERRIDE, MIN_OVERRIDE_REASON,
   newRunId, migrateRuns,
-  cronIntentKey, webhookIntentKey, httpIntentKey, parentIntentKey,
+  cronIntentKey, webhookIntentKey, httpIntentKey, parentIntentKey, objectiveIntentKey,
 };

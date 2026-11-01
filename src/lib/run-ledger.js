@@ -75,6 +75,10 @@ function ledger({ query, onDurabilityFailure = defaultOnDurabilityFailure } = {}
       // together or MATCH FULL refuses the row, the pair must exist in `objectives`, and the
       // transition guard freezes both at insert so no later UPDATE can re-point the run.
       companyId = null,
+      // K4: the DECLARED runtime ceiling, in minutes. Unlike company_id this column is added by
+      // src/lib/runs.js itself, so it exists wherever migrateRuns has run and can be named
+      // unconditionally. Null means "no declaration" and recovery falls back to workflow policy.
+      maxRuntimeMinutes = null,
     } = spec;
 
     if (!trigger) throw new Error('run.trigger is required');
@@ -90,8 +94,8 @@ function ledger({ query, onDurabilityFailure = defaultOnDurabilityFailure } = {}
         `INSERT INTO agent_runs
            (run_id, root_run_id, parent_run_id, trigger, trigger_detail, workflow, agent, product,
             tenant_id, objective_id, actor_user_id, state, intent_key, attempt,
-            predecessor_run_id, retry_override_reason${companyId === null ? '' : ', company_id'})
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16${companyId === null ? '' : ',$17'})`,
+            predecessor_run_id, retry_override_reason, max_runtime_minutes${companyId === null ? '' : ', company_id'})
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17${companyId === null ? '' : ',$18'})`,
         // company_id is named ONLY when office work is actually being created. agent_runs.company_id
         // is added by src/lib/office/schema.js, so naming it unconditionally broke every fixture
         // database where migrateRuns has run without migrateOffice — which is what the run-ledger
@@ -101,10 +105,10 @@ function ledger({ query, onDurabilityFailure = defaultOnDurabilityFailure } = {}
         companyId === null
           ? [runId, root, parentRunId, trigger, triggerDetail, workflow, agent, product,
             tenantId, objectiveId, actorUserId, CREATED, intentKey, attempt,
-            predecessorRunId, retryOverrideReason]
+            predecessorRunId, retryOverrideReason, maxRuntimeMinutes]
           : [runId, root, parentRunId, trigger, triggerDetail, workflow, agent, product,
             tenantId, objectiveId, actorUserId, CREATED, intentKey, attempt,
-            predecessorRunId, retryOverrideReason, companyId],
+            predecessorRunId, retryOverrideReason, maxRuntimeMinutes, companyId],
       );
     } catch (e) {
       if (e.code === '23505') {

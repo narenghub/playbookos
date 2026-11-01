@@ -37,6 +37,9 @@ async function runObjectiveReview({ objectiveId }, deps = {}) {
     triggerDetail: 'executive-agent/objective-review',
     workflow: 'objective-review',
     agent: 'executive-agent',
+    // K4: declare the ceiling. This review is reads plus two inserts; if it is still going after
+    // 15 minutes something is wrong, and recovery can say so without guessing a global threshold.
+    maxRuntimeMinutes: 15,
   }, deps);
 
   if (started.duplicate) {
