@@ -30,11 +30,15 @@ const seen = async (held) => {
     check("'internal' alone sees only the platform-wide row", await seen(['internal']), ['(null)']);
 
     // read-all, scoped: a partner clicking the bell must not clear the other two.
+    // BY ID, for the same reason the cleanup below is by id: a `title LIKE` lets a PATTERN do the
+    // selecting, so a real notification that happened to share the prefix would be marked read by
+    // a verification. The scope SQL under test is untouched — it is still exactly what the product
+    // builds — and `id = ANY($1)` keeps the parameter indices productScopeSql was given ($2 on).
     const s = productScopeSql(['sitenex'], '', 2);
-    const upd = await query(`UPDATE notifications SET read_at = NOW() WHERE title LIKE $1 AND read_at IS NULL AND ${s.sql}`,
-      [TAG + '%', ...s.params]);
+    const upd = await query(`UPDATE notifications SET read_at = NOW() WHERE id = ANY($1) AND read_at IS NULL AND ${s.sql}`,
+      [ids, ...s.params]);
     check('read-all as an sitenex-only user marks exactly 1 row', upd.rowCount, 1);
-    const stillUnread = (await query(`SELECT COUNT(*)::int n FROM notifications WHERE title LIKE $1 AND read_at IS NULL`, [TAG + '%'])).rows[0].n;
+    const stillUnread = (await query(`SELECT COUNT(*)::int n FROM notifications WHERE id = ANY($1) AND read_at IS NULL`, [ids])).rows[0].n;
     check("the other two stay unread — one click does not clear the org", stillUnread, 2);
   } catch (e) { fail++; console.error('ERROR:', e.message); }
   finally {

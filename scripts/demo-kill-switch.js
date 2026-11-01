@@ -33,6 +33,49 @@ const argv = process.argv.slice(2);
 const PG = (argv.find((a) => a.startsWith('--pg=')) || '').slice(5);
 const LABEL_REASON = 'P0.2 production demonstration — verifying the kill switch halts and releases';
 
+// ── THE LIVE PATH IS NO LONGER THE DEFAULT ───────────────────────────────────
+//
+// Program-wide verification rule, 1 Nov 2026:
+//
+//   "A production verification must never perform the mutation it predicts will be refused."
+//
+// This script inserts a REAL global stop into the production control plane so that a real outbound
+// primitive will refuse, which is that pattern exactly. Its mitigations are good — it refuses to
+// run if a stop already exists, it resumes in a `finally`, it prints the manual resume command, and
+// the probe email goes to a reserved .invalid domain — but a `finally` is REMEDIATION, NOT
+// ISOLATION: if the process is killed between the stop and the resume, production autonomy stays
+// halted, and the window is observable by every other process meanwhile.
+//
+// So the behavioural proof belongs on a throwaway cluster (`--pg=`), where `check-autonomy-stop-db.js`
+// already proves the same sequence with mutation controls. Production proves the mechanism is
+// DEPLOYED, structurally, which is what `validate-k8-deployed.js` does.
+//
+// The live path is kept rather than deleted — the break-glass sequence is worth being able to
+// rehearse against the real database — but it now has to be asked for, by name, by a human who has
+// read this paragraph.
+const LIVE_ACK = '--yes-halt-production-autonomy';
+if (!PG && !argv.includes(LIVE_ACK)) {
+  console.error(`
+  REFUSED — this script halts ALL autonomy on production in order to prove that a stop is
+  obeyed. Proving a refusal by performing the mutation on a real control-plane object is
+  prohibited (verification rule, 1 Nov 2026), and the resume is in a \`finally\`, which is
+  remediation rather than isolation.
+
+  Behavioural proof, with mutation controls, no production exposure:
+      node scripts/check-autonomy-stop-db.js
+      node scripts/demo-kill-switch.js --pg=<throwaway cluster url>
+
+  Deployed-mechanism proof against production:
+      railway ssh 'node scripts/validate-k8-deployed.js'
+
+  If a human genuinely intends to halt production autonomy for a few seconds to rehearse the
+  break-glass sequence, and is watching it, that is a deliberate operational act and can be
+  asked for by name:
+      railway ssh 'node scripts/demo-kill-switch.js ${LIVE_ACK}'
+`);
+  process.exit(2);
+}
+
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
 const bad = (m, d) => { fail++; console.log(`  FAIL  ${m}`); if (d) console.log(`          ${d}`); };
