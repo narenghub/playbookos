@@ -150,6 +150,14 @@ step "cross-company work is refused by the database" node scripts/check-office-i
 # violation must be caught, and prose naming the tables must NOT be, because a check that cries
 # wolf gets an exemption added to it rather than a fix.
 step "kernel tables are reached only through the scoped accessor" node scripts/check-office-scope-discipline.js
+# Is the K1 PRODUCTION validator trustworthy? It runs once against production and its verdict is
+# what decides PRODUCTION VALIDATED, so three things need proving first: it writes nothing durable
+# (a fixture left on production could not be removed — agent_run_events is append-only); it goes red
+# for each distinct reason (five independent sabotages); and every refusal was INDEPENDENTLY
+# evaluated. That last one is the trap: a failed statement aborts a Postgres transaction, so without
+# a SAVEPOINT per attempt the first refusal makes every later statement fail 25P02 "transaction is
+# aborted" — nine attacks would report success with only the first ever tested.
+step "the K1 production validator can go red and writes nothing" node scripts/check-k1-validator-runs.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

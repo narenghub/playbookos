@@ -46,13 +46,33 @@ const bad = (m, d) => {
 
 const ROOT = path.join(__dirname, '..');
 
-// The accessor owns reads/writes; the schema owns DDL; this check and the isolation check must
-// name the tables to do their job. Everything else is in scope.
+// THE EXEMPTION RULE, AND ITS LIMIT.
+//
+// Two kinds of file may name a kernel table in SQL:
+//   • the accessor itself (it owns the predicate) and the schema (it owns the DDL);
+//   • ISOLATION VALIDATORS, whose job is to attempt writes the accessor cannot express. A
+//     cross-company insert has to be built by hand: the accessor exists precisely to make that
+//     unrepresentable, so a validator routed through it would prove nothing about the
+//     constraints. Those scripts test the database, not the application.
+//
+// NOTHING ELSE. In particular no product code is ever exempt, and that is asserted below rather
+// than left to the reader — an exemption list that nobody checks is how this kind of guard dies:
+// the next person hits the failure, adds a line here, and the predicate quietly moves back to the
+// call sites.
 const EXEMPT = new Set([
   path.join('src', 'lib', 'office', 'scope.js'),
   path.join('src', 'lib', 'office', 'schema.js'),
   path.join('scripts', 'check-office-scope-discipline.js'),
   path.join('scripts', 'check-office-isolation-db.js'),
+  path.join('scripts', 'validate-k1-deployed.js'),
+  path.join('scripts', 'check-k1-validator-runs.js'),
+]);
+
+// Product code may never be exempt. The only permitted exemptions under src/ are the accessor and
+// the schema; everything else exempt must be a script.
+const ALLOWED_SRC_EXEMPTIONS = new Set([
+  path.join('src', 'lib', 'office', 'scope.js'),
+  path.join('src', 'lib', 'office', 'schema.js'),
 ]);
 
 const SCAN_DIRS = ['src', 'scripts', 'public'];
@@ -107,6 +127,15 @@ if (!files.length) {
   bad('scanned zero files — the walk is broken and this check would pass vacuously');
 } else {
   ok(`scanned ${files.length} files across ${SCAN_DIRS.join(', ')} for ${KERNEL_TABLES.length} kernel tables`);
+}
+
+// The exemption list guards itself: a future exemption for product code fails here.
+const smuggled = [...EXEMPT].filter((p) => p.startsWith(`src${path.sep}`) && !ALLOWED_SRC_EXEMPTIONS.has(p));
+if (smuggled.length) {
+  bad('product code has been added to the exemption list — company scoping must not move back to call sites',
+    smuggled.join('\n'));
+} else {
+  ok(`exemptions are the accessor, the schema and ${EXEMPT.size - ALLOWED_SRC_EXEMPTIONS.size} isolation validator(s) — no product code`);
 }
 
 const violations = scan(files);
