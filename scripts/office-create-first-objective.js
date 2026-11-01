@@ -75,17 +75,26 @@ const note = (m) => console.log(`  --    ${m}`);
       bad(`expected exactly one company (abiozen); found ${all.length}: ${all.join(', ')}`);
     } else ok('exactly one company exists, and it is abiozen — no other company was created');
 
-    // The company id is immutable: a downstream foreign key depends on it, and a slug rename must
-    // never become an identity change.
-    let e = null;
-    try {
-      await query(`UPDATE companies SET id = $2 WHERE id = $1`, [company.id, `co-${crypto.randomUUID()}`]);
-    } catch (err) { e = err; }
-    if (!e) {
-      bad('the company id was CHANGED — downstream foreign keys would be silently re-pointed');
-      // Put it back if that somehow succeeded.
-      await query(`UPDATE companies SET id = $1 WHERE slug = 'abiozen'`, [company.id]).catch(() => {});
-    } else ok(`the company id cannot be changed (${e.code}) — it is the isolation boundary`);
+    // ── STRUCTURAL CHECK, NOT A PROBE ──────────────────────────────────────
+    //
+    // The first version of this attempted the id change ON PRODUCTION, expecting a refusal to make
+    // it harmless. The refusal did not come — companies.id had no immutability guard and the
+    // foreign keys only refuse an id change ONCE SOMETHING REFERENCES IT, which a
+    // just-created company does not. The write landed and only a restore line undid it.
+    //
+    // That is the exact defect CLAUDE.md records from 30 Sep: "it will be refused anyway is a
+    // prediction, not a safeguard. If a script writes somewhere real to prove the write is
+    // refused, then the one run where the guard does not fire is the run that mutates production."
+    //
+    // So the guard is now verified STRUCTURALLY — it exists and is enabled — and its behaviour is
+    // proven against fixtures, where a failed prediction costs nothing.
+    const idGuard = (await query(
+      `SELECT tgenabled FROM pg_trigger
+        WHERE tgname = 'trg_office_companies_id_immutable' AND NOT tgisinternal`
+    )).rows[0];
+    if (!idGuard) bad('trg_office_companies_id_immutable is ABSENT — the company id is mutable while unreferenced');
+    else if (idGuard.tgenabled === 'D') bad('trg_office_companies_id_immutable is DISABLED');
+    else ok('the company id is immutable (trigger present and enabled) — verified structurally, not by probing production');
 
     // ══ K1 CONSTRAINTS STILL ACTIVE ════════════════════════════════════════
     const fk = (await query(

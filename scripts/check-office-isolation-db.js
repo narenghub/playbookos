@@ -189,6 +189,25 @@ async function refused(fn) {
     if (ctxA.companyId !== A || ctxB.companyId !== B) bad('context resolution returned the wrong company');
     else ok('context resolves each run to its own company');
 
+    // ── THE COMPANY IDENTIFIER IS IMMUTABLE ────────────────────────────────
+    //
+    // Found missing on 1 Nov: the foreign keys only refuse an id change ONCE SOMETHING REFERENCES
+    // IT, so a just-created, unreferenced company had a freely mutable id — and that id is the
+    // isolation boundary every composite FK depends on. Tested here, on a fixture, because the
+    // probe that found it ran against PRODUCTION expecting a refusal that never came.
+    const unref = uid('co-unref');
+    await q(`INSERT INTO companies (id, slug, display_name) VALUES ($1,$1,$1)`, [unref]);
+    ids.companies.push(unref);
+    const idErr = await refused(() => q(`UPDATE companies SET id = $2 WHERE id = $1`, [unref, `${unref}-moved`]));
+    if (!idErr) {
+      bad('an UNREFERENCED company id was changed — every composite FK depends on it being stable');
+      ids.companies.push(`${unref}-moved`);
+    } else ok(`an unreferenced company id cannot be changed (${idErr.code}) — not merely protected by being referenced`);
+    const renamed = await refused(() => q(
+      `UPDATE companies SET display_name = 'Renamed', slug = $2 WHERE id = $1`, [unref, `${unref}-slug`]));
+    if (renamed) bad(`renaming a company was refused — the guard is too broad: ${renamed.message}`);
+    else ok('display_name and slug remain changeable — only the identifier is frozen');
+
     // ── 3. P1 — A objective cannot execute as B ──────────────────────────────
     let e = await refused(() => mkRun({ companyId: B, objectiveId: OA }));
     if (!e) bad('P1 a run under company B ATTACHED to company A objective');

@@ -87,6 +87,34 @@ const DDL = [
      CONSTRAINT objectives_approval_policy_check CHECK (approval_policy IN ('all_consequential','budget_threshold','none')),
      CONSTRAINT objectives_budget_check CHECK (budget_usd IS NULL OR budget_usd >= 0)
    )`,
+  // ── THE COMPANY IDENTIFIER IS IMMUTABLE, AND IT WAS NOT ───────────────────
+  //
+  // K1's design says "use a stable immutable company identifier" and the K1 record claimed the id
+  // could not be changed. NEITHER WAS ENFORCED. The foreign keys default to NO ACTION, so an id
+  // change is refused only ONCE SOMETHING REFERENCES IT — an unreferenced company's id was freely
+  // mutable, and a company that has just been created is exactly the unreferenced case.
+  //
+  // Found on 1 Nov 2026 by a probe in office-create-first-objective.js that attempted the change
+  // on PRODUCTION expecting a refusal. The refusal did not come, the write landed, and only a
+  // restore line undid it. That probe has been removed and replaced with a structural check: a
+  // verification must not perform the mutation it predicts will fail.
+  //
+  // The SLUG stays mutable on purpose: renaming "Abiozen LLC" is a display change. The id is the
+  // isolation boundary that every composite foreign key depends on, and re-pointing it would
+  // silently re-attribute every row that referenced it.
+  `CREATE OR REPLACE FUNCTION office_companies_id_immutable() RETURNS TRIGGER AS $fn$
+   BEGIN
+     IF NEW.id IS DISTINCT FROM OLD.id THEN
+       RAISE EXCEPTION 'a company identifier is immutable: % may not become % — it is the isolation boundary every composite foreign key depends on (rename display_name or slug instead)', OLD.id, NEW.id;
+     END IF;
+     RETURN NEW;
+   END;
+   $fn$ LANGUAGE plpgsql`,
+  `DROP TRIGGER IF EXISTS trg_office_companies_id_immutable ON companies`,
+  `CREATE TRIGGER trg_office_companies_id_immutable
+     BEFORE UPDATE ON companies
+     FOR EACH ROW EXECUTE FUNCTION office_companies_id_immutable()`,
+
   `ALTER TABLE objectives ADD CONSTRAINT uq_objectives_id_company UNIQUE (id, company_id)`,
   `CREATE INDEX IF NOT EXISTS idx_objectives_company_status ON objectives (company_id, status)`,
 
