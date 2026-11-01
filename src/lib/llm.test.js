@@ -72,7 +72,11 @@ test('extractClaudeText joins text blocks and skips a leading thinking block', a
     assert.equal(r.text, '{"ok":true}');
     assert.deepEqual(r.json, { ok: true });
     assert.equal(r.usage, null);
-    assert.equal(r.costUsd, 0, 'no usage → cost 0');
+    // C1: a SUCCESSFUL call that returned no usage is the exact case the ruling addresses — the
+    // text arrived, tokens were certainly spent, and we cannot say how many. That is UNKNOWN, not
+    // free. This assertion previously read `costUsd === 0`, which is the defect in test form.
+    assert.equal(r.costUsd, null, 'no usage → cost UNKNOWN, never 0');
+    assert.equal(r.costKnown, false, 'and it is flagged as unknown so a budget cannot read it as free');
   } finally { restore(); }
 });
 
@@ -109,6 +113,49 @@ test('costOf / ratesFor — prefix matching and conservative default', () => {
   assert.deepEqual(ratesFor('claude-opus-4-8'), [5.00 / 1e6, 25.00 / 1e6]);
   assert.deepEqual(ratesFor('claude-sonnet-5'), [3.00 / 1e6, 15.00 / 1e6]);
   assert.deepEqual(ratesFor('some-unknown-model'), [5.00 / 1e6, 25.00 / 1e6], 'unknown → opus-tier default');
-  assert.equal(costOf(null, 'claude-sonnet-5'), 0, 'null usage → 0');
-  assert.ok(Math.abs(costOf({ input_tokens: 1000, output_tokens: 1000 }, 'claude-haiku-4-5-20251001') - 0.006) < 1e-9);
+  // C1: UNKNOWN COST IS NOT ZERO. This previously asserted `costOf(null) === 0`, which is the
+  // defect: a budget built on it would treat every unmeasurable call as free, silently, because
+  // $0.00 looks like a successful measurement of a cheap call. The three states must stay distinct.
+  const unknown = costOf(null, 'claude-sonnet-5');
+  assert.equal(unknown.costUsd, null, 'absent usage → costUsd null, never 0');
+  assert.equal(unknown.costKnown, false, 'absent usage → costKnown false');
+
+  const measured = costOf({ input_tokens: 1000, output_tokens: 1000 }, 'claude-haiku-4-5-20251001');
+  assert.ok(Math.abs(measured.costUsd - 0.006) < 1e-9);
+  assert.equal(measured.costKnown, true);
+
+  // A REAL zero is a measurement and must not be confused with an absence.
+  const realZero = costOf({ input_tokens: 0, output_tokens: 0 }, 'claude-haiku-4-5-20251001');
+  assert.equal(realZero.costUsd, 0, 'zero usage → a real 0');
+  assert.equal(realZero.costKnown, true, 'zero usage is KNOWN to be zero');
+  assert.notEqual(realZero.costKnown, unknown.costKnown, 'a real zero and an unknown are distinguishable');
+});
+
+test('C2 — every provider request has a finite upper bound', () => {
+  const { boundedTimeout, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS } = require('./llm');
+  assert.equal(boundedTimeout(undefined), DEFAULT_LLM_TIMEOUT_MS, 'unspecified → the default bound');
+  assert.equal(boundedTimeout(30000), 30000, 'a justified shorter bound is honoured');
+  assert.equal(boundedTimeout(600000), 600000, 'a justified longer bound is honoured');
+  // "Unbounded" is not a policy an autonomous kernel may express.
+  assert.equal(boundedTimeout(0), DEFAULT_LLM_TIMEOUT_MS, '0 does NOT mean unlimited');
+  assert.equal(boundedTimeout(-1), DEFAULT_LLM_TIMEOUT_MS, 'negative does NOT mean unlimited');
+  assert.equal(boundedTimeout(Infinity), DEFAULT_LLM_TIMEOUT_MS, 'Infinity does NOT mean unlimited');
+  assert.equal(boundedTimeout(null), DEFAULT_LLM_TIMEOUT_MS, 'null does NOT mean unlimited');
+  assert.equal(boundedTimeout('nonsense'), DEFAULT_LLM_TIMEOUT_MS, 'garbage does NOT mean unlimited');
+  assert.equal(boundedTimeout(1), MIN_LLM_TIMEOUT_MS, 'an absurdly small bound is floored, not zeroed');
+});
+
+test('C4 — capability aliases resolve, and a literal id still passes through', () => {
+  const { resolveModel, MODEL_ALIASES } = require('./llm');
+  assert.equal(resolveModel('fast'), MODEL_ALIASES.fast);
+  assert.equal(resolveModel('balanced'), MODEL_ALIASES.balanced);
+  assert.equal(resolveModel('deep'), MODEL_ALIASES.deep);
+  assert.equal(resolveModel('claude-haiku-4-5-20251001'), 'claude-haiku-4-5-20251001',
+    'a literal id is not mangled — existing callers are unaffected');
+  assert.equal(resolveModel(null), null, 'no model stays no model, so the required-model check still fires');
+  // The alias target must be a real-looking pin, not another alias.
+  for (const [k, v] of Object.entries(MODEL_ALIASES)) {
+    assert.ok(v.startsWith('claude-'), `alias ${k} resolves to a literal model id`);
+    assert.equal(resolveModel(v), v, `alias ${k}'s target is itself literal, not chained`);
+  }
 });

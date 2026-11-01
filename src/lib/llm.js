@@ -38,15 +38,83 @@ function ratesFor(model) {
   for (const [prefix, inR, outR] of RATES) if (m.startsWith(prefix)) return [inR, outR];
   return [5.00 / 1e6, 25.00 / 1e6]; // unknown model → opus-tier (conservative over-estimate)
 }
+// ── C1: UNKNOWN COST IS NOT ZERO ────────────────────────────────────────────
+//
+// This returned 0 when `usage` was absent. A $100/day budget built on that would treat every call
+// it could not measure as FREE, which is the one thing the budget exists to prevent — and it would
+// do so silently, because $0.00 looks like a successful measurement of a cheap call.
+//
+// Three states, kept distinct:
+//   • usage present            → costUsd computed,     costKnown true  (may legitimately be 0)
+//   • no call was attempted    → costUsd 0,            costKnown true  (nothing was spent)
+//   • call attempted, no usage → costUsd null,         costKnown FALSE (tokens may have been spent)
+//
+// A REAL zero and an UNKNOWN must stay distinguishable: a prompt that returns no output tokens
+// genuinely costs the input tokens and nothing more, and that is a measurement, not an absence.
 function costOf(usage, model) {
-  if (!usage) return 0;
+  if (!usage) return { costUsd: null, costKnown: false };
   const [inR, outR] = ratesFor(model);
-  return (usage.input_tokens || 0) * inR + (usage.output_tokens || 0) * outR;
+  return {
+    costUsd: (usage.input_tokens || 0) * inR + (usage.output_tokens || 0) * outR,
+    costKnown: true,
+  };
 }
 
-async function callClaude({ model, system, prompt, maxTokens, expectJson = false, apiKey = process.env.ANTHROPIC_API_KEY } = {}) {
-  if (!model) return { error: 'model is required' };
-  if (!apiKey) return { error: 'ANTHROPIC_API_KEY not configured' };
+// Nothing left this process, so nothing was spent. Distinct from "we could not tell".
+const COST_NONE = Object.freeze({ costUsd: 0, costKnown: true });
+// The request went out and we never learned what it consumed.
+const COST_UNKNOWN = Object.freeze({ costUsd: null, costKnown: false });
+
+// ── C2: EVERY AUTONOMOUS PROVIDER REQUEST HAS A FINITE UPPER BOUND ──────────
+//
+// AI_PROVIDER_FABRIC.md named this the dangerous omission: "Every AI call in the system can hang
+// indefinitely, inside a cron that has no timeout either, with withAlerts only firing on a throw.
+// A hung Claude call is invisible to every monitor in the system." The K4 reaper now reclassifies
+// such a run — but a reaper should not be how a hung LLM call terminates.
+//
+// 120s per the fabric's own target, not outbound/http.js's 15s: that bound is right for a JSON API
+// and wrong for a generation. The AbortController MECHANISM is adopted from there rather than a
+// second timeout primitive being invented.
+//
+// A caller may raise or lower it with justification, but it can never be removed: 0, null,
+// Infinity and negatives all resolve to the default, because "unbounded" is not a policy an
+// autonomous kernel may express.
+const DEFAULT_LLM_TIMEOUT_MS = 120000;
+const MIN_LLM_TIMEOUT_MS = 1000;
+function boundedTimeout(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_LLM_TIMEOUT_MS;
+  return Math.max(MIN_LLM_TIMEOUT_MS, Math.floor(n));
+}
+
+// ── C4: CAPABILITY ALIASES (AI_PROVIDER_FABRIC.md step 3) ───────────────────
+//
+// The fabric measured the consequence of literal pins: four model families across nineteen call
+// sites, TWO OF THEM STALE, and llm.js silently billing any unrecognised id at opus rates — so a
+// drifted pin is also a mispriced one. An alias means a pin change edits one line.
+//
+// The literal id is still returned in the result so a past decision stays explicable, exactly as
+// the fabric requires.
+//
+// HONEST LIMIT ON THESE PINS: only `claude-haiku-4-5-20251001` has production evidence behind it
+// (it is the id in the platform's own integration record). The other two are carried over from
+// existing call sites and are NOT verified here — nothing in this repository validates a model id,
+// and a wrong one fails silently. The kernel therefore defaults to `fast`.
+const MODEL_ALIASES = Object.freeze({
+  fast: 'claude-haiku-4-5-20251001',
+  balanced: 'claude-sonnet-5',
+  deep: 'claude-opus-4-8',
+});
+function resolveModel(model) {
+  if (!model) return null;
+  return MODEL_ALIASES[model] || String(model);
+}
+
+async function callClaude({ model, system, prompt, maxTokens, expectJson = false,
+  apiKey = process.env.ANTHROPIC_API_KEY, timeoutMs } = {}) {
+  if (!model) return { error: 'model is required', ...COST_NONE };
+  const resolvedModel = resolveModel(model);
+  if (!apiKey) return { error: 'ANTHROPIC_API_KEY not configured', model: resolvedModel, ...COST_NONE };
 
   // ── THE KILL SWITCH — THINKING, NOT ACTING ───────────────────────────────
   //
@@ -67,20 +135,25 @@ async function callClaude({ model, system, prompt, maxTokens, expectJson = false
     if (blocked) {
       const reason = `STOPPED_BY_POLICY: ${blocked.scope_type}`
         + `${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`;
-      console.warn(`[STOPPED_BY_POLICY] llm.call (${model}): ${reason}`);
-      recordRefusal({ stop: blocked, what: 'llm.call', detail: { model } });
-      return { error: reason, stopped: true };
+      console.warn(`[STOPPED_BY_POLICY] llm.call (${resolvedModel}): ${reason}`);
+      recordRefusal({ stop: blocked, what: 'llm.call', detail: { model: resolvedModel } });
+      // Nothing left the process, so cost is a known zero rather than an unknown.
+      return { error: reason, stopped: true, model: resolvedModel, ...COST_NONE };
     }
   } catch (_) {
     // Read-only: a broken switch does not block thinking. Deliberate, and the inverse of mailer.js.
   }
 
   const reqBody = {
-    model,
+    model: resolvedModel,
     max_tokens: maxTokens || 1024,
     messages: [{ role: 'user', content: String(prompt == null ? '' : prompt) }],
   };
   if (system) reqBody.system = system; // omitted when absent → identical to a no-system call
+
+  const bound = boundedTimeout(timeoutMs);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), bound);
 
   let res;
   try {
@@ -88,25 +161,46 @@ async function callClaude({ model, system, prompt, maxTokens, expectJson = false
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION },
       body: JSON.stringify(reqBody),
+      signal: controller.signal,
     });
   } catch (e) {
-    return { error: 'Claude request failed: ' + (e && e.message ? e.message : String(e)) };
+    // An abort and a network failure are reported differently on purpose: `timedOut` is what a
+    // caller keys off to decide whether the provider may still be working on the request, and a
+    // timeout is the one failure where tokens were plausibly consumed with no usage returned.
+    const aborted = e && (e.name === 'AbortError' || controller.signal.aborted);
+    clearTimeout(timer);
+    return aborted
+      ? { error: `Claude request aborted after ${bound}ms (provider did not respond)`,
+          timedOut: true, timeoutMs: bound, model: resolvedModel, ...COST_UNKNOWN }
+      : { error: 'Claude request failed: ' + (e && e.message ? e.message : String(e)),
+          model: resolvedModel, ...COST_UNKNOWN };
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    return { error: `Claude ${res.status}: ${String(t).slice(0, 200)}` };
+    // The request reached the provider; it may have consumed tokens before failing.
+    return { error: `Claude ${res.status}: ${String(t).slice(0, 200)}`, status: res.status,
+      model: resolvedModel, ...COST_UNKNOWN };
   }
 
   let body;
   try { body = await res.json(); }
-  catch (e) { return { error: 'Claude response not JSON: ' + (e && e.message ? e.message : String(e)) }; }
+  catch (e) {
+    return { error: 'Claude response not JSON: ' + (e && e.message ? e.message : String(e)),
+      model: resolvedModel, ...COST_UNKNOWN };
+  }
 
   const text = extractClaudeText(body);
   const usage = body.usage || null;
-  const out = { text, usage, costUsd: costOf(usage, model) };
+  const cost = costOf(usage, model);          // rates resolve on the ALIAS-OR-LITERAL the caller gave
+  const out = { text, usage, model: resolvedModel, timeoutMs: bound, ...cost };
   if (expectJson) out.json = parseClaudeJSON(text); // null (not an error) when unparseable
   return out;
 }
 
-module.exports = { callClaude, costOf, ratesFor, ANTHROPIC_URL, ANTHROPIC_VERSION };
+module.exports = {
+  DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, boundedTimeout,
+  MODEL_ALIASES, resolveModel, COST_NONE, COST_UNKNOWN,
+  callClaude, costOf, ratesFor, ANTHROPIC_URL, ANTHROPIC_VERSION };

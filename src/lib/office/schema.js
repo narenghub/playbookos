@@ -183,6 +183,25 @@ const DDL = [
    )`,
   `CREATE INDEX IF NOT EXISTS idx_office_cost_company_at ON office_cost_ledger (company_id, at DESC)`,
 
+  // ── C1 AT THE STORAGE LAYER: UNKNOWN COST MUST BE STORABLE ────────────────
+  //
+  // cost_usd was NOT NULL, so an unmeasurable call could not be recorded as unknown AT ALL — the
+  // only way to file it was as 0, which is precisely what the ruling forbids. Fixing costOf() in
+  // llm.js without this would have pushed the lie one layer down.
+  //
+  // The CHECK makes the two states mutually exclusive in the database, the same shape as
+  // rfq_identity_decisions' refusal constraint: a row cannot claim to know a cost it does not
+  // have, and cannot carry a cost while claiming not to know it.
+  `ALTER TABLE office_cost_ledger ALTER COLUMN cost_usd DROP NOT NULL`,
+  `ALTER TABLE office_cost_ledger ADD COLUMN IF NOT EXISTS cost_known BOOLEAN NOT NULL DEFAULT TRUE`,
+  `ALTER TABLE office_cost_ledger ADD CONSTRAINT office_cost_known_shape CHECK (
+     (cost_known AND cost_usd IS NOT NULL) OR (NOT cost_known AND cost_usd IS NULL))`,
+  // Attribution the ruling requires alongside provider/model: which agent and workflow spent it.
+  `ALTER TABLE office_cost_ledger ADD COLUMN IF NOT EXISTS agent TEXT`,
+  `ALTER TABLE office_cost_ledger ADD COLUMN IF NOT EXISTS workflow TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_office_cost_unknown ON office_cost_ledger (company_id, at DESC)
+     WHERE NOT cost_known`,
+
   `CREATE TABLE IF NOT EXISTS office_approvals (
      id            TEXT PRIMARY KEY,
      company_id    TEXT NOT NULL REFERENCES companies(id),
@@ -204,6 +223,36 @@ const DDL = [
        FOREIGN KEY (run_id, company_id) REFERENCES agent_runs (run_id, company_id) MATCH FULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_office_approvals_company_status ON office_approvals (company_id, status, created_at)`,
+
+  // ── K7: THE THING APPROVED IS THE THING SENT ──────────────────────────────
+  //
+  // release() returns the STORED payload, so by construction the sent artefact is the approved
+  // one — provided the stored payload cannot change after a human looked at it. Without this an
+  // operator could approve email text A and email text B could be released, and every row would
+  // still read "approved".
+  //
+  // action_kind is frozen too: approving "draft_rfq_email" must not become permission to
+  // "send_payment". run_id and objective_id are frozen for the same reason company identity is.
+  `CREATE OR REPLACE FUNCTION office_approvals_payload_immutable() RETURNS TRIGGER AS $fn$
+   BEGIN
+     IF NEW.action_payload::text IS DISTINCT FROM OLD.action_payload::text
+        OR NEW.action_kind IS DISTINCT FROM OLD.action_kind
+        OR NEW.run_id IS DISTINCT FROM OLD.run_id
+        OR NEW.objective_id IS DISTINCT FROM OLD.objective_id
+        OR NEW.company_id IS DISTINCT FROM OLD.company_id THEN
+       RAISE EXCEPTION 'an approval request is immutable: action_kind, action_payload, run_id, objective_id and company_id are fixed at creation so that what was approved is what is released';
+     END IF;
+     RETURN NEW;
+   END;
+   $fn$ LANGUAGE plpgsql`,
+  `DROP TRIGGER IF EXISTS trg_office_approvals_payload_immutable ON office_approvals`,
+  `CREATE TRIGGER trg_office_approvals_payload_immutable
+     BEFORE UPDATE ON office_approvals
+     FOR EACH ROW EXECUTE FUNCTION office_approvals_payload_immutable()`,
+  // Released-at records that the approved action was actually carried out, so an approval that was
+  // granted and never used is distinguishable from one that was acted on.
+  `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ`,
+  `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS released_by TEXT`,
 
   // The exception queue. "A counter on a dashboard is not a work queue" — so every ruled field is
   // here, and an email is NOT the record: notifications point to this row, they are not it.

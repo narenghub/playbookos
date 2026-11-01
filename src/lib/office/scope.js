@@ -185,10 +185,15 @@ async function listPendingApprovals(ctx, deps = {}) {
 // Spend for the company's current UTC day. The $100/day cap is NOT enforced here — K5 budget
 // refusal is a separate authorization and its production activation requires a ruling. This is
 // the measurement the cap will later read.
+// Spend for the company's current UTC day, with UNMEASURED CALLS COUNTED SEPARATELY rather than
+// summed as zero. A budget that reads only `usd` would under-report by exactly the amount it could
+// not see, so `unknown_calls` travels with it and K5's refusal surface must consult both.
 async function spendToday(ctx, deps = {}) {
   assertContext(ctx);
   const res = await q(deps)(
-    `SELECT COALESCE(SUM(cost_usd), 0)::float8 AS usd, COUNT(*)::int AS calls
+    `SELECT COALESCE(SUM(cost_usd) FILTER (WHERE cost_known), 0)::float8 AS usd,
+            COUNT(*)::int AS calls,
+            COUNT(*) FILTER (WHERE NOT cost_known)::int AS unknown_calls
        FROM office_cost_ledger
       WHERE company_id = $1 AND at >= date_trunc('day', NOW())`,
     [ctx.companyId]
@@ -214,14 +219,23 @@ async function listOutcomes(ctx, deps = {}) {
 // not this file's — this file only declines to hand it the wrong thing.
 // ---------------------------------------------------------------------------------------------
 
-async function recordCost(ctx, { runId, provider, model, tokensInput, tokensOutput, costUsd }, deps = {}) {
+// costKnown is REQUIRED, not inferred from costUsd being null — an inferred flag can be silently
+// wrong in exactly the direction that matters (a caller that forgot to pass a cost would file it as
+// "known to be nothing"). The database CHECK enforces that the pair is coherent either way.
+async function recordCost(ctx, { runId, provider, model, tokensInput, tokensOutput,
+  costUsd, costKnown, agent = null, workflow = null }, deps = {}) {
   assertContext(ctx);
+  if (typeof costKnown !== 'boolean') {
+    throw new Error('recordCost requires an explicit costKnown: an unmeasured call must not be filed as free');
+  }
   const res = await q(deps)(
     `INSERT INTO office_cost_ledger
-       (company_id, run_id, objective_id, provider, model, tokens_input, tokens_output, cost_usd)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+       (company_id, run_id, objective_id, provider, model, tokens_input, tokens_output,
+        cost_usd, cost_known, agent, workflow)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, cost_known`,
     [ctx.companyId, runId, ctx.objectiveId || null, provider, model,
-     tokensInput ?? null, tokensOutput ?? null, costUsd]
+     tokensInput ?? null, tokensOutput ?? null,
+     costKnown ? costUsd : null, costKnown, agent, workflow]
   );
   return res.rows[0];
 }
@@ -277,6 +291,39 @@ async function decideApproval(ctx, { id, decision, resolvedBy }, deps = {}) {
   return res.rows[0] || null;
 }
 
+// K7 release, arbitrated. Lives here because this file owns every kernel table name — and because
+// the scope-discipline check correctly refused to exempt approval.js: it is product code, and
+// product code may never hold a kernel predicate at the call site.
+//
+// The claim and the read are ONE statement. A SELECT-then-UPDATE would let two concurrent releases
+// both see 'approved' and both act, which is one human decision authorising two consequential
+// sends. `released_at IS NULL` is what makes a second release impossible.
+async function claimApprovalRelease(ctx, { approvalId, releasedBy }, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `UPDATE office_approvals
+        SET released_at = NOW(), released_by = $3
+      WHERE company_id = $1 AND id = $2
+        AND status = 'approved'
+        AND released_at IS NULL
+      RETURNING id, action_kind, action_payload, resolved_by, resolved_at`,
+    [ctx.companyId, approvalId, releasedBy]
+  );
+  return res.rows[0] || null;
+}
+
+// Why a release did not happen. 'not_approved' and 'already_released' call for very different
+// operator responses, so they are distinguished rather than collapsed into a single failure.
+async function approvalReleaseState(ctx, approvalId, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `SELECT status, released_at, released_by FROM office_approvals
+      WHERE company_id = $1 AND id = $2`,
+    [ctx.companyId, approvalId]
+  );
+  return res.rows[0] || null;
+}
+
 async function recordOutcome(ctx, { id, runId, outcome, businessEffect, effectRef }, deps = {}) {
   assertContext(ctx);
   const res = await q(deps)(
@@ -289,7 +336,94 @@ async function recordOutcome(ctx, { id, runId, outcome, businessEffect, effectRe
   return res.rows[0];
 }
 
+// ── K9: PROVENANCE FOR ONE GOVERNED RUN ─────────────────────────────────────
+//
+// Answers, from durable evidence only:
+//
+//   "Which CEO objective caused this supplier action, what did the AI do, what did it cost,
+//    who approved it, and what happened?"
+//
+// Company-scoped like every other read, and it RETROFITS NOTHING: it reports what a governed run
+// recorded. A pre-K9 row has no objective and will simply return nothing, which is the correct
+// answer rather than an inferred one.
+async function provenance(ctx, runId, deps = {}) {
+  assertContext(ctx);
+  const query = q(deps);
+
+  const run = (await query(
+    `SELECT r.run_id, r.state, r.workflow, r.agent, r.trigger, r.attempt,
+            r.created_at, r.started_at, r.ended_at,
+            o.id AS objective_id, o.objective, o.priority, o.kpi_metric, o.kpi_target,
+            o.deadline, o.budget_usd, o.autonomy_tier, o.approval_policy, o.created_by
+       FROM agent_runs r
+       JOIN objectives o ON o.id = r.objective_id AND o.company_id = r.company_id
+      WHERE r.company_id = $1 AND r.run_id = $2`,
+    [ctx.companyId, runId]
+  )).rows[0];
+  if (!run) return null;
+
+  const ai = (await query(
+    `SELECT provider, model, agent, workflow, tokens_input, tokens_output,
+            cost_usd, cost_known, at
+       FROM office_cost_ledger
+      WHERE company_id = $1 AND run_id = $2 ORDER BY at`,
+    [ctx.companyId, runId]
+  )).rows;
+
+  const approvals = (await query(
+    `SELECT id, action_kind, status, reason, owner_user_id, created_at,
+            resolved_by, resolved_at, released_at, released_by
+       FROM office_approvals
+      WHERE company_id = $1 AND run_id = $2 ORDER BY created_at`,
+    [ctx.companyId, runId]
+  )).rows;
+
+  const outcomes = (await query(
+    `SELECT id, outcome, business_effect, effect_ref, at
+       FROM office_outcomes
+      WHERE company_id = $1 AND run_id = $2 ORDER BY at`,
+    [ctx.companyId, runId]
+  )).rows;
+
+  const exceptions = (await query(
+    `SELECT id, source, reason, severity, status, created_at, resolved_at, resolution
+       FROM office_exceptions
+      WHERE company_id = $1 AND run_id = $2 ORDER BY created_at`,
+    [ctx.companyId, runId]
+  )).rows;
+
+  // Measured AI spend is reported as a LOWER BOUND whenever any call was unmeasured. Summing
+  // unknown costs as zero here would be the same defect as costOf() returning 0.
+  const measured = ai.filter((a) => a.cost_known);
+  const unmeasured = ai.length - measured.length;
+
+  return {
+    objective: {
+      id: run.objective_id, objective: run.objective, priority: run.priority,
+      kpi_metric: run.kpi_metric, kpi_target: run.kpi_target, deadline: run.deadline,
+      budget_usd: run.budget_usd, autonomy_tier: run.autonomy_tier,
+      approval_policy: run.approval_policy, created_by: run.created_by,
+    },
+    run: {
+      run_id: run.run_id, state: run.state, workflow: run.workflow, agent: run.agent,
+      trigger: run.trigger, attempt: run.attempt,
+      created_at: run.created_at, started_at: run.started_at, ended_at: run.ended_at,
+    },
+    ai_calls: ai,
+    ai_cost: {
+      measured_usd: measured.reduce((t, a) => t + Number(a.cost_usd || 0), 0),
+      measured_calls: measured.length,
+      unmeasured_calls: unmeasured,
+      lower_bound: unmeasured > 0,
+    },
+    approvals,
+    outcomes,
+    exceptions,
+  };
+}
+
 module.exports = {
+  provenance, claimApprovalRelease, approvalReleaseState,
   bootstrapObjectiveForContext,
   createObjective, setObjectiveStatus,
   listObjectives, getObjective, listOpenExceptions, listPendingApprovals, spendToday, listOutcomes,

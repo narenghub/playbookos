@@ -203,7 +203,7 @@ async function refused(fn) {
     // Each uses company A's context against company B's RUN. The (run_id, company_id) pair does
     // not exist in agent_runs, so the composite FK refuses it. Nothing in scope.js checks this.
     const crossers = [
-      ['P5 budget', () => scope.recordCost(ctxA, { runId: RB, provider: 'anthropic', model: 'm', costUsd: 1 }, { query: q })],
+      ['P5 budget', () => scope.recordCost(ctxA, { runId: RB, provider: 'anthropic', model: 'm', costUsd: 1, costKnown: true }, { query: q })],
       ['P3 approval', () => scope.requestApproval(ctxA, { id: uid('ap'), runId: RB, actionKind: 'x', actionPayload: {}, reason: 'r' }, { query: q })],
       ['P4 exception', () => scope.openException(ctxA, { id: uid('ex'), runId: RB, source: 's', reason: 'r', severity: 'high' }, { query: q })],
       ['P6 outcome', () => scope.recordOutcome(ctxA, { id: uid('oc'), runId: RB, outcome: 'achieved' }, { query: q })],
@@ -217,7 +217,9 @@ async function refused(fn) {
     // And the legitimate version of each must work, or the refusals above prove nothing: a write
     // that always fails would pass every assertion in this section.
     const exA = uid('ex'), apA = uid('ap'), ocA = uid('oc');
-    await scope.recordCost(ctxA, { runId: RA, provider: 'anthropic', model: 'm', tokensInput: 10, tokensOutput: 5, costUsd: 0.25 }, { query: q });
+    // costKnown is now REQUIRED by recordCost (K5 C1): a cost filed without it would be an
+    // unmeasured call recorded as free, so the accessor refuses to guess.
+    await scope.recordCost(ctxA, { runId: RA, provider: 'anthropic', model: 'm', tokensInput: 10, tokensOutput: 5, costUsd: 0.25, costKnown: true }, { query: q });
     const exRow = await scope.openException(ctxA, { id: exA, runId: RA, source: 'check', reason: 'fixture', severity: 'high', slaHours: 4 }, { query: q });
     ids.exceptions.push(exA);
     await scope.requestApproval(ctxA, { id: apA, runId: RA, actionKind: 'send', actionPayload: { to: 'x' }, reason: 'fixture' }, { query: q });
