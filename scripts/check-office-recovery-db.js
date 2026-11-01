@@ -294,13 +294,24 @@ process.env.DATABASE_URL = url;
 
     // ══ 5. STOPPED_BY_POLICY RE-EVALUATES THE KILL POLICY ══════════════════
     autonomy.resetForTests && autonomy.resetForTests();
+    // K8 refuses a stop whose scope key names nothing, so this fixture workflow must be declared
+    // the same way a real non-cron owner declares its own. That interaction is the point: before
+    // K8 this check happily stopped an invented workflow name and the stop protected nothing.
+    autonomy.registerScopes({ workflows: ['k4-stopped-wf'], agents: ['k4-agent'] });
     const stoppedIntent = `cron:k4-sbp:${crypto.randomUUID()}`;
     const sbp = await mkRun({ state: 'STOPPED_BY_POLICY', ageMinutes: 10, intentKey: stoppedIntent,
       workflow: 'k4-stopped-wf', agent: 'k4-agent' });
-    await autonomy.stop({ scope_type: 'workflow', scope_key: 'k4-stopped-wf',
+    // Assert the precondition. An earlier version ignored stop()'s return value, and when K8 began
+    // refusing the invented scope key the "stop" silently did nothing — so the next assertion
+    // reported that the retry path bypasses the kill switch when in fact no stop existed. A
+    // precondition is asserted, never assumed.
+    const stopped = await autonomy.stop({ scope_type: 'workflow', scope_key: 'k4-stopped-wf',
       reason: 'K4 check: the stop must still be in force at retry time', actor: 'check' },
       { deps: { query: q } });
+    if (!stopped.ok) bad(`the fixture stop was not created, so the next assertion would be meaningless: ${stopped.error}`);
+    else ok('the fixture workflow stop is in force (asserted, not assumed)');
     x = await recovery.retryRun(sbp, {}, deps);
+    if (x.runId) ids.runs.push(x.runId);
     if (x.retried) bad('a STOPPED_BY_POLICY run was retried WHILE THE STOP WAS STILL IN FORCE — the retry path bypasses the kill switch');
     else if (x.reason !== 'still_stopped_by_policy') bad(`refused for the wrong reason: ${JSON.stringify(x)}`);
     else ok(`retry of STOPPED_BY_POLICY re-evaluates the kill policy and refuses while stopped (${x.scope_type})`);
@@ -316,8 +327,9 @@ process.env.DATABASE_URL = url;
     else ok('the fixture stop was lifted (asserted, not assumed)');
     autonomy.resetForTests && autonomy.resetForTests();
     x = await recovery.retryRun(sbp, {}, deps);
+    if (x.runId) ids.runs.push(x.runId);
     if (!x.retried) bad(`after the stop was lifted the retry was still refused: ${JSON.stringify(x)}`);
-    else { ids.runs.push(x.runId); ok('once the stop is lifted the same retry is permitted — policy is re-evaluated, not remembered'); }
+    else ok('once the stop is lifted the same retry is permitted — policy is re-evaluated, not remembered');
 
     // ══ 6. DURABILITY ACROSS A CRASH ═══════════════════════════════════════
     if (await stateOf(staleRunning, q2) !== 'ABANDONED') bad('a second connection does not see the recovery — it is not durable');
@@ -416,6 +428,15 @@ process.env.DATABASE_URL = url;
             await q(`UPDATE agent_runs SET predecessor_run_id = NULL WHERE run_id = ANY($1)`, [ids.runs]);
             await q(`ALTER TABLE agent_runs ENABLE TRIGGER trg_agent_runs_transition_guard`);
           });
+        // Sweep anything pointing at a fixture run. A retry created by an assertion that FAILED
+        // may not be in ids.runs, and it would then block the predecessor FK on delete — which is
+        // how cleanup failed once already.
+        await q(`ALTER TABLE agent_runs DISABLE TRIGGER trg_agent_runs_transition_guard`);
+        try {
+          await q(`UPDATE agent_runs SET predecessor_run_id = NULL WHERE predecessor_run_id = ANY($1)`, [ids.runs]);
+        } finally {
+          await q(`ALTER TABLE agent_runs ENABLE TRIGGER trg_agent_runs_transition_guard`);
+        }
         for (const id of ids.runs) await q(`DELETE FROM agent_runs WHERE run_id = $1`, [id]);
       } finally {
         await q(`ALTER TABLE agent_run_events ENABLE TRIGGER trg_agent_run_events_append_only`);

@@ -23,6 +23,15 @@
 const { beginObjectiveRun } = require('./run');
 const scope = require('./scope');
 
+// K8: declare this agent's kill-switch scope keys where they are DEFINED, so an operator can stop
+// `workflow=objective-review` or `agent=executive-agent` by name and validation accepts it. An
+// owner that forgets to register cannot be stopped by name — a loud, testable failure rather than
+// a silent one. Additive: registration can never narrow what may be stopped.
+require('../autonomy').registerScopes({
+  workflows: ['objective-review'],
+  agents: ['executive-agent'],
+});
+
 function lazyLedger(deps) {
   if (deps && deps.ledger) return deps.ledger;
   return require('../run-ledger').ledger({ query: deps && deps.query });

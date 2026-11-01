@@ -205,6 +205,69 @@ async function checkStopped(scopes = {}, { consequential = true, deps = {} } = {
 // the field, and "x" reconstructs nothing.
 const MIN_REASON = 10;
 
+// ── K8: SCOPE KEYS MUST NAME SOMETHING ──────────────────────────────────────
+//
+// THE DEFECT. matchStop() matches by EXACT string equality (`s.scope_key === scopes[t]`), so a
+// stop whose key no caller ever passes matches nothing — for ever. Before K8 such a stop was
+// accepted, stored, audited and reported as successful: `capability='email_send'` (the real key is
+// `email.send`) or `agent='seo'` (the real name is `seo-agent`) produced a row that looked like
+// protection and was not. A STOP that accepts a nonexistent scope and reports success is false
+// safety evidence, which is worse than no stop at all, because the operator stops looking.
+//
+// WHICH DIRECTION TO FAIL. Rejecting a LEGITIMATE stop is far worse than accepting a useless one:
+// it denies an operator the ability to halt something. So validation only ever rejects a key that
+// is known to match nothing, and the vocabularies it checks are DERIVED from the authoritative
+// registries rather than copied into a second hand-written list (the mistake that put five copies
+// of SOURCES in this repo):
+//
+//   capability  → CAPABILITIES, the closed vocabulary callers actually pass
+//   workflow    → the cron names in CRON_SCOPES, plus anything registerScopes() has declared
+//   agent       → the agent names in CRON_SCOPES, plus anything registerScopes() has declared
+//   company     → NOT checked here. P0.2 made the company key free text on purpose, "so a new
+//                 business needs no migration", and K1's companies table is not readable from a
+//                 synchronous function. stop() checks it asynchronously against that table
+//                 instead, and only when the table exists — see below.
+//
+// Non-cron owners declare their own names once, where they are defined, via registerScopes().
+// That is what "derived from authoritative registered scopes" means here: nobody maintains a
+// duplicate, and an owner that forgets to register cannot be stopped by name — which is a loud,
+// testable failure rather than a silent one.
+
+const EXTRA_SCOPES = { workflow: new Set(), agent: new Set() };
+
+/**
+ * Declare scope keys that are not cron names. Called by the module that owns them, at load.
+ * Additive only: it can never remove a key, so it cannot narrow what an operator may stop.
+ */
+function registerScopes({ workflows = [], agents = [] } = {}) {
+  for (const w of workflows) if (w) EXTRA_SCOPES.workflow.add(String(w));
+  for (const a of agents) if (a) EXTRA_SCOPES.agent.add(String(a));
+  return { workflows: EXTRA_SCOPES.workflow.size, agents: EXTRA_SCOPES.agent.size };
+}
+
+/** Every key an operator may legitimately stop, for a scope type. Derived, never maintained. */
+function knownScopeKeys(scope_type) {
+  if (scope_type === 'capability') return [...CAPABILITIES].sort();
+  if (scope_type === 'workflow') {
+    return [...new Set([...Object.keys(CRON_SCOPES), ...EXTRA_SCOPES.workflow])].sort();
+  }
+  if (scope_type === 'agent') {
+    const fromCrons = Object.values(CRON_SCOPES).map((m) => m && m.agent).filter(Boolean);
+    return [...new Set([...fromCrons, ...EXTRA_SCOPES.agent])].sort();
+  }
+  return null;   // company: free text by design; global: no key
+}
+
+// A near-miss is the likely typo, so it is named in the error. An operator who typed `email_send`
+// is not helped by a list of 40 workflows.
+function nearest(key, candidates) {
+  const k = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const hit = candidates.find((c) => c.toLowerCase().replace(/[^a-z0-9]/g, '') === k);
+  if (hit) return hit;
+  return candidates.find((c) => c.toLowerCase().includes(String(key).toLowerCase())
+    || String(key).toLowerCase().includes(c.toLowerCase())) || null;
+}
+
 function validate({ scope_type, scope_key, reason }) {
   if (!SCOPE_TYPES.includes(scope_type)) {
     return `scope_type must be one of ${SCOPE_TYPES.join(', ')}`;
@@ -217,6 +280,14 @@ function validate({ scope_type, scope_key, reason }) {
   if (!reason || String(reason).trim().length < MIN_REASON) {
     return `reason is required and must be at least ${MIN_REASON} characters — it is what an incident review reads`;
   }
+
+  // K8. Only for the scope types with a closed, derivable vocabulary.
+  const known = knownScopeKeys(scope_type);
+  if (known && !known.includes(String(scope_key))) {
+    const did = nearest(scope_key, known);
+    return `${scope_type} "${scope_key}" matches nothing, so this stop would protect nothing`
+      + (did ? ` — did you mean "${did}"?` : ` — valid: ${known.slice(0, 12).join(', ')}${known.length > 12 ? `, … (${known.length} total)` : ''}`);
+  }
   return null;
 }
 
@@ -226,6 +297,28 @@ function validate({ scope_type, scope_key, reason }) {
 async function stop({ scope_type, scope_key = '', reason, actor }, { deps = {} } = {}) {
   const err = validate({ scope_type, scope_key, reason });
   if (err) return { ok: false, error: err };
+
+  // K8, company scope. Not checked in validate() because that function is synchronous and the
+  // authoritative source is K1's companies table. Checked here, and ONLY when that table exists:
+  // if it does not (an older deploy, a fixture that applied migrateRuns without migrateOffice) we
+  // cannot know, and refusing a stop we merely failed to verify is the dangerous direction. On
+  // production the table exists, which K1 validated.
+  if (scope_type === 'company') {
+    const query = deps.query || require('./db').query;
+    try {
+      const exists = (await query(`SELECT to_regclass('companies') AS t`)).rows[0].t;
+      if (exists) {
+        const hit = await query(`SELECT 1 FROM companies WHERE id = $1 OR slug = $1 LIMIT 1`, [scope_key]);
+        if (!hit.rows.length) {
+          return { ok: false,
+            error: `company "${scope_key}" is not a known company, so this stop would protect nothing` };
+        }
+      }
+    } catch (e) {
+      // Verification unavailable. Proceed rather than deny a halt on an unverifiable key.
+      console.error(`[autonomy] company scope key could not be verified (${e.message}); accepting the stop`);
+    }
+  }
   const withTransaction = deps.withTransaction || require('./db').withTransaction;
   await withTransaction(async (client) => {
     await client.query('SELECT set_config($1, $2, true)', ['autonomy.actor', String(actor || 'unknown')]);
@@ -355,5 +448,6 @@ module.exports = {
   TTL_CONSEQUENTIAL_MS, TTL_READONLY_MS, QUERY_TIMEOUT_MS, MIN_REASON,
   migrateAutonomy, checkStopped, stop, resume, listStops, history,
   recordRefusal, scopesForCron, validate, matchStop,
+  registerScopes, knownScopeKeys,
   resetForTests,
 };

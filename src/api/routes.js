@@ -85,7 +85,14 @@ async function autonomyHalt(scopes, what, detail = {}) {
 router.get('/autonomy/stops', authMiddleware, adminOnly, async (req, res) => {
   try {
     const [stops, events] = await Promise.all([autonomy.listStops(), autonomy.history({ limit: req.query.limit })]);
-    res.json({ stops, events, scope_types: autonomy.SCOPE_TYPES, capabilities: autonomy.CAPABILITIES });
+    // K8: hand the operator the VALID keys per scope type. A stop that names nothing is now
+    // refused, so the UI must be able to offer what exists rather than invite a typo.
+    const scope_keys = {};
+    for (const t of autonomy.SCOPE_TYPES) {
+      const k = autonomy.knownScopeKeys(t);
+      if (k) scope_keys[t] = k;
+    }
+    res.json({ stops, events, scope_types: autonomy.SCOPE_TYPES, capabilities: autonomy.CAPABILITIES, scope_keys });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

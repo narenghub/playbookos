@@ -112,6 +112,14 @@ step "rotation snapshot survives a new process" node scripts/check-rotation-snap
 # history. It also MEASURES propagation with the LISTEN accelerator deliberately disabled — a kill
 # switch whose latency is asserted in a comment is a kill switch nobody has timed.
 step "kill switch stops, propagates and audits" node scripts/check-autonomy-stop-db.js
+# K8: a stop must NAME something. matchStop() matches by exact string equality, so a key no caller
+# ever passes matches nothing for ever — yet before K8 such a stop was accepted, stored, audited and
+# reported as successful. `capability=email_send` and `agent=seo` looked like protection and were
+# not, and false safety evidence is worse than none because people stop looking. The dangerous
+# direction here is OVER-strictness — refusing a legitimate stop denies an operator a halt — so the
+# vocabularies are DERIVED from CRON_SCOPES/CAPABILITIES and every key in them is accepted by
+# ENUMERATION, not by sampling two. A refused stop must also leave no row behind.
+step "a stop that protects nothing is refused" node scripts/check-autonomy-scope-validation-db.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither
