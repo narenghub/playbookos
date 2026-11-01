@@ -133,6 +133,23 @@ step "run identity invariants hold in Postgres" node scripts/check-run-identity-
 # the three durability classes really do behave differently: CRITICAL throws, OPERATIONAL reports
 # loudly without throwing, TELEMETRY degrades silently.
 step "canary fails closed and never fakes success" node scripts/check-run-canary-db.js
+# K1 company isolation. The entire claim is that isolation is a property of the DATA and not of the
+# query — composite foreign keys with MATCH FULL — so none of it can be proven with a stubbed
+# query, which would accept all twelve cross-company attacks and report success. Two fixture
+# companies in a real server; every kernel record is attempted against the OTHER company's run and
+# must be refused by the engine; the legitimate same-company write of each is also exercised,
+# because a write that always fails would satisfy every refusal assertion. M2 is the control that
+# matters: MATCH SIMPLE is the PostgreSQL DEFAULT for a composite key and passes if ANY column is
+# NULL, so on a legacy-nullable company_id it admits the evasion — without that control, a future
+# migration omitting two words re-opens the hole and everything else still passes.
+step "cross-company work is refused by the database" node scripts/check-office-isolation-db.js
+# The read side, which no foreign key can enforce. One accessor owns every kernel table name, so a
+# caller cannot forget `WHERE company_id = ?` because a caller never writes it. This check fails if
+# a kernel table is reached in SQL anywhere else — the difference between "every developer
+# remembers" and "a check fails if they don't". It carries both negative controls: a planted
+# violation must be caught, and prose naming the tables must NOT be, because a check that cries
+# wolf gets an exemption added to it rather than a fix.
+step "kernel tables are reached only through the scoped accessor" node scripts/check-office-scope-discipline.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one
