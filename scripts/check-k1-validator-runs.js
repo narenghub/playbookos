@@ -81,15 +81,21 @@ const { query } = require('../src/lib/db');
 const { migrateRuns } = require('../src/lib/runs');
 const { migrateOffice } = require('../src/lib/office/schema');
 
-function runValidator() {
+// Both production validators are exercised from this one harness rather than from two: the
+// Postgres bootstrap, the migrations and the historical fixtures are identical, and duplicating
+// ~80 lines of cluster setup to test a second script is the same mistake that put five copies of
+// SOURCES in this repo.
+function runScript(name) {
   try {
-    const stdout = execFileSync(process.execPath, [path.join(REPO, 'scripts', 'validate-k1-deployed.js')],
+    const stdout = execFileSync(process.execPath, [path.join(REPO, 'scripts', name)],
       { env: { ...process.env, DATABASE_URL: url }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     return { code: 0, stdout };
   } catch (e) {
     return { code: e.status === undefined ? -1 : e.status, stdout: String(e.stdout || ''), stderr: String(e.stderr || '') };
   }
 }
+const runValidator = () => runScript('validate-k1-deployed.js');
+const runK2Validator = () => runScript('validate-k2-deployed.js');
 
 const HISTORICAL = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
 
@@ -173,14 +179,14 @@ const POSITIVES = [
     // ── 3. IT CAN GO RED, FOR EACH DISTINCT REASON ────────────────────────
     out('  --    sabotage controls: each must turn the validator red');
 
-    const sabotage = async (label, breakIt, fixIt, expect) => {
+    const sabotage = async (label, breakIt, fixIt, expect, runner = runValidator) => {
       await breakIt();
-      const r = runValidator();
+      const r = runner();
       if (r.code === 0) bad(`SABOTAGE ${label}: the validator stayed GREEN`);
       else if (expect && !expect.test(r.stdout)) bad(`SABOTAGE ${label}: red, but not for the expected reason`, r.stdout.slice(-700));
       else ok(`SABOTAGE ${label}: the validator goes red${expect ? ', for the right reason' : ''}`);
       await fixIt();
-      const back = runValidator();
+      const back = runner();
       if (back.code !== 0) bad(`after repairing "${label}" the validator is still red`, (back.stdout + back.stderr).slice(-700));
     };
 
@@ -251,6 +257,37 @@ const POSITIVES = [
     if (hist.n !== HISTORICAL.length) bad(`historical fixture runs lost: ${hist.n} of ${HISTORICAL.length}`);
     else if (hist.attributed !== 0) bad(`${hist.attributed} historical fixture run(s) left attributed after the sabotage repair`);
     else ok('historical runs survived every validator run and sabotage, still unattributed');
+
+    // ── 5. THE K2 VALIDATOR ───────────────────────────────────────────────
+    out('  --    the K2 production validator');
+    const k2before = (await query(`SELECT COUNT(*)::int n FROM agent_runs`)).rows[0].n;
+    const k2 = runK2Validator();
+    if (k2.code !== 0) bad('the K2 validator is RED against a correctly migrated database', (k2.stdout + k2.stderr).slice(-1500));
+    else ok('the K2 validator is GREEN against a correctly migrated database');
+
+    const k2after = (await query(`SELECT COUNT(*)::int n FROM agent_runs`)).rows[0].n;
+    if (k2after !== k2before) bad(`the K2 validator left ${k2after - k2before} run(s) behind — it runs a real agent and must write nothing durable`);
+    else ok(`the K2 validator wrote nothing durable (agent_runs ${k2before} -> ${k2after})`);
+    for (const t of ['companies', 'objectives', 'office_outcomes']) {
+      const n = (await query(`SELECT COUNT(*)::int n FROM ${t}`)).rows[0].n;
+      if (n) bad(`${t} holds ${n} row(s) after the K2 validator ran — its rollback did not hold`);
+    }
+    ok('no company, objective or outcome survived the K2 validator\'s rollback');
+    if (!/network spy records a deliberate call/.test(k2.stdout)) {
+      bad('the K2 validator did not prove its own network spy can fire — its silence would be vacuous');
+    } else ok('the K2 validator proves its own network spy can fire');
+
+    await sabotage('K2: immutability trigger dropped',
+      () => query(`DROP TRIGGER IF EXISTS trg_office_runs_company_immutable ON agent_runs`),
+      () => migrateOffice(query),
+      /re-pointing a run to another company by UPDATE was ACCEPTED|promoting a legacy companyless run/,
+      runK2Validator);
+
+    await sabotage('K2: composite FK dropped',
+      () => query(`ALTER TABLE agent_runs DROP CONSTRAINT fk_agent_runs_objective_company`),
+      () => migrateOffice(query),
+      /cross-company objective substitution.*ACCEPTED/s,
+      runK2Validator);
 
   } catch (e) {
     bad('unexpected error', e.stack || e.message);
