@@ -145,8 +145,30 @@ const CRON_NAME = 'quarter-hourly-office-recovery';
     const beforeListen = src.indexOf(`withAlerts('${CRON_NAME}'`) < src.indexOf('app.listen(PORT');
     if (!beforeListen) bad('the reaper is registered AFTER app.listen — a boot that fails to listen would skip it');
     else ok('the reaper is registered at module scope before app.listen, so any boot re-arms it');
-    const uptime = (await query(`SELECT 1`)) && process.uptime();
-    note(`this container's uptime is ${Math.round(uptime)}s; the schedule re-arms on every boot.`);
+    // process.uptime() here is THIS script's process, not the server's — `railway ssh` spawns a
+    // fresh node. An earlier version printed it as though it said something about the running
+    // server; it does not, and reporting it that way was misleading.
+    note(`(process.uptime() is this script's own process, not the server's — it proves nothing about the server)`);
+
+    // ── 13. THE ONLY PROOF THAT THE LIVE SERVER ACTUALLY ARMED IT ─────────
+    //
+    // Everything above proves the deployed BYTES register the cron. It does not prove the running
+    // process did: a boot that threw before reaching that line would pass every assertion so far.
+    // Because the reaper executes inside instrumentedRun, every firing leaves a durable run row —
+    // so an OBSERVED FIRING is the difference between "wired" and "running".
+    const fired = (await query(
+      `SELECT COUNT(*)::int AS n, MAX(created_at) AS last, MAX(state) AS last_state
+         FROM agent_runs WHERE workflow = $1`, [CRON_NAME]
+    )).rows[0];
+    if (fired.n > 0) {
+      ok(`OBSERVED ${fired.n} reaper firing(s) — the live server armed the schedule, not just the bytes`);
+      console.log(`        most recent ${fired.last.toISOString()} (${fired.last_state})`);
+    } else {
+      note('NO reaper firing observed yet. Expected only inside the first cadence window after a');
+      note('deploy (it fires at :07/:22/:37/:52 UTC). Re-run after the next boundary: if it is');
+      note('still zero, the schedule is NOT armed in the running process and the activation is');
+      note('wired-but-dead — which every other assertion in this file would still pass.');
+    }
 
     console.log('\n' + (fail
       ? `FAIL  ${fail} activation assertion(s) failed`
