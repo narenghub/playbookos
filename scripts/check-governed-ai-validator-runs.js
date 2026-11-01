@@ -292,6 +292,50 @@ function runValidator(stub, extraEnv = {}) {
     const restored = fs.readFileSync(AIFILE, 'utf8') === aiBefore;
     if (restored) ok('ai.js restored byte-for-byte'); else bad('ai.js was NOT restored');
 
+    // ══ 6. THE K7/K9 VALIDATOR, AND WHETHER IT CAN GO RED ════════════════
+    console.log('\n── 6. the approval + provenance validator\n');
+    const runK7 = () => spawnSync(process.execPath, ['scripts/validate-k7-k9-deployed.js'], {
+      cwd: REPO, encoding: 'utf8',
+      env: { ...process.env, DATABASE_URL: url, RAILWAY_GIT_COMMIT_SHA: 'rehearsal' },
+    });
+    const k1r = runK7();
+    const k1out = (k1r.stdout || '') + (k1r.stderr || '');
+    if (k1r.status === 0) ok('the K7/K9 validator exits 0 against a correctly wired build');
+    else bad(`the K7/K9 validator exited ${k1r.status}`, k1out.split('\n').slice(-22).join('\n'));
+    for (const want of ['the approved payload is immutable in the database',
+      'release is an ARBITRATED UPDATE',
+      "it requires status = 'approved'",
+      'it requires released_at IS NULL',
+      'no mailer, WhatsApp, outreach or supplier-claim module is reachable from the approval path',
+      '`consequential` defaults to TRUE']) {
+      if (k1out.split('\n').some((l) => l.includes(want) && l.trim().startsWith('ok'))) ok(`  reported: ${want}`);
+      else bad(`  did NOT report: ${want}`);
+    }
+
+    // The red path: remove the approved predicate, exactly as mutation control M4 does. A
+    // validator that still passes without it would be certifying that approval precedes action
+    // when it does not.
+    const SCOPEFILE = path.join(REPO, 'src', 'lib', 'office', 'scope.js');
+    const scopeBefore = fs.readFileSync(SCOPEFILE, 'utf8');
+    const predicate = `        AND status = 'approved'\n        AND released_at IS NULL`;
+    if (!scopeBefore.includes(predicate)) {
+      bad('could not locate the approved predicate in scope.js — this red-path control is stale');
+    } else {
+      fs.writeFileSync(SCOPEFILE, scopeBefore.replace(predicate, `        AND released_at IS NULL`));
+      try {
+        const k2r = runK7();
+        const k2out = (k2r.stdout || '') + (k2r.stderr || '');
+        if (k2r.status !== 0) ok('without the approved predicate the K7/K9 validator GOES RED');
+        else bad('it passed with the approved predicate removed — its green means nothing', k2out.split('\n').slice(-18).join('\n'));
+        if (/approved predicate is MISSING/.test(k2out)) ok('and it names the missing predicate exactly');
+        else bad('it went red for an unclear reason', k2out.split('\n').slice(-14).join('\n'));
+      } finally {
+        fs.writeFileSync(SCOPEFILE, scopeBefore);
+      }
+    }
+    if (fs.readFileSync(SCOPEFILE, 'utf8') === scopeBefore) ok('scope.js restored byte-for-byte');
+    else bad('scope.js was NOT restored');
+
     console.log('\n' + (fail ? `FAIL  ${fail} assertion(s) failed` :
       'PASS  the validator stops before spending on a mismatch, is idempotent, attributes its '
       + 'evidence, leaves the approved objective alone, and cannot report a fabricated cost.'));
