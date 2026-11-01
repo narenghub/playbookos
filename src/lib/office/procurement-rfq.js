@@ -289,5 +289,97 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
   };
 }
 
-module.exports = { renderGovernedRFQ, prepareGovernedRFQ, identityContainment, casTokens,
-  fileException, AGENT, WORKFLOW };
+// ── §12: THE GOVERNED-OFFICE PROCUREMENT ENTRY POINT ────────────────────────
+//
+// This is the wiring, and it is deliberately a SEPARATE ENTRY POINT rather than a change to the
+// existing weekly procurement cron. "Wire renderGovernedRFQ into governed-office procurement only.
+// Do not globally replace unrelated procurement execution." The Tuesday cron
+// (weekly-tue-9cst-procurement-rfqs) is untouched and still uses the path it always did.
+//
+// The required chain, and where each link is:
+//
+//   canonical identity decision  → guardSend, in prepareGovernedRFQ (the SAME authority the live
+//                                  send path uses, so the governed path cannot drift to a softer
+//                                  notion of "approved")
+//   governed AI rendering        → renderGovernedRFQ → office/ai.js governedCall
+//   output containment           → identityContainment, which REFUSES rather than sanitising
+//   durable cost / provenance    → office_cost_ledger via governedCall; the run carries company
+//                                  and objective by K1's composite key
+//   prepared action              → office_approvals, payload immutable from insert
+//   blocking approval            → status 'pending'; release is a separate recorded decision
+//   release                      → NOT HERE. This function prepares and stops.
+//
+// WHAT IT CANNOT DO. It cannot send: no mailer, no outreach module and no supplier-claim call is
+// reachable from this file, which an architectural assertion in the fixture suite checks on the
+// require graph rather than trusting this comment. It cannot run against a draft objective —
+// beginObjectiveRun resolves the context, which refuses anything but `active`. It cannot run twice
+// in a day for one objective: the day-slot intent key makes the second attempt a duplicate, which
+// is the wanted behaviour when the deliverable is "exactly one RFQ".
+//
+// THE SUPPLIER IS NAMED BY THE CALLER AND LOADED FROM THE DATABASE. The AI does not choose it.
+// Supplier selection is a commercial decision; letting the renderer pick would put the model in
+// authority over who Abiozen contacts, which is the same class of mistake as letting it decide
+// chemical identity.
+async function runGovernedProcurement({ objectiveId, rfqId, supplierId, trigger = 'manual',
+  triggerDetail = null }, deps = {}) {
+  if (!objectiveId) throw new Error('runGovernedProcurement requires an objectiveId');
+  if (!rfqId) throw new Error('runGovernedProcurement requires an rfqId');
+  if (!supplierId) throw new Error('runGovernedProcurement requires a supplierId — the AI does not choose the supplier');
+
+  const query = (deps && deps.query) || require('../db').query;
+
+  // Authoritative supplier facts, read from the row. A caller-supplied email address would be an
+  // unverified destination for a real communication.
+  const supplier = (await query(
+    `SELECT id, name, contact_email, contact_name, country, region FROM suppliers WHERE id = $1`,
+    [supplierId]
+  )).rows[0];
+  if (!supplier) return { ok: false, refusal: 'no_such_supplier', supplierId };
+  if (!supplier.contact_email) {
+    return { ok: false, refusal: 'supplier_has_no_contact_email', supplierId, supplier_name: supplier.name };
+  }
+
+  const { beginObjectiveRun } = require('./run');
+  const begun = await beginObjectiveRun({
+    objectiveId, trigger, triggerDetail, workflow: WORKFLOW, agent: AGENT,
+    maxRuntimeMinutes: 15,
+  }, deps);
+
+  if (begun.duplicate) {
+    return { ok: false, refusal: 'duplicate_intent', intentKey: begun.intentKey,
+      detail: 'a governed procurement run for this objective already exists for today — '
+        + 'a second run is not a second intent' };
+  }
+
+  const L = (deps && deps.ledger)
+    || require('../run-ledger').ledger({ query: (deps && deps.query) || undefined });
+  await L.startRun(begun.runId);
+
+  let out;
+  try {
+    out = await prepareGovernedRFQ(begun.context, { rfqId, supplier }, deps);
+  } catch (e) {
+    await L.finish(begun.runId, { error: e.message });
+    throw e;
+  }
+
+  // A governed REFUSAL is the system working, not the run failing — the exception it filed is the
+  // deliverable in that case. The terminal state is left to the ledger to DERIVE from the recorded
+  // events rather than asserted here, because a caller that names its own terminal state can
+  // report success over a run that did nothing (the K2 defect).
+  const fin = await L.finish(begun.runId);
+
+  return {
+    ...out,
+    runId: begun.runId,
+    objectiveId,
+    companyId: begun.context.companyId,
+    workflow: WORKFLOW,
+    agent: AGENT,
+    runState: fin.state,
+    sent: false,     // stated, never inferred: this path has no send capability at all
+  };
+}
+
+module.exports = { renderGovernedRFQ, prepareGovernedRFQ, runGovernedProcurement,
+  identityContainment, casTokens, fileException, AGENT, WORKFLOW };

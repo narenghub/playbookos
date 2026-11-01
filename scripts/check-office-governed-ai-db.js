@@ -624,6 +624,18 @@ globalThis.fetch = async (u, opts) => {
       bad('§6 the governed module can reach the LEGACY procurement agent — a refusal could fall back to it');
     } else ok('§6 the governed module cannot reach the legacy generator at all (asserted on the require graph, not read from a comment)');
 
+    // AND IT CANNOT SEND. The entry point's header claims no mailer, no outreach and no supplier
+    // claim is reachable from it. A claim like that belongs in an assertion, not a comment — the
+    // whole §12 chain ends at "prepared", and "it has no send capability" is the only reason that
+    // boundary cannot be crossed by a later edit that looks reasonable in review.
+    const sendable = ['mailer.js', 'whatsapp.js', path.join('outreach', 'registry.js'),
+      path.join('procurement', 'rfq-claim.js')];
+    const reachable = sendable.filter((m) => graphG.some((f) => f.includes(m)));
+    if (reachable.length) {
+      bad('§6 the governed module can reach an OUTBOUND primitive — "prepares and stops" is not structural',
+        reachable.join(', '));
+    } else ok('§6 no mailer, WhatsApp, outreach or supplier-claim module is reachable from the governed path');
+
     // The fixture table must exist before the FIRST call: prepareGovernedRFQ reads rfq_requests
     // even to discover the RFQ is absent, so creating it later made "no such RFQ" fail as a
     // missing relation instead.
@@ -662,6 +674,125 @@ globalThis.fetch = async (u, opts) => {
       else if (payload.action_payload.subject !== prep.subject || payload.action_payload.body !== prep.body) {
         bad('§6 the stored payload is not the prepared communication');
       } else ok('§6 the stored, immutable payload IS the exact prepared communication and its identity decision');
+    }
+
+    // ══ RULING §12: THE GOVERNED-OFFICE PROCUREMENT ENTRY POINT ════════════
+    //
+    // The wiring itself: a caller gives an objective, an RFQ and a SUPPLIER ID, and gets a
+    // prepared action. The entry point must open its own governed run, must not choose the
+    // supplier, must not send, and must not be reachable from the legacy weekly cron.
+    note('§12: the governed-office entry point prepares and stops');
+
+    await q(`CREATE TABLE IF NOT EXISTS suppliers (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+             country TEXT, region TEXT, contact_email TEXT, contact_name TEXT)`);
+    await q(`INSERT INTO suppliers (id, name, country, contact_email, contact_name)
+             VALUES ('sup-k56','Fixture Labs Pvt Ltd','India','rfq@fixture-labs.invalid','A. Buyer')
+             ON CONFLICT (id) DO NOTHING`);
+    await q(`INSERT INTO suppliers (id, name, country, contact_email)
+             VALUES ('sup-noemail','No Email Labs','India',NULL) ON CONFLICT (id) DO NOTHING`);
+
+    // An unknown supplier, and one with no address, are refused BEFORE a run is opened — an
+    // unverified destination for a real supplier communication is not an acceptable input.
+    const runsBefore = (await q(`SELECT COUNT(*)::int n FROM agent_runs WHERE workflow = $1`, [freshRfq.WORKFLOW])).rows[0].n;
+    const noSup = await freshRfq.runGovernedProcurement({ objectiveId: OA, rfqId: 'rfq-k56',
+      supplierId: 'sup-does-not-exist' }, { ...deps, guard: allowingGuard });
+    if (!noSup.ok && noSup.refusal === 'no_such_supplier') ok('§12 an unknown supplier is refused');
+    else bad('§12 an unknown supplier was not refused', JSON.stringify(noSup));
+
+    const noMail = await freshRfq.runGovernedProcurement({ objectiveId: OA, rfqId: 'rfq-k56',
+      supplierId: 'sup-noemail' }, { ...deps, guard: allowingGuard });
+    if (!noMail.ok && noMail.refusal === 'supplier_has_no_contact_email') {
+      ok('§12 a supplier with no contact address is refused');
+    } else bad('§12 a supplier with no address was not refused', JSON.stringify(noMail));
+
+    const runsAfterRefusals = (await q(`SELECT COUNT(*)::int n FROM agent_runs WHERE workflow = $1`, [freshRfq.WORKFLOW])).rows[0].n;
+    if (runsAfterRefusals === runsBefore) ok('§12 neither refusal opened a run — the input is validated first');
+    else bad(`§12 a refused input still opened ${runsAfterRefusals - runsBefore} run(s)`);
+
+    // A DRAFT objective cannot be procured against. This is the property that keeps §15's
+    // "activate last" ordering honest: the entry point cannot act before the CEO switches it on.
+    const ODRAFT = `k56-draft-${crypto.randomUUID()}`;
+    await scope.createObjective({ id: ODRAFT, companyId: A, objective: 'Draft objective fixture',
+      priority: 'P3', kpiMetric: 'x', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+      autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+    ids.objectives.push(ODRAFT);
+    let draftErr = null;
+    try {
+      await freshRfq.runGovernedProcurement({ objectiveId: ODRAFT, rfqId: 'rfq-k56',
+        supplierId: 'sup-k56' }, { ...deps, guard: allowingGuard });
+    } catch (e) { draftErr = e; }
+    if (draftErr && draftErr.code === 'NO_COMPANY_CONTEXT') {
+      ok('§12 a DRAFT objective cannot be procured against — no execution context');
+    } else bad('§12 a draft objective was procured against', draftErr ? draftErr.message : 'no error raised');
+
+    // ── THE HAPPY PATH: PREPARED, AND STOPPED ───────────────────────────────
+    //
+    // Its OWN objective, deliberately. The first version of this used OA and was refused as a
+    // duplicate — because the harness had already opened a run for OA under the same workflow
+    // during setup, and the day-slot intent key is per (workflow, objective). The refusal was
+    // right and the test was wrong, which is worth keeping: it is the property §15 depends on.
+    const OENTRY = `k56-entry-${crypto.randomUUID()}`;
+    await scope.createObjective({ id: OENTRY, companyId: A, objective: 'Governed procurement entry fixture',
+      priority: 'P2', kpiMetric: 'qualified_supplier_quotes_received', kpiTarget: 1,
+      deadline: '2026-12-31', budgetUsd: 5, autonomyTier: 'supervised',
+      approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+    ids.objectives.push(OENTRY);
+    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OENTRY, runId: null }),
+      { id: OENTRY, status: 'active' }, deps);
+
+    const gp = await freshRfq.runGovernedProcurement({ objectiveId: OENTRY, rfqId: 'rfq-k56',
+      supplierId: 'sup-k56', trigger: 'manual', triggerDetail: 'fixture' },
+      { ...deps, guard: allowingGuard });
+    if (!gp.ok) bad(`§12 the governed entry point failed: ${gp.refusal} ${gp.detail || ''}`);
+    else {
+      ids.runs.push(gp.runId);
+      ids.approvals.push(gp.approvalId);
+      if (gp.sent === false) ok('§12 the result states sent=false — never inferred, this path has no send capability');
+      else bad('§12 the entry point reported a send');
+      if (gp.status === 'pending') ok('§12 the prepared action is PENDING a human decision');
+      else bad(`§12 the prepared action is ${gp.status}, not pending`);
+      if (gp.companyId === A) ok('§12 the run carries the company, derived from the objective');
+      else bad('§12 wrong company on the governed procurement run', gp.companyId);
+      if (gp.objectiveId === OENTRY) ok('§12 the run carries the objective'); else bad('§12 wrong objective');
+      if (gp.workflow === 'governed-rfq-generation' && gp.agent === 'procurement-agent') {
+        ok(`§12 attributed to ${gp.workflow}/${gp.agent}`);
+      } else bad('§12 wrong workflow/agent attribution', `${gp.workflow}/${gp.agent}`);
+      if (gp.runState === 'SUCCEEDED') ok(`§12 the run reached ${gp.runState}, derived by the ledger`);
+      else bad(`§12 the run ended ${gp.runState}`);
+
+      // The AI spend for the rendering is attributed to this run and this objective.
+      const spendRow = (await q(
+        `SELECT objective_id, workflow, agent, cost_known FROM office_cost_ledger WHERE run_id = $1`,
+        [gp.runId])).rows;
+      if (spendRow.length && spendRow.every((r) => r.objective_id === OENTRY)) {
+        ok(`§12 the rendering's AI cost is attributed to the objective (${spendRow.length} call(s))`);
+      } else bad('§12 the rendering cost is not attributed to the objective', JSON.stringify(spendRow));
+
+      // Nothing was claimed as a business outcome: "do not claim a quote received when the RFQ is
+      // merely sent" — and it has not even been sent.
+      const outcomes = (await q(`SELECT COUNT(*)::int n FROM office_outcomes WHERE run_id=$1`, [gp.runId])).rows[0].n;
+      if (outcomes === 0) ok('§12 no outcome was recorded — preparing an RFQ is not a business result');
+      else bad(`§12 ${outcomes} outcome(s) recorded for a merely prepared RFQ`);
+
+      // A second run the same day is not a second intent.
+      const again = await freshRfq.runGovernedProcurement({ objectiveId: OENTRY, rfqId: 'rfq-k56',
+        supplierId: 'sup-k56' }, { ...deps, guard: allowingGuard });
+      if (!again.ok && again.refusal === 'duplicate_intent') {
+        ok('§12 a second governed procurement run for the same objective today is refused as a duplicate');
+      } else bad('§12 a second run was permitted the same day', JSON.stringify(again).slice(0, 200));
+    }
+
+    // K8 must recognize the workflow by name, independent of which modules are loaded.
+    {
+      const freshAutonomy = require('../src/lib/autonomy');
+      const wf = freshAutonomy.knownScopeKeys('workflow') || [];
+      const ag = freshAutonomy.knownScopeKeys('agent') || [];
+      if (wf.includes('governed-rfq-generation')) ok('§12 K8 recognizes workflow:governed-rfq-generation');
+      else bad('§12 K8 does not recognize the governed RFQ workflow — an operator could not stop it by name');
+      if (wf.includes('objective-review')) ok('§12 K8 recognizes workflow:objective-review without executive-agent being loaded');
+      else bad('§12 objective-review is still invisible unless its module happens to be required');
+      if (ag.includes('procurement-agent')) ok('§12 K8 recognizes agent:procurement-agent');
+      else bad('§12 K8 does not recognize agent:procurement-agent');
     }
 
     // ══ MUTATION CONTROLS ══════════════════════════════════════════════════

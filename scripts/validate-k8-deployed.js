@@ -56,6 +56,28 @@ const REASON = 'K8 production validation: confirming scope-key validation (no st
     if (missing.length) bad(`${missing.length} live cron name(s) are not in the workflow vocabulary`, missing.slice(0, 6).join(', '));
     else ok(`the workflow vocabulary is DERIVED from the live CRON_SCOPES (all ${cronNames.length} present), not a second list`);
 
+    // ── §14 PREREQUISITE: THE AI OFFICE'S OWN SCOPES ──────────────────────
+    //
+    // "K8 recognizes the new workflow/agent/capability scopes." These used to be registered as a
+    // SIDE EFFECT of requiring the module that owned them, so the vocabulary varied with the
+    // import graph: `objective-review` was invisible to any process that had not loaded
+    // executive-agent, and a legitimate stop could be rejected as an unknown key at exactly the
+    // moment somebody needed it. They are now declared statically in autonomy.js.
+    //
+    // This validator does NOT require the office modules, deliberately — that is what makes the
+    // assertion meaningful rather than self-fulfilling.
+    const officeWorkflows = ['objective-review', 'governed-rfq-generation', 'quarter-hourly-office-recovery'];
+    const officeAgents = ['executive-agent', 'procurement-agent'];
+    const missingOffice = officeWorkflows.filter((w) => !vocab.workflow.includes(w));
+    const missingOfficeAgents = officeAgents.filter((a) => !vocab.agent.includes(a));
+    if (missingOffice.length) {
+      bad('AI Office workflow scope(s) are NOT stoppable by name — an operator could not halt them',
+        missingOffice.join(', '));
+    } else ok(`all ${officeWorkflows.length} AI Office workflow scopes are recognized without their modules being loaded`);
+    if (missingOfficeAgents.length) {
+      bad('AI Office agent scope(s) are NOT stoppable by name', missingOfficeAgents.join(', '));
+    } else ok(`both AI Office agent scopes are recognized (${officeAgents.join(', ')})`);
+
     const cronAgents = [...new Set(Object.values(autonomy.CRON_SCOPES).map((m) => m && m.agent).filter(Boolean))];
     const missingAgents = cronAgents.filter((a) => !vocab.agent.includes(a));
     if (missingAgents.length) bad(`${missingAgents.length} live cron agent(s) missing from the vocabulary`, missingAgents.join(', '));

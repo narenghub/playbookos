@@ -235,6 +235,31 @@ const MIN_REASON = 10;
 
 const EXTRA_SCOPES = { workflow: new Set(), agent: new Set() };
 
+// ── THE AI OFFICE'S SCOPES ARE DECLARED, NOT DISCOVERED ─────────────────────
+//
+// registerScopes() runs as a side effect of REQUIRING the module that owns the scope, so the
+// vocabulary an operator sees depended on which modules happened to be loaded in that process.
+// `objective-review` was invisible to any process that had not required executive-agent — so a
+// legitimate stop could be rejected as an unknown key at exactly the moment somebody needed it,
+// and `knownScopeKeys` would under-report what is stoppable.
+//
+// A kill switch whose vocabulary varies by import graph is not a kill switch you can rely on under
+// pressure, so the office's scopes are declared here, statically, the same way CRON_SCOPES are.
+// registerScopes() remains for genuinely dynamic owners (a validation workflow that exists only
+// while a script runs), and it is still additive-only.
+//
+// Keys already present in CRON_SCOPES — quarter-hourly-office-recovery, procurement-agent — are
+// not repeated; knownScopeKeys unions and de-duplicates.
+const OFFICE_SCOPES = Object.freeze({
+  workflows: Object.freeze([
+    'objective-review',           // office/executive-agent.js
+    'governed-rfq-generation',    // office/procurement-rfq.js
+  ]),
+  agents: Object.freeze([
+    'executive-agent',            // office/executive-agent.js
+  ]),
+});
+
 /**
  * Declare scope keys that are not cron names. Called by the module that owns them, at load.
  * Additive only: it can never remove a key, so it cannot narrow what an operator may stop.
@@ -249,11 +274,12 @@ function registerScopes({ workflows = [], agents = [] } = {}) {
 function knownScopeKeys(scope_type) {
   if (scope_type === 'capability') return [...CAPABILITIES].sort();
   if (scope_type === 'workflow') {
-    return [...new Set([...Object.keys(CRON_SCOPES), ...EXTRA_SCOPES.workflow])].sort();
+    return [...new Set([...Object.keys(CRON_SCOPES), ...OFFICE_SCOPES.workflows,
+      ...EXTRA_SCOPES.workflow])].sort();
   }
   if (scope_type === 'agent') {
     const fromCrons = Object.values(CRON_SCOPES).map((m) => m && m.agent).filter(Boolean);
-    return [...new Set([...fromCrons, ...EXTRA_SCOPES.agent])].sort();
+    return [...new Set([...fromCrons, ...OFFICE_SCOPES.agents, ...EXTRA_SCOPES.agent])].sort();
   }
   return null;   // company: free text by design; global: no key
 }
