@@ -32,6 +32,7 @@
 
 const { governedCall } = require('./ai');
 const { assertContext } = require('./context');
+const scope = require('./scope');
 
 const AGENT = 'procurement-agent';
 const WORKFLOW = 'governed-rfq-generation';
@@ -143,18 +144,51 @@ palash@abiozen.com`;
   // An unaccounted or failed AI call produces no sendable artefact. governedCall already withholds
   // text it could not account for; this is the caller honouring that rather than reaching past it.
   if (!ai.ok) {
-    return { ok: false, refusal: ai.accounted === false ? 'ai_not_accounted' : 'ai_unavailable',
-      body: null, subject, ai, detail: ai.error };
+    const refusal = ai.accounted === false ? 'ai_not_accounted' : 'ai_unavailable';
+    // An unaccounted AI call is a governance failure, not a transient hiccup: it means spend
+    // happened outside the budget's knowledge. A provider being unavailable is ordinary and does
+    // not need a human, so only the accounting failure is queued.
+    const exceptionId = refusal === 'ai_not_accounted'
+      ? await fileException(ctx, { rfqId, severity: 'high', source: 'office/procurement-rfq',
+        reason: `AI cost evidence could not be persisted for RFQ ${rfqId || '(unknown)'}, so the generated text was withheld. Spend may have occurred outside the budget: ${ai.error}`,
+      }, deps)
+      : null;
+    return { ok: false, refusal, body: null, subject, ai, detail: ai.error, exception_id: exceptionId };
   }
 
   const violation = identityContainment(ai.text, { approvedCas, filedCas });
   if (violation) {
+    // THIS MUST REACH A HUMAN. A model attempting to state a chemical identity the identity
+    // decision refused is the 21 July failure mode caught one layer earlier — a refusal that
+    // vanished into a return value would mean nobody ever learns the model tried.
+    const exceptionId = await fileException(ctx, {
+      rfqId, severity: 'critical', source: 'office/procurement-rfq',
+      reason: `generated RFQ text contradicted the approved chemical identity and was refused: ${violation}`,
+    }, deps);
     return { ok: false, refusal: 'ai_contradicted_approved_identity', body: null, subject, ai,
-      detail: violation };
+      detail: violation, exception_id: exceptionId };
   }
 
   return { ok: true, subject, body: ai.text, ai,
     approved_by_decision: approvedMol.__approvedByDecision };
 }
 
-module.exports = { renderGovernedRFQ, identityContainment, casTokens, AGENT, WORKFLOW };
+// File a durable exception, adopting the K1 queue rather than inventing a second one. Never throws:
+// the refusal must stand even if the queue is unavailable, and a queue failure is reported loudly
+// rather than converted into a successful render.
+async function fileException(ctx, { rfqId, severity, source, reason }, deps = {}) {
+  const id = `ex-rfq-${ctx.runId}-${rfqId || 'unknown'}`;
+  try {
+    await scope.openException(ctx, {
+      id, runId: ctx.runId, source, reason, severity,
+      slaHours: severity === 'critical' ? 4 : 24,
+    }, deps);
+    return id;
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[office/procurement-rfq] refusal recorded in the result but NOT queued: ${e.message}`);
+    return null;
+  }
+}
+
+module.exports = { renderGovernedRFQ, identityContainment, casTokens, fileException, AGENT, WORKFLOW };

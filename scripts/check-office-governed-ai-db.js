@@ -335,6 +335,43 @@ globalThis.fetch = async (u, opts) => {
     else if (!/FILED CAS/.test(stale.detail)) bad(`G the refusal does not name the stale filed CAS: ${stale.detail}`);
     else ok('G the stale FILED CAS in generated prose is refused BY NAME (the 21 July failure mode)');
 
+    // K7 LIFECYCLE: the refusal must reach a human, not vanish into a return value. A model that
+    // attempted to state a refused chemical identity is exactly what somebody has to see.
+    if (!stale.exception_id) bad('H/K7 the identity refusal was NOT queued — nobody would learn the model tried');
+    else {
+      const exRow = (await q(
+        `SELECT company_id, objective_id, run_id, source, severity, status, sla_hours, reason, created_at
+           FROM office_exceptions WHERE id = $1`, [stale.exception_id]
+      )).rows[0];
+      if (!exRow) bad('H/K7 the exception id was returned but no row exists');
+      else {
+        const gaps = [];
+        if (exRow.company_id !== A) gaps.push('company');
+        if (exRow.objective_id !== OA) gaps.push('objective');
+        if (exRow.run_id !== ctx.runId) gaps.push('run');
+        if (!exRow.reason) gaps.push('reason');
+        if (exRow.severity !== 'critical') gaps.push('severity');
+        if (exRow.status !== 'open') gaps.push('status');
+        if (!exRow.sla_hours) gaps.push('sla');
+        if (!exRow.created_at) gaps.push('age');
+        if (gaps.length) bad(`H/K7 the exception is missing ruled fields: ${gaps.join(', ')}`);
+        else ok('H/K7 the identity refusal is queued as a CRITICAL exception with company, objective, run, reason, severity, status, SLA and age');
+      }
+      // Acknowledgment and resolution complete the lifecycle.
+      const listed = await scope.listOpenExceptions(ctx, deps);
+      const mineEx = listed.find((x) => x.id === stale.exception_id);
+      if (!mineEx) bad('H/K7 the exception is not in the open queue');
+      else if (typeof mineEx.age_hours !== 'number' && mineEx.age_hours === undefined) bad('H/K7 the queue does not expose age');
+      else ok('H/K7 the exception appears in the company-scoped open queue with an age');
+      const resolved = await scope.resolveException(ctx, { id: stale.exception_id,
+        resolvedBy: 'naresh', resolution: 'reviewed: model output refused correctly, no send occurred' }, deps);
+      if (!resolved || resolved.status !== 'resolved') bad('H/K7 the exception could not be resolved');
+      else ok('H/K7 the exception can be resolved by a human, closing the lifecycle');
+      const stillOpen = (await scope.listOpenExceptions(ctx, deps)).some((x) => x.id === stale.exception_id);
+      if (stillOpen) bad('H/K7 a resolved exception is still in the open queue');
+      else ok('H/K7 a resolved exception leaves the open queue');
+    }
+
     // A CAS the model invented from nowhere.
     mode = 'invents-cas';
     const invented = await rfq.renderGovernedRFQ(ctx, { approvedMol, supplier, rfqId: 'rfq-1' }, deps);

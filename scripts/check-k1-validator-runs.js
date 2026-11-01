@@ -96,6 +96,7 @@ function runScript(name) {
 }
 const runValidator = () => runScript('validate-k1-deployed.js');
 const runK2Validator = () => runScript('validate-k2-deployed.js');
+const runK8Validator = () => runScript('validate-k8-deployed.js');
 
 const HISTORICAL = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
 
@@ -288,6 +289,31 @@ const POSITIVES = [
       () => migrateOffice(query),
       /cross-company objective substitution.*ACCEPTED/s,
       runK2Validator);
+
+    // ── 6. THE K8 VALIDATOR ───────────────────────────────────────────────
+    out('  --    the K8 production validator');
+    await require('../src/lib/autonomy').migrateAutonomy(query);
+    const k8 = runK8Validator();
+    if (k8.code !== 0) bad('the K8 validator is RED against a correctly migrated database', (k8.stdout + k8.stderr).slice(-1200));
+    else ok('the K8 validator is GREEN against a correctly migrated database');
+    if (!/no stop was written by this validator/.test(k8.stdout)) {
+      bad('the K8 validator does not assert that it wrote no stop');
+    } else ok('the K8 validator asserts it wrote no stop — writing one would halt autonomy');
+    const stopsAfter = (await query(`SELECT COUNT(*)::int n FROM autonomy_stops`)).rows[0].n;
+    if (stopsAfter !== 0) bad(`the K8 validator left ${stopsAfter} stop row(s) behind`);
+    else ok('the K8 validator wrote nothing durable');
+
+    // It must detect a stop that protects nothing — the assertion only production can make.
+    await query(`INSERT INTO autonomy_stops (scope_type, scope_key, reason, set_by)
+                 VALUES ('capability','email_send','K8 harness: a stop that matches nothing','harness')`);
+    const k8red = runK8Validator();
+    if (k8red.code === 0) bad('SABOTAGE K8: a stop row matching nothing did NOT turn the validator red');
+    else if (!/protecting nothing RIGHT NOW/.test(k8red.stdout)) bad('SABOTAGE K8: red, but not for the dead-stop reason', k8red.stdout.slice(-600));
+    else ok('SABOTAGE K8: an existing stop row that matches nothing turns the validator red, for the right reason');
+    await query(`DELETE FROM autonomy_stops WHERE set_by = 'harness'`);
+    const k8back = runK8Validator();
+    if (k8back.code !== 0) bad('after removing the dead stop the K8 validator is still red', (k8back.stdout + k8back.stderr).slice(-600));
+    else ok('after removing the dead stop the K8 validator is green again');
 
   } catch (e) {
     bad('unexpected error', e.stack || e.message);
