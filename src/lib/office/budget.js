@@ -1,8 +1,19 @@
-// PlayNexa AI Office — K5: the budget mechanism. BUILT AND TESTED; ACTIVATION IS A SEPARATE RULING.
+// PlayNexa AI Office — K5: the budget mechanism. ACTIVATED 1 Nov 2026.
 //
-// Nothing in this file is wired to a call path. `enforce()` has no production caller, so no
-// autonomous work is refused today. That is deliberate: "Build and adversarially test it now.
-// Activation remains the separate decision."
+// ── WIRED, AS OF ACTIVATION ─────────────────────────────────────────────────
+//
+// This header previously read "Nothing in this file is wired to a call path." That became false
+// at activation, and a stale comment asserting an invariant that no longer holds is exactly the
+// defect recorded as Defect 7 in the verification standard — so it is corrected here rather than
+// left to be discovered.
+//
+//   enforceHierarchy        → office/ai.js governedCall, BEFORE the provider call. Every governed
+//                             AI invocation is now refused when either cap is exhausted.
+//   consequentialReleaseGate → office/approval.js release. Unknown cost fails closed THERE, not at
+//                             the call, so the evidence a human reviews survives.
+//
+// Activation was authorized only after real cost capture succeeded in production, so the numbers
+// these decisions are made on are measured rather than assumed.
 //
 // ── THE POLICY ──────────────────────────────────────────────────────────────
 //
@@ -148,11 +159,21 @@ async function enforceHierarchy(ctx, { objectiveId, criticality = 'routine',
     const o = await scope.spendForObjective(ctx, objectiveId, deps);
     const spent = Number(o.usd || 0);
     const unknown = Number(o.unknown_calls || 0);
+    // A $0 OBJECTIVE BUDGET MEANS NO SPEND IS PERMITTED, NOT UNLIMITED SPEND.
+    //
+    // This read `fraction: budget > 0 ? spent / budget : 0`, so an objective explicitly given a
+    // $0 budget produced fraction 0 — tier 'ok' — and could spend without limit. The guard against
+    // the $10-objective-eating-$50 case was silently absent for the strictest budget a CEO can
+    // set, which is the one most likely to be set deliberately.
+    //
+    // `objectiveBudgetUsd == null` still means "no objective budget configured" and skips this
+    // block entirely (see the caller above). An explicit 0 is a decision, not an absence.
+    const cap = Number(objectiveBudgetUsd);
     const objective = {
-      budgetUsd: Number(objectiveBudgetUsd),
+      budgetUsd: cap,
       spendKnownUsd: spent,
       unknownCalls: unknown,
-      fraction: Number(objectiveBudgetUsd) > 0 ? spent / Number(objectiveBudgetUsd) : 0,
+      fraction: cap > 0 ? spent / cap : 1,
       confident: unknown === 0,
       lowerBound: true,
     };
@@ -161,7 +182,9 @@ async function enforceHierarchy(ctx, { objectiveId, criticality = 'routine',
 
     if (objective.fraction >= 1.0) {
       return { allow: false, scope: 'objective', criticality, enterprise, objective,
-        reason: `objective budget exhausted: $${spent.toFixed(4)} of $${objectiveBudgetUsd} measured` };
+        reason: cap > 0
+          ? `objective budget exhausted: $${spent.toFixed(4)} of $${cap} measured`
+          : `objective budget is $0 — no AI spend is permitted against this objective` };
     }
     if (refuseOnUnmeasured && !objective.confident) {
       return { allow: false, scope: 'objective', criticality, enterprise, objective,

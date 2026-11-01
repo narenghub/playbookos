@@ -3,6 +3,8 @@
 // THE ONLY WAY THE KERNEL CALLS A MODEL. The ruled chain, and where each link is enforced:
 //
 //   AI capability request   → `capability` ('fast' | 'balanced' | 'deep'), never a literal pin
+//   budget check            → K5, ACTIVE: both the enterprise daily cap and the objective's total
+//                             budget must allow the call, BEFORE the provider is reached
 //   selected provider       → returned and persisted, not assumed
 //   selected model          → resolved from the alias, literal id recorded so a past decision
 //                             stays explicable (AI_PROVIDER_FABRIC.md step 3)
@@ -36,6 +38,7 @@
 
 const llm = require('../llm');
 const scope = require('./scope');
+const budget = require('./budget');
 const { assertContext } = require('./context');
 
 const PROVIDER = 'anthropic';      // the only provider the first kernel workflow needs (Decision 5)
@@ -99,6 +102,11 @@ async function governedCall(ctx, spec, deps = {}) {
   const {
     capability = 'fast', prompt, system = null, maxTokens,
     timeoutMs, agent = null, workflow = null, purpose = null,
+    // 'routine' is the STRICTER default, deliberately: critical, recovery and observability work
+    // is exempt from the spend limit, so a caller that forgets to declare its criticality gets
+    // refused when the budget is exhausted rather than silently exempted. Same shape as
+    // `consequential` defaulting to true in approval.release.
+    criticality = 'routine',
   } = spec || {};
 
   if (!ctx.runId) {
@@ -110,6 +118,37 @@ async function governedCall(ctx, spec, deps = {}) {
   if (!CAPABILITIES.includes(capability)) {
     return { ok: false, accounted: true, text: null, json: null, ...llm.COST_NONE,
       error: `unknown capability "${capability}" — expected one of ${CAPABILITIES.join(', ')}` };
+  }
+
+  // ── K5 BUDGET ENFORCEMENT, ACTIVATED ──────────────────────────────────────
+  //
+  // Both caps must be satisfied: the enterprise cap is PER DAY and resets; an objective's budget
+  // is a TOTAL for its life. "Do not allow a $10 objective to consume $50 simply because
+  // enterprise budget remains."
+  //
+  // The objective's budget is READ FROM THE RESOLVED CONTEXT, which read it from the stored
+  // objective. There is no parameter through which a caller could raise its own ceiling — the same
+  // structural choice as the company never being caller-supplied.
+  //
+  // `refuseOnUnmeasured` is deliberately NOT set here. Unknown cost fails closed at RELEASE, in
+  // consequentialReleaseGate, because blocking the AI call would destroy the text and the cost row
+  // a human is meant to review. Unmeasured calls still raise the tier by one, so they tighten the
+  // assessment without inventing a dollar figure.
+  const budgetDecision = await budget.enforceHierarchy(ctx, {
+    objectiveId: ctx.objectiveId || null,
+    criticality,
+    objectiveBudgetUsd: ctx.budgetUsd === undefined ? null : ctx.budgetUsd,
+  }, deps);
+
+  if (!budgetDecision.allow) {
+    // Nothing reached the provider, so cost is a KNOWN ZERO and no ledger row is owed. Filing a
+    // $0.00 row here would pad the ledger with non-events and make "zero spend" ambiguous.
+    console.warn(`[BUDGET_REFUSED] ${workflow || 'office'}/${agent || '?'} `
+      + `(${budgetDecision.scope}): ${budgetDecision.reason}`);
+    return { ok: false, accounted: true, text: null, json: null, ...llm.COST_NONE,
+      refusedBy: 'budget', budgetScope: budgetDecision.scope, budget: budgetDecision,
+      capability, criticality,
+      error: `BUDGET_REFUSED: ${budgetDecision.reason}` };
   }
 
   const model = llm.resolveModel(capability);

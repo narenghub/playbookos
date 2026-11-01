@@ -742,6 +742,122 @@ globalThis.fetch = async (u, opts) => {
     if (sha(RFQF) !== before) bad('M3 procurement-rfq.js was NOT restored byte-for-byte');
     else ok('M3 procurement-rfq.js restored, verified by content hash');
 
+    // ══ K5 ACTIVATED: THE GOVERNED CALL IS NOW REFUSED WHEN A CAP IS GONE ═══
+    //
+    // Before activation `enforce()` had no production caller and nothing was refused. These prove
+    // the wiring, on fixtures — per Rule 7 no threshold is ever consumed in production to watch it
+    // bite.
+    //
+    // WHAT THESE PROVE AND WHAT THEY DO NOT. The OBJECTIVE cap is driven end to end through
+    // governedCall, because a fixture objective can be given a budget small enough to exhaust for
+    // a fraction of a cent. The ENTERPRISE cap is $100/day and is proven at the enforce /
+    // enforceHierarchy layer above, not through governedCall, because reaching it end to end would
+    // mean spending $100 — and governedCall deliberately exposes NO cap parameter, so a caller
+    // cannot raise or lower its own ceiling. That boundary is stated rather than blurred.
+    note('K5 ACTIVATED: both caps are now enforced before the provider is reached');
+    mode = 'normal';
+
+    // An objective with a budget so small that one stubbed call exhausts it.
+    const OTIGHT = `k56-tight-${crypto.randomUUID()}`;
+    await scope.createObjective({
+      id: OTIGHT, companyId: A, objective: 'Budget activation fixture — tiny budget',
+      priority: 'P3', kpiMetric: 'calls', kpiTarget: 1, deadline: '2026-12-31',
+      // 0.01, not 0.0001: objectives.budget_usd is NUMERIC(12,2), so anything finer ROUNDS TO
+      // $0.00 — and the new $0 guard then refuses everything, which is how this fixture's first
+      // version failed. A budget the column cannot represent is not a small budget.
+      budgetUsd: 0.01, autonomyTier: 'supervised', approvalPolicy: 'all_consequential',
+      createdBy: 'test',
+    }, deps);
+    ids.objectives.push(OTIGHT);
+    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OTIGHT, runId: null }),
+      { id: OTIGHT, status: 'active' }, deps);
+    const tightRun = await beginObjectiveRun({ objectiveId: OTIGHT, trigger: 'office',
+      workflow: 'budget-activation-fixture', agent: 'test-agent', maxRuntimeMinutes: 5 }, deps);
+    ids.runs.push(tightRun.runId);
+    await L.startRun(tightRun.runId);
+    const tightCtx = tightRun.context;
+
+    // First call: inside budget, so it must succeed and be accounted.
+    const t1 = await ai.governedCall(tightCtx, { capability: 'fast', prompt: 'hi', maxTokens: 20,
+      workflow: 'budget-activation-fixture', agent: 'test-agent' }, deps);
+    if (t1.ok) ok('a call within the objective budget proceeds and is accounted');
+    else bad('the first in-budget call was refused', t1.error);
+
+    // Now exhaust the budget EXPLICITLY rather than by making ~57 real calls at haiku rates.
+    // The cost row is the thing the budget reads, so filing one is the honest way to put the
+    // objective over its cap — and it keeps this test independent of provider pricing, which is
+    // not the subject under test and would silently change the meaning of a pass.
+    const beforeRows = (await q(
+      `SELECT COUNT(*)::int n FROM office_cost_ledger WHERE run_id = $1`, [tightRun.runId])).rows[0].n;
+    await scope.recordCost(tightCtx, { runId: tightRun.runId, provider: 'anthropic',
+      model: 'claude-haiku-4-5-20251001', tokensInput: 1000, tokensOutput: 1000,
+      costUsd: 0.02, costKnown: true, agent: 'test-agent', workflow: 'budget-activation-fixture' }, deps);
+
+    const t2 = await ai.governedCall(tightCtx, { capability: 'fast', prompt: 'hi again', maxTokens: 20,
+      workflow: 'budget-activation-fixture', agent: 'test-agent' }, deps);
+    if (!t2.ok && t2.refusedBy === 'budget' && t2.budgetScope === 'objective') {
+      ok(`the next call is REFUSED by the objective cap: ${t2.error}`);
+    } else bad('an exhausted objective budget did NOT refuse the governed call', JSON.stringify({ ok: t2.ok, err: t2.error }));
+
+    // A refusal must not file a cost row: nothing reached the provider, so nothing is owed.
+    // A DELTA against what was already there, not an absolute count: an absolute becomes false
+    // the moment anything else legitimately files a row, and the obvious fix for a failing
+    // absolute is to widen it.
+    const afterRows = (await q(
+      `SELECT COUNT(*)::int n FROM office_cost_ledger WHERE run_id = $1`, [tightRun.runId])).rows[0].n;
+    if (afterRows === beforeRows + 1) ok('the refusal filed NO cost row — only the exhausting row I wrote myself');
+    else bad(`the refused call changed the ledger: ${beforeRows} → ${afterRows} (expected +1 from my own row only)`);
+
+    // And the text is withheld, not returned with a warning.
+    if (t2.text === null) ok('a budget refusal withholds the text rather than returning it with a note');
+    else bad('a refused call still returned text');
+
+    // ── NEVER REFUSED: an accounting limit must not become an outage ─────────
+    for (const crit of ['critical', 'recovery', 'observability']) {
+      const ex = await ai.governedCall(tightCtx, { capability: 'fast', prompt: 'urgent', maxTokens: 20,
+        workflow: 'budget-activation-fixture', agent: 'test-agent', criticality: crit }, deps);
+      if (ex.ok) ok(`${crit} work still runs with the objective budget exhausted`);
+      else bad(`${crit} work was refused by a spend limit — the limit has become an outage`, ex.error);
+    }
+
+    // ── THE STRICTER DEFAULT ────────────────────────────────────────────────
+    // A caller that forgets to declare criticality must get the REFUSED path, not the exempt one.
+    const forgot = await ai.governedCall(tightCtx, { capability: 'fast', prompt: 'x', maxTokens: 20,
+      workflow: 'budget-activation-fixture', agent: 'test-agent' }, deps);
+    if (!forgot.ok && forgot.refusedBy === 'budget') ok('omitting criticality defaults to routine — refused, not silently exempt');
+    else bad('a call with no declared criticality was treated as exempt');
+
+    // ── A $0 OBJECTIVE BUDGET IS NOT UNLIMITED ──────────────────────────────
+    // This was a live defect: fraction was `budget > 0 ? spent/budget : 0`, so an objective given
+    // exactly $0 produced tier 'ok' and could spend without limit — the strictest budget a CEO can
+    // set was the one with no enforcement at all.
+    const OZERO = `k56-zero-${crypto.randomUUID()}`;
+    await scope.createObjective({
+      id: OZERO, companyId: A, objective: 'Zero-budget fixture', priority: 'P3',
+      kpiMetric: 'calls', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 0,
+      autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test',
+    }, deps);
+    ids.objectives.push(OZERO);
+    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OZERO, runId: null }),
+      { id: OZERO, status: 'active' }, deps);
+    const zRun = await beginObjectiveRun({ objectiveId: OZERO, trigger: 'office',
+      workflow: 'budget-activation-fixture', agent: 'test-agent', maxRuntimeMinutes: 5 }, deps);
+    ids.runs.push(zRun.runId);
+    await L.startRun(zRun.runId);
+    const zeroCall = await ai.governedCall(zRun.context, { capability: 'fast', prompt: 'x', maxTokens: 20,
+      workflow: 'budget-activation-fixture', agent: 'test-agent' }, deps);
+    if (!zeroCall.ok && zeroCall.refusedBy === 'budget') ok(`a $0 objective budget permits NO spend: ${zeroCall.error}`);
+    else bad('a $0 objective budget allowed an AI call — $0 is being read as unlimited');
+
+    // ── THE CEILING IS NOT CALLER-SUPPLIED ──────────────────────────────────
+    // The objective's budget is read from the resolved context, which read it from the stored row.
+    // An agent passing a bigger number in its spec must not be able to buy itself more room.
+    const forged = await ai.governedCall(tightCtx, { capability: 'fast', prompt: 'x', maxTokens: 20,
+      workflow: 'budget-activation-fixture', agent: 'test-agent',
+      budgetUsd: 1000, objectiveBudgetUsd: 1000, capUsd: 1000 }, deps);
+    if (!forged.ok && forged.refusedBy === 'budget') ok('a spec carrying its own budget is ignored — the ceiling comes from the stored objective');
+    else bad('a caller raised its own spending ceiling through the spec');
+
     // M4 — remove the approved predicate from the arbitrated release claim.
     //
     // This control originally mutated approval.js. The predicate has since MOVED to scope.js —
@@ -775,6 +891,42 @@ globalThis.fetch = async (u, opts) => {
     }
     if (sha(SCOPEF) !== before) bad('M4 scope.js was NOT restored byte-for-byte');
     else ok('M4 scope.js restored, verified by content hash');
+
+    // M5 — remove the budget gate from the governed call.
+    //
+    // Activation is only real if its absence is detectable. Without this control, "the budget is
+    // active" would rest on a passing test that might be passing for another reason — which is
+    // Defect 5 in the verification standard, and the reason Rule 6 exists.
+    const AIF = path.join(__dirname, '..', 'src', 'lib', 'office', 'ai.js');
+    before = sha(AIF); src = fs.readFileSync(AIF, 'utf8');
+    const n5 = '  if (!budgetDecision.allow) {';
+    if (!src.includes(n5)) bad('M5 could not locate the budget gate in ai.js — the control is stale');
+    else {
+      fs.writeFileSync(AIF, src.replace(n5, '  if (false && !budgetDecision.allow) {'));
+      try {
+        fresh(path.join('src', 'lib', 'office', 'ai.js'));
+        const mutatedAi = require('../src/lib/office/ai');
+        // The same exhausted objective that was refused a moment ago.
+        const leak = await mutatedAi.governedCall(tightCtx, { capability: 'fast', prompt: 'x',
+          maxTokens: 20, workflow: 'budget-activation-fixture', agent: 'test-agent' }, deps);
+        if (leak.ok) {
+          ok('M5 without the gate an EXHAUSTED objective budget still buys AI calls — the gate is load-bearing');
+          // Clean up the row the mutated build was able to write.
+          await q(`DELETE FROM office_cost_ledger WHERE run_id = $1 AND id = (
+                     SELECT MAX(id) FROM office_cost_ledger WHERE run_id = $1)`, [tightRun.runId]);
+        } else if (leak.refusedBy === 'budget') {
+          bad('M5 the call was STILL refused by the budget with the gate disabled — the control is not '
+            + 'measuring what it claims, or the gate exists in a second place');
+        } else {
+          bad('M5 the call failed for an unrelated reason, so the gate was never measured', leak.error);
+        }
+      } finally {
+        fs.writeFileSync(AIF, src);
+        fresh(path.join('src', 'lib', 'office', 'ai.js'));
+      }
+    }
+    if (sha(AIF) !== before) bad('M5 ai.js was NOT restored byte-for-byte');
+    else ok('M5 ai.js restored, verified by content hash');
 
   } catch (e) {
     bad('unexpected error', e.stack || e.message);

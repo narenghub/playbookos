@@ -242,6 +242,56 @@ function runValidator(stub, extraEnv = {}) {
       bad('zero-usage cost was neither caught nor recorded unknown', r4.out.slice(-1200));
     }
 
+    // ══ 5. THE BUDGET VALIDATOR, AND WHETHER IT CAN GO RED ═══════════════
+    //
+    // validate-k5-budget-deployed.js is read-only, so the risk is not that it breaks something —
+    // it is that it passes while the budget is NOT wired, which is the one thing it exists to
+    // deny. So it is run twice: once as deployed, and once with the gate removed from ai.js.
+    console.log('\n── 5. the budget activation validator\n');
+    const AIFILE = path.join(REPO, 'src', 'lib', 'office', 'ai.js');
+    const runBudget = () => spawnSync(process.execPath, ['scripts/validate-k5-budget-deployed.js'], {
+      cwd: REPO, encoding: 'utf8',
+      env: { ...process.env, DATABASE_URL: url, RAILWAY_GIT_COMMIT_SHA: 'rehearsal' },
+    });
+
+    const b1 = runBudget();
+    const b1out = (b1.stdout || '') + (b1.stderr || '');
+    if (b1.status === 0) ok('the budget validator exits 0 against a correctly wired build');
+    else bad(`the budget validator exited ${b1.status}`, b1out.split('\n').slice(-20).join('\n'));
+    for (const want of ['enterprise daily cap is $100',
+      'thresholds are 50% / 75% / 90% / 100%',
+      'critical, recovery and observability are exempt',
+      'acts on a refusal BEFORE reaching the provider',
+      'consequential release consults the fail-closed gate',
+      'governedCall exposes NO cap parameter',
+      'measured spend agrees with raw SQL by an independent path',
+      'is correct for fraction']) {
+      if (b1out.split('\n').some((l) => l.includes(want) && l.trim().startsWith('ok'))) ok(`  reported: ${want}`);
+      else bad(`  did NOT report: ${want}`);
+    }
+
+    // ── the red path ────────────────────────────────────────────────────────
+    const aiBefore = fs.readFileSync(AIFILE, 'utf8');
+    const anchor = '  if (!budgetDecision.allow) {';
+    if (!aiBefore.includes(anchor)) {
+      bad('could not locate the budget gate in ai.js — this red-path control is stale');
+    } else {
+      fs.writeFileSync(AIFILE, aiBefore.replace(anchor, '  if (false && !budgetDecision.allow) {'));
+      try {
+        const b2 = runBudget();
+        const b2out = (b2.stdout || '') + (b2.stderr || '');
+        if (b2.status !== 0) ok('with the refusal disabled the budget validator GOES RED — its green is load-bearing');
+        else bad('the budget validator still passed with the gate disabled — its green means nothing', b2out.split('\n').slice(-18).join('\n'));
+        if (/the budget is assessed but its refusal is not acted on/.test(b2out)) {
+          ok('and it names the exact defect rather than failing vaguely');
+        } else bad('it went red for an unclear reason', b2out.split('\n').slice(-14).join('\n'));
+      } finally {
+        fs.writeFileSync(AIFILE, aiBefore);
+      }
+    }
+    const restored = fs.readFileSync(AIFILE, 'utf8') === aiBefore;
+    if (restored) ok('ai.js restored byte-for-byte'); else bad('ai.js was NOT restored');
+
     console.log('\n' + (fail ? `FAIL  ${fail} assertion(s) failed` :
       'PASS  the validator stops before spending on a mismatch, is idempotent, attributes its '
       + 'evidence, leaves the approved objective alone, and cannot report a fabricated cost.'));
