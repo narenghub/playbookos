@@ -43,6 +43,42 @@ const CAPABILITIES = Object.freeze(['fast', 'balanced', 'deep']);
 
 // Normalize provider usage into kernel field names. Anthropic's `input_tokens`/`output_tokens` are
 // a wire detail; if they reached the Executive Agent, swapping providers would edit every agent.
+// ── MODEL FAILURE SEMANTICS (ruling §5) ─────────────────────────────────────
+//
+//   "Do not let { error } silently become 'no AI result available' inside the governed path."
+//
+// A provider failure is CLASSIFIED, because the right response differs sharply and collapsing them
+// is how a misconfiguration hides as flakiness:
+//
+//   model_invalid  a pinned model that does not exist or was rejected. A CONFIGURATION DEFECT. It
+//                  will fail identically on every retry, for ever, and nothing in this repository
+//                  validates a model id — so without this it is indistinguishable from the provider
+//                  having a bad minute. Queued for a human.
+//   auth           a rejected or missing key. Also a configuration defect. Queued.
+//   rate_limited   real but transient-ish; not queued, because flooding the queue with 429s buries
+//                  the two classes above.
+//   timeout        bounded abort. Ordinary. Not queued (ruling §14).
+//   transient      5xx, network. Ordinary. Not queued.
+//
+// Only the configuration classes reach the human queue. That is the distinction §14 asks for
+// between a defect somebody must fix and a provider having a bad minute.
+const CONFIG_FAILURES = Object.freeze(['model_invalid', 'auth']);
+
+function classifyProviderFailure(r) {
+  if (!r || !r.error) return null;
+  if (r.stopped) return 'stopped_by_policy';
+  if (r.timedOut) return 'timeout';
+  const status = r.status;
+  if (status === 401 || status === 403) return 'auth';
+  if (status === 429) return 'rate_limited';
+  // Anthropic answers an unknown model with 404, and a malformed request naming one with 400.
+  if (status === 404) return 'model_invalid';
+  if (status === 400 && /model/i.test(String(r.error))) return 'model_invalid';
+  if (typeof status === 'number' && status >= 500) return 'transient';
+  if (/not configured/i.test(String(r.error))) return 'auth';
+  return 'transient';
+}
+
 function normalizeUsage(usage) {
   if (!usage) return null;
   return {
@@ -103,7 +139,22 @@ async function governedCall(ctx, spec, deps = {}) {
   // A policy stop, a missing key or a rejected capability never reached the provider. Filing a
   // $0.00 row for those would pad the ledger with non-events and make "zero spend" ambiguous.
   if (r.stopped || (r.error && r.costKnown === true && r.costUsd === 0)) {
-    return { ok: false, accounted: true, text: null, json: null, ...base, error: r.error, stopped: !!r.stopped };
+    const failure = classifyProviderFailure(r);
+    let exceptionId = null;
+    if (CONFIG_FAILURES.includes(failure)) {
+      try {
+        exceptionId = `ex-ai-${failure}-${ctx.runId}`;
+        await scope.openException(ctx, {
+          id: exceptionId, runId: ctx.runId, source: 'office/ai',
+          reason: `provider ${failure}: ${r.error} (provider=${PROVIDER}, model=${base.model}) — `
+            + 'a configuration defect, not a transient failure: it will recur identically until changed',
+          severity: 'critical', slaHours: 4,
+        }, deps);
+      } catch (_) { exceptionId = null; }
+    }
+    return { ok: false, accounted: true, text: null, json: null, ...base, error: r.error,
+      stopped: !!r.stopped, provider_failure: failure,
+      needs_human: CONFIG_FAILURES.includes(failure), exception_id: exceptionId };
   }
 
   // ── Everything from here consumed, or may have consumed, provider tokens ──
@@ -130,8 +181,25 @@ async function governedCall(ctx, spec, deps = {}) {
   }
 
   if (r.error) {
+    const failure = classifyProviderFailure(r);
+    const needsHuman = CONFIG_FAILURES.includes(failure);
+    // A configuration defect is filed for a human. A transient one is not — the run's own
+    // terminal state and the cost row are already durable evidence of it.
+    let exceptionId = null;
+    if (needsHuman) {
+      try {
+        exceptionId = `ex-ai-${failure}-${ctx.runId}`;
+        await scope.openException(ctx, {
+          id: exceptionId, runId: ctx.runId, source: 'office/ai',
+          reason: `provider ${failure}: ${r.error} (provider=${PROVIDER}, model=${base.model}, `
+            + `capability=${capability}) — this will fail identically on every retry until a human changes the configuration`,
+          severity: 'critical', slaHours: 4,
+        }, deps);
+      } catch (_) { exceptionId = null; }
+    }
     return { ok: false, accounted: true, text: null, json: null, ...base,
-      error: r.error, cost_row_id: costRow ? costRow.id : null };
+      error: r.error, provider_failure: failure, needs_human: needsHuman,
+      exception_id: exceptionId, cost_row_id: costRow ? costRow.id : null };
   }
 
   return {
@@ -143,4 +211,5 @@ async function governedCall(ctx, spec, deps = {}) {
   };
 }
 
-module.exports = { governedCall, normalizeUsage, CAPABILITIES, PROVIDER };
+module.exports = { governedCall, normalizeUsage, classifyProviderFailure,
+  CAPABILITIES, PROVIDER, CONFIG_FAILURES };

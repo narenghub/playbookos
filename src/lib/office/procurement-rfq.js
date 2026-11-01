@@ -191,4 +191,103 @@ async function fileException(ctx, { rfqId, severity, source, reason }, deps = {}
   }
 }
 
-module.exports = { renderGovernedRFQ, identityContainment, casTokens, fileException, AGENT, WORKFLOW };
+// ── THE GOVERNED PROCUREMENT PATH (ruling §6) ───────────────────────────────
+//
+//   approved canonical identity facts → governed AI renderer → identity containment →
+//   prepared action → blocking approval → release
+//
+// THE LEGACY GENERATOR IS NOT A FALLBACK. "Governed refusal → exception/review, not → legacy
+// generator." So this function has no reference to generateRFQEmail at all: a refusal cannot fall
+// back to it even by a future edit, because the symbol is not in scope here.
+//
+// IT PREPARES AND STOPS. It never sends, never claims a supplier, and returns the prepared
+// communication with its approval id. Releasing it is a separate call that requires a recorded
+// human decision and passes the fail-closed cost gate.
+//
+// Identity authority is the SAME object the live send path uses — guardSend from
+// rfq-identity-guard — so the governed path cannot drift to a softer notion of "approved".
+async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
+  assertContext(ctx);
+  const query = (deps && deps.query) || require('../db').query;
+  // Injectable so the governed path is testable without the full molecule registry, but the
+  // DEFAULT is the same object the live send path uses — the governed path must not be able to
+  // drift to a softer notion of "approved".
+  const guard = (deps && deps.guard) || require('../procurement/rfq-identity-guard');
+
+  const rfq = (await query(
+    `SELECT id, molecule_name, cas_number, target_quantity, target_purity, gmp_required, status
+       FROM rfq_requests WHERE id = $1`, [rfqId]
+  )).rows[0];
+  if (!rfq) return { ok: false, refusal: 'no_such_rfq', rfqId };
+
+  // The identity decision, persisted. A refusal here is the guard working: the RFQ's identity is
+  // contested or unresolvable and no communication may be built from it.
+  const decided = await guard.guardSend(query, rfq);
+  if (!decided.allow) {
+    const exceptionId = await fileException(ctx, {
+      rfqId, severity: 'critical', source: 'office/procurement-rfq',
+      reason: `RFQ ${rfqId} refused by the identity guard (${decided.reason}) — no supplier `
+        + 'communication may be built from contested identity, and the legacy generator is NOT a fallback',
+    }, deps);
+    return { ok: false, refusal: 'identity_guard_refused', guard_reason: decided.reason,
+      decision_id: decided.decisionId, exception_id: exceptionId, rfqId };
+  }
+
+  const approvedMol = {
+    ...decided.approved,
+    target_quantity: rfq.target_quantity,
+    target_purity: rfq.target_purity,
+    gmp_required: rfq.gmp_required,
+  };
+
+  const rendered = await renderGovernedRFQ(ctx, {
+    approvedMol, supplier, rfqId, filedCas: rfq.cas_number,
+  }, deps);
+  if (!rendered.ok) {
+    // Already queued by renderGovernedRFQ where it warrants a human. NO LEGACY FALLBACK.
+    return { ok: false, refusal: rendered.refusal, detail: rendered.detail,
+      exception_id: rendered.exception_id || null, ai: rendered.ai || null, rfqId };
+  }
+
+  // Prepared, not sent. The approval carries the EXACT communication, and the payload is immutable
+  // from here, so what a human reads is what would go out.
+  const approval = require('./approval');
+  const prepared = await approval.prepare(ctx, {
+    id: `ap-rfq-${rfqId}-${supplier.id || supplier.name}`,
+    actionKind: 'send_rfq_email',
+    actionPayload: {
+      rfq_id: rfqId,
+      supplier_id: supplier.id || null,
+      supplier_name: supplier.name,
+      to: supplier.contact_email || null,
+      subject: rendered.subject,
+      body: rendered.body,
+      approved_molecule_name: approvedMol.molecule_name,
+      approved_cas: approvedMol.cas_number || null,
+      identity_decision_id: decided.decisionId,
+    },
+    reason: `supervised autonomy: a supplier communication for RFQ ${rfqId} requires human `
+      + `approval before release. Identity decision ${decided.decisionId} approved `
+      + `"${approvedMol.molecule_name}"${approvedMol.cas_number ? ` (${approvedMol.cas_number})` : ' with no CAS'}.`,
+    ownerUserId: 'palash',
+  }, deps);
+
+  return {
+    ok: true, rfqId,
+    approvalId: prepared.approvalId,
+    status: prepared.status,
+    subject: rendered.subject,
+    body: rendered.body,
+    supplier,
+    identity: {
+      decision_id: decided.decisionId,
+      approved_name: approvedMol.molecule_name,
+      approved_cas: approvedMol.cas_number || null,
+      filed_cas: rfq.cas_number || null,
+    },
+    ai: rendered.ai,
+  };
+}
+
+module.exports = { renderGovernedRFQ, prepareGovernedRFQ, identityContainment, casTokens,
+  fileException, AGENT, WORKFLOW };

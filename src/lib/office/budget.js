@@ -129,4 +129,83 @@ async function enforce(ctx, { criticality = 'routine', capUsd = DAILY_CAP_USD,
   return { allow: true, criticality, assessment: a };
 }
 
-module.exports = { assess, enforce, DAILY_CAP_USD, THRESHOLDS, TIERS, NEVER_REFUSED, tierFor, raiseOne };
+// ── BUDGET HIERARCHY: A CALL MUST SATISFY BOTH ──────────────────────────────
+//
+// "Do not allow a $10 objective to consume $50 simply because enterprise budget remains."
+//
+// The two caps are different kinds of thing and are checked as such: the enterprise cap is PER DAY
+// and resets; an objective's budget is a TOTAL for its whole life. A $10 objective that has spent
+// $10 is finished even on a day when the enterprise has spent nothing.
+async function enforceHierarchy(ctx, { objectiveId, criticality = 'routine',
+  capUsd = DAILY_CAP_USD, objectiveBudgetUsd = null, refuseOnUnmeasured = false } = {}, deps = {}) {
+  assertContext(ctx);
+
+  const enterprise = await enforce(ctx, { criticality, capUsd, refuseOnUnmeasured }, deps);
+  if (NEVER_REFUSED.includes(criticality)) return { allow: true, exempt: true, criticality, enterprise };
+  if (!enterprise.allow) return { allow: false, scope: 'enterprise', criticality, enterprise, reason: enterprise.reason };
+
+  if (objectiveId && objectiveBudgetUsd != null) {
+    const o = await scope.spendForObjective(ctx, objectiveId, deps);
+    const spent = Number(o.usd || 0);
+    const unknown = Number(o.unknown_calls || 0);
+    const objective = {
+      budgetUsd: Number(objectiveBudgetUsd),
+      spendKnownUsd: spent,
+      unknownCalls: unknown,
+      fraction: Number(objectiveBudgetUsd) > 0 ? spent / Number(objectiveBudgetUsd) : 0,
+      confident: unknown === 0,
+      lowerBound: true,
+    };
+    objective.measuredTier = tierFor(objective.fraction);
+    objective.tier = objective.confident ? objective.measuredTier : raiseOne(objective.measuredTier);
+
+    if (objective.fraction >= 1.0) {
+      return { allow: false, scope: 'objective', criticality, enterprise, objective,
+        reason: `objective budget exhausted: $${spent.toFixed(4)} of $${objectiveBudgetUsd} measured` };
+    }
+    if (refuseOnUnmeasured && !objective.confident) {
+      return { allow: false, scope: 'objective', criticality, enterprise, objective,
+        reason: `objective spend cannot be proven under its budget: ${unknown} unmeasured call(s)` };
+    }
+    return { allow: true, criticality, enterprise, objective };
+  }
+
+  return { allow: true, criticality, enterprise, objective: null };
+}
+
+// ── THE FAIL-CLOSED RELEASE GATE ────────────────────────────────────────────
+//
+//   "For governed consequential work: unknown cost must fail closed. [...] If cost is unknown:
+//    AI result may remain preserved as evidence, but consequential release is blocked →
+//    exception → human/operator review."
+//
+// WHY THE GATE IS AT RELEASE AND NOT AT THE CALL. Blocking the AI call would destroy the evidence
+// the ruling asks to preserve: the text and its cost row are what a human reviews. So the call
+// proceeds, the unknown is recorded, and the CONSEQUENTIAL ACT is what refuses.
+//
+// It is also the right boundary for a second reason: a run may make several AI calls, and whether
+// spend is provable is a property of the run as a whole at the moment it tries to act.
+//
+// Non-consequential observability and recovery work is not gated here — "unknown cost may be
+// recorded without causing an outage".
+async function consequentialReleaseGate(ctx, { runId, objectiveId = null,
+  capUsd = DAILY_CAP_USD, objectiveBudgetUsd = null } = {}, deps = {}) {
+  assertContext(ctx);
+
+  const u = await scope.unmeasuredForRun(ctx, runId, deps);
+  if (Number(u.unknown_calls) > 0) {
+    return { allow: false, reason: 'unmeasured_ai_cost',
+      detail: `${u.unknown_calls} of ${u.calls} AI call(s) on this run returned no provider usage, `
+        + 'so the cost of this consequential action cannot be proven — release is blocked pending human review',
+      unmeasured: Number(u.unknown_calls) };
+  }
+
+  const h = await enforceHierarchy(ctx, { objectiveId, criticality: 'routine', capUsd,
+    objectiveBudgetUsd, refuseOnUnmeasured: true }, deps);
+  if (!h.allow) return { allow: false, reason: `budget_${h.scope}`, detail: h.reason, hierarchy: h };
+
+  return { allow: true, hierarchy: h };
+}
+
+module.exports = { assess, enforce, enforceHierarchy, consequentialReleaseGate,
+  DAILY_CAP_USD, THRESHOLDS, TIERS, NEVER_REFUSED, tierFor, raiseOne };

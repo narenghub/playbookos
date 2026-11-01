@@ -336,6 +336,36 @@ async function recordOutcome(ctx, { id, runId, outcome, businessEffect, effectRe
   return res.rows[0];
 }
 
+// Objective-level spend, measured and unmeasured, for the whole life of the objective. The
+// enterprise cap is per DAY; an objective's budget is a TOTAL — a $10 objective that has spent
+// $10 is finished whether that happened today or last week.
+async function spendForObjective(ctx, objectiveId, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `SELECT COALESCE(SUM(cost_usd) FILTER (WHERE cost_known), 0)::float8 AS usd,
+            COUNT(*)::int AS calls,
+            COUNT(*) FILTER (WHERE NOT cost_known)::int AS unknown_calls
+       FROM office_cost_ledger
+      WHERE company_id = $1 AND objective_id = $2`,
+    [ctx.companyId, objectiveId]
+  );
+  return res.rows[0];
+}
+
+// Unmeasured AI spend attributable to ONE run. The fail-closed release gate reads this: a
+// consequential action must not be released on the back of a call whose cost nobody knows.
+async function unmeasuredForRun(ctx, runId, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `SELECT COUNT(*) FILTER (WHERE NOT cost_known)::int AS unknown_calls,
+            COUNT(*)::int AS calls
+       FROM office_cost_ledger
+      WHERE company_id = $1 AND run_id = $2`,
+    [ctx.companyId, runId]
+  );
+  return res.rows[0];
+}
+
 // ── K9: PROVENANCE FOR ONE GOVERNED RUN ─────────────────────────────────────
 //
 // Answers, from durable evidence only:
@@ -423,7 +453,7 @@ async function provenance(ctx, runId, deps = {}) {
 }
 
 module.exports = {
-  provenance, claimApprovalRelease, approvalReleaseState,
+  provenance, spendForObjective, unmeasuredForRun, claimApprovalRelease, approvalReleaseState,
   bootstrapObjectiveForContext,
   createObjective, setObjectiveStatus,
   listObjectives, getObjective, listOpenExceptions, listPendingApprovals, spendToday, listOutcomes,

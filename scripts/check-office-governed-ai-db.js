@@ -410,7 +410,12 @@ globalThis.fetch = async (u, opts) => {
     if (prepared.status !== 'pending') bad(`H a prepared action is not pending: ${prepared.status}`);
     else ok('H prepare() records the action as pending and performs nothing');
 
-    let rel = await approval.release(ctx, { approvalId: prepared.approvalId, releasedBy: 'agent' }, deps);
+    // consequential:false ISOLATES the ordering assertions. This run deliberately carries
+    // unmeasured AI calls from the C1 section, so the fail-closed cost gate would refuse first and
+    // mask whether approval ordering works at all. The gate itself — and that it DEFAULTS to
+    // strict — is proven in §9 below on this same run.
+    const mech = { consequential: false };
+    let rel = await approval.release(ctx, { approvalId: prepared.approvalId, releasedBy: 'agent', ...mech }, deps);
     if (rel.released) bad('H a PENDING approval was released — approval does not block the action');
     else if (rel.reason !== 'not_approved') bad(`H refused for the wrong reason: ${rel.reason}`);
     else ok('H release() refuses a pending approval — the action cannot happen first');
@@ -439,16 +444,16 @@ globalThis.fetch = async (u, opts) => {
     if (!decided || decided.status !== 'approved') bad('H the human approval did not take');
     else ok('H a human approves, scoped to their own company');
 
-    if ((await approval.release(ctxB, { approvalId: prepared.approvalId, releasedBy: 'intruder' }, deps)).released) {
+    if ((await approval.release(ctxB, { approvalId: prepared.approvalId, releasedBy: 'intruder', ...mech }, deps)).released) {
       bad('H company B released company A approved action');
     } else ok('H company B cannot release company A approved action');
 
-    rel = await approval.release(ctx, { approvalId: prepared.approvalId, releasedBy: 'agent' }, deps);
+    rel = await approval.release(ctx, { approvalId: prepared.approvalId, releasedBy: 'agent', ...mech }, deps);
     if (!rel.released) bad(`H an approved action could not be released: ${rel.reason}`);
     else if (rel.actionPayload.body !== good.body) bad('H the released payload is not the approved one');
     else ok('H release() returns the APPROVED payload, and only after approval');
 
-    const again = await approval.release(ctx, { approvalId: prepared.approvalId, releasedBy: 'agent' }, deps);
+    const again = await approval.release(ctx, { approvalId: prepared.approvalId, releasedBy: 'agent', ...mech }, deps);
     if (again.released) bad('H the same approval released TWICE — one human decision authorised two sends');
     else ok(`H a second release of the same approval is refused (${again.reason})`);
 
@@ -512,6 +517,152 @@ globalThis.fetch = async (u, opts) => {
     const provB = await scope.provenance(ctxB, ctx.runId, deps);
     if (provB) bad('J company B read company A provenance');
     else ok('J provenance is company-scoped');
+
+    // ══ RULING §5: MODEL FAILURE SEMANTICS ═════════════════════════════════
+    note('§5: a configuration defect must not hide as a transient provider failure');
+    const cls = ai.classifyProviderFailure;
+    const cases = [
+      [{ error: 'Claude 404: model not found', status: 404 }, 'model_invalid'],
+      [{ error: 'Claude 400: invalid model id', status: 400 }, 'model_invalid'],
+      [{ error: 'Claude 401: bad key', status: 401 }, 'auth'],
+      [{ error: 'ANTHROPIC_API_KEY not configured' }, 'auth'],
+      [{ error: 'Claude 429: slow down', status: 429 }, 'rate_limited'],
+      [{ error: 'Claude 503: upstream', status: 503 }, 'transient'],
+      [{ error: 'aborted', timedOut: true }, 'timeout'],
+    ];
+    const misclassified = cases.filter(([r, want]) => cls(r) !== want)
+      .map(([r, want]) => `${r.status || r.error}: expected ${want}, got ${cls(r)}`);
+    if (misclassified.length) bad('§5 provider failures are misclassified', misclassified.join('\n'));
+    else ok('§5 provider failures classify into model_invalid / auth / rate_limited / timeout / transient');
+    if (!ai.CONFIG_FAILURES.includes('model_invalid') || !ai.CONFIG_FAILURES.includes('auth')) {
+      bad('§5 the configuration-defect classes are wrong');
+    } else if (ai.CONFIG_FAILURES.includes('transient') || ai.CONFIG_FAILURES.includes('timeout')) {
+      bad('§5 transient failures are classified as configuration defects — the queue would flood');
+    } else ok('§5 only configuration defects reach the human queue; transient failures do not flood it');
+
+    // An invalid model must file an exception rather than reading as "no AI result available".
+    mode = 'http-500';
+    const transientCall = await ai.governedCall(ctx, { capability: 'fast', prompt: 'x', maxTokens: 20,
+      agent: 'test-agent', workflow: 'transient-wf' }, deps);
+    if (transientCall.needs_human) bad('§5 a 5xx was escalated to a human — ordinary provider failure would flood the queue');
+    else if (transientCall.provider_failure !== 'transient') bad(`§5 a 5xx classified as ${transientCall.provider_failure}`);
+    else ok('§5 a 5xx is durable evidence but does NOT queue a human');
+
+    // Swap the stub for a hard 404 and PUT IT BACK. An earlier version replaced globalThis.fetch
+    // permanently here, so every assertion after this point inherited a 404 — three later checks
+    // failed for a reason that had nothing to do with what they were testing.
+    const modeStub = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: false, status: 404, text: async () => 'model: not found' });
+    let badModel;
+    try {
+      badModel = await ai.governedCall(ctx, { capability: 'fast', prompt: 'x', maxTokens: 20,
+        agent: 'test-agent', workflow: 'badmodel-wf' }, deps);
+    } finally { globalThis.fetch = modeStub; }
+    if (badModel.ok) bad('§5 an invalid model produced a successful result');
+    else if (badModel.provider_failure !== 'model_invalid') bad(`§5 an invalid model classified as ${badModel.provider_failure}`);
+    else if (!badModel.needs_human) bad('§5 an invalid model did not require a human — it would recur for ever as flakiness');
+    else if (!badModel.exception_id) bad('§5 an invalid model filed no exception');
+    else {
+      const exRow = (await q(`SELECT severity, status, reason FROM office_exceptions WHERE id=$1`, [badModel.exception_id])).rows[0];
+      if (!exRow) bad('§5 the exception id was returned but no row exists');
+      else if (!/will fail identically on every retry/.test(exRow.reason)) bad('§5 the exception does not say the failure is permanent');
+      else ok('§5 an invalid/unavailable model files a CRITICAL exception saying it will recur until a human changes it');
+    }
+    if (badModel.text !== null) bad('§5 an invalid model returned text');
+    else ok('§5 no downstream consequential action is possible from a provider failure');
+
+    // ══ RULING §10: BUDGET HIERARCHY — BOTH CAPS ═══════════════════════════
+    note('§10: a $10 objective may not consume enterprise headroom');
+    const hier = await budget.enforceHierarchy(ctx, { objectiveId: OA, criticality: 'routine',
+      capUsd: 1e9, objectiveBudgetUsd: 0.000001 }, deps);
+    if (hier.allow) bad('§10 an exhausted OBJECTIVE budget was permitted because enterprise headroom remained');
+    else if (hier.scope !== 'objective') bad(`§10 refused at the wrong scope: ${hier.scope}`);
+    else ok('§10 an exhausted objective budget refuses even with unlimited enterprise headroom');
+    const hier2 = await budget.enforceHierarchy(ctx, { objectiveId: OA, criticality: 'routine',
+      capUsd: 0.000001, objectiveBudgetUsd: 1e9 }, deps);
+    if (hier2.allow) bad('§10 an exhausted ENTERPRISE cap was permitted because the objective had budget');
+    else if (hier2.scope !== 'enterprise') bad(`§10 refused at the wrong scope: ${hier2.scope}`);
+    else ok('§10 an exhausted enterprise cap refuses even with objective budget remaining');
+    const hier3 = await budget.enforceHierarchy(ctx, { objectiveId: OA, criticality: 'recovery',
+      capUsd: 0.000001, objectiveBudgetUsd: 0.000001 }, deps);
+    if (!hier3.allow) bad('§10 recovery work was refused by the hierarchy — an accounting limit became an outage');
+    else ok('§10 recovery work remains exempt from BOTH caps');
+
+    // ══ RULING §9: UNKNOWN COST FAILS CLOSED AT RELEASE ════════════════════
+    note('§9: unknown cost preserves the AI result as evidence but BLOCKS consequential release');
+    const gate = await budget.consequentialReleaseGate(ctx, { runId: ctx.runId,
+      objectiveId: OA, objectiveBudgetUsd: 1e9, capUsd: 1e9 }, deps);
+    if (gate.allow) bad('§9 release was permitted on a run carrying unmeasured AI cost');
+    else if (gate.reason !== 'unmeasured_ai_cost') bad(`§9 blocked for the wrong reason: ${gate.reason}`);
+    else ok(`§9 consequential release is BLOCKED while ${gate.unmeasured} AI call(s) on the run are unmeasured`);
+
+    mode = 'normal';
+    const prepared2 = await approval.prepare(ctx, { id: `ap-gate-${crypto.randomUUID()}`,
+      actionKind: 'send_rfq_email', actionPayload: { body: 'x' },
+      reason: '§9 control: a consequential release on a run with unmeasured cost' }, deps);
+    ids.approvals.push(prepared2.approvalId);
+    await scope.decideApproval(ctx, { id: prepared2.approvalId, decision: 'approved', resolvedBy: 'naresh' }, deps);
+    const blockedRel = await approval.release(ctx, { approvalId: prepared2.approvalId,
+      releasedBy: 'agent', objectiveId: OA, objectiveBudgetUsd: 1e9, capUsd: 1e9 }, deps);
+    if (blockedRel.released) bad('§9 an APPROVED consequential action released despite unmeasured AI cost');
+    else if (blockedRel.reason !== 'unmeasured_ai_cost') bad(`§9 release blocked for the wrong reason: ${blockedRel.reason}`);
+    else if (!blockedRel.exception_id) bad('§9 the blocked release filed no exception — a consequential action that silently did not happen');
+    else ok('§9 an approved consequential release is refused on unmeasured cost, and files an exception');
+    // Non-consequential work is explicitly NOT gated.
+    const nonCons = await approval.release(ctx, { approvalId: prepared2.approvalId,
+      releasedBy: 'agent', consequential: false }, deps);
+    if (!nonCons.released) bad(`§9 non-consequential release was gated: ${nonCons.reason}`);
+    else ok('§9 non-consequential work is not gated — unknown cost may be recorded without an outage');
+
+    // ══ RULING §6: THE GOVERNED PATH HAS NO LEGACY FALLBACK ════════════════
+    note('§6: governed refusal → exception/review, never → legacy generator');
+    for (const k of Object.keys(require.cache)) if (k.includes(path.join('src', 'lib', 'office'))) delete require.cache[k];
+    const beforeG = new Set(Object.keys(require.cache));
+    const freshRfq = require('../src/lib/office/procurement-rfq');
+    const graphG = Object.keys(require.cache).filter((k) => !beforeG.has(k) && !k.includes('node_modules'));
+    if (graphG.some((f) => f.includes(path.join('agents', 'procurement-agent.js')))) {
+      bad('§6 the governed module can reach the LEGACY procurement agent — a refusal could fall back to it');
+    } else ok('§6 the governed module cannot reach the legacy generator at all (asserted on the require graph, not read from a comment)');
+
+    // The fixture table must exist before the FIRST call: prepareGovernedRFQ reads rfq_requests
+    // even to discover the RFQ is absent, so creating it later made "no such RFQ" fail as a
+    // missing relation instead.
+    await q(`CREATE TABLE IF NOT EXISTS rfq_requests (id TEXT PRIMARY KEY, molecule_name TEXT, cas_number TEXT,
+             target_quantity TEXT, target_purity TEXT, gmp_required INTEGER DEFAULT 0, status TEXT)`);
+    const noRfq = await freshRfq.prepareGovernedRFQ(ctx, { rfqId: 'no-such-rfq', supplier }, deps);
+    if (noRfq.ok) bad('§6 a nonexistent RFQ was prepared');
+    else ok(`§6 a nonexistent RFQ is refused (${noRfq.refusal})`);
+
+    // A guard refusal must queue and must NOT fall back.
+    const refusingGuard = { guardSend: async () => ({ allow: false, reason: 'cas_disputed', decisionId: 'dec-fixture' }) };
+    await q(`INSERT INTO rfq_requests (id, molecule_name, cas_number, target_quantity, target_purity, status)
+             VALUES ('rfq-k56','Tramadol Hydrochloride','27203-92-5','25kg','99%','pending') ON CONFLICT DO NOTHING`);
+    const guardRefused = await freshRfq.prepareGovernedRFQ(ctx, { rfqId: 'rfq-k56', supplier },
+      { ...deps, guard: refusingGuard });
+    if (guardRefused.ok) bad('§6 an identity-guard refusal still produced a prepared communication');
+    else if (guardRefused.refusal !== 'identity_guard_refused') bad(`§6 wrong refusal: ${guardRefused.refusal}`);
+    else if (!guardRefused.exception_id) bad('§6 the guard refusal was not queued for review');
+    else ok('§6 an identity-guard refusal queues a critical exception and prepares nothing');
+
+    // The happy path prepares an approval carrying the EXACT communication, and sends nothing.
+    const allowingGuard = { guardSend: async () => ({ allow: true, reason: null, decisionId: 'dec-ok',
+      approved: { molecule_name: 'Tramadol Hydrochloride', cas_number: '36282-47-0', __approvedByDecision: 'dec-ok' } }) };
+    const prep = await freshRfq.prepareGovernedRFQ(ctx, { rfqId: 'rfq-k56', supplier },
+      { ...deps, guard: allowingGuard });
+    if (!prep.ok) bad(`§6 the governed happy path failed: ${prep.refusal} ${prep.detail || ''}`);
+    else {
+      ids.approvals.push(prep.approvalId);
+      if (prep.status !== 'pending') bad(`§6 the prepared action is not pending: ${prep.status}`);
+      else if (prep.identity.approved_cas !== '36282-47-0') bad('§6 the approved CAS is not carried');
+      else if (prep.identity.filed_cas !== '27203-92-5') bad('§6 the filed CAS is not recorded alongside it');
+      else ok('§6 the governed path prepares a PENDING approval carrying the approved identity and the filed CAS');
+      const payload = (await q(`SELECT action_payload, action_kind, status FROM office_approvals WHERE id=$1`, [prep.approvalId])).rows[0];
+      if (!payload) bad('§6 no approval row was stored');
+      else if (payload.action_payload.identity_decision_id !== 'dec-ok') bad('§6 the identity decision id is not in the payload');
+      else if (payload.action_payload.subject !== prep.subject || payload.action_payload.body !== prep.body) {
+        bad('§6 the stored payload is not the prepared communication');
+      } else ok('§6 the stored, immutable payload IS the exact prepared communication and its identity decision');
+    }
 
     // ══ MUTATION CONTROLS ══════════════════════════════════════════════════
     note('mutation controls: disable each mechanism, prove the defect returns');
@@ -610,7 +761,10 @@ globalThis.fetch = async (u, opts) => {
         const p2 = await mutatedApp.prepare(ctx, { actionKind: 'send_rfq_email_m4',
           actionPayload: { body: 'x' }, reason: 'M4 control: prove the approved predicate is load-bearing' }, deps);
         ids.approvals.push(p2.approvalId);
-        const leak = await mutatedApp.release(ctx, { approvalId: p2.approvalId, releasedBy: 'agent' }, deps);
+        // consequential:false isolates the predicate under test. With the gate active this run's
+        // unmeasured AI cost refuses first, so the mutation could not be measured at all — the
+        // control would report "still refused" and look like the predicate was not load-bearing.
+        const leak = await mutatedApp.release(ctx, { approvalId: p2.approvalId, releasedBy: 'agent', consequential: false }, deps);
         if (!leak.released) bad('M4 the pending approval was still refused — the predicate may not be what blocks it');
         else ok('M4 without the approved predicate a PENDING action releases — approval-before-action is load-bearing');
       } finally {

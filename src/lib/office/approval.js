@@ -63,10 +63,48 @@ async function prepare(ctx, { id, actionKind, actionPayload, reason, ownerUserId
  * Never throws for a refusal — a refusal is an expected outcome, and a caller that treats an
  * exception as the only failure mode would act on an undefined payload.
  */
-async function release(ctx, { approvalId, releasedBy }, deps = {}) {
+async function release(ctx, { approvalId, releasedBy, consequential = true,
+  objectiveId = null, objectiveBudgetUsd = null, capUsd = undefined }, deps = {}) {
   assertContext(ctx);
   if (!approvalId) return { released: false, reason: 'no_approval_id' };
   if (!releasedBy) return { released: false, reason: 'no_releasing_actor' };
+
+  // ── THE FAIL-CLOSED COST GATE (ruling §9) ────────────────────────────────
+  //
+  // `consequential` DEFAULTS TO TRUE. A caller that forgets to say what it is doing gets the
+  // stricter path, because the direction of that mistake matters: treating a supplier email as
+  // non-consequential is unrecoverable, while treating an internal step as consequential merely
+  // asks a human.
+  //
+  // Unknown AI cost does not block the CALL — that would destroy the evidence a human reviews —
+  // it blocks the ACT. And a blocked release files an exception rather than returning quietly,
+  // because a consequential action that silently did not happen is indistinguishable from one
+  // that did.
+  if (consequential) {
+    const budget = require('./budget');
+    let gate;
+    try {
+      gate = await budget.consequentialReleaseGate(ctx, {
+        runId: ctx.runId, objectiveId, objectiveBudgetUsd,
+        ...(capUsd === undefined ? {} : { capUsd }),
+      }, deps);
+    } catch (e) {
+      // An unreadable budget is not permission to act.
+      return { released: false, reason: 'budget_gate_unavailable', detail: e.message };
+    }
+    if (!gate.allow) {
+      let exceptionId = null;
+      try {
+        exceptionId = `ex-release-${gate.reason}-${approvalId}`;
+        await scope.openException(ctx, {
+          id: exceptionId, runId: ctx.runId, source: 'office/approval',
+          reason: `consequential release of ${approvalId} blocked (${gate.reason}): ${gate.detail}`,
+          severity: 'critical', slaHours: 4,
+        }, deps);
+      } catch (_) { exceptionId = null; }
+      return { released: false, reason: gate.reason, detail: gate.detail, exception_id: exceptionId, gate };
+    }
+  }
 
   // The arbitrated claim lives in scope.js, which owns every kernel table name. The
   // scope-discipline check refused to exempt this file and was right to: approval.js is product
