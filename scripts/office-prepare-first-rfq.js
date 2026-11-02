@@ -367,8 +367,10 @@ const stop = (why, detail) => {
       'PASS  one governed supplier RFQ is PREPARED and PENDING. Nothing was sent.\n\n'
       + '  ══ THE NEXT DECISION IS YOURS ══\n\n'
       + `  APPROVE or REJECT approval ${out.approvalId}.\n\n`
-      + '  Read the communication above. Approving records your decision; it does not transmit,\n'
-      + '  because no send capability exists in this build yet.'));
+      + '  Read the communication above. Approving records your decision but does NOT transmit\n'
+      + '  this communication. R1 send capability IS deployed; this objective is in explicit\n'
+      + '  release mode, so a separate RELEASE authorization is required before any supplier\n'
+      + '  communication is attempted.'));
     process.exit(fail ? 1 : 0);
   } catch (e) {
     console.error('\nFAIL  preparation error:', e.stack || e.message);

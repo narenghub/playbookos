@@ -200,6 +200,11 @@ step "R1: nothing sends without a claim, and no retry ever happens" node scripts
 # against the platform's own reliability_score, because a ranking that quietly falls back to either
 # one still returns plausible rows.
 step "supplier evidence runs on Postgres and ranks by evidence" node scripts/check-supplier-evidence-sql.js
+# The LAST script a human reads before a first production send. Its worst failure is not a crash —
+# it is reporting PASS when a release precondition would refuse. Rehearsed on a throwaway cluster:
+# green on a clean approval, RED for each precondition independently AND for the right reason, and
+# writing nothing on any path including the red ones.
+step "the pre-release report can go red and writes nothing" node scripts/check-pre-release-report-runs.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

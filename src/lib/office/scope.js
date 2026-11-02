@@ -104,6 +104,7 @@ async function bootstrapApprovalForExecution(approvalId, deps = {}) {
   const res = await q(deps)(
     `SELECT a.id, a.company_id, a.objective_id, a.run_id, a.action_kind, a.action_payload,
             a.status, a.release_claimed_at, a.released_at, a.resolved_by, a.resolved_at,
+            a.resolution,
             o.budget_usd, o.release_mode, o.status AS objective_status
        FROM office_approvals a
        JOIN objectives o ON o.id = a.objective_id AND o.company_id = a.company_id
@@ -206,7 +207,8 @@ async function listObjectives(ctx, deps = {}) {
 async function getObjective(ctx, objectiveId, deps = {}) {
   assertContext(ctx);
   const res = await q(deps)(
-    `SELECT id, objective, priority, status, autonomy_tier, approval_policy, budget_usd, company_id
+    `SELECT id, objective, priority, status, autonomy_tier, approval_policy, budget_usd, company_id,
+            kpi_metric, kpi_target, release_mode, deadline
        FROM objectives
       WHERE company_id = $1 AND id = $2`,
     [ctx.companyId, objectiveId]

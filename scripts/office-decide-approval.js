@@ -137,8 +137,16 @@ const stop = (why, detail) => {
 
     console.log('\n' + (fail ? `FAIL  ${fail} assertion(s) failed` : status === 'rejected'
       ? 'PASS  REJECTED. This action can never release: release requires status="approved".'
-      : 'PASS  APPROVED and recorded. It still cannot be transmitted — no send capability exists\n'
-        + '      in this build, so releasing it is a separate decision that does not yet exist.'));
+      // THIS TEXT WAS FALSE AND SAID SO TO A CEO AT HIS DECISION POINT. It read "no send
+      // capability exists in this build", which stopped being true when R1 (office/execute.js)
+      // shipped with a real mailer call. What makes approval safe is NOT the absence of a send
+      // path — it is that this objective's release_mode is 'explicit', so a second deliberate
+      // human act is required. A script that misattributes a safety property to the wrong
+      // mechanism teaches the reader to trust the wrong thing.
+      : 'PASS  APPROVED and recorded. Approval does NOT transmit this communication.\n'
+        + '      R1 send capability IS deployed, but this objective is in explicit release mode,\n'
+        + '      so a separate RELEASE authorization is required before any supplier\n'
+        + '      communication is attempted.'));
     process.exit(fail ? 1 : 0);
   } catch (e) {
     console.error('\nFAIL  decision error:', e.stack || e.message);

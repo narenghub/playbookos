@@ -97,6 +97,11 @@ const EXEMPT = new Set([
   // — which leaves no outreach row, so the pair's deterministic approval id is spent invisibly.
   // The library it tests names no kernel table: it goes through the accessor, as product code must.
   path.join('scripts', 'check-supplier-evidence-sql.js'),
+  // Rehearses office-pre-release-report.js on a throwaway cluster. It must set release_mode,
+  // deactivate a signatory and plant an ACTION_ATTEMPTED by hand — the accessor exists precisely
+  // to make those unrepresentable, so a rehearsal routed through it would prove nothing. The
+  // report it rehearses names no kernel table: it goes through the accessor.
+  path.join('scripts', 'check-pre-release-report-runs.js'),
 ]);
 
 // Product code may never be exempt. The only permitted exemptions under src/ are the accessor and
