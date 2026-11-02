@@ -273,8 +273,13 @@ const freshOffice = () => {
       const { apId } = await prepare({ cost: null, costKnown: false });
       mailerSpy = accepts();
       const r = await exec(mailerSpy)(apId);
-      if (!r.ok && /unmeasured|budget/.test(String(r.refusal))) ok(`UNKNOWN COST is refused (${r.refusal})`);
-      else bad('an unprovable cost was released', JSON.stringify(r).slice(0, 180));
+      // THE EXACT REASON, not a pattern that several gates would satisfy. `/unmeasured|budget/`
+      // would have passed on budget_enterprise, budget_objective or unmeasured_ai_cost — three
+      // independent controls — so it proved only that SOMETHING refused. That is Gate
+      // Contamination / False Attribution, and this file has produced it four times.
+      if (!r.ok && r.refusal === 'unmeasured_ai_cost') ok('UNKNOWN COST is refused BY THE COST GATE');
+      else bad(`expected unmeasured_ai_cost, got "${r.refusal}" — a different control refused, so `
+        + 'the cost gate was never measured', JSON.stringify(r).slice(0, 180));
       if (mailerSpy.calls.length === 0 && await claims(apId) === 0) ok('  no claim, no mailer call');
       else bad('  claim/mailer leaked on unknown cost');
     }
@@ -283,8 +288,12 @@ const freshOffice = () => {
       const { apId } = await prepare({ budget: 0.01, cost: 0.02 });
       mailerSpy = accepts();
       const r = await exec(mailerSpy)(apId);
-      if (!r.ok && /budget/.test(String(r.refusal))) ok(`an EXHAUSTED objective budget is refused (${r.refusal})`);
-      else bad('an over-budget action was released', JSON.stringify(r).slice(0, 180));
+      // Specifically the OBJECTIVE scope. `/budget/` would also pass on budget_enterprise, which
+      // is a different cap and a different claim.
+      if (!r.ok && r.refusal === 'budget_objective') {
+        ok('an EXHAUSTED OBJECTIVE budget is refused by the objective cap');
+      } else bad(`expected budget_objective, got "${r.refusal}" — the objective cap was not what `
+        + 'refused', JSON.stringify(r).slice(0, 180));
       if (mailerSpy.calls.length === 0 && await claims(apId) === 0) ok('  no claim, no mailer call');
       else bad('  claim/mailer leaked on an exhausted budget');
     }

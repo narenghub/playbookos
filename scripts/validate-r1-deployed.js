@@ -199,6 +199,48 @@ const SRC = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', .
       }
     }
 
+    // ══ 6b. REJECTED ACTIONS MUST BE INERT (ruling §4) ═════════════════════
+    //
+    // A rejection is only meaningful if the action is genuinely unable to proceed and genuinely
+    // preserved. Both halves are checked: nothing was executed, and nothing was tidied away.
+    const rejected = aps.filter((a) => a.status === 'rejected');
+    if (rejected.length) {
+      console.log('\n  REJECTED ACTIONS — VERIFIED INERT AND PRESERVED\n');
+      for (const a of rejected) {
+        const p = a.action_payload || {};
+        console.log(`    ${a.id}`);
+        if (a.resolved_by) ok(`  approver recorded: ${a.resolved_by}`);
+        else bad('  no approver recorded on a rejected action');
+        if (a.resolution && String(a.resolution).trim().length >= 12) {
+          ok(`  resolution persisted: ${String(a.resolution).slice(0, 90)}`);
+        } else bad('  no durable resolution recorded', a.resolution);
+        if (!a.release_claimed_at && !a.released_at) ok('  no execution claim and never released');
+        else bad('  a rejected action carries an execution claim');
+
+        const attempted = (await query(
+          `SELECT COUNT(*)::int n FROM agent_run_events
+            WHERE kind = 'ACTION_ATTEMPTED' AND detail ->> 'approval_id' = $1`, [a.id])).rows[0].n;
+        if (attempted === 0) ok('  no ACTION_ATTEMPTED event exists for it');
+        else bad(`  ${attempted} ACTION_ATTEMPTED event(s) exist for a rejected action`);
+
+        const outreach = (await query(
+          `SELECT COUNT(*)::int n FROM supplier_outreach_log WHERE approval_id = $1`, [a.id])).rows[0].n;
+        if (outreach === 0) ok('  no supplier outreach row was created for it');
+        else bad(`  ${outreach} outreach row(s) exist for a rejected action`);
+
+        // Preserved, not tidied: the payload must still be the one that was prepared, including
+        // the ABSENCE of signatory provenance. Retrofitting that absence would destroy the
+        // evidence of why it was rejected.
+        if (!p.signed_by_email && !p.signed_by_user_id) {
+          ok('  its payload still records no signatory — not retrofitted, so the evidence stands');
+        } else note('  its payload records a signatory; confirm it was prepared that way');
+        if (p.body) {
+          ok(`  the body is intact (sha256 ${crypto.createHash('sha256').update(String(p.body)).digest('hex').slice(0, 16)})`);
+        } else bad('  the body is gone from a preserved rejection');
+        console.log('');
+      }
+    }
+
     // ══ 7. BUDGET POSITION, ASKED NOT CONSUMED ═════════════════════════════
     console.log('\n  BUDGET\n');
     for (const o of objs.filter((x) => x.status === 'active')) {
