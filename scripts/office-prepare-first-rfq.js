@@ -232,6 +232,9 @@ const stop = (why, detail) => {
     if (out.signatory) {
       field('signed by', `${out.signatory.name}, ${out.signatory.title} <${out.signatory.email}>`);
       field('signatory user id', out.signatory.id || '(none)');
+      field('copied to', (out.copyTo || []).length
+        ? out.copyTo.map((c) => `${c.name} <${c.email}>`).join(', ')
+        : '(nobody — the letter has one contact)');
       field('why that signatory', out.signatory.why || '(not stated)');
     }
     field('objective', out.objectiveId);

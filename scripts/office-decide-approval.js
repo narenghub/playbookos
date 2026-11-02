@@ -89,6 +89,7 @@ const stop = (why, detail) => {
     const p = row.action_payload || {};
     console.log('\n  WHAT WOULD GO OUT, FROM THE IMMUTABLE PAYLOAD\n');
     field('to', p.to || '(none)');
+    field('cc', (p.cc || []).length ? p.cc.join(', ') : '(none)');
     field('supplier', p.supplier_name || p.supplier_id || '(none)');
     field('approved molecule', p.approved_molecule_name || '(none)');
     field('approved CAS', p.approved_cas || 'NONE — deliberately omitted');

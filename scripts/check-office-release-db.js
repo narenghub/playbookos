@@ -180,6 +180,7 @@ const freshOffice = () => {
           rfq_id: rfqId || `rfq-${n}`, supplier_id: supplierId || `sup-${n}`,
           supplier_name: `Fixture Supplier ${n}`, to: `s${n}@fixture.invalid`,
           subject: `RFQ — fixture ${n}`, body: `Dear supplier,\n\nPlease quote.\n\nFixture Director`,
+          cc: ['principal@fixture.invalid'],
           approved_molecule_name: 'Candidatium', approved_cas: '36282-47-0',
           identity_decision_id: `dec-${n}`,
           ...(recordSignatory ? {
@@ -347,6 +348,10 @@ const freshOffice = () => {
       else bad('  the body was not the frozen one');
       if (sent.replyTo === 'dir@fixture.invalid') ok('  replies addressed to the frozen signatory');
       else bad('  wrong reply-to', sent.replyTo);
+      // The copy list comes from the frozen payload, never re-resolved at release.
+      if (Array.isArray(sent.cc) && sent.cc.length === 1 && sent.cc[0] === 'principal@fixture.invalid') {
+        ok('  and copied to the FROZEN copy list, not one re-resolved at release');
+      } else bad('  the frozen copy list was not transmitted', JSON.stringify(sent.cc));
 
       const c = (await q(`SELECT status, provider, provider_message_id, provider_accepted_at, run_id
                             FROM supplier_outreach_log WHERE approval_id=$1`, [happy.apId])).rows[0];

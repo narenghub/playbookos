@@ -155,6 +155,36 @@ async function resolveSignatory(deps = {}) {
   return null;
 }
 
+// ── WHO ELSE AT ABIOZEN IS ON THE LETTER ────────────────────────────────────
+//
+// "Both of us handle it": the signatory signs, and the company's principal is copied so supplier
+// replies reach both. The copy contact is RESOLVED FROM A ROLE for the same reason the signatory
+// is — hardcoding an address here would recreate, in a different field, precisely the defect that
+// put a departed Procurement Director's name on two supplier letters.
+//
+// A copy contact is a RECIPIENT, not the represented authority. So:
+//   · it is frozen into the payload, like everything else a human approves
+//   · its absence is NOT a refusal — a letter with one contact is still a valid letter
+//   · release revalidates the SIGNATORY only; a copied colleague who has left means an internal
+//     bounce, not a letter sent over the name of someone who is gone
+//
+// The signatory is excluded, so nobody is both signer and copy.
+async function resolveCopyContacts(deps = {}, signatory = null) {
+  const query = (deps && deps.query) || require('../db').query;
+  if (deps && deps.copyContacts) return deps.copyContacts;   // fixtures only
+
+  const rows = (await query(
+    `SELECT id, name, email, role FROM users
+      WHERE is_active = 1 AND role IN ('admin','super_admin') AND email IS NOT NULL
+      ORDER BY CASE WHEN LOWER(email) LIKE 'naren%' THEN 0 ELSE 1 END, created_at`)).rows;
+
+  return rows
+    .filter((r) => !signatory || (r.id !== signatory.id
+      && String(r.email).toLowerCase() !== String(signatory.email).toLowerCase()))
+    .slice(0, 2)      // the principal, and at most one more. Not a distribution list.
+    .map((r) => ({ id: r.id, name: r.name, email: r.email, role: r.role }));
+}
+
 async function renderGovernedRFQ(ctx, { approvedMol, supplier, rfqId, filedCas = null }, deps = {}) {
   assertContext(ctx);
 
@@ -333,6 +363,10 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
       exception_id: rendered.exception_id || null, ai: rendered.ai || null, rfqId };
   }
 
+  // Resolved AFTER the render, so the copy list cannot influence what the model wrote, and frozen
+  // into the payload below with everything else the human approves.
+  const copyTo = await resolveCopyContacts(deps, rendered.signatory);
+
   // Prepared, not sent. The approval carries the EXACT communication, and the payload is immutable
   // from here, so what a human reads is what would go out.
   const approval = require('./approval');
@@ -360,6 +394,10 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
       // same person, and two people sharing a name are not confused for one.
       signed_by_user_id: rendered.signatory.id || null,
       signed_by_role: rendered.signatory.role || null,
+      // Frozen: who else at Abiozen the supplier's reply reaches. Part of what is approved.
+      cc: copyTo.map((c) => c.email),
+      cc_names: copyTo.map((c) => c.name),
+      cc_user_ids: copyTo.map((c) => c.id),
     },
     reason: `supervised autonomy: a supplier communication for RFQ ${rfqId} requires human `
       + `approval before release. Identity decision ${decided.decisionId} approved `
@@ -379,6 +417,7 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
     body: rendered.body,
     supplier,
     signatory: rendered.signatory,
+    copyTo,
     identity: {
       decision_id: decided.decisionId,
       approved_name: approvedMol.molecule_name,
@@ -499,4 +538,5 @@ async function runGovernedProcurement({ objectiveId, rfqId, supplierId, trigger 
 }
 
 module.exports = { renderGovernedRFQ, prepareGovernedRFQ, runGovernedProcurement,
-  resolveSignatory, identityContainment, casTokens, fileException, AGENT, WORKFLOW };
+  resolveSignatory, resolveCopyContacts, identityContainment, casTokens, fileException,
+  AGENT, WORKFLOW };

@@ -86,6 +86,7 @@ const stop = (why, detail) => {
     field('approval reason', String(row.resolution || '(none recorded)').slice(0, 160));
     field('release mode', row.release_mode);
     field('destination', p.to || '(none)');
+    field('copied to', (p.cc || []).length ? p.cc.join(', ') : '(none)');
     field('supplier', p.supplier_name || p.supplier_id || '(none)');
     field('approved molecule', p.approved_molecule_name || '(none)');
     field('approved CAS', p.approved_cas || 'NONE — deliberately omitted');

@@ -1011,6 +1011,67 @@ globalThis.fetch = async (u, opts) => {
     // Restore a sane signatory for everything that follows.
     await freshUsers([['sig-dir', 'newdir@abiozen.invalid', 'A New Director', 'procurement_director', 1]]);
 
+    // ══ THE COPY CONTACT IS ALSO RESOLVED, NOT HARDCODED ═══════════════════
+    //
+    // "Both of us handle it" — the signatory signs, the principal is copied. A hardcoded address
+    // here would recreate the departed-director defect in a different field, so it is resolved
+    // from role like the signatory, and frozen into the payload like everything else approved.
+    note('the copy contact is resolved from role, excluded of the signatory, and frozen');
+    {
+      await freshUsers([
+        ['sig-dir', 'newdir@abiozen.invalid', 'A New Director', 'procurement_director', 1],
+        ['sig-ceo', 'naren@abiozen.invalid', 'Naresh Boda', 'super_admin', 1],
+        ['sig-gone-admin', 'goneadmin@abiozen.invalid', 'A Departed Admin', 'admin', 0],
+      ]);
+      const cc = await freshRfq.resolveCopyContacts(deps, null);
+      if (cc.some((c) => c.email === 'naren@abiozen.invalid')) ok('the active principal is copied');
+      else bad('the principal was not resolved as a copy contact', JSON.stringify(cc));
+      if (!cc.some((c) => c.email === 'goneadmin@abiozen.invalid')) {
+        ok('an INACTIVE admin is not copied — is_active applies here too');
+      } else bad('a departed admin was copied');
+
+      // The signatory must not also be the copy.
+      const ccSelf = await freshRfq.resolveCopyContacts(deps,
+        { id: 'sig-ceo', email: 'naren@abiozen.invalid' });
+      if (!ccSelf.some((c) => c.email === 'naren@abiozen.invalid')) {
+        ok('the signatory is excluded from the copy list — nobody signs and copies themselves');
+      } else bad('the signatory appears in their own copy list');
+
+      // And no literal address survives in the resolver.
+      const rfqSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'office', 'procurement-rfq.js'), 'utf8');
+      const resolver = rfqSrc.slice(rfqSrc.indexOf('async function resolveCopyContacts'),
+        rfqSrc.indexOf('async function renderGovernedRFQ'));
+      if (/@abiozen\.com|@adificetechnologies\.com/.test(resolver)) {
+        bad('a literal company address is hardcoded in the copy resolver — the same defect, new field');
+      } else ok('no literal address appears in the copy resolver');
+
+      // Frozen into the payload, and the executor must use the FROZEN list.
+      const OCC = `k56-cc-${crypto.randomUUID()}`;
+      await scope.createObjective({ id: OCC, companyId: A, objective: 'CC fixture', priority: 'P3',
+        kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+        autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+      ids.objectives.push(OCC);
+      await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OCC, runId: null }),
+        { id: OCC, status: 'active' }, deps);
+      await q(`INSERT INTO suppliers (id, name, country, contact_email)
+               VALUES ('sup-cc','CC Labs','India','cc@sup.invalid') ON CONFLICT (id) DO NOTHING`);
+      const ccPrep = await freshRfq.runGovernedProcurement({ objectiveId: OCC, rfqId: 'rfq-k56',
+        supplierId: 'sup-cc' }, { ...deps, guard: allowingGuard });
+      if (!ccPrep.ok) bad('the CC preparation failed', ccPrep.refusal);
+      else {
+        ids.runs.push(ccPrep.runId); ids.approvals.push(ccPrep.approvalId);
+        const pl = (await q(`SELECT action_payload FROM office_approvals WHERE id=$1`,
+          [ccPrep.approvalId])).rows[0].action_payload;
+        if (Array.isArray(pl.cc) && pl.cc.includes('naren@abiozen.invalid')) {
+          ok('the copy list is FROZEN into the immutable payload');
+        } else bad('the payload does not carry the copy list', JSON.stringify(pl.cc));
+        if (pl.signed_by_email === 'newdir@abiozen.invalid' && !pl.cc.includes('newdir@abiozen.invalid')) {
+          ok('and the signatory signs while the principal is copied — not the same person twice');
+        } else bad('signatory/copy overlap in the frozen payload', JSON.stringify({ s: pl.signed_by_email, cc: pl.cc }));
+      }
+    }
+    await freshUsers([['sig-dir', 'newdir@abiozen.invalid', 'A New Director', 'procurement_director', 1]]);
+
     // K8 must recognize the workflow by name, independent of which modules are loaded.
     {
       const freshAutonomy = require('../src/lib/autonomy');

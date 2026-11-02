@@ -248,13 +248,20 @@ async function executeApprovedAction(approvalId, { releasedBy, requireExplicitRe
   }
 
   // ══ 5. THE SEND — THE FROZEN PAYLOAD, UNMODIFIED ═══════════════════════
+  // The CC comes from the FROZEN payload, exactly like the destination and the body. It is not
+  // re-resolved here: who the supplier's reply reaches is part of what the human approved, and
+  // re-resolving it at release would answer "who holds the role now" rather than "who was this
+  // letter approved to copy".
+  const ccList = Array.isArray(approved.cc) ? approved.cc.filter(Boolean) : [];
   const mailResult = await mailer.sendEmailDetailed({
     to,
     subject,
     html: String(body).split('\n').map((l) => escapeHtml(l)).join('<br>\n'),
     replyTo: approved.signed_by_email || undefined,
+    ...(ccList.length ? { cc: ccList } : {}),
     capability: 'email.send',
   });
+  report.cc = ccList;
   report.provider = mailResult.provider || 'resend';
   report.providerPhase = mailResult.phase || (mailResult.ok ? 'provider_accepted' : 'unknown');
   report.providerMessageId = mailResult.id || null;
