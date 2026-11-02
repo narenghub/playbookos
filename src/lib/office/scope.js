@@ -75,11 +75,17 @@ function q(deps) {
 // ---------------------------------------------------------------------------------------------
 // THE FOURTH DELIBERATELY UNSCOPED READ, AND WHY IT MUST BE UNSCOPED
 //
-// "Has this (RFQ, supplier) pair already been prepared?" is a question about an id COLLISION, and
-// office_approvals.id is a PRIMARY KEY — global, not per company. The governed preparation derives
-// it deterministically as `ap-rfq-<rfq>-<supplier>`, so a company predicate here would be worse
-// than useless: it could report a pair as available while the insert still collides with another
-// company's row. The truthful answer to a global-uniqueness question is a global read.
+// "What has already been prepared for this RFQ?" is a question about PRIMARY KEY collisions and
+// about live authorizations, and office_approvals.id is global rather than per company. So a
+// company predicate here would be worse than useless: it could report a pair as available while
+// the insert still collides with another company's row. The truthful answer to a global-uniqueness
+// question is a global read.
+//
+// It returns release_claimed_at and released_at because the states are not interchangeable. A
+// REJECTED attempt is dead and must not block a corrected re-preparation — that is the whole
+// point of separating a stable business intent from one preparation attempt. An APPROVED and
+// unreleased attempt is a live authorization, and a CLAIMED one has already reached the outside
+// world. Only the last two may block.
 //
 // It returns only what an eligibility listing needs — id, status, the payload's supplier and the
 // resolution — never the frozen payload itself, so this cannot become a route to reading another
@@ -93,10 +99,12 @@ function q(deps) {
 async function rfqApprovalsForEligibility(rfqId, deps = {}) {
   const query = (deps && deps.query) || require('../db').query;
   return (await query(
-    `SELECT id, status, action_payload->>'supplier_id' AS supplier_id, resolution, created_at
+    `SELECT id, status, action_payload->>'supplier_id' AS supplier_id, resolution, created_at,
+            release_claimed_at, released_at
        FROM office_approvals
       WHERE action_kind = 'send_rfq_email'
-        AND action_payload->>'rfq_id' = $1`, [rfqId])).rows;
+        AND action_payload->>'rfq_id' = $1
+      ORDER BY created_at`, [rfqId])).rows;
 }
 
 /** Everything the executor needs to decide whether an approved action may be carried out. */

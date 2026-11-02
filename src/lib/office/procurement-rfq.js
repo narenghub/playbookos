@@ -211,6 +211,122 @@ async function resolveCopyContacts(deps = {}, signatory = null) {
     : [];
 }
 
+// ── A STABLE BUSINESS INTENT, AND SEPARATE PREPARATION ATTEMPTS ─────────────
+//
+// THE DEFECT, SEEN TWICE IN ONE DAY. The approval id was `ap-rfq-<rfq>-<supplier>` — one approval
+// per pair, for ever. So a preparation that was REJECTED for a defect in MY code permanently
+// consumed a real supplier: Aurobindo was lost to a copy-list defect, MSN to the departed
+// signatory, and Hetero was about to be lost because its payload records no sender. Each time the
+// business intent — "ask this supplier to quote this molecule" — was unchanged and entirely
+// legitimate, and each time the system behaved as though the opportunity itself had been spent.
+//
+// The two things were conflated:
+//
+//   BUSINESS INTENT     (rfq_id, supplier_id)   stable. One per supplier per RFQ.
+//   PREPARATION ATTEMPT one approval            many per intent. Each immutable, each separately
+//                                               decided, superseded ones inert.
+//
+// So the approval id carries an attempt number, and a rejected attempt no longer blocks a
+// corrected one. What a new attempt must NOT do is create a second live authorization or a second
+// external send:
+//
+//   pending            a human is already being asked          → refuse
+//   approved, unreleased  already authorized                   → refuse
+//   claimed or released   the outside world was already reached → refuse
+//   rejected / expired    dead                                 → ALLOW a new attempt
+//
+// IDEMPOTENCY OF THE SEND IS UNTOUCHED, deliberately. `uq_supplier_outreach_rfq_supplier` is
+// UNIQUE on (rfq_id, supplier_id) with no exclusion for failed rows, so there is still exactly ONE
+// external send per pair, ever, enforced by the database rather than by this reasoning. Relaxing
+// the approval identity does not relax that, and the fixture proves it: two approved attempts for
+// one pair, and the second release is refused by the claim.
+//
+// Returns null when a new attempt may be prepared, or a refusal naming the blocking approval.
+function intentBlockedBy(priorAttempts, supplierId) {
+  const mine = (priorAttempts || []).filter((a) => a.supplier_id === supplierId);
+  for (const a of mine) {
+    if (a.released_at || a.release_claimed_at) {
+      return { reason: 'intent_already_attempted', approval_id: a.id,
+        detail: `approval ${a.id} has already been claimed for release`
+          + `${a.released_at ? '' : ' (claim without a recorded release)'} — the outside world was `
+          + 'reached for this supplier and there is exactly one send per pair' };
+    }
+    if (a.status === 'pending') {
+      return { reason: 'preparation_already_pending', approval_id: a.id,
+        detail: `approval ${a.id} is already awaiting a human decision; preparing a second one `
+          + 'would ask the same person the same question twice about one supplier' };
+    }
+    if (a.status === 'approved') {
+      return { reason: 'preparation_already_approved', approval_id: a.id,
+        detail: `approval ${a.id} is already APPROVED and unreleased — a live authorization. `
+          + 'Supersede it with a recorded decision before preparing a replacement' };
+    }
+  }
+  return null;
+}
+
+/** The next attempt number for this intent: one more than every attempt already recorded. */
+function nextAttempt(priorAttempts, supplierId) {
+  return (priorAttempts || []).filter((a) => a.supplier_id === supplierId).length + 1;
+}
+
+// ── THE SENDER IS PART OF THE APPROVED COMMUNICATION ────────────────────────
+//
+//   "The external identity of an email consists of more than body, signatory, To and CC. It also
+//    includes From. Therefore the sender must be determined BEFORE approval, displayed at the
+//    approval boundary, frozen into action_payload, and executed exactly as approved."
+//
+// WHAT WENT WRONG. R1 called the mailer with no `from`, so the sender fell through to
+// mailer.defaultFrom() — `MAIL_FROM || 'PlayNexa <no-reply@adificetechnologies.com>'`. MAIL_FROM is
+// unset in production, so the first Abiozen supplier RFQ would have reached Hetero Drugs from
+// another company's domain, over a signature block reading Abiozen LLC / raj@abiozen.com. The
+// letter would have contradicted its own envelope.
+//
+// Nobody approved that, and nobody could have: the sender was not in the payload a human read. It
+// was decided at send time by a deployment variable, which is the one thing the frozen-payload
+// invariant exists to prevent.
+//
+// THE SENDER IS THE SIGNATORY. Not an alias, not a role address, not a no-reply — even once the
+// domain is authorized and `procurement@abiozen.com` becomes possible. The supplier should see the
+// same human identity the signature represents, and a reply should reach that person.
+const senderOf = (signatory) => (!signatory || !signatory.email || !signatory.name ? null : {
+  user_id: signatory.id || null,
+  name: signatory.name,
+  email: signatory.email,
+  display: `${signatory.name} <${signatory.email}>`,
+});
+
+// Verified before the provider is invoked, beside the recipient check. Same shape, same reason: a
+// sender that a human would have to reject is not an artefact worth paying to produce.
+function verifySenderPolicy({ sender, signatory }) {
+  const bad = (reason, detail) => ({ reason, detail });
+  if (!sender || !sender.email) {
+    return bad('sender_not_recorded',
+      'no sender could be derived, so the external identity of this letter is undetermined — and a '
+      + 'deployment default must never supply it for a governed external action');
+  }
+  if (!signatory || !signatory.email) {
+    return bad('sender_not_recorded', 'there is no signatory to derive a sender from');
+  }
+  // sender user = frozen signatory user, and sender email = frozen signatory email.
+  if (String(sender.email).toLowerCase() !== String(signatory.email).toLowerCase()) {
+    return bad('sender_is_not_the_signatory',
+      `the letter would be sent from ${sender.email} but is signed by ${signatory.email}; the `
+      + 'supplier must see one human identity, and a reply must reach the person who signed');
+  }
+  if ((sender.user_id || null) !== (signatory.id || null)) {
+    return bad('sender_is_not_the_signatory',
+      'the sender and the signatory resolve to different users');
+  }
+  const d = emailDomain(sender.email);
+  if (!d) return bad('sender_outside_company_boundary', `"${sender.email}" has no domain`);
+  if (d !== emailDomain(signatory.email)) {
+    return bad('sender_outside_company_boundary',
+      `the letter would be sent from ${d} but is signed from ${emailDomain(signatory.email)}`);
+  }
+  return null;
+}
+
 // ── THE RECIPIENT SET IS VERIFIED BEFORE THE PROVIDER IS INVOKED ────────────
 //
 //   "If any unexpected recipient appears: STOP BEFORE PROVIDER INVOCATION."
@@ -426,7 +542,7 @@ async function fileException(ctx, { rfqId, severity, source, reason }, deps = {}
 //
 // Identity authority is the SAME object the live send path uses — guardSend from
 // rfq-identity-guard — so the governed path cannot drift to a softer notion of "approved".
-async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
+async function prepareGovernedRFQ(ctx, { rfqId, supplier, attempt: knownAttempt = null }, deps = {}) {
   assertContext(ctx);
   const query = (deps && deps.query) || require('../db').query;
   // Injectable so the governed path is testable without the full molecule registry, but the
@@ -474,6 +590,43 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
         + 'honestly be from — refusing rather than signing a name' };
   }
 
+  // ── THE SENDER, DERIVED FROM THE SIGNATORY AND VERIFIED ─────────────────
+  const sender = senderOf(signatory);
+  const senderViolation = verifySenderPolicy({ sender, signatory });
+  if (senderViolation) {
+    const exceptionId = await fileException(ctx, {
+      rfqId, severity: 'critical', source: 'office/procurement-rfq',
+      reason: `RFQ ${rfqId} STOPPED BEFORE PROVIDER INVOCATION `
+        + `(${senderViolation.reason}): ${senderViolation.detail}. No AI call was made and no `
+        + 'approval was prepared. The external identity of a governed communication is part of '
+        + 'what a human approves and must never come from deployment configuration.',
+    }, deps);
+    return { ok: false, refusal: 'sender_policy_violation',
+      sender_reason: senderViolation.reason, detail: senderViolation.detail,
+      exception_id: exceptionId, rfqId };
+  }
+
+  // ── ONE LIVE AUTHORIZATION PER BUSINESS INTENT ──────────────────────────
+  //
+  // Checked before the provider too, because a preparation that cannot legitimately exist should
+  // not cost tokens. A REJECTED prior attempt does not block: that is the fix for suppliers being
+  // permanently consumed by defects in this code.
+  // runGovernedProcurement has already decided this and keyed its RUN on the answer, so the
+  // number is ACCEPTED rather than recomputed — recomputing it here could disagree with the run's
+  // own identity under a race, and two layers disagreeing about which attempt this is was the
+  // defect one layer up. Still checked and computed when a caller comes in directly, so this
+  // function cannot be used to bypass the guard.
+  let attempt = knownAttempt;
+  if (attempt === null) {
+    const prior = await scope.rfqApprovalsForEligibility(rfqId, deps);
+    const blocked = intentBlockedBy(prior, supplier.id || null);
+    if (blocked) {
+      return { ok: false, refusal: blocked.reason, detail: blocked.detail,
+        blocking_approval_id: blocked.approval_id, rfqId };
+    }
+    attempt = nextAttempt(prior, supplier.id || null);
+  }
+
   const copyTo = await resolveCopyContacts(deps, signatory);
 
   // STOP BEFORE PROVIDER INVOCATION. Not a warning, not a sanitization: no tokens are spent and
@@ -510,7 +663,11 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
   // from here, so what a human reads is what would go out.
   const approval = require('./approval');
   const prepared = await approval.prepare(ctx, {
-    id: `ap-rfq-${rfqId}-${supplier.id || supplier.name}`,
+    // THE ATTEMPT NUMBER IS PART OF THE ID. Attempt 1 keeps the historical form so the three
+    // approvals already recorded keep their ids and stay exactly as they are.
+    id: attempt === 1
+      ? `ap-rfq-${rfqId}-${supplier.id || supplier.name}`
+      : `ap-rfq-${rfqId}-${supplier.id || supplier.name}-a${attempt}`,
     actionKind: 'send_rfq_email',
     actionPayload: {
       rfq_id: rfqId,
@@ -533,6 +690,21 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
       // same person, and two people sharing a name are not confused for one.
       signed_by_user_id: rendered.signatory.id || null,
       signed_by_role: rendered.signatory.role || null,
+      // ── THE SENDER IS FROZEN, LIKE THE SIGNATORY AND THE RECIPIENTS ───────
+      //
+      // R1 sends FROM this value and refuses if it is absent. There is no fallback: the mailer's
+      // legacy MAIL_FROM default must never silently supply the external identity of a governed
+      // action, which is exactly what it was about to do.
+      from: sender.display,
+      from_email: sender.email,
+      from_name: sender.name,
+      from_user_id: sender.user_id,
+      sender_provenance: 'derived from the resolved active signatory, so the envelope carries the '
+        + 'same human identity as the signature block and a reply reaches the person who signed',
+      // The business intent this attempt belongs to, and which attempt it is. Recorded so a
+      // superseded attempt is legible as one attempt at a live intent rather than a dead end.
+      intent_key: `${rfqId}:${supplier.id || supplier.name}`,
+      attempt,
       // ── RECIPIENT PROVENANCE IS CONSEQUENTIAL PROVENANCE ──────────────────
       //
       // The external recipient set is treated like the signatory: frozen, and explicit about WHY
@@ -569,6 +741,8 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
     body: rendered.body,
     supplier,
     signatory: rendered.signatory,
+    sender,
+    attempt,
     copyTo,
     identity: {
       decision_id: decided.decisionId,
@@ -643,9 +817,34 @@ async function runGovernedProcurement({ objectiveId, rfqId, supplierId, trigger 
   // the same granularity as the deterministic approval id below. The date stays in the key so a
   // deliberate follow-up to the same supplier on a later day remains possible; preparing the same
   // pair twice in a day is still one intent.
+  // ── AND THE ATTEMPT, BECAUSE A DAY SLOT BLOCKED RE-PREPARATION TOO ────────
+  //
+  // Narrowing to the (objective, RFQ, supplier) triple fixed the first version of this defect but
+  // not the second. A rejected preparation still held the day's slot for that triple, so a
+  // supplier whose attempt was rejected for a defect in OUR code could not be re-prepared until
+  // tomorrow. The approval-level fix alone was not enough: the fixture proved it by refusing
+  // `duplicate_intent` where `preparation_already_pending` was expected, and then refusing a
+  // legitimate attempt 2 for the same reason.
+  //
+  // An attempt IS a distinct intent — "prepare this letter again, correctly" is not the same act
+  // as the attempt that was rejected. So the attempt number joins the key, and the two layers now
+  // agree on what one attempt is instead of disagreeing by a day.
+  //
+  // THE INTENT GUARD RUNS FIRST, before the run is opened, for two reasons: a preparation that
+  // cannot legitimately exist should not open a run at all, and it answers with the SPECIFIC reason
+  // (already pending, already approved, already attempted) rather than the generic duplicate_intent
+  // that a run-key collision would give.
+  const priorAttempts = await scope.rfqApprovalsForEligibility(rfqId, deps);
+  const intentBlock = intentBlockedBy(priorAttempts, supplier.id);
+  if (intentBlock) {
+    return { ok: false, refusal: intentBlock.reason, detail: intentBlock.detail,
+      blocking_approval_id: intentBlock.approval_id, rfqId, supplierId };
+  }
+  const attempt = nextAttempt(priorAttempts, supplier.id);
+
   const { objectiveIntentKey } = require('../runs');
   const dayKey = objectiveIntentKey(WORKFLOW, objectiveId);
-  const intentKey = `${dayKey}:${rfqId}:${supplier.id}`;
+  const intentKey = `${dayKey}:${rfqId}:${supplier.id}:a${attempt}`;
 
   const { beginObjectiveRun } = require('./run');
   const begun = await beginObjectiveRun({
@@ -655,8 +854,8 @@ async function runGovernedProcurement({ objectiveId, rfqId, supplierId, trigger 
 
   if (begun.duplicate) {
     return { ok: false, refusal: 'duplicate_intent', intentKey: begun.intentKey,
-      detail: 'a governed procurement run for this objective already exists for today — '
-        + 'a second run is not a second intent' };
+      detail: `a governed procurement run for attempt ${attempt} at this (RFQ, supplier) already `
+        + 'exists today — two concurrent runs of one attempt are not two intents' };
   }
 
   const L = (deps && deps.ledger)
@@ -665,7 +864,7 @@ async function runGovernedProcurement({ objectiveId, rfqId, supplierId, trigger 
 
   let out;
   try {
-    out = await prepareGovernedRFQ(begun.context, { rfqId, supplier }, deps);
+    out = await prepareGovernedRFQ(begun.context, { rfqId, supplier, attempt }, deps);
   } catch (e) {
     await L.finish(begun.runId, { error: e.message });
     throw e;
@@ -690,6 +889,7 @@ async function runGovernedProcurement({ objectiveId, rfqId, supplierId, trigger 
 }
 
 module.exports = { renderGovernedRFQ, prepareGovernedRFQ, runGovernedProcurement,
-  verifyRecipientPolicy, resolveSignatory, resolveCopyContacts,
+  verifyRecipientPolicy, verifySenderPolicy, senderOf, intentBlockedBy, nextAttempt,
+  resolveSignatory, resolveCopyContacts,
   identityContainment, casTokens, fileException,
   AGENT, WORKFLOW };

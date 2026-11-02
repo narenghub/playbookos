@@ -633,13 +633,19 @@ function runValidator(stub, extraEnv = {}) {
       ok('a refused RFQ and an allowed one hold SEPARATE slots — a guard refusal locks out nothing');
     } else bad('the intent keys do not distinguish the two RFQs', keys.join('\n'));
 
-    // ── and a second preparation the same day is one intent, not two ────────
+    // ── and a second preparation against a PENDING one is refused ───────────
+    //
+    // This expected `duplicate_intent` — the run-level day slot. It no longer fires, and that is
+    // the fix rather than a regression: the day slot also blocked legitimate re-preparation after
+    // a REJECTED attempt, which permanently consumed three real suppliers in one day. The specific
+    // reason is now given, and no run is opened at all.
     const again2 = runScript('office-prepare-first-rfq.js',
       ['--rfq=cand-allow', '--supplier=s-fresh', '--allow-duplicate'], okStub());
     const again2Out = (again2.stdout || '') + (again2.stderr || '');
-    if (again2.status !== 0 && /duplicate_intent/.test(again2Out)) {
-      ok('a second governed procurement run for the objective today is refused as one intent');
-    } else bad('a second preparation was permitted the same day', again2Out.split('\n').slice(-14).join('\n'));
+    if (again2.status !== 0 && /preparation_already_pending|already awaiting a human decision/.test(again2Out)) {
+      ok('a second preparation against a PENDING attempt is refused, by name');
+    } else bad('a second preparation was permitted against a pending attempt',
+      again2Out.split('\n').slice(-14).join('\n'));
     const apAfter = (await query(`SELECT COUNT(*)::int n FROM office_approvals`)).rows[0].n;
     if (apAfter === 1) ok('still exactly one approval — no second communication was prepared');
     else bad(`${apAfter} approvals after the duplicate attempt`);

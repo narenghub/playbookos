@@ -87,6 +87,7 @@ const RFQ = 'rfq-prerelease';
 const SUP = 'sup-prerelease';
 const SIG = 'u-prerelease-sig';
 let RUN = null;   // assigned by beginObjectiveRun; read by the cleanup in `finally`
+const extraApprovals = [];   // sender cases build their own approvals; cleanup removes them by id
 
 // sslmode=disable: the child builds its own pool through src/lib/db.js, which asks for SSL, and a
 // throwaway cluster has none. Without it every case above failed with "The server does not support
@@ -95,8 +96,8 @@ let RUN = null;   // assigned by beginObjectiveRun; read by the cleanup in `fina
 // why each case asserts its specific reason.
 const CHILD_URL = `${url}&sslmode=disable`;
 
-function runReport() {
-  const r = spawnSync(process.execPath, ['scripts/office-pre-release-report.js', `--approval=${AP}`], {
+function runReport(id = AP) {
+  const r = spawnSync(process.execPath, ['scripts/office-pre-release-report.js', `--approval=${id}`], {
     cwd: REPO, encoding: 'utf8',
     env: { ...process.env, DATABASE_URL: CHILD_URL, RAILWAY_GIT_COMMIT_SHA: 'rehearsal' },
   });
@@ -215,6 +216,12 @@ function runReport() {
       signed_by_email: 'sig@prerelease.invalid', signed_by_user_id: SIG,
       signed_by_role: 'procurement_director',
       cc: ['principal@prerelease.invalid'], bcc: [],
+      // The sender is part of the approved communication. Present by default so every other case
+      // measures its own precondition rather than refusing on this one first.
+      from: 'A Fixture Signatory <sig@prerelease.invalid>',
+      from_email: 'sig@prerelease.invalid', from_name: 'A Fixture Signatory', from_user_id: SIG,
+      sender_provenance: 'derived from the resolved active signatory',
+      intent_key: `${RFQ}:${SUP}`, attempt: 1,
       recipients: [
         { kind: 'to', email: 'sup@prerelease.invalid', relationship: 'external supplier', why: 'the supplier' },
         { kind: 'cc', email: 'principal@prerelease.invalid', relationship: 'principal', why: 'the company principal' },
@@ -235,6 +242,8 @@ function runReport() {
     else bad('the report did not report the release mode');
     if (/payload sha256\s+[0-9a-f]{64}/.test(r.out)) ok('and prints a canonical payload digest');
     else bad('no payload digest was printed');
+    if (/FROM\s+A Fixture Signatory/.test(r.out)) ok('and it displays FROM — a report without it is incomplete');
+    else bad('the report does not display the sender');
     if (/R1 send capability IS deployed/.test(r.out)) {
       ok('and attributes the safety to EXPLICIT RELEASE MODE, not to an absent send capability');
     } else bad('the report does not state why approval is safe');
@@ -266,6 +275,42 @@ function runReport() {
       () => q(`UPDATE objectives SET release_mode='on_approval' WHERE id=$1`, [OB]),
       () => q(`UPDATE objectives SET release_mode='explicit' WHERE id=$1`, [OB]),
       /release_mode is "on_approval".*NOT what was authorized/s);
+
+    // ── THE SENDER CASES GET THEIR OWN APPROVAL ROWS ──────────────────────
+    //
+    // They cannot be done by editing this fixture's payload: the immutability trigger refuses it —
+    // "an approval request is immutable ... so that what was approved is what is released". That
+    // is the protection the whole frozen-payload invariant rests on, so the fixture works WITH it
+    // rather than disabling it, and each case inserts the payload it wants to test.
+    const senderCase = async (label, suffix, overrides, pattern) => {
+      const id = `${AP}-${suffix}`;
+      const { from, from_email: fe, ...rest } = payload;
+      await q(`INSERT INTO office_approvals (id, company_id, objective_id, run_id, action_kind,
+                 action_payload, status, reason, resolution, resolved_by, resolved_at)
+               VALUES ($1,$2,$3,$4,'send_rfq_email',$5::jsonb,'approved','fixture',
+                       'approved in rehearsal','rehearsal',NOW())`,
+        [id, CO, OB, RUN, JSON.stringify({ ...rest, ...overrides })]);
+      extraApprovals.push(id);
+      const rr = runReport(id);
+      if (rr.code === 0) bad(`${label}: the report PASSED on a payload it must refuse`, rr.out.slice(-400));
+      else if (!pattern.test(rr.out)) {
+        bad(`${label}: red for the WRONG reason — the sender precondition was never measured`,
+          reasons(rr.out));
+      } else ok(`${label} → RED, for the right reason`);
+    };
+
+    // THE HETERO STATE: approved, and its payload records no sender because it was prepared before
+    // the sender became part of the approved communication.
+    await senderCase('a payload with NO sender', 'nosender', {}, /THE PAYLOAD RECORDS NO SENDER/);
+
+    await senderCase('a sender that is not the signatory', 'notsig',
+      { from: 'Procurement <procurement@prerelease.invalid>',
+        from_email: 'procurement@prerelease.invalid' },
+      /is not the frozen signatory/);
+
+    await senderCase('a sender at another company\'s domain', 'otherdomain',
+      { from: 'PlayNexa <no-reply@elsewhere.invalid>', from_email: 'no-reply@elsewhere.invalid' },
+      /is not the frozen signatory|sender_outside_company_boundary/);
 
     await redCase('a departed signatory',
       () => q(`UPDATE users SET is_active=0 WHERE id=$1`, [SIG]),
@@ -311,6 +356,7 @@ function runReport() {
     bad('unexpected error', e.stack || e.message);
   } finally {
     try {
+      for (const id of extraApprovals) await q(`DELETE FROM office_approvals WHERE id = $1`, [id]).catch(() => {});
       await q(`DELETE FROM office_approvals WHERE id = $1`, [AP]).catch(() => {});
       await q(`DELETE FROM supplier_outreach_log WHERE rfq_id = $1`, [RFQ]).catch(() => {});
       await q(`ALTER TABLE agent_run_events DISABLE TRIGGER trg_agent_run_events_append_only`).catch(() => {});

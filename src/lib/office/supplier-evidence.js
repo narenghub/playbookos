@@ -111,7 +111,22 @@ function acceptDmf(dmfRows, supplierName) {
 function buildEvidence({ rfq, suppliers, consumed = [], replies = [], dmfRows = [], approvals = [] }) {
   const spentBy = new Map((consumed || []).map((c) => [c.supplier_id, c]));
   const replyBy = new Map((replies || []).map((h) => [h.supplier_id, h]));
-  const apprBy = new Map((approvals || []).filter((a) => a.supplier_id).map((a) => [a.supplier_id, a]));
+  // ── ONLY A LIVE OR CONSUMED ATTEMPT MAKES A SUPPLIER INELIGIBLE ─────────
+  //
+  // A REJECTED attempt no longer blocks: a preparation rejected for a defect in our own code does
+  // not spend the business opportunity, which is the whole point of separating a stable (RFQ,
+  // supplier) intent from one preparation attempt. Before that separation existed, this listing
+  // reported Aurobindo, MSN and nearly Hetero as permanently consumed by defects we had already
+  // fixed.
+  const blocking = (a) => a.released_at || a.release_claimed_at
+    || a.status === 'pending' || a.status === 'approved';
+  const apprBy = new Map((approvals || []).filter((a) => a.supplier_id && blocking(a))
+    .map((a) => [a.supplier_id, a]));
+  const supersededBy = new Map();
+  for (const a of approvals || []) {
+    if (!a.supplier_id || blocking(a)) continue;
+    supersededBy.set(a.supplier_id, (supersededBy.get(a.supplier_id) || 0) + 1);
+  }
   const gmpRequired = Number(rfq && rfq.gmp_required) === 1;
 
   return (suppliers || []).map((s) => {
@@ -128,9 +143,11 @@ function buildEvidence({ rfq, suppliers, consumed = [], replies = [], dmfRows = 
         ? `already holds an outreach row for this RFQ (${spent.status}) — consumed under the `
           + 'current deterministic preparation identity'
         : appr
-          ? `already holds approval ${appr.id} for this RFQ (${appr.status}) — the approval id is `
-            + 'deterministic, so this pair cannot be prepared again whatever became of it'
+          ? `holds a LIVE approval ${appr.id} for this RFQ (${appr.status}`
+            + `${appr.release_claimed_at ? ', claimed for release' : ''}) — supersede or complete it `
+            + 'before preparing another attempt for this supplier'
           : (!s.contact_email ? 'no contact_email on the suppliers row' : null),
+      supersededAttempts: supersededBy.get(s.id) || 0,
       dmfSafe: safe,
       dmfWeak: weak,
       sent: h ? h.sent : 0,
@@ -225,6 +242,9 @@ function reasonsFor(r, { dmfAvailable = true } = {}) {
   else if (!r.replied) out.push(`contacted ${r.sent} time(s) and NEVER replied`);
   else out.push(`replied ${r.replied} of ${r.sent} previous RFQ(s)`);
   out.push(`reliability ${r.supplier.reliability_score}`);
+  if (r.supersededAttempts) {
+    out.push(`${r.supersededAttempts} superseded preparation attempt(s) — still eligible`);
+  }
   return out;
 }
 

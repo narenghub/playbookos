@@ -125,6 +125,10 @@ function canonical(v) {
     note('canonical (key-sorted) digest. Re-run this before release: a different digest means the');
     note('payload changed, which the immutability trigger should have made impossible.');
     field('supplier', `${p.supplier_name || '(none)'} (${p.supplier_id || 'no id'})`);
+    // FROM IS DISPLAYED FIRST AND ITS ABSENCE IS A FAILURE. "A pre-release report without FROM is
+    // incomplete." The first version of this report omitted it entirely, which is how an approval
+    // whose sender would have come from a deployment variable passed every check here.
+    field('FROM', p.from || '(NONE RECORDED)');
     field('destination (To)', p.to || '(none)');
     field('CC', (p.cc || []).join(', ') || '(none)');
     field('BCC', (p.bcc || []).length ? (p.bcc || []).join(', ') : '(none — explicitly empty)');
@@ -140,6 +144,24 @@ function canonical(v) {
     }
     if (Array.isArray(p.recipients) && p.recipients.length) ok('every recipient carries a recorded reason');
     else bad('the payload records no recipient provenance');
+
+    // ── THE SENDER, WHICH IS PART OF THE EXTERNAL IDENTITY ────────────────
+    if (p.sender_provenance) field('sender provenance', p.sender_provenance);
+    if (p.attempt) field('intent / attempt', `${p.intent_key || '(none)'} · attempt ${p.attempt}`);
+    if (!p.from || !p.from_email) {
+      bad('THE PAYLOAD RECORDS NO SENDER — release would refuse sender_not_recorded. The external '
+        + 'identity of this letter would otherwise be supplied by deployment configuration rather '
+        + 'than by the human who approved it, and this action needs re-preparation');
+    } else if (String(p.from_email).toLowerCase() !== String(p.signed_by_email || '').toLowerCase()) {
+      bad(`the frozen sender ${p.from_email} is not the frozen signatory ${p.signed_by_email} — `
+        + 'release would refuse sender_is_not_the_signatory');
+    } else {
+      const sd = String(p.from_email).toLowerCase().split('@')[1];
+      const gd = String(p.signed_by_email).toLowerCase().split('@')[1];
+      if (sd && sd === gd) ok('the sender is the signatory, inside one company boundary, and frozen');
+      else bad(`the sender is at ${sd} but the letter is signed from ${gd} — release would refuse `
+        + 'sender_outside_company_boundary');
+    }
 
     // ══ 3. THE RELEASE PRECONDITIONS, AS THE REAL GATES ANSWER THEM ════════
     console.log('\n  ── RELEASE PRECONDITIONS (the same functions release calls) ──\n');

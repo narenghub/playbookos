@@ -830,12 +830,62 @@ globalThis.fetch = async (u, opts) => {
       if (outcomes === 0) ok('§12 no outcome was recorded — preparing an RFQ is not a business result');
       else bad(`§12 ${outcomes} outcome(s) recorded for a merely prepared RFQ`);
 
-      // A second run the same day is not a second intent.
+      // ── A SECOND PREPARATION AGAINST A PENDING ONE IS REFUSED ─────────
+      //
+      // This assertion used to expect `duplicate_intent` — the run-level day slot. That reason is
+      // no longer the one that fires, and the change is deliberate: the day slot ALSO blocked
+      // legitimate re-preparation after a rejected attempt, which is how three real suppliers were
+      // consumed by defects in this code. The specific reason is now given instead, and the run is
+      // never opened at all.
+      const runsBefore = (await q(
+        `SELECT COUNT(*)::int n FROM agent_runs WHERE objective_id = $1`, [OENTRY])).rows[0].n;
       const again = await freshRfq.runGovernedProcurement({ objectiveId: OENTRY, rfqId: 'rfq-k56',
         supplierId: 'sup-k56' }, { ...deps, guard: allowingGuard });
-      if (!again.ok && again.refusal === 'duplicate_intent') {
-        ok('§12 a second governed procurement run for the same objective today is refused as a duplicate');
-      } else bad('§12 a second run was permitted the same day', JSON.stringify(again).slice(0, 200));
+      if (!again.ok && again.refusal === 'preparation_already_pending') {
+        ok('§12 a second preparation against a PENDING attempt is refused by name');
+      } else bad('§12 a second preparation was permitted against a pending attempt',
+        JSON.stringify(again).slice(0, 200));
+      const runsAfter = (await q(
+        `SELECT COUNT(*)::int n FROM agent_runs WHERE objective_id = $1`, [OENTRY])).rows[0].n;
+      if (runsAfter === runsBefore) ok('§12 and NO run was opened — the refusal costs nothing');
+      else bad(`§12 a run was opened for a preparation that could not legitimately exist `
+        + `(${runsBefore} → ${runsAfter})`);
+
+      // ── THE RUN KEY STILL ARBITRATES A RACE ───────────────────────────
+      //
+      // The day slot's real job — two concurrent runs of ONE attempt are not two intents — must
+      // survive narrowing the key by attempt number. Two calls launched together, with no prior
+      // approval to block either, so the ONLY thing that can separate them is the run key.
+      {
+        const ORACE = `k56-race-${crypto.randomUUID()}`;
+        await scope.createObjective({ id: ORACE, companyId: A, objective: 'Race fixture',
+          priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+          autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+        ids.objectives.push(ORACE);
+        await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: ORACE, runId: null }),
+          { id: ORACE, status: 'active' }, deps);
+        await q(`INSERT INTO suppliers (id, name, country, contact_email)
+                 VALUES ('sup-race','Race Labs','India','race@sup.invalid')
+                 ON CONFLICT (id) DO NOTHING`);
+        mode = 'normal';
+        const both = await Promise.all([
+          freshRfq.runGovernedProcurement({ objectiveId: ORACE, rfqId: 'rfq-k56',
+            supplierId: 'sup-race' }, { ...deps, guard: allowingGuard }),
+          freshRfq.runGovernedProcurement({ objectiveId: ORACE, rfqId: 'rfq-k56',
+            supplierId: 'sup-race' }, { ...deps, guard: allowingGuard }),
+        ]);
+        for (const r of both) { if (r.runId) ids.runs.push(r.runId); if (r.approvalId) ids.approvals.push(r.approvalId); }
+        const won = both.filter((r) => r.ok);
+        if (won.length === 1) {
+          ok('§12 two CONCURRENT preparations of one attempt: exactly one wins — narrowing the run '
+            + 'key by attempt did not remove its arbitration');
+        } else bad(`§12 ${won.length} of 2 concurrent preparations succeeded`,
+          JSON.stringify(both.map((r) => r.refusal || 'ok')));
+        const aps = (await q(`SELECT COUNT(*)::int n FROM office_approvals
+          WHERE action_payload->>'supplier_id' = 'sup-race'`)).rows[0].n;
+        if (aps === 1) ok('§12 and exactly ONE approval exists for that pair');
+        else bad(`§12 ${aps} approvals exist for one raced pair`);
+      }
     }
 
     // ══ THE SIGNATORY IS LIVE DATA, NOT A CONSTANT ═════════════════════════
@@ -1075,9 +1125,18 @@ globalThis.fetch = async (u, opts) => {
 
       // And no literal address survives in the resolver.
       const rfqSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'office', 'procurement-rfq.js'), 'utf8');
-      const resolver = rfqSrc.slice(rfqSrc.indexOf('async function resolveCopyContacts'),
-        rfqSrc.indexOf('// ── THE RECIPIENT SET IS VERIFIED'));
+      // SLICED TO THE END OF THE FUNCTION, not to a named later section. The end anchor used to
+      // name the recipient-verification block; new sections were then added between the two and
+      // the slice swallowed their commentary, which legitimately discusses the
+      // adificetechnologies.com address from the incident. The control fired on a comment. Ending
+      // at the next top-level section marker measures the resolver itself however the file is
+      // reordered.
+      const resolverStart = rfqSrc.indexOf('async function resolveCopyContacts');
+      const nextSection = rfqSrc.indexOf('\n// ── ', resolverStart);
+      const resolver = rfqSrc.slice(resolverStart, nextSection === -1 ? undefined : nextSection);
+      if (resolverStart === -1 || nextSection === -1) bad('the copy-resolver slice anchors are stale');
       if (!resolver || resolver.length < 200) bad('the copy-resolver slice is stale — this control is reading nothing');
+      if (resolver.includes('async function renderGovernedRFQ')) bad('the slice overran the resolver');
       if (/@abiozen\.com|@adificetechnologies\.com/.test(resolver)) {
         bad('a literal company address is hardcoded in the copy resolver — the same defect, new field');
       } else ok('no literal address appears in the copy resolver');
@@ -1514,6 +1573,111 @@ globalThis.fetch = async (u, opts) => {
         if (ccRec && ccRec.email === 'naren@abiozen.invalid') {
           ok('the copied recipient is the resolved principal, inside the signatory\'s own domain');
         } else bad('the copied recipient is not the principal', JSON.stringify(ccRec));
+      }
+    }
+
+    // ══ THE SENDER IS FROZEN, AND A REJECTED ATTEMPT DOES NOT BURN A SUPPLIER ══
+    //
+    // Two things proved together because they were found together. The sender was absent from the
+    // payload, so correcting it meant re-preparing — and re-preparing was IMPOSSIBLE, because the
+    // approval id was `ap-rfq-<rfq>-<supplier>`, one per pair for ever. Three real suppliers were
+    // consumed that way in one day by defects in this code: Aurobindo to a copy-list defect, MSN
+    // to a departed signatory, and Hetero was about to go to a missing sender. Each time the
+    // business intent was unchanged and entirely legitimate.
+    note('the sender is frozen into the payload, and a rejected attempt leaves the intent alive');
+    {
+      await freshUsers([
+        ['sig-dir', 'newdir@abiozen.invalid', 'A New Director', 'procurement_director', 1],
+        ['sig-ceo', 'naren@abiozen.invalid', 'Naresh Boda', 'super_admin', 1],
+      ]);
+      const OS1 = `k56-sender-${crypto.randomUUID()}`;
+      await scope.createObjective({ id: OS1, companyId: A, objective: 'Sender fixture', priority: 'P3',
+        kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+        autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+      ids.objectives.push(OS1);
+      await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OS1, runId: null }),
+        { id: OS1, status: 'active' }, deps);
+      await q(`INSERT INTO suppliers (id, name, country, contact_email)
+               VALUES ('sup-sender','Sender Labs','India','snd@sup.invalid')
+               ON CONFLICT (id) DO NOTHING`);
+
+      mode = 'normal';
+      const p1 = await freshRfq.runGovernedProcurement(
+        { objectiveId: OS1, rfqId: 'rfq-k56', supplierId: 'sup-sender' },
+        { ...deps, guard: allowingGuard });
+      if (p1.runId) ids.runs.push(p1.runId);
+      if (!p1.ok) bad('the sender preparation failed', JSON.stringify(p1));
+      else {
+        ids.approvals.push(p1.approvalId);
+        const pl = (await q(`SELECT action_payload FROM office_approvals WHERE id=$1`,
+          [p1.approvalId])).rows[0].action_payload;
+
+        if (pl.from && pl.from_email) ok('the FROM is frozen into the immutable payload');
+        else bad('the payload records no sender', JSON.stringify({ from: pl.from, e: pl.from_email }));
+        if (pl.from_email === pl.signed_by_email) {
+          ok('and the sender IS the signatory — one human identity, and a reply reaches the signer');
+        } else bad('the sender and signatory disagree in the payload',
+          JSON.stringify({ from: pl.from_email, signed: pl.signed_by_email }));
+        if (pl.from === `${pl.signed_by_name} <${pl.signed_by_email}>`) {
+          ok('and the display form carries the signatory\'s own name');
+        } else bad('the sender display form is not the signatory', pl.from);
+        if (pl.sender_provenance) ok('and WHY that sender was chosen is recorded');
+        else bad('the sender has no recorded provenance');
+        if (pl.attempt === 1 && pl.intent_key === `rfq-k56:sup-sender`) {
+          ok('the payload records the business intent and that this is attempt 1');
+        } else bad('intent/attempt not recorded', JSON.stringify({ a: pl.attempt, k: pl.intent_key }));
+
+        // ── A PENDING ATTEMPT BLOCKS A SECOND ────────────────────────────
+        const p2 = await freshRfq.runGovernedProcurement(
+          { objectiveId: OS1, rfqId: 'rfq-k56', supplierId: 'sup-sender' },
+          { ...deps, guard: allowingGuard });
+        if (p2.runId) ids.runs.push(p2.runId);
+        if (!p2.ok && p2.refusal === 'preparation_already_pending') {
+          ok('a second preparation while one is PENDING is refused — a human is not asked the '
+            + 'same question twice about one supplier');
+        } else bad('a second preparation was allowed while one was pending', JSON.stringify(p2));
+
+        // ── REJECT IT, AND THE INTENT IS ALIVE AGAIN ─────────────────────
+        await scope.decideApproval(Object.freeze({ companyId: A, objectiveId: OS1, runId: p1.runId }),
+          { id: p1.approvalId, decision: 'rejected', resolvedBy: 'ceo',
+            resolution: 'Superseded — prepared before sender identity was included in the payload' }, deps);
+
+        const p3 = await freshRfq.runGovernedProcurement(
+          { objectiveId: OS1, rfqId: 'rfq-k56', supplierId: 'sup-sender' },
+          { ...deps, guard: allowingGuard });
+        if (p3.runId) ids.runs.push(p3.runId);
+        if (!p3.ok) {
+          bad('A REJECTED ATTEMPT STILL BURNS THE SUPPLIER — this is the defect that cost '
+            + 'Aurobindo and MSN', JSON.stringify(p3));
+        } else {
+          ids.approvals.push(p3.approvalId);
+          ok('after a REJECTED attempt the same supplier can be prepared again — a defect in our '
+            + 'own code no longer spends a real business opportunity');
+          if (p3.approvalId !== p1.approvalId) ok('and attempt 2 has its own immutable approval id');
+          else bad('attempt 2 reused the approval id of attempt 1');
+          const pl3 = (await q(`SELECT action_payload FROM office_approvals WHERE id=$1`,
+            [p3.approvalId])).rows[0].action_payload;
+          if (pl3.attempt === 2) ok('and records itself as attempt 2 of the same intent');
+          else bad('the attempt number did not advance', String(pl3.attempt));
+          // THE FIRST ATTEMPT IS UNTOUCHED. Historical evidence, not cleaned up.
+          const pl1 = (await q(`SELECT action_payload, status, resolution FROM office_approvals WHERE id=$1`,
+            [p1.approvalId])).rows[0];
+          if (pl1.status === 'rejected' && pl1.resolution && pl1.action_payload.attempt === 1) {
+            ok('and the superseded attempt is preserved exactly, with its resolution');
+          } else bad('the superseded attempt was altered', JSON.stringify(pl1.status));
+
+          // ── AN APPROVED, UNRELEASED ATTEMPT BLOCKS A THIRD ─────────────
+          await scope.decideApproval(Object.freeze({ companyId: A, objectiveId: OS1, runId: p3.runId }),
+            { id: p3.approvalId, decision: 'approved', resolvedBy: 'ceo',
+              resolution: 'approved in fixture' }, deps);
+          const p4 = await freshRfq.runGovernedProcurement(
+            { objectiveId: OS1, rfqId: 'rfq-k56', supplierId: 'sup-sender' },
+            { ...deps, guard: allowingGuard });
+          if (p4.runId) ids.runs.push(p4.runId);
+          if (!p4.ok && p4.refusal === 'preparation_already_approved') {
+            ok('an APPROVED and unreleased attempt blocks another — one live authorization per intent');
+          } else bad('a preparation was allowed against a live authorization', JSON.stringify(p4));
+        }
       }
     }
 

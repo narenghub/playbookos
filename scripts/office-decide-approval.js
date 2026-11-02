@@ -88,8 +88,11 @@ const stop = (why, detail) => {
 
     const p = row.action_payload || {};
     console.log('\n  WHAT WOULD GO OUT, FROM THE IMMUTABLE PAYLOAD\n');
+    // FROM is shown at the approval boundary because it is part of what is being approved.
+    field('from', p.from || '(NONE RECORDED — not releasable)');
     field('to', p.to || '(none)');
     field('cc', (p.cc || []).length ? p.cc.join(', ') : '(none)');
+    field('bcc', (p.bcc || []).length ? p.bcc.join(', ') : '(none)');
     field('supplier', p.supplier_name || p.supplier_id || '(none)');
     field('approved molecule', p.approved_molecule_name || '(none)');
     field('approved CAS', p.approved_cas || 'NONE — deliberately omitted');

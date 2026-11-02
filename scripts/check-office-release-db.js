@@ -139,7 +139,13 @@ const freshOffice = () => {
     let n = 0;
     const prepare = async ({ releaseMode = 'explicit', signatoryActive = true, cost = 0.001,
       costKnown = true, budget = 10, rfqId = null, supplierId = null, approve = true,
-      recordSignatory = true } = {}) => {
+      recordSignatory = true,
+      // ── THE FROZEN SENDER ─────────────────────────────────────────────────
+      // Present by DEFAULT, because every case in this harness measures something else and a
+      // missing sender would now refuse them all before they reached their own gate — the
+      // gate-contamination pattern. The knobs exist for the sender cases themselves.
+      recordSender = true, senderEmail = 'dir@fixture.invalid',
+      senderName = 'Fixture Director' } = {}) => {
       n += 1;
       // ── ONE COMPANY PER CASE, AND THE REASON IS THE POINT ─────────────────
       //
@@ -186,6 +192,10 @@ const freshOffice = () => {
           ...(recordSignatory ? {
             signed_by_name: 'Fixture Director', signed_by_title: 'Procurement Director',
             signed_by_email: 'dir@fixture.invalid', signed_by_user_id: 'u-dir',
+          } : {}),
+          ...(recordSender ? {
+            from: `${senderName} <${senderEmail}>`, from_email: senderEmail,
+            from_name: senderName, from_user_id: 'u-dir',
           } : {}),
         },
         reason: 'R1 fixture: a supplier communication requires human approval',
@@ -527,6 +537,129 @@ const freshOffice = () => {
       else bad('  the claim was not kept', c && c.status);
     }
 
+    // ══ THE SENDER IS PART OF THE APPROVED COMMUNICATION (sender ruling §12) ══
+    //
+    // R1 called the mailer with NO `from`, so the sender fell through to mailer.defaultFrom() —
+    // `MAIL_FROM || 'PlayNexa <no-reply@adificetechnologies.com>'` — and MAIL_FROM is unset in
+    // production. The first governed supplier RFQ would have left from another company's domain
+    // over a signature reading Abiozen LLC. No human approved that sender and none could have: it
+    // was not in the payload they read.
+    //
+    // EVERY CASE HERE ASSERTS no claim AND no mailer call, because a sender defect is knowable
+    // from the payload alone. A refusal after the claim consumes the supplier permanently —
+    // markFailed leaves the row and the unique index has no exclusion for it — which is exactly
+    // how a copy-list defect cost Aurobindo and a departed signatory cost MSN.
+    note('the sender is frozen, is the signatory, and no deployment default can supply it');
+
+    {
+      // 1. A RECORDED VALID SENDER → ELIGIBLE, and the mailer receives THAT value.
+      const { apId } = await prepare({ rfqId: 'rfq-sender-ok', supplierId: 'sup-sender-ok' });
+      mailerSpy = accepts();
+      const r = await exec(mailerSpy)(apId);
+      if (r.ok && r.sent) ok('a recorded valid sender RELEASES');
+      else bad('a valid sender did not release', JSON.stringify(r));
+      const call = mailerSpy.calls[0];
+      if (call && call.from === 'Fixture Director <dir@fixture.invalid>') {
+        ok('and the mailer is given the FROZEN sender, explicitly');
+      } else bad('the mailer did not receive the frozen sender', JSON.stringify(call && call.from));
+      // THE FALLBACK MUST BE UNREACHABLE: `from` is never undefined on this path, so
+      // mailer.defaultFrom() cannot supply the identity of a governed action.
+      if (call && call.from !== undefined && call.from !== null && call.from !== '') {
+        ok('`from` is never absent at the mailer boundary — defaultFrom() is unreachable from R1');
+      } else bad('R1 reached the mailer with no sender, so the legacy default would supply it');
+    }
+
+    {
+      // 2. MISSING SENDER → sender_not_recorded. This is the state of every approval prepared
+      //    before the sender became part of the payload, including the approved Hetero one.
+      const { apId } = await prepare({ recordSender: false,
+        rfqId: 'rfq-nosender', supplierId: 'sup-nosender' });
+      mailerSpy = accepts();
+      const r = await exec(mailerSpy)(apId);
+      if (r.refusal === 'sender_not_recorded') ok('a payload with NO sender refuses sender_not_recorded');
+      else bad('a senderless payload was not refused by name', JSON.stringify(r));
+      if (r.needs_repreparation === true) ok('  and says re-preparation is required');
+      else bad('  it does not say the action needs re-preparing');
+      if (mailerSpy.calls.length === 0 && await claims(apId) === 0) ok('  no claim, no mailer call');
+      else bad(`  claim/mailer leaked: claims=${await claims(apId)} calls=${mailerSpy.calls.length}`);
+      const ex = (await q(`SELECT id FROM office_exceptions WHERE id = $1`,
+        [`ex-send-nosender-${apId}`])).rows[0];
+      if (ex) ok('  and a durable exception names this approval specifically');
+      else bad('  no exception was filed, or it collapsed onto a shared id');
+    }
+
+    {
+      // 3. SENDER DIFFERENT FROM THE SIGNATORY → refuse. An alias on the right domain is still
+      //    the wrong identity: a reply must reach the person who signed.
+      const { apId } = await prepare({ senderEmail: 'procurement@fixture.invalid',
+        senderName: 'Procurement', rfqId: 'rfq-notsig', supplierId: 'sup-notsig' });
+      mailerSpy = accepts();
+      const r = await exec(mailerSpy)(apId);
+      if (r.refusal === 'sender_is_not_the_signatory') {
+        ok('a sender that is not the signatory refuses, even on the SAME authorized domain');
+      } else bad('an alias sender was not refused', JSON.stringify(r));
+      if (mailerSpy.calls.length === 0 && await claims(apId) === 0) ok('  no claim, no mailer call');
+      else bad(`  claim/mailer leaked: claims=${await claims(apId)} calls=${mailerSpy.calls.length}`);
+    }
+
+    {
+      // 4. SENDER OUTSIDE THE COMPANY BOUNDARY → refuse. THE PRODUCTION CASE: the sender R1 would
+      //    have used was `no-reply@adificetechnologies.com` on an Abiozen letter.
+      const { apId } = await prepare({ senderEmail: 'no-reply@adificetechnologies.invalid',
+        senderName: 'PlayNexa', rfqId: 'rfq-otherdomain', supplierId: 'sup-otherdomain' });
+      mailerSpy = accepts();
+      const r = await exec(mailerSpy)(apId);
+      if (r.refusal === 'sender_is_not_the_signatory'
+          || r.refusal === 'sender_outside_company_boundary') {
+        ok(`a sender at ANOTHER COMPANY'S DOMAIN refuses (${r.refusal}) — the production default `
+          + 'would have been exactly this');
+      } else bad('an out-of-domain sender was not refused', JSON.stringify(r));
+      if (mailerSpy.calls.length === 0 && await claims(apId) === 0) ok('  no claim, no mailer call');
+      else bad(`  claim/mailer leaked: claims=${await claims(apId)} calls=${mailerSpy.calls.length}`);
+    }
+
+    {
+      // 5. CHANGING MAIL_FROM CANNOT CHANGE THE GOVERNED SENDER. Not an argument about the code —
+      //    the variable is actually set to something conspicuous and the spy is asked what arrived.
+      const saved = process.env.MAIL_FROM;
+      process.env.MAIL_FROM = 'Hijack <attacker@elsewhere.invalid>';
+      try {
+        const { apId } = await prepare({ rfqId: 'rfq-envproof', supplierId: 'sup-envproof' });
+        mailerSpy = accepts();
+        const r = await exec(mailerSpy)(apId);
+        const call = mailerSpy.calls[0];
+        if (r.ok && call && call.from === 'Fixture Director <dir@fixture.invalid>') {
+          ok('setting MAIL_FROM does NOT change the governed sender — the payload wins because it '
+            + 'is the APPROVED sender');
+        } else if (call && /attacker/.test(String(call.from))) {
+          bad('MAIL_FROM OVERRODE THE APPROVED SENDER — deployment configuration is deciding the '
+            + 'external identity of an approved communication', String(call.from));
+        } else bad('the env case did not measure the sender', JSON.stringify({ r, from: call && call.from }));
+      } finally {
+        if (saved === undefined) delete process.env.MAIL_FROM; else process.env.MAIL_FROM = saved;
+      }
+    }
+
+    {
+      // 6. TWO APPROVED ATTEMPTS FOR ONE PAIR → ONE SEND. The intent/attempt separation lets a
+      //    REJECTED preparation be replaced, and this is the proof it did not also open a second
+      //    external send: the claim's unique index is what stops it, not the approval id.
+      const a = await prepare({ rfqId: 'rfq-two-attempts', supplierId: 'sup-two-attempts' });
+      const b = await prepare({ rfqId: 'rfq-two-attempts', supplierId: 'sup-two-attempts' });
+      if (a.apId !== b.apId) ok('two preparation attempts for one pair get DIFFERENT approval ids');
+      else bad('the two attempts share an approval id');
+      mailerSpy = accepts();
+      const r1 = await exec(mailerSpy)(a.apId);
+      const spy2 = accepts();
+      const r2 = await exec(spy2)(b.apId);
+      if (r1.ok && r1.sent) ok('the first attempt sends');
+      else bad('the first attempt did not send', JSON.stringify(r1));
+      if (!r2.ok && spy2.calls.length === 0) {
+        ok(`the second approved attempt for the SAME pair is refused (${r2.refusal}) and the `
+          + 'mailer is never called — relaxing the approval identity did NOT relax the send');
+      } else bad('a second approved attempt for the same pair reached the mailer', JSON.stringify(r2));
+    }
+
     // ══ MUTATION CONTROLS ══════════════════════════════════════════════════
     note('mutation controls: disable each mechanism, prove the defect returns');
     const before = sha(EXF);
@@ -602,6 +735,49 @@ const freshOffice = () => {
         } finally { fs.writeFileSync(EXF, src); freshOffice(); }
       }
       if (sha(EXF) !== before) bad('M11 execute.js was NOT restored'); else ok('M11 execute.js restored, verified by hash');
+    }
+
+    // M12 — remove the frozen-sender requirement. The mailer must then be reached with NO `from`,
+    // which is the exact production state: mailer.defaultFrom() supplies the identity of a
+    // governed external action, and MAIL_FROM is unset so it resolves to another company's domain.
+    {
+      let before = sha(EXF); const src = fs.readFileSync(EXF, 'utf8');
+      // ALL THREE SENDER GATES ARE DISABLED TOGETHER, and that is a finding rather than a
+      // convenience. Disabling only the first left the SECOND one refusing — frozenSenderEmail is
+      // null, so `sameAsSignatory` is falsy and the release still stopped. That is defence in
+      // depth working, and it also means a single-predicate mutation measures nothing here. So the
+      // control removes the sender verification AS A WHOLE, which is the requirement being tested:
+      // without it, does the external identity come from deployment configuration?
+      const anchors = [
+        '  if (!frozenSender || !frozenSenderEmail) {',
+        '  if (!sameAsSignatory) {',
+        '  if (!senderDomain || senderDomain !== signatoryDomain) {',
+      ];
+      const missing = anchors.filter((a) => !src.includes(a));
+      if (missing.length) bad('M12 could not locate every sender gate — the control is stale', missing.join('\n'));
+      else {
+        let mutated = src;
+        for (const a of anchors) mutated = mutated.replace(a, '  if (false) {');
+        fs.writeFileSync(EXF, mutated);
+        try {
+          const { apId } = await prepare({ recordSender: false,
+            rfqId: 'rfq-m12-sender', supplierId: 'sup-m12-sender' });
+          mailerSpy = accepts();
+          const r = await exec(mailerSpy)(apId);
+          const call = mailerSpy.calls[0];
+          if (r.ok && call && (call.from === undefined || call.from === null)) {
+            ok('M12 without the gate, a senderless payload reaches the mailer with NO `from` — the '
+              + 'legacy MAIL_FROM default would supply the external identity. The gate is load-bearing');
+          } else if (!r.ok) {
+            bad('M12 the release still refused with the gate removed, so the gate was not what '
+              + 'blocks a senderless payload', r.refusal);
+          } else bad('M12 the mutation did not measure the sender', JSON.stringify(call && call.from));
+        } finally {
+          fs.writeFileSync(EXF, src);
+          freshOffice();
+        }
+      }
+      if (sha(EXF) !== before) bad('M12 execute.js was NOT restored'); else ok('M12 execute.js restored, verified by hash');
     }
 
     note('M10 (claim after send) is not mutated: moving the claim below the mailer is a structural');

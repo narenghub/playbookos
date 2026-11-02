@@ -205,6 +205,66 @@ async function executeApprovedAction(approvalId, { releasedBy, requireExplicitRe
       claimWritten: false };
   }
 
+  // ══ 2b. THE FROZEN SENDER — BEFORE THE CLAIM, DELIBERATELY ══════════════
+  //
+  //   "Do not derive it from MAIL_FROM at release. Do not use RESEND_FROM as an alternative
+  //    fallback. Do not let deployment configuration silently determine the external identity of
+  //    an approved communication."
+  //
+  // THIS BLOCK EXISTS BECAUSE THIS FUNCTION CALLED THE MAILER WITH NO `from`. The sender then fell
+  // through to mailer.defaultFrom() — `MAIL_FROM || 'PlayNexa <no-reply@adificetechnologies.com>'`
+  // — and MAIL_FROM is unset in production. The first governed supplier RFQ would have reached
+  // Hetero Drugs from another company's domain over a signature reading Abiozen LLC. No human
+  // approved that sender, and no human could have: it was not in the payload they read.
+  //
+  // ── WHY IT IS CHECKED BEFORE THE CLAIM AND NOT AFTER ──────────────────────
+  //
+  // rfqClaim.claim writes a durable row, and markFailed LEAVES THAT ROW with status 'failed' while
+  // the unique index on (rfq_id, supplier_id) has no exclusion for it. So a refusal after the claim
+  // CONSUMES THE SUPPLIER PERMANENTLY — which is how a copy-list defect cost Aurobindo and a
+  // departed signatory cost MSN. A sender defect is knowable from the payload alone, with no
+  // external call and nothing durable written, so it is knowable before anything is spent.
+  const frozenSender = approved.from || null;
+  const frozenSenderEmail = approved.from_email || null;
+  if (!frozenSender || !frozenSenderEmail) {
+    // Fail closed. The two approvals prepared before the sender became part of the payload reach
+    // exactly this branch, which is correct: they are not eligible for release under the corrected
+    // invariant, and their payloads must NOT be edited to rescue them.
+    const exceptionId = await fileSendException(ctx, {
+      id: `ex-send-nosender-${approvalId}`, runId: row.run_id, severity: 'critical',
+      reason: `release of ${approvalId} blocked: its frozen payload records NO sender, so the `
+        + 'external identity of this letter would be supplied by deployment configuration rather '
+        + 'than by the human who approved it. The payload is NOT rewritten — this action predates '
+        + 'sender recording and needs re-preparation.',
+    }, deps);
+    return { ...report, ok: false, refusal: 'sender_not_recorded',
+      detail: 'the approved payload records no sender; re-preparation is required',
+      needs_repreparation: true, exception_id: exceptionId, claimWritten: false };
+  }
+
+  // The sender must still be the person this letter is signed by. approvalMod.release has already
+  // revalidated that THAT PERSON IS STILL ACTIVE; this is the different question of whether the
+  // envelope and the signature still agree.
+  const sameAsSignatory = approved.signed_by_email
+    && String(frozenSenderEmail).toLowerCase() === String(approved.signed_by_email).toLowerCase();
+  if (!sameAsSignatory) {
+    return { ...report, ok: false, refusal: 'sender_is_not_the_signatory',
+      detail: `the frozen sender ${frozenSenderEmail} is not the frozen signatory `
+        + `${approved.signed_by_email || '(none recorded)'}; the supplier must see one human `
+        + 'identity and a reply must reach the person who signed',
+      claimWritten: false };
+  }
+
+  const senderDomain = String(frozenSenderEmail).toLowerCase().split('@')[1] || null;
+  const signatoryDomain = String(approved.signed_by_email).toLowerCase().split('@')[1] || null;
+  if (!senderDomain || senderDomain !== signatoryDomain) {
+    return { ...report, ok: false, refusal: 'sender_outside_company_boundary',
+      detail: `the frozen sender is at ${senderDomain || '(no domain)'} but the letter is signed `
+        + `from ${signatoryDomain || '(no domain)'}`,
+      claimWritten: false };
+  }
+  report.from = frozenSender;
+
   // ══ 3. THE SUPPLIER CLAIM — DURABLE, BEFORE ANY EXTERNAL EFFECT ═════════
   const claimId = await rfqClaim.claim(query, {
     rfqId: approved.rfq_id,
@@ -254,6 +314,10 @@ async function executeApprovedAction(approvalId, { releasedBy, requireExplicitRe
   // letter approved to copy".
   const ccList = Array.isArray(approved.cc) ? approved.cc.filter(Boolean) : [];
   const mailResult = await mailer.sendEmailDetailed({
+    // THE APPROVED SENDER, PASSED EXPLICITLY. mailer.defaultFrom() is unreachable from this path:
+    // frozenSender is non-null by the gate above, so `from` is never undefined here and the
+    // legacy MAIL_FROM default can never supply the identity of a governed external action.
+    from: frozenSender,
     to,
     subject,
     html: String(body).split('\n').map((l) => escapeHtml(l)).join('<br>\n'),
@@ -329,8 +393,12 @@ async function executeApprovedAction(approvalId, { releasedBy, requireExplicitRe
 }
 
 // Deterministic id, so a repeated attempt for the same claim does not multiply incidents (§13).
-async function fileSendException(ctx, { approvalId, claimId, runId, reason, severity }, deps = {}) {
-  const id = `ex-send-${claimId}`;
+async function fileSendException(ctx, { id: explicitId, approvalId, claimId, runId, reason, severity }, deps = {}) {
+  // `ex-send-${claimId}` is the deterministic id for a failure AFTER a claim exists. A refusal
+  // BEFORE the claim has no claimId, so it must supply its own id — the first version ignored the
+  // caller's and would have filed `ex-send-undefined`, collapsing every pre-claim exception onto
+  // one row.
+  const id = explicitId || `ex-send-${claimId}`;
   try {
     await scope.openException(ctx, { id, runId, source: 'office/execute', reason, severity,
       slaHours: 4 }, deps);

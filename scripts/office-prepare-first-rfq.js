@@ -197,6 +197,8 @@ const stop = (why, detail) => {
     // list was correct in policy terms and wrong in fact, and nobody saw it until after the
     // letter existed and a rejection record had to be written.
     const copyTo = await rfqMod.resolveCopyContacts({}, signatory);
+    const sender = rfqMod.senderOf(signatory);
+    const senderViolation = rfqMod.verifySenderPolicy({ sender, signatory });
     const recipientViolation = rfqMod.verifyRecipientPolicy({
       to: sup.contact_email, cc: copyTo, bcc: [], signatory, supplier: sup,
     });
@@ -214,6 +216,9 @@ const stop = (why, detail) => {
     field('quantity / spec', `${rfq.target_quantity || '?'} at ${rfq.target_purity || '?'}`
       + `${Number(rfq.gmp_required) === 1 ? ', GMP required' : ''}`);
     field('signatory', `${signatory.name}, ${signatory.title} <${signatory.email}>`);
+    // FROM FIRST. It is what the supplier reads before anything else, and it was the one field of
+    // the external identity that no human had ever approved — it came from a deployment variable.
+    field('From', sender ? sender.display : '(NONE — nothing can be sent)');
     field('To', sup.contact_email || '(none)');
     field('CC', copyTo.length ? copyTo.map((c) => `${c.name} <${c.email}>`).join(', ') : '(none)');
     field('BCC', '(none — this workflow sends no blind copies)');
@@ -224,6 +229,15 @@ const stop = (why, detail) => {
     for (const c of copyTo) {
       field('  why copied', `${c.email} — ${c.why || '(no reason recorded)'}`);
     }
+
+    if (senderViolation) {
+      stop(`the sender is NOT what this workflow permits (${senderViolation.reason}).`,
+        `${senderViolation.detail}\n\n`
+        + 'STOPPED BEFORE PROVIDER INVOCATION. Nothing was spent and no approval was prepared.\n\n'
+        + 'The external identity of a governed communication is part of what a human approves.\n'
+        + 'It is derived from the resolved signatory and never from deployment configuration.');
+    }
+    ok(`the sender is the signatory: ${sender.display}`);
 
     if (recipientViolation) {
       stop(`the recipient set is NOT what this workflow permits (${recipientViolation.reason}).`,

@@ -99,9 +99,13 @@ if (!url) {
 
     // Only the columns this query reads. action_payload is JSONB because the query navigates it
     // with ->>, which is the part that would fail against a TEXT column.
+    // release_claimed_at and released_at are read too: a REJECTED attempt must not block a
+    // corrected re-preparation, while a CLAIMED one must. Without the columns the accessor cannot
+    // tell those apart, and this fixture would silently stop testing the distinction.
     await q(`CREATE TABLE office_approvals (
                id TEXT PRIMARY KEY, action_kind TEXT, action_payload JSONB,
-               status TEXT, resolution TEXT, created_at TIMESTAMPTZ DEFAULT NOW())`);
+               status TEXT, resolution TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
+               release_claimed_at TIMESTAMPTZ, released_at TIMESTAMPTZ)`);
 
     await q(`INSERT INTO rfq_requests (id, molecule_name, cas_number, target_quantity,
                target_purity, gmp_required, status)
@@ -129,13 +133,24 @@ if (!url) {
                ('s-mid','Mid Chemicals','India','india','m@mid.invalid',70,2,0,5),
                ('s-spent','Spent Organics','India','india','s@spent.invalid',99,1,1,20),
                ('s-appr','Appr Organics','India','india','p@appr.invalid',97,1,1,0),
+               ('s-live','Live Organics','India','india','l@live.invalid',96,1,1,0),
+               ('s-claim','Claimed Organics','India','india','c@claim.invalid',94,1,1,0),
                ('s-noreply','Noreply Inc','India','india',NULL,88,1,1,3)`);
 
     // A REJECTED approval for this RFQ. It creates no outreach row, so only the approvals query
     // can see that this pair's deterministic approval id is already spent.
-    await q(`INSERT INTO office_approvals (id, action_kind, action_payload, status, resolution)
+    // Three approval states, because they are NOT interchangeable:
+    //   rejected → the attempt is dead, the business intent is alive, supplier STILL ELIGIBLE
+    //   pending  → a human is already being asked, BLOCKS
+    //   claimed  → the outside world was reached, BLOCKS for ever
+    await q(`INSERT INTO office_approvals (id, action_kind, action_payload, status, resolution,
+               release_claimed_at)
              VALUES ('ap-rfq-rfq-ev-s-appr','send_rfq_email',
-                     '{"rfq_id":"rfq-ev","supplier_id":"s-appr"}'::jsonb,'rejected','recipient set')`);
+                     '{"rfq_id":"rfq-ev","supplier_id":"s-appr"}'::jsonb,'rejected','recipient set',NULL),
+                    ('ap-rfq-rfq-ev-s-live','send_rfq_email',
+                     '{"rfq_id":"rfq-ev","supplier_id":"s-live"}'::jsonb,'pending',NULL,NULL),
+                    ('ap-rfq-rfq-ev-s-claim','send_rfq_email',
+                     '{"rfq_id":"rfq-ev","supplier_id":"s-claim"}'::jsonb,'approved','approved',NOW())`);
 
     await q(`INSERT INTO supplier_outreach_log (id,rfq_id,supplier_id,sent_at,replied_at,status)
              VALUES ('o1','rfq-other','s-alpha','2026-10-01','2026-10-02','replied'),
@@ -162,13 +177,13 @@ if (!url) {
     else bad('SQL.rfq did not return the RFQ', JSON.stringify(rfq));
 
     const suppliers = (await q(ev.SQL.suppliers)).rows;
-    if (suppliers.length === 7) ok('SQL.suppliers runs and reads every declared column');
-    else bad(`SQL.suppliers returned ${suppliers.length} rows, expected 7`);
+    if (suppliers.length === 9) ok('SQL.suppliers runs and reads every declared column');
+    else bad(`SQL.suppliers returned ${suppliers.length} rows, expected 9`);
 
     // Through the scope.js accessor, exactly as the script does — so this executes the statement
     // that actually ships, not a copy of it in a test.
     const approvals = await ev.approvalsForRfq('rfq-ev', { query: q });
-    if (approvals.length === 1 && approvals[0].supplier_id === 's-appr') {
+    if (approvals.length === 3 && approvals.some((a) => a.supplier_id === 's-appr')) {
       ok('the approvals accessor runs — ->> navigates JSONB and the read is scoped to THIS RFQ');
     } else bad('the approvals accessor is wrong', JSON.stringify(approvals));
 
@@ -209,21 +224,38 @@ if (!url) {
     if (!names.includes('Spent Organics')) ok('a supplier holding an outreach row for THIS RFQ is not eligible');
     else bad('a consumed supplier was offered again');
 
-    // THE CASE READING supplier_outreach_log ALONE CANNOT SEE. A rejected approval creates no
-    // outreach row, so without SQL.approvals this supplier — the second-highest reliability score
-    // in the population and holder of a DMF — would be recommended, and the preparation would then
-    // collide on an approval id that already exists.
-    if (!names.includes('Appr Organics')) {
-      ok('a supplier whose DETERMINISTIC APPROVAL ID is already spent is not eligible, even though '
-        + 'its rejected approval left no outreach row');
+    // ── A REJECTED ATTEMPT DOES NOT SPEND THE SUPPLIER ───────────────────
+    //
+    // This assertion was the exact opposite when the approval id was `ap-rfq-<rfq>-<supplier>`,
+    // one per pair for ever. Under that model a preparation rejected for a defect in OUR code
+    // permanently consumed a real supplier — Aurobindo to a copy-list defect, MSN to a departed
+    // signatory, and Hetero was about to go to a missing sender. The business intent was legitimate
+    // and unchanged every time.
+    if (names.includes('Appr Organics')) {
+      ok('a supplier whose only approval was REJECTED is STILL ELIGIBLE — a defect in our code '
+        + 'does not spend a business opportunity');
     } else {
-      bad('a supplier holding a rejected approval for this RFQ was offered again — its approval id '
-        + 'is already taken and the preparation would collide');
+      bad('a rejected attempt still burns the supplier — this is the defect that cost Aurobindo '
+        + 'and MSN', rows.find((r) => r.supplier.name === 'Appr Organics').ineligibleBecause);
     }
     const apprRow = rows.find((r) => r.supplier.name === 'Appr Organics');
-    if (apprRow && /ap-rfq-rfq-ev-s-appr/.test(apprRow.ineligibleBecause || '')) {
-      ok('and it says WHICH approval spent it');
-    } else bad('the reason does not name the approval', apprRow && apprRow.ineligibleBecause);
+    if (apprRow && apprRow.supersededAttempts === 1) {
+      ok('and the superseded attempt is still reported, so a third attempt is visible as such');
+    } else bad('superseded attempts are not counted', apprRow && apprRow.supersededAttempts);
+
+    // ── BUT A LIVE OR CONSUMED ATTEMPT DOES BLOCK ────────────────────────
+    if (!names.includes('Live Organics')) {
+      ok('a supplier with a PENDING attempt is not offered — one live authorization per intent');
+    } else bad('a supplier with a pending approval was offered again');
+    const liveRow = rows.find((r) => r.supplier.name === 'Live Organics');
+    if (liveRow && /ap-rfq-rfq-ev-s-live/.test(liveRow.ineligibleBecause || '')) {
+      ok('and it says WHICH approval blocks it');
+    } else bad('the reason does not name the blocking approval', liveRow && liveRow.ineligibleBecause);
+
+    if (!names.includes('Claimed Organics')) {
+      ok('a supplier whose approval was CLAIMED for release is not offered — the outside world was '
+        + 'reached and there is one send per pair');
+    } else bad('a supplier with a claimed approval was offered again');
     if (!names.includes('Noreply Inc')) ok('a supplier with no contact_email is not eligible');
     else bad('a supplier with nowhere to send was offered');
 
@@ -310,7 +342,7 @@ if (!url) {
                                     (SELECT COUNT(*) FROM suppliers) b,
                                     (SELECT COUNT(*) FROM dmf_holders) c,
                                     (SELECT COUNT(*) FROM office_approvals) d`)).rows[0];
-    if (before.a === '3' && before.b === '7' && before.c === '10' && before.d === '1') {
+    if (before.a === '3' && before.b === '9' && before.c === '10' && before.d === '3') {
       ok('and the fixture rows are untouched after every query ran');
     } else bad('the row counts changed while reading', JSON.stringify(before));
   } catch (e) {
