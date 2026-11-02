@@ -178,11 +178,20 @@ async function resolveCopyContacts(deps = {}, signatory = null) {
       WHERE is_active = 1 AND role IN ('admin','super_admin') AND email IS NOT NULL
       ORDER BY CASE WHEN LOWER(email) LIKE 'naren%' THEN 0 ELSE 1 END, created_at`)).rows;
 
-  return rows
-    .filter((r) => !signatory || (r.id !== signatory.id
-      && String(r.email).toLowerCase() !== String(signatory.email).toLowerCase()))
-    .slice(0, 2)      // the principal, and at most one more. Not a distribution list.
-    .map((r) => ({ id: r.id, name: r.name, email: r.email, role: r.role }));
+  // EXACTLY ONE. The first version took `.slice(0, 2)` — "the principal, and at most one more" —
+  // and on the first real preparation that copied a second admin at a DIFFERENT COMPANY'S DOMAIN
+  // onto an Abiozen letter to a supplier. The instruction was "both of us handle it": the
+  // signatory signs, the principal is copied. Two people, not a distribution list that grows
+  // whenever somebody is given an admin role.
+  //
+  // super_admin outranks admin, because "the principal" is a specific person and not a permission
+  // level that several people may happen to hold.
+  const eligible = rows.filter((r) => !signatory || (r.id !== signatory.id
+    && String(r.email).toLowerCase() !== String(signatory.email).toLowerCase()));
+  const principal = eligible.find((r) => r.role === 'super_admin') || eligible[0] || null;
+  return principal
+    ? [{ id: principal.id, name: principal.name, email: principal.email, role: principal.role }]
+    : [];
 }
 
 async function renderGovernedRFQ(ctx, { approvedMol, supplier, rfqId, filedCas = null }, deps = {}) {

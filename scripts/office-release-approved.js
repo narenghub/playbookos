@@ -148,6 +148,13 @@ const stop = (why, detail) => {
          FROM office_cost_ledger WHERE objective_id = $1`, [row.objective_id])).rows[0];
     field('objective spend', `$${Number(spend.usd).toFixed(8)} of $${row.budget_usd}`
       + ` over ${spend.calls} call(s), ${spend.unknown} unmeasured`);
+    const entSpend = (await query(
+      `SELECT COALESCE(SUM(cost_usd) FILTER (WHERE cost_known),0)::float8 AS usd,
+              COUNT(*)::int AS calls, COUNT(*) FILTER (WHERE NOT cost_known)::int AS unknown
+         FROM office_cost_ledger
+        WHERE company_id = $1 AND at >= date_trunc('day', NOW())`, [row.company_id])).rows[0];
+    field('enterprise today', `$${Number(entSpend.usd).toFixed(8)} of $100`
+      + ` over ${entSpend.calls} call(s), ${entSpend.unknown} unmeasured`);
     const outcomes = (await query(
       `SELECT COUNT(*)::int n FROM office_outcomes WHERE objective_id = $1`, [row.objective_id])).rows[0].n;
     field('business outcomes', `${outcomes} — the KPI moves only on a real qualified quotation`);

@@ -255,6 +255,10 @@ const stop = (why, detail) => {
     const spend = await scope.spendForObjective(bctx, OBJECTIVE_ID);
     field('objective spend', `$${Number(spend.usd).toFixed(8)} of $${obj.budget_usd}`
       + ` over ${spend.calls} call(s), ${spend.unknown_calls} unmeasured`);
+    // §12 asks for enterprise daily spend at the boundary too, and the first report omitted it.
+    const ent = await scope.spendToday(bctx);
+    field('enterprise today', `$${Number(ent.usd).toFixed(8)} of $${budget.DAILY_CAP_USD}`
+      + ` over ${ent.calls} call(s), ${ent.unknown_calls} unmeasured`);
 
     // ── THE EXACT COMMUNICATION ────────────────────────────────────────────
     console.log('\n  ── THE EXACT COMMUNICATION AWAITING APPROVAL ──\n');

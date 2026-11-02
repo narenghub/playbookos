@@ -1023,9 +1023,22 @@ globalThis.fetch = async (u, opts) => {
         ['sig-ceo', 'naren@abiozen.invalid', 'Naresh Boda', 'super_admin', 1],
         ['sig-gone-admin', 'goneadmin@abiozen.invalid', 'A Departed Admin', 'admin', 0],
       ]);
+      // A SECOND admin, at a different company's domain — the exact shape that reached the first
+      // real preparation, where `.slice(0, 2)` copied an adificetechnologies.com address onto an
+      // Abiozen supplier letter nobody had asked to include.
+      await q(`INSERT INTO users (id, email, name, role, is_active)
+               VALUES ('sig-other-admin','other@elsewhere.invalid','Another Admin','admin',1)
+               ON CONFLICT (id) DO UPDATE SET is_active = 1`);
+      if (!ids.users.includes('sig-other-admin')) ids.users.push('sig-other-admin');
+
       const cc = await freshRfq.resolveCopyContacts(deps, null);
-      if (cc.some((c) => c.email === 'naren@abiozen.invalid')) ok('the active principal is copied');
-      else bad('the principal was not resolved as a copy contact', JSON.stringify(cc));
+      if (cc.length === 1) ok('EXACTLY ONE copy contact — not a list that grows with admin roles');
+      else bad(`${cc.length} copy contacts resolved; exactly 1 expected`, JSON.stringify(cc));
+      if (cc.some((c) => c.email === 'naren@abiozen.invalid')) ok('and it is the principal (super_admin)');
+      else bad('the principal was not resolved as the copy contact', JSON.stringify(cc));
+      if (!cc.some((c) => c.email === 'other@elsewhere.invalid')) {
+        ok('a second admin is NOT copied — super_admin outranks admin');
+      } else bad('a second admin was copied onto a supplier letter');
       if (!cc.some((c) => c.email === 'goneadmin@abiozen.invalid')) {
         ok('an INACTIVE admin is not copied — is_active applies here too');
       } else bad('a departed admin was copied');
