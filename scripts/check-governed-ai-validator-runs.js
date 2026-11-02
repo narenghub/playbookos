@@ -336,6 +336,109 @@ function runValidator(stub, extraEnv = {}) {
     if (fs.readFileSync(SCOPEFILE, 'utf8') === scopeBefore) ok('scope.js restored byte-for-byte');
     else bad('scope.js was NOT restored');
 
+    // ══ 7. THE CANDIDATE LISTING MUST REPORT THE REAL VERDICT ════════════
+    //
+    // This exists because the first version of office-rfq-candidates.js read guardSend()'s return
+    // fields off decide()'s result — a DIFFERENT shape — so `d.allow` was undefined, every row
+    // printed "REFUSE — undefined", and it announced on production that none of six real RFQs was
+    // eligible. A false finding about production data, which would have sent somebody into the
+    // molecule registry hunting a problem that may not exist.
+    //
+    // So the listing is now exercised against molecules whose verdicts are KNOWN IN ADVANCE, and
+    // the assertion is that it prints each one. "No crash" would not have caught the defect: the
+    // broken version did not crash.
+    console.log('\n── 7. the candidate listing reports the real guard verdict\n');
+    await require('../src/lib/molecules/canonical').migrate?.(query).catch?.(() => {});
+    await query(`CREATE TABLE IF NOT EXISTS molecules (
+      id TEXT PRIMARY KEY, molecule_ref TEXT, normalized_name TEXT UNIQUE, preferred_name TEXT,
+      cas TEXT, cas_suppressed_reason TEXT, substance_form TEXT,
+      deprecated_at TIMESTAMPTZ, deprecated_reason TEXT, parent_molecule_id TEXT)`).catch(() => {});
+    await query(`CREATE TABLE IF NOT EXISTS molecule_aliases (
+      alias TEXT PRIMARY KEY, molecule_id TEXT)`).catch(() => {});
+    await query(`CREATE TABLE IF NOT EXISTS rfq_requests (
+      id TEXT PRIMARY KEY, molecule_name TEXT, cas_number TEXT, target_quantity TEXT,
+      target_purity TEXT, gmp_required INTEGER DEFAULT 0, status TEXT,
+      priority TEXT, week_start TEXT, created_at TIMESTAMPTZ DEFAULT NOW())`).catch(() => {});
+    await require('../src/lib/procurement/rfq-identity-guard').migrate(query).catch(() => {});
+
+    await query(`CREATE TABLE IF NOT EXISTS suppliers (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+      country TEXT, region TEXT, contact_email TEXT, contact_name TEXT,
+      gmp_certified INTEGER DEFAULT 0, reliability_score INTEGER, total_orders INTEGER)`).catch(() => {});
+    // An earlier phase already created this table with a narrower shape, so CREATE TABLE IF NOT
+    // EXISTS silently skips the columns the listing needs. The columns are added explicitly —
+    // production's real table has supplier_id, email_sent_to and sent_at (and NO created_at,
+    // which is why the §8 validator counts outreach defensively).
+    await query(`CREATE TABLE IF NOT EXISTS supplier_outreach_log (id TEXT PRIMARY KEY, rfq_id TEXT)`).catch(() => {});
+    for (const c of ['supplier_id TEXT', 'email_sent_to TEXT', 'status TEXT', 'sent_at TEXT']) {
+      await query(`ALTER TABLE supplier_outreach_log ADD COLUMN IF NOT EXISTS ${c}`).catch(() => {});
+    }
+    await query(`INSERT INTO suppliers (id, name, country, contact_email, gmp_certified)
+                 VALUES ('s-ok','Rehearsal Labs','India','bd@rehearsal.invalid',1)
+                 ON CONFLICT (id) DO NOTHING`);
+
+    // THE CAS VALUES HERE MUST BE CHECKSUM-VALID, AND THIS TEST'S FIRST VERSION'S WERE NOT.
+    //
+    // 111-11-1 and 222-22-2 look like CAS numbers and are not: both fail the check digit. The
+    // guard therefore DISCARDED the filed value as evidence and used the canonical CAS, which is
+    // correct and documented behaviour -- so the "disputed" fixture reported ALLOW and this test
+    // read that as the guard failing. The guard was right and the fixture was fake.
+    //
+    // These are the real Tramadol pair, which is the case the identity guard exists for:
+    // 36282-47-0 is the hydrochloride, 27203-92-5 is the base. Both are checksum-valid, they
+    // disagree, and a checksum-only path would wave either one through.
+    await query(`INSERT INTO molecules (id, molecule_ref, normalized_name, preferred_name, cas)
+                 VALUES ('m-cand','MOL-CAND','candidatium','Candidatium','36282-47-0')
+                 ON CONFLICT (normalized_name) DO NOTHING`);
+    await query(`INSERT INTO rfq_requests (id, molecule_name, cas_number, target_quantity, status)
+                 VALUES ('cand-allow','Candidatium','36282-47-0','1kg','pending'),
+                        ('cand-disputed','Candidatium','27203-92-5','1kg','pending'),
+                        ('cand-malformed','Candidatium','222-22-2','1kg','pending'),
+                        ('cand-unknown','Notamoleculeium','109581-93-3','1kg','pending')
+                 ON CONFLICT (id) DO NOTHING`);
+
+    const cand = spawnSync(process.execPath, ['scripts/office-rfq-candidates.js'], {
+      cwd: REPO, encoding: 'utf8',
+      env: { ...process.env, DATABASE_URL: url, RAILWAY_GIT_COMMIT_SHA: 'rehearsal' },
+    });
+    const cout = (cand.stdout || '') + (cand.stderr || '');
+    if (cand.status === 0) ok('the candidate listing exits 0');
+    else bad(`the candidate listing exited ${cand.status}`, cout.split('\n').slice(-18).join('\n'));
+
+    if (/REFUSE — undefined/.test(cout)) {
+      bad('the listing STILL prints "REFUSE — undefined" — it is reading the wrong return shape');
+    } else ok('no "REFUSE — undefined": the verdict fields are being read correctly');
+    if (/NOT INTERPRETABLE/.test(cout)) {
+      bad('the listing could not interpret a verdict — the guard shape has changed again', cout.split('\n').filter((l) => /NOT INTERPRETABLE/.test(l)).join('\n'));
+    } else ok('every verdict was interpretable');
+
+    const line = (id) => cout.split('\n').find((l) => l.includes(id)) || '';
+    if (/ALLOW as "Candidatium" \(36282-47-0\)/.test(line('cand-allow'))) {
+      ok('an agreeing filed CAS reports ALLOW with the CANONICAL name and CAS');
+    } else bad('the allowed RFQ was not reported as allowed', line('cand-allow'));
+    if (/REFUSE — cas_disputed/.test(line('cand-disputed'))) {
+      ok('a filed CAS disagreeing with the canonical one reports REFUSE — cas_disputed (the Tramadol class)');
+      if (/filed 27203-92-5 vs canonical 36282-47-0/.test(line('cand-disputed'))) {
+        ok('and it shows BOTH CAS values, which is the fact a human needs to act on');
+      } else bad('it refused without showing the disagreement', line('cand-disputed'));
+    } else bad('a disputed CAS was not reported as cas_disputed', line('cand-disputed'));
+    if (/REFUSE — identity_unresolved/.test(line('cand-unknown'))) {
+      ok('an unresolvable name reports REFUSE — identity_unresolved');
+    } else bad('an unknown molecule was not reported as unresolved', line('cand-unknown'));
+
+    // The behaviour this test's own defect uncovered, now asserted deliberately: a filed CAS that
+    // fails its check digit is DISCARDED as evidence rather than treated as a disagreement, and
+    // the identity supplies its own CAS. Worth pinning down, because it is the difference between
+    // "the filed value was corrected" -- which would be identity being edited -- and "the filed
+    // value was never evidence in the first place".
+    if (/ALLOW as "Candidatium" \(36282-47-0\)/.test(line('cand-malformed'))) {
+      ok('a checksum-MALFORMED filed CAS is discarded, and the canonical CAS is used instead');
+    } else bad('a malformed filed CAS was not handled as documented', line('cand-malformed'));
+
+    // And it must still write nothing — no identity decision for a candidate nobody chose.
+    const decisions = (await query(`SELECT COUNT(*)::int n FROM rfq_identity_decisions`).catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n;
+    if (decisions === 0) ok('the listing persisted NO identity decision — decide(), never guardSend()');
+    else bad(`${decisions} identity decision(s) were written by a read-only listing`);
+
     console.log('\n' + (fail ? `FAIL  ${fail} assertion(s) failed` :
       'PASS  the validator stops before spending on a mismatch, is idempotent, attributes its '
       + 'evidence, leaves the approved objective alone, and cannot report a fabricated cost.'));

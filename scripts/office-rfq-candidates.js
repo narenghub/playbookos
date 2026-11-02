@@ -42,30 +42,56 @@ const pad = (s, n) => String(s === null || s === undefined ? '' : s).padEnd(n);
     if (!rfqs.length) {
       console.log('    none — there is no RFQ to prepare, and one would have to be created first\n');
     } else {
-      console.log(`    ${pad('id', 22)}${pad('molecule', 34)}${pad('filed CAS', 14)}`
-        + `${pad('qty', 10)}${pad('status', 11)}GUARD WOULD`);
-      console.log(`    ${'-'.repeat(22)}${'-'.repeat(34)}${'-'.repeat(14)}${'-'.repeat(10)}${'-'.repeat(11)}${'-'.repeat(30)}`);
+      // Widths match the data: these ids are 36-character UUIDs, and the first version padded
+      // them to 22, so every column after the id was shunted out of alignment and unreadable.
+      console.log(`    ${pad('id', 38)}${pad('molecule', 32)}${pad('filed CAS', 14)}`
+        + `${pad('qty', 6)}${pad('status', 10)}GUARD WOULD`);
+      console.log(`    ${'-'.repeat(37)} ${'-'.repeat(31)} ${'-'.repeat(13)} ${'-'.repeat(5)} ${'-'.repeat(9)} ${'-'.repeat(40)}`);
 
       let eligible = 0;
+      let uninterpretable = 0;
       for (const r of rfqs) {
         let verdict;
         try {
           // decide(), NOT guardSend(): no decision row is written for a candidate nobody chose.
+          //
+          // THE SHAPE MATTERS, AND READING THE WRONG ONE PRODUCED A FALSE REPORT ONCE.
+          // decide() returns { decision: 'allow'|'refuse', refusal_reason, approved_name,
+          // approved_cas, resolution, ... }. guardSend() returns { allow, reason, approved,
+          // decisionId } — a DIFFERENT shape. The first version of this script read guardSend's
+          // fields off decide's result, so `d.allow` was undefined, every row printed
+          // "REFUSE — undefined", and the summary announced that none of six RFQs was eligible.
+          // That is a false finding about production data, and it would have sent somebody into
+          // the molecule registry looking for a problem that may not exist.
           const d = await guard.decide(query, r);
-          if (d.allow) {
+
+          // An ABSENT verdict is not a refusal. If the shape is not what this script expects, it
+          // says so instead of inferring — inferring is precisely what went wrong before.
+          if (!d || typeof d.decision !== 'string') {
+            uninterpretable++;
+            verdict = `VERDICT NOT INTERPRETABLE — no 'decision' field (keys: ${d ? Object.keys(d).join(',').slice(0, 40) : 'null'})`;
+          } else if (d.decision === 'allow') {
             eligible++;
-            const cas = d.approved && d.approved.cas_number;
-            verdict = `ALLOW as "${(d.approved && d.approved.molecule_name) || '?'}"`
-              + (cas ? ` (${cas})` : ' with NO CAS');
+            verdict = `ALLOW as "${d.approved_name || '?'}"`
+              + (d.approved_cas ? ` (${d.approved_cas})` : ' with NO CAS')
+              + (d.cas_suppressed ? ' [canonical CAS withheld]' : '');
           } else {
-            verdict = `REFUSE — ${d.reason}`;
+            verdict = `REFUSE — ${d.refusal_reason || '(no reason given)'}`
+              + (d.resolution && d.resolution !== 'ok' ? ` [${d.resolution}]` : '')
+              + (d.refusal_reason === 'cas_disputed' && d.canonical_cas
+                ? ` — filed ${r.cas_number} vs canonical ${d.canonical_cas}` : '');
           }
         } catch (e) {
-          verdict = `could not decide: ${e.message.slice(0, 40)}`;
+          uninterpretable++;
+          verdict = `could not decide: ${e.message.slice(0, 50)}`;
         }
-        console.log(`    ${pad(r.id, 22)}${pad(String(r.molecule_name).slice(0, 32), 34)}`
-          + `${pad(r.cas_number || '(none)', 14)}${pad(r.target_quantity || '', 10)}`
-          + `${pad(r.status, 11)}${verdict}`);
+        console.log(`    ${pad(r.id, 38)}${pad(String(r.molecule_name).slice(0, 30), 32)}`
+          + `${pad(r.cas_number || '(none)', 14)}${pad(r.target_quantity || '', 6)}`
+          + `${pad(r.status, 10)}${verdict}`);
+      }
+      if (uninterpretable) {
+        console.log(`\n    ${uninterpretable} verdict(s) COULD NOT BE INTERPRETED — that is a defect in this`);
+        console.log('    script or a change in the guard\'s return shape, NOT a statement about the RFQ.');
       }
       console.log(`\n    ${eligible} of ${rfqs.length} would be ALLOWED by the identity guard.`);
       console.log('    A REFUSE is the guard working: that RFQ\'s identity is contested or');
@@ -85,11 +111,11 @@ const pad = (s, n) => String(s === null || s === undefined ? '' : s).padEnd(n);
       console.log('    address, because an unverified destination for a real communication is not');
       console.log('    an acceptable input. One would have to be filled in first.\n');
     } else {
-      console.log(`    ${pad('id', 18)}${pad('name', 34)}${pad('country', 12)}${pad('GMP', 5)}contact`);
-      console.log(`    ${'-'.repeat(18)}${'-'.repeat(34)}${'-'.repeat(12)}${'-'.repeat(5)}${'-'.repeat(34)}`);
+      console.log(`    ${pad('id', 38)}${pad('name', 34)}${pad('country', 9)}${pad('GMP', 5)}contact`);
+      console.log(`    ${'-'.repeat(37)} ${'-'.repeat(33)} ${'-'.repeat(8)} ${'-'.repeat(4)} ${'-'.repeat(34)}`);
       for (const s of reachable) {
-        console.log(`    ${pad(s.id, 18)}${pad(String(s.name).slice(0, 32), 34)}`
-          + `${pad(s.country || '', 12)}${pad(s.gmp_certified ? 'yes' : 'no', 5)}${s.contact_email}`);
+        console.log(`    ${pad(s.id, 38)}${pad(String(s.name).slice(0, 32), 34)}`
+          + `${pad(s.country || '', 9)}${pad(s.gmp_certified ? 'yes' : 'no', 5)}${s.contact_email}`);
       }
       console.log('');
     }
@@ -112,8 +138,8 @@ const pad = (s, n) => String(s === null || s === undefined ? '' : s).padEnd(n);
     if (!prior.length) console.log('    none\n');
     else {
       for (const p of prior) {
-        console.log(`    ${pad(p.rfq_id, 22)}${pad(p.supplier_id, 16)}${pad(p.status, 12)}`
-          + `${pad(p.sent_at || '', 24)}${p.email_sent_to || ''}`);
+        console.log(`    ${pad(p.rfq_id, 38)}${pad(p.supplier_id, 38)}${pad(p.status, 12)}`
+          + `${pad(String(p.sent_at || '').slice(0, 19), 21)}${p.email_sent_to || ''}`);
       }
       console.log('\n    Historical rows are preserved deliberately and are NOT re-sends.\n');
     }
