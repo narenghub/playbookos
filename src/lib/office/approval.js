@@ -69,6 +69,65 @@ async function release(ctx, { approvalId, releasedBy, consequential = true,
   if (!approvalId) return { released: false, reason: 'no_approval_id' };
   if (!releasedBy) return { released: false, reason: 'no_releasing_actor' };
 
+  // ── THE FROZEN SIGNATORY MUST STILL HOLD AUTHORITY (ruling §8) ───────────
+  //
+  // The payload freezes who the letter is from, which is right: a human approves THIS message
+  // signed by THIS representative, and the frozen text must not be quietly rewritten later.
+  //
+  // But that leaves a second question. What if the approved signatory LEAVES between approval and
+  // release? The letter would then go out over the name of someone who is gone — the very incident
+  // this exists because of, arriving by a different route and after a human had legitimately
+  // approved it.
+  //
+  // So the payload is NOT re-derived and NOT rewritten. The authority it asserts is REVALIDATED:
+  // is the person this letter claims to be from still active? If not, release refuses, files a
+  // durable exception, and the action needs re-preparing and re-approving with the current
+  // signatory. That distinction matters — this is not regenerating the communication, it is
+  // checking that the authority the frozen communication represents still exists.
+  //
+  // Non-consequential releases are not gated: they transmit nothing to anybody.
+  //
+  // CHECKED BEFORE THE COST GATE, deliberately. Both are release preconditions and either can
+  // refuse, but when both would, "the person this letter is from has left" is the useful answer
+  // and "spend cannot be proven" is a distraction. Ordering it second also made it unmeasurable:
+  // the first version of its fixture reported budget_enterprise and the signatory check never ran,
+  // which is the same masking that hid mutation control M4.
+  if (consequential) {
+    const pending = await scope.approvalReleaseState(ctx, approvalId, deps).catch(() => null);
+    const payload = pending && pending.action_payload;
+    const signedEmail = payload && payload.signed_by_email;
+    const signedUserId = payload && payload.signed_by_user_id;
+
+    if (signedEmail || signedUserId) {
+      const query = (deps && deps.query) || require('../db').query;
+      const still = (await query(
+        `SELECT id, name, email, role, is_active FROM users
+          WHERE ($1::text IS NOT NULL AND id = $1) OR ($2::text IS NOT NULL AND LOWER(email) = LOWER($2))
+          ORDER BY is_active DESC LIMIT 1`,
+        [signedUserId || null, signedEmail || null]
+      )).rows[0];
+
+      if (!still || Number(still.is_active) !== 1) {
+        let exceptionId = null;
+        try {
+          exceptionId = `ex-release-signatory-${approvalId}`;
+          await scope.openException(ctx, {
+            id: exceptionId, runId: ctx.runId, source: 'office/approval',
+            reason: `consequential release of ${approvalId} blocked: the approved signatory `
+              + `${payload.signed_by_name || signedEmail} is no longer active, so this letter would `
+              + 'go out over the name of someone who has left. The payload is NOT rewritten — a new '
+              + 'preparation and a new human approval are required with the current signatory.',
+            severity: 'critical', slaHours: 4,
+          }, deps);
+        } catch (_) { exceptionId = null; }
+        return { released: false, reason: 'signatory_no_longer_active',
+          detail: `${payload.signed_by_name || signedEmail} is not an active user; re-preparation required`,
+          signatory: { name: payload.signed_by_name || null, email: signedEmail || null },
+          needs_repreparation: true, exception_id: exceptionId };
+      }
+    }
+  }
+
   // ── THE FAIL-CLOSED COST GATE (ruling §9) ────────────────────────────────
   //
   // `consequential` DEFAULTS TO TRUE. A caller that forgets to say what it is doing gets the

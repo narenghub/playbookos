@@ -322,8 +322,11 @@ async function claimApprovalRelease(ctx, { approvalId, releasedBy }, deps = {}) 
 // operator responses, so they are distinguished rather than collapsed into a single failure.
 async function approvalReleaseState(ctx, approvalId, deps = {}) {
   assertContext(ctx);
+  // action_payload is returned so the release path can REVALIDATE the authority the frozen
+  // communication asserts — specifically whether its signatory is still active — without
+  // re-deriving or rewriting any of it.
   const res = await q(deps)(
-    `SELECT status, released_at, released_by FROM office_approvals
+    `SELECT status, released_at, released_by, action_payload FROM office_approvals
       WHERE company_id = $1 AND id = $2`,
     [ctx.companyId, approvalId]
   );
@@ -406,9 +409,18 @@ async function provenance(ctx, runId, deps = {}) {
     [ctx.companyId, runId]
   )).rows;
 
+  // External human representation is part of business provenance (ruling §13): who the supplier
+  // would reply to, and who decided, are projected out of the frozen payload rather than
+  // re-resolved — re-resolving would answer "who holds the role now", not "who did this letter
+  // claim to be from".
   const approvals = (await query(
-    `SELECT id, action_kind, status, reason, owner_user_id, created_at,
-            resolved_by, resolved_at, released_at, released_by
+    `SELECT id, action_kind, status, reason, resolution, owner_user_id, created_at,
+            resolved_by, resolved_at, released_at, released_by,
+            action_payload ->> 'signed_by_name'    AS signed_by_name,
+            action_payload ->> 'signed_by_title'   AS signed_by_title,
+            action_payload ->> 'signed_by_email'   AS signed_by_email,
+            action_payload ->> 'signed_by_user_id' AS signed_by_user_id,
+            action_payload ->> 'identity_decision_id' AS identity_decision_id
        FROM office_approvals
       WHERE company_id = $1 AND run_id = $2 ORDER BY created_at`,
     [ctx.companyId, runId]

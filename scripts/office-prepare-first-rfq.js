@@ -158,7 +158,29 @@ const stop = (why, detail) => {
     }
     field('would be signed by', `${signatory.name}, ${signatory.title} <${signatory.email}>`);
     field('resolved from role', `${signatory.role} (user ${signatory.id})`);
+    field('why this person', signatory.why || '(not stated)');
+    for (const sk of signatory.skipped || []) {
+      field('  SKIPPED', `${sk.name || '(no name)'} <${sk.email || 'no email'}> — ${sk.role} — ${sk.reason}`);
+    }
     note('the supplier would reply to that address — if it is wrong, stop now and fix Team Management');
+
+    // ── A FALLBACK PAST PROCUREMENT IS THE "UNEXPECTED" CASE (ruling §6) ────
+    //
+    // "If the resolved person is unexpected: STOP. Do not generate the RFQ." The resolver cannot
+    // know what the CEO expects — but it knows when it had to pass over the procurement roles
+    // entirely, which is exactly when a human should look before money is spent. Explicit
+    // acknowledgement, not a warning that scrolls past.
+    if (signatory.fallback && !argv.includes('--signatory-ok')) {
+      stop(`the signatory FELL BACK past procurement to ${signatory.name} (${signatory.role}).`,
+        `${signatory.why}\n\n`
+        + (signatory.skipped || []).map((sk) => `skipped: ${sk.name} (${sk.role}) — ${sk.reason}`).join('\n')
+        + '\n\nThat may be correct — a letter from the company principal is honest — but it is not\n'
+        + 'the ordinary case, so it is confirmed rather than assumed. If the procurement roles\n'
+        + 'should be filled instead, do that in Team Management first.\n\n'
+        + 'To proceed with this signatory deliberately, add --signatory-ok:\n\n'
+        + `  railway ssh 'node scripts/office-prepare-first-rfq.js --rfq=${RFQ_ID} `
+        + `--supplier=${SUPPLIER_ID} --signatory-ok'`);
+    }
 
     // ══ 4. WHAT THE BUDGET WOULD ALLOW, BEFORE SPENDING ════════════════════
     const bctx = Object.freeze({ companyId: company.id, objectiveId: OBJECTIVE_ID, runId: null });
@@ -209,6 +231,8 @@ const stop = (why, detail) => {
     field('identity decision', out.identity.decision_id);
     if (out.signatory) {
       field('signed by', `${out.signatory.name}, ${out.signatory.title} <${out.signatory.email}>`);
+      field('signatory user id', out.signatory.id || '(none)');
+      field('why that signatory', out.signatory.why || '(not stated)');
     }
     field('objective', out.objectiveId);
     field('run', out.runId);

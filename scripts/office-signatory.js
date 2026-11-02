@@ -39,6 +39,15 @@ const pad = (s, n) => String(s === null || s === undefined ? '' : s).padEnd(n);
       console.log('    Abiozen LLC');
       console.log(`    ${who.email}\n`);
       console.log(`  resolved from role "${who.role}" (user id ${who.id})`);
+      console.log(`  why: ${who.why || '(not stated)'}`);
+      if (who.fallback) {
+        console.log('  NOTE: this is a FALLBACK past the procurement roles. office-prepare-first-rfq.js');
+        console.log('        requires --signatory-ok to proceed with it, deliberately.');
+      }
+      for (const sk of who.skipped || []) {
+        console.log(`  skipped: ${sk.name || '(no name)'} <${sk.email || 'no email'}> `
+          + `— ${sk.role} — ${sk.reason}`);
+      }
       console.log('  replies from the supplier would go to that address.\n');
     }
 

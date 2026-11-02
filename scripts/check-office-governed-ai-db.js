@@ -892,6 +892,86 @@ globalThis.fetch = async (u, opts) => {
       } else bad('the payload does not record the signatory', JSON.stringify(pl || {}).slice(0, 160));
     }
 
+    // 5. TEAM FALLBACK: no director at all, but an active procurement_team member.
+    await freshUsers([
+      ['sig-team', 'team@abiozen.invalid', 'A Team Buyer', 'procurement_team', 1],
+      ['sig-ceo', 'naren@abiozen.invalid', 'Naresh Boda', 'super_admin', 1],
+    ]);
+    const r5 = await renderWith();
+    if (r5.ok && r5.signatory.role === 'procurement_team' && !r5.signatory.fallback) {
+      ok('an active procurement_team member signs before the CEO is considered');
+    } else bad('the team fallback did not apply', JSON.stringify(r5.signatory || r5.refusal));
+
+    // 6. THE RESOLUTION EXPLAINS ITSELF (ruling §6).
+    await freshUsers([
+      ['sig-gone', 'departed@abiozen.invalid', 'A Departed Director', 'procurement_director', 0],
+      ['sig-ceo', 'naren@abiozen.invalid', 'Naresh Boda', 'super_admin', 1],
+    ]);
+    const r6 = await renderWith();
+    if (r6.ok && r6.signatory.fallback === true && /fell back/.test(r6.signatory.why || '')) {
+      ok('a fallback past procurement is FLAGGED as a fallback and says why');
+      const sk = (r6.signatory.skipped || []).find((x) => x.email === 'departed@abiozen.invalid');
+      if (sk && sk.reason === 'not active') {
+        ok('and names the higher-priority candidate it skipped, and why');
+      } else bad('the skipped candidate was not reported', JSON.stringify(r6.signatory.skipped));
+    } else bad('the fallback was not flagged', JSON.stringify(r6.signatory));
+
+    // 7. RELEASE REFUSES IF THE APPROVED SIGNATORY HAS SINCE LEFT (ruling §8).
+    //
+    // The letter was legitimately approved. Then the person it is from leaves. Releasing would send
+    // it over the name of somebody gone — the original incident arriving by a different route,
+    // after a human had correctly approved.
+    await freshUsers([['sig-dir2', 'dir2@abiozen.invalid', 'Second Director', 'procurement_director', 1]]);
+    const OREL = `k56-rel-${crypto.randomUUID()}`;
+    await scope.createObjective({ id: OREL, companyId: A, objective: 'Release revalidation fixture',
+      priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+      autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+    ids.objectives.push(OREL);
+    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OREL, runId: null }),
+      { id: OREL, status: 'active' }, deps);
+    await q(`INSERT INTO suppliers (id, name, country, contact_email)
+             VALUES ('sup-rel','Release Labs','India','y@rel.invalid') ON CONFLICT (id) DO NOTHING`);
+    const relPrep = await freshRfq.runGovernedProcurement({ objectiveId: OREL, rfqId: 'rfq-k56',
+      supplierId: 'sup-rel' }, { ...deps, guard: allowingGuard });
+    if (!relPrep.ok) bad('the release fixture could not be prepared', relPrep.refusal);
+    else {
+      ids.runs.push(relPrep.runId); ids.approvals.push(relPrep.approvalId);
+      const relCtx = Object.freeze({ companyId: A, objectiveId: OREL, runId: relPrep.runId });
+      await scope.decideApproval(relCtx, { id: relPrep.approvalId, decision: 'approved',
+        resolvedBy: 'ceo', resolution: 'approved while the signatory was still active' }, deps);
+
+      // Now the signatory leaves.
+      await q(`UPDATE users SET is_active = 0 WHERE id = 'sig-dir2'`);
+      const blocked = await approval.release(relCtx, { approvalId: relPrep.approvalId,
+        releasedBy: 'agent', consequential: true, objectiveId: OREL, objectiveBudgetUsd: 5 }, deps);
+      if (blocked.released) {
+        bad('AN APPROVED LETTER RELEASED OVER THE NAME OF SOMEBODY WHO HAD LEFT');
+      } else if (blocked.reason === 'signatory_no_longer_active') {
+        ok('release REFUSES when the approved signatory is no longer active');
+        if (blocked.needs_repreparation) ok('and says the action needs re-preparing, not patching');
+        else bad('it refused without asking for re-preparation');
+        if (blocked.exception_id) {
+          const exr = (await q(`SELECT severity, reason FROM office_exceptions WHERE id=$1`,
+            [blocked.exception_id])).rows[0];
+          if (exr && /NOT rewritten/.test(exr.reason)) ok('a critical exception records that the payload was not rewritten');
+          else bad('the exception does not state the payload was left alone', exr && exr.reason);
+        } else bad('no exception was filed for a blocked release');
+      } else bad(`release refused for the wrong reason: ${blocked.reason}`, blocked.detail);
+
+      // THE FROZEN PAYLOAD MUST BE UNTOUCHED. Not re-derived, not "corrected".
+      const frozen = (await q(`SELECT action_payload, status, released_at FROM office_approvals WHERE id=$1`,
+        [relPrep.approvalId])).rows[0];
+      if (frozen.action_payload.signed_by_email === 'dir2@abiozen.invalid') {
+        ok('the frozen payload still names the signatory who was approved — it was not rewritten');
+      } else bad('the payload was rewritten during the refusal', frozen.action_payload.signed_by_email);
+      if (frozen.released_at === null) ok('and the action remains unreleased');
+      else bad('the action was released anyway');
+      await q(`UPDATE users SET is_active = 1 WHERE id = 'sig-dir2'`);
+    }
+
+    // Restore a sane signatory for everything that follows.
+    await freshUsers([['sig-dir', 'newdir@abiozen.invalid', 'A New Director', 'procurement_director', 1]]);
+
     // K8 must recognize the workflow by name, independent of which modules are loaded.
     {
       const freshAutonomy = require('../src/lib/autonomy');
@@ -1168,6 +1248,92 @@ globalThis.fetch = async (u, opts) => {
     }
     if (sha(AIF) !== before) bad('M5 ai.js was NOT restored byte-for-byte');
     else ok('M5 ai.js restored, verified by content hash');
+
+    // ── MUTATION CONTROLS FOR SIGNATORY INTEGRITY (ruling §14) ─────────────
+    const RFQF2 = path.join(__dirname, '..', 'src', 'lib', 'office', 'procurement-rfq.js');
+    const APPRF = path.join(__dirname, '..', 'src', 'lib', 'office', 'approval.js');
+
+    // M6 — remove the is_active filter: a departed employee must become selectable again.
+    let before6 = sha(RFQF2); let src6 = fs.readFileSync(RFQF2, 'utf8');
+    const n6 = 'if (Number(r.is_active) === 1 && r.name && r.email) return r;';
+    if (!src6.includes(n6)) bad('M6 could not locate the is_active filter — the control is stale');
+    else {
+      fs.writeFileSync(RFQF2, src6.replace(n6, 'if (r.name && r.email) return r;'));
+      try {
+        fresh(path.join('src', 'lib', 'office', 'procurement-rfq.js'));
+        await freshUsers([['sig-gone', 'departed@abiozen.invalid', 'A Departed Director', 'procurement_director', 0]]);
+        const mutated = require('../src/lib/office/procurement-rfq');
+        const who = await mutated.resolveSignatory(deps);
+        if (who && who.email === 'departed@abiozen.invalid') {
+          ok('M6 without the is_active filter a DEPARTED employee is selected again — the filter is load-bearing');
+        } else bad('M6 the departed employee was still not selected, so the filter was not measured', JSON.stringify(who));
+      } finally {
+        fs.writeFileSync(RFQF2, src6);
+        fresh(path.join('src', 'lib', 'office', 'procurement-rfq.js'));
+      }
+    }
+    if (sha(RFQF2) !== before6) bad('M6 procurement-rfq.js was NOT restored byte-for-byte');
+    else ok('M6 procurement-rfq.js restored, verified by content hash');
+
+    // M7 — remove the release-time revalidation: an approved letter from a departed signatory
+    // must become releasable, which is the whole point of the check.
+    let before7 = sha(APPRF); let src7 = fs.readFileSync(APPRF, 'utf8');
+    const n7 = "      if (!still || Number(still.is_active) !== 1) {";
+    if (!src7.includes(n7)) bad('M7 could not locate the release revalidation — the control is stale');
+    else {
+      fs.writeFileSync(APPRF, src7.replace(n7, '      if (false) {'));
+      try {
+        fresh(path.join('src', 'lib', 'office', 'approval.js'));
+        const mutatedAppr = require('../src/lib/office/approval');
+        // A FRESH COMPANY, to isolate the control. Company A has unmeasured AI calls from the C1
+        // tests, and consequentialReleaseGate refuses on unprovable spend — so with the signatory
+        // check disabled the release was refused as budget_enterprise and the control measured
+        // nothing. That is the same masking twice over, and the fix is to remove the unrelated
+        // reason rather than to weaken the gate.
+        const C7 = `k56-coc-${crypto.randomUUID()}`;
+        await q(`INSERT INTO companies (id, slug, display_name) VALUES ($1,$1,$1)`, [C7]);
+        ids.companies.push(C7);
+        const ORL2 = `k56-rel2-${crypto.randomUUID()}`;
+        await freshUsers([['sig-dir3', 'dir3@abiozen.invalid', 'Third Director', 'procurement_director', 1]]);
+        await scope.createObjective({ id: ORL2, companyId: C7, objective: 'M7 fixture', priority: 'P3',
+          kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+          autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+        ids.objectives.push(ORL2);
+        await scope.setObjectiveStatus(Object.freeze({ companyId: C7, objectiveId: ORL2, runId: null }),
+          { id: ORL2, status: 'active' }, deps);
+        // A DISTINCT supplier: the approval id is deterministic on (rfq, supplier), so reusing
+        // sup-rel collided with test 7's approval on the primary key — and because the throw
+        // happened after the run was created but before its id was tracked, cleanup then hit an
+        // FK violation deleting the objective. One cause, two failures.
+        await q(`INSERT INTO suppliers (id, name, country, contact_email)
+                 VALUES ('sup-rel2','Release Labs Two','India','z@rel2.invalid')
+                 ON CONFLICT (id) DO NOTHING`);
+        const p7 = await freshRfq.runGovernedProcurement({ objectiveId: ORL2, rfqId: 'rfq-k56',
+          supplierId: 'sup-rel2' }, { ...deps, guard: allowingGuard });
+        if (!p7.ok) bad('M7 fixture could not be prepared', p7.refusal);
+        else {
+          ids.runs.push(p7.runId); ids.approvals.push(p7.approvalId);
+          const c7 = Object.freeze({ companyId: C7, objectiveId: ORL2, runId: p7.runId });
+          await scope.decideApproval(c7, { id: p7.approvalId, decision: 'approved',
+            resolvedBy: 'ceo', resolution: 'M7 control: approved while active' }, deps);
+          await q(`UPDATE users SET is_active = 0 WHERE id = 'sig-dir3'`);
+          const leak7 = await mutatedAppr.release(c7, { approvalId: p7.approvalId,
+            releasedBy: 'agent', consequential: true, objectiveId: ORL2, objectiveBudgetUsd: 5 }, deps);
+          if (leak7.released) {
+            ok('M7 without the revalidation an approved letter from a DEPARTED signatory releases — the check is load-bearing');
+          } else if (leak7.reason === 'signatory_no_longer_active') {
+            bad('M7 release was STILL refused for the signatory with the check disabled — the control is not measuring it');
+          } else bad(`M7 release failed for an unrelated reason (${leak7.reason}), so the check was never measured`, leak7.detail);
+          await q(`UPDATE users SET is_active = 1 WHERE id = 'sig-dir3'`);
+        }
+      } finally {
+        fs.writeFileSync(APPRF, src7);
+        fresh(path.join('src', 'lib', 'office', 'approval.js'));
+      }
+    }
+    if (sha(APPRF) !== before7) bad('M7 approval.js was NOT restored byte-for-byte');
+    else ok('M7 approval.js restored, verified by content hash');
+
 
   } catch (e) {
     bad('unexpected error', e.stack || e.message);

@@ -107,25 +107,50 @@ const SIGNATORY_TITLES = Object.freeze({
   super_admin: 'Chief Executive Officer',
 });
 
+// Returns null, or { id, name, email, title, role, why, skipped[], fallback }.
+//
+// `why` and `skipped` exist because of ruling §6: "the human identity must be understandable
+// before money is spent on generation." A resolver that returns only a name leaves the operator
+// unable to tell a correct selection from a lucky one — and the case that matters is precisely
+// when a HIGHER-priority candidate was passed over because they are no longer active.
+const PROCUREMENT_ROLES = Object.freeze(['procurement_director', 'procurement_team']);
+
 async function resolveSignatory(deps = {}) {
   const query = (deps && deps.query) || require('../db').query;
   if (deps && deps.signatory) return deps.signatory;   // injectable for fixtures only
 
-  for (const role of ['procurement_director', 'procurement_team']) {
-    const r = (await query(
-      `SELECT id, name, email, role FROM users WHERE is_active = 1 AND role = $1
-        ORDER BY created_at LIMIT 1`, [role])).rows[0];
-    if (r && r.name && r.email) {
-      return { id: r.id, name: r.name, email: r.email,
-        title: SIGNATORY_TITLES[r.role] || 'Procurement', role: r.role };
+  const skipped = [];
+  const consider = (rows, role) => {
+    for (const r of rows) {
+      if (Number(r.is_active) === 1 && r.name && r.email) return r;
+      skipped.push({ name: r.name, email: r.email, role,
+        reason: Number(r.is_active) === 1 ? 'no name or email on the user row' : 'not active' });
+    }
+    return null;
+  };
+
+  for (const role of PROCUREMENT_ROLES) {
+    const rows = (await query(
+      `SELECT id, name, email, role, is_active FROM users WHERE role = $1
+        ORDER BY is_active DESC, created_at`, [role])).rows;
+    const hit = consider(rows, role);
+    if (hit) {
+      return { id: hit.id, name: hit.name, email: hit.email,
+        title: SIGNATORY_TITLES[hit.role] || 'Procurement', role: hit.role,
+        why: `active ${hit.role}`, skipped, fallback: false };
     }
   }
-  const ceo = (await query(
-    `SELECT id, name, email, role FROM users WHERE is_active = 1 AND role IN ('admin','super_admin')
-      ORDER BY CASE WHEN LOWER(email) LIKE 'naren%' THEN 0 ELSE 1 END, created_at LIMIT 1`)).rows[0];
-  if (ceo && ceo.name && ceo.email) {
+
+  const rows = (await query(
+    `SELECT id, name, email, role, is_active FROM users WHERE role IN ('admin','super_admin')
+      ORDER BY is_active DESC, CASE WHEN LOWER(email) LIKE 'naren%' THEN 0 ELSE 1 END, created_at`)).rows;
+  const ceo = consider(rows, 'admin/super_admin');
+  if (ceo) {
     return { id: ceo.id, name: ceo.name, email: ceo.email,
-      title: SIGNATORY_TITLES[ceo.role] || 'Chief Executive Officer', role: ceo.role };
+      title: SIGNATORY_TITLES[ceo.role] || 'Chief Executive Officer', role: ceo.role,
+      why: `no active procurement_director or procurement_team, so the resolution fell back to an `
+        + `active ${ceo.role}`,
+      skipped, fallback: true };
   }
   return null;
 }
@@ -330,6 +355,11 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
       signed_by_name: rendered.signatory.name,
       signed_by_title: rendered.signatory.title,
       signed_by_email: rendered.signatory.email,
+      // The authoritative identifier, not just the display fields: release revalidates the
+      // authority by id first and email second, so a renamed or re-addressed person is still the
+      // same person, and two people sharing a name are not confused for one.
+      signed_by_user_id: rendered.signatory.id || null,
+      signed_by_role: rendered.signatory.role || null,
     },
     reason: `supervised autonomy: a supplier communication for RFQ ${rfqId} requires human `
       + `approval before release. Identity decision ${decided.decisionId} approved `
