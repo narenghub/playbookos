@@ -143,6 +143,23 @@ const stop = (why, detail) => {
       ok('no supplier has been contacted for this RFQ at all — this is the first');
     }
 
+    // ══ 3b. WHO WOULD SIGN IT — BEFORE ANY MONEY IS SPENT ══════════════════
+    //
+    // Shown here rather than only in the report, because on 2 Nov 2026 two real RFQs were prepared
+    // signed by a Procurement Director who had left the organisation. Seeing the signature block
+    // before the provider is called is the difference between noticing and paying to notice.
+    const signatory = await rfqMod.resolveSignatory({});
+    console.log('');
+    if (!signatory) {
+      stop('there is no active signatory, so nobody this RFQ could honestly be from.',
+        'renderGovernedRFQ would refuse with no_active_signatory. Someone active must hold\n'
+        + 'procurement_director, procurement_team, admin or super_admin in `users`.\n\n'
+        + "  railway ssh 'node scripts/office-signatory.js'   — who the system considers");
+    }
+    field('would be signed by', `${signatory.name}, ${signatory.title} <${signatory.email}>`);
+    field('resolved from role', `${signatory.role} (user ${signatory.id})`);
+    note('the supplier would reply to that address — if it is wrong, stop now and fix Team Management');
+
     // ══ 4. WHAT THE BUDGET WOULD ALLOW, BEFORE SPENDING ════════════════════
     const bctx = Object.freeze({ companyId: company.id, objectiveId: OBJECTIVE_ID, runId: null });
     const before = await budget.enforceHierarchy(bctx, {
@@ -190,6 +207,9 @@ const stop = (why, detail) => {
     field('quantity', rfq.target_quantity || '(unspecified)');
     field('purity', rfq.target_purity || '(unspecified)');
     field('identity decision', out.identity.decision_id);
+    if (out.signatory) {
+      field('signed by', `${out.signatory.name}, ${out.signatory.title} <${out.signatory.email}>`);
+    }
     field('objective', out.objectiveId);
     field('run', out.runId);
     field('workflow / agent', `${out.workflow} / ${out.agent}`);

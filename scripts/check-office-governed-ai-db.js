@@ -123,7 +123,7 @@ globalThis.fetch = async (u, opts) => {
   const q = (t, p) => P.query(t, p);
   const deps = { query: q };
 
-  const ids = { companies: [], objectives: [], runs: [], approvals: [] };
+  const ids = { companies: [], objectives: [], runs: [], approvals: [], users: [] };
   const { migrateRuns } = require('../src/lib/runs');
   const { migrateOffice } = require('../src/lib/office/schema');
   const llm = require('../src/lib/llm');
@@ -171,6 +171,18 @@ globalThis.fetch = async (u, opts) => {
     const L = ledger({ query: q, onDurabilityFailure: () => {} });
     await L.startRun(ctx.runId);
     ok('governed run opened against the objective, company derived from it');
+
+    // `users` must exist and hold an ACTIVE signatory before the first render: the RFQ signature
+    // is resolved from it, so without this every render below refuses with no_active_signatory.
+    // Same lesson as rfq_requests further down — a fixture table created after the first call that
+    // reads it makes an unrelated failure look like the behaviour under test.
+    await q(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL,
+             name TEXT NOT NULL, role TEXT NOT NULL, is_active INTEGER DEFAULT 1,
+             created_at TEXT DEFAULT NOW())`);
+    await q(`INSERT INTO users (id, email, name, role, is_active)
+             VALUES ('sig-default','dir@fixture.invalid','Fixture Director','procurement_director',1)
+             ON CONFLICT (id) DO NOTHING`);
+    ids.users.push('sig-default');
 
     // ══ C4: CAPABILITY ALIASES, NO PROVIDER SHAPES LEAKING ══════════════════
     mode = 'normal';
@@ -782,6 +794,104 @@ globalThis.fetch = async (u, opts) => {
       } else bad('§12 a second run was permitted the same day', JSON.stringify(again).slice(0, 200));
     }
 
+    // ══ THE SIGNATORY IS LIVE DATA, NOT A CONSTANT ═════════════════════════
+    //
+    // On 2 Nov 2026 two real supplier RFQs were prepared signed by a Procurement Director who had
+    // LEFT THE ORGANISATION, with his address as the reply-to, because the signature block was
+    // three hardcoded lines inside the AI prompt. Nothing failed and nothing warned.
+    note('the signatory is resolved from users, and a departed employee cannot sign');
+
+    // Replaces the signatory set by id, tracking every row so cleanup removes exactly what this
+    // check created and nothing else.
+    const freshUsers = async (rows) => {
+      for (const id of ids.users) await q(`DELETE FROM users WHERE id = $1`, [id]);
+      for (const [id, email, name, role, active] of rows) {
+        await q(`INSERT INTO users (id, email, name, role, is_active) VALUES ($1,$2,$3,$4,$5)
+                 ON CONFLICT (id) DO UPDATE SET is_active = $5, role = $4`,
+          [id, email, name, role, active]);
+        if (!ids.users.includes(id)) ids.users.push(id);
+      }
+    };
+    const renderWith = async () => {
+      const approvedMol = { __approvedByDecision: 'dec-sig', molecule_name: 'Candidatium',
+        cas_number: '36282-47-0', target_quantity: '1kg', target_purity: '99%', gmp_required: 1 };
+      return freshRfq.renderGovernedRFQ(ctx, { approvedMol, supplier, rfqId: 'rfq-k56' }, deps);
+    };
+
+    // 1. THE EXACT SITUATION: the director's row is still there but inactive.
+    await freshUsers([
+      ['sig-gone', 'departed@abiozen.invalid', 'A Departed Director', 'procurement_director', 0],
+      ['sig-ceo', 'naren@abiozen.invalid', 'Naresh Boda', 'super_admin', 1],
+    ]);
+    // ASSERT ON THE PROMPT, NOT ON THE STUB'S REPLY. The stubbed provider returns canned text, so
+    // checking the rendered body would be checking the fixture — and the fixture's canned text
+    // happens to contain the old hardcoded name, which would have read as the defect persisting.
+    const promptSent = () => (lastBody && lastBody.messages && lastBody.messages[0]
+      && lastBody.messages[0].content) || '';
+    const r1 = await renderWith();
+    const p1 = promptSent();
+    if (!r1.ok) bad('the render failed outright when a director was inactive', r1.refusal);
+    else if (/A Departed Director|departed@abiozen\.invalid/.test(p1)) {
+      bad('A DEPARTED EMPLOYEE WAS PUT IN THE SIGNATURE BLOCK — is_active is not being honoured');
+    } else if (r1.signatory && r1.signatory.email === 'naren@abiozen.invalid') {
+      ok('an INACTIVE director is skipped and the active CEO signs instead');
+      if (/Naresh Boda/.test(p1) && /naren@abiozen\.invalid/.test(p1)) {
+        ok('and the signature block in the PROMPT carries the resolved signatory');
+      } else bad('the prompt does not carry the resolved signatory', p1.slice(-200));
+      if (!/Palash/.test(p1)) ok('no hardcoded name survives anywhere in the prompt');
+      else bad('a hardcoded name is still in the prompt', p1.slice(-200));
+    } else bad('unexpected signatory', JSON.stringify(r1.signatory));
+
+    // 2. An ACTIVE director outranks the CEO.
+    await freshUsers([
+      ['sig-dir', 'newdir@abiozen.invalid', 'A New Director', 'procurement_director', 1],
+      ['sig-ceo', 'naren@abiozen.invalid', 'Naresh Boda', 'super_admin', 1],
+    ]);
+    const r2 = await renderWith();
+    const p2 = promptSent();
+    if (r2.ok && r2.signatory.email === 'newdir@abiozen.invalid'
+        && /A New Director/.test(p2) && /newdir@abiozen\.invalid/.test(p2)) {
+      ok('an ACTIVE procurement director signs in preference to the CEO');
+    } else bad('the active director did not sign', JSON.stringify(r2.signatory || r2.refusal));
+
+    // 3. NOBODY active → refuse. It must not invent or inherit a name.
+    await freshUsers([['sig-gone', 'departed@abiozen.invalid', 'A Departed Director', 'procurement_director', 0]]);
+    const r3 = await renderWith();
+    if (r3.ok) {
+      bad('an RFQ was rendered with NO active signatory — it is signed by somebody who is gone',
+        String(r3.body).slice(-160));
+    } else if (r3.refusal === 'no_active_signatory') {
+      ok('with nobody active the render REFUSES — it does not sign a name it has no right to use');
+    } else bad(`refused for the wrong reason: ${r3.refusal}`);
+
+    // 4. The prepared approval is OWNED by the signatory and the payload records them.
+    await freshUsers([
+      ['sig-dir', 'newdir@abiozen.invalid', 'A New Director', 'procurement_director', 1],
+    ]);
+    const OSIG = `k56-sig-${crypto.randomUUID()}`;
+    await scope.createObjective({ id: OSIG, companyId: A, objective: 'Signatory fixture',
+      priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+      autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+    ids.objectives.push(OSIG);
+    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OSIG, runId: null }),
+      { id: OSIG, status: 'active' }, deps);
+    await q(`INSERT INTO suppliers (id, name, country, contact_email)
+             VALUES ('sup-sig','Signatory Labs','India','x@sig.invalid') ON CONFLICT (id) DO NOTHING`);
+    const sigPrep = await freshRfq.runGovernedProcurement({ objectiveId: OSIG, rfqId: 'rfq-k56',
+      supplierId: 'sup-sig' }, { ...deps, guard: allowingGuard });
+    if (!sigPrep.ok) bad('the signatory preparation failed', sigPrep.refusal);
+    else {
+      ids.runs.push(sigPrep.runId); ids.approvals.push(sigPrep.approvalId);
+      const row = (await q(`SELECT owner_user_id, action_payload FROM office_approvals WHERE id=$1`,
+        [sigPrep.approvalId])).rows[0];
+      if (row && row.owner_user_id === 'sig-dir') ok('the approval is OWNED by the resolved signatory, not a hardcoded login');
+      else bad('the approval owner is wrong', row && row.owner_user_id);
+      const pl = row && row.action_payload;
+      if (pl && pl.signed_by_email === 'newdir@abiozen.invalid' && pl.signed_by_name === 'A New Director') {
+        ok('the immutable payload records WHO the supplier would reply to');
+      } else bad('the payload does not record the signatory', JSON.stringify(pl || {}).slice(0, 160));
+    }
+
     // K8 must recognize the workflow by name, independent of which modules are loaded.
     {
       const freshAutonomy = require('../src/lib/autonomy');
@@ -1079,6 +1189,7 @@ globalThis.fetch = async (u, opts) => {
       }
       const trg = (await q(`SELECT tgenabled FROM pg_trigger WHERE tgname='trg_agent_run_events_append_only'`)).rows[0];
       if (!trg || trg.tgenabled === 'D') bad('the append-only trigger was left DISABLED after cleanup');
+      for (const id of ids.users) await q(`DELETE FROM users WHERE id = $1`, [id]).catch(() => {});
       for (const id of ids.objectives) await q(`DELETE FROM objectives WHERE id = $1`, [id]);
       for (const id of ids.companies) await q(`DELETE FROM companies WHERE id = $1`, [id]);
 
@@ -1090,6 +1201,7 @@ globalThis.fetch = async (u, opts) => {
       };
       await mine('agent_runs', 'run_id', ids.runs);
       await mine('objectives', 'id', ids.objectives);
+      await mine('users', 'id', ids.users);
       await mine('companies', 'id', ids.companies);
       await mine('office_approvals', 'id', ids.approvals);
       if (leaks.length) bad('fixture cleanup leaked', leaks.join('\n'));

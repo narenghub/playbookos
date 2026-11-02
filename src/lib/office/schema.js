@@ -251,6 +251,13 @@ const DDL = [
        FOREIGN KEY (run_id, company_id) REFERENCES agent_runs (run_id, company_id) MATCH FULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_office_approvals_company_status ON office_approvals (company_id, status, created_at)`,
+  // ── A DECISION WITHOUT A RECORDED REASON IS NOT AN AUDIT TRAIL ────────────
+  //
+  // office_approvals carried `reason` — why the action NEEDS a human — but nothing recorded why
+  // the human decided as they did. An incident review asking "why was this supplier contacted" or
+  // "why was this rejected" found a status and a name and no answer, which is the same gap
+  // autonomy.stop's mandatory reason exists to close.
+  `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS resolution TEXT`,
 
   // ── K7: THE THING APPROVED IS THE THING SENT ──────────────────────────────
   //

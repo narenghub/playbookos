@@ -89,6 +89,47 @@ function identityContainment(text, { approvedCas, filedCas }) {
  *
  * Returns { ok, subject, body, refusal, ai } — on a refusal `body` is null and nothing may be sent.
  */
+// ── THE SIGNATORY: THE ACTIVE HOLDER OF THE ROLE, OR NOBODY ─────────────────
+//
+// Preference order, and each step is deliberate:
+//   1. the active procurement_director — whoever actually holds the job today
+//   2. the active procurement team lead — procurement work still has an owner if the directorship
+//      is vacant
+//   3. the active admin/super_admin (the CEO) — a letter from the company's principal is honest
+//   4. NOBODY → the render refuses
+//
+// `is_active = 1` is the whole point: a row left behind for a departed employee is not a
+// signatory. It never falls back to a literal name, because that is the defect this replaces.
+const SIGNATORY_TITLES = Object.freeze({
+  procurement_director: 'Procurement Director',
+  procurement_team: 'Procurement',
+  admin: 'Chief Executive Officer',
+  super_admin: 'Chief Executive Officer',
+});
+
+async function resolveSignatory(deps = {}) {
+  const query = (deps && deps.query) || require('../db').query;
+  if (deps && deps.signatory) return deps.signatory;   // injectable for fixtures only
+
+  for (const role of ['procurement_director', 'procurement_team']) {
+    const r = (await query(
+      `SELECT id, name, email, role FROM users WHERE is_active = 1 AND role = $1
+        ORDER BY created_at LIMIT 1`, [role])).rows[0];
+    if (r && r.name && r.email) {
+      return { id: r.id, name: r.name, email: r.email,
+        title: SIGNATORY_TITLES[r.role] || 'Procurement', role: r.role };
+    }
+  }
+  const ceo = (await query(
+    `SELECT id, name, email, role FROM users WHERE is_active = 1 AND role IN ('admin','super_admin')
+      ORDER BY CASE WHEN LOWER(email) LIKE 'naren%' THEN 0 ELSE 1 END, created_at LIMIT 1`)).rows[0];
+  if (ceo && ceo.name && ceo.email) {
+    return { id: ceo.id, name: ceo.name, email: ceo.email,
+      title: SIGNATORY_TITLES[ceo.role] || 'Chief Executive Officer', role: ceo.role };
+  }
+  return null;
+}
+
 async function renderGovernedRFQ(ctx, { approvedMol, supplier, rfqId, filedCas = null }, deps = {}) {
   assertContext(ctx);
 
@@ -97,6 +138,24 @@ async function renderGovernedRFQ(ctx, { approvedMol, supplier, rfqId, filedCas =
   if (!approvedMol || approvedMol.__approvedByDecision === undefined || approvedMol.__approvedByDecision === null) {
     return { ok: false, refusal: 'identity_not_approved', body: null, subject: null,
       detail: 'renderGovernedRFQ requires identity facts approved by rfq-identity-guard; it must not re-derive identity from the RFQ row' };
+  }
+
+  // ── WHO THE COMMUNICATION CLAIMS TO BE FROM IS NOT A CONSTANT ─────────────
+  //
+  // This signature block was three hardcoded lines inside the prompt: a name, a title and an
+  // email address. On 2 Nov 2026 two real supplier RFQs were prepared signed by a Procurement
+  // Director who had LEFT THE ORGANIZATION, with his address as the reply-to. Nothing failed,
+  // nothing warned, and every future RFQ would have carried his name indefinitely.
+  //
+  // A person's employment is live data, so it is READ, and read from the same authority the rest
+  // of the codebase uses: the active holder of the role in `users`. And it FAILS CLOSED — if no
+  // active signatory can be resolved, no communication is rendered at all. Defaulting to a name,
+  // any name, is how a departed employee ends up signing a letter to a supplier.
+  const signatory = await resolveSignatory(deps);
+  if (!signatory) {
+    return { ok: false, refusal: 'no_active_signatory', body: null, subject: null,
+      detail: 'no active procurement_director (or admin fallback) exists in users, so there is '
+        + 'nobody this RFQ can honestly be from — refusing rather than signing a name' };
   }
   if (!supplier || !supplier.name) {
     return { ok: false, refusal: 'no_supplier', body: null, subject: null };
@@ -127,10 +186,10 @@ ${gmpBlock}- COA format / availability
 
 Tone: concise, courteous, industry-standard B2B pharma procurement. Open with a brief line about Abiozen sourcing this molecule for its US customers. Do NOT invent prices, volumes beyond those stated, or commitments.${approvedCas ? '' : ' Do NOT state any CAS number: none has been approved for this request.'} Close with the signature block exactly:
 
-Palash Das
-Procurement Director
+${signatory.name}
+${signatory.title}
 Abiozen LLC
-palash@abiozen.com`;
+${signatory.email}`;
 
   const ai = await governedCall(ctx, {
     capability: 'fast',
@@ -169,7 +228,7 @@ palash@abiozen.com`;
       detail: violation, exception_id: exceptionId };
   }
 
-  return { ok: true, subject, body: ai.text, ai,
+  return { ok: true, subject, body: ai.text, ai, signatory,
     approved_by_decision: approvedMol.__approvedByDecision };
 }
 
@@ -265,11 +324,21 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
       approved_molecule_name: approvedMol.molecule_name,
       approved_cas: approvedMol.cas_number || null,
       identity_decision_id: decided.decisionId,
+      // Frozen into the payload deliberately: the person the supplier would reply to is part of
+      // what a human is approving, and it must not be re-derived at release time from a users
+      // table that may have changed since.
+      signed_by_name: rendered.signatory.name,
+      signed_by_title: rendered.signatory.title,
+      signed_by_email: rendered.signatory.email,
     },
     reason: `supervised autonomy: a supplier communication for RFQ ${rfqId} requires human `
       + `approval before release. Identity decision ${decided.decisionId} approved `
-      + `"${approvedMol.molecule_name}"${approvedMol.cas_number ? ` (${approvedMol.cas_number})` : ' with no CAS'}.`,
-    ownerUserId: 'palash',
+      + `"${approvedMol.molecule_name}"${approvedMol.cas_number ? ` (${approvedMol.cas_number})` : ' with no CAS'}.`
+      + ` Signed by ${rendered.signatory.name} (${rendered.signatory.title}).`,
+    // The OWNER is the resolved signatory, not a hardcoded login. An approval queued to a
+    // departed employee is an approval nobody will ever make, and it was `ownerUserId: 'palash'`
+    // until a Procurement Director left and two real RFQs were queued to him.
+    ownerUserId: rendered.signatory.id || rendered.signatory.email,
   }, deps);
 
   return {
@@ -279,6 +348,7 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
     subject: rendered.subject,
     body: rendered.body,
     supplier,
+    signatory: rendered.signatory,
     identity: {
       decision_id: decided.decisionId,
       approved_name: approvedMol.molecule_name,
@@ -399,4 +469,4 @@ async function runGovernedProcurement({ objectiveId, rfqId, supplierId, trigger 
 }
 
 module.exports = { renderGovernedRFQ, prepareGovernedRFQ, runGovernedProcurement,
-  identityContainment, casTokens, fileException, AGENT, WORKFLOW };
+  resolveSignatory, identityContainment, casTokens, fileException, AGENT, WORKFLOW };

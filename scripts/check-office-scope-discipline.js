@@ -88,6 +88,7 @@ const EXEMPT = new Set([
   path.join('scripts', 'office-activate-objective.js'),
   path.join('scripts', 'office-prepare-first-rfq.js'),
   path.join('scripts', 'office-rfq-candidates.js'),
+  path.join('scripts', 'office-decide-approval.js'),
 ]);
 
 // Product code may never be exempt. The only permitted exemptions under src/ are the accessor and

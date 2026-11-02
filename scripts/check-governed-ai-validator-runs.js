@@ -129,6 +129,16 @@ function runValidator(stub, extraEnv = {}) {
     await query(`CREATE TABLE IF NOT EXISTS supplier_outreach_log (
       id TEXT PRIMARY KEY, rfq_id TEXT, status TEXT, created_at TIMESTAMPTZ DEFAULT NOW())`);
 
+    // The signature block on a governed RFQ is resolved from `users` at render time, so an active
+    // signatory must exist before anything renders — otherwise every preparation below refuses
+    // with no_active_signatory and the failure looks like the behaviour under test.
+    await query(`CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL, role TEXT NOT NULL, is_active INTEGER DEFAULT 1,
+      created_at TEXT DEFAULT NOW())`).catch(() => {});
+    await query(`INSERT INTO users (id, email, name, role, is_active)
+                 VALUES ('u-dir','dir@rehearsal.invalid','Rehearsal Director','procurement_director',1)
+                 ON CONFLICT (id) DO UPDATE SET is_active = 1`);
+
     const CO = 'co-rehearsal-abiozen';
     await query(`INSERT INTO companies (id, slug, display_name, status) VALUES ($1,'abiozen','Abiozen LLC','active')
                  ON CONFLICT (slug) DO NOTHING`, [CO]);
@@ -622,6 +632,66 @@ function runValidator(stub, extraEnv = {}) {
     const apAfter = (await query(`SELECT COUNT(*)::int n FROM office_approvals`)).rows[0].n;
     if (apAfter === 1) ok('still exactly one approval — no second communication was prepared');
     else bad(`${apAfter} approvals after the duplicate attempt`);
+
+    // ══ 9. THE HUMAN DECISION, AND THE SIGNATORY REPORT ══════════════════
+    console.log('\n── 9. deciding a prepared action, and who would sign\n');
+
+    const sig = runScript('office-signatory.js');
+    const sigOut = (sig.stdout || '') + (sig.stderr || '');
+    if (sig.status === 0 && /THE SIGNATURE BLOCK A SUPPLIER WOULD SEE/.test(sigOut)) {
+      ok('the signatory report names who a supplier would see');
+    } else bad('the signatory report failed', sigOut.split('\n').slice(-12).join('\n'));
+
+    // An inactive director must be shown as skipped, not silently omitted.
+    await query(`INSERT INTO users (id, email, name, role, is_active)
+                 VALUES ('u-gone','gone@abiozen.invalid','A Departed Director','procurement_director',0)
+                 ON CONFLICT (id) DO UPDATE SET is_active = 0`);
+    const sig2 = (runScript('office-signatory.js').stdout || '');
+    if (/A Departed Director/.test(sig2) && /skipped: inactive/.test(sig2)) {
+      ok('and shows an inactive director as SKIPPED rather than hiding them');
+    } else bad('the inactive director was not shown as skipped', sig2.split('\n').slice(-14).join('\n'));
+
+    // ── the decision itself ─────────────────────────────────────────────────
+    const theApproval = (await query(`SELECT id FROM office_approvals LIMIT 1`)).rows[0];
+    if (!theApproval) bad('no approval to decide — phase 8 should have prepared one');
+    else {
+      // a missing or too-short reason must be refused
+      const noReason = runScript('office-decide-approval.js',
+        [`--approval=${theApproval.id}`, '--reject']);
+      if (noReason.status !== 0 && /--reason/.test((noReason.stdout || ''))) {
+        ok('a decision without a reason is refused');
+      } else bad('a reasonless decision was accepted');
+      const bothWays = runScript('office-decide-approval.js',
+        [`--approval=${theApproval.id}`, '--approve', '--reject', '--reason=cannot be both ways']);
+      if (bothWays.status !== 0) ok('--approve and --reject together are refused rather than guessed');
+      else bad('it guessed between approve and reject');
+
+      // and it must print the stored communication before deciding
+      const rej = runScript('office-decide-approval.js',
+        [`--approval=${theApproval.id}`, '--reject', '--reason=rehearsal: signed by a departed employee']);
+      const rejOut = (rej.stdout || '') + (rej.stderr || '');
+      if (/WHAT WOULD GO OUT, FROM THE IMMUTABLE PAYLOAD/.test(rejOut)) {
+        ok('it prints the stored payload before applying the decision');
+      } else bad('it decided without showing what was being decided');
+      if (rej.status === 0 && /REJECTED/.test(rejOut)) ok('the rejection is recorded');
+      else bad(`the rejection failed (${rej.status})`, rejOut.split('\n').slice(-16).join('\n'));
+      if (/the reason is stored beside the verdict/.test(rejOut)) ok('and the reason is persisted, not merely printed');
+      else bad('the reason was not persisted');
+      if (/nothing was released and nothing was transmitted/.test(rejOut)) ok('and nothing was released');
+      else bad('it did not confirm nothing was released');
+
+      const st2 = (await query(`SELECT status, resolution, released_at FROM office_approvals WHERE id=$1`,
+        [theApproval.id])).rows[0];
+      if (st2.status === 'rejected') ok('the stored status is rejected'); else bad(`stored status ${st2.status}`);
+      if (st2.released_at === null) ok('released_at is still NULL'); else bad('it was released');
+
+      // a second decision on the same action must be refused — arbitrated, not re-decided
+      const again3 = runScript('office-decide-approval.js',
+        [`--approval=${theApproval.id}`, '--approve', '--reason=trying to overturn the rejection']);
+      if (again3.status !== 0 && /already "rejected"/.test((again3.stdout || ''))) {
+        ok('a rejected action cannot be re-decided into approved');
+      } else bad('a decided action was decided again', (again3.stdout || '').slice(-400));
+    }
 
     console.log('\n' + (fail ? `FAIL  ${fail} assertion(s) failed` :
       'PASS  the validator stops before spending on a mismatch, is idempotent, attributes its '

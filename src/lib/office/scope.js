@@ -278,15 +278,21 @@ async function requestApproval(ctx, { id, runId, actionKind, actionPayload, reas
   return res.rows[0];
 }
 
-async function decideApproval(ctx, { id, decision, resolvedBy }, deps = {}) {
+async function decideApproval(ctx, { id, decision, resolvedBy, resolution = null }, deps = {}) {
   assertContext(ctx);
   if (!['approved', 'rejected'].includes(decision)) throw new Error(`bad approval decision: ${decision}`);
+  // `resolution` is WHY the human decided as they did, stored beside the verdict. Optional at this
+  // layer so existing callers are unaffected; the operator-facing script requires it, because a
+  // decision nobody can account for later is worth little more than no decision.
+  //
+  // Still arbitrated on status = 'pending': the WHERE clause is what makes a second decision
+  // impossible, rather than a prior SELECT the caller is trusted to have done.
   const res = await q(deps)(
     `UPDATE office_approvals
-        SET status = $3, resolved_at = NOW(), resolved_by = $4
+        SET status = $3, resolved_at = NOW(), resolved_by = $4, resolution = COALESCE($5, resolution)
       WHERE company_id = $1 AND id = $2 AND status = 'pending'
-      RETURNING id, status`,
-    [ctx.companyId, id, decision, resolvedBy]
+      RETURNING id, status, resolution`,
+    [ctx.companyId, id, decision, resolvedBy, resolution]
   );
   return res.rows[0] || null;
 }
