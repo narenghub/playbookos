@@ -434,6 +434,31 @@ function runValidator(stub, extraEnv = {}) {
       ok('a checksum-MALFORMED filed CAS is discarded, and the canonical CAS is used instead');
     } else bad('a malformed filed CAS was not handled as documented', line('cand-malformed'));
 
+    // ── THE DUPLICATE WARNING ───────────────────────────────────────────────
+    //
+    // Every real RFQ on production is already status='sent', so the pair a human picks may be one
+    // a supplier was already contacted about in July. That is not an identity problem — the guard
+    // has no opinion about it — so nothing else would catch it, and the supplier would discover it
+    // by receiving a second RFQ for the same molecule.
+    await query(`INSERT INTO supplier_outreach_log (id, rfq_id, supplier_id, email_sent_to, status, sent_at)
+                 VALUES ('out-1','cand-allow','s-ok','bd@rehearsal.invalid','no_response','2026-07-21 16:00:00')
+                 ON CONFLICT (id) DO NOTHING`);
+    const cand2 = spawnSync(process.execPath, ['scripts/office-rfq-candidates.js'], {
+      cwd: REPO, encoding: 'utf8',
+      env: { ...process.env, DATABASE_URL: url, RAILWAY_GIT_COMMIT_SHA: 'rehearsal' },
+    });
+    const c2 = (cand2.stdout || '') + (cand2.stderr || '');
+    if (/ALREADY CONTACTED, PER ELIGIBLE RFQ/.test(c2)) ok('the listing reports prior outreach per eligible RFQ');
+    else bad('the prior-outreach section is missing', c2.split('\n').slice(-12).join('\n'));
+    if (/ALREADY SENT\s+Rehearsal Labs/.test(c2)) ok('and names the supplier that already holds an RFQ for that molecule');
+    else bad('it did not name the already-contacted supplier');
+    if (/makes the first governed action a DUPLICATE/.test(c2)) ok('and says plainly that choosing it would be a duplicate');
+    else bad('it did not warn about the duplicate');
+    // The RFQ nobody has been contacted about must say so, rather than being silent.
+    if (/no supplier has been contacted for this RFQ/.test(c2)) {
+      ok('an eligible RFQ with no prior outreach is reported as a clean NEW action');
+    } else bad('an RFQ with no prior outreach was not distinguished from one with it');
+
     // And it must still write nothing — no identity decision for a candidate nobody chose.
     const decisions = (await query(`SELECT COUNT(*)::int n FROM rfq_identity_decisions`).catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n;
     if (decisions === 0) ok('the listing persisted NO identity decision — decide(), never guardSend()');

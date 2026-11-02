@@ -93,6 +93,42 @@ const pad = (s, n) => String(s === null || s === undefined ? '' : s).padEnd(n);
         console.log(`\n    ${uninterpretable} verdict(s) COULD NOT BE INTERPRETED — that is a defect in this`);
         console.log('    script or a change in the guard\'s return shape, NOT a statement about the RFQ.');
       }
+
+      // ── WHO HAS ALREADY BEEN CONTACTED FOR EACH ELIGIBLE RFQ ─────────────
+      //
+      // Because "exactly one" means one NEW supplier action. Every one of these RFQs is already
+      // status='sent': the legacy path contacted suppliers for them in July. Preparing a governed
+      // RFQ for the same (molecule, supplier) pair would be a SECOND real communication to a
+      // supplier who already has the first — which the identity guard has no opinion about, since
+      // nothing about the identity is wrong. It is a commercial duplicate, so it is surfaced here
+      // rather than discovered by the supplier.
+      const eligibleIds = [];
+      for (const r of rfqs) {
+        try {
+          const d = await guard.decide(query, r);
+          if (d && d.decision === 'allow') eligibleIds.push(r);
+        } catch (_) { /* already reported above */ }
+      }
+      if (eligibleIds.length) {
+        console.log('\n  ALREADY CONTACTED, PER ELIGIBLE RFQ\n');
+        for (const r of eligibleIds) {
+          const prior = (await query(
+            `SELECT o.supplier_id, s.name, o.status, o.sent_at
+               FROM supplier_outreach_log o LEFT JOIN suppliers s ON s.id = o.supplier_id
+              WHERE o.rfq_id = $1 ORDER BY o.sent_at`, [r.id])).rows;
+          console.log(`    ${r.molecule_name}  (${r.id})`);
+          if (!prior.length) {
+            console.log('      no supplier has been contacted for this RFQ — any supplier is a NEW action\n');
+          } else {
+            for (const p of prior) {
+              console.log(`      ALREADY SENT  ${pad(p.name || p.supplier_id, 34)}${pad(p.status, 13)}`
+                + `${String(p.sent_at || '').slice(0, 10)}`);
+            }
+            console.log(`      → ${prior.length} supplier(s) already hold an RFQ for this molecule.`);
+            console.log('        Choosing one of them makes the first governed action a DUPLICATE.\n');
+          }
+        }
+      }
       console.log(`\n    ${eligible} of ${rfqs.length} would be ALLOWED by the identity guard.`);
       console.log('    A REFUSE is the guard working: that RFQ\'s identity is contested or');
       console.log('    unresolvable, and no supplier communication may be built from it.\n');
