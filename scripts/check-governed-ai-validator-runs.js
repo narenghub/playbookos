@@ -349,12 +349,17 @@ function runValidator(stub, extraEnv = {}) {
     // broken version did not crash.
     console.log('\n── 7. the candidate listing reports the real guard verdict\n');
     await require('../src/lib/molecules/canonical').migrate?.(query).catch?.(() => {});
+    // id is BIGSERIAL in the real schema (scripts/migrate-molecules.js), and
+    // rfq_identity_decisions.molecule_id is BIGINT. The first version of this fixture made it
+    // TEXT, so persist() could not write the identity decision and guardSend correctly reported
+    // decision_not_persisted — the guard refusing because its evidence could not be stored, which
+    // is the right behaviour and was entirely my fixture's fault.
     await query(`CREATE TABLE IF NOT EXISTS molecules (
-      id TEXT PRIMARY KEY, molecule_ref TEXT, normalized_name TEXT UNIQUE, preferred_name TEXT,
+      id BIGSERIAL PRIMARY KEY, molecule_ref TEXT, normalized_name TEXT UNIQUE, preferred_name TEXT,
       cas TEXT, cas_suppressed_reason TEXT, substance_form TEXT,
-      deprecated_at TIMESTAMPTZ, deprecated_reason TEXT, parent_molecule_id TEXT)`).catch(() => {});
+      deprecated_at TIMESTAMPTZ, deprecated_reason TEXT, parent_molecule_id BIGINT)`).catch(() => {});
     await query(`CREATE TABLE IF NOT EXISTS molecule_aliases (
-      alias TEXT PRIMARY KEY, molecule_id TEXT)`).catch(() => {});
+      alias TEXT PRIMARY KEY, molecule_id BIGINT)`).catch(() => {});
     await query(`CREATE TABLE IF NOT EXISTS rfq_requests (
       id TEXT PRIMARY KEY, molecule_name TEXT, cas_number TEXT, target_quantity TEXT,
       target_purity TEXT, gmp_required INTEGER DEFAULT 0, status TEXT,
@@ -387,7 +392,7 @@ function runValidator(stub, extraEnv = {}) {
     // 36282-47-0 is the hydrochloride, 27203-92-5 is the base. Both are checksum-valid, they
     // disagree, and a checksum-only path would wave either one through.
     await query(`INSERT INTO molecules (id, molecule_ref, normalized_name, preferred_name, cas)
-                 VALUES ('m-cand','MOL-CAND','candidatium','Candidatium','36282-47-0')
+                 VALUES (9001,'MOL-CAND','candidatium','Candidatium','36282-47-0')
                  ON CONFLICT (normalized_name) DO NOTHING`);
     await query(`INSERT INTO rfq_requests (id, molecule_name, cas_number, target_quantity, status)
                  VALUES ('cand-allow','Candidatium','36282-47-0','1kg','pending'),
@@ -463,6 +468,160 @@ function runValidator(stub, extraEnv = {}) {
     const decisions = (await query(`SELECT COUNT(*)::int n FROM rfq_identity_decisions`).catch(() => ({ rows: [{ n: 0 }] }))).rows[0].n;
     if (decisions === 0) ok('the listing persisted NO identity decision — decide(), never guardSend()');
     else bad(`${decisions} identity decision(s) were written by a read-only listing`);
+
+    // ══ 8. §14 ACTIVATION AND §15 PREPARATION ════════════════════════════
+    //
+    // These two WRITE TO PRODUCTION — one flips the approved objective live, the other spends real
+    // money and creates a durable approval carrying a real supplier communication. Rehearsing them
+    // here is not optional: a defect in either is discovered in front of the CEO otherwise.
+    console.log('\n── 8. activation and first-RFQ preparation\n');
+
+    // The approved objective, exactly as ruled, in DRAFT.
+    await query(`UPDATE objectives SET objective = $1, priority='P1',
+                   kpi_metric='qualified_supplier_quotes_received', kpi_target=1,
+                   deadline='2026-11-15', budget_usd=10, autonomy_tier='supervised',
+                   approval_policy='all_consequential', created_by='naren', status='draft'
+                 WHERE id='obj-abiozen-first-governed-rfq'`,
+      ['Obtain a qualified supplier quotation through governed RFQ outreach']);
+    // A second supplier, so there is a clean (non-duplicate) choice available.
+    await query(`INSERT INTO suppliers (id, name, country, contact_email, gmp_certified)
+                 VALUES ('s-fresh','Fresh Labs','India','bd@fresh.invalid',1)
+                 ON CONFLICT (id) DO NOTHING`);
+
+    const runScript = (script, args = [], stub = null) => spawnSync(process.execPath,
+      [...(stub ? ['--require', stub] : []), `scripts/${script}`, ...args], {
+        cwd: REPO, encoding: 'utf8',
+        env: { ...process.env, DATABASE_URL: url, ANTHROPIC_API_KEY: 'sk-ant-stub',
+          RAILWAY_GIT_COMMIT_SHA: 'rehearsal' },
+      });
+    const okStub = () => writeStub({ usage: { input_tokens: 220, output_tokens: 180 } });
+
+    // ── preparing BEFORE activation must stop ───────────────────────────────
+    const early = runScript('office-prepare-first-rfq.js',
+      ['--rfq=cand-allow', '--supplier=s-fresh'], okStub());
+    const earlyOut = (early.stdout || '') + (early.stderr || '');
+    if (early.status !== 0 && /is "draft", not active/.test(earlyOut)) {
+      ok('§15 refuses to prepare against a DRAFT objective, and says to activate first');
+    } else bad('§15 did not refuse a draft objective', earlyOut.split('\n').slice(-14).join('\n'));
+
+    // ── missing arguments must stop, without choosing anything ──────────────
+    const noArgs = runScript('office-prepare-first-rfq.js', [], okStub());
+    const noArgsOut = (noArgs.stdout || '') + (noArgs.stderr || '');
+    if (noArgs.status !== 0 && /both required/.test(noArgsOut)) {
+      ok('§15 refuses without --rfq and --supplier rather than choosing for the CEO');
+    } else bad('§15 did not refuse missing arguments');
+
+    // ── activate ────────────────────────────────────────────────────────────
+    const act = runScript('office-activate-objective.js');
+    const actOut = (act.stdout || '') + (act.stderr || '');
+    if (act.status === 0) ok('§14 activation exits 0');
+    else bad(`§14 activation exited ${act.status}`, actOut.split('\n').slice(-20).join('\n'));
+    if (/ACTIVATED/.test(actOut)) ok('it reports the activation');
+    else bad('it did not report an activation');
+    if (/activation created no run, no AI call, no approval and no outcome/.test(actOut)) {
+      ok('and that activation created no work');
+    } else bad('it did not assert that activation created nothing');
+    const st = (await query(`SELECT status FROM objectives WHERE id='obj-abiozen-first-governed-rfq'`)).rows[0];
+    if (st.status === 'active') ok('the objective is active in the database');
+    else bad(`the objective is "${st.status}" after activation`);
+
+    // ── activation is idempotent and does not re-activate ───────────────────
+    const act2 = runScript('office-activate-objective.js');
+    if (act2.status === 0 && /ALREADY active/.test((act2.stdout || ''))) {
+      ok('a second activation is a no-op that says so');
+    } else bad('a second activation did not report already-active', (act2.stdout || '').slice(-400));
+
+    // ── the duplicate guard ─────────────────────────────────────────────────
+    // s-ok already holds an RFQ for cand-allow (seeded in phase 7).
+    const dup = runScript('office-prepare-first-rfq.js',
+      ['--rfq=cand-allow', '--supplier=s-ok'], okStub());
+    const dupOut = (dup.stdout || '') + (dup.stderr || '');
+    if (dup.status !== 0 && /ALREADY HOLDS an RFQ/.test(dupOut)) {
+      ok('§15 REFUSES a supplier who already holds an RFQ for that molecule');
+      if (/--allow-duplicate/.test(dupOut)) ok('and names the explicit override rather than hiding it');
+      else bad('it refused without offering the deliberate path');
+    } else bad('§15 did not refuse a duplicate supplier', dupOut.split('\n').slice(-16).join('\n'));
+    const dupAppr = (await query(`SELECT COUNT(*)::int n FROM office_approvals`)).rows[0].n;
+    if (dupAppr === 0) ok('the refused duplicate created NO approval');
+    else bad(`${dupAppr} approval(s) exist after a refusal`);
+
+    // ── a refused identity must stop, with the exception as the outcome ─────
+    const disputed = runScript('office-prepare-first-rfq.js',
+      ['--rfq=cand-disputed', '--supplier=s-fresh'], okStub());
+    const disOut = (disputed.stdout || '') + (disputed.stderr || '');
+    if (disputed.status !== 0 && /identity_guard_refused/.test(disOut)) {
+      ok('§15 stops on a cas_disputed RFQ and reports the guard refusal as the outcome');
+      if (/legacy generator is NOT a fallback/.test(disOut)) ok('and states there is no legacy fallback');
+      else bad('it did not state the no-fallback rule');
+    } else bad('a disputed RFQ was not refused', disOut.split('\n').slice(-16).join('\n'));
+
+    // ── THE HAPPY PATH ──────────────────────────────────────────────────────
+    const prep = runScript('office-prepare-first-rfq.js',
+      ['--rfq=cand-allow', '--supplier=s-fresh'], okStub());
+    const prepOut = (prep.stdout || '') + (prep.stderr || '');
+    if (prep.status === 0) ok('§15 prepares successfully for a clean (RFQ, supplier) pair');
+    else bad(`§15 exited ${prep.status}`, prepOut.split('\n').slice(-24).join('\n'));
+    for (const want of ['the action is PENDING', 'nothing was transmitted',
+      'no outcome recorded', 'the supplier outreach log is unchanged']) {
+      if (prepOut.split('\n').some((l) => l.includes(want) && l.trim().startsWith('ok'))) ok(`  reported: ${want}`);
+      else bad(`  did NOT report: ${want}`);
+    }
+    if (/THE NEXT DECISION IS YOURS/.test(prepOut)) ok('it ends at the human decision boundary');
+    else bad('it did not end at the approval boundary');
+    if (/THE EXACT COMMUNICATION AWAITING APPROVAL/.test(prepOut)) ok('it prints the exact communication');
+    else bad('it did not print the communication a human must read');
+    if (/PROVENANCE CHAIN/.test(prepOut)) ok('and the provenance chain');
+    else bad('it did not print provenance');
+
+    // The durable state: exactly one pending approval, payload is the communication, nothing sent.
+    const apRows = (await query(
+      `SELECT id, status, action_kind, action_payload FROM office_approvals`)).rows;
+    if (apRows.length === 1) ok('exactly one approval exists');
+    else bad(`${apRows.length} approvals exist, expected 1`);
+    const ap = apRows[0] || {};
+    if (ap.status === 'pending') ok('it is pending'); else bad(`it is ${ap.status}`);
+    if (ap.action_kind === 'send_rfq_email') ok('its action kind is send_rfq_email');
+    else bad(`unexpected action kind ${ap.action_kind}`);
+    if (ap.action_payload && ap.action_payload.to === 'bd@fresh.invalid') {
+      ok('its payload addresses the chosen supplier');
+    } else bad('the payload does not address the chosen supplier', JSON.stringify(ap.action_payload || {}).slice(0, 160));
+    if (ap.action_payload && ap.action_payload.approved_cas === '36282-47-0') {
+      ok('and carries the CANONICAL CAS, not the filed one');
+    } else bad('the payload does not carry the canonical CAS', ap.action_payload && ap.action_payload.approved_cas);
+    const sentRows = (await query(`SELECT COUNT(*)::int n FROM supplier_outreach_log WHERE supplier_id='s-fresh'`)).rows[0].n;
+    if (sentRows === 0) ok('no outreach row was written — the supplier was not claimed or contacted');
+    else bad(`${sentRows} outreach row(s) written for a merely prepared RFQ`);
+
+    // ── A GUARD REFUSAL MUST NOT CONSUME THE SLOT FOR A DIFFERENT RFQ ──────
+    //
+    // This is the property the rehearsal discovered was broken. The cas_disputed attempt above
+    // opened a run before the guard refused it, and with a per-(workflow, objective) day key that
+    // refusal consumed the objective's only slot — so the correct RFQ could not be prepared until
+    // the next day. A guard refusal, which is the system working, would have locked out the very
+    // work it was protecting. The intent is now the (objective, RFQ, supplier) triple.
+    //
+    // The happy path above ran AFTER the disputed refusal, so its success already demonstrates
+    // this. Asserted explicitly so it cannot regress silently.
+    const keys = (await query(
+      `SELECT intent_key FROM agent_runs WHERE workflow = 'governed-rfq-generation'
+        ORDER BY created_at`)).rows.map((r) => r.intent_key);
+    if (new Set(keys).size === keys.length) {
+      ok(`each governed procurement run has its OWN intent key (${keys.length} distinct)`);
+    } else bad('two governed procurement runs share an intent key', keys.join('\n'));
+    if (keys.some((k) => k && k.includes('cand-disputed')) && keys.some((k) => k && k.includes('cand-allow'))) {
+      ok('a refused RFQ and an allowed one hold SEPARATE slots — a guard refusal locks out nothing');
+    } else bad('the intent keys do not distinguish the two RFQs', keys.join('\n'));
+
+    // ── and a second preparation the same day is one intent, not two ────────
+    const again2 = runScript('office-prepare-first-rfq.js',
+      ['--rfq=cand-allow', '--supplier=s-fresh', '--allow-duplicate'], okStub());
+    const again2Out = (again2.stdout || '') + (again2.stderr || '');
+    if (again2.status !== 0 && /duplicate_intent/.test(again2Out)) {
+      ok('a second governed procurement run for the objective today is refused as one intent');
+    } else bad('a second preparation was permitted the same day', again2Out.split('\n').slice(-14).join('\n'));
+    const apAfter = (await query(`SELECT COUNT(*)::int n FROM office_approvals`)).rows[0].n;
+    if (apAfter === 1) ok('still exactly one approval — no second communication was prepared');
+    else bad(`${apAfter} approvals after the duplicate attempt`);
 
     console.log('\n' + (fail ? `FAIL  ${fail} assertion(s) failed` :
       'PASS  the validator stops before spending on a mismatch, is idempotent, attributes its '

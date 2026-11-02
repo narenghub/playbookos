@@ -339,10 +339,27 @@ async function runGovernedProcurement({ objectiveId, rfqId, supplierId, trigger 
     return { ok: false, refusal: 'supplier_has_no_contact_email', supplierId, supplier_name: supplier.name };
   }
 
+  // ── THE INTENT IS THE (OBJECTIVE, RFQ, SUPPLIER) TRIPLE, NOT THE DAY ──────
+  //
+  // beginObjectiveRun's default key is `office:<workflow>:<objective>:<date>`, which makes every
+  // governed procurement run for one objective the same intent for a whole day. That is wrong
+  // here, and the way it is wrong matters: a run REFUSED BY THE IDENTITY GUARD still opened, so it
+  // consumed the day's only slot. Picking a cas_disputed RFQ by mistake would then block preparing
+  // the correct one until tomorrow — a guard refusal, which is the system working, would lock out
+  // the work it was protecting.
+  //
+  // "Prepare an RFQ for this molecule to this supplier" is the actual unit of intent, and it is
+  // the same granularity as the deterministic approval id below. The date stays in the key so a
+  // deliberate follow-up to the same supplier on a later day remains possible; preparing the same
+  // pair twice in a day is still one intent.
+  const { objectiveIntentKey } = require('../runs');
+  const dayKey = objectiveIntentKey(WORKFLOW, objectiveId);
+  const intentKey = `${dayKey}:${rfqId}:${supplier.id}`;
+
   const { beginObjectiveRun } = require('./run');
   const begun = await beginObjectiveRun({
     objectiveId, trigger, triggerDetail, workflow: WORKFLOW, agent: AGENT,
-    maxRuntimeMinutes: 15,
+    maxRuntimeMinutes: 15, intentKey,
   }, deps);
 
   if (begun.duplicate) {
