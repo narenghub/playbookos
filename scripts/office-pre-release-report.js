@@ -108,7 +108,17 @@ function canonical(v) {
     field('release mode', a.release_mode || '(unset)');
 
     if (a.status === 'approved') ok('status = approved');
-    else bad(`status is "${a.status}", not approved — release requires approved`);
+    else if (a.status === 'superseded') {
+      bad('status is SUPERSEDED — this action was approved and then superseded before any external '
+        + 'execution, because a later correction made it no longer executable as prepared. It is '
+        + 'terminal: release requires status="approved". A new preparation attempt is required, and '
+        + 'the business intent is NOT consumed');
+    } else bad(`status is "${a.status}", not approved — release requires approved`);
+    if (a.status === 'superseded') {
+      field('previous status', a.previous_status || '(not recorded)');
+      field('superseded by / at', `${a.superseded_by || '(none)'} / ${a.superseded_at || '(none)'}`);
+      field('supersession reason', a.superseded_reason || '(none)');
+    }
     if (a.resolution) ok('the resolution is PERSISTED beside the verdict, not only printed');
     else bad('no resolution was persisted');
     if (a.release_mode === 'explicit') {

@@ -279,6 +279,31 @@ const DDL = [
   `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS release_claimed_at TIMESTAMPTZ`,
   `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS release_claimed_by TEXT`,
 
+  // ── 'superseded' IS A DIFFERENT FACT FROM 'rejected' ──────────────────────
+  //
+  //   rejected    the proposed action reached the human decision boundary and the decision-maker
+  //               declined it.
+  //   superseded  the action WAS approved, and before external execution a later governance,
+  //               identity, policy, configuration or factual correction made that approved action
+  //               no longer executable as prepared.
+  //
+  // Reusing 'rejected' for the second would rewrite the first fact to represent the second. Both
+  // are true of the Hetero approval and they are not the same sentence: the CEO did approve that
+  // exact payload at that time, AND a newly enforced sender-provenance invariant later made it
+  // ineligible. An evidence trail that cannot say both says the wrong one.
+  //
+  // THE SUPERSESSION IS RECORDED BESIDE THE ORIGINAL DECISION, NOT OVER IT. `resolution` holds the
+  // approver's own words and is never touched here — overwriting it to add a terminal status would
+  // trade the original decision evidence for the correction, which is exactly backwards.
+  `ALTER TABLE office_approvals DROP CONSTRAINT IF EXISTS office_approvals_status_check`,
+  `ALTER TABLE office_approvals ADD CONSTRAINT office_approvals_status_check
+     CHECK (status IN ('pending','approved','rejected','expired','superseded'))`,
+  `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS superseded_at TIMESTAMPTZ`,
+  `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS superseded_by TEXT`,
+  `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS superseded_reason TEXT`,
+  // What it was before, so the transition is legible without reconstructing it from timestamps.
+  `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS previous_status TEXT`,
+
   // ── §16: FIRST-SEND BEHAVIOUR IS DURABLE POLICY, NOT A MISSING CALLER ─────
   //
   // "Do not implement the first-send two-act policy as 'we just won't call it automatically yet.'"

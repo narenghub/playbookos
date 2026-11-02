@@ -102,6 +102,12 @@ const EXEMPT = new Set([
   // to make those unrepresentable, so a rehearsal routed through it would prove nothing. The
   // report it rehearses names no kernel table: it goes through the accessor.
   path.join('scripts', 'check-pre-release-report-runs.js'),
+  // Attacks office_approvals by hand to prove the supersession transition is no wider than it was
+  // authorized to be: it must set release_claimed_at and plant an outreach row to construct the
+  // states that MUST be refused. The accessor exists to make those unrepresentable, so a harness
+  // routed through it would prove nothing about the arbitration. The operation it tests names no
+  // kernel table outside the accessor.
+  path.join('scripts', 'check-office-supersede-db.js'),
 ]);
 
 // Product code may never be exempt. The only permitted exemptions under src/ are the accessor and

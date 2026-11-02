@@ -220,6 +220,15 @@ async function release(ctx, { approvalId, releasedBy, consequential = true,
     return { released: false, reason: 'already_released', status: cur.status,
       released_at: cur.released_at, released_by: cur.released_by };
   }
+  // SUPERSEDED IS TERMINAL AND SAYS SO. The claim predicate already refuses it — it demands
+  // status='approved' — so this adds no protection; it adds an answer. "not_approved" for an
+  // action a human deliberately superseded reads like a missing approval rather than a completed
+  // governance decision, and the operator then looks for the wrong thing.
+  if (cur.status === 'superseded') {
+    return { released: false, reason: 'superseded', status: cur.status,
+      detail: 'this approval was superseded after approval and before any external execution; it '
+        + 'is terminal and a new preparation attempt is required' };
+  }
   return { released: false, reason: 'not_approved', status: cur.status };
 }
 

@@ -205,6 +205,11 @@ step "supplier evidence runs on Postgres and ranks by evidence" node scripts/che
 # green on a clean approval, RED for each precondition independently AND for the right reason, and
 # writing nothing on any path including the red ones.
 step "the pre-release report can go red and writes nothing" node scripts/check-pre-release-report-runs.js
+# Supersession: approved + never externally claimed → superseded, and NOTHING wider. The risk is
+# not that it fails, it is that a decided approval quietly becomes re-decidable — so most of that
+# harness asserts what must remain impossible, including claimed → superseded, which is the one
+# ordering that must never happen.
+step "supersession is one transition and no wider" node scripts/check-office-supersede-db.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

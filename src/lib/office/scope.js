@@ -112,7 +112,7 @@ async function bootstrapApprovalForExecution(approvalId, deps = {}) {
   const res = await q(deps)(
     `SELECT a.id, a.company_id, a.objective_id, a.run_id, a.action_kind, a.action_payload,
             a.status, a.release_claimed_at, a.released_at, a.resolved_by, a.resolved_at,
-            a.resolution,
+            a.resolution, a.previous_status, a.superseded_at, a.superseded_by, a.superseded_reason,
             o.budget_usd, o.release_mode, o.status AS objective_status
        FROM office_approvals a
        JOIN objectives o ON o.id = a.objective_id AND o.company_id = a.company_id
@@ -352,6 +352,64 @@ async function requestApproval(ctx, { id, runId, actionKind, actionPayload, reas
   return res.rows[0];
 }
 
+// ── SUPERSESSION: THE ONE NEW TRANSITION, AND NOTHING WIDER ─────────────────
+//
+//   approved + NEVER EXTERNALLY CLAIMED  →  superseded
+//
+// Deliberately NOT a change to decideApproval, and deliberately not a generic setApprovalStatus.
+// decideApproval owns the human verdict — pending → approved or pending → rejected — and the fact
+// that neither can afterwards be changed through it is a property worth keeping. Widening its
+// predicate to admit this transition would have bought one correction at the cost of making every
+// decided approval re-decidable.
+//
+// ── WHY THE CLAIM TABLE IS IN THE PREDICATE ───────────────────────────────
+//
+//   "Once external execution has been claimed, approval supersession is too late."
+//
+// release_claimed_at being NULL is the control plane's belief about that. supplier_outreach_log is
+// where the external attempt is actually recorded, and it is written by a different code path at a
+// different moment — the claim is taken BEFORE the mailer, precisely so a crash between them is
+// visible. So both are required, and the stronger source is included rather than assumed to agree:
+// if a claim row exists for this approval, or for its (rfq, supplier) pair, the outside world may
+// already have been reached and the question of whether to supersede is moot.
+//
+// ONE STATEMENT, so there is no window between checking and acting. A caller that read the status
+// first and then updated could be overtaken by a release in between — which is the one ordering
+// that must never be possible here.
+//
+// Returns the row on success, or null. The caller says precisely why nothing happened; this
+// function does not guess, because "no rows matched" has several causes and they are not alike.
+async function supersedeApproval(ctx, { approvalId, supersededBy, reason }, deps = {}) {
+  assertContext(ctx);
+  if (!approvalId) throw new Error('supersedeApproval requires an approvalId');
+  if (!supersededBy) throw new Error('supersedeApproval requires an actor: a supersession with no author is not evidence');
+  if (!reason || String(reason).trim().length < 12) {
+    throw new Error('supersedeApproval requires a durable reason: a terminal status nobody can account for later is worth little more than no record');
+  }
+  const res = await q(deps)(
+    `UPDATE office_approvals a
+        SET status = 'superseded',
+            previous_status = a.status,
+            superseded_at = NOW(),
+            superseded_by = $3,
+            superseded_reason = $4
+      WHERE a.company_id = $1
+        AND a.id = $2
+        AND a.status = 'approved'
+        AND a.release_claimed_at IS NULL
+        AND a.released_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM supplier_outreach_log s
+           WHERE s.approval_id = a.id
+              OR (s.rfq_id = a.action_payload->>'rfq_id'
+                  AND s.supplier_id = a.action_payload->>'supplier_id'))
+      RETURNING id, status, previous_status, superseded_at, superseded_by, superseded_reason,
+                resolution, resolved_by, resolved_at`,
+    [ctx.companyId, approvalId, supersededBy, String(reason).trim()]
+  );
+  return res.rows[0] || null;
+}
+
 async function decideApproval(ctx, { id, decision, resolvedBy, resolution = null }, deps = {}) {
   assertContext(ctx);
   if (!['approved', 'rejected'].includes(decision)) throw new Error(`bad approval decision: ${decision}`);
@@ -567,5 +625,6 @@ module.exports = {
   rfqApprovalsForEligibility,
   createObjective, setObjectiveStatus,
   listObjectives, getObjective, listOpenExceptions, listPendingApprovals, spendToday, listOutcomes,
-  recordCost, openException, resolveException, requestApproval, decideApproval, recordOutcome,
+  recordCost, openException, resolveException, requestApproval, decideApproval, supersedeApproval,
+  recordOutcome,
 };
