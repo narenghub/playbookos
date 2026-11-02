@@ -27,6 +27,7 @@
 'use strict';
 
 const rfqMod = require('../src/lib/office/procurement-rfq');
+const guard = require('../src/lib/procurement/rfq-identity-guard');
 const scope = require('../src/lib/office/scope');
 const budget = require('../src/lib/office/budget');
 const { query } = require('../src/lib/db');
@@ -181,6 +182,58 @@ const stop = (why, detail) => {
         + `  railway ssh 'node scripts/office-prepare-first-rfq.js --rfq=${RFQ_ID} `
         + `--supplier=${SUPPLIER_ID} --signatory-ok'`);
     }
+
+    // ══ 3c. THE FULL RECIPIENT SET, BEFORE THE PROVIDER IS INVOKED ════════
+    //
+    //   "Before invoking the provider, print: supplier; supplier destination; molecule/form;
+    //    canonical CAS; quantity/specification; signatory name/title/email; To; CC; BCC; reason
+    //    for every copied recipient. Expected CC for this workflow: Naresh/Naren only. If any
+    //    unexpected recipient appears: STOP BEFORE PROVIDER INVOCATION."
+    //
+    // This is printed here, by the operator-facing script, AS WELL AS being enforced inside
+    // prepareGovernedRFQ. Two different jobs: the kernel gate refuses an unauthorized recipient
+    // whatever calls it, and this block puts the whole addressed envelope in front of a human
+    // while it still costs nothing to change. The first real preparation showed why — the copy
+    // list was correct in policy terms and wrong in fact, and nobody saw it until after the
+    // letter existed and a rejection record had to be written.
+    const copyTo = await rfqMod.resolveCopyContacts({}, signatory);
+    const recipientViolation = rfqMod.verifyRecipientPolicy({
+      to: sup.contact_email, cc: copyTo, bcc: [], signatory, supplier: sup,
+    });
+
+    // decide(), NOT guardSend(): the canonical CAS is read here only to show it, and guardSend
+    // would persist an identity decision for a letter that may never be generated. The real,
+    // recorded decision is made inside runGovernedProcurement below.
+    const preview = await guard.decide(query, rfq);
+
+    console.log('\n  ── THE ADDRESSED ENVELOPE (nothing has been generated or sent yet) ──\n');
+    field('supplier', sup.name);
+    field('supplier destination', sup.contact_email || '(none — nowhere to send)');
+    field('molecule / form', preview.approved_name || rfq.molecule_name);
+    field('canonical CAS', preview.approved_cas || '(none approved)');
+    field('quantity / spec', `${rfq.target_quantity || '?'} at ${rfq.target_purity || '?'}`
+      + `${Number(rfq.gmp_required) === 1 ? ', GMP required' : ''}`);
+    field('signatory', `${signatory.name}, ${signatory.title} <${signatory.email}>`);
+    field('To', sup.contact_email || '(none)');
+    field('CC', copyTo.length ? copyTo.map((c) => `${c.name} <${c.email}>`).join(', ') : '(none)');
+    field('BCC', '(none — this workflow sends no blind copies)');
+    if (!copyTo.length) {
+      note('NO copied recipient resolved. That is a valid letter, but the expected CC for this '
+        + 'workflow is the company principal — check Team Management if that is a surprise.');
+    }
+    for (const c of copyTo) {
+      field('  why copied', `${c.email} — ${c.why || '(no reason recorded)'}`);
+    }
+
+    if (recipientViolation) {
+      stop(`the recipient set is NOT what this workflow permits (${recipientViolation.reason}).`,
+        `${recipientViolation.detail}\n\n`
+        + 'STOPPED BEFORE PROVIDER INVOCATION. No AI call was made, nothing was spent, and no\n'
+        + 'approval was prepared — so there is nothing to reject and nothing to preserve.\n\n'
+        + 'Platform administrative authority is not communication-recipient authority. Fix the\n'
+        + 'user records in Team Management, then run this again.');
+    }
+    ok('the recipient set matches the policy for this workflow: supplier + the company principal');
 
     // ══ 4. WHAT THE BUDGET WOULD ALLOW, BEFORE SPENDING ════════════════════
     const bctx = Object.freeze({ companyId: company.id, objectiveId: OBJECTIVE_ID, runId: null });

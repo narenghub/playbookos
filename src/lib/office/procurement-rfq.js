@@ -33,6 +33,7 @@
 const { governedCall } = require('./ai');
 const { assertContext } = require('./context');
 const scope = require('./scope');
+const { excludeExternalSql } = require('../roles');
 
 const AGENT = 'procurement-agent';
 const WORKFLOW = 'governed-rfq-generation';
@@ -173,9 +174,26 @@ async function resolveCopyContacts(deps = {}, signatory = null) {
   const query = (deps && deps.query) || require('../db').query;
   if (deps && deps.copyContacts) return deps.copyContacts;   // fixtures only
 
+  // ── PLATFORM ADMINISTRATIVE AUTHORITY ≠ COMMUNICATION-RECIPIENT AUTHORITY ──
+  //
+  // `super_admin` ONLY, and no fallback to `admin`. Holding an administrative role on the platform
+  // is not authority to appear on a supplier letter: the first real preparation copied an
+  // `adificetechnologies.com` address onto an Abiozen procurement communication purely because
+  // that user is a platform admin. Multiple active administrators are not permission to copy
+  // multiple people.
+  //
+  // If no active super_admin exists there is NO copy contact. That is correct rather than
+  // unfortunate — a letter with one contact is valid, and inferring a recipient is the defect.
+  // excludeExternalSql() is REDUNDANT against the role filter and included anyway. A partner is
+  // never super_admin, so this changes no row today — but the roster sweep in
+  // external-roles.test.js flagged this query, and the honest response to "you are reading the
+  // whole roster to pick a recipient" is to state the exclusion rather than to add an exemption.
+  // An external collaborator on a supplier letter is the SAME defect this gate exists for, one
+  // role away.
   const rows = (await query(
     `SELECT id, name, email, role FROM users
-      WHERE is_active = 1 AND role IN ('admin','super_admin') AND email IS NOT NULL
+      WHERE is_active = 1 AND role = 'super_admin' AND email IS NOT NULL
+      ${excludeExternalSql()}
       ORDER BY CASE WHEN LOWER(email) LIKE 'naren%' THEN 0 ELSE 1 END, created_at`)).rows;
 
   // EXACTLY ONE. The first version took `.slice(0, 2)` — "the principal, and at most one more" —
@@ -183,18 +201,94 @@ async function resolveCopyContacts(deps = {}, signatory = null) {
   // onto an Abiozen letter to a supplier. The instruction was "both of us handle it": the
   // signatory signs, the principal is copied. Two people, not a distribution list that grows
   // whenever somebody is given an admin role.
-  //
-  // super_admin outranks admin, because "the principal" is a specific person and not a permission
-  // level that several people may happen to hold.
   const eligible = rows.filter((r) => !signatory || (r.id !== signatory.id
     && String(r.email).toLowerCase() !== String(signatory.email).toLowerCase()));
-  const principal = eligible.find((r) => r.role === 'super_admin') || eligible[0] || null;
+  const principal = eligible[0] || null;
   return principal
-    ? [{ id: principal.id, name: principal.name, email: principal.email, role: principal.role }]
+    ? [{ id: principal.id, name: principal.name, email: principal.email, role: principal.role,
+        why: 'the company principal (active super_admin), copied so supplier replies reach both '
+          + 'the signatory and the CEO' }]
     : [];
 }
 
-async function renderGovernedRFQ(ctx, { approvedMol, supplier, rfqId, filedCas = null }, deps = {}) {
+// ── THE RECIPIENT SET IS VERIFIED BEFORE THE PROVIDER IS INVOKED ────────────
+//
+//   "If any unexpected recipient appears: STOP BEFORE PROVIDER INVOCATION."
+//
+// This is the recipient analogue of identityContainment, with one difference that matters: the
+// containment check runs on model OUTPUT and therefore cannot run before the call, while the
+// recipient set is deterministic policy and is fully known beforehand. So it is checked FIRST, and
+// an unexpected recipient costs nothing — no tokens, no ledger row, no prepared artefact for a
+// human to read and reject. The first bad preparation cost $0.0085 and a rejection record.
+//
+// WHAT "UNEXPECTED" MEANS, mechanically:
+//
+//   · exactly one `to`, and it is the selected supplier's own address
+//   · at most one `cc`, and it holds `super_admin` — the platform-administrator fallback that put
+//     a second company's address on an Abiozen letter is refused here even if a caller re-adds it
+//   · no `bcc` at all in this workflow; a silent recipient on a first supplier contact is not
+//     something to discover later
+//   · every internal recipient shares the SIGNATORY'S email domain
+//
+// THE DOMAIN IS DERIVED, NOT CONFIGURED. Hardcoding "abiozen.com" here would be the same shape of
+// defect as the hardcoded signature block: a fact about the organization frozen into code. The
+// signatory is the authority the letter represents, resolved live from the active role, so the
+// boundary the letter speaks for is the signatory's own domain. A legitimate second domain is then
+// a deliberate decision somebody records, not an inference this code makes.
+const emailDomain = (e) => String(e || '').toLowerCase().split('@')[1] || null;
+
+function verifyRecipientPolicy({ to, cc = [], bcc = [], signatory, supplier }) {
+  const bad = (reason, detail) => ({ reason, detail });
+
+  if (!to) return bad('no_recipient', 'the supplier has no contact_email, so there is nobody to send to');
+  if (Array.isArray(to) && to.length !== 1) {
+    return bad('multiple_primary_recipients', `expected exactly one To, got ${to.length}`);
+  }
+  const toAddr = String(Array.isArray(to) ? to[0] : to).toLowerCase();
+  if (supplier && supplier.contact_email
+      && toAddr !== String(supplier.contact_email).toLowerCase()) {
+    return bad('to_is_not_the_supplier',
+      `To is ${toAddr} but the selected supplier's address is ${supplier.contact_email}`);
+  }
+
+  if (bcc && bcc.length) {
+    return bad('bcc_not_permitted',
+      `this workflow sends no blind copies; found ${bcc.length}: ${bcc.join(', ')}`);
+  }
+
+  if (cc.length > 1) {
+    return bad('too_many_copied_recipients',
+      `recipient policy permits at most one copied recipient (the company principal); found `
+      + `${cc.length}: ${cc.map((c) => c.email).join(', ')}`);
+  }
+
+  const expectedDomain = emailDomain(signatory && signatory.email);
+  for (const c of cc) {
+    if (!c.email) return bad('copied_recipient_without_address', `${c.name || 'a copied recipient'} has no email`);
+    if (c.role !== 'super_admin') {
+      return bad('copied_recipient_is_not_the_principal',
+        `${c.email} holds role "${c.role || '(none)'}" — platform administrative authority is not `
+        + 'communication-recipient authority, and only the company principal is copied');
+    }
+    const d = emailDomain(c.email);
+    if (expectedDomain && d !== expectedDomain) {
+      return bad('copied_recipient_outside_company_boundary',
+        `${c.email} is at ${d}, but this letter is signed from ${expectedDomain} — a recipient at `
+        + 'another company\'s domain is outside the communication boundary this letter speaks for');
+    }
+    if (toAddr === String(c.email).toLowerCase()) {
+      return bad('copied_recipient_is_the_supplier', `${c.email} is both the supplier and a copy`);
+    }
+    if (signatory && String(c.email).toLowerCase() === String(signatory.email).toLowerCase()) {
+      return bad('copied_recipient_is_the_signatory',
+        `${c.email} signs this letter; copying the signer is a duplicate, not a second recipient`);
+    }
+  }
+  return null;
+}
+
+async function renderGovernedRFQ(ctx, { approvedMol, supplier, rfqId, filedCas = null,
+  signatory: preResolved = null }, deps = {}) {
   assertContext(ctx);
 
   // The upstream authority check, restated here rather than assumed: this module must be unusable
@@ -215,7 +309,10 @@ async function renderGovernedRFQ(ctx, { approvedMol, supplier, rfqId, filedCas =
   // of the codebase uses: the active holder of the role in `users`. And it FAILS CLOSED — if no
   // active signatory can be resolved, no communication is rendered at all. Defaulting to a name,
   // any name, is how a departed employee ends up signing a letter to a supplier.
-  const signatory = await resolveSignatory(deps);
+  // Accepted pre-resolved so the caller can verify the recipient set BEFORE any provider call —
+  // the ruled order is signatory → recipients → generation. Resolved here when absent, so this
+  // function is still usable on its own and cannot be made to render without a signatory.
+  const signatory = preResolved || await resolveSignatory(deps);
   if (!signatory) {
     return { ok: false, refusal: 'no_active_signatory', body: null, subject: null,
       detail: 'no active procurement_director (or admin fallback) exists in users, so there is '
@@ -363,18 +460,51 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
     gmp_required: rfq.gmp_required,
   };
 
+  // ── THE RULED ORDER: SIGNATORY → RECIPIENTS → GENERATION ─────────────────
+  //
+  // Both are resolved and the recipient set is VERIFIED before the provider is reached. The
+  // earlier version resolved the copy list after the render — the reasoning was that the model
+  // then could not be influenced by it, which is true but is enforced by never passing it to the
+  // renderer, not by call order. Resolving after meant an unexpected recipient was only visible
+  // once the tokens were spent and a human had an artefact to read; it is now visible for free.
+  const signatory = await resolveSignatory(deps);
+  if (!signatory) {
+    return { ok: false, refusal: 'no_active_signatory', rfqId,
+      detail: 'no active procurement signatory exists in users, so there is nobody this RFQ can '
+        + 'honestly be from — refusing rather than signing a name' };
+  }
+
+  const copyTo = await resolveCopyContacts(deps, signatory);
+
+  // STOP BEFORE PROVIDER INVOCATION. Not a warning, not a sanitization: no tokens are spent and
+  // no approval is prepared, because a recipient set a human would have to reject is not an
+  // artefact worth producing. Filed for a human, because an unexpected recipient is a defect in
+  // the resolver or in the user records, and both need somebody to look.
+  const recipientViolation = verifyRecipientPolicy({
+    to: supplier.contact_email, cc: copyTo, bcc: [], signatory, supplier,
+  });
+  if (recipientViolation) {
+    const exceptionId = await fileException(ctx, {
+      rfqId, severity: 'critical', source: 'office/procurement-rfq',
+      reason: `RFQ ${rfqId} STOPPED BEFORE PROVIDER INVOCATION `
+        + `(${recipientViolation.reason}): ${recipientViolation.detail}. No AI call was made and no `
+        + 'approval was prepared. Platform administrative authority is not communication-recipient '
+        + 'authority — the recipient set must be corrected in the user records or the resolver.',
+    }, deps);
+    return { ok: false, refusal: 'recipient_policy_violation',
+      recipient_reason: recipientViolation.reason, detail: recipientViolation.detail,
+      exception_id: exceptionId, rfqId,
+      attempted_recipients: { to: supplier.contact_email, cc: copyTo.map((c) => c.email), bcc: [] } };
+  }
+
   const rendered = await renderGovernedRFQ(ctx, {
-    approvedMol, supplier, rfqId, filedCas: rfq.cas_number,
+    approvedMol, supplier, rfqId, filedCas: rfq.cas_number, signatory,
   }, deps);
   if (!rendered.ok) {
     // Already queued by renderGovernedRFQ where it warrants a human. NO LEGACY FALLBACK.
     return { ok: false, refusal: rendered.refusal, detail: rendered.detail,
       exception_id: rendered.exception_id || null, ai: rendered.ai || null, rfqId };
   }
-
-  // Resolved AFTER the render, so the copy list cannot influence what the model wrote, and frozen
-  // into the payload below with everything else the human approves.
-  const copyTo = await resolveCopyContacts(deps, rendered.signatory);
 
   // Prepared, not sent. The approval carries the EXACT communication, and the payload is immutable
   // from here, so what a human reads is what would go out.
@@ -403,10 +533,23 @@ async function prepareGovernedRFQ(ctx, { rfqId, supplier }, deps = {}) {
       // same person, and two people sharing a name are not confused for one.
       signed_by_user_id: rendered.signatory.id || null,
       signed_by_role: rendered.signatory.role || null,
-      // Frozen: who else at Abiozen the supplier's reply reaches. Part of what is approved.
+      // ── RECIPIENT PROVENANCE IS CONSEQUENTIAL PROVENANCE ──────────────────
+      //
+      // The external recipient set is treated like the signatory: frozen, and explicit about WHY
+      // each address is there. The AI never expands this — recipient selection is deterministic
+      // policy, not model judgment, and the model is not even shown the list.
       cc: copyTo.map((c) => c.email),
       cc_names: copyTo.map((c) => c.name),
       cc_user_ids: copyTo.map((c) => c.id),
+      bcc: [],                         // not used by this workflow, recorded so its absence is explicit
+      recipients: [
+        { kind: 'to', email: supplier.contact_email, name: supplier.name,
+          relationship: 'external supplier',
+          why: `the supplier selected for RFQ ${rfqId}; address read from the suppliers row, not supplied by a caller` },
+        ...copyTo.map((c) => ({ kind: 'cc', email: c.email, name: c.name,
+          user_id: c.id, role: c.role, relationship: 'Abiozen principal',
+          why: c.why || 'company principal' })),
+      ],
     },
     reason: `supervised autonomy: a supplier communication for RFQ ${rfqId} requires human `
       + `approval before release. Identity decision ${decided.decisionId} approved `
@@ -547,5 +690,6 @@ async function runGovernedProcurement({ objectiveId, rfqId, supplierId, trigger 
 }
 
 module.exports = { renderGovernedRFQ, prepareGovernedRFQ, runGovernedProcurement,
-  resolveSignatory, resolveCopyContacts, identityContainment, casTokens, fileException,
+  verifyRecipientPolicy, resolveSignatory, resolveCopyContacts,
+  identityContainment, casTokens, fileException,
   AGENT, WORKFLOW };

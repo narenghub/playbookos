@@ -90,6 +90,10 @@ process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'PLACEHOLDER-te
 const realFetch = globalThis.fetch;
 let mode = 'normal';
 let lastBody = null;
+// Counts PROVIDER INVOCATIONS. Required by the gate-contamination rule: a refusal case must prove
+// not only that the intended gate refused, but that the downstream one was never reached. Without
+// a counter, "stopped before the provider" is an assertion about code I read, not about what ran.
+let providerCalls = 0;
 function okResp(text, usage) {
   return {
     ok: true, status: 200,
@@ -98,6 +102,7 @@ function okResp(text, usage) {
   };
 }
 globalThis.fetch = async (u, opts) => {
+  providerCalls += 1;
   lastBody = opts && opts.body ? JSON.parse(opts.body) : null;
   if (mode === 'hang') {
     // Never resolves on its own. Rejects only when the AbortController fires, which is the
@@ -1037,7 +1042,7 @@ globalThis.fetch = async (u, opts) => {
       if (cc.some((c) => c.email === 'naren@abiozen.invalid')) ok('and it is the principal (super_admin)');
       else bad('the principal was not resolved as the copy contact', JSON.stringify(cc));
       if (!cc.some((c) => c.email === 'other@elsewhere.invalid')) {
-        ok('a second admin is NOT copied — super_admin outranks admin');
+        ok('a plain platform admin is NOT copied — administrative authority is not recipient authority');
       } else bad('a second admin was copied onto a supplier letter');
       if (!cc.some((c) => c.email === 'goneadmin@abiozen.invalid')) {
         ok('an INACTIVE admin is not copied — is_active applies here too');
@@ -1050,10 +1055,29 @@ globalThis.fetch = async (u, opts) => {
         ok('the signatory is excluded from the copy list — nobody signs and copies themselves');
       } else bad('the signatory appears in their own copy list');
 
+      // ── A super_admin AT ANOTHER COMPANY'S DOMAIN ────────────────────────
+      //
+      // The role filter alone is not enough. If the principal happened to hold super_admin at a
+      // different company's domain, the resolver would return them and the role check would be
+      // satisfied — which is why the boundary is checked SEPARATELY, against the signatory's own
+      // domain, rather than being assumed to follow from the role.
+      {
+        const foreign = [{ id: 'cc-foreign', name: 'An Admin Elsewhere',
+          email: 'admin@someothercompany.invalid', role: 'super_admin' }];
+        const v = freshRfq.verifyRecipientPolicy({
+          to: 'info@supplier.invalid', cc: foreign, bcc: [],
+          signatory: { id: 'sig-dir', email: 'newdir@abiozen.invalid' },
+          supplier: { contact_email: 'info@supplier.invalid' } });
+        if (v && v.reason === 'copied_recipient_outside_company_boundary') {
+          ok('a super_admin at ANOTHER domain is refused on the company boundary, not just the role');
+        } else bad('an out-of-domain recipient passed the policy', JSON.stringify(v));
+      }
+
       // And no literal address survives in the resolver.
       const rfqSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'office', 'procurement-rfq.js'), 'utf8');
       const resolver = rfqSrc.slice(rfqSrc.indexOf('async function resolveCopyContacts'),
-        rfqSrc.indexOf('async function renderGovernedRFQ'));
+        rfqSrc.indexOf('// ── THE RECIPIENT SET IS VERIFIED'));
+      if (!resolver || resolver.length < 200) bad('the copy-resolver slice is stale — this control is reading nothing');
       if (/@abiozen\.com|@adificetechnologies\.com/.test(resolver)) {
         bad('a literal company address is hardcoded in the copy resolver — the same defect, new field');
       } else ok('no literal address appears in the copy resolver');
@@ -1365,6 +1389,134 @@ globalThis.fetch = async (u, opts) => {
     if (sha(AIF) !== before) bad('M5 ai.js was NOT restored byte-for-byte');
     else ok('M5 ai.js restored, verified by content hash');
 
+    // ══ AN UNEXPECTED RECIPIENT STOPS BEFORE THE PROVIDER IS INVOKED ═══════
+    //
+    //   "If any unexpected recipient appears: STOP BEFORE PROVIDER INVOCATION."
+    //
+    // The first real preparation did the opposite by construction: it resolved the copy list AFTER
+    // generating the letter, so a recipient nobody authorized cost a provider call, a ledger row
+    // and a prepared artefact a human had to read and reject. This proves the order changed.
+    //
+    // THE ASSERTION IS DELIBERATELY FOUR-PART, because a refusal alone would not distinguish this
+    // gate from any of the ones around it:
+    //   1. the refusal is `recipient_policy_violation` with the exact recipient reason
+    //   2. THE PROVIDER WAS NEVER CALLED — counted, not inferred
+    //   3. no approval row exists, so no human is asked to judge an unauthorized recipient
+    //   4. no cost row exists, because nothing was spent
+    note('an unexpected recipient stops the preparation before any provider call');
+    {
+      const ORP = `k56-recip-${crypto.randomUUID()}`;
+      await scope.createObjective({ id: ORP, companyId: A, objective: 'Recipient policy fixture',
+        priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+        autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+      ids.objectives.push(ORP);
+      await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: ORP, runId: null }),
+        { id: ORP, status: 'active' }, deps);
+      await q(`INSERT INTO suppliers (id, name, country, contact_email)
+               VALUES ('sup-recip','Recipient Labs','India','recip@sup.invalid')
+               ON CONFLICT (id) DO NOTHING`);
+
+      // EVERY PREREQUISITE IS CONSTRUCTED HERE, not inherited. The first version of this case
+      // asserted the principal was copied and found an EMPTY copy list, because an earlier case
+      // had left the users table without an active super_admin. That is the gate-contamination
+      // pattern in its quietest form: the gate under test was never the thing being measured.
+      await freshUsers([
+        ['sig-dir', 'newdir@abiozen.invalid', 'A New Director', 'procurement_director', 1],
+        ['sig-ceo', 'naren@abiozen.invalid', 'Naresh Boda', 'super_admin', 1],
+      ]);
+      const ccNow = await freshRfq.resolveCopyContacts(deps, null);
+      if (ccNow.length !== 1 || ccNow[0].email !== 'naren@abiozen.invalid') {
+        bad('the recipient fixture is not set up as this case assumes — it would measure nothing',
+          JSON.stringify(ccNow));
+      }
+
+      mode = 'normal';
+      const callsBefore = providerCalls;
+      // The out-of-domain recipient is INJECTED rather than resolved: the resolver no longer
+      // produces one, and the point of this gate is that it refuses an unauthorized recipient
+      // however one arrives — a future resolver change, a caller passing its own list, or a user
+      // record with an unexpected domain.
+      const stopped = await freshRfq.runGovernedProcurement(
+        { objectiveId: ORP, rfqId: 'rfq-k56', supplierId: 'sup-recip' },
+        { ...deps, guard: allowingGuard,
+          copyContacts: [{ id: 'cc-foreign', name: 'An Admin Elsewhere',
+            email: 'admin@someothercompany.invalid', role: 'super_admin' }] });
+      if (stopped.runId) ids.runs.push(stopped.runId);
+
+      if (stopped.ok) bad('an out-of-domain recipient was PREPARED anyway', JSON.stringify(stopped.copyTo));
+      else if (stopped.refusal !== 'recipient_policy_violation') {
+        bad('the preparation was refused for an unrelated reason, so the recipient gate was never '
+          + 'measured — this is the gate-contamination pattern', stopped.refusal);
+      } else if (stopped.recipient_reason !== 'copied_recipient_outside_company_boundary') {
+        bad('the recipient gate refused for the wrong recipient reason', stopped.recipient_reason);
+      } else ok('an out-of-domain recipient refuses the preparation by name');
+
+      if (providerCalls === callsBefore) ok('AND THE PROVIDER WAS NEVER INVOKED — counted, not inferred');
+      else bad(`the provider was called ${providerCalls - callsBefore} time(s) despite the refusal`);
+
+      if (stopped.runId) {
+        const apN = (await q(`SELECT COUNT(*)::int n FROM office_approvals WHERE run_id = $1`,
+          [stopped.runId])).rows[0].n;
+        if (apN === 0) ok('no approval was prepared — no human is asked to judge an unauthorized recipient');
+        else bad(`${apN} approval(s) were prepared for a refused recipient set`);
+
+        const costN = (await q(`SELECT COUNT(*)::int n FROM office_cost_ledger WHERE run_id = $1`,
+          [stopped.runId])).rows[0].n;
+        if (costN === 0) ok('and nothing was spent — no cost row exists');
+        else bad(`${costN} cost row(s) exist for a preparation that never reached the provider`);
+
+        const exN = (await q(`SELECT COUNT(*)::int n FROM office_exceptions WHERE run_id = $1`,
+          [stopped.runId])).rows[0].n;
+        if (exN >= 1) ok('a human is told: an exception is filed for the unexpected recipient');
+        else bad('the unexpected recipient was refused silently — nobody is told');
+      }
+
+      // THE NEGATIVE CONTROL. The same call with the authorized principal must SUCCEED and must
+      // reach the provider — otherwise this case could be passing for a reason unrelated to the
+      // recipient set, which is exactly how M4, M7 and two R1 cases passed while measuring nothing.
+      const ORP2 = `k56-recip-ok-${crypto.randomUUID()}`;
+      await scope.createObjective({ id: ORP2, companyId: A, objective: 'Recipient policy negative control',
+        priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+        autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+      ids.objectives.push(ORP2);
+      await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: ORP2, runId: null }),
+        { id: ORP2, status: 'active' }, deps);
+      await q(`INSERT INTO suppliers (id, name, country, contact_email)
+               VALUES ('sup-recip2','Recipient Labs Two','India','recip2@sup.invalid')
+               ON CONFLICT (id) DO NOTHING`);
+
+      const callsBefore2 = providerCalls;
+      const allowed = await freshRfq.runGovernedProcurement(
+        { objectiveId: ORP2, rfqId: 'rfq-k56', supplierId: 'sup-recip2' },
+        { ...deps, guard: allowingGuard });
+      if (allowed.runId) ids.runs.push(allowed.runId);
+      if (!allowed.ok) bad('the policy-compliant preparation was refused', JSON.stringify(allowed));
+      else {
+        ids.approvals.push(allowed.approvalId);
+        ok('THE NEGATIVE CONTROL: the identical call with the resolved principal is PREPARED');
+        if (providerCalls > callsBefore2) ok('and that one DID reach the provider — the gate is what stopped the other');
+        else bad('the compliant call never reached the provider either, so the gate was not what blocked the first');
+
+        const fr = (await q(`SELECT action_payload FROM office_approvals WHERE id = $1`,
+          [allowed.approvalId])).rows[0].action_payload;
+        if (Array.isArray(fr.recipients) && fr.recipients.length === 2) {
+          ok('the frozen payload records every recipient explicitly');
+        } else bad('the frozen payload does not record the recipient set', JSON.stringify(fr.recipients));
+        const toRec = (fr.recipients || []).find((r) => r.kind === 'to');
+        const ccRec = (fr.recipients || []).find((r) => r.kind === 'cc');
+        if (toRec && toRec.why && ccRec && ccRec.why) ok('and WHY each recipient is on the letter');
+        else bad('a recipient is recorded without a reason', JSON.stringify(fr.recipients));
+        if (ccRec && ccRec.relationship) ok('and its company relationship');
+        else bad('the copied recipient has no recorded relationship');
+        if (Array.isArray(fr.bcc) && fr.bcc.length === 0) {
+          ok('and that there is no blind copy — absence stated, not implied');
+        } else bad('bcc is not explicitly empty in the frozen payload', JSON.stringify(fr.bcc));
+        if (ccRec && ccRec.email === 'naren@abiozen.invalid') {
+          ok('the copied recipient is the resolved principal, inside the signatory\'s own domain');
+        } else bad('the copied recipient is not the principal', JSON.stringify(ccRec));
+      }
+    }
+
     // ── MUTATION CONTROLS FOR SIGNATORY INTEGRITY (ruling §14) ─────────────
     const RFQF2 = path.join(__dirname, '..', 'src', 'lib', 'office', 'procurement-rfq.js');
     const APPRF = path.join(__dirname, '..', 'src', 'lib', 'office', 'approval.js');
@@ -1449,6 +1601,66 @@ globalThis.fetch = async (u, opts) => {
     }
     if (sha(APPRF) !== before7) bad('M7 approval.js was NOT restored byte-for-byte');
     else ok('M7 approval.js restored, verified by content hash');
+
+    // M12 — remove the recipient-policy gate. An unauthorized recipient must then reach a frozen,
+    // approvable payload, which is exactly what happened on the first real preparation.
+    //
+    // THE MUTATION TARGETS THE CALL, NOT THE POLICY FUNCTION. Breaking verifyRecipientPolicy would
+    // prove the function matters; breaking the call proves it is REACHED on the path that prepares
+    // a real letter. The first version of the signatory control made that mistake and measured a
+    // function nothing was using.
+    let before12 = sha(RFQF2); let src12 = fs.readFileSync(RFQF2, 'utf8');
+    const n12 = '  const recipientViolation = verifyRecipientPolicy({';
+    if (!src12.includes(n12)) bad('M12 could not locate the recipient-policy call — the control is stale');
+    else {
+      // `false &&` SHORT-CIRCUITS: the arguments still parse, and verifyRecipientPolicy is never
+      // called. The first attempt used `(() => null)() || verifyRecipientPolicy({`, which still
+      // calls it — the mutation did not take, the case failed honestly, and that is what a
+      // mutation control is for.
+      fs.writeFileSync(RFQF2, src12.replace(n12,
+        '  const recipientViolation = false && verifyRecipientPolicy({'));
+      try {
+        fresh(path.join('src', 'lib', 'office', 'procurement-rfq.js'));
+        const mutated = require('../src/lib/office/procurement-rfq');
+        const OM12 = `k56-m12-${crypto.randomUUID()}`;
+        await scope.createObjective({ id: OM12, companyId: A, objective: 'M12 fixture', priority: 'P3',
+          kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
+          autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
+        ids.objectives.push(OM12);
+        await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OM12, runId: null }),
+          { id: OM12, status: 'active' }, deps);
+        await q(`INSERT INTO suppliers (id, name, country, contact_email)
+                 VALUES ('sup-m12','M12 Labs','India','m12@sup.invalid') ON CONFLICT (id) DO NOTHING`);
+        mode = 'normal';
+        await freshUsers([
+          ['sig-dir', 'newdir@abiozen.invalid', 'A New Director', 'procurement_director', 1],
+          ['sig-ceo', 'naren@abiozen.invalid', 'Naresh Boda', 'super_admin', 1],
+        ]);
+        const leak = await mutated.runGovernedProcurement(
+          { objectiveId: OM12, rfqId: 'rfq-k56', supplierId: 'sup-m12' },
+          { ...deps, guard: allowingGuard,
+            copyContacts: [{ id: 'cc-foreign', name: 'An Admin Elsewhere',
+              email: 'admin@someothercompany.invalid', role: 'super_admin' }] });
+        if (leak.runId) ids.runs.push(leak.runId);
+        if (!leak.ok) {
+          bad('M12 the preparation still failed with the gate removed, so the gate was not what '
+            + 'blocks an unauthorized recipient', leak.refusal);
+        } else {
+          ids.approvals.push(leak.approvalId);
+          const pl = (await q(`SELECT action_payload FROM office_approvals WHERE id=$1`,
+            [leak.approvalId])).rows[0].action_payload;
+          if ((pl.cc || []).includes('admin@someothercompany.invalid')) {
+            ok('M12 without the gate an address at ANOTHER COMPANY\'S DOMAIN reaches a frozen, '
+              + 'approvable supplier letter — the gate is load-bearing');
+          } else bad('M12 the mutation did not actually place the foreign recipient', JSON.stringify(pl.cc));
+        }
+      } finally {
+        fs.writeFileSync(RFQF2, src12);
+        fresh(path.join('src', 'lib', 'office', 'procurement-rfq.js'));
+      }
+    }
+    if (sha(RFQF2) !== before12) bad('M12 procurement-rfq.js was NOT restored byte-for-byte');
+    else ok('M12 procurement-rfq.js restored, verified by content hash');
 
 
   } catch (e) {
