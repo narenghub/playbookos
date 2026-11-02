@@ -192,6 +192,7 @@ step "stale runs recover under arbitration, retries are new runs" node scripts/c
 # output is a budget bypass. The provider is stubbed so the never-responds case is reachable at all.
 step "AI is bounded, metered, and cannot overrule identity" node scripts/check-office-governed-ai-db.js
 step "the governed-AI production validator stops before spending" node scripts/check-governed-ai-validator-runs.js
+step "R1: nothing sends without a claim, and no retry ever happens" node scripts/check-office-release-db.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

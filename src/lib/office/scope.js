@@ -56,6 +56,43 @@ function q(deps) {
 // different company's objective because the caller cannot express a company.
 // ---------------------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------------------
+// THE SECOND AND THIRD DELIBERATELY UNSCOPED READS, AND WHY THEY ARE HERE TOO
+//
+// R1's executor and reconciler both start from an APPROVAL ID and nothing else. Like
+// bootstrapObjectiveForContext above, at the moment they run there is no company context yet —
+// the company is what the read returns. A company predicate would have to come from the caller,
+// which is the thing company context exists to refuse.
+//
+// They live in this file for the same reason: it owns every kernel table name, so the
+// scope-discipline check needs no exemption for execute.js or reconcile.js. An exemption there
+// would make every future query in the office's only outbound module unscoped and unreviewed —
+// which is the last place to relax that rule.
+//
+// Neither takes a company, so neither caller can ask for another company's approval.
+// ---------------------------------------------------------------------------------------------
+
+/** Everything the executor needs to decide whether an approved action may be carried out. */
+async function bootstrapApprovalForExecution(approvalId, deps = {}) {
+  const res = await q(deps)(
+    `SELECT a.id, a.company_id, a.objective_id, a.run_id, a.action_kind, a.action_payload,
+            a.status, a.release_claimed_at, a.released_at, a.resolved_by, a.resolved_at,
+            o.budget_usd, o.release_mode, o.status AS objective_status
+       FROM office_approvals a
+       JOIN objectives o ON o.id = a.objective_id AND o.company_id = a.company_id
+      WHERE a.id = $1`, [approvalId]);
+  return res.rows[0] || null;
+}
+
+/** Which company authorized an external attempt, so an unresolved claim can be attributed. */
+async function bootstrapApprovalOwner(approvalId, deps = {}) {
+  if (!approvalId) return null;
+  const res = await q(deps)(
+    `SELECT id AS approval_id, company_id, objective_id, run_id
+       FROM office_approvals WHERE id = $1`, [approvalId]);
+  return res.rows[0] || null;
+}
+
 async function bootstrapObjectiveForContext(objectiveId, deps = {}) {
   const res = await q(deps)(
     `SELECT id, company_id, status, autonomy_tier, approval_policy, budget_usd
@@ -304,15 +341,31 @@ async function decideApproval(ctx, { id, decision, resolvedBy, resolution = null
 // The claim and the read are ONE statement. A SELECT-then-UPDATE would let two concurrent releases
 // both see 'approved' and both act, which is one human decision authorising two consequential
 // sends. `released_at IS NULL` is what makes a second release impossible.
+// ── WHAT THIS CLAIM MEANS, EXACTLY (ruling §2) ────────────────────────────────
+//
+// It means: THE EXECUTOR HAS DURABLY TAKEN RESPONSIBILITY FOR ATTEMPTING THIS EXTERNAL ACTION.
+//
+// It does NOT mean the supplier received anything. It runs before the supplier claim and before
+// the mailer, so treating it as proof of delivery is how a durable record comes to lie — which is
+// the ambiguity ruling §2 required removing.
+//
+// `release_claimed_at` carries that meaning in its name. `released_at` is kept in step with it for
+// the existing checks and predicates that reference it, and means the same narrow thing.
+//
+// Arbitrated: the WHERE clause decides, so two concurrent executors cannot both claim. A
+// SELECT-then-UPDATE would leave exactly the window this exists to close.
 async function claimApprovalRelease(ctx, { approvalId, releasedBy }, deps = {}) {
   assertContext(ctx);
   const res = await q(deps)(
     `UPDATE office_approvals
-        SET released_at = NOW(), released_by = $3
+        SET release_claimed_at = NOW(), release_claimed_by = $3,
+            released_at = NOW(), released_by = $3
       WHERE company_id = $1 AND id = $2
         AND status = 'approved'
+        AND release_claimed_at IS NULL
         AND released_at IS NULL
-      RETURNING id, action_kind, action_payload, resolved_by, resolved_at`,
+      RETURNING id, action_kind, action_payload, resolved_by, resolved_at,
+                release_claimed_at, release_claimed_by`,
     [ctx.companyId, approvalId, releasedBy]
   );
   return res.rows[0] || null;
@@ -326,7 +379,8 @@ async function approvalReleaseState(ctx, approvalId, deps = {}) {
   // communication asserts — specifically whether its signatory is still active — without
   // re-deriving or rewriting any of it.
   const res = await q(deps)(
-    `SELECT status, released_at, released_by, action_payload FROM office_approvals
+    `SELECT status, released_at, released_by, release_claimed_at, release_claimed_by,
+            resolved_at, resolved_by, action_payload, objective_id, run_id FROM office_approvals
       WHERE company_id = $1 AND id = $2`,
     [ctx.companyId, approvalId]
   );
@@ -472,7 +526,7 @@ async function provenance(ctx, runId, deps = {}) {
 
 module.exports = {
   provenance, spendForObjective, unmeasuredForRun, claimApprovalRelease, approvalReleaseState,
-  bootstrapObjectiveForContext,
+  bootstrapObjectiveForContext, bootstrapApprovalForExecution, bootstrapApprovalOwner,
   createObjective, setObjectiveStatus,
   listObjectives, getObjective, listOpenExceptions, listPendingApprovals, spendToday, listOutcomes,
   recordCost, openException, resolveException, requestApproval, decideApproval, recordOutcome,

@@ -126,6 +126,13 @@ function runValidator(stub, extraEnv = {}) {
     await require('../src/lib/office/schema').migrateOffice(query);
     await require('../src/lib/autonomy').migrateAutonomy(query);
     await require('../src/lib/procurement/rfq-identity-guard').migrate(query).catch(() => {});
+    // Production migrates the supplier-claim table at boot, including R1's provider-acknowledgement
+    // columns. Doing it here too means the K7/K9 validator sees the same shape it will on
+    // production — the first version ran before this and reported the columns missing.
+    await query(`CREATE TABLE IF NOT EXISTS supplier_outreach_log (
+      id TEXT PRIMARY KEY, rfq_id TEXT, supplier_id TEXT, email_sent_to TEXT, email_subject TEXT,
+      email_body TEXT, sent_at TEXT, replied_at TEXT, reply_text TEXT, status TEXT DEFAULT 'sent')`).catch(() => {});
+    await require('../src/lib/idempotency/supplier-rfq').migrate(query).catch(() => {});
     await query(`CREATE TABLE IF NOT EXISTS supplier_outreach_log (
       id TEXT PRIMARY KEY, rfq_id TEXT, status TEXT, created_at TIMESTAMPTZ DEFAULT NOW())`);
 
@@ -315,7 +322,9 @@ function runValidator(stub, extraEnv = {}) {
     for (const want of ['the approved payload is immutable in the database',
       'release is an ARBITRATED UPDATE',
       "it requires status = 'approved'",
-      'it requires released_at IS NULL',
+      'it requires release_claimed_at IS NULL',
+      'the EXECUTION CLAIM is its own fact',
+      'PROVIDER ACKNOWLEDGEMENT is its own fact',
       'no mailer, WhatsApp, outreach or supplier-claim module is reachable from the approval path',
       '`consequential` defaults to TRUE']) {
       if (k1out.split('\n').some((l) => l.includes(want) && l.trim().startsWith('ok'))) ok(`  reported: ${want}`);
@@ -327,11 +336,13 @@ function runValidator(stub, extraEnv = {}) {
     // when it does not.
     const SCOPEFILE = path.join(REPO, 'src', 'lib', 'office', 'scope.js');
     const scopeBefore = fs.readFileSync(SCOPEFILE, 'utf8');
-    const predicate = `        AND status = 'approved'\n        AND released_at IS NULL`;
+    // Anchor updated when ruling §2 split authorization from the execution claim. The control
+    // reported itself stale rather than passing on text that no longer existed.
+    const predicate = `        AND status = 'approved'\n        AND release_claimed_at IS NULL`;
     if (!scopeBefore.includes(predicate)) {
       bad('could not locate the approved predicate in scope.js — this red-path control is stale');
     } else {
-      fs.writeFileSync(SCOPEFILE, scopeBefore.replace(predicate, `        AND released_at IS NULL`));
+      fs.writeFileSync(SCOPEFILE, scopeBefore.replace(predicate, `        AND release_claimed_at IS NULL`));
       try {
         const k2r = runK7();
         const k2out = (k2r.stdout || '') + (k2r.stderr || '');

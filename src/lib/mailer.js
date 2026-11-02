@@ -147,7 +147,8 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
       console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${reason}`);
       await logEmail({ to, subject, status: 'stopped_by_policy', errorMessage: reason });
       recordRefusal({ stop: blocked, what: 'email.send', detail: { to, subject } });
-      return { ok: false, id: null, error: reason, stopped: true };
+      return { ok: false, id: null, error: reason, stopped: true, phase: 'stopped_by_policy',
+        providerResponded: false };
     }
   } catch (e) {
     // A defect in the switch itself. An alert still goes out — the channel that reports breakage
@@ -159,7 +160,8 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
     const reason = `STOPPED_BY_POLICY: kill-switch check failed (${e.message})`;
     console.error(`[STOPPED_BY_POLICY] email to ${to}: ${reason}`);
     try { await logEmail({ to, subject, status: 'stopped_by_policy', errorMessage: reason }); } catch (_) {}
-    return { ok: false, id: null, error: reason, stopped: true };
+    return { ok: false, id: null, error: reason, stopped: true, phase: 'stopped_by_policy',
+      providerResponded: false };
     }
   }
 
@@ -167,14 +169,16 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   if (!key) {
     console.log('No RESEND_API_KEY');
     await logEmail({ to, subject, status: 'failed', errorMessage: 'RESEND_API_KEY not configured' });
-    return { ok: false, id: null, error: 'RESEND_API_KEY not configured' };
+    return { ok: false, id: null, error: 'RESEND_API_KEY not configured',
+      phase: 'refused_before_request', providerResponded: false };
   }
   const enc = encodeAttachments(attachments);
   if (!enc.ok) {
     // Refused before the request, and still logged: an attachment problem is a send that did not happen,
     // and email_log is where somebody looks for that.
     await logEmail({ to, subject, status: 'failed', errorMessage: enc.error });
-    return { ok: false, id: null, error: enc.error };
+    return { ok: false, id: null, error: enc.error, phase: 'refused_before_request',
+      providerResponded: false };
   }
   try {
     const sender = from || defaultFrom();
@@ -200,11 +204,22 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
       const m = /not authorized to send emails from ([^"'\s]+)/i.exec(String(data.message || ''));
       if (m) await alertSendFailure({ domain: m[1], detail: JSON.stringify(data) });
     }
-    return { ok, id: data.id || null, error: ok ? null : (data.message || JSON.stringify(data)) };
+    // The provider RESPONDED. Whether it accepted or rejected, the answer is definite — this is
+    // not a case where acceptance "cannot be ruled out".
+    return { ok, id: data.id || null, error: ok ? null : (data.message || JSON.stringify(data)),
+      phase: ok ? 'provider_accepted' : 'provider_rejected', providerResponded: true,
+      provider: 'resend' };
   } catch(e) {
+    // ── THE KNOWN UNKNOWN ────────────────────────────────────────────────────
+    //
+    // fetch threw, or the response body could not be parsed. The request may have reached Resend
+    // and been accepted before this failed. Collapsing this into the same state as a definite
+    // provider rejection is exactly what ruling §11 forbids: one means nothing was sent, the other
+    // means nobody knows, and a retry decision differs completely between them.
     console.error('Email error:', e.message);
     await logEmail({ to, subject, status: 'failed', errorMessage: e.message });
-    return { ok: false, id: null, error: e.message };
+    return { ok: false, id: null, error: e.message, phase: 'transport_unknown',
+      providerResponded: false, provider: 'resend' };
   }
 }
 

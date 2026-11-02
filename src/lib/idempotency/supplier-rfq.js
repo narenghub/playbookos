@@ -46,6 +46,17 @@ async function migrate(query) {
     .catch((e) => { if (!/already exists/i.test(e.message)) throw e; });
   await query(`ALTER TABLE supplier_outreach_log ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ`);
   await query(`ALTER TABLE supplier_outreach_log ADD COLUMN IF NOT EXISTS error TEXT`);
+  // ── PROVIDER ACKNOWLEDGEMENT IS ITS OWN FACT (ruling §9) ──────────────────
+  //
+  // provider acceptance ≠ delivery ≠ supplier read ≠ supplier quotation. These columns record only
+  // the first: the outbound provider acknowledged the request and returned an id for it. They are
+  // the evidence anchor reconciliation and R2 will need, and they are never invented — if the
+  // provider returns no id, the column stays NULL rather than carrying something made up.
+  await query(`ALTER TABLE supplier_outreach_log ADD COLUMN IF NOT EXISTS provider TEXT`);
+  await query(`ALTER TABLE supplier_outreach_log ADD COLUMN IF NOT EXISTS provider_message_id TEXT`);
+  await query(`ALTER TABLE supplier_outreach_log ADD COLUMN IF NOT EXISTS provider_accepted_at TIMESTAMPTZ`);
+  await query(`ALTER TABLE supplier_outreach_log ADD COLUMN IF NOT EXISTS approval_id TEXT`);
+  await query(`ALTER TABLE supplier_outreach_log ADD COLUMN IF NOT EXISTS run_id UUID`);
 
   try {
     await query(`CREATE UNIQUE INDEX IF NOT EXISTS ${INDEX_NAME}
@@ -78,14 +89,18 @@ async function isEnforced(query) {
  * Claim the right to email this supplier about this RFQ. Returns the claim id, or null when another
  * execution already holds it. Call this BEFORE generating or sending anything.
  */
-async function claim(query, { rfqId, supplierId, email, subject }) {
+async function claim(query, { rfqId, supplierId, email, subject, approvalId = null, runId = null }) {
   const id = crypto.randomUUID();
   try {
+    // approvalId and runId are recorded ON THE CLAIM so an unresolved external attempt can be
+    // traced back to the authorization that permitted it and the run that performed it, without
+    // joining through anything that might have changed since.
     await query(
       `INSERT INTO supplier_outreach_log
-         (id, rfq_id, supplier_id, email_sent_to, email_subject, status, claimed_at)
-       VALUES ($1, $2, $3, $4, $5, 'pending', NOW())`,
-      [id, rfqId, supplierId, email || null, subject || null],
+         (id, rfq_id, supplier_id, email_sent_to, email_subject, status, claimed_at,
+          approval_id, run_id)
+       VALUES ($1, $2, $3, $4, $5, 'pending', NOW(), $6, $7)`,
+      [id, rfqId, supplierId, email || null, subject || null, approvalId, runId],
     );
     return id;
   } catch (e) {
@@ -96,19 +111,40 @@ async function claim(query, { rfqId, supplierId, email, subject }) {
 
 // The send landed. Records the body only now, because a body stored against a send that never
 // happened is a claim about correspondence that does not exist.
-async function confirm(query, id, { subject, body }) {
+async function confirm(query, id, { subject, body, provider = null, providerMessageId = null }) {
+  // `status='sent'` means THE PROVIDER ACCEPTED IT. Not that it was delivered, not that anybody
+  // read it, and certainly not that a quotation exists. Those are separate facts and two of them
+  // are not knowable here at all.
   await query(
     `UPDATE supplier_outreach_log
         SET status = 'sent', sent_at = NOW()::text, email_subject = COALESCE($2, email_subject),
-            email_body = $3
+            email_body = $3, provider = $4, provider_message_id = $5,
+            provider_accepted_at = NOW()
       WHERE id = $1`,
-    [id, subject || null, body || null],
+    [id, subject || null, body || null, provider, providerMessageId],
   );
 }
 
-// The send did not land. The claim is KEPT, not deleted: deleting it would reopen the window and let
-// the next run try again with no record that the first attempt may have reached the supplier.
-// A kept 'failed' claim is a known-unknown, which is the whole point.
+/**
+ * The transport failed in a way where PROVIDER ACCEPTANCE CANNOT BE RULED OUT (ruling §8/§11).
+ *
+ * The claim deliberately STAYS 'pending', so `unresolved()` keeps returning it and the
+ * reconciler keeps reporting it as unresolved. Marking it 'failed' would assert that nothing was
+ * sent, which is precisely the thing nobody knows — and marking it 'sent' would assert the
+ * opposite lie. The error text is recorded beside it so a human reads what actually happened.
+ */
+async function markUnknown(query, id, reason) {
+  await query(
+    `UPDATE supplier_outreach_log SET error = $2 WHERE id = $1 AND status = 'pending'`,
+    [id, `KNOWN UNKNOWN — provider acceptance cannot be ruled out: ${String(reason || '').slice(0, 400)}`]);
+}
+
+// The send DEFINITIVELY did not land: the provider responded and rejected it, or the request was
+// refused before it was ever made. Only for failures where acceptance IS ruled out — anything
+// ambiguous goes to markUnknown() instead and stays unresolved.
+//
+// The claim is KEPT, not deleted: deleting it would reopen the (rfq, supplier) window and let the
+// next run try again with no record that an attempt was made at all.
 async function markFailed(query, id, reason) {
   await query(`UPDATE supplier_outreach_log SET status = 'failed', error = $2 WHERE id = $1`,
     [id, String(reason || '').slice(0, 500)]);
@@ -118,11 +154,12 @@ async function markFailed(query, id, reason) {
 // happened. These must be looked at by a human before anything retries them.
 async function unresolved(query, { olderThanMinutes = 15 } = {}) {
   const r = await query(
-    `SELECT id, rfq_id, supplier_id, email_sent_to, claimed_at, error
+    `SELECT id, rfq_id, supplier_id, email_sent_to, claimed_at, error, approval_id, run_id
        FROM supplier_outreach_log
       WHERE status = 'pending' AND claimed_at < NOW() - ($1 || ' minutes')::interval
       ORDER BY claimed_at`, [String(olderThanMinutes)]);
   return r.rows;
 }
 
-module.exports = { INDEX_NAME, migrate, isEnforced, claim, confirm, markFailed, unresolved };
+module.exports = { INDEX_NAME, migrate, isEnforced, claim, confirm, markFailed,
+                   markUnknown, unresolved };

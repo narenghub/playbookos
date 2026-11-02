@@ -334,8 +334,12 @@ const field = (k, v) => console.log(`    ${String(k).padEnd(20)} ${v === null ||
     // Separate, and defensive: this script does not own supplier_outreach_log's shape, and an
     // unexpected column name here must not abort the evidence report above it.
     try {
+      // claimed_at, not created_at: this table has no created_at, which is what made the first
+      // version fall into the defensive branch on production and report nothing either way.
+      // claimed_at is written by the supplier claim, so it is the right column for "recent".
       const sent = (await query(
-        `SELECT COUNT(*)::int n FROM supplier_outreach_log WHERE created_at > NOW() - INTERVAL '1 hour'`
+        `SELECT COUNT(*)::int n FROM supplier_outreach_log
+          WHERE claimed_at > NOW() - INTERVAL '1 hour'`
       )).rows[0].n;
       if (sent) bad(`${sent} supplier outreach row(s) in the last hour — investigate`);
       else ok('no supplier was contacted');

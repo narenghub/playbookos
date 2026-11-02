@@ -254,9 +254,11 @@ const OFFICE_SCOPES = Object.freeze({
   workflows: Object.freeze([
     'objective-review',           // office/executive-agent.js
     'governed-rfq-generation',    // office/procurement-rfq.js
+    'governed-rfq-release',       // office/execute.js — R1, the only outbound office path
   ]),
   agents: Object.freeze([
     'executive-agent',            // office/executive-agent.js
+    'release-executor',           // office/execute.js
   ]),
 });
 
@@ -429,6 +431,10 @@ const CRON_SCOPES = {
   // and only a global or workflow stop halts it. Registered here so scopesForCron() returns real
   // scopes AND so K8 accepts `workflow=quarter-hourly-office-recovery` as a stoppable target.
   'quarter-hourly-office-recovery':          { company: null,      agent: null },
+  // R1 reconciliation. Platform-level like the reaper: reporting unresolved external attempts
+  // belongs to no one business, and an operator halting Abiozen should not blind the channel that
+  // says which supplier correspondence is in an unknown state.
+  'hourly-send-reconciliation':              { company: null,      agent: null },
   'daily-0utc-metrics-snapshot':             { company: null,      agent: null },
   'daily-7cst-command-center-briefing':      { company: 'abiozen', agent: null },
   'weekly-mon-8utc-goal-engine':             { company: 'abiozen', agent: null },

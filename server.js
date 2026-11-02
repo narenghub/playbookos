@@ -1064,6 +1064,54 @@ cron.schedule('7,22,37,52 * * * *', withAlerts('quarter-hourly-office-recovery',
 }));
 
 
+// ── R1 RECONCILIATION: UNRESOLVED EXTERNAL ATTEMPTS BECOME VISIBLE ──────────
+//
+// Claim-before-send turns a crash from "silently maybe sent" into a durable known-unknown. This is
+// the half that makes that worth anything: without it the unknown is a row in a table nobody
+// queries, and platform invariant 2 — every consequential autonomous writer needs an independently
+// observable reconciliation — is satisfied on paper only.
+//
+// It never resends, never marks a claim sent or failed from age, and never deletes one. The
+// exception id derives from the claim id, so an hourly scan leaves ONE open incident per unresolved
+// attempt rather than a fresh critical alert every hour.
+//
+// Minute 41 deliberately: not :00, where every other scheduler in the world also fires.
+cron.schedule('41 * * * *', withAlerts('hourly-send-reconciliation', async (firedAt) => {
+  const { instrumentedRun } = require('./src/lib/run-ledger');
+  const reconcile = require('./src/lib/office/reconcile');
+
+  const out = await instrumentedRun(
+    {
+      workflow: 'hourly-send-reconciliation',
+      product: 'internal',
+      trigger: 'cron',
+      triggerDetail: '41 * * * * (UTC)',
+      firedAt,
+    },
+    async () => {
+      // dryRun:false is stated, never defaulted — the acting mode lives in the caller.
+      const r = await reconcile.reconcile({ dryRun: false, olderThanMinutes: 15, limit: 200 });
+      if (r.filed || r.alreadyOpen || r.unattributable) {
+        console.log(`[CRON] send reconciliation: ${r.examined} unresolved, ${r.filed} newly filed, `
+          + `${r.alreadyOpen} already open, ${r.unattributable} unattributable`);
+        for (const i of r.items) {
+          console.log(`[CRON] send reconciliation: claim ${i.claimId} rfq=${i.rfqId} `
+            + `supplier=${i.supplierId} unresolved ${i.minutesUnresolved}m -> ${i.status}`);
+        }
+      }
+      return r;
+    },
+  );
+
+  if (out.ran === false && out.reason !== 'duplicate_intent' && out.reason !== 'stopped_by_policy') {
+    // A reconciler that silently stops reconciling leaves real uncertainty about real supplier
+    // correspondence unreported, which is the exact failure it exists to prevent.
+    const { sendCronAlert } = require('./src/lib/cron-alerts');
+    await sendCronAlert('hourly-send-reconciliation (did not run)',
+      new Error(`reconciler did not execute: ${out.reason}${out.error ? ` — ${out.error}` : ''}`));
+  }
+}));
+
 app.listen(PORT, () => {
   console.log(`
 ╔══════════════════════════════════════════════════╗

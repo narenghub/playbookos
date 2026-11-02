@@ -259,6 +259,36 @@ const DDL = [
   // autonomy.stop's mandatory reason exists to close.
   `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS resolution TEXT`,
 
+  // ── AUTHORIZATION, EXECUTION ATTEMPT AND PROVIDER ACK ARE THREE FACTS ─────
+  //
+  // Ruling §2. `released_at` was written by the arbitrated release claim BEFORE the supplier claim
+  // and before the mailer, so a crash after it left a row saying "released" when the supplier had
+  // received nothing. One timestamp cannot honestly mean human authorization, executor
+  // responsibility and provider acceptance at once.
+  //
+  // The three facts now live in three places, and none of them is inferred from another:
+  //
+  //   authorization        office_approvals.status='approved' + resolved_at / resolved_by
+  //   execution claimed    office_approvals.release_claimed_at / release_claimed_by  (below)
+  //   attempt evidence     agent_run_events ACTION_ATTEMPTED (throws if it cannot persist)
+  //   provider accepted    supplier_outreach_log.provider_accepted_at / provider_message_id
+  //
+  // `released_at` is RETAINED and kept in step with release_claimed_at, because existing checks and
+  // the arbitration predicate reference it, but it means ONLY "the executor claimed the right to
+  // attempt this" — never "the supplier received it".
+  `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS release_claimed_at TIMESTAMPTZ`,
+  `ALTER TABLE office_approvals ADD COLUMN IF NOT EXISTS release_claimed_by TEXT`,
+
+  // ── §16: FIRST-SEND BEHAVIOUR IS DURABLE POLICY, NOT A MISSING CALLER ─────
+  //
+  // "Do not implement the first-send two-act policy as 'we just won't call it automatically yet.'"
+  // So it is stored per objective and the executor reads it. 'explicit' means approval authorizes
+  // but a separate human RELEASE is required; 'on_approval' means the executor may release once a
+  // human has approved. Promotion is a deliberate, visible configuration change.
+  `ALTER TABLE objectives ADD COLUMN IF NOT EXISTS release_mode TEXT NOT NULL DEFAULT 'explicit'`,
+  `ALTER TABLE objectives ADD CONSTRAINT objectives_release_mode_check
+     CHECK (release_mode IN ('explicit','on_approval'))`,
+
   // ── K7: THE THING APPROVED IS THE THING SENT ──────────────────────────────
   //
   // release() returns the STORED payload, so by construction the sent artefact is the approved

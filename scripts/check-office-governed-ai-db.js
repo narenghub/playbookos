@@ -641,12 +641,42 @@ globalThis.fetch = async (u, opts) => {
     // whole §12 chain ends at "prepared", and "it has no send capability" is the only reason that
     // boundary cannot be crossed by a later edit that looks reasonable in review.
     const sendable = ['mailer.js', 'whatsapp.js', path.join('outreach', 'registry.js'),
-      path.join('procurement', 'rfq-claim.js')];
+      path.join('idempotency', 'supplier-rfq.js')];
     const reachable = sendable.filter((m) => graphG.some((f) => f.includes(m)));
     if (reachable.length) {
-      bad('§6 the governed module can reach an OUTBOUND primitive — "prepares and stops" is not structural',
+      bad('§6 the PREPARATION module can reach an OUTBOUND primitive — "prepares and stops" is not structural',
         reachable.join(', '));
-    } else ok('§6 no mailer, WhatsApp, outreach or supplier-claim module is reachable from the governed path');
+    } else ok('§6 the PREPARATION path reaches no mailer, WhatsApp, outreach or supplier-claim module');
+
+    // ── §14: THE ASSERTION IS NARROWED, NOT DELETED ────────────────────────
+    //
+    // R1 must reach the mailer, so the old blanket claim could not survive. Narrowing it is itself
+    // the control: preparation still cannot send, and exactly one module can. Deleting the
+    // assertion would have lost that distinction silently.
+    //
+    // And this is ARCHITECTURAL EVIDENCE, not the safety mechanism. The durable approval, the
+    // arbitrated release claim, the UNIQUE supplier claim, the kill switch and the budget are what
+    // actually stop an unapproved send; module reachability only shows the shape is right.
+    for (const k of Object.keys(require.cache)) if (k.includes(path.join('src', 'lib', 'office'))) delete require.cache[k];
+    const beforeX = new Set(Object.keys(require.cache));
+    const executor = require('../src/lib/office/execute');
+    const graphX = Object.keys(require.cache).filter((k) => !beforeX.has(k) && !k.includes('node_modules'));
+    if (graphX.some((f) => f.includes('mailer.js'))) {
+      ok('§14 the EXECUTOR does reach the mailer — the outbound capability exists, in one place');
+    } else bad('§14 the executor cannot reach the mailer, so R1 cannot send at all');
+    if (graphX.some((f) => f.includes(path.join('idempotency', 'supplier-rfq.js')))) {
+      ok('§14 and it reaches the supplier claim, so it cannot send without claiming first');
+    } else bad('§14 the executor cannot reach the supplier claim — claim-before-send is not wired');
+
+    // §15: the API is an action id. A destination/subject/body signature would let another office
+    // module use R1 as a generic governed-looking mailer.
+    const exSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'office', 'execute.js'), 'utf8');
+    if (/async function executeApprovedAction\(approvalId/.test(exSrc)) {
+      ok('§15 the executor takes an approval id, not an email');
+    } else bad('§15 the executor signature is not an approval id');
+    if (/function send\s*\(|exports\.send\b/.test(exSrc)) {
+      bad('§15 the executor exposes a generic send() — another module could use it as a mailer');
+    } else ok('§15 it exposes no generic send(): the only way to make it send is a human approval');
 
     // The fixture table must exist before the FIRST call: prepareGovernedRFQ reads rfq_requests
     // even to discover the RFQ is absent, so creating it later made "no such RFQ" fail as a
@@ -1187,10 +1217,13 @@ globalThis.fetch = async (u, opts) => {
     // is the whole purpose of the staleness branch: a mutation control pointed at the wrong file
     // proves nothing, and silence would have looked like success.
     before = sha(SCOPEF); src = fs.readFileSync(SCOPEF, 'utf8');
-    const n4 = `        AND status = 'approved'\n        AND released_at IS NULL`;
+    // The anchor moved when ruling §2 split authorization from the execution claim: the predicate
+    // list gained `release_claimed_at IS NULL`. The control reported itself STALE rather than
+    // passing on text that no longer existed — which is the entire reason that branch is there.
+    const n4 = `        AND status = 'approved'\n        AND release_claimed_at IS NULL`;
     if (!src.includes(n4)) bad('M4 could not locate the approved predicate — the control is stale');
     else {
-      fs.writeFileSync(SCOPEF, src.replace(n4, `        AND released_at IS NULL`));
+      fs.writeFileSync(SCOPEF, src.replace(n4, `        AND release_claimed_at IS NULL`));
       try {
         fresh(path.join('src', 'lib', 'office', 'scope.js'));
         fresh(path.join('src', 'lib', 'office', 'approval.js'));

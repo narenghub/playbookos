@@ -102,8 +102,30 @@ const SRC = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', .
       } else bad('release does not look like an arbitrated update — a SELECT-then-UPDATE can double-release');
       if (/status\s*=\s*'approved'/.test(claim)) ok("it requires status = 'approved' — a PENDING action cannot release");
       else bad('the approved predicate is MISSING from the release claim — pending work could release');
-      if (/released_at\s+IS\s+NULL/i.test(claim)) ok('it requires released_at IS NULL — a second release is refused');
-      else bad('the unreleased predicate is MISSING — the same action could be released twice');
+      if (/release_claimed_at\s+IS\s+NULL/i.test(claim)) {
+        ok('it requires release_claimed_at IS NULL — a second executor cannot claim the same action');
+      } else bad('the unclaimed predicate is MISSING — the same action could be released twice');
+
+      // ── §2: THREE FACTS, THREE PLACES ──────────────────────────────────
+      //
+      // `released_at` used to be written before the supplier claim and before the mailer, so it
+      // could say "released" when the supplier had received nothing. Authorization, execution
+      // attempt and provider acknowledgement must not be one fact.
+      const apCols = (await query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'office_approvals'`)).rows.map((r) => r.column_name);
+      if (apCols.includes('release_claimed_at') && apCols.includes('release_claimed_by')) {
+        ok('the EXECUTION CLAIM is its own fact (release_claimed_at / release_claimed_by)');
+      } else bad('office_approvals has no distinct execution-claim columns');
+      if (apCols.includes('resolved_at') && apCols.includes('resolution')) {
+        ok('AUTHORIZATION is its own fact (resolved_at / resolved_by / resolution)');
+      } else bad('authorization is not separately recorded');
+      const soCols = (await query(
+        `SELECT column_name FROM information_schema.columns
+          WHERE table_name = 'supplier_outreach_log'`)).rows.map((r) => r.column_name);
+      if (soCols.includes('provider_accepted_at') && soCols.includes('provider_message_id')) {
+        ok('PROVIDER ACKNOWLEDGEMENT is its own fact, on the claim, not on the approval');
+      } else bad('provider acknowledgement has nowhere distinct to live');
     }
 
     const apprSrc = SRC('office', 'approval.js');
