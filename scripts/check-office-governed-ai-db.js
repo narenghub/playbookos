@@ -609,8 +609,17 @@ globalThis.fetch = async (u, opts) => {
     else ok(`§9 consequential release is BLOCKED while ${gate.unmeasured} AI call(s) on the run are unmeasured`);
 
     mode = 'normal';
+    // A RECORDED, ACTIVE SIGNATORY, so the gate under test is the cost one. Release checks the
+    // signatory BEFORE the cost, and a payload with no signatory now refuses outright — so this
+    // fixture reported signatory_not_recorded and measured nothing about unmeasured cost. Remove
+    // the unrelated reason rather than reorder a control to suit a test.
     const prepared2 = await approval.prepare(ctx, { id: `ap-gate-${crypto.randomUUID()}`,
-      actionKind: 'send_rfq_email', actionPayload: { body: 'x' },
+      actionKind: 'send_rfq_email',
+      // sig-default, the active signatory seeded in setup. The first attempt named a user the
+      // harness does not create until much later, so release refused with
+      // signatory_no_longer_active — right behaviour, wrong fixture, still measuring nothing.
+      actionPayload: { body: 'x', signed_by_name: 'Fixture Director',
+        signed_by_email: 'dir@fixture.invalid', signed_by_user_id: 'sig-default' },
       reason: '§9 control: a consequential release on a run with unmeasured cost' }, deps);
     ids.approvals.push(prepared2.approvalId);
     await scope.decideApproval(ctx, { id: prepared2.approvalId, decision: 'approved', resolvedBy: 'naresh' }, deps);

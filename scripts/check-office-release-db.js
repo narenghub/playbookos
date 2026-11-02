@@ -138,7 +138,8 @@ const freshOffice = () => {
     // One objective + one prepared, approved action per case.
     let n = 0;
     const prepare = async ({ releaseMode = 'explicit', signatoryActive = true, cost = 0.001,
-      costKnown = true, budget = 10, rfqId = null, supplierId = null, approve = true } = {}) => {
+      costKnown = true, budget = 10, rfqId = null, supplierId = null, approve = true,
+      recordSignatory = true } = {}) => {
       n += 1;
       // ── ONE COMPANY PER CASE, AND THE REASON IS THE POINT ─────────────────
       //
@@ -181,8 +182,10 @@ const freshOffice = () => {
           subject: `RFQ — fixture ${n}`, body: `Dear supplier,\n\nPlease quote.\n\nFixture Director`,
           approved_molecule_name: 'Candidatium', approved_cas: '36282-47-0',
           identity_decision_id: `dec-${n}`,
-          signed_by_name: 'Fixture Director', signed_by_title: 'Procurement Director',
-          signed_by_email: 'dir@fixture.invalid', signed_by_user_id: 'u-dir',
+          ...(recordSignatory ? {
+            signed_by_name: 'Fixture Director', signed_by_title: 'Procurement Director',
+            signed_by_email: 'dir@fixture.invalid', signed_by_user_id: 'u-dir',
+          } : {}),
         },
         reason: 'R1 fixture: a supplier communication requires human approval',
         ownerUserId: 'u-dir',
@@ -244,6 +247,26 @@ const freshOffice = () => {
       } else bad('a letter from an inactive signatory was released', JSON.stringify(r).slice(0, 180));
       if (mailerSpy.calls.length === 0 && await claims(apId) === 0) ok('  no claim, no mailer call');
       else bad('  claim/mailer leaked on an inactive signatory');
+    }
+
+    {
+      // ── AN APPROVAL THAT RECORDS NO SIGNATORY AT ALL ─────────────────────
+      //
+      // The real case: two production approvals were prepared before the signatory was recorded in
+      // the payload. The release check read "if a signatory is recorded, verify it", so for
+      // exactly those — the actions with the LEAST evidence about who they claim to be from — it
+      // verified nothing. Both are signed in their body by somebody who has left.
+      const { apId } = await prepare({ recordSignatory: false });
+      mailerSpy = accepts();
+      const r = await exec(mailerSpy)(apId);
+      if (!r.ok && r.refusal === 'signatory_not_recorded') {
+        ok('an approval recording NO signatory is REFUSED — absence is not permission');
+        if (r.needs_repreparation) ok('  and re-preparation is required');
+        else bad('  it refused without requiring re-preparation');
+        if (r.exception_id) ok('  with a durable exception'); else bad('  no exception filed');
+      } else bad('a letter with no recorded signatory was released', JSON.stringify(r).slice(0, 200));
+      if (mailerSpy.calls.length === 0 && await claims(apId) === 0) ok('  no claim, no mailer call');
+      else bad('  claim/mailer leaked on a letter with no recorded signatory');
     }
 
     {

@@ -170,6 +170,20 @@ const SRC = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', .
         + `  ·  ${a.resolution ? `reason: ${String(a.resolution).slice(0, 70)}` : 'no decision reason'}`);
     }
 
+    // ── WHICH UNRELEASED ACTIONS RECORD NO SIGNATORY AT ALL ───────────────
+    //
+    // This is what exposed the fail-open: an approval prepared before the signatory was recorded
+    // in the payload has no signed_by_* fields, and the release check used to read "if a signatory
+    // is recorded, verify it" — verifying nothing for exactly the actions with the least evidence.
+    // Release now refuses them outright, and they are listed here so it is not a surprise.
+    const noSig = aps.filter((a) => !a.release_claimed_at
+      && !(a.action_payload || {}).signed_by_email && !(a.action_payload || {}).signed_by_user_id);
+    if (noSig.length) {
+      note(`${noSig.length} unreleased approval(s) record NO signatory, so release REFUSES them `
+        + 'and they need re-preparation:');
+      for (const a of noSig) console.log(`      ${a.status.padEnd(9)} ${a.id}`);
+    } else ok('every unreleased approval records who it claims to be from');
+
     // Is each approved action's frozen signatory still active? A read, not a probe.
     for (const a of aps.filter((x) => x.status === 'approved' && !x.release_claimed_at)) {
       const p = a.action_payload || {};

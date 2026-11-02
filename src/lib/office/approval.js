@@ -98,7 +98,38 @@ async function release(ctx, { approvalId, releasedBy, consequential = true,
     const signedEmail = payload && payload.signed_by_email;
     const signedUserId = payload && payload.signed_by_user_id;
 
-    if (signedEmail || signedUserId) {
+    // ── NO RECORDED SIGNATORY IS A REFUSAL, NOT A SKIP ────────────────────
+    //
+    // Found by reading production: the two approvals prepared before the signatory fix carry no
+    // signed_by_* fields at all, and this check read "if a signatory is recorded, verify it" — so
+    // for exactly those actions it verified NOTHING. An approval whose payload cannot say who the
+    // letter is from is the case with the LEAST evidence, and it was getting the least scrutiny.
+    //
+    // It is also not hypothetical: both of those letters are signed, in their body, by a
+    // Procurement Director who has left. The control that exists to stop that would have waved
+    // them through because the fact it checks was absent.
+    //
+    // Fail closed. A send whose representative cannot be established requires re-preparation.
+    if (!signedEmail && !signedUserId) {
+      let exceptionId = null;
+      try {
+        exceptionId = `ex-release-nosignatory-${approvalId}`;
+        await scope.openException(ctx, {
+          id: exceptionId, runId: ctx.runId, source: 'office/approval',
+          reason: `consequential release of ${approvalId} blocked: its frozen payload records NO `
+            + 'signatory, so there is no way to verify that whoever this letter claims to be from '
+            + 'still holds authority. The payload is NOT rewritten — this action predates signatory '
+            + 'recording and needs re-preparation with the current signatory.',
+          severity: 'critical', slaHours: 4,
+        }, deps);
+      } catch (_) { exceptionId = null; }
+      return { released: false, reason: 'signatory_not_recorded',
+        detail: 'the approved payload records no signatory, so its authority cannot be verified; '
+          + 're-preparation is required',
+        needs_repreparation: true, exception_id: exceptionId };
+    }
+
+    {
       const query = (deps && deps.query) || require('../db').query;
       const still = (await query(
         `SELECT id, name, email, role, is_active FROM users
