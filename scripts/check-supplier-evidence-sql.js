@@ -97,6 +97,12 @@ if (!url) {
                holder_normalized TEXT, subject_normalized TEXT, source_file TEXT,
                ingested_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
 
+    // Only the columns this query reads. action_payload is JSONB because the query navigates it
+    // with ->>, which is the part that would fail against a TEXT column.
+    await q(`CREATE TABLE office_approvals (
+               id TEXT PRIMARY KEY, action_kind TEXT, action_payload JSONB,
+               status TEXT, resolution TEXT, created_at TIMESTAMPTZ DEFAULT NOW())`);
+
     await q(`INSERT INTO rfq_requests (id, molecule_name, cas_number, target_quantity,
                target_purity, gmp_required, status)
              VALUES ('rfq-ev','Clopidogrel Bisulfate','120202-66-6','1kg','99%',1,'sent')`);
@@ -104,18 +110,32 @@ if (!url) {
     // ── THE POPULATION, RIGGED ────────────────────────────────────────────
     //
     //   Alpha Labs     reliability 95, GMP, replied 2/2, NO DMF   ← wins on every typed column
-    //   Zeta Pharma    reliability 40, GMP, never contacted, DMF  ← LAST alphabetically, LOWEST
+    //   Zeta Pharma    reliability 40, GMP, never contacted, 3 DMF ← LAST alphabetically, LOWEST
     //                                                               score, and the right answer
+    //   Betta Pharma   reliability 90, GMP, 1 DMF                 ← THE DEPTH CASE: satisfies a
+    //                                                               boolean DMF test and carries a
+    //                                                               far higher score, so it wins
+    //                                                               unless filings are COUNTED
     //   Mid Chemicals  reliability 70, NOT GMP, DMF               ← a GMP-required RFQ excludes it
-    //   Spent Organics reliability 99, GMP, DMF                   ← already consumed for this RFQ
+    //   Spent Organics reliability 99, GMP, DMF                   ← consumed: outreach row
+    //   Appr Organics  reliability 97, GMP, DMF                   ← consumed: a REJECTED approval,
+    //                                                               which creates no outreach row
     //   Noreply Inc    reliability 88, GMP, DMF, no contact_email  ← nowhere to send
     await q(`INSERT INTO suppliers (id,name,country,region,contact_email,reliability_score,
                avg_response_days,gmp_certified,total_orders) VALUES
                ('s-alpha','Alpha Labs','India','india','a@alpha.invalid',95,1,1,10),
                ('s-zeta','Zeta Pharma','India','india','z@zeta.invalid',40,9,1,0),
+               ('s-betta','Betta Pharma','India','india','b@betta.invalid',90,1,1,0),
                ('s-mid','Mid Chemicals','India','india','m@mid.invalid',70,2,0,5),
                ('s-spent','Spent Organics','India','india','s@spent.invalid',99,1,1,20),
+               ('s-appr','Appr Organics','India','india','p@appr.invalid',97,1,1,0),
                ('s-noreply','Noreply Inc','India','india',NULL,88,1,1,3)`);
+
+    // A REJECTED approval for this RFQ. It creates no outreach row, so only the approvals query
+    // can see that this pair's deterministic approval id is already spent.
+    await q(`INSERT INTO office_approvals (id, action_kind, action_payload, status, resolution)
+             VALUES ('ap-rfq-rfq-ev-s-appr','send_rfq_email',
+                     '{"rfq_id":"rfq-ev","supplier_id":"s-appr"}'::jsonb,'rejected','recipient set')`);
 
     await q(`INSERT INTO supplier_outreach_log (id,rfq_id,supplier_id,sent_at,replied_at,status)
              VALUES ('o1','rfq-other','s-alpha','2026-10-01','2026-10-02','replied'),
@@ -126,8 +146,12 @@ if (!url) {
     // runs through the tiered matcher rather than string equality.
     await q(`INSERT INTO dmf_holders (dmf_number,status,dmf_type,holder,subject,subject_normalized)
              VALUES (1001,'A','II','ZETA PHARMA PVT LTD','Clopidogrel Bisulfate','clopidogrel bisulfate'),
+                    (1007,'A','II','ZETA PHARMA LIMITED','Clopidogrel Bisulfate','clopidogrel bisulfate'),
+                    (1008,'A','II','ZETA PHARMA','Clopidogrel Bisulfate','clopidogrel bisulfate'),
+                    (1009,'A','II','BETTA PHARMA PVT LTD','Clopidogrel Bisulfate','clopidogrel bisulfate'),
                     (1002,'A','II','MID CHEMICALS LIMITED','Clopidogrel Bisulfate','clopidogrel bisulfate'),
                     (1003,'A','II','SPENT ORGANICS LTD','Clopidogrel Bisulfate','clopidogrel bisulfate'),
+                    (1010,'A','II','APPR ORGANICS LTD','Clopidogrel Bisulfate','clopidogrel bisulfate'),
                     (1004,'A','II','NOREPLY INC','Clopidogrel Bisulfate','clopidogrel bisulfate'),
                     (1005,'I','II','INACTIVE FILER LTD','Clopidogrel Bisulfate','clopidogrel bisulfate'),
                     (1006,'A','III','ALPHA LABS LTD','Clopidogrel packaging','clopidogrel bisulfate')`);
@@ -138,8 +162,15 @@ if (!url) {
     else bad('SQL.rfq did not return the RFQ', JSON.stringify(rfq));
 
     const suppliers = (await q(ev.SQL.suppliers)).rows;
-    if (suppliers.length === 5) ok('SQL.suppliers runs and reads every declared column');
-    else bad(`SQL.suppliers returned ${suppliers.length} rows, expected 5`);
+    if (suppliers.length === 7) ok('SQL.suppliers runs and reads every declared column');
+    else bad(`SQL.suppliers returned ${suppliers.length} rows, expected 7`);
+
+    // Through the scope.js accessor, exactly as the script does — so this executes the statement
+    // that actually ships, not a copy of it in a test.
+    const approvals = await ev.approvalsForRfq('rfq-ev', { query: q });
+    if (approvals.length === 1 && approvals[0].supplier_id === 's-appr') {
+      ok('the approvals accessor runs — ->> navigates JSONB and the read is scoped to THIS RFQ');
+    } else bad('the approvals accessor is wrong', JSON.stringify(approvals));
 
     const consumed = (await q(ev.SQL.consumed, ['rfq-ev'])).rows;
     if (consumed.length === 1 && consumed[0].supplier_id === 's-spent') ok('SQL.consumed runs and is scoped to THIS RFQ');
@@ -152,8 +183,9 @@ if (!url) {
 
     const [eq, like] = ev.dmfTerms('Clopidogrel Bisulfate');
     const dmfRows = (await q(ev.SQL.dmf, [eq, like])).rows;
-    if (dmfRows.length === 4) ok('SQL.dmf runs — = ANY($1) and LIKE ANY($2) both execute');
-    else bad(`SQL.dmf returned ${dmfRows.length} rows, expected 4 active type II`, JSON.stringify(dmfRows.map((r) => r.dmf_number)));
+    // 8 active type II of the 10 rows: one is status I and one is type III.
+    if (dmfRows.length === 8) ok('SQL.dmf runs — = ANY($1) and LIKE ANY($2) both execute');
+    else bad(`SQL.dmf returned ${dmfRows.length} rows, expected 8 active type II`, JSON.stringify(dmfRows.map((r) => r.dmf_number)));
     if (!dmfRows.some((r) => r.status === 'I')) ok('an INACTIVE DMF is excluded by the query');
     else bad('an inactive DMF was returned');
     if (!dmfRows.some((r) => r.dmf_type !== 'II')) ok('a type III (packaging) DMF is excluded — only drug substances count');
@@ -161,35 +193,77 @@ if (!url) {
 
     // ── 2. THE TIERING ────────────────────────────────────────────────────
     const zeta = ev.acceptDmf(dmfRows, 'Zeta Pharma');
-    if (zeta.safe.length === 1 && zeta.safe[0].dmf_number === 1001) {
-      ok('"ZETA PHARMA PVT LTD" matches "Zeta Pharma" at a tier safe enough to act on');
-    } else bad('the DMF holder did not match its supplier', JSON.stringify(zeta));
+    if (zeta.safe.length === 3 && zeta.safe.every((x) => /^ZETA PHARMA/.test(x.holder))) {
+      ok('"ZETA PHARMA PVT LTD", "ZETA PHARMA LIMITED" and "ZETA PHARMA" all match "Zeta Pharma" '
+        + 'at a tier safe enough to act on — the legal suffix is folded, the brand is not');
+    } else bad('the DMF holder did not match its supplier', JSON.stringify(zeta.safe.map((x) => [x.dmf_number, x.holder, x.tier])));
     const alphaDmf = ev.acceptDmf(dmfRows, 'Alpha Labs');
     if (!alphaDmf.safe.length) ok('Alpha Labs has NO accepted DMF — its only filing was type III and never returned');
     else bad('Alpha Labs was credited with a DMF it does not hold', JSON.stringify(alphaDmf.safe));
 
     // ── 3. THE ORDER ──────────────────────────────────────────────────────
-    const rows = ev.buildEvidence({ rfq, suppliers, consumed, replies, dmfRows });
+    const rows = ev.buildEvidence({ rfq, suppliers, consumed, replies, dmfRows, approvals });
     const ordered = ev.rankEvidence(rows);
     const names = ordered.map((r) => r.supplier.name);
 
-    if (!names.includes('Spent Organics')) ok('a supplier already consumed for THIS RFQ is not eligible');
+    if (!names.includes('Spent Organics')) ok('a supplier holding an outreach row for THIS RFQ is not eligible');
     else bad('a consumed supplier was offered again');
+
+    // THE CASE READING supplier_outreach_log ALONE CANNOT SEE. A rejected approval creates no
+    // outreach row, so without SQL.approvals this supplier — the second-highest reliability score
+    // in the population and holder of a DMF — would be recommended, and the preparation would then
+    // collide on an approval id that already exists.
+    if (!names.includes('Appr Organics')) {
+      ok('a supplier whose DETERMINISTIC APPROVAL ID is already spent is not eligible, even though '
+        + 'its rejected approval left no outreach row');
+    } else {
+      bad('a supplier holding a rejected approval for this RFQ was offered again — its approval id '
+        + 'is already taken and the preparation would collide');
+    }
+    const apprRow = rows.find((r) => r.supplier.name === 'Appr Organics');
+    if (apprRow && /ap-rfq-rfq-ev-s-appr/.test(apprRow.ineligibleBecause || '')) {
+      ok('and it says WHICH approval spent it');
+    } else bad('the reason does not name the approval', apprRow && apprRow.ineligibleBecause);
     if (!names.includes('Noreply Inc')) ok('a supplier with no contact_email is not eligible');
     else bad('a supplier with nowhere to send was offered');
 
     if (names[0] === 'Zeta Pharma') {
       ok('THE ORDERING PICKS Zeta Pharma: last alphabetically, LOWEST reliability score, and the '
-        + 'only eligible supplier with an active type II DMF for this molecule');
+        + 'holder of the MOST active type II DMFs for this molecule');
     } else {
       bad('the ordering did not pick the supplier the evidence supports — if it picked Alpha Labs '
-        + 'the typed columns outvoted an FDA filing; if it picked by name the ordering collapsed '
-        + 'to the alphabet', names.join(' > '));
+        + 'the typed columns outvoted an FDA filing; if it picked Betta Pharma the DMF class is '
+        + 'still a boolean and reliability_score broke the tie; if it picked by name the ordering '
+        + 'collapsed to the alphabet', names.join(' > '));
     }
 
-    const mid = ordered.find((r) => r.supplier.name === 'Mid Chemicals');
-    if (mid && names.indexOf('Mid Chemicals') === names.length - 1) {
-      ok('a NON-GMP supplier ranks last on a GMP-required RFQ, even holding a DMF');
+    // ── DMF EVIDENCE IS COUNTED, NOT A YES/NO ────────────────────────────
+    //
+    // This is the defect the real Clopidogrel population exposed: Hetero Drugs (ONE filing,
+    // reliability 84) ranked above MSN Laboratories (FOUR, reliability 81) because both satisfied
+    // a boolean and the decision fell through to a score nobody maintains. Betta Pharma is rigged
+    // the same way — one filing, reliability 90 against Zeta's 40 — so a boolean DMF class fails
+    // here rather than in front of a supplier.
+    const zIdx = names.indexOf('Zeta Pharma'); const bIdx = names.indexOf('Betta Pharma');
+    const zeta3 = rows.find((r) => r.supplier.name === 'Zeta Pharma');
+    const betta1 = rows.find((r) => r.supplier.name === 'Betta Pharma');
+    if (!(zeta3 && zeta3.dmfSafe.length === 3 && betta1 && betta1.dmfSafe.length === 1)) {
+      bad('the depth fixture is not set up as this case assumes — it would measure nothing',
+        JSON.stringify({ zeta: zeta3 && zeta3.dmfSafe.length, betta: betta1 && betta1.dmfSafe.length }));
+    } else if (zIdx < bIdx) {
+      ok('THREE active type II DMFs at reliability 40 outrank ONE at reliability 90 — the filings '
+        + 'are COUNTED, so a typed default cannot outvote an FDA filing one level down either');
+    } else {
+      bad('one DMF at a higher reliability_score outranked three at a lower one — the DMF class is '
+        + 'a boolean and the score is deciding', names.join(' > '));
+    }
+
+    // Mid Chemicals holds a DMF and is NOT GMP certified. On a GMP-required RFQ it must rank below
+    // every GMP supplier, including those with no DMF at all — otherwise GMP is not the first
+    // comparison.
+    const gmpNames = names.filter((n) => n !== 'Mid Chemicals');
+    if (names.indexOf('Mid Chemicals') === names.length - 1 && gmpNames.length) {
+      ok('a NON-GMP supplier ranks below EVERY GMP supplier on a GMP-required RFQ, even holding a DMF');
     } else bad('GMP is not the first comparison', names.join(' > '));
 
     // THE NEGATIVE CONTROL FOR THE GMP CLASS. With GMP not required, Mid Chemicals must rise —
@@ -234,8 +308,9 @@ if (!url) {
 
     const before = (await q(`SELECT (SELECT COUNT(*) FROM supplier_outreach_log) a,
                                     (SELECT COUNT(*) FROM suppliers) b,
-                                    (SELECT COUNT(*) FROM dmf_holders) c`)).rows[0];
-    if (before.a === '3' && before.b === '5' && before.c === '6') {
+                                    (SELECT COUNT(*) FROM dmf_holders) c,
+                                    (SELECT COUNT(*) FROM office_approvals) d`)).rows[0];
+    if (before.a === '3' && before.b === '7' && before.c === '10' && before.d === '1') {
       ok('and the fixture rows are untouched after every query ran');
     } else bad('the row counts changed while reading', JSON.stringify(before));
   } catch (e) {

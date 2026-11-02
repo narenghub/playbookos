@@ -72,6 +72,33 @@ function q(deps) {
 // Neither takes a company, so neither caller can ask for another company's approval.
 // ---------------------------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------------------------
+// THE FOURTH DELIBERATELY UNSCOPED READ, AND WHY IT MUST BE UNSCOPED
+//
+// "Has this (RFQ, supplier) pair already been prepared?" is a question about an id COLLISION, and
+// office_approvals.id is a PRIMARY KEY — global, not per company. The governed preparation derives
+// it deterministically as `ap-rfq-<rfq>-<supplier>`, so a company predicate here would be worse
+// than useless: it could report a pair as available while the insert still collides with another
+// company's row. The truthful answer to a global-uniqueness question is a global read.
+//
+// It returns only what an eligibility listing needs — id, status, the payload's supplier and the
+// resolution — never the frozen payload itself, so this cannot become a route to reading another
+// company's prepared communication.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Approvals that already exist for an RFQ, for deciding whether a supplier pair can be prepared
+ * again. UNSCOPED BY DESIGN: see the note above. Read-only.
+ */
+async function rfqApprovalsForEligibility(rfqId, deps = {}) {
+  const query = (deps && deps.query) || require('../db').query;
+  return (await query(
+    `SELECT id, status, action_payload->>'supplier_id' AS supplier_id, resolution, created_at
+       FROM office_approvals
+      WHERE action_kind = 'send_rfq_email'
+        AND action_payload->>'rfq_id' = $1`, [rfqId])).rows;
+}
+
 /** Everything the executor needs to decide whether an approved action may be carried out. */
 async function bootstrapApprovalForExecution(approvalId, deps = {}) {
   const res = await q(deps)(
@@ -527,6 +554,7 @@ async function provenance(ctx, runId, deps = {}) {
 module.exports = {
   provenance, spendForObjective, unmeasuredForRun, claimApprovalRelease, approvalReleaseState,
   bootstrapObjectiveForContext, bootstrapApprovalForExecution, bootstrapApprovalOwner,
+  rfqApprovalsForEligibility,
   createObjective, setObjectiveStatus,
   listObjectives, getObjective, listOpenExceptions, listPendingApprovals, spendToday, listOutcomes,
   recordCost, openException, resolveException, requestApproval, decideApproval, recordOutcome,

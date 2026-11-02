@@ -79,10 +79,11 @@ const pad = (s, n) => String(s === null || s === undefined ? '' : s).padEnd(n);
       process.exit(1);
     }
 
-    const [suppliers, consumed, replies] = await Promise.all([
+    const [suppliers, consumed, replies, approvals] = await Promise.all([
       query(ev.SQL.suppliers).then((r) => r.rows),
       query(ev.SQL.consumed, [rfqId]).then((r) => r.rows),
       query(ev.SQL.replies).then((r) => r.rows),
+      ev.approvalsForRfq(rfqId),
     ]);
 
     // "searched and found nothing" and "could not search" are DIFFERENT ANSWERS. Conflating them
@@ -98,7 +99,7 @@ const pad = (s, n) => String(s === null || s === undefined ? '' : s).padEnd(n);
       console.log('        DMF evidence is UNAVAILABLE, which is not the same as absent\n');
     }
 
-    const rows = ev.buildEvidence({ rfq, suppliers, consumed, replies, dmfRows });
+    const rows = ev.buildEvidence({ rfq, suppliers, consumed, replies, dmfRows, approvals });
     const ordered = ev.rankEvidence(rows);
     const blocked = rows.filter((r) => !r.eligible);
 

@@ -30,6 +30,7 @@
 // Compared IN THAT ORDER, so a typed default cannot outvote an FDA filing.
 
 const { matchTier, companyCore } = require('../cphi/match-company');
+const scope = require('./scope');
 
 // ── ONLY THE SAFE MATCH TIERS COUNT AS EVIDENCE ────────────────────────────
 //
@@ -56,6 +57,11 @@ const SQL = Object.freeze({
   // whatever its outcome.
   consumed: `SELECT supplier_id, status, sent_at, claimed_at
                FROM supplier_outreach_log WHERE rfq_id = $1`,
+
+  // Approval-level consumption is READ THROUGH scope.js (rfqApprovalsForEligibility), not with
+  // SQL here. office_approvals is a kernel table and the scope-discipline check refused to let
+  // this module name it — correctly: that file owns every kernel table name so a predicate cannot
+  // be forgotten at a call site. The accessor is deliberately unscoped and documents why.
 
   // Reply history across ALL RFQs. FILTER rather than SUM(CASE ...) because replied_at IS NULL is
   // the condition, and a CASE over a nullable column is where an off-by-one hides.
@@ -102,23 +108,29 @@ function acceptDmf(dmfRows, supplierName) {
  *
  * gmpOk is true when the RFQ does not require GMP — an RFQ that does not ask cannot penalise.
  */
-function buildEvidence({ rfq, suppliers, consumed = [], replies = [], dmfRows = [] }) {
+function buildEvidence({ rfq, suppliers, consumed = [], replies = [], dmfRows = [], approvals = [] }) {
   const spentBy = new Map((consumed || []).map((c) => [c.supplier_id, c]));
   const replyBy = new Map((replies || []).map((h) => [h.supplier_id, h]));
+  const apprBy = new Map((approvals || []).filter((a) => a.supplier_id).map((a) => [a.supplier_id, a]));
   const gmpRequired = Number(rfq && rfq.gmp_required) === 1;
 
   return (suppliers || []).map((s) => {
     const { safe, weak } = acceptDmf(dmfRows, s.name);
     const h = replyBy.get(s.id) || null;
     const spent = spentBy.get(s.id) || null;
+    const appr = apprBy.get(s.id) || null;
     return {
       supplier: s,
       spent,
-      eligible: !spent && !!s.contact_email,
+      approval: appr,
+      eligible: !spent && !appr && !!s.contact_email,
       ineligibleBecause: spent
         ? `already holds an outreach row for this RFQ (${spent.status}) — consumed under the `
           + 'current deterministic preparation identity'
-        : (!s.contact_email ? 'no contact_email on the suppliers row' : null),
+        : appr
+          ? `already holds approval ${appr.id} for this RFQ (${appr.status}) — the approval id is `
+            + 'deterministic, so this pair cannot be prepared again whatever became of it'
+          : (!s.contact_email ? 'no contact_email on the suppliers row' : null),
       dmfSafe: safe,
       dmfWeak: weak,
       sent: h ? h.sent : 0,
@@ -131,7 +143,7 @@ function buildEvidence({ rfq, suppliers, consumed = [], replies = [], dmfRows = 
 
 const ORDERING_RULE = Object.freeze([
   'GMP certified, when the RFQ requires GMP',
-  'an active type II DMF for the APPROVED molecule, matched at exact or core tier',
+  'HOW MANY active type II DMFs for the APPROVED molecule, matched at exact or core tier',
   'responsiveness: has replied > never contacted > contacted and never replied, then how often',
   'reliability_score, then avg_response_days, then total_orders, then name',
 ]);
@@ -161,11 +173,24 @@ function responsivenessClass(r) {
   return 2;
 }
 
+// ── DMF EVIDENCE IS COUNTED, NOT A YES/NO ─────────────────────────────────
+//
+// The first version asked only "does it hold a DMF". On the real Clopidogrel bisulfate population
+// that put Hetero Drugs (ONE active type II filing, reliability 84) above MSN Laboratories (FOUR,
+// reliability 81): both satisfied the boolean, the class tied, and the decision fell through to
+// `reliability_score` — a number nobody has maintained, where every supplier in that list shows 0
+// orders and 0 of 0 replies.
+//
+// So the rule this module states about itself — "a typed default must not outvote an FDA filing" —
+// was being violated one level below where it was being checked. Four active drug-substance
+// filings for the same molecule is materially stronger evidence than one: it indicates established,
+// usually multi-site or multi-route manufacture. The count is the evidence; the score is an
+// opinion.
 function rankKey(r) {
   const hasHistory = r.sent > 0;
   return [
     r.gmpOk ? 0 : 1,
-    r.dmfSafe.length ? 0 : 1,
+    -r.dmfSafe.length,
     responsivenessClass(r),
     -(hasHistory ? r.replied / r.sent : 0),
     -(Number(r.supplier.reliability_score) || 0),
@@ -194,7 +219,7 @@ function reasonsFor(r, { dmfAvailable = true } = {}) {
   const out = [];
   if (r.gmpRequired) out.push(Number(r.supplier.gmp_certified) === 1 ? 'GMP certified' : 'NOT GMP certified');
   if (!dmfAvailable) out.push('DMF evidence unavailable');
-  else if (r.dmfSafe.length) out.push(`${r.dmfSafe.length} active type II DMF(s) for this molecule`);
+  else if (r.dmfSafe.length) out.push(`${r.dmfSafe.length} active type II DMF(s) for this molecule`);  // the count is the evidence
   else out.push('no accepted DMF for this molecule');
   if (!r.sent) out.push('never contacted before (no responsiveness evidence)');
   else if (!r.replied) out.push(`contacted ${r.sent} time(s) and NEVER replied`);
@@ -203,8 +228,13 @@ function reasonsFor(r, { dmfAvailable = true } = {}) {
   return out;
 }
 
+/** Approvals that already exist for this RFQ. Delegates to scope.js, which owns the table name. */
+function approvalsForRfq(rfqId, deps = {}) {
+  return scope.rfqApprovalsForEligibility(rfqId, deps);
+}
+
 module.exports = {
-  SQL, SAFE_TIERS, ORDERING_RULE,
+  SQL, SAFE_TIERS, ORDERING_RULE, approvalsForRfq,
   dmfTerms, acceptDmf, buildEvidence, responsivenessClass, rankKey, compareEvidence,
   rankEvidence, reasonsFor,
 };

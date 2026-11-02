@@ -93,6 +93,10 @@ const EXEMPT = new Set([
   path.join('scripts', 'office-pending-approvals.js'),
   path.join('scripts', 'validate-r1-deployed.js'),
   path.join('scripts', 'check-office-release-db.js'),
+  // Seeds office_approvals by hand to prove the supplier-eligibility read sees a REJECTED approval
+  // — which leaves no outreach row, so the pair's deterministic approval id is spent invisibly.
+  // The library it tests names no kernel table: it goes through the accessor, as product code must.
+  path.join('scripts', 'check-supplier-evidence-sql.js'),
 ]);
 
 // Product code may never be exempt. The only permitted exemptions under src/ are the accessor and
