@@ -9,3 +9,12 @@ public/linkedin-images/
 
 # Generated call sheets contain prospect contact data — keep them out of git.
 docs/acbm-call-sheet-*.md
+
+# Generated data exports. They are regenerated from the database on demand, and
+# some carry supplier, trial-sponsor or prospect data that does not belong in git
+# history — where deletion does not remove it and every clone keeps a copy.
+/approved.csv
+/approved-products.json
+/supplier-products.csv
+/paul-*.csv
+/log
