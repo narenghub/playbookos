@@ -20,6 +20,8 @@
 // and fails, which is what should have happened the first time.
 'use strict';
 
+const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -31,8 +33,7 @@ let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
 const bad = (m, d) => { fail++; console.log(`  FAIL  ${m}`); if (d) console.log(String(d).split('\n').map((l) => '          ' + l).join('\n')); };
 
-const BIN = ['/usr/lib/postgresql/16/bin', '/usr/lib/postgresql/15/bin', '/usr/local/bin', '/usr/bin'];
-const findInitdb = () => BIN.find((d) => fs.existsSync(path.join(d, 'initdb'))) || null;
+const findInitdb = pgBin;
 
 let temp = null;
 function startTemp() {
@@ -43,7 +44,7 @@ function startTemp() {
   const run = (cmd) => execFileSync('sh', ['-c', asRoot ? `su postgres -c ${JSON.stringify(cmd)}` : cmd], { stdio: 'pipe' });
   try {
     if (asRoot) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data -A trust`);
+    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
     run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55997 -c listen_addresses=' start -w`);
   } catch (e) { return null; }
   temp = { base, dir, asRoot };
@@ -63,7 +64,7 @@ const url = process.env.MOLSEARCH_PG_URL || startTemp();
 if (!url) {
   console.log('  skip  no Postgres available (set MOLSEARCH_PG_URL or install initdb)');
   console.log('SKIP  lab delegate queries not executed — this check needs a server');
-  process.exit(0);
+  process.exit(EXIT_NOT_EXECUTED);
 }
 
 // The real column set, and a population built to make the LIMIT bite — which is what the first

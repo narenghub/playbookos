@@ -32,14 +32,12 @@
 // not the same claim and is the kind of evidence this project has learned to distrust.
 'use strict';
 
+const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 
-const BIN = ['/usr/lib/postgresql/16/bin', '/usr/lib/postgresql/15/bin', '/usr/local/bin', '/usr/bin'];
-function findInitdb() {
-  for (const d of BIN) { try { fs.accessSync(`${d}/initdb`); return d; } catch (_) { /* next */ } }
-  return null;
-}
+const findInitdb = pgBin;
 
 let temp = null;
 function startTemp() {
@@ -52,7 +50,7 @@ function startTemp() {
     { env, stdio: 'pipe' });
   try {
     if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data -A trust`);
+    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
     run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55993 -c listen_addresses=' start -w`);
   } catch (_) { return null; }
   temp = { base, dir, asPostgres };
@@ -71,8 +69,11 @@ function stopTemp() {
 
 const sock = startTemp();
 if (!sock) {
+  // Exit 3, not 1. Nothing failed here — this check did not RUN, and the preflight aggregator has a
+  // verdict for that (INCOMPLETE) which is still not exit 0. Reporting it as a failure was honest
+  // but wrong in kind: it conflated "the invariant is broken" with "the invariant is unexamined".
   console.error('SKIP  no local postgres available — cannot verify the pricing identity invariant');
-  process.exit(1);
+  process.exit(EXIT_NOT_EXECUTED);
 }
 // Set BEFORE requiring the agent: db.js builds its pool at require time.
 delete process.env.DATABASE_URL;

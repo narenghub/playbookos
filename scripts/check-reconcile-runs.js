@@ -27,6 +27,8 @@
 // does not exist, a renamed export: all of them surface here, locally, in seconds.
 'use strict';
 
+const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 
@@ -38,11 +40,7 @@ const { execFileSync } = require('child_process');
 const say = (m) => fs.writeSync(1, `${m}\n`);
 const err = (m) => fs.writeSync(2, `${m}\n`);
 
-const BIN = ['/usr/lib/postgresql/16/bin', '/usr/lib/postgresql/15/bin', '/usr/local/bin', '/usr/bin'];
-function findInitdb() {
-  for (const d of BIN) { try { fs.accessSync(`${d}/initdb`); return d; } catch (_) { /* next */ } }
-  return null;
-}
+const findInitdb = pgBin;
 
 let temp = null;
 function startTemp() {
@@ -55,7 +53,7 @@ function startTemp() {
     { env, stdio: 'pipe' });
   try {
     if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data -A trust`);
+    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
     run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55994 -c listen_addresses=' start -w`);
   } catch (_) { return null; }
   temp = { base, dir, asPostgres };
@@ -74,8 +72,9 @@ function stopTemp() {
 
 const sock = startTemp();
 if (!sock) {
+  // Exit 3, not 1 — see check-inquiry-pricing-identity.js. "Did not run" is its own verdict.
   err('SKIP  no local postgres available — cannot prove the reconciliation runs');
-  process.exit(1);
+  process.exit(EXIT_NOT_EXECUTED);
 }
 // Before any require that builds a pool: db.js reads these at module load, and with DATABASE_URL
 // absent it uses PG* with ssl:false.

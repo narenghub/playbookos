@@ -26,6 +26,8 @@
 // "my fixtures are gone", never "the table is empty".
 'use strict';
 
+const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -39,11 +41,7 @@ const bad = (m, d) => {
 };
 const note = (m) => console.log(`  --    ${m}`);
 
-const BIN = ['/usr/lib/postgresql/16/bin', '/usr/lib/postgresql/15/bin', '/usr/local/bin', '/usr/bin'];
-function findInitdb() {
-  for (const d of BIN) { const p = path.join(d, 'initdb'); if (fs.existsSync(p)) return d; }
-  return null;
-}
+const findInitdb = pgBin;
 let temp = null;
 function startTemp() {
   const dir = findInitdb();
@@ -55,7 +53,7 @@ function startTemp() {
     { env, stdio: 'pipe' });
   try {
     if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data -A trust`);
+    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
     run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55997 -c listen_addresses=' start -w`);
   } catch (e) { return null; }
   temp = { base, dir, asPostgres };
@@ -76,7 +74,7 @@ const url = process.env.OFFICE_PG_URL || startTemp();
 if (!url) {
   console.log('  skip  no Postgres available (set OFFICE_PG_URL or install initdb)');
   console.log('SKIP  K4 recovery not executed against a server — this check needs one');
-  process.exit(0);
+  process.exit(EXIT_NOT_EXECUTED);
 }
 // src/lib/autonomy.js writes a stop through db.js's withTransaction, NOT through an injectable
 // query — so injecting deps.query is not enough and an un-set DATABASE_URL made it dial

@@ -42,7 +42,10 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
+const { EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+
 let fail = 0;
+let notExec = 0;      // clauses a missing dependency left unproven — neither a pass nor a failure
 const out = (s) => fs.writeSync(1, s + '\n');
 const ok = (m) => out(`  ok    ${m}`);
 const bad = (m, d) => { fail++; out(`  FAIL  ${m}`); if (d) out(`          ${String(d).slice(0, 500)}`); };
@@ -210,13 +213,24 @@ try {
 // Delegated to its own check, which builds a real Postgres from the real DDL and executes
 // e1-reconcile's main(). Running it here rather than asserting "the require worked" is the
 // difference between proving the extraction is inert and hoping it is.
+// The delegate has three outcomes, not two, and so does this clause. On 2026-11-03 this check went
+// RED on the CEO's Mac for a reconciliation that had never run — no local Postgres — and the report
+// read `the reconciliation check failed after the extraction`, which was untrue. A delegate that
+// could not execute has disproved nothing; it has simply left this clause unproven, and the honest
+// verdict is INCOMPLETE rather than a failure that sends someone looking for a defect in the
+// extraction.
 try {
   execFileSync(process.execPath, [path.join(REPO, 'scripts', 'check-reconcile-runs.js')],
     { stdio: 'pipe', env: { ...process.env, DATABASE_URL: '' } });
   ok('the reconciliation still runs end to end after the extraction');
 } catch (e) {
-  bad('the reconciliation check failed after the extraction',
-    String(e.stdout || '').slice(-600) + String(e.stderr || '').slice(-300));
+  if (e.status === EXIT_NOT_EXECUTED) {
+    notExec++;
+    out('  SKIP  the reconciliation was NOT EXECUTED — no Postgres, so this clause is unproven');
+  } else {
+    bad('the reconciliation check failed after the extraction',
+      String(e.stdout || '').slice(-600) + String(e.stderr || '').slice(-300));
+  }
 }
 
 // ── 6. no consumer mutates the shared array ─────────────────────────────────
@@ -229,7 +243,13 @@ if (JSON.stringify(afterAll.SOURCES) === JSON.stringify(BASELINE)) {
 
 if (fail) {
   out(`FAIL  ${fail} assertion(s) failed`);
+  if (notExec) out(`      and ${notExec} clause(s) did not execute`);
   process.exit(1);
+}
+if (notExec) {
+  out(`INCOMPLETE  ${notExec} clause(s) DID NOT EXECUTE — nothing failed, but this run does not`);
+  out('            establish that the extraction is inert. Install a local Postgres and re-run.');
+  process.exit(EXIT_NOT_EXECUTED);
 }
 out('PASS  one SOURCES definition, shared by every consumer, and provably load-bearing');
 process.exit(0);

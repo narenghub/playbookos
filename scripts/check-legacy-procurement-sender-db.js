@@ -28,6 +28,8 @@
 // this process and no real supplier is ever named.
 'use strict';
 
+const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
@@ -37,8 +39,7 @@ const ok = (m) => console.log(`  ok    ${m}`);
 const bad = (m, d) => { fail++; console.log(`  FAIL  ${m}`); if (d) console.log(String(d).split('\n').slice(0, 5).map((l) => '          ' + l).join('\n')); };
 const note = (m) => console.log(`  --    ${m}`);
 
-const BIN = ['/usr/lib/postgresql/16/bin', '/usr/lib/postgresql/15/bin', '/usr/local/bin', '/usr/bin'];
-const findInitdb = () => BIN.find((d) => fs.existsSync(path.join(d, 'initdb'))) || null;
+const findInitdb = pgBin;
 
 let temp = null;
 function startTemp() {
@@ -49,7 +50,7 @@ function startTemp() {
   const run = (cmd) => execFileSync('sh', ['-c', asRoot ? `su postgres -c ${JSON.stringify(cmd)}` : cmd], { stdio: 'pipe' });
   try {
     if (asRoot) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data -A trust`);
+    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
     run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55979 -c listen_addresses=' start -w`);
   } catch (e) { return null; }
   temp = { base, dir, asRoot };
@@ -69,7 +70,7 @@ const url = process.env.LEGACYPROC_PG_URL || startTemp();
 if (!url) {
   console.log('  skip  no Postgres available (set LEGACYPROC_PG_URL or install initdb)');
   console.log('SKIP  the legacy sender was not exercised — this check needs a server');
-  process.exit(0);
+  process.exit(EXIT_NOT_EXECUTED);
 }
 process.env.DATABASE_URL = url;
 process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'PLACEHOLDER-not-a-key';

@@ -17,6 +17,8 @@
 // With neither it SKIPS, so a machine without Postgres can still run preflight.
 'use strict';
 
+const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
@@ -27,11 +29,7 @@ let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
 const bad = (m, d) => { fail++; console.log(`  FAIL  ${m}`); if (d) console.log(`          ${String(d).slice(0, 300)}`); };
 
-const BIN = ['/usr/lib/postgresql/16/bin', '/usr/lib/postgresql/15/bin', '/usr/local/bin', '/usr/bin'];
-function findInitdb() {
-  for (const d of BIN) { const p = path.join(d, 'initdb'); if (fs.existsSync(p)) return d; }
-  return null;
-}
+const findInitdb = pgBin;
 let temp = null;
 function startTemp() {
   const dir = findInitdb();
@@ -43,7 +41,7 @@ function startTemp() {
     { env, stdio: 'pipe' });
   try {
     if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data -A trust`);
+    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
     run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55977 -c listen_addresses=' start -w`);
   } catch (e) { return null; }
   temp = { base, dir, asPostgres };
@@ -64,7 +62,7 @@ const url = process.env.RUNS_PG_URL || startTemp();
 if (!url) {
   console.log('  skip  no Postgres available (set RUNS_PG_URL or install initdb)');
   console.log('SKIP  run identity invariants not executed — this check needs a server');
-  process.exit(0);
+  process.exit(EXIT_NOT_EXECUTED);
 }
 
 const OVERRIDE = 'investigated the unresolved send with Palash and accepted the risk';

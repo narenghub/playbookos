@@ -25,6 +25,8 @@
 // card: `railway ssh` has failed five distinct ways, and every one of them invites a re-run.
 'use strict';
 
+const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+
 const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -40,12 +42,6 @@ const bad = (m, d) => {
 };
 
 // ── a throwaway cluster, same pattern as the other harnesses ────────────────
-const BIN = ['/usr/lib/postgresql/16/bin', '/usr/lib/postgresql/15/bin', '/usr/lib/postgresql/14/bin',
-  '/usr/pgsql-16/bin', '/opt/homebrew/opt/postgresql@16/bin', '/usr/local/opt/postgresql@16/bin'];
-function pgBin() {
-  for (const d of BIN) if (fs.existsSync(path.join(d, 'initdb'))) return d;
-  try { return path.dirname(execFileSync('which', ['initdb'], { encoding: 'utf8' }).trim()); } catch (_) { return null; }
-}
 let temp = null;
 function startCluster() {
   const dir = pgBin();
@@ -55,10 +51,10 @@ function startCluster() {
   try {
     if (process.getuid && process.getuid() === 0) {
       execFileSync('bash', ['-c', `chown -R postgres ${base}`], { stdio: 'pipe' });
-      run(`su postgres -c "PATH=${dir}:\\$PATH initdb -D ${base}/data -A trust"`);
+      run(`su postgres -c "PATH=${dir}:\\$PATH initdb -D ${base}/data ${INITDB_FLAGS}"`);
       run(`su postgres -c "PATH=${dir}:\\$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55987 -c listen_addresses=' start -w"`);
     } else {
-      run(`PATH=${dir}:$PATH initdb -D ${base}/data -A trust`);
+      run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
       run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55987 -c listen_addresses=' start -w`);
     }
   } catch (e) {
@@ -82,7 +78,7 @@ console.log('\nRehearsal: office-validate-governed-ai.js\n');
 const url = startCluster();
 if (!url) {
   console.log('  skip  no Postgres available — the validator cannot be rehearsed here');
-  process.exit(0);
+  process.exit(EXIT_NOT_EXECUTED);
 }
 
 // ── the provider stub, injected with --require so the validator is unmodified ──
