@@ -175,6 +175,111 @@ function nextTuesday9amChicago(now = new Date()) {
     note('approval boundary. Removing the departed CC does not make it governed. That is a');
     note('separate decision and it is why this check does not conclude that C is safe by itself.');
 
+    // ── 7. TARGETED CONTAINMENT, AS DEPLOYED ───────────────────────────────
+    console.log('\n  ── 7. TARGETED CONTAINMENT OF EACH LEGACY SENDER ──\n');
+    const INQ_WF = 'legacy-inquiry-buyer-email';
+    const RFQ_WF = 'legacy-supplier-rfq-email';
+    const wfKeys = autonomy.knownScopeKeys('workflow') || [];
+    for (const k of [INQ_WF, RFQ_WF]) {
+      if (wfKeys.includes(k)) ok(`workflow:${k} is a RECOGNIZED kill scope on this deploy`);
+      else bad(`workflow:${k} is NOT recognized — a stop naming it would be rejected`);
+    }
+
+    // The mail path must CONSULT the scope, not merely have one defined. A recognized scope that
+    // no send path declares is a stop nobody is subject to.
+    const mailSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'mailer.js'), 'utf8');
+    const forwards = /\.\.\.\(workflow \? \{ workflow \} : \{\}\)/.test(mailSrc);
+    const declaresInq = new RegExp(`workflow: '${INQ_WF}'`).test(inqSrc);
+    const declaresRfq = new RegExp(`workflow: '${RFQ_WF}'`).test(agentSrc);
+    field('mailer forwards workflow', forwards ? 'yes' : 'NO');
+    field('inquiry send declares it', declaresInq ? 'yes' : 'NO');
+    field('supplier send declares it', declaresRfq ? 'yes' : 'NO');
+    if (forwards && declaresInq && declaresRfq) {
+      ok('the deployed mail path consults the workflow scope, and both senders declare one');
+    } else bad('the scope is defined but not consulted end to end — it would contain nothing');
+
+    // Is the targeted stop actually IN FORCE, as the buyer path would measure it?
+    let inqSeen = null;
+    try {
+      inqSeen = await autonomy.checkStopped(
+        { capability: 'email.send', workflow: INQ_WF, agent: 'inquiry-agent' },
+        { consequential: true });
+    } catch (e) { field('buyer-path check', `THREW — ${e.message}`); }
+    if (inqSeen) {
+      field('buyer path', `STOPPED by ${inqSeen.scope_type}:${inqSeen.scope_key || '(global)'}`);
+      ok('autonomous buyer email is contained right now');
+      if (inqSeen.scope_type === 'capability') {
+        note('contained by the BLUNT capability stop, which also silences internal mail. The');
+        note(`targeted ${INQ_WF} stop would contain it precisely.`);
+      }
+    } else {
+      bad('THE BUYER PATH IS NOT STOPPED — autonomous AI email to buyers would send as soon as '
+        + 'the sending domain verifies');
+    }
+
+    // Provider invocation must be downstream of that decision. Asserted on the deployed source:
+    // the kill-switch block appears before the fetch to the provider.
+    const killAt = mailSrc.indexOf('const blocked = await checkStopped(');
+    const fetchAt = mailSrc.indexOf("fetch('https://api.resend.com/emails'");
+    field('kill check / provider call', `${killAt} / ${fetchAt}`);
+    if (killAt > -1 && fetchAt > -1 && killAt < fetchAt) {
+      ok('the provider call is DOWNSTREAM of the kill-switch decision');
+    } else bad('the provider call is not provably downstream of the kill switch');
+
+    // ── 8. R1 IS STILL GOVERNED AND EXPLICIT-RELEASE ───────────────────────
+    console.log('\n  ── 8. THE GOVERNED PATH IS UNCHANGED ──\n');
+    const execSrc = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'lib', 'office', 'execute.js'), 'utf8');
+    const checks = [
+      [/requireExplicitRelease/, 'release requires an explicit act'],
+      [/sender_not_recorded/, 'it refuses a payload with no frozen sender'],
+      [/from: frozenSender/, 'and sends the approved sender explicitly'],
+    ];
+    for (const [re, what] of checks) {
+      if (re.test(execSrc)) ok(what);
+      else bad(`R1 no longer: ${what}`);
+    }
+    const modes = (await query(
+      `SELECT release_mode, COUNT(*)::int n FROM objectives
+        WHERE release_mode IS NOT NULL GROUP BY release_mode`)).rows;
+    for (const m of modes) field(`objectives release_mode=${m.release_mode}`, m.n);
+    if (!modes.some((m) => m.release_mode === 'on_approval')) {
+      ok('no objective releases on approval alone');
+    } else bad('an objective is set to release WITHOUT a separate human act');
+
+    // ── 9. DID ANY EXTERNAL EMAIL GO OUT DURING REMEDIATION? ───────────────
+    console.log('\n  ── 9. EXTERNAL EMAIL DURING THE REMEDIATION WINDOW ──\n');
+    const since = "2026-11-03 00:00:00+00";
+    const log = (await query(
+      `SELECT status, COUNT(*)::int n FROM email_log
+        WHERE sent_at >= $1::timestamptz GROUP BY status ORDER BY n DESC`, [since])).rows;
+    if (!log.length) note('no email_log rows at all since 3 Nov 00:00 UTC');
+    for (const r of log) field(`status ${r.status}`, r.n);
+    const externalSent = (await query(
+      `SELECT to_email, subject, sent_at FROM email_log
+        WHERE sent_at >= $1::timestamptz AND status = 'sent'
+          AND to_email NOT LIKE '%@abiozen.com'
+          AND to_email NOT LIKE '%@adificetechnologies.com'
+        ORDER BY sent_at DESC LIMIT 20`, [since])).rows;
+    field('external recipients since then', externalSent.length);
+    for (const r of externalSent) {
+      field('  SENT', `${r.to_email} — ${String(r.subject || '').slice(0, 60)} — ${r.sent_at}`);
+    }
+    if (externalSent.length === 0) {
+      ok('NO email reached an address outside the company during remediation');
+    } else {
+      bad(`${externalSent.length} external recipient(s) received email during remediation — read `
+        + 'the rows above and establish what was sent before proceeding');
+    }
+    const stoppedCount = (await query(
+      `SELECT COUNT(*)::int n FROM email_log
+        WHERE sent_at >= $1::timestamptz AND status = 'stopped_by_policy'`, [since])).rows[0].n;
+    field('refused by policy', stoppedCount);
+    if (Number(stoppedCount) > 0) {
+      note('the kill switch refused real attempts — that is the containment working, and each');
+      note('refusal is durable evidence rather than a silent non-event.');
+    }
+
     console.log('');
     if (fail) {
       console.log(`FAIL  ${fail} blocking finding(s). DO NOT VERIFY THE DOMAIN YET.\n`);
