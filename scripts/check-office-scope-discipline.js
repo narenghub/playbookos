@@ -108,6 +108,10 @@ const EXEMPT = new Set([
   // routed through it would prove nothing about the arbitration. The operation it tests names no
   // kernel table outside the accessor.
   path.join('scripts', 'check-office-supersede-db.js'),
+  // Reads `objectives` raw to answer "is any objective set to release without a second human
+  // act" — a GLOBAL question across every company, which a company-scoped accessor cannot ask.
+  // Read-only: it writes nothing and sends nothing.
+  path.join('scripts', 'confirm-legacy-email-state.js'),
 ]);
 
 // Product code may never be exempt. The only permitted exemptions under src/ are the accessor and
