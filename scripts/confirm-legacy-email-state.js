@@ -47,8 +47,18 @@ function nextTuesday9amChicago(now = new Date()) {
   let daysAhead = (2 - dow + 7) % 7;                       // 2 = Tuesday
   if (daysAhead === 0 && (hour > 9 || (hour === 9 && minute > 0))) daysAhead = 7;
   const mins = daysAhead * 1440 + (9 * 60 - (hour * 60 + minute));
+  // THE DATE OF THE NEXT RUN, not today's date with 09:00 pasted over it. The first version
+  // formatted `now` and then regex-replaced the time, so at 10:26 on a Tuesday it reported
+  // "Tue 2026-11-03 09:00" — an execution that had already happened — while minutesAway correctly
+  // said 9994. Two fields disagreeing, and the human-readable one was the wrong one.
+  const at = new Date(now.getTime() + mins * 60000);
+  const atParts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', weekday: 'short', year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(at).map((x) => [x.type, x.value]));
   return { daysAhead, minutesAway: mins,
-    local: `${parts.weekday} ${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} America/Chicago` };
+    local: `${atParts.weekday} ${atParts.year}-${atParts.month}-${atParts.day} `
+      + `${atParts.hour}:${atParts.minute} America/Chicago` };
 }
 
 (async () => {
@@ -70,7 +80,7 @@ function nextTuesday9amChicago(now = new Date()) {
       note('silently removed leaves none.');
     } else warn('the cron is not registered as expected — verify this is deliberate');
     const nx = nextTuesday9amChicago();
-    field('next execution', nx.local.replace(/\d\d:\d\d America/, '09:00 America'));
+    field('next execution', nx.local);
     field('minutes away', nx.minutesAway);
     field('now', new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }) + ' America/Chicago');
 
@@ -109,9 +119,22 @@ function nextTuesday9amChicago(now = new Date()) {
     console.log('\n  ── 4. SENDER / SIGNATORY / REPLY-TO, AS DEPLOYED ──\n');
     const agentSrc = fs.readFileSync(
       path.join(__dirname, '..', 'src', 'lib', 'agents', 'procurement-agent.js'), 'utf8');
-    const hardcoded = /\|\|\s*\{\s*name:\s*'Palash/.test(agentSrc);
-    const failsClosed = /const sig = await getSignatory\(\);\s*\n\s*if \(!sig\) \{/.test(agentSrc);
-    const usesGoverned = /require\('\.\.\/office\/procurement-rfq'\)/.test(agentSrc);
+    // ── COMMENTS ARE EVIDENCE, NOT EXECUTION ────────────────────────────────
+    //
+    // The first version reported "hardcoded human fallback PRESENT" on a clean deploy, because its
+    // pattern matched the COMMENT that deliberately records the removed line:
+    //
+    //     //     )).rows[0] || { name: 'Palash Das', ... };
+    //
+    // A validator that cannot tell history from live code flags the audit trail as the defect —
+    // and the next person's fix is to delete the evidence. Executable lines only.
+    const executable = (src) => src.split('\n')
+      .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); })
+      .join('\n');
+    const agentExec = executable(agentSrc);
+    const hardcoded = /\|\|\s*\{\s*name:\s*'Palash/.test(agentExec);
+    const failsClosed = /const sig = await getSignatory\(\);\s*\n\s*if \(!sig\) \{/.test(agentExec);
+    const usesGoverned = /require\('\.\.\/office\/procurement-rfq'\)/.test(agentExec);
     field('hardcoded human fallback', hardcoded ? 'PRESENT' : 'removed');
     field('fails closed with no signatory', failsClosed ? 'yes' : 'NO');
     field('uses the governed resolver', usesGoverned ? 'yes' : 'NO');
@@ -155,8 +178,8 @@ function nextTuesday9amChicago(now = new Date()) {
     const stops = await autonomy.listStops().catch(() => []);
     field('active stops', (stops || []).length);
     for (const s of stops || []) {
-      field('  stop', `${s.scope_type}:${s.scope_key || '(global)'} by ${s.actor || '?'} — `
-        + String(s.reason || '').slice(0, 70));
+      field('  stop', `${s.scope_type}:${s.scope_key || '(global)'} by ${s.set_by || '?'} `
+        + `at ${s.set_at || '?'} — ${String(s.reason || '').slice(0, 60)}`);
     }
 
     // ── 6. WHAT VERIFYING THE DOMAIN WOULD ARM ─────────────────────────────
@@ -249,15 +272,26 @@ function nextTuesday9amChicago(now = new Date()) {
 
     // ── 9. DID ANY EXTERNAL EMAIL GO OUT DURING REMEDIATION? ───────────────
     console.log('\n  ── 9. EXTERNAL EMAIL DURING THE REMEDIATION WINDOW ──\n');
-    const since = "2026-11-03 00:00:00+00";
+    // ── email_log.sent_at IS `TEXT DEFAULT NOW()`, NOT timestamptz ───────────
+    //
+    // `sent_at >= $1::timestamptz` fails outright: "operator does not exist: text >= timestamp
+    // with time zone". This repository has the lesson written down already — a one-off ops script
+    // shipped `joined_at = CASE WHEN $2 THEN NOW() ELSE joined_at END`, passed node --check and the
+    // whole unit suite, and failed on the live database because joined_at is TEXT. I assumed a
+    // column type instead of reading it, and repeated the same class of defect.
+    //
+    // THE COLUMN IS CAST, not the parameter. Safe here because nothing ever supplies sent_at —
+    // mailer's INSERT omits it, so every row carries the `DEFAULT NOW()` rendering and the format
+    // is uniform. A column somebody wrote by hand would need a guarded cast.
+    const since = '2026-11-03 00:00:00+00';
     const log = (await query(
       `SELECT status, COUNT(*)::int n FROM email_log
-        WHERE sent_at >= $1::timestamptz GROUP BY status ORDER BY n DESC`, [since])).rows;
+        WHERE sent_at::timestamptz >= $1::timestamptz GROUP BY status ORDER BY n DESC`, [since])).rows;
     if (!log.length) note('no email_log rows at all since 3 Nov 00:00 UTC');
     for (const r of log) field(`status ${r.status}`, r.n);
     const externalSent = (await query(
       `SELECT to_email, subject, sent_at FROM email_log
-        WHERE sent_at >= $1::timestamptz AND status = 'sent'
+        WHERE sent_at::timestamptz >= $1::timestamptz AND status = 'sent'
           AND to_email NOT LIKE '%@abiozen.com'
           AND to_email NOT LIKE '%@adificetechnologies.com'
         ORDER BY sent_at DESC LIMIT 20`, [since])).rows;
@@ -273,7 +307,7 @@ function nextTuesday9amChicago(now = new Date()) {
     }
     const stoppedCount = (await query(
       `SELECT COUNT(*)::int n FROM email_log
-        WHERE sent_at >= $1::timestamptz AND status = 'stopped_by_policy'`, [since])).rows[0].n;
+        WHERE sent_at::timestamptz >= $1::timestamptz AND status = 'stopped_by_policy'`, [since])).rows[0].n;
     field('refused by policy', stoppedCount);
     if (Number(stoppedCount) > 0) {
       note('the kill switch refused real attempts — that is the containment working, and each');
