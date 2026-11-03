@@ -215,6 +215,12 @@ step "supersession is one transition and no wider" node scripts/check-office-sup
 # DEACTIVATING a departed director SELECTED him. The mailer is a spy here, so "never called" is
 # counted; M1 restores the fallback and proves a letter then goes out over his name.
 step "the legacy RFQ cron cannot send as a departed employee" node scripts/check-legacy-procurement-sender-db.js
+# The two PRE-KERNEL paths that email people outside the company on their own schedule. Until they
+# declared a kill-switch identity the only scope reaching them was capability:email.send — every
+# email in the platform — so containing one ungoverned sender silenced the 6pm scores and the
+# briefings too. Every case asserts WHICH scope refused, because `ok === false` would pass when an
+# unrelated gate refused first.
+step "each legacy external sender stops on its own, by name" node scripts/check-legacy-email-containment-db.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

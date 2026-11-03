@@ -255,10 +255,24 @@ const OFFICE_SCOPES = Object.freeze({
     'objective-review',           // office/executive-agent.js
     'governed-rfq-generation',    // office/procurement-rfq.js
     'governed-rfq-release',       // office/execute.js — R1, the only outbound office path
+    // ── LEGACY EXTERNAL SENDERS, NAMED SO THEY CAN BE STOPPED INDIVIDUALLY ──
+    //
+    // These are NOT governed office workflows. They are pre-kernel paths that email people
+    // OUTSIDE the company on their own schedule, with no approval boundary — and until they were
+    // named here the only scope that reached them was `capability:email.send`, which also silences
+    // the 6pm scores, the briefings and the alerts. Containing one ungoverned sender meant
+    // stopping all internal mail with it.
+    //
+    // Naming them buys precise containment with the mechanism that already exists, rather than a
+    // second parallel one. Each is retired from this list when its workflow is migrated into the
+    // governed architecture — not before.
+    'legacy-inquiry-buyer-email',   // agents/inquiry-agent.js — autonomous AI email to BUYERS
+    'legacy-supplier-rfq-email',    // agents/procurement-agent.js — weekly supplier RFQs
   ]),
   agents: Object.freeze([
     'executive-agent',            // office/executive-agent.js
     'release-executor',           // office/execute.js
+    'inquiry-agent',              // agents/inquiry-agent.js
   ]),
 });
 

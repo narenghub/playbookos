@@ -380,7 +380,20 @@ async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', product
     productTypeLabel, bodyHtml: textToHtml(body), specsTable, controlled, ctaLabel,
     ...(ctaUrl ? { ctaUrl } : {}),
   });
-  const ok = await sendEmail({ to: inquiry.buyer_email, subject, html, from: SALES_FROM, replyTo: 'sales@abiozen.com', cc });
+  // ── THIS IS THE ONE PLACE THIS AGENT EMAILS SOMEBODY OUTSIDE THE COMPANY ──
+  //
+  // Eleven call sites funnel through here, which is why the containment belongs here and not at
+  // each of them. It declares an explicit kill-switch identity so that
+  // `workflow:legacy-inquiry-buyer-email` stops autonomous buyer email on its own — without
+  // silencing the internal briefings, scores and alerts that a `capability:email.send` stop takes
+  // down with it.
+  //
+  // This is containment, not governance. The path still has no approval boundary, no durable
+  // evidence before the external effect and no idempotency comparable to the supplier RFQ claim.
+  // Naming it makes it stoppable; migrating it into the governed architecture is separate work.
+  const ok = await sendEmail({ to: inquiry.buyer_email, subject, html, from: SALES_FROM,
+    replyTo: 'sales@abiozen.com', cc,
+    workflow: 'legacy-inquiry-buyer-email', agent: 'inquiry-agent' });
   await logMessage(inquiry.id, { direction: 'outbound', sender_name: REP_NAME, sender_email: 'sales@abiozen.com', subject, body_text: body, body_html: html });
   await query(`UPDATE inquiries SET total_emails_sent=COALESCE(total_emails_sent,0)+1, last_email_at=NOW(), updated_at=NOW() WHERE id=$1`, [inquiry.id]);
   return ok;

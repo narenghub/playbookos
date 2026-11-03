@@ -495,7 +495,13 @@ async function sendRFQEmails(rfqIds, dryRun = false) {
       }
       const html = `<div style="font-family:Arial;font-size:14px;line-height:1.6;color:#222;white-space:pre-wrap">${esc(body)}</div>`;
 
-      const ok = await sendEmail({ to: s.contact_email, subject, html, from: fromLine, replyTo: sig.email });
+      // Declares an explicit kill-switch identity for the same reason the inquiry path does: this
+      // is an external send on a pre-kernel path, and `workflow:legacy-supplier-rfq-email` can now
+      // stop it alone. The fail-closed signatory guard above is the primary control; this is the
+      // operator's handle on the workflow itself.
+      const ok = await sendEmail({ to: s.contact_email, subject, html, from: fromLine,
+        replyTo: sig.email,
+        workflow: 'legacy-supplier-rfq-email', agent: 'procurement-agent' });
       if (!ok) {
         await rfqClaim.markFailed(query, claimId, 'send refused by the mail provider');
         out.failed++; out.details.push(`${rfq.molecule_name}/${s.name}: send failed`);

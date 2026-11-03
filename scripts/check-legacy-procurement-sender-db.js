@@ -72,13 +72,13 @@ if (!url) {
   process.exit(0);
 }
 process.env.DATABASE_URL = url;
-process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'sk-ant-stub';
+process.env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'PLACEHOLDER-not-a-key';
 // procurement-agent pulls in core.js transitively, which refuses to load without this.
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'legacy-sender-check';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'PLACEHOLDER-not-a-secret';
 // WITHOUT THIS THE MAILER REFUSES BEFORE THE REQUEST, so the fetch stub below is never reached —
 // and the mutation control then reports "nothing was sent" and proves nothing. A stub key makes
 // the provider call happen against the stub, which is what lets case 3 and M1 actually measure.
-process.env.RESEND_API_KEY = process.env.RESEND_API_KEY || 're_stub_key_for_fixture';
+process.env.RESEND_API_KEY = process.env.RESEND_API_KEY || 'PLACEHOLDER-not-a-key';
 process.env.MAIL_FROM = process.env.MAIL_FROM || 'Fixture <fixture@example.invalid>';
 
 // ── THE PROVIDER AND MAILER ARE BOTH STUBBED ───────────────────────────────

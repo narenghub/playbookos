@@ -109,7 +109,18 @@ function encodeAttachments(attachments) {
 // cannot carry one. Deliberately NOT done by changing sendEmail's return type to an object: every
 // existing `if (await sendEmail(...))` would then be unconditionally true and every failure path in the
 // codebase would go quiet — which is the exact shape of the eight-week outage this file already documents.
-async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments, capability = 'email.send' }) {
+// ── workflow / agent ARE OPTIONAL AND ADDITIVE ──────────────────────────────
+//
+// The kill switch has always supported workflow and agent scopes; this function never passed them,
+// so the ONLY scope that could reach an email was `capability:email.send` — which is every email
+// in the platform. Containing one ungoverned external sender therefore meant silencing the 6pm
+// scores, the briefings and the team tasks along with it.
+//
+// A caller that declares its workflow can now be stopped by name. A caller that declares nothing
+// behaves exactly as before, so this adds precision without moving anything that already worked:
+// an undeclared send is still covered by the capability and global scopes.
+async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments,
+  capability = 'email.send', workflow = null, agent = null }) {
   // ── THE KILL SWITCH, BEFORE THE PROVIDER CALL ────────────────────────────
   //
   // Placed here rather than at each of the ~37 routes and 37 crons that can cause an email, so
@@ -140,7 +151,14 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   const OBSERVABILITY = new Set(['email.alert']);
   try {
     const { checkStopped, recordRefusal } = require('./autonomy');
-    const blocked = await checkStopped({ capability }, { consequential: !OBSERVABILITY.has(capability) });
+    // Scopes are passed only when declared. matchStop compares each scope type it is GIVEN, so an
+    // absent workflow cannot accidentally match a workflow stop, and a global or capability stop
+    // still dominates whatever is declared here.
+    const blocked = await checkStopped({
+      capability,
+      ...(workflow ? { workflow } : {}),
+      ...(agent ? { agent } : {}),
+    }, { consequential: !OBSERVABILITY.has(capability) });
     if (blocked) {
       const reason = `STOPPED_BY_POLICY: ${blocked.scope_type}`
         + `${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`;
