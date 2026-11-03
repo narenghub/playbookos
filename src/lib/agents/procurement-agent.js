@@ -2,7 +2,7 @@
 // v1: pulls market-intelligence demand and has Claude propose sourcing tasks, routed
 // to the approval queue for the CEO.
 // v2: takes APPROVED sourcing tasks, matches suppliers, generates + sends RFQ emails
-// from Palash, and scores the responses he logs — eliminating manual supplier research.
+// from the active procurement signatory, and scores the responses logged against them.
 const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
@@ -41,11 +41,31 @@ async function callClaude(prompt, { maxTokens = 1500, json = false } = {}) {
   } catch (e) { return { data: null, text: null, error: e.message }; }
 }
 
-// Palash (procurement_director) is the RFQ sender + recipient of comparisons.
-async function getPalash() {
-  return (await query(
-    `SELECT id, name, email FROM users WHERE role='procurement_director' AND is_active=1 ORDER BY created_at LIMIT 1`
-  )).rows[0] || { name: 'Palash Das', email: 'palash@abiozen.com', id: null };
+// ── WHO THIS AGENT SENDS AS, AND WHY IT IS NOT A CONSTANT ───────────────────
+//
+// THIS FUNCTION USED TO END IN A HARDCODED PERSON:
+//
+//     )).rows[0] || { name: 'Palash Das', email: 'palash@abiozen.com', id: null };
+//
+// Palash Das left the organization. The query above filters `is_active=1`, so once he was
+// deactivated it returned NOTHING and the fallback took over — meaning the departure made the
+// hardcoded identity MORE likely to be used, not less. This cron would have sent real supplier
+// RFQs from, signed by, and reply-to a departed Procurement Director, every Tuesday, indefinitely.
+// Nothing would have failed. The only thing stopping it was that `abiozen.com` is unauthorized in
+// Resend, and a provider rejection is not a control.
+//
+// THE RESOLVER IS THE GOVERNED ONE. `office/procurement-rfq.js` resolveSignatory is already
+// production-validated for exactly this question — active procurement_director, then
+// procurement_team, then an admin/super_admin fallback, and NULL when there is nobody. Reusing it
+// means the legacy weekly cron and the governed kernel path cannot disagree about who speaks for
+// Abiozen procurement, which two separate resolvers would eventually do.
+//
+// IT FAILS CLOSED. No authorized signatory → no sender → nothing is sent. Defaulting to a name,
+// any name, is how a departed employee ends up writing to suppliers.
+const { resolveSignatory } = require('../office/procurement-rfq');
+
+async function getSignatory() {
+  return resolveSignatory({ query });
 }
 // Naresh gets the weekly brief.
 async function getNaresh() {
@@ -280,7 +300,9 @@ async function generateRFQsFromApprovals({ weekStart } = {}) {
      ORDER BY created_at DESC`
   )).rows;
 
-  const palash = await getPalash();
+  // The RFQ's assignee. NULL rather than a departed person: an unassigned RFQ is visible as
+  // unassigned, whereas one owned by somebody who has left looks handled and is not.
+  const sig = await getSignatory();
   const created = [];
   for (const a of approvals) {
     const m = parseApproval(a.action_payload, a.action_type);
@@ -298,7 +320,7 @@ async function generateRFQsFromApprovals({ weekStart } = {}) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9,$10,NOW())
        ON CONFLICT (week_start, molecule_name) DO NOTHING`,
       [rfqId, m.molecule_name, m.cas_number, m.target_quantity, m.target_purity, m.gmp_required,
-       week, String(a.priority || 'medium').toLowerCase(), palash.id, a.id]
+       week, String(a.priority || 'medium').toLowerCase(), sig ? sig.id : null, a.id]
     );
     const suppliers = await matchSuppliers(m, 3);
     created.push({ rfq_id: rfqId, ...m, suppliers });
@@ -316,10 +338,16 @@ async function generateRFQsFromApprovals({ weekStart } = {}) {
 // Throwing rather than falling back, because a renderer handed unapproved identity has no safe
 // default. A dry run passes `{ ...mol, __approvedByDecision: 'dry-run' }` so previews still work
 // without claiming or sending.
-async function generateRFQEmail(mol, supplier, rfqId) {
+async function generateRFQEmail(mol, supplier, rfqId, sig) {
   if (!mol || mol.__approvedByDecision === undefined || mol.__approvedByDecision === null) {
     throw new Error('generateRFQEmail requires identity facts approved by rfq-identity-guard; '
       + 'it must not re-derive identity from the RFQ row');
+  }
+  // The signatory is REQUIRED and is never defaulted here. The same reasoning as the approved
+  // identity above: a renderer that can invent who the letter is from is a renderer that will.
+  if (!sig || !sig.name || !sig.email || !sig.title) {
+    throw new Error('generateRFQEmail requires a resolved active signatory: no supplier letter may '
+      + 'be written without an authorized person to send it from');
   }
   const gmpBlock = mol.gmp_required
     ? '- GMP certificate and DMF availability (this is a GMP-grade requirement)\n' : '';
@@ -338,10 +366,10 @@ ${gmpBlock}- COA format / availability
 
 Tone: concise, courteous, industry-standard B2B pharma procurement. Open with a brief line about Abiozen sourcing this molecule for its US customers. Do NOT invent prices, volumes beyond those stated, or commitments. Close with the signature block exactly:
 
-Palash Das
-Procurement Director
+${sig.name}
+${sig.title}
 Abiozen LLC
-palash@abiozen.com`;
+${sig.email}`;
   const { text, error } = await callClaude(prompt, { maxTokens: 900 });
   const subject = `RFQ — ${mol.molecule_name}${mol.cas_number ? ' (' + mol.cas_number + ')' : ''} — Abiozen LLC`;
   return { subject, body: text || null, error };
@@ -349,7 +377,7 @@ palash@abiozen.com`;
 
 // ── Function 4 — send RFQ emails ──────────────────────────────────────────────
 // dryRun=true (default is caller's choice) logs the email without sending. Real
-// sends go FROM palash@abiozen.com to the supplier's contact_email. NOTE: these
+// sends go FROM the RESOLVED ACTIVE SIGNATORY to the supplier's contact_email. NOTE: these
 // reach REAL external companies — verify contact_email accuracy before enabling.
 async function sendRFQEmails(rfqIds, dryRun = false) {
   const out = { sent: 0, failed: 0, skipped: 0, dryRun, details: [] };
@@ -371,8 +399,19 @@ async function sendRFQEmails(rfqIds, dryRun = false) {
     return out;
   }
 
-  const palash = await getPalash();
-  const fromLine = `${palash.name || 'Palash Das'} <${palash.email || 'palash@abiozen.com'}>`;
+  // ── FAIL CLOSED BEFORE ANY SUPPLIER IS CONTACTED ──────────────────────────
+  const sig = await getSignatory();
+  if (!sig) {
+    // `details` is this function's channel — runProcurementAgent maps it onto `errors`. The
+    // idempotency refusal above uses the same one; a second channel here would be a message
+    // nobody reads.
+    out.details.push('REFUSED: no active procurement signatory could be resolved, so no supplier RFQ was '
+      + 'sent: there is nobody these letters could honestly be from. Fill procurement_director or '
+      + 'procurement_team in Team Management.');
+    out.blocked = true;
+    return out;
+  }
+  const fromLine = `${sig.name} <${sig.email}>`;
 
   for (const rfqId of rfqIds) {
     const rfq = (await query('SELECT * FROM rfq_requests WHERE id=$1', [rfqId])).rows[0];
@@ -446,7 +485,7 @@ async function sendRFQEmails(rfqIds, dryRun = false) {
       });
       if (!claimId) { out.skipped++; continue; }   // another execution holds it
 
-      const { subject, body, error } = await generateRFQEmail(mol, s, rfqId);
+      const { subject, body, error } = await generateRFQEmail(mol, s, rfqId, sig);
       if (!body) {
         // The claim is kept and marked failed rather than deleted. Deleting it would reopen the
         // window; a kept row says "this pair was attempted and did not send", which is a fact.
@@ -456,7 +495,7 @@ async function sendRFQEmails(rfqIds, dryRun = false) {
       }
       const html = `<div style="font-family:Arial;font-size:14px;line-height:1.6;color:#222;white-space:pre-wrap">${esc(body)}</div>`;
 
-      const ok = await sendEmail({ to: s.contact_email, subject, html, from: fromLine, replyTo: palash.email });
+      const ok = await sendEmail({ to: s.contact_email, subject, html, from: fromLine, replyTo: sig.email });
       if (!ok) {
         await rfqClaim.markFailed(query, claimId, 'send refused by the mail provider');
         out.failed++; out.details.push(`${rfq.molecule_name}/${s.name}: send failed`);
@@ -513,7 +552,7 @@ async function scoreAndRankSuppliers(rfqId, { notify = true } = {}) {
     summary = (await callClaude(
       `You are a pharmaceutical procurement analyst. In 3-4 sentences, summarise this supplier comparison for ${rfq.molecule_name} and justify the recommended supplier (highest score). Be specific about the price/lead-time/quality trade-off. Do not invent data.\n\n${table}`,
       { maxTokens: 400 })).text;
-    const palash = await getPalash();
+    const sig = await getSignatory();
     const rows = ranked.map((r, i) => `<tr style="background:${i === 0 ? '#f0fdf4' : '#fff'}">
       <td style="padding:6px 10px;border:1px solid #e2e8f0">${i === 0 ? '⭐ ' : ''}${esc(r.supplier_name)}</td>
       <td style="padding:6px 10px;border:1px solid #e2e8f0">$${esc(r.price_per_kg)}/kg</td>
@@ -521,8 +560,10 @@ async function scoreAndRankSuppliers(rfqId, { notify = true } = {}) {
       <td style="padding:6px 10px;border:1px solid #e2e8f0">${esc(r.gmp_status || '—')}</td>
       <td style="padding:6px 10px;border:1px solid #e2e8f0">${r.coa_available ? 'Yes' : 'No'}</td>
       <td style="padding:6px 10px;border:1px solid #e2e8f0;font-weight:700">${esc(r.score)}</td></tr>`).join('');
-    await sendEmail({
-      to: palash.email,
+    // Skipped rather than defaulted when nobody holds the role. An internal notification that
+    // cannot be addressed is not a reason to invent an addressee.
+    if (sig) await sendEmail({
+      to: sig.email,
       subject: `Supplier comparison ready — ${rfq.molecule_name}`,
       html: `<div style="font-family:Arial;max-width:640px">
         <h2 style="color:#1B3A6B">Supplier comparison — ${esc(rfq.molecule_name)}</h2>
@@ -555,16 +596,16 @@ async function runProcurementAgent({ dryRun = false, weekStart } = {}) {
     out.errors = send.details;
   }
 
-  const palash = await getPalash();
+  const sig = await getSignatory();
   const naresh = await getNaresh();
   if (!dryRun && rfqs.length) {
     const molList = rfqs.map(r => `${r.molecule_name}${r.cas_number ? ' (' + r.cas_number + ')' : ''}`).join(', ');
-    await sendEmail({ to: palash.email, subject: `${out.emails_sent} RFQ emails dispatched this week`,
+    if (sig) await sendEmail({ to: sig.email, subject: `${out.emails_sent} RFQ emails dispatched this week`,
       html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#1B3A6B">Procurement Agent — RFQs sent</h2>
         <p style="font-size:14px">Sent <strong>${out.emails_sent}</strong> RFQ emails to suppliers for <strong>${rfqs.length}</strong> molecules this week.</p>
         <p style="font-size:13px;color:#555">Molecules: ${esc(molList)}</p>
         <p><a href="${BASE_URL()}/#procurement-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Procurement Agent →</a></p></div>` }).catch(() => {});
-    if (naresh && naresh.email && naresh.email !== palash.email) {
+    if (naresh && naresh.email && (!sig || naresh.email !== sig.email)) {
       await sendEmail({ to: naresh.email, subject: `Procurement Agent: ${rfqs.length} RFQs dispatched this week`,
         html: `<div style="font-family:Arial"><p>Procurement Agent dispatched <strong>${out.emails_sent}</strong> RFQ emails across <strong>${rfqs.length}</strong> molecules this week (${esc(week)}).</p></div>` }).catch(() => {});
     }

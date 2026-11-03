@@ -3362,7 +3362,7 @@ function renderMarketSummary(s, week){
   el.innerHTML = card('Identified this week', s.total||0, week?('Week of '+week):'no data yet', '#1B3A6B')
     + card('Already in catalog', s.in_catalog||0, 'we have these', '#0D7377')
     + card('New opportunities', s.new_opportunities||0, 'not in catalog', '#1D9E75')
-    + card('Procurement tasks', s.tasks_queued||0, "queued for Palash", '#d97706')
+    + card('Procurement tasks', s.tasks_queued||0, "queued for procurement", '#d97706')
     + card('Weeks tracked', s.weeks_tracked||0, 'history depth', '#6b46c1');
 }
 
@@ -3373,7 +3373,7 @@ function miTable(headers, bodyRows){
   </table>`;
 }
 function miActions(m){
-  const a = `<button onclick="assignToProcurement('${miEsc(m.molecule_name)}','${miEsc(m.cas_number||'')}')" style="background:#0D7377;color:#fff;border:none;padding:5px 9px;border-radius:4px;font-size:11px;cursor:pointer">Assign to Palash</button>`;
+  const a = `<button onclick="assignToProcurement('${miEsc(m.molecule_name)}','${miEsc(m.cas_number||'')}')" style="background:#0D7377;color:#fff;border:none;padding:5px 9px;border-radius:4px;font-size:11px;cursor:pointer">Assign to procurement</button>`;
   const s = miCanSeo() ? `<button onclick="generateSeoContent('${miEsc(m.molecule_name)}','${miEsc(m.cas_number||'')}',this)" style="background:#1B3A6B;color:#fff;border:none;padding:5px 9px;border-radius:4px;font-size:11px;cursor:pointer;margin-left:4px">Gen SEO</button>` : '';
   return a+s;
 }

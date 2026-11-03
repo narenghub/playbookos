@@ -238,8 +238,8 @@ If fewer than 10 real molecules can be identified in the candidates, return fewe
 // Generates 150 molecules/week — 100 non-GMP research chemicals + 50 GMP generic
 // APIs — deduped against molecule_history (best-effort, name+CAS) so nothing
 // repeats, cross-checked against the catalog, stored, with sourcing tasks queued
-// for Palash and a summary emailed to the CEO. CAS numbers are AI-generated and
-// must be verified by Palash before sourcing.
+// for the active procurement signatory and a summary emailed to the CEO. CAS numbers are
+// AI-generated and must be verified by procurement before sourcing.
 const MI_MODEL = 'claude-opus-4-7';
 
 // Monday (UTC) of the given date's week, as YYYY-MM-DD.
@@ -444,12 +444,25 @@ async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
     );
   }
 
-  // 9. Procurement tasks — top 20 research + top 10 GMP → approval_queue for Palash.
-  const palash = (await query(
-    `SELECT id FROM users WHERE is_active=1 AND (LOWER(name) LIKE '%palash%' OR role='procurement')
-     ORDER BY (LOWER(name) LIKE '%palash%') DESC LIMIT 1`
-  )).rows[0];
-  const palashId = palash ? palash.id : null;
+  // ── 9. Procurement tasks → approval_queue, OWNED BY THE ACTIVE SIGNATORY ──
+  //
+  // THIS QUERY MATCHED A PERSON BY NAME AND PREFERRED HIM:
+  //
+  //     WHERE is_active=1 AND (LOWER(name) LIKE '%palash%' OR role='procurement')
+  //     ORDER BY (LOWER(name) LIKE '%palash%') DESC
+  //
+  // Two defects in four lines. It bound task ownership to one human's NAME rather than to the role
+  // he happened to hold, so it would have followed him anywhere and preferred him over whoever
+  // actually held the job. And its fallback, `role='procurement'`, is not a role this platform has
+  // — the twelve roles include procurement_director and procurement_team — so once the name stopped
+  // matching, the OR branch matched nothing and every queued sourcing task was owned by nobody.
+  //
+  // Resolved from the role hierarchy instead, through the same authority the governed path and the
+  // weekly RFQ cron now use. Null when there is genuinely nobody: an unowned task shows as unowned,
+  // which is true, whereas one owned by a departed employee looks handled.
+  const { resolveSignatory } = require('../office/procurement-rfq');
+  const sig = await resolveSignatory({ query });
+  const ownerUserId = sig ? sig.id : null;
 
   // Dedup guard: collect molecules that already have a market-intelligence task
   // queued for THIS week (from any prior/overlapping run in the last 14 days), so
@@ -471,7 +484,7 @@ async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
     await query(
       `INSERT INTO approval_queue (id, agent_name, action_type, action_payload, requested_for_user_id, status, priority)
        VALUES ($1,'market-intelligence',$2,$3,$4,'pending',$5)`,
-      [crypto.randomUUID(), actionType, JSON.stringify({ task, molecule: r.molecule_name, cas: r.cas_number, gmp_status: r.gmp_status, week_start: week }), palashId, priority]
+      [crypto.randomUUID(), actionType, JSON.stringify({ task, molecule: r.molecule_name, cas: r.cas_number, gmp_status: r.gmp_status, week_start: week }), ownerUserId, priority]
     );
     tasksQueued++;
   };
@@ -512,10 +525,10 @@ async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
         html: `<div style="font-family:Arial;max-width:640px;line-height:1.6;color:#333">
   <h2 style="color:#1B3A6B;margin:0 0 4px">Market Intelligence — Week of ${week}</h2>
   <p>${research.length} research chemicals (non-GMP) + ${gmp.length} GMP APIs identified.</p>
-  <p><b>${summary.in_catalog}</b> already in catalog · <b>${summary.new_opportunities}</b> new opportunities · <b>${tasksQueued}</b> sourcing tasks queued for Palash's review.</p>
+  <p><b>${summary.in_catalog}</b> already in catalog · <b>${summary.new_opportunities}</b> new opportunities · <b>${tasksQueued}</b> sourcing tasks queued for procurement review.</p>
   <h3 style="color:#0D7377;margin:16px 0 4px">Top 5 research chemicals</h3><ul>${topR || '<li>none</li>'}</ul>
   <h3 style="color:#0D7377;margin:16px 0 4px">Top 5 GMP APIs by market size</h3><ul>${topG || '<li>none</li>'}</ul>
-  <p style="font-size:12px;color:#a00">⚠ CAS numbers are AI-generated and must be verified by Palash before sourcing.</p>
+  <p style="font-size:12px;color:#a00">⚠ CAS numbers are AI-generated and must be verified by procurement before sourcing.</p>
   <p><a href="${base}/#market-intelligence">Open Market Intelligence →</a></p>
 </div>`,
       });

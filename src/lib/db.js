@@ -102,7 +102,7 @@ async function initDB() {
     -- never re-suggests the same one (dedup by name+CAS across the whole table;
     -- the generator excludes the rolling last-12-weeks list). gmp_status is
     -- 'gmp' (generic API) or 'non_gmp' (research chemical). sourcing_status is
-    -- Palash's pipeline state. details_json holds the full generated record
+    -- the procurement pipeline state. details_json holds the full generated record
     -- (purity, price, market size, patent status, etc.) for the UI / CSV export.
     CREATE TABLE IF NOT EXISTS molecule_history (
       id TEXT PRIMARY KEY,
@@ -266,8 +266,11 @@ async function initPhase2() {
 
     const steps = [
       ['Target set',1,100,'complete','Naresh','2026-04-01'],
-      ['SKU catalog',2,60,'in_progress','Palash','2026-05-25'],
-      ['Sales outreach loaded',3,40,'in_progress','Palash','2026-05-28'],
+      // Owner is a FUNCTION, not a person. These rows are seeded on boot, so a named individual
+      // here is re-created as a live owner every restart — which is how a departed employee keeps
+      // owning work. 'Procurement' names the responsibility; who holds it is resolved from `users`.
+      ['SKU catalog',2,60,'in_progress','Procurement','2026-05-25'],
+      ['Sales outreach loaded',3,40,'in_progress','Procurement','2026-05-28'],
       ['Orders live',4,0,'pending','Dev team','2026-05-31'],
       ['India fulfillment',5,20,'at_risk','Naresh','2026-05-15'],
       ['QC reports ready',6,50,'in_progress','Utkarsh','2026-05-31'],

@@ -81,8 +81,8 @@ async function addTables() {
 
   const steps = [
     ['Target set', 1, 100, 'complete', 'Naresh', '2026-04-01'],
-    ['SKU catalog', 2, 60, 'in_progress', 'Palash', '2026-05-25'],
-    ['Sales outreach loaded', 3, 40, 'in_progress', 'Palash', '2026-05-28'],
+    ['SKU catalog', 2, 60, 'in_progress', 'Procurement', '2026-05-25'],
+    ['Sales outreach loaded', 3, 40, 'in_progress', 'Procurement', '2026-05-28'],
     ['Orders live', 4, 0, 'pending', 'Dev team', '2026-05-31'],
     ['India fulfillment', 5, 20, 'at_risk', 'Naresh', '2026-05-15'],
     ['QC reports ready', 6, 50, 'in_progress', 'Utkarsh', '2026-05-31'],

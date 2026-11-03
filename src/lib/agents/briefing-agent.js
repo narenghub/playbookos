@@ -213,7 +213,7 @@ ACTIONS FOR TODAY
 Rules:
 - Every line must reference an actual number or specific item from the data above.
 - No hedging words. Direct statements only.
-- Each action names an owner (Naresh, Palash, sales, marketing, qc, devs) and a verifiable success criterion.
+- Each action names an owner (Naresh, procurement, sales, marketing, qc, devs) and a verifiable success criterion.
 - One sentence per numbered line, max.
 - If a section truly has fewer than 3 items worth listing, write "(none today)" for the missing lines rather than padding.
 

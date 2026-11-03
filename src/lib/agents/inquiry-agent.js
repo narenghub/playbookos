@@ -804,7 +804,22 @@ ${signatory}`;
     leadTime: pricing.lead_time_days, docs: docsLine, total,
   });
   const subject = `Quotation ${ref} — ${inq.molecule_name} (${qtyKg}kg) | Abiozen LLC`;
-  await sendAndLog(inq, { subject, body, specsTable, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API', controlled, ctaLabel: 'Reply "ACCEPTED" to Proceed &rarr;', cc: isResearch ? ['naren@abiozen.com'] : ['palash@abiozen.com', 'naren@abiozen.com'] });
+  // ── THE CC ON AN EXTERNAL QUOTATION IS RESOLVED, NOT HARDCODED ───────────
+  //
+  // This read `['palash@abiozen.com', 'naren@abiozen.com']` for GMP quotes: a departed
+  // Procurement Director, written into the recipient list of a letter that goes to a CUSTOMER.
+  // Hardcoded, so no change to the organization could ever correct it, and on the outside of the
+  // company rather than the inside.
+  //
+  // The procurement copy is now the active signatory or NOBODY. The CEO address stays as the
+  // literal it always was — that is the company principal on his own domain, and resolving it here
+  // is a separate change this ruling does not call for.
+  const procurementCc = isResearch ? null : await getUser('procurement_director')
+    .catch(() => null);
+  const quoteCc = isResearch
+    ? ['naren@abiozen.com']
+    : [...(procurementCc && procurementCc.email ? [procurementCc.email] : []), 'naren@abiozen.com'];
+  await sendAndLog(inq, { subject, body, specsTable, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API', controlled, ctaLabel: 'Reply "ACCEPTED" to Proceed &rarr;', cc: quoteCc });
   await query(`UPDATE inquiries SET status='quote_sent', order_value_usd=$1, quote_ref=$3, updated_at=NOW() WHERE id=$2`, [total, inquiryId, ref]);
 
   if (needsApproval || total > ESCALATE_ABOVE) {
@@ -828,11 +843,12 @@ async function escalateToHuman(inquiryId, reason = 'buyer requested a human') {
     `🚨 URGENT: Inquiry escalated to human — ${inq.buyer_name || 'Buyer'} at ${inq.buyer_company || '?'} for ${inq.molecule_name} — Est. value: $${Number(value).toLocaleString()}. Reason: ${reason}`,
     { user_id: naresh.id || null, message_type: 'inquiry_escalation' }).catch(() => {});
 
-  // Full conversation to Palash.
+  // Full conversation to the active procurement signatory, resolved by ROLE. Skipped when nobody
+  // holds it: an escalation that cannot be addressed is not a reason to invent an addressee.
   const msgs = (await query('SELECT direction, sender_name, body_text, created_at FROM inquiry_messages WHERE inquiry_id=$1 ORDER BY created_at', [inquiryId])).rows;
   const thread = msgs.map(m => `<div style="margin:8px 0;padding:8px;background:${m.direction === 'inbound' ? '#eff6ff' : '#f8fafc'};border-radius:6px"><strong>${m.direction === 'inbound' ? '⬅ ' + esc(m.sender_name || 'Buyer') : '➡ Abiozen'}</strong><div style="font-size:12px;white-space:pre-wrap;margin-top:4px">${esc(String(m.body_text || '').slice(0, 1500))}</div></div>`).join('');
-  const palash = await getUser('procurement_director');
-  if (palash) await sendEmail({ to: palash.email, cc: 'naren@abiozen.com',
+  const procurement = await getUser('procurement_director');
+  if (procurement) await sendEmail({ to: procurement.email, cc: 'naren@abiozen.com',
     subject: `Escalated GMP inquiry — ${inq.buyer_company || inq.buyer_email} — ${inq.molecule_name}`,
     html: `<div style="font-family:Arial;max-width:680px"><h2 style="color:#991B1B">Inquiry escalated to human</h2>
       <p style="font-size:14px"><strong>Buyer:</strong> ${esc(inq.buyer_name)} at ${esc(inq.buyer_company)} (${esc(inq.buyer_email)})<br>
@@ -1248,7 +1264,7 @@ async function seedMoleculePricing() {
 }
 
 // Payment confirmed (Stripe webhook or manual): open the order, move to production,
-// and notify buyer + Naresh + Palash. Idempotent — safe to call more than once
+// and notify buyer + Naresh + procurement. Idempotent — safe to call more than once
 // (Stripe may deliver a webhook multiple times).
 async function markPaymentReceived(inquiryId, { amount } = {}) {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
@@ -1290,9 +1306,9 @@ async function markPaymentReceived(inquiryId, { amount } = {}) {
   if (naresh.whatsapp_number) await sendWhatsApp(naresh.whatsapp_number,
     `💰 PAYMENT RECEIVED — ${inq.buyer_company || inq.buyer_name || inq.buyer_email} — ${inq.molecule_name} $${(amount || advance).toLocaleString()} — Order ${inq.quote_ref || ''}`,
     { user_id: naresh.id || null, message_type: 'payment_received' }).catch(() => {});
-  // Palash: start production.
-  const palash = await getUser('procurement_director');
-  if (palash) await sendEmail({ to: palash.email, cc: 'naren@abiozen.com',
+  // Procurement: start production. Resolved by role; skipped when nobody holds it.
+  const procurement = await getUser('procurement_director');
+  if (procurement) await sendEmail({ to: procurement.email, cc: 'naren@abiozen.com',
     subject: `START PRODUCTION — ${inq.molecule_name} ${qtyStr} — Payment confirmed`,
     html: `<div style="font-family:Arial;max-width:640px"><h2 style="color:#1B3A6B">Payment confirmed — start production</h2>
       <p style="font-size:14px"><strong>Order:</strong> ${esc(inq.quote_ref || '')} · <strong>Buyer:</strong> ${esc(inq.buyer_company || inq.buyer_email)}<br>

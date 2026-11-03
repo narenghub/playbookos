@@ -210,6 +210,11 @@ step "the pre-release report can go red and writes nothing" node scripts/check-p
 # harness asserts what must remain impossible, including claimed → superseded, which is the one
 # ordering that must never happen.
 step "supersession is one transition and no wider" node scripts/check-office-supersede-db.js
+# The LEGACY weekly RFQ cron — the one that sends real supplier email with no approval boundary.
+# It resolved its sender with `... AND is_active=1` and a hardcoded fallback to a named human, so
+# DEACTIVATING a departed director SELECTED him. The mailer is a spy here, so "never called" is
+# counted; M1 restores the fallback and proves a letter then goes out over his name.
+step "the legacy RFQ cron cannot send as a departed employee" node scripts/check-legacy-procurement-sender-db.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one
