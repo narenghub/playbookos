@@ -45,6 +45,10 @@ const { initDB, query } = require('../src/lib/db');
 // The SHIPPED validator, not a second copy. A CAS check digit implemented twice is two authorities
 // that can disagree, which is the defect class this repo fails builds over.
 const { validCas } = require('../src/lib/catalogue/cas');
+// The evidence gathering is a pure function under test, because the first version of this script
+// omitted skus.cas_number from its own aggregate and reported "none on record" for five SKUs that
+// each hold a checksum-valid CAS. See src/lib/catalogue/sku-identity.js.
+const { casEvidenceFor } = require('../src/lib/catalogue/sku-identity');
 
 if (REPORT && !REPORTING) {
   console.error(`--report=${REPORT} is not a format. Use --report=json.`);
@@ -107,15 +111,16 @@ const tableExists = async (t) => Boolean((await query(
 
     // A CAS is evidence only when it passes the check digit AND was printed on the molecule's own
     // line. Anything else is a candidate.
-    const casFromPricing = pricing.map((p) => p.cas_number).filter(validCas);
-    const casSameLine = supplied.filter((r) => r.cas && r.confidence === 'high' && validCas(r.cas));
-    const casNearby = supplied.filter((r) => r.cas && r.confidence !== 'high');
-    const distinctValidCas = [...new Set([...casFromPricing, ...casSameLine.map((r) => r.cas)])];
+    const cas = casEvidenceFor({ skuRow: s, pricingRows: pricing, supplierRows: supplied, validCas });
+    const distinctValidCas = cas.all_checksum_valid;
 
-    const unresolved = [];
-    if (!distinctValidCas.length) unresolved.push('CAS — no checksum-valid CAS on record anywhere');
-    if (distinctValidCas.length > 1) unresolved.push(`CAS — ${distinctValidCas.length} DIFFERENT valid CAS on record: ${distinctValidCas.join(', ')}`);
+    const unresolved = [...cas.unresolved];
     unresolved.push('substance_form — base / salt / ester / hydrate: not recorded in any table');
+    // The census found 113 canonical groups holding CONFLICTING checksum-valid CAS numbers, 109 of
+    // them merged by salt-stripping alone. For a peptide the form is not a detail: leuprolide
+    // 53714-56-0 and leuprolide acetate 74381-53-6 are different substances to order.
+    unresolved.push('peptide identity — sequence, modifications and counterion have no column in '
+      + 'molecules, so a peptide cannot be represented even once the spine is referenced');
     if (!spine.molecules) unresolved.push('molecule_id — the canonical spine does not exist yet');
     if (!s.supplier) unresolved.push('supplier — blank on the SKU row');
 
@@ -126,7 +131,7 @@ const tableExists = async (t) => Boolean((await query(
       supplier_on_row: s.supplier || null,
       is_gmp: s.is_gmp === 1,
       units_sold: s.units_sold,
-      identity_on_the_sku_row: 'NONE — skus holds no CAS, form or molecule reference',
+      cas_evidence: cas,
       name_matches: {
         molecule_pricing: pricing.map((p) => ({ name: p.molecule_name, cas: p.cas_number,
           cas_checksum_valid: validCas(p.cas_number) })),
@@ -152,8 +157,12 @@ const tableExists = async (t) => Boolean((await query(
     if (!REPORTING) {
       say(`── ${s.name}   [${s.id}]`);
       say(`     category ${String(s.category || '(none)').padEnd(18)} supplier on row: ${s.supplier || '(blank)'}`);
-      say(`     identity on the SKU row: NONE (skus holds no CAS, form or molecule reference)`);
-      say(`     checksum-valid CAS on record: ${distinctValidCas.length ? distinctValidCas.join(', ') : 'none'}`);
+      // Derived from the row, never asserted. The hardcoded version of this line contradicted the
+      // schema probe printed a few lines above it.
+      say(`     cas_number on the row: ${cas.on_sku_row || '(blank)'}`
+        + `${cas.on_sku_row ? (cas.on_sku_row_checksum_valid ? '  CHECKSUM-VALID' : '  CHECKSUM-INVALID') : ''}`);
+      say(`     cas provenance: ${cas.on_sku_row_provenance}`);
+      say(`     checksum-valid CAS anywhere: ${distinctValidCas.length ? distinctValidCas.join(', ') : 'none'}`);
       say(`     name matches — pricing ${pricing.length} · DMF ${dmf.length} · supplier_products ${supplied.length}`);
       for (const r of supplied.slice(0, 6)) {
         say(`        ${r.supplier.slice(0, 28).padEnd(30)} ${(r.cas || '(no CAS)').padEnd(14)}`
