@@ -184,3 +184,68 @@ test('an empty run reports zeroes rather than throwing', () => {
   const l = ladder({});
   for (const [, n] of l) assert.equal(n, 0);
 });
+
+// ── THE ORDER-DEPENDENT COMPARISON THAT GOT THE ANSWER WRONG ────────────────
+
+const { linkIdenticalAttachments } = require('./measure');
+
+// The real Alivus thread, in the real order: the .eml comes FIRST, and the covering message's own
+// spreadsheet is collected after it. The digests are the real ones from the 4 Nov probe run.
+const EML_FIRST = () => [
+  {
+    filename: 'RE: Book1.xlsx.eml',
+    sha256: '7c8be27abeb47599742ca1ecf1f7b74d',
+    nested: {
+      ok: true,
+      attachments: [
+        { filename: 'image001.jpg', sha256: '0bea2cd9ba8d60401605b53648e8cf80' },
+        { filename: 'Abiozen - Samples - Revised.xlsx', sha256: '9d235a5be378fe1c7cbf3c46e84b2bbc' },
+      ],
+    },
+  },
+  { filename: 'Abiozen - Samples - Revised.xlsx', sha256: '9d235a5be378fe1c7cbf3c46e84b2bbc', nested: null },
+];
+
+test('a nested file is matched against attachments collected AFTER it', () => {
+  // The defect: comparing inside the read loop searched a list the match was not in yet, so this
+  // reported "NOT seen elsewhere" for two files whose digests were identical three lines apart.
+  const [eml, outer] = linkIdenticalAttachments(EML_FIRST());
+  const xlsx = eml.nested.attachments.find((a) => a.filename.endsWith('.xlsx'));
+  assert.equal(xlsx.identical_to, outer.filename,
+    'the nested spreadsheet is byte-for-byte the one attached beside it and must say so');
+});
+
+test('a nested file with no twin is reported as unique, not as a duplicate', () => {
+  const [eml] = linkIdenticalAttachments(EML_FIRST());
+  const jpg = eml.nested.attachments.find((a) => a.filename.endsWith('.jpg'));
+  assert.equal(jpg.identical_to, null, 'a file seen only inside the attached email must stay flagged');
+});
+
+test('a file is not a duplicate of the envelope that carried it', () => {
+  // A degenerate case worth pinning: if a .eml somehow shares a digest with its own payload, the
+  // container must not be offered as the match.
+  const same = 'aaaa1111';
+  const [eml] = linkIdenticalAttachments([
+    { filename: 'x.eml', sha256: same, nested: { ok: true, attachments: [{ filename: 'inner', sha256: same }] } },
+  ]);
+  assert.equal(eml.nested.attachments[0].identical_to, null);
+});
+
+test('resolution is order-independent — the reversed thread gives the same answer', () => {
+  const reversed = EML_FIRST().reverse();
+  linkIdenticalAttachments(reversed);
+  const eml = reversed.find((a) => a.filename.endsWith('.eml'));
+  const xlsx = eml.nested.attachments.find((a) => a.filename.endsWith('.xlsx'));
+  assert.equal(xlsx.identical_to, 'Abiozen - Samples - Revised.xlsx',
+    'the verdict changed with the order, which is the bug this replaced');
+});
+
+test('an unparseable or absent nested message is skipped without throwing', () => {
+  assert.doesNotThrow(() => linkIdenticalAttachments([
+    { filename: 'a.eml', sha256: 'x', nested: { ok: false, reason: 'no parts found' } },
+    { filename: 'b.pdf', sha256: 'y', nested: null },
+    { filename: 'c.pdf' },
+    null,
+  ]));
+  assert.doesNotThrow(() => linkIdenticalAttachments(undefined));
+});

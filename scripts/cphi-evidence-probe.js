@@ -52,6 +52,8 @@ const { isEvent } = require('../src/lib/events/registry');
 const { gmailClientFor } = require('../src/lib/gmail/client');
 const { readIncoming, otherParticipants, parseAddressList } = require('../src/lib/gmail/incoming');
 const { sniff } = require('../src/lib/catalogue/file-format');
+const { splitParticipants, domainOf } = require('../src/lib/gmail/participants');
+const { linkIdenticalAttachments } = require('../src/lib/catalogue/measure');
 const { partsOf } = require('../src/lib/catalogue/rfc822');
 const crypto = require('crypto');
 
@@ -190,11 +192,16 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
               // The digest is what answers "is this the same file we already parsed, or an older
               // version under the same name?" — Alivus's nested and outer spreadsheets share both
               // their filename and their size.
-              const same = entry.attachments.find((x) => x.sha256 === qd);
+              // Resolved AFTER the thread is fully read, not here: the .eml is opened before the
+              // covering message's own attachments have been collected, so a lookup at this point
+              // searches a list the match is not in yet. That order dependency reported Alivus's
+              // nested spreadsheet as "NOT seen elsewhere" when it is byte-for-byte the file
+              // attached beside it — and only the printed digests contradicted it.
+              const same = null;
               say(`             📎 ${q.filename || '(unnamed)'}  ${kb(q.bytes.length)}  → ${qs.format}`
                 + `${qs.readable ? '  (text extractable)' : ''}`);
               say(`                sha256 ${qd.slice(0, 32)}…`
-                + `${same ? `  ⟲ IDENTICAL to the thread's "${same.filename}"` : '  ★ NOT seen elsewhere in this thread'}`);
+                );
               rec.nested.attachments.push({ filename: q.filename, bytes: q.bytes.length,
                 sha256: qd, actual_format: qs.format, readable: qs.readable,
                 identical_to: same ? same.filename : null });
@@ -204,6 +211,19 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
         entry.attachments.push(rec);
       }
     }
+    // ── DUPLICATE RESOLUTION, ONCE THE WHOLE THREAD IS READ ──
+    // In src/lib/catalogue/measure.js, under test with the real Alivus ordering as its fixture.
+    linkIdenticalAttachments(entry.attachments);
+    for (const a of entry.attachments) {
+      if (!a.nested || !a.nested.ok) continue;
+      for (const q of a.nested.attachments) {
+        say(`   ${q.identical_to ? '⟲' : '★'} ${a.filename} → ${q.filename}`);
+        say(`        ${q.identical_to
+          ? `IDENTICAL to "${q.identical_to}" attached beside it — already extracted, nothing missing`
+          : 'NOT seen elsewhere in this thread — this content exists only inside the attached email'}`);
+      }
+    }
+
     if (nestedSeen.size) {
       say('   — people who appear ONLY inside an attached email —');
       for (const a2 of nestedSeen.values()) {
@@ -218,8 +238,13 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
   }
 
   // ── THE FINDINGS, GATHERED ──
-  const newPeople = record.flatMap((e) => (e.participants || [])
+  // An address on our own domain is never a contact to add, however absent from the roster. Palash
+  // appears on the Alivus thread because a supplier forwarded a message addressed to him — real
+  // provenance, and an action nobody should take.
+  const OUR_DOMAINS = [domainOf(FROM_MAILBOX)].filter(Boolean);
+  const unseen = record.flatMap((e) => (e.participants || [])
     .filter((p) => !p.known_contact).map((p) => ({ company: e.company, ...p })));
+  const { external: newPeople, internal: internalPeople } = splitParticipants(unseen, OUR_DOMAINS);
   const mismatches = record.flatMap((e) => (e.attachments || [])
     .filter((a) => a.extension_mismatch).map((a) => ({ company: e.company, ...a })));
   const nested = record.flatMap((e) => (e.attachments || [])
@@ -228,8 +253,14 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
 
   if (!REPORTING) {
     say('── FINDINGS ──\n');
-    say(`   ${newPeople.length} participant(s) on a thread who are NOT in our contacts`);
+    say(`   ${newPeople.length} EXTERNAL participant(s) not in our contacts — candidates to add`);
     for (const p of newPeople) say(`      ${p.company}: ${p.name || '(no name)'} <${p.email}>`);
+    if (internalPeople.length) {
+      say(`\n   ${internalPeople.length} address(es) on our OWN domain, present as historical`);
+      say('   provenance. These are NOT contacts to add, and a departed colleague appearing here');
+      say('   must not be re-created as live authority — he may exist in history, not as authority.');
+      for (const p of internalPeople) say(`      ${p.company}: ${p.name || '(no name)'} <${p.email}>`);
+    }
     say(`\n   ${mismatches.length} attachment(s) whose bytes disagree with their extension`);
     for (const m of mismatches) {
       say(`      ${m.company}: ${m.filename} — is ${m.actual_format}`
@@ -246,7 +277,12 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
     out.emitJson({
       event: EVENT, generated_at: new Date().toISOString(),
       wrote_nothing: true, sent_nothing: true, saved_nothing: true,
-      findings: { unknown_participants: newPeople, extension_mismatches: mismatches, nested_emails: nested },
+      findings: {
+        external_participants_not_in_contacts: newPeople,
+        internal_addresses_historical_only: internalPeople,
+        extension_mismatches: mismatches,
+        nested_emails: nested,
+      },
       threads: record,
     });
   }

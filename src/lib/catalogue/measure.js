@@ -116,4 +116,35 @@ function ladder({
 
 const ladderKey = (label) => label.replace(/[^a-z0-9]+/gi, '_').toLowerCase().replace(/^_|_$/g, '');
 
-module.exports = { makeDocRegistry, ladder, ladderKey, normName, normText, sha256 };
+// ── IS THIS NESTED FILE THE SAME AS ONE ATTACHED BESIDE IT? ─────────────────
+//
+// Rakesh forwarded an August message to Palash whose attachment is `Abiozen - Samples -
+// Revised.xlsx`, and attached a file of that same name and the same 17 KB to the covering message.
+// Whether the August list is a version we have never parsed, or simply the same file again, is
+// decided by the digest and by nothing else.
+//
+// The first attempt compared inside the read loop, which is wrong by construction: the `.eml` is
+// opened before the covering message's own attachments have been collected, so the lookup searched
+// a list the match was not in yet. It printed "NOT seen elsewhere in this thread" for two files
+// whose digests were visibly identical three lines apart, and only the printed digests contradicted
+// it. Resolution therefore happens ONCE, over the complete set.
+function linkIdenticalAttachments(attachments) {
+  const byDigest = new Map();
+  for (const a of attachments || []) {
+    if (!a || !a.sha256) continue;
+    if (!byDigest.has(a.sha256)) byDigest.set(a.sha256, []);
+    byDigest.get(a.sha256).push(a.filename);
+  }
+  for (const a of attachments || []) {
+    if (!a || !a.nested || !a.nested.ok) continue;
+    for (const q of a.nested.attachments || []) {
+      // "Elsewhere" excludes the container the nested file came out of — a file is not a duplicate
+      // of the envelope that carried it.
+      const elsewhere = (byDigest.get(q.sha256) || []).filter((f) => f !== a.filename);
+      q.identical_to = elsewhere.length ? elsewhere[0] : null;
+    }
+  }
+  return attachments;
+}
+
+module.exports = { makeDocRegistry, ladder, ladderKey, linkIdenticalAttachments, normName, normText, sha256 };
