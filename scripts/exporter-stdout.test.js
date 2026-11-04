@@ -114,6 +114,56 @@ test('NEGATIVE CONTROL: the redaction itself is load-bearing', () => {
   assert.equal(scrub('2 admin account(s)'), '2 admin account(s)', 'scrub altered ordinary text');
 });
 
+// ── A DEPENDENCY THAT PRINTS AT REQUIRE TIME ────────────────────────────────
+
+test('a noisy require is diverted when stdout is claimed first', () => {
+  // pdfjs-dist prints six lines to STDOUT the moment it is required, on any machine without the
+  // optional `canvas` module:
+  //
+  //     Warning: Cannot polyfill `DOMMatrix`, rendering may be broken ...
+  //
+  // cphi-catalogue-extract.js requires it. The first version of --report=json claimed stdout where
+  // the other flags are parsed — AFTER the requires — and emitted a document with those warnings
+  // above it, which does not parse. The guard was present and the output was still contaminated.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'noisyreq-'));
+  fs.writeFileSync(path.join(dir, 'noisy.js'), 'process.stdout.write("Warning: cannot polyfill\\n");');
+
+  const after = runChild(`
+    require(${JSON.stringify(path.join(dir, 'noisy.js'))});       // noisy require FIRST
+    const { payloadMode } = require(${GUARD});
+    payloadMode().emitJson({ ok: true });
+  `);
+  const before = runChild(`
+    const { payloadMode } = require(${GUARD});
+    const out = payloadMode();                                     // stream claimed FIRST
+    require(${JSON.stringify(path.join(dir, 'noisy.js'))});
+    out.emitJson({ ok: true });
+  `);
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+
+  // NEGATIVE CONTROL: requiring first really does contaminate, so the ordering is load-bearing.
+  assert.match(after.stdout, /cannot polyfill/,
+    'the noisy require did not contaminate stdout — this test is not measuring the ordering');
+  assert.throws(() => JSON.parse(after.stdout), 'contaminated stdout should not parse');
+
+  assert.doesNotMatch(before.stdout, /cannot polyfill/, `claiming first did not help:\n${before.stdout}`);
+  assert.deepEqual(JSON.parse(before.stdout), { ok: true });
+  assert.match(before.stderr, /cannot polyfill/, 'the warning was discarded rather than diverted');
+});
+
+test('cphi-catalogue-extract claims stdout before its noisy requires', () => {
+  const src = fs.readFileSync(path.join(SCRIPTS, 'cphi-catalogue-extract.js'), 'utf8');
+  const claim = src.indexOf('payloadMode()');
+  const pdf = src.indexOf("require('../src/lib/catalogue/pdf-text')");
+  assert.ok(claim > -1 && pdf > -1, 'the script no longer has both a claim and the pdf require');
+  assert.ok(claim < pdf,
+    'stdout is claimed AFTER pdfjs is required, so --report=json will begin with its startup '
+    + 'warnings and will not parse');
+  // --report must never also write. A run that reports and writes invites the report being read as
+  // a record of what was written.
+  assert.match(src, /REPORTING && EXECUTE/, 'the report/execute exclusion is gone');
+});
+
 // ── 4. A FAILURE LEAVES NOTHING ON STDOUT ───────────────────────────────────
 
 test('a failure exits non-zero and leaves stdout EMPTY, not truncated', () => {

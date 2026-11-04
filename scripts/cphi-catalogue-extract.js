@@ -26,6 +26,28 @@
 // so every file reports as it is read.
 'use strict';
 
+// ── STDOUT IS CLAIMED BEFORE ANYTHING ELSE IS REQUIRED ──────────────────────
+//
+// This block is first ON PURPOSE and must stay first. `pdfjs-dist` prints at REQUIRE time, and it
+// prints to STDOUT:
+//
+//     Warning: Cannot polyfill `DOMMatrix`, rendering may be broken: "Error: Cannot find module
+//     'canvas' ... Warning: Cannot polyfill `Path2D` ...
+//
+// Six lines, before a single statement of this script runs. Claiming the stream further down —
+// after the requires, where the other flags are parsed — produced a `--report=json` whose stdout
+// began with those warnings and did not parse. The guard was in place and the document was still
+// contaminated, because the contamination happened before the guard existed.
+//
+// So the report flag is read straight off argv here, ahead of every other require. The generalisable
+// rule: a payload-emitting script must claim stdout before loading anything that might print, and
+// "might print" includes a dependency's startup warning on a machine that lacks an optional
+// native module.
+const { payloadMode } = require('./lib/clean-stdout');
+const REPORT = ((process.argv.find((a) => a.startsWith('--report=')) || '').split('=')[1] || '').toLowerCase();
+const REPORTING = REPORT === 'json' || REPORT === 'csv';
+const out = REPORTING ? payloadMode() : null;
+
 const { initDB, query } = require('../src/lib/db');
 const { isEvent } = require('../src/lib/events/registry');
 const { gmailClientFor } = require('../src/lib/gmail/client');
@@ -34,6 +56,7 @@ const { normalizeCompany } = require('../src/lib/cphi/match-company');
 const { pdfToText } = require('../src/lib/catalogue/pdf-text');
 const { rowsFromText, rowsFromSheet } = require('../src/lib/catalogue/extract');
 const { classifyAll } = require('../src/lib/catalogue/classify');
+const { makeDocRegistry, ladder, ladderKey, normName } = require('../src/lib/catalogue/measure');
 
 const arg = (n, d) => {
   const h = process.argv.find((a) => a.startsWith(`--${n}=`));
@@ -44,6 +67,24 @@ const FROM_MAILBOX = arg('from', 'naren@abiozen.com');
 const ONLY = arg('supplier', null);
 const SHOW = Math.max(0, parseInt(arg('show', '12'), 10) || 0);
 const EXECUTE = process.argv.includes('--execute');
+// ── THE TRACEABILITY REPORT ─────────────────────────────────────────────────
+//
+//   --report=json   one document, every row with its full provenance
+//   --report=csv    the same, for a reviewer in a spreadsheet
+//
+// Read-only and incompatible with --execute, because a run that both reports and writes invites
+// reading the report as a record of what was written. REPORT itself is parsed at the top of the
+// file, ahead of the requires — see the note there.
+if (REPORTING && EXECUTE) {
+  console.error('--report and --execute are mutually exclusive. A run that both reports and writes '
+    + 'invites reading the report as a record of what was written. Run the report, read it, then '
+    + 'decide about --execute as a separate command.');
+  process.exit(2);
+}
+if (REPORT && !REPORTING) {
+  console.error(`--report=${REPORT} is not a format. Use --report=json or --report=csv.`);
+  process.exit(2);
+}
 // ── SEE THE TEXT BEFORE BELIEVING A ZERO ────────────────────────────────────
 //
 // The first live run read twelve PDFs that all HAD a text layer and returned zero products from
@@ -168,6 +209,31 @@ async function main() {
 
   const all = [];
   const skipped = [];
+  // ── DURABLE DOCUMENT IDENTITY ─────────────────────────────────────────────
+  //
+  // Sinopep sent `Brochure_3.12.2026_Generic_APIs_Sinopep.pdf` and
+  // `Brochure_Generic_APIs_--Sinopep 2026.pdf`: both 24 pages, both 37,094 characters, both 26
+  // products. The same document under two names, counted twice in every total.
+  //
+  // Filename cannot settle that — these differ. Byte equality cannot either, because a document
+  // re-saved or re-exported has different bytes and identical content. So identity is the SHA-256
+  // of the EXTRACTED CONTENT, whitespace-normalised: what the parser actually read. Two files that
+  // yield the same text are the same product list however they were produced.
+  //
+  // Duplicates are RECORDED, never dropped. The second file is real supplier evidence — they sent
+  // it — and deleting it would lose the fact that it arrived. It is marked `duplicate_of` the first
+  // and excluded from the distinct-product count.
+  // The registry and the ladder live in src/lib/catalogue/measure.js, under test with the real
+  // Sinopep duplicate and the real 19-examined/9-contributing shape as fixtures. Replacing one
+  // wrong number with nine unverified ones would not be an improvement.
+  const { docs, register } = makeDocRegistry();
+  const registerDoc = (d) => {
+    const doc = register(d);
+    if (doc.duplicate_of) {
+      say(`      ⟲ identical content to "${doc.duplicate_of}" — counted once, evidence kept`);
+    }
+    return doc;
+  };
 
   for (const r of rows) {
     let msgs;
@@ -196,6 +262,7 @@ async function main() {
       } catch (e) { skipped.push(`${r.company} · ${f.filename}: download failed — ${(e && e.message) || e}`); continue; }
 
       let res;
+      let doc = null;
       try {
         if (isPdf(f)) {
           const t = await pdfToText(buf);
@@ -206,6 +273,8 @@ async function main() {
           }
           res = rowsFromText(t.text, { file: f.filename, supplier: r.company, dictionary: ctx.dictionary });
           say(`      ${t.pages} page(s), ${t.chars} chars, ${res.rows.length} product(s), ${res.stats.high_confidence} high confidence`);
+          doc = registerDoc({ supplier: r.company, filename: f.filename, buf, bytes: buf.length,
+            extent: `${t.pages} page(s), ${t.chars} chars`, content: t.text });
           if (DUMP) {
             const lines = t.text.split('\n').filter((l) => l.trim());
             say(`      ── first ${Math.min(DUMP, lines.length)} non-empty line(s) of ${lines.length}:`);
@@ -217,24 +286,149 @@ async function main() {
           const XLSX = require('xlsx');
           const wb = XLSX.read(buf, { type: 'buffer' });
           res = { rows: [], unanchored: [], stats: {} };
+          const grids = [];
           for (const sheet of wb.SheetNames) {
             const grid = XLSX.utils.sheet_to_json(wb.Sheets[sheet], { header: 1, raw: false, defval: '' });
+            grids.push(grid);
             const r2 = rowsFromSheet(grid, { file: `${f.filename}#${sheet}`, supplier: r.company, dictionary: ctx.dictionary });
             res.rows.push(...r2.rows);
           }
           say(`      ${wb.SheetNames.length} sheet(s), ${res.rows.length} product(s)`);
+          // The parsed cells, not the file bytes: a workbook re-saved by Excel differs byte for
+          // byte while holding the same table.
+          doc = registerDoc({ supplier: r.company, filename: f.filename, buf, bytes: buf.length,
+            extent: `${wb.SheetNames.length} sheet(s)`, content: JSON.stringify(grids) });
         }
       } catch (e) { skipped.push(`${r.company} · ${f.filename}: parse failed — ${(e && e.message) || e}`); continue; }
 
-      for (const row of res.rows) all.push({ ...row, contact_id: r.contact_id });
+      for (const row of res.rows) {
+        all.push({
+          ...row,
+          contact_id: r.contact_id,
+          doc_index: doc ? doc.index : null,
+          source_doc_sha256: doc ? doc.content_sha256 : null,
+          duplicate_of_file: doc ? doc.duplicate_of : null,
+        });
+      }
     }
   }
 
   const { rows: classified, counts } = classifyAll(all, ctx);
 
-  say(`\n   ${classified.length} product row(s) from ${rows.length} supplier(s)\n`);
+  // ── THE MEASUREMENT LADDER ────────────────────────────────────────────────
+  //
+  // This used to print `${classified.length} product row(s) from ${rows.length} supplier(s)`, where
+  // `rows` is the query above — the suppliers whose threads were EXAMINED. On 4 Nov it read
+  // "508 product row(s) from 19 supplier(s)" when nine suppliers had contributed all 508 and the
+  // other ten contributed nothing. A number that reads as coverage while measuring the attempt,
+  // and it would have gone into a board update as supplier onboarding overstated twofold.
+  //
+  // Each line below counts a different thing, and none of them is a proxy for another. The two
+  // zeros at the bottom are the honest answer and not a gap in the report: clearance is a human
+  // judgement about one molecule in one jurisdiction, and nothing here publishes.
+  const levels = ladder({ threads: rows, rows: classified, normalizeCompany });
+  say('');
+  for (const [label, n] of levels) say(`   ${String(label).padEnd(44)} ${String(n).padStart(5)}`);
+  say('');
+  say('   commercially cleared is 0 by definition here: DMF registration is evidence of intent to');
+  say('   supply, not freedom to operate. Clearance is per molecule, per jurisdiction, by a human.');
+  say('   published is 0: nothing in PlaybookOS writes to abiozen.com.');
+  say('');
   for (const [k, v] of Object.entries(counts)) say(`      ${k.padEnd(14)} ${v}`);
   say();
+  const dupDocs = docs.filter((d) => d.duplicate_of);
+  if (dupDocs.length) {
+    say(`   ${dupDocs.length} duplicate document(s), kept as evidence and counted once:`);
+    for (const d of dupDocs) {
+      say(`      ${d.supplier} · ${d.filename}`);
+      say(`         identical extracted content to "${d.duplicate_of}"`);
+      say(`         content sha256 ${d.content_sha256.slice(0, 32)}…  (bytes differ: ${
+        d.bytes_sha256 !== docs[d.duplicate_of_index].bytes_sha256 ? 'yes' : 'no'})`);
+    }
+    say();
+  }
+
+  // ── THE PER-ROW TRACEABILITY REPORT ───────────────────────────────────────
+  //
+  // Every row carries where it came from and how its identity was reached, because the disposition
+  // cannot be reviewed without that. `cas_provenance` is the field that matters most: a CAS read
+  // from the same line as the name is evidence, and a CAS sitting near a name is a guess that
+  // happens to look identical once it is in a column.
+  if (REPORTING) {
+    const canon = (n) => {
+      const k = normName(n);
+      return {
+        on_dmf_register: ctx.dmfNames.has(k),
+        named_in_active_trials: ctx.trialNames.has(k),
+        matches_existing_catalogue: ctx.catalogueNames.has(k),
+      };
+    };
+    const uncertainty = (r) => {
+      const u = [];
+      if (!r.cas) u.push('no CAS printed');
+      if (r.cas && r.confidence !== 'high') u.push(`CAS not on the name's line (${r.name_source})`);
+      if (r.confidence === 'low') u.push('name read from a neighbouring line');
+      if (r.name_source === 'dictionary') u.push('name matched by dictionary, not printed as a product');
+      if (!r.name) u.push('no name found');
+      if (r.duplicate_of_file) u.push('row comes from a duplicate document');
+      return u;
+    };
+    const record = (r) => ({
+      source_supplier: r.supplier,
+      source_document: r.source_file,
+      source_document_sha256: r.source_doc_sha256,
+      source_line: r.line,
+      extracted_name: r.name,
+      cas: r.cas || null,
+      cas_provenance: r.cas ? (r.confidence === 'high' ? 'printed on the same line as the name'
+        : `NOT on the name's line — ${r.name_source}`) : 'none printed',
+      identity_verified: Boolean(r.cas && r.confidence === 'high'),
+      grade: r.grade || null,
+      markers: r.markers || null,
+      duplicate_classification: r.duplicate_of_file
+        ? `duplicate of ${r.duplicate_of_file} (identical extracted content)` : 'unique document',
+      canonical_match: canon(r.name),
+      uncertainty: uncertainty(r),
+      use_class: r.use_class || null,
+      listing_notice: r.listing_notice || null,
+      patent_check: r.patent_check || null,
+      proposed_disposition: r.decision,
+      proposed_reason: r.reason,
+      priority: r.priority,
+    });
+
+    if (REPORT === 'json') {
+      out.emitJson({
+        event: EVENT,
+        generated_at: new Date().toISOString(),
+        wrote_nothing: true,
+        measurement: Object.fromEntries(levels.map(([k, v]) => [ladderKey(k), v])),
+        rules: {
+          identity: 'identity_verified requires a checksum-valid CAS printed on the same line as the '
+            + 'name. An adjacent CAS or a name similarity is NOT identity.',
+          clearance: 'DMF registration is evidence of intent to supply, not freedom to operate. '
+            + 'commercially_cleared_products is 0 until a human clears a molecule for a jurisdiction.',
+          duplicates: 'Duplicate documents are recorded, never deleted — the supplier did send them.',
+        },
+        documents: docs,
+        rows: classified.map(record),
+      });
+    } else {
+      const cols = ['source_supplier', 'source_document', 'source_line', 'extracted_name', 'cas',
+        'cas_provenance', 'identity_verified', 'grade', 'duplicate_classification', 'use_class',
+        'listing_notice', 'proposed_disposition', 'proposed_reason', 'priority', 'uncertainty'];
+      const cell = (v) => {
+        const s = v == null ? '' : (Array.isArray(v) ? v.join('; ') : String(v));
+        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      out.emitLine(cols.join(','));
+      for (const r of classified) {
+        const rec = record(r);
+        out.emitLine(cols.map((c) => cell(rec[c])).join(','));
+      }
+    }
+    return;                                  // a report NEVER falls through to the write path
+  }
 
   if (SHOW && classified.length) {
     say(`   top ${Math.min(SHOW, classified.length)} by priority:`);
