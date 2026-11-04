@@ -187,6 +187,19 @@ const PURITY = /\b\d{2}(\.\d+)?\s*%/;
       units_in_stock: s.units_in_stock,
       lead_time_days: s.lead_time_days,
       purity_claim_in_title: PURITY.test(s.name) ? (s.name.match(PURITY) || [])[0] : null,
+      // SUPPLIER DOCUMENTATION — its own category per the ruling, and omitted by the first
+      // version of this audit, which listed 23 column names and then displayed a hand-picked
+      // subset. A report that names a field and does not show it is worse than one that never
+      // looked: the reader believes it was checked.
+      purity_field: Object.prototype.hasOwnProperty.call(s, 'purity') ? (s.purity ?? null) : '(no column)',
+      currency: Object.prototype.hasOwnProperty.call(s, 'currency') ? (s.currency ?? null) : '(no column)',
+      sds_link: s.sds_link ?? null,
+      sds_status: s.sds_status ?? null,
+      coa_link: s.coa_link ?? null,
+      coa_status: s.coa_status ?? null,
+      owner_user_id: s.owner_user_id ?? null,
+      // Every remaining column, verbatim, so nothing is hidden by my choice of what to print.
+      all_columns: Object.fromEntries(Object.entries(s)),
       claim_words_present: claimsIn(text),
       research_use_notice_present: /research use|not for human|ruo|laboratory use/i.test(text),
       buyer_restriction_fields_on_row: noticeFields.length ? noticeFields : [],
@@ -204,6 +217,11 @@ const PURITY = /\b\d{2}(\.\d+)?\s*%/;
       field('sale price', r.sale_price);
       field('units sold / stock', `${r.units_sold} / ${r.units_in_stock}`);
       field('purity claim in title', r.purity_claim_in_title || 'none');
+      field('purity field', r.purity_field);
+      field('currency', r.currency);
+      field('CoA', `${r.coa_status || '(no status)'}  ${r.coa_link || '(no link)'}`);
+      field('SDS', `${r.sds_status || '(no status)'}  ${r.sds_link || '(no link)'}`);
+      field('owner_user_id', r.owner_user_id);
       field('claim words present', r.claim_words_present.length ? r.claim_words_present.join(', ') : 'none');
       field('research-use notice', r.research_use_notice_present ? 'PRESENT' : 'ABSENT');
       field('restriction columns', r.buyer_restriction_fields_on_row.length
@@ -213,7 +231,12 @@ const PURITY = /\b\d{2}(\.\d+)?\s*%/;
         field('algolia hits', r.algolia.nbHits);
         for (const h of r.algolia.records) {
           say(`        ${h.objectID}  ${String(h.name || '').slice(0, 34).padEnd(36)}`
-            + ` active=${h.is_active} price=${h.price} notice=${h.notice || 'none'}`);
+            + ` active=${h.is_active === null || h.is_active === undefined ? 'NO SUCH FIELD' : h.is_active}`
+            + ` price=${h.price} notice=${h.notice || 'none'}`);
+          if (h.is_active === null || h.is_active === undefined) {
+            say('           ⚠ the index record carries NO is_active field, so deactivating this SKU');
+            say('             in Postgres cannot make it stop being returned by search');
+          }
         }
       } else field('algolia', 'not queried');
       say('');
