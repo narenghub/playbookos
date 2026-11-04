@@ -1,0 +1,190 @@
+{
+  "_provenance": {
+    "source_document": "Abiozen_MASTER_Supplier_Sourcing__1_.xlsx",
+    "source_sheet": "DO_NOT_LIST",
+    "transcribed_on": "2026-11-04",
+    "transcribed_by": "read-only transcription of an existing human-authored policy; no entry added, removed or reworded",
+    "authority": "the procurement team who authored the workbook — NOT this file, and NOT any script that reads it",
+    "verbatim_header": "These manufacturers may lawfully produce them. Abiozen cannot lawfully list them to US buyers."
+  },
+  "display_rules": [
+    {
+      "state": "DISPLAY - INQUIRY ONLY",
+      "applies_to": "Phase 1 non-oncology APIs and research peptides",
+      "note": "Live now"
+    },
+    {
+      "state": "HOLD - AROS GATE",
+      "applies_to": "Oncology / cytotoxic",
+      "note": "The buyer-verification gate is NOT built"
+    },
+    {
+      "state": "HOLD - LEGAL",
+      "applies_to": "REMS, FDA-withdrawn, not-US-approved, GLP-1",
+      "note": ""
+    },
+    {
+      "state": "DO NOT LIST",
+      "applies_to": "DEA controlled substances",
+      "note": "Not listable without registration"
+    }
+  ],
+  "do_not_list": [
+    {
+      "product": "Semaglutide",
+      "supplier": "Shilpa",
+      "reason_code": "GLP-1 / FDA ENFORCEMENT",
+      "detail": "FDA enforcement active on bulk GLP-1 compounding. CAS 910463-68-2"
+    },
+    {
+      "product": "Tirzepatide",
+      "supplier": "Shilpa",
+      "reason_code": "GLP-1 / FDA ENFORCEMENT",
+      "detail": "FDA enforcement active on bulk GLP-1 compounding. CAS 2023788-19-2"
+    },
+    {
+      "product": "Liraglutide",
+      "supplier": "Shilpa",
+      "reason_code": "GLP-1 / FDA ENFORCEMENT",
+      "detail": "FDA enforcement active on bulk GLP-1 compounding. CAS 204656-20-2"
+    },
+    {
+      "product": "Retatrutide",
+      "supplier": "Shilpa",
+      "reason_code": "GLP-1 / FDA ENFORCEMENT",
+      "detail": "FDA enforcement active on bulk GLP-1 compounding. CAS 2381089-83-2"
+    },
+    {
+      "product": "Eszopiclone",
+      "supplier": "Alivus",
+      "reason_code": "DEA CIV",
+      "detail": "Schedule IV controlled - Viyash also"
+    },
+    {
+      "product": "Lacosamide",
+      "supplier": "Alivus",
+      "reason_code": "DEA CV",
+      "detail": "Schedule V controlled - Viyash also"
+    },
+    {
+      "product": "Lomitapide Mesylate",
+      "supplier": "Alivus",
+      "reason_code": "REMS",
+      "detail": "Hepatotoxicity REMS program"
+    },
+    {
+      "product": "Solriamfetol",
+      "supplier": "Alivus",
+      "reason_code": "DEA CIV",
+      "detail": "Schedule IV controlled"
+    },
+    {
+      "product": "Zolpidem Tartrate",
+      "supplier": "Alivus",
+      "reason_code": "DEA CIV",
+      "detail": "Schedule IV controlled"
+    },
+    {
+      "product": "Clomiphene Citrate",
+      "supplier": "Viyash",
+      "reason_code": "REVIEW",
+      "detail": "Fertility agent - prescription sensitive"
+    },
+    {
+      "product": "Eszopiclone",
+      "supplier": "Viyash",
+      "reason_code": "DEA CIV",
+      "detail": "Schedule IV controlled - Alivus also"
+    },
+    {
+      "product": "Flibanserin",
+      "supplier": "Viyash",
+      "reason_code": "REVIEW",
+      "detail": "Was subject to REMS - alcohol interaction"
+    },
+    {
+      "product": "Lacosamide",
+      "supplier": "Viyash",
+      "reason_code": "DEA CV",
+      "detail": "Schedule V controlled - Alivus also"
+    },
+    {
+      "product": "Lisdexamfetamine Dimesylate",
+      "supplier": "Viyash",
+      "reason_code": "DEA CII",
+      "detail": "SCHEDULE II - amphetamine prodrug"
+    },
+    {
+      "product": "Mavacamten",
+      "supplier": "Viyash",
+      "reason_code": "REMS",
+      "detail": "Camzyos REMS program"
+    },
+    {
+      "product": "Meprobamate",
+      "supplier": "Viyash",
+      "reason_code": "DEA CIV",
+      "detail": "Schedule IV controlled"
+    },
+    {
+      "product": "Modafinil",
+      "supplier": "Viyash",
+      "reason_code": "DEA CIV",
+      "detail": "Schedule IV - Abiozen already deactivated this June 2026"
+    },
+    {
+      "product": "Phentermine HCl",
+      "supplier": "Viyash",
+      "reason_code": "DEA CIV",
+      "detail": "Schedule IV - anorectic"
+    },
+    {
+      "product": "Pregabalin",
+      "supplier": "Viyash",
+      "reason_code": "DEA CV",
+      "detail": "Schedule V - Abiozen already deactivated this June 2026"
+    },
+    {
+      "product": "Tapentadol HCl (Form-A)",
+      "supplier": "Viyash",
+      "reason_code": "DEA CII OPIOID",
+      "detail": "SCHEDULE II OPIOID - DEA registration required"
+    },
+    {
+      "product": "Tapentadol Phosphate",
+      "supplier": "Viyash",
+      "reason_code": "DEA CII OPIOID",
+      "detail": "SCHEDULE II OPIOID - DEA registration required"
+    },
+    {
+      "product": "Thalidomide",
+      "supplier": "Viyash",
+      "reason_code": "REMS",
+      "detail": "REMS-restricted teratogen - same class excluded from Shilpa P2"
+    },
+    {
+      "product": "Ranitidine HCl (Form-2)",
+      "supplier": "SMS",
+      "reason_code": "FDA WITHDRAWN",
+      "detail": "FDA requested removal of ALL ranitidine from US market Apr 2020 - NDMA carcinogen forms on storage. Do not list for US buyers."
+    },
+    {
+      "product": "Sibutramine HCl",
+      "supplier": "SMS",
+      "reason_code": "FDA WITHDRAWN + DEA CIV",
+      "detail": "Withdrawn from US market 2010 (cardiovascular risk) AND Schedule IV controlled. Do not list."
+    },
+    {
+      "product": "Domperidone / Domperidone Maleate",
+      "supplier": "SMS",
+      "reason_code": "NOT FDA APPROVED",
+      "detail": "Never approved in US; FDA import alert. Cardiac arrhythmia risk. Legal review required."
+    },
+    {
+      "product": "Pregabalin",
+      "supplier": "SMS",
+      "reason_code": "DEA CV",
+      "detail": "Schedule V controlled. Abiozen already deactivated this June 2026. Viyash also offers it."
+    }
+  ]
+}
