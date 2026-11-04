@@ -118,6 +118,9 @@ function partsOf(buf) {
     date: h.date || null,
     to: decodeWords(h.to) || null,
     cc: decodeWords(h.cc) || null,
+    // The message's own durable identity, independent of the Gmail id of whatever forwarded it.
+    // Two threads carrying the same forwarded message agree on this and on nothing else.
+    message_id: (h['message-id'] || '').trim() || null,
   };
 
   const parts = [];

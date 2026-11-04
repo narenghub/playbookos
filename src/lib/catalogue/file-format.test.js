@@ -221,3 +221,58 @@ test('an undecodable encoded word is left exactly as it arrived', () => {
   assert.equal(typeof decodeWords(weird), 'string');
   assert.ok(decodeWords('=?utf-8?B?' + 'x'.repeat(3) + '?=').length >= 0);
 });
+
+test("an attached message's own Message-ID is reported as its durable identity", () => {
+  // The Gmail id identifies whatever forwarded a message; the Message-ID identifies the message.
+  // Two threads carrying the same forwarded mail agree on this and on nothing else, which is what
+  // makes a cross-thread duplicate claim checkable.
+  const withId = [
+    'Message-ID: <AM0PR09MB1234567890@eurprd09.prod.outlook.com>',
+    'From: Sajan <sajan@chieron.com>',
+    'Content-Type: text/plain',
+    '',
+    'body',
+  ].join('\r\n');
+  const r = partsOf(Buffer.from(withId, 'binary'));
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.message_id, '<AM0PR09MB1234567890@eurprd09.prod.outlook.com>');
+
+  // Absent is null, never an invented value.
+  const without = partsOf(Buffer.from('From: x@y.com\r\nContent-Type: text/plain\r\n\r\nbody', 'binary'));
+  assert.equal(without.message_id, null);
+});
+
+test('no script implements its own CAS check digit', () => {
+  // src/lib/catalogue/cas.js is the one validator. A second implementation is two authorities that
+  // can disagree about whether 315-30-1 is a molecule, and the one that is wrong will be the one in
+  // the path that reaches a customer quote. This caught a duplicate in sku-identity-decisions.js
+  // before it shipped.
+  const fs2 = require('fs');
+  const path2 = require('path');
+  const root = path2.join(__dirname, '..', '..', '..');
+  const findings = [];
+  let scanned = 0;
+  for (const dir of ['scripts', path2.join('src', 'lib'), path2.join('src', 'api')]) {
+    const walk = (d) => {
+      let entries;
+      try { entries = fs2.readdirSync(d, { withFileTypes: true }); } catch (_) { return; }
+      for (const e of entries) {
+        const full = path2.join(d, e.name);
+        if (e.isDirectory()) { walk(full); continue; }
+        if (!e.name.endsWith('.js') || e.name.endsWith('.test.js')) continue;
+        if (full.endsWith(path2.join('catalogue', 'cas.js'))) continue;     // the one definition
+        scanned++;
+        const src = fs2.readFileSync(full, 'utf8');
+        if (/function validCas\s*\(|const validCas\s*=\s*\(/.test(src)) {
+          findings.push(path2.relative(root, full));
+        }
+      }
+    };
+    walk(path2.join(root, dir));
+  }
+  assert.ok(scanned >= 50, `the sweep scanned only ${scanned} files — it has stopped working`);
+  assert.deepEqual(findings, [],
+    `\n${findings.length} file(s) implement their own CAS check digit. There is one validator, in\n`
+    + 'src/lib/catalogue/cas.js. Two implementations are two authorities that can disagree.\n\n'
+    + findings.join('\n'));
+});

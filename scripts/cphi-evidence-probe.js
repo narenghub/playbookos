@@ -153,13 +153,15 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
         const s = sniff(bytes, a.filename);
         const digest = sha(bytes);
         const rec = { filename: a.filename, bytes: bytes.length, sha256: digest,
-          declared_mime: a.mimeType || null, actual_format: s.format, readable: s.readable,
+          in_gmail_message_id: m.id, declared_mime: a.mimeType || null,
+          actual_format: s.format, readable: s.readable,
           extension_mismatch: s.mismatch, note: s.note, nested: null };
         say(`   📎 ${a.filename}`);
         say(`        ${kb(bytes.length).padEnd(10)} bytes say: ${s.format.padEnd(8)}`
           + `${s.mismatch ? ' ⚠ EXTENSION MISMATCH' : ''}${s.readable ? '  (text extractable)' : ''}`);
         say(`        ${s.note}`);
-        say(`        sha256 ${digest.slice(0, 32)}…`);
+        say(`        sha256  ${digest}`);
+        say(`        in message  ${m.id}`);
 
         // An attached email: open it and report what IT carries.
         if (s.format === 'rfc822' || /\.eml$/i.test(a.filename) || /rfc822/i.test(a.mimeType || '')) {
@@ -174,7 +176,8 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
             say(`             to   ${inner.to || '(unknown)'}${inner.cc ? `  ·  cc ${inner.cc}` : ''}`);
             say(`             date ${inner.date || '(unknown)'}`);
             rec.nested = { ok: true, subject: inner.subject, from: inner.from, to: inner.to,
-              cc: inner.cc, date: inner.date, attachments: [] };
+              cc: inner.cc, date: inner.date, message_id: inner.message_id || null, attachments: [] };
+            if (inner.message_id) say(`             Message-ID ${inner.message_id}`);
             if (!inAtt.length) say('             (no attachments of its own)');
             // Participants of the ATTACHED message are swept too. Three people reached us only
             // this way — Erin Chang and Jim Chuang at ScinoPharm, Chandrakumar V at Chieron — and
@@ -200,8 +203,7 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
               const same = null;
               say(`             📎 ${q.filename || '(unnamed)'}  ${kb(q.bytes.length)}  → ${qs.format}`
                 + `${qs.readable ? '  (text extractable)' : ''}`);
-              say(`                sha256 ${qd.slice(0, 32)}…`
-                );
+              say(`                sha256  ${qd}`);
               rec.nested.attachments.push({ filename: q.filename, bytes: q.bytes.length,
                 sha256: qd, actual_format: qs.format, readable: qs.readable,
                 identical_to: same ? same.filename : null });
