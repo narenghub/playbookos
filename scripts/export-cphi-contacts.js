@@ -29,6 +29,7 @@
 'use strict';
 
 const { initDB, query } = require('../src/lib/db');
+const { payloadMode, quietly } = require('./lib/clean-stdout');
 const { EVENTS, isEvent } = require('../src/lib/events/registry');
 
 // 'cphi' is NOT the slug — the registry calls it cphi-milan-2026, and a default of 'cphi' found
@@ -64,8 +65,14 @@ const csvRow = (cells) => cells.map(csvCell).join(',');
 const HEADER = ['First Name', 'Last Name', 'Full Name', 'Email', 'Company', 'Title',
                 'Mobile Phone', 'Work Direct Phone', 'Website', 'Segment', 'Name Check', 'Card Note'];
 
+// In --print mode stdout is the CSV blocks and nothing else: the banner, the segment summary and
+// every warning below belong on stderr, because this output exists to be redirected into a file.
+// Claiming the stream (rather than wrapping initDB) means the summary diverts automatically and a
+// diagnostic added later cannot land in the file either.
+const out = PRINT ? payloadMode() : null;
+
 async function main() {
-  await initDB();
+  if (PRINT) await initDB(); else await quietly(() => initDB());
 
   if (!isEvent(EVENT)) {
     console.log(`✗ "${EVENT}" is not an event. Known events: ${EVENTS.map((e) => e.slug).join(', ')}\n`);
@@ -169,19 +176,18 @@ async function main() {
 
   for (const [seg, list] of Object.entries(bySegment)) {
     if (!list.length) continue;
-    console.log(`\n===== BEGIN CSV: ${seg} (${list.length} rows) =====`);
-    console.log(csvRow(HEADER));
+    out.emitLine(`===== BEGIN CSV: ${seg} (${list.length} rows) =====`);
+    out.emitLine(csvRow(HEADER));
     for (const r of list) {
       const s = splitName(r.name);
-      console.log(csvRow([
+      out.emitLine(csvRow([
         s.first, s.last, r.name, r.email, r.company, r.title,
         r.phone_mobile, r.phone_office, r.website, seg,
         s.safe ? '' : `CHECK: ${s.why}`, r.note || '',
       ]));
     }
-    console.log(`===== END CSV: ${seg} =====`);
+    out.emitLine(`===== END CSV: ${seg} =====`);
   }
-  console.log();
 }
 
 main().then(() => process.exit(0)).catch((e) => {

@@ -24,6 +24,7 @@
 'use strict';
 
 const { initDB, query } = require('../src/lib/db');
+const { payloadMode, quietly } = require('./lib/clean-stdout');
 
 const arg = (n, d) => {
   const h = process.argv.find((a) => a.startsWith(`--${n}=`));
@@ -41,8 +42,15 @@ const csvCell = (v) => {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
+// csv and json are payloads meant to be redirected into a file; the default is prose for a human.
+// The distinction decides who owns stdout, so it is made ONCE, here, and before anything prints.
+const PAYLOAD = FORMAT === 'csv' || FORMAT === 'json';
+
 async function main() {
-  await initDB();
+  // Claim stdout before initDB, because initDB is the thing that printed the banner into the file.
+  // Claiming it first also covers whatever prints next, rather than only the call known to print today.
+  const out = PAYLOAD ? payloadMode() : null;
+  if (PAYLOAD) await initDB(); else await quietly(() => initDB());
 
   const where = ['event_slug = $1'];
   const params = [EVENT];
@@ -69,14 +77,14 @@ async function main() {
     const cols = ['id', 'supplier', 'product_name', 'cas', 'grade', 'markers', 'confidence',
       'use_class', 'listing_notice', 'patent_check', 'suggested', 'priority',
       'review_status', 'source_file'];
-    console.log(cols.join(','));
-    for (const r of safe) console.log(cols.map((c) => csvCell(r[c])).join(','));
+    out.emitLine(cols.join(','));
+    for (const r of safe) out.emitLine(cols.map((c) => csvCell(r[c])).join(','));
     if (unsafe.length) console.error(`\n⚠ ${unsafe.length} row(s) omitted: no use_class. Re-run the extractor.`);
     return;
   }
 
   if (FORMAT === 'json') {
-    console.log(JSON.stringify({
+    out.emitJson({
       event: EVENT,
       generated_at: new Date().toISOString(),
       contract: {
@@ -88,7 +96,7 @@ async function main() {
       count: safe.length,
       omitted_without_use_class: unsafe.length,
       products: safe,
-    }, null, 2));
+    });
     return;
   }
 

@@ -36,6 +36,7 @@
 'use strict';
 
 const { initDB, query } = require('../src/lib/db');
+const { quietly } = require('./lib/clean-stdout');
 const { RUO_NOTICE } = require('../src/lib/catalogue/classify');
 const RUO_NOTICE_TEXT = RUO_NOTICE;
 
@@ -69,7 +70,9 @@ const STATUS_FOR = { approve: 'approved', reject: 'rejected', hold: 'held' };
 const say = (s = '') => console.log(s);
 
 async function main() {
-  await initDB();
+  // This tool's output is prose, not a payload — but it gets pasted into mail and tickets, so the
+  // banner and the super-admin address it names stay out of it. Diagnostics to stderr.
+  await quietly(() => initDB());
 
   // ── --set-use: a human clearing a molecule for commercial supply ────
   if (SET_USE) {

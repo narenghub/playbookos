@@ -99,6 +99,14 @@ pf_step "demand count runs on Postgres" node scripts/check-demand-count-sql.js
 # || 'literal'`. A scanner that fires on anything high-entropy gets muted, and then misses the real
 # one — the same alarm fatigue that let a broken cron send 168 false alerts a week unnoticed.
 pf_step "no committed credentials" node scripts/check-secrets.js
+
+# An exporter's stdout is a file somebody else opens. `initDB` prints the database banner — with the
+# super-admin address in it — and three of the four exporters wrote that into customer-bound CSVs
+# because the fix had been made in place in the fourth. The guard is now shared, and this proves the
+# banner cannot reach stdout, that an administrative address does not survive even into the diverted
+# diagnostic, that `--format=json` yields exactly one parseable document, and that a failure leaves
+# stdout EMPTY rather than half a handover file.
+pf_step "exporter stdout is uncontaminated" env JWT_SECRET=preflight node --test scripts/exporter-stdout.test.js
 # The pre-rotation snapshot is the only record of what a credential was before it was rotated, and
 # once rotated the before-state cannot be recreated. The first version kept it in /tmp on the
 # Railway container — and the procedure requires a redeploy between writing it and reading it, which

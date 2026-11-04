@@ -29,6 +29,7 @@
 
 const fs = require('fs');
 const { initDB, query } = require('../src/lib/db');
+const { payloadMode, quietly } = require('./lib/clean-stdout');
 const { groupSponsors, canonicalSponsor } = require('../src/lib/trials/sponsor');
 
 const argv = process.argv.slice(2);
@@ -59,6 +60,8 @@ const AREA = arg('area', '');
 const REGION = String(arg('region', '')).toUpperCase();
 const DAYS = Math.max(1, Math.min(365, parseInt(arg('days', '90'), 10) || 90));
 const OUT = arg('out', '');
+// Claimed at module load, before anything can print: see the note at initDB below.
+const out = OUT ? null : payloadMode();
 const STATUS = arg('status', 'RECRUIT');   // substring of overall_status
 // ── WHY ENROLMENT IS A FILTER AND A SORT ────
 // Therapeutic area is the obvious axis and it is the wrong one for some buyers. Mural Health sells
@@ -76,20 +79,23 @@ const esc = (v) => {
 
 async function main() {
   if (has('list-regions')) {
+    // An informational mode, not an export: its answer belongs on stdout where a caller can read
+    // or pipe it, and no database is opened, so there is no banner to keep out. Hand the stream
+    // back before printing — otherwise claiming stdout for the CSV silently redirects this too.
+    if (out) out.restore();
     for (const [k, v] of Object.entries(REGIONS)) console.log(`${k.padEnd(8)} ${v.length} countries`);
     process.exit(0);
   }
   // ── KEEP THE DATABASE BANNER OUT OF THE CSV ────
-  // initDB announces itself with console.log ("✅ PostgreSQL database ready. 2 admin account(s);
-  // super_admin: naren@abiozen.com"). This script writes the CSV to stdout so it can be
-  // redirected into a file, so that banner became LINE 1 of a spreadsheet on its way to a
-  // customer — a junk row in Excel, and our admin address published to someone outside the
-  // company. Nothing errored; the file simply had an extra line nobody looked at.
+  // The fix used to live here, inline, and that is exactly how it failed to protect anything else:
+  // three other exporters wrote the banner into customer-bound files while this copy was correct.
+  // It now comes from scripts/lib/clean-stdout.js, which claims the STREAM rather than wrapping the
+  // one call known to print today, and redacts administrative addresses out of the diagnostics it
+  // forwards. The history is in that module's header.
   //
-  // Anything a library prints during startup belongs on stderr when stdout is the product.
-  const realLog = console.log;
-  console.log = (...a) => console.error(...a);
-  try { await initDB(); } finally { console.log = realLog; }
+  // Without --out the CSV goes to stdout, so stdout is the product and payload mode owns it. With
+  // --out the CSV goes to a file and stdout is prose, so only the banner needs diverting.
+  if (OUT) await quietly(() => initDB()); else await initDB();
 
   const countries = REGIONS[REGION] || null;
   if (REGION && !countries) {
@@ -151,7 +157,7 @@ async function main() {
     fs.writeFileSync(OUT, csv);
     console.error(`\n   wrote ${OUT}`);
   } else {
-    process.stdout.write(`${csv}\n`);
+    out.emitRaw(`${csv}\n`);
   }
 
   // The summary goes to stderr so it never contaminates a piped CSV, and gives the numbers to
