@@ -79,9 +79,9 @@ test('the ladder never reports the examined set as the contributing set', () => 
   const l = ladder({ threads: THREADS, rows: ROWS });
   assert.equal(get(l, 'supplier threads examined'), 19);
   assert.equal(get(l, 'suppliers who replied'), 19);
-  assert.equal(get(l, 'suppliers with parseable product data'), 9,
+  assert.equal(get(l, 'suppliers with a MACHINE-READABLE catalogue'), 9,
     'the contributing count has collapsed back into the examined count — the original defect');
-  assert.notEqual(get(l, 'suppliers with parseable product data'), get(l, 'supplier threads examined'),
+  assert.notEqual(get(l, 'suppliers with a MACHINE-READABLE catalogue'), get(l, 'supplier threads examined'),
     'these two must be separately computed, not aliases');
 });
 
@@ -90,7 +90,7 @@ test('duplicate rows are counted and excluded from distinct products, not delete
     duplicate_of_file: 'Brochure_3.12.2026_Generic_APIs_Sinopep.pdf' };
   const l = ladder({ threads: THREADS, rows: [...ROWS, dup, { ...dup }] });
 
-  assert.equal(get(l, 'extracted product rows'), 11, 'duplicates must still be counted as extracted');
+  assert.equal(get(l, 'extracted candidate rows'), 11, 'duplicates must still be counted as extracted');
   assert.equal(get(l, 'duplicate rows (identical document content)'), 2);
   assert.equal(get(l, 'distinct candidate products'), 9, 'a duplicate row reached the distinct count');
 });
@@ -111,30 +111,72 @@ test('identity verification refuses an adjacent CAS, a dictionary name and a nei
 
 test('cleared and published are zero unless something actually cleared or published', () => {
   const l = ladder({ threads: THREADS, rows: ROWS });
-  assert.equal(get(l, 'commercially cleared products'), 0,
+  assert.equal(get(l, 'commercially qualified products'), 0,
     'clearance cannot be derived from extraction — it is per molecule, per jurisdiction, by a human');
   assert.equal(get(l, 'published marketplace products'), 0);
   // They are inputs, not constants, so a later system that really does clear or publish can report
   // it — but nothing in the extractor may set them.
   const l2 = ladder({ threads: THREADS, rows: ROWS, cleared: 7, published: 3 });
-  assert.equal(get(l2, 'commercially cleared products'), 7);
+  assert.equal(get(l2, 'commercially qualified products'), 7);
   assert.equal(get(l2, 'published marketplace products'), 3);
 });
 
-test('the ladder has all nine levels, in order, and each is a distinct question', () => {
+test('the ladder has all twelve levels, in order, and each is a distinct question', () => {
   const l = ladder({ threads: THREADS, rows: ROWS });
-  assert.equal(l.length, 9, 'a level has been added or dropped');
+  assert.equal(l.length, 12, 'a level has been added or dropped');
   assert.deepEqual(l.map(([k]) => ladderKey(k)), [
     'supplier_threads_examined',
     'suppliers_who_replied',
-    'suppliers_with_parseable_product_data',
-    'extracted_product_rows',
+    'suppliers_who_sent_a_catalogue',
+    'suppliers_with_a_machine_readable_catalogue',
+    'source_documents_received',
+    'distinct_source_documents',
+    'extracted_candidate_rows',
     'duplicate_rows_identical_document_content',
     'distinct_candidate_products',
     'identity_verified_same_line_checksum_cas',
-    'commercially_cleared_products',
+    'commercially_qualified_products',
     'published_marketplace_products',
   ]);
+});
+
+test('sending a catalogue and sending a READABLE catalogue are separate levels', () => {
+  // The real 4 Nov shape: 19 replied, 15 attached something, 9 of those could be read. Collapsing
+  // the middle two is what let fifteen catalogues sound like nine — or nine sound like nineteen.
+  const l = ladder({
+    threads: THREADS,
+    rows: ROWS,
+    suppliersWithCatalogue: new Set(['Alivus', 'Biophore', 'ChemWerth', 'Chieron', 'Egis',
+      'Reliance', 'Kelun', 'Sinopep', 'Synthon', 'Duorui', 'Emcure', 'Harbin', 'ZPC', 'Thinheal',
+      'Shanxi']),
+  });
+  assert.equal(get(l, 'suppliers who replied'), 19);
+  assert.equal(get(l, 'suppliers who sent a catalogue'), 15);
+  assert.equal(get(l, 'suppliers with a MACHINE-READABLE catalogue'), 9);
+  // Each strictly below the one above it. If any pair is equal by construction rather than by the
+  // data, a level has become an alias again.
+  assert.ok(get(l, 'suppliers who sent a catalogue') < get(l, 'suppliers who replied'));
+  assert.ok(get(l, 'suppliers with a MACHINE-READABLE catalogue') < get(l, 'suppliers who sent a catalogue'));
+});
+
+test('without a catalogue count, the level is a floor and never an estimate', () => {
+  // A supplier whose file parsed certainly sent one, so the parseable count is a safe lower bound.
+  // It must never be inflated by guessing.
+  const l = ladder({ threads: THREADS, rows: ROWS });
+  assert.equal(get(l, 'suppliers who sent a catalogue'), 9);
+  assert.equal(get(l, 'suppliers with a MACHINE-READABLE catalogue'), 9);
+});
+
+test('documents received and distinct documents are counted separately', () => {
+  const docs = [
+    { filename: 'a.pdf', duplicate_of: null },
+    { filename: 'b.pdf', duplicate_of: null },
+    { filename: 'b-copy.pdf', duplicate_of: 'b.pdf' },
+  ];
+  const l = ladder({ threads: THREADS, rows: ROWS, docs });
+  assert.equal(get(l, 'source documents received'), 3,
+    'both Sinopep sends must remain in the evidence trail');
+  assert.equal(get(l, 'distinct source documents'), 2, 'the duplicate was counted as distinct');
 });
 
 test('an empty run reports zeroes rather than throwing', () => {

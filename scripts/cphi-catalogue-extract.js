@@ -51,7 +51,7 @@ const out = REPORTING ? payloadMode() : null;
 const { initDB, query } = require('../src/lib/db');
 const { isEvent } = require('../src/lib/events/registry');
 const { gmailClientFor } = require('../src/lib/gmail/client');
-const { readIncoming } = require('../src/lib/gmail/incoming');
+const { readIncoming, looksLikeCatalogue } = require('../src/lib/gmail/incoming');
 const { normalizeCompany } = require('../src/lib/cphi/match-company');
 const { pdfToText } = require('../src/lib/catalogue/pdf-text');
 const { rowsFromText, rowsFromSheet } = require('../src/lib/catalogue/extract');
@@ -227,6 +227,10 @@ async function main() {
   // Sinopep duplicate and the real 19-examined/9-contributing shape as fixtures. Replacing one
   // wrong number with nine unverified ones would not be an improvement.
   const { docs, register } = makeDocRegistry();
+  // Suppliers who ATTACHED something that could be a product list, readable or not. This is the
+  // level between "replied" and "parseable" whose absence let fifteen catalogues sound like nine.
+  // `looksLikeCatalogue` is the same predicate cphi-replies.js reports with, so the two agree.
+  const suppliersWithCatalogue = new Set();
   const registerDoc = (d) => {
     const doc = register(d);
     if (doc.duplicate_of) {
@@ -249,6 +253,7 @@ async function main() {
       for (const a of p.attachments) files.push({ ...a, messageId: m.id });
     }
     if (!files.length) continue;
+    if (files.some(looksLikeCatalogue)) suppliersWithCatalogue.add(normalizeCompany(r.company));
 
     for (const f of files) {
       if (!isPdf(f) && !isSheet(f)) { skipped.push(`${r.company} · ${f.filename}: not a product list format`); continue; }
@@ -326,7 +331,8 @@ async function main() {
   // Each line below counts a different thing, and none of them is a proxy for another. The two
   // zeros at the bottom are the honest answer and not a gap in the report: clearance is a human
   // judgement about one molecule in one jurisdiction, and nothing here publishes.
-  const levels = ladder({ threads: rows, rows: classified, normalizeCompany });
+  const levels = ladder({ threads: rows, rows: classified, docs, suppliersWithCatalogue,
+    normalizeCompany });
   say('');
   for (const [label, n] of levels) say(`   ${String(label).padEnd(44)} ${String(n).padStart(5)}`);
   say('');

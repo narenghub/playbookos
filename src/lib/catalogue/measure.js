@@ -80,21 +80,36 @@ function makeDocRegistry() {
 // DMF filing is evidence a manufacturer intends commercial supply; it is not freedom to operate,
 // which is a legal question about one molecule, one territory and one date. published is 0 because
 // nothing here writes to the marketplace.
-function ladder({ threads = [], rows = [], normalizeCompany = normName, cleared = 0, published = 0 } = {}) {
+// `docs` is the document registry. `suppliersWithCatalogue` is the set of suppliers who ATTACHED
+// something that could be a product list, readable or not — the level between "replied" and
+// "parseable", and the one whose absence let fifteen catalogues sound like nine.
+function ladder({
+  threads = [], rows = [], docs = [], suppliersWithCatalogue = null,
+  normalizeCompany = normName, cleared = 0, published = 0,
+} = {}) {
   const notDup = rows.filter((r) => !r.duplicate_of_file);
   const distinct = new Set(notDup.map(
     (r) => `${normalizeCompany(r.supplier)}|${normName(r.name)}|${r.cas || ''}`));
   const verified = notDup.filter((r) => r.cas && r.confidence === 'high');
+  const parseable = new Set(rows.map((r) => normalizeCompany(r.supplier)));
+  // Fall back to the parseable set only when the caller does not know who attached something. It is
+  // a floor, never an estimate: a supplier whose file could be read certainly sent one.
+  const withCatalogue = suppliersWithCatalogue === null
+    ? parseable.size
+    : (suppliersWithCatalogue instanceof Set ? suppliersWithCatalogue.size : suppliersWithCatalogue);
 
   return [
     ['supplier threads examined', threads.length],
     ['suppliers who replied', new Set(threads.map((t) => normalizeCompany(t.company))).size],
-    ['suppliers with parseable product data', new Set(rows.map((r) => normalizeCompany(r.supplier))).size],
-    ['extracted product rows', rows.length],
+    ['suppliers who sent a catalogue', withCatalogue],
+    ['suppliers with a MACHINE-READABLE catalogue', parseable.size],
+    ['source documents received', docs.length],
+    ['distinct source documents', docs.filter((d) => !d.duplicate_of).length],
+    ['extracted candidate rows', rows.length],
     ['duplicate rows (identical document content)', rows.length - notDup.length],
     ['distinct candidate products', distinct.size],
     ['identity-verified (same-line checksum CAS)', verified.length],
-    ['commercially cleared products', cleared],
+    ['commercially qualified products', cleared],
     ['published marketplace products', published],
   ];
 }
