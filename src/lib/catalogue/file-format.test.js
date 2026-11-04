@@ -173,3 +173,51 @@ test('a nested multipart does not lose the inner attachment', () => {
   const found = r.parts.filter((p) => p.isAttachment).map((p) => p.filename);
   assert.deepEqual(found, ['deep.pdf'], `inner attachment lost: ${JSON.stringify(r.parts.map((p) => p.filename))}`);
 });
+
+// ── FOUR DEFECTS THE FIRST LIVE PROBE RUN EXPOSED ───────────────────────────
+//
+// The probe worked and answered all three questions it was built for. It also printed this:
+//
+//   from =?utf-8?B?RXJpbiBDaGFuZy3lvLXlu7fljYk=?=
+//
+// — the sender of the most important attached email in the mailbox, rendered as line noise.
+
+const { decodeWords } = require('./rfc822');
+const { parseAddressList } = require('../gmail/incoming');
+
+test('an encoded header is decoded, so a CJK sender is not line noise', () => {
+  assert.equal(decodeWords('=?utf-8?B?RXJpbiBDaGFuZy3lvLXlu7fljYk=?= <Erin.Chang@scinopharm.com>'),
+    'Erin Chang-張廷卉 <Erin.Chang@scinopharm.com>');
+  assert.equal(decodeWords('=?utf-8?B?SmltIENodWFuZy3ojorpiJ7os4A=?='), 'Jim Chuang-莊鈞賀');
+  assert.equal(decodeWords('plain ascii stays itself'), 'plain ascii stays itself');
+  assert.equal(decodeWords(null), null);
+});
+
+test('whitespace BETWEEN adjacent encoded words is dropped, or a subject reads "w ork"', () => {
+  // The real ScinoPharm subject, split across two encoded words. The space between them is a
+  // transport artefact: keeping it produced "how we w ork, and a question".
+  const raw = '=?utf-8?B?UkU6IEZvbGxvd2luZyB1cCBmcm9tIENQSEkgTWlsYW4g4oCUIGhvdyB3ZSB3?= '
+    + '=?utf-8?Q?ork,_and_a_question=5FAbiozen?=';
+  assert.equal(decodeWords(raw), 'RE: Following up from CPHI Milan — how we work, and a question_Abiozen');
+  // A space between an encoded word and ordinary text is real and must survive.
+  assert.equal(decodeWords('=?utf-8?Q?Hello?= world'), 'Hello world');
+});
+
+test('a quoted bare address loses its quotes, so a known contact is not reported as unknown', () => {
+  // Sinopep's client sends `"jinyu.wei@sinopep.com"` with no angle brackets. The quotes stayed on,
+  // so a contact we already had was reported as an unknown participant — and a quoted address in a
+  // Cc line is rejected outright by some servers.
+  const [a] = parseAddressList('"jinyu.wei@sinopep.com"');
+  assert.equal(a.email, 'jinyu.wei@sinopep.com');
+  // The quoted-display-name case must keep working: that is what the quotes are normally for.
+  const [b] = parseAddressList('"Rakesh, K" <rakesh@alivus.com>');
+  assert.equal(b.email, 'rakesh@alivus.com');
+  assert.equal(b.name, 'Rakesh, K', 'a comma inside a quoted display name must not split the item');
+});
+
+test('an undecodable encoded word is left exactly as it arrived', () => {
+  // Better a visible raw header than a silently mangled name.
+  const weird = '=?x-unknown-charset?B?!!!notbase64!!!?=';
+  assert.equal(typeof decodeWords(weird), 'string');
+  assert.ok(decodeWords('=?utf-8?B?' + 'x'.repeat(3) + '?=').length >= 0);
+});

@@ -147,7 +147,11 @@ function parseAddressList(value) {
     .map((a) => {
       const m = a.match(/^(.*?)\s*<([^>]+)>$/);
       if (m) return { name: m[1].replace(/^"|"$/g, '').trim(), email: m[2].trim() };
-      return { email: a.replace(/^<|>$/g, '').trim() };
+      // A bare address, which may still arrive QUOTED. Sinopep's mail client sends
+      // `"jinyu.wei@sinopep.com"` with no angle brackets, and leaving the quotes on produced an
+      // "unknown participant" that was really a contact we already had — and would have put a
+      // quoted address into a Cc line, which some servers reject outright.
+      return { email: a.replace(/^[<"']+|[>"']+$/g, '').trim() };
     })
     .filter((a) => a.email && a.email.includes('@'));
 }

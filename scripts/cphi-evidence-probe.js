@@ -50,9 +50,12 @@ const out = REPORTING ? payloadMode() : null;
 const { initDB, query } = require('../src/lib/db');
 const { isEvent } = require('../src/lib/events/registry');
 const { gmailClientFor } = require('../src/lib/gmail/client');
-const { readIncoming, otherParticipants } = require('../src/lib/gmail/incoming');
+const { readIncoming, otherParticipants, parseAddressList } = require('../src/lib/gmail/incoming');
 const { sniff } = require('../src/lib/catalogue/file-format');
 const { partsOf } = require('../src/lib/catalogue/rfc822');
+const crypto = require('crypto');
+
+const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
 
 const arg = (n, d) => {
   const h = process.argv.find((a) => a.startsWith(`--${n}=`));
@@ -113,6 +116,7 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
 
     // ── 1. PARTICIPANTS ──
     const seen = new Map();
+    const nestedSeen = new Map();
     for (const m of msgs) {
       const p = readIncoming(m);
       if (!p.fromEmail || p.fromEmail === String(FROM_MAILBOX).toLowerCase()) continue;
@@ -145,13 +149,15 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
         }
 
         const s = sniff(bytes, a.filename);
-        const rec = { filename: a.filename, bytes: bytes.length, declared_mime: a.mimeType || null,
-          actual_format: s.format, readable: s.readable, extension_mismatch: s.mismatch,
-          note: s.note, nested: null };
+        const digest = sha(bytes);
+        const rec = { filename: a.filename, bytes: bytes.length, sha256: digest,
+          declared_mime: a.mimeType || null, actual_format: s.format, readable: s.readable,
+          extension_mismatch: s.mismatch, note: s.note, nested: null };
         say(`   📎 ${a.filename}`);
         say(`        ${kb(bytes.length).padEnd(10)} bytes say: ${s.format.padEnd(8)}`
           + `${s.mismatch ? ' ⚠ EXTENSION MISMATCH' : ''}${s.readable ? '  (text extractable)' : ''}`);
         say(`        ${s.note}`);
+        say(`        sha256 ${digest.slice(0, 32)}…`);
 
         // An attached email: open it and report what IT carries.
         if (s.format === 'rfc822' || /\.eml$/i.test(a.filename) || /rfc822/i.test(a.mimeType || '')) {
@@ -168,16 +174,43 @@ const kb = (n) => `${Math.round(n / 1024)} KB`;
             rec.nested = { ok: true, subject: inner.subject, from: inner.from, to: inner.to,
               cc: inner.cc, date: inner.date, attachments: [] };
             if (!inAtt.length) say('             (no attachments of its own)');
+            // Participants of the ATTACHED message are swept too. Three people reached us only
+            // this way — Erin Chang and Jim Chuang at ScinoPharm, Chandrakumar V at Chieron — and
+            // the first version of this probe looked only at the outer thread, so it reported
+            // "0 findings" for exactly the message that carried the most new information.
+            for (const field of ['from', 'to', 'cc']) {
+              for (const a2 of parseAddressList(inner[field])) {
+                const k = a2.email.toLowerCase();
+                if (!nestedSeen.has(k)) nestedSeen.set(k, { ...a2, via: a.filename });
+              }
+            }
             for (const q of inAtt) {
               const qs = sniff(q.bytes, q.filename || '');
+              const qd = sha(q.bytes);
+              // The digest is what answers "is this the same file we already parsed, or an older
+              // version under the same name?" — Alivus's nested and outer spreadsheets share both
+              // their filename and their size.
+              const same = entry.attachments.find((x) => x.sha256 === qd);
               say(`             📎 ${q.filename || '(unnamed)'}  ${kb(q.bytes.length)}  → ${qs.format}`
                 + `${qs.readable ? '  (text extractable)' : ''}`);
+              say(`                sha256 ${qd.slice(0, 32)}…`
+                + `${same ? `  ⟲ IDENTICAL to the thread's "${same.filename}"` : '  ★ NOT seen elsewhere in this thread'}`);
               rec.nested.attachments.push({ filename: q.filename, bytes: q.bytes.length,
-                actual_format: qs.format, readable: qs.readable });
+                sha256: qd, actual_format: qs.format, readable: qs.readable,
+                identical_to: same ? same.filename : null });
             }
           }
         }
         entry.attachments.push(rec);
+      }
+    }
+    if (nestedSeen.size) {
+      say('   — people who appear ONLY inside an attached email —');
+      for (const a2 of nestedSeen.values()) {
+        const isNew = !known.has(a2.email.toLowerCase()) && !seen.has(a2.email.toLowerCase());
+        entry.participants.push({ name: a2.name || null, email: a2.email,
+          known_contact: !isNew, via_attached_email: a2.via });
+        say(`   ${isNew ? '➕ NOT IN CONTACTS' : '   on file         '}  ${(a2.name || '').slice(0, 34).padEnd(36)} ${a2.email}`);
       }
     }
     say('');

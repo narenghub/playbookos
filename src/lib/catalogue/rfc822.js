@@ -24,6 +24,33 @@
 
 const DECODE_LIMIT = 40 * 1024 * 1024;        // a sanity bound; CPHI attachments are single-digit MB
 
+// ── RFC 2047 ENCODED WORDS ──────────────────────────────────────────────────
+//
+// A header containing anything outside ASCII is transmitted encoded, and ScinoPharm's forwarded
+// message printed as:
+//
+//   from =?utf-8?B?RXJpbiBDaGFuZy3lvLXlu7fljYk=?=
+//
+// which is unreadable, so the sender of the most important attached email in the mailbox looked
+// like line noise. Decoded it is `Erin Chang-張廷卉`. Every CJK supplier on this campaign sends
+// headers this way, so leaving them raw makes the probe useless for most of the list.
+//
+// The subtlety worth keeping: whitespace BETWEEN two adjacent encoded words is a transport artefact
+// and must be dropped, or a subject split across two words reads "how we w ork".
+function decodeWords(value) {
+  if (value == null) return value;
+  const s = String(value).replace(/(=\?[^?]+\?[BbQq]\?[^?]*\?=)\s+(?==\?)/g, '$1');
+  return s.replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, (whole, charset, enc, text) => {
+    try {
+      const cs = /utf-?8/i.test(charset) ? 'utf8' : 'latin1';
+      if (enc.toUpperCase() === 'B') return Buffer.from(text, 'base64').toString(cs);
+      const bytes = text.replace(/_/g, ' ')
+        .replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
+      return Buffer.from(bytes, 'binary').toString(cs);
+    } catch (_) { return whole; }           // an undecodable word stays as it arrived
+  });
+}
+
 function headerBlock(buf) {
   // Headers end at the first blank line. Both CRLFCRLF and LFLF occur in the wild.
   for (const sep of ['\r\n\r\n', '\n\n']) {
@@ -86,11 +113,11 @@ function partsOf(buf) {
 
   const h = parseHeaders(top.head);
   const meta = {
-    subject: h.subject || null,
-    from: h.from || null,
+    subject: decodeWords(h.subject) || null,
+    from: decodeWords(h.from) || null,
     date: h.date || null,
-    to: h.to || null,
-    cc: h.cc || null,
+    to: decodeWords(h.to) || null,
+    cc: decodeWords(h.cc) || null,
   };
 
   const parts = [];
@@ -118,7 +145,7 @@ function partsOf(buf) {
     }
 
     const disp = headers['content-disposition'] || '';
-    const filename = paramOf(disp, 'filename') || paramOf(ctype, 'name');
+    const filename = decodeWords(paramOf(disp, 'filename') || paramOf(ctype, 'name'));
     const isAttachment = Boolean(filename) || /^attachment/i.test(disp);
     parts.push({
       filename: filename || null,
@@ -144,4 +171,4 @@ const trimTrailingCrlf = (b) => {
   return b.subarray(0, end);
 };
 
-module.exports = { partsOf, parseHeaders, paramOf };
+module.exports = { partsOf, parseHeaders, paramOf, decodeWords };
