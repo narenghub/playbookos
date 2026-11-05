@@ -404,6 +404,120 @@ async function main() {
         else { bad(`GET /api/prpa/${ep} → ${r.status}`, body.slice(0, 200)); s6 = false; }
       }
 
+      // ── NEGATIVE CONTROLS OVER HTTP (ruling 9 item 5) ──────────────────
+      //
+      // A suite of 200s proves the happy path and nothing about the gate. Until these ran, every
+      // assertion in this file was compatible with an endpoint that served anybody — which, given
+      // this is a procurement pipeline with supplier pricing in it, is the failure that matters.
+      for (const ep of ['opportunities', 'export/opportunities.csv']) {
+        const anon = await fetch(`${base}/api/prpa/${ep}`);
+        if (anon.status === 401) ok(`NEGATIVE: unauthenticated GET /api/prpa/${ep} → 401`);
+        else { bad(`unauthenticated GET /api/prpa/${ep} → ${anon.status}, expected 401`); s6 = false; }
+
+        const garbage = await fetch(`${base}/api/prpa/${ep}`, { headers: { Authorization: 'Bearer not-a-real-token' } });
+        if (garbage.status === 401) ok(`NEGATIVE: forged token on /api/prpa/${ep} → 401`);
+        else { bad(`forged token on /api/prpa/${ep} → ${garbage.status}, expected 401`); s6 = false; }
+      }
+
+      // A REAL non-admin user. The role is read from the DATABASE, not from the token, so a
+      // hand-minted JWT would not exercise adminOnly — the user has to exist and be non-admin.
+      const bcrypt = require('bcryptjs');
+      const hash = bcrypt.hashSync('SupportOnly123', 10);
+      await db.query(
+        `INSERT INTO users (id, email, name, role, password_hash, is_active)
+         VALUES ('u_support','support@example.invalid','Support User','support_team',$1,1)
+         ON CONFLICT (email) DO NOTHING`, [hash]);
+      const supLogin = await fetch(`${base}/api/auth/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'support@example.invalid', password: 'SupportOnly123' }),
+      });
+      const supToken = (await supLogin.json()).token;
+      if (supToken) {
+        for (const ep of ['opportunities', 'export/opportunities.csv']) {
+          const r = await fetch(`${base}/api/prpa/${ep}`, { headers: { Authorization: `Bearer ${supToken}` } });
+          if (r.status === 403) ok(`NEGATIVE: authenticated NON-ADMIN on /api/prpa/${ep} → 403`);
+          else { bad(`non-admin on /api/prpa/${ep} → ${r.status}, expected 403`); s6 = false; }
+        }
+      } else { bad('could not log in as the non-admin fixture user — the 403 control did not run'); s6 = false; }
+
+      // ── CSV EXPORT OVER HTTP (ruling 9 item 1) ─────────────────────────
+      //
+      // export.js is unit-tested, but nothing had ever fetched this endpoint. The unit tests
+      // cannot see the Content-Type header, the filename, or whether the route is even wired.
+      {
+        // A hostile value, stored the way a source would store it, so the neutralisation is
+        // proven on the REAL response body rather than on a function call.
+        await db.query(
+          `UPDATE funding_opportunities SET title = $1
+            WHERE company_id = $2 AND opportunity_id = (
+              SELECT opportunity_id FROM funding_opportunities WHERE company_id = $2 ORDER BY opportunity_id LIMIT 1)`,
+          ['=cmd|\' /C calc\'!A0', ctx.companyId]);
+
+        const r = await fetch(`${base}/api/prpa/export/opportunities.csv`, { headers: { Authorization: `Bearer ${token}` } });
+        const csv = await r.text();
+        if (r.status === 200) ok('GET /api/prpa/export/opportunities.csv → 200');
+        else { bad(`CSV export → ${r.status}`, csv.slice(0, 200)); s6 = false; }
+
+        const ctype = r.headers.get('content-type') || '';
+        if (/text\/csv/.test(ctype)) ok(`Content-Type is ${ctype}`);
+        else { bad(`Content-Type is "${ctype}", expected text/csv`); s6 = false; }
+
+        const disp = r.headers.get('content-disposition') || '';
+        if (/attachment; *filename=/.test(disp)) ok(`Content-Disposition: ${disp}`);
+        else { bad(`Content-Disposition is "${disp}", expected an attachment filename`); s6 = false; }
+
+        const header = (csv.split('\n')[0] || '');
+        const required = ['source_url', 'record_kind', 'qualification_verdict', 'blocking_reasons',
+          'rule_set_version', 'evaluated_as_of'];
+        const missing = required.filter((c) => !header.includes(c));
+        if (!missing.length) ok('every mandatory column is present in the delivered header');
+        else { bad(`the delivered CSV is missing mandatory column(s): ${missing.join(', ')}`, header); s6 = false; }
+
+        // THE INJECTION CHECK, on the wire. A cell opening with = + - @ is executed by Excel and
+        // Sheets on open; the file is the attack. It must arrive neutralised, not merely be
+        // neutralisable.
+        if (/=cmd/.test(csv)) {
+          const line = csv.split('\n').find((l) => /=cmd/.test(l)) || '';
+          const idx = line.indexOf('=cmd');
+          const prefix = line.slice(Math.max(0, idx - 2), idx);
+          if (prefix.includes("'")) ok(`the hostile cell arrived neutralised (prefixed with an apostrophe)`);
+          else { bad('a formula cell was delivered WITHOUT neutralisation', line.slice(0, 120)); s6 = false; }
+        } else {
+          bad('the hostile value never reached the export — the injection control did not run',
+            'it proves nothing when the row it targets is absent');
+          s6 = false;
+        }
+      }
+
+      // ── TENANT ISOLATION OVER HTTP ─────────────────────────────────────
+      //
+      // The export cannot be tested by seeding a second company and checking its rows are absent,
+      // because with two active companies the read-session resolver REFUSES outright. That refusal
+      // IS the isolation behaviour at the HTTP layer for this release, so it is what gets asserted —
+      // and asserting it here is what makes the single-company resolver's safety a measured claim
+      // rather than a design intention. Row-level scoping is covered separately by
+      // check-dashboard-views-db.js.
+      {
+        await db.query(
+          `INSERT INTO companies (id, slug, display_name, status)
+           VALUES ('co_second','second','Second Tenant','active') ON CONFLICT (id) DO NOTHING`);
+        const r = await fetch(`${base}/api/prpa/export/opportunities.csv`, { headers: { Authorization: `Bearer ${token}` } });
+        const body = await r.text();
+        if (r.status !== 200 && /no user-to-company mapping|2 active companies/.test(body)) {
+          ok('TENANT ISOLATION: with a second active company the export REFUSES rather than guessing');
+        } else if (r.status === 200) {
+          bad('with two active companies the export still returned data',
+            'it cannot know whose data that is — this would be a silent cross-tenant read');
+          s6 = false;
+        } else {
+          bad(`refused, but not for the tenancy reason: ${body.slice(0, 160)}`); s6 = false;
+        }
+        await db.query("DELETE FROM companies WHERE id='co_second'");
+        const back = await fetch(`${base}/api/prpa/export/opportunities.csv`, { headers: { Authorization: `Bearer ${token}` } });
+        if (back.status === 200) ok('and it resolves again once the ambiguity is removed');
+        else { bad(`the export did not recover after removing the second company: ${back.status}`); s6 = false; }
+      }
+
       // And the page itself, driven through the SPA's own router.
       const { chromium } = require('playwright');
       const browser = await chromium.launch({ args: ['--no-proxy-server', '--no-sandbox'] });

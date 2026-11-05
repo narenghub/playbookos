@@ -456,5 +456,18 @@ pf_step "the evidence inventory never invents a capability" node scripts/check-e
 # `DELETE ... SELECT` entirely, which would have made every clean result below vacuous.
 pf_step "the production-bound read-only scripts change nothing" node scripts/check-readonly-prod-scripts-db.js
 
+# Ruling 9 item 3. The connector migration is run by a dedicated versioned command, NOT by the boot
+# chain — a migration in server.js runs on every restart including a crash loop, welds the migrate
+# and deploy decisions together, and has no operator when it needs reversing.
+#
+# A runner is exactly the kind of script whose claims nobody tests, because running it is scary. So
+# all four claimed properties are exercised against a real server: it refuses on a clean database
+# naming the composite-FK constraint that is easiest to miss (and creates NOTHING when it refuses),
+# --check never writes even when preconditions pass, a second apply is idempotent down to the
+# version row, re-applying REPAIRS a partially-applied schema, rollback refuses without an explicit
+# acknowledgement, and a real rollback drops all twelve while leaving companies and agent_runs
+# untouched.
+pf_step "the migration runner refuses, applies, repeats and rolls back" node scripts/check-migration-runner-db.js
+
 pf_verdict
 exit $?
