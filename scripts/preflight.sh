@@ -427,5 +427,22 @@ pf_step "dashboard views are tenant-scoped in Postgres" node scripts/check-dashb
 # in it contains a mutating verb) and that two runs over identical data print an identical report.
 pf_step "the CAS conflict triage classifies what it says it classifies" node scripts/check-cas-triage-db.js
 
+# Ruling 6 items 1-2. The inventory's job is to say what we have evidence FOR, and its failure mode
+# is a boolean: labs.research_capable is BOOLEAN NOT NULL DEFAULT FALSE with no evidence column, no
+# source, no date and no approver behind it. Read as a capability it says "this firm can do research
+# work"; read honestly it says "a row was set to true, by someone, for a reason nobody recorded".
+# So this asserts the bare flag classifies as a CLAIM and never enters the verification queue.
+#
+# The control that matters most is the other one. matchTier('CRO360','CRO 360 Inc') is null — one
+# space defeats it — so a search keyed on the normalized name would report CRO360 as holding no
+# laboratory, registration or accreditation records while a real row sat in the table. "Zero records
+# found" and "the name did not match" are different findings, and an inventory that reports the
+# second as the first looks like a completed search. The harness seeds exactly that row and requires
+# it to surface under NEAR MISSES with IDENTITY UNCONFIRMED.
+#
+# It also requires every entity to report VERIFIED capabilities: 0 — nothing this path produces can
+# satisfy the verified_capabilities CHECK constraint, and saying so out loud is the point.
+pf_step "the evidence inventory never invents a capability" node scripts/check-evidence-inventory-db.js
+
 pf_verdict
 exit $?
