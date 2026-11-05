@@ -412,5 +412,20 @@ pf_step "the census counts what it says it counts" node scripts/check-census-ari
 # company_id, so that view cannot isolate and a green tick beside it would be a lie.
 pf_step "dashboard views are tenant-scoped in Postgres" node scripts/check-dashboard-views-db.js
 
+# Ruling 6 item 5. The classifier is unit-tested, but the thing that will be run against production
+# is the SCRIPT, so this seeds a disposable cluster and checks the script's own output against an
+# answer computed by hand in its header.
+#
+# The ordering is the part worth protecting. form_pair and grade_duplicate are the two classes that
+# answer "no action", and checked first they bury a real signal: the gemcitabine group is a
+# de-salted form pair AND shares 95058-81-4 with a different substance, so form_pair-first would
+# have reported "nothing wrong" and the shared number would never have been seen. The harness pins
+# that case specifically, in both directions — a sharing form pair must escalate, and a
+# non-sharing one must still be dismissed, or the backlog inflates by every legitimate salt pair.
+#
+# It also proves the script is read-only two ways (the fixture rows survive it, and no SQL literal
+# in it contains a mutating verb) and that two runs over identical data print an identical report.
+pf_step "the CAS conflict triage classifies what it says it classifies" node scripts/check-cas-triage-db.js
+
 pf_verdict
 exit $?

@@ -78,6 +78,14 @@ const SEARCH_CALLER_ALLOWLIST = Object.freeze({
     + 'single number supports.',
   'src/lib/molecules/merge.test.js':
     'tests merge.js, so it must import what merge.js imports.',
+  'scripts/cas-conflict-triage.js':
+    'MEASURES the conflicting-CAS groups that canonicalMolecule() produces, rebuilding them the '
+    + 'same way census section 4 does so the two counts are comparable. Calling the legacy function '
+    + 'is the entire point: the report exists to say how many of its groupings are artifacts of '
+    + 'de-salting rather than defects in the data. The script is read-only — it issues SELECT only, '
+    + 'asserts that at the call site, and the preflight check proves both that its fixture rows '
+    + 'survive a run and that no SQL literal in it contains a mutating verb. It prices nothing, '
+    + 'quotes nothing and reads no listing, supplier or price column.',
 });
 
 // Paths under which a file is exempt entirely: the definition itself and its own tests.
