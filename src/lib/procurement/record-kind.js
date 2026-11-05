@@ -152,29 +152,54 @@ function kindFromGrantsGov({ docType, oppStatus } = {}) {
 function biddability(record = {}) {
   const kind = record.recordKind || null;
   if (!kind) {
-    return { biddable: false, kind: null, reason: 'record kind is unknown; an unclassified record is never biddable' };
+    return {
+      biddable: false, kind: null, determinable: false,
+      reason: 'record kind is unknown; an unclassified record is never biddable',
+    };
   }
   const spec = RECORD_KINDS[kind];
   if (!spec) {
-    return { biddable: false, kind, reason: `"${kind}" is not a known record kind` };
+    return {
+      biddable: false, kind, determinable: false,
+      reason: `"${kind}" is not a known record kind`,
+    };
   }
   if (!spec.biddable) {
     return {
       biddable: false,
       kind,
+      // A category error: this can never be bid, however complete the data.
+      determinable: true,
       reason: `a ${kind.replace(/_/g, ' ')} is not biddable — the expected response is a `
         + `${spec.responseArtifact}. ${spec.note}`,
     };
   }
-  if (!record.responseDeadline) {
+  // The deadline must be a date we can actually read, not merely a non-empty field.
+  //
+  // An adversarial test caught this: `responseDeadline: '12/10/2027'` is truthy, so the first
+  // version called the record biddable while the deadline gate separately reported it as
+  // unparseable. A solicitation whose closing date we cannot read is one we cannot submit against,
+  // and "there is a string in the field" is not the same as "we know when it closes".
+  const iso = typeof record.responseDeadline === 'string'
+    && /^\d{4}-\d{2}-\d{2}$/.test(record.responseDeadline.trim());
+  if (!iso) {
     return {
       biddable: false,
       kind,
-      reason: 'a solicitation with no recorded response deadline is not biddable: the deadline was '
-        + 'either never published or not captured, and neither permits a submission',
+      // `determinable: false` marks this as a DATA GAP rather than a category error. The
+      // distinction decides the verdict: a sources-sought notice is NOT_QUALIFIED because it can
+      // never be bid, while a solicitation with an unread deadline is NEEDS_REVIEW because the
+      // deadline almost certainly exists on the source and was not captured. Failing it outright
+      // would archive a real opportunity.
+      determinable: false,
+      reason: record.responseDeadline
+        ? `the response deadline "${record.responseDeadline}" is not a readable date (YYYY-MM-DD), `
+          + 'so when this closes is unknown and nothing may be submitted against it'
+        : 'a solicitation with no recorded response deadline is not biddable: the deadline was '
+          + 'either never published or not captured, and neither permits a submission',
     };
   }
-  return { biddable: true, kind, reason: `${kind} with a recorded response deadline` };
+  return { biddable: true, kind, determinable: true, reason: `${kind} with a recorded response deadline` };
 }
 
 /**

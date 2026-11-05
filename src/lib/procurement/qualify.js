@@ -99,9 +99,13 @@ const isoDay = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.tri
 function assessRecordKind(record, deps) {
   const b = deps.biddability(record);
   if (b.biddable) return finding('record_kind_biddable', 'pass', b.reason, { url: record.sourceUrl });
-  // An unclassified record is UNKNOWN (we could not tell), a classified non-biddable one is FAIL
-  // (we can tell, and it is not). Collapsing them would hide which of the two we are looking at.
-  const result = b.kind ? 'fail' : 'unknown';
+  // FAIL for a category error, UNKNOWN for a data gap, and the difference matters.
+  //
+  // A sources-sought notice can never be bid however complete its data, so NOT_QUALIFIED is the
+  // right verdict and the record can be archived. A solicitation whose deadline was not captured is
+  // a gap in OUR data, not a fact about the opportunity — the deadline almost certainly exists on
+  // the source. Failing it would archive a real opportunity, so it goes to review instead.
+  const result = b.determinable === false ? 'unknown' : 'fail';
   return finding('record_kind_biddable', result, b.reason, { url: record.sourceUrl });
 }
 

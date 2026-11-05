@@ -185,13 +185,20 @@ test('a passed deadline fails', () => {
   assert.match(r.findings.find((x) => x.criterion_key === 'submission_deadline').reason, /in the past/);
 });
 
-test('a missing deadline blocks via two gates at once, and both are reported', () => {
+test('a missing deadline blocks via two gates at once, and goes to REVIEW not NOT_QUALIFIED', () => {
   const r = fully({ record: { ...GOOD_RECORD, responseDeadline: null } });
-  assert.equal(r.verdict, 'NOT_QUALIFIED');
-  // record_kind_biddable fails (a solicitation with no deadline is not biddable) and the deadline
-  // gate is unknown. A fail outranks an unknown, and both appear in `blocking`.
+  // Both gates report UNKNOWN, because a missing deadline is a gap in OUR data rather than a fact
+  // about the opportunity: the deadline almost certainly exists on the source and was not captured.
+  // NOT_QUALIFIED would archive a real opportunity, so this must be NEEDS_REVIEW.
+  assert.equal(r.verdict, 'NEEDS_REVIEW');
   assert.ok(r.blocking.includes('record_kind_biddable'));
   assert.ok(r.blocking.includes('submission_deadline'));
+});
+
+test('a category error still FAILS — sources-sought is not a data gap', () => {
+  const r = fully({ record: { ...GOOD_RECORD, recordKind: 'sources_sought' } });
+  assert.equal(r.verdict, 'NOT_QUALIFIED',
+    'a sources-sought notice can never be bid however complete its data, so it can be archived');
 });
 
 // ── one closed gate is decisive ─────────────────────────────────────────────
