@@ -103,4 +103,69 @@ function assertContext(ctx) {
   return ctx;
 }
 
-module.exports = { resolveCompanyContext, resolveObjectiveContext, assertContext, NoCompanyContext };
+// ── READ CONTEXT FOR A HUMAN SESSION ────────────────────────────────────────
+//
+// WHY THIS HAD TO EXIST AT ALL. resolveCompanyContext resolves a company from an agent RUN, and
+// that is correct for agent work: every agent action belongs to a run, and the run carries the
+// company. A person opening a dashboard has no run. src/api/routes.js called
+// resolveCompanyContext({ userId }) — a field this module does not accept — so it threw
+// "requires a runId" on every request, and ALL FIVE PRPA endpoints returned HTTP 500. They had
+// never once been exercised against the real backend; the dashboard's tests all ran against
+// stubbed responses, which is precisely why nobody noticed.
+//
+// THE PART THAT IS NOT A BUG. There is no user-to-company mapping anywhere in this system: not a
+// column on users, not a membership table, nothing. So "which company is this person looking at?"
+// has no stored answer, and inventing one would be the guess that ruling 7 item 3 forbids —
+// applied at read time rather than at migration time, but the same mistake.
+//
+// SO THIS RESOLVES ONLY WHEN THE ANSWER IS UNAMBIGUOUS:
+//
+//   exactly one company   → that company. There is nothing to choose between.
+//   zero companies        → refuse. The kernel is not configured.
+//   two or more           → REFUSE, and say so. With no mapping, picking one would show a person
+//                           another tenant's pipeline, prices and review queue. "The first row"
+//                           is not a tenancy model.
+//
+// The refusal is the feature. It keeps the single-tenant deployment working today and turns the
+// day a second company appears into a loud, immediate failure rather than a silent cross-tenant
+// read. When that day comes the fix is a real user-to-company mapping, which is a ruling, not a
+// patch here.
+async function resolveCompanyForReadSession({ userId }, deps = {}) {
+  const query = deps.query || lazyQuery();
+  if (!userId) throw new NoCompanyContext('a read session requires a userId');
+
+  const { rows } = await query(
+    `SELECT id FROM companies WHERE status = 'active' ORDER BY created_at, id`,
+  );
+
+  if (rows.length === 0) {
+    throw new NoCompanyContext(
+      'no active company exists, so there is no pipeline to show. This is a configuration gap, '
+      + 'not an empty result: the office kernel has not been given a company.',
+    );
+  }
+  if (rows.length > 1) {
+    throw new NoCompanyContext(
+      `${rows.length} active companies exist and this system has no user-to-company mapping, so `
+      + 'which one this person may see is UNKNOWN. Refusing rather than showing a tenant that may '
+      + 'not be theirs. Resolving this needs a membership model, not a default.',
+    );
+  }
+  return Object.freeze({
+    companyId: rows[0].id,
+    objectiveId: null,
+    // Named so a reader of a log or a stack can tell this apart from a run-derived context. A
+    // read session must never be handed to a kernel WRITER; assertContext guards the write path
+    // and this object is deliberately not produced by resolveCompanyContext.
+    source: 'read_session',
+    userId,
+  });
+}
+
+module.exports = {
+  resolveCompanyContext,
+  resolveObjectiveContext,
+  resolveCompanyForReadSession,
+  assertContext,
+  NoCompanyContext,
+};

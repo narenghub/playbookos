@@ -6336,14 +6336,25 @@ router.post('/notifications/read-all', authMiddleware, requireTier('intelligence
 const prpaViews = require('../lib/procurement/views');
 const prpaTasks = require('../lib/procurement/review-tasks');
 const prpaExport = require('../lib/procurement/export');
-const { resolveCompanyContext } = require('../lib/office/context');
+const { resolveCompanyForReadSession } = require('../lib/office/context');
 
 const prpaToday = () => new Date().toISOString().slice(0, 10);
 
 async function prpaCtx(req) {
-  // The same bootstrap the governed kernel uses. It derives the company; it is never read from the
-  // request, which is the whole point of company context.
-  return resolveCompanyContext({ userId: req.user && req.user.id });
+  // The company is DERIVED, never read from the request — that is the whole point of company
+  // context, and it is unchanged.
+  //
+  // What changed: this called resolveCompanyContext({ userId }), which resolves a company from an
+  // agent RUN and does not accept a userId at all. Every call threw "resolveCompanyContext
+  // requires a runId", so all five PRPA endpoints returned HTTP 500 and the dashboard had never
+  // worked against the real backend even once. Its tests ran against stubbed responses, which is
+  // exactly why it looked finished.
+  //
+  // A person opening a dashboard has no run, so a read-session resolver is the right shape. It
+  // resolves only when exactly one active company exists and REFUSES otherwise, because this
+  // system has no user-to-company mapping and defaulting to one would show somebody another
+  // tenant's pipeline.
+  return resolveCompanyForReadSession({ userId: req.user && req.user.id });
 }
 
 router.get('/prpa/review-queue', authMiddleware, adminOnly, async (req, res) => {

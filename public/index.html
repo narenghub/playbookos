@@ -2330,20 +2330,38 @@ window.prpaCommandPage = async function prpaCommandPage() {
       '<span style="font-size:12px;color:var(--gray)">' + prpaU(c.kind) + '</span>' +
       '</div>';
   }).join('');
-  var hasLiveProcurement = connList.some(function (c) {
-    return c.kind === 'procurement' && (c.activated === true || c.activated === 't');
+  // WHETHER ANYTHING CAN BE BID IS A FACT ABOUT THE RECORDS, NOT ABOUT THE CONNECTOR TAXONOMY.
+  //
+  // This first asked whether any LIVE connector had kind='procurement'. Running the page against
+  // the real backend showed why that is wrong: the seed gives BOTH usaspending and sam_gov
+  // kind='procurement', and usaspending is live — so the "nothing is biddable" warning was
+  // suppressed by a source that only ever yields historical awards. The page showed "3 OPEN" and
+  // said nothing about none of them being respondable.
+  //
+  // `kind` does not encode biddability and should not be asked to. The honest question is whether
+  // any record actually reached SUBMITTABLE, which is computed from the ladder, plus whether the
+  // one source that can produce a solicitation is active.
+  var samLive = connList.some(function (c) {
+    return c.source_key === 'sam_gov' && (c.activated === true || c.activated === 't');
   });
+  var anythingRespondable = nSubmittable > 0;
   var coverageCard = card('SOURCE COVERAGE',
     'What we can see, and what we cannot. An absent source is a hole in the pipeline, not a ' +
     'smaller pipeline.',
     (covRows || '<div style="color:var(--gray);font-size:13px">No connectors registered.</div>') +
-    (!hasLiveProcurement
+    (!anythingRespondable
       ? '<div style="margin-top:14px;padding:12px 14px;background:#FBE4E4;border-radius:6px;font-size:13px;color:#7A2322;line-height:1.5">' +
-        '<b>No procurement source is live, so nothing here is biddable.</b> ' +
-        'A federal contract opportunity is a SAM.gov solicitation, and a solicitation is the only ' +
-        'record kind a priced bid may be produced from. Grants, forecasts, research leads and ' +
-        'historical awards are all visible and none of them can be bid. This is the binding ' +
-        'constraint on the whole channel, and it is an access question rather than an engineering one.' +
+        '<b>Nothing currently visible can be responded to.</b> ' +
+        (nOpen ? nOpen + ' record(s) are open, and none of them is a solicitation — ' : 'No record is a solicitation — ') +
+        'a solicitation is the only record kind a priced bid may be produced from. Grants, ' +
+        'forecasts, research leads and historical awards are all legitimate intelligence and none ' +
+        'of them can be bid.' +
+        (samLive
+          ? ''
+          : '<br><br><b>SAM.gov, the only source that supplies solicitations, is NOT ACTIVE.</b> ' +
+            'Until it is, this will stay true however many records arrive — the constraint is ' +
+            'access, not engineering. Note that a live source listed as "procurement" above does ' +
+            'not change this: USAspending reports awards already made to other recipients.') +
         '</div>'
       : ''));
 
