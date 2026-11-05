@@ -383,5 +383,20 @@ pf_step "the search rule cannot reach a commercial path" node scripts/check-sear
 # reported; it never asserts a table is empty.
 pf_step "the connector schema holds in Postgres, every guard load-bearing" node scripts/check-connector-schema-db.js
 
+# The census produced the number a ruling was asked to act on, and that number was then reported
+# wrongly -- as a defect in the canonical molecule layer rather than as a measurement of what a
+# candidate merge rule WOULD collapse. The reporting error is corrected; this answers the next
+# question, which is whether the arithmetic itself is right.
+#
+# It runs the SHIPPED script as a child process against a disposable cluster seeded with a fixture
+# set whose answer is computable by hand, rather than reimplementing the grouping -- a second copy
+# would prove only that two copies of the same reasoning agree. It then perturbs the data by exactly
+# one conflict and requires the count to move by exactly one, so a script printing hard-coded
+# numbers would fail.
+#
+# It also asserts the report STATES ITS SCOPE (study_molecules only, source data, prospective).
+# That sentence is what stops the number being misread again, so its absence is a failure.
+pf_step "the census counts what it says it counts" node scripts/check-census-arithmetic-db.js
+
 pf_verdict
 exit $?
