@@ -398,5 +398,19 @@ pf_step "the connector schema holds in Postgres, every guard load-bearing" node 
 # That sentence is what stops the number being misread again, so its absence is a failure.
 pf_step "the census counts what it says it counts" node scripts/check-census-arithmetic-db.js
 
+# PR-6. views.test.js asserts every builder MENTIONS company_id, which is a text check and would
+# pass on `WHERE company_id = company_id` or on a join that scopes one table and not the other. The
+# only way to know a view does not leak is to put a SECOND company's rows in the database and look.
+#
+# Both tenants are seeded with structurally identical rows on purpose: data that looked different
+# would make a leak obvious, data that looks the same makes it invisible unless the test checks ids.
+# Then the predicate is removed and the same query must return the other tenant — without that, a
+# view returning nothing for an unrelated reason would pass the leak test while proving nothing.
+#
+# It also refuses to count a 0-row result as isolation coverage, and records moleculeDemandCandidates
+# as single-tenant BY NECESSITY rather than disguising the gap as a pass: study_molecules has no
+# company_id, so that view cannot isolate and a green tick beside it would be a lie.
+pf_step "dashboard views are tenant-scoped in Postgres" node scripts/check-dashboard-views-db.js
+
 pf_verdict
 exit $?

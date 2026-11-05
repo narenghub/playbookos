@@ -212,10 +212,11 @@ async function upsertAwards(ctx, syncId, normalized, deps = {}) {
  * Separate from upsertAwards by ruling: grant opportunities are preserved apart from procurement
  * contracts and revenue, and there is no column here that could feed a procurement total.
  *
- * `biddable` is NEVER passed. It is a generated column, so the database computes it from
+ * `application_open` is NEVER passed. It is a generated column, so the database computes it from
  * opp_status, doc_type and close_date; attempting to write it is an error rather than a silent
- * override. That is the point — a forecast cannot be made to look live by a caller that misread a
- * field.
+ * override. That is the point — a forecast cannot be made to look open by a caller that misread a
+ * field. (It was called `biddable` until the record-kind taxonomy gave that word a precise meaning
+ * under which no funding record qualifies.)
  */
 async function upsertFundingOpportunities(ctx, syncId, normalized, deps = {}) {
   assertContext(ctx);

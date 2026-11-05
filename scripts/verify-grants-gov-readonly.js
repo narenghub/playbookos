@@ -26,7 +26,7 @@
 // claims to populate, and the rate is reported rather than averaged away. A connector that writes
 // NULL into every column reports success — that is the failure mode this repo keeps finding.
 //
-// A forecast presented as live. Measured on real records, not fixtures: every row's biddable flag
+// A forecast presented as live. Measured on real records, not fixtures: every row's application_open flag
 // is read back FROM THE DATABASE, where it is computed, and cross-checked against the standing the
 // adapter assigned. If those two ever disagree, one of them is lying to a dashboard.
 'use strict';
@@ -238,21 +238,21 @@ const CLAIMED = ['opportunityId', 'opportunityNumber', 'title', 'agencyCode', 'a
     console.log('');
     console.log(`  standings assigned by the adapter: ${JSON.stringify(first.standings)}`);
     const { rows: bid } = await q(
-      `SELECT standing, biddable, COUNT(*)::int n FROM funding_opportunities
-        WHERE company_id = $1 GROUP BY standing, biddable ORDER BY standing`, [CO]);
-    for (const r of bid) console.log(`    standing=${String(r.standing).padEnd(20)} biddable=${String(r.biddable).padEnd(5)} ${r.n}`);
+      `SELECT standing, application_open, COUNT(*)::int n FROM funding_opportunities
+        WHERE company_id = $1 GROUP BY standing, application_open ORDER BY standing`, [CO]);
+    for (const r of bid) console.log(`    standing=${String(r.standing).padEnd(20)} application_open=${String(r.application_open).padEnd(5)} ${r.n}`);
 
-    const contradictions = bid.filter((r) => (r.standing === 'open') !== (r.biddable === true));
+    const contradictions = bid.filter((r) => (r.standing === 'open') !== (r.application_open === true));
     if (!contradictions.length) {
-      ok('the adapter\'s standing and the database\'s computed biddable agree on every live record');
+      ok('the adapter\'s standing and the database\'s computed application_open agree on every live record');
     } else {
       bad('standing and biddable must agree — if they disagree one of them is lying to a dashboard',
         contradictions.map((c) => `standing=${c.standing} biddable=${c.biddable} ×${c.n}`).join('; '));
     }
 
-    const forecastsBiddable = bid.filter((r) => r.standing === 'forecast' && r.biddable === true);
-    if (!forecastsBiddable.length) ok('no forecast is marked biddable on live data');
-    else bad('a forecast is marked biddable', JSON.stringify(forecastsBiddable));
+    const forecastsBiddable = bid.filter((r) => r.standing === 'forecast' && r.application_open === true);
+    if (!forecastsBiddable.length) ok('no forecast is marked open for applications on live data');
+    else bad('a forecast is marked open for applications', JSON.stringify(forecastsBiddable));
 
     // ── the call ledger ───────────────────────────────────────────────────
     const { rows: ledger } = await q(

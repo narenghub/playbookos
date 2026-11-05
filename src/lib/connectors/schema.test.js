@@ -167,9 +167,9 @@ test('funding opportunities have their own table with no procurement or revenue 
   }
 });
 
-test('biddability is GENERATED, so no caller can assert a forecast is live', () => {
+test('application_open is GENERATED, so no caller can assert a forecast is live', () => {
   const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
-  assert.match(s, /biddable\s+BOOLEAN GENERATED ALWAYS AS \(/);
+  assert.match(s, /application_open\s+BOOLEAN GENERATED ALWAYS AS \(/);
   assert.match(s, /STORED/);
   assert.match(s, /doc_type <> 'forecast'/);
   assert.match(s, /close_date IS NOT NULL/);
@@ -178,9 +178,9 @@ test('biddability is GENERATED, so no caller can assert a forecast is live', () 
 
 test("an unknown status yields FALSE, not NULL — for a control those are the same answer", () => {
   const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
-  const gen = s.slice(s.indexOf('biddable'), s.indexOf('STORED'));
+  const gen = s.slice(s.indexOf('application_open'), s.indexOf('STORED'));
   assert.match(gen, /COALESCE\(/,
-    'without COALESCE a NULL opp_status makes biddable NULL, which a careless filter reads as not-false');
+    'without COALESCE a NULL opp_status makes application_open NULL, which a careless filter reads as not-false');
 });
 
 test('the standing vocabulary is closed, and forecast is one of its values', () => {
@@ -201,9 +201,18 @@ test('the revision chain dedupes on (tenant, source, opportunity, revision)', ()
   assert.match(s, /revision >= 0/, 'revision 0 is the first version, so negative is the only invalid case');
 });
 
-test('the live-funding dashboard index reads biddable, not status', () => {
-  assert.match(ddl, /idx_fo_biddable ON funding_opportunities \(company_id, close_date\)\s+WHERE biddable/,
-    'if the view filtered on opp_status it would have to re-derive biddability and could get it wrong');
+test('the open-for-applications index reads the generated column, not the status', () => {
+  assert.match(ddl, /idx_fo_application_open ON funding_opportunities \(company_id, close_date\)\s+WHERE application_open/,
+    'if the view filtered on opp_status it would have to re-derive the condition and could get it wrong');
+});
+
+test('funding_opportunities has NO column called biddable — the word is reserved', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  assert.ok(!/\bbiddable\b\s+BOOLEAN/.test(s),
+    'the column was called biddable until PR-5 gave that word a precise meaning: exactly one of six '
+    + 'record kinds, and grant_opportunity is not one. A grant is an application, never an offer, so '
+    + 'a column named biddable reading true on every row in this table asserted something false. '
+    + 'Biddability lives in record-kind.js, which answers no for every funding record.');
 });
 
 // ── the migration runner ────────────────────────────────────────────────────

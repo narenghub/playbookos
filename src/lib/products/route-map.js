@@ -233,6 +233,17 @@ const ABIOZEN = [
 ];
 
 // ── per-product ───────────────────────────────────────────────────────────────
+// PRPA — the federal procurement and funding surface. Abiozen, for the same reason the CPHI event
+// surface is: the entity that would hold the contract is Abiozen, and the capability registry these
+// read is Abiozen's. Listed CONCRETELY rather than as '/api/prpa/*' because an unclassified route
+// 403s for every user under enforce, and a wildcard would silently absorb a future route that
+// belongs somewhere else.
+const PRPA = [
+  'GET /api/prpa/review-queue', 'GET /api/prpa/capabilities', 'GET /api/prpa/opportunities',
+  'GET /api/prpa/connectors', 'GET /api/prpa/export/opportunities.csv',
+  'GET /api/prpa/tasks', 'POST /api/prpa/tasks', 'PATCH /api/prpa/tasks/:id',
+];
+
 const GOLFNEX = [
   // Content Studio is GolfNex's content pipeline.
   'GET /api/content', 'GET /api/content/:id', 'PUT /api/content/:id', 'POST /api/content/run',
@@ -274,6 +285,7 @@ const ROUTE_PRODUCT = {};
 for (const r of SHARED) ROUTE_PRODUCT[r] = 'shared';
 for (const r of INTERNAL) ROUTE_PRODUCT[r] = 'internal';
 for (const r of ABIOZEN) ROUTE_PRODUCT[r] = 'abiozen';
+for (const r of PRPA) ROUTE_PRODUCT[r] = 'abiozen';
 for (const r of GOLFNEX) ROUTE_PRODUCT[r] = 'golfnex';
 for (const r of AROS) ROUTE_PRODUCT[r] = 'aros';
 for (const r of SITENEX) ROUTE_PRODUCT[r] = 'sitenex';
@@ -327,4 +339,4 @@ function classifyRoute(method, path) {
 
 module.exports = { ROUTE_PRODUCT, AGENT_PRODUCT, PARAM_DEFAULT, ROW_PRODUCT, ROW_FORM,
   PRODUCTS, PSEUDO_PRODUCTS, GRANTABLE, VALUES, classifyRoute,
-  SHARED, INTERNAL, ABIOZEN, GOLFNEX, AROS, SITENEX, PARAM_PRODUCT };
+  SHARED, INTERNAL, ABIOZEN, PRPA, GOLFNEX, AROS, SITENEX, PARAM_PRODUCT };

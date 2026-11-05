@@ -302,37 +302,37 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     };
 
     await insertOpp('opp-open', '359966');
-    let { rows: b } = await q(`SELECT biddable FROM funding_opportunities WHERE id = 'opp-open'`);
-    if (b[0].biddable === true) ok('C8 a posted synopsis with a deadline computes biddable = true');
-    else bad('C8 a posted synopsis with a deadline is biddable', JSON.stringify(b[0]));
+    let { rows: b } = await q(`SELECT application_open FROM funding_opportunities WHERE id = 'opp-open'`);
+    if (b[0].application_open === true) ok('C8 a posted synopsis with a deadline computes application_open = true');
+    else bad('C8 a posted synopsis with a deadline is open for applications', JSON.stringify(b[0]));
 
     await insertOpp('opp-forecast', '336962', { status: 'forecasted', docType: 'forecast', close: null, standing: 'forecast' });
-    ({ rows: b } = await q(`SELECT biddable FROM funding_opportunities WHERE id = 'opp-forecast'`));
-    if (b[0].biddable === false) ok('C8 a forecast with no deadline computes biddable = false');
-    else bad('C8 a forecast is not biddable', JSON.stringify(b[0]));
+    ({ rows: b } = await q(`SELECT application_open FROM funding_opportunities WHERE id = 'opp-forecast'`));
+    if (b[0].application_open === false) ok('C8 a forecast with no deadline computes application_open = false');
+    else bad('C8 a forecast is not open for applications', JSON.stringify(b[0]));
 
     // The whole point: a caller cannot overrule it.
     e = await refusedBy(() => q(
-      `UPDATE funding_opportunities SET biddable = true WHERE id = 'opp-forecast'`));
+      `UPDATE funding_opportunities SET application_open = true WHERE id = 'opp-forecast'`));
     if (e && e.code === '428C9') {
-      ok('C8 writing biddable directly is refused by the server — a forecast cannot be made to look live');
+      ok('C8 writing application_open directly is refused by the server — a forecast cannot be made to look open');
     } else {
-      bad('C8 biddable cannot be written directly',
+      bad('C8 application_open cannot be written directly',
         e ? `${e.code}/${e.constraint}` : 'the UPDATE was ACCEPTED — the generated column is not generated');
     }
 
     // And it recomputes when the facts change, rather than going stale.
     await q(`UPDATE funding_opportunities SET opp_status = 'posted', doc_type = 'synopsis',
              close_date = '2026-12-01', standing = 'open' WHERE id = 'opp-forecast'`);
-    ({ rows: b } = await q(`SELECT biddable FROM funding_opportunities WHERE id = 'opp-forecast'`));
-    if (b[0].biddable === true) ok('C8 biddable recomputes when the underlying facts change');
-    else bad('C8 biddable recomputes on update', JSON.stringify(b[0]));
+    ({ rows: b } = await q(`SELECT application_open FROM funding_opportunities WHERE id = 'opp-forecast'`));
+    if (b[0].application_open === true) ok('C8 application_open recomputes when the underlying facts change');
+    else bad('C8 application_open recomputes on update', JSON.stringify(b[0]));
 
     // A status the vocabulary does not know must read as NOT biddable, not as NULL.
     await insertOpp('opp-unknown', '999999', { status: null, standing: 'unknown' });
-    ({ rows: b } = await q(`SELECT biddable FROM funding_opportunities WHERE id = 'opp-unknown'`));
-    if (b[0].biddable === false) ok('C8 an unknown status computes biddable = false, not NULL');
-    else bad('C8 an unknown status is not biddable', JSON.stringify(b[0]));
+    ({ rows: b } = await q(`SELECT application_open FROM funding_opportunities WHERE id = 'opp-unknown'`));
+    if (b[0].application_open === false) ok('C8 an unknown status computes application_open = false, not NULL');
+    else bad('C8 an unknown status is not open for applications', JSON.stringify(b[0]));
 
     e = await refusedBy(() => insertOpp('opp-badstanding', '888888', { standing: 'live' }));
     if (e && e.code === '23514' && e.constraint === 'funding_opportunities_standing_check') {
@@ -652,6 +652,7 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     else bad('cleanup left fixtures behind', leaks.join('; '));
 
     // ── the documented rollback, actually executed ───────────────────────
+    await q('DROP TABLE IF EXISTS review_tasks');
     await q('DROP TABLE IF EXISTS capability_scope_items');
     await q('DROP TABLE IF EXISTS verified_capabilities');
     await q('DROP TABLE IF EXISTS eligibility_findings');

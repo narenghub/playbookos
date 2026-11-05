@@ -6,6 +6,7 @@
 // real error is worse than one that fails.
 //
 // ROLLBACK (safe, additive — nothing existing is altered):
+//   DROP TABLE IF EXISTS review_tasks;
 //   DROP TABLE IF EXISTS capability_scope_items;
 //   DROP TABLE IF EXISTS verified_capabilities;
 //   DROP TABLE IF EXISTS eligibility_findings;
@@ -195,13 +196,26 @@ const DDL = [
   // happen is a number from this source landing in a procurement pipeline total, and the surest way
   // to prevent it is for there to be no column it could land in.
   //
-  // BIDDABILITY IS GENERATED, NOT STORED BY A CALLER. The first probe found 5 of 10 hits were
+  // THE COLUMN IS application_open, AND IT USED TO BE CALLED biddable. THAT NAME WAS WRONG.
+  //
+  // It was written in PR-4, before the record-kind taxonomy existed, and it means what its
+  // expression says: this record is live at the source and has a deadline you can still apply
+  // against. Once PR-5 gave "biddable" a precise meaning — exactly one of six record kinds, and
+  // grant_opportunity is NOT one of them — the old name asserted something false about every row
+  // in this table. A grant is an APPLICATION, never an offer, so no funding record is ever
+  // biddable, and a column called `biddable` reading true on all of them is the unsupported claim
+  // the ruling forbids. scripts/check-dashboard-views-db.js caught the disagreement by comparing
+  // the column against the ladder on a real row.
+  //
+  // IT IS STILL GENERATED, for the original reason. The first probe found 5 of 10 hits were
   // forecasts — plans, with an empty close date — and an empty close date is not "no deadline,
-  // apply anytime". If `biddable` were an ordinary column, some later writer would set it from a
-  // field it misread, and a forecast would render as a live opportunity. As a generated column the
-  // database computes it from the three facts that decide it and no INSERT can assert otherwise.
-  // COALESCE wraps the expression so an unknown status yields FALSE rather than NULL: for a
-  // control, "we do not know" and "not biddable" must be the same answer.
+  // apply anytime". If this were an ordinary column, some later writer would set it from a field it
+  // misread. As a generated column the database computes it from the three facts that decide it and
+  // no INSERT can assert otherwise. COALESCE wraps the expression so an unknown status yields FALSE
+  // rather than NULL: for a control, "we do not know" and "not open" must be the same answer.
+  //
+  // Biddability is NOT in this table. It is src/lib/procurement/record-kind.js's biddability(),
+  // which answers for any record kind and answers no for every one of these.
   // ---------------------------------------------------------------------------------------
   `CREATE TABLE IF NOT EXISTS funding_opportunities (
      id                   TEXT PRIMARY KEY,
@@ -230,7 +244,7 @@ const DDL = [
      last_seen_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
      first_seen_sync_id   TEXT,
      last_seen_sync_id    TEXT,
-     biddable             BOOLEAN GENERATED ALWAYS AS (
+     application_open     BOOLEAN GENERATED ALWAYS AS (
        COALESCE(opp_status = 'posted' AND doc_type <> 'forecast' AND close_date IS NOT NULL, false)
      ) STORED,
      CONSTRAINT funding_opportunities_standing_check
@@ -241,9 +255,9 @@ const DDL = [
      ON funding_opportunities (company_id, source_key, opportunity_id)`,
   `CREATE INDEX IF NOT EXISTS idx_fo_close ON funding_opportunities (company_id, close_date)
      WHERE close_date IS NOT NULL`,
-  // The dashboard's "live federal funding" view reads this and nothing else.
-  `CREATE INDEX IF NOT EXISTS idx_fo_biddable ON funding_opportunities (company_id, close_date)
-     WHERE biddable`,
+  // The dashboard's "open for applications" view reads this and nothing else.
+  `CREATE INDEX IF NOT EXISTS idx_fo_application_open ON funding_opportunities (company_id, close_date)
+     WHERE application_open`,
   `CREATE INDEX IF NOT EXISTS idx_fo_agency ON funding_opportunities (company_id, agency_code)`,
 
   // ---------------------------------------------------------------------------------------
@@ -480,6 +494,77 @@ const DDL = [
      ON capability_scope_items (capability_id, scope_kind, scope_value)`,
   `CREATE INDEX IF NOT EXISTS idx_csi_lookup
      ON capability_scope_items (company_id, scope_kind, scope_value)`,
+
+  // ---------------------------------------------------------------------------------------
+  // PR-6b: REVIEW TASKS. Owner, priority, due date, status — and NO AUTHORITY.
+  //
+  // The ruling is explicit: "Assignment must not grant approval or trigger external actions."
+  // That is enforced here rather than promised, in three ways:
+  //
+  //   1. THERE IS NO APPROVAL COLUMN. No `approved`, no `decision`, no `authorised_by`. A reviewer
+  //      marking a task `done` records that somebody looked; it does not record that anything may
+  //      proceed. Approval lives in office_approvals and nowhere else, and the only link to it is
+  //      read-only: approval_id below is the approval this task was raised ABOUT, never one it
+  //      creates.
+  //
+  //   2. THE STATUS VOCABULARY CANNOT EXPRESS A DECISION. 'open', 'in_progress', 'blocked',
+  //      'done', 'cancelled'. There is deliberately no 'approved' and no 'rejected' — a status set
+  //      that can say "approved" will eventually be read as approval by something downstream, and
+  //      the cheapest way to prevent that is for the word to be unstoreable.
+  //
+  //   3. IT POINTS AT A FINDING, NOT AT AN ACTION. A task is "resolve this blocked criterion",
+  //      which is work. It is not "submit this bid", which is an external action and belongs behind
+  //      the gate.
+  //
+  // ROLLBACK: DROP TABLE review_tasks;
+  // ---------------------------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS review_tasks (
+     id              TEXT PRIMARY KEY,
+     company_id      TEXT NOT NULL REFERENCES companies(id),
+     subject_kind    TEXT NOT NULL,
+     subject_id      TEXT NOT NULL,
+     criterion_key   TEXT,
+     assessment_id   TEXT,
+     approval_id     TEXT,
+     title           TEXT NOT NULL,
+     detail          TEXT,
+     owner_user_id   TEXT,
+     priority        TEXT NOT NULL DEFAULT 'normal',
+     due_date        DATE,
+     status          TEXT NOT NULL DEFAULT 'open',
+     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     closed_at       TIMESTAMPTZ,
+     closed_by       TEXT,
+     closure_note    TEXT,
+     CONSTRAINT review_tasks_priority_check
+       CHECK (priority IN ('low','normal','high','urgent')),
+     CONSTRAINT review_tasks_status_check
+       CHECK (status IN ('open','in_progress','blocked','done','cancelled')),
+     CONSTRAINT review_tasks_subject_check
+       CHECK (subject_kind IN ('procurement_opportunity','funding_opportunity','capability')),
+     CONSTRAINT review_tasks_title_check
+       CHECK (length(btrim(title)) > 0),
+     -- A closed task records WHO closed it and WHY. "Done" with no note and no name is the audit
+     -- gap that makes a review queue look complete without anybody having looked.
+     CONSTRAINT review_tasks_closure_check
+       CHECK (status NOT IN ('done','cancelled') OR (
+         closed_at IS NOT NULL
+         AND closed_by IS NOT NULL AND length(btrim(closed_by)) > 0
+         AND closure_note IS NOT NULL AND length(btrim(closure_note)) > 0
+       ))
+   )`,
+
+  // One live task per subject+criterion. Two open tasks for the same blocked gate is two people
+  // doing the same work and one of them discovering it afterwards.
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_rt_one_live
+     ON review_tasks (company_id, subject_kind, subject_id, COALESCE(criterion_key, ''))
+     WHERE status IN ('open','in_progress','blocked')`,
+  `CREATE INDEX IF NOT EXISTS idx_rt_owner
+     ON review_tasks (company_id, owner_user_id, status, due_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_rt_due
+     ON review_tasks (company_id, due_date)
+     WHERE status IN ('open','in_progress','blocked')`,
 ];
 
 // ── The registry seed ───────────────────────────────────────────────────────
@@ -614,6 +699,7 @@ const CONNECTOR_TABLES = Object.freeze([
   'eligibility_findings',
   'verified_capabilities',
   'capability_scope_items',
+  'review_tasks',
 ]);
 
 // source_connectors is deliberately absent from CONNECTOR_TABLES: it holds global facts about

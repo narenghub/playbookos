@@ -970,6 +970,11 @@ const NAV_SECTIONS = [
     {id:'seo-content', label:'SEO Content', icon:'✍️'},
     {id:'linkedin-content', label:'LinkedIn Content', icon:'📰'},
   ]},
+  {title:'FEDERAL', access:['admin'], items:[
+    // Owner-first, per ruling 1: a decision queue, not a status board. Its own section so the
+    // access list is explicit rather than inherited from a neighbouring section.
+    {id:'prpa-command', label:'Federal Pipeline', icon:'🏛️'},
+  ]},
   {title:'EVENT AGENT', access:['admin','procurement','business_dev','events'], items:[
     {id:'cphi-milan', label:'CPHI Milan 2026', icon:'🧪'},
     // A DEMAND floor, unlike CPHI. Same section and therefore the same access, so adding it grants
@@ -1066,7 +1071,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"lab-connect":[["intelligence"]],"lab-connect-agent":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"scope-europe":[["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["sitenex"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]],"sitenex-partners":[["intelligence"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"lab-connect":[["intelligence"]],"lab-connect-agent":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"prpa-command":[["intelligence","procurement"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"scope-europe":[["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["sitenex"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]],"sitenex-partners":[["intelligence"]]};
 // The caller's tiers. They arrive on /auth/me and /auth/login WITH the identity, so this needs no
 // fetch of its own and cannot be left unknown by a failed request — a failed /auth/me logs you out
 // rather than showing you a nav computed from nothing.
@@ -1113,7 +1118,7 @@ function passesPageReads(pageId, role, tiers) {
 // platform + me are NOT products: they render to the right of the product tabs, separated.
 const PRODUCTS = [
   { key:'abiozen',  label:'Abiozen',  icon:'🧪', kind:'product',
-    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe'] },
+    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command'] },
   { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
   { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
   { key:'linkabl',  label:'Linkabl',  icon:'🧑‍💼', kind:'product', pages:['prospects'] },
@@ -1850,7 +1855,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -2030,6 +2035,234 @@ async function outreachPage() {
       </div>
     </div>`;
 }
+
+
+// ── PRPA FEDERAL PIPELINE — OWNER-FIRST (PR-6b) ───────────────────────────────
+//
+// A DECISION QUEUE, NOT A STATUS BOARD (ruling 1). What is blocking, what is due, what needs a
+// person — in that order.
+//
+// THREE RULES THIS PAGE OBEYS, each because the alternative puts a false claim on a screen:
+//
+//   1. OPEN, SUBMITTABLE and QUALIFIED render as three distinct things. A source record's status
+//      is never allowed to imply eligibility.
+//   2. UNKNOWN RENDERS AS UNKNOWN. Not a blank, not a dash, not 0. prpaU() is the only way a value
+//      reaches the DOM, and it also escapes — every string here comes from an external notice.
+//   3. NO NUMBER APPEARS WITHOUT ITS BASIS.
+//
+// IT USES THE APP'S OWN DESIGN SYSTEM: .card, .card-title and the :root variables. The first
+// version hardcoded a dark panel with inline colours, which rendered dark-on-dark against this
+// light theme and left the dates, verdicts and capability codes essentially invisible. A
+// screenshot of the real page caught it; reading the diff would not have.
+//
+// Declared BEFORE the pages literal and attached with pages['...'] afterwards, because a function
+// declaration inside that object literal is a syntax error that kills the whole app. Assigned to
+// window as an async function expression, because Annex B hoists a plain function out of a block
+// but not an async one, and a non-global onclick handler throws ReferenceError and does nothing.
+//
+// THE FIRST ATTEMPT AT THIS EDIT BROKE THE PAGE. It anchored on the text "const pages = {", whose
+// first occurrence in this file is inside a COMMENT quoting it in backticks, so the insert landed
+// in the middle of a template string. CLAUDE.md says to anchor every edit here uniquely; this one
+// is anchored on the literal plus the comment that follows, with the occurrence count checked
+// before replacing.
+
+function prpaU(v, unit) {
+  if (v === null || v === undefined || v === '') {
+    return '<i style="color:var(--warn)" title="not known - this is not zero">unknown</i>';
+  }
+  if (Array.isArray(v) && !v.length) return '<i style="color:var(--warn)">unknown</i>';
+  var t = String(Array.isArray(v) ? v.join(', ') : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return unit ? t + ' ' + unit : t;
+}
+
+var PRPA_STAGE_STYLE = {
+  qualified:   {bg:'#E3F5EC', fg:'#13land', label:'QUALIFIED'},
+  submittable: {bg:'#E4F0F7', fg:'#0D5C8A', label:'SUBMITTABLE'},
+  open:        {bg:'#FBF0DC', fg:'#8A5A12', label:'OPEN'},
+  none:        {bg:'#FBE4E4', fg:'#9A2B2A', label:'NOT OPEN'}
+};
+PRPA_STAGE_STYLE.qualified.fg = '#116B4C';
+
+function prpaStageBadge(stage, reasons) {
+  var st = PRPA_STAGE_STYLE[stage] || PRPA_STAGE_STYLE.none;
+  var why = [reasons && reasons.open, reasons && reasons.submittable, reasons && reasons.qualified]
+    .filter(Boolean).join(' - ').replace(/"/g, '&quot;');
+  return '<span title="' + why + '" style="background:' + st.bg + ';color:' + st.fg +
+    ';padding:3px 9px;border-radius:10px;font-size:11px;font-weight:700;letter-spacing:.4px;white-space:nowrap">' +
+    st.label + '</span>';
+}
+
+function prpaKindBadge(kind) {
+  var map = {
+    solicitation:      {c:'#116B4C', t:'biddable - an offer is expected'},
+    sources_sought:    {c:'#8A5A12', t:'MARKET RESEARCH - capability statement, no price'},
+    rfi:               {c:'#8A5A12', t:'request for information - not a solicitation'},
+    grant_opportunity: {c:'#0D5C8A', t:'an application, never an offer, and never procurement revenue'},
+    forecast:          {c:'#5B4B8A', t:'a PLAN - nothing to respond to yet'},
+    research_lead:     {c:'#555', t:'AI-derived demand - not a confirmed buyer requirement'},
+    historical_award:  {c:'#777', t:'already awarded, to somebody else'}
+  };
+  if (!kind) return prpaU(null);
+  var m = map[kind] || {c:'#9A2B2A', t:'unclassified - never biddable'};
+  return '<span title="' + m.t + '" style="color:' + m.c + ';font-size:11px;font-weight:700">' +
+    prpaU(kind) + '</span>';
+}
+
+window.prpaCommandPage = async function prpaCommandPage() {
+  var el = document.getElementById('content');
+  el.innerHTML = '<p style="color:var(--gray);padding:20px">Loading federal pipeline...</p>';
+
+  var res = await Promise.all([
+    API('/prpa/review-queue').catch(function (e) { return {error: e.message}; }),
+    API('/prpa/capabilities').catch(function (e) { return {error: e.message}; }),
+    API('/prpa/opportunities').catch(function (e) { return {error: e.message}; }),
+    API('/prpa/connectors').catch(function (e) { return {error: e.message}; }),
+    API('/prpa/tasks').catch(function (e) { return {error: e.message}; })
+  ]);
+  var queue = res[0], caps = res[1], opps = res[2], conns = res[3], tasks = res[4];
+
+  var errs = res.map(function (r) { return r && r.error; }).filter(Boolean);
+  var banner = errs.length
+    ? '<div class="card" style="border-color:var(--danger);color:var(--danger)">' +
+      '<b>Some panels could not load.</b> They are shown empty rather than filled with assumptions.' +
+      '<div style="font-size:12px;margin-top:6px;color:var(--gray)">' + prpaU(errs.join(' - ')) + '</div></div>'
+    : '';
+
+  function card(title, note, body) {
+    return '<div class="card"><div class="card-title">' + title + '</div>' +
+      (note ? '<div style="font-size:12px;color:var(--gray);margin:-8px 0 14px;line-height:1.5">' + note + '</div>' : '') +
+      body + '</div>';
+  }
+  var TH = 'style="text-align:left;padding:8px 10px;font-size:11px;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;border-bottom:2px solid var(--border)"';
+  var TD = 'style="padding:10px;border-bottom:1px solid var(--border);vertical-align:top"';
+
+  var byCrit = (queue && queue.by_criterion) || [];
+  var blockingRows = byCrit.map(function (c) {
+    return '<tr><td ' + TD + '><code style="color:var(--navy);font-weight:700">' + prpaU(c.criterion_key) +
+      '</code><div style="font-size:11px;color:var(--gray);margin-top:2px">' + prpaU(c.label) + '</div></td>' +
+      '<td ' + TD + ' style="padding:10px;border-bottom:1px solid var(--border);text-align:right;font-weight:700;font-size:22px;color:var(--danger)">' +
+      prpaU(c.subjects_blocked) + '</td>' +
+      '<td ' + TD + '><span style="font-size:12px;color:#333">' + prpaU(c.example_reason) + '</span></td></tr>';
+  }).join('');
+
+  var usable = (caps && caps.usable) || [];
+  var unusable = (caps && caps.on_file_unusable) || [];
+  var usableRows = usable.map(function (c) {
+    var d = c.days_until_expiry;
+    var warn = (d !== null && d !== undefined && d <= 90)
+      ? ' <b style="color:var(--warn)">expires in ' + prpaU(d) + 'd</b>' : '';
+    return '<li style="margin:6px 0"><b style="color:var(--navy)">' + prpaU(c.code) + '</b> ' +
+      '<span style="color:var(--gray)">(' + prpaU(c.responsible_entity) + ')</span>' + warn +
+      '<div style="font-size:11px;color:var(--gray)">evidence: ' + prpaU(c.evidence_source) + '</div></li>';
+  }).join('');
+  var unusableRows = unusable.map(function (c) {
+    return '<li style="margin:6px 0"><b style="color:var(--navy)">' + prpaU(c.code) + '</b> ' +
+      '<span style="color:var(--gray)">(' + prpaU(c.responsible_entity) + ')</span>' +
+      '<div style="font-size:11px;color:var(--warn)">' + prpaU(c.reason) + '</div></li>';
+  }).join('');
+
+  var list = (opps && opps.opportunities) || [];
+  var oppRows = list.map(function (o) {
+    return '<tr><td ' + TD + '>' + prpaStageBadge(o.stage, o.stage_reasons) + '</td>' +
+      '<td ' + TD + '>' + prpaKindBadge(o.record_kind) + '</td>' +
+      '<td ' + TD + '><a href="' + prpaU(o.source_url) + '" target="_blank" rel="noopener" ' +
+      'style="color:var(--navy);font-weight:600;text-decoration:none">' + prpaU(o.title) + '</a>' +
+      '<div style="font-size:11px;color:var(--gray)">' + prpaU(o.agency_name) + ' - ' +
+      prpaU(o.opportunity_number) + '</div></td>' +
+      '<td ' + TD + ' style="padding:10px;border-bottom:1px solid var(--border);white-space:nowrap;color:#333">' +
+      prpaU(o.close_date) + '</td>' +
+      '<td ' + TD + '><span style="font-size:12px;font-weight:600;color:#333">' +
+      prpaU(o.verdict || 'NOT_ASSESSED') + '</span></td></tr>';
+  }).join('');
+
+  var connRows = ((conns && conns.connectors) || []).map(function (c) {
+    var state = c.access_mode === 'manual_assisted'
+      ? '<span style="color:#5B4B8A;font-weight:600" title="authenticated portal, no published API - a scheduled human task">manual</span>'
+      : (c.activated
+        ? '<span style="color:var(--success);font-weight:600">active</span>'
+        : '<span style="color:var(--gray)" title="prepared, not activated">inactive</span>');
+    var ceiling = (c.daily_call_ceiling === null || c.daily_call_ceiling === undefined)
+      ? '<span style="color:var(--gray)" title="no published quota - not a quota of nothing">no published quota</span>'
+      : prpaU(c.last_calls_made) + ' / ' + prpaU(c.daily_call_ceiling);
+    return '<tr><td ' + TD + '><code style="color:var(--navy)">' + prpaU(c.source_key) + '</code></td>' +
+      '<td ' + TD + '>' + state + '</td>' +
+      '<td ' + TD + '><span style="font-size:12px;color:#333">' + prpaU(c.last_status) + '</span></td>' +
+      '<td ' + TD + '><span style="font-size:12px;color:#333">' + ceiling + '</span></td>' +
+      '<td ' + TD + '><span style="font-size:12px;color:#333">' + prpaU(c.last_watermark) + '</span></td></tr>';
+  }).join('');
+
+  var taskRows = ((tasks && tasks.tasks) || []).map(function (t) {
+    var pc = t.priority === 'urgent' ? 'var(--danger)' : (t.priority === 'high' ? 'var(--warn)' : 'var(--gray)');
+    return '<tr><td ' + TD + '><b style="color:' + pc + ';text-transform:uppercase;font-size:11px">' +
+      prpaU(t.priority) + '</b></td>' +
+      '<td ' + TD + '><span style="color:#222">' + prpaU(t.title) + '</span></td>' +
+      '<td ' + TD + '><span style="font-size:12px;color:#333">' + prpaU(t.owner_user_id) + '</span></td>' +
+      '<td ' + TD + '><span style="font-size:12px;color:#333">' + prpaU(t.due_date) + '</span></td>' +
+      '<td ' + TD + '><span style="font-size:12px;color:#333">' + prpaU(t.status) + '</span></td></tr>';
+  }).join('');
+
+  el.innerHTML = banner +
+    '<div style="margin-bottom:18px"><h2 style="margin:0;color:var(--navy)">Federal Pipeline</h2>' +
+    '<div style="font-size:12px;color:var(--gray);margin-top:4px">Evaluated as of ' +
+      prpaU((opps && opps.as_of) || (queue && queue.as_of)) +
+      '. Every figure traces to a stored row; anything not known reads <i>unknown</i>, never zero.</div></div>' +
+
+    card('WHAT IS BLOCKING',
+      'Mandatory gates that failed or could not be determined, grouped by gate. One gate blocking ' +
+      'many opportunities is one piece of work, not many reviews.',
+      byCrit.length
+        ? '<table style="width:100%;border-collapse:collapse"><tr><th ' + TH + '>gate</th><th ' + TH +
+          ' style="text-align:right;padding:8px 10px;font-size:11px;color:var(--gray);border-bottom:2px solid var(--border)">opportunities</th><th ' +
+          TH + '>example reason</th></tr>' + blockingRows + '</table>'
+        : '<div style="color:var(--gray);font-size:13px">Nothing blocked, or nothing assessed yet. Those ' +
+          'are different states and this panel does not guess which.</div>') +
+
+    card('OPPORTUNITIES',
+      'OPEN is a fact about the notice. SUBMITTABLE is whether we may respond at all. QUALIFIED is a ' +
+      'judgement about eligibility. A source status implies none of the others.',
+      list.length
+        ? '<table style="width:100%;border-collapse:collapse"><tr><th ' + TH + '>stage</th><th ' + TH +
+          '>kind</th><th ' + TH + '>opportunity</th><th ' + TH + '>closes</th><th ' + TH +
+          '>verdict</th></tr>' + oppRows + '</table>' +
+          '<div style="margin-top:14px"><a href="/api/prpa/export/opportunities.csv" ' +
+          'style="font-size:12px;color:var(--teal);font-weight:600">Download CSV</a> ' +
+          '<span style="font-size:11px;color:var(--gray)">- columns carry their basis, because a ' +
+          'spreadsheet outlives the page it came from</span></div>'
+        : '<div style="color:var(--gray);font-size:13px">No opportunities ingested yet.</div>') +
+
+    card('CAPABILITY REGISTRY',
+      'A requirement is satisfied only by a verified row inside its validity window and in scope. ' +
+      'Planned and pending are recorded and are not approved.',
+      '<div style="display:flex;gap:28px;flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:240px"><div style="font-size:11px;color:var(--success);font-weight:700;letter-spacing:.5px;margin-bottom:6px">USABLE NOW</div>' +
+        (usable.length
+          ? '<ul style="margin:0;padding-left:18px;font-size:13px">' + usableRows + '</ul>'
+          : '<div style="color:var(--danger);font-size:13px">Nothing verified. Until a row exists every ' +
+            'verdict is NEEDS_REVIEW, which is the honest answer rather than a failure of the engine.</div>') +
+      '</div><div style="flex:1;min-width:240px"><div style="font-size:11px;color:var(--warn);font-weight:700;letter-spacing:.5px;margin-bottom:6px">ON FILE, NOT USABLE</div>' +
+        (unusable.length
+          ? '<ul style="margin:0;padding-left:18px;font-size:13px">' + unusableRows + '</ul>'
+          : '<div style="color:var(--gray);font-size:13px">Nothing on file.</div>') +
+      '</div></div>') +
+
+    card('REVIEW TASKS',
+      'Assignment only. A task records that somebody owns a piece of work; it grants no approval and ' +
+      'triggers nothing external.',
+      taskRows
+        ? '<table style="width:100%;border-collapse:collapse"><tr><th ' + TH + '>priority</th><th ' + TH +
+          '>task</th><th ' + TH + '>owner</th><th ' + TH + '>due</th><th ' + TH + '>status</th></tr>' +
+          taskRows + '</table>'
+        : '<div style="color:var(--gray);font-size:13px">No open tasks.</div>') +
+
+    card('CONNECTORS',
+      'A portal with no published API shows "manual", never a tick.',
+      connRows
+        ? '<table style="width:100%;border-collapse:collapse"><tr><th ' + TH + '>source</th><th ' + TH +
+          '>mode</th><th ' + TH + '>last run</th><th ' + TH + '>calls</th><th ' + TH +
+          '>watermark</th></tr>' + connRows + '</table>'
+        : '<div style="color:var(--gray);font-size:13px">No connectors registered.</div>');
+};
 
 const pages = {
 
@@ -2676,6 +2909,7 @@ pm2 startup</pre>
 };
 
 pages['outreach'] = outreachPage;
+pages['prpa-command'] = window.prpaCommandPage;
 window.orDays = function orDays(d) { window._orDays = d; pages['outreach'](); };
 
 // ── ACTIONS ───────────────────────────────────────────────────────────────────

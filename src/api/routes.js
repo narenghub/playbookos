@@ -6315,3 +6315,129 @@ router.post('/notifications/read-all', authMiddleware, requireTier('intelligence
     res.json({ marked: upd.rowCount || 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// ── PRPA PR-6: READ-ONLY DASHBOARD ENDPOINTS ─────────────────────────────────
+//
+// Every handler below reads. The ONE exception is the review-task pair, which the ruling
+// authorizes for assignment and which grants no approval: src/lib/procurement/review-tasks.js has
+// no approval column and a status vocabulary that cannot express a decision.
+//
+// Company scoping comes from the resolved company context, not from a query parameter. A caller
+// cannot ask for another tenant's rows because a caller never supplies the tenant.
+const prpaViews = require('../lib/procurement/views');
+const prpaTasks = require('../lib/procurement/review-tasks');
+const prpaExport = require('../lib/procurement/export');
+const { resolveCompanyContext } = require('../lib/office/context');
+
+const prpaToday = () => new Date().toISOString().slice(0, 10);
+
+async function prpaCtx(req) {
+  // The same bootstrap the governed kernel uses. It derives the company; it is never read from the
+  // request, which is the whole point of company context.
+  return resolveCompanyContext({ userId: req.user && req.user.id });
+}
+
+router.get('/prpa/review-queue', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const byCriterion = prpaViews.reviewQueueByCriterion(ctx.companyId);
+    const items = prpaViews.reviewQueueItems(ctx.companyId, {
+      criterionKey: req.query.criterion || null, limit: 200,
+    });
+    const [g, i] = await Promise.all([query(byCriterion.text, byCriterion.values),
+      query(items.text, items.values)]);
+    res.json({ as_of: prpaToday(), by_criterion: g.rows, items: i.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/prpa/capabilities', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const asOf = prpaToday();
+    const u = prpaViews.capabilitiesUsable(ctx.companyId, asOf);
+    const x = prpaViews.capabilitiesOnFileUnusable(ctx.companyId, asOf);
+    const a = prpaViews.capabilitiesRequiredButAbsent(ctx.companyId);
+    const [usable, unusable, absent] = await Promise.all([
+      query(u.text, u.values), query(x.text, x.values), query(a.text, a.values)]);
+    res.json({
+      as_of: asOf,
+      usable: usable.rows,
+      on_file_unusable: unusable.rows,
+      required_but_absent: absent.rows,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/prpa/opportunities', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const asOf = prpaToday();
+    const b = prpaViews.fundingOpportunities(ctx.companyId, { limit: 200 });
+    const { rows } = await query(b.text, b.values);
+    // The ladder is derived HERE, once, from the stored facts — never stored and never recomputed
+    // in the browser, where it could drift from the server's answer.
+    const out = rows.map((r) => {
+      const stage = prpaViews.opportunityStage({
+        recordKind: r.record_kind, oppStatus: r.opp_status, responseDeadline: r.close_date,
+      }, { verdict: r.verdict, rationale: r.rationale }, asOf);
+      return { ...r, stage: stage.stage, stage_reasons: stage.reasons };
+    });
+    res.json({ as_of: asOf, opportunities: out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/prpa/connectors', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const b = prpaViews.connectorHealth(ctx.companyId);
+    const { rows } = await query(b.text, b.values);
+    res.json({ as_of: prpaToday(), connectors: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Download only. No external destination, per ruling 6.
+router.get('/prpa/export/opportunities.csv', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const asOf = prpaToday();
+    const b = prpaViews.fundingOpportunities(ctx.companyId, { limit: 1000 });
+    const { rows } = await query(b.text, b.values);
+    const exportRows = prpaExport.opportunityRows(rows, {
+      stageFor: (r) => prpaViews.opportunityStage({
+        recordKind: r.record_kind, oppStatus: r.opp_status, responseDeadline: r.close_date,
+      }, { verdict: r.verdict, rationale: r.rationale }, asOf),
+    });
+    const csv = prpaExport.toCsv(prpaExport.OPPORTUNITY_FIELDS, exportRows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="prpa-opportunities-${asOf}.csv"`);
+    res.send(csv);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/prpa/tasks', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const tasks = await prpaTasks.listTasks(ctx, {
+      ownerUserId: req.query.owner || null,
+      includeClosed: req.query.closed === '1',
+    });
+    res.json({ tasks });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Assignment. Writes a task row and nothing else — no approval, no external action.
+router.post('/prpa/tasks', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const task = await prpaTasks.openTask(ctx, req.body || {});
+    res.status(201).json({ task });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+router.patch('/prpa/tasks/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const task = await prpaTasks.updateTask(ctx, req.params.id, req.body || {});
+    res.json({ task });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
