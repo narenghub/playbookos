@@ -41,7 +41,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
-const { pgBinCandidates, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+const { pgBinCandidates, pgClientOnlyDirs, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 
 const PORT = 3994;
 const PGPORT = 55987;
@@ -194,18 +194,34 @@ async function main() {
 
   const chosen = toolchainFor(dumpPath, isCustom);
   if (!chosen.dir) {
-    if (!chosen.tried.length) { console.log('\nSKIP  no Postgres available'); process.exit(EXIT_NOT_EXECUTED); }
-    // NOT a skip. Postgres is installed; every copy of it is too old to read this backup. That is a
-    // real, actionable finding about this machine's ability to recover, so it exits 1, not 3.
+    const clientOnly = pgClientOnlyDirs();
+    if (!chosen.tried.length && !clientOnly.length) {
+      console.log('\nSKIP  no Postgres available');
+      process.exit(EXIT_NOT_EXECUTED);
+    }
+    // NOT a skip. Postgres is installed in some form; no complete server toolchain here can read
+    // this backup. That is a real, actionable finding about this machine's ability to recover from
+    // it, so it exits 1, not 3.
     h('TOOLCHAIN');
-    bad(`no installed pg_restore can read this dump (archive version ${archive})`,
+    bad(`no PostgreSQL server install here can restore this dump (archive version ${archive})`,
       'a custom-format dump can only be read by a pg_restore at least as new as the pg_dump that '
-      + 'wrote it');
-    console.log('\n  tried:');
-    for (const t of chosen.tried) console.log(`    ${t}`);
-    console.log(`\n  The dump was written by a NEWER pg_dump than any pg_restore here. Either install`);
-    console.log(`  a matching major version (on macOS: brew install postgresql@17) or re-take the dump`);
-    console.log(`  with a pg_dump of the same major version as one of the above.`);
+      + 'wrote it, and the restore also needs a SERVER of that version to restore into');
+    if (chosen.tried.length) {
+      console.log('\n  server installs found, none able to read this archive:');
+      for (const t of chosen.tried) console.log(`    ${t}`);
+    } else {
+      console.log('\n  server installs found: NONE');
+    }
+    if (clientOnly.length) {
+      // This is the half that is easy to miss: the newest tools on the machine may be client-only,
+      // which is exactly how a dump gets written in a format nothing here can restore.
+      console.log('\n  client-only directories (psql/pg_dump/pg_restore but NO server) — these can');
+      console.log('  WRITE a dump this machine cannot then restore, which is how you got here:');
+      for (const d of clientOnly) console.log(`    ${d}  ${toolVersion(d, 'pg_restore')}`);
+    }
+    console.log('\n  FIX: install a PostgreSQL SERVER at least as new as the client that wrote the');
+    console.log('  dump. On macOS with Homebrew: brew install postgresql@18');
+    console.log('  (installing the server does not disturb libpq or the client tools on PATH.)');
     console.log(`\n  THE BACKUP IS NOT NECESSARILY BAD — this machine cannot currently restore it,`);
     console.log(`  which for disaster recovery is the same problem and is worth knowing now.\n`);
     process.exit(1);
