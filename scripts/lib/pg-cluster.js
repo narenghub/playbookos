@@ -88,6 +88,34 @@ function pgBin() {
   } catch (_) { return null; }
 }
 
+// EVERY installed toolchain, newest-first, not just the first one found.
+//
+// pgBin() returns one directory and that is right for a harness building a database from scratch:
+// any version will do. It is WRONG for restoring a dump, because a dump can only be read by a
+// pg_restore at least as new as the pg_dump that wrote it, and these are independent choices on a
+// developer machine. On the CEO's Mac `pg_dump` on PATH was PostgreSQL 17 while pgBin() returned a
+// versioned Homebrew keg of 16 — which outranks the unversioned /opt/homebrew/bin in BIN — so a
+// 24.92 MiB production backup came back as `unsupported version (1.16) in file header`.
+//
+// A caller that needs a specific capability must be able to TEST each candidate rather than trust
+// the ordering, so this returns all of them. Deduped, because /opt/homebrew/bin and a keg can be the
+// same install reached two ways, and probing one twice would report the same answer twice.
+function pgBinCandidates() {
+  const found = [];
+  const seen = new Set();
+  const add = (d) => {
+    if (!d || seen.has(d) || !fs.existsSync(path.join(d, 'initdb'))) return;
+    seen.add(d);
+    found.push(d);
+  };
+  for (const d of BIN) add(d);
+  try {
+    const p = execFileSync('which', ['initdb'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    add(path.dirname(p.trim()));
+  } catch (_) { /* nothing on PATH */ }
+  return found;
+}
+
 // `initdb -A trust -U postgres`. Named so a harness cannot half-apply it, and so the discipline test
 // can assert that no harness assembles its own initdb invocation.
 const INITDB_FLAGS = '-A trust -U postgres';
@@ -99,4 +127,4 @@ function notExecuted(reason) {
   process.exit(EXIT_NOT_EXECUTED);
 }
 
-module.exports = { BIN, pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED, notExecuted };
+module.exports = { BIN, pgBin, pgBinCandidates, INITDB_FLAGS, EXIT_NOT_EXECUTED, notExecuted };

@@ -41,7 +41,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
-const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+const { pgBinCandidates, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 
 const PORT = 3994;
 const PGPORT = 55987;
@@ -72,9 +72,55 @@ if (!fs.existsSync(dumpPath)) {
   process.exit(1);
 }
 
+// ── WHICH POSTGRES CAN ACTUALLY READ THIS DUMP? ────────────────────────────
+//
+// A custom-format dump carries the archive version its pg_dump wrote, and a pg_restore older than
+// that REFUSES it: `unsupported version (1.16) in file header`. The two versions are chosen
+// independently on a developer machine — `pg_dump` came off PATH, the restore came off pgBin() —
+// and on the CEO's Mac they differed, so a good 24.92 MiB backup looked like a bad backup.
+//
+// The version is read from the header rather than inferred, and the toolchain is chosen by ASKING
+// EACH CANDIDATE whether it can read this file. `pg_restore --list` parses the archive and touches
+// no server, so the probe is free and, more to the point, it is a measurement: no table mapping
+// archive versions to major releases to go stale, and no assumption that a higher directory in the
+// search path means a newer install.
+//
+// The chosen directory is then used for initdb, pg_ctl AND pg_restore together. That is what keeps
+// the cluster's server version consistent with the client doing the restore — restoring a newer
+// dump into an older server is the same defect one layer down.
+function archiveVersion(file) {
+  const fd = fs.openSync(file, 'r');
+  const buf = Buffer.alloc(8);
+  fs.readSync(fd, buf, 0, 8, 0);
+  fs.closeSync(fd);
+  if (buf.toString('latin1', 0, 5) !== 'PGDMP') return null;
+  return `${buf[5]}.${buf[6]}`;
+}
+
+function toolVersion(dir, tool) {
+  try {
+    return execFileSync(path.join(dir, tool), ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch (_) { return 'unknown'; }
+}
+
+// Returns { dir, version } for a toolchain that can read this dump, or { tried } if none can.
+function toolchainFor(file, isCustom) {
+  const candidates = pgBinCandidates();
+  if (!candidates.length) return { tried: [] };
+  if (!isCustom) return { dir: candidates[0], version: toolVersion(candidates[0], 'psql') };
+  const tried = [];
+  for (const dir of candidates) {
+    const v = toolVersion(dir, 'pg_restore');
+    try {
+      execFileSync(path.join(dir, 'pg_restore'), ['--list', file], { stdio: 'ignore' });
+      return { dir, version: v };
+    } catch (_) { tried.push(`${dir} (${v})`); }
+  }
+  return { tried };
+}
+
 let temp = null;
-function startCluster() {
-  const dir = pgBin();
+function startCluster(dir) {
   if (!dir) return null;
   const base = fs.mkdtempSync('/var/tmp/restore-');
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
@@ -109,7 +155,35 @@ async function main() {
   console.log('');
   console.log('  This script does not connect to production. It reads the dump only.');
 
-  const base = startCluster();
+  // The format and the archive version are properties OF THE FILE, so they are read before any
+  // toolchain is chosen — the file decides which Postgres is fit to read it, not the other way round.
+  const archive = archiveVersion(dumpPath);
+  const isCustom = archive !== null;
+  const isGz = /\.gz$/i.test(dumpPath);
+  console.log(`  format    : ${isCustom ? `custom (PGDMP, archive ${archive}) → pg_restore` : isGz ? 'gzipped SQL → gunzip | psql' : 'plain SQL → psql'}`);
+
+  const chosen = toolchainFor(dumpPath, isCustom);
+  if (!chosen.dir) {
+    if (!chosen.tried.length) { console.log('\nSKIP  no Postgres available'); process.exit(EXIT_NOT_EXECUTED); }
+    // NOT a skip. Postgres is installed; every copy of it is too old to read this backup. That is a
+    // real, actionable finding about this machine's ability to recover, so it exits 1, not 3.
+    h('TOOLCHAIN');
+    bad(`no installed pg_restore can read this dump (archive version ${archive})`,
+      'a custom-format dump can only be read by a pg_restore at least as new as the pg_dump that '
+      + 'wrote it');
+    console.log('\n  tried:');
+    for (const t of chosen.tried) console.log(`    ${t}`);
+    console.log(`\n  The dump was written by a NEWER pg_dump than any pg_restore here. Either install`);
+    console.log(`  a matching major version (on macOS: brew install postgresql@17) or re-take the dump`);
+    console.log(`  with a pg_dump of the same major version as one of the above.`);
+    console.log(`\n  THE BACKUP IS NOT NECESSARILY BAD — this machine cannot currently restore it,`);
+    console.log(`  which for disaster recovery is the same problem and is worth knowing now.\n`);
+    process.exit(1);
+  }
+  console.log(`  toolchain : ${chosen.dir}`);
+  console.log(`              ${chosen.version}`);
+
+  const base = startCluster(chosen.dir);
   if (!base) { console.log('\nSKIP  no Postgres available'); process.exit(EXIT_NOT_EXECUTED); }
   const dir = temp.dir;
   const asPostgres = temp.asPostgres;
@@ -134,18 +208,6 @@ async function main() {
     h('1. RESTORE');
     sh(`PATH=${dir}:$PATH psql -U postgres -h ${sock} -p ${PGPORT} -d postgres -c "DROP DATABASE IF EXISTS restored" -c "CREATE DATABASE restored"`, true);
     ok('created a fresh, empty database "restored" in a disposable cluster');
-
-    // The dump is untrusted input in the sense that matters here: its FORMAT is not known until it
-    // is looked at. A plain .sql goes through psql; a custom-format dump through pg_restore.
-    const isCustom = (() => {
-      const fd = fs.openSync(dumpPath, 'r');
-      const buf = Buffer.alloc(5);
-      fs.readSync(fd, buf, 0, 5, 0);
-      fs.closeSync(fd);
-      return buf.toString('latin1').startsWith('PGDMP');
-    })();
-    const isGz = /\.gz$/i.test(dumpPath);
-    console.log(`  format    : ${isCustom ? 'custom (PGDMP) → pg_restore' : isGz ? 'gzipped SQL → gunzip | psql' : 'plain SQL → psql'}`);
 
     const abs = path.resolve(dumpPath);
     // The cluster runs as the postgres user when we are root, so the dump must be readable by it.
