@@ -444,5 +444,17 @@ pf_step "the CAS conflict triage classifies what it says it classifies" node scr
 # satisfy the verified_capabilities CHECK constraint, and saying so out loud is the point.
 pf_step "the evidence inventory never invents a capability" node scripts/check-evidence-inventory-db.js
 
+# Ruling 7 item 6 says to run the production-bound read-only scripts "only after confirming the
+# scripts". This confirms them. The Railway environment and the permissions are not confirmable
+# from here and stay with whoever runs them.
+#
+# Reading a file and seeing no INSERT is a statement about my attention, so each script is RUN
+# against a real server holding real rows, and a full table-by-table row census is compared before
+# and after. Both halves of the detection are controlled: a planted mutating literal must still be
+# caught after comments are stripped, and a mutating verb inside a comment must be ignored — the
+# first version of that scanner paired backticks across the whole file and missed a planted
+# `DELETE ... SELECT` entirely, which would have made every clean result below vacuous.
+pf_step "the production-bound read-only scripts change nothing" node scripts/check-readonly-prod-scripts-db.js
+
 pf_verdict
 exit $?

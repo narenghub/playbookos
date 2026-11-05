@@ -114,7 +114,7 @@ const RUN_A = '11111111-1111-4111-8111-111111111111';
 const RUN_B = '22222222-2222-4222-8222-222222222222';
 
 // Recorded as created, deleted by exactly these ids.
-const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [], assessments: [], findings: [], caps: [], scopes: [] };
+const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [], assessments: [], findings: [], caps: [], scopes: [], sols: [], amends: [] };
 
 (async () => {
   const { Pool } = require('pg');
@@ -586,13 +586,116 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
       ok('C6 an invented status is refused by source_sync_runs_status_check');
     } else bad('C6 an invented status is refused', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
 
+    // ── C20 PR-3 solicitations: response_open is computed, never asserted ─
+    //
+    // The SAM equivalent of C8, and it matters more, because `solicitation` is the ONLY biddable
+    // record kind in the system. If a caller could set response_open, the single gate that decides
+    // whether a priced bid may be produced would be writable by whoever ingests the row.
+    const insertSol = async (id, noticeId, {
+      kind = 'solicitation', active = true, deadline = '2026-12-01T17:00:00Z', company = A,
+    } = {}) => {
+      await q(`INSERT INTO solicitations
+                 (id, company_id, source_key, notice_id, record_kind, active, response_deadline, raw_json)
+               VALUES ($1,$2,'sam_gov',$3,$4,$5,$6,'{}'::jsonb)`,
+      [id, company, noticeId, kind, active, deadline]);
+      made.sols = made.sols || [];
+      made.sols.push(id);
+    };
+
+    await insertSol('sol-open', 'N0001');
+    let s = (await q(`SELECT response_open FROM solicitations WHERE id = 'sol-open'`)).rows[0];
+    if (s.response_open === true) ok('C20 an active solicitation with a deadline computes response_open = true');
+    else bad('C20 an active solicitation with a deadline is open', JSON.stringify(s));
+
+    // An UNRECOGNISED notice type arrives as NULL record_kind. It must NOT be open — a new SAM
+    // notice type becoming biddable by default is the failure in the expensive direction.
+    await insertSol('sol-unknown-kind', 'N0002', { kind: null });
+    s = (await q(`SELECT response_open FROM solicitations WHERE id = 'sol-unknown-kind'`)).rows[0];
+    if (s.response_open === false) ok('C20 an UNKNOWN record_kind computes response_open = false, never open-by-default');
+    else bad('C20 an unknown notice type must not be biddable', JSON.stringify(s));
+
+    await insertSol('sol-sought', 'N0003', { kind: 'sources_sought' });
+    s = (await q(`SELECT response_open FROM solicitations WHERE id = 'sol-sought'`)).rows[0];
+    if (s.response_open === false) ok('C20 a sources-sought notice is never response_open');
+    else bad('C20 sources_sought must not be open', JSON.stringify(s));
+
+    await insertSol('sol-withdrawn', 'N0004', { active: false });
+    s = (await q(`SELECT response_open FROM solicitations WHERE id = 'sol-withdrawn'`)).rows[0];
+    if (s.response_open === false) ok('C20 a withdrawn solicitation is not open');
+    else bad('C20 an inactive solicitation must not be open', JSON.stringify(s));
+
+    await insertSol('sol-nodeadline', 'N0005', { deadline: null });
+    s = (await q(`SELECT response_open FROM solicitations WHERE id = 'sol-nodeadline'`)).rows[0];
+    if (s.response_open === false) ok('C20 a solicitation with no deadline is not open — empty is not "apply anytime"');
+    else bad('C20 a missing deadline must not read as open', JSON.stringify(s));
+
+    e = await refusedBy(() => q(`UPDATE solicitations SET response_open = true WHERE id = 'sol-sought'`));
+    if (e && e.code === '428C9') {
+      ok('C20 writing response_open directly is refused by the server — the biddability gate is not writable');
+    } else {
+      bad('C20 response_open cannot be written directly',
+        e ? `${e.code}/${e.constraint}` : 'the UPDATE was ACCEPTED — the gate is writable');
+    }
+
+    e = await refusedBy(() => insertSol('sol-badkind', 'N0006', { kind: 'totally_new_kind' }));
+    if (e && e.constraint === 'solicitations_record_kind_check') {
+      ok('C20 an invented record_kind is refused by the CHECK');
+    } else bad('C20 record_kind is constrained', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    // ── C21 amendments: the only history SAM will ever give us ───────────
+    const insertAmend = async (id, { sol = 'sol-open', company = A, sig = 'deadline_moved', fields = ['response_deadline'] } = {}) => {
+      await q(`INSERT INTO solicitation_amendments
+                 (id, company_id, solicitation_id, notice_id, significance, changed_fields, previous_values, new_values)
+               VALUES ($1,$2,$3,'N0001',$4,$5,'{}'::jsonb,'{}'::jsonb)`,
+      [id, company, sol, sig, fields]);
+      made.amends = made.amends || [];
+      made.amends.push(id);
+    };
+
+    await insertAmend('amd-1');
+    ok('C21 a well-formed amendment is accepted');
+
+    e = await refusedBy(() => insertAmend('amd-empty', { fields: [] }));
+    if (e && e.constraint === 'solicitation_amendments_fields_not_empty') {
+      ok('C21 an amendment with NO changed fields is refused — that is not an amendment');
+    } else bad('C21 changed_fields must be non-empty', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    e = await refusedBy(() => insertAmend('amd-badsig', { sig: 'interesting' }));
+    if (e && e.constraint === 'solicitation_amendments_significance_check') {
+      ok('C21 an invented significance is refused');
+    } else bad('C21 significance is constrained', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    // TENANT ISOLATION, the composite FK doing its job: tenant B may not attach an amendment to
+    // tenant A's solicitation. Without MATCH FULL on the pair this would succeed, because
+    // sol-open is a perfectly real id.
+    e = await refusedBy(() => insertAmend('amd-cross', { sol: 'sol-open', company: B }));
+    if (e && (e.code === '23503' || /foreign key/i.test(e.message || ''))) {
+      ok('C21 CROSS-TENANT: company B cannot attach an amendment to company A\'s solicitation');
+    } else {
+      bad('C21 an amendment must not cross tenants',
+        e ? `${e.code}/${e.constraint}` : 'ACCEPTED — the composite FK is not enforcing');
+    }
+
     // ── C7 the seed, as it lands ─────────────────────────────────────────
     const { rows: seeded } = await q(
       'SELECT source_key, access_mode, activated, daily_call_ceiling FROM source_connectors ORDER BY source_key');
     const byKey = Object.fromEntries(seeded.map((r) => [r.source_key, r]));
-    if (byKey.sam_gov && byKey.sam_gov.activated === false && byKey.sam_gov.daily_call_ceiling === 10) {
-      ok('C7 sam_gov lands activated=false with the personal-key ceiling of 10 (ruling 7)');
-    } else bad('C7 sam_gov lands inert', JSON.stringify(byKey.sam_gov));
+    // The ceiling must be NULL, and that is the assertion — not a number.
+    //
+    // This check used to require daily_call_ceiling === 10, pinning a figure that is not published
+    // anywhere. open.gsa.gov says only, verbatim, "Request per day are limited based on the
+    // federal or non-federal or general roles", with no number for any role; the 10 (and the
+    // "~1,000 for a system account" beside it) came from recollection. The seed's own rule is that
+    // an unpublished limit is NULL, so the check was pinning a violation of it in place.
+    //
+    // A wrong ceiling is not harmless in either direction: too low and the quota ledger refuses
+    // valid calls, too high and it sails past the real limit on an API whose overrun behaviour is
+    // also undocumented. When the entity administrator issues the system account and states the
+    // real number, set it in the seed and assert that number here.
+    if (byKey.sam_gov && byKey.sam_gov.activated === false && byKey.sam_gov.daily_call_ceiling === null) {
+      ok('C7 sam_gov lands activated=false with a NULL ceiling — the limit is unpublished, and an '
+        + 'invented number would look like knowledge');
+    } else bad('C7 sam_gov lands inert with an honest ceiling', JSON.stringify(byKey.sam_gov));
 
     const active = seeded.filter((r) => r.activated).map((r) => r.source_key);
     // Ruling 2 authorized PR-4 ahead of PR-3, so grants_gov joins usaspending. Asserted exactly:
@@ -621,6 +724,9 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     for (const id of made.findings) await q('DELETE FROM eligibility_findings WHERE id = $1', [id]);
     for (const id of made.assessments) await q('DELETE FROM eligibility_assessments WHERE id = $1', [id]);
     for (const id of made.vers) await q('DELETE FROM funding_opportunity_versions WHERE id = $1', [id]);
+    // Amendments before solicitations: the composite FK points one way.
+    for (const id of made.amends) await q('DELETE FROM solicitation_amendments WHERE id = $1', [id]);
+    for (const id of made.sols) await q('DELETE FROM solicitations WHERE id = $1', [id]);
     for (const id of made.opps) await q('DELETE FROM funding_opportunities WHERE id = $1', [id]);
     for (const id of made.awards) await q('DELETE FROM federal_awards WHERE id = $1', [id]);
     for (const id of made.syncs) await q('DELETE FROM source_sync_runs WHERE id = $1', [id]);
@@ -637,6 +743,8 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
       ['eligibility_findings', 'id', made.findings],
       ['eligibility_assessments', 'id', made.assessments],
       ['funding_opportunity_versions', 'id', made.vers],
+      ['solicitation_amendments', 'id', made.amends],
+      ['solicitations', 'id', made.sols],
       ['funding_opportunities', 'id', made.opps],
       ['federal_awards', 'id', made.awards],
       ['source_sync_runs', 'id', made.syncs],
@@ -652,6 +760,12 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     else bad('cleanup left fixtures behind', leaks.join('; '));
 
     // ── the documented rollback, actually executed ───────────────────────
+    // Dropped before source_connectors, which they reference. Children first, and the amendment
+    // table before the solicitations it has a composite FK into — the teardown failing with
+    // "cannot drop table source_connectors because other objects depend on it" is how the new
+    // PR-3 tables announced themselves here.
+    await q('DROP TABLE IF EXISTS solicitation_amendments');
+    await q('DROP TABLE IF EXISTS solicitations');
     await q('DROP TABLE IF EXISTS review_tasks');
     await q('DROP TABLE IF EXISTS capability_scope_items');
     await q('DROP TABLE IF EXISTS verified_capabilities');

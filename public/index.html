@@ -2229,11 +2229,146 @@ window.prpaCommandPage = async function prpaCommandPage() {
       '<td ' + TD + '><span style="font-size:12px;color:#333">' + prpaU(t.status) + '</span></td></tr>';
   }).join('');
 
+  // The phone form of the same list. Built from the identical array, so the two views cannot
+  // drift — and every field is labelled, because a bare value in a card has no column header to
+  // tell a reader what it is.
+  var taskCards = ((tasks && tasks.tasks) || []).map(function (t) {
+    var pc = t.priority === 'urgent' ? 'var(--danger)' : (t.priority === 'high' ? 'var(--warn)' : 'var(--gray)');
+    return '<div class="prpa-rowcard">' +
+      '<div style="font-size:11px;font-weight:700;letter-spacing:.4px;color:' + pc + ';text-transform:uppercase">' +
+        prpaU(t.priority) + '</div>' +
+      '<div style="color:#222;font-weight:600;margin-top:4px;line-height:1.4">' + prpaU(t.title) + '</div>' +
+      '<b class="k">owner</b><span style="font-size:13px;color:#333">' + prpaU(t.owner_user_id) + '</span>' +
+      '<b class="k">due</b><span style="font-size:13px;color:#333">' + prpaU(t.due_date) + '</span>' +
+      '<b class="k">status</b><span style="font-size:13px;color:#333">' + prpaU(t.status) + '</span>' +
+      '</div>';
+  }).join('');
+
+  // ── RULING 7 ITEM 5: EXECUTIVE SUMMARY, REGISTRATION, SOURCE COVERAGE ────
+  //
+  // Every figure below is COUNTED from the rows already fetched above. Nothing is estimated and
+  // nothing is derived from a second source that could disagree with the table underneath it — a
+  // summary that does not match the detail is worse than no summary, because it is the number
+  // people quote.
+  var nOpen = list.filter(function (o) { return o.stage === 'open' || o.stage === 'submittable' || o.stage === 'qualified'; }).length;
+  var nSubmittable = list.filter(function (o) { return o.stage === 'submittable' || o.stage === 'qualified'; }).length;
+  var nQualified = list.filter(function (o) { return o.stage === 'qualified'; }).length;
+  var nOpenTasks = ((tasks && tasks.tasks) || []).filter(function (t) {
+    return t.status === 'open' || t.status === 'in_progress' || t.status === 'blocked';
+  }).length;
+
+  // A metric whose value is not known reads unknown, never 0. The two are different claims and
+  // only one of them is true when a panel failed to load.
+  function stat(label, value, note, colour) {
+    var shown = (value === null || value === undefined) ? prpaU(null) : String(value);
+    return '<div>' +
+      '<div style="font-size:26px;font-weight:700;color:' + (colour || 'var(--navy)') + ';line-height:1.1">' + shown + '</div>' +
+      '<div style="font-size:11px;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;margin-top:4px">' + label + '</div>' +
+      (note ? '<div style="font-size:11px;color:var(--gray);margin-top:3px;line-height:1.4">' + note + '</div>' : '') +
+      '</div>';
+  }
+
+  var loadFailed = errs.length > 0;
+  var execSummary = card('WHERE THIS STANDS',
+    'Counted from the rows below, not computed separately — a summary that disagrees with its own ' +
+    'detail is the number people end up quoting.',
+    '<div class="prpa-stats">' +
+      stat('open', loadFailed ? null : nOpen, 'the notice is live') +
+      stat('submittable', loadFailed ? null : nSubmittable, 'we may respond at all') +
+      stat('qualified', loadFailed ? null : nQualified,
+        'eligibility established', nQualified ? 'var(--success)' : 'var(--gray)') +
+      stat('gates blocking', loadFailed ? null : byCrit.length, 'distinct reasons, not reviews') +
+      stat('open review tasks', loadFailed ? null : nOpenTasks, 'work someone owns') +
+    '</div>' +
+    (!loadFailed && nQualified === 0
+      ? '<div style="margin-top:16px;padding:12px 14px;background:#FBF0DC;border-radius:6px;font-size:13px;color:#6B4A12;line-height:1.5">' +
+        '<b>Nothing is qualified, and that is a statement about our evidence, not about the market.</b> ' +
+        'A verdict can only reach QUALIFIED when the mandatory gates pass, and they cannot pass while ' +
+        'the capability registry is empty and no SAM registration is on record. Fix those two and the ' +
+        'same opportunities are re-judged automatically.</div>'
+      : ''));
+
+  // ── REGISTRATION STATUS ──────────────────────────────────────────────────
+  //
+  // There is no stored registration record, so this reads UNKNOWN. It is rendered from
+  // `caps.registration` when the API starts supplying it, and until then it says plainly that the
+  // absence is OURS — not a finding that the registration is invalid. The distinction matters: one
+  // means "we have not recorded it", the other means "we cannot bid".
+  var reg = (caps && caps.registration) || null;
+  var regCard = card('REGISTRATION STATUS',
+    'Checked against each submission deadline, not against today — a registration that lapses ' +
+    'before a closing date does not qualify for it.',
+    reg
+      ? '<div class="prpa-stats">' +
+        stat('UEI', reg.uei) + stat('CAGE', reg.cage) +
+        stat('status', reg.status, null, /active/i.test(reg.status || '') ? 'var(--success)' : 'var(--danger)') +
+        stat('expires', reg.expires_on) + '</div>'
+      : '<div style="font-size:13px;color:#333;line-height:1.6">' +
+        '<b style="color:var(--warn)">UNKNOWN — no SAM registration record is stored.</b><br>' +
+        'This is a gap in what we have recorded, <i>not</i> a finding that the registration is ' +
+        'invalid or expired. The qualification engine treats an absent registration as UNKNOWN and ' +
+        'returns NEEDS_REVIEW, rather than assuming either way — so this single missing record is ' +
+        'enough on its own to keep every opportunity out of QUALIFIED.' +
+        '</div>');
+
+  // ── SOURCE COVERAGE ──────────────────────────────────────────────────────
+  //
+  // The point of this panel is the ABSENCE. A dashboard that lists the sources it has says nothing
+  // about the one it does not, and the one it does not is the only source of biddable work: a
+  // federal contract opportunity is a SAM.gov solicitation, and `solicitation` is the sole biddable
+  // record kind. So an inactive procurement source is rendered as a gap in coverage with its
+  // consequence spelled out, not as a greyed-out row in a list.
+  var connList = (conns && conns.connectors) || [];
+  var covRows = connList.map(function (c) {
+    var live = c.activated === true || c.activated === 't';
+    var isProcurement = c.kind === 'procurement';
+    var colour = live ? 'var(--success)' : (isProcurement ? 'var(--danger)' : 'var(--warn)');
+    var label = live ? 'LIVE' : 'NOT ACTIVE';
+    return '<div style="display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid var(--border)">' +
+      '<span style="min-width:92px;font-size:11px;font-weight:700;letter-spacing:.4px;color:' + colour + '">' + label + '</span>' +
+      '<code style="color:var(--navy);font-size:12px;min-width:120px">' + prpaU(c.source_key) + '</code>' +
+      '<span style="font-size:12px;color:var(--gray)">' + prpaU(c.kind) + '</span>' +
+      '</div>';
+  }).join('');
+  var hasLiveProcurement = connList.some(function (c) {
+    return c.kind === 'procurement' && (c.activated === true || c.activated === 't');
+  });
+  var coverageCard = card('SOURCE COVERAGE',
+    'What we can see, and what we cannot. An absent source is a hole in the pipeline, not a ' +
+    'smaller pipeline.',
+    (covRows || '<div style="color:var(--gray);font-size:13px">No connectors registered.</div>') +
+    (!hasLiveProcurement
+      ? '<div style="margin-top:14px;padding:12px 14px;background:#FBE4E4;border-radius:6px;font-size:13px;color:#7A2322;line-height:1.5">' +
+        '<b>No procurement source is live, so nothing here is biddable.</b> ' +
+        'A federal contract opportunity is a SAM.gov solicitation, and a solicitation is the only ' +
+        'record kind a priced bid may be produced from. Grants, forecasts, research leads and ' +
+        'historical awards are all visible and none of them can be bid. This is the binding ' +
+        'constraint on the whole channel, and it is an access question rather than an engineering one.' +
+        '</div>'
+      : ''));
+
   el.innerHTML = banner +
+    '<style>' +
+    // Stacked cards on a phone, a table on a desktop. Both are rendered and one is hidden,
+    // because a table squeezed into 390px is not a smaller table — it is an unreadable one, and
+    // horizontally scrolling a review queue is how a row gets missed.
+    '@media (max-width: 760px){.prpa-wide{display:none}.prpa-stack{display:block}}' +
+    '@media (min-width: 761px){.prpa-wide{display:block}.prpa-stack{display:none}}' +
+    // auto-fit packs two stats per row on a 390px phone and up to five on a desktop, instead of
+    // one full-width block each — five stacked stats push the actual content a whole screen down.
+    '.prpa-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:18px 24px}' +
+    '.prpa-rowcard{border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:10px}' +
+    '.prpa-rowcard b.k{display:block;font-size:10px;letter-spacing:.5px;color:var(--gray);' +
+    'text-transform:uppercase;margin-top:8px;font-weight:700}' +
+    '</style>' +
     '<div style="margin-bottom:18px"><h2 style="margin:0;color:var(--navy)">Federal Pipeline</h2>' +
     '<div style="font-size:12px;color:var(--gray);margin-top:4px">Evaluated as of ' +
       prpaU((opps && opps.as_of) || (queue && queue.as_of)) +
       '. Every figure traces to a stored row; anything not known reads <i>unknown</i>, never zero.</div></div>' +
+
+    execSummary +
+    regCard +
+    coverageCard +
 
     card('WHAT IS BLOCKING',
       'Mandatory gates that failed or could not be determined, grouped by gate. One gate blocking ' +
@@ -2277,9 +2412,13 @@ window.prpaCommandPage = async function prpaCommandPage() {
       'Assignment only. A task records that somebody owns a piece of work; it grants no approval and ' +
       'triggers nothing external.',
       taskRows
-        ? '<table style="width:100%;border-collapse:collapse"><tr><th ' + TH + '>priority</th><th ' + TH +
+        // Ruling 7 item 5: stacked cards on a phone, not a compressed table. Both forms are
+        // rendered from the SAME task list and the CSS above picks one, so the two can never
+        // disagree about what is in the queue.
+        ? '<div class="prpa-wide"><table style="width:100%;border-collapse:collapse"><tr><th ' + TH + '>priority</th><th ' + TH +
           '>task</th><th ' + TH + '>owner</th><th ' + TH + '>due</th><th ' + TH + '>status</th></tr>' +
-          taskRows + '</table>'
+          taskRows + '</table></div>' +
+          '<div class="prpa-stack">' + taskCards + '</div>'
         : '<div style="color:var(--gray);font-size:13px">No open tasks.</div>') +
 
     card('CONNECTORS',

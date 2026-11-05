@@ -109,9 +109,21 @@ const SAM_NOTICE_TYPES = Object.freeze({
   'special notice': 'rfi',
   'request for information': 'rfi',
   'rfi': 'rfi',
+  // MEASURED AGAINST THE PUBLISHED ptype TABLE (open.gsa.gov, read 2026-11-05). This key used to
+  // read 'dod- funded', with a space after the hyphen, so the real label never matched and every
+  // bundling notice fell through to null. It failed SAFE — unknown goes to review, never to a
+  // wrong verdict — but it sent work to a human for no reason. Both spellings are kept: the
+  // documented one, and the typo, in case a stored row was normalised with it.
+  'intent to bundle requirements (dod-funded)': 'rfi',
   'intent to bundle requirements (dod- funded)': 'rfi',
   'award notice': 'historical_award',
   'justification and approval (j&a)': 'historical_award',
+  // The published ptype table labels code `u` simply "Justification (J&A)", and the `type` string
+  // the API actually returns is NOT documented — only the request-side code is. Both plausible
+  // labels map here; a third spelling still returns null and goes to review, which is the right
+  // failure direction. CONFIRM THE REAL STRING on the first authenticated call.
+  'justification (j&a)': 'historical_award',
+  'justification': 'historical_award',
   'fair opportunity / limited sources justification': 'historical_award',
   'sale of surplus property': 'rfi',
   'foreign government standard': 'rfi',

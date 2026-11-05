@@ -101,14 +101,27 @@ test('only the five real statuses are accepted', () => {
 
 // ── the seed is the control for rulings 3 and 5 ─────────────────────────────
 
-test('ruling 5: SAM.gov is seeded prepared-but-not-activated, at the personal-key ceiling', () => {
+test('ruling 5/7: SAM.gov is seeded prepared-but-not-activated, with an HONEST ceiling', () => {
   const sam = CONNECTOR_SEED.find((c) => c.source_key === 'sam_gov');
   assert.ok(sam);
-  assert.strictEqual(sam.activated, false, 'ruling 5 — not activated until access and quotas are verified');
-  assert.strictEqual(sam.daily_call_ceiling, 10,
-    'the personal-key limit. If activated before a system account exists, the ceiling stops it at '
-    + 'ten calls rather than letting it 429 mid-page and leave a false watermark');
+  assert.strictEqual(sam.activated, false, 'not activated until access and quotas are verified');
+
+  // This assertion used to require daily_call_ceiling === 10, described as "the personal-key
+  // limit". THAT NUMBER IS NOT PUBLISHED ANYWHERE. open.gsa.gov says only, verbatim, "Request per
+  // day are limited based on the federal or non-federal or general roles", and gives no figure for
+  // any role — so the 10, and the "~1,000 for a system account" that sat beside it in the notes,
+  // came from recollection rather than a source. The seed's own rule is that an unpublished limit
+  // is NULL, because an invented number looks like knowledge; the test was pinning a violation of
+  // that rule in place.
+  //
+  // It matters operationally, not just tidily: the quota ledger refuses calls once the ceiling is
+  // reached, so too low a number refuses valid work, and too high a number sails past the real
+  // limit on an API whose overrun behaviour is also undocumented.
+  assert.strictEqual(sam.daily_call_ceiling, null,
+    'the real limit is unpublished; record it here once the entity administrator states it');
   assert.match(sam.notes, /2026-12-30/, 'the registration expiry belongs on the record');
+  assert.match(sam.notes, /CEILING CORRECTED TO NULL/,
+    'the correction is recorded on the row, so the next reader does not re-add a remembered number');
 });
 
 test('ruling 3: the two portals are manual_assisted, which beginSync refuses', () => {

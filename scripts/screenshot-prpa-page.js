@@ -107,11 +107,30 @@ const STUBS = {
       { capability: 'ISO 9001', responsible_entity: 'Abiozen Scientific', verification_status: 'pending', valid_to: '2020-01-01', unusable_reason: 'expired' },
     ],
   },
+  // Columns from views.js connectorHealth, not invented: source_key / kind / activated /
+  // access_mode / daily_call_ceiling / last_status / last_watermark. A third wrong guess at a
+  // response shape would have rendered the new SOURCE COVERAGE card entirely "unknown" and looked
+  // like a page bug.
   '/api/prpa/connectors': {
     as_of: AS_OF,
     connectors: [
-      { source: 'grants.gov', status: 'read_only', last_run_at: AS_OF, mode: 'api' },
-      { source: 'sam.gov', status: 'NOT_AUTHORIZED', last_run_at: null, mode: 'manual' },
+      {
+        source_key: 'grants_gov', display_name: 'Grants.gov', kind: 'funding', auth_mode: 'none',
+        access_mode: 'api', activated: true, daily_call_ceiling: null,
+        last_status: 'succeeded', last_watermark: AS_OF,
+      },
+      {
+        source_key: 'usaspending', display_name: 'USAspending', kind: 'procurement_history',
+        auth_mode: 'none', access_mode: 'api', activated: true, daily_call_ceiling: null,
+        last_status: 'succeeded', last_watermark: AS_OF,
+      },
+      {
+        // The one that matters: a procurement source that is NOT live. The coverage card must
+        // render this as a hole in the pipeline, not as a greyed-out row.
+        source_key: 'sam_gov', display_name: 'SAM.gov', kind: 'procurement', auth_mode: 'api_key',
+        access_mode: 'api', activated: false, daily_call_ceiling: null,
+        last_status: null, last_watermark: null,
+      },
     ],
   },
   '/api/prpa/tasks': {

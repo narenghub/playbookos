@@ -6,6 +6,8 @@
 // real error is worse than one that fails.
 //
 // ROLLBACK (safe, additive — nothing existing is altered):
+//   DROP TABLE IF EXISTS solicitation_amendments;
+//   DROP TABLE IF EXISTS solicitations;
 //   DROP TABLE IF EXISTS review_tasks;
 //   DROP TABLE IF EXISTS capability_scope_items;
 //   DROP TABLE IF EXISTS verified_capabilities;
@@ -565,6 +567,118 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_rt_due
      ON review_tasks (company_id, due_date)
      WHERE status IN ('open','in_progress','blocked')`,
+
+  // ---------------------------------------------------------------------------------------
+  // PR-3 / ruling 7 items 1 and 4 — SAM.GOV SOLICITATIONS, IN THEIR OWN TABLE.
+  //
+  // A solicitation does NOT go in funding_opportunities. That table is Grants.gov-shaped
+  // (cfda_list, estimated_funding, award_ceiling, cost_sharing) and its generated
+  // `application_open` column encodes Grants.gov semantics outright: opp_status='posted' AND
+  // doc_type<>'forecast'. Reusing it would mean a procurement solicitation living in the funding
+  // table under a funding-shaped status, which is the category collapse ruling 7 item 4 forbids —
+  // in the other direction. The two channels stay separate in the SCHEMA, not merely in a report,
+  // because a shared table is how they eventually get summed.
+  //
+  // RECORD KIND IS STORED, NOT DERIVED FROM A STRING HERE. record-kind.js owns the notice-type
+  // mapping and returns NULL for anything it does not recognise. A NULL arrives here as NULL and
+  // the generated column below treats it as not-open, so a new SAM notice type can never become
+  // biddable by default — the failure in the expensive direction.
+  `CREATE TABLE IF NOT EXISTS solicitations (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL REFERENCES companies(id),
+     source_key           TEXT NOT NULL REFERENCES source_connectors(source_key),
+     notice_id            TEXT NOT NULL,
+     solicitation_number  TEXT,
+     title                TEXT,
+     -- CURRENT type and ORIGINAL type. Keeping only one loses the transition that decides
+     -- biddability: a Sources Sought that becomes a Solicitation has just become biddable.
+     notice_type          TEXT,
+     base_notice_type     TEXT,
+     record_kind          TEXT,
+     organization_name    TEXT,
+     naics_code           TEXT,
+     classification_code  TEXT,
+     set_aside            TEXT,
+     set_aside_code       TEXT,
+     posted_date          DATE,
+     response_deadline    TIMESTAMPTZ,
+     active               BOOLEAN,
+     archive_type         TEXT,
+     archive_date         DATE,
+     source_url           TEXT,
+     raw_json             JSONB NOT NULL,
+     ingested_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     last_seen_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     first_seen_sync_id   TEXT,
+     last_seen_sync_id    TEXT,
+     -- A GENERATED column, so no caller can assert that something is open. Three conditions, all
+     -- required: it is the one biddable kind, it has not been withdrawn, and a deadline exists.
+     -- COALESCE makes an UNKNOWN record_kind or an UNKNOWN active flag resolve to false.
+     response_open        BOOLEAN GENERATED ALWAYS AS (
+       COALESCE(record_kind = 'solicitation' AND active AND response_deadline IS NOT NULL, false)
+     ) STORED,
+     CONSTRAINT solicitations_record_kind_check
+       CHECK (record_kind IS NULL OR record_kind IN (
+         'solicitation','sources_sought','rfi','grant_opportunity','forecast',
+         'research_lead','historical_award')),
+     -- A composite FK target for anything that must not cross tenants.
+     UNIQUE (id, company_id)
+   )`,
+
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_sol_natural_key
+     ON solicitations (company_id, source_key, notice_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_sol_open
+     ON solicitations (company_id, response_deadline)
+     WHERE response_open`,
+  `CREATE INDEX IF NOT EXISTS idx_sol_number
+     ON solicitations (company_id, solicitation_number)`,
+
+  // ---------------------------------------------------------------------------------------
+  // AMENDMENTS — DETECTED BY US, BECAUSE THE API WILL NOT TELL US.
+  //
+  // Documented at open.gsa.gov: "The API only provides the latest active version of the
+  // opportunity. Earlier versions must be retrieved from SAM.gov Data Services." There is no
+  // history array, no revision number and no amendment list — unlike Grants.gov, which hands over
+  // opportunityHistoryDetails and fills funding_opportunity_versions from it.
+  //
+  // So an amendment is not something we read, it is something we OBSERVE: this table is the only
+  // amendment history that will ever exist for a SAM notice, and it exists only for notices we
+  // were already watching. A notice amended before we first saw it has a history we cannot
+  // reconstruct, and `observed_from_first_sight` records which of the two a row is, so nobody
+  // later reads an empty history as "never amended".
+  `CREATE TABLE IF NOT EXISTS solicitation_amendments (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL REFERENCES companies(id),
+     solicitation_id      TEXT NOT NULL,
+     notice_id            TEXT NOT NULL,
+     detected_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     detected_in_sync_id  TEXT,
+     significance         TEXT NOT NULL,
+     changed_fields       TEXT[] NOT NULL,
+     previous_values      JSONB NOT NULL,
+     new_values           JSONB NOT NULL,
+     observed_from_first_sight BOOLEAN NOT NULL DEFAULT FALSE,
+     CONSTRAINT solicitation_amendments_significance_check
+       CHECK (significance IN ('deadline_moved','type_changed','withdrawn','material')),
+     -- COALESCE IS LOAD-BEARING. array_length(ARRAY[]::text[], 1) returns NULL, not 0, and a CHECK
+     -- passes on NULL — it only fails on FALSE. So the obvious spelling, array_length(...) >= 1
+     -- without the COALESCE, is VACUOUS for the empty array, which is the one value it exists to
+     -- reject. It was written that way first and the harness accepted an amendment with no
+     -- changed fields. (No backticks in this comment: it lives inside a JS template literal, and
+     -- a backtick here ends the string and breaks the module at load — which also already
+     -- happened once in this file.)
+     CONSTRAINT solicitation_amendments_fields_not_empty
+       CHECK (COALESCE(array_length(changed_fields, 1), 0) >= 1),
+     -- MATCH FULL: an amendment may never attach to another tenant's solicitation.
+     FOREIGN KEY (solicitation_id, company_id)
+       REFERENCES solicitations (id, company_id) MATCH FULL
+   )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_sol_amend_notice
+     ON solicitation_amendments (company_id, notice_id, detected_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_sol_amend_significant
+     ON solicitation_amendments (company_id, detected_at DESC)
+     WHERE significance IN ('deadline_moved','withdrawn','type_changed')`,
 ];
 
 // ── The registry seed ───────────────────────────────────────────────────────
@@ -614,14 +728,26 @@ const CONNECTOR_SEED = Object.freeze([
     kind: 'procurement',
     auth_mode: 'api_key',
     access_mode: 'api',
-    daily_call_ceiling: 10,
+    daily_call_ceiling: null,
     activated: false,
-    notes: 'PR-3, PREPARED BUT NOT ACTIVATED (ruling 5). Ceiling 10 = the personal-key limit; a '
-         + 'system account raises it to ~1,000/day and must be obtained via the entity administrator '
-         + 'before activation. Description and attachments each cost a further authenticated call. '
-         + 'postedFrom/postedTo required, MM/dd/yyyy, max 365 days apart. Dedupe on noticeId; track '
-         + 'solicitationNumber across amendments. Federal prime only — no state, local, education, '
-         + 'DLA DIBBS or GSA eBuy. Abiozen SAM registration expires 2026-12-30.',
+    notes: 'PR-3, PREPARED BUT NOT ACTIVATED (rulings 5 and 7). '
+         + 'CEILING CORRECTED TO NULL ON 2026-11-05. It previously read 10, with a note claiming a '
+         + 'system account raises it to ~1,000/day. Neither figure is published. The documentation '
+         + 'at open.gsa.gov says only, verbatim, "Request per day are limited based on the federal '
+         + 'or non-federal or general roles", and gives NO number for any role — so those values '
+         + 'came from recollection, not from a source, and this seed\'s own rule is that an '
+         + 'unpublished limit is NULL because an invented number looks like knowledge. A wrong '
+         + 'ceiling is not harmless either way: too low refuses valid calls, too high sails past '
+         + 'the real limit. CONFIRM THE REAL NUMBER with the entity administrator when the system '
+         + 'account is issued, then set it here. '
+         + 'Description and attachments each cost a further authenticated call, and the description '
+         + 'field is a URL that requires the api_key appended. '
+         + 'postedFrom/postedTo required, MM/dd/yyyy, max 365 days apart; limit defaults to 1 and '
+         + 'must always be set explicitly. Dedupe on noticeId; track solicitationNumber across '
+         + 'amendments. The API returns ONLY the latest version of a notice, so amendment history '
+         + 'must be observed by diffing polls — see solicitation_amendments. Federal prime only — '
+         + 'no state, local, education, DLA DIBBS or GSA eBuy. '
+         + 'Abiozen SAM registration expires 2026-12-30.',
   },
   {
     source_key: 'fedconnect',
@@ -700,6 +826,8 @@ const CONNECTOR_TABLES = Object.freeze([
   'verified_capabilities',
   'capability_scope_items',
   'review_tasks',
+  'solicitations',
+  'solicitation_amendments',
 ]);
 
 // source_connectors is deliberately absent from CONNECTOR_TABLES: it holds global facts about
