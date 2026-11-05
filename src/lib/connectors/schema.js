@@ -6,6 +6,8 @@
 // real error is worse than one that fails.
 //
 // ROLLBACK (safe, additive — nothing existing is altered):
+//   DROP TABLE IF EXISTS eligibility_findings;
+//   DROP TABLE IF EXISTS eligibility_assessments;
 //   DROP TABLE IF EXISTS funding_opportunity_versions;
 //   DROP TABLE IF EXISTS funding_opportunities;
 //   DROP TABLE IF EXISTS federal_awards;
@@ -277,6 +279,100 @@ const DDL = [
      WHERE is_current`,
   `CREATE INDEX IF NOT EXISTS idx_fov_opp
      ON funding_opportunity_versions (company_id, source_key, opportunity_id, revision DESC)`,
+
+  // ---------------------------------------------------------------------------------------
+  // Ruling item 4: a funding record is a grant or a forecast, and can never be anything else.
+  //
+  // The CHECK is the control. src/lib/procurement/record-kind.js has six kinds and exactly one of
+  // them is biddable; this table's source can produce only two of the six, so the other four — a
+  // solicitation above all — are unstoreable here rather than merely unexpected. A solicitation
+  // written into the funding table would be a biddable contract sitting in the pipeline that by
+  // ruling must never hold procurement revenue.
+  // ---------------------------------------------------------------------------------------
+  `ALTER TABLE funding_opportunities ADD COLUMN IF NOT EXISTS record_kind TEXT`,
+  `ALTER TABLE funding_opportunities
+     ADD CONSTRAINT funding_opportunities_record_kind_check
+     CHECK (record_kind IS NULL OR record_kind IN ('grant_opportunity','forecast'))`,
+  `CREATE INDEX IF NOT EXISTS idx_fo_kind ON funding_opportunities (company_id, record_kind)`,
+
+  // ---------------------------------------------------------------------------------------
+  // PR-5: the qualification verdict and its per-criterion evidence.
+  //
+  // ONE ROW PER CRITERION, not a JSON blob on the assessment. §6 requires every determination to
+  // contain evidence and a reason, and thirteen criteria each need their own provenance — a verdict
+  // whose per-criterion evidence cannot be retrieved is not auditable, which is the same as not
+  // having one.
+  //
+  // rule_set_version is NOT NULL because a verdict read against today's rules rather than the rules
+  // that produced it is a different verdict wearing the same label.
+  // ---------------------------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS eligibility_assessments (
+     id                 TEXT PRIMARY KEY,
+     company_id         TEXT NOT NULL REFERENCES companies(id),
+     subject_kind       TEXT NOT NULL,
+     subject_id         TEXT NOT NULL,
+     record_kind        TEXT,
+     verdict            TEXT NOT NULL,
+     rationale          TEXT NOT NULL,
+     rule_set_version   TEXT NOT NULL,
+     as_of              DATE NOT NULL,
+     blocking_count     INTEGER NOT NULL,
+     assessed_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     CONSTRAINT eligibility_assessments_verdict_check
+       CHECK (verdict IN ('QUALIFIED','CONDITIONAL','NOT_QUALIFIED','NEEDS_REVIEW')),
+     CONSTRAINT eligibility_assessments_subject_check
+       CHECK (subject_kind IN ('procurement_opportunity','funding_opportunity')),
+     CONSTRAINT eligibility_assessments_blocking_check
+       CHECK (blocking_count >= 0),
+     -- THE TWO CONSTRAINTS THAT MAKE THE VERDICT HONEST.
+     --
+     -- A QUALIFIED verdict that admits a blocked gate is a contradiction, and the engine computes
+     -- the blocking list from the findings precisely so that it cannot disagree with them. These make the
+     -- same thing true of what is STORED, for any writer — including one that recomputes a verdict
+     -- by hand or replays an old payload. Without them the most damaging possible row is also the
+     -- easiest to insert.
+     CONSTRAINT eligibility_assessments_qualified_check
+       CHECK (verdict <> 'QUALIFIED' OR blocking_count = 0),
+     CONSTRAINT eligibility_assessments_conditional_check
+       CHECK (verdict <> 'CONDITIONAL' OR blocking_count = 0),
+     CONSTRAINT eligibility_assessments_blocked_check
+       CHECK (verdict NOT IN ('NOT_QUALIFIED','NEEDS_REVIEW') OR blocking_count > 0)
+   )`,
+
+  `CREATE INDEX IF NOT EXISTS idx_ea_subject
+     ON eligibility_assessments (company_id, subject_kind, subject_id, assessed_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_ea_verdict
+     ON eligibility_assessments (company_id, verdict, assessed_at DESC)`,
+
+  `CREATE TABLE IF NOT EXISTS eligibility_findings (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL REFERENCES companies(id),
+     assessment_id        TEXT NOT NULL,
+     criterion_key        TEXT NOT NULL,
+     label                TEXT NOT NULL,
+     mandatory            BOOLEAN NOT NULL,
+     result               TEXT NOT NULL,
+     reason               TEXT NOT NULL,
+     evidence_text        TEXT,
+     evidence_source_url  TEXT,
+     CONSTRAINT eligibility_findings_result_check
+       CHECK (result IN ('pass','fail','unknown','not_applicable')),
+     -- §6 again: a finding with no reason is not a determination. An empty string is as useless as
+     -- a NULL, so both are refused.
+     CONSTRAINT eligibility_findings_reason_check
+       CHECK (length(btrim(reason)) > 0)
+   )`,
+
+  // One finding per criterion per assessment. A duplicate would let the same criterion appear twice
+  // with different results, and any report over it would silently pick one.
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_ef_one_per_criterion
+     ON eligibility_findings (assessment_id, criterion_key)`,
+  `CREATE INDEX IF NOT EXISTS idx_ef_assessment
+     ON eligibility_findings (company_id, assessment_id)`,
+  // The review queue reads exactly this.
+  `CREATE INDEX IF NOT EXISTS idx_ef_blocking
+     ON eligibility_findings (company_id, criterion_key)
+     WHERE mandatory AND result IN ('fail','unknown')`,
 ];
 
 // ── The registry seed ───────────────────────────────────────────────────────
@@ -407,6 +503,8 @@ const CONNECTOR_TABLES = Object.freeze([
   'federal_awards',
   'funding_opportunities',
   'funding_opportunity_versions',
+  'eligibility_assessments',
+  'eligibility_findings',
 ]);
 
 // source_connectors is deliberately absent from CONNECTOR_TABLES: it holds global facts about

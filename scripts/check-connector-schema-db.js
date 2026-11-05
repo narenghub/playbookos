@@ -114,7 +114,7 @@ const RUN_A = '11111111-1111-4111-8111-111111111111';
 const RUN_B = '22222222-2222-4222-8222-222222222222';
 
 // Recorded as created, deleted by exactly these ids.
-const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [] };
+const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [], assessments: [], findings: [] };
 
 (async () => {
   const { Pool } = require('pg');
@@ -392,6 +392,83 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
       ok('C10 funding_opportunities carries no procurement column — a grant figure has nowhere to land in a procurement total');
     } else bad('C10 funding and procurement stay separate', `leaked columns: ${leaked.join(', ')}`);
 
+    // ── C11 a funding record cannot be a solicitation ────────────────────
+    e = await refusedBy(() => q(
+      `UPDATE funding_opportunities SET record_kind = 'solicitation' WHERE id = 'opp-open'`));
+    if (e && e.code === '23514' && e.constraint === 'funding_opportunities_record_kind_check') {
+      ok('C11 a solicitation is UNSTOREABLE in the funding table (ruling 4)');
+    } else {
+      bad('C11 funding_opportunities refuses a non-funding record kind',
+        e ? `${e.code}/${e.constraint}` : 'ACCEPTED — a biddable contract now sits in the grant pipeline');
+    }
+    for (const kind of ['grant_opportunity', 'forecast']) {
+      e = await refusedBy(() => q(
+        `UPDATE funding_opportunities SET record_kind = $1 WHERE id = 'opp-open'`, [kind]));
+      if (!e) ok(`C11 ${kind} is accepted — the CHECK constrains the kind, not the column`);
+      else bad(`C11 ${kind} should be accepted`, `${e.code}/${e.constraint}`);
+    }
+
+    // ── C12 a verdict cannot contradict its own blockers ─────────────────
+    const insertAssessment = async (id, verdict, blocking) => {
+      await q(`INSERT INTO eligibility_assessments
+                 (id, company_id, subject_kind, subject_id, verdict, rationale,
+                  rule_set_version, as_of, blocking_count)
+               VALUES ($1,$2,'funding_opportunity','359966',$3,'fixture','pr5-2026-11-05','2026-11-05',$4)`,
+      [id, A, verdict, blocking]);
+      made.assessments.push(id);
+    };
+
+    await insertAssessment('as-qualified', 'QUALIFIED', 0);
+    ok('C12 a QUALIFIED verdict with no blockers is accepted');
+
+    e = await refusedBy(() => insertAssessment('as-lying', 'QUALIFIED', 2));
+    if (e && e.code === '23514' && e.constraint === 'eligibility_assessments_qualified_check') {
+      ok('C12 a QUALIFIED verdict that admits 2 blocked gates is REFUSED by the engine');
+    } else {
+      bad('C12 QUALIFIED with blockers is refused',
+        e ? `${e.code}/${e.constraint}` : 'ACCEPTED — the most damaging row in this schema is also the easiest to insert');
+    }
+
+    e = await refusedBy(() => insertAssessment('as-empty-block', 'NEEDS_REVIEW', 0));
+    if (e && e.code === '23514' && e.constraint === 'eligibility_assessments_blocked_check') {
+      ok('C12 NEEDS_REVIEW with zero blockers is refused — the verdict must name what it is waiting on');
+    } else bad('C12 NEEDS_REVIEW requires a blocker', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    e = await refusedBy(() => insertAssessment('as-badverdict', 'MAYBE', 1));
+    if (e && e.code === '23514') ok('C12 an invented verdict is refused');
+    else bad('C12 an invented verdict is refused', e ? `${e.code}` : 'ACCEPTED');
+
+    await q('ALTER TABLE eligibility_assessments DROP CONSTRAINT eligibility_assessments_qualified_check');
+    e = await refusedBy(() => insertAssessment('as-lying-neg', 'QUALIFIED', 2));
+    if (!e) ok('C12 negative control: with the CHECK dropped the contradictory verdict lands — it is load-bearing');
+    else bad('C12 negative control', `${e.code}/${e.constraint}`);
+    await q(`DELETE FROM eligibility_assessments WHERE id = 'as-lying-neg'`);
+    made.assessments = made.assessments.filter((x) => x !== 'as-lying-neg');
+    await q(`ALTER TABLE eligibility_assessments ADD CONSTRAINT eligibility_assessments_qualified_check
+             CHECK (verdict <> 'QUALIFIED' OR blocking_count = 0)`);
+
+    // ── C13 one finding per criterion, and every finding has a reason ────
+    const insertFinding = async (id, assessment, key, reason = 'fixture reason long enough') => {
+      await q(`INSERT INTO eligibility_findings
+                 (id, company_id, assessment_id, criterion_key, label, mandatory, result, reason)
+               VALUES ($1,$2,$3,$4,'label',TRUE,'pass',$5)`, [id, A, assessment, key, reason]);
+      made.findings.push(id);
+    };
+    await insertFinding('f-1', 'as-qualified', 'sam_registration');
+    ok('C13 a finding with a reason is accepted');
+
+    e = await refusedBy(() => insertFinding('f-dup', 'as-qualified', 'sam_registration'));
+    if (e && e.code === '23505' && /idx_ef_one_per_criterion/.test(e.constraint || e.message)) {
+      ok('C13 the same criterion twice on one assessment is refused — a report over it would pick one silently');
+    } else bad('C13 one finding per criterion', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    for (const blank of ['', '   ']) {
+      e = await refusedBy(() => insertFinding(`f-blank-${blank.length}`, 'as-qualified', `k${blank.length}`, blank));
+      if (e && e.code === '23514' && e.constraint === 'eligibility_findings_reason_check') {
+        ok(`C13 a finding whose reason is ${JSON.stringify(blank)} is refused — §6 requires a reason`);
+      } else bad('C13 a blank reason is refused', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+    }
+
     // ── C6 the status domain ─────────────────────────────────────────────
     e = await refusedBy(() => q(
       `UPDATE source_sync_runs SET status = 'done' WHERE id = 'sync-ok' AND company_id = $1`, [A]));
@@ -429,6 +506,8 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     await q(`UPDATE source_connectors SET activated = false WHERE source_key = 'sam_gov'`);
 
     // ── cleanup: only what I made, by id ─────────────────────────────────
+    for (const id of made.findings) await q('DELETE FROM eligibility_findings WHERE id = $1', [id]);
+    for (const id of made.assessments) await q('DELETE FROM eligibility_assessments WHERE id = $1', [id]);
     for (const id of made.vers) await q('DELETE FROM funding_opportunity_versions WHERE id = $1', [id]);
     for (const id of made.opps) await q('DELETE FROM funding_opportunities WHERE id = $1', [id]);
     for (const id of made.awards) await q('DELETE FROM federal_awards WHERE id = $1', [id]);
@@ -441,6 +520,8 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     // the DELETE.
     const leaks = [];
     for (const [t, col, ids] of [
+      ['eligibility_findings', 'id', made.findings],
+      ['eligibility_assessments', 'id', made.assessments],
       ['funding_opportunity_versions', 'id', made.vers],
       ['funding_opportunities', 'id', made.opps],
       ['federal_awards', 'id', made.awards],
@@ -457,6 +538,8 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     else bad('cleanup left fixtures behind', leaks.join('; '));
 
     // ── the documented rollback, actually executed ───────────────────────
+    await q('DROP TABLE IF EXISTS eligibility_findings');
+    await q('DROP TABLE IF EXISTS eligibility_assessments');
     await q('DROP TABLE IF EXISTS funding_opportunity_versions');
     await q('DROP TABLE IF EXISTS funding_opportunities');
     await q('DROP TABLE IF EXISTS federal_awards');
