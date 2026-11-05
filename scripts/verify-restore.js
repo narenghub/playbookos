@@ -217,9 +217,15 @@ async function main() {
         DATABASE_URL: url,
         PORT: String(PORT),
         NODE_ENV: 'development',
-        JWT_SECRET: process.env.JWT_SECRET || 'restore-verification-only',
+        // These fall back to OBVIOUS placeholders, and the spelling is the point. They reach only
+        // the throwaway cluster this script creates and destroys, so no real value is involved —
+        // but the committed-credential guard flagged the previous wording ("restore-verification-
+        // only", "RestoreCheckOnly123") because it could not tell those from real secrets, and
+        // neither could a person skim-reading the file. A scanner that cries wolf gets ignored, so
+        // the fix belongs here rather than in an exemption.
+        JWT_SECRET: process.env.JWT_SECRET || 'REPLACE_ME_NOT_A_SECRET',
         ADMIN_EMAIL: process.env.ADMIN_EMAIL || 'restore-check@example.invalid',
-        ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'RestoreCheckOnly123',
+        ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'REPLACE_ME_NOT_A_SECRET',
       },
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
