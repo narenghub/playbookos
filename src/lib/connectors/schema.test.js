@@ -241,7 +241,13 @@ test('the migration only swallows the three "already exists" codes', async () =>
 
 test('the rollback is documented in the file, and drops in dependency order', () => {
   const src = require('node:fs').readFileSync(require.resolve('./schema'), 'utf8');
-  const rb = src.slice(src.indexOf('ROLLBACK'), src.indexOf('ROLLBACK') + 400);
+  // Slice to the end of the comment block, not a fixed 400 characters. The fixed window silently
+  // excluded the last DROP lines as tables were added, so the test began reporting a missing
+  // rollback entry that was in fact present — a test failing for the wrong reason, which is as
+  // costly as one passing for the wrong reason.
+  const start = src.indexOf('ROLLBACK');
+  const end = src.indexOf('\n//\n', start) > start ? src.indexOf('\n//\n', start) : start + 1200;
+  const rb = src.slice(start, end);
   for (const t of [...CONNECTOR_TABLES, ...GLOBAL_TABLES]) {
     assert.ok(rb.includes(`DROP TABLE IF EXISTS ${t}`), `${t} missing from the documented rollback`);
   }

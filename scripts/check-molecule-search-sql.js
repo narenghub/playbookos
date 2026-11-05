@@ -197,19 +197,50 @@ INSERT INTO molecule_pricing (molecule_name, cas_number, gmp_grade, gmp_certifie
 
       const top = inn.rows[0];
       const holders = (top.holders || []).map(h => h.holder);
-      if (top.holder_count !== 3) {
-        bad('holder_count counts every holder of the substance',
-          `got ${top.holder_count}, expected 3 — the page would claim false scarcity`);
-      } else ok('holder_count=3 — not "SOLE holder worldwide"');
+      const relatedHolders = (top.related_form_holders || []).map(h => h.holder);
+
+      // ── THESE ASSERTIONS CHANGED, AND THE REASON MATTERS ────────────────
+      //
+      // They used to require holder_count === 3 and Bachem in `holders`, with the note that
+      // printing 1 would be "a false scarcity claim". Half right: understating holders does
+      // overstate scarcity. But 3 counted Bachem's `Leuprolide` together with Sun's and
+      // ScinoPharm's `Leuprolide Acetate` — two substances with different registry numbers —
+      // under the acetate's name, which the page renders as "competitive, low leverage".
+      // Overstating supply is equally a claim, in the direction that costs us the negotiation.
+      //
+      // Neither number was safe to print as a verdict, so the row now carries both and refuses
+      // the verdict when the group spans forms. Bachem has not disappeared: it moved to
+      // related_form_holders, which is discovery.
+      if (top.holder_count !== 2) {
+        bad('holder_count counts holders of the EXACT substance and form',
+          `got ${top.holder_count}, expected 2 (Sun and ScinoPharm hold the acetate)`);
+      } else ok('holder_count=2 — holders of the acetate, which is what the row is labelled');
       if (top.holder_count !== holders.length) {
         bad('holder_count matches the holder list', `${top.holder_count} vs ${holders.length}`);
       }
-      for (const want of [/scinopharm/i, /bachem/i, /sun pharm/i]) {
+      for (const want of [/scinopharm/i, /sun pharm/i]) {
         if (!holders.some(h => want.test(h))) bad(`holder matching ${want} is present`, JSON.stringify(holders));
       }
-      ok(`holders attached: ${holders.join(', ')}`);
-      if (top.on_floor !== 2) bad('both exhibiting holders are counted', `on_floor=${top.on_floor}, expected 2`);
-      else ok('on_floor=2 — both booth chips will render');
+      if (holders.some(h => /bachem/i.test(h))) {
+        bad('Bachem must NOT be an exact holder', 'it holds Leuprolide, the base — a different substance');
+      } else ok('Bachem is not counted as a holder of the acetate');
+      if (!relatedHolders.some(h => /bachem/i.test(h))) {
+        bad('Bachem must still be REACHABLE as a related form',
+          `related_form_holders=${JSON.stringify(relatedHolders)} — losing it would be a regression in `
+          + 'discovery, which is the half of this that must keep working');
+      } else ok('Bachem appears under related_form_holders — discovery preserved');
+      if (top.supply_claim_allowed !== false) {
+        bad('a group spanning forms must not permit a leverage verdict',
+          `supply_claim_allowed=${top.supply_claim_allowed}`);
+      } else ok('supply_claim_allowed=false — the page prints two counts, not a conclusion');
+      ok(`holders attached: ${holders.join(', ')}; related: ${relatedHolders.join(', ') || 'none'}`);
+
+      if (top.on_floor !== 1) {
+        bad('on_floor counts only exhibiting holders of the exact form',
+          `on_floor=${top.on_floor}, expected 1 — ScinoPharm 5B14. Bachem 3C22 is on the floor but `
+          + 'holds the base, and walking a buyer there for an acetate quote is the merge error as a '
+          + 'physical journey.');
+      } else ok('on_floor=1 — ScinoPharm only; Bachem\'s booth belongs to the base');
       if (top.studies !== 2) bad('demand sums across aliases', `studies=${top.studies}, expected 2`);
       else ok('studies=2 — the INN trial and the USAN trial are both counted');
       if (!(top.filed_as || []).length) bad('filed_as explains the merge on the page', 'null');

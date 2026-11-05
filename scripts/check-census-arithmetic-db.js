@@ -138,9 +138,13 @@ function runCensus() {
     env: {
       ...process.env,
       DATABASE_URL: url,
-      JWT_SECRET: 'census-harness-fixture',
+      // Deliberately shaped so nothing here can be mistaken for a secret. The repo's own
+      // no-committed-credentials check flagged the first attempt, because a value like
+      // "census-harness-fixture" reads like a key — and its advice is exactly right: a placeholder
+      // must be obvious at a glance.
+      JWT_SECRET: 'REPLACE_ME_NOT_A_SECRET',
       ADMIN_EMAIL: 'fixture-admin@example.invalid',
-      ADMIN_PASSWORD: 'fixture-only-not-a-real-password',
+      ADMIN_PASSWORD: 'REPLACE_ME_NOT_A_SECRET',
     },
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -166,7 +170,7 @@ function runCensus() {
     // the census does not call either. So they are called here by name, from db.js, which keeps the
     // DDL in one place.
     process.env.DATABASE_URL = url;
-    process.env.JWT_SECRET = process.env.JWT_SECRET || 'census-harness-fixture';
+    process.env.JWT_SECRET = process.env.JWT_SECRET || 'REPLACE_ME_NOT_A_SECRET';
     process.env.ADMIN_EMAIL = 'fixture-admin@example.invalid';
     process.env.ADMIN_PASSWORD = 'fixture-only-not-a-real-password';
     const db = require('../src/lib/db');
