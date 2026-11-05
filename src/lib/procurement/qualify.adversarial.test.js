@@ -36,7 +36,7 @@ const VERIFIED_ROW = {
   verification_status: 'verified',
   evidence_source: 'certificate on file',
   verified_at: '2026-01-15T00:00:00Z',
-  verified_by: 'naren@abiozen.com',
+  verified_by: 'fixture-verifier@example.invalid',
   approval_id: 'appr-fixture-1',
   valid_from: '2026-01-01',
   valid_to: '2027-12-31',
