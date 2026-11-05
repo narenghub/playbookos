@@ -519,7 +519,22 @@ async function main() {
       }
 
       // And the page itself, driven through the SPA's own router.
-      const { chromium } = require('playwright');
+      // PLAYWRIGHT IS OPTIONAL, ON PURPOSE.
+      //
+      // The HTTP stages above are the substance: five endpoints, their auth gates, the CSV and its
+      // injection protection. The browser adds the screenshot and the "no error banner" check,
+      // which are worth having and are not worth making this script unrunnable on a machine that
+      // has no Chromium. Anyone validating this on their own laptop should get the eight stages
+      // that need only Node and Postgres, and a clear note about the one they are not getting —
+      // rather than a stack trace that looks like the product is broken.
+      let chromium = null;
+      try { ({ chromium } = require('playwright')); } catch (_) { chromium = null; }
+      if (!chromium) {
+        note('playwright is not installed, so the browser checks are SKIPPED and no screenshot is');
+        note('taken. Everything above this line still ran: the five endpoints, 401/403 controls,');
+        note('the CSV export and tenant isolation were all exercised over real HTTP.');
+        note('To include them: npx playwright install chromium');
+      } else {
       const browser = await chromium.launch({ args: ['--no-proxy-server', '--no-sandbox'] });
       for (const v of [{ n: 'real-backend-desktop', w: 1440, h: 1000 }, { n: 'real-backend-phone', w: 390, h: 844 }]) {
         const c = await browser.newContext({ viewport: { width: v.w, height: v.h }, deviceScaleFactor: 2 });
@@ -545,6 +560,7 @@ async function main() {
         await c.close();
       }
       await browser.close();
+      }
     }
   } catch (e) { bad('dashboard stage threw', e.message); s6 = false; } finally {
     if (server) server.kill('SIGKILL');
