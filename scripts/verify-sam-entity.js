@@ -39,9 +39,15 @@
 //
 //   SAM_API_KEY=<key> node scripts/verify-sam-entity.js --i-am-authorized-to-activate
 //
-// Same shape as sam-gov-readiness.js, same reason: a key in the environment is not consent. The
-// quota here is published — 10 requests/day for a non-federal personal key with no SAM.gov role,
-// 1,000 with one — and 10 is few enough that an accidental loop costs a day's budget.
+// Same shape as sam-gov-readiness.js, same reason: a key in the environment is not consent.
+//
+// ON THE QUOTA, AND WHAT IS NOT KNOWN. The Entity Management API page publishes a five-row table
+// of daily limits by account type. WHICH ROW APPLIES TO THIS ACCOUNT IS UNVERIFIED: the two rows
+// that could apply to a non-federal personal key differ by whether the user "has a Role in
+// SAM.gov", and nobody has established whether this account does. A third GSA page publishes a
+// contradictory scheme with no role distinction at all. So no number is assumed here — the
+// response's own X-RateLimit headers are printed, and until one is observed the quota is UNKNOWN.
+// Treating it as unknown argues for the same care a small number would: one call, no loop.
 //
 // THIS SCRIPT WRITES NOTHING. It makes one GET and prints what came back. Recording the result as
 // a registration record needs a table that does not exist yet, and that migration is a separate
@@ -141,8 +147,9 @@ async function main() {
     const hint = res.status === 401 || res.status === 403
       ? 'the key was rejected. Not retried — retrying an auth failure in a loop gets a key blocked.'
       : res.status === 429
-        ? 'rate limited. For a non-federal personal key the documented limit is 10/day with no '
-          + 'SAM.gov role. This burned part of today\'s budget; wait rather than retrying.'
+        ? 'rate limited. THIS IS THE DIRECT EVIDENCE of the real limit — record what the '
+          + 'X-RateLimit headers above said, since the documentation does not state which of its '
+          + 'published figures applies to this account. Wait rather than retrying.'
         : 'unexpected status';
     bad(`HTTP ${res.status} — ${hint}`, JSON.stringify(body || {}).slice(0, 300));
     return finish();
