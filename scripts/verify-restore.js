@@ -119,18 +119,48 @@ function toolchainFor(file, isCustom) {
   return { tried };
 }
 
+// ── A FAILURE TO START IS NOT "NO POSTGRES AVAILABLE" ──────────────────────
+//
+// This function used to end `catch (e) { return null; }`, and main() printed
+// `SKIP no Postgres available` for every null. So when initdb or pg_ctl failed on a machine with
+// PostgreSQL 18.3 installed and correctly selected, the script reported that Postgres was not
+// installed, and exited 3 — INCOMPLETE, with a reason that was not true.
+//
+// That is the 2026-11-03 defect wearing a different hat. There, 33 harnesses did not execute and
+// said `ok`. Here the verdict was honest and the DIAGNOSIS was invented, which is worse in one
+// specific way: a person reading it goes off to install something they already have.
+//
+// So the error is captured and surfaced — which step, its output, and the server's own log, which is
+// usually the only place the actual reason appears. `no Postgres at all` remains a skip and is
+// decided before this function is called; a cluster that will not start is a real finding.
 let temp = null;
+let clusterError = null;
 function startCluster(dir) {
   if (!dir) return null;
   const base = fs.mkdtempSync('/var/tmp/restore-');
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
   const asPostgres = process.getuid && process.getuid() === 0;
-  const run = (cmd) => execFileSync('sh', ['-c', asPostgres ? `su postgres -c ${JSON.stringify(cmd)}` : cmd], { env, stdio: 'pipe' });
+  const run = (cmd) => execFileSync('sh', ['-c', asPostgres ? `su postgres -c ${JSON.stringify(cmd)}` : cmd],
+    { env, encoding: 'utf8', stdio: 'pipe' });
+  let step = 'preparing the directory';
   try {
     if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
+    step = `initdb (${dir}/initdb)`;
     run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
+    step = `pg_ctl start (${dir}/pg_ctl)`;
     run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p ${PGPORT} -c listen_addresses=' start -w`);
-  } catch (e) { return null; }
+  } catch (e) {
+    let log = '';
+    try { log = fs.readFileSync(path.join(base, 'pg.log'), 'utf8'); } catch (_) { /* may not exist yet */ }
+    clusterError = {
+      step,
+      message: e.message || String(e),
+      output: `${e.stdout || ''}${e.stderr || ''}`.trim(),
+      log: log.trim(),
+      base,
+    };
+    return null;
+  }
   temp = { base, dir, asPostgres };
   return base;
 }
@@ -180,11 +210,44 @@ async function main() {
     console.log(`  which for disaster recovery is the same problem and is worth knowing now.\n`);
     process.exit(1);
   }
+  // BOTH versions, because they can differ IN THE SAME DIRECTORY. /opt/homebrew/bin holds symlinks
+  // placed by whichever formula was linked last, so pg_restore can come from one major version and
+  // initdb from another. A cluster initialised by one and addressed by the other is a failure whose
+  // cause is invisible unless both numbers are on the page.
+  const initdbVersion = toolVersion(chosen.dir, 'initdb');
   console.log(`  toolchain : ${chosen.dir}`);
   console.log(`              ${chosen.version}`);
+  console.log(`              ${initdbVersion}`);
+  const major = (s) => (s.match(/\)\s+(\d+)/) || [])[1] || null;
+  const mixed = major(initdbVersion) && major(chosen.version) && major(initdbVersion) !== major(chosen.version);
+  if (mixed) {
+    note(`initdb is PostgreSQL ${major(initdbVersion)} but pg_restore is ${major(chosen.version)} — same`);
+    note('directory, different major versions. That is a broken install, not a broken backup.');
+  }
 
   const base = startCluster(chosen.dir);
-  if (!base) { console.log('\nSKIP  no Postgres available'); process.exit(EXIT_NOT_EXECUTED); }
+  if (!base) {
+    // Postgres IS installed — it was selected by probing this very dump a moment ago. So this is a
+    // failure, not an absence, and it exits 1 with the reason rather than 3 with a wrong one.
+    h('CLUSTER');
+    bad(`the selected PostgreSQL could not start a disposable cluster`, `failed at: ${clusterError.step}`);
+    if (clusterError.output) {
+      console.log('\n  command output:');
+      for (const line of clusterError.output.split('\n').slice(-25)) console.log(`    ${line}`);
+    }
+    if (clusterError.log) {
+      console.log('\n  server log:');
+      for (const line of clusterError.log.split('\n').slice(-25)) console.log(`    ${line}`);
+    }
+    if (!clusterError.output && !clusterError.log) console.log(`\n  (no output captured)  ${clusterError.message}`);
+    if (mixed) {
+      console.log(`\n  LIKELY CAUSE: initdb (${major(initdbVersion)}) and pg_restore (${major(chosen.version)}) in`);
+      console.log(`  ${chosen.dir} are different major versions.`);
+    }
+    console.log(`\n  data directory left in place for inspection: ${clusterError.base}`);
+    console.log('\n  THE BACKUP IS UNVERIFIED. This is not a statement about the dump.\n');
+    process.exit(1);
+  }
   const dir = temp.dir;
   const asPostgres = temp.asPostgres;
   const sock = base;
