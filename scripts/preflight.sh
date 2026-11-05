@@ -345,6 +345,25 @@ pf_step "no RFQ sends an unsupported CAS" node scripts/check-rfq-identity-guard-
 # otherwise those were never testing the trigger.
 pf_step "the deployment validator can go red and writes nothing" node scripts/check-rfq-guard-validation-runs.js
 
+# R2. src/lib/molecules/synonyms.js de-salts names on purpose, for SEARCH, and documents the limit
+# itself: stripping `testosterone enanthate` to `testosterone` is "correct for FINDING a supplier and
+# wrong for ordering one". Until this check existed that scoping rule was enforced only by whoever
+# read the file. DEFAULT DENY: every file is forbidden from importing the search-only functions
+# unless src/lib/molecules/search-scope.js lists it with a reason, so a new matcher is forbidden the
+# moment somebody creates it, by doing nothing.
+#
+# It plants a real import in a non-allowlisted path, asserts it is caught by name, and removes it --
+# because a check whose detector never matched anything would pass with a clean report, which is the
+# false green this repo has already shipped twice. It did exactly that on its first run: a regex
+# comment-stripper had eaten the region of routes.js holding the real import, so the check found
+# ZERO callers and reported success.
+#
+# Weaker than the engine-side guards, and says so: it is static, it can be defeated by a dynamic
+# require or a wrapper, and routes.js is allowlisted because it hosts the search endpoints -- so a
+# pricing handler added inline there sits inside the exemption. That residual risk is recorded in
+# search-scope.js with its remedy rather than left implied.
+pf_step "the search rule cannot reach a commercial path" node scripts/check-search-rule-scope.js
+
 # The PRPA connector schema, against a real server. src/lib/connectors/schema.test.js reads the DDL
 # TEXT and so proves the migration SAYS the right thing; it cannot prove a server accepts it or that
 # a constraint fires. Every guard here is exercised twice -- intact the violation is refused BY NAME
