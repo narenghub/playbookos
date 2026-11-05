@@ -132,10 +132,13 @@ test('ruling 4: Grants.gov is kind=funding and says so in its notes', () => {
   assert.match(g.notes, /forecast is a PLAN/, 'the biddability trap belongs on the record');
 });
 
-test('USAspending is the only source seeded active, and its caveats travel with it', () => {
-  const active = CONNECTOR_SEED.filter((c) => c.activated);
-  assert.deepEqual(active.map((c) => c.source_key), ['usaspending']);
-  const u = active[0];
+test('exactly the two authorized sources are seeded active — SAM.gov and the portals are not', () => {
+  // Ruling 2 authorized PR-4 ahead of PR-3, so grants_gov joins usaspending. The list is asserted
+  // exactly rather than loosely: "at least these" would let a future source switch itself on
+  // unnoticed, which is the opposite of what the activated flag is for.
+  const active = CONNECTOR_SEED.filter((c) => c.activated).map((c) => c.source_key).sort();
+  assert.deepEqual(active, ['grants_gov', 'usaspending']);
+  const u = CONNECTOR_SEED.find((c) => c.source_key === 'usaspending');
   assert.strictEqual(u.daily_call_ceiling, null, 'no published quota — not a quota of nothing');
   assert.match(u.notes, /OBLIGATIONS at action time, not outlays/);
   assert.match(u.notes, /withheld ~90 days/);
@@ -150,6 +153,57 @@ test('no seeded ceiling is invented — every one is null or a documented number
         + 'invented number looks like knowledge');
     }
   }
+});
+
+// ── funding is kept apart from procurement (ruling 2) ───────────────────────
+
+test('funding opportunities have their own table with no procurement or revenue column', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  assert.ok(s, 'no funding_opportunities table');
+  for (const forbidden of [/obligated_amount/, /\bpiid\b/, /parent_piid/, /revenue/, /\bpsc_code\b/, /\bnaics_code\b/]) {
+    assert.ok(!forbidden.test(s),
+      `funding_opportunities must not carry ${forbidden} — the surest way a grant figure never lands `
+      + 'in a procurement total is for there to be no column it could land in');
+  }
+});
+
+test('biddability is GENERATED, so no caller can assert a forecast is live', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  assert.match(s, /biddable\s+BOOLEAN GENERATED ALWAYS AS \(/);
+  assert.match(s, /STORED/);
+  assert.match(s, /doc_type <> 'forecast'/);
+  assert.match(s, /close_date IS NOT NULL/);
+  assert.match(s, /opp_status = 'posted'/);
+});
+
+test("an unknown status yields FALSE, not NULL — for a control those are the same answer", () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  const gen = s.slice(s.indexOf('biddable'), s.indexOf('STORED'));
+  assert.match(gen, /COALESCE\(/,
+    'without COALESCE a NULL opp_status makes biddable NULL, which a careless filter reads as not-false');
+});
+
+test('the standing vocabulary is closed, and forecast is one of its values', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  assert.match(s, /standing IN \('open','posted_no_deadline','forecast','closed','archived','unknown'\)/);
+  assert.match(s, /standing\s+TEXT NOT NULL/, 'a row with no standing would be a row with no verdict');
+});
+
+test('exactly one revision may claim to be current', () => {
+  assert.match(ddl, /CREATE UNIQUE INDEX IF NOT EXISTS idx_fov_one_current\s+ON funding_opportunity_versions \(company_id, source_key, opportunity_id\)\s+WHERE is_current/,
+    'two rows claiming to be current is how a proposal gets written against a superseded version');
+});
+
+test('the revision chain dedupes on (tenant, source, opportunity, revision)', () => {
+  assert.match(ddl, /CREATE UNIQUE INDEX IF NOT EXISTS idx_fov_natural_key\s+ON funding_opportunity_versions \(company_id, source_key, opportunity_id, revision\)/);
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunity_versions/);
+  assert.match(s, /revision\s+INTEGER NOT NULL/);
+  assert.match(s, /revision >= 0/, 'revision 0 is the first version, so negative is the only invalid case');
+});
+
+test('the live-funding dashboard index reads biddable, not status', () => {
+  assert.match(ddl, /idx_fo_biddable ON funding_opportunities \(company_id, close_date\)\s+WHERE biddable/,
+    'if the view filtered on opp_status it would have to re-derive biddability and could get it wrong');
 });
 
 // ── the migration runner ────────────────────────────────────────────────────
@@ -193,4 +247,6 @@ test('the rollback is documented in the file, and drops in dependency order', ()
   }
   assert.ok(rb.indexOf('federal_awards') < rb.indexOf('source_connectors'),
     'children drop before the table they reference');
+  assert.ok(rb.indexOf('funding_opportunity_versions') < rb.indexOf('funding_opportunities'),
+    'the version chain drops before the opportunity it belongs to');
 });

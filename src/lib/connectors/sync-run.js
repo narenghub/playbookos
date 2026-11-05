@@ -207,6 +207,106 @@ async function upsertAwards(ctx, syncId, normalized, deps = {}) {
 }
 
 /**
+ * Upsert Grants.gov funding opportunities and their revision chain.
+ *
+ * Separate from upsertAwards by ruling: grant opportunities are preserved apart from procurement
+ * contracts and revenue, and there is no column here that could feed a procurement total.
+ *
+ * `biddable` is NEVER passed. It is a generated column, so the database computes it from
+ * opp_status, doc_type and close_date; attempting to write it is an error rather than a silent
+ * override. That is the point — a forecast cannot be made to look live by a caller that misread a
+ * field.
+ */
+async function upsertFundingOpportunities(ctx, syncId, normalized, deps = {}) {
+  assertContext(ctx);
+  const rows = (normalized || []).filter((n) => n && !n.skip);
+  const skipped = (normalized || []).filter((n) => n && n.skip);
+  let inserted = 0;
+  let updated = 0;
+  let versionRows = 0;
+
+  for (const o of rows) {
+    if (o.companyId !== ctx.companyId) {
+      throw new Error(`upsertFundingOpportunities: row companyId ${o.companyId} does not match context ${ctx.companyId}`);
+    }
+    const rowId = newId();
+    const { rows: out } = await q(deps)(
+      `INSERT INTO funding_opportunities
+         (id, company_id, source_key, opportunity_id, opportunity_number, title, agency_code,
+          agency_name, doc_type, opp_status, standing, open_date, close_date, archive_date,
+          estimated_funding, award_ceiling, award_floor, cost_sharing, cfda_list, current_revision,
+          source_url, raw_json, first_seen_sync_id, last_seen_sync_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$23)
+       ON CONFLICT (company_id, source_key, opportunity_id) DO UPDATE SET
+         opportunity_number = EXCLUDED.opportunity_number,
+         title              = EXCLUDED.title,
+         agency_code        = EXCLUDED.agency_code,
+         agency_name        = EXCLUDED.agency_name,
+         doc_type           = EXCLUDED.doc_type,
+         opp_status         = EXCLUDED.opp_status,
+         standing           = EXCLUDED.standing,
+         open_date          = EXCLUDED.open_date,
+         close_date         = EXCLUDED.close_date,
+         archive_date       = EXCLUDED.archive_date,
+         estimated_funding  = EXCLUDED.estimated_funding,
+         award_ceiling      = EXCLUDED.award_ceiling,
+         award_floor        = EXCLUDED.award_floor,
+         cost_sharing       = EXCLUDED.cost_sharing,
+         cfda_list          = EXCLUDED.cfda_list,
+         current_revision   = EXCLUDED.current_revision,
+         source_url         = EXCLUDED.source_url,
+         raw_json           = EXCLUDED.raw_json,
+         last_seen_at       = NOW(),
+         last_seen_sync_id  = EXCLUDED.last_seen_sync_id
+       RETURNING id, (ingested_at = last_seen_at) AS is_new`,
+      [rowId, o.companyId, o.sourceKey, o.opportunityId, o.opportunityNumber, o.title, o.agencyCode,
+        o.agencyName, o.docType, o.oppStatus, o.standing, o.openDate, o.closeDate, o.archiveDate,
+        o.estimatedFunding ?? null, o.awardCeiling ?? null, o.awardFloor ?? null,
+        o.costSharing ?? null, o.cfdaList || [], o.currentRevision ?? null,
+        o.sourceUrl, JSON.stringify(o.rawJson), syncId]);
+    if (out[0] && out[0].is_new) inserted += 1; else updated += 1;
+
+    // The revision chain, when the detail call supplied one.
+    for (const v of o.versions || []) {
+      // is_current is cleared across the whole opportunity BEFORE the new current is written.
+      // Without that, the partial unique index refuses the write — correctly — because two rows
+      // would claim to be current, and the right resolution is to retire the old claim rather than
+      // to widen the index.
+      if (v.isCurrent) {
+        await q(deps)(
+          `UPDATE funding_opportunity_versions SET is_current = FALSE
+            WHERE company_id = $1 AND source_key = $2 AND opportunity_id = $3
+              AND is_current AND revision <> $4`,
+          [ctx.companyId, o.sourceKey, o.opportunityId, v.revision]);
+      }
+      await q(deps)(
+        `INSERT INTO funding_opportunity_versions
+           (id, company_id, source_key, opportunity_id, opportunity_row_id, revision, is_current,
+            title, opportunity_number, modified_fields, close_date, raw_json)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         ON CONFLICT (company_id, source_key, opportunity_id, revision) DO UPDATE SET
+           is_current       = EXCLUDED.is_current,
+           title            = EXCLUDED.title,
+           modified_fields  = EXCLUDED.modified_fields,
+           close_date       = EXCLUDED.close_date,
+           raw_json         = EXCLUDED.raw_json`,
+        [newId(), ctx.companyId, o.sourceKey, o.opportunityId, out[0] ? out[0].id : rowId,
+          v.revision, !!v.isCurrent, v.title, v.opportunityNumber,
+          v.modifiedFields || [], v.closeDate, JSON.stringify(v.rawJson)]);
+      versionRows += 1;
+    }
+  }
+
+  await q(deps)(
+    `UPDATE source_sync_runs
+        SET records_seen = records_seen + $3, records_upserted = records_upserted + $4
+      WHERE id = $1 AND company_id = $2`,
+    [syncId, ctx.companyId, (normalized || []).length, rows.length]);
+
+  return { inserted, updated, versions: versionRows, skipped: skipped.length, skippedReasons: skipped.map((s) => s.reason) };
+}
+
+/**
  * Close a sync successfully. THE ONLY place high_water_mark is written.
  */
 async function completeSync(ctx, syncId, { highWaterMark = null } = {}, deps = {}) {
@@ -262,6 +362,7 @@ module.exports = {
   beginSync,
   chargeCalls,
   upsertAwards,
+  upsertFundingOpportunities,
   completeSync,
   endSyncUnsuccessfully,
   lastWatermark,

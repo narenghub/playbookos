@@ -6,6 +6,8 @@
 // real error is worse than one that fails.
 //
 // ROLLBACK (safe, additive — nothing existing is altered):
+//   DROP TABLE IF EXISTS funding_opportunity_versions;
+//   DROP TABLE IF EXISTS funding_opportunities;
 //   DROP TABLE IF EXISTS federal_awards;
 //   DROP TABLE IF EXISTS source_sync_runs;
 //   DROP TABLE IF EXISTS source_connectors;
@@ -178,6 +180,103 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_fa_recipient ON federal_awards (company_id, recipient_profile_id)`,
   `CREATE INDEX IF NOT EXISTS idx_fa_parent ON federal_awards (company_id, parent_piid)
      WHERE parent_piid IS NOT NULL`,
+
+  // ---------------------------------------------------------------------------------------
+  // Grants.gov funding opportunities (PR-4).
+  //
+  // A SEPARATE TABLE FROM PROCUREMENT, BY RULING. Grant opportunities are preserved apart from
+  // procurement contracts and revenue. Grants.gov's fundingInstruments vocabulary does include
+  // "Procurement Contract" for a minority of records, and that does NOT move them: a grant-funded
+  // contract reached through Grants.gov is still a Grants.gov record. The one thing that must never
+  // happen is a number from this source landing in a procurement pipeline total, and the surest way
+  // to prevent it is for there to be no column it could land in.
+  //
+  // BIDDABILITY IS GENERATED, NOT STORED BY A CALLER. The first probe found 5 of 10 hits were
+  // forecasts — plans, with an empty close date — and an empty close date is not "no deadline,
+  // apply anytime". If `biddable` were an ordinary column, some later writer would set it from a
+  // field it misread, and a forecast would render as a live opportunity. As a generated column the
+  // database computes it from the three facts that decide it and no INSERT can assert otherwise.
+  // COALESCE wraps the expression so an unknown status yields FALSE rather than NULL: for a
+  // control, "we do not know" and "not biddable" must be the same answer.
+  // ---------------------------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS funding_opportunities (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL REFERENCES companies(id),
+     source_key           TEXT NOT NULL REFERENCES source_connectors(source_key),
+     opportunity_id       TEXT NOT NULL,
+     opportunity_number   TEXT,
+     title                TEXT,
+     agency_code          TEXT,
+     agency_name          TEXT,
+     doc_type             TEXT,
+     opp_status           TEXT,
+     standing             TEXT NOT NULL,
+     open_date            DATE,
+     close_date           DATE,
+     archive_date         DATE,
+     estimated_funding    NUMERIC(18,2),
+     award_ceiling        NUMERIC(18,2),
+     award_floor          NUMERIC(18,2),
+     cost_sharing         BOOLEAN,
+     cfda_list            TEXT[],
+     current_revision     INTEGER,
+     source_url           TEXT,
+     raw_json             JSONB NOT NULL,
+     ingested_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     last_seen_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     first_seen_sync_id   TEXT,
+     last_seen_sync_id    TEXT,
+     biddable             BOOLEAN GENERATED ALWAYS AS (
+       COALESCE(opp_status = 'posted' AND doc_type <> 'forecast' AND close_date IS NOT NULL, false)
+     ) STORED,
+     CONSTRAINT funding_opportunities_standing_check
+       CHECK (standing IN ('open','posted_no_deadline','forecast','closed','archived','unknown'))
+   )`,
+
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_fo_natural_key
+     ON funding_opportunities (company_id, source_key, opportunity_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_fo_close ON funding_opportunities (company_id, close_date)
+     WHERE close_date IS NOT NULL`,
+  // The dashboard's "live federal funding" view reads this and nothing else.
+  `CREATE INDEX IF NOT EXISTS idx_fo_biddable ON funding_opportunities (company_id, close_date)
+     WHERE biddable`,
+  `CREATE INDEX IF NOT EXISTS idx_fo_agency ON funding_opportunities (company_id, agency_code)`,
+
+  // ---------------------------------------------------------------------------------------
+  // The amendment chain. §4's SolicitationVersion and §15's "correct preservation of notice IDs
+  // and amendment versions" — for this source, available unauthenticated and free, which is why
+  // PR-4 runs before SAM.gov.
+  //
+  // The current revision is NOT in the API's history array (measured: data.revision = 6 while
+  // opportunityHistoryDetails carried 0..5), so the adapter appends it. The partial unique index
+  // below makes "exactly one current revision" an invariant the engine holds, rather than
+  // something the ingest is trusted to get right — two rows claiming to be current is precisely
+  // how a proposal gets written against a superseded version.
+  // ---------------------------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS funding_opportunity_versions (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL REFERENCES companies(id),
+     source_key           TEXT NOT NULL REFERENCES source_connectors(source_key),
+     opportunity_id       TEXT NOT NULL,
+     opportunity_row_id   TEXT,
+     revision             INTEGER NOT NULL,
+     is_current           BOOLEAN NOT NULL DEFAULT FALSE,
+     title                TEXT,
+     opportunity_number   TEXT,
+     modified_fields      TEXT[],
+     close_date           DATE,
+     raw_json             JSONB NOT NULL,
+     ingested_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     CONSTRAINT funding_opportunity_versions_revision_check CHECK (revision >= 0)
+   )`,
+
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_fov_natural_key
+     ON funding_opportunity_versions (company_id, source_key, opportunity_id, revision)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_fov_one_current
+     ON funding_opportunity_versions (company_id, source_key, opportunity_id)
+     WHERE is_current`,
+  `CREATE INDEX IF NOT EXISTS idx_fov_opp
+     ON funding_opportunity_versions (company_id, source_key, opportunity_id, revision DESC)`,
 ];
 
 // ── The registry seed ───────────────────────────────────────────────────────
@@ -208,7 +307,10 @@ const CONNECTOR_SEED = Object.freeze([
     auth_mode: 'none',
     access_mode: 'api',
     daily_call_ceiling: null,
-    activated: false,
+    // Activated: ruling 2 authorizes PR-4 ahead of SAM.gov, and this source needs no key, publishes
+    // no quota and has a staging host. Nothing is wired or deployed, so activation here records the
+    // authorization rather than starting anything.
+    activated: true,
     notes: 'PR-4. "Authentication and authorization are not required" (api-guide); confirmed HTTP 200 '
          + 'in PR-1. Natural key oppHits[].id, solicitation number oppHits[].number. docType '
          + 'synopsis|forecast and oppStatus posted|forecasted: a forecast is a PLAN and must never '
@@ -303,6 +405,8 @@ async function migrateConnectors(query) {
 const CONNECTOR_TABLES = Object.freeze([
   'source_sync_runs',
   'federal_awards',
+  'funding_opportunities',
+  'funding_opportunity_versions',
 ]);
 
 // source_connectors is deliberately absent from CONNECTOR_TABLES: it holds global facts about

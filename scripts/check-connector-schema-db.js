@@ -114,7 +114,7 @@ const RUN_A = '11111111-1111-4111-8111-111111111111';
 const RUN_B = '22222222-2222-4222-8222-222222222222';
 
 // Recorded as created, deleted by exactly these ids.
-const made = { companies: [], runs: [], syncs: [], awards: [] };
+const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [] };
 
 (async () => {
   const { Pool } = require('pg');
@@ -292,6 +292,106 @@ const made = { companies: [], runs: [], syncs: [], awards: [] };
     await q(`ALTER TABLE source_sync_runs ADD CONSTRAINT source_sync_runs_calls_check
              CHECK (calls_made >= 0 AND (call_ceiling IS NULL OR calls_made <= call_ceiling))`);
 
+    // ── C8 biddability is computed, not asserted ─────────────────────────
+    const insertOpp = async (id, oppId, { status = 'posted', docType = 'synopsis', close = '2026-11-17', standing = 'open' } = {}) => {
+      await q(`INSERT INTO funding_opportunities
+                 (id, company_id, source_key, opportunity_id, doc_type, opp_status, standing, close_date, raw_json)
+               VALUES ($1,$2,'grants_gov',$3,$4,$5,$6,$7,'{}'::jsonb)`,
+      [id, A, oppId, docType, status, standing, close]);
+      made.opps.push(id);
+    };
+
+    await insertOpp('opp-open', '359966');
+    let { rows: b } = await q(`SELECT biddable FROM funding_opportunities WHERE id = 'opp-open'`);
+    if (b[0].biddable === true) ok('C8 a posted synopsis with a deadline computes biddable = true');
+    else bad('C8 a posted synopsis with a deadline is biddable', JSON.stringify(b[0]));
+
+    await insertOpp('opp-forecast', '336962', { status: 'forecasted', docType: 'forecast', close: null, standing: 'forecast' });
+    ({ rows: b } = await q(`SELECT biddable FROM funding_opportunities WHERE id = 'opp-forecast'`));
+    if (b[0].biddable === false) ok('C8 a forecast with no deadline computes biddable = false');
+    else bad('C8 a forecast is not biddable', JSON.stringify(b[0]));
+
+    // The whole point: a caller cannot overrule it.
+    e = await refusedBy(() => q(
+      `UPDATE funding_opportunities SET biddable = true WHERE id = 'opp-forecast'`));
+    if (e && e.code === '428C9') {
+      ok('C8 writing biddable directly is refused by the server — a forecast cannot be made to look live');
+    } else {
+      bad('C8 biddable cannot be written directly',
+        e ? `${e.code}/${e.constraint}` : 'the UPDATE was ACCEPTED — the generated column is not generated');
+    }
+
+    // And it recomputes when the facts change, rather than going stale.
+    await q(`UPDATE funding_opportunities SET opp_status = 'posted', doc_type = 'synopsis',
+             close_date = '2026-12-01', standing = 'open' WHERE id = 'opp-forecast'`);
+    ({ rows: b } = await q(`SELECT biddable FROM funding_opportunities WHERE id = 'opp-forecast'`));
+    if (b[0].biddable === true) ok('C8 biddable recomputes when the underlying facts change');
+    else bad('C8 biddable recomputes on update', JSON.stringify(b[0]));
+
+    // A status the vocabulary does not know must read as NOT biddable, not as NULL.
+    await insertOpp('opp-unknown', '999999', { status: null, standing: 'unknown' });
+    ({ rows: b } = await q(`SELECT biddable FROM funding_opportunities WHERE id = 'opp-unknown'`));
+    if (b[0].biddable === false) ok('C8 an unknown status computes biddable = false, not NULL');
+    else bad('C8 an unknown status is not biddable', JSON.stringify(b[0]));
+
+    e = await refusedBy(() => insertOpp('opp-badstanding', '888888', { standing: 'live' }));
+    if (e && e.code === '23514' && e.constraint === 'funding_opportunities_standing_check') {
+      ok('C8 an invented standing is refused by funding_opportunities_standing_check');
+    } else bad('C8 an invented standing is refused', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    // ── C9 exactly one current revision ─────────────────────────────────
+    const insertVer = async (id, oppId, rev, isCurrent) => {
+      await q(`INSERT INTO funding_opportunity_versions
+                 (id, company_id, source_key, opportunity_id, revision, is_current, raw_json)
+               VALUES ($1,$2,'grants_gov',$3,$4,$5,'{}'::jsonb)`, [id, A, oppId, rev, isCurrent]);
+      made.vers.push(id);
+    };
+    for (let r = 0; r <= 5; r++) await insertVer(`ver-${r}`, '359966', r, false);
+    await insertVer('ver-6', '359966', 6, true);
+    ok('C9 the measured chain (history 0..5 plus current 6) stores as seven revisions');
+
+    e = await refusedBy(() => insertVer('ver-6-dup', '359966', 6, false));
+    if (e && e.code === '23505' && /idx_fov_natural_key/.test(e.constraint || e.message)) {
+      ok('C9 re-ingesting a revision is refused by idx_fov_natural_key');
+    } else bad('C9 duplicate revision refused', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    e = await refusedBy(() => insertVer('ver-7-alsocurrent', '359966', 7, true));
+    if (e && e.code === '23505' && /idx_fov_one_current/.test(e.constraint || e.message)) {
+      ok('C9 a SECOND current revision is refused by idx_fov_one_current — a proposal cannot be '
+        + 'written against two "current" versions');
+    } else {
+      bad('C9 only one revision may be current',
+        e ? `${e.code}/${e.constraint}` : 'ACCEPTED — two rows now both claim to be current');
+    }
+
+    // The legitimate path: retire the old claim, then make the new one. This is what
+    // upsertFundingOpportunities does, and it must work.
+    await q(`UPDATE funding_opportunity_versions SET is_current = FALSE
+              WHERE company_id = $1 AND source_key = 'grants_gov' AND opportunity_id = '359966'
+                AND is_current AND revision <> 7`, [A]);
+    e = await refusedBy(() => insertVer('ver-7-current', '359966', 7, true));
+    if (!e) ok('C9 retiring the previous current revision first lets the new one land');
+    else bad('C9 the retire-then-write path works', `${e.code}/${e.constraint}`);
+
+    await q('DROP INDEX idx_fov_one_current');
+    e = await refusedBy(() => insertVer('ver-8-neg', '359966', 8, true));
+    if (!e) ok('C9 negative control: with the index dropped a second current SUCCEEDS — it is load-bearing');
+    else bad('C9 negative control', `${e.code}/${e.constraint}`);
+    await q(`DELETE FROM funding_opportunity_versions WHERE id = 'ver-8-neg'`);
+    made.vers = made.vers.filter((x) => x !== 'ver-8-neg');
+    await q(`CREATE UNIQUE INDEX idx_fov_one_current
+             ON funding_opportunity_versions (company_id, source_key, opportunity_id)
+             WHERE is_current`);
+
+    // ── C10 funding is structurally separate from procurement ───────────
+    const { rows: fcols } = await q(
+      `SELECT column_name FROM information_schema.columns WHERE table_name = 'funding_opportunities'`);
+    const names = fcols.map((r) => r.column_name);
+    const leaked = ['obligated_amount', 'piid', 'parent_piid', 'naics_code', 'psc_code'].filter((c) => names.includes(c));
+    if (!leaked.length) {
+      ok('C10 funding_opportunities carries no procurement column — a grant figure has nowhere to land in a procurement total');
+    } else bad('C10 funding and procurement stay separate', `leaked columns: ${leaked.join(', ')}`);
+
     // ── C6 the status domain ─────────────────────────────────────────────
     e = await refusedBy(() => q(
       `UPDATE source_sync_runs SET status = 'done' WHERE id = 'sync-ok' AND company_id = $1`, [A]));
@@ -308,8 +408,11 @@ const made = { companies: [], runs: [], syncs: [], awards: [] };
     } else bad('C7 sam_gov lands inert', JSON.stringify(byKey.sam_gov));
 
     const active = seeded.filter((r) => r.activated).map((r) => r.source_key);
-    if (active.length === 1 && active[0] === 'usaspending') ok('C7 usaspending is the only source seeded active');
-    else bad('C7 usaspending is the only active source', `active = ${active.join(', ')}`);
+    // Ruling 2 authorized PR-4 ahead of PR-3, so grants_gov joins usaspending. Asserted exactly:
+    // "at least these" would let a future source switch itself on unnoticed.
+    if (active.sort().join(',') === 'grants_gov,usaspending') {
+      ok('C7 exactly grants_gov and usaspending are seeded active (rulings 2 and 7)');
+    } else bad('C7 exactly the two authorized sources are active', `active = ${active.join(', ')}`);
 
     const manual = seeded.filter((r) => r.access_mode === 'manual_assisted').map((r) => r.source_key).sort();
     if (manual.join(',') === 'fedconnect,hhs_sbcx') ok('C7 fedconnect and hhs_sbcx land manual_assisted (ruling 3)');
@@ -326,6 +429,8 @@ const made = { companies: [], runs: [], syncs: [], awards: [] };
     await q(`UPDATE source_connectors SET activated = false WHERE source_key = 'sam_gov'`);
 
     // ── cleanup: only what I made, by id ─────────────────────────────────
+    for (const id of made.vers) await q('DELETE FROM funding_opportunity_versions WHERE id = $1', [id]);
+    for (const id of made.opps) await q('DELETE FROM funding_opportunities WHERE id = $1', [id]);
     for (const id of made.awards) await q('DELETE FROM federal_awards WHERE id = $1', [id]);
     for (const id of made.syncs) await q('DELETE FROM source_sync_runs WHERE id = $1', [id]);
     for (const id of made.runs) await q('DELETE FROM agent_runs WHERE run_id = $1', [id]);
@@ -336,6 +441,8 @@ const made = { companies: [], runs: [], syncs: [], awards: [] };
     // the DELETE.
     const leaks = [];
     for (const [t, col, ids] of [
+      ['funding_opportunity_versions', 'id', made.vers],
+      ['funding_opportunities', 'id', made.opps],
       ['federal_awards', 'id', made.awards],
       ['source_sync_runs', 'id', made.syncs],
       ['agent_runs', 'run_id::text', made.runs],
@@ -345,10 +452,13 @@ const made = { companies: [], runs: [], syncs: [], awards: [] };
       const { rows } = await q(`SELECT COUNT(*)::int n FROM ${t} WHERE ${col} = ANY($1)`, [ids]);
       if (rows[0].n) leaks.push(`${t}: ${rows[0].n}`);
     }
-    if (!leaks.length) ok(`cleanup: all ${made.awards.length + made.syncs.length + made.runs.length + made.companies.length} fixtures removed by id, none leaked`);
+    const totalMade = Object.values(made).reduce((n, a) => n + a.length, 0);
+    if (!leaks.length) ok(`cleanup: all ${totalMade} fixtures removed by id, none leaked`);
     else bad('cleanup left fixtures behind', leaks.join('; '));
 
     // ── the documented rollback, actually executed ───────────────────────
+    await q('DROP TABLE IF EXISTS funding_opportunity_versions');
+    await q('DROP TABLE IF EXISTS funding_opportunities');
     await q('DROP TABLE IF EXISTS federal_awards');
     await q('DROP TABLE IF EXISTS source_sync_runs');
     await q('DROP TABLE IF EXISTS source_connectors');
