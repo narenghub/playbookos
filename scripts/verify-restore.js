@@ -115,6 +115,14 @@ async function main() {
   const asPostgres = temp.asPostgres;
   const sock = base;
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
+  // EVERY psql / pg_restore BELOW PASSES -U postgres, and that is not decoration.
+  //
+  // pg-cluster's INITDB_FLAGS is '-A trust -U postgres', so the cluster's only superuser is
+  // `postgres`. In a container running as root this script wraps commands in `su postgres`, so the
+  // OS user happened to match and the omission was invisible. On an ordinary developer machine the
+  // commands run as that person, psql defaults the role to their username, and every call dies
+  // with `role "<username>" does not exist`. The script only ever worked as root — found when it
+  // was run on a Mac, which is exactly the environment it is meant for.
   const sh = (cmd, quiet) => execFileSync('sh', ['-c', asPostgres ? `su postgres -c ${JSON.stringify(cmd)}` : cmd],
     { env, encoding: 'utf8', stdio: quiet ? 'pipe' : ['pipe', 'pipe', 'pipe'] });
 
@@ -124,7 +132,7 @@ async function main() {
   try {
     // ── 1. restore into a FRESH database ───────────────────────────────────
     h('1. RESTORE');
-    sh(`PATH=${dir}:$PATH psql -h ${sock} -p ${PGPORT} -d postgres -c "DROP DATABASE IF EXISTS restored" -c "CREATE DATABASE restored"`, true);
+    sh(`PATH=${dir}:$PATH psql -U postgres -h ${sock} -p ${PGPORT} -d postgres -c "DROP DATABASE IF EXISTS restored" -c "CREATE DATABASE restored"`, true);
     ok('created a fresh, empty database "restored" in a disposable cluster');
 
     // The dump is untrusted input in the sense that matters here: its FORMAT is not known until it
@@ -148,12 +156,12 @@ async function main() {
       if (isCustom) {
         // --exit-on-error is deliberate: a restore that reports success while skipping objects is
         // the failure this whole exercise exists to catch.
-        restoreOut = sh(`PATH=${dir}:$PATH pg_restore --no-owner --no-privileges --exit-on-error `
+        restoreOut = sh(`PATH=${dir}:$PATH pg_restore -U postgres --no-owner --no-privileges --exit-on-error `
           + `-h ${sock} -p ${PGPORT} -d restored ${JSON.stringify(abs)} 2>&1`, true);
       } else if (isGz) {
-        restoreOut = sh(`gunzip -c ${JSON.stringify(abs)} | PATH=${dir}:$PATH psql -v ON_ERROR_STOP=1 -h ${sock} -p ${PGPORT} -d restored 2>&1`, true);
+        restoreOut = sh(`gunzip -c ${JSON.stringify(abs)} | PATH=${dir}:$PATH psql -U postgres -v ON_ERROR_STOP=1 -h ${sock} -p ${PGPORT} -d restored 2>&1`, true);
       } else {
-        restoreOut = sh(`PATH=${dir}:$PATH psql -v ON_ERROR_STOP=1 -h ${sock} -p ${PGPORT} -d restored -f ${JSON.stringify(abs)} 2>&1`, true);
+        restoreOut = sh(`PATH=${dir}:$PATH psql -U postgres -v ON_ERROR_STOP=1 -h ${sock} -p ${PGPORT} -d restored -f ${JSON.stringify(abs)} 2>&1`, true);
       }
       ok('restore completed with no error (strict mode: --exit-on-error / ON_ERROR_STOP)');
     } catch (e) {
@@ -163,7 +171,7 @@ async function main() {
 
     // ── 2. what came back ──────────────────────────────────────────────────
     h('2. WHAT CAME BACK');
-    const q = (sql) => sh(`PATH=${dir}:$PATH psql -tAq -h ${sock} -p ${PGPORT} -d restored -c ${JSON.stringify(sql)}`, true).trim();
+    const q = (sql) => sh(`PATH=${dir}:$PATH psql -tAq -U postgres -h ${sock} -p ${PGPORT} -d restored -c ${JSON.stringify(sql)}`, true).trim();
     const tables = Number(q("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public'"));
     console.log(`  tables restored : ${tables}`);
     if (tables > 0) ok(`${tables} tables present`);
