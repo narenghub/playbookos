@@ -4566,12 +4566,12 @@ router.get('/research-intelligence/studies', authMiddleware, requireTier('intell
     // person says 'leuprorelin'" — naming the exact failure and then not fixing it. A substring
     // cannot cross a name change; `leuprorelin` is not inside `leuprolide acetate`. So the term is
     // expanded to every legal name for the substance first, and the LIKE runs against all of them.
-    if (req.query.molecule && String(req.query.molecule).trim().length >= 2) {
-      const mexp = expandMolecule(req.query.molecule);
-      params.push(likePatterns(mexp.terms));
+    const molExp = expandForSearch(req.query.molecule);
+    if (molExp.ok) {
+      params.push(molExp.patterns);
       where.push(`EXISTS (SELECT 1 FROM study_molecules sm
                            WHERE sm.study_id = cs.id
-                             AND ${moleculeLikeSql('LOWER(sm.molecule_name)', params.length)})`);
+                             AND ${searchLikeSql('LOWER(sm.molecule_name)', params.length)})`);
     }
     // ── THE BUYING-INTENT FILTER ──────────────────────────────────────────────
     // The single most useful column on this table for a commercial question, and the reason the
@@ -5208,7 +5208,15 @@ const { normalizeCompany: cphiNormalizeCompany } = require('../lib/cphi/match-co
 // One substance, several legal names. A customer at CPHI Milan asked for LEUPRORELIN (the INN) and
 // got nothing, because every holder is filed under LEUPROLIDE (the USAN). src/lib/molecules/synonyms.js
 // owns the equivalence table and the salt-stripping, and says why each is needed.
-const { expandMolecule, moleculeLikeSql, likePatterns } = require('../lib/molecules/synonyms');
+//
+// IMPORTED THROUGH search-query.js, NOT FROM synonyms.js DIRECTLY. This file is ~6,000 lines and
+// holds pricing, RFQ, order and approval handlers beside the search ones. While it was allowlisted
+// to import the search-only functions, that exemption covered all of them — so a quote handler
+// written here could have called expandMolecule() forty lines from a price, and the R2 guard would
+// have waved it through. The exemption now belongs to search-query.js, which does one job, and
+// routes.js is off the allowlist: a direct import of synonyms.js anywhere in this file is a guard
+// violation from here on.
+const { expandForSearch, searchLikeSql } = require('../lib/molecules/search-query');
 // And one substance must come back as ONE row. The register files Leuprolide, Leuprolide Acetate and
 // Leuprorelin separately, which splits the holders three ways and makes the page print "SOLE holder
 // worldwide" over a substance three companies hold. src/lib/molecules/merge.js recounts.
@@ -5807,11 +5815,12 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
     const term = String(req.query.q || '').trim().toLowerCase();
     // Two characters is the floor: one would scan every molecule in the register to tell you
     // nothing, and at a venue that is several seconds of nothing.
-    if (term.length < 2) return res.json({ q: term, items: [], hint: 'Type at least two letters.' });
-
     // EVERY name for this substance, not just the one that was typed. The register is American and
-    // half the floor is European, so the typed name is often not the filed name.
-    const expansion = expandMolecule(term);
+    // half the floor is European, so the typed name is often not the filed name. The two-character
+    // floor now lives in search-query.js with the expansion it guards, rather than being restated
+    // here where it could drift from it.
+    const expansion = expandForSearch(term);
+    if (!expansion.ok) return res.json({ q: term, items: [], hint: 'Type at least two letters.' });
     const terms = expansion.terms;
 
     const items = (await query(
@@ -5834,14 +5843,14 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
        -- counterpart and its de-salted base. One array parameter rather than per-term placeholders,
        -- so the same set matches in all three branches without index arithmetic.
        keys AS (
-         SELECT k, molecule FROM demand  WHERE ${moleculeLikeSql('k', 2)}
+         SELECT k, molecule FROM demand  WHERE ${searchLikeSql('k', 2)}
          UNION
-         SELECT k, molecule FROM holders WHERE ${moleculeLikeSql('k', 2)}
+         SELECT k, molecule FROM holders WHERE ${searchLikeSql('k', 2)}
          UNION
          -- A molecule we have PRICED but that has neither a trial nor a US DMF holder still has to
          -- be findable: that is exactly the research-grade catalogue.
          SELECT LOWER(molecule_name), molecule_name FROM molecule_pricing
-          WHERE active = 1 AND ${moleculeLikeSql('LOWER(molecule_name)', 2)})
+          WHERE active = 1 AND ${searchLikeSql('LOWER(molecule_name)', 2)})
        SELECT kk.molecule,
               dm.studies::int, dm.ph3::int, dm.ph2::int, dm.patients::int,
               COALESCE(c.n, 0)::int AS holder_count,
@@ -5882,7 +5891,7 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
                  COALESCE(c.n, 999) ASC,
                  COALESCE(dm.studies, 0) DESC,
                  kk.molecule
-        LIMIT 25`, [CPHI_EVENT, likePatterns(terms), terms])).rows;
+        LIMIT 25`, [CPHI_EVENT, expansion.patterns, terms])).rows;
 
     // Collapse the alias rows and RECOUNT the holders. Done after the LIMIT, so the merged list can
     // be shorter than 25 — which is correct: 25 substances would have needed a larger LIMIT, and

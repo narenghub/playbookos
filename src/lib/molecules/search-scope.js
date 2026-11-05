@@ -49,12 +49,17 @@ const SEARCH_MODULE = 'src/lib/molecules/synonyms.js';
 // quotes, orders or bids. If an entry ever starts doing one of those, it belongs in a new module
 // rather than in this list.
 const SEARCH_CALLER_ALLOWLIST = Object.freeze({
-  'src/api/routes.js':
-    'hosts the molecule SEARCH endpoints, which is the purpose these functions were written for. '
-    + 'RESIDUAL RISK, stated rather than assumed: routes.js is a large mixed file, so a pricing or '
-    + 'quoting handler added inline there would sit inside this exemption. The check cannot see '
-    + 'that, and narrowing it means extracting the search handlers into their own module — worth '
-    + 'doing, not done here.',
+  'src/lib/molecules/search-query.js':
+    'THE BOUNDARY. The only file permitted to import the search rule, and it does exactly one job: '
+    + 'turn a typed term into search terms and a LIKE fragment. It returns no price, no supplier '
+    + 'count, no holder count, no CAS and no identity, and it reimplements nothing — every function '
+    + 'delegates to synonyms.js. '
+    + 'THIS ENTRY REPLACES THE routes.js EXEMPTION, whose stated residual risk was that routes.js '
+    + 'is a ~6,000-line mixed file holding pricing, RFQ, order and approval handlers beside the '
+    + 'search ones, so a quote handler written there could have called expandMolecule() forty lines '
+    + 'from a price and this guard would have waved it through. The exemption was granted to a PLACE; '
+    + 'it is now granted to a JOB. routes.js imports from here and is off the allowlist, so a direct '
+    + 'import of synonyms.js anywhere in routes.js is a violation from here on — which is the point.',
   'scripts/check-molecule-search-sql.js':
     'asserts the search SQL does what the search rule claims; it must call the real functions.',
   'scripts/molecule-identity-census.js':
@@ -78,6 +83,12 @@ const SEARCH_CALLER_ALLOWLIST = Object.freeze({
     + 'single number supports.',
   'src/lib/molecules/merge.test.js':
     'tests merge.js, so it must import what merge.js imports.',
+  'src/lib/molecules/search-query.test.js':
+    'REGRESSION-tests the boundary module by comparing its output against the functions it '
+    + 'delegates to, which means importing both sides. That comparison is the whole value of the '
+    + 'test: search-query.js was extracted out of routes.js to narrow this guard, and an extraction '
+    + 'that quietly changed behaviour would be worse than the exemption it fixed. Asserting the new '
+    + 'call emits byte-identical SQL and identical term lists requires calling the old functions.',
   'scripts/cas-conflict-triage.js':
     'MEASURES the conflicting-CAS groups that canonicalMolecule() produces, rebuilding them the '
     + 'same way census section 4 does so the two counts are comparable. Calling the legacy function '

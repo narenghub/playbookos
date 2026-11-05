@@ -65,8 +65,18 @@ function extractMoleculeSearchSql() {
   if (i >= src.length) throw new Error('template literal never closed');
   const raw = src.slice(open + 1, i);
   // Evaluate the interpolations with the real helpers in scope.
+  //
+  // BOTH names are supplied. routes.js now interpolates searchLikeSql, from the search-query
+  // boundary module that holds the R2 exemption (ruling 6 item 6) — it used to interpolate
+  // moleculeLikeSql directly. Supplying only one name made this check fail with "searchLikeSql is
+  // not defined" the moment the handler was rewired, which is the check working: it evaluates the
+  // SQL that actually ships rather than a copy. search-query.test.js asserts the two emit
+  // byte-identical SQL, so which one the handler uses cannot change what runs.
+  const { searchLikeSql } = require('../src/lib/molecules/search-query');
   // eslint-disable-next-line no-new-func
-  return new Function('moleculeLikeSql', 'return `' + raw + '`;')(moleculeLikeSql);
+  return new Function('moleculeLikeSql', 'searchLikeSql', 'return `' + raw + '`;')(
+    moleculeLikeSql, searchLikeSql,
+  );
 }
 
 let SQL;

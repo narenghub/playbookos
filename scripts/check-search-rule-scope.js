@@ -222,9 +222,41 @@ function negativeControl() {
 
   // And the mirror: the SAME import inside an allowlisted file must NOT be reported, or the guard
   // is just a ban and the allowlist is decoration.
-  const inAllowlisted = isAllowedCaller('src/api/routes.js');
-  if (inAllowlisted.allowed) ok('negative control: the same import inside an allowlisted file is permitted');
-  else bad('negative control: an allowlisted file must be permitted', 'the allowlist is not consulted');
+  //
+  // The path is TAKEN FROM THE ALLOWLIST rather than hardcoded. It used to name src/api/routes.js,
+  // and when that exemption was correctly narrowed away this control failed — not because the guard
+  // broke, but because the control had a stale fixture. A control that has to be edited whenever the
+  // thing it checks changes legitimately will eventually be edited the lazy way.
+  const allowlisted = Object.keys(SEARCH_CALLER_ALLOWLIST);
+  if (!allowlisted.length) {
+    bad('negative control: the allowlist is empty', 'nothing to test the allowlist path against — '
+      + 'this control would pass vacuously');
+  } else {
+    const inAllowlisted = isAllowedCaller(allowlisted[0]);
+    if (inAllowlisted.allowed) {
+      ok(`negative control: the same import inside an allowlisted file is permitted (${allowlisted[0]})`);
+    } else {
+      bad('negative control: an allowlisted file must be permitted', 'the allowlist is not consulted');
+    }
+  }
+
+  // REGRESSION TEST FOR RULING 6 ITEM 6. routes.js must NOT be allowlisted. The exemption was
+  // granted to a ~6,000-line file holding pricing, RFQ, order and approval handlers beside the
+  // search ones, which exempted all of them; it now belongs to src/lib/molecules/search-query.js,
+  // which does one job. If routes.js ever reappears on the list, the narrowing has been undone and
+  // an inline expandMolecule() next to a price becomes invisible again.
+  const routesDenied = isAllowedCaller('src/api/routes.js');
+  if (!routesDenied.allowed) {
+    ok('REGRESSION: src/api/routes.js is NOT allowlisted — the exemption belongs to the boundary module');
+  } else {
+    bad('src/api/routes.js is allowlisted again',
+      'the item 6 narrowing has been undone: a pricing handler in routes.js could import the '
+      + 'search rule and this guard would permit it');
+  }
+  // And the boundary module must actually hold the exemption, or the narrowing moved it nowhere.
+  const boundary = isAllowedCaller('src/lib/molecules/search-query.js');
+  if (boundary.allowed) ok('REGRESSION: the boundary module src/lib/molecules/search-query.js holds the exemption');
+  else bad('the boundary module is not allowlisted', 'the search endpoints cannot work');
 
   // A planted file must leave nothing behind.
   if (!fs.existsSync(planted)) ok('negative control: the planted file was removed');
