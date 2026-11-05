@@ -6,6 +6,8 @@
 // real error is worse than one that fails.
 //
 // ROLLBACK (safe, additive — nothing existing is altered):
+//   DROP TABLE IF EXISTS capability_scope_items;
+//   DROP TABLE IF EXISTS verified_capabilities;
 //   DROP TABLE IF EXISTS eligibility_findings;
 //   DROP TABLE IF EXISTS eligibility_assessments;
 //   DROP TABLE IF EXISTS funding_opportunity_versions;
@@ -373,6 +375,111 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_ef_blocking
      ON eligibility_findings (company_id, criterion_key)
      WHERE mandatory AND result IN ('fail','unknown')`,
+
+  // ---------------------------------------------------------------------------------------
+  // THE VERIFIED-CAPABILITY AND ACCREDITATION REGISTRY.
+  //
+  // This is what PR-5 has been waiting for. §8 forbids inventing certifications, project
+  // references, equipment, laboratory capacity or regulatory approvals, so the qualification
+  // engine's capability gate resolves against rows by id — and until now there were no rows, which
+  // is why every verdict was NEEDS_REVIEW.
+  //
+  // ── "PLANNED OR PENDING MUST NEVER BE TREATED AS APPROVED" IS A CONSTRAINT, NOT A CONVENTION ──
+  //
+  // The ruling's second item is the whole design. A capability becomes usable only at
+  // verification_status = 'verified', and the CHECK below makes that status UNREACHABLE without
+  // all four things that justify it: the evidence source, who verified it, when, and the
+  // office_approvals row that authorised the verification.
+  //
+  // So a row cannot be quietly promoted. Somebody who wants to mark an ISO 17025 accreditation
+  // verified must produce an approval id and an evidence source or the INSERT fails — which is a
+  // different kind of safeguard from a code path that checks a status and could be bypassed by the
+  // next writer. The statuses 'planned' and 'pending' exist precisely so an intended certification
+  // can be RECORDED without becoming usable: leaving them out would push people to file aspirations
+  // as verified facts, which is the failure this is built to prevent.
+  //
+  // ── VALIDITY IS A WINDOW, AND AN EXPIRED CAPABILITY IS NOT A CAPABILITY ──
+  //
+  // valid_from/valid_to are checked against the assessment's as-of date, not against row existence.
+  // An accreditation that lapsed last month is still a true historical fact and still must not
+  // satisfy a gate today. The reader enforces that; the CHECK here only stops an impossible window.
+  //
+  // ── SCOPE IS SEPARATE, BECAUSE ISO 17025 IS NOT HELD "IN GENERAL" ──
+  //
+  // An accreditation covers named methods. Holding it is not the same as being accredited for the
+  // method a solicitation asks about, and flattening scope into a boolean on the capability row is
+  // how "we have ISO 17025" becomes an answer to a question it does not answer.
+  //
+  // ROLLBACK: DROP TABLE capability_scope_items; DROP TABLE verified_capabilities;
+  // ---------------------------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS verified_capabilities (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL REFERENCES companies(id),
+     kind                 TEXT NOT NULL,
+     code                 TEXT NOT NULL,
+     name                 TEXT NOT NULL,
+     responsible_entity   TEXT NOT NULL,
+     verification_status  TEXT NOT NULL DEFAULT 'planned',
+     evidence_source      TEXT,
+     evidence_url         TEXT,
+     evidence_sha256      TEXT,
+     verified_at          TIMESTAMPTZ,
+     verified_by          TEXT,
+     approval_id          TEXT,
+     valid_from           DATE,
+     valid_to             DATE,
+     notes                TEXT,
+     created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     CONSTRAINT verified_capabilities_kind_check
+       CHECK (kind IN ('capability','accreditation')),
+     CONSTRAINT verified_capabilities_status_check
+       CHECK (verification_status IN ('planned','pending','verified','disputed','revoked')),
+     -- THE CONTROL. 'verified' is unreachable without the evidence, the verifier, the date and the
+     -- approval that authorised it. A planned certification therefore cannot be promoted by
+     -- changing one column.
+     CONSTRAINT verified_capabilities_verified_requires_evidence
+       CHECK (
+         verification_status <> 'verified' OR (
+           evidence_source IS NOT NULL AND length(btrim(evidence_source)) > 0
+           AND verified_at IS NOT NULL
+           AND verified_by IS NOT NULL AND length(btrim(verified_by)) > 0
+           AND approval_id IS NOT NULL AND length(btrim(approval_id)) > 0
+           AND valid_from IS NOT NULL
+         )
+       ),
+     CONSTRAINT verified_capabilities_window_check
+       CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from)
+   )`,
+
+  // One row per capability per holding entity. Abiozen LLC and CRO360 may each hold their own ISO
+  // 17025, and they are not interchangeable: a bid by one entity cannot rest on the other's
+  // accreditation.
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_natural_key
+     ON verified_capabilities (company_id, kind, code, responsible_entity)`,
+  `CREATE INDEX IF NOT EXISTS idx_vc_usable
+     ON verified_capabilities (company_id, kind, code)
+     WHERE verification_status = 'verified'`,
+  `CREATE INDEX IF NOT EXISTS idx_vc_expiring
+     ON verified_capabilities (company_id, valid_to)
+     WHERE verification_status = 'verified' AND valid_to IS NOT NULL`,
+
+  `CREATE TABLE IF NOT EXISTS capability_scope_items (
+     id              TEXT PRIMARY KEY,
+     company_id      TEXT NOT NULL REFERENCES companies(id),
+     capability_id   TEXT NOT NULL REFERENCES verified_capabilities(id) ON DELETE CASCADE,
+     scope_kind      TEXT NOT NULL,
+     scope_value     TEXT NOT NULL,
+     notes           TEXT,
+     CONSTRAINT capability_scope_items_kind_check
+       CHECK (scope_kind IN ('method','molecule','service','naics','psc')),
+     CONSTRAINT capability_scope_items_value_check
+       CHECK (length(btrim(scope_value)) > 0)
+   )`,
+
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_csi_natural_key
+     ON capability_scope_items (capability_id, scope_kind, scope_value)`,
+  `CREATE INDEX IF NOT EXISTS idx_csi_lookup
+     ON capability_scope_items (company_id, scope_kind, scope_value)`,
 ];
 
 // ── The registry seed ───────────────────────────────────────────────────────
@@ -505,6 +612,8 @@ const CONNECTOR_TABLES = Object.freeze([
   'funding_opportunity_versions',
   'eligibility_assessments',
   'eligibility_findings',
+  'verified_capabilities',
+  'capability_scope_items',
 ]);
 
 // source_connectors is deliberately absent from CONNECTOR_TABLES: it holds global facts about

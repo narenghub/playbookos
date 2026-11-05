@@ -46,6 +46,8 @@
 // passing with a note. Abiozen's expires 2026-12-30; this is how that date shows up in the product
 // instead of as a surprise.
 
+const { effectiveAsOf, resolveRequirement } = require('./capability-registry');
+
 const RESULTS = Object.freeze(['pass', 'fail', 'unknown', 'not_applicable']);
 const VERDICTS = Object.freeze(['QUALIFIED', 'CONDITIONAL', 'NOT_QUALIFIED', 'NEEDS_REVIEW']);
 
@@ -184,58 +186,69 @@ function assessPolicyGate(key, policy, { unknownReason, failReason }) {
  * regulatory approvals." The structural form of that is an id lookup — a requirement either maps to
  * a capability row we hold, or it does not map. A truthy string in a field is not a capability.
  */
-function assessVerifiedCapability(record, capabilities) {
-  if (!Array.isArray(capabilities)) {
-    return finding('verified_capability', 'unknown',
-      'no verified-capability registry was supplied. §8 forbids inventing capabilities, so a '
-      + 'requirement cannot be confirmed as something we can supply. This is the gate that keeps '
-      + 'every verdict at NEEDS_REVIEW until a registry exists.');
+// ── the two registry gates ──────────────────────────────────────────────────
+//
+// ONE input path, not two. Both gates resolve through src/lib/procurement/capability-registry.js
+// against the raw `verified_capabilities` rows, so the status, validity-window, scope and
+// responsible-entity rules live in one module rather than being re-implemented per caller. A
+// second, "simpler" shape for tests would be the duplication that produced five copies of SOURCES.
+//
+// A MISSING REGISTRY IS STILL UNKNOWN. That is unchanged by the registry existing: `registry`
+// absent means nobody told us what we hold, which is different from being told we hold nothing.
+
+function registryGate(key, required, effective, { noneRequiredReason, failPrefix }) {
+  if (!effective) {
+    return finding(key, 'unknown',
+      'no capability registry was supplied. §8 forbids inventing capabilities or certifications, so '
+      + 'a requirement cannot be confirmed against rows nobody provided.');
   }
-  const required = Array.isArray(record.requiredCapabilities) ? record.requiredCapabilities : [];
-  if (!required.length) {
-    return finding('verified_capability', 'unknown',
-      'the solicitation\'s required capabilities have not been extracted, so there is nothing to '
-      + 'map. An empty requirement list must not read as "nothing required".');
+  const reqs = Array.isArray(required) ? required : [];
+  if (!reqs.length) {
+    return finding(key, 'unknown', noneRequiredReason);
   }
-  const held = new Map(capabilities.filter((c) => c && c.id).map((c) => [String(c.id), c]));
-  const missing = required.filter((r) => !held.has(String(r)));
-  if (missing.length) {
-    return finding('verified_capability', 'fail',
-      `no verified capability row for: ${missing.join(', ')}`,
-      { text: `holds ${[...held.keys()].join(', ') || 'nothing'}` });
+
+  const resolved = reqs.map((r) => ({ requirement: r, out: resolveRequirement(r, effective) }));
+  const unmet = resolved.filter((x) => !x.out.satisfied);
+
+  if (unmet.length) {
+    // "On file but pending" is the single most actionable thing to say about a blocked gate, so it
+    // is surfaced rather than flattened into "missing".
+    const recorded = unmet.filter((x) => x.out.recordedButUnusable);
+    const reason = `${failPrefix}: ` + unmet.map((x) => x.out.reason).join(' | ');
+    // A requirement that is ON FILE but not yet usable is a data/process gap, not a disqualifying
+    // fact — the certification may be days from issue. That is UNKNOWN (go look), where genuinely
+    // not holding it is FAIL.
+    const result = recorded.length === unmet.length ? 'unknown' : 'fail';
+    return finding(key, result, reason, {
+      text: `${effective.capabilities.length + effective.accreditations.length} usable row(s); `
+        + `${effective.excluded.length} on file but unusable`,
+    });
   }
-  return finding('verified_capability', 'pass',
-    `every required capability maps to a held row: ${required.join(', ')}`,
-    { text: required.map((r) => `${r} → ${held.get(String(r)).reference || 'row'}`).join('; ') });
+
+  const nearExpiry = resolved
+    .map((x) => x.out.entry)
+    .filter((e) => e && e.daysUntilExpiry != null && e.daysUntilExpiry <= 90);
+  const detail = resolved.map((x) => x.out.reason).join('; ');
+  return finding(key, 'pass',
+    nearExpiry.length
+      ? `satisfied, but expiring soon: ${nearExpiry.map((e) => `${e.code} in ${e.daysUntilExpiry}d`).join(', ')}. ${detail}`
+      : detail,
+    { text: detail, url: (resolved[0].out.entry || {}).evidenceUrl || null });
 }
 
-function assessAccreditation(record, accreditations) {
-  if (!Array.isArray(accreditations)) {
-    return finding('accreditation', 'unknown',
-      'no accreditation registry was supplied. An accreditation claim must resolve to a row with a '
-      + 'scope and an expiry; §8 forbids asserting one we cannot show.');
-  }
-  const required = Array.isArray(record.requiredAccreditations) ? record.requiredAccreditations : [];
-  if (!required.length) {
-    return finding('accreditation', 'unknown',
-      'required accreditations have not been extracted from the solicitation');
-  }
-  const held = new Map(accreditations.filter((a) => a && a.id).map((a) => [String(a.id), a]));
-  const missing = required.filter((r) => !held.has(String(r)));
-  if (missing.length) {
-    return finding('accreditation', 'fail', `not accredited for: ${missing.join(', ')}`);
-  }
-  // Scope matters as much as possession: ISO 17025 is accredited for named methods, not in general.
-  const outOfScope = required.filter((r) => {
-    const a = held.get(String(r));
-    return a.inScope === false;
+function assessVerifiedCapability(record, effective) {
+  return registryGate('verified_capability', record.requiredCapabilities, effective, {
+    noneRequiredReason: 'the solicitation\'s required capabilities have not been extracted, so there '
+      + 'is nothing to map. An empty requirement list must not read as "nothing required".',
+    failPrefix: 'capability requirement not met',
   });
-  if (outOfScope.length) {
-    return finding('accreditation', 'fail',
-      `held but OUT OF SCOPE for: ${outOfScope.join(', ')} — an accreditation covers named methods, `
-      + 'not a field in general');
-  }
-  return finding('accreditation', 'pass', `accredited and in scope for: ${required.join(', ')}`);
+}
+
+function assessAccreditation(record, effective) {
+  return registryGate('accreditation', record.requiredAccreditations, effective, {
+    noneRequiredReason: 'required accreditations have not been extracted from the solicitation',
+    failPrefix: 'accreditation requirement not met',
+  });
 }
 
 /**
@@ -244,8 +257,9 @@ function assessAccreditation(record, accreditations) {
  * @param {object} input
  * @param {object} input.record            the normalised opportunity (recordKind, responseDeadline, …)
  * @param {object} [input.registration]    { uei, cage, status, expiresOn }
- * @param {Array}  [input.capabilities]    verified capability rows — absent means UNKNOWN, not none
- * @param {Array}  [input.accreditations]  accreditation rows with scope
+ * @param {Array}  [input.registry]       verified_capabilities rows (each optionally with `scope`).
+ *                                        ABSENT means UNKNOWN — nobody told us what we hold, which
+ *                                        is not the same as being told we hold nothing.
  * @param {object} [input.policy]          per-criterion { applicable, satisfied, reason, evidence, url }
  * @param {string} input.asOf              YYYY-MM-DD; required, so a verdict is reproducible
  */
@@ -255,6 +269,10 @@ function assess(input = {}, deps = {}) {
   if (!asOf) throw new Error('assess: asOf (YYYY-MM-DD) is required — a verdict must be reproducible');
   const record = input.record || {};
   const policy = input.policy || {};
+  // Resolved once, as of the assessment date, so both gates see the same usable set and the same
+  // exclusions. Computing it per gate would let the two disagree about an expiry that falls on the
+  // boundary.
+  const effective = Array.isArray(input.registry) ? effectiveAsOf(input.registry, asOf) : null;
 
   const findings = [
     assessRecordKind(record, { biddability: biddabilityFn }),
@@ -272,8 +290,8 @@ function assess(input = {}, deps = {}) {
       unknownReason: 'the solicitation NAICS/PSC has not been compared with what we sell',
       failReason: 'the NAICS/PSC is outside what we supply',
     }),
-    assessVerifiedCapability(record, input.capabilities),
-    assessAccreditation(record, input.accreditations),
+    assessVerifiedCapability(record, effective),
+    assessAccreditation(record, effective),
     assessPolicyGate('country_of_origin', policy.country_of_origin, {
       unknownReason: 'country-of-origin and sourcing restrictions (TAA, Buy American, Section 889) '
         + 'have not been evaluated against the proposed supply chain',
@@ -333,6 +351,9 @@ function assess(input = {}, deps = {}) {
     rule_set_version: RULE_SET_VERSION,
     as_of: asOf,
     findings,
+    // What is on file but unusable, so a NEEDS_REVIEW verdict can say "pending since March"
+    // rather than only "missing".
+    registry_excluded: effective ? effective.excluded : null,
     // A convenience for the review queue, derived rather than stored, so it cannot disagree with
     // the findings it summarises.
     blocking: [...failedGates, ...unknownGates].map((f) => f.criterion_key),

@@ -22,11 +22,55 @@ test('three alias rows become one substance', () => {
   assert.strictEqual(merged.length, 1, 'one substance, one row');
 });
 
-test('holder_count is RECOUNTED, not carried from the first row', () => {
+test('holder_count is RECOUNTED, and counts the EXACT substance and form', () => {
   const [row] = mergeMoleculeRows(LEUPROLIDE_ROWS);
-  assert.strictEqual(row.holder_count, 3,
-    'the page prints "SOLE holder worldwide" at 1 — that would be a false scarcity claim to a buyer');
-  assert.strictEqual(row.holders.length, 3);
+
+  // THIS ASSERTION USED TO EXPECT 3, with the note: 'the page prints "SOLE holder worldwide" at 1 —
+  // that would be a false scarcity claim to a buyer'. That reasoning was half right. Understating
+  // holders overstates scarcity, which is a claim. But 3 was holders of `Leuprolide` AND
+  // `Leuprolide Acetate` together — two substances with different registry numbers — printed under
+  // the acetate's name as "competitive, low leverage". Overstating supply is equally a claim, and
+  // in the direction that costs us the negotiation.
+  //
+  // So neither number was safe to print as a verdict. The row now carries both, and refuses the
+  // verdict when the forms are mixed.
+  assert.strictEqual(row.holder_count, 2, 'Sun and ScinoPharm hold the acetate');
+  assert.strictEqual(row.holders.length, 2);
+  assert.strictEqual(row.holder_count_basis, 'exact-substance-and-form');
+
+  assert.strictEqual(row.related_form_holder_count, 1, 'Bachem holds the base, which is a related form');
+  // Both base-form filings are listed under the names they were FILED under, not collapsed:
+  // `Leuprorelin` is the INN of `Leuprolide` and its row carries no holders. Showing the filed
+  // spellings is provenance — a buyer can see which name each number came from.
+  assert.deepEqual(row.related_forms, ['Leuprolide', 'Leuprorelin']);
+
+  assert.strictEqual(row.supply_claim_allowed, false,
+    'the group spans forms, so no single leverage or scarcity sentence is supportable');
+  assert.match(row.supply_claim_basis, /No single leverage verdict is supportable across distinct substances/);
+});
+
+test('a group with ONE form permits a supply claim', () => {
+  const rows = [
+    { molecule: 'Leuprolide Acetate', holders: [{ holder: 'Sun Pharmaceutical Industries' }] },
+    { molecule: 'Leuprorelin Acetate', holders: [{ holder: 'ScinoPharm Taiwan' }] },
+  ];
+  const [row] = mergeMoleculeRows(rows);
+  assert.strictEqual(row.supply_claim_allowed, true,
+    'INN and USAN spellings of the SAME form are one substance, so the count is a fact about it');
+  assert.strictEqual(row.holder_count, 2);
+  assert.strictEqual(row.related_form_holder_count, 0);
+});
+
+test('a company holding both forms is not double-counted as breadth', () => {
+  const rows = [
+    { molecule: 'Leuprolide', holders: [{ holder: 'Sun Pharmaceutical Industries' }] },
+    { molecule: 'Leuprolide Acetate', holders: [{ holder: 'Sun Pharmaceutical Industries' }] },
+  ];
+  const [row] = mergeMoleculeRows(rows);
+  assert.strictEqual(row.holder_count, 1, 'Sun holds the acetate');
+  assert.strictEqual(row.related_form_holder_count, 0,
+    'Sun also holds the base, but it is the same company — counting it again would present one '
+    + 'supplier as two sources');
 });
 
 test('the holder count equals the distinct holders, always', () => {
@@ -39,9 +83,55 @@ test('the holder count equals the distinct holders, always', () => {
   }
 });
 
-test('on_floor counts only holders with a booth', () => {
+test('on_floor counts only exhibiting holders OF THE EXACT FORM', () => {
   const [row] = mergeMoleculeRows(LEUPROLIDE_ROWS);
-  assert.strictEqual(row.on_floor, 2, 'Bachem 3C22 and ScinoPharm 5B14; Sun is not exhibiting');
+  assert.strictEqual(row.on_floor, 1,
+    'ScinoPharm 5B14 holds the acetate. Bachem 3C22 is on the floor but holds the BASE — walking a '
+    + "buyer to Bachem's booth for an acetate quote is the merge error as a physical journey.");
+  // Bachem is still reachable: it appears in related_form_holders, which is discovery.
+  assert.deepEqual(row.related_form_holders.map((h) => h.holder), ['Bachem AG']);
+  assert.equal(row.related_form_holders[0].booth, '3C22');
+});
+
+// ── THE HALF THAT MATTERED MORE THAN THE COUNT ──────────────────────────────
+
+test('a price never crosses a form boundary', () => {
+  const rows = [
+    { molecule: 'Leuprolide', holders: [{ holder: 'Bachem AG' }], price_per_kg_usd: 100, cas_number: '53714-56-0' },
+    { molecule: 'Leuprolide Acetate', holders: [{ holder: 'Sun Pharmaceutical Industries' }], price_per_kg_usd: 900, cas_number: '74381-53-6' },
+  ];
+  const [row] = mergeMoleculeRows(rows);
+  assert.equal(row.molecule, 'Leuprolide Acetate');
+  assert.strictEqual(row.price_per_kg_usd, 900,
+    'the old code took minNum across the group and returned 100 — the BASE\'s price, on a row '
+    + 'labelled with the acetate. A quotable number for a substance nobody priced.');
+  assert.strictEqual(row.cas_number, '74381-53-6',
+    'and the CAS came from firstDefined across two substances with different registry numbers');
+});
+
+test('the exact substance having no price row yields null, not the related form\'s price', () => {
+  const rows = [
+    { molecule: 'Leuprolide', holders: [{ holder: 'Bachem AG' }], price_per_kg_usd: 100, lead_time_days: 14, gmp_certified: true },
+    { molecule: 'Leuprolide Acetate', holders: [{ holder: 'Sun Pharmaceutical Industries' }] },
+  ];
+  const [row] = mergeMoleculeRows(rows);
+  assert.strictEqual(row.price_per_kg_usd, null, 'silence is the safe failure');
+  assert.strictEqual(row.lead_time_days, null);
+  assert.strictEqual(row.gmp_certified, false,
+    'one form\'s GMP certificate is not the other\'s');
+  // Exactly the behaviour the inquiry agent already has: "A buyer writing 'Gemcitabine
+  // hydrochloride' against a catalogue row for 'Gemcitabine' still gets no price."
+});
+
+test('controlled_substance stays ANY across the whole group, deliberately', () => {
+  const rows = [
+    { molecule: 'Leuprolide', holders: [{ holder: 'Bachem AG' }], controlled_substance: true },
+    { molecule: 'Leuprolide Acetate', holders: [{ holder: 'Sun Pharmaceutical Industries' }] },
+  ];
+  const [row] = mergeMoleculeRows(rows);
+  assert.strictEqual(row.controlled_substance, true,
+    'a safety flag errs toward the restrictive answer — over-restricting costs a conversation, '
+    + 'under-restricting ships a scheduled substance');
 });
 
 test('demand sums across aliases', () => {

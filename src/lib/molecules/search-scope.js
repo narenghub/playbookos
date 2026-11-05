@@ -65,16 +65,17 @@ const SEARCH_CALLER_ALLOWLIST = Object.freeze({
     + 'identity stops stripping the form. Like the census, it must call the legacy function to '
     + 'compare against it.',
   'src/lib/molecules/merge.js':
-    'collapses SEARCH-RESULT rows for display and recomputes holder_count, reached only from the '
-    + 'search endpoint at routes.js:5890. It prices nothing and orders nothing. '
-    + 'FLAGGED CONCERN, not a clean exemption: it merges `Leuprolide` (Bachem) with '
-    + '`Leuprolide Acetate` (Sun, ScinoPharm) into one substance with holder_count 3. Its own '
-    + 'header argues that "understated supply is a price claim" — which is true, and applies '
-    + 'symmetrically: if two of those three holders carry only the acetate, supply depth for the '
-    + 'base is OVERstated, and the page says "competitive, low leverage" about a substance that '
-    + 'may have one holder. Changing the displayed grouping is a product decision and is not '
-    + 'authorized here, so this is recorded for a ruling rather than silently fixed or silently '
-    + 'permitted.',
+    'GROUPS search-result rows for discovery with canonicalMolecule, which is what makes a search '
+    + 'for the base find the salt. Every COMMERCIAL number on the row now comes from the identity '
+    + 'layer instead (moleculeKey/identityOf), so the search rule decides what appears together and '
+    + 'never what a thing costs or how many suppliers hold it. '
+    + 'CONCERN RESOLVED: it previously merged `Leuprolide` (Bachem) with `Leuprolide Acetate` (Sun, '
+    + 'ScinoPharm) into one substance with holder_count 3, took minNum across the group for price '
+    + "(returning the BASE's 100 on a row labelled with the acetate) and firstDefined for CAS across "
+    + 'two different registry numbers. holder_count is now the exact substance and form, related '
+    + 'forms are reported separately as discovery, and supply_claim_allowed is false whenever a '
+    + 'group spans forms — so the page prints two counts rather than a leverage verdict that no '
+    + 'single number supports.',
   'src/lib/molecules/merge.test.js':
     'tests merge.js, so it must import what merge.js imports.',
 });

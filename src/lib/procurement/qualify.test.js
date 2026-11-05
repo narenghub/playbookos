@@ -33,8 +33,22 @@ const GOOD_RECORD = {
   requiredAccreditations: ['acc-iso-17025'],
 };
 const GOOD_REGISTRATION = { uei: 'GW4MAZJHFV44', cage: '0P2Q9', status: 'Active', expiresOn: '2027-06-30' };
-const GOOD_CAPABILITIES = [{ id: 'cap-api-sourcing', reference: 'CAP-001' }];
-const GOOD_ACCREDITATIONS = [{ id: 'acc-iso-17025', inScope: true }];
+// Real verified_capabilities row shape, because the gates resolve through the registry module and a
+// simplified test-only shape would be testing a path production does not take.
+const VERIFIED = {
+  verification_status: 'verified',
+  evidence_source: 'certificate on file',
+  verified_at: '2026-01-15T00:00:00Z',
+  verified_by: 'naren@abiozen.com',
+  approval_id: 'appr-fixture-1',
+  valid_from: '2026-01-01',
+  valid_to: '2027-12-31',
+  responsible_entity: 'Abiozen LLC',
+};
+const GOOD_REGISTRY = [
+  { ...VERIFIED, id: 'cap-api-sourcing', kind: 'capability', code: 'API-SOURCING', name: 'API sourcing', scope: [] },
+  { ...VERIFIED, id: 'acc-iso-17025', kind: 'accreditation', code: 'ISO-17025', name: 'ISO/IEC 17025', scope: [] },
+];
 const ALL_PASS_POLICY = {
   legal_entity_eligibility: { satisfied: true },
   set_aside_eligibility: { applicable: false },
@@ -49,8 +63,7 @@ const ALL_PASS_POLICY = {
 const fully = (over = {}) => assess({
   record: GOOD_RECORD,
   registration: GOOD_REGISTRATION,
-  capabilities: GOOD_CAPABILITIES,
-  accreditations: GOOD_ACCREDITATIONS,
+  registry: GOOD_REGISTRY,
   policy: ALL_PASS_POLICY,
   asOf: TODAY,
   ...over,
@@ -104,12 +117,12 @@ test('with every gate satisfied the verdict is QUALIFIED', () => {
 // ── THE CONSEQUENCE: nothing is qualified until a capability registry exists ─
 
 test('with no capability registry supplied, the verdict is NEEDS_REVIEW — not QUALIFIED', () => {
-  const r = fully({ capabilities: undefined, accreditations: undefined });
+  const r = fully({ registry: undefined });
   assert.equal(r.verdict, 'NEEDS_REVIEW');
   assert.ok(r.blocking.includes('verified_capability'));
   assert.ok(r.blocking.includes('accreditation'));
   const f = r.findings.find((x) => x.criterion_key === 'verified_capability');
-  assert.match(f.reason, /§8 forbids inventing capabilities/);
+  assert.match(f.reason, /§8 forbids inventing capabilities or certifications/);
   // This is today's real state: there is no verified-capability registry in the codebase, so every
   // live assessment lands here. That is the honest output, not a defect — a version that returned
   // QUALIFIED by assuming capability would invent exactly what §8 forbids, silently.
@@ -126,14 +139,19 @@ test('a capability that is required but not held FAILS rather than being unknown
   const r = fully({ record: { ...GOOD_RECORD, requiredCapabilities: ['cap-sterile-fill'] } });
   assert.equal(r.verdict, 'NOT_QUALIFIED');
   const f = r.findings.find((x) => x.criterion_key === 'verified_capability');
-  assert.match(f.reason, /no verified capability row for: cap-sterile-fill/);
+  assert.match(f.reason, /no verified capability row for cap-sterile-fill/);
+  assert.match(f.evidence_text, /2 usable row\(s\); 0 on file but unusable/,
+    'the evidence says how much the registry held, so "not met" is distinguishable from "empty registry"');
 });
 
 test('an accreditation held but OUT OF SCOPE fails — scope is not possession', () => {
-  const r = fully({ accreditations: [{ id: 'acc-iso-17025', inScope: false }] });
+  // The requirement now names a METHOD, and the held accreditation has no scope rows covering it.
+  const r = fully({
+    record: { ...GOOD_RECORD, requiredAccreditations: [{ id: 'acc-iso-17025', scope: { kind: 'method', value: 'USP <621> HPLC assay' } }] },
+  });
   assert.equal(r.verdict, 'NOT_QUALIFIED');
   assert.match(r.findings.find((x) => x.criterion_key === 'accreditation').reason,
-    /OUT OF SCOPE.*named methods, not a field in general/s);
+    /has no recorded scope.*named methods; holding it is not a general permission/s);
 });
 
 // ── the SAM registration gate ───────────────────────────────────────────────
@@ -347,4 +365,82 @@ test('blocking is derived from the findings and cannot disagree with them', () =
     .filter((f) => f.mandatory && (f.result === 'fail' || f.result === 'unknown'))
     .map((f) => f.criterion_key);
   assert.deepEqual([...r.blocking].sort(), [...expected].sort());
+});
+
+// ── registry integration (ruling item 3) ────────────────────────────────────
+
+test('INTEGRATION: verified evidence qualifies; the same row pending does not', () => {
+  const verified = fully();
+  assert.equal(verified.verdict, 'QUALIFIED');
+
+  const pending = fully({
+    registry: GOOD_REGISTRY.map((r) => ({ ...r, verification_status: 'pending' })),
+  });
+  assert.equal(pending.verdict, 'NEEDS_REVIEW',
+    'ruling item 3: missing evidence must continue to produce NEEDS_REVIEW');
+  assert.ok(pending.blocking.includes('verified_capability'));
+  assert.ok(pending.blocking.includes('accreditation'));
+});
+
+test('INTEGRATION: a planned certification is reported as ON FILE, not as missing', () => {
+  const r = fully({
+    registry: GOOD_REGISTRY.map((x) => ({ ...x, verification_status: 'planned' })),
+  });
+  const f = r.findings.find((x) => x.criterion_key === 'accreditation');
+  assert.equal(f.result, 'unknown', 'on file but not yet usable is a process gap, so review rather than fail');
+  assert.match(f.reason, /IS on file but is not usable: recorded as PLANNED/);
+  // The distinction a human needs: chase the certification, do not go and buy one.
+});
+
+test('INTEGRATION: genuinely not holding a capability FAILS rather than going to review', () => {
+  const r = fully({ record: { ...GOOD_RECORD, requiredCapabilities: ['cap-we-do-not-have'] } });
+  assert.equal(r.verdict, 'NOT_QUALIFIED');
+  assert.equal(r.findings.find((x) => x.criterion_key === 'verified_capability').result, 'fail');
+});
+
+test('INTEGRATION: an expired accreditation blocks the verdict', () => {
+  const r = fully({
+    registry: GOOD_REGISTRY.map((x) => (x.kind === 'accreditation' ? { ...x, valid_to: '2026-10-01' } : x)),
+  });
+  assert.equal(r.verdict, 'NEEDS_REVIEW');
+  assert.match(r.findings.find((x) => x.criterion_key === 'accreditation').reason, /EXPIRED on 2026-10-01/);
+});
+
+test('INTEGRATION: a near-expiry capability still passes, with the countdown on the finding', () => {
+  const r = fully({
+    registry: GOOD_REGISTRY.map((x) => ({ ...x, valid_to: '2026-12-30' })),
+  });
+  assert.equal(r.verdict, 'QUALIFIED');
+  assert.match(r.findings.find((x) => x.criterion_key === 'accreditation').reason,
+    /expiring soon: ISO-17025 in 55d/);
+  // The same shape as the SAM gate: eligible today, with the renewal clock stated where a human
+  // reads it rather than as a downgrade that would block work we can legitimately do.
+});
+
+test('INTEGRATION: the assessment reports what is on file but unusable', () => {
+  const r = fully({
+    registry: [
+      ...GOOD_REGISTRY,
+      { ...VERIFIED, id: 'acc-iso-13485', kind: 'accreditation', code: 'ISO-13485', name: 'ISO 13485',
+        verification_status: 'pending', scope: [] },
+    ],
+  });
+  assert.equal(r.verdict, 'QUALIFIED', 'an unusable row we did not need does not block anything');
+  assert.equal(r.registry_excluded.length, 1);
+  assert.equal(r.registry_excluded[0].code, 'ISO-13485');
+});
+
+test('INTEGRATION: an absent registry is still UNKNOWN, which the registry existing does not change', () => {
+  const r = fully({ registry: undefined });
+  assert.equal(r.verdict, 'NEEDS_REVIEW');
+  assert.strictEqual(r.registry_excluded, null);
+  // "Nobody told us what we hold" is not the same as "we were told we hold nothing", and an empty
+  // registry is a statement where a missing one is not.
+});
+
+test('INTEGRATION: an EMPTY registry fails rather than going to review', () => {
+  const r = fully({ registry: [] });
+  assert.equal(r.verdict, 'NOT_QUALIFIED');
+  assert.equal(r.findings.find((x) => x.criterion_key === 'verified_capability').result, 'fail');
+  assert.deepEqual(r.registry_excluded, []);
 });

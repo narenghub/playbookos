@@ -114,7 +114,7 @@ const RUN_A = '11111111-1111-4111-8111-111111111111';
 const RUN_B = '22222222-2222-4222-8222-222222222222';
 
 // Recorded as created, deleted by exactly these ids.
-const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [], assessments: [], findings: [] };
+const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [], assessments: [], findings: [], caps: [], scopes: [] };
 
 (async () => {
   const { Pool } = require('pg');
@@ -469,6 +469,116 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
       } else bad('C13 a blank reason is refused', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
     }
 
+    // ── C14 'verified' is unreachable without the evidence that justifies it ──
+    const insertCap = async (id, over = {}) => {
+      const r = {
+        kind: 'accreditation', code: `ISO-${id}`, name: 'ISO/IEC 17025',
+        responsible_entity: 'Abiozen LLC', verification_status: 'planned',
+        evidence_source: null, verified_at: null, verified_by: null, approval_id: null,
+        valid_from: null, valid_to: null, ...over,
+      };
+      await q(`INSERT INTO verified_capabilities
+                 (id, company_id, kind, code, name, responsible_entity, verification_status,
+                  evidence_source, verified_at, verified_by, approval_id, valid_from, valid_to)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [id, A, r.kind, r.code, r.name, r.responsible_entity, r.verification_status,
+        r.evidence_source, r.verified_at, r.verified_by, r.approval_id, r.valid_from, r.valid_to]);
+      made.caps.push(id);
+    };
+
+    await insertCap('cap-planned');
+    ok('C14 a PLANNED capability can be recorded with no evidence — so aspirations are filed as plans');
+
+    const FULL = {
+      verification_status: 'verified', evidence_source: 'A2LA cert 1234.01',
+      verified_at: '2026-01-15T00:00:00Z', verified_by: 'naren@abiozen.com',
+      approval_id: 'appr-1', valid_from: '2026-01-01', valid_to: '2027-12-31',
+    };
+    await insertCap('cap-verified', FULL);
+    ok('C14 a VERIFIED capability with evidence, verifier, date and approval is accepted');
+
+    // Each of the four requirements, dropped one at a time, must break it.
+    for (const [field, value] of [['evidence_source', null], ['evidence_source', '   '],
+      ['verified_at', null], ['verified_by', null], ['approval_id', null], ['valid_from', null]]) {
+      e = await refusedBy(() => insertCap(`cap-no-${field}-${String(value).length}`,
+        { ...FULL, [field]: value }));
+      if (e && e.code === '23514' && e.constraint === 'verified_capabilities_verified_requires_evidence') {
+        ok(`C14 'verified' without ${field} is refused — planned cannot be promoted by one column`);
+      } else {
+        bad(`C14 'verified' requires ${field}`,
+          e ? `${e.code}/${e.constraint}` : 'ACCEPTED — a certification could be asserted with no evidence');
+      }
+    }
+
+    e = await refusedBy(() => q(
+      `UPDATE verified_capabilities SET verification_status = 'verified' WHERE id = 'cap-planned'`));
+    if (e && e.code === '23514' && e.constraint === 'verified_capabilities_verified_requires_evidence') {
+      ok('C14 a planned row cannot be promoted by UPDATE either — the CHECK fires on the write, not the insert');
+    } else bad('C14 promotion by UPDATE is refused', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    e = await refusedBy(() => insertCap('cap-badstatus', { verification_status: 'approved' }));
+    if (e && e.code === '23514') ok('C14 a status outside the five is refused ("approved" reads like a pass and is not one)');
+    else bad('C14 an invented status is refused', e ? `${e.code}` : 'ACCEPTED');
+
+    e = await refusedBy(() => insertCap('cap-badwindow', { ...FULL, valid_from: '2027-01-01', valid_to: '2026-01-01' }));
+    if (e && e.code === '23514' && e.constraint === 'verified_capabilities_window_check') {
+      ok('C14 a validity window that ends before it starts is refused');
+    } else bad('C14 an impossible window is refused', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    await q('ALTER TABLE verified_capabilities DROP CONSTRAINT verified_capabilities_verified_requires_evidence');
+    e = await refusedBy(() => insertCap('cap-neg', { verification_status: 'verified' }));
+    if (!e) ok('C14 negative control: with the CHECK dropped an evidence-free "verified" row lands — it is load-bearing');
+    else bad('C14 negative control', `${e.code}/${e.constraint}`);
+    await q(`DELETE FROM verified_capabilities WHERE id = 'cap-neg'`);
+    made.caps = made.caps.filter((x) => x !== 'cap-neg');
+    await q(`ALTER TABLE verified_capabilities ADD CONSTRAINT verified_capabilities_verified_requires_evidence
+             CHECK (verification_status <> 'verified' OR (
+               evidence_source IS NOT NULL AND length(btrim(evidence_source)) > 0
+               AND verified_at IS NOT NULL
+               AND verified_by IS NOT NULL AND length(btrim(verified_by)) > 0
+               AND approval_id IS NOT NULL AND length(btrim(approval_id)) > 0
+               AND valid_from IS NOT NULL))`);
+
+    // ── C15 two entities may each hold the same code; scope is per-method ──
+    e = await refusedBy(() => insertCap('cap-cro360', { ...FULL, code: 'ISO-cap-verified', responsible_entity: 'CRO360' }));
+    if (!e) ok('C15 CRO360 may hold its own copy of the same code — they are not interchangeable');
+    else bad('C15 two entities may each hold the same code', `${e.code}/${e.constraint}`);
+
+    e = await refusedBy(() => insertCap('cap-dupe', { ...FULL, code: 'ISO-cap-verified', responsible_entity: 'Abiozen LLC' }));
+    if (e && e.code === '23505' && /idx_vc_natural_key/.test(e.constraint || e.message)) {
+      ok('C15 the same code twice for one entity is refused');
+    } else bad('C15 one row per code per entity', e ? `${e.code}/${e.constraint}` : 'ACCEPTED');
+
+    const insertScope = async (id, cap, kind, value) => {
+      await q(`INSERT INTO capability_scope_items (id, company_id, capability_id, scope_kind, scope_value)
+               VALUES ($1,$2,$3,$4,$5)`, [id, A, cap, kind, value]);
+      made.scopes.push(id);
+    };
+    await insertScope('sc-1', 'cap-verified', 'method', 'USP <621> HPLC assay');
+    ok('C15 a scope item is accepted');
+
+    e = await refusedBy(() => insertScope('sc-dupe', 'cap-verified', 'method', 'USP <621> HPLC assay'));
+    if (e && e.code === '23505') ok('C15 a duplicate scope item is refused');
+    else bad('C15 duplicate scope refused', e ? `${e.code}` : 'ACCEPTED');
+
+    for (const bad2 of [['vibes', 'x'], ['method', '   ']]) {
+      e = await refusedBy(() => insertScope(`sc-bad-${bad2[0]}`, 'cap-verified', bad2[0], bad2[1]));
+      if (e && e.code === '23514') ok(`C15 scope ${JSON.stringify(bad2)} is refused`);
+      else bad(`C15 scope ${JSON.stringify(bad2)} refused`, e ? `${e.code}` : 'ACCEPTED');
+    }
+
+    // Deleting a capability must not orphan its scope — a scope row pointing at nothing would read
+    // as an unscoped claim, which is the general permission this design refuses to make.
+    await insertCap('cap-temp', FULL);
+    await insertScope('sc-temp', 'cap-temp', 'method', 'temp method');
+    await q(`DELETE FROM verified_capabilities WHERE id = 'cap-temp' AND company_id = $1`, [A]);
+    made.caps = made.caps.filter((x) => x !== 'cap-temp');
+    const { rows: orphan } = await q(`SELECT COUNT(*)::int n FROM capability_scope_items WHERE id = 'sc-temp'`);
+    if (orphan[0].n === 0) {
+      ok('C15 deleting a capability cascades its scope — no orphan that would read as an unscoped claim');
+      made.scopes = made.scopes.filter((x) => x !== 'sc-temp');
+    } else bad('C15 scope cascades on delete', `${orphan[0].n} orphan(s)`);
+
     // ── C6 the status domain ─────────────────────────────────────────────
     e = await refusedBy(() => q(
       `UPDATE source_sync_runs SET status = 'done' WHERE id = 'sync-ok' AND company_id = $1`, [A]));
@@ -506,6 +616,8 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     await q(`UPDATE source_connectors SET activated = false WHERE source_key = 'sam_gov'`);
 
     // ── cleanup: only what I made, by id ─────────────────────────────────
+    for (const id of made.scopes) await q('DELETE FROM capability_scope_items WHERE id = $1', [id]);
+    for (const id of made.caps) await q('DELETE FROM verified_capabilities WHERE id = $1', [id]);
     for (const id of made.findings) await q('DELETE FROM eligibility_findings WHERE id = $1', [id]);
     for (const id of made.assessments) await q('DELETE FROM eligibility_assessments WHERE id = $1', [id]);
     for (const id of made.vers) await q('DELETE FROM funding_opportunity_versions WHERE id = $1', [id]);
@@ -520,6 +632,8 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     // the DELETE.
     const leaks = [];
     for (const [t, col, ids] of [
+      ['capability_scope_items', 'id', made.scopes],
+      ['verified_capabilities', 'id', made.caps],
       ['eligibility_findings', 'id', made.findings],
       ['eligibility_assessments', 'id', made.assessments],
       ['funding_opportunity_versions', 'id', made.vers],
@@ -538,6 +652,8 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     else bad('cleanup left fixtures behind', leaks.join('; '));
 
     // ── the documented rollback, actually executed ───────────────────────
+    await q('DROP TABLE IF EXISTS capability_scope_items');
+    await q('DROP TABLE IF EXISTS verified_capabilities');
     await q('DROP TABLE IF EXISTS eligibility_findings');
     await q('DROP TABLE IF EXISTS eligibility_assessments');
     await q('DROP TABLE IF EXISTS funding_opportunity_versions');
