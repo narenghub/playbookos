@@ -345,5 +345,24 @@ pf_step "no RFQ sends an unsupported CAS" node scripts/check-rfq-identity-guard-
 # otherwise those were never testing the trigger.
 pf_step "the deployment validator can go red and writes nothing" node scripts/check-rfq-guard-validation-runs.js
 
+# The PRPA connector schema, against a real server. src/lib/connectors/schema.test.js reads the DDL
+# TEXT and so proves the migration SAYS the right thing; it cannot prove a server accepts it or that
+# a constraint fires. Every guard here is exercised twice -- intact the violation is refused BY NAME
+# (Rule 8: a refusal test must prove which control refused), then with the guard dropped the same
+# violation must SUCCEED, so nothing passes unproven.
+#
+# It found one of my own claims to be wrong. PR-2 said MATCH FULL on (run_id, company_id) closes the
+# evasion where a row points at another company's run with a NULL company_id. On a NULLABLE column
+# it does. But both columns are NOT NULL here, so the half-NULL row cannot be written at all and
+# MATCH FULL is defence-in-depth rather than the operative control -- exactly the "a NOT NULL nobody
+# noticed" case the molecule identity step above was written to catch. It stays, because it becomes
+# load-bearing the moment company_id is relaxed; it must not be removed on the grounds that it never
+# fires. The check now records that attribution rather than letting the pass imply the wrong cause.
+#
+# Isolated and disposable only: it starts its own cluster in /var/tmp and REFUSES a CONN_PG_URL that
+# looks like a hosted or production database. Fixtures are deleted by recorded id and leaks are
+# reported; it never asserts a table is empty.
+pf_step "the connector schema holds in Postgres, every guard load-bearing" node scripts/check-connector-schema-db.js
+
 pf_verdict
 exit $?
