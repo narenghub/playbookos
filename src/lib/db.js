@@ -464,11 +464,8 @@ async function migrateSchemas() {
       ALTER TABLE weekly_kpis ADD COLUMN IF NOT EXISTS last_comment TEXT;
       ALTER TABLE weekly_kpis ADD COLUMN IF NOT EXISTS last_updated_at TIMESTAMPTZ;
       ALTER TABLE weekly_kpis ADD COLUMN IF NOT EXISTS last_updated_by TEXT;
-      -- Task status-change audit + task-level comments (mirrors weekly_kpis above).
-      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
-      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS updated_by TEXT;
-      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS last_comment TEXT;
-      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS assign_comment TEXT;
+      -- The four daily_tasks ALTERs that used to sit here have MOVED to just after
+      -- CREATE TABLE IF NOT EXISTS daily_tasks, further down this same block. See the note there.
       CREATE TABLE IF NOT EXISTS kpi_hierarchy (
         id TEXT PRIMARY KEY,
         level TEXT NOT NULL,
@@ -524,6 +521,27 @@ async function migrateSchemas() {
         created_at TEXT DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_daily_tasks_user_date ON daily_tasks (user_id, task_date);
+      -- Task status-change audit + task-level comments (mirrors weekly_kpis above).
+      --
+      -- THESE FOUR MOVED HERE, AND THE MOVE IS THE FIX FOR A FRESH DEPLOY.
+      --
+      -- They used to run ~45 lines ABOVE the CREATE TABLE that defines daily_tasks. On a database
+      -- that already had the table that was harmless, which is why production never showed it. On
+      -- an EMPTY database the ALTER failed, and because this whole function is a SINGLE
+      -- multi-statement query() in one try/catch that only logs, Postgres aborted the entire
+      -- block: every statement after the failure — several dozen tables, including
+      -- supplier_outreach_log — was never created. Boot then reached
+      -- idempotency/supplier-rfq.migrate(), which needs supplier_outreach_log, threw, and the
+      -- chain's final .catch called process.exit(1).
+      --
+      -- app.listen() had already bound by then, so the server answered GET /health and then died.
+      -- That is the exact shape CLAUDE.md warns about: /health proves the server is alive, not
+      -- that the application is. A fresh deployment to a new database could not boot, and neither
+      -- could a restore into an empty one.
+      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
+      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS updated_by TEXT;
+      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS last_comment TEXT;
+      ALTER TABLE daily_tasks ADD COLUMN IF NOT EXISTS assign_comment TEXT;
       CREATE TABLE IF NOT EXISTS agent_messages (
         id TEXT PRIMARY KEY,
         user_id TEXT,

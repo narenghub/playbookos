@@ -48,6 +48,39 @@ const declaresOwnSearchPath = (src) => OWN_SEARCH_PATH.some((re) => re.test(src)
 const hasBareInitdb = (src) => /initdb\b[^\n]*-A trust(?![^\n]*INITDB_FLAGS)/.test(src)
   && !/initdb -D \$\{base\}\/data \$\{INITDB_FLAGS\}/.test(src);
 
+// ── AND THE SAME DEFECT ON THE CLIENT SIDE ─────────────────────────────────
+//
+// `-U postgres` in INITDB_FLAGS fixes the SERVER's idea of the superuser's name. It does nothing for
+// the psql, pg_restore and pg_dump calls that then connect to it: those default the ROLE to the
+// invoking OS user independently. scripts/verify-restore.js was written after the 2026-11-03 lesson,
+// uses the shared module, uses INITDB_FLAGS — and still passed no -U on any of its five client
+// calls. In a container it runs as root and `su postgres`, so the role matched by coincidence, every
+// run was green, and the first time it ran on the CEO's Mac it died on
+// `role "nboda3230" does not exist` — the identical message pg-cluster.js's header was written about.
+//
+// The lesson had been recorded as a COMMENT in the shared module. A comment cannot fail a build, so
+// the next script reproduced the bug while importing the file that explains it. This is the check
+// that was missing.
+//
+// Only template literals that actually address the disposable cluster count. The signature of one is
+// unambiguous — it interpolates the cluster's socket, port or bin directory — and it keeps prose,
+// log labels and the documented production `pg_dump "$DATABASE_URL"` out of the sweep without an
+// exemption list.
+const CLIENT = /\b(psql|pg_restore|pg_dump|createdb|dropdb|pg_isready)\b/;
+const ADDRESSES_CLUSTER = /-h \$\{sock\}|-p \$\{PGPORT\}|PATH=\$\{dir\}/;
+const NAMES_A_ROLE = /\s-U\s+\S|postgres@|-U\$\{/;
+
+function roleLessClientCalls(src) {
+  const bad = [];
+  // Comments first: a commented-out example is not an invocation.
+  const code = src.split('\n').map((l) => l.replace(/^\s*\/\/.*$/, '')).join('\n');
+  for (const lit of code.match(/`(?:[^`\\]|\\.)*`/g) || []) {
+    if (!CLIENT.test(lit) || !ADDRESSES_CLUSTER.test(lit)) continue;
+    if (!NAMES_A_ROLE.test(lit)) bad.push(lit.replace(/\s+/g, ' ').slice(0, 120));
+  }
+  return bad;
+}
+
 // Non-execution reported as success: a "no Postgres" branch that exits 0.
 function skipExitsZero(src) {
   const lines = src.split('\n');
@@ -114,6 +147,24 @@ test('every initdb names its superuser explicitly', () => {
     + findings.join('\n'));
 });
 
+test('every psql / pg_restore call against a disposable cluster names its role', () => {
+  const findings = [];
+  const files = harnesses();
+  for (const file of files) {
+    for (const call of roleLessClientCalls(fs.readFileSync(file, 'utf8'))) {
+      findings.push(`${path.relative(ROOT, file)}: ${call}`);
+    }
+  }
+  assert.ok(files.length >= 30, `the sweep found only ${files.length} harnesses`);
+  assert.deepEqual(findings, [],
+    `\n${findings.length} client call(s) connect to a disposable cluster without naming the role.\n\n`
+    + 'The cluster\'s only superuser is `postgres` (INITDB_FLAGS). psql and pg_restore default the\n'
+    + 'role to the INVOKING OS USER, which is a separate decision from initdb\'s. Run as root with an\n'
+    + '`su postgres` wrapper the two coincide and the omission is invisible; run as a person it is\n'
+    + '`role "<username>" does not exist` on the first call. Pass -U postgres.\n\n'
+    + findings.join('\n'));
+});
+
 test('no harness reports a pass when it did not execute', () => {
   const findings = [];
   const files = harnesses();
@@ -158,6 +209,47 @@ test('the sweep detects a bare initdb and accepts the shared flags', () => {
     'a bare initdb with extra flags was not detected');
   assert.ok(!hasBareInitdb('run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);'),
     'the shared flags were misreported as a bare initdb');
+});
+
+test('the client sweep detects the real bug and leaves prose alone', () => {
+  // THE REAL THING, verbatim from verify-restore.js as it was when it failed on the Mac.
+  for (const planted of [
+    'sh(`PATH=${dir}:$PATH psql -h ${sock} -p ${PGPORT} -d postgres -c "CREATE DATABASE restored"`, true);',
+    'sh(`PATH=${dir}:$PATH pg_restore --no-owner --exit-on-error -h ${sock} -p ${PGPORT} -d restored x`);',
+    'sh(`gunzip -c x | PATH=${dir}:$PATH psql -v ON_ERROR_STOP=1 -h ${sock} -p ${PGPORT} -d restored`);',
+    'sh(`PATH=${dir}:$PATH psql -tAq -h ${sock} -p ${PGPORT} -d restored -c ${JSON.stringify(sql)}`);',
+  ]) {
+    assert.equal(roleLessClientCalls(planted).length, 1, `a role-less client call was not detected: ${planted}`);
+  }
+  // The corrected forms, in both orderings a person might write them.
+  for (const fixed of [
+    'sh(`PATH=${dir}:$PATH psql -U postgres -h ${sock} -p ${PGPORT} -d postgres -c "x"`);',
+    'sh(`PATH=${dir}:$PATH psql -tAq -U postgres -h ${sock} -p ${PGPORT} -d restored -c "x"`);',
+    'sh(`PATH=${dir}:$PATH pg_restore -U postgres --no-owner -h ${sock} -p ${PGPORT} -d restored x`);',
+  ]) {
+    assert.deepEqual(roleLessClientCalls(fixed), [], `a corrected call was still flagged: ${fixed}`);
+  }
+
+  // AND THE FALSE POSITIVES THAT WOULD HAVE MADE THIS SWEEP UNUSABLE. Each of these is real text
+  // from verify-restore.js. A check that fires on a log label gets an exemption list, and an
+  // exemption list is where the next real finding goes to be ignored.
+  for (const innocent of [
+    "console.log(`  format    : ${isCustom ? 'custom (PGDMP) → pg_restore' : 'gzipped SQL → gunzip | psql'}`);",
+    "note('pg_restore exiting 0 proves the bytes moved. This proves the thing you need in a disaster.');",
+    'const usage = `  pg_dump --format=custom --no-owner --no-privileges "$DATABASE_URL" -f prod.dump`;',
+    '  // sh(`PATH=${dir}:$PATH psql -h ${sock} -d restored`); an old line, commented out',
+    'const url = `postgresql://postgres@localhost/restored?host=${sock}&port=${PGPORT}`;',
+  ]) {
+    assert.deepEqual(roleLessClientCalls(innocent), [], `prose or a safe form was flagged: ${innocent}`);
+  }
+
+  // Non-vacuity for the predicate itself: the sweep must still fire on the file it was written for
+  // if the fix is reverted. Reverting it here is how that is proved without keeping a broken copy.
+  const live = fs.readFileSync(path.join(SCRIPTS, 'verify-restore.js'), 'utf8');
+  assert.deepEqual(roleLessClientCalls(live), [], 'verify-restore.js has role-less client calls again');
+  const reverted = live.replace(/ -U postgres/g, '');
+  assert.ok(roleLessClientCalls(reverted).length >= 4,
+    'with -U stripped the sweep no longer finds the original bug — the predicate has stopped working');
 });
 
 test('the sweep detects non-execution reported as exit 0', () => {

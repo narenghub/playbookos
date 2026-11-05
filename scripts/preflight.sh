@@ -345,5 +345,135 @@ pf_step "no RFQ sends an unsupported CAS" node scripts/check-rfq-identity-guard-
 # otherwise those were never testing the trigger.
 pf_step "the deployment validator can go red and writes nothing" node scripts/check-rfq-guard-validation-runs.js
 
+# R2. src/lib/molecules/synonyms.js de-salts names on purpose, for SEARCH, and documents the limit
+# itself: stripping `testosterone enanthate` to `testosterone` is "correct for FINDING a supplier and
+# wrong for ordering one". Until this check existed that scoping rule was enforced only by whoever
+# read the file. DEFAULT DENY: every file is forbidden from importing the search-only functions
+# unless src/lib/molecules/search-scope.js lists it with a reason, so a new matcher is forbidden the
+# moment somebody creates it, by doing nothing.
+#
+# It plants a real import in a non-allowlisted path, asserts it is caught by name, and removes it --
+# because a check whose detector never matched anything would pass with a clean report, which is the
+# false green this repo has already shipped twice. It did exactly that on its first run: a regex
+# comment-stripper had eaten the region of routes.js holding the real import, so the check found
+# ZERO callers and reported success.
+#
+# Weaker than the engine-side guards, and says so: it is static, it can be defeated by a dynamic
+# require or a wrapper, and routes.js is allowlisted because it hosts the search endpoints -- so a
+# pricing handler added inline there sits inside the exemption. That residual risk is recorded in
+# search-scope.js with its remedy rather than left implied.
+pf_step "the search rule cannot reach a commercial path" node scripts/check-search-rule-scope.js
+
+# The PRPA connector schema, against a real server. src/lib/connectors/schema.test.js reads the DDL
+# TEXT and so proves the migration SAYS the right thing; it cannot prove a server accepts it or that
+# a constraint fires. Every guard here is exercised twice -- intact the violation is refused BY NAME
+# (Rule 8: a refusal test must prove which control refused), then with the guard dropped the same
+# violation must SUCCEED, so nothing passes unproven.
+#
+# It found one of my own claims to be wrong. PR-2 said MATCH FULL on (run_id, company_id) closes the
+# evasion where a row points at another company's run with a NULL company_id. On a NULLABLE column
+# it does. But both columns are NOT NULL here, so the half-NULL row cannot be written at all and
+# MATCH FULL is defence-in-depth rather than the operative control -- exactly the "a NOT NULL nobody
+# noticed" case the molecule identity step above was written to catch. It stays, because it becomes
+# load-bearing the moment company_id is relaxed; it must not be removed on the grounds that it never
+# fires. The check now records that attribution rather than letting the pass imply the wrong cause.
+#
+# Isolated and disposable only: it starts its own cluster in /var/tmp and REFUSES a CONN_PG_URL that
+# looks like a hosted or production database. Fixtures are deleted by recorded id and leaks are
+# reported; it never asserts a table is empty.
+pf_step "the connector schema holds in Postgres, every guard load-bearing" node scripts/check-connector-schema-db.js
+
+# The census produced the number a ruling was asked to act on, and that number was then reported
+# wrongly -- as a defect in the canonical molecule layer rather than as a measurement of what a
+# candidate merge rule WOULD collapse. The reporting error is corrected; this answers the next
+# question, which is whether the arithmetic itself is right.
+#
+# It runs the SHIPPED script as a child process against a disposable cluster seeded with a fixture
+# set whose answer is computable by hand, rather than reimplementing the grouping -- a second copy
+# would prove only that two copies of the same reasoning agree. It then perturbs the data by exactly
+# one conflict and requires the count to move by exactly one, so a script printing hard-coded
+# numbers would fail.
+#
+# It also asserts the report STATES ITS SCOPE (study_molecules only, source data, prospective).
+# That sentence is what stops the number being misread again, so its absence is a failure.
+pf_step "the census counts what it says it counts" node scripts/check-census-arithmetic-db.js
+
+# PR-6. views.test.js asserts every builder MENTIONS company_id, which is a text check and would
+# pass on `WHERE company_id = company_id` or on a join that scopes one table and not the other. The
+# only way to know a view does not leak is to put a SECOND company's rows in the database and look.
+#
+# Both tenants are seeded with structurally identical rows on purpose: data that looked different
+# would make a leak obvious, data that looks the same makes it invisible unless the test checks ids.
+# Then the predicate is removed and the same query must return the other tenant — without that, a
+# view returning nothing for an unrelated reason would pass the leak test while proving nothing.
+#
+# It also refuses to count a 0-row result as isolation coverage, and records moleculeDemandCandidates
+# as single-tenant BY NECESSITY rather than disguising the gap as a pass: study_molecules has no
+# company_id, so that view cannot isolate and a green tick beside it would be a lie.
+pf_step "dashboard views are tenant-scoped in Postgres" node scripts/check-dashboard-views-db.js
+
+# Ruling 6 item 5. The classifier is unit-tested, but the thing that will be run against production
+# is the SCRIPT, so this seeds a disposable cluster and checks the script's own output against an
+# answer computed by hand in its header.
+#
+# The ordering is the part worth protecting. form_pair and grade_duplicate are the two classes that
+# answer "no action", and checked first they bury a real signal: the gemcitabine group is a
+# de-salted form pair AND shares 95058-81-4 with a different substance, so form_pair-first would
+# have reported "nothing wrong" and the shared number would never have been seen. The harness pins
+# that case specifically, in both directions — a sharing form pair must escalate, and a
+# non-sharing one must still be dismissed, or the backlog inflates by every legitimate salt pair.
+#
+# It also proves the script is read-only two ways (the fixture rows survive it, and no SQL literal
+# in it contains a mutating verb) and that two runs over identical data print an identical report.
+pf_step "the CAS conflict triage classifies what it says it classifies" node scripts/check-cas-triage-db.js
+
+# Ruling 6 items 1-2. The inventory's job is to say what we have evidence FOR, and its failure mode
+# is a boolean: labs.research_capable is BOOLEAN NOT NULL DEFAULT FALSE with no evidence column, no
+# source, no date and no approver behind it. Read as a capability it says "this firm can do research
+# work"; read honestly it says "a row was set to true, by someone, for a reason nobody recorded".
+# So this asserts the bare flag classifies as a CLAIM and never enters the verification queue.
+#
+# The control that matters most is the other one. matchTier('CRO360','CRO 360 Inc') is null — one
+# space defeats it — so a search keyed on the normalized name would report CRO360 as holding no
+# laboratory, registration or accreditation records while a real row sat in the table. "Zero records
+# found" and "the name did not match" are different findings, and an inventory that reports the
+# second as the first looks like a completed search. The harness seeds exactly that row and requires
+# it to surface under NEAR MISSES with IDENTITY UNCONFIRMED.
+#
+# It also requires every entity to report VERIFIED capabilities: 0 — nothing this path produces can
+# satisfy the verified_capabilities CHECK constraint, and saying so out loud is the point.
+pf_step "the evidence inventory never invents a capability" node scripts/check-evidence-inventory-db.js
+
+# Ruling 7 item 6 says to run the production-bound read-only scripts "only after confirming the
+# scripts". This confirms them. The Railway environment and the permissions are not confirmable
+# from here and stay with whoever runs them.
+#
+# Reading a file and seeing no INSERT is a statement about my attention, so each script is RUN
+# against a real server holding real rows, and a full table-by-table row census is compared before
+# and after. Both halves of the detection are controlled: a planted mutating literal must still be
+# caught after comments are stripped, and a mutating verb inside a comment must be ignored — the
+# first version of that scanner paired backticks across the whole file and missed a planted
+# `DELETE ... SELECT` entirely, which would have made every clean result below vacuous.
+pf_step "the production-bound read-only scripts change nothing" node scripts/check-readonly-prod-scripts-db.js
+
+# Ruling 9 item 3. The connector migration is run by a dedicated versioned command, NOT by the boot
+# chain — a migration in server.js runs on every restart including a crash loop, welds the migrate
+# and deploy decisions together, and has no operator when it needs reversing.
+#
+# A runner is exactly the kind of script whose claims nobody tests, because running it is scary. So
+# all four claimed properties are exercised against a real server: it refuses on a clean database
+# naming the composite-FK constraint that is easiest to miss (and creates NOTHING when it refuses),
+# --check never writes even when preconditions pass, a second apply is idempotent down to the
+# version row, re-applying REPAIRS a partially-applied schema, rollback refuses without an explicit
+# acknowledgement, and a real rollback drops all twelve while leaving companies and agent_runs
+# untouched.
+pf_step "the migration runner refuses, applies, repeats and rolls back" node scripts/check-migration-runner-db.js
+
+# Ruling 10 item 5. SAM.gov inactive, no supplier communication, no bidding — three claims I have
+# made in prose several times, which is not evidence. The risk is drift: a seed value edited for a
+# test, an env default flipped, a send added next to routes that already exist, or migrateConnectors
+# quietly wired into startup. Each is re-asserted against the code as it stands, every run.
+pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
+
 pf_verdict
 exit $?

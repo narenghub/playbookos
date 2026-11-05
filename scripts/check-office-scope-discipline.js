@@ -66,6 +66,12 @@ const ROOT = path.join(__dirname, '..');
 // the next person hits the failure, adds a line here, and the predicate quietly moves back to the
 // call sites.
 const EXEMPT = new Set([
+  // The end-to-end acceptance test (ruling 8 item 5). It SEEDS a company, an objective and a run
+  // into a DISPOSABLE cluster it creates and destroys, so that the real server has something to
+  // serve — the kernel rows are the fixture, not the subject. It never runs against production
+  // and reads nothing through a scoped query it could have used instead. Same category as the
+  // validators below: a measurement harness, not product code.
+  path.join('scripts', 'acceptance-e2e.js'),
   path.join('src', 'lib', 'office', 'scope.js'),
   path.join('src', 'lib', 'office', 'schema.js'),
   path.join('scripts', 'check-office-scope-discipline.js'),

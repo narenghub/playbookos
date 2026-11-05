@@ -18,3 +18,6 @@ docs/acbm-call-sheet-*.md
 /supplier-products.csv
 /paul-*.csv
 /log
+
+# UI rendering evidence — regenerate with scripts/screenshot-prpa-page.js
+ui-evidence/

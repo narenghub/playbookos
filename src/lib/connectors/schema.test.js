@@ -1,0 +1,280 @@
+// ── THE CONTROLS THAT LIVE IN THE DATABASE, NOT IN A CODE PATH ──────────────
+//
+//   node --test src/lib/connectors/schema.test.js
+//
+// sync-run.test.js proves the application refuses the wrong things. This file proves the ENGINE
+// does too, because the application is one caller among several and the next one will be written
+// by somebody who has not read it. src/lib/office/schema.js puts it plainly: a constraint in the
+// schema "fires on the write, from inside the engine, whoever is connected and whatever they
+// forgot."
+//
+// These read the DDL text rather than a live cluster. That is a real limit and worth naming: this
+// asserts the migration SAYS the right thing, not that a server accepted it. Applying it against
+// a throwaway cluster is PR-2's production-validation step and is not authorized yet (ruling 8 —
+// no production migrations). What this does catch is the migration drifting away from the design
+// without anybody noticing, which is the failure that actually happens.
+'use strict';
+
+const assert = require('node:assert');
+const { test } = require('node:test');
+const { DDL, CONNECTOR_SEED, CONNECTOR_TABLES, GLOBAL_TABLES, migrateConnectors } = require('./schema');
+
+const ddl = DDL.join('\n;\n');
+const stmtFor = (re) => DDL.find((s) => re.test(s)) || '';
+
+// ── tenant isolation, engine-side ───────────────────────────────────────────
+
+test('every tenant table declares company_id NOT NULL — new tables are owed no legacy latitude', () => {
+  for (const t of CONNECTOR_TABLES) {
+    const s = stmtFor(new RegExp(`CREATE TABLE IF NOT EXISTS ${t}\\b`));
+    assert.ok(s, `no CREATE TABLE for ${t}`);
+    assert.match(s, /company_id\s+TEXT NOT NULL REFERENCES companies\(id\)/,
+      `${t}.company_id must be NOT NULL and reference companies — a nullable tenant column on a `
+      + 'new table reopens the MATCH FULL evasion the kernel exists to close');
+  }
+});
+
+test('the run linkage is MATCH FULL, not the MATCH SIMPLE default', () => {
+  const s = stmtFor(/fk_source_sync_runs_run_company/);
+  assert.match(s, /FOREIGN KEY \(run_id, company_id\) REFERENCES agent_runs \(run_id, company_id\)/);
+  assert.match(s, /MATCH FULL/,
+    'MATCH SIMPLE passes if any column is NULL, which on a nullable company_id is an evasion');
+  assert.match(s, /NOT VALID/,
+    'existing agent_runs history must not be re-examined; new writes are still enforced');
+});
+
+test('run_id is NOT NULL, which is what forces every sync inside an agent_run', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS source_sync_runs/);
+  assert.match(s, /run_id\s+UUID NOT NULL/);
+  // Under MATCH FULL with company_id NOT NULL the pair can never be half-present anyway, so this
+  // makes the consequence explicit instead of leaving it to be rediscovered as a constraint error.
+});
+
+test('source_connectors deliberately carries no company_id, and is excluded from the tenant list', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS source_connectors/);
+  assert.ok(!/company_id/.test(s),
+    'that USAspending needs no key is a fact about the world, not tenant data');
+  for (const g of GLOBAL_TABLES) assert.ok(!CONNECTOR_TABLES.includes(g), `${g} must not be listed as tenant-scoped`);
+});
+
+// ── idempotency, engine-side ────────────────────────────────────────────────
+
+test('the natural key is a UNIQUE INDEX — §15 cannot be an application-side check', () => {
+  assert.match(ddl, /CREATE UNIQUE INDEX IF NOT EXISTS idx_fa_natural_key\s+ON federal_awards \(company_id, source_key, award_key\)/,
+    'two concurrent syncs both read "absent" and both insert unless the database refuses the second');
+});
+
+test('the natural key is scoped by company, so two tenants can hold the same public award', () => {
+  const m = ddl.match(/idx_fa_natural_key\s+ON federal_awards \(([^)]+)\)/);
+  assert.ok(m, 'index not found');
+  assert.equal(m[1].split(',')[0].trim(), 'company_id',
+    'company_id must lead the unique key — Abiozen and CRO360 may both track the same award');
+});
+
+// ── the sentinel ────────────────────────────────────────────────────────────
+
+test("'-NONE-' is unstoreable in parent_piid, not merely discouraged", () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS federal_awards/);
+  assert.match(s, /CONSTRAINT federal_awards_parent_sentinel_check/);
+  assert.match(s, /parent_piid IS NULL OR parent_piid NOT IN \('-NONE-', 'NONE', ''\)/);
+  // PR-1 measured 3 of 10 awards carrying it. Stored verbatim, every later join on parent_piid
+  // matches unrelated standalone awards — a wrong answer, not an empty one.
+});
+
+// ── the ceiling ─────────────────────────────────────────────────────────────
+
+test('the call ceiling is enforced by a CHECK, so the engine refuses the overrun too', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS source_sync_runs/);
+  assert.match(s, /calls_made >= 0 AND \(call_ceiling IS NULL OR calls_made <= call_ceiling\)/);
+});
+
+test('a ceiling of zero is not expressible — null means unmetered', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS source_connectors/);
+  assert.match(s, /daily_call_ceiling IS NULL OR daily_call_ceiling > 0/,
+    'a ceiling of 0 would read as "no quota" to a careless caller and "never sync" to a careful one');
+});
+
+test('only the five real statuses are accepted', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS source_sync_runs/);
+  assert.match(s, /status IN \('running','completed','failed','ceiling_reached','refused'\)/);
+});
+
+// ── the seed is the control for rulings 3 and 5 ─────────────────────────────
+
+test('ruling 5/7: SAM.gov is seeded prepared-but-not-activated, with an HONEST ceiling', () => {
+  const sam = CONNECTOR_SEED.find((c) => c.source_key === 'sam_gov');
+  assert.ok(sam);
+  assert.strictEqual(sam.activated, false, 'not activated until access and quotas are verified');
+
+  // This assertion used to require daily_call_ceiling === 10, described as "the personal-key
+  // limit". THAT NUMBER IS NOT PUBLISHED ANYWHERE. open.gsa.gov says only, verbatim, "Request per
+  // day are limited based on the federal or non-federal or general roles", and gives no figure for
+  // any role — so the 10, and the "~1,000 for a system account" that sat beside it in the notes,
+  // came from recollection rather than a source. The seed's own rule is that an unpublished limit
+  // is NULL, because an invented number looks like knowledge; the test was pinning a violation of
+  // that rule in place.
+  //
+  // It matters operationally, not just tidily: the quota ledger refuses calls once the ceiling is
+  // reached, so too low a number refuses valid work, and too high a number sails past the real
+  // limit on an API whose overrun behaviour is also undocumented.
+  assert.strictEqual(sam.daily_call_ceiling, null,
+    'the real limit is unpublished; record it here once the entity administrator states it');
+  assert.match(sam.notes, /2026-12-30/, 'the registration expiry belongs on the record');
+  assert.match(sam.notes, /CEILING CORRECTED TO NULL/,
+    'the correction is recorded on the row, so the next reader does not re-add a remembered number');
+});
+
+test('ruling 3: the two portals are manual_assisted, which beginSync refuses', () => {
+  for (const key of ['fedconnect', 'hhs_sbcx']) {
+    const c = CONNECTOR_SEED.find((x) => x.source_key === key);
+    assert.ok(c, `${key} not seeded`);
+    assert.equal(c.access_mode, 'manual_assisted');
+    assert.equal(c.auth_mode, 'portal_login');
+    assert.strictEqual(c.activated, false);
+  }
+  const fc = CONNECTOR_SEED.find((x) => x.source_key === 'fedconnect');
+  assert.match(fc.notes, /UNKNOWN, not denied/,
+    'we measured a 302 to a sign-in page; that is not evidence that no API exists');
+});
+
+test('ruling 4: Grants.gov is kind=funding and says so in its notes', () => {
+  const g = CONNECTOR_SEED.find((c) => c.source_key === 'grants_gov');
+  assert.equal(g.kind, 'funding');
+  assert.equal(g.auth_mode, 'none');
+  assert.match(g.notes, /never procurement revenue/);
+  assert.match(g.notes, /forecast is a PLAN/, 'the biddability trap belongs on the record');
+});
+
+test('exactly the two authorized sources are seeded active — SAM.gov and the portals are not', () => {
+  // Ruling 2 authorized PR-4 ahead of PR-3, so grants_gov joins usaspending. The list is asserted
+  // exactly rather than loosely: "at least these" would let a future source switch itself on
+  // unnoticed, which is the opposite of what the activated flag is for.
+  const active = CONNECTOR_SEED.filter((c) => c.activated).map((c) => c.source_key).sort();
+  assert.deepEqual(active, ['grants_gov', 'usaspending']);
+  const u = CONNECTOR_SEED.find((c) => c.source_key === 'usaspending');
+  assert.strictEqual(u.daily_call_ceiling, null, 'no published quota — not a quota of nothing');
+  assert.match(u.notes, /OBLIGATIONS at action time, not outlays/);
+  assert.match(u.notes, /withheld ~90 days/);
+  assert.match(u.notes, /not name matching/);
+});
+
+test('no seeded ceiling is invented — every one is null or a documented number', () => {
+  for (const c of CONNECTOR_SEED) {
+    if (c.daily_call_ceiling !== null) {
+      assert.equal(c.source_key, 'sam_gov',
+        `${c.source_key} has a ceiling of ${c.daily_call_ceiling} but no published limit — an `
+        + 'invented number looks like knowledge');
+    }
+  }
+});
+
+// ── funding is kept apart from procurement (ruling 2) ───────────────────────
+
+test('funding opportunities have their own table with no procurement or revenue column', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  assert.ok(s, 'no funding_opportunities table');
+  for (const forbidden of [/obligated_amount/, /\bpiid\b/, /parent_piid/, /revenue/, /\bpsc_code\b/, /\bnaics_code\b/]) {
+    assert.ok(!forbidden.test(s),
+      `funding_opportunities must not carry ${forbidden} — the surest way a grant figure never lands `
+      + 'in a procurement total is for there to be no column it could land in');
+  }
+});
+
+test('application_open is GENERATED, so no caller can assert a forecast is live', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  assert.match(s, /application_open\s+BOOLEAN GENERATED ALWAYS AS \(/);
+  assert.match(s, /STORED/);
+  assert.match(s, /doc_type <> 'forecast'/);
+  assert.match(s, /close_date IS NOT NULL/);
+  assert.match(s, /opp_status = 'posted'/);
+});
+
+test("an unknown status yields FALSE, not NULL — for a control those are the same answer", () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  const gen = s.slice(s.indexOf('application_open'), s.indexOf('STORED'));
+  assert.match(gen, /COALESCE\(/,
+    'without COALESCE a NULL opp_status makes application_open NULL, which a careless filter reads as not-false');
+});
+
+test('the standing vocabulary is closed, and forecast is one of its values', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  assert.match(s, /standing IN \('open','posted_no_deadline','forecast','closed','archived','unknown'\)/);
+  assert.match(s, /standing\s+TEXT NOT NULL/, 'a row with no standing would be a row with no verdict');
+});
+
+test('exactly one revision may claim to be current', () => {
+  assert.match(ddl, /CREATE UNIQUE INDEX IF NOT EXISTS idx_fov_one_current\s+ON funding_opportunity_versions \(company_id, source_key, opportunity_id\)\s+WHERE is_current/,
+    'two rows claiming to be current is how a proposal gets written against a superseded version');
+});
+
+test('the revision chain dedupes on (tenant, source, opportunity, revision)', () => {
+  assert.match(ddl, /CREATE UNIQUE INDEX IF NOT EXISTS idx_fov_natural_key\s+ON funding_opportunity_versions \(company_id, source_key, opportunity_id, revision\)/);
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunity_versions/);
+  assert.match(s, /revision\s+INTEGER NOT NULL/);
+  assert.match(s, /revision >= 0/, 'revision 0 is the first version, so negative is the only invalid case');
+});
+
+test('the open-for-applications index reads the generated column, not the status', () => {
+  assert.match(ddl, /idx_fo_application_open ON funding_opportunities \(company_id, close_date\)\s+WHERE application_open/,
+    'if the view filtered on opp_status it would have to re-derive the condition and could get it wrong');
+});
+
+test('funding_opportunities has NO column called biddable — the word is reserved', () => {
+  const s = stmtFor(/CREATE TABLE IF NOT EXISTS funding_opportunities/);
+  assert.ok(!/\bbiddable\b\s+BOOLEAN/.test(s),
+    'the column was called biddable until PR-5 gave that word a precise meaning: exactly one of six '
+    + 'record kinds, and grant_opportunity is not one. A grant is an application, never an offer, so '
+    + 'a column named biddable reading true on every row in this table asserted something false. '
+    + 'Biddability lives in record-kind.js, which answers no for every funding record.');
+});
+
+// ── the migration runner ────────────────────────────────────────────────────
+
+test('re-running the seed never flips activated — that is an operational decision, not a migration', async () => {
+  const seen = [];
+  await migrateConnectors(async (sql, params) => {
+    seen.push({ sql: sql.replace(/\s+/g, ' ').trim(), params });
+    return { rows: [] };
+  });
+  const upserts = seen.filter((s) => /INSERT INTO source_connectors/.test(s.sql));
+  assert.equal(upserts.length, CONNECTOR_SEED.length);
+  for (const u of upserts) {
+    const doUpdate = u.sql.slice(u.sql.indexOf('DO UPDATE SET'));
+    assert.ok(!/\bactivated\b/.test(doUpdate),
+      'a migration re-run must not quietly switch a source on — or off');
+    assert.match(doUpdate, /notes\s+= EXCLUDED\.notes/, 'corrected notes should still propagate');
+  }
+});
+
+test('the migration only swallows the three "already exists" codes', async () => {
+  // A migration that hides a real error is worse than one that fails — the office schema's words.
+  await assert.rejects(
+    migrateConnectors(async () => { const e = new Error('permission denied'); e.code = '42501'; throw e; }),
+    /connector schema failed on/);
+
+  let applied = 0;
+  await migrateConnectors(async () => {
+    applied += 1;
+    if (applied <= DDL.length) { const e = new Error('already exists'); e.code = '42P07'; throw e; }
+    return { rows: [] };
+  });
+  assert.ok(applied > DDL.length, 'duplicate-object errors are survivable and the seed still runs');
+});
+
+test('the rollback is documented in the file, and drops in dependency order', () => {
+  const src = require('node:fs').readFileSync(require.resolve('./schema'), 'utf8');
+  // Slice to the end of the comment block, not a fixed 400 characters. The fixed window silently
+  // excluded the last DROP lines as tables were added, so the test began reporting a missing
+  // rollback entry that was in fact present — a test failing for the wrong reason, which is as
+  // costly as one passing for the wrong reason.
+  const start = src.indexOf('ROLLBACK');
+  const end = src.indexOf('\n//\n', start) > start ? src.indexOf('\n//\n', start) : start + 1200;
+  const rb = src.slice(start, end);
+  for (const t of [...CONNECTOR_TABLES, ...GLOBAL_TABLES]) {
+    assert.ok(rb.includes(`DROP TABLE IF EXISTS ${t}`), `${t} missing from the documented rollback`);
+  }
+  assert.ok(rb.indexOf('federal_awards') < rb.indexOf('source_connectors'),
+    'children drop before the table they reference');
+  assert.ok(rb.indexOf('funding_opportunity_versions') < rb.indexOf('funding_opportunities'),
+    'the version chain drops before the opportunity it belongs to');
+});

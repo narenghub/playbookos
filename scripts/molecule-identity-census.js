@@ -131,6 +131,20 @@ async function main() {
 
   // ── 3. WHAT CANONICALISATION WOULD COLLAPSE ───────────────────────────────
   h('3. Collapse: distinct filed names -> distinct canonical substances');
+  // ── SCOPE, STATED, BECAUSE IT WAS READ WRONGLY ONCE ──────────────────────
+  //
+  // Sections 3 and 4 measure study_molecules AND NOTHING ELSE. Section 2 above lists every
+  // identity table, which makes it easy to read these counts as covering all of them — and that is
+  // exactly the mistake that was made: a PRPA Phase 0 document reported section 4's number as a
+  // defect in the canonical molecule layer, which it is not.
+  //
+  // src/lib/molecules/preview.js analyses SIX tables (skus, supplier_products, study_molecules,
+  // research_interests, clinical_studies, patent_watch), so its figures are not comparable with
+  // these and a difference between the two is scope, not drift.
+  console.log('   SCOPE: study_molecules only. Not the molecules table, and not the other five');
+  console.log('   identity tables. This is a measurement of SOURCE data, and it says what');
+  console.log('   canonicalMolecule() WOULD merge if adopted as the merge rule — not what is');
+  console.log('   merged today. Nothing in the canonical layer is affected by these numbers.\n');
   const smExists = await tableExists('study_molecules');
   if (!smExists) {
     console.log('   study_molecules does not exist — nothing to measure.');

@@ -4566,12 +4566,12 @@ router.get('/research-intelligence/studies', authMiddleware, requireTier('intell
     // person says 'leuprorelin'" — naming the exact failure and then not fixing it. A substring
     // cannot cross a name change; `leuprorelin` is not inside `leuprolide acetate`. So the term is
     // expanded to every legal name for the substance first, and the LIKE runs against all of them.
-    if (req.query.molecule && String(req.query.molecule).trim().length >= 2) {
-      const mexp = expandMolecule(req.query.molecule);
-      params.push(likePatterns(mexp.terms));
+    const molExp = expandForSearch(req.query.molecule);
+    if (molExp.ok) {
+      params.push(molExp.patterns);
       where.push(`EXISTS (SELECT 1 FROM study_molecules sm
                            WHERE sm.study_id = cs.id
-                             AND ${moleculeLikeSql('LOWER(sm.molecule_name)', params.length)})`);
+                             AND ${searchLikeSql('LOWER(sm.molecule_name)', params.length)})`);
     }
     // ── THE BUYING-INTENT FILTER ──────────────────────────────────────────────
     // The single most useful column on this table for a commercial question, and the reason the
@@ -5208,7 +5208,15 @@ const { normalizeCompany: cphiNormalizeCompany } = require('../lib/cphi/match-co
 // One substance, several legal names. A customer at CPHI Milan asked for LEUPRORELIN (the INN) and
 // got nothing, because every holder is filed under LEUPROLIDE (the USAN). src/lib/molecules/synonyms.js
 // owns the equivalence table and the salt-stripping, and says why each is needed.
-const { expandMolecule, moleculeLikeSql, likePatterns } = require('../lib/molecules/synonyms');
+//
+// IMPORTED THROUGH search-query.js, NOT FROM synonyms.js DIRECTLY. This file is ~6,000 lines and
+// holds pricing, RFQ, order and approval handlers beside the search ones. While it was allowlisted
+// to import the search-only functions, that exemption covered all of them — so a quote handler
+// written here could have called expandMolecule() forty lines from a price, and the R2 guard would
+// have waved it through. The exemption now belongs to search-query.js, which does one job, and
+// routes.js is off the allowlist: a direct import of synonyms.js anywhere in this file is a guard
+// violation from here on.
+const { expandForSearch, searchLikeSql } = require('../lib/molecules/search-query');
 // And one substance must come back as ONE row. The register files Leuprolide, Leuprolide Acetate and
 // Leuprorelin separately, which splits the holders three ways and makes the page print "SOLE holder
 // worldwide" over a substance three companies hold. src/lib/molecules/merge.js recounts.
@@ -5807,11 +5815,12 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
     const term = String(req.query.q || '').trim().toLowerCase();
     // Two characters is the floor: one would scan every molecule in the register to tell you
     // nothing, and at a venue that is several seconds of nothing.
-    if (term.length < 2) return res.json({ q: term, items: [], hint: 'Type at least two letters.' });
-
     // EVERY name for this substance, not just the one that was typed. The register is American and
-    // half the floor is European, so the typed name is often not the filed name.
-    const expansion = expandMolecule(term);
+    // half the floor is European, so the typed name is often not the filed name. The two-character
+    // floor now lives in search-query.js with the expansion it guards, rather than being restated
+    // here where it could drift from it.
+    const expansion = expandForSearch(term);
+    if (!expansion.ok) return res.json({ q: term, items: [], hint: 'Type at least two letters.' });
     const terms = expansion.terms;
 
     const items = (await query(
@@ -5834,14 +5843,14 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
        -- counterpart and its de-salted base. One array parameter rather than per-term placeholders,
        -- so the same set matches in all three branches without index arithmetic.
        keys AS (
-         SELECT k, molecule FROM demand  WHERE ${moleculeLikeSql('k', 2)}
+         SELECT k, molecule FROM demand  WHERE ${searchLikeSql('k', 2)}
          UNION
-         SELECT k, molecule FROM holders WHERE ${moleculeLikeSql('k', 2)}
+         SELECT k, molecule FROM holders WHERE ${searchLikeSql('k', 2)}
          UNION
          -- A molecule we have PRICED but that has neither a trial nor a US DMF holder still has to
          -- be findable: that is exactly the research-grade catalogue.
          SELECT LOWER(molecule_name), molecule_name FROM molecule_pricing
-          WHERE active = 1 AND ${moleculeLikeSql('LOWER(molecule_name)', 2)})
+          WHERE active = 1 AND ${searchLikeSql('LOWER(molecule_name)', 2)})
        SELECT kk.molecule,
               dm.studies::int, dm.ph3::int, dm.ph2::int, dm.patients::int,
               COALESCE(c.n, 0)::int AS holder_count,
@@ -5882,7 +5891,7 @@ router.get('/events/cphi/molecule-search', authMiddleware, requireAnyTier('intel
                  COALESCE(c.n, 999) ASC,
                  COALESCE(dm.studies, 0) DESC,
                  kk.molecule
-        LIMIT 25`, [CPHI_EVENT, likePatterns(terms), terms])).rows;
+        LIMIT 25`, [CPHI_EVENT, expansion.patterns, terms])).rows;
 
     // Collapse the alias rows and RECOUNT the holders. Done after the LIMIT, so the merged list can
     // be shorter than 25 — which is correct: 25 substances would have needed a larger LIMIT, and
@@ -6314,4 +6323,141 @@ router.post('/notifications/read-all', authMiddleware, requireTier('intelligence
       `UPDATE notifications SET read_at = NOW() WHERE read_at IS NULL AND ${scope.sql}`, scope.params);
     res.json({ marked: upd.rowCount || 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── PRPA PR-6: READ-ONLY DASHBOARD ENDPOINTS ─────────────────────────────────
+//
+// Every handler below reads. The ONE exception is the review-task pair, which the ruling
+// authorizes for assignment and which grants no approval: src/lib/procurement/review-tasks.js has
+// no approval column and a status vocabulary that cannot express a decision.
+//
+// Company scoping comes from the resolved company context, not from a query parameter. A caller
+// cannot ask for another tenant's rows because a caller never supplies the tenant.
+const prpaViews = require('../lib/procurement/views');
+const prpaTasks = require('../lib/procurement/review-tasks');
+const prpaExport = require('../lib/procurement/export');
+const { resolveCompanyForReadSession } = require('../lib/office/context');
+
+const prpaToday = () => new Date().toISOString().slice(0, 10);
+
+async function prpaCtx(req) {
+  // The company is DERIVED, never read from the request — that is the whole point of company
+  // context, and it is unchanged.
+  //
+  // What changed: this called resolveCompanyContext({ userId }), which resolves a company from an
+  // agent RUN and does not accept a userId at all. Every call threw "resolveCompanyContext
+  // requires a runId", so all five PRPA endpoints returned HTTP 500 and the dashboard had never
+  // worked against the real backend even once. Its tests ran against stubbed responses, which is
+  // exactly why it looked finished.
+  //
+  // A person opening a dashboard has no run, so a read-session resolver is the right shape. It
+  // resolves only when exactly one active company exists and REFUSES otherwise, because this
+  // system has no user-to-company mapping and defaulting to one would show somebody another
+  // tenant's pipeline.
+  return resolveCompanyForReadSession({ userId: req.user && req.user.id });
+}
+
+router.get('/prpa/review-queue', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const byCriterion = prpaViews.reviewQueueByCriterion(ctx.companyId);
+    const items = prpaViews.reviewQueueItems(ctx.companyId, {
+      criterionKey: req.query.criterion || null, limit: 200,
+    });
+    const [g, i] = await Promise.all([query(byCriterion.text, byCriterion.values),
+      query(items.text, items.values)]);
+    res.json({ as_of: prpaToday(), by_criterion: g.rows, items: i.rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/prpa/capabilities', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const asOf = prpaToday();
+    const u = prpaViews.capabilitiesUsable(ctx.companyId, asOf);
+    const x = prpaViews.capabilitiesOnFileUnusable(ctx.companyId, asOf);
+    const a = prpaViews.capabilitiesRequiredButAbsent(ctx.companyId);
+    const [usable, unusable, absent] = await Promise.all([
+      query(u.text, u.values), query(x.text, x.values), query(a.text, a.values)]);
+    res.json({
+      as_of: asOf,
+      usable: usable.rows,
+      on_file_unusable: unusable.rows,
+      required_but_absent: absent.rows,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/prpa/opportunities', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const asOf = prpaToday();
+    const b = prpaViews.fundingOpportunities(ctx.companyId, { limit: 200 });
+    const { rows } = await query(b.text, b.values);
+    // The ladder is derived HERE, once, from the stored facts — never stored and never recomputed
+    // in the browser, where it could drift from the server's answer.
+    const out = rows.map((r) => {
+      const stage = prpaViews.opportunityStage({
+        recordKind: r.record_kind, oppStatus: r.opp_status, responseDeadline: r.close_date,
+      }, { verdict: r.verdict, rationale: r.rationale }, asOf);
+      return { ...r, stage: stage.stage, stage_reasons: stage.reasons };
+    });
+    res.json({ as_of: asOf, opportunities: out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/prpa/connectors', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const b = prpaViews.connectorHealth(ctx.companyId);
+    const { rows } = await query(b.text, b.values);
+    res.json({ as_of: prpaToday(), connectors: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Download only. No external destination, per ruling 6.
+router.get('/prpa/export/opportunities.csv', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const asOf = prpaToday();
+    const b = prpaViews.fundingOpportunities(ctx.companyId, { limit: 1000 });
+    const { rows } = await query(b.text, b.values);
+    const exportRows = prpaExport.opportunityRows(rows, {
+      stageFor: (r) => prpaViews.opportunityStage({
+        recordKind: r.record_kind, oppStatus: r.opp_status, responseDeadline: r.close_date,
+      }, { verdict: r.verdict, rationale: r.rationale }, asOf),
+    });
+    const csv = prpaExport.toCsv(prpaExport.OPPORTUNITY_FIELDS, exportRows);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="prpa-opportunities-${asOf}.csv"`);
+    res.send(csv);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/prpa/tasks', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const tasks = await prpaTasks.listTasks(ctx, {
+      ownerUserId: req.query.owner || null,
+      includeClosed: req.query.closed === '1',
+    });
+    res.json({ tasks });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Assignment. Writes a task row and nothing else — no approval, no external action.
+router.post('/prpa/tasks', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const task = await prpaTasks.openTask(ctx, req.body || {});
+    res.status(201).json({ task });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+router.patch('/prpa/tasks/:id', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const ctx = await prpaCtx(req);
+    const task = await prpaTasks.updateTask(ctx, req.params.id, req.body || {});
+    res.json({ task });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
