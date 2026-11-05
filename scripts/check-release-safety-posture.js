@@ -74,6 +74,31 @@ for (const forbidden of ['sendEmail', 'sendMail', 'mailer', 'resend', 'twilio', 
   else bad(`a PRPA route references ${forbidden}`, 'read-only intelligence must not be able to send');
 }
 
+// ── 3b. the connector does not ASSEMBLE a contact list ─────────────────────
+//
+// Ruling 11 item 7 preserves the external-action HOLDs, and a HOLD on sending is weaker than it
+// looks if the system has meanwhile built the list to send to. SAM.gov notices carry
+// `pointOfContact` — names, emails and phone numbers of federal contracting officers. Collecting
+// them while nothing is authorised to contact anyone creates an outreach capability nobody asked
+// for, and the moment the email HOLD lifts for an unrelated reason, the list is already there.
+//
+// Asserted against the code rather than left to the unit test, because this is a posture claim
+// about the release and it should be re-made on every preflight run alongside the other HOLDs.
+if (/pointOfContact/.test(samSrc) && /DELIBERATELY NOT COLLECTED/.test(samSrc)) {
+  ok('sam-gov.js names pointOfContact only to record that it is NOT collected');
+} else if (!/pointOfContact/.test(samSrc)) {
+  ok('sam-gov.js does not reference pointOfContact at all');
+} else {
+  bad('sam-gov.js references pointOfContact without the non-collection note',
+    'federal officer contact details must not be assembled while the email HOLD stands');
+}
+// The normalised notice must not carry it as a field, whatever the comments say.
+const normalizeBlock = samSrc.slice(samSrc.indexOf('function normalizeNotice'));
+const normalizeBody = normalizeBlock.slice(0, normalizeBlock.indexOf('\n}\n'));
+if (!/^\s*pointOfContact\s*:/m.test(normalizeBody) && !/^\s*email\s*:/m.test(normalizeBody)) {
+  ok('the normalised notice carries no contact field — nothing to send to, by construction');
+} else bad('normalizeNotice emits a contact field', 'this builds a federal-officer contact list');
+
 // ── 4. no bidding or submission functionality ──────────────────────────────
 const bidRoutes = (routes.match(/router\.(post|put|patch)\('\/[^']*/g) || [])
   .filter((r) => /\b(bid|submit|proposal|offer|tender|award-response)\b/i.test(r));

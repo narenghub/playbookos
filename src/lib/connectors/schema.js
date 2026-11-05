@@ -49,9 +49,16 @@
 //
 // Ruling 5: prepare SAM.gov, do not activate it until API access and quotas are verified. A code
 // comment saying so is not a control. A row that cannot be synced until somebody flips a column is.
-// The seed below inserts sam_gov with activated = FALSE and a ceiling of 10 — the personal-key
-// limit — so that if it is ever activated before a system account exists, the ceiling stops it
-// after ten calls instead of letting it 429 halfway through and leave a false high-water mark.
+// The seed below inserts sam_gov with activated = FALSE and daily_call_ceiling = NULL.
+//
+// NULL, AND NOT A NUMBER. This comment previously said the ceiling was 10, "the personal-key
+// limit". That figure came from recollection and is not published: open.gsa.gov states only that
+// "Request per day are limited based on the federal or non-federal or general roles" and gives NO
+// NUMBER FOR ANY ROLE. An invented ceiling is worse than none — it reads as knowledge to the next
+// person, and it is wrong in both directions. Too low silently caps ingestion and looks like a
+// quiet source; too high 429s halfway through a run and leaves a false high-water mark. NULL means
+// UNKNOWN, the quota ledger permits calls while refusing to report a budget it does not have, and
+// the real number gets recorded here only once an authenticated call has measured it.
 
 const DDL = [
   // ---------------------------------------------------------------------------------------

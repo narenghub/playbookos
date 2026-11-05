@@ -298,6 +298,107 @@ t('typeDiverged says UNKNOWN rather than false when a type is missing', () => {
 
 // ── the first-call checklist is real content, not a stub ───────────────────
 
+// ── THE DEADLINE SPELLING, WHICH DECIDES WHETHER ANYTHING IS EVER BIDDABLE ──
+//
+// open.gsa.gov spells this field two ways on one page: `reponseDeadLine` in the parameter table,
+// `responseDeadLine` in Example 1. Reading only one and getting it wrong yields a null deadline,
+// which makes solicitations.response_open false for every record, which is indistinguishable from
+// the correct pre-activation output. These tests exist because that failure is invisible.
+
+const base = {
+  noticeId: 'n1', solicitationNumber: 'S-1', title: 'Thing', type: 'Solicitation',
+  baseType: 'Solicitation', postedDate: '2026-11-01', active: 'Yes',
+};
+
+t('either documented spelling of the deadline is read, and the one used is reported', () => {
+  for (const key of sam.DEADLINE_KEYS) {
+    const n = sam.normalizeNotice({ ...base, [key]: '2026-12-01T17:00:00-05:00' });
+    assert.strictEqual(n.responseDeadline, '2026-12-01T17:00:00-05:00',
+      `the deadline was not read from ${key}`);
+    assert.strictEqual(n.deadlineKeySeen, key, 'the spelling actually used must be reported');
+  }
+});
+
+t('a null deadline VALUE is legitimate data and is preserved as null', () => {
+  // Example 1 on the documentation page itself shows "responseDeadLine": null, and notice types
+  // such as an award notice have no deadline. A null value must NOT be treated as a schema error,
+  // or every award notice would fail ingestion.
+  const n = sam.normalizeNotice({ ...base, responseDeadLine: null });
+  assert.strictEqual(n.responseDeadline, null);
+  assert.strictEqual(n.deadlineKeySeen, 'responseDeadLine');
+});
+
+t('a notice with NO deadline key is accepted — absence is data, not a schema error', () => {
+  // The first version of this threw here, which was my own assumption dressed as rigour: JSON
+  // APIs omit null fields, so an award notice would have been rejected as malformed.
+  const n = sam.normalizeNotice({ ...base });
+  assert.strictEqual(n.responseDeadline, null);
+  assert.strictEqual(n.deadlineKeySeen, null, 'the absence must be recorded, not guessed at');
+});
+
+t('a RESPONSE in which no record carries either spelling is a loud failure', () => {
+  // This is the decidable version of the question, and the only place it is decidable.
+  assert.throws(
+    () => sam.assertResponseShape({ opportunitiesData: [{ ...base }, { ...base, noticeId: 'n2' }] }),
+    (e) => /NOT ONE of 2 notice/.test(e.message) && /response_open/.test(e.message),
+    'a whole response with the field renamed must refuse, and say why it would not surface',
+  );
+  // One record with the key is enough: the others legitimately have no deadline.
+  assert.doesNotThrow(
+    () => sam.assertResponseShape({
+      opportunitiesData: [{ ...base }, { ...base, noticeId: 'n2', responseDeadLine: '2026-12-01' }],
+    }),
+    'a mixed response is normal data and must not be rejected',
+  );
+  // And an EMPTY response is not evidence of a rename — it is evidence of nothing.
+  assert.doesNotThrow(() => sam.assertResponseShape({ opportunitiesData: [] }));
+});
+
+t('when both spellings appear, the one carrying a value wins', () => {
+  const n = sam.normalizeNotice({ ...base, responseDeadLine: null, reponseDeadLine: '2026-12-09' });
+  assert.strictEqual(n.responseDeadline, '2026-12-09');
+  assert.strictEqual(n.deadlineKeySeen, 'reponseDeadLine');
+});
+
+t('deadlineKeySeen is not a tracked field, so it cannot register as an amendment', () => {
+  // It is diagnostic metadata about the API, not data about the notice. If it entered the diff, a
+  // documentation fix on GSA's side would read as every solicitation being amended at once.
+  assert.ok(!sam.TRACKED_FIELDS.includes('deadlineKeySeen'));
+  const a = sam.normalizeNotice({ ...base, responseDeadLine: '2026-12-01' });
+  const b = sam.normalizeNotice({ ...base, reponseDeadLine: '2026-12-01' });
+  const d = sam.detectAmendment(a, b);
+  assert.strictEqual(d.amended, false,
+    'the same deadline under the other spelling must not look like an amendment');
+});
+
+// ── the rate-limit headers, which are the only route to the real quota ──────
+
+t('the rate-limit headers are read when present and UNKNOWN when absent', () => {
+  const withHeaders = { headers: { get: (n) => ({ 'x-ratelimit-limit': '1000', 'x-ratelimit-remaining': '997' }[n.toLowerCase()] || null) } };
+  const r = sam.readRateLimitHeaders(withHeaders);
+  assert.strictEqual(r.limit, 1000);
+  assert.strictEqual(r.remaining, 997);
+  assert.strictEqual(r.measured, true);
+  assert.ok(/record this/.test(r.note), 'a measured limit must say what to do with it');
+
+  // ABSENT IS NOT ZERO AND NOT UNLIMITED. This is the distinction that matters: a missing header
+  // means the quota is still unknown, and the note must say so rather than inviting the reader to
+  // borrow a number from a sibling API's published table.
+  const none = sam.readRateLimitHeaders({ headers: { get: () => null } });
+  assert.strictEqual(none.limit, 'UNKNOWN');
+  assert.strictEqual(none.remaining, 'UNKNOWN');
+  assert.strictEqual(none.measured, false);
+  assert.ok(/STILL UNKNOWN/.test(none.note));
+  assert.ok(/Do not infer/.test(none.note), 'the absent case must warn against inferring a number');
+
+  // A response object with no headers at all must not throw — test stubs look like this.
+  assert.doesNotThrow(() => sam.readRateLimitHeaders({}));
+  assert.strictEqual(sam.readRateLimitHeaders({}).limit, 'UNKNOWN');
+  // And a non-numeric header is UNKNOWN, not NaN.
+  const junk = sam.readRateLimitHeaders({ headers: { get: () => 'unlimited' } });
+  assert.strictEqual(junk.limit, 'UNKNOWN');
+});
+
 t('VERIFY_ON_FIRST_CALL names the offset ambiguity and the unknown quota', () => {
   const all = sam.VERIFY_ON_FIRST_CALL.join(' ');
   assert.ok(sam.VERIFY_ON_FIRST_CALL.length >= 5);

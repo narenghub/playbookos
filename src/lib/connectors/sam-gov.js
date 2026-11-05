@@ -78,7 +78,10 @@ const VERIFY_ON_FIRST_CALL = Object.freeze([
   'the exact `type` strings returned (the docs list only request-side ptype codes). Any string not '
   + 'in SAM_NOTICE_TYPES returns null and goes to review, so an unlisted spelling is safe but noisy.',
   'whether `pointOfContact` sits at the top level or under `data.` — the page shows both.',
-  'whether `responseDeadLine` (capital L) is the real spelling, and its format and timezone.',
+  'WHICH SPELLING of the deadline the API returns. The parameter table says `reponseDeadLine` (no '
+  + '"s"), Example 1 says `responseDeadLine`. Both are now read and the absence of both is a loud '
+  + 'failure, so this cannot silently produce a null — but the probe reports `deadlineKeySeen` and '
+  + 'the losing spelling should then be dropped. Also confirm the VALUE format and timezone.',
   'the real per-day quota for this account role — the documentation gives no number for any role.',
   'whether an exhausted quota returns 429, or a 200 with an error body.',
   'whether `totalRecords` is the count for the query or for the page.',
@@ -238,6 +241,31 @@ function assertResponseShape(payload) {
     throw new Error('sam-gov: response has no opportunitiesData array — the documented shape has '
       + `changed or the payload is an error. Keys present: ${Object.keys(payload).join(', ') || 'none'}`);
   }
+  // ── IS THE DEADLINE FIELD NAME THE ONE WE THINK IT IS? ──────────────────
+  //
+  // Decidable here and nowhere else. The documentation gives two spellings of this field, and
+  // picking the wrong one does not raise an error — it yields a null deadline, which makes
+  // solicitations.response_open false for EVERY record, which reads as "nothing is biddable",
+  // which is the correct output for the current pre-activation state. The product would report
+  // the right answer for the wrong reason and nobody would look.
+  //
+  // A single notice without a deadline is ordinary (award notices have none). A response with
+  // records in which NOT ONE carries either spelling means the field has been renamed again.
+  if (payload.opportunitiesData.length) {
+    const withKey = payload.opportunitiesData.filter(
+      (n) => n && typeof n === 'object' && DEADLINE_KEYS.some((k) => Object.prototype.hasOwnProperty.call(n, k)),
+    ).length;
+    if (withKey === 0) {
+      const keys = Object.keys(payload.opportunitiesData[0] || {});
+      throw new Error(
+        `sam-gov: NOT ONE of ${payload.opportunitiesData.length} notice(s) carries either documented `
+        + `spelling of the response deadline (${DEADLINE_KEYS.join(' | ')}). The field has been `
+        + `renamed. Keys on the first record: ${keys.join(', ') || 'none'}. Refusing: a null deadline `
+        + 'makes response_open false for every record, which is indistinguishable from the correct '
+        + '"nothing is biddable" state, so this would not surface as a bug.',
+      );
+    }
+  }
   if (payload.totalRecords !== undefined && typeof payload.totalRecords !== 'number') {
     throw new Error(`sam-gov: totalRecords is ${typeof payload.totalRecords}, expected number`);
   }
@@ -252,9 +280,49 @@ function assertResponseShape(payload) {
  * default of `solicitation` would make every new notice type biddable, which is the failure in the
  * expensive direction.
  */
+// ── THE DEADLINE FIELD IS SPELLED TWO WAYS IN THE DOCUMENTATION ────────────
+//
+// The parameter table at open.gsa.gov spells it `reponseDeadLine` — no `s` in "response". Example 1
+// on the same page spells it `responseDeadLine`. The page never reconciles them, and with no key
+// there is no way to ask the API which is real.
+//
+// READING ONLY ONE OF THEM IS THE WORST AVAILABLE OUTCOME, and not for the obvious reason. The
+// field feeds `solicitations.response_open`, a GENERATED column requiring
+// `response_deadline IS NOT NULL`. Pick the wrong spelling and every deadline is null, so
+// response_open is false for every record, so the product reports that NOTHING IS BIDDABLE —
+// which is character-for-character the correct output for the current, pre-activation state. The
+// defect would be indistinguishable from working as designed, on the one number the whole product
+// exists to produce.
+//
+// So both spellings are read, and the ABSENCE OF BOTH KEYS is a loud failure. Note the distinction
+// that makes this safe: a null VALUE is legitimate data — Example 1 itself shows
+// `"responseDeadLine": null`, and notice types like an award notice have no deadline. It is the
+// missing KEY that means the field name is wrong. `deadlineKeySeen` records which spelling the live
+// API actually used, so the first authenticated call ANSWERS the question instead of surviving it.
+const DEADLINE_KEYS = Object.freeze(['responseDeadLine', 'reponseDeadLine']);
+
+// WHERE THE LOUD FAILURE BELONGS, AND WHY NOT HERE. The first version of this threw when a notice
+// carried neither key. That was an assumption of my own dressed up as rigour: JSON APIs routinely
+// omit null fields, and notice types that genuinely have no deadline — an award notice, a special
+// notice — would then have been rejected as schema errors. A confident wrong refusal is not an
+// improvement on a silent null.
+//
+// One record without a deadline is DATA. A whole response in which NOT ONE record carries either
+// spelling is a FIELD NAME ERROR. Only the second is decidable, and only from the full payload, so
+// it lives in assertResponseShape() below. This function stays total and reports what it saw.
+function readDeadline(raw) {
+  const present = DEADLINE_KEYS.filter((k) => Object.prototype.hasOwnProperty.call(raw, k));
+  if (!present.length) return { value: null, key: null };
+  // If both are somehow present, the one with a value wins; ties go to the Example 1 spelling.
+  const withValue = present.find((k) => raw[k] !== undefined && raw[k] !== null && raw[k] !== '');
+  const key = withValue || present[0];
+  return { value: raw[key], key };
+}
+
 function normalizeNotice(raw) {
   if (!raw || typeof raw !== 'object') throw new Error('sam-gov: notice is not an object');
   const s = (v) => (v === undefined || v === null || v === '' ? null : String(v));
+  const deadline = readDeadline(raw);
   return {
     noticeId: s(raw.noticeId),
     solicitationNumber: s(raw.solicitationNumber),
@@ -264,7 +332,10 @@ function normalizeNotice(raw) {
     noticeType: s(raw.type),
     baseNoticeType: s(raw.baseType),
     postedDate: s(raw.postedDate),
-    responseDeadline: s(raw.responseDeadLine),   // documented with a capital L
+    responseDeadline: s(deadline.value),
+    // Which of the two documented spellings this record actually carried. Not stored with the
+    // notice — reported by the readiness probe, so one authenticated call settles it permanently.
+    deadlineKeySeen: deadline.key,
     naicsCode: s(raw.naicsCode),
     classificationCode: s(raw.classificationCode),
     setAside: s(raw.typeOfSetAside) || s(raw.setAside) || null,
@@ -404,6 +475,57 @@ async function fetchSearch(params = {}, opts = {}) {
     offset: body.offset === undefined ? null : body.offset,
     notices: body.opportunitiesData.map(normalizeNotice),
     quotaRemaining: quota.remaining,
+    // THE ONLY ROUTE TO THE REAL QUOTA, AND IT WAS BEING THROWN AWAY.
+    //
+    // The documentation gives no number for this API — open.gsa.gov says only that requests "are
+    // limited based on the federal or non-federal or general roles". Sibling GSA pages carrying
+    // that identical sentence publish 10/day for a non-federal user; another publishes a table
+    // where a non-federal personal key gets 10/day with no SAM.gov role and 1,000/day with one.
+    // Those two schemes contradict each other and neither is stated to apply here.
+    //
+    // So the number cannot be looked up — it can only be MEASURED, and the response says it. The
+    // headers are reported rather than acted on: this function does not silently reconcile a
+    // header against the ledger's budget, because a budget the operator set deliberately should
+    // not be widened by a header, and narrowing it is a decision with evidence attached. Read,
+    // record in source_connectors.daily_call_ceiling, and stop guessing.
+    rateLimit: readRateLimitHeaders(res),
+  };
+}
+
+/**
+ * The api.data.gov rate-limit headers, if this API sets them.
+ *
+ * Reported as UNKNOWN rather than as a number when absent, because "no header" means we still do
+ * not know the limit — it does not mean there isn't one. SAM.gov's error strings ("No api_key was
+ * supplied", "An invalid api_key was supplied") are verbatim API Umbrella strings, which is
+ * suggestive that these headers exist, but no official page states that SAM.gov is behind
+ * api.data.gov. Suggestive is not documented, so this reads whatever is there and claims nothing.
+ */
+function readRateLimitHeaders(res) {
+  const get = (name) => {
+    try {
+      if (res && res.headers && typeof res.headers.get === 'function') return res.headers.get(name);
+    } catch (_) { /* a stub response in a test need not have headers */ }
+    return null;
+  };
+  const num = (v) => {
+    if (v === null || v === undefined || v === '') return 'UNKNOWN';
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 'UNKNOWN';
+  };
+  const limit = num(get('x-ratelimit-limit'));
+  const remaining = num(get('x-ratelimit-remaining'));
+  return {
+    limit,
+    remaining,
+    // What a person should do with it, carried alongside so the readiness report does not have to
+    // re-derive the meaning of an absent header.
+    measured: limit !== 'UNKNOWN',
+    note: limit === 'UNKNOWN'
+      ? 'this API set no X-RateLimit-Limit header, so the real daily quota is STILL UNKNOWN and '
+        + 'must be learned from a 429. Do not infer it from a sibling API\'s published table.'
+      : `the account's limit is ${limit} per window as reported by the API itself — record this in `
+        + 'source_connectors.daily_call_ceiling, replacing the NULL that means UNKNOWN.',
   };
 }
 
@@ -411,6 +533,7 @@ module.exports = {
   SEARCH_URL,
   ALPHA_SEARCH_URL,
   VERIFY_ON_FIRST_CALL,
+  DEADLINE_KEYS,
   ERROR_KINDS,
   TRACKED_FIELDS,
   QuotaExhausted,
@@ -422,6 +545,7 @@ module.exports = {
   isRetryable,
   assertResponseShape,
   normalizeNotice,
+  readRateLimitHeaders,
   detectAmendment,
   typeDiverged,
   fetchSearch,

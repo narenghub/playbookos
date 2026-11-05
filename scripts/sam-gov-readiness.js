@@ -20,10 +20,16 @@
 // a connector that activates on its presence would start ingesting the moment they did. So the
 // flag is a separate, deliberate act, and its name is awkward on purpose.
 //
-// WHAT THE LIVE TEST DOES: exactly ONE request, the smallest one that can answer anything
-// (limit=1 over a two-day window). It then works through VERIFY_ON_FIRST_CALL and reports which
-// assumptions held. It writes nothing to any database — this is a probe, not an ingest, and
-// ingestion stays unauthorized until the results of this probe have been read by a person.
+// WHAT THE LIVE TEST DOES: at most TWO requests, budgeted in a ledger that refuses a third
+// locally rather than discovering the real limit remotely. Both ask for 5 notices over a two-day
+// window. The page size is 5 and not 1 for a specific reason: with a page size of one, a page
+// index and a record offset mean the same thing, so the offset question — the one that silently
+// truncates an ingest — cannot be answered at all. An earlier version used limit=1 and reported
+// an answer anyway.
+//
+// It then works through VERIFY_ON_FIRST_CALL, reports which assumptions held, and runs every real
+// record returned through the notice-type mapping. It writes nothing to any database — this is a
+// probe, not an ingest, and ingestion stays unauthorized until a person has read its output.
 //
 // Exit: 0 report produced · 1 the live test ran and an assumption failed
 
@@ -89,7 +95,7 @@ function readiness() {
   h('HOW TO RUN THE LIVE TEST, WHEN YOU ARE READY');
   console.log(`  SAM_API_KEY=<key> node scripts/sam-gov-readiness.js ${AUTHORIZE_FLAG}`);
   console.log('');
-  console.log('  It makes exactly ONE request (limit=1, a two-day window) and writes nothing to any');
+  console.log('  It makes at most TWO requests (5 notices each, a two-day window) and writes nothing to any');
   console.log('  database. Ingestion remains unauthorized until a person has read its output.');
   console.log('');
 }
@@ -107,14 +113,18 @@ async function liveTest(key) {
   // A budget of 2 for the whole run: one probe, one spare for the offset question. If the real
   // limit turns out to be lower, the ledger refuses locally rather than discovering it remotely.
   const quota = sam.makeQuotaLedger(2);
+  // A page size above 1 is REQUIRED, not a preference: with limit=1 a page index and a record
+  // offset are indistinguishable, so the offset question cannot be answered at all.
+  const PAGE_SIZE = 5;
   console.log(`  window    : ${mmddyyyy(from)} → ${mmddyyyy(today)}`);
   console.log(`  budget    : ${quota.budget} call(s) for this run`);
+  console.log(`  page size : ${PAGE_SIZE} (must exceed 1 to decide the offset question)`);
   console.log('');
 
   let first;
   try {
     first = await sam.fetchSearch(
-      { postedFrom: mmddyyyy(from), postedTo: mmddyyyy(today), limit: 1, offset: 0 },
+      { postedFrom: mmddyyyy(from), postedTo: mmddyyyy(today), limit: PAGE_SIZE, offset: 0 },
       { apiKey: key, authorized: true, quota, fetchImpl: (u, o) => fetch(u, o) },
     );
     ok('the request succeeded and the response matched the documented shape');
@@ -133,7 +143,33 @@ async function liveTest(key) {
 
   console.log(`  totalRecords: ${first.totalRecords === null ? 'UNKNOWN' : first.totalRecords}`);
   console.log(`  notices     : ${first.notices.length}`);
-  console.log(`  quota left  : ${first.quotaRemaining}`);
+  console.log(`  quota left  : ${first.quotaRemaining}   (our local ledger, not the API's)`);
+
+  // ── THE REAL QUOTA, IF THE API WILL SAY ─────────────────────────────────
+  //
+  // open.gsa.gov publishes NO number for this API. Two sibling GSA pages carrying the identical
+  // "federal or non-federal or general roles" sentence publish 10/day for a non-federal user; a
+  // third publishes a table giving a non-federal personal key 10/day with no SAM.gov role and
+  // 1,000/day with one. The schemes contradict each other and neither is stated to apply here, so
+  // the number must be measured. This is the measurement.
+  const rl = first.rateLimit || { limit: 'UNKNOWN', remaining: 'UNKNOWN', measured: false, note: '' };
+  console.log(`  API limit   : ${rl.limit}`);
+  console.log(`  API left    : ${rl.remaining}`);
+  if (rl.measured) {
+    ok(`the API reported its own limit: ${rl.limit}`);
+    console.log(`          ${rl.note}`);
+    if (typeof rl.limit === 'number' && rl.limit <= 10) {
+      bad(`the limit is ${rl.limit} per window — a backfill CANNOT be done naively`,
+        'postedFrom/postedTo are mandatory with a 1-year maximum span, so a full backfill is '
+        + 'inherently multi-request. At this limit it would silently capture a fraction and look '
+        + 'like a quiet source. Plan the ingest around the measured number before activating.');
+    }
+  } else {
+    console.log('  note  no X-RateLimit-Limit header was returned, so the daily quota is STILL');
+    console.log('        UNKNOWN. Do NOT adopt the 10/day or 1,000/day figures from the sibling');
+    console.log('        GSA pages — neither is stated to apply to this API. The real limit can');
+    console.log('        then only be learned from a 429, so keep the local ledger conservative.');
+  }
 
   const n = first.notices[0];
   if (!n) {
@@ -147,9 +183,25 @@ async function liveTest(key) {
   if (n.noticeId) ok(`noticeId is present (${n.noticeId})`);
   else bad('noticeId is absent — the natural key is wrong');
 
-  if (n.responseDeadline !== null) ok(`responseDeadLine resolved (${n.responseDeadline}) — the capital L is right`);
-  else console.log('  note  responseDeadline is null for this notice; it may be absent or renamed. '
-    + 'Check a notice that definitely has a deadline before concluding.');
+  // WHICH SPELLING THE API ACTUALLY USES. open.gsa.gov gives two — `reponseDeadLine` in the
+  // parameter table, `responseDeadLine` in Example 1 — and the connector reads both, so this is
+  // now a measurement rather than a hope. It matters more than it looks: the field feeds
+  // solicitations.response_open, and a null deadline makes that false for every record, which
+  // reads as "nothing is biddable" — the correct output for the pre-activation state. Getting it
+  // wrong would look exactly like working.
+  const keysSeen = [...new Set(first.notices.map((x) => x.deadlineKeySeen).filter(Boolean))];
+  if (keysSeen.length === 1) {
+    ok(`the deadline field is spelled "${keysSeen[0]}" — ANSWERED. Drop the other spelling.`);
+  } else if (keysSeen.length > 1) {
+    bad(`both spellings appear across this page (${keysSeen.join(', ')})`,
+      'the API is inconsistent per record; keep reading both and do not drop either');
+  } else {
+    console.log('  note  not one notice on this page carried EITHER spelling of the deadline. These');
+    console.log('        may all be notice types without a deadline (award, special notice). Fetch a');
+    console.log('        Solicitation or Combined Synopsis before concluding the field was renamed.');
+  }
+  const withDeadline = first.notices.filter((x) => x.responseDeadline !== null).length;
+  console.log(`  deadlines   : ${withDeadline} of ${first.notices.length} notice(s) carry a value`);
 
   if (n.noticeType) {
     const kind = kindFromSamNoticeType(n.noticeType);
@@ -163,29 +215,74 @@ async function liveTest(key) {
     ok(`baseType present; divergence ${d.diverged ? 'DETECTED' : 'none'} — ${d.reason}`);
   } else console.log('  note  baseType is absent on this notice; the type-transition signal needs it.');
 
-  // THE OFFSET QUESTION, the one assumption that silently truncates an ingest.
-  if (quota.remaining === 'UNKNOWN' || quota.remaining > 0) {
+  // ── THE OFFSET QUESTION ───────────────────────────────────────────────────
+  //
+  // The assumption that silently truncates an ingest, and the earlier version of this probe COULD
+  // NOT ANSWER IT. It asked for limit=1 at offset=0 and offset=1 and concluded "paging works as a
+  // record offset" when the two differed. With a page size of ONE, a page index and a record
+  // offset are the same thing — offset=1 means record 2 under both readings — so that conclusion
+  // was stronger than the measurement, which is the failure this whole repository is organised
+  // against. The connector's own VERIFY_ON_FIRST_CALL said to use limit=2; the probe did not.
+  //
+  // With PAGE_SIZE > 1 the readings separate and the answer is decisive:
+  //
+  //   page index   offset=1 → records PAGE_SIZE+1 …   → first id of page 2 is NOT in page 1
+  //   record offset offset=1 → records 2 …            → first id of page 2 IS page 1's SECOND id
+  if (first.notices.length < 2) {
+    console.log('  note  fewer than 2 notices returned, so a page size above 1 was not achieved and');
+    console.log('        the offset question CANNOT be answered. Widen the window and re-run.');
+  } else if (quota.remaining === 'UNKNOWN' || quota.remaining > 0) {
     try {
       const second = await sam.fetchSearch(
-        { postedFrom: mmddyyyy(from), postedTo: mmddyyyy(today), limit: 1, offset: 1 },
+        { postedFrom: mmddyyyy(from), postedTo: mmddyyyy(today), limit: PAGE_SIZE, offset: 1 },
         { apiKey: key, authorized: true, quota, fetchImpl: (u, o) => fetch(u, o) },
       );
-      const a = first.notices[0] && first.notices[0].noticeId;
-      const b = second.notices[0] && second.notices[0].noticeId;
-      if (a && b && a !== b) {
-        ok('offset advances the result set — paging works as a record offset');
-      } else if (a && b && a === b) {
-        bad('offset=1 returned the SAME notice as offset=0',
-          'paging does not work the way the connector assumes. An ingest would re-read page 1 '
-          + 'forever and silently capture only the first `limit` notices. Resolve before ingesting.');
-      } else {
+      const page1 = first.notices.map((x) => x.noticeId);
+      const head2 = second.notices[0] && second.notices[0].noticeId;
+      if (!head2) {
         console.log('  note  the second page returned nothing; offset semantics remain UNCONFIRMED.');
+      } else if (head2 === page1[1]) {
+        ok(`offset is a RECORD offset (page 2 begins at page 1's second notice, ${head2})`);
+        bad('the documentation calls offset a "page index" — it is not',
+          'paging by page index would SKIP records. Use a record offset: advance by `limit`, not by 1.');
+      } else if (!page1.includes(head2)) {
+        ok(`offset is a PAGE INDEX, as documented (page 2 begins outside page 1, ${head2})`);
+        ok('the connector pages by incrementing offset by 1 — correct for a page index');
+      } else {
+        bad(`page 2 begins at ${head2}, which is inside page 1 but not its second record`,
+          'offset behaves as neither reading. Do NOT bulk ingest until this is understood — an '
+          + 'ingest would silently capture an unknown subset.');
       }
     } catch (e) {
       console.log(`  note  the offset probe could not run: ${e.message}`);
     }
   } else {
     console.log('  note  budget spent; the offset question remains UNCONFIRMED.');
+  }
+
+  // ── EVERY REAL RECORD ON THIS PAGE, THROUGH THE MAPPING (ruling 11 item 3) ─
+  //
+  // "Test a small number of real solicitation records." One record proves the request works; a
+  // handful is what surfaces a notice type nobody listed. An unmapped type is SAFE — record-kind
+  // returns null and the record goes to review rather than defaulting to biddable — but it is
+  // invisible until something counts them.
+  h(`THE ${first.notices.length} REAL RECORD(S) RETURNED`);
+  const unmapped = new Map();
+  for (const x of first.notices) {
+    const kind = x.noticeType ? kindFromSamNoticeType(x.noticeType) : null;
+    const div = x.baseNoticeType ? sam.typeDiverged(x) : null;
+    console.log(`  ${(x.noticeId || 'NO-ID').slice(0, 22).padEnd(24)} ${String(x.noticeType || 'UNKNOWN').slice(0, 30).padEnd(32)} → ${kind || 'UNMAPPED → review'}`);
+    console.log(`      deadline ${x.responseDeadline || 'none'}${div && div.diverged ? `   TYPE CHANGED from ${x.baseNoticeType}` : ''}`);
+    if (x.noticeType && !kind) unmapped.set(x.noticeType, (unmapped.get(x.noticeType) || 0) + 1);
+  }
+  if (unmapped.size) {
+    console.log('');
+    bad(`${unmapped.size} notice type string(s) are not in SAM_NOTICE_TYPES`,
+      [...unmapped.entries()].map(([k, v]) => `${k} ×${v}`).join(' | '));
+    console.log('          These are SAFE — they map to null and go to review, never to biddable.');
+    console.log('          Add the exact strings before a bulk run, or the review queue fills with them.');
+  } else {
+    ok('every notice type on this page maps to a known record kind');
   }
 
   h('AFTER THIS TEST');
