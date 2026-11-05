@@ -2076,6 +2076,26 @@ function prpaU(v, unit) {
   return unit ? t + ' ' + unit : t;
 }
 
+// prpaU() IS NOT SAFE INSIDE AN ATTRIBUTE, and this is the function that is.
+//
+// prpaU escapes its value branch but its UNKNOWN branch returns markup on purpose —
+// `<i style="color:var(--warn)" ...>unknown</i>`. Dropped into `href="' + prpaU(x) + '"` with a
+// null x, the quote in style="..." closes the href early and the rest of the tag leaks into the
+// document as text. A screenshot caught it: an opportunity row rendered the literal string
+// `unknown" target="_blank" rel="noopener" style="...">Forecasted API supply programme` as its
+// link. Every assertion passed — the page had content, the right character count and no console
+// error — because nothing in the DOM says "this is broken markup".
+//
+// So: prpaU() for text content, prpaAttr() for attribute values. prpaAttr never returns markup and
+// never returns the unknown marker; a caller with nothing to put in an attribute must not build
+// the element at all.
+function prpaAttr(v) {
+  if (v === null || v === undefined || v === '') return '';
+  return String(v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 var PRPA_STAGE_STYLE = {
   qualified:   {bg:'#E3F5EC', fg:'#13land', label:'QUALIFIED'},
   submittable: {bg:'#E4F0F7', fg:'#0D5C8A', label:'SUBMITTABLE'},
@@ -2166,8 +2186,15 @@ window.prpaCommandPage = async function prpaCommandPage() {
   var oppRows = list.map(function (o) {
     return '<tr><td ' + TD + '>' + prpaStageBadge(o.stage, o.stage_reasons) + '</td>' +
       '<td ' + TD + '>' + prpaKindBadge(o.record_kind) + '</td>' +
-      '<td ' + TD + '><a href="' + prpaU(o.source_url) + '" target="_blank" rel="noopener" ' +
-      'style="color:var(--navy);font-weight:600;text-decoration:none">' + prpaU(o.title) + '</a>' +
+      // A row with no source_url is NOT given a broken link. prpaU() returns markup for an unknown
+      // value, which escaped the href attribute and leaked the rest of the tag as visible text; and
+      // an <a> with an empty href is a link to the current page, which is worse than no link at all
+      // because it looks clickable and goes nowhere.
+      '<td ' + TD + '>' + (o.source_url
+        ? '<a href="' + prpaAttr(o.source_url) + '" target="_blank" rel="noopener" ' +
+          'style="color:var(--navy);font-weight:600;text-decoration:none">' + prpaU(o.title) + '</a>'
+        : '<span style="color:var(--navy);font-weight:600">' + prpaU(o.title) + '</span>' +
+          '<span style="font-size:11px;margin-left:6px">' + prpaU(null) + ' source</span>') +
       '<div style="font-size:11px;color:var(--gray)">' + prpaU(o.agency_name) + ' - ' +
       prpaU(o.opportunity_number) + '</div></td>' +
       '<td ' + TD + ' style="padding:10px;border-bottom:1px solid var(--border);white-space:nowrap;color:#333">' +
