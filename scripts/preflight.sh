@@ -469,5 +469,11 @@ pf_step "the production-bound read-only scripts change nothing" node scripts/che
 # untouched.
 pf_step "the migration runner refuses, applies, repeats and rolls back" node scripts/check-migration-runner-db.js
 
+# Ruling 10 item 5. SAM.gov inactive, no supplier communication, no bidding — three claims I have
+# made in prose several times, which is not evidence. The risk is drift: a seed value edited for a
+# test, an env default flipped, a send added next to routes that already exist, or migrateConnectors
+# quietly wired into startup. Each is re-asserted against the code as it stands, every run.
+pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
+
 pf_verdict
 exit $?
