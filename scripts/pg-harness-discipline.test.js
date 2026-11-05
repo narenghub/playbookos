@@ -147,9 +147,24 @@ test('every initdb names its superuser explicitly', () => {
     + findings.join('\n'));
 });
 
+// THE SWEEP MUST FOLLOW THE CODE. The restore logic was extracted from verify-restore.js into
+// scripts/lib/restore.js so a second harness could not become a second copy — and that extraction
+// moved the psql and pg_restore calls OUT of the set this file scans, because harnesses() looks at
+// scripts/*.js only. The sweep would have kept passing while guarding nothing, which is the
+// failure mode it exists to prevent. Caught by the non-vacuity control below, which is the whole
+// reason that control is there.
+function clientCallFiles() {
+  const libDir = path.join(SCRIPTS, 'lib');
+  const lib = fs.existsSync(libDir)
+    ? fs.readdirSync(libDir).filter((f) => f.endsWith('.js') && !f.endsWith('.test.js'))
+      .map((f) => path.join(libDir, f))
+    : [];
+  return [...harnesses(), ...lib];
+}
+
 test('every psql / pg_restore call against a disposable cluster names its role', () => {
   const findings = [];
-  const files = harnesses();
+  const files = clientCallFiles();
   for (const file of files) {
     for (const call of roleLessClientCalls(fs.readFileSync(file, 'utf8'))) {
       findings.push(`${path.relative(ROOT, file)}: ${call}`);
@@ -243,13 +258,26 @@ test('the client sweep detects the real bug and leaves prose alone', () => {
     assert.deepEqual(roleLessClientCalls(innocent), [], `prose or a safe form was flagged: ${innocent}`);
   }
 
-  // Non-vacuity for the predicate itself: the sweep must still fire on the file it was written for
-  // if the fix is reverted. Reverting it here is how that is proved without keeping a broken copy.
-  const live = fs.readFileSync(path.join(SCRIPTS, 'verify-restore.js'), 'utf8');
-  assert.deepEqual(roleLessClientCalls(live), [], 'verify-restore.js has role-less client calls again');
-  const reverted = live.replace(/ -U postgres/g, '');
-  assert.ok(roleLessClientCalls(reverted).length >= 4,
-    'with -U stripped the sweep no longer finds the original bug — the predicate has stopped working');
+  // Non-vacuity, pointed at WHEREVER the implementation currently lives rather than at a file
+  // name. The calls started in verify-restore.js and were extracted to lib/restore.js; hardcoding
+  // either path means this control silently stops guarding the real code the next time it moves.
+  // So: find the file that actually makes these calls, and prove the sweep fires on it.
+  const holders = clientCallFiles().filter((f) => {
+    const src = fs.readFileSync(f, 'utf8');
+    return /pg_restore -U postgres/.test(src) && /-h \$\{(sock|base)\}/.test(src);
+  });
+  assert.ok(holders.length >= 1,
+    'no file in the swept set makes a pg_restore call against a disposable cluster any more — '
+    + 'either the restore logic moved outside scripts/, or this control has stopped guarding it');
+  for (const f of holders) {
+    const live = fs.readFileSync(f, 'utf8');
+    assert.deepEqual(roleLessClientCalls(live), [],
+      `${path.relative(ROOT, f)} has role-less client calls again`);
+    const reverted = live.replace(/ -U postgres/g, '');
+    assert.ok(roleLessClientCalls(reverted).length >= 3,
+      `with -U stripped the sweep no longer finds the bug in ${path.relative(ROOT, f)} — `
+      + 'the predicate has stopped working');
+  }
 });
 
 test('the sweep detects non-execution reported as exit 0', () => {

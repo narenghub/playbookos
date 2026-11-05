@@ -41,7 +41,11 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
-const { pgBinCandidates, pgClientOnlyDirs, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+const { EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+// ONE implementation of toolchain selection, cluster start and restore, in scripts/lib/restore.js.
+// It used to live here, and the migration-on-restore harness was about to become the second copy —
+// the same shape as the 35 harnesses that each carried their own Postgres search path and drifted.
+const R = require('./lib/restore');
 
 const PORT = 3994;
 const PGPORT = 55987;
@@ -72,108 +76,12 @@ if (!fs.existsSync(dumpPath)) {
   process.exit(1);
 }
 
-// ── WHICH POSTGRES CAN ACTUALLY READ THIS DUMP? ────────────────────────────
-//
-// A custom-format dump carries the archive version its pg_dump wrote, and a pg_restore older than
-// that REFUSES it: `unsupported version (1.16) in file header`. The two versions are chosen
-// independently on a developer machine — `pg_dump` came off PATH, the restore came off pgBin() —
-// and on the CEO's Mac they differed, so a good 24.92 MiB backup looked like a bad backup.
-//
-// The version is read from the header rather than inferred, and the toolchain is chosen by ASKING
-// EACH CANDIDATE whether it can read this file. `pg_restore --list` parses the archive and touches
-// no server, so the probe is free and, more to the point, it is a measurement: no table mapping
-// archive versions to major releases to go stale, and no assumption that a higher directory in the
-// search path means a newer install.
-//
-// The chosen directory is then used for initdb, pg_ctl AND pg_restore together. That is what keeps
-// the cluster's server version consistent with the client doing the restore — restoring a newer
-// dump into an older server is the same defect one layer down.
-function archiveVersion(file) {
-  const fd = fs.openSync(file, 'r');
-  const buf = Buffer.alloc(8);
-  fs.readSync(fd, buf, 0, 8, 0);
-  fs.closeSync(fd);
-  if (buf.toString('latin1', 0, 5) !== 'PGDMP') return null;
-  return `${buf[5]}.${buf[6]}`;
-}
-
-function toolVersion(dir, tool) {
-  try {
-    return execFileSync(path.join(dir, tool), ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch (_) { return 'unknown'; }
-}
-
-// Returns { dir, version } for a toolchain that can read this dump, or { tried } if none can.
-function toolchainFor(file, isCustom) {
-  const candidates = pgBinCandidates();
-  if (!candidates.length) return { tried: [] };
-  if (!isCustom) return { dir: candidates[0], version: toolVersion(candidates[0], 'psql') };
-  const tried = [];
-  for (const dir of candidates) {
-    const v = toolVersion(dir, 'pg_restore');
-    try {
-      execFileSync(path.join(dir, 'pg_restore'), ['--list', file], { stdio: 'ignore' });
-      return { dir, version: v };
-    } catch (_) { tried.push(`${dir} (${v})`); }
-  }
-  return { tried };
-}
-
-// ── A FAILURE TO START IS NOT "NO POSTGRES AVAILABLE" ──────────────────────
-//
-// This function used to end `catch (e) { return null; }`, and main() printed
-// `SKIP no Postgres available` for every null. So when initdb or pg_ctl failed on a machine with
-// PostgreSQL 18.3 installed and correctly selected, the script reported that Postgres was not
-// installed, and exited 3 — INCOMPLETE, with a reason that was not true.
-//
-// That is the 2026-11-03 defect wearing a different hat. There, 33 harnesses did not execute and
-// said `ok`. Here the verdict was honest and the DIAGNOSIS was invented, which is worse in one
-// specific way: a person reading it goes off to install something they already have.
-//
-// So the error is captured and surfaced — which step, its output, and the server's own log, which is
-// usually the only place the actual reason appears. `no Postgres at all` remains a skip and is
-// decided before this function is called; a cluster that will not start is a real finding.
-let temp = null;
-let clusterError = null;
-function startCluster(dir) {
-  if (!dir) return null;
-  const base = fs.mkdtempSync('/var/tmp/restore-');
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
-  const asPostgres = process.getuid && process.getuid() === 0;
-  const run = (cmd) => execFileSync('sh', ['-c', asPostgres ? `su postgres -c ${JSON.stringify(cmd)}` : cmd],
-    { env, encoding: 'utf8', stdio: 'pipe' });
-  let step = 'preparing the directory';
-  try {
-    if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    step = `initdb (${dir}/initdb)`;
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
-    step = `pg_ctl start (${dir}/pg_ctl)`;
-    run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p ${PGPORT} -c listen_addresses=' start -w`);
-  } catch (e) {
-    let log = '';
-    try { log = fs.readFileSync(path.join(base, 'pg.log'), 'utf8'); } catch (_) { /* may not exist yet */ }
-    clusterError = {
-      step,
-      message: e.message || String(e),
-      output: `${e.stdout || ''}${e.stderr || ''}`.trim(),
-      log: log.trim(),
-      base,
-    };
-    return null;
-  }
-  temp = { base, dir, asPostgres };
-  return base;
-}
-function stopCluster() {
-  if (!temp) return;
-  const env = { ...process.env, PATH: `${temp.dir}:${process.env.PATH}` };
-  try {
-    execFileSync('sh', ['-c', temp.asPostgres
-      ? `su postgres -c "PATH=${temp.dir}:\\$PATH pg_ctl -D ${temp.base}/data -m immediate stop"`
-      : `PATH=${temp.dir}:$PATH pg_ctl -D ${temp.base}/data -m immediate stop`], { env, stdio: 'pipe' });
-  } catch (_) { /* best effort */ }
-  try { fs.rmSync(temp.base, { recursive: true, force: true }); } catch (_) { /* best effort */ }
-}
+// Toolchain selection, cluster lifecycle and the restore itself are in scripts/lib/restore.js,
+// along with the three lessons they encode: every client call names its role, the toolchain is
+// chosen by what can read the dump rather than by search order, and initdb's presence does not
+// mean a server is installed.
+let cluster = null;
+function stopCluster() { R.stopCluster(cluster); cluster = null; }
 
 async function main() {
   const stat = fs.statSync(dumpPath);
@@ -187,14 +95,14 @@ async function main() {
 
   // The format and the archive version are properties OF THE FILE, so they are read before any
   // toolchain is chosen — the file decides which Postgres is fit to read it, not the other way round.
-  const archive = archiveVersion(dumpPath);
+  const archive = R.archiveVersion(dumpPath);
   const isCustom = archive !== null;
   const isGz = /\.gz$/i.test(dumpPath);
   console.log(`  format    : ${isCustom ? `custom (PGDMP, archive ${archive}) → pg_restore` : isGz ? 'gzipped SQL → gunzip | psql' : 'plain SQL → psql'}`);
 
-  const chosen = toolchainFor(dumpPath, isCustom);
+  const chosen = R.toolchainFor(dumpPath, isCustom);
   if (!chosen.dir) {
-    const clientOnly = pgClientOnlyDirs();
+    const clientOnly = chosen.clientOnly || [];
     if (!chosen.tried.length && !clientOnly.length) {
       console.log('\nSKIP  no Postgres available');
       process.exit(EXIT_NOT_EXECUTED);
@@ -230,7 +138,7 @@ async function main() {
   // placed by whichever formula was linked last, so pg_restore can come from one major version and
   // initdb from another. A cluster initialised by one and addressed by the other is a failure whose
   // cause is invisible unless both numbers are on the page.
-  const initdbVersion = toolVersion(chosen.dir, 'initdb');
+  const initdbVersion = chosen.initdbVersion;
   console.log(`  toolchain : ${chosen.dir}`);
   console.log(`              ${chosen.version}`);
   console.log(`              ${initdbVersion}`);
@@ -241,8 +149,9 @@ async function main() {
     note('directory, different major versions. That is a broken install, not a broken backup.');
   }
 
-  const base = startCluster(chosen.dir);
-  if (!base) {
+  cluster = R.startCluster(chosen.dir, { port: PGPORT });
+  if (cluster.error) {
+    const clusterError = cluster.error;
     // Postgres IS installed — it was selected by probing this very dump a moment ago. So this is a
     // failure, not an absence, and it exits 1 with the reason rather than 3 with a wrong one.
     h('CLUSTER');
@@ -264,8 +173,9 @@ async function main() {
     console.log('\n  THE BACKUP IS UNVERIFIED. This is not a statement about the dump.\n');
     process.exit(1);
   }
-  const dir = temp.dir;
-  const asPostgres = temp.asPostgres;
+  const base = cluster.base;
+  const dir = cluster.dir;
+  const asPostgres = cluster.asPostgres;
   const sock = base;
   const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
   // EVERY psql / pg_restore BELOW PASSES -U postgres, and that is not decoration.
@@ -285,30 +195,13 @@ async function main() {
   try {
     // ── 1. restore into a FRESH database ───────────────────────────────────
     h('1. RESTORE');
-    sh(`PATH=${dir}:$PATH psql -U postgres -h ${sock} -p ${PGPORT} -d postgres -c "DROP DATABASE IF EXISTS restored" -c "CREATE DATABASE restored"`, true);
-    ok('created a fresh, empty database "restored" in a disposable cluster');
-
-    const abs = path.resolve(dumpPath);
-    // The cluster runs as the postgres user when we are root, so the dump must be readable by it.
-    if (asPostgres) { try { execFileSync('chmod', ['a+r', abs]); } catch (_) { /* best effort */ } }
-
-    let restoreOut = '';
-    try {
-      if (isCustom) {
-        // --exit-on-error is deliberate: a restore that reports success while skipping objects is
-        // the failure this whole exercise exists to catch.
-        restoreOut = sh(`PATH=${dir}:$PATH pg_restore -U postgres --no-owner --no-privileges --exit-on-error `
-          + `-h ${sock} -p ${PGPORT} -d restored ${JSON.stringify(abs)} 2>&1`, true);
-      } else if (isGz) {
-        restoreOut = sh(`gunzip -c ${JSON.stringify(abs)} | PATH=${dir}:$PATH psql -U postgres -v ON_ERROR_STOP=1 -h ${sock} -p ${PGPORT} -d restored 2>&1`, true);
-      } else {
-        restoreOut = sh(`PATH=${dir}:$PATH psql -U postgres -v ON_ERROR_STOP=1 -h ${sock} -p ${PGPORT} -d restored -f ${JSON.stringify(abs)} 2>&1`, true);
-      }
-      ok('restore completed with no error (strict mode: --exit-on-error / ON_ERROR_STOP)');
-    } catch (e) {
-      bad('THE RESTORE FAILED', `${e.stdout || ''}${e.stderr || ''}`.slice(0, 900));
-      return;
-    }
+    // One implementation, in scripts/lib/restore.js: it creates the database, picks pg_restore or
+    // psql by the dump's own header, passes -U postgres on every call, and runs strict
+    // (--exit-on-error / ON_ERROR_STOP) because a restore that reports success while skipping
+    // objects is the failure this whole exercise exists to catch.
+    const restored = R.restoreDump(cluster, dumpPath);
+    if (restored.error) { bad('THE RESTORE FAILED', restored.error.slice(0, 900)); return; }
+    ok('created a fresh database and restored into it with no error (strict mode)');
 
     // ── 2. what came back ──────────────────────────────────────────────────
     h('2. WHAT CAME BACK');

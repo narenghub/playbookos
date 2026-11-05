@@ -14,12 +14,34 @@ separate review."* Nothing in this ticket may be acted on without that review.
 `scripts/migrate-*.js` files and not one of them is in that boot chain.** They are run by hand,
 once, against whichever database needed them.
 
-Measured, both numbers independently confirmed on 2026-11-05:
-
 | | tables |
 |---|---|
-| production (`SELECT count(*) … table_schema='public'`) | **125** (now 137 after `2026-11-05.connectors.v1`) |
-| a fresh deploy against an empty database | **~66** |
+| production (`SELECT count(*) … table_schema='public'`) | **125**, measured directly 2026-11-05 (now 137 after `2026-11-05.connectors.v1`) |
+| a fresh deploy against an empty database | **not reliably measured — see below** |
+
+**Correction, 2026-11-06.** An earlier version of this ticket put the fresh-install figure at
+"~66". That number is not supported by a measurement I can point at, so it is withdrawn rather than
+repeated. What *was* measured, while building the Gate 3 restore harness: `initDB()` alone on an
+empty database produces **17 tables**, and `initDB` + `migrateRuns` + `migrateOffice` +
+`2026-11-05.connectors.v1` produces **30**. Neither is the fresh-deploy number, because `server.js`
+also calls `initPhase2` and the research-intelligence migrations. The honest statement is that the
+gap is large and unquantified, which is exactly why task 1 below is to measure it rather than to
+fix it.
+
+**A second finding from the same exercise, and the sharper one.** The order between these
+migrations is undocumented and load-bearing:
+
+- `agent_runs` is created by **neither** `initDB` nor `migrateOffice` — it lives in
+  `src/lib/runs.js` (`migrateRuns`).
+- `migrateOffice` **ALTERs `agent_runs`**, so it cannot run before `migrateRuns`.
+- When it does run too early, `migrateOffice` **logs** the failure and continues:
+  `office schema failed on [ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS company_id …]:
+  relation "agent_runs" does not exist`.
+
+That is the same swallowed-error shape as `migrateSchemas`, in a second place. A caller who does
+not read stdout gets a partially migrated office kernel and a success exit. Reproducing production
+therefore requires knowing three entry points and the order between them, and that order exists
+only as whatever sequence somebody once used.
 
 So **a new environment built from this repository is not the application that is running.** The
 difference is roughly half the schema: `fda_establishments`, `labs`, `test_catalogue`, `lab_tests`,
