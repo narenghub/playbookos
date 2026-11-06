@@ -66,7 +66,14 @@ function arg(name, dflt) {
 const BASE = arg('--url', 'https://app.playnexa.ai').replace(/\/$/, '');
 const OUT = arg('--out', path.join(process.cwd(), 'prod-ui-evidence'));
 
-const EMAIL = process.env.PBO_EMAIL;
+// THE EMAIL MAY COME FROM ARGV; THE PASSWORD MAY NOT.
+//
+// The first run of this script skipped with exit 3 because PBO_PASSWORD was exported and PBO_EMAIL
+// was not — two environment variables where one of them did not need to be one. A password in argv
+// is visible in `ps` to every process on the machine and lands in shell history, so it stays in the
+// environment. An email address is not a credential and is already the account's public identifier,
+// so requiring it to be exported bought nothing and cost a run.
+const EMAIL = arg('--email', process.env.PBO_EMAIL);
 const PASSWORD = process.env.PBO_PASSWORD;
 
 // The six GET endpoints an administrator's dashboard depends on. The two task-mutating routes are
@@ -89,11 +96,15 @@ async function main() {
   console.log('  Read-only: every endpoint called is a GET; login is a SELECT. Nothing is written.');
 
   if (!EMAIL || !PASSWORD) {
-    console.log('\nSKIP  PBO_EMAIL and PBO_PASSWORD must both be set in the environment.');
+    // Say WHICH one is missing. "both must be set" when one of them already is sends a person
+    // looking at the wrong half.
+    console.log(`\nSKIP  missing: ${[!EMAIL && 'the email', !PASSWORD && 'the password'].filter(Boolean).join(' and ')}.`);
+    console.log(`      email    : ${EMAIL ? EMAIL : 'NOT SET — pass --email or export PBO_EMAIL'}`);
+    console.log(`      password : ${PASSWORD ? 'set' : 'NOT SET — export PBO_PASSWORD'}`);
     console.log('      This check asserted NOTHING. It is not a pass.');
+    console.log('\n      Two commands, and the password never appears on a command line:');
     console.log('\n        read -rs PBO_PASSWORD; export PBO_PASSWORD');
-    console.log('        export PBO_EMAIL=you@example.com');
-    console.log('        node scripts/verify-prod-dashboard.js\n');
+    console.log('        node scripts/verify-prod-dashboard.js --email you@example.com\n');
     process.exit(EXIT_NOT_EXECUTED);
   }
 

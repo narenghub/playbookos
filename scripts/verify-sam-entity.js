@@ -123,41 +123,126 @@ async function main() {
     process.exit(EXIT_NOT_EXECUTED);
   }
 
-  // ── the one call ──────────────────────────────────────────────────────────
-  h('THE REQUEST');
-  const url = `${ENTITY_URL}?api_key=${encodeURIComponent(key)}`
-    + `&ueiSAM=${encodeURIComponent(uei)}`
-    + '&includeSections=entityRegistration,coreData';
-  console.log(`  GET ${redact(url)}`);
+  // ── THE REQUEST, AS A BOUNDED MEASUREMENT RATHER THAN A GUESS ─────────────
+  //
+  // The first run of this script asked v2 and got **HTTP 404 with an empty body**. That is not
+  // explained by the documentation: open.gsa.gov lists v1 through v4 as live production endpoints
+  // with no deprecation notice on any of them, documents no 404 for this API, and an invalid key
+  // is documented to come back as a 403 carrying "An invalid api_key was supplied". An empty-bodied
+  // 404 is the signature of a gateway rejecting the ROUTE — a path that is no longer served, or a
+  // key not provisioned for this API — rather than of a rejected credential or a missing entity.
+  //
+  // So which variable is wrong is UNKNOWN, and there are three candidates: the version, the
+  // includeSections parameter, and the key's entitlement. Changing all three at once and declaring
+  // victory on a 200 would tell us nothing about why. Changing one at a time is the method, and
+  // each attempt costs a call against a quota nobody has measured.
+  //
+  // Hence: an ordered, CAPPED matrix, newest version first since v2 already failed, varying one
+  // thing per step, stopping at the first 200. Four calls maximum, printed as they go, with the
+  // rate-limit headers from every attempt — a 404 still carries them, so even total failure
+  // measures the quota, which is the one thing ruling 13 item 5 actually wants.
+  //
+  // v1 is last and flagged, because v1 names the expiry `expirationDate` rather than
+  // `registrationExpirationDate`. The field check below reads whichever is present, so a v1
+  // answer is still usable evidence — it just has to be labelled as v1.
+  const ATTEMPTS = [
+    { version: 'v4', sections: true },
+    { version: 'v3', sections: true },
+    { version: 'v2', sections: true },
+    { version: 'v4', sections: false },
+  ];
+  const MAX_CALLS = Number((process.argv.find((a) => /^--max-calls=/.test(a)) || '').split('=')[1]) || ATTEMPTS.length;
+
+  h(`THE REQUEST — up to ${Math.min(MAX_CALLS, ATTEMPTS.length)} attempt(s), stopping at the first 200`);
+  console.log('  Each attempt spends one call against a quota that is UNKNOWN. The rate-limit');
+  console.log('  headers are printed for every attempt, including failures.');
+  console.log('');
 
   let body = null;
   let res = null;
-  try {
-    res = await fetch(url, { method: 'GET' });
-    try { body = await res.json(); } catch (_) { body = null; }
-  } catch (e) {
-    bad('the request could not be made', e.message);
-    return finish();
+  let used = null;
+  let calls = 0;
+
+  for (const attempt of ATTEMPTS) {
+    if (calls >= MAX_CALLS) break;
+    const base = `https://api.sam.gov/entity-information/${attempt.version}/entities`;
+    const url = `${base}?api_key=${encodeURIComponent(key)}`
+      + `&ueiSAM=${encodeURIComponent(uei)}`
+      + (attempt.sections ? '&includeSections=entityRegistration,coreData' : '');
+    calls += 1;
+    // The key is in the query string, so the URL is a secret. Redacted on every path — the natural
+    // instinct on a failure is to print the URL, and that pastes a live credential into a terminal
+    // transcript and, if copied into an issue, into GitHub.
+    console.log(`  [${calls}] GET ${redact(url)}`);
+
+    let r = null;
+    let b = null;
+    try {
+      r = await fetch(url, { method: 'GET' });
+      try { b = await r.json(); } catch (_) { b = null; }
+    } catch (e) {
+      console.log(`      network error: ${redact(e.message)}`);
+      continue;
+    }
+    const hdr = (n) => { try { return r.headers.get(n); } catch (_) { return null; } };
+    const lim = hdr('x-ratelimit-limit');
+    const rem = hdr('x-ratelimit-remaining');
+    console.log(`      HTTP ${r.status}   X-RateLimit-Limit: ${lim || 'not set'}   Remaining: ${rem || 'not set'}`);
+    if (r.status !== 200) {
+      const raw = JSON.stringify(b || {});
+      console.log(`      body: ${raw.length > 220 ? `${raw.slice(0, 220)}…` : raw}`);
+      if (r.status === 401 || r.status === 403) {
+        bad('the key was REJECTED (401/403)',
+          'this is a credential problem, not a route problem. Stopping — retrying an auth failure '
+          + 'in a loop is how a key gets blocked.');
+        return finish();
+      }
+      if (r.status === 429) {
+        bad('RATE LIMITED (429) — and this is the direct evidence of the real limit',
+          `record the X-RateLimit values above. Attempts made this run: ${calls}.`);
+        return finish();
+      }
+      continue;   // 404 or 5xx: try the next variable
+    }
+    res = r; body = b; used = attempt;
+    console.log(`      → 200. Using ${attempt.version}${attempt.sections ? ' with includeSections' : ' WITHOUT includeSections'}.`);
+    break;
   }
 
-  // The key is in the query string, so the URL is a secret. Every error path here redacts — the
-  // natural instinct on a failure is to print the URL, and doing that pastes a live credential
-  // into a terminal transcript and, if copied into an issue, into GitHub.
-  if (res.status !== 200) {
-    const hint = res.status === 401 || res.status === 403
-      ? 'the key was rejected. Not retried — retrying an auth failure in a loop gets a key blocked.'
-      : res.status === 429
-        ? 'rate limited. THIS IS THE DIRECT EVIDENCE of the real limit — record what the '
-          + 'X-RateLimit headers above said, since the documentation does not state which of its '
-          + 'published figures applies to this account. Wait rather than retrying.'
-        : 'unexpected status';
-    bad(`HTTP ${res.status} — ${hint}`, JSON.stringify(body || {}).slice(0, 300));
+  if (!res) {
+    h('NO VERSION ANSWERED');
+    bad(`all ${calls} attempt(s) failed — the Entity Management API route is not reachable with this key`,
+      'every attempt returned 404 or 5xx, never 401/403, so the key was not rejected — the ROUTE was.');
+    console.log('\n  What this narrows it to, and what it does NOT prove:');
+    console.log('    · NOT a bad UEI — a UEI that does not exist returns 200 with an empty list.');
+    console.log('    · NOT a rejected key — that is a documented 403 with a message body.');
+    console.log('    · The documentation lists v1–v4 as live with no deprecation, so either the');
+    console.log('      published paths are stale, or this key is not entitled to the Entity API.');
+    console.log('\n  The cheapest next step is NOT another call. On sam.gov, open');
+    console.log('  Workspace → Profile → Account Details and check whether the account shows any');
+    console.log('  API entitlement beyond the Public API Key, then ask FSD (www.fsd.gov) whether a');
+    console.log('  personal key is entitled to entity-information. A System Account with');
+    console.log('  "Entity Information: read public" is documented for this API and may be required.');
+    console.log('\n  THE REGISTRATION ITSELF IS NOT IN DOUBT from this failure. It is unverified by');
+    console.log('  THIS ROUTE, which is a different statement. The UEI, CAGE, purpose and expiry');
+    console.log('  remain as stated and unconfirmed against the authoritative source.\n');
     return finish();
   }
 
   const rl = (n) => { try { return res.headers.get(n); } catch (_) { return null; } };
+  console.log('');
+  console.log(`  answered by           : ${used.version}${used.sections ? '' : ' (no includeSections)'}`);
+  console.log(`  calls spent this run  : ${calls}`);
   console.log(`  X-RateLimit-Limit     : ${rl('x-ratelimit-limit') || 'not set'}`);
   console.log(`  X-RateLimit-Remaining : ${rl('x-ratelimit-remaining') || 'not set'}`);
+  if (!rl('x-ratelimit-limit')) {
+    note('no X-RateLimit-Limit header, so the daily quota remains UNKNOWN — do not adopt a figure');
+    note('from a sibling GSA page; neither published scheme is stated to apply to this account.');
+  }
+  if (used.version === 'v1') {
+    note('v1 answered. v1 names the expiry `expirationDate`, not `registrationExpirationDate` —');
+    note('the field check below reads whichever is present, so this is still usable evidence.');
+  }
 
   const list = (body && (body.entityData || body.entities)) || [];
   if (!Array.isArray(list) || !list.length) {
