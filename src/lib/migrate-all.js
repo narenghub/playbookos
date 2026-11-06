@@ -41,14 +41,33 @@ const db = require('./db');
 // Found because the SPA's own shell requests 500'd on a freshly migrated database — /api/notifications
 // and /api/outreach/tasks both returned "relation does not exist". A deploy to an empty database
 // would have done the same, on the first page load, for every user.
-function runScript(rel) {
+function runScript(rel, { refusalIsSuccess = null } = {}) {
   const abs = path.join(__dirname, '..', '..', rel);
-  execFileSync(process.execPath, [abs], {
-    env: { ...process.env },
-    stdio: 'pipe',
-    encoding: 'utf8',
-  });
-  return { script: rel };
+  try {
+    execFileSync(process.execPath, [abs], { env: { ...process.env }, stdio: 'pipe', encoding: 'utf8' });
+    return { script: rel };
+  } catch (e) {
+    // ── A DELIBERATE REFUSAL IS NOT A FAILED MIGRATION ───────────────────────
+    //
+    // migrate-product-boundary.js creates its two tables and THEN exits non-zero if user_products
+    // already holds rows, because "a re-run cannot tell revoked from never granted, so it would
+    // silently re-grant products somebody deliberately took away". That refusal is correct, and it
+    // is the same hazard as the 2026-09-30 incident where a super admin's deliberately removed
+    // user_products rows made a write look like a widening.
+    //
+    // But it meant the migrator could not run against ANY populated database — including
+    // production. Found by scripts/verify-migration-readiness.js, which is the only place that
+    // runs the migration against a database that already has data in it.
+    //
+    // So a caller may declare the one refusal it expects. The match is on the script's own refusal
+    // text; anything else still fails the migration.
+    const out = `${e.stdout || ''}${e.stderr || ''}`;
+    if (refusalIsSuccess && refusalIsSuccess.test(out)) {
+      return { script: rel, refused: true, note: 'schema applied; the one-time backfill was correctly refused' };
+    }
+    const detail = out.trim().split('\n').filter(Boolean).slice(-4).join(' | ');
+    throw new Error(`${rel} failed${detail ? `: ${detail}` : ''}`);
+  }
 }
 
 // Steps that create or alter schema. Every one is idempotent (IF NOT EXISTS / OR REPLACE), which is
@@ -162,7 +181,17 @@ const SCHEMA_STEPS = [
   { name: 'registrations', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-registrations.js') },
   { name: 'permissions', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-permissions.js') },
   { name: 'shadow log', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-shadow-log.js') },
-  { name: 'product boundary', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-product-boundary.js') },
+  {
+    // The two CREATE TABLE IF NOT EXISTS statements run first and are idempotent. The backfill
+    // after them is a ONE-TIME operation that refuses to repeat itself, and that refusal is the
+    // correct behaviour, not a migration failure — see runScript.
+    name: 'product boundary',
+    required: true,
+    usesOwnPool: true,
+    run: () => runScript('scripts/migrate-product-boundary.js', {
+      refusalIsSuccess: /REFUSING TO BACKFILL: user_products already has/,
+    }),
+  },
   { name: 'product grant log', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-product-grant-log.js') },
   { name: 'tool audit', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-tool-audit.js') },
   { name: 'molecules', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-molecules.js') },
@@ -198,6 +227,20 @@ const SCHEMA_STEPS = [
     name: 'sitenex rename (creates partners)',
     required: true,
     usesOwnPool: true,
+    // NOT RE-RUNNABLE, and this is the one step in the chain that is not. Its table renames are
+    // existence-guarded, but its ALTER INDEX ... RENAME is not: on a database where the rename has
+    // already happened it fails with 'relation "sitenex_packages_pkey" already exists'.
+    //
+    // `partners` is created by this script and by nothing else, so its presence is an exact record
+    // of whether this step has run. Gating on it rather than patching the script means nothing is
+    // changed about a migration that has already been applied to production.
+    //
+    // Found by scripts/verify-migration-readiness.js — the only harness that runs the migration
+    // twice, which is what production is: a database the migrator has already been run against.
+    when: async (q) => {
+      const r = await q(`SELECT to_regclass('public.partners') IS NULL AS needs_rename`);
+      return r.rows[0].needs_rename === true;
+    },
     run: () => runScript('scripts/migrate-sitenex-rename.js'),
   },
   { name: 'partner territories', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-partner-territories.js') },
@@ -371,6 +414,16 @@ async function runAll(q, opts = {}) {
   for (const step of all) {
     const t0 = Date.now();
     try {
+      // A step may declare `when`: a read-only predicate deciding whether it applies to THIS
+      // database. Used for the one step in the chain that is genuinely not re-runnable.
+      if (step.when) {
+        const applies = await step.when(q);
+        if (!applies) {
+          steps.push({ name: step.name, ok: true, skipped: true, ms: 0, result: 'already applied' });
+          log(`  --    ${step.name}  — already applied, skipped`);
+          continue;
+        }
+      }
       const result = await step.run(q);
       const ms = Date.now() - t0;
       steps.push({ name: step.name, ok: true, ms, result: summarise(result) });
