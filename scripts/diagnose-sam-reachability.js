@@ -46,10 +46,16 @@
 // Exit: 0 the diagnostic ran and printed its findings · 1 it could not run
 //       The verdict here is the REPORT, not the exit code: this script measures, it does not judge.
 
+// Every path the documentation publishes, keyless. The v1 forms are here because the page's own
+// OpenAPI section lists `/v1/search` while its prose states `/v2/search`, and its response examples
+// link to `api.sam.gov/prod/opportunities/v1/...`. The page's change log ends 06/11/2021, so which
+// of its paths is current is exactly the open question.
 const PROBES = [
   // The two paths the authenticated attempts used, keyless.
   { label: 'Opportunities, documented base URL', url: 'https://api.sam.gov/opportunities/v2/search?postedFrom=11/04/2026&postedTo=11/06/2026&limit=1' },
   { label: 'Opportunities, /prod/ path from the examples', url: 'https://api.sam.gov/prod/opportunities/v2/search?postedFrom=11/04/2026&postedTo=11/06/2026&limit=1' },
+  { label: 'Opportunities v1, documented base', url: 'https://api.sam.gov/opportunities/v1/search?postedFrom=11/04/2026&postedTo=11/06/2026&limit=1' },
+  { label: 'Opportunities v1, /prod/ path (used by the docs\' own response examples)', url: 'https://api.sam.gov/prod/opportunities/v1/search?postedFrom=11/04/2026&postedTo=11/06/2026&limit=1' },
   { label: 'Entity Management v4', url: 'https://api.sam.gov/entity-information/v4/entities?ueiSAM=GW4MAZJHFV44' },
   // The host itself, with no path. Tells us whether anything at all is served.
   { label: 'api.sam.gov root (no path)', url: 'https://api.sam.gov/' },
@@ -62,6 +68,8 @@ const PROBES = [
 // `server` is first because it turned out to be the most informative field of the lot: an
 // `istio-envoy` answering an empty 404 on EVERY path including the bare root is a service-mesh
 // proxy with no route configured for the host, which is not how an API behaves.
+const dns = require('dns').promises;
+
 const INTERESTING_HEADERS = [
   'server', 'content-type', 'content-length', 'via', 'x-cache', 'cf-ray',
   'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-amzn-requestid', 'x-amz-cf-id',
@@ -131,6 +139,19 @@ async function main() {
     console.log('  no proxy environment variables are set');
   }
 
+  // WHOSE SERVER IS THIS? A consistent `server` header from two unrelated networks points at the
+  // origin, but only if the hostname resolves to the origin. Printed so the question is answered
+  // rather than argued.
+  h('DNS');
+  for (const host of ['api.sam.gov', 'open.gsa.gov']) {
+    try {
+      const a = await dns.resolve4(host);
+      console.log(`  ${host.padEnd(16)} ${a.join(', ')}`);
+    } catch (e) {
+      console.log(`  ${host.padEnd(16)} DID NOT RESOLVE: ${e.code || e.message}`);
+    }
+  }
+
   h('PROBES');
   const results = [];
   for (const p of PROBES) results.push(await probe(p));
@@ -180,25 +201,40 @@ async function main() {
     console.log('      re-enter it — a trailing character or a truncated paste is the common cause');
     console.log('    · confirm the key is the "Public API Key" field and not another value');
   } else if (meshSignature.length) {
-    // The strongest available signal, and the reason `server` is captured at all.
-    console.log(`  EVERY FAILING PROBE WAS ANSWERED BY "${meshSignature[0].server}" WITH AN EMPTY 404.`);
+    // ── CORRECTED 2026-11-06, AND THE CORRECTION IS THE POINT ──────────────
+    //
+    // This branch used to conclude "an INTERCEPTION or ROUTING problem between this machine and
+    // SAM.gov" and send the reader to look at their VPN. That was wrong, and the evidence that
+    // disproves it was already in hand: the SAME signature — `server: istio-envoy`, content-length
+    // 0, empty 404 on every path including the root — appeared from a sandboxed container behind an
+    // allowlisting proxy AND from a developer Mac with no proxy at all, on a different network,
+    // while both machines' control hosts answered normally through entirely different edges.
+    //
+    // Two independent networks producing an identical response is the ORIGIN answering, not two
+    // coincidental interceptions. Sending someone to audit their VPN over this would have been a
+    // confident wrong diagnosis, which is worse than no diagnosis.
+    console.log(`  EVERY FAILING PROBE WAS ANSWERED BY "${meshSignature[0].server}" WITH AN EMPTY 404,`);
+    console.log('  while the control hosts answered normally through different edges.');
     if (root && root.status === 404 && root.emptyBody) {
       console.log('  Including https://api.sam.gov/ with no path at all.');
     }
     console.log('');
-    console.log('  That is a service-mesh proxy with NO ROUTE CONFIGURED for this host. It is not');
-    console.log('  the SAM.gov API returning 404 for an unknown path — an API would answer its own');
-    console.log('  root with a body, and the documented behaviour for a keyless call is a 403');
-    console.log('  carrying "No api_key was supplied". Nothing reached the API.');
+    console.log('  READ THIS AS THE ORIGIN, NOT AS LOCAL INTERFERENCE, if the same signature appears');
+    console.log('  from a second, unrelated network — it is an ingress with no route for these');
+    console.log('  paths. The decisive check is one line and costs nothing:');
     console.log('');
-    console.log('  So this is an INTERCEPTION or ROUTING problem between this machine and SAM.gov,');
-    console.log('  not a path problem and not a key problem. In order of likelihood:');
-    console.log('    · a VPN, corporate proxy or endpoint-security client terminating HTTPS');
-    console.log('    · DNS resolving api.sam.gov to something that is not SAM.gov');
-    console.log('    · a transparent filtering appliance on the network');
+    console.log('    run this again from a phone hotspot');
     console.log('');
-    console.log('  THE DECISIVE TEST COSTS NOTHING: re-run this from a phone hotspot. A 403 there');
-    console.log('  proves the cause is local, and no change to this codebase can fix it.');
+    console.log('  Same empty 404 there → the published paths are not routed, and this is an');
+    console.log('  ACCESS/DOCUMENTATION question for FSD, not a code question. Note that the');
+    console.log('  open.gsa.gov change log ends 06/11/2021, and that the same page states');
+    console.log('  /v2/search in prose while its OpenAPI section lists /v1/search and its response');
+    console.log('  examples use a /prod/ prefix — three different answers on one page.');
+    console.log('    A 403 "No api_key was supplied" there → the cause IS local to this network.');
+    console.log('');
+    console.log('  Either way, nothing in this codebase needs changing to fix a 404: the connector');
+    console.log('  takes its base URL as a parameter, so a corrected path is a one-line change once');
+    console.log('  somebody tells us what it is.');
   } else if (notFound.length && !headered.length) {
     console.log(`  ${notFound.length} keyless request(s) returned 404 with NO rate-limit headers,`);
     console.log('  while the control hosts answered normally. A request that reached the real');
