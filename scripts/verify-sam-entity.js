@@ -145,11 +145,23 @@ async function main() {
   // v1 is last and flagged, because v1 names the expiry `expirationDate` rather than
   // `registrationExpirationDate`. The field check below reads whichever is present, so a v1
   // answer is still usable evidence — it just has to be labelled as v1.
+  // THE /prod/ PREFIX IS NOW IN THE MATRIX, AND IT IS THE LEADING HYPOTHESIS.
+  //
+  // open.gsa.gov states the Opportunities base URL as https://api.sam.gov/opportunities/v2/search
+  // while its own EXAMPLES use https://api.sam.gov/prod/opportunities/v2/search. We treated the
+  // stated base as authoritative and recorded the contradiction as an open question. Then, on
+  // 2026-11-06, the stated path returned an empty-bodied 404 for the Opportunities API AND for all
+  // four versions of this one. A 404 is a gateway refusing a route; a rejected key is a 403.
+  //
+  // So the prefix the examples use gets tested, newest version first. Ordered and capped: one
+  // variable per step, stopping at the first 200.
   const ATTEMPTS = [
-    { version: 'v4', sections: true },
-    { version: 'v3', sections: true },
-    { version: 'v2', sections: true },
-    { version: 'v4', sections: false },
+    { version: 'v4', sections: true, prefix: '' },
+    { version: 'v3', sections: true, prefix: '' },
+    { version: 'v4', sections: true, prefix: 'prod/' },
+    { version: 'v3', sections: true, prefix: 'prod/' },
+    { version: 'v2', sections: true, prefix: 'prod/' },
+    { version: 'v4', sections: false, prefix: '' },
   ];
   const MAX_CALLS = Number((process.argv.find((a) => /^--max-calls=/.test(a)) || '').split('=')[1]) || ATTEMPTS.length;
 
@@ -165,7 +177,7 @@ async function main() {
 
   for (const attempt of ATTEMPTS) {
     if (calls >= MAX_CALLS) break;
-    const base = `https://api.sam.gov/entity-information/${attempt.version}/entities`;
+    const base = `https://api.sam.gov/${attempt.prefix || ''}entity-information/${attempt.version}/entities`;
     const url = `${base}?api_key=${encodeURIComponent(key)}`
       + `&ueiSAM=${encodeURIComponent(uei)}`
       + (attempt.sections ? '&includeSections=entityRegistration,coreData' : '');

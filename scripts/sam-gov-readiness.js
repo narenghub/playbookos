@@ -112,7 +112,12 @@ async function liveTest(key) {
 
   // A budget of 2 for the whole run: one probe, one spare for the offset question. If the real
   // limit turns out to be lower, the ledger refuses locally rather than discovering it remotely.
-  const quota = sam.makeQuotaLedger(2);
+  // THREE, not two: one for route discovery. The documented base URL returned an empty-bodied
+  // 404 on 2026-11-06, and so did all four Entity API versions, so the next call has to establish
+  // WHICH PATH works before anything else can be measured. A 404 almost certainly never reaches
+  // the quota accounting — the route is not matched — but the ledger counts it anyway, because
+  // assuming otherwise about an unknown quota is the mistake this ledger exists to prevent.
+  const quota = sam.makeQuotaLedger(3);
   // A page size above 1 is REQUIRED, not a preference: with limit=1 a page index and a record
   // offset are indistinguishable, so the offset question cannot be answered at all.
   const PAGE_SIZE = 5;
@@ -121,15 +126,67 @@ async function liveTest(key) {
   console.log(`  page size : ${PAGE_SIZE} (must exceed 1 to decide the offset question)`);
   console.log('');
 
-  let first;
-  try {
-    first = await sam.fetchSearch(
-      { postedFrom: mmddyyyy(from), postedTo: mmddyyyy(today), limit: PAGE_SIZE, offset: 0 },
-      { apiKey: key, authorized: true, quota, fetchImpl: (u, o) => fetch(u, o) },
-    );
-    ok('the request succeeded and the response matched the documented shape');
-  } catch (e) {
-    if (e.kind === sam.ERROR_KINDS.AUTH) {
+  // ── WHICH PATH IS REAL? ──────────────────────────────────────────────────
+  //
+  // open.gsa.gov states the base URL as https://api.sam.gov/opportunities/v2/search, and its own
+  // EXAMPLES use https://api.sam.gov/prod/opportunities/v2/search. This connector chose the stated
+  // base and recorded the contradiction as an open question — and then the stated base returned
+  // HTTP 404 with an empty body, which is a gateway refusing a route rather than an API refusing a
+  // key. So the examples are now the better evidence, and the question is settled by measurement:
+  // the documented base first, and on a 404 the /prod/ form once.
+  //
+  // Ordered, capped, one variable at a time, stopping at the first success — the same discipline as
+  // the entity probe. Not "try everything and declare victory on a 200".
+  const BASES = [
+    { label: 'documented base URL', url: sam.SEARCH_URL },
+    { label: 'the /prod/ path the documentation EXAMPLES use', url: 'https://api.sam.gov/prod/opportunities/v2/search' },
+  ];
+  const params = { postedFrom: mmddyyyy(from), postedTo: mmddyyyy(today), limit: PAGE_SIZE, offset: 0 };
+
+  let first = null;
+  let chosenBase = null;
+  let lastError = null;
+  for (const base of BASES) {
+    try {
+      console.log(`  trying ${base.label}:\n    ${base.url}`);
+      first = await sam.fetchSearch(params,
+        { apiKey: key, authorized: true, quota, baseUrl: base.url, fetchImpl: (u, o) => fetch(u, o) });
+      chosenBase = base;
+      ok(`ANSWERED: ${base.label}`);
+      ok('the response matched the documented shape');
+      break;
+    } catch (e) {
+      lastError = e;
+      const is404 = e.status === 404;
+      console.log(`  ${is404 ? 'note' : 'FAIL'}  HTTP ${e.status || '?'} (${e.kind || 'unknown'})`);
+      // Only a 404 justifies trying another path. An auth failure or a quota refusal means the
+      // route was found, and retrying it on a different path would be looping a real rejection.
+      if (!is404) break;
+    }
+  }
+
+  if (!first) {
+    const e = lastError || new Error('no attempt was made');
+    if (e.status === 404) {
+      bad('EVERY PATH RETURNED 404 — the route is unreachable with this key',
+        'never 401 or 403, so the key was not rejected; the path was. Both the documented base URL '
+        + 'and the /prod/ form the examples use failed, and all four Entity API versions failed the '
+        + 'same way earlier. Two different APIs, one key, same empty-bodied 404.');
+      console.log('');
+      console.log('  THE CHEAPEST NEXT STEP IS NOT ANOTHER CALL. Two APIs failing identically');
+      console.log('  points at the key\'s entitlement rather than at either path:');
+      console.log('');
+      console.log('   1. On sam.gov, Workspace → Profile → Account Details — confirm the value in');
+      console.log('      "Public API Key" is the one in use, and whether the account lists any');
+      console.log('      other API entitlement.');
+      console.log('   2. Ask FSD (www.fsd.gov) whether a PERSONAL public API key is entitled to');
+      console.log('      the Opportunities and Entity Management APIs, or whether a SYSTEM ACCOUNT');
+      console.log('      is required. A System Account is documented for the Entity API and is NOT');
+      console.log('      documented at all for Opportunities, which is itself a gap worth asking about.');
+      console.log('');
+      console.log('  Until that is answered, ingestion is blocked on an ACCESS question, not a');
+      console.log('  code question. Nothing in the connector needs changing to fix a 404.');
+    } else if (e.kind === sam.ERROR_KINDS.AUTH) {
       bad('AUTH: the key was rejected. Not retried — retrying an auth failure in a loop is how a '
         + 'key gets blocked.', e.message);
     } else if (e.kind === sam.ERROR_KINDS.QUOTA) {
@@ -139,6 +196,14 @@ async function liveTest(key) {
     }
     console.log('\n  No assumption could be checked, because no response was received.');
     return failures;
+  }
+
+  if (chosenBase && chosenBase.url !== sam.SEARCH_URL) {
+    bad('THE DOCUMENTED BASE URL IS WRONG — the /prod/ path is the working one',
+      `change SEARCH_URL in src/lib/connectors/sam-gov.js to ${chosenBase.url} and record that the `
+      + 'open.gsa.gov "base URL" section is stale while its examples are correct. Reported as a '
+      + 'failure so it cannot be read past: every assumption below was measured against a path the '
+      + 'connector does not yet use by default.');
   }
 
   console.log(`  totalRecords: ${first.totalRecords === null ? 'UNKNOWN' : first.totalRecords}`);

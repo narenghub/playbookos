@@ -306,14 +306,37 @@ async function main() {
     } finally { await browser.close(); }
   }
 
+}
+
+// ── THE EXIT CODE IS COMPUTED HERE, NOT INSIDE main() ──────────────────────
+//
+// It used to live at the end of main(), after the checks. main() has five early `return`
+// statements — /health unreachable, login failed, no token, login threw — and every one of them
+// resolved the promise and SKIPPED the exit. So on 2026-11-06 this script printed
+//
+//     FAIL  login failed with 401
+//
+// and exited 0. A verification that reports a failure and exits zero is the 2026-09-30 defect
+// written fresh, in the script added to catch that class of defect: the rule in CLAUDE.md is that
+// a checker's verdict IS its exit status, and this one's verdict and status disagreed.
+//
+// Computing it in .then() makes it structural rather than remembered. Every path through main(),
+// including the early returns and anything thrown, now produces the code that matches `fail`.
+// scripts/check-verifier-exit-codes.js proves it by running the failure path for real.
+function result() {
   h('RESULT');
   if (fail) {
     console.log(`  ${fail} failure(s). The dashboard is NOT confirmed for an authenticated admin.\n`);
-    process.exit(1);
+  } else {
+    console.log('  The deployed dashboard answers and renders for an authenticated administrator.');
+    console.log(`  Screenshots in ${OUT}. Nothing was written to production.\n`);
   }
-  console.log(`  The deployed dashboard answers and renders for an authenticated administrator.`);
-  console.log(`  Commit ${commit}. Screenshots in ${OUT}. Nothing was written to production.\n`);
-  process.exit(0);
+  return fail ? 1 : 0;
 }
 
-main().catch((e) => { console.error(`\nverify-prod-dashboard: ${e.stack || e.message}`); process.exit(1); });
+main()
+  .then(() => process.exit(result()))
+  .catch((e) => {
+    console.error(`\nverify-prod-dashboard: ${e.stack || e.message}`);
+    process.exit(1);
+  });

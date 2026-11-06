@@ -404,16 +404,28 @@ async function main() {
     R.stopCluster(cluster);
   }
 
+}
+
+// ── THE EXIT CODE IS COMPUTED HERE, NOT INSIDE main() ──────────────────────
+//
+// Same correction as verify-prod-dashboard.js, where this shape was caught producing a FAIL and
+// an exit 0. main() returns early when the restore fails, when a precondition is absent, when the
+// dump already records v2 and when --check or --apply fails — and a `return` inside a try/finally
+// runs the finally and then leaves the function, so the RESULT block that used to sit below it
+// never executed. Those are the paths where a wrong verdict matters most.
+function result() {
   h('RESULT');
   if (fail) {
     console.log(`  ${fail} property FAILED. Migration v2 is NOT verified against production's schema.\n`);
-    process.exit(1);
+  } else {
+    console.log('  Migration v2 applies cleanly to a restore of the real production database,');
+    console.log('  twice, changes no existing row, loses no index or constraint, and its rollback');
+    console.log('  refuses rather than destroy capability evidence.');
+    console.log('  Production itself was never connected to.\n');
   }
-  console.log('  Migration v2 applies cleanly to a restore of the real production database,');
-  console.log('  twice, changes no existing row, loses no index or constraint, and its rollback');
-  console.log('  refuses rather than destroy capability evidence.');
-  console.log('  Production itself was never connected to.\n');
-  process.exit(0);
+  return fail ? 1 : 0;
 }
 
-main().catch((e) => { console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
+main()
+  .then(() => process.exit(result()))
+  .catch((e) => { console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
