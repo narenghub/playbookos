@@ -33,6 +33,7 @@
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -143,3 +144,128 @@ if (findings.length) {
 }
 
 console.log(`PASS  no committed credentials (scanned ${files().length} tracked files)`);
+
+// ── HISTORY ──────────────────────────────────────────────────────────────────
+//
+//   scripts/check-secrets.js --history
+//
+// The scan above reads `git ls-files` — the working tree. That is the right default and it is also
+// a blind spot: a credential committed and then deleted leaves this check GREEN forever while the
+// value stays in history. On 2026-11-06 that blind spot was measured, not hypothesised. The live
+// admin password was committed on 27 Oct in scripts/init-db.js and AUTONOMY_SECURITY_REVIEW.md,
+// removed from the tip the same day, and remained readable in the history of a PUBLIC repository.
+// Every check was green throughout, correctly, because none of them looked.
+//
+// So this mode scans every patch in every reachable commit. It is cheap — one `git log --all -p`
+// pass, well under a second on this repo.
+//
+// ── THE BASELINE, AND WHY IT HOLDS ONLY RETIRED VALUES ───────────────────────
+//
+// History cannot be cleaned without a rewrite, so a check that fails forever on a known finding is
+// a check that gets muted — the alarm-fatigue failure this file's header already warns about. The
+// baseline at docs/security/history-findings.json therefore records each known finding with a
+// STATUS, and the gate is the status, not the finding:
+//
+//   rotate-required → FAIL. The credential is exposed and still valid. Rotate it, then set
+//                     'retired'. This is a real gate with a real, reachable green state.
+//   retired         → pass, and the value is additionally WATCHED: if it ever reappears in the
+//                     tree or in a new commit, that fails.
+//   placeholder     → pass. Triaged as never having been a credential.
+//
+// The baseline stores a TRUNCATED SHA-256, never a value, because the baseline itself lives in the
+// public repository.
+//
+// ── NEVER ADD A LIVE SECRET'S HASH HERE ──────────────────────────────────────
+//
+// A hash of a weak secret in a public file is a brute-force target, so only values that are
+// already compromised AND rotated out of use may be watched. The hash of a retired password
+// protects nothing that still matters; the hash of a live one is a liability. This is a policy,
+// not a mechanism, and it is the reason the mechanism is safe.
+if (process.argv.includes('--history')) {
+  const BASELINE = path.join(ROOT, 'docs', 'security', 'history-findings.json');
+  const h12 = (v) => crypto.createHash('sha256').update(v).digest('hex').slice(0, 12);
+
+  let base = { findings: [] };
+  try { base = JSON.parse(fs.readFileSync(BASELINE, 'utf8')); } catch (e) {
+    console.error(`FAIL  cannot read ${path.relative(ROOT, BASELINE)}: ${e.message}`);
+    console.error('      A missing baseline is not an empty baseline. "I cannot tell" is not "clean".');
+    process.exit(1);
+  }
+  const known = new Map(base.findings.map((f) => [f.id, f]));
+  // Only RETIRED values are watched, and only when the baseline carries an explicit watch hash.
+  // A finding can therefore be recorded and gated without storing any hash of a value that might
+  // still be live — which is the case for a password that is exposed but not yet rotated.
+  const watched = new Set(base.findings
+    .filter((f) => f.status === 'retired' && typeof f.watch_sha12 === 'string')
+    .map((f) => f.watch_sha12));
+
+  let patches = '';
+  try {
+    patches = execFileSync('git', ['log', '--all', '-p', '--no-color', '--unified=0'],
+      { cwd: ROOT, encoding: 'utf8', maxBuffer: 512 * 1024 * 1024 });
+  } catch (e) {
+    console.error(`FAIL  could not read git history: ${e.message}`);
+    process.exit(1);
+  }
+
+  const seen = new Map();   // id → {rule, sample}
+  const reappeared = [];
+  for (const line of patches.split('\n')) {
+    if (PLACEHOLDER.test(line)) continue;
+    for (const rule of RULES) {
+      const m = line.match(rule.re);
+      if (m) { const id = h12(m[0]); if (!seen.has(id)) seen.set(id, { rule: rule.name, hint: `${m[0].slice(0, 6)}…` }); }
+    }
+    // Watched retired values: tokenise and hash. Only retired values are watched, so this can
+    // never be a search for something that is still a secret.
+    if (watched.size) {
+      for (const tok of line.split(/[\s"'`,;(){}\[\]<>]+/)) {
+        if (tok.length < 8) continue;
+        if (watched.has(h12(tok))) reappeared.push(h12(tok));
+      }
+    }
+  }
+
+  const unknown = [...seen.entries()].filter(([id]) => !known.has(id));
+  // A rotate-required finding is time-boxed. Within its window it is reported loudly and passes;
+  // past the window it FAILS. Neither extreme works: failing from day one deadlocks the branch on
+  // an action only the credential's owner can take, and never failing is a warning nobody reads.
+  // The date is the thing that cannot be forgotten.
+  const today = new Date().toISOString().slice(0, 10);
+  const pending = base.findings.filter((f) => f.status === 'rotate-required');
+  const outstanding = pending.filter((f) => !f.accepted_until || f.accepted_until < today);
+  const accepted = pending.filter((f) => f.accepted_until && f.accepted_until >= today);
+  const commits = execFileSync('git', ['rev-list', '--all', '--count'], { cwd: ROOT, encoding: 'utf8' }).trim();
+
+  let bad = 0;
+  if (unknown.length) {
+    bad += unknown.length;
+    console.error(`\nFAIL  ${unknown.length} credential(s) in history that the baseline does not know:`);
+    for (const [id, v] of unknown) console.error(`  id ${id}  ${v.rule} — starts "${v.hint}"`);
+    console.error('  Triage each one, ROTATE if real, and record it in docs/security/history-findings.json.');
+  }
+  if (outstanding.length) {
+    bad += outstanding.length;
+    console.error(`\nFAIL  ${outstanding.length} exposed credential(s) past their rotation deadline:`);
+    for (const f of outstanding) {
+      console.error(`  ${f.what}`);
+      console.error(`     ${f.where}`);
+      console.error(`     deadline ${f.accepted_until || '(none set)'} — today ${today}`);
+    }
+    console.error('  Rotate it, then set status to "retired" in docs/security/history-findings.json.');
+  }
+  for (const f of accepted) {
+    console.log(`  NOTE  ${f.what} is exposed and unrotated — this check FAILS after ${f.accepted_until}`);
+    console.log(`        ${f.where}`);
+  }
+  if (reappeared.length) {
+    bad += reappeared.length;
+    console.error(`\nFAIL  ${reappeared.length} RETIRED credential(s) have reappeared:`);
+    const byWatch = new Map(base.findings.filter((f) => f.watch_sha12).map((f) => [f.watch_sha12, f]));
+    for (const id of [...new Set(reappeared)]) console.error(`  ${(byWatch.get(id) || {}).what || `watch ${id}`}`);
+    console.error('  A value that was compromised once must never come back.');
+  }
+  if (bad) process.exit(1);
+  console.log(`PASS  history clean: ${commits} commits scanned, ${seen.size} known finding(s), `
+    + `${watched.size} retired value(s) watched, 0 outstanding`);
+}

@@ -89,6 +89,21 @@ const SHA = (c) => {
 // A real digest, for fixtures that need many distinct hashes.
 const H = (s) => require('crypto').createHash('sha256').update(String(s)).digest('hex');
 
+// Ruling 18 item 6: a verdict must be INGESTED before it can be reflected. These two helpers are
+// the only legitimate way to give a document a verdict, which is the point.
+const MAP = {
+  NO_THREATS_FOUND: 'clean', THREATS_FOUND: 'infected', UNSUPPORTED: 'unsupported',
+  ACCESS_DENIED: 'access_denied', FAILED: 'failed',
+};
+let evt = 0;
+const ingest = (q, docId, ver, providerStatus, co = 'co-a') => q(
+  `INSERT INTO document_scan_results
+     (id,company_id,document_id,storage_version_id,provider,channel,
+      provider_event_id,provider_status,mapped_status,threats)
+   VALUES ($1,$2,$3,$4,'aws_guardduty_malware_protection_s3','eventbridge',$5,$6,$7,$8)`,
+  [`scan-${++evt}`, co, docId, ver, `evt-${evt}`, providerStatus, MAP[providerStatus],
+   providerStatus === 'THREATS_FOUND' ? 'EICAR-Test-File (not a virus)' : null]);
+
 async function main() {
   h('MIGRATION v3 — ADVERSARIAL TESTS (ruling 15 item 7)');
   const base = startCluster();
@@ -186,12 +201,18 @@ async function main() {
     // A clean document now has to name the object version its verdict judged, and show that its
     // bytes were verified. This fixture predates ruling 17 item 4 and was a plain 'clean' row; the
     // new constraint rejected it, which is the constraint working.
+    // Pending first, then an ingested verdict, then the reflection. Writing 'clean' directly is
+    // now refused — which is ruling 18 item 6, and which broke this fixture, correctly.
     await q(`INSERT INTO intake_documents
                (id,company_id,submitted_by,origin,byte_size,sha256,storage_bucket,storage_key,
-                storage_version_id,scan_status,scan_version_id,scanned_at,
-                integrity_ok,integrity_checked_at,detected_mime)
+                storage_version_id,detected_mime)
              VALUES ('doc-a','co-a','naren','upload',1024,$1,'abiozen-intake','co-a/doc-a.pdf',
-                     'ver-a','clean','ver-a',NOW(),true,NOW(),'application/pdf')`, [SHA('a')]);
+                     'ver-a','application/pdf')`, [SHA('a')]);
+    await ingest(q, 'doc-a', 'ver-a', 'NO_THREATS_FOUND');
+    await q(`UPDATE intake_documents
+                SET scan_status='clean', scan_version_id='ver-a', scanned_at=NOW(),
+                    integrity_ok=true, integrity_checked_at=NOW()
+              WHERE id='doc-a'`);
     await q(`INSERT INTO solicitation_requirements
                (id,company_id,solicitation_id,requirement_kind,description,quantity_value,quantity_unit)
              VALUES ('req-a','co-a','sol-a','material','50 kg of a named API',50,'kg')`);
@@ -427,9 +448,18 @@ async function main() {
 
     // ── 7. documents: integrity and scan discipline (items 5–6) ───────────
     h('7. DOCUMENT INTEGRITY AND SCAN DISCIPLINE');
+    // This must reach intake_documents_clean_requires_storage, so it needs a version and an
+    // ingested verdict first: the ruling-18 trigger is a BEFORE trigger and fires ahead of every
+    // CHECK, so without those the refusal would come from the wrong guard and this assertion
+    // would be testing something it does not name.
+    await q(`INSERT INTO intake_documents
+               (id,company_id,submitted_by,origin,byte_size,sha256,storage_version_id)
+             VALUES ('doc-bad','co-a','naren','upload',10,$1,'v1')`, [SHA('b')]);
+    await ingest(q, 'doc-bad', 'v1', 'NO_THREATS_FOUND');
     const cleanNoStore = await refused(q,
-      `INSERT INTO intake_documents (id,company_id,submitted_by,origin,byte_size,sha256,scan_status)
-         VALUES ('doc-bad','co-a','naren','upload',10,$1,'clean')`, [SHA('b')]);
+      `UPDATE intake_documents SET scan_status='clean', scan_version_id='v1', scanned_at=NOW(),
+              integrity_ok=true, integrity_checked_at=NOW()
+         WHERE id='doc-bad'`);
     if (cleanNoStore && /clean_requires_storage/.test(cleanNoStore)) {
       ok('a document marked clean with no storage reference or scan time → refused');
     } else bad('a clean document with no storage was accepted', cleanNoStore || 'accepted');
@@ -457,19 +487,144 @@ async function main() {
          VALUES ('doc-dup','co-a','naren','upload',1024,$1)`, [SHA('a')]);
     if (dupSha && /unique|duplicate key/i.test(dupSha)) ok('the same bytes twice → one document');
     else bad('duplicate bytes created a second document', dupSha || 'accepted');
+    // ── 7c. RULING 18 ITEM 6 — A CLEAN VERDICT CANNOT BE FORGED ──────────
+    h('7c. THE APPLICATION AND THE AI PATH CANNOT INVENT A SCAN VERDICT');
+    // The threat model is not an outside attacker: it is our own code, and specifically the AI
+    // evaluation path, writing 'clean' because a column was writable.
+    await q(`INSERT INTO intake_documents
+               (id,company_id,submitted_by,origin,byte_size,sha256,detected_mime,
+                storage_bucket,storage_key,storage_version_id)
+             VALUES ('doc-forge','co-a','naren','upload',2048,$1,'application/pdf',
+                     'b','prpa/co-a/2026/11/f.pdf','fv1')`, [H('forge')]);
+
+    const asserted = await refused(q,
+      `UPDATE intake_documents SET scan_status='clean', scan_version_id='fv1', scanned_at=NOW(),
+              integrity_ok=true, integrity_checked_at=NOW() WHERE id='doc-forge'`);
+    if (asserted && /cannot be asserted, only reflected/.test(asserted)) {
+      ok("'clean' with NO ingested scanner result → REFUSED; a verdict is reflected, not asserted");
+    } else bad('a verdict was asserted with no scanner result', asserted || 'accepted');
+
+    // The AI path has no channel by which its reasoning becomes a scan result.
+    for (const ch of ['application', 'ai', 'manual', 'claude']) {
+      const e = await refused(q,
+        `INSERT INTO document_scan_results
+           (id,company_id,document_id,storage_version_id,provider,channel,
+            provider_event_id,provider_status,mapped_status)
+         VALUES ($1,'co-a','doc-forge','fv1','aws_guardduty_malware_protection_s3',$2,
+                 $3,'NO_THREATS_FOUND','clean')`, [`sr-${ch}`, ch, `e-${ch}`]);
+      if (e && /document_scan_results_channel/.test(e)) ok(`channel '${ch}' → REFUSED; there is no such delivery path`);
+      else bad(`channel '${ch}' was accepted`, e || 'accepted');
+    }
+
+    // A verdict may not be mapped to something the provider did not say.
+    const badMap = await refused(q,
+      `INSERT INTO document_scan_results
+         (id,company_id,document_id,storage_version_id,provider,channel,
+          provider_event_id,provider_status,mapped_status)
+       VALUES ('sr-map','co-a','doc-forge','fv1','aws_guardduty_malware_protection_s3',
+               'eventbridge','e-map','THREATS_FOUND','clean')`);
+    if (badMap && /mapping_is_the_documented_one/.test(badMap)) {
+      ok("THREATS_FOUND mapped to 'clean' → REFUSED; the mapping is fixed in the database too");
+    } else bad('a threat was mapped to clean', badMap || 'accepted');
+
+    const unknownStatus = await refused(q,
+      `INSERT INTO document_scan_results
+         (id,company_id,document_id,storage_version_id,provider,channel,
+          provider_event_id,provider_status,mapped_status)
+       VALUES ('sr-unk','co-a','doc-forge','fv1','aws_guardduty_malware_protection_s3',
+               'eventbridge','e-unk','PROBABLY_FINE','clean')`);
+    // Refused — by the MAPPING constraint, because an unrecognised status cannot satisfy any of
+    // its five branches. That makes document_scan_results_provider_status unreachable in practice:
+    // defence in depth rather than the first line. Asserting its name would assert a path the
+    // database does not take.
+    if (unknownStatus && /(provider_status|mapping_is_the_documented_one)/.test(unknownStatus)) {
+      ok('an unrecognised provider status cannot be stored at all, so it cannot become clean');
+    } else bad('an unknown provider status was accepted', unknownStatus || 'accepted');
+
+    // A real verdict, and the reflection it permits — the positive control.
+    await ingest(q, 'doc-forge', 'fv1', 'THREATS_FOUND');
+    const claimClean = await refused(q,
+      `UPDATE intake_documents SET scan_status='clean', scan_version_id='fv1', scanned_at=NOW(),
+              integrity_ok=true, integrity_checked_at=NOW() WHERE id='doc-forge'`);
+    if (claimClean && /says 'infected', not 'clean'/.test(claimClean)) {
+      ok("the scanner said infected → 'clean' is REFUSED with the real verdict named");
+    } else bad('a clean verdict overrode an infected scan result', claimClean || 'accepted');
+    const reflectTrue = await refused(q,
+      `UPDATE intake_documents SET scan_status='infected', scan_version_id='fv1', scanned_at=NOW()
+         WHERE id='doc-forge'`);
+    if (!reflectTrue) ok('…and the TRUE verdict is accepted — the gate reflects, it does not block');
+    else bad('the true verdict was refused', reflectTrue);
+
+    // An ingested result for a different version authorizes nothing.
+    const otherVer = await refused(q,
+      `UPDATE intake_documents SET storage_version_id='fv2', scan_status='clean',
+              scan_version_id='fv2', scanned_at=NOW(), integrity_ok=true,
+              integrity_checked_at=NOW() WHERE id='doc-forge'`);
+    if (otherVer && /no ingested scan result/.test(otherVer)) {
+      ok('a result for version fv1 does not clear version fv2');
+    } else bad('a verdict crossed object versions', otherVer || 'accepted');
+
+    // Evidence is append-only. Evidence that can be edited is not evidence.
+    const edited = await refused(q,
+      `UPDATE document_scan_results SET provider_status='NO_THREATS_FOUND', mapped_status='clean'
+         WHERE document_id='doc-forge'`);
+    if (edited && /append-only/.test(edited)) ok('a stored scan result cannot be edited');
+    else bad('a scan result was rewritten', edited || 'accepted');
+    const deleted = await refused(q, `DELETE FROM document_scan_results WHERE document_id='doc-forge'`);
+    if (deleted && /never deleted/.test(deleted)) ok('a stored scan result cannot be deleted');
+    else bad('a scan result was deleted', deleted || 'accepted');
+
+    const dupEvent = await refused(q,
+      `INSERT INTO document_scan_results
+         (id,company_id,document_id,storage_version_id,provider,channel,
+          provider_event_id,provider_status,mapped_status)
+       SELECT 'sr-dup',company_id,document_id,storage_version_id,provider,channel,
+              provider_event_id,provider_status,mapped_status
+         FROM document_scan_results WHERE document_id='doc-forge' LIMIT 1`);
+    if (dupEvent) ok('the same provider event cannot be ingested twice');
+    else bad('a duplicate provider event was accepted', 'accepted');
+
+    const crossScan = await refused(q,
+      `INSERT INTO document_scan_results
+         (id,company_id,document_id,storage_version_id,provider,channel,
+          provider_event_id,provider_status,mapped_status)
+       VALUES ('sr-cross','co-b','doc-forge','fv1','aws_guardduty_malware_protection_s3',
+               'eventbridge','e-cross','NO_THREATS_FOUND','clean')`);
+    if (crossScan) ok("co-b cannot ingest a scan result for co-a's document");
+    else bad('a cross-tenant scan result was accepted', 'accepted');
+
+    const threatsOnClean = await refused(q,
+      `INSERT INTO document_scan_results
+         (id,company_id,document_id,storage_version_id,provider,channel,
+          provider_event_id,provider_status,mapped_status,threats)
+       VALUES ('sr-tc','co-a','doc-forge','fv3','aws_guardduty_malware_protection_s3',
+               'eventbridge','e-tc','NO_THREATS_FOUND','clean','EICAR')`);
+    if (threatsOnClean && /threats_only_when_found/.test(threatsOnClean)) {
+      ok('a clean verdict carrying a threat list → refused');
+    } else bad('a clean verdict carried threats', threatsOnClean || 'accepted');
+
     // ── 7b. RULING 17 ITEM 4 — A VERDICT BELONGS TO ONE OBJECT VERSION ───
     h('7b. ONLY A CURRENT CLEAN VERDICT PLUS INTEGRITY AUTHORIZES A DOWNLOAD');
     // A presigned URL is not a database write, so the row that must precede one is the gate.
-    const mkDoc = async (id, extra) => q(
-      `INSERT INTO intake_documents
-         (id,company_id,submitted_by,origin,byte_size,sha256,detected_mime,
-          storage_bucket,storage_key,storage_version_id,
-          scan_status,scan_version_id,scanned_at,integrity_ok,integrity_checked_at)
-       VALUES ($1,'co-a','naren','upload',1024,$2,'application/pdf',
-               'playnexa-prpa-documents-dev','prpa/co-a/2026/11/x.pdf',$3,
-               $4,$5,$6,$7,$8)`,
-      [id, H(id), extra.ver, extra.status, extra.scanVer, extra.scannedAt,
-       extra.integrity, extra.integrityAt]);
+    const PS = { clean: 'NO_THREATS_FOUND', infected: 'THREATS_FOUND', unsupported: 'UNSUPPORTED',
+      access_denied: 'ACCESS_DENIED', failed: 'FAILED' };
+    const mkDoc = async (id, extra) => {
+      await q(
+        `INSERT INTO intake_documents
+           (id,company_id,submitted_by,origin,byte_size,sha256,detected_mime,
+            storage_bucket,storage_key,storage_version_id)
+         VALUES ($1,'co-a','naren','upload',1024,$2,'application/pdf',
+                 'playnexa-prpa-documents-dev','prpa/co-a/2026/11/x.pdf',$3)`,
+        [id, H(id), extra.ver]);
+      if (extra.status === 'pending') return;
+      await ingest(q, id, extra.scanVer, PS[extra.status]);
+      await q(
+        `UPDATE intake_documents
+            SET scan_status=$2, scan_version_id=$3, scanned_at=$4,
+                integrity_ok=$5, integrity_checked_at=$6
+          WHERE id=$1`,
+        [id, extra.status, extra.scanVer, extra.scannedAt, extra.integrity, extra.integrityAt]);
+    };
 
     const grant = (id, doc, ver, mins = 5) => refused(q,
       `INSERT INTO document_download_grants
@@ -526,6 +681,7 @@ async function main() {
 
     // Re-scanned at the new version, it is servable again — and a grant naming the OLD version is
     // still refused, so a grant cannot be replayed across a re-upload.
+    await ingest(q, 'doc-ok', 'v2', 'NO_THREATS_FOUND');
     await q(`UPDATE intake_documents
                 SET scan_status='clean', scan_version_id='v2', scanned_at=NOW(),
                     integrity_ok=true, integrity_checked_at=NOW()
@@ -542,22 +698,29 @@ async function main() {
     } else bad('integrity could be revoked while the document stayed clean', brokeIntegrity || 'accepted');
 
     // Integrity is a separate requirement from the scan, per ruling 17 item 4.
+    await q(`INSERT INTO intake_documents
+                (id,company_id,submitted_by,origin,byte_size,sha256,detected_mime,storage_bucket,
+                 storage_key,storage_version_id)
+              VALUES ('doc-noint','co-a','naren','upload',10,$1,'application/pdf','b','k','v1')`,
+      [H('noint')]);
+    await ingest(q, 'doc-noint', 'v1', 'NO_THREATS_FOUND');
     const noIntegrity = await refused(q,
-      `INSERT INTO intake_documents
-         (id,company_id,submitted_by,origin,byte_size,sha256,detected_mime,storage_bucket,
-          storage_key,storage_version_id,scan_status,scan_version_id,scanned_at)
-       VALUES ('doc-noint','co-a','naren','upload',10,$1,'application/pdf','b','k','v1',
-               'clean','v1',NOW())`, [H('noint')]);
+      `UPDATE intake_documents SET scan_status='clean', scan_version_id='v1', scanned_at=NOW()
+         WHERE id='doc-noint'`);
     if (noIntegrity && /clean_verdict_is_current/.test(noIntegrity)) {
       ok('clean with NO integrity verification → refused (scan and integrity are separate)');
     } else bad('a clean document with no integrity check was accepted', noIntegrity || 'accepted');
 
+    // intake_documents_verdict_names_its_version is now DEFENCE IN DEPTH rather than the first
+    // line: any non-pending verdict with a null version is refused by the ruling-18 trigger
+    // before a CHECK is evaluated. Asserting the constraint name here would be asserting a path
+    // the database no longer takes, so this asserts the refusal and names what produced it.
     const verdictNoVersion = await refused(q,
       `INSERT INTO intake_documents
          (id,company_id,submitted_by,origin,byte_size,sha256,scan_status)
        VALUES ('doc-nov','co-a','naren','upload',10,$1,'infected')`, [H('nov')]);
-    if (verdictNoVersion && /verdict_names_its_version/.test(verdictNoVersion)) {
-      ok('a verdict that names no object version → refused');
+    if (verdictNoVersion && /no ingested scan result/.test(verdictNoVersion)) {
+      ok('a verdict naming no object version → refused (by the ingestion gate, which fires first)');
     } else bad('a versionless verdict was accepted', verdictNoVersion || 'accepted');
 
     // Short-lived by construction, and tenant-scoped.

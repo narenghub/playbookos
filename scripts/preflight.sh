@@ -99,6 +99,7 @@ pf_step "demand count runs on Postgres" node scripts/check-demand-count-sql.js
 # || 'literal'`. A scanner that fires on anything high-entropy gets muted, and then misses the real
 # one — the same alarm fatigue that let a broken cron send 168 false alerts a week unnoticed.
 pf_step "no committed credentials" node scripts/check-secrets.js
+pf_step "no credentials in git history past their rotation deadline" node scripts/check-secrets.js --history
 
 # An exporter's stdout is a file somebody else opens. `initDB` prints the database banner — with the
 # super-admin address in it — and three of the four exporters wrote that into customer-bound CSVs

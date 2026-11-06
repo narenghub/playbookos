@@ -418,3 +418,45 @@ decision with a cost benefit, not a cost decision with a security footnote.
 - [Malware Protection for S3 — supported S3 features](https://docs.aws.amazon.com/guardduty/latest/ug/supported-s3-features-malware-protection-s3.html)
 - [Malware Protection for S3 — scan result monitoring](https://docs.aws.amazon.com/guardduty/latest/ug/monitoring-malware-protection-s3-scans-gdu.html)
 - [Malware Protection for S3 — EventBridge](https://docs.aws.amazon.com/guardduty/latest/ug/monitor-with-eventbridge-s3-malware-protection.html)
+
+---
+
+## 8. Decisions recorded by ruling 18
+
+**Credential model: option A, as a 90-day exception.** Railway holds long-lived static AWS access
+keys in sealed variables. Granted 2026-11-06, **expires 2027-02-04**, reassess by **2027-01-21**.
+The record is `docs/security/credential-exceptions.json`, and `scripts/check-storage-isolation.js`
+— part of preflight — **fails once that date passes**. A 90-day window is only real if something
+breaks on day 91.
+
+Reassessment triggers for the AWS broker alternative, so the review is against criteria rather than
+a mood: a second consumer of the document store; materially higher document volume or sensitivity;
+or an external requirement forbidding static cloud credentials on a third-party platform.
+
+**KMS: annual automatic rotation, both keys.** Approved 2026-11-06. AWS bills the first and second
+rotation at $1/month each and caps there, so per key: $1 now, $2 after 2027-11-06, $3 after
+2028-11-05, and $3 thereafter. Both keys reach a **$6/month steady state on 2028-11-05** — $4/month
+above the unrotated figure, deliberately accepted.
+
+**IAM access-key rotation is tracked separately**, per ruling 18 item 4: quarterly and manual,
+because Railway documents no rotation mechanism. Next due 2027-02-04, the same date the exception
+expires — deliberately, so the two land as one piece of work.
+
+**Sealed variables cannot be read back.** Rotation therefore means minting a fresh key in AWS and
+sealing the new value; the old one is unrecoverable by design. Plan the rotation as a replacement,
+never as a copy.
+
+## 9. Scan verdicts are ingested, not asserted (ruling 18 item 6)
+
+`intake_documents.scan_status` is no longer a column the application may set. It may only reflect a
+row in `document_scan_results`, which must name a provider, a delivery channel (`eventbridge` or
+`guardduty_on_demand`; `application` and `ai` are not permissible values), a provider event id, and
+the object version judged. The provider→internal mapping is fixed in the database as well as in
+JavaScript, results are append-only, and a `THREATS_FOUND` result cannot be recorded as `clean`.
+
+**This is structural separation, not privilege separation**, and the difference is recorded in
+`docs/tickets/ENG-003`. The application connects to Postgres as a superuser, which bypasses `GRANT`
+and RLS, so a code path that meant to lie could fabricate a result row and reflect it. The control
+removes the accident and the casual path and leaves a row naming its channel behind. Real separation
+needs a non-superuser application role and an ingestion role of its own, which is a production
+change.

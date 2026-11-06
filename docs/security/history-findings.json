@@ -1,0 +1,96 @@
+{
+  "_README": [
+    "Triaged credential findings in this repository's GIT HISTORY. Scanned by",
+    "`node scripts/check-secrets.js --history`, which is part of preflight.",
+    "",
+    "History cannot be cleaned without a rewrite, so the gate is each finding's STATUS, not its",
+    "existence:",
+    "  rotate-required : the credential is exposed and may still be valid. FAILS once",
+    "                    accepted_until has passed. Rotate it, then set status to retired.",
+    "  retired         : rotated out of use. Passes, and if watch_sha12 is present the value is",
+    "                    WATCHED -- its reappearance anywhere fails.",
+    "  placeholder     : triaged as never having been a credential.",
+    "",
+    "NEVER add a hash of a LIVE secret to this file. It lives in a PUBLIC repository, and a hash",
+    "of a weak secret is a brute-force target. Only a value that is already compromised AND",
+    "rotated out of use may carry a watch_sha12 -- at which point the hash protects nothing that",
+    "still matters. A finding that is exposed but not yet rotated is recorded WITHOUT a hash of",
+    "its value, which is why the admin-password entry below has none."
+  ],
+
+  "_assessed": {
+    "date": "2026-11-06",
+    "ruling": "18 item 2 -- assess repository history and any shared copies for exposure",
+    "repository_visibility": "PUBLIC (confirmed via GitHub API: private=false, visibility=public)",
+    "commits_scanned": 162,
+    "forks": 0,
+    "conclusion": [
+      "Exactly one real credential is in this repository's history: the production admin",
+      "password. Because the repository is public, it has been readable by anyone on the internet",
+      "since 2026-10-27, and removing it from the tip the same day did not remove it from history.",
+      "",
+      "Measured NOT to be in history: the GitHub personal access token, the Railway Postgres",
+      "password, and the three webhook/trigger secrets -- 0 commits each. No .env was ever",
+      "committed; only .env.example, with placeholder values. No vendor-prefixed API key",
+      "(Anthropic, OpenAI, Resend, AWS, Google, Twilio, Slack, SendGrid, Stripe) appears in any",
+      "commit as a real value.",
+      "",
+      "Those credentials are exposed through the project handoff document instead, which is a",
+      "different and smaller blast radius: everyone with access to that document, plus anyone it",
+      "was pasted to. They still require rotation; they do not require assuming the whole internet",
+      "has them."
+    ]
+  },
+
+  "findings": [
+    {
+      "id": "2026-10-27-admin-password",
+      "what": "production admin password for naren@abiozen.com",
+      "where": "scripts/init-db.js (bc5a8e5), AUTONOMY_SECURITY_REVIEW.md (0c6a937)",
+      "removed_from_tip": "98a0765 on 2026-10-27 -- 'Day 0: stop committing credentials, and make rotation provable'",
+      "exposure": "PUBLIC git history of a public repository, since 2026-10-27. Not recoverable by deletion.",
+      "status": "rotate-required",
+      "accepted_until": "2026-11-13",
+      "watch_sha12": null,
+      "note": [
+        "No hash of this value is stored, because it may still be live and this file is public.",
+        "Once the password is changed, set status to 'retired' and add watch_sha12 of the OLD",
+        "value so its reappearance is caught; at that point the hash is harmless.",
+        "",
+        "accepted_until is deliberately 7 days, not the 90 granted to the AWS credential",
+        "exception in ruling 18 item 3. A publicly exposed admin password does not get a quarter.",
+        "Past that date this check fails and preflight goes red, which is the intended behaviour:",
+        "shipping more code matters less than an exposed production login.",
+        "",
+        "Production login has been returning password_mismatch since 2026-11-06, which may mean",
+        "the password was already changed. 'May' is not a remediation record, so this stays",
+        "rotate-required until the change is confirmed."
+      ]
+    },
+    {
+      "id": "bb3dda2954eb",
+      "what": "database URL with an embedded password",
+      "where": "scripts/verify-rotation.test.js (81c8fe1)",
+      "status": "placeholder",
+      "note": [
+        "A fixture: postgresql://u:<32 chars>@h:5432. The username is 'u' and the host is 'h'.",
+        "It exists to exercise the rotation test and addresses nothing real. It is recorded here",
+        "rather than pattern-excluded because 'u' and 'h' are not placeholder words, so the",
+        "scanner cannot tell -- and a human decision written down is better than a regex that",
+        "quietly widens."
+      ]
+    },
+    {
+      "id": "2026-10-27-env-example-abiozen-dsn",
+      "what": "ABIOZEN_DATABASE_URL template carrying the real database host",
+      "where": ".env.example (bc5a8e5)",
+      "status": "placeholder",
+      "note": [
+        "postgresql://USER:PASSWORD@interchange.proxy.rlwy.net:18553/railway -- the credentials are",
+        "the literal words USER and PASSWORD. The HOST is real, and that is acceptable: a Railway",
+        "proxy endpoint is not a secret and knowing it grants nothing without credentials.",
+        "Recorded so that a future reader does not rediscover it and assume a leak."
+      ]
+    }
+  ]
+}

@@ -126,6 +126,36 @@ for (const t of [901, 3600, 604800, 0, -1, 1.5, 'five', null]) {
   else bad('a 7-day URL was permitted', e || 'accepted');
 }
 
+h('7. THE 90-DAY CREDENTIAL EXCEPTION HAS NOT EXPIRED');
+// Ruling 18 item 3 granted static AWS credentials as a 90-day exception. A 90-day window is only
+// real if something fails on day 91, and that something is this check. Without it the end date is
+// a sentiment in a document nobody rereads.
+{
+  const fsx = require('fs');
+  const pathx = require('path');
+  const file = pathx.join(__dirname, '..', 'docs', 'security', 'credential-exceptions.json');
+  let doc = null;
+  try { doc = JSON.parse(fsx.readFileSync(file, 'utf8')); } catch (e) {
+    bad('cannot read docs/security/credential-exceptions.json', `${e.message} — a missing record is not an absent exception`);
+  }
+  if (doc) {
+    const today = new Date().toISOString().slice(0, 10);
+    for (const x of doc.exceptions || []) {
+      if (!x.expires_on) { bad(`exception '${x.id}' has no expiry`, 'an exception without an end date is a permanent decision wearing a temporary label'); continue; }
+      if (x.expires_on < today) {
+        bad(`exception '${x.id}' EXPIRED on ${x.expires_on}`, `today is ${today}. Reassess it or renew it deliberately; do not extend it by ignoring this.`);
+      } else if (x.reassess_by && x.reassess_by < today) {
+        bad(`exception '${x.id}' is past its reassessment date ${x.reassess_by}`, `it expires ${x.expires_on}, so there is still time — but the review was due`);
+      } else {
+        ok(`exception '${x.id}' valid until ${x.expires_on} (reassess by ${x.reassess_by || 'n/a'})`);
+      }
+    }
+    const r = doc.kms_rotation || {};
+    if (/annual/.test(r.decision || '')) ok('annual KMS key rotation is recorded as approved, with its cost consequence');
+    else bad('the KMS rotation decision is not recorded');
+  }
+}
+
 console.log(`\n${'─'.repeat(78)}`);
 console.log(`  ${pass} assertion(s) passed · ${fail} failed`);
 if (fail) {

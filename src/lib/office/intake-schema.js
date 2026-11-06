@@ -76,6 +76,7 @@ const VERSION = '2026-11-06.intake.v3';
 const CREATED_TABLES = Object.freeze([
   'intake_documents',
   'document_download_grants',
+  'document_scan_results',
   'solicitation_requirements',
   'requirement_matches',
   'fulfillment_authorizations',
@@ -89,6 +90,7 @@ const ROLLBACK_ORDER = Object.freeze([
   'requirement_matches',
   'solicitation_requirements',
   'document_download_grants',
+  'document_scan_results',
   'intake_documents',
 ]);
 
@@ -501,6 +503,134 @@ const DDL = [
      BEFORE INSERT OR UPDATE ON fulfillment_authorizations
      FOR EACH ROW EXECUTE FUNCTION prpa_authorization_write_guard()`,
 
+  // ── RULING 18 ITEM 6 — A VERDICT IS INGESTED, NEVER ASSERTED ───────────────
+  //
+  // Until now intake_documents.scan_status was an ordinary column. Any code path that could write
+  // the row could write 'clean' — including the AI evaluation path, which has no business having
+  // an opinion about malware.
+  //
+  // So a verdict is no longer something the application states. It is something a scanner's
+  // result is INGESTED as, and scan_status may only reflect an ingested result for the exact
+  // object version it judged. The application's remaining power is to copy a verdict it received;
+  // it cannot invent one.
+  //
+  // WHAT THIS DOES NOT ACHIEVE, stated plainly because the gap matters more than the control:
+  // src/lib/office/context.js records that this application connects to Postgres as a SUPERUSER.
+  // A superuser bypasses GRANT, so there is no in-database privilege separation available: a
+  // determined code path could insert a fabricated row into document_scan_results and then
+  // reflect it. What follows is STRUCTURAL separation — the verdict must be derived from an
+  // ingested result that names a provider, a channel and an event id — not PRIVILEGE separation.
+  // Real privilege separation requires a non-superuser application role and a scanner-ingestion
+  // role of its own. That is ENG-003, and it is a production change, so it is not done here.
+  //
+  // Structural separation is still worth having: it removes the accident and the casual path, and
+  // it makes a forged verdict something that has to be deliberately constructed and that leaves a
+  // row naming its channel behind. It does not stop an attacker who already runs our code.
+  `CREATE TABLE IF NOT EXISTS document_scan_results (
+     id                 TEXT PRIMARY KEY,
+     company_id         TEXT NOT NULL REFERENCES companies(id),
+     document_id        TEXT NOT NULL,
+     -- The object version the scanner judged. GuardDuty's EventBridge event carries
+     -- detail.s3ObjectDetails.versionId, so this is a documented field and not an inference.
+     storage_version_id TEXT NOT NULL,
+     provider           TEXT NOT NULL,
+     -- How the result reached us. 'application' and 'ai' are deliberately NOT permitted values:
+     -- there is no channel by which the app's own reasoning becomes a scan result.
+     channel            TEXT NOT NULL,
+     -- The provider's own identifier for the event, kept so a result cannot be ingested twice and
+     -- so a verdict can be traced back to a specific delivery.
+     provider_event_id  TEXT NOT NULL,
+     provider_status    TEXT NOT NULL,
+     mapped_status      TEXT NOT NULL,
+     threats            TEXT,
+     received_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     raw_detail         JSONB,
+     CONSTRAINT document_scan_results_doc_fk
+       FOREIGN KEY (document_id, company_id) REFERENCES intake_documents(id, company_id)
+       MATCH FULL ON DELETE RESTRICT,
+     CONSTRAINT document_scan_results_channel
+       CHECK (channel IN ('eventbridge', 'guardduty_on_demand')),
+     CONSTRAINT document_scan_results_provider
+       CHECK (provider IN ('aws_guardduty_malware_protection_s3')),
+     -- The provider's five documented values, and ours. An unrecognised provider status cannot be
+     -- stored at all, so it can never be silently mapped to 'clean'.
+     CONSTRAINT document_scan_results_provider_status
+       CHECK (provider_status IN ('NO_THREATS_FOUND','THREATS_FOUND','UNSUPPORTED','ACCESS_DENIED','FAILED')),
+     CONSTRAINT document_scan_results_mapped_status
+       CHECK (mapped_status IN ('clean','infected','unsupported','access_denied','failed')),
+     -- The mapping is fixed here as well as in JavaScript, so a wrong mapping is refused by the
+     -- database rather than depending on the one caller getting it right.
+     CONSTRAINT document_scan_results_mapping_is_the_documented_one CHECK (
+       (provider_status = 'NO_THREATS_FOUND' AND mapped_status = 'clean')
+       OR (provider_status = 'THREATS_FOUND'  AND mapped_status = 'infected')
+       OR (provider_status = 'UNSUPPORTED'    AND mapped_status = 'unsupported')
+       OR (provider_status = 'ACCESS_DENIED'  AND mapped_status = 'access_denied')
+       OR (provider_status = 'FAILED'         AND mapped_status = 'failed')),
+     -- A threat list belongs only to a verdict that found one.
+     CONSTRAINT document_scan_results_threats_only_when_found
+       CHECK (mapped_status = 'infected' OR threats IS NULL),
+     UNIQUE (provider, provider_event_id),
+     UNIQUE (id, company_id)
+   )`,
+
+  // Append-only. A scan result is evidence; evidence that can be edited after the fact is not
+  // evidence. A later verdict for the same version is a NEW row, not a correction of the old one.
+  `CREATE OR REPLACE FUNCTION prpa_scan_results_append_only() RETURNS TRIGGER AS $fn$
+     BEGIN
+       IF TG_OP = 'UPDATE' THEN
+         RAISE EXCEPTION 'document_scan_results is append-only; a later verdict is a new row'
+           USING ERRCODE = 'check_violation';
+       END IF;
+       RAISE EXCEPTION 'document_scan_results rows are never deleted'
+         USING ERRCODE = 'check_violation';
+     END;
+   $fn$ LANGUAGE plpgsql`,
+  `DROP TRIGGER IF EXISTS trg_prpa_scan_results_append_only ON document_scan_results`,
+  `CREATE TRIGGER trg_prpa_scan_results_append_only
+     BEFORE UPDATE OR DELETE ON document_scan_results
+     FOR EACH ROW EXECUTE FUNCTION prpa_scan_results_append_only()`,
+
+  // The gate: scan_status may only hold what an ingested result said, about the version it judged.
+  `CREATE OR REPLACE FUNCTION prpa_scan_status_must_be_ingested() RETURNS TRIGGER AS $fn$
+     DECLARE
+       m TEXT;
+     BEGIN
+       -- 'pending' is the only verdict the application may write on its own, because it is the
+       -- absence of one. Everything else must be shown.
+       IF NEW.scan_status = 'pending' THEN RETURN NEW; END IF;
+
+       IF TG_OP = 'UPDATE'
+          AND NEW.scan_status = OLD.scan_status
+          AND NEW.scan_version_id IS NOT DISTINCT FROM OLD.scan_version_id THEN
+         RETURN NEW;                      -- the verdict is unchanged; this write is about something else
+       END IF;
+
+       SELECT mapped_status INTO m
+         FROM document_scan_results
+        WHERE document_id = NEW.id
+          AND company_id = NEW.company_id
+          AND storage_version_id = NEW.scan_version_id
+        ORDER BY received_at DESC
+        LIMIT 1;
+
+       IF m IS NULL THEN
+         RAISE EXCEPTION 'intake_documents: no ingested scan result for document % version %; a verdict of ''%'' cannot be asserted, only reflected',
+             NEW.id, COALESCE(NEW.scan_version_id, '(null)'), NEW.scan_status
+           USING ERRCODE = 'insufficient_privilege';
+       END IF;
+       IF m <> NEW.scan_status THEN
+         RAISE EXCEPTION 'intake_documents: the ingested scan result for version % says ''%'', not ''%''',
+             NEW.scan_version_id, m, NEW.scan_status
+           USING ERRCODE = 'check_violation';
+       END IF;
+       RETURN NEW;
+     END;
+   $fn$ LANGUAGE plpgsql`,
+  `DROP TRIGGER IF EXISTS trg_prpa_scan_status_must_be_ingested ON intake_documents`,
+  `CREATE TRIGGER trg_prpa_scan_status_must_be_ingested
+     BEFORE INSERT OR UPDATE ON intake_documents
+     FOR EACH ROW EXECUTE FUNCTION prpa_scan_status_must_be_ingested()`,
+
   // ── RULING 17 ITEM 4 — ONLY A CURRENT CLEAN VERDICT AUTHORIZES A DOWNLOAD ──
   // A presigned URL is not a database write, so the database cannot refuse one directly. What it
   // CAN refuse is the record that must exist before one is issued. Every download authorization is
@@ -579,6 +709,8 @@ const ROLLBACK_EXTRA_DDL = [
   // dangling object that the next apply would silently CREATE OR REPLACE.
   `DROP FUNCTION IF EXISTS prpa_authorization_write_guard()`,
   `DROP FUNCTION IF EXISTS prpa_download_grant_guard()`,
+  `DROP FUNCTION IF EXISTS prpa_scan_results_append_only()`,
+  `DROP FUNCTION IF EXISTS prpa_scan_status_must_be_ingested()`,
   `DELETE FROM source_connectors WHERE source_key = 'manual'`,
 ];
 
