@@ -63,6 +63,23 @@ const baselineArg = (process.argv.find((a) => /^--expect-baseline=/.test(a)) || 
 const MEASURED_BASELINE = baselineArg ? Number(baselineArg) : DEFAULT_BASELINE;
 const BASELINE_IS_MEASURED = !baselineArg;
 
+// ── THE PREDICATE HAS TO MATCH THE ONE THE BASELINE WAS COUNTED WITH ───────
+//
+// The 125 was measured on production with
+//
+//     SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'
+//
+// and that view — information_schema.tables — INCLUDES VIEWS. The first version of this script
+// counted `AND table_type = 'BASE TABLE'`, got 137 where verify-restore.js had reported 138 for
+// the same dump, and reported a phantom surplus of one.
+//
+// Both numbers were right. 138 total relations = 137 base tables + 1 view. The error was comparing
+// a base-tables-only count against a baseline that counted views too — two numbers arrived at by
+// different predicates, which is the same mistake as the 137 it was written to investigate.
+//
+// So the reconciliation is done on the baseline's own predicate, and the composition is printed
+// so the difference between the two figures is visible rather than confusing.
+
 // What connectors.v1 is responsible for: the tables it creates, plus the one its runner creates to
 // record itself. The runner's table is the whole discrepancy and is listed separately so it cannot
 // be quietly folded into the migration's own count again.
@@ -139,14 +156,28 @@ async function main() {
     await client.connect();
     const q = (sql, p) => client.query(sql, p);
 
-    const rows = (await q(
-      `SELECT table_name FROM information_schema.tables
-         WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-         ORDER BY table_name`)).rows.map((r) => r.table_name);
+    // Exactly the baseline's predicate: every relation information_schema.tables reports.
+    const all = (await q(
+      `SELECT table_name, table_type FROM information_schema.tables
+         WHERE table_schema = 'public'
+         ORDER BY table_type, table_name`)).rows;
+    const baseTables = all.filter((r) => r.table_type === 'BASE TABLE');
+    const views = all.filter((r) => r.table_type !== 'BASE TABLE');
+    const rows = all.map((r) => r.table_name);
     const present = new Set(rows);
 
     h('WHAT IS IN THE DUMP');
-    console.log(`  public base tables: ${rows.length}`);
+    console.log(`  relations counted by information_schema.tables : ${all.length}   ← the baseline's predicate`);
+    console.log(`    of which BASE TABLE                          : ${baseTables.length}`);
+    console.log(`    of which views                               : ${views.length}`);
+    if (views.length) {
+      for (const v of views) console.log(`      ${v.table_name}  (${v.table_type})`);
+      console.log('');
+      console.log('  The two figures reported elsewhere differ by exactly this: verify-restore.js');
+      console.log('  and the migration harness count relations (views included), so they say');
+      console.log(`  ${all.length}. A base-tables-only count says ${baseTables.length}. Neither is wrong; they must not be`);
+      console.log('  compared with each other, and the baseline below is the relation count.');
+    }
 
     // ── the thirteen, by name ─────────────────────────────────────────────
     h('THE 13 TABLES connectors.v1 IS RESPONSIBLE FOR');
@@ -189,7 +220,7 @@ async function main() {
     h('THE ARITHMETIC');
     const accountedFor = [...V1_TABLES, ...RUNNER_TABLES].filter((t) => present.has(t));
     const derived = rows.length - accountedFor.length;
-    console.log(`  tables in the dump                      ${String(rows.length).padStart(5)}`);
+    console.log(`  relations in the dump                   ${String(rows.length).padStart(5)}`);
     console.log(`  less the migration's own tables         ${String(-V1_TABLES.filter((t) => present.has(t)).length).padStart(5)}`);
     console.log(`  less the runner's bookkeeping table     ${String(-RUNNER_TABLES.filter((t) => present.has(t)).length).padStart(5)}`);
     console.log(`                                          ${'-'.repeat(5)}`);
@@ -203,7 +234,8 @@ async function main() {
       ok('created by the runner to record its own version. My 137 was an arithmetic error, not an');
       ok('unaccounted object.');
       console.log('');
-      console.log(`  After migration v2 (+3 tables) production should read ${rows.length + 3}.`);
+      console.log(`  After migration v2 (+3 tables) production should read ${rows.length + 3} relations`);
+      console.log(`  (${baseTables.length + 3} base tables + ${views.length} view${views.length === 1 ? '' : 's'}).`);
     } else {
       const diff = derived - MEASURED_BASELINE;
       bad(`THE IDENTITY DOES NOT CLOSE — derived ${derived}, measured ${MEASURED_BASELINE} (${diff > 0 ? '+' : ''}${diff})`,
