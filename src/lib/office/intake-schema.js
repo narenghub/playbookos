@@ -1,0 +1,416 @@
+'use strict';
+// ── MANUAL SOLICITATION INTAKE — SCHEMA v3 ──────────────────────────────────
+//
+// Ruling 15. Prepared and tested, NOT APPLIED to production.
+//
+// ── THE THREE THINGS RULING 15 ITEM 1 SEPARATES ─────────────────────────────
+//
+// My earlier design had two: a match either supported a commercial commitment or it did not. That
+// collapsed three different questions into one boolean, and the ruling is right to split them:
+//
+//   1. EVIDENCE SUFFICIENCY   — is there adequate, current evidence for THIS requirement?
+//                               Computed. Lives on requirement_matches.evidence_sufficient.
+//
+//   2. ELIGIBILITY            — does the solicitation's whole mandatory set come out satisfied?
+//                               Computed by qualify.js from (1). Still only ever NEEDS_REVIEW while
+//                               anything is UNKNOWN.
+//
+//   3. AUTHORIZATION TO BID   — may Abiozen commit to delivering this?
+//                               A HUMAN DECISION. Never computed, never derived, never implied by
+//                               (1) or (2). fulfillment_authorizations, below.
+//
+// "A previous delivery, supplier quote, catalog listing, or synthesis prediction must never
+// independently establish guaranteed fulfillment." Note that this names prior_delivery and
+// supplier_quote too — not just the three indicative classes. So no evidence class, however good,
+// establishes fulfillment. The strongest thing evidence can do is make a requirement SUFFICIENT,
+// and sufficiency across every requirement still is not a commitment.
+//
+// That is why authorization is a separate table and not a column. A column on solicitations would
+// be one UPDATE away from being set by whatever computed the verdict; a table whose every row
+// requires an approval id, an authorizing person and a timestamp cannot be produced by an
+// evaluation at all. The asymmetry is deliberate: evidence flows upward into sufficiency
+// automatically, and nothing flows upward into authorization ever.
+//
+// ── WHAT ITEM 2 CAN AND CANNOT BE GIVEN ─────────────────────────────────────
+//
+// "Reject orphaned references and cross-company records."
+//
+// Orphan rejection: everywhere, by foreign key.
+//
+// Cross-company rejection: everywhere the TARGET is tenant-scoped — solicitations,
+// solicitation_requirements, verified_capabilities, capability_scope_items, company_brands,
+// intake_documents — using the composite (id, company_id) MATCH FULL pattern this schema already
+// uses, so the constraint fires on the write from inside the engine.
+//
+// **AND NOT FOR `skus` OR `suppliers`.** Both are `id TEXT PRIMARY KEY` with NO company_id — they
+// are global legacy tables. There is no (id, company_id) to reference, so a composite FK is not
+// merely omitted here, it is impossible. A plain FK rejects orphans and that is the whole of what
+// can be enforced. Writing a constraint that LOOKED like it guarded tenancy would be worse than
+// this comment.
+//
+// The exposure is currently nil — one active company exists, and the read-session resolver refuses
+// outright when that stops being true. It becomes real the day a second company is added, and the
+// fix is a separate migration giving those two tables a tenant column, which touches live rows and
+// is deliberately not in this slice.
+//
+// ── WHY expires_on / valid_until APPEAR ON EVIDENCE ─────────────────────────
+//
+// Ruling 15 item 3: qualification must evaluate CURRENT evidence validity. An inventory count and a
+// supplier quote are facts as of a date, and a quote outside its validity window supports nothing.
+// So every match carries `evidence_as_of`, and `valid_until` where the class has one — and
+// sufficiency is a question asked at a point in time, not a stored truth.
+//
+// ── ITEM 9, WHICH IS A CORRECTION WORTH ENCODING ────────────────────────────
+//
+// "Do not treat an unrenewed future expiration as permanently disqualifying an opportunity that
+// could become eligible after renewal."
+//
+// A registration expiring before a submission deadline is not the same kind of failure as a
+// capability we do not have. One is remediable by an action already on somebody's list; the other
+// is a fact about the business. Collapsing them into NOT_QUALIFIED loses the distinction that
+// decides whether an opportunity is worth chasing. `blocking_reason_class` carries it:
+// 'remediable' vs 'structural', so the review queue can sort by what is fixable.
+
+const VERSION = '2026-11-06.intake.v3';
+
+const CREATED_TABLES = Object.freeze([
+  'intake_documents',
+  'solicitation_requirements',
+  'requirement_matches',
+  'fulfillment_authorizations',
+  'intake_audit',
+]);
+
+// Children first.
+const ROLLBACK_ORDER = Object.freeze([
+  'intake_audit',
+  'fulfillment_authorizations',
+  'requirement_matches',
+  'solicitation_requirements',
+  'intake_documents',
+]);
+
+// The three that can never make a requirement sufficient, named so they can be recorded honestly
+// and still never qualify anything.
+const INDICATIVE_CLASSES = Object.freeze([
+  'catalog_listing',        // we list it for sale. A listing is a sales page, not a shelf.
+  'synthesis_prediction',   // a model produced a route. A prediction is a hypothesis.
+  'supplier_relationship',  // a supplier exists and talks to us. Not a delivery.
+]);
+
+// These CAN make a requirement sufficient. None of them authorizes a bid.
+const SUFFICIENT_CLASSES = Object.freeze([
+  'stock_on_hand',
+  'prior_delivery',
+  'method_validated',
+  'supplier_quote',
+  'accreditation',
+  'certification',
+  'regulatory_authorization',
+]);
+
+const EVIDENCE_CLASSES = Object.freeze([...INDICATIVE_CLASSES, ...SUFFICIENT_CLASSES]);
+
+const BUSINESS_LINES = Object.freeze([
+  'molecule_commerce',
+  'custom_synthesis',
+  'analytical_services',
+  'scientific_intelligence',
+]);
+
+const REQUIREMENT_KINDS = Object.freeze([
+  'material', 'quantity', 'delivery', 'certification', 'analytical', 'specification', 'other',
+]);
+
+const list = (xs) => xs.map((x) => `'${x}'`).join(',');
+
+const DDL = [
+  // ─────────────────────────────────────────────────────────────────────────
+  // DOCUMENTS — integrity, scanning, and S3 by reference only
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // Bytes never enter Postgres. `storage_key` points at a private S3 object (ruling 15 item 5);
+  // downloads are short-lived presigned URLs issued per request, never a public object.
+  `CREATE TABLE IF NOT EXISTS intake_documents (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL REFERENCES companies(id),
+     submitted_by         TEXT NOT NULL,
+     submitted_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     origin               TEXT NOT NULL,
+     source_url           TEXT,
+     filename_original    TEXT,
+     -- declared_mime is recorded for the audit trail and NEVER trusted. detected_mime comes from
+     -- magic bytes and is what decides. A mismatch is a rejection, not a correction.
+     declared_mime        TEXT,
+     detected_mime        TEXT,
+     byte_size            BIGINT NOT NULL,
+     sha256               TEXT NOT NULL,
+     storage_bucket       TEXT,
+     storage_key          TEXT,
+     storage_kms_key_id   TEXT,
+     scan_status          TEXT NOT NULL DEFAULT 'pending',
+     scan_detail          TEXT,
+     scanned_at           TIMESTAMPTZ,
+     integrity_checked_at TIMESTAMPTZ,
+     integrity_ok         BOOLEAN,
+     CONSTRAINT intake_documents_origin_check CHECK (origin IN ('upload','url')),
+     -- 'unscannable' is NOT clean. Extraction requires 'clean', and the difference between
+     -- "scanned and fine" and "could not be scanned" is the whole point of having four values.
+     CONSTRAINT intake_documents_scan_check
+       CHECK (scan_status IN ('pending','clean','rejected','unscannable')),
+     CONSTRAINT intake_documents_url_has_url
+       CHECK (origin <> 'url' OR (source_url IS NOT NULL AND length(btrim(source_url)) > 0)),
+     CONSTRAINT intake_documents_size_cap
+       CHECK (byte_size > 0 AND byte_size <= 52428800),
+     CONSTRAINT intake_documents_sha256_shape
+       CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+     -- A clean document must say where it is and that its bytes were verified. A scan verdict with
+     -- no storage reference is a verdict about nothing.
+     CONSTRAINT intake_documents_clean_requires_storage CHECK (
+       scan_status <> 'clean' OR (
+         storage_bucket IS NOT NULL AND length(btrim(storage_bucket)) > 0
+         AND storage_key IS NOT NULL AND length(btrim(storage_key)) > 0
+         AND scanned_at IS NOT NULL
+         AND detected_mime IS NOT NULL)),
+     -- The same bytes submitted twice is the same document.
+     UNIQUE (company_id, sha256),
+     UNIQUE (id, company_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_intake_documents_company
+     ON intake_documents (company_id, submitted_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_intake_documents_scan
+     ON intake_documents (company_id, scan_status)`,
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // WHAT THE SOLICITATION ASKS FOR
+  // ─────────────────────────────────────────────────────────────────────────
+  `CREATE TABLE IF NOT EXISTS solicitation_requirements (
+     id                    TEXT PRIMARY KEY,
+     company_id            TEXT NOT NULL,
+     solicitation_id       TEXT NOT NULL,
+     requirement_kind      TEXT NOT NULL,
+     -- NULL is legitimate and common: ruling 15 item 4 models Abiozen as ONE platform, and a single
+     -- solicitation may touch molecule commerce, custom synthesis, analytical services and
+     -- scientific intelligence at once. The line is a property of the REQUIREMENT, never of the
+     -- solicitation, and a requirement nobody has classified yet is not a requirement in no line.
+     business_line         TEXT,
+     mandatory             BOOLEAN NOT NULL DEFAULT true,
+     description           TEXT NOT NULL,
+     specification         TEXT,
+     quantity_value        NUMERIC,
+     quantity_unit         TEXT,
+     required_by           DATE,
+     delivery_terms        TEXT,
+     -- PROVENANCE OF THE EXTRACTION ITSELF. A requirement nobody can trace back to a span of a
+     -- document is an assertion, not a finding.
+     extracted_from        TEXT,
+     source_span           JSONB,
+     extraction_method     TEXT,
+     extraction_confidence NUMERIC,
+     confirmed_by          TEXT,
+     confirmed_at          TIMESTAMPTZ,
+     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     CONSTRAINT solicitation_requirements_kind_check
+       CHECK (requirement_kind IN (${list(REQUIREMENT_KINDS)})),
+     CONSTRAINT solicitation_requirements_line_check
+       CHECK (business_line IS NULL OR business_line IN (${list(BUSINESS_LINES)})),
+     -- Anything a model proposed must name the model. An unattributed extraction cannot be audited,
+     -- and "a machine said so" is not provenance.
+     CONSTRAINT solicitation_requirements_method_attributed
+       CHECK (extraction_method IS NULL
+              OR extraction_method IN ('human','structured')
+              OR extraction_method LIKE 'model:%'),
+     CONSTRAINT solicitation_requirements_confidence_range
+       CHECK (extraction_confidence IS NULL
+              OR (extraction_confidence >= 0 AND extraction_confidence <= 1)),
+     -- A confirmation is a person and a time, together or not at all.
+     CONSTRAINT solicitation_requirements_confirmation_paired
+       CHECK ((confirmed_by IS NULL) = (confirmed_at IS NULL)),
+     CONSTRAINT solicitation_requirements_quantity_paired
+       CHECK ((quantity_value IS NULL) OR (quantity_unit IS NOT NULL)),
+     CONSTRAINT solicitation_requirements_tenant_fk
+       FOREIGN KEY (solicitation_id, company_id)
+       REFERENCES solicitations (id, company_id) MATCH FULL,
+     CONSTRAINT solicitation_requirements_document_tenant_fk
+       FOREIGN KEY (extracted_from, company_id)
+       REFERENCES intake_documents (id, company_id) MATCH SIMPLE,
+     UNIQUE (id, company_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_solicitation_requirements_sol
+     ON solicitation_requirements (company_id, solicitation_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_solicitation_requirements_unconfirmed
+     ON solicitation_requirements (company_id, solicitation_id) WHERE confirmed_at IS NULL`,
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // EVIDENCE SUFFICIENCY — ruling 15 item 1, concept (1) of three
+  // ─────────────────────────────────────────────────────────────────────────
+  `CREATE TABLE IF NOT EXISTS requirement_matches (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL,
+     requirement_id       TEXT NOT NULL,
+     evidence_class       TEXT NOT NULL,
+     capability_id        TEXT,
+     scope_item_id        TEXT,
+     -- skus and suppliers have NO company_id (see the header). A plain FK rejects orphans; cross-
+     -- tenant safety is NOT enforceable here and is not pretended to be.
+     sku_id               TEXT REFERENCES skus(id),
+     supplier_id          TEXT REFERENCES suppliers(id),
+     evidence_ref         TEXT,
+     -- Inventory and quotes are facts AS OF a date, and a quote outside its window supports nothing.
+     evidence_as_of       DATE,
+     valid_until          DATE,
+     -- How much of the requirement this evidence actually covers. A quote for 5 kg against a 50 kg
+     -- requirement is real evidence and is not sufficient, and without this column that difference
+     -- is invisible.
+     quantity_covered     NUMERIC,
+     quantity_unit        TEXT,
+     -- CONCEPT (1): is the evidence adequate for this requirement? NOT a commitment, NOT a bid
+     -- authorization, and deliberately not named as either.
+     evidence_sufficient  BOOLEAN NOT NULL DEFAULT false,
+     notes                TEXT,
+     matched_by           TEXT NOT NULL,
+     matched_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     approval_id          TEXT,
+     CONSTRAINT requirement_matches_class_check
+       CHECK (evidence_class IN (${list(EVIDENCE_CLASSES)})),
+     -- ── RULING 15 ITEM 1, AS A CONSTRAINT ──────────────────────────────
+     -- The three indicative classes can never be sufficient. The claim cannot be stored, by any
+     -- caller, however it is phrased.
+     CONSTRAINT requirement_matches_indicative_never_sufficient CHECK (
+       evidence_sufficient = false OR evidence_class NOT IN (${list(INDICATIVE_CLASSES)})),
+     -- Sufficiency needs a reference, an approval, and a date to be read at.
+     CONSTRAINT requirement_matches_sufficient_requires_evidence CHECK (
+       evidence_sufficient = false OR (
+         approval_id IS NOT NULL AND length(btrim(approval_id)) > 0
+         AND (capability_id IS NOT NULL OR evidence_ref IS NOT NULL)
+         AND evidence_as_of IS NOT NULL)),
+     CONSTRAINT requirement_matches_validity_window CHECK (
+       valid_until IS NULL OR evidence_as_of IS NULL OR valid_until >= evidence_as_of),
+     CONSTRAINT requirement_matches_quantity_paired
+       CHECK ((quantity_covered IS NULL) OR (quantity_unit IS NOT NULL)),
+     CONSTRAINT requirement_matches_tenant_fk
+       FOREIGN KEY (requirement_id, company_id)
+       REFERENCES solicitation_requirements (id, company_id) MATCH FULL,
+     CONSTRAINT requirement_matches_capability_tenant_fk
+       FOREIGN KEY (capability_id, company_id)
+       REFERENCES verified_capabilities (id, company_id) MATCH SIMPLE,
+     UNIQUE (id, company_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_requirement_matches_req
+     ON requirement_matches (company_id, requirement_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_requirement_matches_sufficient
+     ON requirement_matches (company_id, requirement_id) WHERE evidence_sufficient`,
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // AUTHORIZATION TO BID — concept (3). A HUMAN DECISION, NEVER DERIVED.
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // A table and not a column on solicitations, deliberately. A column is one UPDATE away from
+  // being written by whatever computed the verdict. A row here requires an approving person, an
+  // approval id and a timestamp, so an evaluation cannot produce one even by accident — there is
+  // nothing for it to set.
+  //
+  // Evidence flows upward into sufficiency automatically. Nothing flows upward into authorization,
+  // ever. That asymmetry is the control.
+  `CREATE TABLE IF NOT EXISTS fulfillment_authorizations (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL,
+     solicitation_id      TEXT NOT NULL,
+     -- What is being authorised, in the authoriser's words. Not generated.
+     scope                TEXT NOT NULL,
+     authorized_by        TEXT NOT NULL,
+     authorized_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     approval_id          TEXT NOT NULL,
+     -- An authorization is bounded. An open-ended commitment is how a stale decision becomes a
+     -- current one.
+     valid_until          DATE,
+     -- A revocation is recorded, never a deletion: the fact that we once authorised this is itself
+     -- part of the audit trail.
+     revoked_at           TIMESTAMPTZ,
+     revoked_by           TEXT,
+     revocation_reason    TEXT,
+     notes                TEXT,
+     CONSTRAINT fulfillment_authorizations_authorizer_present
+       CHECK (length(btrim(authorized_by)) > 0 AND length(btrim(approval_id)) > 0
+              AND length(btrim(scope)) > 0),
+     CONSTRAINT fulfillment_authorizations_revocation_paired
+       CHECK ((revoked_at IS NULL) = (revoked_by IS NULL)),
+     CONSTRAINT fulfillment_authorizations_tenant_fk
+       FOREIGN KEY (solicitation_id, company_id)
+       REFERENCES solicitations (id, company_id) MATCH FULL,
+     UNIQUE (id, company_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_fulfillment_authorizations_sol
+     ON fulfillment_authorizations (company_id, solicitation_id) WHERE revoked_at IS NULL`,
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // APPROVAL HISTORY — ruling 15 item 2, "preserve approval history"
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // Append-only. Nothing updates or deletes a row here, and the rollback guard treats the presence
+  // of these rows as human work that must not be destroyed to make a revert succeed.
+  `CREATE TABLE IF NOT EXISTS intake_audit (
+     id                   TEXT PRIMARY KEY,
+     company_id           TEXT NOT NULL REFERENCES companies(id),
+     subject_table        TEXT NOT NULL,
+     subject_id           TEXT NOT NULL,
+     action               TEXT NOT NULL,
+     actor                TEXT NOT NULL,
+     occurred_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     approval_id          TEXT,
+     detail               JSONB,
+     CONSTRAINT intake_audit_subject_check CHECK (subject_table IN (
+       'intake_documents','solicitation_requirements','requirement_matches',
+       'fulfillment_authorizations','solicitations')),
+     CONSTRAINT intake_audit_action_check CHECK (action IN (
+       'submitted','scanned','rejected','confirmed','matched','authorized','revoked',
+       'duplicate_linked','integrity_failed')),
+     CONSTRAINT intake_audit_actor_present CHECK (length(btrim(actor)) > 0),
+     -- The actions that represent a human decision must carry the approval that made it.
+     CONSTRAINT intake_audit_decisions_have_approval CHECK (
+       action NOT IN ('confirmed','authorized','revoked') OR
+       (approval_id IS NOT NULL AND length(btrim(approval_id)) > 0))
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_intake_audit_subject
+     ON intake_audit (company_id, subject_table, subject_id, occurred_at DESC)`,
+
+  // The manual source. Last, because everything above is what makes it usable.
+  // activated = true because there is no API to activate; the control on this source is per-record
+  // human approval, not a connector flag. kind = 'manual' and NOT 'procurement', so the coverage
+  // panel does not imply an automated procurement feed exists.
+  `INSERT INTO source_connectors (source_key, display_name, kind, auth_mode, access_mode,
+                                  daily_call_ceiling, activated, notes)
+     VALUES ('manual', 'Manual intake (human-submitted)', 'manual', 'none', 'manual',
+             NULL, true,
+             'Human-submitted solicitations. Control is per-record human approval, not a connector flag.')
+     ON CONFLICT (source_key) DO NOTHING`,
+];
+
+// Reverting. Children first; the source row last, because it will fail by foreign key if any
+// manual solicitation survives — which is the correct outcome.
+const ROLLBACK_EXTRA_DDL = [
+  `DELETE FROM source_connectors WHERE source_key = 'manual'`,
+];
+
+const PRECONDITIONS = Object.freeze([
+  { name: 'P1', what: 'companies exists (migrateOffice has run)', table: 'companies' },
+  { name: 'P2', what: 'solicitations exists (connectors.v1 has run)', table: 'solicitations' },
+  { name: 'P3', what: 'verified_capabilities exists (connectors.v1 has run)', table: 'verified_capabilities' },
+  { name: 'P4', what: 'source_connectors exists (connectors.v1 has run)', table: 'source_connectors' },
+  { name: 'P5', what: 'skus exists (referenced for orphan rejection)', table: 'skus' },
+  { name: 'P6', what: 'suppliers exists (referenced for orphan rejection)', table: 'suppliers' },
+]);
+
+module.exports = {
+  VERSION,
+  DDL,
+  ROLLBACK_ORDER,
+  ROLLBACK_EXTRA_DDL,
+  CREATED_TABLES,
+  PRECONDITIONS,
+  EVIDENCE_CLASSES,
+  INDICATIVE_CLASSES,
+  SUFFICIENT_CLASSES,
+  BUSINESS_LINES,
+  REQUIREMENT_KINDS,
+};

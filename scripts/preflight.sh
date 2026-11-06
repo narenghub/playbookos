@@ -469,6 +469,7 @@ pf_step "the production-bound read-only scripts change nothing" node scripts/che
 # untouched.
 pf_step "the migration runner refuses, applies, repeats and rolls back" node scripts/check-migration-runner-db.js
 pf_step "migration v2 guards fire: registrations, brands, capability kinds" node scripts/check-migration-v2-db.js
+pf_step "migration v3 guards fire: evidence sufficiency never authorizes a bid" node scripts/check-migration-v3-db.js
 pf_step "a failing verifier exits non-zero, and a skip still exits 3" node scripts/check-verifier-exit-codes.js
 
 # Ruling 10 item 5. SAM.gov inactive, no supplier communication, no bidding — three claims I have

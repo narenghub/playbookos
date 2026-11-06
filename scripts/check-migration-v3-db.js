@@ -1,0 +1,447 @@
+#!/usr/bin/env node
+'use strict';
+// ── DO v3's GUARDS FIRE? ADVERSARIAL TESTS AGAINST A DISPOSABLE CLUSTER ─────
+//
+// Ruling 15 item 7: adversarial tests. Runs the REAL runner. Never touches production.
+//
+// Every assertion proves a guard by ATTEMPTING WHAT IT FORBIDS and requiring the database to
+// refuse. A constraint that exists is not a constraint that works: a test suite that only exercised
+// happy paths would pass unchanged against a schema where every CHECK was `CHECK (true)`.
+//
+// The three concepts ruling 15 item 1 separates are tested separately, because the whole point is
+// that they do not imply one another:
+//
+//   evidence sufficiency  — can this evidence satisfy this requirement?
+//   eligibility           — qualify.js's business, not the schema's
+//   authorization to bid  — a human decision that NOTHING can derive
+//
+// Exit: 0 every guard fired · 1 a guard did not · 3 did not execute (no Postgres)
+
+const { execFileSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const { Client } = require('pg');
+const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+const schema = require('../src/lib/office/intake-schema');
+
+const PGPORT = 56003;
+let fail = 0;
+const ok = (m) => console.log(`  ok    ${m}`);
+const bad = (m, d) => { fail++; console.log(`  FAIL  ${m}`); if (d) console.log(`          ${String(d).slice(0, 320)}`); };
+const bar = () => '─'.repeat(78);
+const h = (t) => console.log(`\n${bar()}\n${t}\n${bar()}`);
+
+let temp = null;
+function startCluster() {
+  const dir = pgBin();
+  if (!dir) return null;
+  const base = fs.mkdtempSync('/var/tmp/mig3-');
+  const asPostgres = process.getuid && process.getuid() === 0;
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
+  const run = (cmd) => execFileSync('sh', ['-c', asPostgres ? `su postgres -c ${JSON.stringify(cmd)}` : cmd],
+    { env, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
+    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
+    run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p ${PGPORT} -c listen_addresses=' start -w`);
+  } catch (e) { return null; }
+  temp = { base, dir, asPostgres };
+  return base;
+}
+function stopCluster() {
+  if (!temp) return;
+  const env = { ...process.env, PATH: `${temp.dir}:${process.env.PATH}` };
+  try {
+    execFileSync('sh', ['-c', temp.asPostgres
+      ? `su postgres -c "PATH=${temp.dir}:\\$PATH pg_ctl -D ${temp.base}/data -m immediate stop"`
+      : `PATH=${temp.dir}:$PATH pg_ctl -D ${temp.base}/data -m immediate stop`], { env, stdio: 'pipe' });
+  } catch (_) { /* best effort */ }
+  try { fs.rmSync(temp.base, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+}
+
+function runner(url, args) {
+  const script = path.join(__dirname, 'migrate-intake.js');
+  try {
+    const out = execFileSync(process.execPath, [script, ...args], {
+      env: { ...process.env, DATABASE_URL: url, MIGRATION_OPERATOR: 'v3-adversarial-harness' },
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { code: 0, out };
+  } catch (e) {
+    return { code: e.status === undefined ? 1 : e.status, out: `${e.stdout || ''}${e.stderr || ''}` };
+  }
+}
+
+/** Did the database refuse? Returns the error message, or null if it accepted. */
+async function refused(q, sql, params) {
+  try { await q(sql, params); return null; } catch (e) { return e.message; }
+}
+
+const SHA = (c) => c.repeat(64);
+
+async function main() {
+  h('MIGRATION v3 — ADVERSARIAL TESTS (ruling 15 item 7)');
+  const base = startCluster();
+  if (!base) {
+    console.log('\nSKIP  no complete PostgreSQL server toolchain. This asserted NOTHING.\n');
+    process.exit(EXIT_NOT_EXECUTED);
+  }
+  const url = `postgresql://postgres@localhost/postgres?host=${base}&port=${PGPORT}&sslmode=disable`;
+  const client = new Client({ connectionString: url });
+  await client.connect();
+  const q = (sql, params) => client.query(sql, params);
+
+  try {
+    // ── 1. a database without the preconditions must be refused ───────────
+    h('1. PRECONDITIONS REFUSED, AND NOTHING CREATED');
+    let r = runner(url, ['--apply']);
+    if (r.code === 2) ok('--apply with no companies/solicitations exits 2');
+    else bad(`--apply exited ${r.code} on a bare database, expected 2`, r.out.slice(-300));
+    let created = 0;
+    for (const t of schema.CREATED_TABLES) {
+      created += (await q(
+        `SELECT COUNT(*)::int n FROM information_schema.tables WHERE table_schema='public' AND table_name=$1`,
+        [t])).rows[0].n;
+    }
+    if (created === 0) ok('a refused migration created ZERO tables');
+    else bad(`${created} table(s) created by a migration that refused`);
+
+    // ── the preconditions, shaped as production has them ──────────────────
+    await q(`CREATE TABLE companies (
+               id TEXT PRIMARY KEY, slug TEXT UNIQUE NOT NULL, display_name TEXT NOT NULL,
+               status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ DEFAULT NOW())`);
+    await q(`INSERT INTO companies (id,slug,display_name) VALUES
+               ('co-a','abiozen','Abiozen LLC'), ('co-b','other','Other Tenant LLC')`);
+    await q(`CREATE TABLE source_connectors (
+               source_key TEXT PRIMARY KEY, display_name TEXT NOT NULL, kind TEXT NOT NULL,
+               auth_mode TEXT, access_mode TEXT, daily_call_ceiling INTEGER, activated BOOLEAN,
+               notes TEXT)`);
+    await q(`INSERT INTO source_connectors (source_key,display_name,kind,activated)
+               VALUES ('grants_gov','Grants.gov','grant',true)`);
+    await q(`CREATE TABLE solicitations (
+               id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
+               source_key TEXT NOT NULL REFERENCES source_connectors(source_key),
+               notice_id TEXT, record_kind TEXT, active BOOLEAN, response_deadline TIMESTAMPTZ,
+               UNIQUE (id, company_id))`);
+    await q(`CREATE TABLE verified_capabilities (
+               id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
+               kind TEXT NOT NULL, code TEXT, name TEXT, responsible_entity TEXT,
+               verification_status TEXT DEFAULT 'planned', UNIQUE (id, company_id))`);
+    await q(`CREATE TABLE skus (id TEXT PRIMARY KEY, name TEXT)`);
+    await q(`CREATE TABLE suppliers (id TEXT PRIMARY KEY, name TEXT)`);
+    await q(`INSERT INTO skus VALUES ('sku-1','A molecule')`);
+    await q(`INSERT INTO suppliers VALUES ('sup-1','A supplier')`);
+    await q(`INSERT INTO verified_capabilities (id,company_id,kind,code,name,responsible_entity)
+               VALUES ('cap-a','co-a','accreditation','ISO17025','Accredited','Abiozen Scientific')`);
+    await q(`INSERT INTO solicitations (id,company_id,source_key,notice_id)
+               VALUES ('sol-a','co-a','grants_gov','n-1'), ('sol-b','co-b','grants_gov','n-2')`);
+
+    // ── 2. check writes nothing; apply works; idempotent ──────────────────
+    h('2. --check WRITES NOTHING, --apply WORKS, AND REPEATS SAFELY');
+    r = runner(url, ['--check']);
+    if (r.code === 0) ok('--check exits 0 with preconditions met');
+    else bad(`--check exited ${r.code}`, r.out.slice(-300));
+    let any = 0;
+    for (const t of schema.CREATED_TABLES) {
+      any += (await q(
+        `SELECT COUNT(*)::int n FROM information_schema.tables WHERE table_schema='public' AND table_name=$1`,
+        [t])).rows[0].n;
+    }
+    if (any === 0) ok('--check created nothing');
+    else bad(`--check created ${any} table(s)`);
+
+    r = runner(url, ['--apply']);
+    if (r.code === 0) ok('--apply exits 0 and self-verifies');
+    else { bad(`--apply exited ${r.code}`, r.out.slice(-900)); return; }
+    r = runner(url, ['--apply']);
+    if (r.code === 0) ok('a second --apply is safe');
+    else bad(`the second --apply exited ${r.code}`, r.out.slice(-400));
+
+    const manual = (await q(`SELECT kind, activated FROM source_connectors WHERE source_key='manual'`)).rows[0];
+    if (manual && manual.kind === 'manual') ok(`manual source seeded, kind='manual' not 'procurement'`);
+    else bad('manual source row wrong or absent', JSON.stringify(manual || null));
+
+    // ── 3. RULING 15 ITEM 1 — the three indicative classes ────────────────
+    h('3. CATALOG LISTING, SYNTHESIS PREDICTION, SUPPLIER RELATIONSHIP (item 1)');
+    await q(`INSERT INTO intake_documents
+               (id,company_id,submitted_by,origin,byte_size,sha256,storage_bucket,storage_key,
+                scan_status,scanned_at,detected_mime)
+             VALUES ('doc-a','co-a','naren','upload',1024,$1,'abiozen-intake','co-a/doc-a.pdf',
+                     'clean',NOW(),'application/pdf')`, [SHA('a')]);
+    await q(`INSERT INTO solicitation_requirements
+               (id,company_id,solicitation_id,requirement_kind,description,quantity_value,quantity_unit)
+             VALUES ('req-a','co-a','sol-a','material','50 kg of a named API',50,'kg')`);
+
+    for (const cls of schema.INDICATIVE_CLASSES) {
+      const msg = await refused(q,
+        `INSERT INTO requirement_matches
+           (id,company_id,requirement_id,evidence_class,evidence_ref,evidence_as_of,
+            evidence_sufficient,matched_by,approval_id)
+         VALUES ($1,'co-a','req-a',$2,'ref',CURRENT_DATE,true,'naren','appr-1')`,
+        [`m-${cls}`, cls]);
+      if (msg && /indicative_never_sufficient/.test(msg)) {
+        ok(`'${cls}' with evidence_sufficient=true → REFUSED by the database`);
+      } else {
+        bad(`'${cls}' was accepted as SUFFICIENT`, msg || 'the insert succeeded');
+      }
+    }
+    // They must still be storable as indicative — excluded evidence gets re-entered under a class
+    // that does qualify, so visible and powerless beats absent.
+    for (const cls of schema.INDICATIVE_CLASSES) {
+      const msg = await refused(q,
+        `INSERT INTO requirement_matches
+           (id,company_id,requirement_id,evidence_class,evidence_ref,evidence_sufficient,matched_by)
+         VALUES ($1,'co-a','req-a',$2,'ref',false,'naren')`, [`i-${cls}`, cls]);
+      if (!msg) ok(`'${cls}' IS storable as indicative (sufficient=false) — recorded, powerless`);
+      else bad(`'${cls}' could not be recorded at all`, msg);
+    }
+
+    // ── 4. the sufficient classes, and what they still require ────────────
+    h('4. SUFFICIENCY REQUIRES A REFERENCE, AN APPROVAL AND A DATE');
+    const full = {
+      id: 'm-ok', company_id: 'co-a', requirement_id: 'req-a', evidence_class: 'supplier_quote',
+      evidence_ref: 'Q-1234', evidence_as_of: '2026-11-06', evidence_sufficient: true,
+      matched_by: 'naren', approval_id: 'appr-2',
+    };
+    for (const omit of ['evidence_ref', 'evidence_as_of', 'approval_id']) {
+      const row = { ...full, id: `m-omit-${omit}` };
+      delete row[omit];
+      const cols = Object.keys(row);
+      const msg = await refused(q,
+        `INSERT INTO requirement_matches (${cols.join(',')})
+           VALUES (${cols.map((_, i) => `$${i + 1}`).join(',')})`,
+        cols.map((c) => row[c]));
+      if (msg && /sufficient_requires_evidence/.test(msg)) ok(`sufficient without ${omit} → refused`);
+      else bad(`a sufficient match with no ${omit} was ACCEPTED`, msg || 'accepted');
+    }
+    const cols = Object.keys(full);
+    const acc = await refused(q,
+      `INSERT INTO requirement_matches (${cols.join(',')})
+         VALUES (${cols.map((_, i) => `$${i + 1}`).join(',')})`, cols.map((c) => full[c]));
+    if (!acc) ok('a fully evidenced supplier_quote IS accepted — the constraint is not a wall');
+    else bad('a complete sufficient match was refused', acc);
+
+    const backdated = await refused(q,
+      `INSERT INTO requirement_matches
+         (id,company_id,requirement_id,evidence_class,evidence_ref,evidence_as_of,valid_until,
+          evidence_sufficient,matched_by,approval_id)
+       VALUES ('m-bad-window','co-a','req-a','supplier_quote','Q-9',CURRENT_DATE,
+               CURRENT_DATE - 10,true,'naren','appr-3')`);
+    if (backdated && /validity_window/.test(backdated)) {
+      ok('a quote whose valid_until precedes its evidence_as_of → refused');
+    } else bad('an impossible validity window was accepted', backdated || 'accepted');
+
+    // ── 5. AUTHORIZATION IS NOT DERIVABLE — item 1, concept (3) ───────────
+    h('5. AUTHORIZATION TO BID IS A HUMAN ACT, NOT A COMPUTED STATE');
+    // No column anywhere outside fulfillment_authorizations could hold it. That absence IS the
+    // control: a column is one UPDATE away from being set by whatever computed the verdict.
+    const strays = (await q(
+      `SELECT table_name, column_name FROM information_schema.columns
+         WHERE table_schema='public' AND table_name <> 'fulfillment_authorizations'
+           AND (column_name LIKE '%authorized%' OR column_name LIKE '%guaranteed%'
+                OR column_name LIKE '%bid_%')`)).rows;
+    if (!strays.length) ok('no other table has an authorization or guarantee column');
+    else bad(`${strays.length} stray column(s)`, strays.map((s) => `${s.table_name}.${s.column_name}`).join(', '));
+
+    for (const omit of ['authorized_by', 'approval_id', 'scope']) {
+      const row = {
+        id: `auth-omit-${omit}`, company_id: 'co-a', solicitation_id: 'sol-a',
+        scope: '50 kg API delivery', authorized_by: 'naren', approval_id: 'appr-bid-1',
+      };
+      delete row[omit];
+      const c2 = Object.keys(row);
+      const msg = await refused(q,
+        `INSERT INTO fulfillment_authorizations (${c2.join(',')})
+           VALUES (${c2.map((_, i) => `$${i + 1}`).join(',')})`, c2.map((k) => row[k]));
+      if (msg) ok(`an authorization with no ${omit} → refused`);
+      else bad(`an authorization with no ${omit} was ACCEPTED`, 'a bid commitment needs all three');
+    }
+    const authOk = await refused(q,
+      `INSERT INTO fulfillment_authorizations
+         (id,company_id,solicitation_id,scope,authorized_by,approval_id)
+       VALUES ('auth-1','co-a','sol-a','50 kg API delivery','naren','appr-bid-1')`);
+    if (!authOk) ok('a complete authorization IS accepted — a person can still authorise a bid');
+    else bad('a complete authorization was refused', authOk);
+
+    // Sufficiency across every requirement STILL does not produce one. Proved by the absence of
+    // any mechanism: nothing in the schema writes this table.
+    const authCount = (await q(`SELECT COUNT(*)::int n FROM fulfillment_authorizations`)).rows[0].n;
+    const suffCount = (await q(`SELECT COUNT(*)::int n FROM requirement_matches WHERE evidence_sufficient`)).rows[0].n;
+    ok(`${suffCount} sufficient match(es) exist and produced ${authCount - 1} authorization(s) by themselves`);
+
+    // ── 6. tenant isolation, and the limit of it (item 2) ─────────────────
+    h('6. TENANT ISOLATION, AND WHERE IT CANNOT REACH');
+    const crossReq = await refused(q,
+      `INSERT INTO solicitation_requirements (id,company_id,solicitation_id,requirement_kind,description)
+         VALUES ('req-x','co-b','sol-a','material','co-b reaching into co-a')`);
+    if (crossReq && /tenant_fk|foreign key/i.test(crossReq)) {
+      ok("co-b cannot attach a requirement to co-a's solicitation");
+    } else bad('a requirement crossed tenants', crossReq || 'accepted');
+
+    const crossDoc = await refused(q,
+      `INSERT INTO solicitation_requirements
+         (id,company_id,solicitation_id,requirement_kind,description,extracted_from)
+       VALUES ('req-y','co-b','sol-b','material','cites co-a document','doc-a')`);
+    if (crossDoc && /document_tenant_fk|foreign key/i.test(crossDoc)) {
+      ok("co-b cannot cite co-a's document as its extraction source");
+    } else bad("a requirement cited another tenant's document", crossDoc || 'accepted');
+
+    const crossCap = await refused(q,
+      `INSERT INTO requirement_matches
+         (id,company_id,requirement_id,evidence_class,capability_id,evidence_as_of,
+          evidence_sufficient,matched_by,approval_id)
+       VALUES ('m-x','co-a','req-a','accreditation','cap-a',CURRENT_DATE,true,'naren','appr-4')`);
+    if (!crossCap) ok('a same-tenant capability match is allowed');
+    else bad('a valid capability match was refused', crossCap);
+
+    const orphanSku = await refused(q,
+      `INSERT INTO requirement_matches
+         (id,company_id,requirement_id,evidence_class,sku_id,evidence_sufficient,matched_by)
+       VALUES ('m-orphan','co-a','req-a','catalog_listing','sku-does-not-exist',false,'naren')`);
+    if (orphanSku && /foreign key|skus/i.test(orphanSku)) {
+      ok('an orphaned sku reference → refused (item 2: reject orphaned references)');
+    } else bad('an orphaned sku reference was accepted', orphanSku || 'accepted');
+
+    // THE HONEST LIMIT. skus and suppliers have no company_id, so cross-tenant use of a REAL sku
+    // cannot be refused. Asserted as a KNOWN GAP rather than left for somebody to discover.
+    const crossSku = await refused(q,
+      `INSERT INTO requirement_matches
+         (id,company_id,requirement_id,evidence_class,sku_id,evidence_sufficient,matched_by)
+       VALUES ('m-globalsku','co-a','req-a','catalog_listing','sku-1',false,'naren')`);
+    if (!crossSku) {
+      ok('a real sku reference is accepted — and NOTE: skus has no company_id, so tenant');
+      ok('scoping on skus/suppliers is NOT enforceable. Recorded as a known gap, not a pass.');
+    } else bad('a legitimate sku reference was refused', crossSku);
+
+    // ── 7. documents: integrity and scan discipline (items 5–6) ───────────
+    h('7. DOCUMENT INTEGRITY AND SCAN DISCIPLINE');
+    const cleanNoStore = await refused(q,
+      `INSERT INTO intake_documents (id,company_id,submitted_by,origin,byte_size,sha256,scan_status)
+         VALUES ('doc-bad','co-a','naren','upload',10,$1,'clean')`, [SHA('b')]);
+    if (cleanNoStore && /clean_requires_storage/.test(cleanNoStore)) {
+      ok('a document marked clean with no storage reference or scan time → refused');
+    } else bad('a clean document with no storage was accepted', cleanNoStore || 'accepted');
+
+    const badSha = await refused(q,
+      `INSERT INTO intake_documents (id,company_id,submitted_by,origin,byte_size,sha256)
+         VALUES ('doc-sha','co-a','naren','upload',10,'not-a-sha')`);
+    if (badSha && /sha256_shape/.test(badSha)) ok('a malformed sha256 → refused');
+    else bad('a malformed sha256 was accepted', badSha || 'accepted');
+
+    const tooBig = await refused(q,
+      `INSERT INTO intake_documents (id,company_id,submitted_by,origin,byte_size,sha256)
+         VALUES ('doc-big','co-a','naren','upload',60000000,$1)`, [SHA('c')]);
+    if (tooBig && /size_cap/.test(tooBig)) ok('a 60 MB document → refused by the constraint, not just the handler');
+    else bad('an oversized document was accepted', tooBig || 'accepted');
+
+    const urlNoUrl = await refused(q,
+      `INSERT INTO intake_documents (id,company_id,submitted_by,origin,byte_size,sha256)
+         VALUES ('doc-url','co-a','naren','url',10,$1)`, [SHA('d')]);
+    if (urlNoUrl && /url_has_url/.test(urlNoUrl)) ok("origin='url' with no source_url → refused");
+    else bad('a url-origin document with no url was accepted', urlNoUrl || 'accepted');
+
+    const dupSha = await refused(q,
+      `INSERT INTO intake_documents (id,company_id,submitted_by,origin,byte_size,sha256)
+         VALUES ('doc-dup','co-a','naren','upload',1024,$1)`, [SHA('a')]);
+    if (dupSha && /unique|duplicate key/i.test(dupSha)) ok('the same bytes twice → one document');
+    else bad('duplicate bytes created a second document', dupSha || 'accepted');
+
+    // ── 8. extraction provenance (item 2 of ruling 14, kept) ──────────────
+    h('8. A MODEL-EXTRACTED REQUIREMENT MUST NAME THE MODEL');
+    const unattributed = await refused(q,
+      `INSERT INTO solicitation_requirements
+         (id,company_id,solicitation_id,requirement_kind,description,extraction_method)
+       VALUES ('req-unattr','co-a','sol-a','material','from a machine','gpt-guess')`);
+    if (unattributed && /method_attributed/.test(unattributed)) {
+      ok("an extraction_method that is not 'human', 'structured' or 'model:…' → refused");
+    } else bad('an unattributed extraction method was accepted', unattributed || 'accepted');
+    const attributed = await refused(q,
+      `INSERT INTO solicitation_requirements
+         (id,company_id,solicitation_id,requirement_kind,description,extraction_method,
+          extraction_confidence,source_span)
+       VALUES ('req-attr','co-a','sol-a','quantity','50 kg','model:claude-x@2026-11',0.82,
+               '{"page":3,"start":120,"end":168,"text":"fifty (50) kilograms"}'::jsonb)`);
+    if (!attributed) ok('a properly attributed extraction with a source span is accepted');
+    else bad('a properly attributed extraction was refused', attributed);
+
+    const halfConfirmed = await refused(q,
+      `UPDATE solicitation_requirements SET confirmed_by = 'naren' WHERE id = 'req-attr'`);
+    if (halfConfirmed && /confirmation_paired/.test(halfConfirmed)) {
+      ok('a confirmation without a timestamp → refused (a person and a time, or neither)');
+    } else bad('a half-recorded confirmation was accepted', halfConfirmed || 'accepted');
+
+    // ── 9. audit history (item 2: preserve approval history) ──────────────
+    h('9. AUDIT ENTRIES FOR DECISIONS MUST CARRY THEIR APPROVAL');
+    const noApproval = await refused(q,
+      `INSERT INTO intake_audit (id,company_id,subject_table,subject_id,action,actor)
+         VALUES ('aud-1','co-a','requirement_matches','m-ok','authorized','naren')`);
+    if (noApproval && /decisions_have_approval/.test(noApproval)) {
+      ok("an 'authorized' audit entry with no approval_id → refused");
+    } else bad('a decision was audited without its approval', noApproval || 'accepted');
+    const withApproval = await refused(q,
+      `INSERT INTO intake_audit (id,company_id,subject_table,subject_id,action,actor,approval_id)
+         VALUES ('aud-2','co-a','fulfillment_authorizations','auth-1','authorized','naren','appr-bid-1')`);
+    if (!withApproval) ok('the same entry with its approval is accepted');
+    else bad('a properly approved audit entry was refused', withApproval);
+
+    // ── 10. the rollback guard ────────────────────────────────────────────
+    h('10. ROLLBACK REFUSES RATHER THAN DESTROY HUMAN DECISIONS');
+    r = runner(url, ['--rollback']);
+    if (r.code === 2) ok('--rollback without the acknowledgement exits 2');
+    else bad(`--rollback without acknowledgement exited ${r.code}`);
+
+    r = runner(url, ['--rollback', '--i-understand-this-drops-tables']);
+    if (r.code === 2 && /HUMAN DECISIONS WOULD BE DESTROYED/.test(r.out)) {
+      ok('rollback REFUSED while approvals, authorizations and audit entries exist');
+    } else bad(`rollback exited ${r.code} with human decisions present`, r.out.slice(-400));
+    let survived = 0;
+    for (const t of schema.CREATED_TABLES) {
+      survived += (await q(
+        `SELECT COUNT(*)::int n FROM information_schema.tables WHERE table_schema='public' AND table_name=$1`,
+        [t])).rows[0].n;
+    }
+    if (survived === schema.CREATED_TABLES.length) ok('the refused rollback dropped NOTHING');
+    else bad(`only ${survived} of ${schema.CREATED_TABLES.length} tables survived a refused rollback`);
+
+    // Clean rollback once the human work is deliberately removed.
+    h('11. A CLEAN ROLLBACK, ONCE THE DECISIONS ARE DELIBERATELY REMOVED');
+    await q(`DELETE FROM intake_audit`);
+    await q(`DELETE FROM fulfillment_authorizations`);
+    await q(`DELETE FROM requirement_matches`);
+    await q(`UPDATE solicitation_requirements SET confirmed_by=NULL, confirmed_at=NULL`);
+    r = runner(url, ['--rollback', '--i-understand-this-drops-tables']);
+    if (r.code === 0) ok('rollback succeeds once nothing human remains');
+    else bad(`rollback exited ${r.code}`, r.out.slice(-500));
+    let gone = 0;
+    for (const t of schema.CREATED_TABLES) {
+      gone += (await q(
+        `SELECT COUNT(*)::int n FROM information_schema.tables WHERE table_schema='public' AND table_name=$1`,
+        [t])).rows[0].n;
+    }
+    if (gone === 0) ok(`all ${schema.CREATED_TABLES.length} tables dropped`);
+    else bad(`${gone} table(s) survived the rollback`);
+    const manualGone = (await q(`SELECT COUNT(*)::int n FROM source_connectors WHERE source_key='manual'`)).rows[0].n;
+    if (manualGone === 0) ok('the manual source row was removed');
+    else bad('the manual source row survived');
+    const sols = (await q(`SELECT COUNT(*)::int n FROM solicitations`)).rows[0].n;
+    const caps = (await q(`SELECT COUNT(*)::int n FROM verified_capabilities`)).rows[0].n;
+    if (sols === 2 && caps === 1) ok('solicitations and verified_capabilities untouched');
+    else bad(`pre-existing rows changed: solicitations ${sols}, capabilities ${caps}`);
+
+    r = runner(url, ['--apply']);
+    if (r.code === 0) ok('the migration re-applies cleanly after a rollback');
+    else bad(`re-apply exited ${r.code}`, r.out.slice(-400));
+  } finally {
+    await client.end().catch(() => {});
+    stopCluster();
+  }
+
+  h('RESULT');
+  if (fail) { console.log(`  ${fail} guard(s) FAILED. v3 is not proved.\n`); process.exit(1); }
+  console.log('  Every guard was tested by attempting what it forbids, and the database refused.');
+  console.log('  Evidence sufficiency, eligibility and bid authorization are separate, and nothing');
+  console.log('  derives the third from the first two.\n');
+  process.exit(0);
+}
+
+main().catch((e) => { stopCluster(); console.error(e && e.stack ? e.stack : String(e)); process.exit(1); });
