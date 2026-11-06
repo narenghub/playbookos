@@ -478,6 +478,9 @@ pf_step "a failing verifier exits non-zero, and a skip still exits 3" node scrip
 # made in prose several times, which is not evidence. The risk is drift: a seed value edited for a
 # test, an env default flipped, a send added next to routes that already exist, or migrateConnectors
 # quietly wired into startup. Each is re-asserted against the code as it stands, every run.
+pf_step "the SSRF guard refuses metadata, private ranges and redirects into them" node scripts/check-url-guard.js
+pf_step "least-privilege DB roles hold as designed (ENG-003)" node scripts/check-db-role-separation.js
+pf_step "open production release blockers are reported" node scripts/check-release-blockers.js
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 
 pf_verdict

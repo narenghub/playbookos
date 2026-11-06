@@ -17,7 +17,6 @@
     "still matters. A finding that is exposed but not yet rotated is recorded WITHOUT a hash of",
     "its value, which is why the admin-password entry below has none."
   ],
-
   "_assessed": {
     "date": "2026-11-06",
     "ruling": "18 item 2 -- assess repository history and any shared copies for exposure",
@@ -41,7 +40,6 @@
       "has them."
     ]
   },
-
   "findings": [
     {
       "id": "2026-10-27-admin-password",
@@ -54,18 +52,27 @@
       "watch_sha12": null,
       "note": [
         "No hash of this value is stored, because it may still be live and this file is public.",
-        "Once the password is changed, set status to 'retired' and add watch_sha12 of the OLD",
-        "value so its reappearance is caught; at that point the hash is harmless.",
+        "Once the owner CONFIRMS the password has been changed, set status to 'retired', set",
+        "confirmed_changed_by_owner to true, and add watch_sha12 of the OLD value so its reappearance is",
+        "caught; at that point the hash is harmless.",
         "",
-        "accepted_until is deliberately 7 days, not the 90 granted to the AWS credential",
-        "exception in ruling 18 item 3. A publicly exposed admin password does not get a quarter.",
-        "Past that date this check fails and preflight goes red, which is the intended behaviour:",
-        "shipping more code matters less than an exposed production login.",
+        "RULING 19 ITEM 1: this finding stays OPEN until Naresh confirms the change. It is NOT to be",
+        "closed by inference. An earlier version of this note offered production's password_mismatch",
+        "errors as evidence the password had probably already been changed. That was wrong twice over:",
+        "a login failure is equally consistent with a different password, a locked account, a broken",
+        "hash column or a bug, and treating it as remediation would have closed a compromised-credential",
+        "finding on a symptom. The owner's confirmation is the only acceptable evidence.",
         "",
-        "Production login has been returning password_mismatch since 2026-11-06, which may mean",
-        "the password was already changed. 'May' is not a remediation record, so this stays",
-        "rotate-required until the change is confirmed."
-      ]
+        "accepted_until is 7 days, not the 90 granted to the AWS credential exception in ruling 18",
+        "item 3. A publicly exposed admin password does not get a quarter. Past that date this check",
+        "fails and preflight goes red, which is intended: shipping more code matters less than an",
+        "exposed production login.",
+        "",
+        "Changing the password does not revoke tokens already minted with it. src/lib/core.js signs with",
+        "expiresIn: '7d', so JWT_SECRET must be rotated too, AFTER the password change. See",
+        "docs/security/rotation-order.md."
+      ],
+      "confirmed_changed_by_owner": false
     },
     {
       "id": "bb3dda2954eb",

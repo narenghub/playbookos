@@ -108,22 +108,24 @@ test('a changed value compares as CHANGED and an unchanged one as UNCHANGED', ()
   const out = path.join(dir, 'fp.json');
   // The three credentials marked required-but-not-rotating must be present or --compare fails the
   // run on their absence, which is correct in production and merely noise in a fixture.
-  const REQUIRED = { JWT_SECRET: 'j', ANTHROPIC_API_KEY: 'a', RESEND_API_KEY: 'r' };
-  const before = {
-    ...REQUIRED,
-    DATABASE_URL: 'postgresql://u:old@h:5432/db',
-    ADMIN_PASSWORD: 'old-admin',
-    TRIGGERS_SECRET: 'old-trig',
-    PLAYBOOKOS_WEBHOOK_SECRET: 'old-hook',
-    ENGAGEMENT_SECRET: 'old-eng',
-  };
+  // Derived from the script's own list, never a second copy of it. The previous version hard-coded
+  // these and silently encoded "JWT_SECRET does not rotate"; when that changed, the test failed for
+  // a reason that had nothing to do with the behaviour it checks.
+  const { CREDENTIALS } = require('./verify-rotation');
+  const ROTATING = CREDENTIALS.filter(([, , rot]) => rot).map(([n]) => n);
+  const REQUIRED_ONLY = CREDENTIALS.filter(([, req, rot]) => req && !rot).map(([n]) => n);
+  const REQUIRED = {};
+  for (const n of REQUIRED_ONLY) REQUIRED[n] = `fixture-${n.toLowerCase()}`;
+  const before = { ...REQUIRED };
+  for (const n of ROTATING) {
+    before[n] = n === 'DATABASE_URL' ? 'postgresql://u:old@h:5432/db' : `old-${n.toLowerCase()}`;
+  }
   assert.strictEqual(run([`--snapshot=${out}`], before).status, 0);
 
   // All five rotated → pass. The required-but-not-rotating three are left alone deliberately:
   // "unchanged" must be an acceptable verdict for them, or the script would demand rotating keys
   // this round was never about.
-  const ROTATES = ['DATABASE_URL', 'ADMIN_PASSWORD', 'TRIGGERS_SECRET',
-    'PLAYBOOKOS_WEBHOOK_SECRET', 'ENGAGEMENT_SECRET'];
+  const ROTATES = ROTATING;
   const rotated = { ...before };
   for (const k of ROTATES) rotated[k] = `${before[k]}-NEW`;
   const good = run([`--compare=${out}`], rotated);
@@ -131,7 +133,8 @@ test('a changed value compares as CHANGED and an unchanged one as UNCHANGED', ()
   assert.match(good.stdout, /CHANGED/);
 
   // One forgotten → must fail, and must name it.
-  const partial = { ...rotated, ADMIN_PASSWORD: before.ADMIN_PASSWORD };
+  const forgotten = ROTATING.includes('ADMIN_PASSWORD') ? 'ADMIN_PASSWORD' : ROTATING[0];
+  const partial = { ...rotated, [forgotten]: before[forgotten] };
   const bad = run([`--compare=${out}`], partial);
   assert.strictEqual(bad.status, 1, 'a credential that did not rotate must fail the run');
   assert.match(bad.stdout, /ADMIN_PASSWORD\s+rotate\s+✗ UNCHANGED/);

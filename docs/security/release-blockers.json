@@ -1,0 +1,33 @@
+{
+  "_README": [
+    "Open blockers on a PRODUCTION release. Checked by scripts/check-release-blockers.js.",
+    "",
+    "Run bare, it REPORTS: part of preflight, so every push shows what still blocks a release.",
+    "Run with --releasing, it FAILS while any blocker is open: that is the gate, and it belongs in",
+    "whatever command actually ships. Preflight is a push gate, not a release gate, and conflating",
+    "the two would either deadlock the feature branch or make this advisory. It is neither."
+  ],
+  "blockers": [
+    {
+      "id": "ENG-003",
+      "title": "the application retains PostgreSQL superuser privileges for ordinary operations",
+      "raised_by": "ruling 19 item 5",
+      "opened": "2026-11-06",
+      "status": "open",
+      "why_it_blocks": [
+        "A superuser bypasses GRANT and row-level security, so no in-database privilege separation",
+        "is possible. Every control in the PRPA schema is therefore a CHECK or a BEFORE trigger,",
+        "which a superuser connection can also DROP. Ruling 18 item 6 asked that only a trusted",
+        "scanner workflow be able to set scan verdict fields; what shipped is structural",
+        "separation, not privilege separation, and this is the gap."
+      ],
+      "design_verified": "scripts/check-db-role-separation.js — 31 assertions, exit 0, on a disposable cluster",
+      "remaining_work": [
+        "Extract the ~12 boot-time migrations chained in server.js line 3 into a migrator",
+        "entrypoint run as its own role, as a separate deploy step. The grants are proven; the",
+        "refactor is the blocker. An app role without DDL cannot start the application today."
+      ],
+      "ticket": "docs/tickets/ENG-003-non-superuser-application-role.md"
+    }
+  ]
+}

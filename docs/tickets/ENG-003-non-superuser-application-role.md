@@ -1,6 +1,7 @@
 # ENG-003 — the application connects to Postgres as a superuser
 
-**Class:** security · **Opened:** 2026-11-06 · **Status:** OPEN — structural control in place, privilege control impossible
+**Class:** security · **Opened:** 2026-11-06 · **Status:** OPEN — **PRODUCTION RELEASE BLOCKER** (ruling 19 item 5)
+**Design:** verified on a disposable cluster — `scripts/check-db-role-separation.js`, 31 assertions, exit 0
 **Raised by:** ruling 18 item 6 · **Blocks:** real privilege separation for scan verdicts, and RLS of any kind
 
 ## The constraint
@@ -62,3 +63,65 @@ Adding a shared secret that the ingestion path passes to the database (`SET LOCA
 prpa.scan_writer = '…'`) looks like authentication and is not: the secret would live in the same
 codebase and process group as the application it is meant to exclude, so any path that can write
 the table can also set the variable. It would convert a documented gap into an undocumented one.
+
+
+---
+
+## The design, verified rather than proposed (ruling 19 item 5)
+
+`scripts/check-db-role-separation.js` builds the v3 schema on a disposable cluster, creates the three
+roles below with the exact grants intended for production, and then attempts what each must not be
+able to do. 31 assertions, exit 0, no production involvement and no AWS account. It is part of
+preflight, so the design cannot quietly rot.
+
+### The mechanism: PostgreSQL column-level UPDATE grants
+
+```sql
+GRANT UPDATE (id, company_id, submitted_by, …, integrity_ok) ON intake_documents TO playbookos_app;
+GRANT UPDATE (scan_status, scan_version_id, scan_provider, scan_provider_status,
+              scan_detail, scanned_at)                        ON intake_documents TO playbookos_scanner;
+```
+
+The application gets UPDATE on every column of `intake_documents` **except** the six that carry a
+security verdict; the scanner gets UPDATE on **only** those. The application then cannot write a
+verdict because it lacks the privilege — not because a trigger declined. That is the whole
+difference between what ruling 18 item 6 delivered and what it asked for.
+
+### Three roles, none of them a superuser
+
+| Role | May | May not |
+|---|---|---|
+| `playbookos_migrator` | DDL (needs `GRANT CREATE ON SCHEMA public`) | run the application |
+| `playbookos_app` | SELECT/INSERT/UPDATE on business tables; INSERT + non-verdict UPDATE on `intake_documents` | write any verdict column · INSERT into `document_scan_results` · any DDL |
+| `playbookos_scanner` | INSERT into `document_scan_results`; UPDATE of the six verdict columns | touch requirements, authorizations, download grants, or any other column · any DDL |
+
+Demonstrated refusals include `DROP TRIGGER` for both the app and the scanner — a role that cannot
+drop a trigger cannot disarm the guards above it, which is the failure mode that makes the current
+superuser connection load-bearing.
+
+### Two findings the demonstration produced
+
+**PostgreSQL 15 stopped granting `CREATE` on schema `public` to `PUBLIC`.** The first run failed
+with `permission denied for schema public` for the migrator. That needs an explicit
+`GRANT CREATE ON SCHEMA public TO playbookos_migrator` — exactly the sort of thing that otherwise
+surfaces midway through a production cutover.
+
+**The blocker is not the grants. It is `server.js` line 3.** It chains about twelve migrations
+before the server listens — `initDB`, `initPhase2`, `migrateSchemas`, `migrateAutonomy`, the
+supplier-RFQ and RFQ-identity-guard migrations, `migrateRuns`, `migrateOffice`,
+`migrateResearchIntelligence` and two phase-3 migrations, then three seeders — issuing `CREATE
+TABLE` and `ALTER TABLE`. The test confirms the app role cannot run those statements, so pointing
+`DATABASE_URL` at it today would fail **at startup**, not at runtime.
+
+So the work is, in order:
+
+1. Extract the boot-time migration chain into a migration entrypoint, run as `playbookos_migrator`
+   as a **separate deploy step**. This is the blocker and it is where the time goes.
+2. Apply the grants above. Proven; the easy part.
+3. Switch `DATABASE_URL` to `playbookos_app` and give the scanner worker its own credential.
+4. Keep a superuser credential for break-glass only, out of the application's environment.
+5. Re-run the whole verification suite against the restricted roles, expecting the scripts that
+   create and drop tables to fail — that is what running them proves.
+
+Step 1 is what will be tempting to defer. Until it is done, every control in the PRPA schema is a
+trigger that the connection running the application is privileged to drop.

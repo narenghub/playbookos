@@ -110,6 +110,12 @@ const pad = (s, n) => String(s == null ? '' : s).padEnd(n);
 // meaningless to anyone who does not also hold the file, and the file is deleted after use.
 const fp = (v, salt) => crypto.createHash('sha256').update(`${salt}\u0000${String(v)}`).digest('hex');
 
+// NOT IN THIS LIST, AND NOT AN OVERSIGHT: the GitHub personal access token. It is not an
+// environment variable of this process, so this script cannot fingerprint it and must not pretend
+// to. It is rotated at github.com/settings/tokens and verified there — a token replaced locally
+// and left active at GitHub is still a live credential in whatever document carried it. The same
+// applies to any credential held only in the project handoff document.
+//
 // Names only. Safe to commit, and the point of the list is that it is reviewable.
 const CREDENTIALS = [
   // [name, requiredInProduction, expectedToRotateInThisRound]
@@ -118,7 +124,13 @@ const CREDENTIALS = [
   ['TRIGGERS_SECRET', false, true],
   ['PLAYBOOKOS_WEBHOOK_SECRET', false, true],
   ['ENGAGEMENT_SECRET', false, true],
-  ['JWT_SECRET', true, false],
+  // RULING 19 item 4 moved this to expected-to-rotate, and there is a measured reason rather
+  // than a tidiness one. src/lib/core.js signs tokens with `expiresIn: '7d'`. Changing the admin
+  // password does NOT invalidate a token already minted with it — so anyone who logged in while
+  // the password was readable in public git history holds a valid bearer token for up to seven
+  // days afterwards. Rotating JWT_SECRET is the only thing that revokes those. It logs everyone
+  // out, which is the intended effect and the reason it must come AFTER the password change.
+  ['JWT_SECRET', true, true],
   ['ANTHROPIC_API_KEY', true, false],
   ['RESEND_API_KEY', true, false],
   ['STRIPE_SECRET_KEY', false, false],
@@ -394,7 +406,16 @@ async function main() {
   if (missing) { say(`✗ ${missing} required credential(s) unset.\n`); process.exit(1); }
 }
 
-main().then(() => process.exit(0)).catch((e) => {
-  console.error('verify-rotation failed:', e && e.message ? e.message : e);
-  process.exit(1);
-});
+// Exported so the test derives the rotation round from THIS list instead of keeping its own copy.
+// It kept one, and the moment ruling 19 item 4 moved JWT_SECRET to expected-to-rotate the test
+// failed — not because the script was wrong, but because a second copy of the list had drifted.
+// Two lists that must agree and nothing forcing them to is the same defect as the permitted-role
+// list that a mutation test caught earlier in this project.
+module.exports = { CREDENTIALS };
+
+if (require.main === module) {
+  main().then(() => process.exit(0)).catch((e) => {
+    console.error('verify-rotation failed:', e && e.message ? e.message : e);
+    process.exit(1);
+  });
+}
