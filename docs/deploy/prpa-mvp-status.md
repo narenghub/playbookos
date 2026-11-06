@@ -25,7 +25,7 @@ Each line names the check that proves it. All run bare; the exit code is the ver
 | **Dashboard** | Renders real data with both banners; 17 assertions including "no page errors". `screenshot-prpa-tracker.js` |
 | **Dataset is not presented as live** | `is_live_feed: false` on every response, with an age-aware staleness warning. |
 | **ENG-003 — the code half** | Boot applies no DDL. The app imports, assesses, confirms, reviews and exports as a role with NOSUPERUSER and no CREATE, while every DDL statement it attempts is refused. 28 assertions. |
-| **Migration coverage** | 47 steps, a `schema_migrations` ledger, and a checker that fails if any migration script creates a table the migrator does not. |
+| **Migration coverage** | 48 steps, a `schema_migrations` ledger, and a checker that fails if any migration script creates a table the migrator does not. |
 
 ```sh
 node scripts/prpa-e2e-demo.js             # 46 assertions — import → … → Excel, over HTTP
@@ -93,7 +93,7 @@ In order. Steps 1–5 need no merge and no deployment.
 4. **Split the URLs:** `MIGRATION_DATABASE_URL` (owner), `DATABASE_URL` (app). This is what closes
    ENG-003; the code half is done.
 5. **Run `node scripts/migrate.js`** against the production database as a deploy step, and read
-   `$?`. 47 steps. The app will not start without it — by design.
+   `$?`. 48 steps. The app will not start without it — by design.
 6. **Merge to `main` and deploy.** Needs your separate authorization (ruling 27 item 10). Railway
    auto-deploys from `main`, so the merge *is* the deployment.
 7. **`scripts/wait-for-deploy.sh` then `scripts/smoke-deployed.sh`**, each bare, each `$?` read.

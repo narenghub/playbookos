@@ -97,6 +97,39 @@ async function fingerprint(q, tables) {
   return out;
 }
 
+// The columns the running application reads. §6 asks whether the migration is additive, which is a
+// question about a BEFORE and an AFTER: a column that is absent in both was never created, and that
+// is not a backward-compatibility problem — it is either a table this release introduces or, if the
+// chain halted, a step that never ran.
+const APP_COLUMNS = [
+  ['federal_opportunities', 'solicitation_number'], ['federal_opportunities', 'response_deadline'],
+  ['federal_opportunities', 'is_biddable'], ['opportunity_assessments', 'verdict'],
+  ['opportunity_bid_reviews', 'decision'], ['users', 'email'], ['users', 'role'],
+  ['companies', 'slug'], ['verified_capabilities', 'verification_status'],
+];
+
+// Pure, and exported, so the negative control can watch it say "dropped". The clean-build path never
+// reaches the never-created branch, and a classifier nobody has seen say no is not a classifier.
+function classifyColumns(before, after) {
+  const dropped = []; const notCreated = [];
+  for (const key of Object.keys(after)) {
+    if (after[key]) continue;
+    if (before && before[key]) dropped.push(key);
+    else notCreated.push(key);
+  }
+  return { dropped, notCreated };
+}
+
+async function columnPresence(q) {
+  const out = {};
+  for (const [t, c] of APP_COLUMNS) {
+    const r = await q(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_schema='public' AND table_name=$1 AND column_name=$2) AS present`, [t, c]);
+    out[`${t}.${c}`] = r.rows[0].present === true;
+  }
+  return out;
+}
+
 async function main() {
   h(`PRODUCTION MIGRATION READINESS — ${DUMP ? `restore of ${path.basename(DUMP)}` : 'PRODUCTION-LIKE (no dump supplied)'}`);
 
@@ -112,7 +145,7 @@ async function main() {
   process.env.ADMIN_PASSWORD = require('crypto').randomBytes(18).toString('hex');
   process.env.JWT_SECRET = require('crypto').randomBytes(32).toString('hex');
 
-  let baseline = null; let after = null; let client = null;
+  let baseline = null; let after = null; let client = null; let baselineCols = null;
   try {
     // ── 1. THE "EXISTING" DATABASE ────────────────────────────────────────────
     h('1. AN EXISTING DATABASE WITH DATA IN IT');
@@ -180,6 +213,29 @@ async function main() {
         throw new Error('stop');
       }
       ok(`it is the PlaybookOS database (${present.join(', ')} present)`);
+
+      // EVERY skipped-constraint gap, listed BEFORE the migration runs.
+      //
+      // The migration halts at the first required step that fails, so a run reports one of these at a
+      // time — and finding the next one costs another 25MB dump, taken by hand, by the CEO. The first
+      // such run halted at `outreach`; this says up front whether anything else is waiting behind it.
+      //
+      // It is a DIAGNOSTIC, not an assertion: a gap here is a decision (some repairs need a person to
+      // choose which duplicate row survives), and the verdict belongs to the migration step that
+      // actually tries it. Making this a failure would double-report the same defect.
+      try {
+        const out = execFileSync(process.execPath,
+          [path.join(__dirname, 'check-skipped-inline-constraints.js'), '--against', urlFor('existing')],
+          { encoding: 'utf8', stdio: 'pipe' });
+        console.log('        no constraint declared inline is missing from this database');
+        void out;
+      } catch (e) {
+        const text = `${e.stdout || ''}${e.stderr || ''}`;
+        const lines = text.split('\n').filter((l) => /DECLARED but MISSING|^    \S|^        /.test(l));
+        console.log('        ── skipped-constraint gaps in this database (diagnostic, not a verdict) ──');
+        for (const l of lines.slice(0, 40)) console.log(`        ${l.trim()}`);
+        console.log('        ── these are what will halt the migration below, in this order ──');
+      }
     } else {
       // Production-like: the migrator's schema, then representative rows, so the second migration
       // run below is against a POPULATED database rather than an empty one. Migrating an empty
@@ -212,6 +268,12 @@ async function main() {
       'notifications', 'outreach', 'prospects'];
     baseline = await fingerprint(q, TRACKED);
     console.log(`        baseline rows: ${JSON.stringify(baseline)}`);
+
+    // Which of the application's columns exist BEFORE the migration. Without this reading, §6 cannot
+    // tell a column the migration DROPPED from one it never created, and on the first real production
+    // dump it reported five columns as "GONE" that had never existed — sending the reader looking for
+    // a destructive statement that was not there. A backward-compatibility check needs a before.
+    baselineCols = await columnPresence(q);
 
     // ── 2. BACKUP, BEFORE ANYTHING IS CHANGED ────────────────────────────────
     h('2. BACKUP — taken before the migration, which is the only time it is worth anything');
@@ -264,7 +326,15 @@ async function main() {
         // wrong on the first real production dump.
         skip(`${what}s: the table did not exist before this migration`, `created now, holding ${now} row(s)`);
       } else if (before === null || now === null) {
-        bad(`${table} is not readable after the migration`, `before=${baseline[table]} after=${after[table]}`);
+        // If the chain halted, this table's creating step never ran. Reporting it as its own failure
+        // turns one root cause into four, and the reader then has four things to investigate instead
+        // of one. Name the cause and let the real failure carry the verdict.
+        if (!run.ok) {
+          skip(`${table} is absent`, `the migration halted at ${run.failed.map((f) => f.name).join(', ')}, ` +
+            `so the step that creates it never ran — not a data loss`);
+        } else {
+          bad(`${table} is not readable after the migration`, `before=${baseline[table]} after=${after[table]}`);
+        }
       } else if (before === 0) {
         skip(`${what}s: none in the baseline`, 'nothing to preserve, so nothing is proved here');
       } else if (now >= before) {
@@ -289,19 +359,32 @@ async function main() {
     // The question is whether the migration is additive. A column the old code reads that this
     // migration drops or renames would break the running application during a rolling deploy, and
     // would break a rollback afterwards.
-    const dropped = [];
-    for (const [t, c] of [
-      ['federal_opportunities', 'solicitation_number'], ['federal_opportunities', 'response_deadline'],
-      ['federal_opportunities', 'is_biddable'], ['opportunity_assessments', 'verdict'],
-      ['opportunity_bid_reviews', 'decision'], ['users', 'email'], ['users', 'role'],
-      ['companies', 'slug'], ['verified_capabilities', 'verification_status'],
-    ]) {
-      const r = await q(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
-                          WHERE table_schema='public' AND table_name=$1 AND column_name=$2) AS present`, [t, c]);
-      if (!r.rows[0].present) dropped.push(`${t}.${c}`);
+    //
+    // DROPPED and NEVER-CREATED are different findings and must not share a message. The first
+    // production dump produced "5 column(s) the application reads are GONE" for five columns that
+    // had never existed in that database — the chain had halted at `outreach`, so the steps that
+    // create them never ran. That wording describes a destructive migration, which is the one thing
+    // this check exists to detect, and it was not what happened. Reading the before tells them apart.
+    const afterCols = await columnPresence(q);
+    const { dropped, notCreated } = classifyColumns(baselineCols, afterCols);
+    if (dropped.length) {
+      bad(`${dropped.length} column(s) the application reads were DROPPED by the migration`,
+        `${dropped.join(', ')} — present before, absent after. This breaks a rolling deploy and a rollback.`);
+    } else {
+      ok('the migration dropped no column the application reads');
     }
-    if (!dropped.length) ok('every column the application reads is still present');
-    else bad(`${dropped.length} column(s) the application reads are GONE`, dropped.join(', '));
+    if (notCreated.length) {
+      // Whether this is a problem depends entirely on whether the migration completed.
+      if (run.ok) {
+        bad(`${notCreated.length} column(s) the application reads were never created`,
+          `${notCreated.join(', ')} — the migration reported success without creating them`);
+      } else {
+        skip(`${notCreated.length} column(s) the application reads are absent`,
+          `${notCreated.join(', ')} — never created, NOT dropped: the chain halted at ` +
+          `${run.failed.map((f) => f.name).join(', ')}, so the steps that create them never ran. ` +
+          `Fix that step and this resolves with it.`);
+      }
+    }
 
     // The one destructive statement in the chain, named so it is not discovered.
     const referred = await q(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
@@ -375,4 +458,10 @@ async function main() {
   process.exit(0);
 }
 
-main().catch((e) => { console.error(`\nverify-migration-readiness: ${e.stack || e.message}\n`); stopCluster(); process.exit(1); });
+// Guarded so the negative control can require classifyColumns without starting a Postgres cluster.
+// `node scripts/verify-migration-readiness.js` is unchanged.
+if (require.main === module) {
+  main().catch((e) => { console.error(`\nverify-migration-readiness: ${e.stack || e.message}\n`); stopCluster(); process.exit(1); });
+}
+
+module.exports = { classifyColumns, APP_COLUMNS };

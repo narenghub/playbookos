@@ -256,6 +256,30 @@ const SCHEMA_STEPS = [
     run: () => runScript('scripts/migrate-sitenex-rename.js'),
   },
   { name: 'partner territories', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-partner-territories.js') },
+  {
+    // Schema, not a backfill — and it belongs HERE, after 'sitenex rename (creates partners)', because
+    // outreach.partner_id carries a foreign key to partners(id). Placing it next to the 'outreach'
+    // step, where it reads as though it belongs, fails with `relation "partners" does not exist`.
+    //
+    // It was left out of this chain entirely on the strength of its own description, "back-fills
+    // partner scope over existing rows". It does back-fill. It also ADDS outreach.partner_id, DROPS
+    // UNIQUE (entity_type, entity_id), and CREATES the unique index on
+    // (entity_type, entity_id, COALESCE(partner_id, 0)) that src/lib/outreach/index.js conflicts on.
+    //
+    // Without it a database built by this migrator has no outreach.partner_id, and the application's
+    // own setStatus upsert fails with `column "partner_id" does not exist` — so outreach status
+    // changes are broken on every fresh deployment. Production works only because somebody ran this
+    // script there by hand, which is also why the first gate-2 run against production's dump looked
+    // like a schema defect when the schema was correct and the CHECK was stale.
+    //
+    // Measured, not reasoned: a migrator-built database was probed on 2026-11-06 and the application's
+    // upsert raised exactly that error. The same defect as the 43 hand-run scripts, surviving one
+    // round longer because it was classified by its summary line rather than by what it executes.
+    name: 'outreach partner scope',
+    required: true,
+    usesOwnPool: true,
+    run: () => runScript('scripts/migrate-outreach-partner-scope.js'),
+  },
   { name: 'sitenex phase3', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-sitenex-phase3.js') },
   { name: 'sitenex contract sends', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-sitenex-contract-sends.js') },
   { name: 'sitenex intake links', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-sitenex-intake-links.js') },

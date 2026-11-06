@@ -128,7 +128,7 @@ exact record of whether the step has run. Nothing about the already-applied migr
 
 ### 5.3 What the review proves
 
-- all 48 steps apply to a **populated** database
+- all 49 steps apply to a **populated** database
 - **no table loses a row**; the human bid/no-bid decisions and the audit trail both survive —
   the two things that cannot be re-derived from a re-import
 - a re-run changes nothing and creates no duplicate rows

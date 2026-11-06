@@ -506,6 +506,26 @@ pf_step "the Federal Contracts page renders real data" node scripts/screenshot-p
 # the migration is additive. That sentence was written three times and tested nowhere. This boots
 # the ACTUAL deployed release against a database the new migrator has migrated.
 pf_step "the deployed release still runs on the migrated schema" node scripts/check-previous-release-compat.js
+# The first run against the real production dump halted on `outreach`, and the schema was correct: the
+# check demanded a constraint that migrate-outreach-partner-scope.js drops on purpose. Behind that sat
+# the real defect — that script was not in the chain, so a migrator-built database had no
+# outreach.partner_id and the app's own setStatus upsert failed on it (ENG-004).
+# This asserts the BEHAVIOUR, not the schema shape: the query copied from src/lib/outreach/index.js,
+# run against three real database shapes. A shape assertion is what went stale; this cannot, without
+# the application changing with it.
+pf_step "the application's own outreach upsert works on every real DB shape" node scripts/check-outreach-unique-repair.js
+# The same run reported five columns as "GONE" that had never existed. A backward-compatibility check
+# that cannot tell a dropped column from one never created will cry wolf until nobody believes it.
+pf_step "dropped and never-created columns are told apart" node --test scripts/readiness-column-classification.test.js
+# outreach was one instance of a class: 63 constraints are declared inside CREATE TABLE IF NOT EXISTS
+# across 57 tables, and every one of them is skipped on a database where the table already exists.
+# Finding them one per production dump means the CEO takes a new 25MB backup for each. The sweep lists
+# them all; this proves the sweep can go red, and does not cry wolf on a unique index.
+pf_step "the skipped-constraint sweep can go red and does not cry wolf" node scripts/check-inline-constraint-sweep.js
+# Validating against production's schema needs a dump only the CEO can take. This reconstructs the
+# shape his 2026-11-06 run reported and runs the whole gate-2 harness against it, so a second defect
+# is found here rather than by asking for another 25MB backup.
+pf_step "the gate-2 harness passes against a production-shaped dump" node scripts/check-production-shape-readiness.js
 
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 

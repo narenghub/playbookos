@@ -106,12 +106,46 @@ lifecycle grew. Validated in src/lib/outreach/registry.js instead.$c$`);
     // Specifically (entity_type, entity_id) — the PRIMARY KEY is also a unique index, so matching on
     // "UNIQUE" and taking the first row reported the pkey and told us nothing. This one is what makes the
     // upsert work; without it setStatus would insert a duplicate instead of updating.
+    //
+    // WHAT THE UPSERT NEEDS CHANGED UNDERNEATH THIS CHECK, AND THE CHECK DID NOT FOLLOW.
+    //
+    // This originally demanded `UNIQUE (entity_type, entity_id)`, because that is what setStatus used
+    // to conflict on. On 2026-10-01 migrate-outreach-partner-scope.js DELIBERATELY DROPPED that
+    // constraint and replaced it with a unique INDEX on (entity_type, entity_id, COALESCE(partner_id, 0)),
+    // so a partner and our own staff can each hold a record for the same prospect — and it throws if
+    // the old entity-only constraint is still there. src/lib/outreach/index.js conflicts on the
+    // three-column expression now.
+    //
+    // So on any database where partner scoping has been applied — production — the old constraint is
+    // absent BY DESIGN, and demanding it was a stale expectation, not a finding. It halted the first
+    // gate-2 run against the real production dump and reported the schema as broken when it was
+    // correct. This is the same failure as verify-product-revocation-live.js in CLAUDE.md: an
+    // expectation that encoded a state somebody had since deliberately changed.
+    //
+    // Either key is therefore accepted, and WHICH one is reported, because the two are different
+    // products: one record per prospect, or one per prospect per partner.
     const uniq = (await query(
       `SELECT pg_get_constraintdef(oid) d FROM pg_constraint
         WHERE conrelid = 'outreach'::regclass AND contype = 'u'`)).rows.map(r => r.d);
+    const perPartner = (await query(
+      `SELECT indexdef FROM pg_indexes
+        WHERE tablename = 'outreach' AND indexdef ILIKE '%UNIQUE%' AND indexdef ILIKE '%COALESCE%'`)).rows[0];
     const onEntity = uniq.find(d => /UNIQUE \(entity_type, entity_id\)/.test(d));
-    console.log(`unique on (entity_type, entity_id): ${onEntity || 'MISSING'}`);
-    if (!onEntity) { console.error('❌ the upsert has nothing to conflict on — setStatus would duplicate rows'); process.exit(1); }
+    if (perPartner) {
+      console.log(`conflict target: per-partner — ${perPartner.indexdef.replace(' USING btree', '')}`);
+      if (onEntity) {
+        console.error('❌ BOTH keys exist. The entity-only UNIQUE forbids the per-partner rows the');
+        console.error('   per-partner index exists to allow, so one prospect still means one record.');
+        console.error('   Run scripts/migrate-outreach-partner-scope.js, which drops the old one.');
+        process.exit(1);
+      }
+    } else if (onEntity) {
+      console.log(`conflict target: entity-only — ${onEntity} (partner scoping not yet applied)`);
+    } else {
+      console.error('❌ neither key exists: no UNIQUE (entity_type, entity_id) and no per-partner unique');
+      console.error('   index. setStatus has nothing to conflict on, so every status change fails.');
+      process.exit(1);
+    }
     const chk = (await query(`SELECT COUNT(*)::int n FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
       WHERE t.relname='outreach' AND c.contype='c'`)).rows[0].n;
     console.log(`CHECK constraints on outreach: ${chk} (must be 0 — the vocabulary is a comment)`);

@@ -47,6 +47,14 @@ Get the dump WITHOUT touching production:
 
   (Railway's backup is a read operation. It does not modify the database.)
 
+Or, from the CLI — this is the route that worked on 2026-11-06:
+
+  railway link        # pick the project, then the Postgres service
+  railway run bash -c 'pg_dump --format=custom "$DATABASE_PUBLIC_URL" > ~/Downloads/playbookos-prod.dump'
+
+  DATABASE_PUBLIC_URL, not DATABASE_URL. "railway run" executes LOCALLY, so
+  postgres.railway.internal does not resolve from a laptop. pg_dump is a read.
+
 Then:
 
   scripts/verify-prod-dump.sh ~/Downloads/<the-file>

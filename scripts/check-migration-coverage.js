@@ -56,7 +56,14 @@ const NOT_PLAIN_CREATORS = new Map([
   ['migrate-cphi-roles.js', 'grants roles; belongs to access provisioning, not schema'],
   ['migrate-invite-products.js', 'back-fills product grants for existing accounts'],
   ['migrate-prospects-reachability.js', 'back-fills a computed column over existing rows'],
-  ['migrate-outreach-partner-scope.js', 'back-fills partner scope over existing rows'],
+  // migrate-outreach-partner-scope.js WAS excluded here, as "back-fills partner scope over existing
+  // rows". It is now step 'outreach partner scope' in the chain: the description was accurate about
+  // what it also does and silent about the schema it changes — ADD COLUMN partner_id, DROP the
+  // entity-only UNIQUE, CREATE the per-partner unique index the application's upsert conflicts on.
+  // A migrator-built database had no outreach.partner_id and the app's own setStatus failed on it.
+  //
+  // The lesson is about this list, not that script: an entry here is a claim that a script changes no
+  // schema, and it was accepted on the strength of a summary line. Anything added below is read.
 ]);
 
 let temp = null;

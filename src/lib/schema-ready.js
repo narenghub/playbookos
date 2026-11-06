@@ -50,6 +50,16 @@ const REQUIRED_COLUMNS = Object.freeze([
   ['federal_opportunities', 'version_seq'],
   ['opportunity_assessments', 'evidence_basis'],
   ['verified_capabilities', 'evidence_class'],
+  // outreach.partner_id — added after 2026-11-06, because this check would not have caught the
+  // defect that day. migrate-outreach-partner-scope.js was not in the migrator chain, so a
+  // migrator-built database had no partner_id, and src/lib/outreach/index.js upserts with
+  // ON CONFLICT (entity_type, entity_id, COALESCE(partner_id, 0)) — which fails outright without it.
+  //
+  // The server would have started, answered /health 200 with db: connected, and failed every outreach
+  // status change. That is the 2026-09-30 shape exactly: green from outside, broken in use. A boot
+  // readiness check that lists only the newest release's columns will keep being surprised by the
+  // one before it, so a column the application cannot run without belongs here whatever its age.
+  ['outreach', 'partner_id'],
 ]);
 
 /**

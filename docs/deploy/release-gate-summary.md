@@ -8,14 +8,21 @@
 # FAIL — two gates are unmet, and both are yours
 
 I am **not** requesting execution approval. Ruling 32 says *"If any gate fails, stop immediately. Do
-not bypass it or report the application as live."* Two gates have not been met, and neither can be
-met by me.
+not bypass it or report the application as live."* Two gates are unmet.
+
+Gate 2 is no longer unperformed — **you ran it, and it did its job.** It exited 1 and found two real
+defects on first contact with the actual production database, one of which would have shipped a broken
+feature on every fresh deployment. Both are fixed. What remains is one re-run of the same command
+against the dump you already have.
+
+Gate 1 has not moved: the exposed administrator password is still unconfirmed as changed, and that
+check **begins failing on 2026-11-13**.
 
 | Gate | Status | Who |
 |---|---|---|
 | **1. Admin password changed, credentials rotated** | **FAIL — unconfirmed** | you |
-| **2. Backup restored, 48 steps validated against production's schema** | **FAIL — not performed** | you |
-| 3. Migration incompatibility, mutation, permissions, rollback | **PASS** (local) | done |
+| **2. Backup restored, 49 steps validated against production's schema** | **FAIL — performed; 2 defects found and fixed; needs one re-run** | you |
+| 3. Migration incompatibility, mutation, permissions, rollback | **PASS** — 2 incompatibilities found by gate 2, both resolved; confirmed by gate 2's re-run | done |
 | 4. Least-privilege role + separate migration credentials | **PASS** (prepared, unapplied) | done / you to apply |
 | 5. Full preflight + end-to-end, actual exit codes | **PASS** | done |
 | 6. Exact migration and merge plan | **PASS** | done |
@@ -47,34 +54,59 @@ tokens for up to a week and rotating the secret is the only thing that kills the
 I will never ask you for a secret value, and if one is pasted into this conversation the correct
 response is to rotate it again.
 
-## Gate 2 — FAIL · not performed
+## Gate 2 — FAIL · performed, found a defect, fixed, needs ONE re-run
 
-Ruling 32 item 2: *"Restore an authorized copy into an isolated environment and validate all 48
+Ruling 32 item 2: *"Restore an authorized copy into an isolated environment and validate all 49
 migration steps against the actual production schema."*
 
-**I cannot obtain a production backup.** I have no Railway access, and the credentials in the
-project handoff document are among the exposed ones — using them would be both unauthorised and
-unsafe.
+**You performed it on 2026-11-06.** `railway run pg_dump --format=custom` against
+`DATABASE_PUBLIC_URL` produced a 25MB dump; `scripts/verify-prod-dump.sh` restored it into a
+disposable cluster and **exited 1** — 7 assertions passed, 5 failed, 1 did not run.
 
-Everything needed is ready, and it is one command on your machine:
+**That gate earned its place.** Every green result before it described a database *this repository
+built*. The first contact with the real one found two defects, one of them live in production-adjacent
+code, and neither was findable any other way.
+
+### What it found
+
+| | |
+|---|---|
+| Reported | `outreach: unique on (entity_type, entity_id): MISSING` — the chain halted here |
+| Actually | **your schema was correct.** The check was stale: `migrate-outreach-partner-scope.js` drops that constraint on purpose and replaces it with a per-partner unique index. The check still demanded the old one. |
+| Behind it | that partner-scope script **was not in the migrator chain at all** — excluded as a "backfill". So a migrator-built database has no `outreach.partner_id`, and the application's own status-change query fails on it. Production works only because somebody ran it there by hand. |
+| Also wrong | the report said *"5 column(s) the application reads are GONE"*. None had been dropped; none had ever existed. The chain had halted before the steps that create them. |
+
+Full account: **`docs/tickets/ENG-004`**. All four are fixed; 48 → **49 steps**.
+
+### Why the re-run should pass
+
+`scripts/check-production-shape-readiness.js` reconstructs the shape your run reported — no PRPA
+tables, outreach partner-scoped with 159 rows — dumps it, and runs the **entire** gate-2 harness
+against that dump. **17 assertions, exit 0.**
+
+**It is not a substitute for your dump, and one number says why.** Your dump restored **140 tables**.
+The reconstruction has **147** — the migrator's 152 less the 5 this release adds. So production is
+missing roughly **seven further tables** that exist in the reconstruction, and I cannot say which,
+because your report did not list them. The migration creates missing tables, so the likely answer is
+"nothing to do". But a table absent in the reconstruction and *present* in production, carrying a
+constraint this schema expects, is precisely the shape of the defect that halted the first run — and
+it cannot appear in a reconstruction built from a report that never mentioned it.
+
+That is what the re-run is for, and why I am not treating this harness as the gate.
+
+The readiness check now also lists **every** skipped-constraint gap in your database *before*
+migrating, so a second one surfaces in the same run rather than costing another 25MB backup.
+
+### The re-run
 
 ```sh
-# 1. railway.app -> project -> Postgres service -> Backups -> create -> download   (a read)
-# 2.
 cd ~/Downloads/playbookos && git pull
-scripts/verify-prod-dump.sh ~/Downloads/<the-backup-file>
+scripts/verify-prod-dump.sh ~/Downloads/playbookos-prod.dump
 echo $?
 ```
 
-It restores into a disposable local cluster, runs all 48 steps against **your real schema**, and
-prints table names, row counts and verdicts — **no secrets**. It has no connection string and reads
-none, so it cannot reach production. Tested end to end against a real dump.
-
-**Why this gate is not a formality.** Every green result in this repository describes a database
-*this repository built*: **152 tables**. Production is documented at **~137**. A fresh install here
-once produced **~66** against production's 137 — that divergence is the entire subject of
-`docs/tickets/ENG-001`. Those numbers do not reconcile, and I cannot reconcile them without your
-dump.
+The dump you already took is fine — nothing about it was at fault. No secrets in the output; the
+script holds no connection string and cannot reach production.
 
 ---
 
@@ -101,13 +133,37 @@ deployed release** (`origin/main`, `f284243`) against a database the new migrato
 | | |
 |---|---|
 | Migration against a populated database | `verify-migration-readiness.js` — 13 assertions, **exit 0**: no table loses a row, re-runs change nothing, backup→restore reproduces exactly |
-| Destructive-operation inventory | `analyze-migration-risks.js`: 6 destructive, 19 mutating, 4 breaking, 13 weakening, 8 rollback-only never reached |
+| Destructive-operation inventory | `analyze-migration-risks.js`: 6 destructive, 19 mutating, 4 breaking, 14 weakening, 8 rollback-only never reached |
 | Permission failures | `check-startup-without-ddl.js` — 28 assertions, **exit 0** |
+| The outreach key change, on three real shapes | `check-outreach-unique-repair.js` — 22 assertions, **exit 0** |
+| A production-shaped dump, through the whole gate-2 harness | `check-production-shape-readiness.js` — 17 assertions, **exit 0** |
 
-**One item needs your eye before migrating** (`docs/deploy/migration-risk-report.md` §1.1): four
-`UPDATE users SET role=…` statements remap a legacy taxonomy on every run. They have been running at
-boot already — this is not new — but if anyone in production deliberately holds the role
-`procurement` or `marketing`, they will be silently reassigned. Gate 2's output will show you.
+### Incompatibility — what gate 2 found, and what it changed here
+
+Two defects, both fixed, both covered above and in full in `docs/tickets/ENG-004`:
+
+1. **A stale schema assertion halted a correct database.** `migrate-outreach.js` demanded a constraint
+   that `migrate-outreach-partner-scope.js` drops on purpose. It now accepts either key and reports
+   which.
+2. **A required schema step was not in the chain**, excluded as a "backfill" on the strength of its own
+   description. A migrator-built database therefore had no `outreach.partner_id` and the application's
+   own status-change query failed on it. It is now step `outreach partner scope`.
+
+The second is the one worth noting at a release gate: it means **every green check in this repository
+before today was running against a database where outreach was broken**, and a fresh deployment would
+have shipped it that way. Rolling back would not have revealed it either, because the deployed release
+has the column in production.
+
+**Two items need your eye before migrating:**
+
+- `docs/deploy/migration-risk-report.md` §1.1 — four `UPDATE users SET role=…` statements remap a
+  legacy taxonomy on every run. Running at boot already, so not new; but anyone in production
+  deliberately holding the role `procurement` or `marketing` will be silently reassigned. Gate 2's
+  output shows you the current roles.
+- §1.4, **new** — `DROP CONSTRAINT outreach_entity_type_entity_id_key` against a table with 159 real
+  rows. On production it is a guarded no-op (the constraint is already gone, which is what the halt was
+  about). It drops and recreates inside one transaction; a concurrent write in that window would leave
+  a duplicate the new index then refuses. No rows are lost — asserted on production's shape.
 
 ## Gate 4 — PASS (prepared, applied nowhere)
 
@@ -133,7 +189,13 @@ check-previous-release-compat.js   exit=0    13 assertions, the deployed release
 check-startup-without-ddl.js       exit=0    28 assertions, ENG-003
 check-db-role-separation.js        exit=0    least-privilege roles
 verify-migration-readiness.js      exit=0    13 assertions, populated DB + backup/restore
-check-migration-coverage.js        exit=0    152 tables, no gap
+check-migration-coverage.js        exit=0    49 steps, 152 tables, no gap
+check-outreach-unique-repair.js    exit=0    22 assertions, the app's own upsert on 3 real DB shapes
+check-production-shape-readiness.js exit=0   17 assertions, whole gate-2 harness on a prod-shaped dump
+check-inline-constraint-sweep.js   exit=0    14 assertions, negative controls for the sweep
+readiness-column-classification    exit=0    7 tests, dropped vs never-created
+check-skipped-inline-constraints.js exit=0   63 inline constraints across 57 tables, enumerated
+analyze-migration-risks.js         exit=0    6 destructive, 19 mutating, 4 breaking, 14 weakening
 check-prpa-route-collisions.js     exit=0    no path declared twice
 check-opportunity-tracker.js       exit=0    137 assertions
 screenshot-prpa-tracker.js         exit=0    17 assertions, the page renders real data
@@ -144,7 +206,23 @@ check-secrets.js --history         exit=0    exposure TRACKED, not resolved — 
 check-release-blockers.js          exit=0    1 open blocker, reported
 ```
 
-`scripts/preflight.sh` — **recorded in §Preflight below, read from its log.**
+### Preflight
+
+```
+── 77 checks: 77 executed and passed · 0 failed · 0 did not execute
+PASS  every check executed and passed — safe to push.
+PREFLIGHT_EXIT=0
+```
+
+**Read from the log file, not from the terminal.** Every one of the five preflight runs in this
+release reported `exit code 0` in the shell while the log said otherwise, because the wrapper command
+ended in `echo` and `$?` was the echo's. CLAUDE.md's rule — *a checker's verdict is its exit status* —
+has a corollary this release kept proving: the status must be the status of the **checker**, not of
+whatever ran last. The log line above is written by the run itself.
+
+`0 did not execute` matters as much as `0 failed`. On 2026-11-03, 31 of 44 steps reported `ok` having
+executed nothing; `scripts/lib/pg-cluster.js` reserves exit 3 for that, and preflight counts it as its
+own verdict.
 
 ## Gate 6 — PASS · the exact plan
 
@@ -167,7 +245,7 @@ check-release-blockers.js          exit=0    1 open blocker, reported
 
 # ── 4. MIGRATE — before the app starts, as its own step ───────────────────────
 node scripts/migrate.js
-echo $?                      # must be 0. 48 steps. Stop here if it is not.
+echo $?                      # must be 0. 49 steps. Stop here if it is not.
 
 # ── 5. MERGE — this IS the deployment; Railway auto-deploys from main ─────────
 #   (requires your explicit approval; I will not do this)
@@ -208,11 +286,24 @@ Guide: `docs/deploy/prpa-user-guide.md`.
 
 ## What happens next
 
-1. You clear gate 1 (password + rotation) and gate 2 (backup + `verify-prod-dump.sh`).
-2. You send me gate 2's output — no secrets in it.
-3. I re-run everything against the verified schema and report every exit code.
+1. **Gate 2, re-run** — one command, against the dump you already have:
+   ```sh
+   cd ~/Downloads/playbookos && git pull
+   scripts/verify-prod-dump.sh ~/Downloads/playbookos-prod.dump
+   echo $?
+   ```
+   Send me everything it prints. No secrets in it.
+2. **Gate 1** — change the administrator password, then reply *"password changed"*. Then `JWT_SECRET`,
+   and only after: `src/lib/core.js` signs tokens with `expiresIn: '7d'`, so a password change leaves
+   working tokens for up to a week and rotating the secret is the only thing that kills them. Steps 1–3
+   of `docs/deploy/RELEASE.md`. **This check begins failing on 2026-11-13.**
+3. I re-run everything against the verified schema and report every exit code, read from logs.
 4. **Then** I ask you, explicitly and in one message, for execution approval.
 5. On approval: migrate, merge, verify the deployed commit, smoke, confirm the dashboard and export.
+
+**What I will not do without that approval:** run a production migration, merge to `main`, deploy,
+provision infrastructure, contact a contracting officer, or submit a bid. Ruling 32 gate 7 stops me
+before the first production database mutation, and this document is that stop.
 
 **Nothing has been migrated, merged, deployed or provisioned. No contracting officer has been
 contacted and no bid has been submitted.**

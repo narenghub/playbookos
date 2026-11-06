@@ -7,7 +7,7 @@ Produced by `scripts/analyze-migration-risks.js` — a static scan of every stat
 executes. It connects to nothing. Re-run it any time; it is part of no gate.
 
 ```
-6 destructive · 19 mutating · 4 breaking · 13 weakening
+6 destructive · 19 mutating · 4 breaking · 14 weakening
 8 further statements exist in --rollback branches the migrator never reaches
 ```
 
@@ -51,6 +51,36 @@ migrates the data into the new column first. Order is correct.
 `src/lib/autonomy.js:378` — part of the kill-switch module's own API, reached with parameters, not
 a blanket delete during migration. Listed because a `DELETE` in a migration path should never be
 invisible.
+
+### 1.4 `ALTER TABLE outreach DROP CONSTRAINT outreach_entity_type_entity_id_key` — NEW in this release
+
+`scripts/migrate-outreach-partner-scope.js:60`, step **`outreach partner scope`**. New here only in
+the sense that the step is new to the chain; the statement has been running in production since
+2026-10-01, when somebody ran that script there by hand. **On production it is a no-op**, guarded by a
+`hasOld` lookup — the constraint is already gone, which is precisely why the first gate-2 run halted
+over its absence (see `docs/tickets/ENG-004`).
+
+It drops a uniqueness guarantee on a table holding **159 real outreach rows**, and that is the correct
+thing to do: it is replaced, inside the same transaction, by a unique index on
+`(entity_type, entity_id, COALESCE(partner_id, 0))`, so a partner and our own staff can each hold a
+record for the same prospect. One record per prospect was the old product; one per prospect per partner
+is the current one.
+
+Two things about it are worth knowing before the migration runs:
+
+- **It drops and recreates inside one transaction**, deliberately. Between the two there is no
+  uniqueness at all, and a concurrent write in that window would leave a duplicate that the
+  `CREATE UNIQUE INDEX` then refuses — failing the migration with a confusing error about existing
+  data rather than about the window that caused it.
+- **It drops no rows and loses no column.** Verified against production's shape:
+  `scripts/check-outreach-unique-repair.js` migrates three real database shapes — fresh,
+  pre-partner-scope, and production's — and asserts all 159 rows survive and that the application's
+  own upsert works afterwards. **22 assertions, exit 0.**
+
+Why it is in §1 at all, given it changes nothing on production: a `DROP CONSTRAINT` against a
+populated table belongs in front of the person running the migration, whether or not it is expected
+to fire. The run where a guard does not fire is the run nobody is expecting — the third rule in
+`CLAUDE.md`, and the reason this section exists.
 
 ---
 
