@@ -124,6 +124,10 @@ const REQUIREMENT_KINDS = Object.freeze([
 
 const list = (xs) => xs.map((x) => `'${x}'`).join(',');
 
+// Roles permitted to authorize or revoke a bid commitment. Narrow on purpose — widening is a
+// one-line diff, narrowing after the fact is a conversation.
+const AUTHORIZING_ROLES = Object.freeze(['super_admin', 'admin']);
+
 const DDL = [
   // ─────────────────────────────────────────────────────────────────────────
   // DOCUMENTS — integrity, scanning, and S3 by reference only
@@ -374,6 +378,94 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_intake_audit_subject
      ON intake_audit (company_id, subject_table, subject_id, occurred_at DESC)`,
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // RULING 16 ITEM 7 — AUTHORIZATION ENFORCED BY THE DATABASE, NOT BY SHAPE
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // "Enforce authorization through role-based permissions and database write controls, not merely
+  // table structure."
+  //
+  // The table structure (a separate table, every row needing a person, an approval id and a scope)
+  // makes a bid authorization impossible to DERIVE. It does nothing about a careless or hostile
+  // INSERT that supplies those three fields. So the write itself is controlled.
+  //
+  // WHY A TRIGGER AND NOT ROW-LEVEL SECURITY. RLS is the textbook answer and it does not work here:
+  // src/lib/office/context.js records that the application connects as a SUPERUSER, and a superuser
+  // bypasses RLS even under FORCE ROW LEVEL SECURITY. A policy would read as a control and enforce
+  // nothing. A BEFORE trigger fires for every role including superuser, so it holds against the
+  // connection we actually have rather than the one we would prefer.
+  //
+  // WHAT IT ENFORCES:
+  //
+  //   1. the authorizer must be a REAL, ACTIVE user — not a string somebody passed
+  //   2. their role must be one permitted to commit the company (admin tier only, by default)
+  //   3. the decision is IMMUTABLE once made: only the revocation fields and notes may change,
+  //      so an authorization cannot be quietly re-scoped or re-attributed after the fact
+  //   4. a revocation must also name a real, active, permitted user
+  //
+  // Point 3 matters as much as the first two. An authorization that can be edited is a signature
+  // that can be moved onto a different document.
+  //
+  // The permitted set is interpolated from AUTHORIZING_ROLES, the one declaration. It was written
+  // literally here at first, which meant three copies and nothing forcing them to agree: a mutation
+  // test that widened the constant PASSED, because the constant drove nothing.
+  // The set is deliberately NARROW — super_admin and admin. Whether a procurement
+  // director may commit the company to a federal delivery is a business decision, not mine, and
+  // widening a list is a one-line change with a visible diff whereas narrowing one after it has
+  // been used is a conversation.
+  `CREATE OR REPLACE FUNCTION prpa_authorization_write_guard() RETURNS TRIGGER AS $fn$
+     DECLARE
+       actor_role   TEXT;
+       actor_active INTEGER;
+     BEGIN
+       IF TG_OP = 'INSERT' THEN
+         SELECT role, is_active INTO actor_role, actor_active
+           FROM users WHERE email = NEW.authorized_by OR id = NEW.authorized_by;
+         IF actor_role IS NULL THEN
+           RAISE EXCEPTION 'fulfillment_authorizations: authorized_by % is not a known user', NEW.authorized_by
+             USING ERRCODE = 'check_violation';
+         END IF;
+         IF actor_active IS DISTINCT FROM 1 THEN
+           RAISE EXCEPTION 'fulfillment_authorizations: % is not an active user', NEW.authorized_by
+             USING ERRCODE = 'check_violation';
+         END IF;
+         IF actor_role NOT IN (${list(AUTHORIZING_ROLES)}) THEN
+           RAISE EXCEPTION 'fulfillment_authorizations: role % may not authorize a bid', actor_role
+             USING ERRCODE = 'insufficient_privilege';
+         END IF;
+         RETURN NEW;
+       END IF;
+
+       -- UPDATE: the decision is immutable. Only a revocation, or a note, may be added.
+       IF NEW.id <> OLD.id
+          OR NEW.company_id <> OLD.company_id
+          OR NEW.solicitation_id <> OLD.solicitation_id
+          OR NEW.scope <> OLD.scope
+          OR NEW.authorized_by <> OLD.authorized_by
+          OR NEW.authorized_at <> OLD.authorized_at
+          OR NEW.approval_id <> OLD.approval_id
+          OR NEW.valid_until IS DISTINCT FROM OLD.valid_until THEN
+         RAISE EXCEPTION 'fulfillment_authorizations: an authorization is immutable once made; only revocation fields may change'
+           USING ERRCODE = 'check_violation';
+       END IF;
+
+       IF NEW.revoked_by IS NOT NULL AND NEW.revoked_by IS DISTINCT FROM OLD.revoked_by THEN
+         SELECT role, is_active INTO actor_role, actor_active
+           FROM users WHERE email = NEW.revoked_by OR id = NEW.revoked_by;
+         IF actor_role IS NULL OR actor_active IS DISTINCT FROM 1
+            OR actor_role NOT IN (${list(AUTHORIZING_ROLES)}) THEN
+           RAISE EXCEPTION 'fulfillment_authorizations: % may not revoke an authorization', NEW.revoked_by
+             USING ERRCODE = 'insufficient_privilege';
+         END IF;
+       END IF;
+       RETURN NEW;
+     END;
+   $fn$ LANGUAGE plpgsql`,
+  `DROP TRIGGER IF EXISTS trg_prpa_authorization_write_guard ON fulfillment_authorizations`,
+  `CREATE TRIGGER trg_prpa_authorization_write_guard
+     BEFORE INSERT OR UPDATE ON fulfillment_authorizations
+     FOR EACH ROW EXECUTE FUNCTION prpa_authorization_write_guard()`,
+
   // The manual source. Last, because everything above is what makes it usable.
   // activated = true because there is no API to activate; the control on this source is per-record
   // human approval, not a connector flag. kind = 'manual' and NOT 'procurement', so the coverage
@@ -389,8 +481,12 @@ const DDL = [
 // Reverting. Children first; the source row last, because it will fail by foreign key if any
 // manual solicitation survives — which is the correct outcome.
 const ROLLBACK_EXTRA_DDL = [
+  // The trigger goes with its table; the function must be dropped explicitly or it survives as a
+  // dangling object that the next apply would silently CREATE OR REPLACE.
+  `DROP FUNCTION IF EXISTS prpa_authorization_write_guard()`,
   `DELETE FROM source_connectors WHERE source_key = 'manual'`,
 ];
+
 
 const PRECONDITIONS = Object.freeze([
   { name: 'P1', what: 'companies exists (migrateOffice has run)', table: 'companies' },
@@ -399,6 +495,7 @@ const PRECONDITIONS = Object.freeze([
   { name: 'P4', what: 'source_connectors exists (connectors.v1 has run)', table: 'source_connectors' },
   { name: 'P5', what: 'skus exists (referenced for orphan rejection)', table: 'skus' },
   { name: 'P6', what: 'suppliers exists (referenced for orphan rejection)', table: 'suppliers' },
+  { name: 'P7', what: 'users exists (the authorization trigger reads roles from it)', table: 'users' },
 ]);
 
 module.exports = {
@@ -413,4 +510,5 @@ module.exports = {
   SUFFICIENT_CLASSES,
   BUSINESS_LINES,
   REQUIREMENT_KINDS,
+  AUTHORIZING_ROLES,
 };

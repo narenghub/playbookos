@@ -129,6 +129,16 @@ async function main() {
                verification_status TEXT DEFAULT 'planned', UNIQUE (id, company_id))`);
     await q(`CREATE TABLE skus (id TEXT PRIMARY KEY, name TEXT)`);
     await q(`CREATE TABLE suppliers (id TEXT PRIMARY KEY, name TEXT)`);
+    // users, because the authorization trigger reads roles from it (ruling 16 item 7)
+    await q(`CREATE TABLE users (
+               id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT,
+               role TEXT NOT NULL, is_active INTEGER DEFAULT 1)`);
+    await q(`INSERT INTO users (id,email,name,role,is_active) VALUES
+               ('u-super','naren@abiozen.com','Naresh','super_admin',1),
+               ('u-admin','admin@abiozen.com','Admin','admin',1),
+               ('u-proc','raj@abiozen.com','Raj','procurement_team',1),
+               ('u-dir','dir@abiozen.com','Director','procurement_director',1),
+               ('u-gone','former@abiozen.com','Former','admin',0)`);
     await q(`INSERT INTO skus VALUES ('sku-1','A molecule')`);
     await q(`INSERT INTO suppliers VALUES ('sup-1','A supplier')`);
     await q(`INSERT INTO verified_capabilities (id,company_id,kind,code,name,responsible_entity)
@@ -246,7 +256,7 @@ async function main() {
     for (const omit of ['authorized_by', 'approval_id', 'scope']) {
       const row = {
         id: `auth-omit-${omit}`, company_id: 'co-a', solicitation_id: 'sol-a',
-        scope: '50 kg API delivery', authorized_by: 'naren', approval_id: 'appr-bid-1',
+        scope: '50 kg API delivery', authorized_by: 'naren@abiozen.com', approval_id: 'appr-bid-1',
       };
       delete row[omit];
       const c2 = Object.keys(row);
@@ -259,7 +269,7 @@ async function main() {
     const authOk = await refused(q,
       `INSERT INTO fulfillment_authorizations
          (id,company_id,solicitation_id,scope,authorized_by,approval_id)
-       VALUES ('auth-1','co-a','sol-a','50 kg API delivery','naren','appr-bid-1')`);
+       VALUES ('auth-1','co-a','sol-a','50 kg API delivery','naren@abiozen.com','appr-bid-1')`);
     if (!authOk) ok('a complete authorization IS accepted — a person can still authorise a bid');
     else bad('a complete authorization was refused', authOk);
 
@@ -268,6 +278,69 @@ async function main() {
     const authCount = (await q(`SELECT COUNT(*)::int n FROM fulfillment_authorizations`)).rows[0].n;
     const suffCount = (await q(`SELECT COUNT(*)::int n FROM requirement_matches WHERE evidence_sufficient`)).rows[0].n;
     ok(`${suffCount} sufficient match(es) exist and produced ${authCount - 1} authorization(s) by themselves`);
+
+    // ── 5b. RULING 16 ITEM 7 — THE DATABASE REFUSES THE WRITE ────────────
+    h('5b. AUTHORIZATION IS ENFORCED BY A WRITE CONTROL, NOT ONLY BY SHAPE');
+    // RLS would be the textbook answer and does not work: the app connects as a superuser and a
+    // superuser bypasses RLS. A BEFORE trigger fires for every role, so it holds against the
+    // connection we actually have. These assertions are what make that claim checkable.
+    const notAUser = await refused(q,
+      `INSERT INTO fulfillment_authorizations
+         (id,company_id,solicitation_id,scope,authorized_by,approval_id)
+       VALUES ('auth-ghost','co-a','sol-a','anything','someone@nowhere.invalid','appr-x')`);
+    if (notAUser && /is not a known user/.test(notAUser)) {
+      ok('an authorizer who is not a real user → REFUSED by the trigger');
+    } else bad('a non-existent authorizer was accepted', notAUser || 'accepted');
+
+    const inactive = await refused(q,
+      `INSERT INTO fulfillment_authorizations
+         (id,company_id,solicitation_id,scope,authorized_by,approval_id)
+       VALUES ('auth-gone','co-a','sol-a','anything','former@abiozen.com','appr-x')`);
+    if (inactive && /not an active user/.test(inactive)) {
+      ok('a DEACTIVATED admin cannot authorize a bid — the role is read live, not from a token');
+    } else bad('an inactive user authorized a bid', inactive || 'accepted');
+
+    for (const [email, role] of [['raj@abiozen.com', 'procurement_team'], ['dir@abiozen.com', 'procurement_director']]) {
+      const msg = await refused(q,
+        `INSERT INTO fulfillment_authorizations
+           (id,company_id,solicitation_id,scope,authorized_by,approval_id)
+         VALUES ($1,'co-a','sol-a','anything',$2,'appr-x')`, [`auth-${role}`, email]);
+      if (msg && /may not authorize a bid/.test(msg)) ok(`role '${role}' → REFUSED`);
+      else bad(`role '${role}' authorized a bid`, msg || 'accepted');
+    }
+    const adminOk = await refused(q,
+      `INSERT INTO fulfillment_authorizations
+         (id,company_id,solicitation_id,scope,authorized_by,approval_id)
+       VALUES ('auth-admin','co-a','sol-a','10 kg','admin@abiozen.com','appr-admin')`);
+    if (!adminOk) ok("role 'admin' IS permitted — the guard is a gate, not a wall");
+    else bad('a permitted role was refused', adminOk);
+
+    // IMMUTABILITY. An authorization that can be edited is a signature that can be moved onto a
+    // different document.
+    for (const [sql, what] of [
+      [`UPDATE fulfillment_authorizations SET scope = 'something much larger' WHERE id='auth-1'`, 'the scope'],
+      [`UPDATE fulfillment_authorizations SET authorized_by = 'admin@abiozen.com' WHERE id='auth-1'`, 'the authorizer'],
+      [`UPDATE fulfillment_authorizations SET approval_id = 'appr-different' WHERE id='auth-1'`, 'the approval id'],
+      [`UPDATE fulfillment_authorizations SET valid_until = CURRENT_DATE + 365 WHERE id='auth-1'`, 'the validity window'],
+    ]) {
+      const msg = await refused(q, sql);
+      if (msg && /immutable once made/.test(msg)) ok(`editing ${what} after the fact → REFUSED`);
+      else bad(`${what} was edited after the authorization was made`, msg || 'accepted');
+    }
+    const revokeBad = await refused(q,
+      `UPDATE fulfillment_authorizations
+         SET revoked_at = NOW(), revoked_by = 'raj@abiozen.com' WHERE id='auth-1'`);
+    if (revokeBad && /may not revoke/.test(revokeBad)) ok('a non-admin cannot revoke an authorization');
+    else bad('a non-admin revoked an authorization', revokeBad || 'accepted');
+    const revokeOk = await refused(q,
+      `UPDATE fulfillment_authorizations
+         SET revoked_at = NOW(), revoked_by = 'naren@abiozen.com',
+             revocation_reason = 'supplier withdrew' WHERE id='auth-1'`);
+    if (!revokeOk) ok('an admin CAN revoke — and the row is kept, not deleted');
+    else bad('a legitimate revocation was refused', revokeOk);
+    const stillThere = (await q(`SELECT COUNT(*)::int n FROM fulfillment_authorizations WHERE id='auth-1'`)).rows[0].n;
+    if (stillThere === 1) ok('the revoked authorization survives as history');
+    else bad('revocation deleted the record');
 
     // ── 6. tenant isolation, and the limit of it (item 2) ─────────────────
     h('6. TENANT ISOLATION, AND WHERE IT CANNOT REACH');
@@ -312,6 +385,31 @@ async function main() {
       ok('a real sku reference is accepted — and NOTE: skus has no company_id, so tenant');
       ok('scoping on skus/suppliers is NOT enforceable. Recorded as a known gap, not a pass.');
     } else bad('a legitimate sku reference was refused', crossSku);
+
+    // ── 6b. RULING 16 ITEM 8 — FAIL CLOSED ON A SECOND ACTIVE TENANT ─────
+    h('6b. A SECOND ACTIVE TENANT MUST FAIL CLOSED, NOT PICK ONE');
+    // skus and suppliers have no company_id, so tenant scoping on them is unenforceable (§6).
+    // The compensating control is that the read-session resolver REFUSES outright when more than
+    // one active company exists, rather than defaulting to a row. Tested here against the real
+    // resolver, because a compensating control nobody exercises is an assumption.
+    const ctx = require('../src/lib/office/context');
+    const twoActive = async () => ctx.resolveCompanyForReadSession(
+      { userId: 'u-super' }, { query: (sql, p) => q(sql, p) });
+    try {
+      await twoActive();
+      bad('the resolver returned a company while TWO are active',
+        'with skus/suppliers unscoped, picking one would be a cross-tenant read');
+    } catch (e) {
+      if (/active companies exist/.test(e.message) && /UNKNOWN/.test(e.message)) {
+        ok('two active companies → the resolver REFUSES and says which answer is UNKNOWN');
+      } else bad('the resolver failed for the wrong reason', e.message);
+    }
+    await q(`UPDATE companies SET status='inactive' WHERE id='co-b'`);
+    const one = await twoActive();
+    if (one.companyId === 'co-a') ok('with one active company it resolves, and to the right one');
+    else bad('the resolver returned the wrong company', JSON.stringify(one));
+    await q(`UPDATE companies SET status='active' WHERE id='co-b'`);
+    ok('second tenant restored — the refusal is the steady state while skus/suppliers are unscoped');
 
     // ── 7. documents: integrity and scan discipline (items 5–6) ───────────
     h('7. DOCUMENT INTEGRITY AND SCAN DISCIPLINE');
@@ -380,7 +478,7 @@ async function main() {
     } else bad('a decision was audited without its approval', noApproval || 'accepted');
     const withApproval = await refused(q,
       `INSERT INTO intake_audit (id,company_id,subject_table,subject_id,action,actor,approval_id)
-         VALUES ('aud-2','co-a','fulfillment_authorizations','auth-1','authorized','naren','appr-bid-1')`);
+         VALUES ('aud-2','co-a','fulfillment_authorizations','auth-1','authorized','naren@abiozen.com','appr-bid-1')`);
     if (!withApproval) ok('the same entry with its approval is accepted');
     else bad('a properly approved audit entry was refused', withApproval);
 
