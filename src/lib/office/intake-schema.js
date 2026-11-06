@@ -701,6 +701,9 @@ const DDL = [
   //
   //   base_url      declared NOT NULL; the row omitted it entirely
   //   kind          CHECK IN ('procurement','funding','research'); the row said 'manual'
+  //                 -> RESOLVED by widening the CHECK to include 'manual', not by changing the
+  //                    row: migrate-intake.js verifies kind = 'manual' AND NOT 'procurement', and
+  //                    the reason is in the comment above — a human paste must not read as a feed.
   //   access_mode   CHECK IN ('api','manual_assisted');            the row said 'manual'
   //
   // None of them ever surfaced, because this schema had only been applied to a disposable cluster
@@ -714,7 +717,7 @@ const DDL = [
                                   daily_call_ceiling, activated, notes)
      VALUES ('manual', 'Manual intake (human-submitted)',
              'urn:playbookos:manual-intake',
-             'procurement', 'none', 'manual_assisted',
+             'manual', 'none', 'manual_assisted',
              NULL, true,
              'Human-submitted solicitations. Control is per-record human approval, not a connector '
              || 'flag. base_url is a URN, not an endpoint: there is nothing to call.')

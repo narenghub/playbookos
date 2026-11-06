@@ -189,13 +189,29 @@ async function main() {
     if (!lost.length) ok('no table lost rows');
     else bad(`${lost.length} table(s) lost data`, lost.join(' | '));
 
-    // The two that cannot be re-derived, asserted by identity rather than by count.
-    const reviewKept = (await q(`SELECT COUNT(*)::int n FROM opportunity_bid_reviews`)).rows[0].n;
-    if (reviewKept > 0) ok(`${reviewKept} human bid/no-bid decision(s) survived`);
-    else bad('the human decisions did not survive the migration');
-    const auditKept = (await q(`SELECT COUNT(*)::int n FROM opportunity_audit_events`)).rows[0].n;
-    if (auditKept > 0) ok(`${auditKept} audit event(s) survived`);
-    else bad('the audit trail did not survive the migration');
+    // The two that cannot be re-derived from a re-import, so their survival is the thing that
+    // actually matters. Asserted against the BASELINE, not against zero.
+    //
+    // A real production dump holds none of these yet — the tracker is not deployed — so demanding
+    // a positive count failed a correct migration and said "the human decisions did not survive",
+    // which is both alarming and false. An assertion that cannot distinguish "lost" from "never
+    // existed" is the kind of red that teaches people to ignore exit codes.
+    for (const [table, what] of [
+      ['opportunity_bid_reviews', 'human bid/no-bid decision'],
+      ['opportunity_audit_events', 'audit event'],
+    ]) {
+      const before = typeof baseline[table] === 'number' ? baseline[table] : null;
+      const now = typeof after[table] === 'number' ? after[table] : null;
+      if (before === null || now === null) {
+        bad(`${table} is not readable before or after the migration`);
+      } else if (before === 0) {
+        skip(`${what}s: none in the baseline`, 'nothing to preserve, so nothing is proved here');
+      } else if (now >= before) {
+        ok(`all ${before} ${what}(s) survived the migration`);
+      } else {
+        bad(`${before - now} ${what}(s) were LOST`, `${before} → ${now}`);
+      }
+    }
 
     // ── 5. IDEMPOTENCE ───────────────────────────────────────────────────────
     h('5. IDEMPOTENCE — a re-run must change nothing');

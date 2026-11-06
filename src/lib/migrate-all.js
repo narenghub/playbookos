@@ -41,11 +41,24 @@ const db = require('./db');
 // Found because the SPA's own shell requests 500'd on a freshly migrated database — /api/notifications
 // and /api/outreach/tasks both returned "relation does not exist". A deploy to an empty database
 // would have done the same, on the first page load, for every user.
-function runScript(rel, { refusalIsSuccess = null } = {}) {
+function runScript(rel, { refusalIsSuccess = null, args = [] } = {}) {
   const abs = path.join(__dirname, '..', '..', rel);
   try {
-    execFileSync(process.execPath, [abs], { env: { ...process.env }, stdio: 'pipe', encoding: 'utf8' });
-    return { script: rel };
+    const out = execFileSync(process.execPath, [abs, ...args], { env: { ...process.env }, stdio: 'pipe', encoding: 'utf8' });
+    // ── A SCRIPT THAT PRINTED ITS USAGE DID NOT RUN ──────────────────────────
+    //
+    // migrate-intake.js, migrate-connectors.js and migrate-registrations.js all require an explicit
+    // --apply. Invoked with no arguments they print usage, never connect to a database, and exit 0
+    // — so the migrator recorded three steps as applied that had done nothing at all. The same
+    // disease as a check that did not execute reporting itself as a pass, this time in the thing
+    // that builds the database.
+    //
+    // Caught by reading scripts/analyze-migration-risks.js, which listed rollback branches in
+    // scripts the migrator was calling without the flag that reaches any branch at all.
+    if (/^\s*(Usage|USAGE)[: ]/m.test(out) || /\n\s*Usage:/.test(out)) {
+      throw new Error(`${rel} printed its usage instead of running — it needs an explicit flag`);
+    }
+    return { script: rel, args: args.length ? args.join(' ') : undefined };
   } catch (e) {
     // ── A DELIBERATE REFUSAL IS NOT A FAILED MIGRATION ───────────────────────
     //
@@ -178,7 +191,6 @@ const SCHEMA_STEPS = [
   //
   // `required: true` for all of them on purpose. A fresh deployment missing any one of these 500s on
   // the endpoint that touches it, and a migration that "mostly worked" is how this state arose.
-  { name: 'registrations', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-registrations.js') },
   { name: 'permissions', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-permissions.js') },
   { name: 'shadow log', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-shadow-log.js') },
   {
@@ -247,8 +259,8 @@ const SCHEMA_STEPS = [
   { name: 'sitenex phase3', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-sitenex-phase3.js') },
   { name: 'sitenex contract sends', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-sitenex-contract-sends.js') },
   { name: 'sitenex intake links', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-sitenex-intake-links.js') },
-  { name: 'connectors', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-connectors.js') },
-  { name: 'intake', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-intake.js') },
+  { name: 'connectors', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-connectors.js', { args: ['--apply'] }) },
+  { name: 'intake', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-intake.js', { args: ['--apply'] }) },
 
   // ── PRPA ────────────────────────────────────────────────────────────────────
   // These were never in the boot chain: they were applied by hand on a disposable cluster, which is
@@ -262,6 +274,20 @@ const SCHEMA_STEPS = [
     name: 'connectors / research spine',
     required: true,
     run: (q) => require('./connectors/schema').migrateConnectors(q),
+  },
+  {
+    // AFTER connectors, because it widens the `kind` CHECK on verified_capabilities (2 kinds → 7,
+    // adding certification, regulatory_authorization, equipment, service_capability and
+    // quality_system) and its own preconditions require that table to exist. Ordered first, it
+    // refused with "1 precondition(s) failed. NOTHING WAS WRITTEN."
+    //
+    // This step had been a silent no-op, so the widened kinds were never applied — which is why a
+    // demo fixture using 'service_capability' was rejected by the database earlier in this session.
+    // The fixture was right; the schema was incomplete.
+    name: 'registrations',
+    required: true,
+    usesOwnPool: true,
+    run: () => runScript('scripts/migrate-registrations.js', { args: ['--apply'] }),
   },
   {
     name: 'PRPA intake schema (v3)',

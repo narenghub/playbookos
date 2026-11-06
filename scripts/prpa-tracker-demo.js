@@ -80,10 +80,12 @@ function stopCluster() {
 // Fixture capabilities for pass B ONLY. Every name begins with FIXTURE so the label travels with
 // the data into any export, screenshot or report that quotes it.
 const FIXTURE_CAPABILITIES = [
-  // kind must be 'capability' or 'accreditation' — verified_capabilities_kind_check. The stub this
-  // demo used had no such constraint, so 'service_capability' passed for as long as the table was
-  // fake. What distinguishes a service here is business_line, not a third kind.
-  { id: 'cap-fx-1', kind: 'capability', evidence_class: 'method_validated', business_line: 'analytical_services', name: 'FIXTURE: validated HPLC assay method', valid_until: '2027-06-30' },
+  // 'service_capability' is a valid kind again, and this fixture was right all along. The
+  // registrations migration widens verified_capabilities.kind from 2 values to 7 — but that step
+  // was a SILENT NO-OP in the migrator (it needs --apply and printed usage instead), so the widened
+  // kinds had never been applied anywhere. The database rejected the fixture, and the fixture got
+  // "fixed" to 'capability' to make the red go away. That was treating the symptom.
+  { id: 'cap-fx-1', kind: 'service_capability', evidence_class: 'method_validated', business_line: 'analytical_services', name: 'FIXTURE: validated HPLC assay method', valid_until: '2027-06-30' },
   { id: 'cap-fx-2', kind: 'capability', evidence_class: 'prior_delivery', business_line: 'molecule_commerce', name: 'FIXTURE: prior delivery of a reference standard', valid_until: null },
   { id: 'cap-fx-3', kind: 'capability', evidence_class: 'stock_on_hand', business_line: 'scientific_fulfillment', name: 'FIXTURE: stock on hand, laboratory consumables', valid_until: '2027-01-31' },
   { id: 'cap-fx-4', kind: 'capability', evidence_class: 'catalog_listing', business_line: 'custom_synthesis', name: 'FIXTURE: catalogue listing only (INDICATIVE — must not qualify)', valid_until: null },

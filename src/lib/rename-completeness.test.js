@@ -52,6 +52,10 @@ const ALLOWED_LINE = [
   /migrate-acbm\.js/,                 // the migration script's own filename, in the step list
   /\bacbm_(packages|deals|intake|projects)\b/,  // the pre-rename table names, named as such
   /^\s*(\/\/|\/\*|\*)[^\n]*acbm_\*/,  // "acbm_* → sitenex_*" IN PROSE ONLY, describing the rename
+  // The same mapping stated in Markdown, where there is no comment marker to anchor on. Scoped to
+  // lines that give BOTH sides of the rename, so it allows a sentence describing the migration and
+  // not a stray reference to the old name.
+  /acbm_\*`?\s*(→|->)\s*`?sitenex_\*/,
 ];
 
 function walk(dir, out = []) {

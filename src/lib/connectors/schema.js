@@ -489,6 +489,23 @@ const DDL = [
   // ADD CONSTRAINT has no IF NOT EXISTS, so the DO block is what makes it re-runnable. It is
   // redundant with the primary key for uniqueness purposes and exists purely so the pair is
   // referenceable.
+  // ── 'manual' IS A SOURCE KIND ──────────────────────────────────────────────
+  //
+  // The PRPA intake schema seeds source_connectors('manual') and its migration VERIFIES that the
+  // row's kind is 'manual' and explicitly NOT 'procurement' — because a human pasting a
+  // solicitation must not appear on the coverage panel as an automated procurement feed. The
+  // original CHECK permitted only procurement/funding/research, so that seed could never apply and
+  // migrate-intake.js --apply failed its own verification.
+  //
+  // Earlier in this session the seed was changed to 'procurement' to get it past the constraint.
+  // That made the INSERT succeed and defeated the reason the value exists. Widening the constraint
+  // is the correct direction: the distinction is real and the vocabulary was incomplete.
+  //
+  // DROP ... IF EXISTS then ADD, so re-running is safe.
+  `ALTER TABLE source_connectors DROP CONSTRAINT IF EXISTS source_connectors_kind_check`,
+  `ALTER TABLE source_connectors ADD CONSTRAINT source_connectors_kind_check
+     CHECK (kind IN ('procurement','funding','research','manual','procurement_history'))`,
+
   `DO $$
    BEGIN
      IF NOT EXISTS (
