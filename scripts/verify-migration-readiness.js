@@ -123,8 +123,63 @@ async function main() {
     const q = (s, p) => client.query(s, p);
 
     if (DUMP) {
-      sh(`pg_restore -h ${temp.base} -p ${PGPORT} -U postgres -d existing --no-owner --no-privileges ${JSON.stringify(DUMP)} || true`);
-      ok(`restored ${path.basename(DUMP)} — this is production's schema, not a fixture`);
+      // ── THE RESTORE MUST ACTUALLY RESTORE ───────────────────────────────────
+      //
+      // This said `pg_restore ... || true` and then printed "restored — this is production's
+      // schema". Handed a PLAIN SQL dump, pg_restore cannot read it at all: the restore did
+      // nothing, the `|| true` swallowed the failure, and the harness announced success over an
+      // EMPTY database. A false green in the one check whose entire purpose is to be the real thing.
+      //
+      // So: pick the tool by the file's actual format, let it fail loudly, and then COUNT what
+      // arrived. A restore that produced no tables is a failed restore whatever the exit code said.
+      const head = fs.readFileSync(DUMP, { encoding: 'latin1', flag: 'r' }).slice(0, 8192);
+      const isCustom = head.startsWith('PGDMP');
+      const isTar = /\.tar$/i.test(DUMP);
+      const tool = isCustom || isTar ? 'pg_restore' : 'psql';
+      try {
+        if (tool === 'pg_restore') {
+          sh(`pg_restore -h ${temp.base} -p ${PGPORT} -U postgres -d existing --no-owner --no-privileges ${JSON.stringify(DUMP)}`);
+        } else {
+          // Plain SQL. ON_ERROR_STOP so a broken dump is an error rather than a half-restore.
+          sh(`psql -h ${temp.base} -p ${PGPORT} -U postgres -d existing -v ON_ERROR_STOP=1 -q -f ${JSON.stringify(DUMP)}`);
+        }
+      } catch (e) {
+        // pg_restore warns about owners and extensions on a dump from a managed service; those are
+        // not fatal. A restore that produced tables is accepted, and the count below decides.
+        const msg = String(e.stderr || e.message || '').split('\n').filter(Boolean).slice(-3).join(' | ');
+        console.log(`        (restore reported: ${msg.slice(0, 200)})`);
+      }
+
+      const restored = (await q(
+        `SELECT COUNT(*)::int n FROM pg_tables WHERE schemaname = 'public'`)).rows[0].n;
+      if (restored === 0) {
+        bad(`${path.basename(DUMP)} restored ZERO tables — nothing was loaded`,
+          `format detected: ${isCustom ? 'custom (PGDMP)' : isTar ? 'tar' : 'plain SQL'}; tool used: ${tool}. `
+          + 'A .sql file needs psql, a .dump needs pg_restore. If this is a Railway backup, check it '
+          + 'downloaded completely.');
+        throw new Error('stop');
+      }
+      ok(`restored ${path.basename(DUMP)} via ${tool} — ${restored} table(s)`);
+
+      // ── AND IT MUST BE THE RIGHT DATABASE ───────────────────────────────────
+      //
+      // The first real run of this was handed aros_full_backup_2026-08-06.sql — the AROS database,
+      // not PlaybookOS. Every expected table was missing, and the harness went on to "migrate" it
+      // and report failures that were nothing to do with the migration. Checking identity before
+      // drawing conclusions is cheaper than explaining the conclusions afterwards.
+      const SENTINELS = ['users', 'targets', 'activity_logs'];
+      const present = [];
+      for (const t of SENTINELS) {
+        const r = await q(`SELECT to_regclass($1) IS NOT NULL AS p`, [`public.${t}`]);
+        if (r.rows[0].p) present.push(t);
+      }
+      if (!present.length) {
+        bad(`${path.basename(DUMP)} does not look like the PlaybookOS database`,
+          `none of ${SENTINELS.join(', ')} exist in it. This is a backup of a DIFFERENT database — `
+          + 'take the backup from the Postgres service attached to the PlaybookOS Railway project.');
+        throw new Error('stop');
+      }
+      ok(`it is the PlaybookOS database (${present.join(', ')} present)`);
     } else {
       // Production-like: the migrator's schema, then representative rows, so the second migration
       // run below is against a POPULATED database rather than an empty one. Migrating an empty
@@ -202,8 +257,14 @@ async function main() {
     ]) {
       const before = typeof baseline[table] === 'number' ? baseline[table] : null;
       const now = typeof after[table] === 'number' ? after[table] : null;
-      if (before === null || now === null) {
-        bad(`${table} is not readable before or after the migration`);
+      if (before === null && now !== null) {
+        // The table did not exist before and the migration created it. That is the normal case for
+        // a database that predates this release, and it is not a failure: there was nothing to
+        // preserve. Reporting it as "not readable before or after the migration" was alarming and
+        // wrong on the first real production dump.
+        skip(`${what}s: the table did not exist before this migration`, `created now, holding ${now} row(s)`);
+      } else if (before === null || now === null) {
+        bad(`${table} is not readable after the migration`, `before=${baseline[table]} after=${after[table]}`);
       } else if (before === 0) {
         skip(`${what}s: none in the baseline`, 'nothing to preserve, so nothing is proved here');
       } else if (now >= before) {
@@ -267,9 +328,25 @@ async function main() {
         mismatched.map((t) => `${t}: ${baseline[t]} → ${recFingerprint[t]}`).join(' | '));
 
       // And it is a WORKING database, not just rows: the readiness check the server runs must pass.
+      // Whether the RESTORED (pre-migration) database can start the server is only a meaningful
+      // question if it could before. A backup taken from a database that predates this release
+      // naturally lacks its tables — asserting otherwise failed a correct recovery and said "the
+      // restored database would not start the server", which reads as a broken backup.
+      //
+      // What matters either way is that the restore reproduced the baseline, which is asserted
+      // above, row for row.
+      const baselineCouldStart = typeof baseline.users === 'number'
+        && typeof baseline.federal_opportunities === 'number';
       const ready = await require('../src/lib/schema-ready').check((s, p) => rec.query(s, p));
-      if (ready.ready) ok('…and the restored database passes the readiness check the server runs at boot');
-      else bad('the restored database would not start the server', JSON.stringify(ready));
+      if (ready.ready) {
+        ok('…and the restored database passes the readiness check the server runs at boot');
+      } else if (!baselineCouldStart) {
+        skip('the restored database does not pass the readiness check',
+          'it predates this release, so it never could — the migration is what adds those tables. '
+          + 'Recovery here means restoring and then re-migrating.');
+      } else {
+        bad('the restored database would not start the server', JSON.stringify(ready));
+      }
       await rec.end();
     } catch (e) { bad('recovery failed', e.message.split('\n')[0]); }
   } catch (e) {
