@@ -23,6 +23,40 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "── smoke: ${WANT:0:12} at $BASE"
 
+# ── IS THIS COMMIT EVEN SUPPOSED TO BE DEPLOYED? ──────────────────────────────
+#
+# WANT defaults to `git rev-parse HEAD`, which is right on main and wrong everywhere else. Run from
+# a feature branch it waits for a commit that was never pushed to main and never will be — spinning
+# for twenty minutes before exiting non-zero, correctly, for entirely the wrong reason. That
+# happened on 2026-11-06: the migration had just been applied, the operator was on
+# feat/prpa-phase2-sam-prep, and the instruction to run this came without a sha.
+#
+# A readiness check that makes someone wait twenty minutes to discover a typo in its own argument is
+# the shape of a check people stop running. If the commit is not an ancestor of origin/main it is
+# not going to be deployed by a push to main, and that is knowable in milliseconds.
+#
+# Deliberately advisory about its own limits: if git cannot answer — no repository, origin not
+# fetched, a detached build environment — this says nothing and proceeds. A guard that refuses when
+# it is merely uninformed is worse than no guard.
+if git rev-parse --git-dir >/dev/null 2>&1 && git rev-parse --verify --quiet origin/main >/dev/null; then
+  if git cat-file -e "${WANT}^{commit}" 2>/dev/null; then
+    if ! git merge-base --is-ancestor "$WANT" origin/main 2>/dev/null; then
+      echo "" >&2
+      echo "REFUSED  ${WANT:0:12} is not an ancestor of origin/main, so a push to main will never" >&2
+      echo "         deploy it. Waiting for it to go live would spin until the timeout." >&2
+      echo "" >&2
+      echo "         Currently on branch: $(git rev-parse --abbrev-ref HEAD)" >&2
+      echo "         origin/main is at  : $(git rev-parse --short origin/main)" >&2
+      echo "" >&2
+      echo "         To smoke-test what IS deployed, name it:" >&2
+      echo "           scripts/smoke-deployed.sh \$(git rev-parse --short origin/main)" >&2
+      echo "" >&2
+      echo "         This is not a statement about production — it is about the argument." >&2
+      exit 2
+    fi
+  fi
+fi
+
 # 1. the right build has to be live first, or everything after this is about the wrong code
 if ! "$HERE/wait-for-deploy.sh" "$WANT" "$BASE"; then
   echo "FAIL  the deploy never reached $WANT" >&2
