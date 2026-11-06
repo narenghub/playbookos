@@ -1,0 +1,74 @@
+{
+  "_README": [
+    "Human/assisted verification of the five biddable opportunities against their OFFICIAL SAM.gov",
+    "notices and attachments, 2026-11-06 19:08-19:11 UTC. Ruling 22 item 4.",
+    "",
+    "Every quotation below was taken from a document downloaded from sam.gov. Raw payloads and all",
+    "13 attachments are retained outside the repo. Nothing here is inferred: where a notice is",
+    "silent, the field says so rather than guessing.",
+    "",
+    "Endpoints used (all HTTP 200, no API key):",
+    "  record+description  sam.gov/api/prod/opps/v2/opportunities/<noticeId>",
+    "  attachment list     sam.gov/api/prod/opps/v3/opportunities/<noticeId>/resources",
+    "  attachment download sam.gov/api/prod/opps/v3/opportunities/resources/files/<id>/download"
+  ],
+  "verified_at": "2026-11-06T19:11:00Z",
+  "findings": [
+    {
+      "solicitation_number": "36C25027Q0032",
+      "title": "Effluent Wastewater Testing - Saginaw VAMC",
+      "eligible": false,
+      "decision": "no_bid",
+      "bar": "SDVOSB set-aside",
+      "quote": "Offers are solicited only from concerns designated in SAM as SDVOSB concerns certified by SBA. Offers received from concerns that are not SDVOSB concerns certified by SBA will not be considered. (FAR 52.219-27)",
+      "deadline_conflict": "SAM structured field says 2026-11-06T15:00:00-05:00; Amendment 0001 (posted 2026-11-05) Block 11 says 'HOUR & DATE for Receipt of Offers is EXTENDED to: 11-10-2026 3pm EST'. The structured field was not updated. Only the Contracting Officer can resolve which governs.",
+      "naics_size_standard": "$19 million (NAICS 541380)",
+      "rationale": "Reserved for SDVOSB concerns certified by SBA; the clause states non-SDVOSB offers will not be considered. Abiozen holds no such certification. Separately, SAM's structured deadline and Amendment 0001 disagree by four days."
+    },
+    {
+      "solicitation_number": "36C26227Q0022",
+      "title": "Annual Medical Gas Testing",
+      "eligible": false,
+      "decision": "no_bid",
+      "bar": "SDVOSB set-aside AND ASSE 6020/6030 licences AND OSHA 30-hour card",
+      "quote": "This solicitation is set-aside for 100% Service-Disabled Veteran-Owned Small Business (SDVOSB) concerns IAW FAR 19.1405 ... Offeror must possess a 30-hour OSHA safety card / ASSE Medical Gas Verifier 6030 / ASSE Medical Gas inspector 6020. *** Licenses must be submitted with the solicitation.",
+      "naics_size_standard": "$19 million (NAICS 541380)",
+      "rationale": "SDVOSB set-aside plus mandatory ASSE medical-gas licences submitted with the quote. This is building-services work, not chemistry, and the mandatory site visit on 2026-11-04 has already passed."
+    },
+    {
+      "solicitation_number": "36C25627Q0074",
+      "title": "Roche Ventana Reagents IDIQ",
+      "eligible": true,
+      "decision": "undecided",
+      "bar": "none in the solicitation text",
+      "quote": "This is an unrestricted solicitation. ... This solicitation is 100% Unrestricted which includes all CLIN items being requested in this solicitation.",
+      "oem_requirement": "NOT STATED IN THE SOURCE. Searched the full text for 852.212-71, 'gray market', 'Letter of Authorization', 'authorized dealer/distributor/reseller' and OEM-as-qualification: no matches. Unlike 36C26227Q0073 this notice does NOT incorporate VAAR 852.212-71.",
+      "naics_size_standard": "1,250 employees (NAICS 325413)",
+      "open_questions": [
+        "The document says both 'One contractor will be selected for award' / 'single award' AND 'awarded as Multiple Award Task Order Contracts (MATOC's)'. Unresolved in the text.",
+        "Questions deadline equals the quote deadline (both 11/09/2026 13:00 CST), leaving no window for answers."
+      ],
+      "rationale": "The only one of the five with no eligibility bar: unrestricted, no OEM authorization letter required. Performance is the obstacle, not eligibility - the deliverable is Roche Ventana proprietary reagents priced from a Roche price list, quotes due 2026-11-09 13:00 CST, first delivery 2026-11-21. Guaranteed minimum is $10,000 total across five years."
+    },
+    {
+      "solicitation_number": "36C26227Q0073",
+      "title": "Abbott Architect i1000 Reagents and Consumables",
+      "eligible": false,
+      "decision": "no_bid",
+      "bar": "Total Small Business Set-Aside AND an OEM Letter of Authorization as a required submission document",
+      "quote": "Offeror must provide Letter of Authorization from the OEM to demonstrate that the Offeror is an authorized dealer, authorized distributor, or authorized reseller of the offered products. (ADDENDUM to FAR 52.212-1) ... Vendor shall be an OEM, authorized dealer, authorized distributor, or authorized reseller for the proposed equipment/system, verified by an authorization letter or other documents from the OEM. (VAAR 852.212-71 GRAY MARKET AND COUNTERFEIT ITEMS)",
+      "naics_size_standard": "NOT STATED IN THE SOURCE - the SF-1449 size-standard field value was not recoverable from the .docx",
+      "rationale": "Requires an Abbott Letter of Authorization as a listed submission document. Without it the quote is incomplete regardless of small-business status. All 33 line items in Attachment A are Abbott parts."
+    },
+    {
+      "solicitation_number": "75N98027Q00026",
+      "title": "Reagents and consumables for Roche immunostainers (NIH/NCI)",
+      "eligible": true,
+      "decision": "no_bid",
+      "bar": "none formal - the Government states Roche is the only source",
+      "quote": "The Laboratory of Pathology currently has 4 Ventana Medical Systems (VMS) Benchmark ULTRA immunostainers that requires the procurement of proprietary reagents from Roche Diagnostics ... No generic reagents can be used on these instruments, so Roche is the only source that can provide these reagents.",
+      "naics_size_standard": "1,250 employees (NAICS 325413)",
+      "rationale": "Formally unrestricted with no mandatory OEM letter, but the Government's own text says Roche is the only possible source and that revalidating third-party reagents would nullify its CAP compliance. Tasks 3 and 4 require upgrades performed by Roche IT specialists. Not winnable without being Roche or a Roche channel partner."
+    }
+  ]
+}

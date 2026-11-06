@@ -38,12 +38,14 @@ const CREATED_TABLES = Object.freeze([
   'opportunity_import_batches',
   'federal_opportunities',
   'opportunity_assessments',
+  'opportunity_bid_reviews',
   'opportunity_duplicate_candidates',
 ]);
 
 // Children first.
 const ROLLBACK_ORDER = Object.freeze([
   'opportunity_duplicate_candidates',
+  'opportunity_bid_reviews',
   'opportunity_assessments',
   'federal_opportunities',
   'opportunity_import_batches',
@@ -86,6 +88,7 @@ const V3_BUSINESS_LINES = require('./intake-schema').BUSINESS_LINES;
 const BUSINESS_LINES = Object.freeze([...V3_BUSINESS_LINES, 'scientific_fulfillment']);
 
 const VERDICTS = Object.freeze(['QUALIFIED', 'NOT_QUALIFIED', 'NEEDS_REVIEW']);
+const EVIDENCE_BASES = Object.freeze(['real_registry', 'fixture']);
 
 const list = (xs) => xs.map((x) => `'${x}'`).join(',');
 
@@ -239,11 +242,24 @@ const DDL = [
      -- Evidence actually relied on, by id in verified_capabilities. An empty array with a
      -- QUALIFIED verdict is refused below: that is the failure mode this whole project guards.
      evidence_capability_ids TEXT[] NOT NULL DEFAULT '{}',
+     -- RULING 22 ITEM 1. Which registry the verdict was computed against. A demonstration run uses
+     -- fixture evidence, and a fixture verdict must never be able to masquerade as the company's
+     -- position. Labelling it in the UI is not enough: the label is the first thing lost when a
+     -- row is copied into a spreadsheet, a screenshot or a board pack.
+     --
+     -- So the database refuses. A QUALIFIED verdict may only exist on the real registry, and the
+     -- caller must declare the basis — there is no default, because a default is what a
+     -- demonstration script would silently inherit.
+     evidence_basis       TEXT NOT NULL,
      notes                TEXT,
      CONSTRAINT opportunity_assessments_opp_fk
        FOREIGN KEY (opportunity_id, company_id)
        REFERENCES federal_opportunities(id, company_id) MATCH FULL ON DELETE RESTRICT,
      CONSTRAINT opportunity_assessments_verdict CHECK (verdict IN (${list(VERDICTS)})),
+     CONSTRAINT opportunity_assessments_basis CHECK (evidence_basis IN ('real_registry','fixture')),
+     -- THE CONTROL: a fixture pass cannot produce a QUALIFIED row at all.
+     CONSTRAINT opportunity_assessments_fixture_can_never_qualify
+       CHECK (verdict <> 'QUALIFIED' OR evidence_basis = 'real_registry'),
      -- RULING 21 PRIORITY 2, ENFORCED: no QUALIFIED without evidence and without a reason.
      -- "Do not mark Abiozen qualified without sufficient supporting evidence" is a constraint here
      -- and not a convention, because a convention is what the next deadline overrides.
@@ -269,6 +285,86 @@ const DDL = [
   // Ruling 21 item 5. Tier 3 of duplicate detection does NOT merge anything: two different
   // solicitation numbers that look alike may be a genuine reissue or two genuinely different
   // procurements, and the system is not entitled to that judgement. It records the suspicion.
+  // ── RULING 22 ITEM 2 — THE EVIDENCE CLASS THE REGISTRY WAS MISSING ────────
+  // v3 introduced evidence classes (indicative vs sufficient) on requirement_matches, and the
+  // qualification engine was written against them. verified_capabilities — the live table — has
+  // no such column: it has `kind` ('capability', 'accreditation', …), which says what a record IS,
+  // not how strongly it is evidenced. The demo caught this by failing, which is better than the
+  // engine quietly treating every live capability as sufficient.
+  //
+  // Added nullable and additive. NULL means the class has not been assessed, and the engine treats
+  // an unclassified capability as NOT sufficient — absence must never qualify.
+  `ALTER TABLE verified_capabilities ADD COLUMN IF NOT EXISTS evidence_class TEXT`,
+  `ALTER TABLE verified_capabilities DROP CONSTRAINT IF EXISTS verified_capabilities_evidence_class_check`,
+  `ALTER TABLE verified_capabilities ADD CONSTRAINT verified_capabilities_evidence_class_check
+     CHECK (evidence_class IS NULL OR evidence_class IN (${list(require('./intake-schema').EVIDENCE_CLASSES)}))`,
+  // The business line a capability serves, so the engine can look under the right one.
+  `ALTER TABLE verified_capabilities ADD COLUMN IF NOT EXISTS business_line TEXT`,
+  `ALTER TABLE verified_capabilities DROP CONSTRAINT IF EXISTS verified_capabilities_business_line_check`,
+  `ALTER TABLE verified_capabilities ADD CONSTRAINT verified_capabilities_business_line_check
+     CHECK (business_line IS NULL OR business_line IN (${list(BUSINESS_LINES)}))`,
+
+  // ── RULING 22 ITEM 3 — THE HUMAN BID / NO-BID REVIEW ──────────────────────
+  // Distinct from an assessment (what the engine concluded) and distinct from an authorization
+  // (committing the company, which lives in fulfillment_authorizations with its own trigger).
+  // This is the middle step the dashboard needs: a person's decision to pursue or drop, with a
+  // reason, which is reversible and carries no commitment.
+  `CREATE TABLE IF NOT EXISTS opportunity_bid_reviews (
+     id              TEXT PRIMARY KEY,
+     company_id      TEXT NOT NULL REFERENCES companies(id),
+     opportunity_id  TEXT NOT NULL,
+     decision        TEXT NOT NULL,
+     decided_by      TEXT NOT NULL,
+     decided_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     rationale       TEXT NOT NULL,
+     CONSTRAINT opportunity_bid_reviews_opp_fk
+       FOREIGN KEY (opportunity_id, company_id)
+       REFERENCES federal_opportunities(id, company_id) MATCH FULL ON DELETE RESTRICT,
+     CONSTRAINT opportunity_bid_reviews_decision CHECK (decision IN ('bid','no_bid','undecided')),
+     -- A decision with no reason is not reviewable, and 'no_bid' is the one most worth explaining.
+     CONSTRAINT opportunity_bid_reviews_rationale CHECK (length(btrim(rationale)) >= 10),
+     UNIQUE (id, company_id)
+   )`,
+  `CREATE INDEX IF NOT EXISTS opportunity_bid_reviews_latest
+     ON opportunity_bid_reviews (company_id, opportunity_id, decided_at DESC)`,
+
+  // ── RULING 22 ITEM 2 — A CAPABILITY CANNOT ACTIVATE ITSELF ────────────────
+  // verified_capabilities already refuses a 'verified' row without evidence_source, verified_at,
+  // verified_by, approval_id and valid_from. What it does not do is check that verified_by is a
+  // REAL, ACTIVE, admin-tier person — the same gap the bid-authorization guard closed in v3.
+  // A superuser connection bypasses GRANT, so a BEFORE trigger is the mechanism that works.
+  `CREATE OR REPLACE FUNCTION prpa_capability_activation_guard() RETURNS TRIGGER AS $fn$
+     DECLARE
+       actor_role   TEXT;
+       actor_active INTEGER;
+     BEGIN
+       IF NEW.verification_status IS DISTINCT FROM 'verified' THEN RETURN NEW; END IF;
+       IF NEW.verified_by IS NULL OR NEW.approval_id IS NULL OR NEW.evidence_source IS NULL THEN
+         RAISE EXCEPTION 'verified_capabilities: a verified capability needs evidence_source, verified_by and approval_id'
+           USING ERRCODE = 'check_violation';
+       END IF;
+       SELECT role, is_active INTO actor_role, actor_active
+         FROM users WHERE email = NEW.verified_by OR id = NEW.verified_by;
+       IF actor_role IS NULL THEN
+         RAISE EXCEPTION 'verified_capabilities: verified_by % is not a known user', NEW.verified_by
+           USING ERRCODE = 'check_violation';
+       END IF;
+       IF actor_active IS DISTINCT FROM 1 THEN
+         RAISE EXCEPTION 'verified_capabilities: % is not an active user', NEW.verified_by
+           USING ERRCODE = 'check_violation';
+       END IF;
+       IF actor_role NOT IN (${list(['super_admin','admin'])}) THEN
+         RAISE EXCEPTION 'verified_capabilities: role % may not activate a capability', actor_role
+           USING ERRCODE = 'insufficient_privilege';
+       END IF;
+       RETURN NEW;
+     END;
+   $fn$ LANGUAGE plpgsql`,
+  `DROP TRIGGER IF EXISTS trg_prpa_capability_activation_guard ON verified_capabilities`,
+  `CREATE TRIGGER trg_prpa_capability_activation_guard
+     BEFORE INSERT OR UPDATE ON verified_capabilities
+     FOR EACH ROW EXECUTE FUNCTION prpa_capability_activation_guard()`,
+
   `CREATE TABLE IF NOT EXISTS opportunity_duplicate_candidates (
      id             TEXT PRIMARY KEY,
      company_id     TEXT NOT NULL REFERENCES companies(id),
@@ -297,11 +393,14 @@ const DDL = [
    )`,
 ];
 
-const ROLLBACK_EXTRA_DDL = [];
+const ROLLBACK_EXTRA_DDL = [
+  `DROP FUNCTION IF EXISTS prpa_capability_activation_guard()`,
+];
 
 const PRECONDITIONS = Object.freeze([
   { name: 'P1', what: 'companies exists (migrateOffice has run)', table: 'companies' },
   { name: 'P2', what: 'verified_capabilities exists (connectors.v1 has run)', table: 'verified_capabilities' },
+  { name: 'P3', what: 'users exists (the capability activation guard reads roles from it)', table: 'users' },
 ]);
 
 module.exports = {
@@ -316,4 +415,5 @@ module.exports = {
   BIDDABLE_NOTICE_TYPES,
   BUSINESS_LINES,
   VERDICTS,
+  EVIDENCE_BASES,
 };

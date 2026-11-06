@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const { parseCsv, toExcelCsv } = require('./opportunity-csv');
 const { mapHeaders, normalizeRow } = require('./opportunity-normalize');
 const { assess } = require('./opportunity-qualify');
+const { isoDay } = require('./iso-day');
 
 const id = (p) => `${p}-${crypto.randomBytes(8).toString('hex')}`;
 
@@ -171,21 +172,45 @@ async function confirmDeadline(q, { companyId, opportunityId, confirmedBy }) {
 }
 
 /** Assess every current opportunity against the capability registry, recording each verdict. */
-async function assessAll(q, { companyId, assessedBy, capabilities, opts = {} }) {
+/**
+ * Assess every current opportunity.
+ *
+ * `evidenceBasis` is REQUIRED and has no default — ruling 22 item 1. A demonstration run against
+ * fixture evidence must not be able to inherit a default that makes its verdicts look like the
+ * company's position. When the basis is not the real registry, a computed QUALIFIED is RECORDED as
+ * NEEDS_REVIEW with the reason attached; the database refuses the row otherwise, and this keeps the
+ * refusal from looking like a crash. The raw verdict is still returned as `computed_verdict` so a
+ * demonstration can honestly say "this would have qualified, on fixture evidence".
+ */
+async function assessAll(q, { companyId, assessedBy, capabilities, evidenceBasis, opts = {} }) {
+  if (evidenceBasis !== 'real_registry' && evidenceBasis !== 'fixture') {
+    throw new Error("assessAll needs evidenceBasis: 'real_registry' or 'fixture'. There is no "
+      + 'default, because a default is what a demonstration script inherits by accident.');
+  }
   const opps = (await q(
     `SELECT * FROM federal_opportunities WHERE company_id = $1 AND is_current ORDER BY response_deadline NULLS LAST`,
     [companyId])).rows;
   const results = [];
   for (const opp of opps) {
     const a = assess(opp, capabilities, opts);
+    const computed = a.verdict;
+    if (computed === 'QUALIFIED' && evidenceBasis !== 'real_registry') {
+      a.verdict = 'NEEDS_REVIEW';
+      a.reasons = [...a.reasons,
+        'COMPUTED QUALIFIED AGAINST FIXTURE EVIDENCE — recorded as NEEDS_REVIEW. A fixture verdict '
+        + 'may not be stored as QUALIFIED, because the label is the first thing lost when a row is '
+        + 'copied into a spreadsheet or a screenshot.'];
+      a.missing_requirements = [...a.missing_requirements,
+        'the same evidence, held in the real capability registry'];
+    }
     await q(
       `INSERT INTO opportunity_assessments
          (id, company_id, opportunity_id, assessed_by, verdict, business_lines, reasons,
-          missing_requirements, evidence_capability_ids)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+          missing_requirements, evidence_capability_ids, evidence_basis)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [id('asmt'), companyId, opp.id, assessedBy, a.verdict, a.business_lines, a.reasons,
-        a.missing_requirements, a.evidence_capability_ids]);
-    results.push({ ...a, opportunity: opp });
+        a.missing_requirements, a.evidence_capability_ids, evidenceBasis]);
+    results.push({ ...a, computed_verdict: computed, evidence_basis: evidenceBasis, opportunity: opp });
   }
   return results;
 }
@@ -212,15 +237,24 @@ async function listOpportunities(q, companyId, f = {}) {
   // without the caller reasoning about assessment history.
   let sql = `
     SELECT o.*, a.verdict, a.business_lines, a.reasons, a.missing_requirements,
-           a.evidence_capability_ids, a.assessed_at
+           a.evidence_capability_ids, a.assessed_at, a.evidence_basis,
+           br.decision AS bid_decision, br.decided_by AS bid_decided_by,
+           br.decided_at AS bid_decided_at, br.rationale AS bid_rationale
       FROM federal_opportunities o
       LEFT JOIN LATERAL (
         SELECT * FROM opportunity_assessments s
          WHERE s.opportunity_id = o.id AND s.company_id = o.company_id
          ORDER BY s.assessed_at DESC LIMIT 1) a ON true
+      -- The latest human decision, which is separate from the engine's verdict and separate again
+      -- from authorization. The dashboard needs all three visible at once.
+      LEFT JOIN LATERAL (
+        SELECT decision, decided_by, decided_at, rationale FROM opportunity_bid_reviews b
+         WHERE b.opportunity_id = o.id AND b.company_id = o.company_id
+         ORDER BY b.decided_at DESC LIMIT 1) br ON true
      WHERE ${where.join(' AND ')}`;
   if (f.verdict) { params.push(f.verdict); sql += ` AND a.verdict = $${params.length}`; }
   if (f.businessLine) { params.push(f.businessLine); sql += ` AND $${params.length} = ANY(a.business_lines)`; }
+  if (f.bidDecision) { params.push(f.bidDecision); sql += ` AND br.decision = $${params.length}`; }
   sql += ' ORDER BY o.response_deadline NULLS LAST, o.solicitation_number';
   return (await q(sql, params)).rows;
 }
@@ -241,7 +275,10 @@ const EXPORT_COLUMNS = [
   { key: 'set_aside', label: 'Set-Aside' },
   { key: 'contract_type', label: 'Contract Type' },
   { key: 'estimated_value_usd', label: 'Estimated Value (USD)' },
-  { key: 'posted_date', label: 'Posted Date', value: (r) => (r.posted_date ? String(r.posted_date).slice(0, 10) : '') },
+  // isoDay, not String().slice(). The naive form put "Thu Nov 05" in this column of the exported
+  // spreadsheet — the third time that mistake has appeared in this codebase, and the first time it
+  // reached a deliverable a person would open.
+  { key: 'posted_date', label: 'Posted Date', value: (r) => isoDay(r.posted_date) || '' },
   {
     key: 'response_deadline',
     label: 'Response Deadline',
@@ -257,9 +294,12 @@ const EXPORT_COLUMNS = [
   { key: 'status', label: 'Status' },
   { key: 'is_biddable', label: 'Biddable', value: (r) => (r.is_biddable ? 'yes' : 'no') },
   { key: 'verdict', label: 'Abiozen Qualification', value: (r) => r.verdict || 'NOT ASSESSED' },
+  { key: 'evidence_basis', label: 'Verdict Basis', value: (r) => (r.evidence_basis === 'fixture' ? 'FIXTURE (not Abiozen)' : r.evidence_basis || '') },
   { key: 'business_lines', label: 'Business Lines', value: (r) => (r.business_lines || []).join('; ') },
   { key: 'missing_requirements', label: 'Missing Requirements', value: (r) => (r.missing_requirements || []).join(' | ') },
   { key: 'reasons', label: 'Assessment Reasons', value: (r) => (r.reasons || []).join(' | ') },
+  { key: 'bid_decision', label: 'Bid / No-Bid', value: (r) => (r.bid_decision || 'not reviewed') },
+  { key: 'bid_rationale', label: 'Review Rationale' },
   { key: 'version_seq', label: 'Version' },
   { key: 'source_url', label: 'Source Link' },
 ];

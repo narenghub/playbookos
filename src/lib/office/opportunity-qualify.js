@@ -37,24 +37,9 @@
 const { INDICATIVE_CLASSES, SUFFICIENT_CLASSES } = require('./intake-schema');
 const { BIDDABLE_NOTICE_TYPES } = require('./opportunity-schema');
 
-// ── DATES: COERCE, NEVER String().slice() ────────────────────────────────────
-//
-// Postgres returns a TIMESTAMPTZ as a JS Date, and `String(new Date()).slice(0, 10)` is
-// "Mon Nov 09" — not an ISO day. Compared against '2026-12-30' that is lexicographically GREATER,
-// because 'M' > '2'. The first real run of the tracker therefore told us that every opportunity
-// needed the SAM.gov registration renewed, including ones closing seven weeks before it expires,
-// and the "deadline has passed" check could never fire at all because "Mon Nov 09" < "2026-11-06"
-// is false for the same reason.
-//
-// Both were confident, plausible, wrong business advice. Hence one coercion used everywhere.
-function isoDay(v) {
-  if (v === null || v === undefined || v === '') return null;
-  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString().slice(0, 10);
-  const s = String(v);
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);     // already ISO
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10);
-}
+// Dates are coerced through one shared helper — see src/lib/office/iso-day.js for why the naive
+// String(date).slice(0, 10) is wrong and what it cost here twice.
+const { isoDay } = require('./iso-day');
 
 // Abiozen's SAM.gov entity registration expiry, from the federal-contracting record. A date, not a
 // guess: if it is wrong, the fix is the record, not this constant.
@@ -238,11 +223,17 @@ function assess(opp, capabilities, opts = {}) {
   const servedLines = [];
   for (const line of lines) {
     const forLine = capabilities.filter((c) => !c.business_line || c.business_line === line);
+    // The live table's column is `valid_to`; v4 and the fixtures use `valid_until`. Accept either
+    // rather than silently reading undefined, which would make an expired capability look current.
+    const validTo = (c) => c.valid_to || c.valid_until || null;
+    // An UNCLASSIFIED capability is not sufficient. verified_capabilities carried no evidence_class
+    // until v4 added one, so a null here means "nobody has judged how strongly this is evidenced"
+    // — which must read as not-sufficient, never as sufficient-by-default.
     const sufficient = forLine.filter((c) => SUFFICIENT_CLASSES.includes(c.evidence_class)
-      && (!c.valid_until || (isoDay(c.valid_until) || '9999-12-31') >= today));
+      && (!validTo(c) || (isoDay(validTo(c)) || '9999-12-31') >= today));
     const indicative = forLine.filter((c) => INDICATIVE_CLASSES.includes(c.evidence_class));
     const expired = forLine.filter((c) => SUFFICIENT_CLASSES.includes(c.evidence_class)
-      && c.valid_until && (isoDay(c.valid_until) || '9999-12-31') < today);
+      && validTo(c) && (isoDay(validTo(c)) || '9999-12-31') < today);
 
     if (sufficient.length) {
       servedLines.push(line);
@@ -252,8 +243,15 @@ function assess(opp, capabilities, opts = {}) {
     } else if (expired.length) {
       needsReview = true;
       reasons.push(`${line}: the only sufficient evidence has EXPIRED `
-        + `(${expired.map((c) => `${c.name || c.id} valid until ${isoDay(c.valid_until)}`).join('; ')})`);
+        + `(${expired.map((c) => `${c.name || c.id} valid until ${isoDay(validTo(c))}`).join('; ')})`);
       missing.push(`${line}: renewed evidence — the record exists but is out of date`);
+    } else if (forLine.some((c) => !c.evidence_class)) {
+      needsReview = true;
+      const un = forLine.filter((c) => !c.evidence_class);
+      reasons.push(`${line}: ${un.length} capabilit${un.length === 1 ? 'y has' : 'ies have'} no evidence class `
+        + `(${un.map((c) => c.name || c.id).join('; ')}). Unclassified is not sufficient — nobody has `
+        + 'judged how strongly these are evidenced.');
+      missing.push(`${line}: an evidence class on ${un.map((c) => c.name || c.id).join('; ')}`);
     } else if (indicative.length) {
       needsReview = true;
       reasons.push(`${line}: only INDICATIVE evidence exists `

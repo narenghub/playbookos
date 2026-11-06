@@ -106,8 +106,22 @@ async function main() {
     await q(`CREATE TABLE companies (id TEXT PRIMARY KEY, slug TEXT, name TEXT, status TEXT, UNIQUE (id, status))`);
     await q(`CREATE TABLE solicitations (id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
                record_kind TEXT, active BOOLEAN DEFAULT true, response_deadline DATE, UNIQUE (id, company_id))`);
-    await q(`CREATE TABLE verified_capabilities (id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
-               kind TEXT, evidence_class TEXT, business_line TEXT, name TEXT, valid_until DATE, UNIQUE (id, company_id))`);
+    // Mirrors the LIVE verified_capabilities (src/lib/connectors/schema.js) rather than a
+    // convenient stub. The first run of this demo used a stub with made-up column names and the
+    // v4 activation trigger failed on `verification_status` — a stub that drifts from the real
+    // table makes a demo prove something about a table that does not exist.
+    await q(`CREATE TABLE verified_capabilities (
+               id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
+               kind TEXT NOT NULL, code TEXT NOT NULL, name TEXT NOT NULL,
+               responsible_entity TEXT NOT NULL,
+               verification_status TEXT NOT NULL DEFAULT 'planned',
+               evidence_source TEXT, evidence_url TEXT, evidence_sha256 TEXT,
+               verified_at TIMESTAMPTZ, verified_by TEXT, approval_id TEXT,
+               valid_from DATE, valid_to DATE, notes TEXT,
+               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+               CONSTRAINT verified_capabilities_status_check
+                 CHECK (verification_status IN ('planned','pending','verified','disputed','revoked')),
+               UNIQUE (id, company_id))`);
     await q(`CREATE TABLE source_connectors (source_key TEXT PRIMARY KEY, display_name TEXT, kind TEXT,
                auth_mode TEXT, access_mode TEXT, daily_call_ceiling INT, activated BOOLEAN, notes TEXT)`);
     await q(`CREATE TABLE skus (id TEXT PRIMARY KEY, name TEXT)`);
@@ -172,7 +186,7 @@ async function main() {
     h('3. ASSESS — PASS A: against Abiozen\'s ACTUAL capability registry');
     console.log('  Abiozen holds ZERO verified capabilities. Measured 2026-11-05 across two');
     console.log('  entities by capability-evidence-inventory.js. So this is the truthful run.');
-    const passA = await T.assessAll(q, { companyId: CO, assessedBy: 'engine:pass-a-real', capabilities: [] });
+    const passA = await T.assessAll(q, { companyId: CO, assessedBy: 'engine:pass-a-real', capabilities: [], evidenceBasis: 'real_registry' });
     const tally = (rs) => rs.reduce((a, r) => { a[r.verdict] = (a[r.verdict] || 0) + 1; return a; }, {});
     console.log(`  ${JSON.stringify(tally(passA))}`);
     const qualifiedA = passA.filter((r) => r.verdict === 'QUALIFIED').length;
@@ -181,12 +195,19 @@ async function main() {
     // ── 4. ASSESS — pass B, FIXTURE capabilities ────────────────────────────
     h('4. ASSESS — PASS B: against FIXTURE capabilities (NOT Abiozen\'s real evidence)');
     for (const c of FIXTURE_CAPABILITIES) {
-      await q(`INSERT INTO verified_capabilities (id,company_id,kind,evidence_class,business_line,name,valid_until)
-               VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [c.id, CO, c.kind, c.evidence_class, c.business_line, c.name, c.valid_until]);
+      await q(`INSERT INTO verified_capabilities
+                 (id,company_id,kind,code,name,responsible_entity,verification_status,
+                  evidence_source,verified_at,verified_by,approval_id,valid_from,valid_to,
+                  evidence_class,business_line)
+               VALUES ($1,$2,$3,$4,$5,'Abiozen LLC','verified',
+                       'FIXTURE evidence — not a real document',NOW(),'naren@abiozen.com',
+                       'appr-FIXTURE',$6,$7,$8,$9)`,
+        [c.id, CO, c.kind, c.id.toUpperCase(), c.name, '2026-01-01', c.valid_until,
+          c.evidence_class, c.business_line]);
     }
     const passB = await T.assessAll(q, {
       companyId: CO, assessedBy: 'engine:pass-b-FIXTURE', capabilities: FIXTURE_CAPABILITIES,
+      evidenceBasis: 'fixture',
     });
     console.log(`  ${JSON.stringify(tally(passB))}`);
     console.log('  Every verdict here is about FIXTURE evidence. It shows the engine can reach');
@@ -220,10 +241,28 @@ async function main() {
     console.log('  confirmed the deadline. Still FIXTURE evidence, so still not Abiozen\'s position.');
     const passC = await T.assessAll(q, {
       companyId: CO, assessedBy: 'engine:pass-c-FIXTURE-confirmed', capabilities: FIXTURE_CAPABILITIES,
+      evidenceBasis: 'fixture',
     });
     console.log(`  ${JSON.stringify(tally(passC))}`);
-    const qc = passC.filter((r) => r.verdict === 'QUALIFIED');
-    console.log(`  QUALIFIED: ${qc.length} — each with named evidence and at least one business line`);
+    // RULING 22 ITEM 1: a fixture pass cannot STORE a QUALIFIED verdict. The engine still computes
+    // one, which is what proves it is a gate and not a wall; the row is recorded as NEEDS_REVIEW.
+    const qc = passC.filter((r) => r.computed_verdict === 'QUALIFIED');
+    const storedQ = passC.filter((r) => r.verdict === 'QUALIFIED');
+    console.log(`  computed QUALIFIED: ${qc.length} — each with named evidence and a business line`);
+    console.log(`  STORED as QUALIFIED: ${storedQ.length} — and it must be 0 on a fixture basis`);
+    const direct = await (async () => {
+      try {
+        await q(`INSERT INTO opportunity_assessments
+                   (id,company_id,opportunity_id,assessed_by,verdict,business_lines,reasons,
+                    evidence_capability_ids,evidence_basis)
+                 VALUES ('asmt-forge',$1,$2,'someone','QUALIFIED','{molecule_commerce}','{because}',
+                         '{cap-fx-1}','fixture')`, [CO, passC[0].opportunity.id]);
+        return null;
+      } catch (e) { return e.message; }
+    })();
+    console.log(direct && /fixture_can_never_qualify/.test(direct)
+      ? '  a direct INSERT of a fixture QUALIFIED row → REFUSED by the database'
+      : `  PROBLEM: a fixture QUALIFIED row was accepted (${direct || 'no error'})`);
     for (const r of qc.slice(0, 4)) {
       console.log(`      ${r.opportunity.solicitation_number}  ${String(r.opportunity.title).slice(0, 48)}`);
       console.log(`          lines: ${r.business_lines.join(', ')}`);
@@ -250,6 +289,65 @@ async function main() {
     await fl('biddable only', { biddableOnly: true });
     await fl('verdict NEEDS_REVIEW', { verdict: 'NEEDS_REVIEW' });
     await fl('business line analytical_services', { businessLine: 'analytical_services' });
+
+    // ── 6b. CAPABILITY GAP REPORT (ruling 22 item 2) ────────────────────────
+    h('6b. CAPABILITY GAP — what Abiozen must produce to qualify for anything');
+    const REG = require('../src/lib/office/capability-registry');
+    const gaps = await REG.gapReport(q, CO, { today: new Date().toISOString().slice(0, 10) });
+    for (const g of gaps) {
+      console.log(`  ${g.status.padEnd(15)} ${g.label}`);
+      if (g.evidence_needed.length) console.log(`                  needs: ${g.evidence_needed[0]}`);
+    }
+
+    // ── 6c. HUMAN BID / NO-BID REVIEW (ruling 22 item 3) ────────────────────
+    h('6c. HUMAN BID / NO-BID REVIEW — a decision, not an authorization');
+    // RULING 22 ITEM 4. These are not heuristics over the search index — each decision comes from
+    // reading the OFFICIAL notice and its attachments, and carries the sentence that decided it.
+    // fixtures/verification-2026-11-06.json holds the findings and their verbatim quotations.
+    const VERIFIED = require('../fixtures/verification-2026-11-06.json');
+    const reviewable = (await q(
+      `SELECT id, solicitation_number, set_aside FROM federal_opportunities
+        WHERE company_id=$1 AND is_biddable ORDER BY response_deadline`, [CO])).rows;
+    let reviewed = 0;
+    for (const r of reviewable) {
+      const f = VERIFIED.findings.find((x) => x.solicitation_number === r.solicitation_number);
+      if (!f) {
+        console.log(`  NOTE  ${r.solicitation_number} is biddable but was not in the verification set`);
+        continue;
+      }
+      await q(
+        `INSERT INTO opportunity_bid_reviews (id,company_id,opportunity_id,decision,decided_by,rationale)
+         VALUES ($1,$2,$3,$4,'naren@abiozen.com (verified against the official notice)',$5)`,
+        [`rev-${reviewed}`, CO, r.id, f.decision, f.rationale]);
+      // A deadline the source contradicts itself about must not read as settled. Withdrawing the
+      // confirmation drops is_biddable back to false, which is the correct state for a date nobody
+      // can currently vouch for.
+      if (f.deadline_conflict) {
+        await q(
+          `UPDATE federal_opportunities
+              SET deadline_confirmed_by = NULL, deadline_confirmed_at = NULL
+            WHERE id = $1 AND company_id = $2`, [r.id, CO]);
+        console.log(`  DEADLINE CONFLICT on ${r.solicitation_number} — confirmation WITHDRAWN`);
+        console.log(`      ${f.deadline_conflict.slice(0, 150)}…`);
+      }
+      reviewed += 1;
+    }
+    console.log(`  ${reviewed} review(s) recorded, each from the official notice and its attachments`);
+    for (const f of VERIFIED.findings) {
+      console.log(`      ${f.decision.toUpperCase().padEnd(10)} ${f.solicitation_number}  ${f.bar}`);
+    }
+    const noBid = (await q(`SELECT COUNT(*)::int n FROM opportunity_bid_reviews WHERE company_id=$1 AND decision='no_bid'`, [CO])).rows[0].n;
+    console.log(`  ${noBid} marked no_bid — each with a stated reason, which the constraint requires`);
+    const emptyReason = await (async () => {
+      try {
+        await q(`INSERT INTO opportunity_bid_reviews (id,company_id,opportunity_id,decision,decided_by,rationale)
+                 VALUES ('rev-x',$1,$2,'bid','someone','ok')`, [CO, reviewable[0].id]);
+        return null;
+      } catch (e) { return e.message; }
+    })();
+    console.log(emptyReason && /rationale/.test(emptyReason)
+      ? '  a bid decision with a one-word reason → REFUSED'
+      : `  PROBLEM: an unexplained decision was accepted (${emptyReason || 'no error'})`);
 
     // ── 7. EXPORT ───────────────────────────────────────────────────────────
     h('7. EXPORT — CSV that Excel opens correctly');
@@ -278,13 +376,57 @@ async function main() {
       pass_a_real_registry: tally(passA),
       pass_b_fixture_registry: tally(passB),
       pass_c_fixture_after_confirmation: tally(passC),
+      pass_c_computed_qualified_but_stored_needs_review: qc.length,
       pass_c_qualified_examples: qc.slice(0, 5).map((r) => ({
         solicitation_number: r.opportunity.solicitation_number,
         title: r.opportunity.title,
         business_lines: r.business_lines,
         evidence: r.evidence_capability_ids,
       })),
-      abiozen_verified_capabilities: 0,
+      // Excludes fixture-sourced rows. The first version of this count included them and the
+      // dashboard banner read "holds 5 verified capabilities" directly above a warning that the
+      // evidence was fixture — the banner was contradicting itself.
+      abiozen_verified_capabilities: (await q(
+        `SELECT COUNT(*)::int n FROM verified_capabilities
+          WHERE company_id=$1 AND verification_status='verified'
+            AND (evidence_source IS NULL OR evidence_source !~* '^[[:space:]]*FIXTURE')`,
+        [CO])).rows[0].n,
+      fixture_capabilities_seeded: (await q(
+        `SELECT COUNT(*)::int n FROM verified_capabilities
+          WHERE company_id=$1 AND evidence_source ~* '^[[:space:]]*FIXTURE'`, [CO])).rows[0].n,
+      capability_gaps: gaps.map((g) => ({ area: g.area, label: g.label, status: g.status, needs: g.evidence_needed })),
+      bid_reviews: (await q(
+        `SELECT decision, COUNT(*)::int n FROM opportunity_bid_reviews WHERE company_id=$1 GROUP BY decision`,
+        [CO])).rows,
+      // RULING 22 ITEM 5 — provenance that travels with the artifact.
+      provenance: {
+        harvested_at: '2026-11-06T18:46:00Z',
+        harvest_route: 'https://sam.gov/api/prod/sgs/v1/search/ — SAM.gov web UI backend, no API key',
+        route_status: 'UNDOCUMENTED internal endpoint. Manual/experimental use only; unattended harvesting is NOT enabled.',
+        fixture_file: 'fixtures/sam-opportunities-real-2026-11-06.csv',
+        fixture_sha256: r1.sha256,
+        confirmed_fields: ['solicitation_number', 'notice_id', 'title', 'agency', 'notice_type',
+          'naics_code', 'psc_code', 'set_aside', 'posted_date', 'response_deadline', 'source_url'],
+        unconfirmed_fields: [
+          'contract_type — NOT CARRIED by the SAM search index; empty for every record',
+          'estimated_value_usd — NOT CARRIED by the SAM search index; empty for every record',
+          'response_deadline time-of-day — present for most, absent for some; deadline_has_time says which',
+          'agency — organizationHierarchy is null for a minority of records; those show as empty, not guessed',
+        ],
+        human_confirmed_deadlines: (await q(
+        `SELECT COUNT(*)::int n FROM federal_opportunities WHERE company_id=$1 AND deadline_confirmed_at IS NOT NULL`,
+        [CO])).rows[0].n,
+      verification: {
+        verified_at: VERIFIED.verified_at,
+        method: 'official SAM.gov notice + attachments, read per solicitation',
+        eligible: VERIFIED.findings.filter((f) => f.eligible).map((f) => f.solicitation_number),
+        barred: VERIFIED.findings.filter((f) => !f.eligible).map((f) => ({
+          sol: f.solicitation_number, bar: f.bar,
+        })),
+        deadline_conflicts: VERIFIED.findings.filter((f) => f.deadline_conflict)
+          .map((f) => ({ sol: f.solicitation_number, detail: f.deadline_conflict })),
+      },
+      },
     };
     fs.writeFileSync(path.join(OUTDIR, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
     fs.writeFileSync(path.join(OUTDIR, 'rows.json'), `${JSON.stringify(rows, null, 2)}\n`);

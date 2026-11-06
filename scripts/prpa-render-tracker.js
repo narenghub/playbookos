@@ -97,6 +97,18 @@ const html = `<!doctype html>
   .ttl a:hover{border-bottom-color:var(--accent)}
   .miss{color:var(--muted);font-size:11px;max-width:300px;display:block;margin-top:3px}
   .num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .h2{font-size:14px;margin:22px 0 10px;letter-spacing:-.01em}
+  .gaps{display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:10px;margin-bottom:8px}
+  .gap{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 13px}
+  .gs{font-size:10px;font-weight:700;letter-spacing:.07em;margin-bottom:4px}
+  .gs.COVERED{color:var(--q)} .gs.FIXTURE_ONLY{color:var(--r)} .gs.EXPIRED{color:var(--n)}
+  .gs\\ NO\\ EVIDENCE,.gs{color:var(--n)}
+  .gl{font-size:12.5px;font-weight:600;margin-bottom:5px}
+  .gn{margin:0;padding-left:15px;color:var(--muted);font-size:11px;line-height:1.55}
+  .rev-no_bid{background:var(--nbg);color:var(--n)}
+  .rev-bid{background:var(--qbg);color:var(--q)}
+  .rev-undecided{background:var(--rbg);color:var(--r)}
+  .restrict{color:var(--n);font-weight:600}
   .soon{color:var(--n);font-weight:600}
   .bid{color:var(--q);font-weight:600}
   footer{margin-top:22px;color:var(--muted);font-size:11.5px;line-height:1.7}
@@ -110,7 +122,7 @@ const html = `<!doctype html>
 
 <div class="warn">
   <b>Qualification shown is from the FIXTURE pass.</b> Abiozen's real capability registry holds
-  <b>${S.abiozen_verified_capabilities} verified capabilities</b>, so on the real registry every one of these is
+  <b>${S.abiozen_verified_capabilities} verified capabilities</b>${S.fixture_capabilities_seeded ? ` (${S.fixture_capabilities_seeded} fixture rows exist and are deliberately uncountable)` : ''}, so on the real registry every one of these is
   NEEDS_REVIEW or NOT_QUALIFIED and none is QUALIFIED. The verdicts below exist to show the engine
   reaches a verdict and names its evidence — they are not Abiozen's qualification status.
   The <b>opportunities themselves are real</b>: every solicitation number and link resolves on SAM.gov.
@@ -124,34 +136,48 @@ const html = `<!doctype html>
   <div class="card"><div class="n">${biddable}</div><div class="l">biddable</div></div>
   <div class="card"><div class="n">${S.duplicate_candidates || 0}</div><div class="l">dup candidates</div></div>
   <div class="card"><div class="n">${S.amendments || 0}</div><div class="l">amendments</div></div>
+  <div class="card"><div class="n">${(S.bid_reviews || []).find((b) => b.decision === 'no_bid')?.n || 0}</div><div class="l">no-bid</div></div>
 </div>
 
 <div class="mix">
   ${typeMix.map(([t, n]) => `<span>${esc(t)} <b>${n}</b></span>`).join('')}
 </div>
 
+<h2 class="h2">Capability coverage — what Abiozen must produce before anything can qualify</h2>
+<div class="gaps">
+${(S.capability_gaps || []).map((g) => `
+  <div class="gap">
+    <div class="gs ${esc(g.status)}">${esc(g.status.replace(/_/g, ' '))}</div>
+    <div class="gl">${esc(g.label)}</div>
+    ${(g.needs || []).length ? `<ul class="gn">${g.needs.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : ''}
+  </div>`).join('')}
+</div>
+
+<h2 class="h2">Open solicitations</h2>
+
 <table>
 <thead><tr>
-  <th>Fit</th><th>Solicitation #</th><th>Title</th><th>Agency</th>
-  <th>NAICS</th><th>PSC</th><th>Set-Aside</th><th class="num">Deadline</th>
-  <th class="num">Days</th><th>Biddable</th><th class="num">Est. Value</th>
+  <th>Fit</th><th>Review</th><th>Solicitation #</th><th>Title</th><th>Agency</th>
+  <th>NAICS</th><th>Eligibility restriction</th><th class="num">Deadline</th>
+  <th class="num">Days</th><th>Biddable</th>
 </tr></thead><tbody>
 ${sorted.map((r) => {
     const d = daysLeft(r.response_deadline);
     const v = r.verdict || 'NOT ASSESSED';
     return `<tr>
   <td><span class="chip ${esc(v)}">${esc(v.replace(/_/g, ' '))}</span></td>
+  <td>${r.bid_decision ? `<span class="chip rev-${esc(r.bid_decision)}">${esc(r.bid_decision.replace('_', '-'))}</span>` : '<span style="color:var(--muted);font-size:11px">—</span>'}
+      ${r.bid_rationale ? `<span class="miss">${esc(String(r.bid_rationale).slice(0, 90))}</span>` : ''}</td>
   <td class="sol">${esc(r.solicitation_number)}${r.version_seq > 1 ? ` <span style="color:var(--muted)">v${r.version_seq}</span>` : ''}</td>
   <td class="ttl">${r.source_url ? `<a href="${esc(r.source_url)}">${esc(String(r.title).slice(0, 92))}</a>` : esc(String(r.title).slice(0, 92))}
       ${(r.missing_requirements || []).length ? `<span class="miss">missing: ${esc((r.missing_requirements || []).slice(0, 2).join(' · '))}</span>` : ''}</td>
   <td>${esc(String(r.agency || '—').replace(/, DEPARTMENT OF$/, '').slice(0, 26))}</td>
   <td class="sol">${esc(r.naics_code || '—')}</td>
-  <td class="sol">${esc(r.psc_code || '—')}</td>
-  <td style="font-size:11px;color:var(--muted)">${esc(String(r.set_aside || '—').slice(0, 30))}</td>
+  <td style="font-size:11px">${r.set_aside ? `<span class="restrict">${esc(String(r.set_aside).slice(0, 44))}</span>` : '<span style="color:var(--muted)">open to all</span>'}</td>
   <td class="num">${esc(day(r.response_deadline) || '—')}${r.deadline_has_time ? '' : '<span style="color:var(--muted)"> ?</span>'}</td>
   <td class="num ${d !== null && d <= 7 ? 'soon' : ''}">${d === null ? '—' : d}</td>
   <td class="${r.is_biddable ? 'bid' : ''}">${r.is_biddable ? 'yes' : 'no'}</td>
-  <td class="num">${esc(money(r.estimated_value_usd) || '—')}</td>
+
 </tr>`;
   }).join('\n')}
 </tbody></table>

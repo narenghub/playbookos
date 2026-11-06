@@ -238,6 +238,32 @@ h('7. A SET-ASIDE WE CANNOT MEET IS A HARD NO; A LAPSED REGISTRATION IS NOT');
   } else bad(`an empty registry produced ${r.verdict}`);
 }
 
+h('8. THE NAIVE DATE COERCION CANNOT COME BACK');
+// It has been wrong twice: once in the qualification engine, once in the capability gap report.
+// Both times it produced confident wrong advice rather than an error. A sweep is cheaper than a
+// third occurrence.
+{
+  const fsx = require('fs'); const pathx = require('path');
+  const dir = pathx.join(__dirname, '..', 'src', 'lib', 'office');
+  const offenders = [];
+  for (const f of fsx.readdirSync(dir).filter((x) => x.endsWith('.js'))) {
+    if (f === 'iso-day.js') continue;                     // the one place that may discuss it
+    const src = fsx.readFileSync(pathx.join(dir, f), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((l) => !/^\s*\/\//.test(l)).join('\n');
+    // String(<anything date-ish>).slice(0, 10) — the exact shape that broke twice.
+    const re = /String\(\s*[A-Za-z_$][\w.$]*(valid_to|valid_until|deadline|_at|_date|date)[\w.$]*\s*\)\s*\.slice\(\s*0\s*,\s*10\s*\)/i;
+    if (re.test(src)) offenders.push(f);
+  }
+  if (!offenders.length) ok('no String(<date>).slice(0,10) anywhere in src/lib/office');
+  else bad('the naive date coercion is back', offenders.join(', '));
+  const iso = require('../src/lib/office/iso-day');
+  if (iso.isoDay(new Date('2026-01-01')) === '2026-01-01') ok('the shared isoDay handles a Date');
+  else bad('shared isoDay is wrong');
+  if (!iso.onOrBefore(null, '2026-11-06') && !iso.onOrAfter(null, '2026-11-06')) {
+    ok('a NULL date is neither past nor future — it is unknown, and both helpers say so');
+  } else bad('a null date was treated as a real one');
+}
+
 h('8. DUPLICATE DETECTION IS ADVISORY, NOT A MERGE');
 if (T.titleSimilarity('Blood Type IVD Reagents', 'Blood Type IVD Reagents') === 1) ok('identical titles score 1');
 else bad('identical titles did not score 1');
