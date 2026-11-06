@@ -57,6 +57,7 @@
 //       3 did not execute
 
 const routeBlock = require('./lib/sam-route-block');
+const { isoDay } = require('../src/lib/office/iso-day');
 
 const ENTITY_URL = 'https://api.sam.gov/entity-information/v2/entities';
 const AUTHORIZE_FLAG = '--i-am-authorized-to-activate';
@@ -355,7 +356,7 @@ async function main() {
     ['UEI', EXPECTED.uei, reg.ueiSAM],
     ['CAGE', EXPECTED.cage, reg.cageCode],
     ['legal name', EXPECTED.legalName, reg.legalBusinessName],
-    ['expiry', EXPECTED.expires, expires ? String(expires).slice(0, 10) : null],
+    ['expiry', EXPECTED.expires, expires ? isoDay(expires) : null],
   ];
   for (const [label, want, got] of cmp) {
     if (got === undefined || got === null || got === '') {

@@ -480,6 +480,10 @@ pf_step "a failing verifier exits non-zero, and a skip still exits 3" node scrip
 # quietly wired into startup. Each is re-asserted against the code as it stands, every run.
 pf_step "the SSRF guard refuses metadata, private ranges and redirects into them" node scripts/check-url-guard.js
 pf_step "the opportunity tracker cannot hand Excel a formula or invent a value" node scripts/check-opportunity-tracker.js
+# The date bug has shipped four times (qualification engine, deadline check, gap report, CSV export)
+# and was found a fifth time in contract-render.js, writing "Sat Nov 21" into a contract's payment
+# schedule. Fixing instances one at a time is what produced the fifth, so it is swept every run.
+pf_step "no raw date coercion anywhere — dates go through isoDay()" node scripts/check-date-formatting.js
 pf_step "a capability cannot activate without evidence, authorization or review" node scripts/check-capability-registry.js
 pf_step "the tracker runs end to end on real SAM.gov data" node scripts/prpa-tracker-demo.js
 pf_step "the exported CSV validates against an independent parser" node scripts/validate-export-csv.js

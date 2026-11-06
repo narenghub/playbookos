@@ -166,6 +166,49 @@ async function main() {
       console.log(`  SKIP  ${CSV2} not present`);
     }
 
+    // ── 1c. ENRICH — the notice bodies SAM's search index does not carry ────
+    // The search endpoint returns a Description column that is EMPTY for every record, so the
+    // classifier had only titles to work from, and 59 of 81 wave-1 notices came out as "unknown".
+    // The full record at /opps/v2/opportunities/<noticeId> carries the body — but ONLY if the
+    // request omits `Accept: application/json`, which the endpoint answers with HTTP 406.
+    //
+    // These are fetched offline into a committed fixture rather than live here, because ruling 22
+    // item 8 keeps the undocumented endpoint a manual source: no unattended harvesting.
+    h('1c. ENRICH — notice bodies fetched from the full record, applied by notice id');
+    const DESC_FILE = path.join(__dirname, '..', 'fixtures', 'opportunity-descriptions-2026-11-06.json');
+    let enriched = 0; let noBody = 0;
+    if (fs.existsSync(DESC_FILE)) {
+      const bodies = JSON.parse(fs.readFileSync(DESC_FILE, 'utf8'));
+      const plain = (html) => String(html || '')
+        .replace(/<br\s*\/?>/gi, '\n').replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+        .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+      // By notice id, one row at a time. Not a pattern, not a timestamp window — the same rule the
+      // verification scripts follow, for the same reason.
+      for (const [noticeId, html] of Object.entries(bodies)) {
+        const body = plain(html);
+        if (!body || body === 'N/A') { noBody += 1; continue; }
+        const up = await q(
+          `UPDATE federal_opportunities SET description = $1
+            WHERE company_id = $2 AND notice_id = $3 AND is_current
+              AND (description IS NULL OR description = '')`,
+          [body, CO, noticeId],
+        );
+        enriched += up.rowCount;
+      }
+      console.log(`  ${Object.keys(bodies).length} notice bodies on file · ${enriched} row(s) enriched · `
+        + `${noBody} body was empty or "N/A" at the source`);
+      const still = (await q(
+        `SELECT COUNT(*)::int n FROM federal_opportunities
+          WHERE company_id=$1 AND is_current AND (description IS NULL OR description='')`, [CO])).rows[0].n;
+      console.log(`  ${still} current row(s) still have no description and are classified on title alone.`);
+      console.log('  Those are reported as UNKNOWN, never upgraded by inference.');
+    } else {
+      console.log(`  SKIP  ${path.basename(DESC_FILE)} not present — classification runs on titles alone`);
+    }
+
     // ── 2. DEDUPE — re-import the identical file ────────────────────────────
     h('2. DEDUPE — the same file again, then an amendment');
     const r2 = await T.importCsv(q, {
@@ -195,7 +238,10 @@ async function main() {
         WHERE company_id=$1 AND solicitation_number=$2 ORDER BY version_seq`,
       [CO, target.solicitation_number])).rows;
     console.log(`  amendment to ${target.solicitation_number}: ${r3.amended.length} new version`);
-    console.log(`  versions now held: ${versions.map((v) => `v${v.version_seq}${v.is_current ? ' (current)' : ''} deadline ${String(v.response_deadline).slice(0, 10)}`).join('  |  ')}`);
+    // isoDay, not String(...).slice(0, 10). node-postgres returns a DATE as a JS Date, and
+    // String(new Date('2026-11-21')).slice(0, 10) is "Sat Nov 21". This printed exactly that.
+    const { isoDay: ISO } = require('../src/lib/office/iso-day');
+    console.log(`  versions now held: ${versions.map((v) => `v${v.version_seq}${v.is_current ? ' (current)' : ''} deadline ${ISO(v.response_deadline)}`).join('  |  ')}`);
     console.log('  → the superseded version is kept, which is what an audit of an assessment needs');
     const dups = (await q(`SELECT COUNT(*)::int n FROM opportunity_duplicate_candidates WHERE company_id=$1`, [CO])).rows[0].n;
     console.log(`  tier 3: ${dups} possible cross-number duplicate(s) recorded for a human — none merged`);
@@ -373,7 +419,12 @@ async function main() {
     const verMap = {};
     for (const f of VERIFIED.findings) verMap[f.solicitation_number] = f;
     const allRows = await T.listOpportunities(q, CO);
-    const ranked = RANK.rankAll(allRows, { today: new Date().toISOString().slice(0, 10), verification: verMap });
+    const capsForRank = await REG.activeCapabilities(q, CO, { today: new Date().toISOString().slice(0, 10) });
+    const ranked = RANK.rankAll(allRows, {
+      today: new Date().toISOString().slice(0, 10), verification: verMap,
+      capabilities: capsForRank,          // empty today; the feasibility checks say so rather than assuming
+      supplierQuotes: {},                 // none on record, so margin is never computed
+    });
     const tiers = ranked.reduce((a, r) => { a[r.ranking.tier] = (a[r.ranking.tier] || 0) + 1; return a; }, {});
     console.log(`  ${JSON.stringify(tiers)}`);
     console.log('  top of the list:');
@@ -382,7 +433,14 @@ async function main() {
         + `${String(r.solicitation_number).padEnd(20)} ${String(r.title).slice(0, 44)}`);
     }
     const barredCount = ranked.filter((r) => r.ranking.bars.length).length;
-    console.log(`  ${barredCount} barred and sorted last — an eligibility bar is a floor, not a penalty`);
+    const notFeasible = ranked.filter((r) => r.ranking.bars.some((b) => b.kind === RANK.BAR_KINDS.NOT_FEASIBLE)).length;
+    console.log(`  ${barredCount} barred and sorted last — a bar is a floor, not a penalty`);
+    console.log(`  of those, ${notFeasible} are barred on FULFILMENT: eligible, and we could not deliver them`);
+    const byClass = ranked.reduce((a, r) => {
+      const c = r.ranking.feasibility ? r.ranking.feasibility.product_class : 'n/a';
+      a[c] = (a[c] || 0) + 1; return a;
+    }, {});
+    console.log(`  product classes: ${JSON.stringify(byClass)}`);
     fs.writeFileSync(path.join(OUTDIR, 'ranked.json'), `${JSON.stringify(ranked.map((r) => ({
       solicitation_number: r.solicitation_number, title: r.title, agency: r.agency,
       notice_type: r.notice_type, naics_code: r.naics_code, psc_code: r.psc_code,

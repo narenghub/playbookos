@@ -21,6 +21,7 @@
 // at all, this is what catches it.
 
 const { TEMPLATE_VERSION, FIELDS, SUPPLIER, BLOCKS } = require('./contract-template');
+const { isoDay } = require('../office/iso-day');
 
 const PLACEHOLDER = /\{\{\s*([a-z0-9_]+)\s*\}\}/gi;
 
@@ -232,7 +233,9 @@ async function renderContract(input) {
           cell('Amount', { bold: true, width: 20 })] });
         const body = rows.slice().sort((a, b) => (a.seq || 0) - (b.seq || 0)).map(r => new TableRow({
           children: [cell(String(r.seq == null ? '' : r.seq)), cell(String(r.label || '')),
-                     cell(r.due_date ? String(r.due_date).slice(0, 10)
+                     // isoDay, not String(...).slice(0, 10): pg hands back a DATE as a JS Date and
+                     // the raw form renders "Sat Nov 21" — into a payment schedule in a contract.
+                     cell(r.due_date ? (isoDay(r.due_date) || '')
                                      : (TRIGGER_TEXT[r.due_trigger] || r.due_trigger || '')),
                      cell(money(r.amount_cents) || '')],
         }));

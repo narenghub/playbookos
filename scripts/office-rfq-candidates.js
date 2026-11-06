@@ -23,6 +23,7 @@
 'use strict';
 
 const guard = require('../src/lib/procurement/rfq-identity-guard');
+const { isoDay } = require('../src/lib/office/iso-day');
 const { query } = require('../src/lib/db');
 
 const pad = (s, n) => String(s === null || s === undefined ? '' : s).padEnd(n);
@@ -122,7 +123,7 @@ const pad = (s, n) => String(s === null || s === undefined ? '' : s).padEnd(n);
           } else {
             for (const p of prior) {
               console.log(`      ALREADY SENT  ${pad(p.name || p.supplier_id, 34)}${pad(p.status, 13)}`
-                + `${String(p.sent_at || '').slice(0, 10)}`);
+                + `${isoDay(p.sent_at) || ''}`);
             }
             console.log(`      → ${prior.length} supplier(s) already hold an RFQ for this molecule.`);
             console.log('        Choosing one of them makes the first governed action a DUPLICATE.\n');

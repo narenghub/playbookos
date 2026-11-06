@@ -41,6 +41,7 @@
 'use strict';
 
 const { initDB, query } = require('../src/lib/db');
+const { isoDay } = require('../src/lib/office/iso-day');
 const {
   extractEmails, institutionFrom, departmentFrom,
   normalizeInstitution, normalizePerson, attributeToPi, orgKeyword,
@@ -306,9 +307,9 @@ async function main() {
     [instName, normalizeInstitution(instName), r.org.org_country || null, r.org.org_city || null,
       r.pi.full_name, normalizePerson(r.pi.full_name), r.department,
       r.award.project_title || null, r.award.project_num || null,
-      String(r.award.project_end_date || '').slice(0, 10) || null,
+      isoDay(r.award.project_end_date) || null,
       r.award.award_amount || null,
-      String(r.award.project_start_date || '').slice(0, 10) || null,
+      isoDay(r.award.project_start_date) || null,
       `https://reporter.nih.gov/project-details/${r.award.project_num || ''}`]);
 
     const labId = labRes.rows[0].id;
@@ -385,7 +386,7 @@ async function main() {
 
     say(`      ${pad(pi.full_name, 26)}${pad(String(org.org_name || '').slice(0, 32), 34)}`
       + `${pad(String(org.dept_type || '').slice(0, 11), 13)}`
-      + `${pad(String(a.project_end_date || '').slice(0, 10), 11)}`
+      + `${pad(isoDay(a.project_end_date) || '', 11)}`
       + (email || (found ? 'suppressed'
         : (look && look.error ? `LOOKUP FAILED: ${look.error}` : '—')))
       + (EXECUTE ? '  ✓saved' : ''));

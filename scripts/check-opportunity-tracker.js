@@ -321,9 +321,9 @@ h('9. RANKING ORDERS ATTENTION, AND NEVER OUTRANKS AN ELIGIBILITY BAR');
       ok('margin scores 0 and states WHY, rather than being silently dropped');
     } else bad('margin was scored without a value', JSON.stringify(r.components));
     const r2 = RK.rank({ ...base, estimated_value_usd: 250000 }, { today: T0 });
-    if (r2.components.margin === 0 && r2.notes.some((n) => /without a supplier quote/.test(n))) {
+    if (r2.components.margin === 0 && r2.notes.some((n) => /MARGIN NOT SCORED/.test(n))) {
       ok('a contract VALUE alone still does not produce a margin — that is revenue, not margin');
-    } else bad('a value alone produced a margin score');
+    } else bad('a value alone produced a margin score', JSON.stringify(r2.notes.filter((n) => /MARGIN/.test(n))));
   }
   // Verified capability is the only route to the top band, and it is currently unreachable.
   {
@@ -334,13 +334,16 @@ h('9. RANKING ORDERS ATTENTION, AND NEVER OUTRANKS AN ELIGIBILITY BAR');
     if (nr.notes.some((n) => /no verified capability/.test(n))) ok('…and NEEDS_REVIEW says so in its notes');
     else bad('a NEEDS_REVIEW rank did not explain itself');
   }
-  // A brand-name hint is a prompt to check, never a verdict — 36C25627Q0074 is a Roche buy with
-  // no OEM requirement, which is why this cannot be a bar.
+  // SUPERSEDED BY RULING 24. This previously asserted that a brand-name hint raises risk but does
+  // NOT bar, on the reasoning that 36C25627Q0074 is a Roche buy with no OEM requirement — which is
+  // true about ELIGIBILITY and irrelevant to FULFILMENT. We cannot source Roche consumables
+  // whether or not the notice demands an authorization letter, so the correct behaviour is a bar.
+  // The old assertion was not wrong about eligibility; it was answering the wrong question.
   {
-    const r = RK.rank({ ...base, title: 'Roche Ventana reagents' }, { today: T0 });
-    if (r.components.execution_risk < 0 && !r.bars.length) {
-      ok('a brand-locked-looking title raises RISK but does not bar — it is a signal to check');
-    } else bad('a brand hint became a bar', JSON.stringify(r));
+    const r = RK.rank({ ...base, title: 'Roche Ventana reagents and consumables' }, { today: T0 });
+    if (r.bars.some((b) => b.kind === RK.BAR_KINDS.NOT_FEASIBLE)) {
+      ok('a named-OEM consumable buy is BARRED on fulfilment, independently of eligibility');
+    } else bad('an OEM consumable buy was not barred', JSON.stringify(r.bars));
   }
   // Sole-source language is a bar; "brand name or equal" is not.
   for (const t of ['Notice of Intent to Sole Source', 'The Government intends to award on a non-competitive basis',
@@ -349,15 +352,203 @@ h('9. RANKING ORDERS ATTENTION, AND NEVER OUTRANKS AN ELIGIBILITY BAR');
     if (r.bars.some((b) => b.kind === RK.BAR_KINDS.SOLE_SOURCE)) ok(`"${t.slice(0, 38)}…" → BARRED as sole source`);
     else bad(`sole-source language was not barred: ${t}`, JSON.stringify(r.bars));
   }
+  // Also superseded, and the distinction is worth keeping explicit: "brand name or equal" means
+  // equivalents are INVITED, so it is not a sole-source bar — but a dilatometer is instrument
+  // hardware, which Abiozen cannot supply through a chemical channel. Not barred for the reason it
+  // used to be tested for; barred for a different and correct one.
   {
-    const r = RK.rank({ ...base, title: 'Brand Name or Equal NETZSCH Dilatometer' }, { today: T0 });
-    if (!r.bars.length) ok('"brand name or equal" is NOT barred — equivalents are invited');
-    else bad('an "or equal" notice was barred', JSON.stringify(r.bars));
+    const r = RK.rank({ ...base, title: 'Brand Name or Equal NETZSCH Dil 502 Supreme dilatometer' }, { today: T0 });
+    if (!r.bars.some((b) => b.kind === RK.BAR_KINDS.SOLE_SOURCE)) {
+      ok('"brand name or equal" is NOT a sole-source bar — equivalents are invited');
+    } else bad('an "or equal" notice was barred as sole source', JSON.stringify(r.bars));
+    if (r.bars.some((b) => b.kind === RK.BAR_KINDS.NOT_FEASIBLE)) {
+      ok('…but it IS barred on fulfilment: instrument hardware needs a dealer agreement');
+    } else bad('instrument hardware was not barred on fulfilment');
   }
   {
     const soon = RK.rank({ ...base, response_deadline: '2026-11-08T00:00:00Z' }, { today: T0 });
     if (soon.notes.some((n) => /too little time/.test(n))) ok('a deadline 2 days out is flagged as too little time');
     else bad('an imminent deadline was not flagged');
+  }
+}
+
+h('10. ELIGIBLE IS NOT FULFILLABLE (ruling 24 items 3, 4, 6)');
+{
+  const F = require('../src/lib/office/fulfillment-feasibility');
+  const RK = require('../src/lib/office/opportunity-rank');
+  const T1 = '2026-11-06';
+  const open = { notice_type: 'solicitation', status: 'open', set_aside: null,
+    response_deadline: '2026-12-15T00:00:00Z', estimated_value_usd: null };
+
+  // THE CASE THIS EXISTS FOR: unrestricted, NAICS-matched, says "reagent", and unfulfillable.
+  const roche = { ...open, solicitation_number: 'ROCHE', naics_code: '325413', psc_code: '6550',
+    title: '6550-- Roche Ventana Reagents IDIQ', description: 'reagents for the existing Roche Ventana stainers' };
+  const fr = F.assessFeasibility(roche, { today: T1 });
+  if (fr.verdict === 'NOT_FEASIBLE' && fr.product_class === 'oem_diagnostic_consumable') {
+    ok('an unrestricted, NAICS-matched "reagent" buy from a named OEM → NOT_FEASIBLE');
+  } else bad(`the Roche case came out ${fr.verdict} / ${fr.product_class}`);
+  if (fr.checks.supplier_availability.status === 'blocked'
+      && /small-molecule/i.test(fr.checks.supplier_availability.detail)) {
+    ok('…and supplier_availability is BLOCKED, naming the channel that does not reach it');
+  } else bad('supplier availability did not block', JSON.stringify(fr.checks.supplier_availability));
+  if (fr.confidence === 0) ok('a blocked check collapses confidence to 0');
+  else bad(`confidence was ${fr.confidence} despite a blocker`);
+
+  // Ruling 24 item 6 stated as an assertion: a chemical supplier never fills an OEM order.
+  for (const m of ['Abbott Architect', 'Beckman Coulter', 'Cepheid GeneXpert', 'bioMerieux Vitek', 'Bio-Rad']) {
+    const r = F.assessFeasibility({ ...open, solicitation_number: m, title: `${m} reagents and consumables` }, { today: T1 });
+    if (r.verdict === 'NOT_FEASIBLE') ok(`${m} consumables → NOT_FEASIBLE`);
+    else bad(`${m} was judged ${r.verdict}`);
+  }
+  {
+    const r = F.assessFeasibility({ ...open, solicitation_number: 'INS', title: 'Brand Name or Equal NETZSCH Dil 502 Supreme dilatometer' }, { today: T1 });
+    if (r.verdict === 'NOT_FEASIBLE' && r.product_class === 'instrument_hardware') {
+      ok('instrument hardware → NOT_FEASIBLE, a dealer agreement not a chemical supply chain');
+    } else bad(`instrument came out ${r.verdict}/${r.product_class}`);
+  }
+
+  // The positive control: something inside the channel is UNPROVEN, not feasible, and not blocked.
+  {
+    const r = F.assessFeasibility({ ...open, solicitation_number: 'SYN',
+      title: 'Synthesis and Distribution of Drugs of Abuse and Related Compounds',
+      description: 'custom synthesis of reference standards' }, { today: T1 });
+    if (r.verdict === 'UNPROVEN' && !r.blockers.length) ok('a custom-synthesis buy → UNPROVEN, not blocked');
+    else bad(`custom synthesis came out ${r.verdict}`, JSON.stringify(r.blockers));
+    if (r.checks.supplier_availability.status === 'unknown'
+        && /NO SUPPLIER QUOTE/i.test(r.checks.supplier_availability.detail)) {
+      ok('…and it is UNKNOWN rather than ok, because no supplier quote exists');
+    } else bad('in-channel availability claimed OK without a quote', JSON.stringify(r.checks.supplier_availability));
+  }
+
+  // All seven named checks exist, and UNKNOWN never reads as a pass.
+  const need = ['proprietary_oem', 'oem_authorization', 'supplier_availability',
+    'minimum_order_quantity', 'fulfilment_lead_time', 'required_certifications', 'estimated_gross_margin'];
+  const got = Object.keys(F.assessFeasibility({ ...open, solicitation_number: 'Z', title: 'something' }, { today: T1 }).checks);
+  const missing = need.filter((n) => !got.includes(n));
+  if (!missing.length) ok(`all seven ruling-24 checks are present (${got.length})`);
+  else bad('missing check(s)', missing.join(', '));
+  {
+    const r = F.assessFeasibility({ ...open, solicitation_number: 'U', title: 'Miscellaneous supplies' }, { today: T1 });
+    if (r.verdict !== 'FEASIBLE') ok('an unclassifiable notice is never FEASIBLE — unknown is not a pass');
+    else bad('an unknown product class was judged feasible');
+  }
+  // Margin is never invented.
+  {
+    const r = F.assessFeasibility({ ...open, solicitation_number: 'M', title: 'research chemicals', estimated_value_usd: 500000 }, { today: T1 });
+    if (r.checks.estimated_gross_margin.status === 'unknown' && /no supplier quote/i.test(r.checks.estimated_gross_margin.detail)) {
+      ok('a contract value with no supplier quote → margin UNKNOWN, not a guess');
+    } else bad('margin was estimated without a cost', JSON.stringify(r.checks.estimated_gross_margin));
+    const r2 = F.assessFeasibility({ ...open, solicitation_number: 'M2', title: 'research chemicals', estimated_value_usd: 100000 },
+      { today: T1, supplierQuotes: { M2: { cost: 70000 } } });
+    if (r2.checks.estimated_gross_margin.status === 'ok' && Math.abs(r2.checks.estimated_gross_margin.value - 0.3) < 1e-9) {
+      ok('with BOTH a value and a quote, margin is computed (30%) — the check is a gate, not a wall');
+    } else bad('margin was not computed when both sides existed', JSON.stringify(r2.checks.estimated_gross_margin));
+  }
+  // An empty certification registry cannot satisfy a stated certification requirement.
+  {
+    const r = F.assessFeasibility({ ...open, solicitation_number: 'C', title: 'analytical testing services',
+      description: 'laboratory must hold ISO 17025 accreditation' }, { today: T1, capabilities: [] });
+    if (r.checks.required_certifications.status === 'blocked') ok('a stated ISO requirement against an empty registry → BLOCKED');
+    else bad('a certification requirement passed with no certifications held', JSON.stringify(r.checks.required_certifications));
+  }
+  // And the ranking must bar it, not merely dock points.
+  {
+    const r = RK.rank(roche, { today: T1 });
+    if (r.bars.some((b) => b.kind === RK.BAR_KINDS.NOT_FEASIBLE)) ok('the ranker BARS an unfulfillable notice rather than docking it');
+    else bad('an unfulfillable notice was only penalised', JSON.stringify(r.bars));
+    if (r.score === 0) ok('…and its score floors at 0 rather than going negative');
+    else bad(`barred score was ${r.score}`);
+  }
+}
+
+// ── 11. THE RESEARCH-CHEMICAL / CLINICAL-DIAGNOSTIC LINE (ruling 24 item 6) ───
+// "Do not infer that BLDpharm, ChemScene, or other chemical suppliers can fulfill Roche, Abbott, or
+// similar OEM-specific orders." The word that breaks this is "reagent": it appears in both trades,
+// and the research_chemical pattern matches it. These cases are the ones that were misread on the
+// real board, kept here so a later widening of the chemical patterns cannot quietly re-break them.
+{
+  // Required here rather than relied on from section 10: those bindings are block-scoped, and
+  // reaching for them across blocks is what threw ReferenceError the last two times.
+  const F = require('../src/lib/office/fulfillment-feasibility.js');
+  const RK = require('../src/lib/office/opportunity-rank.js');
+  const T1 = '2026-11-06';
+  const open = { notice_type: 'solicitation', status: 'open', response_deadline: '2026-12-10' };
+
+  const cases = [
+    ['Flow Cytometry Reagents', 'RFI for flow cytometry reagents for the clinical laboratory',
+      'clinical_diagnostic_consumable', 'a flow-cytometry reagent buy is NOT a research chemical'],
+    ['6550--VISN 4 Coagulation Testing', 'coagulation testing reagents and controls for VISN 4 laboratories',
+      'clinical_diagnostic_consumable', 'coagulation reagents classify as clinical diagnostics, not chemicals'],
+    ['6505--MVAHCS FDG Radiopharmaceutical', 'requires FDG (Fluorodeoxyglucose F18) with the salient characteristics below',
+      'radiopharmaceutical', 'FDG classifies as a radiopharmaceutical, not a 6505 pharmaceutical to source'],
+    ['H365--ANNUAL MEDICAL GAS TESTING', 'annual medical gas testing and certification at the medical center',
+      'facility_service', 'medical gas testing classifies as a facility service'],
+    ['JBA Deicer IDIQ', 'indefinite delivery contract for runway deicer',
+      'facility_service', 'the deicer IDIQ classifies as a facility service, not a chemical buy'],
+    ['68--AMMONIUM HYDROXIDE', 'ammonium hydroxide, reagent grade chemical, bulk',
+      'research_chemical', 'a genuine bulk chemical still classifies as research_chemical'],
+    // A three-letter word must not decide a product class. "TIP" is NSF's Directorate for
+    // Technology, Innovation and Partnerships, and it classified a funding announcement as a
+    // consumables buy, which put it in the wave-1 top ten.
+    ['NSF X-Labs Initiative - From Sequence to Function',
+      'The NSF Directorate for Technology, Innovation and Partnerships (TIP) announces its intent to solicit proposals',
+      'unknown', 'the acronym TIP no longer reads as a pipette tip'],
+    ['Pipette tips and centrifuge tubes', 'bulk laboratory consumables',
+      'lab_consumable_generic', '…while a real pipette tip still classifies as a consumable'],
+    ['Building America Subject Matter Expert Technical Support',
+      'help buildings industry stakeholders scale up new construction and building envelope retrofits',
+      'unrelated', 'a buildings-industry contract classifies as another industry, not a chemical buy'],
+  ];
+  for (const [title, description, expect, label] of cases) {
+    const got = F.classifyProduct({ title, description }).product_class;
+    if (got === expect) ok(label);
+    else bad(`${label} — expected ${expect}, got ${got}`, `${title}`);
+  }
+
+  // Each out-of-reach class must BAR, not merely dock. A class that classifies correctly but still
+  // scores is the same false green in a different place.
+  for (const cls of ['clinical_diagnostic_consumable', 'radiopharmaceutical', 'facility_service', 'unrelated']) {
+    const [title, description] = cases.find((c) => c[2] === cls);
+    const opp = { ...open, solicitation_number: `X-${cls}`, title, description, business_lines: ['molecule_commerce'] };
+    const f = F.assessFeasibility(opp, { today: T1, capabilities: [] });
+    if (f.verdict === 'NOT_FEASIBLE') ok(`${cls} → NOT_FEASIBLE`);
+    else bad(`${cls} was not NOT_FEASIBLE`, f.verdict);
+    const r = RK.rank(opp, { today: T1 });
+    if (r.bars.some((b) => b.kind === RK.BAR_KINDS.NOT_FEASIBLE)) ok(`…and the ranker bars it`);
+    else bad(`${cls} ranked without a feasibility bar`, JSON.stringify(r.bars));
+  }
+
+  // A blank set-aside field must not read as "unrestricted" when the notice body says otherwise.
+  // SAM's search index did exactly this for N0010426REJ97, and the engine scored it as open.
+  {
+    const base = { ...open, solicitation_number: 'SA-1', title: '68--AMMONIUM HYDROXIDE',
+      description: 'NOTICE OF TOTAL SMALL BUSINESS SET-ASIDE (DEV 2026-O0037)(FEB 2026)|1||',
+      business_lines: ['molecule_commerce'] };
+    const blank = RK.rank({ ...base, set_aside: '' }, { today: T1 });
+    // It raises a FLAG, and must not also dock the score: docking it pushed the only direct
+    // chemical product fit on the real board out of the top ten, below a vaccine RFP.
+    if (blank.flags.some((f) => f.kind === 'SET_ASIDE_UNVERIFIED')) ok('a blank set-aside field with a set-aside clause in the text raises a flag');
+    else bad('the set-aside conflict raised no flag', JSON.stringify(blank.flags));
+    if (blank.notes.some((n) => /SET-ASIDE CONFLICT/.test(n))) ok('…and the conflict is reported in the notes');
+    else bad('the set-aside conflict was not surfaced', JSON.stringify(blank.notes));
+    const clean = RK.rank({ ...base, description: 'bulk reagent grade chemical', set_aside: '' }, { today: T1 });
+    if (blank.components.eligibility === clean.components.eligibility) {
+      ok('…and it does NOT dock the score — an unknown is a reason to verify, not to hide the row');
+    } else {
+      bad('a set-aside flag also docked the score, which buries the row',
+        `${blank.components.eligibility} vs ${clean.components.eligibility}`);
+    }
+    // And a populated field must NOT trip the conflict — the check is for absence, not disagreement.
+    const populated = RK.rank({ ...base, set_aside: 'Total Small Business Set-Aside (FAR 19.5)' }, { today: T1 });
+    if (!populated.flags.some((f) => f.kind === 'SET_ASIDE_UNVERIFIED')) ok('…and a populated set-aside field does not trip it');
+    else bad('a populated set-aside field falsely reported a conflict');
+  }
+
+  // And the classes must be declared. An undeclared class string is a silent typo away from
+  // falling through every does_not_reach check.
+  for (const cls of ['clinical_diagnostic_consumable', 'radiopharmaceutical', 'facility_service']) {
+    if (F.PRODUCT_CLASSES.includes(cls)) ok(`${cls} is a declared product class`);
+    else bad(`${cls} is used but not declared in PRODUCT_CLASSES`);
   }
 }
 

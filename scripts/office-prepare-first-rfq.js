@@ -126,7 +126,7 @@ const stop = (why, detail) => {
     if (sameSupplier.length) {
       if (!ALLOW_DUPLICATE) {
         stop(`${sup.name} ALREADY HOLDS an RFQ for ${rfq.molecule_name}.`,
-          sameSupplier.map((a) => `sent ${String(a.sent_at).slice(0, 10)} — status ${a.status}`).join('\n')
+          sameSupplier.map((a) => `sent ${require('../src/lib/office/iso-day').isoDay(a.sent_at)} — status ${a.status}`).join('\n')
           + '\n\nPreparing this would make the first governed supplier action a SECOND real\n'
           + 'communication to a supplier who already has the first. The identity guard has no\n'
           + 'opinion about that, because nothing about the identity is wrong.\n\n'

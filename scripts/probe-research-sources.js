@@ -23,6 +23,8 @@
 // Better to learn that from one read-only script than from a quarter of ingest work.
 'use strict';
 
+
+const { isoDay } = require('../src/lib/office/iso-day');
 const EPMC = 'https://www.ebi.ac.uk/europepmc/webservices/rest/search';
 const NIH = 'https://api.reporter.nih.gov/v2/projects/search';
 
@@ -191,7 +193,7 @@ async function probeNihReporter() {
     const pis = (r.principal_investigators || []).map((p) => p.full_name || p.fullName).filter(Boolean);
     const org = (r.organization && (r.organization.org_name || r.organization.orgName)) || '?';
     const amt = r.award_amount != null ? `$${Number(r.award_amount).toLocaleString()}` : '?';
-    say(`      ${String(r.project_end_date || '').slice(0, 10)}  ${String(pis[0] || '?').padEnd(26)} ${String(org).slice(0, 34).padEnd(36)} ${amt}`);
+    say(`      ${isoDay(r.project_end_date) || ''}  ${String(pis[0] || '?').padEnd(26)} ${String(org).slice(0, 34).padEnd(36)} ${amt}`);
   }
   say();
 }
