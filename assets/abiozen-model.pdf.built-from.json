@@ -1,0 +1,8 @@
+{
+  "source": "abiozen-model.src.html",
+  "source_sha256": "55761294cc040d3a5c48232d5edf9e9f35f42aa5da37fdbc0ee01cc16daaa130",
+  "pdf_sha256": "3170ef8247c908eca10e451c661e66d85f460288987cba0bafbe3d2c31c2422d",
+  "pdf_bytes": 113562,
+  "built_at": "2026-11-06T17:04:48.540Z",
+  "note": "Written by scripts/build-one-pager.js. --check compares source_sha256 against the source as it stands. Do not edit by hand; rebuild instead."
+}

@@ -77,7 +77,17 @@ async function refused(q, sql, params) {
   try { await q(sql, params); return null; } catch (e) { return e.message; }
 }
 
-const SHA = (c) => c.repeat(64);
+// SHA('a') → a 64-char hex string. It used to accept anything and repeat it, so SHA('doc-ok')
+// produced a 384-character non-hex value that failed much later inside a CHECK constraint, looking
+// like a schema bug rather than a bad call. A helper that cannot be misused is worth four lines.
+const SHA = (c) => {
+  if (typeof c !== 'string' || !/^[0-9a-f]$/.test(c)) {
+    throw new Error(`SHA() takes ONE lowercase hex char; got ${JSON.stringify(c)}. Use H() for a real digest.`);
+  }
+  return c.repeat(64);
+};
+// A real digest, for fixtures that need many distinct hashes.
+const H = (s) => require('crypto').createHash('sha256').update(String(s)).digest('hex');
 
 async function main() {
   h('MIGRATION v3 — ADVERSARIAL TESTS (ruling 15 item 7)');
@@ -173,11 +183,15 @@ async function main() {
 
     // ── 3. RULING 15 ITEM 1 — the three indicative classes ────────────────
     h('3. CATALOG LISTING, SYNTHESIS PREDICTION, SUPPLIER RELATIONSHIP (item 1)');
+    // A clean document now has to name the object version its verdict judged, and show that its
+    // bytes were verified. This fixture predates ruling 17 item 4 and was a plain 'clean' row; the
+    // new constraint rejected it, which is the constraint working.
     await q(`INSERT INTO intake_documents
                (id,company_id,submitted_by,origin,byte_size,sha256,storage_bucket,storage_key,
-                scan_status,scanned_at,detected_mime)
+                storage_version_id,scan_status,scan_version_id,scanned_at,
+                integrity_ok,integrity_checked_at,detected_mime)
              VALUES ('doc-a','co-a','naren','upload',1024,$1,'abiozen-intake','co-a/doc-a.pdf',
-                     'clean',NOW(),'application/pdf')`, [SHA('a')]);
+                     'ver-a','clean','ver-a',NOW(),true,NOW(),'application/pdf')`, [SHA('a')]);
     await q(`INSERT INTO solicitation_requirements
                (id,company_id,solicitation_id,requirement_kind,description,quantity_value,quantity_unit)
              VALUES ('req-a','co-a','sol-a','material','50 kg of a named API',50,'kg')`);
@@ -443,6 +457,121 @@ async function main() {
          VALUES ('doc-dup','co-a','naren','upload',1024,$1)`, [SHA('a')]);
     if (dupSha && /unique|duplicate key/i.test(dupSha)) ok('the same bytes twice → one document');
     else bad('duplicate bytes created a second document', dupSha || 'accepted');
+    // ── 7b. RULING 17 ITEM 4 — A VERDICT BELONGS TO ONE OBJECT VERSION ───
+    h('7b. ONLY A CURRENT CLEAN VERDICT PLUS INTEGRITY AUTHORIZES A DOWNLOAD');
+    // A presigned URL is not a database write, so the row that must precede one is the gate.
+    const mkDoc = async (id, extra) => q(
+      `INSERT INTO intake_documents
+         (id,company_id,submitted_by,origin,byte_size,sha256,detected_mime,
+          storage_bucket,storage_key,storage_version_id,
+          scan_status,scan_version_id,scanned_at,integrity_ok,integrity_checked_at)
+       VALUES ($1,'co-a','naren','upload',1024,$2,'application/pdf',
+               'playnexa-prpa-documents-dev','prpa/co-a/2026/11/x.pdf',$3,
+               $4,$5,$6,$7,$8)`,
+      [id, H(id), extra.ver, extra.status, extra.scanVer, extra.scannedAt,
+       extra.integrity, extra.integrityAt]);
+
+    const grant = (id, doc, ver, mins = 5) => refused(q,
+      `INSERT INTO document_download_grants
+         (id,company_id,document_id,storage_version_id,granted_to,expires_at,purpose)
+       VALUES ($1,'co-a',$2,$3,'naren', NOW() + ($4 || ' minutes')::interval,'human_review')`,
+      [id, doc, ver, String(mins)]);
+
+    // The positive control FIRST, so a later refusal cannot be mistaken for a wall.
+    await mkDoc('doc-ok', { ver: 'v1', status: 'clean', scanVer: 'v1',
+      scannedAt: new Date().toISOString(), integrity: true, integrityAt: new Date().toISOString() });
+    const okServable = (await q(`SELECT servable FROM intake_documents WHERE id='doc-ok'`)).rows[0].servable;
+    if (okServable === true) ok('a clean, current, integrity-verified document IS servable');
+    else bad('a fully clean document was not servable', String(okServable));
+    const gOk = await grant('g-ok', 'doc-ok', 'v1');
+    if (!gOk) ok('…and a download grant for it IS accepted');
+    else bad('a legitimate download grant was refused', gOk);
+
+    // Each quarantined category named by the ruling.
+    for (const st of ['pending', 'infected', 'unsupported', 'failed', 'access_denied']) {
+      const id = `doc-${st}`;
+      await mkDoc(id, { ver: 'v1', status: st,
+        scanVer: st === 'pending' ? null : 'v1',
+        scannedAt: st === 'pending' ? null : new Date().toISOString(),
+        integrity: true, integrityAt: new Date().toISOString() });
+      const sv = (await q(`SELECT servable FROM intake_documents WHERE id=$1`, [id])).rows[0].servable;
+      const g = await grant(`g-${st}`, id, 'v1');
+      if (sv === false && g && /quarantined/.test(g)) ok(`scan_status '${st}' → not servable, download REFUSED`);
+      else bad(`scan_status '${st}' did not quarantine`, `servable=${sv} grant=${g || 'accepted'}`);
+    }
+
+    // THE CASE THE RULING EXISTS FOR: a clean verdict, then a new version of the same object.
+    // I expected the generated column to render this merely unservable. The CHECK is stronger than
+    // that — it refuses to let such a row EXIST. A stale clean verdict is not a state the database
+    // can be put into, which is better than a state it can be put into and then declines to serve.
+    const staleRow = await refused(q,
+      `UPDATE intake_documents SET storage_version_id = 'v2' WHERE id = 'doc-ok'`);
+    if (staleRow && /clean_verdict_is_current/.test(staleRow)) {
+      ok('pointing a clean document at a NEW object version → REFUSED; the row cannot exist');
+    } else bad('a clean verdict survived being repointed at a new version', staleRow || 'accepted');
+
+    // So the only way to record a new version is to retract the verdict in the same statement.
+    // That is the discipline the constraint forces, and it is the correct one.
+    await q(`UPDATE intake_documents
+                SET storage_version_id='v2', scan_status='pending',
+                    scan_version_id=NULL, scanned_at=NULL
+              WHERE id='doc-ok'`);
+    const afterNewVer = (await q(`SELECT servable, scan_status FROM intake_documents WHERE id='doc-ok'`)).rows[0];
+    if (afterNewVer.servable === false && afterNewVer.scan_status === 'pending') {
+      ok('recording a new version forces the verdict back to pending, and it is not servable');
+    } else bad('a new version did not reset the verdict', JSON.stringify(afterNewVer));
+    const gStale = await grant('g-stale', 'doc-ok', 'v2');
+    if (gStale && /quarantined/.test(gStale)) ok('…and no download may be authorized for it');
+    else bad('a download was authorized for an unscanned version', gStale || 'accepted');
+
+    // Re-scanned at the new version, it is servable again — and a grant naming the OLD version is
+    // still refused, so a grant cannot be replayed across a re-upload.
+    await q(`UPDATE intake_documents
+                SET scan_status='clean', scan_version_id='v2', scanned_at=NOW(),
+                    integrity_ok=true, integrity_checked_at=NOW()
+              WHERE id='doc-ok'`);
+    const gWrongVer = await grant('g-wrongver', 'doc-ok', 'v1');
+    if (gWrongVer && /names version/.test(gWrongVer)) ok('a grant naming a superseded version → REFUSED');
+    else bad('a grant named the wrong version and was accepted', gWrongVer || 'accepted');
+
+    // Integrity alone can withdraw servability, independently of the scan.
+    const brokeIntegrity = await refused(q,
+      `UPDATE intake_documents SET integrity_ok=false WHERE id='doc-ok'`);
+    if (brokeIntegrity && /clean_verdict_is_current/.test(brokeIntegrity)) {
+      ok('a clean document whose bytes fail verification → REFUSED; scan and integrity are separate');
+    } else bad('integrity could be revoked while the document stayed clean', brokeIntegrity || 'accepted');
+
+    // Integrity is a separate requirement from the scan, per ruling 17 item 4.
+    const noIntegrity = await refused(q,
+      `INSERT INTO intake_documents
+         (id,company_id,submitted_by,origin,byte_size,sha256,detected_mime,storage_bucket,
+          storage_key,storage_version_id,scan_status,scan_version_id,scanned_at)
+       VALUES ('doc-noint','co-a','naren','upload',10,$1,'application/pdf','b','k','v1',
+               'clean','v1',NOW())`, [H('noint')]);
+    if (noIntegrity && /clean_verdict_is_current/.test(noIntegrity)) {
+      ok('clean with NO integrity verification → refused (scan and integrity are separate)');
+    } else bad('a clean document with no integrity check was accepted', noIntegrity || 'accepted');
+
+    const verdictNoVersion = await refused(q,
+      `INSERT INTO intake_documents
+         (id,company_id,submitted_by,origin,byte_size,sha256,scan_status)
+       VALUES ('doc-nov','co-a','naren','upload',10,$1,'infected')`, [H('nov')]);
+    if (verdictNoVersion && /verdict_names_its_version/.test(verdictNoVersion)) {
+      ok('a verdict that names no object version → refused');
+    } else bad('a versionless verdict was accepted', verdictNoVersion || 'accepted');
+
+    // Short-lived by construction, and tenant-scoped.
+    const tooLong = await grant('g-long', 'doc-ok', 'v2', 120);
+    if (tooLong && /short_lived/.test(tooLong)) ok('a 2-hour download grant → refused; grants are minutes');
+    else bad('a long-lived download grant was accepted', tooLong || 'accepted');
+
+    const crossGrant = await refused(q,
+      `INSERT INTO document_download_grants
+         (id,company_id,document_id,storage_version_id,granted_to,expires_at,purpose)
+       VALUES ('g-cross','co-b','doc-ok','v2','someone', NOW() + INTERVAL '5 minutes','extraction')`);
+    if (crossGrant) ok("co-b cannot authorize a download of co-a's document");
+    else bad("a cross-tenant download grant was accepted", 'accepted');
+
 
     // ── 8. extraction provenance (item 2 of ruling 14, kept) ──────────────
     h('8. A MODEL-EXTRACTED REQUIREMENT MUST NAME THE MODEL');

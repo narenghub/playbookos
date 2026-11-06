@@ -75,6 +75,7 @@ const VERSION = '2026-11-06.intake.v3';
 
 const CREATED_TABLES = Object.freeze([
   'intake_documents',
+  'document_download_grants',
   'solicitation_requirements',
   'requirement_matches',
   'fulfillment_authorizations',
@@ -87,6 +88,7 @@ const ROLLBACK_ORDER = Object.freeze([
   'fulfillment_authorizations',
   'requirement_matches',
   'solicitation_requirements',
+  'document_download_grants',
   'intake_documents',
 ]);
 
@@ -152,16 +154,49 @@ const DDL = [
      storage_bucket       TEXT,
      storage_key          TEXT,
      storage_kms_key_id   TEXT,
+     -- The S3 object version this row describes. Versioning is on, so every write produces one.
+     storage_version_id   TEXT,
      scan_status          TEXT NOT NULL DEFAULT 'pending',
+     -- The version the VERDICT applies to. Ruling 17 item 4: a verdict is object-version-specific.
+     -- A new version of the same key has not been scanned, whatever the previous verdict said, and
+     -- this column is what makes that representable instead of assumed.
+     scan_version_id      TEXT,
+     -- The scanner's own verdict string, recorded VERBATIM and never parsed for authority. Our
+     -- five-value domain below is ours; this is theirs. Kept separate so that a provider value we
+     -- have never seen cannot silently land in a category it does not belong to.
+     scan_provider        TEXT,
+     scan_provider_status TEXT,
      scan_detail          TEXT,
      scanned_at           TIMESTAMPTZ,
      integrity_checked_at TIMESTAMPTZ,
      integrity_ok         BOOLEAN,
+     -- Derived, STORED, and the single thing the download path may consult. Mirrors the
+     -- solicitations.response_open pattern: a NULL anywhere yields false, so the safe state is the
+     -- default rather than something that has to be maintained.
+     servable             BOOLEAN GENERATED ALWAYS AS (
+       COALESCE(scan_status = 'clean'
+                AND storage_version_id IS NOT NULL
+                AND scan_version_id = storage_version_id
+                AND integrity_ok, false)) STORED,
      CONSTRAINT intake_documents_origin_check CHECK (origin IN ('upload','url')),
-     -- 'unscannable' is NOT clean. Extraction requires 'clean', and the difference between
-     -- "scanned and fine" and "could not be scanned" is the whole point of having four values.
+     -- Ruling 17 item 4 names the quarantined categories: pending, failed, unsupported, infected.
+     -- 'access_denied' is a sixth, added because GuardDuty documents ACCESS_DENIED as a distinct
+     -- result and it means something operationally different from FAILED: not "the scanner broke"
+     -- but "we did not grant it access". Collapsing the two would hide a misconfiguration of ours
+     -- inside a category that reads as the provider's fault.
+     -- Only 'clean' leaves quarantine. The reason for six values rather than a boolean is that
+     -- "could not be scanned" must never be representable as "scanned and fine".
      CONSTRAINT intake_documents_scan_check
-       CHECK (scan_status IN ('pending','clean','rejected','unscannable')),
+       CHECK (scan_status IN ('pending','clean','infected','unsupported','failed','access_denied')),
+     -- A verdict must name the version it judged, and a clean verdict must judge THE CURRENT one.
+     CONSTRAINT intake_documents_verdict_names_its_version CHECK (
+       scan_status = 'pending' OR scan_version_id IS NOT NULL),
+     CONSTRAINT intake_documents_clean_verdict_is_current CHECK (
+       scan_status <> 'clean' OR (
+         storage_version_id IS NOT NULL
+         AND scan_version_id = storage_version_id
+         AND integrity_ok IS TRUE
+         AND integrity_checked_at IS NOT NULL)),
      CONSTRAINT intake_documents_url_has_url
        CHECK (origin <> 'url' OR (source_url IS NOT NULL AND length(btrim(source_url)) > 0)),
      CONSTRAINT intake_documents_size_cap
@@ -466,6 +501,65 @@ const DDL = [
      BEFORE INSERT OR UPDATE ON fulfillment_authorizations
      FOR EACH ROW EXECUTE FUNCTION prpa_authorization_write_guard()`,
 
+  // ── RULING 17 ITEM 4 — ONLY A CURRENT CLEAN VERDICT AUTHORIZES A DOWNLOAD ──
+  // A presigned URL is not a database write, so the database cannot refuse one directly. What it
+  // CAN refuse is the record that must exist before one is issued. Every download authorization is
+  // a row here, and the trigger below refuses the row unless the document is servable for the exact
+  // version being handed out. No row, no URL.
+  //
+  // This is the same reasoning as the authorization guard: enforce in the engine, not in a code
+  // path that a future caller can forget to take.
+  `CREATE TABLE IF NOT EXISTS document_download_grants (
+     id                 TEXT PRIMARY KEY,
+     company_id         TEXT NOT NULL REFERENCES companies(id),
+     document_id        TEXT NOT NULL,
+     -- The version the URL will serve. Recorded so a grant cannot be reused across a re-upload.
+     storage_version_id TEXT NOT NULL,
+     granted_to         TEXT NOT NULL,
+     granted_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     expires_at         TIMESTAMPTZ NOT NULL,
+     purpose            TEXT NOT NULL,
+     CONSTRAINT document_download_grants_doc_fk
+       FOREIGN KEY (document_id, company_id) REFERENCES intake_documents(id, company_id)
+       MATCH FULL ON DELETE RESTRICT,
+     -- Short-lived by construction. A grant good for a day is not a short-lived download.
+     CONSTRAINT document_download_grants_short_lived
+       CHECK (expires_at > granted_at AND expires_at <= granted_at + INTERVAL '15 minutes'),
+     CONSTRAINT document_download_grants_purpose
+       CHECK (purpose IN ('human_review','extraction')),
+     UNIQUE (id, company_id)
+   )`,
+
+  `CREATE OR REPLACE FUNCTION prpa_download_grant_guard() RETURNS TRIGGER AS $fn$
+     DECLARE
+       d RECORD;
+     BEGIN
+       SELECT servable, scan_status, storage_version_id, scan_version_id, integrity_ok
+         INTO d
+         FROM intake_documents
+        WHERE id = NEW.document_id AND company_id = NEW.company_id;
+       IF NOT FOUND THEN
+         RAISE EXCEPTION 'document_download_grants: document % is not this company''s', NEW.document_id
+           USING ERRCODE = 'check_violation';
+       END IF;
+       IF d.servable IS NOT TRUE THEN
+         RAISE EXCEPTION 'document_download_grants: document % is quarantined (scan_status=%, integrity_ok=%); no download may be authorized',
+             NEW.document_id, d.scan_status, COALESCE(d.integrity_ok::text, 'null')
+           USING ERRCODE = 'insufficient_privilege';
+       END IF;
+       IF NEW.storage_version_id IS DISTINCT FROM d.storage_version_id THEN
+         RAISE EXCEPTION 'document_download_grants: grant names version % but the document is now version %',
+             NEW.storage_version_id, d.storage_version_id
+           USING ERRCODE = 'check_violation';
+       END IF;
+       RETURN NEW;
+     END;
+   $fn$ LANGUAGE plpgsql`,
+  `DROP TRIGGER IF EXISTS trg_prpa_download_grant_guard ON document_download_grants`,
+  `CREATE TRIGGER trg_prpa_download_grant_guard
+     BEFORE INSERT OR UPDATE ON document_download_grants
+     FOR EACH ROW EXECUTE FUNCTION prpa_download_grant_guard()`,
+
   // The manual source. Last, because everything above is what makes it usable.
   // activated = true because there is no API to activate; the control on this source is per-record
   // human approval, not a connector flag. kind = 'manual' and NOT 'procurement', so the coverage
@@ -484,9 +578,26 @@ const ROLLBACK_EXTRA_DDL = [
   // The trigger goes with its table; the function must be dropped explicitly or it survives as a
   // dangling object that the next apply would silently CREATE OR REPLACE.
   `DROP FUNCTION IF EXISTS prpa_authorization_write_guard()`,
+  `DROP FUNCTION IF EXISTS prpa_download_grant_guard()`,
   `DELETE FROM source_connectors WHERE source_key = 'manual'`,
 ];
 
+
+// GuardDuty Malware Protection for S3 publishes detail.scanResultDetails.scanResultStatus with
+// exactly these five values, documented at
+// docs.aws.amazon.com/guardduty/latest/ug/monitoring-malware-protection-s3-scans-gdu.html
+// and applied as the object tag GuardDutyMalwareScanStatus. This is the ONLY place the provider's
+// vocabulary is translated into ours; the raw string is also stored verbatim in
+// intake_documents.scan_provider_status so a value we have never seen cannot be silently
+// reinterpreted. An unrecognised status must map to 'failed', never to 'clean'.
+const SCAN_STATUS_FROM_GUARDDUTY = Object.freeze({
+  NO_THREATS_FOUND: 'clean',
+  THREATS_FOUND:    'infected',
+  UNSUPPORTED:      'unsupported',
+  ACCESS_DENIED:    'access_denied',
+  FAILED:           'failed',
+});
+const GUARDDUTY_TAG_KEY = 'GuardDutyMalwareScanStatus';
 
 const PRECONDITIONS = Object.freeze([
   { name: 'P1', what: 'companies exists (migrateOffice has run)', table: 'companies' },
@@ -511,4 +622,6 @@ module.exports = {
   BUSINESS_LINES,
   REQUIREMENT_KINDS,
   AUTHORIZING_ROLES,
+  SCAN_STATUS_FROM_GUARDDUTY,
+  GUARDDUTY_TAG_KEY,
 };
