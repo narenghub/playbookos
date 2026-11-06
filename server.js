@@ -1,6 +1,26 @@
 // server.js — PlaybookOS main server
 require('dotenv').config();
-const { initDB, initPhase2, migrateSchemas, migrateResearchIntelligence, migrateResearchIntelligencePhase3, query } = require('./src/lib/db'); initDB().then(() => initPhase2()).then(() => migrateSchemas()).then(() => require('./src/lib/autonomy').migrateAutonomy(query).then(() => console.log('[boot] autonomy kill switch: tables + audit trigger ready'))).then(() => require('./src/lib/idempotency/supplier-rfq').migrate(query).then((r) => { if (r.enforced) { console.log('[boot] supplier RFQ: UNIQUE (rfq_id, supplier_id) enforced'); } else { console.error('[boot] CRITICAL: supplier RFQ uniqueness NOT enforced — RFQ sending will refuse until this is resolved.'); console.error(`[boot]   reason: ${r.error}`); for (const d of (r.duplicates || [])) console.error(`[boot]   duplicate: rfq=${d.rfq_id} supplier=${d.supplier_id} rows=${d.n}`); } })).then(() => require('./src/lib/procurement/rfq-identity-guard').migrate(query).then(() => console.log('[boot] RFQ identity guard: rfq_identity_decisions, append-only ready')).catch((e) => console.error('[boot] CRITICAL: RFQ identity decisions table NOT ready — RFQ sending will FAIL CLOSED until this is resolved:', e.message))).then(() => require('./src/lib/runs').migrateRuns(query).then(() => console.log('[boot] run ledger: agent_runs + agent_run_events, append-only + retry guards ready'))).then(() => require('./src/lib/office/schema').migrateOffice(query).then(() => console.log('[boot] AI office K1: companies, objectives, company-welded kernel tables ready (additive, inert)')).catch((e) => console.error('[boot] AI office K1 schema NOT applied — the office kernel is unavailable; nothing existing is affected:', e.message))).then(() => migrateResearchIntelligence()).then(() => migrateResearchIntelligencePhase3()).then(() => require('./src/lib/agents/procurement-agent').seedSupplierDatabase().then(r => console.log(`[boot] supplier seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] supplier seed failed:', e.message))).then(() => require('./src/lib/agents/research-agent').seedPatentWatch().then(r => console.log(`[boot] patent-watch seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] patent seed failed:', e.message))).then(() => require('./src/lib/agents/inquiry-agent').seedMoleculePricing().then(r => console.log(`[boot] pricing seed: ${r.seeded} added, ${r.skipped} existing`)).catch(e => console.error('[boot] pricing seed failed:', e.message))).catch(e => { console.error("DB init error:", e.message); process.exit(1); });
+// ── BOOT DOES NOT MIGRATE (ENG-003) ─────────────────────────────────────────
+// This line used to be the entire migration chain: initDB → initPhase2 → migrateSchemas → about a
+// dozen more, each applying DDL. That is why the application connected to Postgres as a SUPERUSER,
+// and a superuser bypasses GRANT, REVOKE and row-level security — so no in-database privilege
+// separation was available to this application at all, however the roles were defined. It was the
+// standing production release blocker.
+//
+// Migrations now run as their own process, once, as a role that holds DDL:
+//
+//     node scripts/migrate.js
+//
+// Boot READS instead: src/lib/schema-ready.js checks that the required tables and columns exist and
+// exits non-zero if they do not. Every statement it runs is a SELECT, so the application can run as
+// a restricted role with no DDL and no superuser — which scripts/check-startup-without-ddl.js
+// proves by booting this check as exactly such a role.
+const { query } = require('./src/lib/db');
+const schemaReady = require('./src/lib/schema-ready');
+schemaReady.assertReadyOrExit(query).catch((e) => {
+  console.error('[boot] schema check could not run:', e.message);
+  process.exit(1);
+});
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -193,6 +213,14 @@ app.use('/api', require('./src/api/sitenex-phase3.routes'));
 // router, same ordering constraint: no path may be declared both here and in routes.js, because the
 // first mount wins and the second silently becomes dead code.
 app.use('/api', require('./src/api/labconnect.routes'));
+
+// PRPA — the federal contract tracker: manual intake, the review queue, deadline confirmation,
+// duplicate resolution, audit history and the Excel export. Its own router for the same reason as
+// the two above, and mounted after them so the ordering constraint is the same: no path may be
+// declared both here and in routes.js, because the first mount wins and the second silently becomes
+// dead code. routes.js already owns /api/prpa/connectors, /api/prpa/tasks and
+// /api/prpa/export/opportunities.csv — this router deliberately declares none of those.
+app.use('/api', require('./src/api/prpa.routes'));
 
 // SPA fallback ('/' now routes here too, since express.static has index:false)
 app.get('*', (req, res) => {

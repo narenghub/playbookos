@@ -21,13 +21,28 @@
         "scanner workflow be able to set scan verdict fields; what shipped is structural",
         "separation, not privilege separation, and this is the gap."
       ],
-      "design_verified": "scripts/check-db-role-separation.js — 31 assertions, exit 0, on a disposable cluster",
+      "design_verified": "scripts/check-db-role-separation.js (31 assertions) and scripts/check-startup-without-ddl.js (28 assertions) — both exit 0 on a disposable cluster",
       "remaining_work": [
-        "Extract the ~12 boot-time migrations chained in server.js line 3 into a migrator",
-        "entrypoint run as its own role, as a separate deploy step. The grants are proven; the",
-        "refactor is the blocker. An app role without DDL cannot start the application today."
+        "CODE: done (ruling 27 item 5). Boot no longer applies any DDL — server.js calls",
+        "src/lib/schema-ready.js, which only SELECTs, and exits non-zero if the schema is absent.",
+        "Migrations run as their own process: node scripts/migrate.js, 47 steps, with a",
+        "schema_migrations ledger. Proved on a disposable cluster by",
+        "scripts/check-startup-without-ddl.js (28 assertions, exit 0): the app imports, assesses,",
+        "confirms, reviews and exports as a role with NOSUPERUSER, no CREATE on schema public and no",
+        "RLS bypass, while every DDL statement it attempts is refused.",
+        "",
+        "DEPLOYMENT: NOT done, and this is why the blocker stays open. Production still connects with",
+        "a single superuser DATABASE_URL. Closing it needs, on the Railway Postgres:",
+        "  1. CREATE ROLE playbookos_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;",
+        "  2. GRANT USAGE ON SCHEMA public; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES;",
+        "     GRANT USAGE,SELECT ON ALL SEQUENCES; (and ALTER DEFAULT PRIVILEGES for future tables)",
+        "  3. set MIGRATION_DATABASE_URL to the owner role and DATABASE_URL to playbookos_app",
+        "  4. run node scripts/migrate.js BEFORE the app starts, as a deploy step",
+        "docs/deploy/prpa-cloud-handover.md carries the exact statements and the rollback."
       ],
-      "ticket": "docs/tickets/ENG-003-non-superuser-application-role.md"
+      "ticket": "docs/tickets/ENG-003-non-superuser-application-role.md",
+      "code_complete": true,
+      "blocks_release_because": "the deployed application still connects as a superuser until the two URLs above are split; the code no longer requires it to."
     }
   ]
 }

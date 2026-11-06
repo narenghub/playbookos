@@ -125,14 +125,24 @@ console.log(`${roles.length} roles\n`);
 // WHO IS ABSENT still matters most. `partner` does not gain it and must not — a SiteNex web partner
 // has no business holding a pharmaceutical event's target list. `sales_team` and `support_team` are
 // also correctly out.
+// 2026-11-06, Federal Contracts (the PRPA tracker): TWO roles gain `prpa-tracker` — super_admin and
+// admin, and only those two. That is not a page-by-page choice either: the page sits in the FEDERAL
+// section, whose access list is ['admin'], so it reaches exactly the roles that already see
+// `prpa-command`. Any third role appearing here means the section's access list was widened, which
+// is a different decision from adding a page to it.
+//
+// WORTH KNOWING, because it is a deliberate asymmetry rather than an oversight: the API behind this
+// page is gated on the `procurement` TIER (requireTier('procurement') in src/api/prpa.routes.js),
+// which is wider than the nav. So a procurement director holds the data but is not shown the page.
+// The nav is the narrower of the two on purpose — ruling 1 made the federal surface owner-first —
+// and widening it is a one-line change to the section's access list when that is wanted.
+//
+// `scope-europe` IS NO LONGER LISTED. It landed in an earlier commit, so it is the baseline now,
+// and the seven entries that still expected it were the exact drift the note above describes:
+// an expectation of a diff that no longer exists. Recorded here rather than left in EXPECTED.
 const EXPECTED = {
-  super_admin:          { gained: ['scope-europe'], lost: [] },
-  admin:                { gained: ['scope-europe'], lost: [] },
-  recruitment_director: { gained: ['scope-europe'], lost: [] },
-  procurement_director: { gained: ['scope-europe'], lost: [] },
-  business_dev:         { gained: ['scope-europe'], lost: [] },
-  recruitment_team:     { gained: ['scope-europe'], lost: [] },
-  procurement_team:     { gained: ['scope-europe'], lost: [] },
+  super_admin:          { gained: ['prpa-tracker'], lost: [] },
+  admin:                { gained: ['prpa-tracker'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and

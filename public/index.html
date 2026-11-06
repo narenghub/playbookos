@@ -974,6 +974,8 @@ const NAV_SECTIONS = [
     // Owner-first, per ruling 1: a decision queue, not a status board. Its own section so the
     // access list is explicit rather than inherited from a neighbouring section.
     {id:'prpa-command', label:'Federal Pipeline', icon:'🏛️'},
+    // The tracker: the opportunity board, its evidence and the human bid/no-bid record.
+    {id:'prpa-tracker', label:'Federal Contracts', icon:'📋'},
   ]},
   {title:'EVENT AGENT', access:['admin','procurement','business_dev','events'], items:[
     {id:'cphi-milan', label:'CPHI Milan 2026', icon:'🧪'},
@@ -1071,7 +1073,7 @@ function navSectionVisible(access, role) {
 // tier-gated implied read, listing the tiers that satisfy it (any-of). Auth/none reads carry
 // no requirement and are omitted; adminOnly/spend reads are excluded from implies upstream.
 // Regenerate alongside the registry — do not hand-edit.
-const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"lab-connect":[["intelligence"]],"lab-connect-agent":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"prpa-command":[["intelligence","procurement"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"scope-europe":[["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["sitenex"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]],"sitenex-partners":[["intelligence"]]};
+const NAV_PAGE_REQS = {"command-center":[["intelligence"],["goals"],["sales"],["sales"],["intelligence"]],"revenue":[["revenue"]],"sales-pipeline":[["sales","revenue"],["sales","revenue"]],"reorder-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"inquiry-agent":[["sales","revenue"],["sales","revenue"],["sales","revenue"],["sales","revenue"]],"email-engine":[["sales","intelligence"]],"market-intelligence":[["procurement","intelligence"]],"procurement-agent":[["procurement"],["procurement"],["procurement"]],"meet-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"research-agent":[["intelligence","goals"],["intelligence","goals"],["intelligence","goals"],["intelligence","goals"]],"prospects":[["sales"]],"clinical-demand-intelligence":[["intelligence"]],"research-institutions":[["intelligence"]],"lab-connect":[["intelligence"]],"lab-connect-agent":[["intelligence"]],"content-studio":[["intelligence"]],"seo-intelligence":[["intelligence"],["intelligence"],["intelligence"]],"seo-content":[["intelligence"]],"linkedin-content":[["intelligence"],["intelligence"],["intelligence"]],"prpa-command":[["intelligence","procurement"]],"prpa-tracker":[["intelligence","procurement"],["intelligence","procurement"],["intelligence","procurement"]],"cphi-milan":[["intelligence","procurement"],["intelligence","procurement"]],"scope-europe":[["intelligence","procurement"]],"aros-establishments":[["intelligence"]],"agent-control":[["intelligence"]],"sku-economics":[["procurement"]],"sitenex-prospects":[["sitenex"]],"sitenex-deals":[["sitenex"]],"sitenex-packages":[["sitenex"]],"sitenex-contracts":[["sitenex"]],"sitenex-partners":[["intelligence"]]};
 // The caller's tiers. They arrive on /auth/me and /auth/login WITH the identity, so this needs no
 // fetch of its own and cannot be left unknown by a failed request — a failed /auth/me logs you out
 // rather than showing you a nav computed from nothing.
@@ -1118,7 +1120,7 @@ function passesPageReads(pageId, role, tiers) {
 // platform + me are NOT products: they render to the right of the product tabs, separated.
 const PRODUCTS = [
   { key:'abiozen',  label:'Abiozen',  icon:'🧪', kind:'product',
-    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command'] },
+    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command','prpa-tracker'] },
   { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
   { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
   { key:'linkabl',  label:'Linkabl',  icon:'🧑‍💼', kind:'product', pages:['prospects'] },
@@ -1855,7 +1857,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','prpa-tracker':'Federal Contracts','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -2446,6 +2448,623 @@ window.prpaCommandPage = async function prpaCommandPage() {
           '>mode</th><th ' + TH + '>last run</th><th ' + TH + '>calls</th><th ' + TH +
           '>watermark</th></tr>' + connRows + '</table>'
         : '<div style="color:var(--gray);font-size:13px">No connectors registered.</div>');
+};
+
+// ── FEDERAL CONTRACTS — THE PRPA TRACKER PAGE (ruling 27 items 2, 3) ─────────
+//
+// One table, the columns the ruling names, and the four actions a human takes: confirm a deadline,
+// record a decision, inspect the documents, export the file.
+//
+// EVERY FUNCTION REACHED FROM AN onclick IS ASSIGNED TO window. Annex B hoists a plain `function`
+// out of a block but NOT an `async function`, so a block-scoped async handler throws ReferenceError
+// on click and does nothing visible. That has broken this page's siblings before.
+//
+// All of these are declared BEFORE `const pages = {` and attached with pages['...'] after it,
+// because a function declaration inside an object literal is a syntax error that kills the SPA.
+
+window._prpaState = { rows: [], dataset: null, filter: 'work', search: '', open: null, caps: null };
+
+// Escaping. prpaU() renders unknown as "unknown" rather than blank, which is the whole point on
+// this page: an empty cell reads as zero, and "not stated" is not zero.
+function prpaEsc(s) {
+  return String(s === null || s === undefined ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+window.prpaTrackerPage = async function prpaTrackerPage() {
+  var el = document.getElementById('content');
+  el.innerHTML = '<p style="color:var(--gray);padding:20px">Loading federal contracts…</p>';
+
+  var res = await Promise.all([
+    API('/prpa/tracker/opportunities').catch(function (e) { return { error: e.message }; }),
+    API('/prpa/tracker/review-queue').catch(function (e) { return { error: e.message }; }),
+    API('/prpa/tracker/capabilities').catch(function (e) { return { error: e.message }; })
+  ]);
+  var board = res[0], queue = res[1], caps = res[2];
+
+  if (board && board.error) {
+    el.innerHTML = '<div class="card" style="border-color:var(--danger)">'
+      + '<div class="card-title" style="color:var(--danger)">The board could not load</div>'
+      + '<p style="color:var(--gray)">' + prpaEsc(board.error) + '</p>'
+      + '<p style="color:var(--gray);font-size:12px">It is shown empty rather than filled with '
+      + 'assumptions. If this says the schema is not applied, the migrations have not been run.</p>'
+      + '</div>';
+    return;
+  }
+
+  window._prpaState.rows = (board && board.opportunities) || [];
+  window._prpaState.dataset = (board && board.dataset) || null;
+  window._prpaState.caps = caps && !caps.error ? caps : null;
+  window._prpaState.queue = queue && !queue.error ? queue : null;
+
+  el.innerHTML = prpaTrackerShell();
+  window.prpaRenderTable();
+};
+
+// ── the staleness banner, which is not decoration ────────────────────────────
+// A board of real solicitation numbers and real deadlines looks exactly like a live feed. Somebody
+// opening this in three weeks would see a deadline of 2026-11-16 and believe there was time.
+function prpaDatasetBanner(d) {
+  if (!d) return '';
+  var live = d.is_live_feed;
+  var colour = live ? 'var(--navy)' : 'var(--warn)';
+  return '<div class="card" style="border-left:4px solid ' + colour + '">'
+    + '<div style="font-weight:700;color:' + colour + ';font-size:13px;letter-spacing:.3px">'
+    + prpaEsc(d.label) + '</div>'
+    + '<div style="color:var(--gray);font-size:12px;margin-top:6px;line-height:1.6">'
+    + prpaEsc(d.staleness_warning)
+    + '<br>Harvested <b>' + prpaEsc(d.as_of) + '</b> from ' + prpaEsc(d.harvest && d.harvest.source)
+    + ' · refresh: ' + prpaEsc(d.refresh)
+    + '</div></div>';
+}
+
+function prpaCapsBanner(c) {
+  if (!c) return '';
+  var n = c.verified_count || 0;
+  if (n > 0) {
+    return '<div class="card" style="border-left:4px solid var(--navy)">'
+      + '<b>' + n + ' verified capability(ies)</b> in the registry.</div>';
+  }
+  return '<div class="card" style="border-left:4px solid var(--danger)">'
+    + '<div style="font-weight:700;color:var(--danger);font-size:13px">'
+    + 'THE CAPABILITY REGISTRY IS EMPTY</div>'
+    + '<div style="color:var(--gray);font-size:12px;margin-top:6px;line-height:1.6">'
+    + 'Abiozen holds zero verified capabilities, so <b>nothing on this board can be QUALIFIED</b> and '
+    + 'every feasibility verdict is UNPROVEN at best. That is the truthful state of the registry, not '
+    + 'a loading error.</div></div>';
+}
+
+function prpaTrackerShell() {
+  var s = window._prpaState;
+  var q = s.queue || {};
+  var counts = {
+    all: s.rows.length,
+    work: s.rows.filter(function (r) { return !r.ranking.bars.length; }).length,
+    deadline: (q.awaiting_deadline_confirmation || []).length,
+    decide: (q.awaiting_decision || []).length,
+    flagged: (q.flagged || []).length,
+    barred: s.rows.filter(function (r) { return r.ranking.bars.length; }).length
+  };
+  function tab(key, label, n) {
+    var on = s.filter === key;
+    return '<button onclick="window.prpaSetFilter(\'' + key + '\')" style="'
+      + 'padding:8px 14px;margin-right:6px;border-radius:6px;cursor:pointer;font-size:13px;'
+      + 'border:1px solid ' + (on ? 'var(--navy)' : 'var(--border)') + ';'
+      + 'background:' + (on ? 'var(--navy)' : '#fff') + ';'
+      + 'color:' + (on ? '#fff' : 'var(--dark)') + ';font-weight:' + (on ? '700' : '500') + '">'
+      + label + ' <span style="opacity:.75">' + n + '</span></button>';
+  }
+  return prpaDatasetBanner(s.dataset)
+    + prpaCapsBanner(s.caps)
+    + '<div class="card">'
+    + '<div class="card-title">Federal contracts</div>'
+    + '<div style="margin-bottom:14px">'
+    + tab('work', 'Worth working', counts.work)
+    + tab('deadline', 'Confirm deadline', counts.deadline)
+    + tab('decide', 'Awaiting decision', counts.decide)
+    + tab('flagged', 'Flagged', counts.flagged)
+    + tab('barred', 'Barred', counts.barred)
+    + tab('all', 'All', counts.all)
+    + '</div>'
+    + '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px">'
+    + '<input id="prpa-search" placeholder="search title, agency, solicitation number…" '
+    + 'oninput="window.prpaSetSearch(this.value)" value="' + prpaEsc(window._prpaState.search) + '" '
+    + 'style="flex:1;min-width:240px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px">'
+    // A plain link, not a fetch: the browser downloads it with no JavaScript, and the Authorization
+    // header is not needed because the session cookie… is not how this app authenticates. So it IS
+    // fetched, below, with the token — see prpaExport().
+    + '<button onclick="window.prpaExport()" style="padding:8px 14px;border-radius:6px;cursor:pointer;'
+    + 'border:1px solid var(--navy);background:var(--navy);color:#fff;font-weight:600;font-size:13px">'
+    + '⬇ Export to Excel (CSV)</button>'
+    + '<button onclick="window.prpaShowImport()" style="padding:8px 14px;border-radius:6px;cursor:pointer;'
+    + 'border:1px solid var(--border);background:#fff;font-size:13px">+ Import</button>'
+    + '</div>'
+    + '<div id="prpa-import-panel"></div>'
+    + '<div id="prpa-table"></div>'
+    + '</div>'
+    + '<div id="prpa-detail"></div>';
+}
+
+window.prpaSetFilter = function prpaSetFilter(k) {
+  window._prpaState.filter = k;
+  document.getElementById('content').innerHTML = prpaTrackerShell();
+  window.prpaRenderTable();
+};
+
+window.prpaSetSearch = function prpaSetSearch(v) {
+  window._prpaState.search = v;
+  window.prpaRenderTable();
+};
+
+function prpaVisibleRows() {
+  var s = window._prpaState;
+  var q = s.queue || {};
+  var rows;
+  if (s.filter === 'all') rows = s.rows;
+  else if (s.filter === 'work') rows = s.rows.filter(function (r) { return !r.ranking.bars.length; });
+  else if (s.filter === 'barred') rows = s.rows.filter(function (r) { return r.ranking.bars.length; });
+  else if (s.filter === 'deadline') rows = q.awaiting_deadline_confirmation || [];
+  else if (s.filter === 'decide') rows = q.awaiting_decision || [];
+  else if (s.filter === 'flagged') rows = q.flagged || [];
+  else rows = s.rows;
+
+  var needle = (s.search || '').trim().toLowerCase();
+  if (!needle) return rows;
+  return rows.filter(function (r) {
+    return [r.title, r.agency, r.solicitation_number, r.naics_code, r.psc_code]
+      .some(function (f) { return String(f || '').toLowerCase().indexOf(needle) !== -1; });
+  });
+}
+
+var PRPA_TH = 'style="text-align:left;padding:8px 10px;font-size:11px;color:var(--gray);'
+  + 'text-transform:uppercase;letter-spacing:.5px;border-bottom:2px solid var(--border);white-space:nowrap"';
+var PRPA_TD = 'style="padding:10px;border-bottom:1px solid var(--border);vertical-align:top;font-size:13px"';
+
+function prpaTierChip(t, bars) {
+  var map = {
+    'WORK NOW': '#0B6E4F', REVIEW: '#1C4E80', 'MARKET ENTRY': '#5B4B8A',
+    WATCH: '#777', BARRED: '#9A2B2A'
+  };
+  var c = map[t] || '#555';
+  var title = bars && bars.length ? bars.map(function (b) { return b.kind + ': ' + b.detail; }).join(' | ') : t;
+  return '<span title="' + prpaEsc(title) + '" style="background:' + c + ';color:#fff;padding:2px 7px;'
+    + 'border-radius:4px;font-size:10px;font-weight:700;white-space:nowrap">' + prpaEsc(t) + '</span>';
+}
+
+function prpaFeasChip(f) {
+  var map = { FEASIBLE: '#0B6E4F', UNPROVEN: '#8A5A12', NOT_FEASIBLE: '#9A2B2A' };
+  var c = map[f.verdict] || '#555';
+  var title = f.blockers && f.blockers.length ? f.blockers.join(' | ') : 'no blocker recorded';
+  return '<span title="' + prpaEsc(title) + '" style="color:' + c + ';font-weight:700;font-size:11px">'
+    + prpaEsc(f.verdict) + '</span>';
+}
+
+// A deadline needs three states, not two: confirmed, unconfirmed, and absent. An unconfirmed
+// deadline is why is_biddable is false, so it is shown as a reason rather than a gap.
+function prpaDeadlineCell(r) {
+  if (!r.response_deadline) {
+    return '<i style="color:var(--warn)" title="the notice did not state one, or it could not be parsed">not stated</i>';
+  }
+  if (r.deadline_confirmed) {
+    return '<span style="font-weight:600">' + prpaEsc(r.response_deadline) + '</span>'
+      + '<div style="font-size:10px;color:#0B6E4F">✓ confirmed</div>';
+  }
+  return '<span>' + prpaEsc(r.response_deadline) + '</span>'
+    + '<div style="font-size:10px;color:var(--warn)" title="harvested, not verified against the '
+    + 'official notice — nothing is biddable until it is">unconfirmed</div>';
+}
+
+function prpaRequestedCell(r) {
+  var req = r.requested || {};
+  var cls = req.product_class || 'unknown';
+  if (cls === 'unknown') {
+    return '<i style="color:var(--warn)" title="' + prpaEsc(req.basis || '') + '">not stated in the notice</i>'
+      + (req.description_available ? '' : '<div style="font-size:10px;color:var(--gray)">no description on record</div>');
+  }
+  return '<span style="font-weight:600">' + prpaEsc(cls.replace(/_/g, ' ')) + '</span>'
+    + (req.manufacturer ? '<div style="font-size:10px;color:#9A2B2A">' + prpaEsc(req.manufacturer) + '</div>' : '')
+    + '<div style="font-size:10px;color:var(--gray)" title="' + prpaEsc(req.basis || '') + '">'
+    + prpaEsc(String(req.basis || '').slice(0, 48)) + '</div>';
+}
+
+function prpaSetAsideCell(r) {
+  var flag = (r.ranking.flags || []).filter(function (f) { return f.kind === 'SET_ASIDE_UNVERIFIED'; })[0];
+  if (flag) {
+    return '<span style="color:var(--danger);font-weight:700;font-size:11px" title="' + prpaEsc(flag.detail)
+      + ' — ' + prpaEsc(flag.action) + '">⚠ UNVERIFIED</span>';
+  }
+  if (!r.set_aside_stated) {
+    return '<span style="color:var(--gray);font-size:12px" title="the field is empty in the source; '
+      + 'that is not a statement that the notice is unrestricted">none stated</span>';
+  }
+  return '<span style="font-size:12px">' + prpaEsc(String(r.set_aside).slice(0, 44)) + '</span>';
+}
+
+function prpaReviewCell(r) {
+  if (!r.review) {
+    return '<button onclick="window.prpaOpen(\'' + prpaEsc(r.id) + '\')" style="padding:4px 9px;'
+      + 'border:1px solid var(--border);background:#fff;border-radius:5px;cursor:pointer;font-size:11px">'
+      + 'review</button>';
+  }
+  var map = { bid: '#0B6E4F', no_bid: '#9A2B2A', undecided: '#777' };
+  return '<span style="color:' + (map[r.review.decision] || '#555') + ';font-weight:700;font-size:11px">'
+    + prpaEsc(r.review.decision.toUpperCase().replace('_', '-')) + '</span>'
+    + '<div style="font-size:10px;color:var(--gray)">' + prpaEsc(String(r.review.decided_by).split('@')[0]) + '</div>';
+}
+
+window.prpaRenderTable = function prpaRenderTable() {
+  var rows = prpaVisibleRows();
+  var host = document.getElementById('prpa-table');
+  if (!host) return;
+  if (!rows.length) {
+    host.innerHTML = '<p style="color:var(--gray);padding:16px 0">Nothing in this view.</p>';
+    return;
+  }
+  var head = '<tr>'
+    + '<th ' + PRPA_TH + '>Title</th>'
+    + '<th ' + PRPA_TH + '>Agency</th>'
+    + '<th ' + PRPA_TH + '>Solicitation</th>'
+    + '<th ' + PRPA_TH + '>Deadline</th>'
+    + '<th ' + PRPA_TH + '>Set-aside</th>'
+    + '<th ' + PRPA_TH + '>Requested</th>'
+    + '<th ' + PRPA_TH + '>Feasibility</th>'
+    + '<th ' + PRPA_TH + '>Missing</th>'
+    + '<th ' + PRPA_TH + '>Tier</th>'
+    + '<th ' + PRPA_TH + '>Source</th>'
+    + '<th ' + PRPA_TH + '>Review</th>'
+    + '</tr>';
+
+  var body = rows.map(function (r) {
+    var missing = (r.missing_evidence || []).length;
+    return '<tr>'
+      + '<td ' + PRPA_TD + '><a href="#" onclick="window.prpaOpen(\'' + prpaEsc(r.id) + '\');return false" '
+      + 'style="color:var(--navy);font-weight:600;text-decoration:none">'
+      + prpaEsc(String(r.title || '').slice(0, 72)) + '</a>'
+      + '<div style="font-size:10px;color:var(--gray)">' + prpaEsc(r.notice_type)
+      + (r.naics_code ? ' · NAICS ' + prpaEsc(r.naics_code) : '')
+      + (r.psc_code ? ' · PSC ' + prpaEsc(r.psc_code) : '') + '</div></td>'
+      + '<td ' + PRPA_TD + '>' + (r.agency_confirmed
+        ? prpaEsc(String(r.agency).slice(0, 30))
+        : '<i style="color:var(--warn)" title="not populated in the source record">not stated</i>') + '</td>'
+      + '<td ' + PRPA_TD + '><code style="font-size:11px">' + prpaEsc(r.solicitation_number) + '</code></td>'
+      + '<td ' + PRPA_TD + '>' + prpaDeadlineCell(r) + '</td>'
+      + '<td ' + PRPA_TD + '>' + prpaSetAsideCell(r) + '</td>'
+      + '<td ' + PRPA_TD + '>' + prpaRequestedCell(r) + '</td>'
+      + '<td ' + PRPA_TD + '>' + prpaFeasChip(r.feasibility) + '</td>'
+      + '<td ' + PRPA_TD + '>' + (missing
+        ? '<span title="' + prpaEsc((r.missing_evidence || []).join(' | ')) + '" '
+          + 'style="font-size:11px;color:var(--warn);font-weight:600">' + missing + ' item(s)</span>'
+        : '<span style="font-size:11px;color:#0B6E4F">none</span>') + '</td>'
+      + '<td ' + PRPA_TD + '>' + prpaTierChip(r.ranking.tier, r.ranking.bars)
+      + '<div style="font-size:10px;color:var(--gray)">score ' + r.ranking.score + '</div></td>'
+      + '<td ' + PRPA_TD + '>' + (r.source_url
+        ? '<a href="' + prpaEsc(r.source_url) + '" target="_blank" rel="noopener noreferrer" '
+          + 'style="font-size:11px;color:var(--navy)">SAM.gov ↗</a>'
+        : '<i style="color:var(--warn);font-size:11px">none</i>') + '</td>'
+      + '<td ' + PRPA_TD + '>' + prpaReviewCell(r) + '</td>'
+      + '</tr>';
+  }).join('');
+
+  host.innerHTML = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
+    + '<thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>'
+    + '<div style="font-size:11px;color:var(--gray);margin-top:10px">' + rows.length
+    + ' row(s). Hover a feasibility verdict, a tier or a flag for the reason behind it.</div>';
+};
+
+// ── the detail panel: one opportunity, its evidence and the two actions ──────
+window.prpaOpen = async function prpaOpen(id) {
+  var host = document.getElementById('prpa-detail');
+  host.innerHTML = '<div class="card"><p style="color:var(--gray)">Loading…</p></div>';
+  var d = await API('/prpa/tracker/opportunities/' + encodeURIComponent(id))
+    .catch(function (e) { return { error: e.message }; });
+  if (!d || d.error) {
+    host.innerHTML = '<div class="card" style="border-color:var(--danger)"><p>'
+      + prpaEsc((d && d.error) || 'could not load') + '</p></div>';
+    return;
+  }
+  window._prpaState.open = d;
+  var o = d.opportunity;
+
+  function row(k, v) {
+    return '<tr><td style="padding:5px 12px 5px 0;color:var(--gray);font-size:12px;white-space:nowrap;'
+      + 'vertical-align:top">' + k + '</td><td style="padding:5px 0;font-size:13px">' + v + '</td></tr>';
+  }
+
+  var checks = Object.keys(o.feasibility.checks || {}).map(function (name) {
+    var c = o.feasibility.checks[name];
+    var colour = c.status === 'ok' ? '#0B6E4F' : (c.status === 'blocked' ? '#9A2B2A' : '#8A5A12');
+    return '<tr><td style="padding:6px 10px 6px 0;vertical-align:top;white-space:nowrap">'
+      + '<span style="color:' + colour + ';font-weight:700;font-size:11px">'
+      + prpaEsc(c.status.toUpperCase()) + '</span></td>'
+      + '<td style="padding:6px 10px 6px 0;vertical-align:top;font-size:12px;font-weight:600;white-space:nowrap">'
+      + prpaEsc(name.replace(/_/g, ' ')) + '</td>'
+      + '<td style="padding:6px 0;vertical-align:top;font-size:12px;color:var(--gray);line-height:1.5">'
+      + prpaEsc(c.detail) + '</td></tr>';
+  }).join('');
+
+  var history = (d.audit_events || []).slice(0, 12).map(function (e) {
+    return '<li style="font-size:12px;color:var(--gray);margin-bottom:3px">'
+      + '<code style="font-size:11px;color:var(--navy)">' + prpaEsc(e.action) + '</code> · '
+      + prpaEsc(String(e.actor).split('@')[0]) + ' · ' + prpaEsc(String(e.at).slice(0, 16).replace('T', ' '))
+      + '</li>';
+  }).join('');
+
+  var versions = (d.versions || []).map(function (v) {
+    return '<li style="font-size:12px;color:var(--gray)">v' + v.version_seq
+      + (v.is_current ? ' <b style="color:var(--navy)">(current)</b>' : ' (superseded)')
+      + ' · deadline ' + prpaEsc(v.response_deadline || 'not stated')
+      + (v.deadline_confirmed ? ' ✓' : '') + '</li>';
+  }).join('');
+
+  host.innerHTML = '<div class="card" style="border-left:4px solid var(--navy)">'
+    + '<div class="card-title">' + prpaEsc(o.title) + '</div>'
+    + '<table style="margin-bottom:16px">'
+    + row('Solicitation', '<code>' + prpaEsc(o.solicitation_number) + '</code>')
+    + row('Agency', o.agency_confirmed ? prpaEsc(o.agency)
+      : '<i style="color:var(--warn)">not stated in the source record</i>')
+    + row('Deadline', prpaDeadlineCell(o))
+    + row('Set-aside', prpaSetAsideCell(o))
+    + row('Requested', prpaRequestedCell(o))
+    + row('Feasibility', prpaFeasChip(o.feasibility) + ' <span style="color:var(--gray);font-size:12px">('
+      + 'confidence ' + o.feasibility.confidence + ')</span>')
+    + row('Qualification', o.qualification.verdict
+      ? prpaEsc(o.qualification.verdict) + ' <span style="color:var(--gray);font-size:11px">on '
+        + prpaEsc(o.qualification.evidence_basis || 'unknown basis') + '</span>'
+      : '<i style="color:var(--warn)">not assessed</i>')
+    + row('Source', o.source_url
+      ? '<a href="' + prpaEsc(o.source_url) + '" target="_blank" rel="noopener noreferrer">'
+        + prpaEsc(o.source_url) + '</a>'
+      : '<i style="color:var(--warn)">none</i>')
+    + '</table>'
+
+    + (o.requested && o.requested.excerpt
+      ? '<div style="margin-bottom:16px"><div style="font-size:11px;color:var(--gray);'
+        + 'text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px">From the notice</div>'
+        + '<div style="font-size:12px;line-height:1.6;color:var(--dark);background:#fafafa;'
+        + 'padding:10px;border-radius:6px">' + prpaEsc(o.requested.excerpt) + '…</div></div>'
+      : '<div style="margin-bottom:16px;font-size:12px;color:var(--warn)">'
+        + 'No description is on record for this notice, so what it asks for is UNKNOWN. '
+        + 'Open it at SAM.gov before judging it.</div>')
+
+    + '<div style="font-size:11px;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;'
+    + 'margin-bottom:5px">Fulfilment checks</div>'
+    + '<table style="width:100%;margin-bottom:16px">' + checks + '</table>'
+
+    + (versions ? '<div style="font-size:11px;color:var(--gray);text-transform:uppercase;'
+      + 'letter-spacing:.5px;margin-bottom:5px">Versions kept</div><ul style="margin:0 0 16px 18px">'
+      + versions + '</ul>' : '')
+
+    + (history ? '<div style="font-size:11px;color:var(--gray);text-transform:uppercase;'
+      + 'letter-spacing:.5px;margin-bottom:5px">Audit history</div><ul style="margin:0 0 16px 18px">'
+      + history + '</ul>' : '')
+
+    // ── actions ───────────────────────────────────────────────────────────────
+    + '<div style="border-top:1px solid var(--border);padding-top:14px">'
+    + (o.response_deadline && !o.deadline_confirmed
+      ? '<button onclick="window.prpaConfirmDeadline(\'' + prpaEsc(o.id) + '\')" '
+        + 'style="padding:8px 14px;margin-right:8px;border-radius:6px;cursor:pointer;border:1px solid var(--navy);'
+        + 'background:var(--navy);color:#fff;font-weight:600;font-size:13px">✓ Confirm this deadline</button>'
+      : '')
+    + '<button onclick="window.prpaDocuments(\'' + prpaEsc(o.id) + '\')" '
+    + 'style="padding:8px 14px;margin-right:8px;border-radius:6px;cursor:pointer;border:1px solid var(--border);'
+    + 'background:#fff;font-size:13px">📎 Inspect documents</button>'
+    + '</div>'
+    + '<div id="prpa-docs"></div>'
+
+    + '<div style="border-top:1px solid var(--border);margin-top:14px;padding-top:14px">'
+    + '<div style="font-size:11px;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;'
+    + 'margin-bottom:8px">Record a human decision</div>'
+    + '<textarea id="prpa-rationale" rows="3" placeholder="Why. At least 10 characters — a decision '
+    + 'with no reason is not reviewable." style="width:100%;padding:9px;border:1px solid var(--border);'
+    + 'border-radius:6px;font-size:13px;font-family:inherit;margin-bottom:9px"></textarea>'
+    + '<button onclick="window.prpaReview(\'' + prpaEsc(o.id) + '\',\'bid\')" '
+    + 'style="padding:8px 14px;margin-right:8px;border-radius:6px;cursor:pointer;border:1px solid #0B6E4F;'
+    + 'background:#0B6E4F;color:#fff;font-weight:600;font-size:13px">Record BID</button>'
+    + '<button onclick="window.prpaReview(\'' + prpaEsc(o.id) + '\',\'no_bid\')" '
+    + 'style="padding:8px 14px;margin-right:8px;border-radius:6px;cursor:pointer;border:1px solid #9A2B2A;'
+    + 'background:#9A2B2A;color:#fff;font-weight:600;font-size:13px">Record NO-BID</button>'
+    + '<button onclick="window.prpaReview(\'' + prpaEsc(o.id) + '\',\'undecided\')" '
+    + 'style="padding:8px 14px;border-radius:6px;cursor:pointer;border:1px solid var(--border);'
+    + 'background:#fff;font-size:13px">Undecided</button>'
+    + '<div style="font-size:11px;color:var(--gray);margin-top:9px;line-height:1.5">'
+    + 'A decision is <b>recorded only</b>. Nothing is submitted to SAM.gov and no contracting officer '
+    + 'is contacted — there is no endpoint in this application that could do either.</div>'
+    + '</div></div>';
+
+  host.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+
+window.prpaConfirmDeadline = async function prpaConfirmDeadline(id) {
+  var r = await API('/prpa/tracker/opportunities/' + encodeURIComponent(id) + '/confirm-deadline', {
+    method: 'POST', body: JSON.stringify({})
+  }).catch(function (e) { return { error: e.message }; });
+  if (r && r.ok) {
+    showToast(r.is_biddable ? 'Deadline confirmed — this is now biddable' : 'Deadline confirmed', 'success');
+    await window.prpaTrackerPage();
+    await window.prpaOpen(id);
+  } else {
+    showToast('Could not confirm: ' + ((r && (r.error || r.detail)) || 'unknown error'), 'error', 6000);
+  }
+};
+
+window.prpaReview = async function prpaReview(id, decision) {
+  var box = document.getElementById('prpa-rationale');
+  var rationale = (box && box.value) || '';
+  if (rationale.trim().length < 10) {
+    showToast('A rationale of at least 10 characters is required', 'error', 5000);
+    if (box) box.focus();
+    return;
+  }
+  var r = await API('/prpa/tracker/opportunities/' + encodeURIComponent(id) + '/review', {
+    method: 'POST', body: JSON.stringify({ decision: decision, rationale: rationale })
+  }).catch(function (e) { return { error: e.message }; });
+  if (r && r.ok) {
+    showToast('Recorded: ' + decision.replace('_', '-').toUpperCase(), 'success');
+    await window.prpaTrackerPage();
+    await window.prpaOpen(id);
+  } else {
+    showToast('Not recorded: ' + ((r && (r.error || r.detail)) || 'unknown error'), 'error', 7000);
+  }
+};
+
+window.prpaDocuments = async function prpaDocuments(id) {
+  var host = document.getElementById('prpa-docs');
+  host.innerHTML = '<p style="color:var(--gray);font-size:12px;padding:8px 0">Fetching the attachment index…</p>';
+  var d = await API('/prpa/tracker/opportunities/' + encodeURIComponent(id) + '/documents')
+    .catch(function (e) { return { error: e.message }; });
+  if (!d || d.error) {
+    host.innerHTML = '<p style="color:var(--danger);font-size:12px;padding:8px 0">'
+      + prpaEsc((d && (d.error + (d.detail ? ' — ' + d.detail : ''))) || 'could not load') + '</p>';
+    return;
+  }
+  if (!d.attachments.length) {
+    host.innerHTML = '<p style="color:var(--gray);font-size:12px;padding:8px 0">'
+      + 'No attachments listed for this notice.</p>';
+    return;
+  }
+  host.innerHTML = '<div style="padding:10px 0"><div style="font-size:11px;color:var(--gray);'
+    + 'text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Attachments on the notice</div>'
+    + '<ul style="margin:0 0 8px 18px">'
+    + d.attachments.map(function (a) {
+      return '<li style="font-size:12px;margin-bottom:3px">'
+        + (a.url ? '<a href="' + prpaEsc(a.url) + '" target="_blank" rel="noopener noreferrer" '
+          + 'style="color:var(--navy)">' + prpaEsc(a.name || a.resource_id) + ' ↗</a>'
+          : prpaEsc(a.name || '(unnamed)'))
+        + (a.size_bytes ? ' <span style="color:var(--gray)">(' + Math.round(a.size_bytes / 1024) + ' KB)</span>' : '')
+        + '</li>';
+    }).join('')
+    + '</ul><div style="font-size:11px;color:var(--gray);line-height:1.5">' + prpaEsc(d.note) + '</div></div>';
+};
+
+// The export is fetched rather than linked, because this app authenticates with a bearer token and
+// a plain <a href> would arrive without it. The blob is downloaded under the filename the server
+// chose, so the provenance header inside the CSV travels with it.
+window.prpaExport = async function prpaExport() {
+  showToast('Preparing the export…', 'info', 2000);
+  try {
+    var r = await fetch('/api/prpa/tracker/export.csv', {
+      headers: token ? { Authorization: 'Bearer ' + token } : {}
+    });
+    if (!r.ok) {
+      var body = await r.text();
+      showToast('Export failed (' + r.status + '): ' + body.slice(0, 120), 'error', 7000);
+      return;
+    }
+    var blob = await r.blob();
+    var name = 'abiozen-federal-opportunities.csv';
+    var cd = r.headers.get('Content-Disposition') || '';
+    var m = cd.match(/filename="([^"]+)"/);
+    if (m) name = m[1];
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Exported ' + name, 'success');
+  } catch (e) {
+    showToast('Export failed: ' + e.message, 'error', 7000);
+  }
+};
+
+window.prpaShowImport = function prpaShowImport() {
+  var host = document.getElementById('prpa-import-panel');
+  if (host.innerHTML.trim()) { host.innerHTML = ''; return; }
+  host.innerHTML = '<div style="border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:14px">'
+    + '<div style="font-size:11px;color:var(--gray);text-transform:uppercase;letter-spacing:.5px;'
+    + 'margin-bottom:8px">Manual intake</div>'
+    + '<div style="margin-bottom:12px">'
+    + '<div style="font-size:12px;color:var(--gray);margin-bottom:5px">One solicitation URL '
+    + '(sam.gov/opp/&lt;notice id&gt;/view)</div>'
+    + '<input id="prpa-url" placeholder="https://sam.gov/opp/…/view" '
+    + 'style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-bottom:7px">'
+    + '<button onclick="window.prpaImportUrl()" style="padding:7px 13px;border-radius:6px;cursor:pointer;'
+    + 'border:1px solid var(--navy);background:var(--navy);color:#fff;font-size:13px;font-weight:600">'
+    + 'Fetch this notice</button>'
+    + '</div>'
+    + '<div>'
+    + '<div style="font-size:12px;color:var(--gray);margin-bottom:5px">Or paste a SAM.gov CSV export</div>'
+    + '<input type="file" id="prpa-csv-file" accept=".csv,text/csv" '
+    + 'onchange="window.prpaCsvChosen(this)" style="font-size:12px;margin-bottom:7px"><br>'
+    + '<textarea id="prpa-csv" rows="4" placeholder="…or paste the CSV contents here" '
+    + 'style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:12px;'
+    + 'font-family:monospace;margin-bottom:7px"></textarea>'
+    + '<input id="prpa-csv-note" placeholder="where this came from (recorded with the import)" '
+    + 'style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-bottom:7px">'
+    + '<button onclick="window.prpaImportCsv()" style="padding:7px 13px;border-radius:6px;cursor:pointer;'
+    + 'border:1px solid var(--navy);background:var(--navy);color:#fff;font-size:13px;font-weight:600">'
+    + 'Import CSV</button>'
+    + '</div>'
+    + '<div style="font-size:11px;color:var(--gray);margin-top:10px;line-height:1.5">'
+    + 'Intake is attended and one notice at a time. There is no scheduled harvest: the SAM.gov '
+    + 'endpoint these use is undocumented, and running it unattended is not authorised.</div>'
+    + '<div id="prpa-import-result"></div>'
+    + '</div>';
+};
+
+window.prpaCsvChosen = function prpaCsvChosen(input) {
+  var f = input.files && input.files[0];
+  if (!f) return;
+  var reader = new FileReader();
+  reader.onload = function () {
+    var box = document.getElementById('prpa-csv');
+    if (box) box.value = reader.result;
+    var note = document.getElementById('prpa-csv-note');
+    if (note && !note.value) note.value = f.name;
+  };
+  reader.readAsText(f);
+};
+
+window.prpaImportUrl = async function prpaImportUrl() {
+  var box = document.getElementById('prpa-url');
+  var url = (box && box.value || '').trim();
+  if (!url) { showToast('Paste a SAM.gov opportunity URL first', 'error'); return; }
+  var out = document.getElementById('prpa-import-result');
+  out.innerHTML = '<p style="font-size:12px;color:var(--gray);padding:8px 0">Fetching…</p>';
+  var r = await API('/prpa/tracker/import/url', { method: 'POST', body: JSON.stringify({ url: url }) })
+    .catch(function (e) { return { error: e.message }; });
+  if (r && r.ok) {
+    out.innerHTML = '<p style="font-size:12px;color:#0B6E4F;padding:8px 0">'
+      + 'Imported: ' + r.inserted.length + ' new, ' + r.amended.length + ' amended, '
+      + r.unchanged.length + ' already held.'
+      + ((r.warning || []).length
+        ? '<br><span style="color:var(--warn)">' + prpaEsc(r.warning.join(' · ')) + '</span>' : '')
+      + '</p>';
+    showToast('Notice imported', 'success');
+    await window.prpaTrackerPage();
+  } else {
+    out.innerHTML = '<p style="font-size:12px;color:var(--danger);padding:8px 0">'
+      + prpaEsc((r && (r.error + (r.detail ? ' — ' + r.detail : ''))) || 'failed') + '</p>';
+  }
+};
+
+window.prpaImportCsv = async function prpaImportCsv() {
+  var box = document.getElementById('prpa-csv');
+  var csv = (box && box.value) || '';
+  if (!csv.trim()) { showToast('Choose a file or paste CSV contents first', 'error'); return; }
+  var noteEl = document.getElementById('prpa-csv-note');
+  var out = document.getElementById('prpa-import-result');
+  out.innerHTML = '<p style="font-size:12px;color:var(--gray);padding:8px 0">Importing…</p>';
+  var r = await API('/prpa/tracker/import/csv', {
+    method: 'POST',
+    body: JSON.stringify({ csv: csv, sourceDetail: (noteEl && noteEl.value) || '' })
+  }).catch(function (e) { return { error: e.message }; });
+  if (r && r.ok) {
+    out.innerHTML = '<p style="font-size:12px;color:#0B6E4F;padding:8px 0">'
+      + r.inserted + ' new · ' + r.amended + ' amended · ' + r.unchanged + ' already held · '
+      + (r.rejected || []).length + ' rejected'
+      + ((r.unmatched_headers || []).length
+        ? '<br><span style="color:var(--warn)">columns not mapped: '
+          + prpaEsc(r.unmatched_headers.join(', ')) + '</span>' : '')
+      + '<br><span style="color:var(--gray)">sha256 ' + prpaEsc(String(r.sha256).slice(0, 16)) + '…</span>'
+      + '</p>';
+    showToast('CSV imported', 'success');
+    await window.prpaTrackerPage();
+  } else {
+    out.innerHTML = '<p style="font-size:12px;color:var(--danger);padding:8px 0">'
+      + prpaEsc((r && (r.error + (r.detail ? ' — ' + r.detail : ''))) || 'failed') + '</p>';
+  }
 };
 
 const pages = {
@@ -3094,6 +3713,7 @@ pm2 startup</pre>
 
 pages['outreach'] = outreachPage;
 pages['prpa-command'] = window.prpaCommandPage;
+pages['prpa-tracker'] = window.prpaTrackerPage;
 window.orDays = function orDays(d) { window._orDays = d; pages['outreach'](); };
 
 // ── ACTIONS ───────────────────────────────────────────────────────────────────

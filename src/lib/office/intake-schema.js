@@ -694,11 +694,30 @@ const DDL = [
   // activated = true because there is no API to activate; the control on this source is per-record
   // human approval, not a connector flag. kind = 'manual' and NOT 'procurement', so the coverage
   // panel does not imply an automated procurement feed exists.
-  `INSERT INTO source_connectors (source_key, display_name, kind, auth_mode, access_mode,
+  // ── THIS SEED WAS WRITTEN AGAINST A STUB AND COULD NEVER HAVE APPLIED ──────
+  //
+  // Three separate mismatches with the real source_connectors table in
+  // src/lib/connectors/schema.js, each of which fails the INSERT outright:
+  //
+  //   base_url      declared NOT NULL; the row omitted it entirely
+  //   kind          CHECK IN ('procurement','funding','research'); the row said 'manual'
+  //   access_mode   CHECK IN ('api','manual_assisted');            the row said 'manual'
+  //
+  // None of them ever surfaced, because this schema had only been applied to a disposable cluster
+  // whose stub table carried neither the NOT NULL nor the CHECKs. On a real database the entire
+  // PRPA intake schema stopped here. Found by running the migrator against an empty cluster.
+  //
+  // base_url has no honest value for a human-submitted source — there is no endpoint. A URN says
+  // that, where a plausible-looking https:// placeholder would imply a service that does not exist
+  // and that something might later try to call.
+  `INSERT INTO source_connectors (source_key, display_name, base_url, kind, auth_mode, access_mode,
                                   daily_call_ceiling, activated, notes)
-     VALUES ('manual', 'Manual intake (human-submitted)', 'manual', 'none', 'manual',
+     VALUES ('manual', 'Manual intake (human-submitted)',
+             'urn:playbookos:manual-intake',
+             'procurement', 'none', 'manual_assisted',
              NULL, true,
-             'Human-submitted solicitations. Control is per-record human approval, not a connector flag.')
+             'Human-submitted solicitations. Control is per-record human approval, not a connector '
+             || 'flag. base_url is a URN, not an endpoint: there is nothing to call.')
      ON CONFLICT (source_key) DO NOTHING`,
 ];
 

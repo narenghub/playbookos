@@ -489,6 +489,20 @@ pf_step "the tracker runs end to end on real SAM.gov data" node scripts/prpa-tra
 pf_step "the exported CSV validates against an independent parser" node scripts/validate-export-csv.js
 pf_step "least-privilege DB roles hold as designed (ENG-003)" node scripts/check-db-role-separation.js
 pf_step "open production release blockers are reported" node scripts/check-release-blockers.js
+# ── PRPA MVP (ruling 27) ─────────────────────────────────────────────────────
+# No path may be declared in two routers: the first mount wins and the second's handlers are dead
+# code. src/api/prpa.routes.js was written declaring three paths routes.js already owns.
+pf_step "no route path is declared in two routers" node scripts/check-prpa-route-collisions.js
+# 43 migrate-*.js scripts were only ever run by hand, so a fresh database was missing 57 tables and
+# the app 500'd on its own page load. The migrator must create everything any of them creates.
+pf_step "the migrator creates every table a migration script creates" node scripts/check-migration-coverage.js
+# ENG-003: boot no longer applies DDL, so the app must start and work as a restricted role.
+pf_step "the app starts and works with no superuser and no DDL (ENG-003)" node scripts/check-startup-without-ddl.js
+# The product, end to end over HTTP: import, documents, feasibility, deadline, decision, export.
+pf_step "PRPA runs end to end over HTTP on real SAM.gov records" node scripts/prpa-e2e-demo.js
+# A page that throws on load still photographs; this asserts what rendered.
+pf_step "the Federal Contracts page renders real data" node scripts/screenshot-prpa-tracker.js
+
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 
 pf_verdict

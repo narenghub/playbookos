@@ -477,6 +477,30 @@ const DDL = [
   // One row per capability per holding entity. Abiozen LLC and CRO360 may each hold their own ISO
   // 17025, and they are not interchangeable: a bid by one entity cannot rest on the other's
   // accreditation.
+  // Company-welded foreign keys need a UNIQUE on the exact referenced pair, and `id TEXT PRIMARY
+  // KEY` alone does not provide (id, company_id). The intake schema (v3) declares
+  //   REFERENCES verified_capabilities (id, company_id)
+  // and without this constraint it fails with "there is no unique constraint matching given keys".
+  //
+  // This never surfaced because the PRPA schema had only ever been applied on a disposable cluster
+  // whose stub table happened to carry the pair. On an empty database the whole PRPA schema could
+  // not apply — found by running the migrator against one, which is the only place it would show.
+  //
+  // ADD CONSTRAINT has no IF NOT EXISTS, so the DO block is what makes it re-runnable. It is
+  // redundant with the primary key for uniqueness purposes and exists purely so the pair is
+  // referenceable.
+  `DO $$
+   BEGIN
+     IF NOT EXISTS (
+       SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'verified_capabilities'::regclass
+          AND conname = 'verified_capabilities_id_company_key'
+     ) THEN
+       ALTER TABLE verified_capabilities
+         ADD CONSTRAINT verified_capabilities_id_company_key UNIQUE (id, company_id);
+     END IF;
+   END $$`,
+
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_natural_key
      ON verified_capabilities (company_id, kind, code, responsible_entity)`,
   `CREATE INDEX IF NOT EXISTS idx_vc_usable

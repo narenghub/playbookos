@@ -302,7 +302,77 @@ const EXPORT_COLUMNS = [
   { key: 'bid_rationale', label: 'Review Rationale' },
   { key: 'version_seq', label: 'Version' },
   { key: 'source_url', label: 'Source Link' },
+
+  // ── PROVENANCE, CARRIED IN THE FILE (ruling 27 item 3) ─────────────────────
+  //
+  // "Include source provenance, verification timestamps, and clear distinctions between confirmed
+  // and unconfirmed information."
+  //
+  // These were a sibling summary.json, which is fine for a verification harness and useless for the
+  // thing the ruling describes: a person clicks one button and gets ONE file. A JSON document left
+  // behind on a server does not travel with the spreadsheet into an email, and the figures in the
+  // spreadsheet are then unattributed.
+  //
+  // Columns rather than a preamble: leading comment rows before the header would break every
+  // parser that reads the first line as column names, including this repo's own validator.
+  {
+    key: '_agency_confirmed',
+    label: 'Agency Confirmed?',
+    // SAM's search index leaves agency empty for some notices, and the full record exposes only an
+    // organisation id. Blank in a spreadsheet reads as "no agency"; this says which it is.
+    value: (r) => (r.agency && String(r.agency).trim() ? 'yes' : 'NO - not stated in source'),
+  },
+  {
+    key: '_set_aside_stated',
+    label: 'Set-Aside Stated?',
+    // A blank set-aside is NOT a statement that a notice is unrestricted. N0010426REJ97 carries
+    // "NOTICE OF TOTAL SMALL BUSINESS SET-ASIDE" in its text with this field empty.
+    value: (r) => (r.set_aside && String(r.set_aside).trim()
+      ? 'yes'
+      : 'NO - blank in source, which is NOT the same as unrestricted'),
+  },
+  {
+    key: '_deadline_confirmed_at',
+    label: 'Deadline Verified At (UTC)',
+    value: (r) => (r.deadline_confirmed_at
+      ? new Date(r.deadline_confirmed_at).toISOString().replace('T', ' ').slice(0, 19)
+      : 'NEVER VERIFIED'),
+  },
+  {
+    key: '_unconfirmed',
+    label: 'Unconfirmed Fields',
+    // Per row, so a reader can see at a glance which cells on THIS line are not evidence.
+    value: (r) => {
+      const u = [];
+      if (!r.agency || !String(r.agency).trim()) u.push('agency');
+      if (!r.set_aside || !String(r.set_aside).trim()) u.push('set_aside');
+      if (!r.deadline_confirmed_at) u.push('response_deadline');
+      if (r.estimated_value_usd === null || r.estimated_value_usd === undefined) u.push('estimated_value_usd');
+      if (!r.description || !String(r.description).trim()) u.push('description');
+      return u.length ? u.join('; ') : 'none';
+    },
+  },
+  { key: '_source_route', label: 'Source Route', value: () => EXPORT_PROVENANCE.route },
+  { key: '_source_caveat', label: 'Source Caveat', value: () => EXPORT_PROVENANCE.caveat },
+  { key: '_harvested_at', label: 'Harvested (UTC)', value: () => EXPORT_PROVENANCE.harvested_at },
+  { key: '_dataset_mode', label: 'Dataset Mode', value: () => EXPORT_PROVENANCE.mode },
+  { key: '_exported_at', label: 'Exported At (UTC)', value: () => EXPORT_PROVENANCE.exportedAt() },
 ];
+
+// Where the rows came from. Read from the dataset module so there is ONE statement of it, rather
+// than a second copy here that drifts from the banner the dashboard shows.
+const EXPORT_PROVENANCE = {
+  get route() { return require('./prpa-dataset').HARVEST.source; },
+  get caveat() {
+    return 'UNDOCUMENTED internal endpoint; manual/attended use only, no unattended harvesting';
+  },
+  get harvested_at() { return require('./prpa-dataset').HARVEST.harvested_at; },
+  get mode() {
+    const d = require('./prpa-dataset').describe();
+    return `${d.mode} - NOT a live feed; refresh is ${d.refresh}`;
+  },
+  exportedAt() { return new Date().toISOString().replace('T', ' ').slice(0, 19); },
+};
 
 function exportCsv(rows) {
   return toExcelCsv(EXPORT_COLUMNS, rows);

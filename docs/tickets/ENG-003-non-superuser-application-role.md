@@ -125,3 +125,54 @@ So the work is, in order:
 
 Step 1 is what will be tempting to defer. Until it is done, every control in the PRPA schema is a
 trigger that the connection running the application is privileged to drop.
+
+---
+
+## 2026-11-06 — step 1 is DONE (ruling 27 item 5)
+
+**"Step 1 is what will be tempting to defer."** It was not deferred. The boot chain is gone.
+
+`server.js` line 3 is now a READ. It calls `src/lib/schema-ready.js`, which issues only `SELECT`s —
+`to_regclass` for each required table, `information_schema.columns` for the columns whose absence
+means a migration applied only partly — and exits non-zero with the command to run if anything is
+missing. No `CREATE`, no `ALTER`, no `INSERT` anywhere in the boot path.
+
+The chain moved to `src/lib/migrate-all.js`, run by `scripts/migrate.js` as its own process against
+`MIGRATION_DATABASE_URL`. **47 steps**, each recorded in a new `schema_migrations` ledger.
+
+### What proves it
+
+`scripts/check-startup-without-ddl.js` — 28 assertions, exit 0, on a disposable cluster:
+
+- the migrator runs as the owner and the readiness check passes
+- `playbookos_app` is created `NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS`, with no `CREATE` on
+  schema `public`
+- **the server's own readiness check passes as that role**, and `assertReadyOrExit` does not exit
+- every DDL statement attempted as that role is refused: `CREATE TABLE`, `ALTER TABLE`, `DROP
+  TABLE`, `CREATE INDEX`, `CREATE FUNCTION`, `TRUNCATE` — each for the right reason, checked
+- the migrator itself fails as that role, at the first step that uses the passed connection
+- and the application does its **real work** restricted: imports 80 records, assesses them, reads
+  the board, confirms a deadline, appends to the audit trail, and produces the Excel export
+
+### What the chain's extraction exposed
+
+Three things that made the old arrangement look like it worked:
+
+1. **43 `migrate-*.js` scripts were in no chain at all** — 57 tables existed only if somebody
+   remembered to run them. Now 27 steps inside the migrator, with
+   `scripts/check-migration-coverage.js` failing the build on any gap.
+2. **The PRPA schema could never have applied to a real database**: `verified_capabilities` lacked
+   the composite `UNIQUE (id, company_id)` its foreign key needs, and the v3 seed violated three
+   constraints on `source_connectors`. Both had only ever run against a disposable stub.
+3. **There was no migration ledger.** Three scripts read `schema_migrations`; nothing created it.
+   "Which migrations has this database had?" had no answer anywhere.
+
+### Why this ticket stays OPEN
+
+The CODE no longer requires a superuser. The DEPLOYMENT still uses one: production connects with a
+single `DATABASE_URL` belonging to a superuser role. Closing it needs steps 2–4 above — the grants,
+the URL split, and the scanner credential — which are environment changes on the Railway Postgres,
+not code. Exact statements: `docs/deploy/prpa-cloud-handover.md` §4.
+
+Step 5 is partly done: the restricted-role check re-runs the PRPA paths and expects DDL to fail,
+which is what running it proves. The rest of the suite has not been run against restricted roles.

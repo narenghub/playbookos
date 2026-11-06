@@ -242,6 +242,29 @@ const PRPA = [
   'GET /api/prpa/review-queue', 'GET /api/prpa/capabilities', 'GET /api/prpa/opportunities',
   'GET /api/prpa/connectors', 'GET /api/prpa/export/opportunities.csv',
   'GET /api/prpa/tasks', 'POST /api/prpa/tasks', 'PATCH /api/prpa/tasks/:id',
+
+  // ── the federal contract tracker (src/api/prpa.routes.js) ──────────────────
+  // Every one listed concretely. A 'GET /api/prpa/*' wildcard would have covered these in one line
+  // and would also have absorbed, unreviewed, any future /api/prpa route belonging to a different
+  // product — and under enforce an unclassified route 403s for everybody, so the map is the thing
+  // that must be explicit rather than convenient.
+  // Under /prpa/tracker/* because routes.js already owns /prpa/review-queue, /prpa/capabilities and
+  // /prpa/opportunities, and the first mount wins — see the header of src/api/prpa.routes.js.
+  'GET /api/prpa/tracker/dataset',
+  'GET /api/prpa/tracker/opportunities',
+  'GET /api/prpa/tracker/opportunities/:id',
+  'GET /api/prpa/tracker/opportunities/:id/documents',
+  'POST /api/prpa/tracker/opportunities/:id/confirm-deadline',
+  'POST /api/prpa/tracker/opportunities/:id/review',
+  'POST /api/prpa/tracker/import/csv',
+  'POST /api/prpa/tracker/import/url',
+  'GET /api/prpa/tracker/review-queue',
+  'GET /api/prpa/tracker/duplicates',
+  'POST /api/prpa/tracker/duplicates/:id/resolve',
+  'POST /api/prpa/tracker/assess',
+  'GET /api/prpa/tracker/export.csv',
+  'GET /api/prpa/tracker/audit',
+  'GET /api/prpa/tracker/capabilities',
 ];
 
 const GOLFNEX = [
