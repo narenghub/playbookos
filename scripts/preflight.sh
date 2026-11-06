@@ -502,6 +502,10 @@ pf_step "the app starts and works with no superuser and no DDL (ENG-003)" node s
 pf_step "PRPA runs end to end over HTTP on real SAM.gov records" node scripts/prpa-e2e-demo.js
 # A page that throws on load still photographs; this asserts what rendered.
 pf_step "the Federal Contracts page renders real data" node scripts/screenshot-prpa-tracker.js
+# Ruling 32 gate 3. Every deployment document says rollback is "redeploy the previous image" because
+# the migration is additive. That sentence was written three times and tested nowhere. This boots
+# the ACTUAL deployed release against a database the new migrator has migrated.
+pf_step "the deployed release still runs on the migrated schema" node scripts/check-previous-release-compat.js
 
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 
