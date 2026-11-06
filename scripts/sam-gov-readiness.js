@@ -34,6 +34,7 @@
 // Exit: 0 report produced · 1 the live test ran and an assumption failed
 
 const sam = require('../src/lib/connectors/sam-gov');
+const routeBlock = require('./lib/sam-route-block');
 const { kindFromSamNoticeType } = require('../src/lib/procurement/record-kind');
 
 const AUTHORIZE_FLAG = '--i-am-authorized-to-activate';
@@ -373,6 +374,13 @@ async function main() {
     console.error(`\n${AUTHORIZE_FLAG} was passed but SAM_API_KEY is not set. No call was made.`);
     return 1;
   }
+  // Ruling item 1, as a control rather than a note. See scripts/lib/sam-route-block.js.
+  const route = routeBlock.routeCheck();
+  if (!route.allowed) {
+    routeBlock.explainBlock('sam-gov-readiness.js');
+    return 2;
+  }
+  console.log(`\n  FSD case ${route.caseRef} — proceeding with the live test on that basis.`);
   return (await liveTest(key)) ? 1 : 0;
 }
 

@@ -56,6 +56,8 @@
 // Exit: 0 the registration was read · 1 the call failed or the registration is not usable
 //       3 did not execute
 
+const routeBlock = require('./lib/sam-route-block');
+
 const ENTITY_URL = 'https://api.sam.gov/entity-information/v2/entities';
 const AUTHORIZE_FLAG = '--i-am-authorized-to-activate';
 const EXIT_NOT_EXECUTED = 3;
@@ -122,6 +124,14 @@ async function main() {
     console.error(`\n${AUTHORIZE_FLAG} was passed but SAM_API_KEY is not set. No call was made.\n`);
     process.exit(EXIT_NOT_EXECUTED);
   }
+
+  // Ruling item 1, as a control rather than a note. See scripts/lib/sam-route-block.js.
+  const route = routeBlock.routeCheck();
+  if (!route.allowed) {
+    routeBlock.explainBlock('verify-sam-entity.js');
+    process.exit(2);
+  }
+  console.log(`\n  FSD case ${route.caseRef} — proceeding on that basis.`);
 
   // ── THE REQUEST, AS A BOUNDED MEASUREMENT RATHER THAN A GUESS ─────────────
   //
