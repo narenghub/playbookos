@@ -161,8 +161,29 @@ That retires this limitation. I would not call the migration production-proven w
 See `docs/deploy/prpa-mvp-status.md` for the defect list and
 `docs/deploy/prpa-cloud-handover.md` for the deployment procedure.
 
-**Preflight result: recorded at the end of this document when the final run completed, read from
-its log.**
+```
+scripts/preflight.sh      PREFLIGHT_EXIT=0
+── 72 checks: 72 executed and passed · 0 failed · 0 did not execute
+PASS  every check executed and passed — safe to push.
+```
+
+Read from `preflight6.log`, not from a task notification. **All four preflight runs in this session
+reported "exit code 0" in their background notification; three of them had exited 1.** The
+notification reflects the wrapper command, which ended in an `echo`, not the checker. Each of those
+three caught something real:
+
+1. a failing test suite (`rename-completeness` — the migration chain now legitimately names the
+   pre-rename tables);
+2. two credential-check failures, from `process.env.X || '<literal>'` fixture patterns I had
+   introduced — the exact shape of a hard-coded fallback credential, which the checker cannot
+   distinguish from a real one and correctly refuses;
+3. `verify-migration-readiness.js` calling `createdb`, `pg_dump` and `pg_restore` without
+   `-U postgres`. Those default the role to the invoking OS user, so it worked as root here and
+   would have failed on your Mac with `role "nboda3230" does not exist` — the harness reporting
+   "could not execute" instead of a result. That is the 2026-11-03 failure mode
+   `scripts/lib/pg-cluster.js` exists to end, and its discipline test caught the repeat.
+
+The branch is pushed: `9477351..397db66`, `PUSH_EXIT=0`.
 
 ---
 
