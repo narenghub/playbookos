@@ -72,7 +72,10 @@ restored copy, and checks the application is still running afterwards.
   process.exit(1);
 }
 if (!fs.existsSync(dumpPath)) {
-  console.error(`dump file not found: ${dumpPath}`);
+  // The placeholder case is diagnosed in scripts/lib/restore.js; the exit code stays here.
+  if (!R.reportPlaceholder(dumpPath, process.argv[1])) {
+    console.error(`dump file not found: ${dumpPath}`);
+  }
   process.exit(1);
 }
 

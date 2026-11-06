@@ -40,6 +40,54 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 const { pgBinCandidates, pgClientOnlyDirs, INITDB_FLAGS } = require('./pg-cluster');
 
+// ── A PLACEHOLDER IS A PREDICTABLE MISTAKE, SO IT GETS A REAL MESSAGE ───────
+//
+// The Gate 3 checklist contained `prod-YYYYMMDD-HHMM.dump` inside a copy-paste block, and it was
+// pasted literally. That is the checklist's fault, not the reader's: text in a shell block is
+// meant to be run, not edited. `dump file not found: prod-YYYYMMDD-HHMM.dump` is true and
+// unhelpful — it reads as a missing backup while the backup sits in the same directory under its
+// real name.
+//
+// So the placeholder is RECOGNISED and the real candidates are listed, newest first. Lives here
+// rather than in each script because it was briefly copied into two of them, which is the
+// duplication this module exists to stop.
+
+/** @returns {{found:string[]}} if the path looks like an unsubstituted placeholder, else null. */
+function placeholderHint(p, cwd = process.cwd()) {
+  if (!/YYYY|MM?DD|HHMM|<|>/.test(String(p))) return null;
+  let found = [];
+  try {
+    found = fs.readdirSync(cwd)
+      .filter((f) => /\.dump(\.gz)?$/i.test(f))
+      .map((f) => ({ f, t: fs.statSync(path.join(cwd, f)).mtimeMs }))
+      .sort((a, b) => b.t - a.t)
+      .map((x) => x.f);
+  } catch (_) { /* nothing to suggest */ }
+  return { found };
+}
+
+/**
+ * Print the placeholder diagnosis if that is what this is, and say whether it was one.
+ * The caller decides the exit code — this module does not exit on anyone's behalf.
+ */
+function reportPlaceholder(dumpPath, scriptPath) {
+  const hint = placeholderHint(dumpPath);
+  if (!hint) return false;
+  const self = String(scriptPath || '').replace(`${process.cwd()}/`, '');
+  console.error(`\n"${dumpPath}" is the PLACEHOLDER from the checklist, not a filename.`);
+  if (hint.found.length) {
+    console.error('\nDump files in this directory, newest first:');
+    for (const f of hint.found) console.error(`    ${f}`);
+    console.error(`\nRe-run with the real name:\n    node ${self} ${hint.found[0]}`);
+    console.error('\nOr let the shell pick it, which is what the corrected checklist does:');
+    console.error('    DUMP=$(ls -t prod-*.dump | head -1)');
+    console.error(`    node ${self} "$DUMP"\n`);
+  } else {
+    console.error('\nNo .dump file in this directory. Take the backup first — see the Gate 3 checklist.\n');
+  }
+  return true;
+}
+
 /** The archive version from a custom-format dump header, or null if it is not one. */
 function archiveVersion(file) {
   const fd = fs.openSync(file, 'r');
@@ -159,6 +207,8 @@ function urlFor(cluster, dbName = 'restored') {
 }
 
 module.exports = {
+  placeholderHint,
+  reportPlaceholder,
   archiveVersion,
   toolVersion,
   toolchainFor,

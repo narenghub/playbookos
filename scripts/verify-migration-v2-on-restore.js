@@ -79,7 +79,12 @@ creates and destroys, and migrates THAT copy.
 `);
   process.exit(1);
 }
-if (!fs.existsSync(dumpPath)) { console.error(`dump file not found: ${dumpPath}`); process.exit(1); }
+if (!fs.existsSync(dumpPath)) {
+  if (!R.reportPlaceholder(dumpPath, process.argv[1])) {
+    console.error(`dump file not found: ${dumpPath}`);
+  }
+  process.exit(1);
+}
 
 /** Run the real migration runner against the restored copy. Non-zero exit is data, not a throw. */
 function runner(url, args) {
