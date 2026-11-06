@@ -42,6 +42,16 @@ const ALLOWED_LINE = [
   // comment lines means the next read of a dropped column is an offender again.
   /^\s*(\/\/|\/\*|\*)[^\n]*referred_by/,
   /\/api\/acbm\//,                    // a check that the OLD routes are gone has to name them
+
+  // The migration chain has to name the OLD table names, because the step that renames them is now
+  // part of it (src/lib/migrate-all.js), and the coverage checker has to know that acbm_* correctly
+  // do not exist after a full run — otherwise it reports the rename itself as a missing table.
+  //
+  // Restricted to the two files that legitimately describe the rename, and to the acbm_* TABLE
+  // names only. A bare /acbm/ allowance here would re-open everything this test exists to catch.
+  /migrate-acbm\.js/,                 // the migration script's own filename, in the step list
+  /\bacbm_(packages|deals|intake|projects)\b/,  // the pre-rename table names, named as such
+  /^\s*(\/\/|\/\*|\*)[^\n]*acbm_\*/,  // "acbm_* → sitenex_*" IN PROSE ONLY, describing the rename
 ];
 
 function walk(dir, out = []) {

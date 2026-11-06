@@ -124,24 +124,42 @@ async function main() {
   try {
     // ── 1. the schema, built by a migrator identity ────────────────────────
     h('1. THE PRECONDITIONS AND THE v3 SCHEMA');
-    await q(`CREATE TABLE companies (id TEXT PRIMARY KEY, slug TEXT, name TEXT, status TEXT,
-               UNIQUE (id, status))`);
-    await q(`CREATE TABLE solicitations (id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
-               record_kind TEXT, active BOOLEAN DEFAULT true, response_deadline DATE,
-               UNIQUE (id, company_id))`);
-    await q(`CREATE TABLE verified_capabilities (id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
-               kind TEXT, UNIQUE (id, company_id))`);
-    await q(`CREATE TABLE source_connectors (source_key TEXT PRIMARY KEY, display_name TEXT, kind TEXT,
-               auth_mode TEXT, access_mode TEXT, daily_call_ceiling INT, activated BOOLEAN, notes TEXT)`);
-    await q(`CREATE TABLE skus (id TEXT PRIMARY KEY, name TEXT)`);
-    await q(`CREATE TABLE suppliers (id TEXT PRIMARY KEY, name TEXT)`);
-    await q(`CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE, name TEXT, role TEXT, is_active INT DEFAULT 1)`);
-    await q(`INSERT INTO companies VALUES ('co-a','abiozen','Abiozen LLC','active')`);
-    await q(`INSERT INTO solicitations (id,company_id,record_kind) VALUES ('sol-a','co-a','solicitation')`);
-    await q(`INSERT INTO skus VALUES ('sku-1','A molecule')`);
-    await q(`INSERT INTO users (id,email,role,is_active) VALUES ('u1','naren@abiozen.com','super_admin',1)`);
-    for (const stmt of schema.DDL) await q(stmt);
-    ok(`v3 schema applied — ${schema.DDL.length} statements, ${schema.CREATED_TABLES.length} tables`);
+    // ── THE REAL MIGRATOR, NOT HAND-WRITTEN STUBS ──────────────────────────
+    //
+    // This block used to hand-write companies, solicitations, verified_capabilities and
+    // source_connectors. The stub source_connectors omitted base_url, which the real table declares
+    // NOT NULL — so when the v3 seed was corrected to satisfy the real schema, this check went red
+    // while the product was right. The same stub-versus-real divergence has now cost three separate
+    // harnesses in this repository.
+    //
+    // The migrator is what a deployment runs, so it is what this runs. The roles below are then
+    // created against a schema identical to production's, which is the only way this check means
+    // anything about production.
+    process.env.DATABASE_URL = url('postgres');
+    process.env.ADMIN_EMAIL = 'eng003-roles-fixture@example.invalid';
+    // Generated per run, never read from the environment: `process.env.X || '<literal>'`
+    // is the exact shape of a hard-coded fallback credential, and check-secrets.js refuses
+    // it on sight — correctly, because it cannot tell an ephemeral fixture from a real one.
+    // This value exists for one disposable cluster and is discarded with it.
+    process.env.ADMIN_PASSWORD = require('crypto').randomBytes(18).toString('hex');
+    process.env.PRPA_COMPANY_SLUG = 'abiozen';
+    const migResult = await require('../src/lib/migrate-all').runAll(q, { seeds: false, log: () => {} });
+    if (!migResult.ok) throw new Error(`migration failed: ${migResult.failed.map((f) => `${f.name}: ${f.error}`).join(' | ')}`);
+    // A fixture company with the id the assertions below use. The migrator seeds the real
+    // 'abiozen' row; this one exists so the literals in this file keep naming a row that exists,
+    // and so nothing here writes against the company the product uses.
+    await q(`INSERT INTO companies (id, slug, display_name, status)
+             VALUES ('co-a', 'roles-fixture', 'Roles fixture company', 'active')
+             ON CONFLICT (id) DO NOTHING`);
+    // raw_json is NOT NULL on the real table — the stub had no such column at all.
+    await q(`INSERT INTO solicitations (id, company_id, source_key, notice_id, record_kind, raw_json)
+             VALUES ('sol-a', 'co-a', 'manual', 'notice-a', 'solicitation', '{}'::jsonb)
+             ON CONFLICT (id) DO NOTHING`);
+    await q(`INSERT INTO users (id, email, name, role, is_active)
+             VALUES ('u1','naren@abiozen.com','Naren B','super_admin', 1)
+             ON CONFLICT (email) DO NOTHING`);
+    ok(`schema applied by the migrator — ${migResult.steps.length} steps`);
+    ok(`v3 included: ${schema.CREATED_TABLES.length} intake tables present via the migrator`);
 
     // ── 2. the roles, exactly as proposed for production ───────────────────
     h('2. THREE ROLES, AND NOT ONE OF THEM A SUPERUSER');
@@ -277,8 +295,11 @@ async function main() {
       console.log('\n  The design in ENG-003 is not a proposal. The mechanism is PostgreSQL');
       console.log('  column-level UPDATE grants, it works, and the application role provably');
       console.log('  cannot write a scan verdict or fabricate a scan result.');
-      console.log('\n  What remains is not the grants. It is moving ~12 boot-time migrations out of');
-      console.log('  the application so a non-DDL role can start it. That is the blocker.');
+      console.log('\n  The boot-time migration chain HAS now been moved out of the application');
+      console.log('  (ruling 27 item 5) — scripts/check-startup-without-ddl.js proves the app');
+      console.log('  starts and does its real work as a restricted role. What remains is the');
+      console.log('  DEPLOYMENT: production still connects with one superuser DATABASE_URL.');
+      console.log('  docs/deploy/prpa-cloud-handover.md section 4 has the exact statements.');
     }
   } finally {
     for (const c of [app, scanner, migrator]) { if (c) { try { await c.end(); } catch (_) { /* */ } } }

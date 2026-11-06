@@ -37,7 +37,10 @@ const PGPORT = process.env.PGPORT_TEST || '55441';
 const EXIT_NOT_EXECUTED = 3;
 const CSV = path.join(__dirname, '..', 'fixtures', 'sam-opportunities-real-2026-11-06.csv');
 const OUTDIR = process.env.PRPA_OUT || '/tmp/claude-0/-home-claude/a0303f00-5fe1-5ee7-be5c-5412f357070f/scratchpad/prpa-out';
-const CO = 'co-bbb13600-5966-4bb4-a569-2df76c5abba8';   // Abiozen LLC, the one active company
+// The company id is READ from the database, not hardcoded: the migrator's own ensureCompany()
+// seeds it, so a literal from before that existed now points at no row — the first import
+// failed on the company_id foreign key.
+let CO = null;
 
 const bar = (c = '─') => c.repeat(78);
 const h = (t) => console.log(`\n${bar()}\n${t}\n${bar()}`);
@@ -77,7 +80,10 @@ function stopCluster() {
 // Fixture capabilities for pass B ONLY. Every name begins with FIXTURE so the label travels with
 // the data into any export, screenshot or report that quotes it.
 const FIXTURE_CAPABILITIES = [
-  { id: 'cap-fx-1', kind: 'service_capability', evidence_class: 'method_validated', business_line: 'analytical_services', name: 'FIXTURE: validated HPLC assay method', valid_until: '2027-06-30' },
+  // kind must be 'capability' or 'accreditation' — verified_capabilities_kind_check. The stub this
+  // demo used had no such constraint, so 'service_capability' passed for as long as the table was
+  // fake. What distinguishes a service here is business_line, not a third kind.
+  { id: 'cap-fx-1', kind: 'capability', evidence_class: 'method_validated', business_line: 'analytical_services', name: 'FIXTURE: validated HPLC assay method', valid_until: '2027-06-30' },
   { id: 'cap-fx-2', kind: 'capability', evidence_class: 'prior_delivery', business_line: 'molecule_commerce', name: 'FIXTURE: prior delivery of a reference standard', valid_until: null },
   { id: 'cap-fx-3', kind: 'capability', evidence_class: 'stock_on_hand', business_line: 'scientific_fulfillment', name: 'FIXTURE: stock on hand, laboratory consumables', valid_until: '2027-01-31' },
   { id: 'cap-fx-4', kind: 'capability', evidence_class: 'catalog_listing', business_line: 'custom_synthesis', name: 'FIXTURE: catalogue listing only (INDICATIVE — must not qualify)', valid_until: null },
@@ -97,40 +103,50 @@ async function main() {
   }
   fs.mkdirSync(OUTDIR, { recursive: true });
   const url = `postgresql://postgres@localhost/postgres?host=${base}&port=${PGPORT}&sslmode=disable`;
+  // The migrator's pool-based steps go through src/lib/db, which builds its pool from DATABASE_URL
+  // when first required — so it must point at this disposable cluster BEFORE that happens. The
+  // admin bootstrap values are throwaway fixtures for a cluster destroyed at the end of this run;
+  // initDB() refuses to seed the first admin without them rather than falling back to a default.
+  process.env.DATABASE_URL = url;
+  process.env.ADMIN_EMAIL = 'prpa-demo-fixture@example.invalid';
+  // Generated per run, never read from the environment: `process.env.X || '<literal>'`
+  // is the exact shape of a hard-coded fallback credential, and check-secrets.js refuses
+  // it on sight — correctly, because it cannot tell an ephemeral fixture from a real one.
+  // This value exists for one disposable cluster and is discarded with it.
+  process.env.ADMIN_PASSWORD = require('crypto').randomBytes(18).toString('hex');
+  process.env.PRPA_COMPANY_SLUG = 'abiozen';
+
   const client = new Client({ connectionString: url });
   await client.connect();
   const q = (sql, p) => client.query(sql, p);
 
   try {
     // ── 0. the schema this runs on ──────────────────────────────────────────
-    await q(`CREATE TABLE companies (id TEXT PRIMARY KEY, slug TEXT, name TEXT, status TEXT, UNIQUE (id, status))`);
-    await q(`CREATE TABLE solicitations (id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
-               record_kind TEXT, active BOOLEAN DEFAULT true, response_deadline DATE, UNIQUE (id, company_id))`);
-    // Mirrors the LIVE verified_capabilities (src/lib/connectors/schema.js) rather than a
-    // convenient stub. The first run of this demo used a stub with made-up column names and the
-    // v4 activation trigger failed on `verification_status` — a stub that drifts from the real
-    // table makes a demo prove something about a table that does not exist.
-    await q(`CREATE TABLE verified_capabilities (
-               id TEXT PRIMARY KEY, company_id TEXT NOT NULL REFERENCES companies(id),
-               kind TEXT NOT NULL, code TEXT NOT NULL, name TEXT NOT NULL,
-               responsible_entity TEXT NOT NULL,
-               verification_status TEXT NOT NULL DEFAULT 'planned',
-               evidence_source TEXT, evidence_url TEXT, evidence_sha256 TEXT,
-               verified_at TIMESTAMPTZ, verified_by TEXT, approval_id TEXT,
-               valid_from DATE, valid_to DATE, notes TEXT,
-               created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-               CONSTRAINT verified_capabilities_status_check
-                 CHECK (verification_status IN ('planned','pending','verified','disputed','revoked')),
-               UNIQUE (id, company_id))`);
-    await q(`CREATE TABLE source_connectors (source_key TEXT PRIMARY KEY, display_name TEXT, kind TEXT,
-               auth_mode TEXT, access_mode TEXT, daily_call_ceiling INT, activated BOOLEAN, notes TEXT)`);
-    await q(`CREATE TABLE skus (id TEXT PRIMARY KEY, name TEXT)`);
-    await q(`CREATE TABLE suppliers (id TEXT PRIMARY KEY, name TEXT)`);
-    await q(`CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE, name TEXT, role TEXT, is_active INT DEFAULT 1)`);
-    await q(`INSERT INTO companies VALUES ($1,'abiozen','Abiozen LLC','active')`, [CO]);
-    await q(`INSERT INTO users (id,email,role,is_active) VALUES ('u1','naren@abiozen.com','super_admin',1)`);
-    for (const s of v3.DDL) await q(s);
-    for (const s of v4.DDL) await q(s);
+    // ── THE REAL MIGRATOR, NOT STUBS AND NOT A SUBSET ──────────────────────
+    //
+    // This block hand-wrote companies, solicitations, verified_capabilities and source_connectors.
+    // The comment that stood here already recorded one casualty — a stub verified_capabilities
+    // whose made-up columns broke the v4 activation trigger. It then happened again to
+    // source_connectors, whose stub omitted base_url (NOT NULL in the real table), so this demo
+    // went red while the product was correct.
+    //
+    // Filtering the real modules to their CREATE statements did not work either: the connectors
+    // module adds record_kind by ALTER and indexes it afterwards, so a filtered subset breaks its
+    // own sequence, and both modules reach tables created by migrations outside their own file.
+    //
+    // So the demo runs THE MIGRATOR — the same 47 steps scripts/migrate.js runs, which is what a
+    // deployment runs. Slower, and there is nothing left that can drift from production.
+    await require('../src/lib/migrate-all').runAll(q, { seeds: false, log: () => {} })
+      .then((r) => { if (!r.ok) throw new Error(`migration failed: ${r.failed.map((f) => `${f.name}: ${f.error}`).join(' | ')}`); });
+    CO = (await q(`SELECT id FROM companies WHERE slug = 'abiozen'`)).rows[0].id;
+    // The real users table declares name NOT NULL; the stub this demo used did not. The capability
+    // activation guard reads this row, so it has to exist and has to satisfy the real constraints.
+    await q(`INSERT INTO users (id, email, name, role, is_active)
+             VALUES ('u1','naren@abiozen.com','Naren B','super_admin', 1)
+             ON CONFLICT (email) DO NOTHING`);
+    // v3, v4 and v5 are applied by the migrator above; re-running them here would be a second,
+    // divergent application of the same schema.
+
     console.log(`  schema: v3 (${v3.DDL.length} statements) + v4 (${v4.DDL.length} statements) on a disposable cluster`);
 
     // ── 1. IMPORT ───────────────────────────────────────────────────────────
