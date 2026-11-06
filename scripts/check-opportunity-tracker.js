@@ -272,6 +272,95 @@ else bad('unrelated titles scored high');
 if (T.titleSimilarity('', 'anything') === 0) ok('an empty title scores 0 rather than dividing by zero');
 else bad('empty title similarity is wrong');
 
+h('9. RANKING ORDERS ATTENTION, AND NEVER OUTRANKS AN ELIGIBILITY BAR');
+{
+  const RK = require('../src/lib/office/opportunity-rank');
+  const T0 = '2026-11-06';
+  const base = { solicitation_number: 'X1', notice_type: 'solicitation', status: 'open',
+    response_deadline: '2026-11-26T00:00:00Z', business_lines: ['molecule_commerce'],
+    verdict: 'NEEDS_REVIEW', title: 'Reference standards', estimated_value_usd: null };
+
+  // A barred item must sort below an unattractive but eligible one, however large it is.
+  const barred = { ...base, solicitation_number: 'BARRED', estimated_value_usd: 50000000 };
+  const ver = { BARRED: { eligible: false, bar: 'SDVOSB set-aside' } };
+  const order = RK.rankAll([barred, { ...base, solicitation_number: 'OK' }], { today: T0, verification: ver });
+  if (order[0].solicitation_number === 'OK' && order[1].ranking.tier === 'BARRED') {
+    ok('an ineligible $50M opportunity sorts BELOW an eligible one — a bar is a floor, not a penalty');
+  } else bad('a barred opportunity outranked an eligible one', order.map((o) => o.solicitation_number).join(','));
+
+  for (const [t, why] of [['award', 'an award notice'], ['special_notice', 'a special notice'],
+    ['justification', 'a sole-source justification']]) {
+    const r = RK.rank({ ...base, notice_type: t }, { today: T0 });
+    if (r.bars.some((b) => b.kind === RK.BAR_KINDS.NOT_BIDDABLE)) ok(`${why} → BARRED`);
+    else bad(`${why} was not barred`, JSON.stringify(r.bars));
+  }
+  // A sources sought is NOT barred — responding is how you reach the RFP.
+  for (const [t, tier] of [['sources_sought', 'MARKET ENTRY'], ['presolicitation', 'MARKET ENTRY']]) {
+    const r = RK.rank({ ...base, notice_type: t }, { today: T0 });
+    if (!r.bars.length && r.ranking === undefined && r.tier === tier) ok(`${t} → ${tier}, not barred`);
+    else if (!r.bars.length && r.tier === tier) ok(`${t} → ${tier}, not barred`);
+    else bad(`${t} was barred or mis-tiered`, `${r.tier} bars=${JSON.stringify(r.bars)}`);
+  }
+  {
+    // …and it still sorts below real biddable work.
+    const se = { ...base, solicitation_number: 'SS', notice_type: 'sources_sought' };
+    const sol = { ...base, solicitation_number: 'SOL' };
+    const o = RK.rankAll([se, sol], { today: T0 });
+    if (o[0].solicitation_number === 'SOL') ok('market-entry items sort below biddable solicitations');
+    else bad('a sources sought outranked a solicitation');
+  }
+  {
+    const r = RK.rank({ ...base, response_deadline: '2026-10-01T00:00:00Z' }, { today: T0 });
+    if (r.bars.some((b) => b.kind === RK.BAR_KINDS.DEADLINE_PASSED)) ok('a passed deadline → BARRED');
+    else bad('a passed deadline was not barred');
+  }
+  // MARGIN: never scored without both a value and a quote, and it says why.
+  {
+    const r = RK.rank(base, { today: T0 });
+    if (r.components.margin === 0 && r.notes.some((n) => /MARGIN NOT SCORED/.test(n))) {
+      ok('margin scores 0 and states WHY, rather than being silently dropped');
+    } else bad('margin was scored without a value', JSON.stringify(r.components));
+    const r2 = RK.rank({ ...base, estimated_value_usd: 250000 }, { today: T0 });
+    if (r2.components.margin === 0 && r2.notes.some((n) => /without a supplier quote/.test(n))) {
+      ok('a contract VALUE alone still does not produce a margin — that is revenue, not margin');
+    } else bad('a value alone produced a margin score');
+  }
+  // Verified capability is the only route to the top band, and it is currently unreachable.
+  {
+    const nr = RK.rank(base, { today: T0 });
+    const qd = RK.rank({ ...base, verdict: 'QUALIFIED' }, { today: T0 });
+    if (qd.score > nr.score) ok('a QUALIFIED verdict scores above NEEDS_REVIEW');
+    else bad('verified capability did not raise the score');
+    if (nr.notes.some((n) => /no verified capability/.test(n))) ok('…and NEEDS_REVIEW says so in its notes');
+    else bad('a NEEDS_REVIEW rank did not explain itself');
+  }
+  // A brand-name hint is a prompt to check, never a verdict — 36C25627Q0074 is a Roche buy with
+  // no OEM requirement, which is why this cannot be a bar.
+  {
+    const r = RK.rank({ ...base, title: 'Roche Ventana reagents' }, { today: T0 });
+    if (r.components.execution_risk < 0 && !r.bars.length) {
+      ok('a brand-locked-looking title raises RISK but does not bar — it is a signal to check');
+    } else bad('a brand hint became a bar', JSON.stringify(r));
+  }
+  // Sole-source language is a bar; "brand name or equal" is not.
+  for (const t of ['Notice of Intent to Sole Source', 'The Government intends to award on a non-competitive basis',
+    'Only one responsible source and no other supplies will satisfy', 'Sole source to Alcami Corporation']) {
+    const r = RK.rank({ ...base, title: t }, { today: T0 });
+    if (r.bars.some((b) => b.kind === RK.BAR_KINDS.SOLE_SOURCE)) ok(`"${t.slice(0, 38)}…" → BARRED as sole source`);
+    else bad(`sole-source language was not barred: ${t}`, JSON.stringify(r.bars));
+  }
+  {
+    const r = RK.rank({ ...base, title: 'Brand Name or Equal NETZSCH Dilatometer' }, { today: T0 });
+    if (!r.bars.length) ok('"brand name or equal" is NOT barred — equivalents are invited');
+    else bad('an "or equal" notice was barred', JSON.stringify(r.bars));
+  }
+  {
+    const soon = RK.rank({ ...base, response_deadline: '2026-11-08T00:00:00Z' }, { today: T0 });
+    if (soon.notes.some((n) => /too little time/.test(n))) ok('a deadline 2 days out is flagged as too little time');
+    else bad('an imminent deadline was not flagged');
+  }
+}
+
 console.log(`\n${bar()}`);
 console.log(`  ${pass} assertion(s) passed · ${fail} failed`);
 if (fail) { console.log('\nFAIL  the tracker does not hold as claimed.\n'); process.exit(1); }

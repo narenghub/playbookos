@@ -148,6 +148,24 @@ async function main() {
     console.log(`  ${withIssues} record(s) carried a normalisation issue — kept, with the issue recorded`);
     for (const i of r1.issues.slice(0, 3)) console.log(`      ${i.solicitation_number}: ${i.issues[0]}`);
 
+    // ── 1b. SECOND WAVE (ruling 23 item 7) ──────────────────────────────────
+    h('1b. IMPORT WAVE 2 — a broader harvest across Abiozen\'s actual lines');
+    const CSV2 = path.join(__dirname, '..', 'fixtures', 'sam-opportunities-wave2-2026-11-06.csv');
+    let r1b = { outcome: { inserted: [], amended: [], unchanged: [] }, issues: [] };
+    if (fs.existsSync(CSV2)) {
+      r1b = await T.importCsv(q, {
+        companyId: CO, importedBy: 'naren@abiozen.com', csvText: fs.readFileSync(CSV2, 'utf8'),
+        sourceDetail: `${path.basename(CSV2)} — wave 2, harvested 2026-11-06 across 13 NAICS and 14 PSC codes`,
+      });
+      console.log(`  imported ${r1b.outcome.inserted.length} new · ${r1b.outcome.amended.length} amended · `
+        + `${r1b.outcome.unchanged.length} already held from wave 1`);
+      console.log('  wave 2 was filtered to chemistry/lab codes before import: 442 harvested, 178 kept.');
+      console.log('  264 were DoD/NASA/DOE R&D notices from NAICS 541715 and PSC A-series — real, open,');
+      console.log('  and not chemistry. Importing them would have buried the relevant set.');
+    } else {
+      console.log(`  SKIP  ${CSV2} not present`);
+    }
+
     // ── 2. DEDUPE — re-import the identical file ────────────────────────────
     h('2. DEDUPE — the same file again, then an amendment');
     const r2 = await T.importCsv(q, {
@@ -349,6 +367,29 @@ async function main() {
       ? '  a bid decision with a one-word reason → REFUSED'
       : `  PROBLEM: an unexplained decision was accepted (${emptyReason || 'no error'})`);
 
+    // ── 6d. RANK (ruling 23 item 8) ─────────────────────────────────────────
+    h('6d. RANK — where attention goes first, not what we will win');
+    const RANK = require('../src/lib/office/opportunity-rank');
+    const verMap = {};
+    for (const f of VERIFIED.findings) verMap[f.solicitation_number] = f;
+    const allRows = await T.listOpportunities(q, CO);
+    const ranked = RANK.rankAll(allRows, { today: new Date().toISOString().slice(0, 10), verification: verMap });
+    const tiers = ranked.reduce((a, r) => { a[r.ranking.tier] = (a[r.ranking.tier] || 0) + 1; return a; }, {});
+    console.log(`  ${JSON.stringify(tiers)}`);
+    console.log('  top of the list:');
+    for (const r of ranked.slice(0, 8)) {
+      console.log(`    ${String(r.ranking.score).padStart(3)} ${r.ranking.tier.padEnd(9)} `
+        + `${String(r.solicitation_number).padEnd(20)} ${String(r.title).slice(0, 44)}`);
+    }
+    const barredCount = ranked.filter((r) => r.ranking.bars.length).length;
+    console.log(`  ${barredCount} barred and sorted last — an eligibility bar is a floor, not a penalty`);
+    fs.writeFileSync(path.join(OUTDIR, 'ranked.json'), `${JSON.stringify(ranked.map((r) => ({
+      solicitation_number: r.solicitation_number, title: r.title, agency: r.agency,
+      notice_type: r.notice_type, naics_code: r.naics_code, psc_code: r.psc_code,
+      set_aside: r.set_aside, response_deadline: r.response_deadline, verdict: r.verdict,
+      source_url: r.source_url, ranking: r.ranking,
+    })), null, 2)}\n`);
+
     // ── 7. EXPORT ───────────────────────────────────────────────────────────
     h('7. EXPORT — CSV that Excel opens correctly');
     const rows = await T.listOpportunities(q, CO);
@@ -367,6 +408,8 @@ async function main() {
       source: 'sam.gov/api/prod/sgs/v1/search/ (SAM.gov web UI backend, no API key) — harvested 2026-11-06',
       csv_sha256: r1.sha256,
       imported: r1.outcome.inserted.length,
+      imported_wave2: r1b.outcome.inserted.length,
+      rank_tiers: tiers,
       amendments: r3.amended.length,
       re_import_duplicates_created: r2.outcome.inserted.length,
       duplicate_candidates: dups,

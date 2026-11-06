@@ -482,6 +482,7 @@ pf_step "the SSRF guard refuses metadata, private ranges and redirects into them
 pf_step "the opportunity tracker cannot hand Excel a formula or invent a value" node scripts/check-opportunity-tracker.js
 pf_step "a capability cannot activate without evidence, authorization or review" node scripts/check-capability-registry.js
 pf_step "the tracker runs end to end on real SAM.gov data" node scripts/prpa-tracker-demo.js
+pf_step "the exported CSV validates against an independent parser" node scripts/validate-export-csv.js
 pf_step "least-privilege DB roles hold as designed (ENG-003)" node scripts/check-db-role-separation.js
 pf_step "open production release blockers are reported" node scripts/check-release-blockers.js
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js

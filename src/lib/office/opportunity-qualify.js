@@ -61,6 +61,12 @@ const NAICS_LINES = Object.freeze({
   541714: ['analytical_services', 'custom_synthesis'], // R&D in biotechnology
   541715: ['analytical_services', 'custom_synthesis'], // R&D in physical/engineering/life sciences
   541990: ['analytical_services'],                     // other professional/scientific services
+  // Added after the wave-2 harvest: the VA's reference-laboratory and FSS lab-testing contracts
+  // carry these, and without them the best-fitting opportunities on the whole board scored zero
+  // for technical fit. A mapping table is only as good as the codes the real data uses.
+  621511: ['analytical_services'],                     // medical laboratories
+  541940: ['analytical_services'],                     // veterinary services (lab testing)
+  423450: ['scientific_fulfillment'],                  // medical/lab equipment wholesalers
 });
 
 // PSC → business line. Same caveat.
@@ -77,6 +83,19 @@ const PSC_LINES = Object.freeze({
   6830: ['molecule_commerce'],                           // gases
   6850: ['molecule_commerce'],                           // misc chemical specialties
   8730: ['molecule_commerce'],                           // chemicals (older code)
+  6515: ['scientific_fulfillment'],                      // medical and surgical instruments/supplies
+  6840: ['molecule_commerce'],                           // pest control agents
+});
+
+// Alphanumeric PSCs, which the numeric map cannot hold. Q301 is medical laboratory testing and
+// B510 is studies/analysis — both are core analytical and CRO work, and both were invisible until
+// the second harvest surfaced them.
+const PSC_ALPHA_LINES = Object.freeze({
+  Q301: ['analytical_services'],
+  Q999: ['analytical_services'],
+  B510: ['analytical_services'],
+  B505: ['analytical_services'],
+  B599: ['analytical_services'],
 });
 
 // Keyword fallback, used only when there is no NAICS or PSC. Weakest signal, and labelled as such
@@ -112,6 +131,10 @@ function relevantLines(opp) {
   if (opp.psc_code && PSC_LINES[Number(opp.psc_code)]) {
     for (const l of PSC_LINES[Number(opp.psc_code)]) lines.add(l);
     basis.push(`PSC ${opp.psc_code} maps to ${PSC_LINES[Number(opp.psc_code)].join(', ')}`);
+  }
+  if (opp.psc_code && PSC_ALPHA_LINES[String(opp.psc_code).toUpperCase()]) {
+    for (const l of PSC_ALPHA_LINES[String(opp.psc_code).toUpperCase()]) lines.add(l);
+    basis.push(`PSC ${opp.psc_code} maps to ${PSC_ALPHA_LINES[String(opp.psc_code).toUpperCase()].join(', ')}`);
   }
   if (!lines.size) {
     const hay = `${opp.title || ''} ${opp.description || ''}`;
@@ -296,6 +319,7 @@ module.exports = {
   SAM_REGISTRATION_EXPIRES,
   NAICS_LINES,
   PSC_LINES,
+  PSC_ALPHA_LINES,
   KEYWORD_LINES,
   SET_ASIDE_CERTS,
   relevantLines,
