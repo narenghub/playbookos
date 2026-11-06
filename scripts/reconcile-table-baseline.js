@@ -46,6 +46,7 @@ const { Client } = require('pg');
 const { EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 const R = require('./lib/restore');
 const { CONNECTOR_TABLES, GLOBAL_TABLES } = require('../src/lib/connectors/schema');
+const v2 = require('../src/lib/office/registration-schema');
 
 const PGPORT = 55997;
 
@@ -85,6 +86,19 @@ const BASELINE_IS_MEASURED = !baselineArg;
 // be quietly folded into the migration's own count again.
 const V1_TABLES = [...GLOBAL_TABLES, ...CONNECTOR_TABLES];
 const RUNNER_TABLES = ['schema_migrations'];
+
+// ── THE EXPECTED ARITHMETIC DEPENDS ON WHICH MIGRATIONS THE DUMP CONTAINS ──
+//
+// This script was written against a dump that predated registrations.v2, so it subtracted 13 and
+// expected 125. Applied to a backup taken AFTER v2, that same subtraction gives 141 − 13 = 128 and
+// reports a surplus of three — a false alarm on a correct database, in a script whose last two
+// outputs were already wrong.
+//
+// So the dump's own schema_migrations decides what to subtract. A migration that is recorded is a
+// migration whose tables are accounted for; one that is not recorded is not subtracted. That makes
+// this work on a backup from either side of any migration, which is what a reconciliation needs to
+// do if it is to be run routinely rather than once.
+const V2_TABLES = v2.CREATED_TABLES;
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -180,19 +194,33 @@ async function main() {
     }
 
     // ── the thirteen, by name ─────────────────────────────────────────────
-    h('THE 13 TABLES connectors.v1 IS RESPONSIBLE FOR');
+    // Which migrations does this dump say have run? That decides what is accounted for.
+    let recordedVersions = [];
+    if (present.has('schema_migrations')) {
+      recordedVersions = (await q('SELECT version FROM schema_migrations ORDER BY version')).rows
+        .map((r) => r.version);
+    }
+    const hasV2 = recordedVersions.includes(v2.VERSION);
+
+    const accountable = [
+      ...V1_TABLES.map((t) => ({ t, why: 'created by connectors.v1' })),
+      ...RUNNER_TABLES.map((t) => ({ t, why: 'CREATED BY THE RUNNER, NOT A MIGRATION' })),
+      ...(hasV2 ? V2_TABLES.map((t) => ({ t, why: `created by ${v2.VERSION}` })) : []),
+    ];
+
+    h(`THE ${accountable.length} TABLES THESE MIGRATIONS ARE RESPONSIBLE FOR`);
+    console.log(`  recorded migrations: ${recordedVersions.join(', ') || 'none'}`);
+    if (!hasV2) {
+      console.log(`  ${v2.VERSION} is NOT recorded here, so its 3 tables are not subtracted.`);
+    }
+    console.log('');
     const missing = [];
-    for (const t of V1_TABLES) {
+    for (const { t, why } of accountable) {
       const here = present.has(t);
-      console.log(`  ${here ? 'present' : 'ABSENT '}  ${t}   (created by the migration)`);
+      console.log(`  ${here ? 'present' : 'ABSENT '}  ${t}   (${why})`);
       if (!here) missing.push(t);
     }
-    for (const t of RUNNER_TABLES) {
-      const here = present.has(t);
-      console.log(`  ${here ? 'present' : 'ABSENT '}  ${t}   ← CREATED BY THE RUNNER, NOT THE MIGRATION`);
-      if (!here) missing.push(t);
-    }
-    if (!missing.length) ok(`all ${V1_TABLES.length + RUNNER_TABLES.length} are present`);
+    if (!missing.length) ok(`all ${accountable.length} are present`);
     else bad(`${missing.length} expected table(s) absent`, missing.join(', '));
 
     // ── schema_migrations is the discrepancy: show what it holds ──────────
@@ -218,11 +246,14 @@ async function main() {
 
     // ── THE IDENTITY ──────────────────────────────────────────────────────
     h('THE ARITHMETIC');
-    const accountedFor = [...V1_TABLES, ...RUNNER_TABLES].filter((t) => present.has(t));
+    const accountedFor = accountable.map((a) => a.t).filter((t) => present.has(t));
     const derived = rows.length - accountedFor.length;
     console.log(`  relations in the dump                   ${String(rows.length).padStart(5)}`);
-    console.log(`  less the migration's own tables         ${String(-V1_TABLES.filter((t) => present.has(t)).length).padStart(5)}`);
+    console.log(`  less connectors.v1's tables             ${String(-V1_TABLES.filter((t) => present.has(t)).length).padStart(5)}`);
     console.log(`  less the runner's bookkeeping table     ${String(-RUNNER_TABLES.filter((t) => present.has(t)).length).padStart(5)}`);
+    if (hasV2) {
+      console.log(`  less registrations.v2's tables          ${String(-V2_TABLES.filter((t) => present.has(t)).length).padStart(5)}`);
+    }
     console.log(`                                          ${'-'.repeat(5)}`);
     console.log(`  derived pre-migration baseline          ${String(derived).padStart(5)}`);
     console.log(`  measured pre-migration baseline         ${String(MEASURED_BASELINE).padStart(5)}`);
@@ -230,12 +261,17 @@ async function main() {
 
     if (derived === MEASURED_BASELINE) {
       ok(`the identity closes: ${rows.length} − ${accountedFor.length} = ${MEASURED_BASELINE}`);
-      ok('NOTHING UNEXPLAINED. The additional table beyond the migration\'s 12 is schema_migrations,');
+      ok('NOTHING UNEXPLAINED. The additional table beyond connectors.v1\'s 12 is schema_migrations,');
       ok('created by the runner to record its own version. My 137 was an arithmetic error, not an');
       ok('unaccounted object.');
       console.log('');
-      console.log(`  After migration v2 (+3 tables) production should read ${rows.length + 3} relations`);
-      console.log(`  (${baseTables.length + 3} base tables + ${views.length} view${views.length === 1 ? '' : 's'}).`);
+      if (!hasV2) {
+        console.log(`  After migration v2 (+3 tables) production should read ${rows.length + 3} relations`);
+        console.log(`  (${baseTables.length + 3} base tables + ${views.length} view${views.length === 1 ? '' : 's'}).`);
+      } else {
+        console.log(`  registrations.v2 is applied here: ${rows.length} relations = ${baseTables.length} base tables`);
+        console.log(`  + ${views.length} view${views.length === 1 ? '' : 's'}.`);
+      }
     } else {
       const diff = derived - MEASURED_BASELINE;
       bad(`THE IDENTITY DOES NOT CLOSE — derived ${derived}, measured ${MEASURED_BASELINE} (${diff > 0 ? '+' : ''}${diff})`,
