@@ -190,6 +190,22 @@ echo $?                            # must be 0, or stop
 #    generation is deterministic, so step 2b rebuilds it and compares a DIGEST. The only thing
 #    that travels between the two commands is a 24-character hash.
 #
+#    ⚠ `railway run` RUNS ON YOUR MACHINE, so it CANNOT use the private database URL.
+#      Railway's DATABASE_URL points at postgres.railway.internal, which resolves only inside
+#      Railway's private network; from your laptop it fails with ENOTFOUND. The maintenance
+#      connection for these two commands must therefore use the PUBLIC proxy host (Railway →
+#      Postgres → Variables → DATABASE_PUBLIC_URL), with the maintenance role's credentials.
+#      Set MIGRATION_DATABASE_URL to that, in the Railway Variables UI, typed not shell-set.
+#      (That variable is also what makes the apply run as the maintenance identity rather than
+#      the application role, so it is needed either way.)
+#
+#      Before either command, confirm WHICH project and environment the CLI is pointed at —
+#      a plan reviewed against staging and applied to production is the accident this prevents:
+#          railway status
+#      Expect project `meticulous-laughter`, environment `production`. The digest also binds
+#      this: the digest covers the database identity, so a digest computed on one database is
+#      refused on another, even one holding identical rows (asserted in §13 of the harness).
+#
 #    ⚠ NOT `railway ssh`. That runs inside the DEPLOYED container, built from `main` — which is
 #      still f284243 and does not contain this script at all. Once it does, it contains whatever
 #      main holds, which is not necessarily the reviewed candidate. Run from YOUR checkout with

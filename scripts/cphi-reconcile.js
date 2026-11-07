@@ -286,6 +286,43 @@ function planDigest(plan) {
   return crypto.createHash('sha256').update(JSON.stringify(rest)).digest('hex').slice(0, 24);
 }
 
+// ── WHAT THE CODE GUARD ACTUALLY COVERS (ruling 47 item 4) ─────────────────────────────────────────
+//
+// The clean-tree refusal covers every TRACKED file in the repository, so any edit to this script,
+// to src/lib/db.js, or to package-lock.json makes a production apply refuse. That is the guard.
+//
+// This fingerprint is the narrower, positive statement: the exact bytes of the files this operation
+// loads, hashed from DISK rather than from git, plus the version of the database driver actually
+// installed. It is printed into the transcript so the record says what ran, not only what was
+// committed — the two differ in precisely the case the guard exists to catch, and node_modules is
+// not tracked at all, so git can say nothing about the installed driver.
+//
+// Two things it still cannot cover, said plainly rather than left implied: the rest of the installed
+// node_modules tree, and the Node binary itself. Both are outside git, and a fingerprint that
+// pretended to cover them would be worse than one that names its own edge.
+const FINGERPRINTED = [
+  'scripts/cphi-reconcile.js',
+  'src/lib/db.js',
+  'package.json',
+  'package-lock.json',
+];
+function codeFingerprint() {
+  const hash = crypto.createHash('sha256');
+  const seen = [];
+  for (const rel of FINGERPRINTED) {
+    const abs = path.join(__dirname, '..', rel);
+    try {
+      hash.update(rel).update('\u0001').update(fs.readFileSync(abs));
+      seen.push(rel);
+    } catch { hash.update(rel).update('\u0001ABSENT'); }
+  }
+  let pgv = 'unknown';
+  // eslint-disable-next-line global-require, import/no-unresolved
+  try { pgv = require('pg/package.json').version; } catch { /* reported as unknown */ }
+  hash.update(`pg@${pgv}`);
+  return `${hash.digest('hex').slice(0, 16)} (${seen.length}/${FINGERPRINTED.length} files, pg@${pgv})`;
+}
+
 // Who am I connected as, and can this identity do the job? Printed rather than assumed, because
 // "run it as the migrator" is an instruction and this is the fact.
 async function connectionIdentity() {
@@ -793,6 +830,7 @@ async function applyPlan(file) {
         `you expected ${EXPECT_CODE_SHA}, this is ${codeSha}.`);
     }
     ok_line(`code: ${codeSha} (clean)${EXPECT_CODE_SHA ? ' — matches the authorized SHA' : ''}`);
+    ok_line(`reconciliation fingerprint: ${codeFingerprint()}`);
 
     console.log(`\n  production apply authorized for plan ${plan.plan_id}`);
     console.log(`  database identity ${live.identity_sha} (${live.database}) — matches the plan`);
@@ -1012,6 +1050,7 @@ async function applyPlan(file) {
   } catch { /* reported above */ }
 
   console.log(`\n  code         ${pcode}`);
+  console.log(`  fingerprint  ${codeFingerprint()}`);
   console.log(`  plan id      ${plan.plan_id}   (new on every generation)`);
   console.log(`  plan digest  ${plan.plan_digest}   <-- THIS is what identifies the plan's CONTENT`);
   console.log(`  database     ${plan.db_identity.database} / identity ${plan.db_identity.identity_sha}`);

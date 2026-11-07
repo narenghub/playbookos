@@ -136,8 +136,12 @@ function snapshotCheckout(label, { dirty = false } = {}) {
     'commit', '-q', '-m', 'harness snapshot', '--allow-empty');
   try { fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(dest, 'node_modules')); } catch { /* exists */ }
   if (dirty) {
-    // Modify a TRACKED file, which is what the refusal is about.
-    fs.appendFileSync(path.join(dest, 'package.json'), '\n');
+    // Modify a TRACKED file, which is what the refusal is about. `dirty` may name which one, so
+    // ruling 47 item 4 can be asserted for files OTHER than the script itself — the guard is
+    // repo-wide, and a change to src/lib/db.js or to the dependency lock is just as relevant to
+    // reconciliation as a change to the script.
+    const target = typeof dirty === 'string' ? dirty : 'package.json';
+    fs.appendFileSync(path.join(dest, target), '\n');
   }
   return {
     script: path.join(dest, 'scripts', 'cphi-reconcile.js'),
@@ -326,6 +330,16 @@ async function main() {
   await refusal('a production apply from a checkout with a modified tracked file', prod.c,
     reconcile(prod.url, ['--apply', planFile, '--apply-to-production',
       '--confirm-plan-id', plan.plan_id], {}, dirtyCo.script), 'uncommitted change');
+  // Item 4: the guard is repo-wide, not script-wide. A change to the database module or to the
+  // dependency lock is as relevant to reconciliation as a change to the script, and reaches it by
+  // a path the script's own contents say nothing about.
+  for (const rel of ['src/lib/db.js', 'package-lock.json']) {
+    const co = snapshotCheckout(`dirty-${rel.replace(/[^a-z]+/gi, '-')}`, { dirty: rel });
+    await refusal(`a production apply with ${rel} modified`, prod.c,
+      reconcile(prod.url, ['--apply', planFile, '--apply-to-production',
+        '--confirm-plan-id', plan.plan_id], {}, co.script), 'uncommitted change');
+  }
+
   await refusal('a production apply whose --expect-code-sha is not this checkout', prod.c,
     reconcile(prod.url, ['--apply', planFile, '--apply-to-production',
       '--confirm-plan-id', plan.plan_id, '--expect-code-sha', 'c0ffee0'], {}, clean.script),
