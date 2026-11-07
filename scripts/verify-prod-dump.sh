@@ -79,6 +79,30 @@ if [ ! -f "$DUMP" ]; then
   exit 2
 fi
 
+# ── THE FILE MUST ACTUALLY CONTAIN A DUMP ─────────────────────────────────────────────────────────
+# On 2026-11-07 this ran against a 0-byte file. It printed "(0 bytes)" in the header, restored
+# nothing, and then reported "format detected: plain SQL" — a format claim about a file with no
+# bytes in it, invented by a detector handed an empty buffer. The real reason was on the line above,
+# unused. A 54-step migration was reported as unverified when nothing had been verified at all.
+#
+# The byte count was already being computed; it was only ever printed. Reading it is the whole fix.
+# 4 KiB is below any possible real dump of this database (production's is ~26 MB) and above any
+# truncation worth attempting a restore on.
+DUMP_BYTES="$(wc -c <"$DUMP" | tr -d ' ')"
+if [ "$DUMP_BYTES" -lt 4096 ]; then
+  echo "" >&2
+  echo "verify-prod-dump: $DUMP is $DUMP_BYTES bytes — that is not a database dump." >&2
+  echo "" >&2
+  echo "  Nothing was restored and nothing was verified. This is not a migration failure." >&2
+  echo "  The file is empty or truncated: the download did not complete, or the dump was" >&2
+  echo "  taken against a connection that failed. Production's dump is around 26 MB." >&2
+  echo "" >&2
+  echo "  Pick the dump that has bytes in it:" >&2
+  echo "      ls -lh \"\$(dirname \"$DUMP\")\"/*.dump" >&2
+  echo "" >&2
+  exit 2
+fi
+
 # Find the toolchain the same way every harness in this repo does, rather than assuming a path.
 for d in /usr/lib/postgresql/16/bin /usr/lib/postgresql/15/bin \
          /opt/homebrew/opt/postgresql@16/bin /opt/homebrew/opt/postgresql@15/bin \

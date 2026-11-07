@@ -247,6 +247,20 @@ async function main() {
       //
       // So: pick the tool by the file's actual format, let it fail loudly, and then COUNT what
       // arrived. A restore that produced no tables is a failed restore whatever the exit code said.
+      // Before detecting anything: is there a dump here at all? A format detector handed an empty
+      // buffer does not return "empty", it returns its fallback — so a 0-byte file was reported on
+      // 2026-11-07 as "format detected: plain SQL", a claim with no evidence behind it, while the
+      // actual reason (no bytes) was already known. Size is checked first so the error names the
+      // file, not the format.
+      const dumpBytes = fs.statSync(DUMP).size;
+      if (dumpBytes < 4096) {
+        bad(`${path.basename(DUMP)} is ${dumpBytes} bytes — that is not a database dump`,
+          'nothing was restored and nothing was verified; this is not a migration failure. The file '
+          + 'is empty or truncated — the download did not complete. Production\'s dump is around '
+          + '26 MB. Check `ls -lh` on the directory and use the one with bytes in it.');
+        throw new Error('stop');
+      }
+
       const head = fs.readFileSync(DUMP, { encoding: 'latin1', flag: 'r' }).slice(0, 8192);
       const isCustom = head.startsWith('PGDMP');
       const isTar = /\.tar$/i.test(DUMP);
