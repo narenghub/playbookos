@@ -542,6 +542,13 @@ pf_step "existing functionality still works on a migrated database" node scripts
 # RELEASE.md is what the CEO follows at the keyboard, and a migration printing a count he was not
 # expecting is where a release stops and a person starts guessing.
 pf_step "no document quotes a stale migration step count" node --test scripts/doc-step-counts.test.js
+# The production dump halted on `could not create unique index "idx_cem_unique"` — the table already
+# held duplicate (event_slug, holder_normalized) pairs. A standalone CREATE UNIQUE INDEX on a
+# populated table FAILS where an inline constraint would have been silently skipped, and the sweep
+# built for the second class reported "nothing missing" on the same run that hit the first. Nine such
+# indexes exist on tables holding production rows. review_status and entity_note carry human work, so
+# the migration refuses by default and refuses a genuine conflict even when asked.
+pf_step "a unique index on duplicated data refuses rather than guessing" node scripts/check-cphi-duplicate-guard.js
 
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 

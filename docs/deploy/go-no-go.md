@@ -108,6 +108,27 @@ a second one surfaces in the same run rather than costing another backup.
 
 ---
 
+## One item that needs a decision from you before the migration can finish
+
+**`cphi_exhibitor_matches` holds duplicate `(event_slug, holder_normalized)` pairs**, so
+`idx_cem_unique` cannot be created and the chain halts at the `cphi exhibitors` step. Full account:
+`docs/tickets/ENG-005`.
+
+`review_status` and `entity_note` carry human work — a review, a note from someone at a stand — so the
+migration refuses to pick a survivor on its own, and refuses a genuine conflict even when asked.
+
+Your next `verify-prod-dump.sh` run prints every duplicate group with its row ids and says, for each,
+whether it can be resolved without losing a review. Then one of two things:
+
+- **all groups resolvable** → run that one step with `--resolve-duplicates`; every reviewed and
+  annotated row is kept, the rest are deleted by explicit id
+- **any group is a conflict** → you decide which row survives in each, delete the others, and the step
+  then passes with no flag
+
+The migrator chain passes no flags, so an unattended migration can never delete a row.
+
+---
+
 ## One item that needs your decision, not your action
 
 `sitenex_deals.status_changed_at` exists on production **with no default**, because

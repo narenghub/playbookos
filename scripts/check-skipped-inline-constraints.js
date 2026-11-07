@@ -179,6 +179,57 @@ function declarations() {
   return [...byKey.values()];
 }
 
+// ── STANDALONE `CREATE UNIQUE INDEX`, WHICH THIS SWEEP ORIGINALLY MISSED ───────────────────────────
+//
+// On 2026-11-07 the production dump run reported "no constraint declared inline is missing from this
+// database" — truthfully — and then halted two sections later:
+//
+//     CPHI migration error: could not create unique index "idx_cem_unique"
+//
+// `CREATE UNIQUE INDEX IF NOT EXISTS idx_cem_unique ON cphi_exhibitor_matches
+//  (event_slug, holder_normalized)` is not declared inside a CREATE TABLE, so this sweep never looked
+// at it. The failure mode is identical and arguably worse: an inline constraint on an existing table
+// is silently SKIPPED, whereas a standalone CREATE UNIQUE INDEX on a table that already holds
+// duplicates FAILS and takes the migration step down with it.
+//
+// There are nine of these, on tables including molecules, molecule_pricing, molecule_dmf_matches,
+// study_molecules and research_findings — all of which hold real rows in production. Covering only
+// the first kind meant finding the second kind one production dump at a time, which is the loop this
+// sweep exists to break.
+//
+// Expression indexes are kept verbatim — `LOWER(molecule_name)` is used as written in the GROUP BY,
+// so the duplicate check means the same thing the index would. Partial indexes keep their WHERE
+// clause, because without it the check invents duplicates the index would never have objected to.
+const UNIQ_IDX = /CREATE\s+UNIQUE\s+INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?["']?([a-zA-Z_][a-zA-Z0-9_]*)["']?\s+ON\s+(?:public\.)?["']?([a-zA-Z_][a-zA-Z0-9_]*)["']?\s*(?=\()/gi;
+
+function uniqueIndexDeclarations() {
+  const found = new Map();
+  for (const dir of DIRS) {
+    if (!fs.existsSync(dir)) continue;
+    for (const file of walk(dir)) {
+      const src = fs.readFileSync(file, 'utf8');
+      let m;
+      UNIQ_IDX.lastIndex = 0;
+      while ((m = UNIQ_IDX.exec(src)) !== null) {
+        const [, name, table] = m;
+        const open = src.indexOf('(', m.index + m[0].length - 1);
+        const exprs = tableBody(src, open);          // balanced, so LOWER(x) survives intact
+        if (!exprs) continue;
+        // A partial index's predicate, up to the statement's end.
+        const rest = src.slice(open + (exprs.length + 2), open + (exprs.length + 2) + 400);
+        const wh = rest.match(/^\s*WHERE\s+([^;`]+)/i);
+        const where = wh ? wh[1].replace(/\s+/g, ' ').trim().replace(/\)\s*$/, '') : null;
+        if (found.has(name)) { found.get(name).files.push(path.relative(ROOT, file)); continue; }
+        found.set(name, {
+          name, table, exprs: exprs.replace(/\s+/g, ' ').trim(), where,
+          files: [path.relative(ROOT, file)],
+        });
+      }
+    }
+  }
+  return [...found.values()];
+}
+
 async function main() {
   h('CONSTRAINTS DECLARED INSIDE `CREATE TABLE IF NOT EXISTS` — SKIPPED ON ANY EXISTING TABLE');
 
@@ -249,6 +300,45 @@ async function main() {
     console.log(`\n  ${[...new Set(absentTables)].length} declared table(s) do not exist here yet — the migration`);
     console.log(`  creates them, so their inline constraints WILL be applied. Not a gap:`);
     console.log(`      ${[...new Set(absentTables)].sort().join(', ')}`);
+  }
+
+  // ── standalone CREATE UNIQUE INDEX, measured the same way ──────────────────────────────────────
+  const idxDecls = uniqueIndexDeclarations();
+  const idxBlocked = [];
+  for (const ix of idxDecls) {
+    const exists = (await c.query(`SELECT to_regclass($1) IS NOT NULL AS t`, [`public.${ix.table}`])).rows[0].t;
+    if (!exists) continue;                      // the migration creates the table, and the index with it
+    const present = (await c.query(
+      `SELECT COUNT(*)::int n FROM pg_indexes WHERE schemaname='public' AND indexname = $1`,
+      [ix.name])).rows[0].n > 0;
+    if (present) continue;
+    // Absent on a table that exists: would CREATE UNIQUE INDEX succeed, or are there already
+    // duplicates? This is the question the cphi failure answered the hard way.
+    try {
+      const whereSql = ix.where ? ` WHERE ${ix.where}` : '';
+      const r = await c.query(
+        `SELECT COUNT(*)::int n FROM (
+           SELECT 1 FROM ${ix.table}${whereSql}
+            GROUP BY ${ix.exprs} HAVING COUNT(*) > 1) d`);
+      const rows = (await c.query(`SELECT COUNT(*)::int n FROM ${ix.table}${whereSql}`)).rows[0].n;
+      if (r.rows[0].n > 0) idxBlocked.push({ ...ix, groups: r.rows[0].n, rows });
+      else console.log(`\n  note  ${ix.name} on ${ix.table} is absent but CAN be created ` +
+        `(${rows} row(s), no duplicates)`);
+    } catch (e) {
+      // A column named in the declaration may not exist here yet; that is the migration's job, not a
+      // duplicate problem. Said rather than swallowed.
+      console.log(`\n  note  ${ix.name} on ${ix.table} could not be pre-checked: ${e.message.split('\n')[0]}`);
+    }
+  }
+  if (idxBlocked.length) {
+    fail = 1;
+    console.log(`\n  ${idxBlocked.length} standalone UNIQUE INDEX(es) CANNOT be created on this database —`);
+    console.log(`  the data already contains duplicates. Each of these HALTS its migration step:\n`);
+    for (const ix of idxBlocked) {
+      console.log(`    ${ix.name}  ON ${ix.table} (${ix.exprs})${ix.where ? ` WHERE ${ix.where}` : ''}`);
+      console.log(`        ${ix.groups} duplicate group(s) among ${ix.rows} row(s) · declared in ${ix.files.join(', ')}`);
+    }
+    console.log('');
   }
 
   if (!missing.length) {
