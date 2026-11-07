@@ -183,25 +183,30 @@ ls -lh ~/db-backups/<new>.dump
 scripts/verify-prod-dump.sh ~/db-backups/<new>.dump --reconcile-on-restore
 echo $?                            # must be 0, or stop
 
-# ── CHECKPOINT 2 — CPHI reconciliation, production.  ⛔ BLOCKED — see below.
-#    PLANNING is read-only and safe to run against production now:
-railway ssh 'node scripts/cphi-reconcile.js --plan-out /tmp/cphi-plan.json'
-echo $?                            # writes nothing to the database; send me the report
+# ── CHECKPOINT 2 — CPHI reconciliation, production. Two commands, with a review between them.
 #
-#    APPLYING to production has NO AUTHORIZED PATH TODAY, by design. The apply is gated on
-#    --confirm-not-production, whose own refusal reads "never against production itself".
-#    That gate came from ruling 35 ("do not run reconciliation against production"), and it is
-#    working exactly as intended. Using it to reconcile production would mean passing a flag
-#    that asserts the opposite of what is true, which is not a safeguard anyone can rely on
-#    afterwards — and the next person reading the audit trail could not tell the difference
-#    between a rehearsal and the real thing.
+#    2a. PLAN. Read-only: it writes nothing to the database.
+railway ssh 'bash -lc "cd /app && node scripts/cphi-reconcile.js --plan-out /tmp/cphi-plan.json"'
+echo $?                            # 1 while duplicates exist — that is the blocking finding
 #
-#    The migration cannot proceed without it: idx_cem_unique cannot be created while duplicates
-#    exist, so the `cphi exhibitors` step halts (fail-closed, by design).
+#    Send me the report. The plan file records the database identity, the table-state
+#    fingerprint, the expected group and deletion counts, the conflict count, and its own
+#    integrity hash. I read it and tell you the plan id to confirm.
 #
-#    This needs a deliberate, separately named production path before the release can continue.
-#    It is a new destructive capability, so it is not being written under the feature freeze
-#    without the owner's explicit say-so.
+#    2b. APPLY. Needs BOTH the production flag and the plan id, which must be the id of the
+#        plan in that file. Neither can be supplied by an environment variable.
+railway ssh 'bash -lc "cd /app && node scripts/cphi-reconcile.js --apply /tmp/cphi-plan.json \
+  --apply-to-production --confirm-plan-id <THE PLAN ID I GIVE YOU>"'
+echo $?
+#
+#    It refuses, having changed nothing, if: the database is not the one the plan was built
+#    from; any row in the table moved since the plan was made; the plan file was edited; the
+#    plan's own counts disagree with its contents; any group is in CONFLICT; or the plan id
+#    does not match. --apply-to-production and --confirm-not-production are mutually exclusive.
+#
+#    ROLLBACK POINT: every prior row is in cphi_reconcile_audit under that plan_id, and
+#    cphi_reconcile_runs records that this run had target 'production' — so a rehearsal and
+#    the real thing stay distinguishable afterwards.
 
 # ── CHECKPOINT 3 — the 54-step migration, as the migrator, app still serving the OLD release.
 #    Safe in this order because the schema is additive: the old release runs against it unchanged.

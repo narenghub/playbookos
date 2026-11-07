@@ -59,6 +59,32 @@ const CONFIRMED = has('--confirm-not-production');
 const PLAN_OUT = val('--plan-out', '/tmp/cphi-reconcile-plan.json');
 const ACTOR = process.env.RECONCILE_ACTOR || 'cphi-reconcile.js';
 
+// ── THE PRODUCTION PATH (ruling 44) ────────────────────────────────────────────────────────────────
+//
+// Until ruling 44 there was exactly one apply flag, --confirm-not-production, and its refusal read
+// "never against production itself". That was right for ruling 35 and it made the release
+// impossible: idx_cem_unique cannot be created while duplicates exist, production has 232 duplicate
+// groups, and the only command that removes them asserts it is not running against production.
+//
+// The wrong fix is to pass that flag anyway. It would leave an audit trail in which a rehearsal and
+// the real thing are indistinguishable — which is the one question that trail exists to answer.
+//
+// So: a second, differently named path, MUTUALLY EXCLUSIVE with the first, which refuses unless the
+// database it is pointed at is the same database the reviewed plan was built from, the rows are
+// still the rows in that plan, and the operator names the plan id out loud. Authorization is never
+// inferred from the environment: an env var can be inherited by a subprocess nobody is watching,
+// and the whole point of this gate is that a person decided.
+const APPLY_PROD = has('--apply-to-production');
+const CONFIRM_PLAN_ID = val('--confirm-plan-id');
+
+if (APPLY_PROD && CONFIRMED) {
+  console.error('\nRefusing: --apply-to-production and --confirm-not-production are mutually exclusive.\n');
+  console.error('  They describe opposite claims about the database in front of you. Passing both says');
+  console.error('  nothing, and a gate that can be satisfied by saying nothing is not a gate.\n');
+  process.exit(2);
+}
+const TARGET = APPLY_PROD ? 'production' : 'isolated-restore';
+
 const HUMAN_FIELDS = ['review_status', 'entity_note'];
 const DERIVED_FIELDS = ['exhibiting', 'exhibitor_name', 'booth', 'hall', 'match_tier',
   'molecules_covered', 'searched_terms', 'checked_at'];
@@ -124,6 +150,71 @@ function fingerprint(rows) {
       r.checked_at instanceof Date ? r.checked_at.toISOString() : r.checked_at].join('\u0001'))
     .join('\u0002');
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+}
+
+// ── WHICH DATABASE IS THIS, AND IS IT STILL THE ONE THE PLAN WAS BUILT FROM ───────────────────────
+//
+// Ruling 44 items 2 and 3. Every component is chosen to be (a) stable for one database over time,
+// (b) different for a restore of that database into a fresh cluster, and (c) not a secret. No
+// connection string, no host, no password, no token — the identity that gets written down is a
+// SHA-256 of these, and the plan carries the hash, not the parts that could identify a host.
+//
+//   database name      stable; differs between 'railway' and a disposable 'existing'
+//   database OID       assigned by CREATE DATABASE — a restore into a fresh cluster gets a new one
+//   table OID          likewise assigned on restore, so it moves even if the name does not
+//   column fingerprint catches a schema that has changed under a reviewed plan
+//   schema step count  which migration chain this code believes in
+//
+// pg_control_system()'s system_identifier would be the textbook answer and is deliberately NOT used:
+// it is superuser-only on a managed Postgres, and a guard that needs superuser is a guard that gets
+// run as superuser.
+async function dbIdentity() {
+  const r = (await query(`
+    SELECT current_database()                                        AS database,
+           (SELECT oid::text FROM pg_database WHERE datname = current_database()) AS db_oid,
+           to_regclass('public.cphi_exhibitor_matches')::oid::text    AS table_oid`)).rows[0];
+  const cols = (await query(
+    `SELECT column_name, data_type FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='cphi_exhibitor_matches'
+      ORDER BY column_name`)).rows.map((c) => `${c.column_name}:${c.data_type}`).join(',');
+  let schemaSteps = null;
+  try { schemaSteps = require('../src/lib/migrate-all').SCHEMA_STEPS.length; } catch { /* reported as null */ }
+
+  const parts = {
+    database: r.database,
+    db_oid: r.db_oid,
+    table_oid: r.table_oid,
+    columns_sha: crypto.createHash('sha256').update(cols).digest('hex').slice(0, 16),
+    schema_steps: schemaSteps,
+  };
+  const sha = crypto.createHash('sha256')
+    .update(JSON.stringify(parts)).digest('hex').slice(0, 24);
+  return { ...parts, identity_sha: sha };
+}
+
+// The state of the whole table, not just the duplicate groups. A plan reviewed yesterday is only
+// safe to apply if nothing in this table moved since — including rows OUTSIDE the duplicate groups,
+// because a row added to a group changes what the survivor should be.
+async function tableStateFingerprint() {
+  const rows = (await query(
+    `SELECT id, event_slug, holder_normalized, review_status,
+            COALESCE(btrim(entity_note), '') AS note
+       FROM cphi_exhibitor_matches ORDER BY id`)).rows;
+  const canonical = rows
+    .map((r) => [r.id, r.event_slug, r.holder_normalized, r.review_status, r.note].join('\u0001'))
+    .join('\u0002');
+  return {
+    rows: rows.length,
+    state_sha: crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 24),
+  };
+}
+
+// A plan file is reviewed, then sits on disk, then is acted on. Between those points it can be
+// edited — by a person tidying it, by a script, by a mistake. The hash covers everything except
+// itself, so an altered plan is refused rather than applied.
+function planIntegritySha(plan) {
+  const { plan_sha: _omit, ...rest } = plan;
+  return crypto.createHash('sha256').update(JSON.stringify(rest)).digest('hex').slice(0, 24);
 }
 
 async function columnsOf(table) {
@@ -297,14 +388,29 @@ async function buildPlan() {
     groups.push(planForGroup(rows));
   }
   const total = (await query(`SELECT COUNT(*)::int n FROM cphi_exhibitor_matches`)).rows[0].n;
-  return {
+
+  // Ruling 44 item 2: the plan file is the reviewed artifact, so everything the apply will check
+  // has to be IN it. A plan that does not state what it expects cannot be compared against reality.
+  const identity = await dbIdentity();
+  const state = await tableStateFingerprint();
+  const conflicts = groups.filter((g) => g.classification === 'CONFLICT').length;
+  const expectedDeletions = groups.reduce((n, g) => n + (g.delete_ids || []).length, 0);
+
+  const plan = {
     plan_id: crypto.randomUUID(),
     generated_at: new Date().toISOString(),
     table: 'cphi_exhibitor_matches',
     index_blocked: 'idx_cem_unique ON cphi_exhibitor_matches (event_slug, holder_normalized)',
     table_rows: total,
+    db_identity: identity,
+    table_state: state,
+    expected_groups: groups.length,
+    expected_deletions: expectedDeletions,
+    conflict_count: conflicts,
     groups,
   };
+  plan.plan_sha = planIntegritySha(plan);
+  return plan;
 }
 
 function report(plan) {
@@ -374,18 +480,175 @@ async function ensureAudit() {
     CREATE INDEX IF NOT EXISTS idx_cra_plan ON cphi_reconcile_audit (plan_id, applied_at);
   `);
   await query(`COMMENT ON TABLE cphi_reconcile_audit IS $c$Every row CPHI duplicate reconciliation changed or removed, with its complete prior contents in before_row. This is the recovery path: a deleted row can be reconstructed field for field from here. Written by scripts/cphi-reconcile.js --apply.$c$`);
+
+  // ── THE RUN LEDGER (ruling 44 item 6) ───────────────────────────────────────────────────────────
+  //
+  // The per-row audit answers "what did this change". It cannot answer "was this a rehearsal or the
+  // real thing", and after the fact that is the question people actually ask. One row per
+  // invocation, naming the target, the plan, the database identity (a hash — never a connection
+  // string, host, user, password or token) and how it ended.
+  //
+  // Added by ALTER rather than folded into the CREATE above, because CREATE TABLE IF NOT EXISTS
+  // skips the whole statement on an existing table — the repository's own founding lesson — so a
+  // column added to that literal would silently never appear on any database that already has it.
+  await query(`
+    CREATE TABLE IF NOT EXISTS cphi_reconcile_runs (
+      run_id       BIGSERIAL PRIMARY KEY,
+      plan_id      TEXT NOT NULL,
+      target       TEXT NOT NULL CHECK (target IN ('production','isolated-restore')),
+      db_identity  TEXT NOT NULL,
+      database_name TEXT,
+      code_sha     TEXT,
+      actor        TEXT NOT NULL,
+      started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finished_at  TIMESTAMPTZ,
+      outcome      TEXT,
+      merged       INTEGER, deleted INTEGER, skipped INTEGER, refused INTEGER, failed INTEGER
+    )`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_crr_plan ON cphi_reconcile_runs (plan_id, started_at)`);
+  await query(`ALTER TABLE cphi_reconcile_audit ADD COLUMN IF NOT EXISTS run_id BIGINT`);
+  await query(`ALTER TABLE cphi_reconcile_audit ADD COLUMN IF NOT EXISTS target TEXT`);
+}
+
+// Opened before the first transaction, so even a run that dies mid-flight leaves a row saying it
+// started, against which target, and never finished.
+async function openRun(plan) {
+  const id = await dbIdentity();
+  let code = null;
+  try {
+    code = execFileSync('git', ['-C', path.join(__dirname, '..'), 'rev-parse', '--short', 'HEAD'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch { /* not a checkout */ }
+  const r = await query(
+    `INSERT INTO cphi_reconcile_runs
+       (plan_id, target, db_identity, database_name, code_sha, actor, outcome)
+     VALUES ($1,$2,$3,$4,$5,$6,'started') RETURNING run_id`,
+    [plan.plan_id, TARGET, id.identity_sha, id.database, code, ACTOR]);
+  return r.rows[0].run_id;
+}
+
+async function closeRun(runId, outcome, counts) {
+  await query(
+    `UPDATE cphi_reconcile_runs
+        SET finished_at = NOW(), outcome = $2,
+            merged = $3, deleted = $4, skipped = $5, refused = $6, failed = $7
+      WHERE run_id = $1`,
+    [runId, outcome, counts.merged, counts.deleted, counts.skipped, counts.refused, counts.failed]);
 }
 
 async function applyPlan(file) {
-  if (!CONFIRMED) {
+  // The original gate, unchanged (ruling 44 item 7). An invocation with neither flag is refused
+  // exactly as before, and the isolated-restore path behaves exactly as it did.
+  if (!CONFIRMED && !APPLY_PROD) {
     console.error('\nRefusing to apply without --confirm-not-production.\n');
     console.error('  This DELETES rows. Run it against an isolated restore of the production backup,');
     console.error('  never against production itself, and only with separate authorization.\n');
+    console.error('  To reconcile PRODUCTION, which is a different and separately authorized thing:');
+    console.error('      --apply-to-production --confirm-plan-id <the plan id>\n');
     process.exit(2);
   }
   if (!fs.existsSync(file)) { console.error(`no such plan file: ${file}`); process.exit(2); }
   const plan = JSON.parse(fs.readFileSync(file, 'utf8'));
+
+  // ── THE PRODUCTION GATE (ruling 44 items 3, 4 and 7) ────────────────────────────────────────────
+  //
+  // Seven refusals, each one a separate reason. They run before ensureAudit() and before any
+  // transaction opens, so a refused production invocation has touched nothing at all — it has not
+  // even created a table.
+  if (APPLY_PROD) {
+    const refuse = (what, why) => {
+      console.error(`\nRefusing production apply: ${what}\n`);
+      console.error(`  ${why}\n`);
+      console.error('  Nothing has been changed. Re-plan against the database you intend to act on,');
+      console.error('  review the new plan, and pass its plan id.\n');
+      process.exit(2);
+    };
+
+    // 4a. The second confirmation, bound to the exact plan — not to the file path, which can be
+    //     recalled from shell history pointing at a file whose contents have since been replaced.
+    if (!CONFIRM_PLAN_ID) {
+      refuse('--confirm-plan-id was not given',
+        'a production apply needs two independent confirmations: the flag that says which database, '
+        + 'and the plan id that says which change. One of them is missing.');
+    }
+    if (CONFIRM_PLAN_ID !== plan.plan_id) {
+      refuse('the confirmed plan id is not this plan\'s id',
+        `you confirmed ${CONFIRM_PLAN_ID}, this file holds ${plan.plan_id} — so the file is not the `
+        + 'plan you reviewed.');
+    }
+
+    // 4b. Authorization is never inferred from the environment. Said out loud because the
+    //     surrounding code reads plenty of env vars, and the next person should not add one here.
+    if (!APPLY_PROD) refuse('internal: production path reached without its flag', 'this should be unreachable');
+
+    // 3a. The plan file must not have been edited since it was written.
+    if (!plan.plan_sha) {
+      refuse('this plan has no integrity hash',
+        'it predates the production path and cannot be verified. Re-plan.');
+    }
+    const recomputed = planIntegritySha(plan);
+    if (recomputed !== plan.plan_sha) {
+      refuse('the plan file has been modified since it was generated',
+        `it records ${plan.plan_sha}, its contents hash to ${recomputed}. A reviewed plan and an `
+        + 'edited plan are not the same artifact.');
+    }
+
+    // 3b. Same database. This is the refusal that stops a plan built on a restore from landing on
+    //     production, and a production plan from landing on a restore.
+    if (!plan.db_identity || !plan.db_identity.identity_sha) {
+      refuse('this plan does not record which database it was built from', 're-plan.');
+    }
+    const live = await dbIdentity();
+    if (live.identity_sha !== plan.db_identity.identity_sha) {
+      refuse('this plan was built against a DIFFERENT database',
+        `plan: ${plan.db_identity.database} (db oid ${plan.db_identity.db_oid}, table oid `
+        + `${plan.db_identity.table_oid}, ${plan.db_identity.schema_steps} schema steps) — `
+        + `connected: ${live.database} (db oid ${live.db_oid}, table oid ${live.table_oid}, `
+        + `${live.schema_steps} schema steps).`);
+    }
+
+    // 3c. Same rows. Covers the whole table, not just the groups: a row added to a group changes
+    //     which row should survive it.
+    const liveState = await tableStateFingerprint();
+    if (!plan.table_state || liveState.state_sha !== plan.table_state.state_sha) {
+      refuse('the table has changed since this plan was reviewed',
+        `plan saw ${plan.table_state ? plan.table_state.rows : '?'} row(s) `
+        + `(${plan.table_state ? plan.table_state.state_sha : 'no fingerprint'}), the database now `
+        + `holds ${liveState.rows} (${liveState.state_sha}). The plan's survivor choices were made `
+        + 'from rows that are no longer what is there.');
+    }
+
+    // 3d. The plan's own arithmetic must still describe itself. Cheap, and it catches a plan
+    //     assembled by something other than buildPlan().
+    const groups = plan.groups || [];
+    const conflicts = groups.filter((g) => g.classification === 'CONFLICT').length;
+    const deletions = groups.reduce((n, g) => n + (g.delete_ids || []).length, 0);
+    if (groups.length !== plan.expected_groups || deletions !== plan.expected_deletions
+        || conflicts !== plan.conflict_count) {
+      refuse('the plan does not match its own summary',
+        `it states ${plan.expected_groups} group(s), ${plan.expected_deletions} deletion(s), `
+        + `${plan.conflict_count} conflict(s); its groups contain ${groups.length}, ${deletions}, `
+        + `${conflicts}.`);
+    }
+
+    // 7. The production flag does not buy its way past conflict refusal. Per-group refusal already
+    //    happens below; this refuses the WHOLE run up front, because a production apply that
+    //    knowingly leaves the index uncreatable is a half-done release, not a step forward.
+    if (conflicts > 0) {
+      refuse(`${conflicts} group(s) are in CONFLICT`,
+        'two rows in those groups carry human-authored notes that disagree, and no rule can settle '
+        + 'that. Resolve them by hand first — the plan lists every row, its status, its note and its '
+        + 'timestamps. The unique index cannot be created while they remain either way.');
+    }
+
+    console.log(`\n  production apply authorized for plan ${plan.plan_id}`);
+    console.log(`  database identity ${live.identity_sha} (${live.database}) — matches the plan`);
+    console.log(`  table state ${liveState.state_sha} (${liveState.rows} rows) — matches the plan`);
+    console.log(`  ${groups.length} group(s), ${deletions} deletion(s), 0 conflict(s)`);
+  }
+
   await ensureAudit();
+  const runId = await openRun(plan);
 
   // ── WHICH CODE IS APPLYING THIS (ruling 38 item 4) ──────────────────────────────────────────────
   //
@@ -471,10 +734,10 @@ async function applyPlan(file) {
             [g.survivor_id, ...g.merges.map((m) => m.value)])).rows[0];
           await tx.query(
             `INSERT INTO cphi_reconcile_audit
-               (plan_id, event_slug, holder_normalized, action, survivor_id, affected_id, before_row, after_row, actor)
-             VALUES ($1,$2,$3,'merge',$4,$4,$5,$6,$7)`,
+               (plan_id, event_slug, holder_normalized, action, survivor_id, affected_id, before_row, after_row, actor, run_id, target)
+             VALUES ($1,$2,$3,'merge',$4,$4,$5,$6,$7,$8,$9)`,
             [plan.plan_id, g.event_slug, g.holder_normalized, g.survivor_id,
-              JSON.stringify(survivorBefore), JSON.stringify(after), ACTOR]);
+              JSON.stringify(survivorBefore), JSON.stringify(after), ACTOR, runId, TARGET]);
           didMerge = true;
         }
 
@@ -484,10 +747,10 @@ async function applyPlan(file) {
           if (!before) continue;
           await tx.query(
             `INSERT INTO cphi_reconcile_audit
-               (plan_id, event_slug, holder_normalized, action, survivor_id, affected_id, before_row, actor)
-             VALUES ($1,$2,$3,'delete',$4,$5,$6,$7)`,
+               (plan_id, event_slug, holder_normalized, action, survivor_id, affected_id, before_row, actor, run_id, target)
+             VALUES ($1,$2,$3,'delete',$4,$5,$6,$7,$8,$9)`,
             [plan.plan_id, g.event_slug, g.holder_normalized, g.survivor_id, id,
-              JSON.stringify(before), ACTOR]);
+              JSON.stringify(before), ACTOR, runId, TARGET]);
           await tx.query(`DELETE FROM cphi_exhibitor_matches WHERE id = $1`, [id]);
           removed.push(id);
         }
@@ -534,15 +797,22 @@ async function applyPlan(file) {
     `SELECT COUNT(*)::int n FROM (
        SELECT 1 FROM cphi_exhibitor_matches
         GROUP BY event_slug, holder_normalized HAVING COUNT(*) > 1) d`)).rows[0].n;
+  const counts = { merged, deleted, skipped, refused, failed };
   if (left) {
+    await closeRun(runId, failed ? 'incomplete-with-rollback' : 'incomplete-conflicts', counts);
     console.log(`\n  ${left} duplicate group(s) remain — the unique index still cannot be created.`);
     console.log(`  Those are the CONFLICT groups: resolve them by hand and re-run.`);
+    console.log(`\n  Run ${runId} recorded in cphi_reconcile_runs against target '${TARGET}'.`);
     process.exit(1);
   }
+  await closeRun(runId, failed ? 'complete-with-rollback' : 'complete', counts);
   console.log(`\n  no duplicate (event_slug, holder_normalized) pairs remain.`);
   console.log(`  The migration's \`cphi exhibitors\` step will now create idx_cem_unique.`);
   console.log(`\n  Recovery: every deleted row's complete prior contents are in cphi_reconcile_audit`);
-  console.log(`  under plan_id ${plan.plan_id}.\n`);
+  console.log(`  under plan_id ${plan.plan_id}.`);
+  console.log(`\n  Run ${runId} recorded in cphi_reconcile_runs: target '${TARGET}', outcome`);
+  console.log(`  '${failed ? 'complete-with-rollback' : 'complete'}'. That row is how anyone later`);
+  console.log(`  tells a rehearsal from the real thing.\n`);
 }
 
 (async () => {

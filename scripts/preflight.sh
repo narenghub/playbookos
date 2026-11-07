@@ -561,6 +561,7 @@ pf_step "CPHI reconciliation is auditable, repeatable and recoverable" node scri
 # is the half that holds against `git add -f` and cannot be forgotten.
 pf_step "no database dump is sitting in the working tree" node scripts/check-no-database-dumps.js
 pf_step "the migration is a pre-deploy step, not part of starting the server" node scripts/check-deploy-ordering.js
+pf_step "the production reconciliation gate cannot be talked past" node scripts/check-cphi-production-path.js
 
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 
