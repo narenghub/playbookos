@@ -64,21 +64,31 @@ could tell that it had.**
 
 `scripts/migrate-cphi-exhibitors.js`, with the unique index separated from the `CREATE TABLE` block:
 
+`scripts/migrate-cphi-exhibitors.js` reports and refuses, and **contains no `DELETE` statement at
+all**. An earlier version took `--resolve-duplicates` and did the cleanup itself; it worked and it was
+tested, and it was still the wrong shape — two destructive paths for one table, and the one nobody
+reads is the one that runs. There is now exactly one, `scripts/cphi-reconcile.js`:
+
 | Situation | Behaviour |
 |---|---|
 | No duplicates | index created, nothing touched |
-| Duplicates, ≤1 human-touched row per group | **refuses by default**, names every group with its row ids, changes nothing |
-| …with `--resolve-duplicates` | keeps the reviewed/annotated row — **even when it is the older one** — else the most recently checked; deletes the rest **by explicit id** |
-| Any group with ≥2 human-touched rows | **refused even with the flag**, and hands over a `SELECT` for the conflicting rows |
+| Duplicates | migration **refuses**, names every group with its row ids, changes nothing, points at the reconciliation tool |
+| `cphi-reconcile.js` (default) | **read-only**: full report and a plan file, per-group fingerprints, exit 1 because duplicates are a blocking finding |
+| `--apply <plan> --confirm-not-production` | **one transaction per group**: merge, audit rows and deletions commit together or not at all. Keeps the reviewed/annotated row — **even when it is the older one** — carries human work the losers hold onto the survivor **with provenance**, deletes the rest **by explicit id** |
+| Any group with contradicting human work | **CONFLICT**: left exactly as it is, with a `SELECT` for the rows |
+| A group whose rows moved since the plan | **REFUSED** per group, under `SELECT … FOR UPDATE` so the check and the act are atomic |
 
-**The migrator chain passes no flags**, so an unattended production migration can never delete a row.
 Deletes are by id, never by pattern or timestamp — the rule the 2026-09-30 ten-minute `DELETE` broke.
+Recovery is `cphi_reconcile_audit`, which holds the complete prior row as JSON for everything touched;
+a deleted row was rebuilt from it field for field as part of the harness, rather than the table's
+existence being taken as proof of recoverability.
 
 ## Verification
 
 | Harness | Asserts | Result |
 |---|---|---|
-| `check-cphi-duplicate-guard.js` | all four situations above, plus that the reviewed row survives when it is the older one, and that the sweep now **predicts** this class | **24 assertions, exit 0** |
+| `check-cphi-duplicate-guard.js` | the migration has **no `DELETE` statement at all** — refused with `(no flags)`, `--resolve-duplicates`, `--force` and `--yes`, rows untouched each time — plus conflict labelling and that the sweep now **predicts** this class | **27 assertions, exit 0** |
+| `check-cphi-reconcile.js` | the reconciliation itself, on a dump restored into an isolated database: deterministic plan, a note on a non-surviving row carried onto the survivor with provenance, conflicts untouched, a deleted row rebuilt from the audit table field for field, a second apply a no-op, drift refused per group, and **one transaction per group** proved by an injected `BEFORE DELETE` failure that rolled back the merge, the deletes and the audit rows together | **66 assertions, exit 0** |
 | `check-skipped-inline-constraints.js` | extended to standalone `CREATE UNIQUE INDEX`, including expression indexes (`LOWER(x)` used verbatim in the `GROUP BY`) and partial indexes (`WHERE` preserved, or the check invents duplicates the index would not object to) | run per dump |
 
 ---

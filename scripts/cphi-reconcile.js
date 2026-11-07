@@ -47,7 +47,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { query } = require('../src/lib/db');
+const { query, withTransaction } = require('../src/lib/db');
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -320,10 +320,30 @@ async function applyPlan(file) {
   await ensureAudit();
 
   h(`APPLYING PLAN ${plan.plan_id}`);
-  let merged = 0; let deleted = 0; let skipped = 0; let refused = 0;
+  let merged = 0; let deleted = 0; let skipped = 0; let refused = 0; let failed = 0;
   const cols = await columnsOf('cphi_exhibitor_matches');
   const noteCol = cols.includes('entity_note') ? 'entity_note' : `NULL::text AS entity_note`;
 
+  // ── ONE TRANSACTION PER GROUP ───────────────────────────────────────────────────────────────────
+  //
+  // Ruling 36 item 2. These statements used to run on autocommit, one at a time: UPDATE the survivor,
+  // INSERT the merge audit, then for each loser INSERT an audit row and DELETE. A failure anywhere in
+  // that sequence left the group HALF RECONCILED — merged but losers still present, or one loser gone
+  // and another not. Worse, a re-run then saw a fingerprint that no longer matched the plan and
+  // correctly refused the group, so a partial apply turned into a group only fixable by hand.
+  //
+  // PER GROUP, not per plan: a group that fails must not roll back the groups that already succeeded,
+  // which is the same isolation the drift refusal already has.
+  //
+  // The SELECT inside the transaction takes FOR UPDATE, which also closes a race the old code had:
+  // it checked the fingerprint, then wrote in a separate statement, with nothing holding the rows in
+  // between. Now the check and the act are one atomic unit.
+  //
+  // And this corrects a comment that used to sit over the delete: "the audit row goes in BEFORE the
+  // delete, so a failure between the two leaves the record rather than losing it". That was the right
+  // instinct for autocommit and is the wrong reasoning now — atomicity is better than ordering. The
+  // audit row and the deletion it describes commit together or not at all, so there can be no audit
+  // row claiming a deletion that did not happen, and no deletion without its record.
   for (const g of plan.groups) {
     const label = `${g.event_slug} / ${g.holder_normalized}`;
     if (g.classification === 'CONFLICT') {
@@ -331,71 +351,98 @@ async function applyPlan(file) {
       skipped += 1;
       continue;
     }
-    const live = (await query(
-      `SELECT id, event_slug, holder, holder_normalized, exhibiting, exhibitor_name, booth, hall,
-              match_tier, molecules_covered, review_status, searched_terms, checked_at, ${noteCol}
-         FROM cphi_exhibitor_matches
-        WHERE event_slug = $1 AND holder_normalized = $2
-        ORDER BY id`, [g.event_slug, g.holder_normalized])).rows;
 
-    // Already reconciled — this is what makes a second run of the same plan a no-op.
-    if (live.length === 1 && String(live[0].id) === String(g.survivor_id)) {
+    let outcome;
+    try {
+      outcome = await withTransaction(async (tx) => {
+        const live = (await tx.query(
+          `SELECT id, event_slug, holder, holder_normalized, exhibiting, exhibitor_name, booth, hall,
+                  match_tier, molecules_covered, review_status, searched_terms, checked_at, ${noteCol}
+             FROM cphi_exhibitor_matches
+            WHERE event_slug = $1 AND holder_normalized = $2
+            ORDER BY id
+              FOR UPDATE`, [g.event_slug, g.holder_normalized])).rows;
+
+        // Already reconciled — this is what makes a second run of the same plan a no-op.
+        if (live.length === 1 && String(live[0].id) === String(g.survivor_id)) {
+          return { status: 'done' };
+        }
+        // Drift: the plan describes rows that no longer look like this. Refuse, never guess.
+        const nowPrint = fingerprint(live);
+        if (nowPrint !== g.fingerprint) {
+          return { status: 'drift', now: nowPrint };
+        }
+        const survivorBefore = live.find((r) => String(r.id) === String(g.survivor_id));
+        if (!survivorBefore) return { status: 'missing' };
+
+        let didMerge = false;
+        if (g.merges.length) {
+          const sets = g.merges.map((m, i) => `${m.field} = $${i + 2}`).join(', ');
+          const after = (await tx.query(
+            `UPDATE cphi_exhibitor_matches SET ${sets} WHERE id = $1
+             RETURNING id, event_slug, holder, holder_normalized, exhibiting, exhibitor_name, booth, hall,
+                       match_tier, molecules_covered, review_status, searched_terms, checked_at, ${noteCol}`,
+            [g.survivor_id, ...g.merges.map((m) => m.value)])).rows[0];
+          await tx.query(
+            `INSERT INTO cphi_reconcile_audit
+               (plan_id, event_slug, holder_normalized, action, survivor_id, affected_id, before_row, after_row, actor)
+             VALUES ($1,$2,$3,'merge',$4,$4,$5,$6,$7)`,
+            [plan.plan_id, g.event_slug, g.holder_normalized, g.survivor_id,
+              JSON.stringify(survivorBefore), JSON.stringify(after), ACTOR]);
+          didMerge = true;
+        }
+
+        const removed = [];
+        for (const id of g.delete_ids) {
+          const before = live.find((r) => String(r.id) === String(id));
+          if (!before) continue;
+          await tx.query(
+            `INSERT INTO cphi_reconcile_audit
+               (plan_id, event_slug, holder_normalized, action, survivor_id, affected_id, before_row, actor)
+             VALUES ($1,$2,$3,'delete',$4,$5,$6,$7)`,
+            [plan.plan_id, g.event_slug, g.holder_normalized, g.survivor_id, id,
+              JSON.stringify(before), ACTOR]);
+          await tx.query(`DELETE FROM cphi_exhibitor_matches WHERE id = $1`, [id]);
+          removed.push(id);
+        }
+        return { status: 'applied', didMerge, removed };
+      });
+    } catch (e) {
+      // The transaction rolled back, so this group is exactly as it was: nothing merged, nothing
+      // deleted, no audit rows. Reported as a failure rather than swallowed, and the other groups
+      // carry on.
+      outcome = { status: 'error', message: e.message.split('\n')[0] };
+    }
+
+    if (outcome.status === 'done') {
       console.log(`  done      ${label} — already reconciled to #${g.survivor_id}`);
       skipped += 1;
-      continue;
-    }
-    // Drift: the plan describes rows that no longer look like this. Refuse the group, never guess.
-    const nowPrint = fingerprint(live);
-    if (nowPrint !== g.fingerprint) {
+    } else if (outcome.status === 'drift') {
       console.log(`  REFUSED   ${label} — changed since the plan was made ` +
-        `(plan ${g.fingerprint}, now ${nowPrint}). Re-generate the plan.`);
+        `(plan ${g.fingerprint}, now ${outcome.now}). Re-generate the plan.`);
       refused += 1;
-      continue;
-    }
-
-    const survivorBefore = live.find((r) => String(r.id) === String(g.survivor_id));
-    if (!survivorBefore) {
+    } else if (outcome.status === 'missing') {
       console.log(`  REFUSED   ${label} — the planned survivor #${g.survivor_id} is gone`);
       refused += 1;
-      continue;
+    } else if (outcome.status === 'error') {
+      console.log(`  ROLLED BACK  ${label} — ${outcome.message}`);
+      console.log(`               nothing merged, nothing deleted, no audit rows written for this group`);
+      failed += 1;
+    } else {
+      if (outcome.didMerge) {
+        console.log(`  merged    ${label} → #${g.survivor_id}: ${g.merges.map((m) => m.field).join(', ')}`);
+        merged += 1;
+      }
+      if (outcome.removed.length) {
+        console.log(`  deleted   ${label} — ${outcome.removed.join(', ')} (recorded in cphi_reconcile_audit)`);
+        deleted += outcome.removed.length;
+      }
     }
-
-    if (g.merges.length) {
-      const sets = g.merges.map((m, i) => `${m.field} = $${i + 2}`).join(', ');
-      const after = (await query(
-        `UPDATE cphi_exhibitor_matches SET ${sets} WHERE id = $1
-         RETURNING id, event_slug, holder, holder_normalized, exhibiting, exhibitor_name, booth, hall,
-                   match_tier, molecules_covered, review_status, searched_terms, checked_at, ${noteCol}`,
-        [g.survivor_id, ...g.merges.map((m) => m.value)])).rows[0];
-      await query(
-        `INSERT INTO cphi_reconcile_audit
-           (plan_id, event_slug, holder_normalized, action, survivor_id, affected_id, before_row, after_row, actor)
-         VALUES ($1,$2,$3,'merge',$4,$4,$5,$6,$7)`,
-        [plan.plan_id, g.event_slug, g.holder_normalized, g.survivor_id,
-          JSON.stringify(survivorBefore), JSON.stringify(after), ACTOR]);
-      merged += 1;
-      console.log(`  merged    ${label} → #${g.survivor_id}: ${g.merges.map((m) => m.field).join(', ')}`);
-    }
-
-    for (const id of g.delete_ids) {
-      const before = live.find((r) => String(r.id) === String(id));
-      if (!before) continue;
-      // The audit row goes in BEFORE the delete, so a failure between the two leaves the record
-      // rather than losing it. Written first, deleted second — never the other way round.
-      await query(
-        `INSERT INTO cphi_reconcile_audit
-           (plan_id, event_slug, holder_normalized, action, survivor_id, affected_id, before_row, actor)
-         VALUES ($1,$2,$3,'delete',$4,$5,$6,$7)`,
-        [plan.plan_id, g.event_slug, g.holder_normalized, g.survivor_id, id,
-          JSON.stringify(before), ACTOR]);
-      await query(`DELETE FROM cphi_exhibitor_matches WHERE id = $1`, [id]);
-      deleted += 1;
-    }
-    if (g.delete_ids.length) console.log(`  deleted   ${label} — ${g.delete_ids.join(', ')} (recorded in cphi_reconcile_audit)`);
   }
 
   h('RESULT');
-  console.log(`  ${merged} group(s) merged · ${deleted} row(s) deleted · ${skipped} skipped · ${refused} refused`);
+  console.log(`  ${merged} group(s) merged · ${deleted} row(s) deleted · ${skipped} skipped · `
+    + `${refused} refused · ${failed} rolled back`);
 
   const left = (await query(
     `SELECT COUNT(*)::int n FROM (

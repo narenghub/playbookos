@@ -20,6 +20,10 @@
 //
 // And the two refusals that make a plan safe to leave on disk and come back to:
 //
+//   TRANSACTIONAL  the merge, the audit rows and the deletions commit together or not at all —
+//                  proved by injecting a real BEFORE DELETE failure at the database and showing the
+//                  group comes back untouched, with no audit rows, while other groups still apply.
+//
 //   DRIFT        a group whose rows have changed since the plan was generated is REFUSED, not
 //                reconciled on stale information. This is the `verify-product-revocation-live.js`
 //                lesson from CLAUDE.md: an expectation that encoded account state somebody had since
@@ -429,6 +433,81 @@ async function main() {
     await c2.end();
   }
 
+  // ── 9. TRANSACTIONAL — an injected failure must roll the whole group back ──────────────────────
+  h('9. TRANSACTIONAL — merge, audit and deletes commit together or not at all');
+  {
+    // NO TEST HOOK IN THE PRODUCTION CODE. A `RECONCILE_FAIL_AFTER` env switch inside the one
+    // destructive path in the repository would be its own defect — a branch that exists only for
+    // tests, in the code least able to afford one. So the failure is injected at the DATABASE: a
+    // BEFORE DELETE trigger that raises for a single row id. That is a real mid-transaction failure,
+    // in the same place a deadlock or a constraint violation would land.
+    const { url: u3, c: c3 } = await db(base, 'cphi_tx', `${TABLE}${FIXTURE}`);
+    const pf = `${temp.base}/tx.json`;
+    reconcile(u3, ['--plan-out', pf]);
+    const tp = JSON.parse(fs.readFileSync(pf, 'utf8'));
+    const gamma = tp.groups.find((g) => g.holder_normalized === 'gamma');
+    const alpha = tp.groups.find((g) => g.holder_normalized === 'alpha');
+
+    // gamma is the group that both MERGES (carries a note) and DELETES, so a rollback has to undo
+    // two different kinds of write plus two audit rows.
+    if (gamma.merges.length && gamma.delete_ids.length) {
+      ok(`gamma both merges (${gamma.merges.map((m) => m.field).join(', ')}) and deletes #${gamma.delete_ids.join(', ')} — a rollback must undo both`);
+    } else {
+      bad('the fixture group does not exercise both a merge and a delete');
+    }
+
+    await c3.query(`
+      CREATE FUNCTION reconcile_boom() RETURNS trigger AS $$
+      BEGIN RAISE EXCEPTION 'injected failure deleting row %', OLD.id; END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER t_reconcile_boom BEFORE DELETE ON cphi_exhibitor_matches
+        FOR EACH ROW WHEN (OLD.id = ${gamma.delete_ids[0]}) EXECUTE FUNCTION reconcile_boom();`);
+    ok(`trigger installed: deleting row #${gamma.delete_ids[0]} will raise`);
+
+    const beforeRows = await total(c3);
+    const r = reconcile(u3, ['--apply', pf, '--confirm-not-production']);
+
+    if (/ROLLED BACK/.test(r.out)) ok('the failing group is reported as ROLLED BACK');
+    else bad('the rollback is not reported', r.out.trim().split('\n').slice(-8).join(' | '));
+    if (/injected failure deleting row/.test(r.out)) ok('…naming the underlying database error');
+    else bad('the error is not surfaced');
+
+    // THE ASSERTIONS THAT MATTER: the group must be byte-for-byte as it was.
+    const gammaRows = await groupRows(c3, 'gamma');
+    if (gammaRows.length === gamma.rows.length) ok(`gamma still has all ${gamma.rows.length} rows — no partial deletion`);
+    else bad(`gamma has ${gammaRows.length} of ${gamma.rows.length} rows`, 'a partial apply is the state that cannot be re-applied');
+
+    const survivorNow = gammaRows.find((x) => String(x.id) === String(gamma.survivor_id));
+    const noteMerge = gamma.merges.find((m) => m.field === 'entity_note');
+    if (noteMerge && !survivorNow.entity_note) ok('the survivor was NOT merged — the UPDATE rolled back with the DELETE');
+    else if (noteMerge) bad('the merge committed while the delete failed', `entity_note is now ${JSON.stringify(survivorNow.entity_note)}`);
+
+    const auditForGamma = (await c3.query(
+      `SELECT COUNT(*)::int n FROM cphi_reconcile_audit WHERE holder_normalized = 'gamma'`)).rows[0].n;
+    if (auditForGamma === 0) ok('no audit rows were written for the rolled-back group');
+    else bad(`${auditForGamma} audit row(s) survive for a group that was never changed`,
+      'an audit row claiming a deletion that did not happen is worse than none');
+
+    // PER GROUP, not per plan: the other groups must have gone through.
+    const alphaRows = await groupRows(c3, 'alpha');
+    if (alphaRows.length === 1) ok('alpha was still reconciled — one failing group does not roll back the others');
+    else bad(`alpha has ${alphaRows.length} rows`, 'a single failure rolled back unrelated work');
+    if (await total(c3) < beforeRows) ok('the rest of the plan applied normally');
+    else bad('nothing at all was applied');
+
+    // And the rollback must leave the group RE-APPLIABLE rather than stuck: same plan, no trigger.
+    await c3.query('DROP TRIGGER t_reconcile_boom ON cphi_exhibitor_matches; DROP FUNCTION reconcile_boom();');
+    const again = reconcile(u3, ['--apply', pf, '--confirm-not-production']);
+    const gammaAfter = await groupRows(c3, 'gamma');
+    if (gammaAfter.length === 1) ok('with the fault removed, the SAME plan reconciles gamma — the rollback left it re-appliable, not stuck');
+    else bad(`gamma still has ${gammaAfter.length} rows after a clean re-apply`, again.out.trim().split('\n').slice(-6).join(' | '));
+    if (gammaAfter.length === 1 && /Met Giulia at the stand/.test(gammaAfter[0].entity_note || '')) {
+      ok('…and the note was carried across on that second attempt');
+    } else if (gammaAfter.length === 1) {
+      bad('the note was lost on the retry', JSON.stringify(gammaAfter[0].entity_note));
+    }
+    await c3.end();
+  }
+
   await c.end();
 
   h(`  ${pass} assertion(s) passed · ${fail} failed`);
@@ -440,8 +519,10 @@ async function main() {
   console.log('\nPASS  the plan is deterministic and reviewable; human notes and reviews are carried onto\n'
     + '      the surviving row rather than deleted with the old one; contradicting groups are left\n'
     + '      alone; every change is recorded with the complete prior row, and a deleted row was\n'
-    + '      rebuilt from that record field for field; a second apply is a no-op; and a plan whose\n'
-    + '      rows have moved is refused rather than acted on.\n');
+    + '      rebuilt from that record field for field; a second apply is a no-op; a plan whose rows\n'
+    + '      have moved is refused rather than acted on; and an injected database failure rolled the\n'
+    + '      whole group back — no partial deletion, no orphan audit row, other groups unaffected,\n'
+    + '      and the group still re-appliable afterwards.\n');
 }
 
 main().then(() => {
