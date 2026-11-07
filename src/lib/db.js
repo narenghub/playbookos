@@ -37,9 +37,26 @@ function sslConfig() {
       ? require('fs').readFileSync(process.env.DATABASE_CA_CERT_FILE, 'utf8')
       : null);
 
-  if (!pem) return { rejectUnauthorized: false };   // unchanged default
-
   const want = (process.env.DATABASE_SSL_FINGERPRINT || '').replace(/[^A-Fa-f0-9]/g, '').toUpperCase();
+
+  // ── FAIL CLOSED, NOT QUIETLY OPEN (ruling 50 item 1) ────────────────────────────────────────────
+  //
+  // A fingerprint with no certificate to verify against used to fall through to the unverified
+  // default. That is the worst of the possible behaviours: the operator has said "pin this", the
+  // connection is NOT pinned, and nothing says so. One mistyped variable name — DATABASE_CA_CERTFILE
+  // for DATABASE_CA_CERT_FILE — produced an unverified connection that looked verified.
+  //
+  // Node only calls checkServerIdentity when rejectUnauthorized is true, so in that state the
+  // fingerprint check was not merely weakened: it never ran at all.
+  if (!pem && want) {
+    throw new Error(
+      'DATABASE_SSL_FINGERPRINT is set but no certificate was supplied, so there is nothing to '
+      + 'verify against and the fingerprint would be ignored. Set DATABASE_CA_CERT_FILE (or '
+      + 'DATABASE_CA_CERT), or unset the fingerprint — refusing to connect unverified while a pin '
+      + 'has been asked for.');
+  }
+
+  if (!pem) return { rejectUnauthorized: false };   // unchanged default
   return {
     ca: pem,
     rejectUnauthorized: true,

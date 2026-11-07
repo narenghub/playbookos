@@ -33,3 +33,9 @@ ui-evidence/
 *.sql.bz2
 *.sql.zst
 *.bak
+
+# Database server certificates fetched for CLI pinning (scripts/fetch-db-cert.sh).
+# Not secret, but operational files do not belong in a public repo — see check-no-database-dumps.js
+*.crt
+*.pem
+db-server.crt

@@ -42,7 +42,7 @@ function stop() {
   try { fs.rmSync(temp.base, { recursive: true, force: true }); } catch { /* temp */ }
 }
 
-function main() {
+async function main() {
   h('DATABASE TLS — DOES VERIFICATION REFUSE THE WRONG CERTIFICATE');
 
   const dir = pgBinCandidates()[0];
@@ -152,7 +152,89 @@ function main() {
     bad(`a fingerprint mismatch was accepted (exit ${a4.code})`, a4.out.slice(0, 200));
   }
 
-  // 5 — item 2: the default is reached by the same code path, unchanged, when nothing is set.
+  // 5 — a fingerprint with no certificate must FAIL CLOSED, not fall through to the unverified
+  //     default. One mistyped variable name used to produce an unverified connection that looked
+  //     pinned, and Node never calls checkServerIdentity when rejectUnauthorized is false, so the
+  //     check did not run at all rather than running weakly.
+  const a5 = attempt('fingerprint without a certificate', {
+    DATABASE_CA_CERT_FILE: '', DATABASE_CA_CERT: '', DATABASE_SSL_FINGERPRINT: fp,
+  });
+  if (a5.code !== 0 && /nothing to verify against|refusing to connect unverified/i.test(a5.out)) {
+    ok('a fingerprint with no certificate is refused — it does not silently fall back to unverified');
+  } else {
+    bad(`a fingerprint with no certificate did not fail closed (exit ${a5.code})`,
+      `${a5.out.slice(0, 200)} — an operator who mistyped the cert variable would believe they were pinned`);
+  }
+
+  // 6 — ITEM 2: pinning on BOTH production CLI connections, through the real commands rather than a
+  //     stand-in. Planning goes through RECONCILE_PLAN_DATABASE_URL (read-only), applying through
+  //     MIGRATION_DATABASE_URL (maintenance). Both must work pinned, and both must fail on a wrong
+  //     certificate — a pin that only covers one of the two leaves the other unprotected.
+  h('BOTH PRODUCTION CLI CONNECTIONS, PINNED');
+  const admin = new (require('pg').Client)({ connectionString: `${url}` });
+  await admin.connect();
+  await admin.query(`CREATE DATABASE tlsrec`);
+  await admin.end();
+  const recUrl = `postgresql://postgres@127.0.0.1:${PGPORT}/tlsrec`;
+  const seed = new (require('pg').Client)({
+    connectionString: recUrl, ssl: { rejectUnauthorized: false },
+  });
+  await seed.connect();
+  await seed.query(`
+    CREATE TABLE cphi_exhibitor_matches (
+      id BIGSERIAL PRIMARY KEY, event_slug TEXT NOT NULL, holder TEXT NOT NULL,
+      holder_normalized TEXT NOT NULL, exhibiting BOOLEAN NOT NULL DEFAULT false,
+      exhibitor_name TEXT, booth TEXT, hall TEXT, match_tier TEXT, molecules_covered TEXT,
+      review_status TEXT NOT NULL DEFAULT 'unreviewed', searched_terms TEXT,
+      checked_at TIMESTAMPTZ DEFAULT NOW(), entity_note TEXT);
+    INSERT INTO cphi_exhibitor_matches
+      (event_slug, holder, holder_normalized, exhibiting, review_status, entity_note, match_tier) VALUES
+      ('e','Alpha','alpha', true, 'entity_review', 'holder is Alpha SA', 't1'),
+      ('e','Alpha','alpha', true, 'unreviewed',    NULL,                 't2');`);
+  await seed.end();
+
+  const planFile = `${base}/tls-plan.json`;
+  const rec = (args, extraEnv) => {
+    try {
+      const out = execFileSync(process.execPath,
+        [path.join(__dirname, 'cphi-reconcile.js'), ...args],
+        { env: { ...process.env, DATABASE_URL: recUrl, ...extraEnv },
+          encoding: 'utf8', stdio: 'pipe', timeout: 120000 });
+      return { code: 0, out };
+    } catch (e) {
+      return { code: e.status === undefined ? 1 : e.status, out: `${e.stdout || ''}${e.stderr || ''}` };
+    }
+  };
+  const PIN = { DATABASE_CA_CERT_FILE: path.join(base, 'server.crt'), DATABASE_SSL_FINGERPRINT: fp };
+  const BADPIN = { DATABASE_CA_CERT_FILE: path.join(base, 'other.crt'), DATABASE_SSL_FINGERPRINT: '' };
+
+  const p1 = rec(['--plan-out', planFile], { ...PIN, RECONCILE_PLAN_DATABASE_URL: recUrl });
+  if (p1.code === 1 && /TLS TLSv1/.test(p1.out)) {
+    ok('read-only PLANNING works over pinned TLS, and reports the transport as TLS');
+  } else bad(`pinned planning exited ${p1.code}`, p1.out.trim().split('\n').slice(-5).join(' | '));
+
+  const p2 = rec(['--plan-out', `${base}/never.json`], { ...BADPIN, RECONCILE_PLAN_DATABASE_URL: recUrl });
+  if (p2.code !== 0 && /self.signed|certificate/i.test(p2.out)) {
+    ok('…and a WRONG certificate refuses the planning connection');
+  } else bad(`planning accepted a wrong certificate (exit ${p2.code})`, p2.out.slice(0, 200));
+
+  const digest = fs.existsSync(planFile) ? JSON.parse(fs.readFileSync(planFile, 'utf8')).plan_digest : null;
+  const a6 = rec(['--apply-current', '--apply-to-production', '--confirm-plan-digest', String(digest)],
+    { ...BADPIN, MIGRATION_DATABASE_URL: recUrl });
+  if (a6.code !== 0 && /self.signed|certificate/i.test(a6.out)) {
+    ok('maintenance-identity APPLY also refuses a wrong certificate — the pin covers both connections');
+  } else bad(`the apply accepted a wrong certificate (exit ${a6.code})`, a6.out.slice(0, 200));
+
+  // The cert must not be able to drift into the repository — the habit that produced the dump near
+  // miss on 2026-11-06.
+  const gi = fs.readFileSync(path.join(__dirname, '..', '.gitignore'), 'utf8');
+  if (/^\*\.crt$/m.test(gi)) ok('.gitignore covers *.crt, so a fetched certificate cannot be committed by `git add -A`');
+  else bad('.gitignore has no *.crt pattern');
+  const fetcher = fs.readFileSync(path.join(__dirname, 'fetch-db-cert.sh'), 'utf8');
+  if (/OUT="\$\{3:-\$HOME\//.test(fetcher)) ok('fetch-db-cert.sh writes outside the repository by default');
+  else bad('fetch-db-cert.sh still defaults to a path inside the repository');
+
+  // 7 — item 2: the default is reached by the same code path, unchanged, when nothing is set.
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'db.js'), 'utf8');
   if (/if \(!pem\) return \{ rejectUnauthorized: false \};/.test(src)) {
     ok('with no certificate supplied, sslConfig() returns the original { rejectUnauthorized: false }');
@@ -172,9 +254,9 @@ function main() {
     + '      byte-for-byte what it was.\n');
 }
 
-try { main(); } catch (e) {
+main().catch((e) => {
   console.error(`\ncheck-db-tls-verification: ${e.message}\n`);
   stop();
   process.exit(1);
-}
+});
 process.on('exit', stop);

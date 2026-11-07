@@ -19,7 +19,12 @@ set -u
 
 HOST="${1:-}"
 PORT="${2:-}"
-OUT="${3:-./db-server.crt}"
+# Default OUTSIDE the repository. On 2026-11-06 three production dumps were sitting in this
+# working tree, one `git add -A` from a public repository. A certificate is not a secret — it is
+# presented to anyone who connects — but the habit of writing operational files into the repo is
+# what produced that near miss, so this does not start one.
+OUT="${3:-$HOME/db-certs/db-server.crt}"
+mkdir -p "$(dirname "$OUT")"
 
 if [ -z "$HOST" ] || [ -z "$PORT" ]; then
   echo "usage: scripts/fetch-db-cert.sh <host> <port> [outfile]" >&2

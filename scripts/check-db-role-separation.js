@@ -385,6 +385,34 @@ async function main() {
       const ddl = await refused(shipped, `CREATE TABLE shipped_probe (x int)`);
       if (ddl && /permission denied/i.test(ddl)) ok('…and that same role still cannot CREATE TABLE');
       else bad('the shipped grants allow DDL', ddl || 'CREATE TABLE was accepted');
+
+      // ── FUTURE OBJECTS (ruling 50 item 3) ───────────────────────────────
+      //
+      // ALTER DEFAULT PRIVILEGES is the half of prod-roles.sql that nobody notices until the
+      // release after next: without it, the NEXT migration's new tables are invisible to the
+      // runtime role and every request touching them fails with "permission denied" — on a deploy
+      // where nothing about the roles was changed, which is the hardest kind to diagnose.
+      //
+      // So a table and a sequence are created AFTER the grants were applied, as the owner, exactly
+      // as a future migration would, and the role's access to them is checked. Nothing about the
+      // existing-object sweep above can detect this.
+      await su.query(`CREATE TABLE future_migration_probe (id BIGSERIAL PRIMARY KEY, x TEXT)`);
+      const fut = (await su.query(
+        `SELECT has_table_privilege('playbookos_app_shipped', 'public.future_migration_probe', 'INSERT') i,
+                has_table_privilege('playbookos_app_shipped', 'public.future_migration_probe', 'SELECT') s,
+                has_sequence_privilege('playbookos_app_shipped',
+                  pg_get_serial_sequence('public.future_migration_probe','id'), 'USAGE') u`)).rows[0];
+      if (fut.i && fut.s && fut.u) {
+        ok('a table created AFTER the grants is usable by the role, sequence included — ALTER DEFAULT PRIVILEGES works');
+      } else {
+        bad('a future migration\'s table would NOT be usable by the runtime role',
+          `insert=${fut.i} select=${fut.s} sequence=${fut.u} — prod-roles.sql's ALTER DEFAULT `
+          + 'PRIVILEGES is missing or incomplete; the next release would fail with permission denied');
+      }
+      const futInsert = await refused(shipped, `INSERT INTO future_migration_probe (x) VALUES ('proof')`);
+      if (!futInsert) ok('…proved by actually inserting into it, which calls nextval() on its new sequence');
+      else bad('the insert into a post-grant table failed', futInsert);
+      await su.query(`DROP TABLE future_migration_probe`);
       await shipped.end();
     } else console.log('        (no nextval-defaulted column found to exercise end to end)');
 
