@@ -66,6 +66,26 @@ const { query } = require('../src/lib/db');
     console.log(`${unknowable ? '⚠️ ' : '✅'} ${unknowable} row(s) left NULL — their status may have changed at any `
       + `point between created_at and updated_at, so any value would be a guess`);
 
+    // ── THE DEFAULT, WHICH THE COMMENT ABOVE PROMISED AND THE SCRIPT NEVER SET ──
+    //
+    // "So: add it empty, backfill what is knowable, and only then set the default for future inserts."
+    // The first two happened. The third was never written, and the verification below demands it — so
+    // this script threw on EVERY run it has ever had, including on production, where the ADD COLUMN
+    // landed before the throw. The column is therefore present there with no default, and every
+    // SiteNex deal created since has started with status_changed_at NULL: no stage clock at all, for
+    // the column that exists to measure stage age.
+    //
+    // Found on 2026-11-07 when the script was added to the migrator chain and failed immediately. It
+    // had never been in a chain, so nothing ever ran it where anybody read the exit code — the same
+    // root cause as ENG-004, one layer further in: a script whose own verification disagreed with its
+    // own DDL, and which reported that disagreement to a terminal nobody was watching.
+    //
+    // Set AFTER the backfill, never on the ADD COLUMN, for the reason given at the top of this file:
+    // ADD COLUMN ... DEFAULT NOW() fills every existing row with NOW(), turning a guess into what
+    // looks like a measurement.
+    await query(`ALTER TABLE sitenex_deals ALTER COLUMN status_changed_at SET DEFAULT NOW()`);
+    console.log('✅ DEFAULT NOW() set for future inserts (existing rows untouched)');
+
     console.log('\nverification:');
     const col = (await query(`SELECT data_type, is_nullable, column_default FROM information_schema.columns
       WHERE table_name='sitenex_deals' AND column_name='status_changed_at'`)).rows[0];

@@ -283,6 +283,63 @@ const SCHEMA_STEPS = [
   { name: 'sitenex phase3', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-sitenex-phase3.js') },
   { name: 'sitenex contract sends', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-sitenex-contract-sends.js') },
   { name: 'sitenex intake links', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-sitenex-intake-links.js') },
+
+  // ── FIVE COLUMN-ONLY MIGRATIONS THAT WERE IN NO CHAIN AND ON NO EXCLUSION LIST ──────────────────
+  //
+  // Found on 2026-11-07 by scripts/check-behavioral-regression.js, which boots the real server and
+  // writes through the real API. The first granted outreach write returned 500:
+  //
+  //     {"error":"column \"channel\" of relation \"outreach\" does not exist"}
+  //
+  // src/lib/outreach/index.js writes outreach.channel on every status change. Production has the
+  // column, because somebody ran migrate-outreach-vocabulary.js there by hand. A database built by
+  // this migrator did not, so outreach was broken on every fresh deployment — the SECOND instance of
+  // that defect in two days, after outreach.partner_id (ENG-004).
+  //
+  // WHY NEITHER CHECKER CAUGHT IT. check-migration-coverage.js asserts that every table a migration
+  // script CREATES is created by the migrator. These five create no tables; they only ADD COLUMN. So
+  // they were not in the chain, not excluded, and not enumerated — invisible by construction. The
+  // coverage checker now fails on any migrate-*.js that is in neither list, whatever it changes.
+  //
+  // Placed here, as a group, because every table they alter exists by this point. They are all
+  // ADD COLUMN IF NOT EXISTS / CREATE INDEX IF NOT EXISTS, so each is a no-op where it has already
+  // been applied — which is every one of them on production.
+  {
+    // outreach.channel + outreach_events.channel — written by src/lib/outreach/index.js on every
+    // status change. Its absence 500s the route.
+    name: 'outreach vocabulary (channel)',
+    required: true,
+    usesOwnPool: true,
+    run: () => runScript('scripts/migrate-outreach-vocabulary.js'),
+  },
+  {
+    // users.invited_partner_id — chosen when an invite is sent, copied to users.partner_id on accept.
+    name: 'partner invite column',
+    required: true,
+    usesOwnPool: true,
+    run: () => runScript('scripts/migrate-partner-invite.js'),
+  },
+  {
+    // prospects.country, prospects.source_partner_id, sitenex_contracts.region
+    name: 'partner book country/region',
+    required: true,
+    usesOwnPool: true,
+    run: () => runScript('scripts/migrate-partner-book-country-region.js'),
+  },
+  {
+    // sitenex_deals.status_changed_at — the stage clock the deal board reads.
+    name: 'sitenex stage clock',
+    required: true,
+    usesOwnPool: true,
+    run: () => runScript('scripts/migrate-sitenex-stage-clock.js'),
+  },
+  {
+    // cphi_exhibitor_matches.entity_note
+    name: 'cphi entity note',
+    required: true,
+    usesOwnPool: true,
+    run: () => runScript('scripts/migrate-cphi-entity-note.js'),
+  },
   { name: 'connectors', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-connectors.js', { args: ['--apply'] }) },
   { name: 'intake', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-intake.js', { args: ['--apply'] }) },
 

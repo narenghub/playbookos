@@ -526,6 +526,22 @@ pf_step "the skipped-constraint sweep can go red and does not cry wolf" node scr
 # shape his 2026-11-06 run reported and runs the whole gate-2 harness against it, so a second defect
 # is found here rather than by asking for another 25MB backup.
 pf_step "the gate-2 harness passes against a production-shaped dump" node scripts/check-production-shape-readiness.js
+# Ruling 33 item 2. The dump test's isolation is an ORDERING — DATABASE_URL is overwritten before
+# src/lib/db binds its Pool — and an invisible load-bearing ordering is one commit from being wrong.
+# This poisons DATABASE_URL, MIGRATION_DATABASE_URL and the PG* vars to point at a live decoy and
+# asserts the decoy is untouched afterwards.
+pf_step "the dump test cannot write to an inherited DATABASE_URL" node scripts/check-dump-test-isolation.js
+# Ruling 33 item 5. Boots the real server against a freshly migrated database and exercises
+# authentication, role freshness, product permissions, outreach and integration gating over HTTP.
+# It found two defects no schema check could: outreach.channel missing (the route 500'd) and
+# migrate-sitenex-stage-clock.js failing its own verification because it never set the DEFAULT its
+# own comment promised. Behaviour catches what shape assertions cannot.
+pf_step "existing functionality still works on a migrated database" node scripts/check-behavioral-regression.js
+# The chain was 47, 48, 49 then 53 steps in two days, and each change left a different subset of eight
+# documents quoting the old number. Corrected by hand three times; the hand-correction was the defect.
+# RELEASE.md is what the CEO follows at the keyboard, and a migration printing a count he was not
+# expecting is where a release stops and a person starts guessing.
+pf_step "no document quotes a stale migration step count" node --test scripts/doc-step-counts.test.js
 
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 

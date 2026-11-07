@@ -129,19 +129,55 @@ async function main() {
 
     // Confirm one deadline and record one decision, so the screenshot shows the states a reviewer
     // will actually see rather than a board on which nothing has happened.
-    const rows = (await oq(
-      `SELECT id FROM federal_opportunities
-        WHERE company_id = (SELECT id FROM companies WHERE slug='abiozen')
-          AND is_current AND response_deadline IS NOT NULL
-        ORDER BY response_deadline LIMIT 1`)).rows;
-    if (rows.length) {
-      await post(`/api/prpa/tracker/opportunities/${rows[0].id}/confirm-deadline`, {});
-      await post(`/api/prpa/tracker/opportunities/${rows[0].id}/review`, {
-        decision: 'no_bid',
-        rationale: 'No verified capability and no supplier quote exists for this requirement.',
-      });
-      ok('one deadline confirmed and one NO-BID recorded, so those states are visible');
+    //
+    // THE ROW MUST BE ONE THE BOARD ACTUALLY SHOWS, and picking it by SQL cannot know that.
+    //
+    // This used to be `ORDER BY response_deadline LIMIT 1` — the earliest deadline, which is the row
+    // most likely to be EXPIRED. The board's default filter is `work`, meaning rows with no bars, and
+    // a passed deadline is a bar (BAR_KINDS.DEADLINE_PASSED). So on 2026-11-07 this check went red
+    // with "the recorded human decision appears — NOT FOUND in the rendered page" having changed
+    // nothing: the fixture's earliest deadline is 2026-11-06T20:00, it was live the day before and
+    // past the day after, and the decided row dropped out of the view being photographed.
+    //
+    // A check that fails by calendar is worse than no check. It would have gone red every day from
+    // now on, for a page that renders correctly — and a checker whose red nobody believes is the
+    // 2026-09-30 root cause, one level up.
+    //
+    // So the row is chosen through the API the page itself reads, by the property the page itself
+    // filters on: no bars. Ranking is computed, not stored, so SQL cannot answer this.
+    const get = (p) => new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1', port: APPPORT, path: p, method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      }, (res) => { const c = []; res.on('data', (d) => c.push(d)); res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(c).toString('utf8') })); });
+      req.on('error', reject); req.end();
+    });
+    const listed = await get('/api/prpa/tracker/opportunities');
+    if (listed.status !== 200) { bad(`could not list opportunities (${listed.status})`, listed.body.slice(0, 200)); throw new Error('stop'); }
+    const all = JSON.parse(listed.body).opportunities || JSON.parse(listed.body);
+    const unbarred = all.filter((r) => r.ranking && r.ranking.bars && r.ranking.bars.length === 0);
+
+    // When the fixture ages out entirely, say THAT, rather than reporting the page as broken. This is
+    // the difference between a failure somebody can act on and one that sends them into the renderer.
+    // NOT EXERCISED: this branch is reached only when every fixture notice has aged out, and there is
+    // no way to reach it here without either waiting months or giving this harness a test-only
+    // override, which is its own defect. Reasoned, not proved — said plainly rather than counted as
+    // coverage. The count in the ok() below is the early warning: when "N of 80 unbarred" approaches
+    // zero, the fixture needs refreshing before this fires.
+    if (!unbarred.length) {
+      bad(`every one of the ${all.length} fixture notices is now barred — the FIXTURE has expired, the page has not`,
+        'refresh fixtures/sam-opportunities-real-*.csv from SAM.gov. The board renders only unbarred '
+        + 'rows by default, so there is nothing for this check to photograph.');
+      throw new Error('stop');
     }
+
+    const target = unbarred[0];
+    await post(`/api/prpa/tracker/opportunities/${target.id}/confirm-deadline`, {});
+    await post(`/api/prpa/tracker/opportunities/${target.id}/review`, {
+      decision: 'no_bid',
+      rationale: 'No verified capability and no supplier quote exists for this requirement.',
+    });
+    ok(`one deadline confirmed and one NO-BID recorded on an unbarred row (${unbarred.length} of ${all.length} unbarred), so those states are visible`);
 
     browser = await chromium.launch();
     const page = await browser.newPage({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 2 });

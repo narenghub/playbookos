@@ -25,7 +25,7 @@
       "remaining_work": [
         "CODE: done (ruling 27 item 5). Boot no longer applies any DDL — server.js calls",
         "src/lib/schema-ready.js, which only SELECTs, and exits non-zero if the schema is absent.",
-        "Migrations run as their own process: node scripts/migrate.js, 48 steps, with a",
+        "Migrations run as their own process: node scripts/migrate.js, 53 steps, with a",
         "schema_migrations ledger. Proved on a disposable cluster by",
         "scripts/check-startup-without-ddl.js (28 assertions, exit 0): the app imports, assesses,",
         "confirms, reviews and exports as a role with NOSUPERUSER, no CREATE on schema public and no",

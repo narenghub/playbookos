@@ -134,6 +134,51 @@ async function main() {
   const declared = scanned.filter((s) => s.tables.length);
   console.log(`  ${scanned.length} migrate-*.js script(s) · ${declared.length} declare at least one CREATE TABLE`);
 
+  // ── EVERY SCRIPT MUST BE IN THE CHAIN OR EXPLICITLY EXCLUDED, WHATEVER IT CHANGES ──────────────
+  //
+  // This check used to reason only about tables a script CREATES, which left a hole the size of the
+  // defect it was written to prevent. On 2026-11-07 check-behavioral-regression.js booted the real
+  // server and the first granted outreach write returned 500:
+  //
+  //     {"error":"column \"channel\" of relation \"outreach\" does not exist"}
+  //
+  // migrate-outreach-vocabulary.js adds outreach.channel, which src/lib/outreach/index.js writes on
+  // every status change. It creates no table, so it was never enumerated here: not in the chain, not
+  // excluded, and not reported — invisible by construction. Four more were in the same position.
+  //
+  // A migration script that only ADDs COLUMNs can break the application just as completely as one
+  // that creates a table, and this is the list that is supposed to notice. So the question is no
+  // longer "does the migrator create this script's tables" but "is this script accounted for at all".
+  // Read from the migrator's SOURCE rather than from its exported SCHEMA_STEPS, because a step's
+  // runner is a closure — `run: () => runScript('scripts/x.js')` — and the path it names is not
+  // recoverable from the exported object.
+  const migratorSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'migrate-all.js'), 'utf8');
+  const chainFiles = new Set(
+    (migratorSrc.match(/runScript\(\s*['"]scripts\/(migrate-[a-z0-9-]+\.js)['"]/g) || [])
+      .map((m) => m.replace(/.*scripts\//, '').replace(/['"].*/, '')),
+  );
+  const orphans = scanned.filter((s) => !chainFiles.has(s.file) && !s.excluded);
+  if (orphans.length) {
+    console.log(`\n  ${orphans.length} script(s) are in NEITHER the migrator chain NOR the exclusion list:`);
+    for (const o of orphans) {
+      const src = fs.readFileSync(path.join(SCRIPTS_DIR, o.file), 'utf8');
+      const cols = [...new Set((src.match(/ALTER TABLE\s+(\w+)\s+ADD COLUMN(?:\s+IF NOT EXISTS)?\s+(\w+)/gi) || [])
+        .map((m) => m.replace(/ALTER TABLE\s+/i, '').replace(/\s+ADD COLUMN(\s+IF NOT EXISTS)?\s+/i, '.')))];
+      console.log(`      ${o.file}`);
+      if (cols.length) console.log(`          adds: ${cols.join(', ')}`);
+      if (o.tables.length) console.log(`          creates: ${o.tables.join(', ')}`);
+      if (!cols.length && !o.tables.length) console.log('          (no CREATE TABLE or ADD COLUMN found — read it and decide)');
+    }
+    console.log('\n  Either add it to SCHEMA_STEPS in src/lib/migrate-all.js, or add it to');
+    console.log('  NOT_PLAIN_CREATORS here with a reason that says what it executes — not what it is for.');
+    console.log('  An entry on that list is a claim about what the script DOES; one was once accepted on');
+    console.log('  the strength of its summary line, and a required schema step sat outside the chain');
+    console.log('  for a month (docs/tickets/ENG-004).');
+    console.log(`\nFAIL  ${orphans.length} migration script(s) unaccounted for.\n`);
+    process.exit(1);
+  }
+  console.log(`  every script is either in the chain (${chainFiles.size}) or excluded by name with a reason`);
+
   if (LIST_ONLY) {
     for (const s of scanned) {
       console.log(`\n  ${s.file}${s.excluded ? '   [EXCLUDED]' : ''}`);

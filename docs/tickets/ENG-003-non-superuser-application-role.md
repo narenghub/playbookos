@@ -138,7 +138,7 @@ means a migration applied only partly — and exits non-zero with the command to
 missing. No `CREATE`, no `ALTER`, no `INSERT` anywhere in the boot path.
 
 The chain moved to `src/lib/migrate-all.js`, run by `scripts/migrate.js` as its own process against
-`MIGRATION_DATABASE_URL`. **48 steps**, each recorded in a new `schema_migrations` ledger.
+`MIGRATION_DATABASE_URL`. **53 steps**, each recorded in a new `schema_migrations` ledger.
 
 ### What proves it
 

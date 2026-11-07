@@ -90,7 +90,7 @@ check exists to detect, and it sent the reader looking for a `DROP` that was not
 | | |
 |---|---|
 | `scripts/migrate-outreach.js` | accepts **either** key and reports which — entity-only (pre-partner-scope) or per-partner. Fails only if neither exists, or if both do (which would forbid the per-partner rows). |
-| `src/lib/migrate-all.js` | `migrate-outreach-partner-scope.js` is now step **`outreach partner scope`**, placed after `sitenex rename (creates partners)` because `partner_id` carries a FK to `partners`. 48 → **49 steps**. |
+| `src/lib/migrate-all.js` | `migrate-outreach-partner-scope.js` is now step **`outreach partner scope`**, placed after `sitenex rename (creates partners)` because `partner_id` carries a FK to `partners`. 47 → **53 steps**: partner scope, plus five column-only scripts found later the same day. |
 | `scripts/check-migration-coverage.js` | exclusion removed; the list now carries a note that an entry there is a *claim* a script changes no schema, and that it was once accepted on a summary line. |
 | `scripts/verify-migration-readiness.js` | reads column presence **before** the migration, so DROPPED and NEVER-CREATED are separate findings. Downstream failures of a halted chain are reported as such instead of as four independent faults. |
 
