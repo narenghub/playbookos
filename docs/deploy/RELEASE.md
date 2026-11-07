@@ -190,9 +190,17 @@ echo $?                            # must be 0, or stop
 #    generation is deterministic, so step 2b rebuilds it and compares a DIGEST. The only thing
 #    that travels between the two commands is a 24-character hash.
 #
+#    ⚠ NOT `railway ssh`. That runs inside the DEPLOYED container, built from `main` — which is
+#      still f284243 and does not contain this script at all. Once it does, it contains whatever
+#      main holds, which is not necessarily the reviewed candidate. Run from YOUR checkout with
+#      `railway run`, which injects the service's environment into a local process: the reviewed
+#      code, the production database. A production apply refuses outright if it is not in a git
+#      checkout, or if any TRACKED file is modified (untracked files are ignored, so a stray
+#      evidence file in your tree is not a blocker).
+#
 #    2a. PLAN. Read-only, and proved so: planning succeeds as a SELECT-only role, creates no
 #        table, and changes no row (check-cphi-production-path.js §12).
-railway ssh 'bash -lc "cd /app && node scripts/cphi-reconcile.js"'
+railway run node scripts/cphi-reconcile.js
 echo $?                            # 1 while duplicates exist — that is the blocking finding
 #
 #    The report prints: the connected identity and its privileges, the database identity, the
@@ -202,8 +210,14 @@ echo $?                            # 1 while duplicates exist — that is the bl
 #    2b. APPLY. Runs as the MAINTENANCE identity, not the application role: the script switches
 #        to MIGRATION_DATABASE_URL for an apply, and refuses outright if the identity it ends up
 #        with cannot create the audit table. Needs BOTH the production flag and the digest.
-railway ssh 'bash -lc "cd /app && node scripts/cphi-reconcile.js --apply-current \
-  --apply-to-production --confirm-plan-digest <THE DIGEST I GIVE YOU>"'
+#        A MATCHING DIGEST IS NOT AUTHORIZATION. The digest says "this is the plan you looked
+#        at"; it says nothing about whether applying it was approved. The approval is the second
+#        step: you reviewed the report, you decided, and you type the production flag yourself.
+#        The script enforces that by requiring both, and by never reading either from the
+#        environment — but the decision is yours, not the digest's.
+railway run node scripts/cphi-reconcile.js --apply-current \
+  --apply-to-production --confirm-plan-digest <THE DIGEST I GIVE YOU> \
+  --expect-code-sha <THE SHA YOU AUTHORIZED>
 echo $?
 #
 #    It refuses, having changed nothing, if: the plan rebuilt from this database does not match
@@ -241,8 +255,33 @@ If the migration is skipped, the app **exits non-zero at boot** with the command
 starting anyway gives a server answering `/health` with 200 while every request fails — which is
 what the 2026-09-30 outage looked like from outside.
 
-**Rollback:** redeploy the previous image. The schema is additive, so the previous release runs
-against it unchanged. No schema rollback needed, and none should be attempted first.
+## Rollback — two different incidents, two different responses
+
+These are not a sequence and the second is not an escalation of the first. Confusing them is how a
+twenty-minute application rollback becomes a data-loss event.
+
+**An APPLICATION failure** — the new release is broken, slow, erroring, rendering nothing:
+**redeploy the previous image, and stop there.** The schema is additive and the previous release
+runs against it unchanged (verified: no column the application reads was dropped). There is nothing
+to undo in the database, and restoring a backup here would discard every row written since it was
+taken in order to fix a problem that is not in the data.
+
+**A DATA-RECOVERY incident** — rows are wrong, missing, or were changed by something that should
+not have changed them: **assess it on its own terms first, and do not restore reflexively.** In
+order of preference:
+
+1. **Targeted recovery from the audit trail.** If the rows came from reconciliation, every prior
+   row is in `cphi_reconcile_audit` by `plan_id`, complete, and can be put back field for field
+   without touching anything else. `cphi_reconcile_runs` says whether that run was `production` or
+   an `isolated-restore`.
+2. **Restore the backup into a SEPARATE database** and copy out what is needed. This is almost
+   always the right shape: it recovers the data without discarding anything written since.
+3. **Restore over production.** Only for broad corruption, only after deciding explicitly what
+   window of writes is being given up, and only with a fresh backup of the current state taken
+   first — because a restore is itself destructive.
+
+An application rollback never requires step 2 or 3, and a data incident is never fixed by
+redeploying an image.
 
 ---
 

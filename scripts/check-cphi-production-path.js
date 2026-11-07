@@ -112,9 +112,42 @@ async function db(base, name, ddl) {
   return { url, c };
 }
 
-function reconcile(url, args = [], extraEnv = {}) {
+// ── A CLEAN CHECKOUT TO RUN THE PRODUCTION PATH FROM (ruling 46 item 2) ───────────────────────────
+//
+// A production apply refuses from a tree with modified tracked files, because then the logic that
+// built the reviewed plan and the logic about to delete rows are not provably the same code. That
+// refusal is correct and it means this harness cannot exercise the authorized path from a working
+// tree mid-change — which is most of the time, since preflight runs before the commit.
+//
+// The answer is not a bypass flag. It is to give it what it asks for: a real git checkout, clean,
+// containing the code under test. Clone HEAD, overlay the working tree, commit that as one snapshot,
+// and symlink node_modules so src/lib/db can still require pg. The clone's SHA differs from HEAD's
+// by design — what is asserted is that a CLEAN checkout is accepted, not which commit it is.
+const ROOT = path.join(__dirname, '..');
+function snapshotCheckout(label, { dirty = false } = {}) {
+  const dest = `${temp.base}/co-${label}`;
+  const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: 'pipe' });
+  git('clone', '--local', '--no-hardlinks', '--quiet', ROOT, dest);
+  execFileSync('sh', ['-c',
+    `cd ${JSON.stringify(ROOT)} && tar -cf - --exclude=./.git --exclude=./node_modules . `
+    + `| (cd ${JSON.stringify(dest)} && tar -xf -)`], { stdio: 'pipe' });
+  git('-C', dest, 'add', '-A');
+  git('-C', dest, '-c', 'user.email=harness@example.invalid', '-c', 'user.name=harness',
+    'commit', '-q', '-m', 'harness snapshot', '--allow-empty');
+  try { fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(dest, 'node_modules')); } catch { /* exists */ }
+  if (dirty) {
+    // Modify a TRACKED file, which is what the refusal is about.
+    fs.appendFileSync(path.join(dest, 'package.json'), '\n');
+  }
+  return {
+    script: path.join(dest, 'scripts', 'cphi-reconcile.js'),
+    sha: git('-C', dest, 'rev-parse', 'HEAD').trim(),
+  };
+}
+
+function reconcile(url, args = [], extraEnv = {}, script = null) {
   try {
-    const out = execFileSync(process.execPath, [path.join(__dirname, 'cphi-reconcile.js'), ...args],
+    const out = execFileSync(process.execPath, [script || path.join(__dirname, 'cphi-reconcile.js'), ...args],
       { env: { ...process.env, DATABASE_URL: url, RECONCILE_ACTOR: 'harness@example.invalid', ...extraEnv },
         encoding: 'utf8', stdio: 'pipe', maxBuffer: 16 * 1024 * 1024 });
     return { code: 0, out };
@@ -285,8 +318,21 @@ async function main() {
 
   // ── 7. THE AUTHORIZED PATH ──────────────────────────────────────────────────────────────────────
   h('7. THE AUTHORIZED PATH — and what it writes down');
+
+  // Ruling 46 item 2: a clean checkout is required, so the harness makes one.
+  const clean = snapshotCheckout('clean');
+  const dirtyCo = snapshotCheckout('dirty', { dirty: true });
+  refusal.before = await rowCount(prod.c);
+  await refusal('a production apply from a checkout with a modified tracked file', prod.c,
+    reconcile(prod.url, ['--apply', planFile, '--apply-to-production',
+      '--confirm-plan-id', plan.plan_id], {}, dirtyCo.script), 'uncommitted change');
+  await refusal('a production apply whose --expect-code-sha is not this checkout', prod.c,
+    reconcile(prod.url, ['--apply', planFile, '--apply-to-production',
+      '--confirm-plan-id', plan.plan_id, '--expect-code-sha', 'c0ffee0'], {}, clean.script),
+    'not the SHA you authorized');
+
   const okRes = reconcile(prod.url, ['--apply', planFile, '--apply-to-production',
-    '--confirm-plan-id', plan.plan_id]);
+    '--confirm-plan-id', plan.plan_id, '--expect-code-sha', clean.sha.slice(0, 12)], {}, clean.script);
   if (okRes.code === 0) ok('a correct production invocation is allowed and exits 0');
   else bad(`the authorized path exited ${okRes.code}`, okRes.out.trim().split('\n').slice(-6).join(' | '));
 
@@ -329,7 +375,7 @@ async function main() {
   h('8. RUNNING IT AGAIN');
   const rowsAfter = await rowCount(prod.c);
   const again = reconcile(prod.url, ['--apply', planFile, '--apply-to-production',
-    '--confirm-plan-id', plan.plan_id]);
+    '--confirm-plan-id', plan.plan_id], {}, clean.script);
   // The table state has legitimately changed — the first run changed it — so the honest outcome is
   // a refusal, not a silent no-op. Either is safe; deleting something is not.
   if (await rowCount(prod.c) === rowsAfter) ok(`a second run changed nothing — still ${rowsAfter} row(s)`);
@@ -354,7 +400,7 @@ async function main() {
       FOR EACH ROW WHEN (OLD.id = ${Number(victim)}) EXECUTE FUNCTION boom();`);
   const brkBefore = await rowCount(brk.c);
   const brkRes = reconcile(brk.url, ['--apply', brkPlan, '--apply-to-production',
-    '--confirm-plan-id', bp.plan_id]);
+    '--confirm-plan-id', bp.plan_id], {}, clean.script);
   if (brkRes.code !== 0) ok(`an injected failure makes the run exit non-zero (${brkRes.code})`);
   else bad('an injected failure still exited 0');
 
@@ -388,7 +434,7 @@ async function main() {
   reconcile(noaud.url, ['--plan-out', noaudPlan]);
   const np = JSON.parse(fs.readFileSync(noaudPlan, 'utf8'));
   const r10 = reconcile(noaud.url, ['--apply', noaudPlan, '--apply-to-production',
-    '--confirm-plan-id', np.plan_id]);
+    '--confirm-plan-id', np.plan_id], {}, clean.script);
   if (r10.code === 0) ok('with no audit table present, the apply creates one rather than proceeding without');
   else bad(`the apply failed with no audit table present (exit ${r10.code})`,
     r10.out.trim().split('\n').slice(-4).join(' | '));
@@ -453,6 +499,89 @@ async function main() {
     ok('planning changed no row');
   } else bad('planning changed rows');
 
+  // ── THE DIGEST MUST NOT DEPEND ON WHO IS LOGGED IN (ruling 46 item 1) ──────────────────────────
+  //
+  // Planning may run as a low-privilege role while the apply runs as the maintenance identity. If
+  // the identity or the digest varied with the login role, the apply would refuse with "this plan
+  // was built against a DIFFERENT database" — fail-closed, so never a data risk, but false, and it
+  // would stop the release pointing at the wrong thing.
+  //
+  // It DID vary, until this was fixed: the column fingerprint came from information_schema.columns,
+  // which is privilege-filtered. Measured on a cluster: a role with column-level SELECT on every
+  // column except entity_note hashed to f96b50ae494a156f where the owner hashed to 68dec06f2f70439a.
+  // pg_attribute is the catalog and is not filtered. This asserts it stays that way.
+  await ro.c.query(`
+    CREATE ROLE cphi_narrow LOGIN NOSUPERUSER;
+    GRANT USAGE ON SCHEMA public TO cphi_narrow;
+    GRANT SELECT (id, event_slug, holder, holder_normalized, exhibiting, exhibitor_name, booth,
+                  hall, match_tier, molecules_covered, review_status, searched_terms, checked_at,
+                  entity_note)
+      ON cphi_exhibitor_matches TO cphi_narrow;
+    REVOKE SELECT (booth, hall) ON cphi_exhibitor_matches FROM cphi_narrow;`);
+  // Measured directly under two roles, because the narrow role cannot run a plan at all — the plan
+  // SELECTs booth and hall, so a role without those grants gets "permission denied", which is
+  // correct and is why the comparison is made at the fingerprint rather than at the plan.
+  const COLQ = {
+    info: `SELECT string_agg(column_name || ':' || data_type, ',' ORDER BY column_name) c
+             FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='cphi_exhibitor_matches'`,
+    cat: `SELECT string_agg(a.attname || ':' || format_type(a.atttypid, a.atttypmod), ','
+                    ORDER BY a.attname) c
+            FROM pg_attribute a
+           WHERE a.attrelid = to_regclass('public.cphi_exhibitor_matches')
+             AND a.attnum > 0 AND NOT a.attisdropped`,
+  };
+  const asRole = async (role) => {
+    const cc = new Client({ connectionString: `postgresql://${role}@localhost/cphi_readonly?host=${base}&port=${PGPORT}&sslmode=disable` });
+    await cc.connect();
+    const out = {
+      info: (await cc.query(COLQ.info)).rows[0].c || '',
+      cat: (await cc.query(COLQ.cat)).rows[0].c || '',
+    };
+    await cc.end();
+    return out;
+  };
+  const asOwner = await asRole('postgres');
+  const asNarrow = await asRole('cphi_narrow');
+
+  if (asOwner.cat === asNarrow.cat) {
+    ok('pg_attribute returns the same columns to the owner and to a role missing two column grants');
+  } else bad('the catalog fingerprint differs between roles', 'the identity would depend on who logged in');
+  if (asOwner.info !== asNarrow.info) {
+    ok('…while information_schema returns DIFFERENT columns to those roles — which is why it is not used');
+  } else {
+    console.log('        (information_schema happened to agree here; the catalog is used regardless)');
+  }
+  const src = fs.readFileSync(path.join(ROOT, 'scripts', 'cphi-reconcile.js'), 'utf8');
+  const identityFn = src.slice(src.indexOf('async function dbIdentity'), src.indexOf('async function tableStateFingerprint'));
+  // Comments stripped first: the function CONTAINS the word information_schema, in the comment
+  // explaining why it is not used. A checker that reads prose as code fails on its own explanation.
+  const identityCode = identityFn.replace(/^\s*\/\/.*$/gm, '');
+  if (/pg_attribute/.test(identityCode) && !/information_schema/.test(identityCode)) {
+    ok('dbIdentity() reads the catalog and never information_schema (comments excluded)');
+  } else bad('dbIdentity() still queries information_schema', 'privilege-filtered: the identity would vary by role');
+
+  // And the realistic pairing, end to end: plan as the low-privilege role that CAN read the table,
+  // and confirm the digest equals the one the owner computes — plan as one, apply as the other.
+  const ownerPlanPath = `${temp.base}/plan-asowner.json`;
+  const plannerPlanPath = `${temp.base}/plan-asplanner.json`;
+  reconcile(`postgresql://postgres@localhost/cphi_readonly?host=${base}&port=${PGPORT}&sslmode=disable`,
+    ['--plan-out', ownerPlanPath]);
+  reconcile(roUrl, ['--plan-out', plannerPlanPath]);
+  if (fs.existsSync(ownerPlanPath) && fs.existsSync(plannerPlanPath)) {
+    const po = JSON.parse(fs.readFileSync(ownerPlanPath, 'utf8'));
+    const pp = JSON.parse(fs.readFileSync(plannerPlanPath, 'utf8'));
+    if (po.db_identity.identity_sha === pp.db_identity.identity_sha) {
+      ok(`database identity matches across login roles (${po.db_identity.identity_sha})`);
+    } else bad('database identity differs by login role', `${po.db_identity.identity_sha} vs ${pp.db_identity.identity_sha}`);
+    if (po.plan_digest === pp.plan_digest) {
+      ok(`plan digest matches across login roles (${po.plan_digest}) — plan as one role, apply as another`);
+    } else bad('the plan digest differs by login role', `${po.plan_digest} vs ${pp.plan_digest}`);
+    if (po.table === pp.table && po.db_identity.table_oid === pp.db_identity.table_oid) {
+      ok(`both target the same table (oid ${po.db_identity.table_oid}) in the same database`);
+    } else bad('the two roles resolved different tables');
+  } else bad('could not plan as both the owner and the read-only role');
+
   // And the identity refusal (ruling 45 item 2): that same role must not be allowed to APPLY.
   const roApply = reconcile(roUrl, ['--apply', roPlan, '--apply-to-production',
     '--confirm-plan-id', JSON.parse(fs.readFileSync(roPlan, 'utf8')).plan_id]);
@@ -510,7 +639,7 @@ async function main() {
   const d2 = JSON.parse(fs.readFileSync(dg2Plan, 'utf8'));
   fs.rmSync(dg2Plan);  // the point: the file is GONE, as it would be after a container restart
   const dg2Res = reconcile(dg2.url, ['--apply-current', '--apply-to-production',
-    '--confirm-plan-digest', d2.plan_digest]);
+    '--confirm-plan-digest', d2.plan_digest], {}, clean.script);
   if (dg2Res.code === 0) ok('--apply-current works with the plan file deleted — nothing had to persist');
   else bad(`the digest path exited ${dg2Res.code}`, dg2Res.out.trim().split('\n').slice(-6).join(' | '));
   if (await dupGroups(dg2.c) === 0) ok('it reconciled the duplicates it was authorized for');

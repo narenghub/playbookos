@@ -96,6 +96,10 @@ const CONFIRM_PLAN_ID = val('--confirm-plan-id');
 // and the apply refuses — which is also ruling 45 item 5, obtained for free rather than bolted on.
 const APPLY_CURRENT = has('--apply-current');
 const CONFIRM_DIGEST = val('--confirm-plan-digest');
+// Optional third binding: the commit the owner authorized. Optional because a clean checkout is
+// already required for a production apply; naming the SHA turns "clean" into "clean and the right
+// one", which is the difference between trusting the operator's shell and checking it.
+const EXPECT_CODE_SHA = val('--expect-code-sha');
 
 // ── WHICH IDENTITY DOES THE WORK (ruling 45 item 2) ────────────────────────────────────────────────
 //
@@ -211,10 +215,27 @@ async function dbIdentity() {
     SELECT current_database()                                        AS database,
            (SELECT oid::text FROM pg_database WHERE datname = current_database()) AS db_oid,
            to_regclass('public.cphi_exhibitor_matches')::oid::text    AS table_oid`)).rows[0];
+  // ── WHY pg_attribute AND NOT information_schema (ruling 46 item 1) ──────────────────────────────
+  //
+  // information_schema.columns is PRIVILEGE-FILTERED: it shows a role only the columns that role may
+  // access. This fingerprint was built from it, which made the database identity — and therefore the
+  // plan digest — depend on WHO WAS LOGGED IN. Measured on a disposable cluster: a role holding
+  // column-level SELECT on every column but `entity_note` produced f96b50ae494a156f where the owner
+  // produced 68dec06f2f70439a.
+  //
+  // That matters precisely because of ruling 45 item 2: planning is meant to be possible as a
+  // low-privilege role while the apply runs as the maintenance identity. Two different roles would
+  // have computed two different identities, and the apply would have refused with "this plan was
+  // built against a DIFFERENT database" — fail-closed, so never a data risk, but false, and it would
+  // have stopped the release with a message pointing at the wrong thing.
+  //
+  // pg_attribute is the catalog, not a privilege-filtered view. Measured: identical for both roles.
   const cols = (await query(
-    `SELECT column_name, data_type FROM information_schema.columns
-      WHERE table_schema='public' AND table_name='cphi_exhibitor_matches'
-      ORDER BY column_name`)).rows.map((c) => `${c.column_name}:${c.data_type}`).join(',');
+    `SELECT string_agg(a.attname || ':' || format_type(a.atttypid, a.atttypmod), ','
+              ORDER BY a.attname) AS c
+       FROM pg_attribute a
+      WHERE a.attrelid = to_regclass('public.cphi_exhibitor_matches')
+        AND a.attnum > 0 AND NOT a.attisdropped`)).rows[0].c || '';
   let schemaSteps = null;
   try { schemaSteps = require('../src/lib/migrate-all').SCHEMA_STEPS.length; } catch { /* reported as null */ }
 
@@ -736,6 +757,43 @@ async function applyPlan(file) {
         + 'timestamps. The unique index cannot be created while they remain either way.');
     }
 
+    // ── WHICH CODE IS THIS (ruling 46 item 2) ─────────────────────────────────────────────────────
+    //
+    // `railway ssh` runs inside the DEPLOYED container, which is built from `main`. While main is
+    // f284243 that container does not contain this script at all — and once it does, it contains
+    // whatever main holds, not necessarily the reviewed candidate. A production apply must therefore
+    // know which code it is, and refuse if it cannot tell or if the tree has uncommitted edits: a
+    // dirty tree means the reviewed plan logic and the running plan logic are not provably the same.
+    let codeSha = null; let dirty = null;
+    try {
+      const root = path.join(__dirname, '..');
+      codeSha = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      // --untracked-files=no on purpose: an untracked file does not change the code that is about
+      // to run, and refusing over one would block the operator for a stray evidence or log file
+      // sitting in their checkout. A MODIFIED TRACKED file is different — that is the running logic
+      // differing from the reviewed logic, which is the thing this refusal exists for.
+      dirty = execFileSync('git', ['-C', root, 'status', '--porcelain', '--untracked-files=no'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+        .trim().split('\n').filter(Boolean).length;
+    } catch { /* handled below */ }
+
+    if (!codeSha) {
+      refuse('this is not a git checkout, so the code applying the plan cannot be identified',
+        'run the production apply from the reviewed checkout — not from inside the deployed '
+        + 'container, whose code comes from main and is not necessarily the reviewed candidate.');
+    }
+    if (dirty > 0) {
+      refuse(`the working tree has ${dirty} uncommitted change(s)`,
+        `at ${codeSha.slice(0, 7)} with local edits, the logic that built the reviewed plan and the `
+        + 'logic about to delete rows are not provably the same code. Commit or stash, then re-plan.');
+    }
+    if (EXPECT_CODE_SHA && !codeSha.startsWith(EXPECT_CODE_SHA)) {
+      refuse('this checkout is not the SHA you authorized',
+        `you expected ${EXPECT_CODE_SHA}, this is ${codeSha}.`);
+    }
+    ok_line(`code: ${codeSha} (clean)${EXPECT_CODE_SHA ? ' — matches the authorized SHA' : ''}`);
+
     console.log(`\n  production apply authorized for plan ${plan.plan_id}`);
     console.log(`  database identity ${live.identity_sha} (${live.database}) — matches the plan`);
     console.log(`  table state ${liveState.state_sha} (${liveState.rows} rows) — matches the plan`);
@@ -942,7 +1000,19 @@ async function applyPlan(file) {
   fs.writeFileSync(PLAN_OUT, `${JSON.stringify(plan, null, 2)}\n`);
 
   h('NOTHING HAS BEEN CHANGED');
-  console.log(`\n  plan id      ${plan.plan_id}   (new on every generation)`);
+  // Which code produced this plan, in the report the owner reviews (ruling 46 item 2). A plan
+  // reviewed without knowing the code that built it is a plan reviewed on trust.
+  let pcode = '(not a git checkout — do NOT use this plan for a production apply)';
+  try {
+    const root = path.join(__dirname, '..');
+    const s = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const d = execFileSync('git', ['-C', root, 'status', '--porcelain'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      .trim().split('\n').filter(Boolean).length;
+    pcode = `${s}${d ? `  (+${d} uncommitted — a production apply will REFUSE until clean)` : '  (clean)'}`;
+  } catch { /* reported above */ }
+
+  console.log(`\n  code         ${pcode}`);
+  console.log(`  plan id      ${plan.plan_id}   (new on every generation)`);
   console.log(`  plan digest  ${plan.plan_digest}   <-- THIS is what identifies the plan's CONTENT`);
   console.log(`  database     ${plan.db_identity.database} / identity ${plan.db_identity.identity_sha}`);
   console.log(`  table state  ${plan.table_state.state_sha} over ${plan.table_state.rows} row(s)`);
