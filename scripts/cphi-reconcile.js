@@ -111,10 +111,49 @@ const EXPECT_CODE_SHA = val('--expect-code-sha');
 // DATABASE_URL once, at require time — the same ordering the readiness harness depends on. Hence the
 // require below this line and not at the top of the file with the others.
 const MAINTENANCE_URL = process.env.MIGRATION_DATABASE_URL || null;
+
+// ── A READ-ONLY OVERRIDE FOR PLANNING (ruling 48 item 1) ───────────────────────────────────────────
+//
+// `railway run` executes on the operator's machine, and Railway's DATABASE_URL points at
+// postgres.railway.internal, which resolves only inside Railway's private network. So planning from
+// a laptop needs a reachable host — the public proxy — WITHOUT touching the DATABASE_URL the
+// deployed application uses, which must stay private.
+//
+// RECONCILE_PLAN_DATABASE_URL is that override, and it is read-only by contract AND by enforcement:
+//   · by contract, because an apply never reads it. If it is set and MIGRATION_DATABASE_URL is not,
+//     an apply refuses rather than silently falling back to it;
+//   · by enforcement, because every planning connection is opened with
+//     `options=-c default_transaction_read_only=on`, which makes the DATABASE refuse any write on
+//     that session. Planning performs no write anyway — that is asserted separately against a
+//     SELECT-only role — but a connection string the operator pastes under time pressure deserves a
+//     guard that does not depend on the script being correct.
+const PLAN_URL = process.env.RECONCILE_PLAN_DATABASE_URL || null;
+const PLANNING_ONLY = !APPLY && !APPLY_CURRENT;
+
+// Appended rather than parsed: libpq's `options` is passed through in the startup packet, so this
+// applies to every connection the pool opens, not just the first one.
+function readOnly(url) {
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}options=${encodeURIComponent('-c default_transaction_read_only=on')}`;
+}
+
 let IDENTITY_SOURCE = 'DATABASE_URL';
-if ((APPLY || APPLY_CURRENT) && MAINTENANCE_URL) {
+if (PLANNING_ONLY && PLAN_URL) {
+  process.env.DATABASE_URL = readOnly(PLAN_URL);
+  IDENTITY_SOURCE = 'RECONCILE_PLAN_DATABASE_URL (session read-only)';
+} else if (PLANNING_ONLY) {
+  // No override: still open the session read-only. Planning is read-only either way, so there is
+  // no cost, and "the database refused it" is a better guarantee than "the code did not do it".
+  if (process.env.DATABASE_URL) process.env.DATABASE_URL = readOnly(process.env.DATABASE_URL);
+  IDENTITY_SOURCE = 'DATABASE_URL (session read-only)';
+} else if (MAINTENANCE_URL) {
   process.env.DATABASE_URL = MAINTENANCE_URL;
   IDENTITY_SOURCE = 'MIGRATION_DATABASE_URL';
+} else if (PLAN_URL) {
+  console.error('\nRefusing: an apply was requested with only RECONCILE_PLAN_DATABASE_URL set.\n');
+  console.error('  That variable is the READ-ONLY planning override and an apply will never use it.');
+  console.error('  Set MIGRATION_DATABASE_URL to the maintenance identity for the apply.\n');
+  process.exit(2);
 }
 // eslint-disable-next-line global-require
 const { query, withTransaction } = require('../src/lib/db');
@@ -325,6 +364,28 @@ function codeFingerprint() {
 
 // Who am I connected as, and can this identity do the job? Printed rather than assumed, because
 // "run it as the migrator" is an instruction and this is the fact.
+// ── IS THIS CONNECTION ENCRYPTED (ruling 48 item 3) ────────────────────────────────────────────────
+//
+// Reported from pg_stat_ssl for THIS backend, not inferred from the connection string — a URL
+// saying sslmode=disable and a pool passing an explicit `ssl` option disagree, and the server's own
+// view is the one that settles it. src/lib/db.js sets `ssl: { rejectUnauthorized: false }` whenever
+// a URL is present, so TLS is negotiated but the CERTIFICATE IS NOT VERIFIED. On Railway's private
+// network that is defensible. Over the public proxy it is not: an attacker positioned between the
+// operator's laptop and Railway could present their own certificate. That is a real limitation of
+// this route, stated rather than papered over, and the reason the window should be short and the
+// network trusted.
+//
+// A non-superuser sees its own backend's row in pg_stat_ssl, which is the row being asked for.
+async function connectionTls() {
+  try {
+    const r = (await query(`
+      SELECT ssl, COALESCE(version, '') AS version, COALESCE(cipher, '') AS cipher, bits,
+             inet_server_addr()::text AS server_addr
+        FROM pg_stat_ssl WHERE pid = pg_backend_pid()`)).rows[0];
+    return r || { ssl: null };
+  } catch (e) { return { ssl: null, error: e.message }; }
+}
+
 async function connectionIdentity() {
   const r = (await query(`
     SELECT current_user AS role, current_database() AS database,
@@ -1012,6 +1073,24 @@ async function applyPlan(file) {
   console.log(`\n  identity: ${who.role}@${who.database} via ${IDENTITY_SOURCE}`
     + ` — superuser=${who.is_super} create=${who.can_create}`
     + ` update=${who.can_update} delete=${who.can_delete}`);
+
+  const tls = await connectionTls();
+  const localish = !tls.server_addr || /^(127\.|::1|10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.)/.test(tls.server_addr);
+  console.log(`  transport: ${tls.ssl ? `TLS ${tls.version} ${tls.cipher} (${tls.bits} bit)` : 'NOT ENCRYPTED'}`
+    + `${tls.ssl ? ' — certificate NOT verified (src/lib/db.js sets rejectUnauthorized: false)' : ''}`
+    + `${tls.server_addr ? `, server ${localish ? 'on a private address' : 'on a PUBLIC address'}` : ', unix socket'}`);
+
+  // Deleting production rows over an unencrypted link across the public internet sends the
+  // credentials and the data in the clear. Refused. A private address or a unix socket — a
+  // disposable cluster, or a run from inside Railway's network — is a different situation and is
+  // allowed, because there the transport is not the exposure.
+  if ((APPLY || APPLY_CURRENT) && APPLY_PROD && tls.ssl === false && !localish) {
+    console.error('\nRefusing production apply: this connection is NOT encrypted and the server is on'
+      + '\n  a public address. The credentials and every deleted row would cross the internet in the'
+      + '\n  clear. Connect over TLS (Railway\'s Postgres supports it — the deployed application uses'
+      + '\n  it today) or run from inside the private network.\n');
+    process.exit(2);
+  }
   if ((APPLY || APPLY_CURRENT) && !who.can_create) {
     console.error('\nRefusing: this identity cannot create tables, so it cannot guarantee the audit\n'
       + '  table exists before deleting anything. Run the apply with MIGRATION_DATABASE_URL set to\n'

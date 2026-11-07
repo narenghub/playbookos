@@ -199,6 +199,22 @@ echo $?                            # must be 0, or stop
 #      (That variable is also what makes the apply run as the maintenance identity rather than
 #      the application role, so it is needed either way.)
 #
+#      DO NOT CHANGE the application's DATABASE_URL. It stays private. For PLANNING there is a
+#      separate override that leaves it alone:
+#          RECONCILE_PLAN_DATABASE_URL = the public proxy host, with the APPLICATION role's
+#                                        credentials (SELECT is all planning needs)
+#      An apply never reads that variable and refuses if it is the only one set. Every planning
+#      connection is additionally opened with `-c default_transaction_read_only=on`, so Postgres
+#      itself refuses any write on that session — verified: a write is refused even as the owner.
+#
+#      TLS: the pool sets `ssl: { rejectUnauthorized: false }`, so the connection is ENCRYPTED
+#      but the CERTIFICATE IS NOT VERIFIED. On Railway's private network that is defensible; over
+#      the public proxy it means someone positioned between your laptop and Railway could present
+#      their own certificate. Both commands print the real transport from pg_stat_ssl — expect
+#      `TLS TLSv1.3 … , server on a PUBLIC address`. A production apply REFUSES outright if the
+#      connection is unencrypted and the server is public. Keep the window short, and do not run
+#      it from an untrusted network.
+#
 #      Before either command, confirm WHICH project and environment the CLI is pointed at —
 #      a plan reviewed against staging and applied to production is the accident this prevents:
 #          railway status

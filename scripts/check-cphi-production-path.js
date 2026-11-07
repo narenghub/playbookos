@@ -680,7 +680,77 @@ async function main() {
     ok('the plan does carry business row content (holders, notes) — internal, and the digest path means it never has to leave the database');
   }
 
-  for (const d of [prod, other, stale, stale2, conf, brk, noaud, iso, ro, dg, dg2]) { try { await d.c.end(); } catch { /* closing */ } }
+  // ── 15. THE READ-ONLY PLANNING OVERRIDE (ruling 48 items 1, 2, 3) ───────────────────────────────
+  h('15. PLANNING OVER A SEPARATE, READ-ONLY CONNECTION');
+
+  // (a) The mechanism, proved against the database rather than trusted: a session opened with
+  //     options=-c default_transaction_read_only=on must have writes REFUSED by Postgres.
+  const x = await db(base, 'cphi_xident', `${TABLE}${CLEAN}`);
+  await x.c.query(`
+    CREATE ROLE cphi_plan2 LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    GRANT USAGE ON SCHEMA public TO cphi_plan2;
+    GRANT SELECT ON cphi_exhibitor_matches TO cphi_plan2;`);
+  const base_ = `host=${base}&port=${PGPORT}&sslmode=disable`;
+  const roOpt = `&options=${encodeURIComponent('-c default_transaction_read_only=on')}`;
+  const probe = new Client({ connectionString: `postgresql://postgres@localhost/cphi_xident?${base_}${roOpt}` });
+  await probe.connect();
+  let refusedWrite = false;
+  try { await probe.query(`CREATE TABLE should_not_exist (x int)`); } catch (e) {
+    refusedWrite = /read-only transaction/i.test(e.message);
+  }
+  await probe.end();
+  if (refusedWrite) ok('a session opened with the read-only option has writes refused BY POSTGRES, even as the owner');
+  else bad('the read-only session option did not block a write', 'the enforcement half of the override is not real');
+
+  // (b) Planning through the override, as a low-privilege role on its own connection.
+  const planUrl = `postgresql://cphi_plan2@localhost/cphi_xident?${base_}`;
+  const maintUrl = `postgresql://postgres@localhost/cphi_xident?${base_}`;
+  const xPlanFile = `${temp.base}/plan-xident.json`;
+  const xPlan = reconcile('postgresql://unused@localhost/cphi_xident?' + base_,
+    ['--plan-out', xPlanFile], { RECONCILE_PLAN_DATABASE_URL: planUrl });
+  if (xPlan.code === 1) ok('planning uses RECONCILE_PLAN_DATABASE_URL in preference to DATABASE_URL');
+  else bad(`planning through the override exited ${xPlan.code}`, xPlan.out.trim().split('\n').slice(-5).join(' | '));
+  if (/session read-only/.test(xPlan.out)) ok('…and reports the connection as session read-only');
+  else bad('the override did not report a read-only session');
+  if (/transport:/.test(xPlan.out)) ok(`…and reports the transport: ${(xPlan.out.match(/transport:.*/) || [''])[0].trim().slice(0, 96)}`);
+  else bad('no transport line was reported', 'ruling 48 item 3 asks for the TLS state to be stated');
+
+  // (c) An apply must never fall back to the read-only planning URL.
+  refusal.before = await rowCount(x.c);
+  await refusal('an apply with only the read-only planning override set', x.c,
+    reconcile('postgresql://unused@localhost/cphi_xident?' + base_,
+      ['--apply-current', '--apply-to-production', '--confirm-plan-digest', 'x'],
+      { RECONCILE_PLAN_DATABASE_URL: planUrl }, clean.script), 'READ-ONLY planning override');
+
+  // (d) Item 2: planned by one identity on one connection, applied by another on another —
+  //     same database, same table, same digest.
+  const xp = JSON.parse(fs.readFileSync(xPlanFile, 'utf8'));
+  const xApply = reconcile('postgresql://unused@localhost/cphi_xident?' + base_,
+    ['--apply-current', '--apply-to-production', '--confirm-plan-digest', xp.plan_digest],
+    { MIGRATION_DATABASE_URL: maintUrl }, clean.script);
+  if (xApply.code === 0) {
+    ok('a plan made by the read-only identity is applied by the maintenance identity — same digest');
+  } else {
+    bad(`cross-identity apply exited ${xApply.code}`, xApply.out.trim().split('\n').slice(-6).join(' | '));
+  }
+  if (/via MIGRATION_DATABASE_URL/.test(xApply.out)) ok('…and the apply ran as the maintenance identity, not the planning one');
+  else bad('the apply did not report the maintenance identity');
+  if (await dupGroups(x.c) === 0) ok('the duplicates are gone — the two identities agreed on the same table');
+  else bad(`${await dupGroups(x.c)} duplicate group(s) remain`);
+  const xRuns = (await x.c.query(`SELECT target, database_name FROM cphi_reconcile_runs`)).rows;
+  if (xRuns.length === 1 && xRuns[0].target === 'production' && xRuns[0].database_name === 'cphi_xident') {
+    ok("the run ledger records target 'production' against the same database the plan named");
+  } else bad(`the run ledger recorded ${JSON.stringify(xRuns)}`);
+
+  // (e) What this harness CANNOT simulate, said rather than implied: a Postgres reachable on a
+  //     public address with TLS off. The refusal for that case is in the code and is exercised by
+  //     neither of the two situations available here (unix socket, private address) — both of which
+  //     are correctly ALLOWED, which is itself worth asserting, since a guard that refused them
+  //     would block every disposable-cluster test and every run from inside Railway's network.
+  console.log('        (a public-address server with TLS off cannot be simulated here; the two');
+  console.log('         reachable cases — unix socket and private address — are allowed, as above)');
+
+  for (const d of [prod, other, stale, stale2, conf, brk, noaud, iso, ro, dg, dg2, x]) { try { await d.c.end(); } catch { /* closing */ } }
 
   h(`  ${pass} assertion(s) passed · ${fail} failed`);
   if (fail) {
