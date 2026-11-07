@@ -289,6 +289,105 @@ async function main() {
     if (!mig) ok('a migrator identity CAN run DDL — so the split is workable, not merely restrictive');
     else bad('the migrator could not run DDL; the proposed split would not work', mig);
 
+    // ── 7. EVERY TABLE AND EVERY SEQUENCE (ruling 49 item 3) ───────────────
+    //
+    // The checks above prove the SHAPE of the separation on the tables they name. This proves the
+    // COVERAGE: that the runtime role can actually do its job on every table and sequence the
+    // migration leaves behind, not just the ones a test happened to pick.
+    //
+    // The sequences half is the part that bites in production. INSERT on a table with a BIGSERIAL
+    // column calls nextval() on its sequence, and nextval needs USAGE on that sequence — a grant
+    // that is easy to leave out because it is not a table grant. A role with INSERT on every table
+    // and USAGE on no sequence passes every table-level check and then fails on the first insert.
+    h('7. COVERAGE: every table and every sequence the migration leaves behind');
+
+    // THE GRANTS UNDER TEST ARE THE ONES WE SHIP. The fixture roles above hold deliberately narrow,
+    // column-level grants, because sections 3 to 6 exist to prove specific refusals. Sweeping those
+    // would measure the fixture, not the artifact — the first run of this section reported 153
+    // tables and 54 sequences "the runtime role cannot use", which was true of the fixture and
+    // false of production.
+    //
+    // So: read docs/deploy/prod-roles.sql, take its REVOKE/GRANT/ALTER DEFAULT PRIVILEGES
+    // statements verbatim, point them at a fresh role, and sweep THAT. If someone deletes the
+    // sequence grant from that file, this fails. Comment lines are stripped first, since the file's
+    // footer carries a commented-out rollback block whose REVOKEs would otherwise be executed.
+    const SHIPPED = 'playbookos_app_shipped';
+    const roleSql = fs.readFileSync(path.join(__dirname, '..', 'docs', 'deploy', 'prod-roles.sql'), 'utf8')
+      .split('\n').filter((l) => !/^\s*--/.test(l)).join('\n')
+      .split(';')
+      .map((s) => s.trim())
+      .filter((s) => /^(REVOKE|GRANT|ALTER DEFAULT PRIVILEGES)/i.test(s) && /playbookos_app/.test(s))
+      .map((s) => s.replace(/playbookos_app/g, SHIPPED));
+
+    if (roleSql.length < 4) {
+      bad(`only ${roleSql.length} grant statement(s) found in prod-roles.sql`,
+        'the file this sweep is meant to validate did not parse — the sweep would prove nothing');
+    } else {
+      await su.query(`CREATE ROLE ${SHIPPED} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT`);
+      for (const s of roleSql) await su.query(s);
+      ok(`applied ${roleSql.length} grant statement(s) taken verbatim from docs/deploy/prod-roles.sql`);
+    }
+
+    const tables = (await su.query(
+      `SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename`)).rows
+      .map((r) => r.tablename);
+    const missing = [];
+    for (const t of tables) {
+      const r = (await su.query(
+        `SELECT has_table_privilege('playbookos_app_shipped', $1, 'SELECT') s,
+                has_table_privilege('playbookos_app_shipped', $1, 'INSERT') i,
+                has_table_privilege('playbookos_app_shipped', $1, 'UPDATE') u,
+                has_table_privilege('playbookos_app_shipped', $1, 'DELETE') d`, [`public.${t}`])).rows[0];
+      const lack = ['SELECT', 'INSERT', 'UPDATE', 'DELETE'].filter((p, n) => !r[['s', 'i', 'u', 'd'][n]]);
+      if (lack.length) missing.push(`${t} (${lack.join(',')})`);
+    }
+    if (!missing.length) ok(`the runtime role holds SELECT/INSERT/UPDATE/DELETE on all ${tables.length} table(s)`);
+    else {
+      bad(`${missing.length} table(s) the runtime role cannot fully use`,
+        `${missing.slice(0, 6).join('; ')}${missing.length > 6 ? ` … and ${missing.length - 6} more` : ''}`);
+    }
+
+    const seqs = (await su.query(
+      `SELECT sequencename FROM pg_sequences WHERE schemaname='public' ORDER BY sequencename`)).rows
+      .map((r) => r.sequencename);
+    const noUsage = [];
+    for (const s of seqs) {
+      const r = (await su.query(
+        `SELECT has_sequence_privilege('playbookos_app_shipped', $1, 'USAGE') u`, [`public.${s}`])).rows[0];
+      if (!r.u) noUsage.push(s);
+    }
+    if (!seqs.length) bad('no sequences found', 'the sweep proved nothing');
+    else if (!noUsage.length) ok(`…and USAGE on all ${seqs.length} sequence(s) — nextval() will work on every insert`);
+    else {
+      bad(`${noUsage.length} sequence(s) the runtime role cannot use`,
+        `${noUsage.slice(0, 6).join(', ')} — an INSERT into the owning table would fail`);
+    }
+
+    // And the end-to-end version of the same thing: a real INSERT that must call nextval().
+    const serialTable = (await su.query(
+      `SELECT c.relname AS t, a.attname AS col
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
+         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+         JOIN pg_attrdef d ON d.adrelid = c.oid AND d.adnum = a.attnum
+        WHERE c.relkind = 'r' AND pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval%'
+        ORDER BY c.relname LIMIT 1`)).rows[0];
+    if (serialTable) {
+      const seqOf = (await su.query(
+        `SELECT pg_get_serial_sequence($1, $2) AS s`, [`public.${serialTable.t}`, serialTable.col])).rows[0].s;
+      // End to end as the SHIPPED role: a grant in a catalog and a working nextval() are not the
+      // same claim, and INSERT is the operation that needs the second one.
+      const shipped = new Client({ connectionString: url(SHIPPED) });
+      await shipped.connect();
+      const nv = await refused(shipped, `SELECT nextval('${seqOf}')`);
+      if (!nv) ok(`the shipped runtime role can call nextval() on ${seqOf} — proved, not inferred`);
+      else bad(`the shipped runtime role cannot call nextval() on ${seqOf}`, nv);
+      const ddl = await refused(shipped, `CREATE TABLE shipped_probe (x int)`);
+      if (ddl && /permission denied/i.test(ddl)) ok('…and that same role still cannot CREATE TABLE');
+      else bad('the shipped grants allow DDL', ddl || 'CREATE TABLE was accepted');
+      await shipped.end();
+    } else console.log('        (no nextval-defaulted column found to exercise end to end)');
+
     h('RESULT');
     console.log(`  ${pass} assertion(s) passed · ${fail} failed`);
     if (fail === 0) {
