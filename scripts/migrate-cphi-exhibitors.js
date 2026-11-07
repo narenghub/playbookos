@@ -85,6 +85,24 @@ async function migrateCphiExhibitors() {
   // has to fall back to review_status alone rather than erroring on a missing column.
   // Without the column there is no human-authored field in this table at all, so nothing is at risk.
   const humanPredicate = hasNote ? HUMAN : 'false';
+  // ── entity_note MAY NOT EXIST YET, AND THIS STEP RUNS LONG BEFORE IT DOES ────────────────────────
+  //
+  // On a fresh database this is step 23; entity_note is added at step 46 by migrate-cphi-entity-note.js.
+  // The first version of the distinct-note count referenced btrim(entity_note) in the SELECT list
+  // unconditionally, so on any database without the column the whole step died on
+  // `column "entity_note" does not exist` — which broke the migration chain and failed TEN preflight
+  // harnesses, every one of them a check that runs the migrator. The predicate above was already
+  // guarded; the counting expression was not.
+  //
+  // Without the column there is no human-authored field in this table at all, so the count is zero and
+  // no group can be a conflict — which is correct, not a workaround.
+  const noteCount = hasNote
+    ? `COUNT(DISTINCT btrim(entity_note)) FILTER (WHERE ${HUMAN})`
+    : '0';
+  // And the ORDER BY drops the term entirely without the column, rather than ordering by the literal
+  // `(0)`: Postgres reads a bare integer in ORDER BY as an ORDINAL POSITION, so `ORDER BY (0)` fails
+  // with "ORDER BY position 0 is not in select list". Caught on the very next run — and caught
+  // legibly, because the halt now reports the reason instead of the SQL that produced it.
 
   const indexExists = (await query(
     `SELECT COUNT(*)::int n FROM pg_indexes
@@ -100,12 +118,12 @@ async function migrateCphiExhibitors() {
       // tools disagreeing about what needs a human is worse than either rule on its own — the owner
       // gets a different answer depending on which one he runs.
       `SELECT event_slug, holder_normalized, COUNT(*)::int n,
-              COUNT(DISTINCT btrim(entity_note)) FILTER (WHERE ${humanPredicate})::int human,
+              (${noteCount})::int human,
               array_agg(id ORDER BY id) ids
          FROM cphi_exhibitor_matches
         GROUP BY event_slug, holder_normalized
        HAVING COUNT(*) > 1
-        ORDER BY COUNT(DISTINCT btrim(entity_note)) FILTER (WHERE ${humanPredicate}) DESC, COUNT(*) DESC`)).rows;
+        ORDER BY ${hasNote ? `(${noteCount}) DESC, ` : ''}COUNT(*) DESC`)).rows;
 
     if (!groups.length) {
       await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cem_unique
