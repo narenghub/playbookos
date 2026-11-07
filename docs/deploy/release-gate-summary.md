@@ -209,7 +209,7 @@ check-release-blockers.js          exit=0    1 open blocker, reported
 ### Preflight
 
 ```
-── 77 checks: 77 executed and passed · 0 failed · 0 did not execute
+── 80 checks: 80 executed and passed · 0 failed · 0 did not execute
 PASS  every check executed and passed — safe to push.
 PREFLIGHT_EXIT=0
 ```

@@ -63,16 +63,30 @@ You ran this on 2026-11-06 and **it did its job**: exit 1, and it found two real
 contact with the real database — one of which would have shipped a broken feature on every fresh
 deployment. Both fixed. It needs one re-run.
 
-### Required owner action — one command
+### Required owner action — four commands
 
 ```sh
-cd ~/Downloads/playbookos && git pull
-scripts/verify-prod-dump.sh ~/Downloads/playbookos-prod.dump
-echo $?
+cd ~/playbookos
+git fetch origin && git checkout feat/prpa-phase2-sam-prep && git pull
+node scripts/migrate.js --plan | head -3        # must say 53 schema step(s)
+scripts/verify-prod-dump.sh ~/Downloads/playbookos-prod.dump ; echo $?
 ```
 
-The 25MB dump you already took is fine; nothing about it was at fault. Send me everything it prints —
-there are no secrets in it, only table names, row counts and verdicts.
+**The `git checkout` is load-bearing.** The fixes are on `feat/prpa-phase2-sam-prep` at `cd5ec74`.
+`main` is at `f284243`, which declares **47** steps, and the branch tip before this push (`9ff2bc7`)
+did too — so on 2026-11-06 three separate runs of this verification all executed 47-step code and
+reported the same already-fixed defect. `git pull` alone cannot fix that; the branch is the fix.
+
+The first wrong run was worse than useless, because `cd ~/Downloads/playbookos && git pull` failed at
+the `cd` — the directory did not exist — so the `git pull` never ran and the script executed from
+another checkout. Nothing in 80 lines of output said so except `(47 schema steps declared)`.
+
+`verify-prod-dump.sh` now prints its repo path, branch, SHA and step count as its first four lines and
+**exits 3 without touching the dump** if the chain is shorter than
+`scripts/expected-schema-steps.txt`. If it does not say 53, stop: everything after that is meaningless.
+
+The 25MB dump you already took is fine; nothing about it was ever at fault. Send me everything it
+prints — there are no secrets in it, only table names, row counts and verdicts.
 
 **Why it is safe** (ruling 33 item 2, asserted not claimed): `check-dump-test-isolation.js` — 10
 assertions, exit 0 — creates a live decoy database, points `DATABASE_URL`,
