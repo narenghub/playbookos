@@ -14,22 +14,56 @@
 --   only REVOKE is against PUBLIC and against the new role itself, before granting it back exactly
 --   what it needs.
 --
--- BEFORE YOU RUN IT
---   1. Replace <<<PUT A NEW PASSWORD HERE>>> on line 38 with a freshly generated password.
---      Generate it on your own machine:  openssl rand -base64 24
---      Do not reuse the superuser password. Do not paste it into a chat, a file, or a document.
---   2. Have the backup from step 2 of the release checklist already downloaded.
+-- NO PASSWORD APPEARS IN THIS FILE, AND NONE SHOULD BE TYPED INTO IT
+--   An earlier version of this file said "replace <<<PUT A NEW PASSWORD HERE>>> on line 38". That
+--   instruction was wrong: it put a live production password into a tracked file in a PUBLIC
+--   repository, one `git add -A` from being published, and into the editor's undo history and any
+--   backup the editor keeps besides. The role is now created with NO password, and the password is
+--   set interactively afterwards, so the value never exists in a file, in shell history, or in a log.
 --
--- HOW TO RUN IT
---   Railway -> your project -> the Postgres service -> "Data" tab -> Query
---   (or psql with the superuser connection string Railway gives you)
+-- BEFORE YOU RUN IT
+--   1. Have the backup from step 2 of the release checklist already downloaded.
+--   2. Nothing else. Do not generate a password yet — step 3 below prompts for it.
+--
+-- HOW TO RUN IT  (psql, from your own machine — not the Railway "Query" tab)
+--   The Railway Data -> Query tab cannot do step 3: \password is a psql command, not SQL. Running
+--   this file there would leave you setting the password with an SQL statement containing the
+--   plaintext, which is the problem this file now avoids.
+--
+--     1. Copy the superuser connection string from Railway -> Postgres -> Variables. Do not paste
+--        it onto a command line: `psql "<string>"` puts the password in your shell history.
+--        Instead let psql prompt you for it:
+--
+--          read -rs PGPASSWORD && export PGPASSWORD   # paste the password, press Enter, nothing echoes
+--          psql -h <host> -p <port> -U postgres -d railway
+--
+--     2. At the psql prompt:        \i docs/deploy/prod-roles.sql
+--     3. Then, still in psql:       \password playbookos_app
+--        It prompts twice, echoes nothing, hashes the password in the client, and sends only the
+--        SCRAM verifier — so even a server with log_statement=all records no plaintext. psql keeps
+--        \password out of its own history.
+--     4. Leave psql, then clear the variable:   unset PGPASSWORD
 --
 -- AFTER YOU RUN IT
---   Set, in Railway -> Variables:
+--   Set these two in the Railway Variables UI by typing or pasting into the field — not with a
+--   `railway variables set ...` command, which would put a production password into your shell
+--   history, and not in a file:
 --     MIGRATION_DATABASE_URL = the EXISTING superuser connection string
 --     DATABASE_URL           = the same string with the user and password swapped for
---                              playbookos_app and the password you chose above
+--                              playbookos_app and the password you set with \password
+--
+--   Railway Variables is a secret store, and it is the ONLY place that password should come to
+--   rest. It does not belong in a chat, a document, a commit, a screenshot or a terminal.
+--
 --   Then run the migration as a deploy step BEFORE the app starts:  node scripts/migrate.js
+--   scripts/migrate.js:53 reads MIGRATION_DATABASE_URL in preference to DATABASE_URL, which is
+--   what makes the migration run as the migrator and the application run as playbookos_app.
+--
+--   ONE ORDERING TRAP. Setting DATABASE_URL to playbookos_app takes effect on the next deploy.
+--   If that deploy happens before the migration step is in place, the app boots as a role with no
+--   CREATE privilege against a schema that has not been migrated — and src/lib/schema-ready.js
+--   refuses to start rather than attempting DDL it cannot perform. That is the designed refusal,
+--   not an outage to debug: run the migration, then let the app start.
 --
 -- ─────────────────────────────────────────────────────────────────────────────
 
@@ -37,8 +71,11 @@ BEGIN;
 
 -- 1. The application role. No superuser, no DDL, no RLS bypass.
 --    NOINHERIT so it cannot pick up privileges from any role it is later added to by accident.
+--    Created with NO password: a role with no password cannot be logged into at all, so this is the
+--    safe intermediate state. `\password playbookos_app` (step 3 above) is what makes it usable,
+--    and until you run it nothing can connect as this role.
 CREATE ROLE playbookos_app
-  LOGIN PASSWORD '<<<PUT A NEW PASSWORD HERE>>>'
+  LOGIN
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOINHERIT;
 
 -- 2. PostgreSQL 15 already stopped granting CREATE on schema public to PUBLIC. This is for a
