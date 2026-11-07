@@ -421,7 +421,123 @@ async function main() {
   if (isoAud.n && isoAud.iso === isoAud.n) ok(`all ${isoAud.n} audit row(s) tagged 'isolated-restore' — a rehearsal is distinguishable forever`);
   else bad(`audit tagging wrong on the isolated path: ${JSON.stringify(isoAud)}`);
 
-  for (const d of [prod, other, stale, stale2, conf, brk, noaud, iso]) { try { await d.c.end(); } catch { /* closing */ } }
+  // ── 12. PLANNING IS GENUINELY READ-ONLY (ruling 45 item 4) ──────────────────────────────────────
+  //
+  // Not "we did not write anything on purpose" — proved by planning as a role that CANNOT write.
+  // A SELECT-only role turns the claim into an assertion the database enforces: if planning tried
+  // to create the audit table, or update a row, it would fail with permission denied.
+  h('12. PLANNING IS READ-ONLY — proved with a role that cannot write');
+  const ro = await db(base, 'cphi_readonly', `${TABLE}${CLEAN}`);
+  await ro.c.query(`
+    CREATE ROLE cphi_planner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+    REVOKE ALL ON SCHEMA public FROM cphi_planner;
+    GRANT USAGE ON SCHEMA public TO cphi_planner;
+    GRANT SELECT ON cphi_exhibitor_matches TO cphi_planner;`);
+  const roUrl = `postgresql://cphi_planner@localhost/cphi_readonly?host=${base}&port=${PGPORT}&sslmode=disable`;
+
+  const tablesBefore = (await ro.c.query(
+    `SELECT string_agg(tablename, ',' ORDER BY tablename) t FROM pg_tables WHERE schemaname='public'`)).rows[0].t;
+  const roPlan = `${temp.base}/plan-ro.json`;
+  const roRes = reconcile(roUrl, ['--plan-out', roPlan]);
+  if (roRes.code === 1) ok('planning succeeds as a SELECT-only role — it performs no write of any kind');
+  else {
+    bad(`planning as a SELECT-only role exited ${roRes.code}`,
+      roRes.out.trim().split('\n').slice(-5).join(' | '));
+  }
+  const tablesAfter = (await ro.c.query(
+    `SELECT string_agg(tablename, ',' ORDER BY tablename) t FROM pg_tables WHERE schemaname='public'`)).rows[0].t;
+  if (tablesAfter === tablesBefore) ok('planning created no table — no implicit audit-table creation');
+  else bad('planning created a table', `before: ${tablesBefore} / after: ${tablesAfter}`);
+  if ((await ro.c.query(`SELECT COUNT(*)::int n FROM cphi_exhibitor_matches`)).rows[0].n === 5) {
+    ok('planning changed no row');
+  } else bad('planning changed rows');
+
+  // And the identity refusal (ruling 45 item 2): that same role must not be allowed to APPLY.
+  const roApply = reconcile(roUrl, ['--apply', roPlan, '--apply-to-production',
+    '--confirm-plan-id', JSON.parse(fs.readFileSync(roPlan, 'utf8')).plan_id]);
+  if (roApply.code !== 0 && /cannot create tables|least-privileged/i.test(roApply.out)) {
+    ok('an apply attempted as the least-privileged role is refused, naming the maintenance identity');
+  } else bad(`apply as a non-DDL role was not refused for that reason (exit ${roApply.code})`,
+    roApply.out.trim().split('\n').slice(-4).join(' | '));
+
+  // ── 13. THE DIGEST PATH — no plan file to keep (ruling 45 items 1 and 5) ────────────────────────
+  h('13. --apply-current — the plan is rebuilt, not carried');
+  const dg = await db(base, 'cphi_digest', `${TABLE}${CLEAN}`);
+  const dgPlanA = `${temp.base}/plan-dg-a.json`;
+  const dgPlanB = `${temp.base}/plan-dg-b.json`;
+  reconcile(dg.url, ['--plan-out', dgPlanA]);
+  reconcile(dg.url, ['--plan-out', dgPlanB]);
+  const dA = JSON.parse(fs.readFileSync(dgPlanA, 'utf8'));
+  const dB = JSON.parse(fs.readFileSync(dgPlanB, 'utf8'));
+
+  if (dA.plan_digest && dA.plan_digest === dB.plan_digest) {
+    ok(`two plans from the same unchanged database share one digest (${dA.plan_digest})`);
+  } else bad('the digest is not stable across generations', `${dA.plan_digest} vs ${dB.plan_digest}`);
+  if (dA.plan_id !== dB.plan_id) ok('…while the plan ids differ — so the digest, not the id, identifies content');
+  else bad('two generations produced the same plan id');
+
+  // The digest covers db_identity, so a rehearsal digest cannot authorize a production apply.
+  const otherPlan = `${temp.base}/plan-other.json`;
+  reconcile(other.url, ['--plan-out', otherPlan]);
+  const dOther = JSON.parse(fs.readFileSync(otherPlan, 'utf8'));
+  if (dOther.plan_digest !== dA.plan_digest) {
+    ok('two databases with identical contents produce DIFFERENT digests — identity is inside the digest');
+  } else bad('identical contents in different databases share a digest', 'a rehearsal digest would authorize production');
+
+  refusal.before = await rowCount(dg.c);
+  await refusal('--apply-current with no --confirm-plan-digest', dg.c,
+    reconcile(dg.url, ['--apply-current', '--apply-to-production']), 'confirm-plan-digest');
+  await refusal('--apply-current with a digest that is not this plan\'s', dg.c,
+    reconcile(dg.url, ['--apply-current', '--apply-to-production', '--confirm-plan-digest', 'deadbeefdeadbeefdeadbeef']),
+    'not the plan you reviewed');
+  await refusal('--apply and --apply-current together', dg.c,
+    reconcile(dg.url, ['--apply', dgPlanA, '--apply-current', '--apply-to-production',
+      '--confirm-plan-digest', dA.plan_digest]), 'mutually exclusive');
+
+  // Item 5: a row changes between review and apply, and the digest catches it.
+  await dg.c.query(`UPDATE cphi_exhibitor_matches SET entity_note = 'changed between review and apply'
+                     WHERE holder_normalized = 'gamma only'`);
+  refusal.before = await rowCount(dg.c);
+  await refusal('a row changed between the review and the apply', dg.c,
+    reconcile(dg.url, ['--apply-current', '--apply-to-production', '--confirm-plan-digest', dA.plan_digest]),
+    'not the plan you reviewed');
+
+  // And the authorized digest path, on a clean database.
+  const dg2 = await db(base, 'cphi_digest2', `${TABLE}${CLEAN}`);
+  const dg2Plan = `${temp.base}/plan-dg2.json`;
+  reconcile(dg2.url, ['--plan-out', dg2Plan]);
+  const d2 = JSON.parse(fs.readFileSync(dg2Plan, 'utf8'));
+  fs.rmSync(dg2Plan);  // the point: the file is GONE, as it would be after a container restart
+  const dg2Res = reconcile(dg2.url, ['--apply-current', '--apply-to-production',
+    '--confirm-plan-digest', d2.plan_digest]);
+  if (dg2Res.code === 0) ok('--apply-current works with the plan file deleted — nothing had to persist');
+  else bad(`the digest path exited ${dg2Res.code}`, dg2Res.out.trim().split('\n').slice(-6).join(' | '));
+  if (await dupGroups(dg2.c) === 0) ok('it reconciled the duplicates it was authorized for');
+  else bad(`${await dupGroups(dg2.c)} duplicate group(s) remain`);
+  const dg2Runs = (await dg2.c.query(`SELECT target FROM cphi_reconcile_runs`)).rows;
+  if (dg2Runs.length === 1 && dg2Runs[0].target === 'production') ok("the digest path records target = 'production'");
+  else bad(`the digest path recorded ${JSON.stringify(dg2Runs)}`);
+
+  // ── 14. WHAT IS ACTUALLY IN A PLAN (ruling 45 item 3) ───────────────────────────────────────────
+  h('14. IS THE PLAN SAFE TO STORE OR SEND');
+  const planObj = JSON.parse(fs.readFileSync(dgPlanA, 'utf8'));
+  const fields = new Set();
+  for (const g of planObj.groups) for (const r of (g.rows || [])) Object.keys(r).forEach((k) => fields.add(k));
+  console.log(`        row fields carried in the plan: ${[...fields].sort().join(', ') || '(none)'}`);
+  const text = fs.readFileSync(dgPlanA, 'utf8');
+  const secretish = [/postgres(ql)?:\/\//i, /password/i, /PGPASSWORD/, /\bsecret\b/i, /\btoken\b/i,
+    /api[_-]?key/i, /BEGIN [A-Z ]*PRIVATE KEY/, /\bBearer\b/, /ghp_[A-Za-z0-9]/, /\b\d{3}-\d{2}-\d{4}\b/];
+  const hits = secretish.filter((re) => re.test(text)).map(String);
+  if (!hits.length) ok('no credential, key, token or government-id pattern anywhere in the plan');
+  else bad(`the plan matches ${hits.length} secret-shaped pattern(s)`, hits.join(' '));
+  // It does carry business row content — company names, booths, and human notes — which is the
+  // point of a reviewable plan. Said out loud so nobody treats it as public.
+  if (/entity_note|holder/.test(text)) {
+    ok('the plan does carry business row content (holders, notes) — internal, and the digest path means it never has to leave the database');
+  }
+
+  for (const d of [prod, other, stale, stale2, conf, brk, noaud, iso, ro, dg, dg2]) { try { await d.c.end(); } catch { /* closing */ } }
 
   h(`  ${pass} assertion(s) passed · ${fail} failed`);
   if (fail) {

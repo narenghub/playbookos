@@ -185,28 +185,37 @@ echo $?                            # must be 0, or stop
 
 # ── CHECKPOINT 2 — CPHI reconciliation, production. Two commands, with a review between them.
 #
-#    2a. PLAN. Read-only: it writes nothing to the database.
-railway ssh 'bash -lc "cd /app && node scripts/cphi-reconcile.js --plan-out /tmp/cphi-plan.json"'
+#    NOTHING HAS TO PERSIST BETWEEN THESE TWO COMMANDS. `railway ssh` can land in a different
+#    container each time, and a restart takes /tmp with it — so the plan is NOT carried. Plan
+#    generation is deterministic, so step 2b rebuilds it and compares a DIGEST. The only thing
+#    that travels between the two commands is a 24-character hash.
+#
+#    2a. PLAN. Read-only, and proved so: planning succeeds as a SELECT-only role, creates no
+#        table, and changes no row (check-cphi-production-path.js §12).
+railway ssh 'bash -lc "cd /app && node scripts/cphi-reconcile.js"'
 echo $?                            # 1 while duplicates exist — that is the blocking finding
 #
-#    Send me the report. The plan file records the database identity, the table-state
-#    fingerprint, the expected group and deletion counts, the conflict count, and its own
-#    integrity hash. I read it and tell you the plan id to confirm.
+#    The report prints: the connected identity and its privileges, the database identity, the
+#    table-state fingerprint, every affected group, and the PLAN DIGEST. Send me the report.
+#    I read it and give you back the digest to confirm.
 #
-#    2b. APPLY. Needs BOTH the production flag and the plan id, which must be the id of the
-#        plan in that file. Neither can be supplied by an environment variable.
-railway ssh 'bash -lc "cd /app && node scripts/cphi-reconcile.js --apply /tmp/cphi-plan.json \
-  --apply-to-production --confirm-plan-id <THE PLAN ID I GIVE YOU>"'
+#    2b. APPLY. Runs as the MAINTENANCE identity, not the application role: the script switches
+#        to MIGRATION_DATABASE_URL for an apply, and refuses outright if the identity it ends up
+#        with cannot create the audit table. Needs BOTH the production flag and the digest.
+railway ssh 'bash -lc "cd /app && node scripts/cphi-reconcile.js --apply-current \
+  --apply-to-production --confirm-plan-digest <THE DIGEST I GIVE YOU>"'
 echo $?
 #
-#    It refuses, having changed nothing, if: the database is not the one the plan was built
-#    from; any row in the table moved since the plan was made; the plan file was edited; the
-#    plan's own counts disagree with its contents; any group is in CONFLICT; or the plan id
-#    does not match. --apply-to-production and --confirm-not-production are mutually exclusive.
+#    It refuses, having changed nothing, if: the plan rebuilt from this database does not match
+#    the reviewed digest (which catches ANY row changed in between, including rows outside every
+#    duplicate group); the database is not the one the digest was computed on; any group is in
+#    CONFLICT; the identity cannot create the audit table; or the digest is absent.
+#    --apply-to-production / --confirm-not-production and --apply / --apply-current are each
+#    mutually exclusive, and no authorization is ever read from an environment variable.
 #
-#    ROLLBACK POINT: every prior row is in cphi_reconcile_audit under that plan_id, and
-#    cphi_reconcile_runs records that this run had target 'production' — so a rehearsal and
-#    the real thing stay distinguishable afterwards.
+#    ROLLBACK POINT: every prior row is in cphi_reconcile_audit under that run's plan_id, and
+#    cphi_reconcile_runs records target 'production' with the database identity hash — so a
+#    rehearsal and the real thing stay distinguishable afterwards.
 
 # ── CHECKPOINT 3 — the 54-step migration, as the migrator, app still serving the OLD release.
 #    Safe in this order because the schema is additive: the old release runs against it unchanged.

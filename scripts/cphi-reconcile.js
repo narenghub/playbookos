@@ -48,7 +48,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
-const { query, withTransaction } = require('../src/lib/db');
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -76,6 +75,45 @@ const ACTOR = process.env.RECONCILE_ACTOR || 'cphi-reconcile.js';
 // and the whole point of this gate is that a person decided.
 const APPLY_PROD = has('--apply-to-production');
 const CONFIRM_PLAN_ID = val('--confirm-plan-id');
+
+// ── PLAN WITHOUT A PLAN FILE (ruling 45 item 1) ────────────────────────────────────────────────────
+//
+// The two-command shape — plan to /tmp, review, apply that file — assumed /tmp survives between
+// `railway ssh` invocations. It may not: each invocation can land in a different container, and a
+// restart or redeploy takes the filesystem with it. A plan that silently disappears between review
+// and apply is bad; a plan file that is silently a DIFFERENT, newer plan than the reviewed one is
+// much worse, and that is what a re-plan into the same path would produce.
+//
+// The fix is to stop moving the artifact. Plan generation is already deterministic — the same
+// database yields the same groups, survivors and fingerprints, which check-cphi-reconcile.js
+// asserts — so the plan does not need to be carried anywhere. It needs to be IDENTIFIED. The report
+// prints a digest over the plan's content (everything except its random id and its timestamp), and
+// --apply-current re-plans from the live database, recomputes that digest, and refuses unless it
+// equals the one reviewed.
+//
+// So nothing is stored, nothing is transferred, and nothing sensitive leaves the database: the only
+// thing that travels is a 24-character hash. If a single row changed in between, the digest differs
+// and the apply refuses — which is also ruling 45 item 5, obtained for free rather than bolted on.
+const APPLY_CURRENT = has('--apply-current');
+const CONFIRM_DIGEST = val('--confirm-plan-digest');
+
+// ── WHICH IDENTITY DOES THE WORK (ruling 45 item 2) ────────────────────────────────────────────────
+//
+// The application role is least-privileged on purpose: no DDL, so it cannot create the audit tables
+// this script needs, and it should not be the identity that deletes rows in a maintenance operation
+// either. The migration identity exists for exactly this.
+//
+// This has to happen BEFORE src/lib/db is required, because that module builds its Pool from
+// DATABASE_URL once, at require time — the same ordering the readiness harness depends on. Hence the
+// require below this line and not at the top of the file with the others.
+const MAINTENANCE_URL = process.env.MIGRATION_DATABASE_URL || null;
+let IDENTITY_SOURCE = 'DATABASE_URL';
+if ((APPLY || APPLY_CURRENT) && MAINTENANCE_URL) {
+  process.env.DATABASE_URL = MAINTENANCE_URL;
+  IDENTITY_SOURCE = 'MIGRATION_DATABASE_URL';
+}
+// eslint-disable-next-line global-require
+const { query, withTransaction } = require('../src/lib/db');
 
 if (APPLY_PROD && CONFIRMED) {
   console.error('\nRefusing: --apply-to-production and --confirm-not-production are mutually exclusive.\n');
@@ -215,6 +253,28 @@ async function tableStateFingerprint() {
 function planIntegritySha(plan) {
   const { plan_sha: _omit, ...rest } = plan;
   return crypto.createHash('sha256').update(JSON.stringify(rest)).digest('hex').slice(0, 24);
+}
+
+// The CONTENT digest, as distinct from the integrity hash above. It deliberately excludes plan_id
+// (random per generation) and generated_at (a clock), so two plans built from the same unchanged
+// database have the same digest — which is what makes "re-plan and compare" a safe substitute for
+// carrying a file between sessions. It covers db_identity, so a digest from one database cannot
+// authorize an apply on another.
+function planDigest(plan) {
+  const { plan_id: _i, generated_at: _g, plan_sha: _s, plan_digest: _d, ...rest } = plan;
+  return crypto.createHash('sha256').update(JSON.stringify(rest)).digest('hex').slice(0, 24);
+}
+
+// Who am I connected as, and can this identity do the job? Printed rather than assumed, because
+// "run it as the migrator" is an instruction and this is the fact.
+async function connectionIdentity() {
+  const r = (await query(`
+    SELECT current_user AS role, current_database() AS database,
+           (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS is_super,
+           has_schema_privilege(current_user, 'public', 'CREATE') AS can_create,
+           has_table_privilege(current_user, 'cphi_exhibitor_matches', 'DELETE') AS can_delete,
+           has_table_privilege(current_user, 'cphi_exhibitor_matches', 'UPDATE') AS can_update`)).rows[0];
+  return r;
 }
 
 async function columnsOf(table) {
@@ -409,6 +469,7 @@ async function buildPlan() {
     conflict_count: conflicts,
     groups,
   };
+  plan.plan_digest = planDigest(plan);
   plan.plan_sha = planIntegritySha(plan);
   return plan;
 }
@@ -547,8 +608,33 @@ async function applyPlan(file) {
     console.error('      --apply-to-production --confirm-plan-id <the plan id>\n');
     process.exit(2);
   }
-  if (!fs.existsSync(file)) { console.error(`no such plan file: ${file}`); process.exit(2); }
-  const plan = JSON.parse(fs.readFileSync(file, 'utf8'));
+  // ── --apply-current: the plan is rebuilt here, not read from disk (ruling 45 item 1) ────────────
+  let plan;
+  if (file === null) {
+    if (!CONFIRM_DIGEST) {
+      console.error('\nRefusing --apply-current without --confirm-plan-digest.\n');
+      console.error('  --apply-current rebuilds the plan from the database in front of it. Without the');
+      console.error('  digest of the plan you reviewed, there is nothing to compare it against, and it');
+      console.error('  would apply whatever it happens to find now.\n');
+      process.exit(2);
+    }
+    plan = await buildPlan();
+    const live = plan.plan_digest;
+    if (live !== CONFIRM_DIGEST) {
+      console.error('\nRefusing production apply: the plan rebuilt from this database is not the plan you reviewed.\n');
+      console.error(`  reviewed digest: ${CONFIRM_DIGEST}`);
+      console.error(`  current digest:  ${live}`);
+      console.error('\n  Something changed between the review and now — a row, the schema, or the');
+      console.error('  database. Nothing has been changed. Re-plan, review the new report, and');
+      console.error('  confirm the new digest.\n');
+      process.exit(2);
+    }
+    console.log(`\n  plan rebuilt from this database and matches the reviewed digest ${live}`);
+    console.log(`  (plan id ${plan.plan_id} — newly generated; the digest is what was reviewed)`);
+  } else {
+    if (!fs.existsSync(file)) { console.error(`no such plan file: ${file}`); process.exit(2); }
+    plan = JSON.parse(fs.readFileSync(file, 'utf8'));
+  }
 
   // ── THE PRODUCTION GATE (ruling 44 items 3, 4 and 7) ────────────────────────────────────────────
   //
@@ -556,6 +642,7 @@ async function applyPlan(file) {
   // transaction opens, so a refused production invocation has touched nothing at all — it has not
   // even created a table.
   if (APPLY_PROD) {
+    const ok_line = (m) => console.log(`  ${m}`);
     const refuse = (what, why) => {
       console.error(`\nRefusing production apply: ${what}\n`);
       console.error(`  ${why}\n`);
@@ -566,15 +653,23 @@ async function applyPlan(file) {
 
     // 4a. The second confirmation, bound to the exact plan — not to the file path, which can be
     //     recalled from shell history pointing at a file whose contents have since been replaced.
-    if (!CONFIRM_PLAN_ID) {
-      refuse('--confirm-plan-id was not given',
-        'a production apply needs two independent confirmations: the flag that says which database, '
-        + 'and the plan id that says which change. One of them is missing.');
-    }
-    if (CONFIRM_PLAN_ID !== plan.plan_id) {
-      refuse('the confirmed plan id is not this plan\'s id',
-        `you confirmed ${CONFIRM_PLAN_ID}, this file holds ${plan.plan_id} — so the file is not the `
-        + 'plan you reviewed.');
+    // With --apply-current the second confirmation is the DIGEST, already verified above against a
+    // plan rebuilt from this database. With a plan file it is the plan id. Exactly one of the two,
+    // never neither — and the digest form is strictly stronger, because a plan id identifies a
+    // generation while a digest identifies the content.
+    if (APPLY_CURRENT) {
+      ok_line(`second confirmation: plan digest ${CONFIRM_DIGEST} (content, not just identity)`);
+    } else {
+      if (!CONFIRM_PLAN_ID) {
+        refuse('--confirm-plan-id was not given',
+          'a production apply needs two independent confirmations: the flag that says which database, '
+          + 'and the plan id that says which change. One of them is missing.');
+      }
+      if (CONFIRM_PLAN_ID !== plan.plan_id) {
+        refuse('the confirmed plan id is not this plan\'s id',
+          `you confirmed ${CONFIRM_PLAN_ID}, this file holds ${plan.plan_id} — so the file is not the `
+          + 'plan you reviewed.');
+      }
     }
 
     // 4b. Authorization is never inferred from the environment. Said out loud because the
@@ -816,6 +911,23 @@ async function applyPlan(file) {
 }
 
 (async () => {
+  // Who is doing this, printed before anything happens (ruling 45 item 2).
+  const who = await connectionIdentity();
+  console.log(`\n  identity: ${who.role}@${who.database} via ${IDENTITY_SOURCE}`
+    + ` — superuser=${who.is_super} create=${who.can_create}`
+    + ` update=${who.can_update} delete=${who.can_delete}`);
+  if ((APPLY || APPLY_CURRENT) && !who.can_create) {
+    console.error('\nRefusing: this identity cannot create tables, so it cannot guarantee the audit\n'
+      + '  table exists before deleting anything. Run the apply with MIGRATION_DATABASE_URL set to\n'
+      + '  the maintenance identity; the application role is least-privileged on purpose.\n');
+    process.exit(2);
+  }
+  if (APPLY_CURRENT && APPLY) {
+    console.error('\nRefusing: --apply and --apply-current are mutually exclusive.\n');
+    console.error('  One applies a file, the other rebuilds the plan here. Pick one.\n');
+    process.exit(2);
+  }
+  if (APPLY_CURRENT) { await applyPlan(null); process.exit(0); }
   if (APPLY) { await applyPlan(APPLY); process.exit(0); }
 
   const plan = await buildPlan();
@@ -830,9 +942,18 @@ async function applyPlan(file) {
   fs.writeFileSync(PLAN_OUT, `${JSON.stringify(plan, null, 2)}\n`);
 
   h('NOTHING HAS BEEN CHANGED');
-  console.log(`\n  plan written to ${PLAN_OUT}`);
-  console.log(`  Review it, then apply against an ISOLATED RESTORE of the backup:\n`);
+  console.log(`\n  plan id      ${plan.plan_id}   (new on every generation)`);
+  console.log(`  plan digest  ${plan.plan_digest}   <-- THIS is what identifies the plan's CONTENT`);
+  console.log(`  database     ${plan.db_identity.database} / identity ${plan.db_identity.identity_sha}`);
+  console.log(`  table state  ${plan.table_state.state_sha} over ${plan.table_state.rows} row(s)`);
+  console.log(`  plan written to ${PLAN_OUT}`);
+
+  console.log(`\n  Apply against an ISOLATED RESTORE of the backup:\n`);
   console.log(`      node scripts/cphi-reconcile.js --apply ${PLAN_OUT} --confirm-not-production\n`);
+  console.log(`  Or, for PRODUCTION, with no plan file to keep or carry — the plan is rebuilt and`);
+  console.log(`  compared against the digest above, and refused if a single row has changed:\n`);
+  console.log(`      node scripts/cphi-reconcile.js --apply-current \\`);
+  console.log(`        --apply-to-production --confirm-plan-digest ${plan.plan_digest}\n`);
   if (counts.conflict) {
     console.log(`  ${counts.conflict} CONFLICT group(s) will be left untouched and the unique index will`);
     console.log(`  still not be creatable. Those need a decision first — the report above lists every`);
