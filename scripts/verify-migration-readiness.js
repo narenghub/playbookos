@@ -456,7 +456,39 @@ async function main() {
       skip('before/after schema comparison', 'no baseline snapshot was taken');
     }
 
-    h('5. EXISTING DATA PRESERVED');
+    // ── BEHAVIORAL REGRESSION ON THE MIGRATED RESTORE (ruling 40 item 2) ─────────────────────────
+    //
+    // The same harness preflight runs, pointed at THIS database instead of one it built for itself.
+    // A second copy of these assertions would drift, and the one nobody ran would be the one that
+    // mattered — so it is a mode on the existing harness, not a new file.
+    //
+    // Only in --reconcile-on-restore mode, because without reconciliation this database still has
+    // duplicate CPHI rows and no idx_cem_unique, and the harness refuses it on exactly that ground.
+    //
+    // The harness guards itself before booting: it stops capability:email.send,
+    // capability:whatsapp.send and the two legacy email workflows in this disposable copy, blanks
+    // every outbound credential in the server's environment, and afterwards checks email_log and
+    // autonomy_stops to confirm nothing left the machine. src/lib/mailer.js and src/lib/whatsapp.js
+    // both consult checkStopped() before sending, so the stop is the designed refusal.
+    if (RECONCILE_ON_RESTORE) {
+      h('5. BEHAVIORAL REGRESSION — THE APPLICATION, ON THIS MIGRATED PRODUCTION RESTORE');
+      let bcode = 0; let bout = '';
+      try {
+        bout = execFileSync(process.execPath, [path.join(__dirname, 'check-behavioral-regression.js')],
+          { encoding: 'utf8', stdio: 'pipe', maxBuffer: 32 * 1024 * 1024,
+            env: {
+              ...process.env,
+              BEHAVIOR_EXISTING_URL: urlFor('existing'),
+              BEHAVIOR_APPPORT: process.env.BEHAVIOR_APPPORT || '5633',
+            } });
+      } catch (e) { bcode = e.status === undefined ? 1 : e.status; bout = `${e.stdout || ''}${e.stderr || ''}`; }
+      for (const l of bout.split('\n')) console.log(`        ${l}`);
+      if (bcode === 0) ok('the application behaves correctly on the migrated production restore');
+      else bad(`behavioral regression exited ${bcode} on the migrated production restore`,
+        'authentication, role freshness, product permissions, outreach or integration gating failed on real data');
+    }
+
+    h('6. EXISTING DATA PRESERVED');
     after = await fingerprint(q, TRACKED);
     const lost = [];
     for (const t of TRACKED) {
@@ -507,7 +539,7 @@ async function main() {
     }
 
     // ── 5. IDEMPOTENCE ───────────────────────────────────────────────────────
-    h('6. IDEMPOTENCE — a re-run must change nothing');
+    h('7. IDEMPOTENCE — a re-run must change nothing');
     const again = await runAll(q, { seeds: false, log: () => {} });
     if (again.ok) ok('the migration runs a second time without error');
     else bad('a re-run failed', again.failed.map((f) => f.error).join(' | '));
@@ -517,7 +549,7 @@ async function main() {
     else bad(`${drifted.length} table(s) changed on a re-run`, drifted.map((t) => `${t}: ${after[t]} → ${third[t]}`).join(' | '));
 
     // ── 6. BACKWARD COMPATIBILITY ────────────────────────────────────────────
-    h('7. BACKWARD COMPATIBILITY — would the PREVIOUS release still run?');
+    h('8. BACKWARD COMPATIBILITY — would the PREVIOUS release still run?');
     // The question is whether the migration is additive. A column the old code reads that this
     // migration drops or renames would break the running application during a rolling deploy, and
     // would break a rollback afterwards.
@@ -559,7 +591,7 @@ async function main() {
     }
 
     // ── 7. RECOVERY ──────────────────────────────────────────────────────────
-    h('8. RECOVERY — restore the pre-migration backup and check it comes back');
+    h('9. RECOVERY — restore the pre-migration backup and check it comes back');
     try {
       await client.end(); client = null;
       sh(`createdb -h ${temp.base} -p ${PGPORT} -U postgres recovered`);

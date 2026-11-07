@@ -109,37 +109,145 @@ const waitForHealth = async () => {
 const ADMIN_EMAIL = 'behavior-admin@example.invalid';
 const ADMIN_PASSWORD = `fixture-only-${require('crypto').randomBytes(12).toString('hex')}`;
 
+// ── TWO MODES, ONE SET OF ASSERTIONS (ruling 40 item 2) ────────────────────────────────────────────
+//
+// Default: build a disposable cluster, migrate it, boot the server. That is the preflight path.
+//
+// BEHAVIOR_EXISTING_URL: run the SAME assertions against a database somebody else prepared — in
+// practice the restored, reconciled, migrated copy of production that verify-migration-readiness.js
+// has in hand. Wired as a mode rather than a second harness on purpose: two copies of these
+// assertions would drift, and the one nobody ran would be the one that mattered.
+//
+// WHY THIS MODE NEEDS MORE CARE THAN THE OTHER. The fixture path boots the server over invented rows.
+// This one boots it over 12 real people, 4,756 prospects and every buyer contact — and server.js
+// registers its cron jobs unconditionally, one of which emails a briefing. So before the server
+// starts, in this mode only:
+//
+//   1. the capability STOPs are inserted into the disposable database. src/lib/mailer.js and
+//      src/lib/whatsapp.js both call checkStopped() before sending, so a stop is the DESIGNED refusal
+//      and not a hope. capability:llm.call is deliberately left unstopped, because section 6 probes
+//      the stop mechanism with it.
+//   2. every outbound credential is blanked in the child's environment, so a path that somehow got
+//      past the stop has nothing to authenticate with.
+//   3. after the run, autonomy_events and email_log are checked for an actual send. The guard is
+//      verified rather than trusted — "it will be refused anyway" is a prediction, not a safeguard.
+const EXISTING_URL = process.env.BEHAVIOR_EXISTING_URL || null;
+
+// Anything that could reach the outside world. Blanked, not removed, so code reading them gets an
+// empty string rather than undefined-with-a-default.
+const OUTBOUND_CREDENTIALS = ['RESEND_API_KEY', 'RESEND_FROM', 'TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN',
+  'TWILIO_WHATSAPP_FROM', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'APOLLO_API_KEY', 'ALGOLIA_API_KEY',
+  'LINKEDIN_ACCESS_TOKEN', 'LINKEDIN_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN', 'GOOGLE_CLIENT_SECRET',
+  'GOOGLE_SERVICE_ACCOUNT_JSON', 'TRIGGERS_SECRET', 'PLAYBOOKOS_WEBHOOK_SECRET', 'ENGAGEMENT_SECRET'];
+
+// Row counts taken before the server boots, so section 7 can compare a delta rather than an
+// absolute. Null in default mode, where the database is built empty by this script.
+let outboundBaseline = null;
+
+const PRE_INSERTED_STOPS = [
+  ['capability', 'email.send'],
+  ['capability', 'whatsapp.send'],
+  ['workflow', 'legacy-inquiry-buyer-email'],
+  ['workflow', 'legacy-supplier-rfq-email'],
+];
+
 async function main() {
-  h('BEHAVIORAL REGRESSION — EXISTING FUNCTIONALITY ON A FRESHLY MIGRATED DATABASE');
+  h(EXISTING_URL
+    ? 'BEHAVIORAL REGRESSION — AGAINST THE RESTORED, RECONCILED PRODUCTION DATABASE'
+    : 'BEHAVIORAL REGRESSION — EXISTING FUNCTIONALITY ON A FRESHLY MIGRATED DATABASE');
 
-  const base = startCluster();
-  if (!base) {
-    console.log('\nSKIP  no PostgreSQL server toolchain (initdb/pg_ctl). This proved NOTHING.\n');
-    process.exit(EXIT_NOT_EXECUTED);
+  let url;
+  if (EXISTING_URL) {
+    url = EXISTING_URL;
+  } else {
+    const base = startCluster();
+    if (!base) {
+      console.log('\nSKIP  no PostgreSQL server toolchain (initdb/pg_ctl). This proved NOTHING.\n');
+      process.exit(EXIT_NOT_EXECUTED);
+    }
+    url = `postgresql://postgres@localhost/postgres?host=${base}&port=${PGPORT}&sslmode=disable`;
   }
-
-  const url = `postgresql://postgres@localhost/postgres?host=${base}&port=${PGPORT}&sslmode=disable`;
   const owner = new Client({ connectionString: url });
   await owner.connect();
   const oq = (s, p) => owner.query(s, p);
 
-  // ── migrate ─────────────────────────────────────────────────────────────────────────────────────
-  h('1. MIGRATE, THEN BOOT THE REAL SERVER');
   process.env.DATABASE_URL = url;
   process.env.ADMIN_EMAIL = ADMIN_EMAIL;
   process.env.ADMIN_PASSWORD = ADMIN_PASSWORD;
   process.env.PRPA_COMPANY_SLUG = 'abiozen';
-  {
+
+  const childEnv = {
+    ...process.env,
+    PORT: APPPORT,
+    NODE_ENV: 'test',
+    JWT_SECRET: require('crypto').randomBytes(24).toString('hex'),
+  };
+
+  if (EXISTING_URL) {
+    h('1. A DATABASE SOMEBODY ELSE PREPARED — guard it, then boot the server over it');
+    const tables = (await oq(`SELECT COUNT(*)::int n FROM pg_tables WHERE schemaname='public'`)).rows[0].n;
+    const users = (await oq(`SELECT COUNT(*)::int n FROM users`)).rows[0].n;
+    ok(`using the supplied database — ${tables} tables, ${users} user(s), already migrated`);
+
+    // The index this whole reconciliation existed for. If it is absent, the database was not
+    // reconciled and these assertions would be running against the wrong thing.
+    const idx = (await oq(`SELECT COUNT(*)::int n FROM pg_indexes WHERE indexname='idx_cem_unique'`)).rows[0].n;
+    if (idx === 1) ok('idx_cem_unique is present — this database has been reconciled and migrated');
+    else bad('idx_cem_unique is absent', 'the supplied database has not been through reconciliation');
+
+    for (const [type, key] of PRE_INSERTED_STOPS) {
+      await oq(`INSERT INTO autonomy_stops (scope_type, scope_key, reason, set_by)
+                VALUES ($1,$2,$3,$4)
+                ON CONFLICT (scope_type, scope_key) DO NOTHING`,
+      [type, key, 'behavioral regression on a restored copy — no outbound traffic permitted',
+        'check-behavioral-regression.js']);
+    }
+    const stopped = (await oq(`SELECT scope_type || ':' || scope_key AS k FROM autonomy_stops ORDER BY 1`))
+      .rows.map((r) => r.k);
+    const missing = PRE_INSERTED_STOPS.map(([t, k]) => `${t}:${k}`).filter((k) => !stopped.includes(k));
+    if (!missing.length) ok(`outbound capabilities stopped before boot: ${PRE_INSERTED_STOPS.map(([t, k]) => `${t}:${k}`).join(', ')}`);
+    else bad(`could not stop ${missing.join(', ')}`, 'refusing to boot a server over real contacts without the kill switch set');
+
+    let blanked = 0;
+    for (const k of OUTBOUND_CREDENTIALS) { if (childEnv[k]) { childEnv[k] = ''; blanked += 1; } }
+    ok(`${blanked} outbound credential(s) blanked in the server's environment (of ${OUTBOUND_CREDENTIALS.length} checked)`);
+
+    // ── BASELINE FOR SECTION 7 ────────────────────────────────────────────────
+    // Taken here, before the server boots, because section 7 has to answer "did this run send
+    // anything" and the only honest form of that question is a DELTA. Not a timestamp window:
+    // email_log.sent_at is TEXT (src/lib/db.js:130) and autonomy_events has `at`, not `created_at`,
+    // so a `> NOW() - INTERVAL` comparison is wrong on both tables — it was, until this run caught
+    // it. And not "the table is empty" either: this database is a copy of production and these
+    // tables legitimately hold history. CLAUDE.md says compare a delta against what was already
+    // there, and that applies to a read-only assertion exactly as it does to cleanup.
+    outboundBaseline = {
+      email_log: (await oq(`SELECT COUNT(*)::int n FROM email_log`)).rows[0].n,
+      autonomy_events: (await oq(`SELECT COUNT(*)::int n FROM autonomy_events`)).rows[0].n,
+    };
+    console.log(`        baseline before boot — email_log ${outboundBaseline.email_log} row(s), `
+      + `autonomy_events ${outboundBaseline.autonomy_events} row(s)`);
+
+    if (missing.length) throw new Error('stop');
+  } else {
+    h('1. MIGRATE, THEN BOOT THE REAL SERVER');
     const r = await require('../src/lib/migrate-all').runAll(oq, { seeds: false, log: () => {} });
     if (r.ok) ok(`${r.steps.length} migration step(s) applied`);
     else { bad(`${r.failed.length} step(s) failed`, r.failed.map((f) => `${f.name}: ${f.error}`).join(' | ')); throw new Error('stop'); }
+  }
 
-    // The seeded admin is a super_admin only if the seed says so; make it explicit, because the role
-    // tests below depend on knowing exactly what this account is.
-    await oq(`UPDATE users SET role='super_admin' WHERE email=$1`, [ADMIN_EMAIL]);
+  {
+    // The fixture admin. In existing-database mode the real accounts are present but their passwords
+    // are not known here and must never be — so a fixture super_admin is inserted with a password
+    // generated for this run, and it dies with the disposable database.
+    const hash = require('bcryptjs').hashSync(ADMIN_PASSWORD, 10);
+    await oq(`INSERT INTO users (id, email, name, role, password_hash)
+              VALUES ('behavior-admin', $1, 'Behavior Admin', 'super_admin', $2)
+              ON CONFLICT (email) DO UPDATE SET role='super_admin', password_hash=$2`,
+    [ADMIN_EMAIL, hash]);
+    if (EXISTING_URL) ok(`fixture super_admin ${ADMIN_EMAIL} created in the disposable copy (password generated for this run)`);
 
     server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-      env: { ...process.env, PORT: APPPORT, NODE_ENV: 'test', JWT_SECRET: require('crypto').randomBytes(24).toString('hex') },
+      env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const boot = [];
@@ -426,6 +534,40 @@ async function main() {
         } else bad('the fixture stop was not cleared', 'it would be left holding a capability');
       }
     }
+  }
+
+  // ── 7. DID ANYTHING ACTUALLY LEAVE THE MACHINE? (ruling 40 item 3) ─────────────────────────────
+  if (EXISTING_URL) {
+    h('7. NO OUTBOUND TRAFFIC — the guard is checked, not trusted');
+
+    // A successful send writes to email_log. Anything the kill switch refused lands in
+    // autonomy_events instead. Both are compared against the pre-boot baseline, because an absolute
+    // count proves nothing on a copy of production and "the table is empty" is also what a table
+    // nobody writes to looks like.
+    if (!outboundBaseline) {
+      bad('no pre-boot baseline was taken', 'section 7 cannot answer the question it exists for');
+    } else {
+      const nowEmail = (await oq(`SELECT COUNT(*)::int n FROM email_log`)).rows[0].n;
+      const dEmail = nowEmail - outboundBaseline.email_log;
+      if (dEmail === 0) ok(`email_log gained no row during this run (${nowEmail}, unchanged)`);
+      else bad(`email_log gained ${dEmail} row(s) during this run`,
+        'something attempted to send mail over contacts copied from production');
+
+      const nowEv = (await oq(`SELECT COUNT(*)::int n FROM autonomy_events`)).rows[0].n;
+      console.log(`        autonomy_events grew by ${nowEv - outboundBaseline.autonomy_events}`
+        + ' row(s) (stop/resume audit from this run — expected, and written by a trigger)');
+    }
+
+    const stillStopped = (await oq(
+      `SELECT COUNT(*)::int n FROM autonomy_stops
+        WHERE (scope_type, scope_key) IN (('capability','email.send'),('capability','whatsapp.send'))`)).rows[0].n;
+    if (stillStopped === 2) ok('the email and WhatsApp stops are still in force at the end of the run');
+    else bad(`${stillStopped} of 2 outbound stops remain`, 'something resumed a capability mid-run');
+
+    // And the credentials: the server was given empty strings, so even a bypass had nothing to use.
+    const anySet = OUTBOUND_CREDENTIALS.filter((k) => childEnv[k]);
+    if (!anySet.length) ok('no outbound credential was set in the server environment');
+    else bad(`${anySet.length} credential(s) were still set`, anySet.join(', '));
   }
 
   await owner.end();
