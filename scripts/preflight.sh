@@ -560,6 +560,7 @@ pf_step "CPHI reconciliation is auditable, repeatable and recoverable" node scri
 # `git status` was run for an unrelated reason. .gitignore stops only the `git add -A` accident; this
 # is the half that holds against `git add -f` and cannot be forgotten.
 pf_step "no database dump is sitting in the working tree" node scripts/check-no-database-dumps.js
+pf_step "the migration is a pre-deploy step, not part of starting the server" node scripts/check-deploy-ordering.js
 
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 

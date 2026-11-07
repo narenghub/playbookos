@@ -107,14 +107,41 @@ If it exits non-zero, send me the failing lines — I fix it and you re-run.
 
 ## Step 6 — create the restricted database role · **yours**
 
-1. Open `docs/deploy/prod-roles.sql`, replace the password placeholder on line 38 with a freshly
-   generated one (`openssl rand -base64 24`).
-2. Railway → Postgres → **Data** → Query → paste → run.
-3. Run the four verification queries at the bottom of that file. The `CREATE TABLE eng003_probe`
-   **must fail** with *permission denied for schema public*. If it succeeds, stop and tell me.
-4. Railway → Variables:
-   - `MIGRATION_DATABASE_URL` = the existing superuser connection string
-   - `DATABASE_URL` = the same, with user and password swapped for `playbookos_app`
+**No password is typed into any file.** This step used to say "replace the placeholder on line 38",
+which put a live production password into a tracked file in a public repository. The role is now
+created with no password at all — such a role cannot be logged into — and the password is set
+interactively, so it exists in no file, no shell history and no server log.
+
+```sh
+cd ~/playbookos
+read -rs PGPASSWORD && export PGPASSWORD    # paste the SUPERUSER password; nothing echoes
+psql -h <host> -p <port> -U postgres -d railway
+```
+
+At the `psql` prompt:
+
+```
+\i docs/deploy/prod-roles.sql
+\password playbookos_app
+```
+
+`\password` prompts twice, echoes nothing, hashes in the client and sends only the SCRAM verifier,
+so a server with `log_statement=all` records no plaintext. This cannot be done in the Railway
+**Data → Query** tab: `\password` is a psql command, not SQL, and doing it there would mean an SQL
+statement carrying the plaintext.
+
+Then, still in psql, run the four verification queries at the bottom of `prod-roles.sql`. The
+`CREATE TABLE eng003_probe` **must fail** with *permission denied for schema public*. If it
+succeeds, stop and tell me. Leave psql and `unset PGPASSWORD`.
+
+Finally, in the Railway **Variables UI** — typed into the field, not via `railway variables set`,
+which writes to shell history:
+
+- `MIGRATION_DATABASE_URL` = the existing superuser connection string
+- `DATABASE_URL` = the same, with user and password swapped for `playbookos_app`
+
+Railway Variables is a secret store and the only place that password should come to rest. Not a
+chat, a document, a commit or a screenshot.
 
 ---
 
@@ -133,17 +160,67 @@ Only if step 7 is clean. I will ask you explicitly, in one message, naming what 
 
 ## Step 9 — deploy · **yours to authorize, then this exact sequence**
 
+**Read before the first command.** A merge to `main` is itself the deploy trigger, so the merge must
+come *after* every database change, not before. The order below is not a preference: reconciliation
+must precede the migration (the migration creates `idx_cem_unique`, which cannot be created while
+duplicates exist), and both must precede the merge.
+
+**Turn Railway auto-deploy OFF for this window** — Railway → the service → Settings → disable the
+automatic deploy from `main` — and turn it back on at the end. `railway.json` declares the migration
+as `preDeployCommand`, which is the right mechanism for ordinary pushes, but Railway's documentation
+does not state what happens when a pre-deploy command fails: whether the deploy is abandoned and
+whether the previous deployment keeps serving. A controlled release should not rest on behaviour
+nobody has confirmed, so for this one the trigger is in your hands.
+
+Each line is its own command. Read the exit code before the next one.
+
 ```sh
-node scripts/migrate.js            # as a deploy step, BEFORE the app starts
-echo $?                            # must be 0
+# ── CHECKPOINT 0 — fresh backup. Nothing below is recoverable without it.
+#    Take it from Railway, then CHECK ITS SIZE (~25 MB). A 0-byte backup is not a backup.
+ls -lh ~/db-backups/<new>.dump
 
-# merge to main — this IS the deployment; Railway auto-deploys from main
+# ── CHECKPOINT 1 — rehearse everything on that fresh dump, in isolation.
+scripts/verify-prod-dump.sh ~/db-backups/<new>.dump --reconcile-on-restore
+echo $?                            # must be 0, or stop
 
-scripts/wait-for-deploy.sh <sha>   # /health returns the deployed commit; uptime is not a signal
+# ── CHECKPOINT 2 — CPHI reconciliation, production.  ⛔ BLOCKED — see below.
+#    PLANNING is read-only and safe to run against production now:
+railway ssh 'node scripts/cphi-reconcile.js --plan-out /tmp/cphi-plan.json'
+echo $?                            # writes nothing to the database; send me the report
+#
+#    APPLYING to production has NO AUTHORIZED PATH TODAY, by design. The apply is gated on
+#    --confirm-not-production, whose own refusal reads "never against production itself".
+#    That gate came from ruling 35 ("do not run reconciliation against production"), and it is
+#    working exactly as intended. Using it to reconcile production would mean passing a flag
+#    that asserts the opposite of what is true, which is not a safeguard anyone can rely on
+#    afterwards — and the next person reading the audit trail could not tell the difference
+#    between a rehearsal and the real thing.
+#
+#    The migration cannot proceed without it: idx_cem_unique cannot be created while duplicates
+#    exist, so the `cphi exhibitors` step halts (fail-closed, by design).
+#
+#    This needs a deliberate, separately named production path before the release can continue.
+#    It is a new destructive capability, so it is not being written under the feature freeze
+#    without the owner's explicit say-so.
+
+# ── CHECKPOINT 3 — the 54-step migration, as the migrator, app still serving the OLD release.
+#    Safe in this order because the schema is additive: the old release runs against it unchanged.
+railway ssh 'node scripts/migrate.js'
+echo $?                            # must be 0, or stop — do NOT merge on a failed migration
+#    ROLLBACK POINT: restore checkpoint 0's dump. Past here, rollback is redeploy-only.
+
+# ── CHECKPOINT 4 — merge to main. The database is already correct; this ships the code.
+#    With auto-deploy off, merging changes nothing by itself.
+
+# ── CHECKPOINT 5 — deploy, by hand, from the Railway UI.
+scripts/wait-for-deploy.sh <sha>   # /health returns the deployed commit; uptime is NOT a signal
 echo $?
 
-scripts/smoke-deployed.sh          # separate command: is the APPLICATION alive, not just the server
+# ── CHECKPOINT 6 — is the APPLICATION alive, not just the server?
+scripts/smoke-deployed.sh
 echo $?
+
+# ── Finally: turn Railway auto-deploy back on.
 ```
 
 If the migration is skipped, the app **exits non-zero at boot** with the command to run. Deliberate:
