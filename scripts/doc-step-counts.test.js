@@ -91,6 +91,22 @@ test('every step count in the docs matches SCHEMA_STEPS', () => {
     + 'point at `node scripts/migrate.js --plan` instead.\n');
 });
 
+test('scripts/expected-schema-steps.txt matches the migrator', () => {
+  // verify-prod-dump.sh refuses to run a checkout with fewer steps than this, which is how a stale
+  // working copy is caught — on 2026-11-06 one produced a full 80-line FAIL report for defects that
+  // were already fixed, and the only clue was "(47 schema steps declared)" in a parenthesis.
+  //
+  // A number typed into that script would go stale the next time the chain grows, so it reads this
+  // file, and this test is what keeps the file honest.
+  const abs = path.join(__dirname, 'expected-schema-steps.txt');
+  assert.ok(fs.existsSync(abs), 'scripts/expected-schema-steps.txt is missing — verify-prod-dump.sh reads it');
+  const recorded = Number(fs.readFileSync(abs, 'utf8').trim());
+  assert.strictEqual(recorded, SCHEMA_STEPS.length,
+    `expected-schema-steps.txt says ${recorded}, SCHEMA_STEPS has ${SCHEMA_STEPS.length}. `
+    + 'Update the file: `node -e \'require("fs").writeFileSync("scripts/expected-schema-steps.txt", '
+    + 'String(require("./src/lib/migrate-all").SCHEMA_STEPS.length)+"\\n")\'`');
+});
+
 test('the plan command the docs point people at still exists', () => {
   // Several documents tell the operator to run this. If the flag is ever renamed, they become
   // instructions that fail at the keyboard, which is worse than a wrong number.

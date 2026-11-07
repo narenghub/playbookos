@@ -120,6 +120,87 @@ function classifyColumns(before, after) {
   return { dropped, notCreated };
 }
 
+// ── A BEFORE/AFTER PICTURE OF THE SCHEMA (ruling 34 item 3) ───────────────────
+//
+// Row counts tell you data survived. They say nothing about what the migration DID to the schema, and
+// "152 tables after" is not a comparison — the useful question is which tables and constraints appeared,
+// which disappeared, and which changed definition. Production is at 140 tables and a database this
+// migrator builds is at 152; that gap is the thing a reader actually wants itemised.
+//
+// Constraint definitions are compared as text, because pg_get_constraintdef is the canonical rendering:
+// a CHECK whose expression was widened, or a UNIQUE that gained a column, shows up as a change rather
+// than as a drop plus an add.
+async function schemaSnapshot(q) {
+  const tables = (await q(
+    `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`)).rows.map((r) => r.tablename);
+  const constraints = {};
+  for (const r of (await q(
+    `SELECT c.conname, t.relname AS tbl, pg_get_constraintdef(c.oid) AS def
+       FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid
+       JOIN pg_namespace n ON n.oid = t.relnamespace
+      WHERE n.nspname = 'public'`)).rows) {
+    constraints[`${r.tbl}.${r.conname}`] = r.def;
+  }
+  // Unique indexes are not constraints but satisfy ON CONFLICT just the same, and the per-partner
+  // outreach key is one — so a comparison that ignored them would miss the most important change in
+  // this release.
+  const uniqueIndexes = {};
+  for (const r of (await q(
+    `SELECT indexname, tablename, indexdef FROM pg_indexes
+      WHERE schemaname = 'public' AND indexdef ILIKE '%UNIQUE%'`)).rows) {
+    uniqueIndexes[`${r.tablename}.${r.indexname}`] = r.indexdef.replace(' USING btree', '');
+  }
+  return { tables, constraints, uniqueIndexes };
+}
+
+function reportSchemaDiff(before, after) {
+  const line = (s) => console.log(`        ${s}`);
+  const addedT = after.tables.filter((t) => !before.tables.includes(t));
+  const removedT = before.tables.filter((t) => !after.tables.includes(t));
+
+  console.log(`        tables: ${before.tables.length} before → ${after.tables.length} after`);
+  if (addedT.length) {
+    line(`  + ${addedT.length} table(s) CREATED by the migration:`);
+    for (let i = 0; i < addedT.length; i += 4) line(`      ${addedT.slice(i, i + 4).join(', ')}`);
+  }
+  if (removedT.length) {
+    line(`  - ${removedT.length} table(s) GONE after the migration:`);
+    for (const t of removedT) line(`      ${t}`);
+  } else {
+    line('  - no table disappeared');
+  }
+
+  const bc = before.constraints; const ac = after.constraints;
+  const addedC = Object.keys(ac).filter((k) => !(k in bc));
+  const removedC = Object.keys(bc).filter((k) => !(k in ac));
+  const changedC = Object.keys(ac).filter((k) => k in bc && bc[k] !== ac[k]);
+
+  console.log(`        constraints: ${Object.keys(bc).length} before → ${Object.keys(ac).length} after`);
+  line(`  + ${addedC.length} added · - ${removedC.length} removed · ~ ${changedC.length} redefined`);
+  // Added constraints on PRE-EXISTING tables are the interesting ones: a new constraint on a new table
+  // is just the table. A new constraint on a table that already held data could have failed, and did not.
+  const addedOnExisting = addedC.filter((k) => before.tables.includes(k.split('.')[0]));
+  if (addedOnExisting.length) {
+    line(`      added on tables that ALREADY HELD DATA (these could have failed, and did not):`);
+    for (const k of addedOnExisting.slice(0, 20)) line(`        ${k}  ${ac[k]}`);
+    if (addedOnExisting.length > 20) line(`        … and ${addedOnExisting.length - 20} more`);
+  }
+  for (const k of removedC) line(`      REMOVED  ${k}  ${bc[k]}`);
+  for (const k of changedC) line(`      CHANGED  ${k}\n          before: ${bc[k]}\n          after:  ${ac[k]}`);
+
+  const bi = before.uniqueIndexes; const ai = after.uniqueIndexes;
+  const addedI = Object.keys(ai).filter((k) => !(k in bi));
+  const removedI = Object.keys(bi).filter((k) => !(k in ai));
+  if (addedI.length || removedI.length) {
+    console.log(`        unique indexes: ${Object.keys(bi).length} before → ${Object.keys(ai).length} after`);
+    for (const k of removedI) line(`      REMOVED  ${k}  ${bi[k]}`);
+    const addedOnExistingI = addedI.filter((k) => before.tables.includes(k.split('.')[0]));
+    for (const k of addedOnExistingI) line(`      ADDED on an existing table  ${k}\n          ${ai[k]}`);
+  }
+
+  return { addedT, removedT, addedC, removedC, changedC, removedI };
+}
+
 async function columnPresence(q) {
   const out = {};
   for (const [t, c] of APP_COLUMNS) {
@@ -145,7 +226,7 @@ async function main() {
   process.env.ADMIN_PASSWORD = require('crypto').randomBytes(18).toString('hex');
   process.env.JWT_SECRET = require('crypto').randomBytes(32).toString('hex');
 
-  let baseline = null; let after = null; let client = null; let baselineCols = null;
+  let baseline = null; let after = null; let client = null; let baselineCols = null; let baselineSchema = null;
   try {
     // ── 1. THE "EXISTING" DATABASE ────────────────────────────────────────────
     h('1. AN EXISTING DATABASE WITH DATA IN IT');
@@ -274,6 +355,7 @@ async function main() {
     // dump it reported five columns as "GONE" that had never existed — sending the reader looking for
     // a destructive statement that was not there. A backward-compatibility check needs a before.
     baselineCols = await columnPresence(q);
+    baselineSchema = await schemaSnapshot(q);
 
     // ── 2. BACKUP, BEFORE ANYTHING IS CHANGED ────────────────────────────────
     h('2. BACKUP — taken before the migration, which is the only time it is worth anything');
@@ -294,7 +376,28 @@ async function main() {
     console.log(`        (${SCHEMA_STEPS.length} schema steps declared)`);
 
     // ── 4. EXISTING DATA PRESERVED ───────────────────────────────────────────
-    h('4. EXISTING DATA PRESERVED');
+    // ── BEFORE / AFTER SCHEMA COMPARISON (ruling 34 item 3) ──────────────────
+    h('4. BEFORE / AFTER — WHAT THE MIGRATION CHANGED ABOUT THE SCHEMA');
+    let diff = null;
+    if (baselineSchema) {
+      const afterSchema = await schemaSnapshot(q);
+      diff = reportSchemaDiff(baselineSchema, afterSchema);
+      // A dropped table or constraint is the only part of this that is a VERDICT; the rest is the
+      // itemised picture the ruling asked for. Removals are asserted because they are what breaks a
+      // rolling deploy and a rollback.
+      if (!diff.removedT.length) ok('the migration dropped no table');
+      else bad(`${diff.removedT.length} table(s) were DROPPED`, diff.removedT.join(', '));
+      // sitenex_deals_referred_by is a documented, deliberate removal (migration-risk-report §1.2),
+      // and so is the entity-only outreach UNIQUE (§1.4). Anything else wants explaining.
+      const EXPECTED_REMOVALS = /referred_by|outreach_entity_type_entity_id_key/;
+      const unexplained = [...diff.removedC, ...diff.removedI].filter((k) => !EXPECTED_REMOVALS.test(k));
+      if (!unexplained.length) ok('every constraint removal is one of the two documented ones');
+      else bad(`${unexplained.length} UNDOCUMENTED constraint removal(s)`, unexplained.join(' | '));
+    } else {
+      skip('before/after schema comparison', 'no baseline snapshot was taken');
+    }
+
+    h('5. EXISTING DATA PRESERVED');
     after = await fingerprint(q, TRACKED);
     const lost = [];
     for (const t of TRACKED) {
@@ -345,7 +448,7 @@ async function main() {
     }
 
     // ── 5. IDEMPOTENCE ───────────────────────────────────────────────────────
-    h('5. IDEMPOTENCE — a re-run must change nothing');
+    h('6. IDEMPOTENCE — a re-run must change nothing');
     const again = await runAll(q, { seeds: false, log: () => {} });
     if (again.ok) ok('the migration runs a second time without error');
     else bad('a re-run failed', again.failed.map((f) => f.error).join(' | '));
@@ -355,7 +458,7 @@ async function main() {
     else bad(`${drifted.length} table(s) changed on a re-run`, drifted.map((t) => `${t}: ${after[t]} → ${third[t]}`).join(' | '));
 
     // ── 6. BACKWARD COMPATIBILITY ────────────────────────────────────────────
-    h('6. BACKWARD COMPATIBILITY — would the PREVIOUS release still run?');
+    h('7. BACKWARD COMPATIBILITY — would the PREVIOUS release still run?');
     // The question is whether the migration is additive. A column the old code reads that this
     // migration drops or renames would break the running application during a rolling deploy, and
     // would break a rollback afterwards.
@@ -397,7 +500,7 @@ async function main() {
     }
 
     // ── 7. RECOVERY ──────────────────────────────────────────────────────────
-    h('7. RECOVERY — restore the pre-migration backup and check it comes back');
+    h('8. RECOVERY — restore the pre-migration backup and check it comes back');
     try {
       await client.end(); client = null;
       sh(`createdb -h ${temp.base} -p ${PGPORT} -U postgres recovered`);

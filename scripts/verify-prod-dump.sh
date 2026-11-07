@@ -32,6 +32,10 @@
 
 set -uo pipefail
 
+# The repository this script lives in — resolved from $0, never from the caller's working directory,
+# which is the whole point: the operator's `cd` is exactly what failed on 2026-11-06.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
 DUMP="${1:-}"
 
 if [ -z "$DUMP" ]; then
@@ -97,7 +101,53 @@ fi
 
 echo "  toolchain: $BIN"
 echo "  dump:      $DUMP ($(wc -c <"$DUMP" | tr -d ' ') bytes)"
+
+# ── WHICH CODE IS THIS? (ruling 34 item 1) ────────────────────────────────────
+#
+# On 2026-11-06 this was run after `cd ~/Downloads/playbookos && git pull` FAILED — the directory
+# did not exist, so the `cd` errored, the `git pull` never happened, and the script ran from an older
+# checkout somewhere else. It reported the exact failure that had already been fixed, and the only
+# evidence anywhere in 80 lines of output was one parenthesis: "(47 schema steps declared)" where the
+# current chain has 53.
+#
+# A verification that cannot say which code it is must not be trusted to say anything else, so it says
+# so first, every time, unmissably. The step count is read from the migrator itself, so it cannot drift
+# from what will actually run.
+BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '(not a git checkout)')"
+COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo '(unknown)')"
+DIRTY="$(git -C "$ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+STEPS="$(cd "$ROOT" && node -e 'process.stdout.write(String(require("./src/lib/migrate-all").SCHEMA_STEPS.length))' 2>/dev/null || echo '?')"
+
+echo "  repo:      $ROOT"
+echo "  branch:    $BRANCH @ $COMMIT$( [ "$DIRTY" != "0" ] && echo "  (${DIRTY} uncommitted change(s))" )"
+# The expected count lives in ONE file, and scripts/doc-step-counts.test.js fails the build if it
+# disagrees with SCHEMA_STEPS. A number typed into this script would go stale the next time the chain
+# grows — which is what happened to eight documents in two days.
+EXPECT="$(tr -d ' \n' <"$ROOT/scripts/expected-schema-steps.txt" 2>/dev/null || echo '?')"
+
+echo "  chain:     $STEPS schema steps  <-- if this is not $EXPECT, you are running an OLD checkout"
 echo ""
+
+if [ "$STEPS" != "?" ] && [ "$EXPECT" != "?" ] && [ "$STEPS" -lt "$EXPECT" ] 2>/dev/null; then
+  cat <<STALE >&2
+──────────────────────────────────────────────────────────────────────────────
+STOP — this checkout has $STEPS migration steps. The current chain has $EXPECT.
+
+You are running code from before the fixes. A result from it says nothing about
+whether the migration is ready, and its failures are ones already fixed.
+
+  1. Find your working copy:   ls -d ~/playbookos ~/Downloads/playbookos ~/Desktop/playbookos 2>/dev/null
+                               (or: git -C . remote -v  from wherever this ran)
+  2. In THAT directory:        git pull
+  3. Confirm:                  node scripts/migrate.js --plan | head -3
+                               must say "53 schema step(s)"
+  4. Re-run this script from there.
+
+Nothing has been restored, migrated or changed. This did NOT run.
+──────────────────────────────────────────────────────────────────────────────
+STALE
+  exit 3
+fi
 
 # The readiness harness creates and destroys its own cluster and takes the dump as its argument.
 # Everything below is its work; this wrapper exists so the whole thing is one command.

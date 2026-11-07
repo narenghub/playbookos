@@ -220,7 +220,31 @@ const SCHEMA_STEPS = [
   { name: 'lead outcomes', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-lead-outcomes.js') },
   { name: 'labconnect', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-labconnect.js') },
   { name: 'lab orders', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-lab-orders.js') },
-  { name: 'acbm', required: true, usesOwnPool: true, run: () => runScript('scripts/migrate-acbm.js') },
+  {
+    // GUARDED BY THE SAME PREDICATE AS THE RENAME BELOW, and it was not.
+    //
+    // migrate-acbm.js creates acbm_deals, acbm_intake, acbm_packages and acbm_projects with
+    // CREATE TABLE IF NOT EXISTS; the next step renames all four to sitenex_* and is guarded on
+    // `partners IS NULL`, meaning "the rename has not happened yet". On a database where it HAS
+    // happened — production, where it was run by hand — the guard correctly skipped the rename while
+    // this step cheerfully recreated the four old tables, empty, to be renamed by nobody.
+    //
+    // Found on 2026-11-07 by the before/after schema comparison added for ruling 34 item 3, which
+    // reported 147 → 156 tables where the chain builds 152. Four stray tables is not data loss and
+    // breaks nothing, which is exactly why it would have sat in production indefinitely, turning up
+    // in some later audit as four empty tables nobody could account for.
+    //
+    // The same predicate, so the two steps cannot disagree: if `partners` exists the rename has run,
+    // and the acbm_* names must not be resurrected.
+    name: 'acbm',
+    required: true,
+    usesOwnPool: true,
+    when: async (q) => {
+      const r = await q(`SELECT to_regclass('public.partners') IS NULL AS pre_rename`);
+      return r.rows[0].pre_rename === true;
+    },
+    run: () => runScript('scripts/migrate-acbm.js'),
+  },
   {
     // The acbm_* → sitenex_* rename, which also CREATES `partners`. partner_territories and
     // sitenex_lead_registrations both have foreign keys into it, so without this step they cannot
