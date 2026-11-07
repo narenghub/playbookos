@@ -28,13 +28,15 @@
 // So three behaviours are asserted here, and the second is the one that matters most:
 //
 //   1. no duplicates           → the index is created, nothing is touched
-//   2. duplicates present      → REFUSED by default, naming every group, CHANGING NOTHING
-//   3. two human-touched rows  → refused even WITH --resolve-duplicates, because that is a conflict
-//                                only a person can settle
+//   2. duplicates present      → REFUSED, naming every group, CHANGING NOTHING
+//   3. no flag can make it delete — the migration has no DELETE statement at all
+//   4. two human-touched rows  → named a CONFLICT, with a query for inspecting them
+//   5. the sweep PREDICTS this class instead of discovering it one production dump at a time
 //
-// and then that --resolve-duplicates, on groups where it cannot lose human work, keeps the right row
-// and deletes the rest BY ID — never by pattern or timestamp, which is the rule the 2026-09-30
-// ten-minute DELETE broke.
+// Reconciliation itself lives in scripts/cphi-reconcile.js and is covered by
+// scripts/check-cphi-reconcile.js: plan determinism, human work carried across rather than lost,
+// conflicts flagged, an audit row holding the complete prior contents of everything touched, refusal
+// on drift, and a second run that changes nothing.
 'use strict';
 
 const { execFileSync } = require('child_process');
@@ -184,14 +186,17 @@ async function main() {
     if (r.code !== 0) ok(`refused — exit ${r.code}`);
     else bad('migration exited 0 on a table it could not index — this is the false green');
 
-    if (/REFUSING to delete/.test(r.out)) ok('it says plainly that it is refusing to delete');
-    else bad('it does not say it is refusing', r.out.trim().split('\n').slice(-4).join(' | '));
+    if (/cannot delete anything/.test(r.out) && /Nothing has been changed/.test(r.out)) {
+      ok('it says plainly that it cannot delete and that nothing was changed');
+    } else {
+      bad('it does not say it is refusing', r.out.trim().split('\n').slice(-4).join(' | '));
+    }
 
     if (/cphi-milan-2026 \/ alpha — 2 rows/.test(r.out)) ok('it names the duplicate group and the row count');
     else bad('it does not name the duplicate group', r.out.trim().split('\n').slice(-6).join(' | '));
 
-    if (/--resolve-duplicates/.test(r.out)) ok('it names the flag that would resolve it');
-    else bad('it does not say how to proceed');
+    if (/cphi-reconcile\.js/.test(r.out)) ok('it names the one tool that can reconcile');
+    else bad('it does not say how to proceed', r.out.trim().split('\n').slice(-4).join(' | '));
 
     if (await rowCount(c) === 3) ok('all 3 rows still there — nothing was deleted');
     else bad(`it deleted rows without being asked: 3 → ${await rowCount(c)}`);
@@ -200,56 +205,53 @@ async function main() {
     await c.end();
   }
 
-  // ── 3. --resolve-duplicates on a safe group ────────────────────────────────────────────────────
-  h('3. WITH --resolve-duplicates — keeps the reviewed row, deletes the rest BY ID');
+  // ── 3. the migration cannot delete, with any flag ──────────────────────────────────────────────
+  h('3. THE MIGRATION HAS NO DELETE PATH — refused even when asked, by any flag');
   {
-    // Two duplicate groups. In the first, one row is reviewed and must survive even though it is the
-    // OLDER one — so "keep the newest" alone would be wrong, and this proves the human row wins.
-    const { url, c } = await db(base, 'cphi_resolve', `${TABLE}
-      ${ins('cphi-milan-2026', 'alpha', { ageDays: 9, review: 'confirmed' })}
+    // An earlier version took --resolve-duplicates and did the cleanup itself. It worked, and it was
+    // still the wrong shape: two destructive paths for one table, and the one nobody reads is the one
+    // that runs. Reconciliation now lives in cphi-reconcile.js, with a plan, an audit trail and a
+    // drift check. This asserts the migration cannot be talked into deleting a row.
+    const src = fs.readFileSync(path.join(__dirname, 'migrate-cphi-exhibitors.js'), 'utf8');
+    if (!/DELETE\s+FROM/i.test(src)) ok('migrate-cphi-exhibitors.js contains no DELETE statement at all');
+    else bad('the migration can still delete rows', 'there must be exactly one destructive path, and it is cphi-reconcile.js');
+    if (!/--resolve-duplicates/.test(src.replace(/\/\/.*$/gm, ''))) ok('the --resolve-duplicates flag is gone from its code');
+    else bad('the migration still accepts --resolve-duplicates');
+
+    const { url, c } = await db(base, 'cphi_noflag', `${TABLE}
+      ${ins('cphi-milan-2026', 'alpha', { ageDays: 9 })}
       ${ins('cphi-milan-2026', 'alpha', { ageDays: 1 })}
-      ${ins('cphi-milan-2026', 'gamma', { ageDays: 7 })}
-      ${ins('cphi-milan-2026', 'gamma', { ageDays: 2 })}
       ${ins('cphi-milan-2026', 'beta')}`);
 
-    const reviewedId = (await c.query(
-      `SELECT id FROM cphi_exhibitor_matches WHERE review_status = 'confirmed'`)).rows[0].id;
-    const newestGamma = (await c.query(
-      `SELECT id FROM cphi_exhibitor_matches WHERE holder_normalized = 'gamma'
-        ORDER BY checked_at DESC LIMIT 1`)).rows[0].id;
+    // Every flag a person might reach for, including the one that used to work.
+    for (const flags of [[], ['--resolve-duplicates'], ['--force'], ['--yes']]) {
+      const r = runMigration(url, flags);
+      const label = flags.length ? flags.join(' ') : '(no flags)';
+      if (r.code !== 0) ok(`refused with ${label} — exit ${r.code}`);
+      else bad(`migration exited 0 with ${label}`, 'it indexed or deleted something it should not have');
+    }
+    if (await rowCount(c) === 3) ok('all 3 rows still there after four attempts');
+    else bad(`rows were deleted: 3 → ${await rowCount(c)}`);
+    if (!(await idxPresent(c))) ok('no index was created');
+    else bad('the index was created despite duplicates');
 
-    const r = runMigration(url, ['--resolve-duplicates']);
-    if (r.code === 0) ok('migration exit 0');
-    else bad(`migration failed (exit ${r.code})`, r.out.trim().split('\n').slice(-4).join(' | '));
-
-    if (await idxPresent(c)) ok('idx_cem_unique created');
-    else bad('the index was still not created');
-
-    if (await rowCount(c) === 3) ok('5 rows → 3: exactly the 2 redundant rows removed');
-    else bad(`expected 3 rows, found ${await rowCount(c)}`);
-
-    const survivors = (await c.query(`SELECT id FROM cphi_exhibitor_matches ORDER BY id`)).rows.map((x) => Number(x.id));
-    if (survivors.includes(Number(reviewedId))) ok('the REVIEWED row survived, though it was the older one');
-    else bad('the reviewed row was deleted', `survivors ${survivors.join(', ')}, reviewed was ${reviewedId}`);
-    if (survivors.includes(Number(newestGamma))) ok('with no review in a group, the most recently checked row survived');
-    else bad('the wrong row survived in the un-reviewed group');
-
-    if (/by id/.test(r.out)) ok('it reports deleting by id');
-    else bad('it does not say the deletes were by id');
+    const r = runMigration(url);
+    if (/cphi-reconcile\.js/.test(r.out)) ok('it points at the one tool that can reconcile');
+    else bad('it does not say how to proceed', r.out.trim().split('\n').slice(-4).join(' | '));
     await c.end();
   }
 
-  // ── 4. a real conflict — refused even WITH the flag ────────────────────────────────────────────
-  h('4. TWO HUMAN-TOUCHED ROWS IN ONE GROUP — refused even with --resolve-duplicates');
+  // ── 4. a conflict is still named as a conflict ─────────────────────────────────────────────────
+  h('4. TWO HUMAN-TOUCHED ROWS IN ONE GROUP — named a CONFLICT, with a query to inspect them');
   {
     const { url, c } = await db(base, 'cphi_conflict', `${TABLE}
       ${ins('cphi-milan-2026', 'alpha', { review: 'confirmed' })}
       ${ins('cphi-milan-2026', 'alpha', { note: 'spoke to them at the stand' })}
       ${ins('cphi-milan-2026', 'beta')}`);
 
-    const r = runMigration(url, ['--resolve-duplicates']);
-    if (r.code !== 0) ok(`refused even with the flag — exit ${r.code}`);
-    else bad('it resolved a group holding two human-touched rows', 'one person\'s review or note was discarded');
+    const r = runMigration(url);
+    if (r.code !== 0) ok(`refused — exit ${r.code}`);
+    else bad('migration exited 0 on an unindexable table');
 
     if (/CONFLICT/.test(r.out)) ok('it labels the group a CONFLICT');
     else bad('it does not distinguish a conflict from a safe group', r.out.trim().split('\n').slice(-5).join(' | '));
@@ -257,7 +259,7 @@ async function main() {
     if (/SELECT id, event_slug/.test(r.out)) ok('it hands over a query for inspecting the conflicting rows');
     else bad('it does not show how to look at them');
 
-    if (await rowCount(c) === 3) ok('all 3 rows still there — nothing was deleted');
+    if (await rowCount(c) === 3) ok('all 3 rows still there');
     else bad(`it deleted rows in a conflict: 3 → ${await rowCount(c)}`);
     await c.end();
   }

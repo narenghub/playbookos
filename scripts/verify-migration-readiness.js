@@ -317,6 +317,36 @@ async function main() {
         for (const l of lines.slice(0, 40)) console.log(`        ${l.trim()}`);
         console.log('        ── these are what will halt the migration below, in this order ──');
       }
+
+      // ── THE CPHI DUPLICATE REPORT AND PLAN, from the same single command ──────────────────────
+      //
+      // Ruling 35 item 3 wants every affected group with its row ids, review statuses, notes, source
+      // references and timestamps. Asking the owner to run a second tool to get it would mean another
+      // round trip, and this release has already cost four. So the read-only report runs here and the
+      // plan is written next to the dump.
+      //
+      // READ-ONLY, and on the RESTORED COPY — never production. It exits 1 when duplicates exist,
+      // which is a finding about the data, not a failure of this harness, so its status is reported
+      // and not adopted.
+      try {
+        const planOut = path.join(path.dirname(DUMP), 'cphi-reconcile-plan.json');
+        let rout = ''; let rcode = 0;
+        try {
+          rout = execFileSync(process.execPath,
+            [path.join(__dirname, 'cphi-reconcile.js'), '--plan-out', planOut],
+            { encoding: 'utf8', stdio: 'pipe', maxBuffer: 32 * 1024 * 1024,
+              env: { ...process.env, DATABASE_URL: urlFor('existing') } });
+        } catch (e) { rcode = e.status === undefined ? 1 : e.status; rout = `${e.stdout || ''}${e.stderr || ''}`; }
+        if (rcode === 0) {
+          console.log('        cphi_exhibitor_matches has no duplicate pairs — nothing to reconcile');
+        } else {
+          console.log('\n        ── CPHI DUPLICATE RECONCILIATION REPORT (read-only, on the restore) ──');
+          for (const l of rout.split('\n')) console.log(`        ${l}`);
+          console.log(`        ── end of reconciliation report · plan written to ${planOut} ──\n`);
+        }
+      } catch (e) {
+        console.log(`        (could not produce the CPHI reconciliation report: ${e.message.split('\n')[0]})`);
+      }
     } else {
       // Production-like: the migrator's schema, then representative rows, so the second migration
       // run below is against a POPULATED database rather than an empty one. Migrating an empty

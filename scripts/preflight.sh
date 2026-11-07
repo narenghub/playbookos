@@ -549,6 +549,11 @@ pf_step "no document quotes a stale migration step count" node --test scripts/do
 # indexes exist on tables holding production rows. review_status and entity_note carry human work, so
 # the migration refuses by default and refuses a genuine conflict even when asked.
 pf_step "a unique index on duplicated data refuses rather than guessing" node scripts/check-cphi-duplicate-guard.js
+# Ruling 35 item 5. The reconciliation is the only destructive path for cphi_exhibitor_matches, so its
+# three guarantees are demonstrated rather than claimed: a note on a row that does NOT survive ends up
+# on the row that does; a deleted row is rebuilt from the audit table field for field; a second apply
+# changes nothing; and a plan whose rows have moved since it was written is refused per group.
+pf_step "CPHI reconciliation is auditable, repeatable and recoverable" node scripts/check-cphi-reconcile.js
 
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 

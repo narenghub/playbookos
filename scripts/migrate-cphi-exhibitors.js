@@ -67,11 +67,10 @@ async function migrateCphiExhibitors() {
   // search and is recomputable. A migration that silently picked a survivor could discard a review,
   // and no later run could tell it had.
   //
-  // So: report every duplicate group precisely, and refuse. `--resolve-duplicates` performs the
-  // cleanup, and even then only where it cannot lose human work — a group holding two or more
-  // human-touched rows is a conflict only a person can settle, and is refused whatever the flag says.
-  // The migrator chain passes no flags, so an unattended migration can never delete a row.
-  const RESOLVE = process.argv.includes('--resolve-duplicates');
+  // So: report every duplicate group precisely, and refuse. This step has NO ability to delete a row,
+  // with any flag — reconciliation lives in scripts/cphi-reconcile.js, which produces a plan a person
+  // reviews, preserves human work by carrying it onto the survivor, records the complete prior
+  // contents of everything it changes, and refuses a plan whose rows have since moved.
   const HUMAN = `(entity_note IS NOT NULL OR review_status <> 'unreviewed')`;
   const hasNote = (await query(
     `SELECT COUNT(*)::int n FROM information_schema.columns
@@ -129,45 +128,27 @@ async function migrateCphiExhibitors() {
         process.exit(1);
       }
 
-      if (!RESOLVE) {
-        console.error(`❌ REFUSING to delete ${redundant} row(s) without being asked. Nothing has been changed.`);
-        console.error(`   Every group above can be resolved without losing a review or a note. To do it:\n`);
-        console.error(`     node scripts/migrate-cphi-exhibitors.js --resolve-duplicates\n`);
-        console.error(`   It keeps, in each group, the reviewed/annotated row if there is one and`);
-        console.error(`   otherwise the most recently checked, and deletes the rest BY ID.\n`);
-        process.exit(1);
-      }
-
-      // Resolve. Survivor per group: the human-touched row if there is one (there is at most one here,
-      // conflicts having been refused above), else the most recently checked; id as the final
-      // tie-break so the choice is deterministic and reproducible.
-      const doomed = [];
-      for (const g of resolvable) {
-        const ranked = (await query(
-          `SELECT id FROM cphi_exhibitor_matches
-            WHERE event_slug = $1 AND holder_normalized = $2
-            ORDER BY (${humanPredicate}) DESC, checked_at DESC, id DESC`,
-          [g.event_slug, g.holder_normalized])).rows.map((r) => r.id);
-        doomed.push(...ranked.slice(1));
-      }
-      // By explicit id, never by pattern or timestamp — the rule in CLAUDE.md that the 2026-09-30
-      // ten-minute DELETE broke.
-      for (const id of doomed) {
-        await query(`DELETE FROM cphi_exhibitor_matches WHERE id = $1`, [id]);
-      }
-      console.log(`✅ deleted ${doomed.length} redundant row(s) by id, keeping every reviewed/annotated row`);
-
-      const left = (await query(
-        `SELECT COUNT(*)::int n FROM (
-           SELECT 1 FROM cphi_exhibitor_matches
-            GROUP BY event_slug, holder_normalized HAVING COUNT(*) > 1) d`)).rows[0].n;
-      if (left) {
-        console.error(`❌ ${left} duplicate group(s) remain after the cleanup — not creating the index`);
-        process.exit(1);
-      }
-      await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cem_unique
-                   ON cphi_exhibitor_matches (event_slug, holder_normalized)`);
-      console.log('✅ idx_cem_unique created');
+      // ── THE MIGRATION CANNOT DELETE. THAT IS THE POINT. ───────────────────────────────────────
+      //
+      // An earlier version of this step took `--resolve-duplicates` and did the cleanup itself. It
+      // worked and it was tested, and it was still the wrong shape: two destructive paths for one
+      // table, and the one nobody reads is the one that runs. Ruling 35 asks for duplicate handling
+      // that is fail-closed by default, with a reviewable plan, an audit trail and a recovery route —
+      // none of which belong inside a migration step that a chain runs unattended.
+      //
+      // So this step now has no ability to delete anything, ever, with any flag. It reports and
+      // refuses. All reconciliation goes through scripts/cphi-reconcile.js, which writes a plan a
+      // person can read, records the complete prior contents of every row it touches, refuses a group
+      // whose rows have changed since the plan was made, and is a no-op when run twice.
+      console.error(`❌ ${redundant} row(s) would have to go to create this index, and this step `
+        + `cannot delete anything.`);
+      console.error(`   Nothing has been changed.\n`);
+      console.error(`   Reconciliation has one path, and it is not this one:\n`);
+      console.error(`     node scripts/cphi-reconcile.js                     # read-only report + plan`);
+      console.error(`     node scripts/cphi-reconcile.js --apply <plan.json> --confirm-not-production\n`);
+      console.error(`   It carries human work across rather than losing it with the row, flags groups`);
+      console.error(`   no rule can settle, and records every change in cphi_reconcile_audit.\n`);
+      process.exit(1);
     }
   }
 
