@@ -554,6 +554,12 @@ pf_step "a unique index on duplicated data refuses rather than guessing" node sc
 # on the row that does; a deleted row is rebuilt from the audit table field for field; a second apply
 # changes nothing; and a plan whose rows have moved since it was written is refused per group.
 pf_step "CPHI reconciliation is auditable, repeatable and recoverable" node scripts/check-cphi-reconcile.js
+# On 2026-11-06 three full production dumps sat untracked in the CEO's checkout of this PUBLIC repo
+# with no *.gitignore pattern to catch them -- one `git add -A` from publishing the users table and
+# its password hashes. Nothing had been committed, so it stayed a near miss, and it was found because
+# `git status` was run for an unrelated reason. .gitignore stops only the `git add -A` accident; this
+# is the half that holds against `git add -f` and cannot be forgotten.
+pf_step "no database dump is sitting in the working tree" node scripts/check-no-database-dumps.js
 
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 

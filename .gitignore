@@ -21,3 +21,15 @@ docs/acbm-call-sheet-*.md
 
 # UI rendering evidence — regenerate with scripts/screenshot-prpa-page.js
 ui-evidence/
+
+# Database dumps. NEVER in this tree: the repository is public, and a dump holds the users table with
+# its password hashes, every prospect and contact, and the integrations table. On 2026-11-06 three
+# production dumps sat here untracked with no pattern to catch them — nothing had been committed, so
+# it stayed a near miss. Keep them in ~/db-backups, outside the repository.
+# scripts/check-no-database-dumps.js is the half that holds when someone uses `git add -f`.
+*.dump
+*.pgdump
+*.sql.gz
+*.sql.bz2
+*.sql.zst
+*.bak

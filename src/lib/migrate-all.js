@@ -78,7 +78,21 @@ function runScript(rel, { refusalIsSuccess = null, args = [] } = {}) {
     if (refusalIsSuccess && refusalIsSuccess.test(out)) {
       return { script: rel, refused: true, note: 'schema applied; the one-time backfill was correctly refused' };
     }
-    const detail = out.trim().split('\n').filter(Boolean).slice(-4).join(' | ');
+    // ── THE REASON, NOT THE LAST FOUR LINES ─────────────────────────────────────────────────────
+    //
+    // This used to take the final four non-empty lines, which is fine for a script that dies on a
+    // Postgres error and useless for one that explains itself first. On 2026-11-06 the CPHI step
+    // refused with a numbered report and then printed a diagnostic SELECT for the owner to run — so
+    // the halt reported to him was the SQL, and the line that said WHY ("5 group(s) hold two or more
+    // annotated rows") was four lines further up and thrown away.
+    //
+    // A migration that halts has exactly one job in its error message: say what to do next. So the
+    // lines a script marks as the reason win, and SQL is explicitly not a reason.
+    const lines = out.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+    const isSql = (l) => /^(SELECT|FROM|WHERE|ORDER BY|GROUP BY|HAVING|AND|OR|\()/i.test(l) || /;$/.test(l);
+    const marked = lines.filter((l) => /^(❌|⚠️|REFUSING)/.test(l) || /\b(cannot|refus)/i.test(l));
+    const chosen = (marked.length ? marked : lines.filter((l) => !isSql(l))).slice(-4);
+    const detail = (chosen.length ? chosen : lines.slice(-4)).join(' | ');
     throw new Error(`${rel} failed${detail ? `: ${detail}` : ''}`);
   }
 }

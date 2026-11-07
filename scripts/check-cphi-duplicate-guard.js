@@ -263,6 +263,66 @@ async function main() {
     if (/SELECT id, event_slug/.test(r.out)) ok('it hands over a query for inspecting the conflicting rows');
     else bad('it does not show how to look at them');
 
+    // ── THE HALT MUST NAME THE REASON, NOT THE DIAGNOSTIC SQL ───────────────────────────────────
+    //
+    // src/lib/migrate-all.js used to report a failing step as its last four output lines. This step
+    // explains itself and THEN prints a SELECT for the owner to run, so on 2026-11-06 the halt he
+    // was shown was the SQL, and the line saying why was four lines above it and discarded. A
+    // migration that stops has one job in its error message: say what to do next.
+    const { runAll } = require('../src/lib/migrate-all');
+    void runAll;
+    const asStep = await (async () => {
+      try {
+        execFileSync(process.execPath, [path.join(__dirname, 'migrate-cphi-exhibitors.js')], {
+          env: { ...process.env, DATABASE_URL: url,
+            ADMIN_EMAIL: 'guard@example.invalid',
+            ADMIN_PASSWORD: require('crypto').randomBytes(12).toString('hex') },
+          encoding: 'utf8', stdio: 'pipe',
+        });
+        return null;
+      } catch (e) {
+        // Reproduce exactly what runScript does with the output.
+        const out = `${e.stdout || ''}${e.stderr || ''}`;
+        const lines = out.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+        const isSql = (l) => /^(SELECT|FROM|WHERE|ORDER BY|GROUP BY|HAVING|AND|OR|\()/i.test(l) || /;$/.test(l);
+        const marked = lines.filter((l) => /^(❌|⚠️|REFUSING)/.test(l) || /\b(cannot|refus)/i.test(l));
+        const chosen = (marked.length ? marked : lines.filter((l) => !isSql(l))).slice(-4);
+        return (chosen.length ? chosen : lines.slice(-4)).join(' | ');
+      }
+    })();
+    if (asStep && !/^\s*SELECT /i.test(asStep)) ok('the halt message leads with the reason, not a SELECT');
+    else bad('the halt message is still SQL', String(asStep).slice(0, 160));
+    if (asStep && /note|conflict|cannot delete/i.test(asStep)) ok('…and the reason is legible without the full log');
+    else bad('the halt message does not explain itself', String(asStep).slice(0, 160));
+
+    // ── THE TWO TOOLS MUST AGREE ON WHAT NEEDS A HUMAN ─────────────────────────────────────────
+    //
+    // The migration counted ROWS CARRYING A NOTE; cphi-reconcile.js counts DISTINCT notes. A group
+    // whose duplicates shared the same note was therefore a conflict in one tool and reconcilable in
+    // the other, so the owner got a different answer depending on which he ran.
+    const { url: uSame, c: cSame } = await db(base, 'cphi_agree', `${TABLE}
+      ${ins('cphi-milan-2026', 'zeta', { note: 'same note on both rows' })}
+      ${ins('cphi-milan-2026', 'zeta', { note: 'same note on both rows' })}
+      ${ins('cphi-milan-2026', 'beta')}`);
+    let planOut = `${temp.base}/agree.json`;
+    try {
+      execFileSync(process.execPath, [path.join(__dirname, 'cphi-reconcile.js'), '--plan-out', planOut],
+        { env: { ...process.env, DATABASE_URL: uSame }, encoding: 'utf8', stdio: 'pipe' });
+    } catch { /* exit 1 is expected: duplicates exist */ }
+    const agreePlan = JSON.parse(fs.readFileSync(planOut, 'utf8'));
+    const zeta = agreePlan.groups.find((x) => x.holder_normalized === 'zeta');
+    const migOut = runMigration(uSame);
+    const migCallsItConflict = /CONFLICT\s+cphi-milan-2026 \/ zeta|zeta[^\n]*\n?[^\n]*CONFLICT/.test(migOut.out)
+      || /CONFLICT.*zeta/.test(migOut.out);
+    const reconcileCallsItConflict = zeta.classification === 'CONFLICT';
+    if (migCallsItConflict === reconcileCallsItConflict) {
+      ok(`both tools agree on an identical-note group (conflict=${reconcileCallsItConflict})`);
+    } else {
+      bad('the migration and the reconciliation tool disagree about the same group',
+        `migration says conflict=${migCallsItConflict}, reconcile says conflict=${reconcileCallsItConflict}`);
+    }
+    await cSame.end();
+
     if (await rowCount(c) === 3) ok('all 3 rows still there');
     else bad(`it deleted rows in a conflict: 3 → ${await rowCount(c)}`);
     await c.end();

@@ -94,13 +94,18 @@ async function migrateCphiExhibitors() {
     console.log('↷ idx_cem_unique already present');
   } else {
     const groups = (await query(
+      // DISTINCT notes, not rows-with-a-note. scripts/cphi-reconcile.js calls a group a CONFLICT when
+      // it holds two DIFFERENT notes; this counted rows carrying any note at all, so a group whose
+      // duplicates happened to share the same note was a conflict here and reconcilable there. Two
+      // tools disagreeing about what needs a human is worse than either rule on its own — the owner
+      // gets a different answer depending on which one he runs.
       `SELECT event_slug, holder_normalized, COUNT(*)::int n,
-              COUNT(*) FILTER (WHERE ${humanPredicate})::int human,
+              COUNT(DISTINCT btrim(entity_note)) FILTER (WHERE ${humanPredicate})::int human,
               array_agg(id ORDER BY id) ids
          FROM cphi_exhibitor_matches
         GROUP BY event_slug, holder_normalized
        HAVING COUNT(*) > 1
-        ORDER BY COUNT(*) FILTER (WHERE ${humanPredicate}) DESC, COUNT(*) DESC`)).rows;
+        ORDER BY COUNT(DISTINCT btrim(entity_note)) FILTER (WHERE ${humanPredicate}) DESC, COUNT(*) DESC`)).rows;
 
     if (!groups.length) {
       await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cem_unique
@@ -119,12 +124,12 @@ async function migrateCphiExhibitors() {
 
       for (const g of groups.slice(0, 25)) {
         console.log(`    ${g.human >= 2 ? 'CONFLICT' : 'resolvable'}  ${g.event_slug} / ${g.holder_normalized}` +
-          ` — ${g.n} rows (${g.human} with review or note), ids ${g.ids.join(', ')}`);
+          ` — ${g.n} rows (${g.human} distinct note${g.human === 1 ? '' : 's'}), ids ${g.ids.join(', ')}`);
       }
       if (groups.length > 25) console.log(`    … and ${groups.length - 25} more`);
 
       if (conflicts.length) {
-        console.error(`\n❌ ${conflicts.length} group(s) hold more than one reviewed or annotated row. ` +
+        console.error(`\n❌ ${conflicts.length} group(s) hold more than one DIFFERENT note. ` +
           `Nothing has been changed.`);
         console.error(`   Decide which row survives in each, delete the others, then re-run. To see them:\n`);
         console.error(`     SELECT id, event_slug, holder_normalized, review_status, exhibitor_name, booth, checked_at`);
