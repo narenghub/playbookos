@@ -118,8 +118,11 @@ const TABLE = `
 //   delta  — MERGE:    the survivor is the reviewed row, and a row that does NOT survive carries a
 //                      HIGHER molecules_covered — so keeping the survivor's own figure would
 //                      understate the holder
-//   omega  — CONFLICT: two different review_status values
-//   sigma  — CONFLICT: two different notes
+//   omega  — NOT a conflict any more (ruling 38): two different MACHINE review_status values, no note.
+//            Reconciled, with the disagreement recorded and the survivor raised to entity_review.
+//   sigma  — CONFLICT: two different notes — the only thing a person actually wrote
+//   kappa  — the status rule's refusal direction: survivor is entity_review, loser is auto_confirmed.
+//            auto_confirmed must NOT be adopted; the flag must stand.
 //   beta   — not duplicated at all; must be left alone entirely
 const FIXTURE = `
   INSERT INTO cphi_exhibitor_matches
@@ -131,8 +134,10 @@ const FIXTURE = `
   ('cphi-milan-2026','Gamma Labs', 'gamma', true,  'Gamma Srl','7B',  '7',  'core',   2, 'confirmed', 'gamma srl',    NOW() - INTERVAL '2 days', NULL),
   ('cphi-milan-2026','Delta Chem', 'delta', true,  NULL,       '3C',  '3',  'prefix', 1, 'confirmed', 'delta chem',   NOW() - INTERVAL '6 days', NULL),
   ('cphi-milan-2026','Delta Chem', 'delta', true,  'Delta AG', NULL,  NULL, 'prefix', 9, 'unreviewed','delta ag',     NOW() - INTERVAL '3 days', NULL),
-  ('cphi-milan-2026','Omega Bio',  'omega', true,  'Omega',    '1A',  '1',  'exact',  4, 'confirmed', 'omega bio',    NOW() - INTERVAL '5 days', NULL),
-  ('cphi-milan-2026','Omega Bio',  'omega', true,  'Omega',    '1A',  '1',  'exact',  4, 'rejected',  'omega bio ag', NOW() - INTERVAL '4 days', NULL),
+  ('cphi-milan-2026','Omega Bio',  'omega', true,  'Omega',    '1A',  '1',  'exact',  4, 'auto_confirmed','omega bio', NOW() - INTERVAL '5 days', NULL),
+  ('cphi-milan-2026','Omega Bio',  'omega', false, NULL,       NULL,  NULL, NULL,     0, 'entity_review','omega bio ag', NOW() - INTERVAL '4 days', NULL),
+  ('cphi-milan-2026','Kappa Labs', 'kappa', false, NULL,       NULL,  NULL, NULL,     0, 'entity_review','kappa labs',  NOW() - INTERVAL '5 days', NULL),
+  ('cphi-milan-2026','Kappa Labs', 'kappa', true,  'Kappa AG', '4E',  '4',  'exact',  2, 'auto_confirmed','kappa ag',   NOW() - INTERVAL '1 days', NULL),
   ('cphi-milan-2026','Sigma Ind',  'sigma', true,  'Sigma',    '9D',  '9',  'core',   1, 'unreviewed','sigma ind',    NOW() - INTERVAL '7 days', 'Booth was unattended both times I went'),
   ('cphi-milan-2026','Sigma Ind',  'sigma', true,  'Sigma',    '9D',  '9',  'core',   1, 'unreviewed','sigma industries', NOW() - INTERVAL '6 days', 'Emailed them instead, no reply'),
   ('cphi-milan-2026','Beta Co',    'beta',  true,  'Beta',     '2B',  '2',  'exact',  5, 'confirmed', 'beta co',      NOW() - INTERVAL '2 days', 'Signed an NDA');
@@ -184,8 +189,8 @@ async function main() {
     const src = await db(base, 'cphi_src', `${TABLE}${FIXTURE}`);
     const n = await total(src.c);
     await src.c.end();
-    if (n === 11) ok(`source database built — ${n} rows, 5 duplicate groups and 1 untouched holder`);
-    else bad(`expected 11 rows, built ${n}`);
+    if (n === 13) ok(`source database built — ${n} rows, 6 duplicate groups and 1 untouched holder`);
+    else bad(`expected 13 rows, built ${n}`);
 
     sh(`pg_dump -h ${temp.base} -p ${PGPORT} -U postgres --format=custom --file=${temp.base}/src.dump cphi_src`);
     const admin = new Client({ connectionString: `postgresql://postgres@localhost/postgres?host=${base}&port=${PGPORT}&sslmode=disable` });
@@ -197,8 +202,8 @@ async function main() {
     url = `postgresql://postgres@localhost/cphi_restored?host=${base}&port=${PGPORT}&sslmode=disable`;
     c = new Client({ connectionString: url });
     await c.connect();
-    if (await total(c) === 11) ok('restored into an isolated database — 11 rows, matching the source');
-    else bad(`the restore holds ${await total(c)} rows, not 11`);
+    if (await total(c) === 13) ok('restored into an isolated database — 13 rows, matching the source');
+    else bad(`the restore holds ${await total(c)} rows, not 13`);
   }
 
   // ── 2. the report: everything item 3 asks for ──────────────────────────────────────────────────
@@ -209,24 +214,24 @@ async function main() {
     else bad(`exit ${r.code}, expected 1`, 'a report nobody has to acknowledge is a report nobody reads');
 
     for (const [needle, what] of [
-      [/AUTO\s+1 group/, 'counts the AUTO groups'],
-      [/MERGE\s+2 group/, 'counts the MERGE groups'],
-      [/CONFLICT\s+2 group/, 'counts the CONFLICT groups'],
+      [/AUTO\s+2 group/, 'counts the AUTO groups'],
+      [/MERGE\s+3 group/, 'counts the MERGE groups'],
+      [/CONFLICT\s+1 group/, 'counts the CONFLICT groups'],
       [/Met Giulia at the stand/, "quotes the note verbatim, including the one on a row that will not survive"],
       [/review_status="confirmed"/, 'shows review statuses'],
       [/fingerprint [0-9a-f]{16}/, 'fingerprints each group so the plan can detect drift'],
       [/searched_terms=/, 'shows the source reference each row came from'],
       [/checked /, 'shows timestamps'],
       [/molecules_covered=/, 'shows molecules_covered, which a careless merge would lower'],
-      [/rows deleted if this plan is applied: 3/, 'states exactly how many rows would go'],
+      [/rows deleted if this plan is applied: 5/, 'states exactly how many rows would go'],
     ]) {
       if (needle.test(r.out)) ok(what);
       else bad(`the report does not: ${what}`);
     }
     if (!fs.existsSync(planFile)) { bad('no plan file was written'); throw new Error('stop'); }
     ok(`plan written to ${path.basename(planFile)}`);
-    if (await total(c) === 11) ok('the report changed nothing — still 11 rows');
-    else bad(`the read-only report mutated the database: 11 → ${await total(c)}`);
+    if (await total(c) === 13) ok('the report changed nothing — still 13 rows');
+    else bad(`the read-only report mutated the database: 13 → ${await total(c)}`);
   }
 
   // ── 3. the plan: survivors and merges, item 4 ──────────────────────────────────────────────────
@@ -238,38 +243,65 @@ async function main() {
     if (g('alpha').classification === 'AUTO') ok('alpha, with no human work anywhere, is AUTO');
     else bad(`alpha classified ${g('alpha').classification}, expected AUTO`);
 
-    // THE ONE THAT MATTERS. The note is on the OLDER row, which does not survive on recency.
+    // ── NO NOTE CAN EVER BE ON A LOSING ROW, BY CONSTRUCTION ──────────────────────────────────────
+    //
+    // Under ruling 38's option 2, entity_note is the ONLY human-authored field, and the survivor
+    // ranking puts noted rows first — so a group with exactly one note always keeps that row, and a
+    // group with two different notes is a CONFLICT nobody touches. The carry-across machinery in
+    // cphi-reconcile.js is therefore unreachable on this rule, and kept only as a net in case the
+    // ranking ever changes. What is asserted here is the structural guarantee, which is stronger
+    // than the behaviour of a branch that cannot fire: NO PLAN ANYWHERE SCHEDULES A NOTED ROW FOR
+    // DELETION.
+    for (const grp of plan.groups) {
+      const notedIds = grp.rows.filter((r) => r.entity_note && String(r.entity_note).trim()).map((r) => String(r.id));
+      const doomed = grp.delete_ids.map(String);
+      const lost = notedIds.filter((id) => doomed.includes(id));
+      if (lost.length) {
+        bad(`${grp.holder_normalized} would delete noted row(s) ${lost.join(', ')}`, 'a note somebody typed would be lost');
+      }
+    }
+    ok('across every group in the plan, no row carrying a note is scheduled for deletion');
+
     const gamma = g('gamma');
     const noteRow = gamma.rows.find((x) => x.entity_note);
-    if (gamma.classification === 'MERGE') ok('gamma is MERGE — its note is on a row that will not survive');
-    else bad(`gamma classified ${gamma.classification}, expected MERGE`);
-    if (String(gamma.survivor_id) !== String(noteRow.id)) {
-      ok(`the surviving row (#${gamma.survivor_id}) is NOT the one holding the note (#${noteRow.id}) — so the note must be carried`);
+    if (String(gamma.survivor_id) === String(noteRow.id)) {
+      ok(`gamma keeps #${noteRow.id}, the row holding the note — the noted row wins the ranking outright`);
     } else {
-      bad('the fixture does not exercise the case it exists for', 'the note is on the survivor, so nothing has to be carried');
+      bad(`gamma would keep #${gamma.survivor_id} over the noted row #${noteRow.id}`);
     }
-    const noteMerge = gamma.merges.find((m) => m.field === 'entity_note');
-    if (noteMerge && /Met Giulia at the stand/.test(noteMerge.value)) ok("the note is carried onto the survivor verbatim");
-    else bad('the note would be LOST', JSON.stringify(gamma.merges));
-    if (noteMerge && /merged from row #/.test(noteMerge.value)) ok('…with provenance recording which row it came from, and when');
-    else bad('the carried note has no provenance');
+    if (gamma.classification === 'AUTO') ok('…so gamma needs no merge at all: AUTO');
+    else ok(`gamma is ${gamma.classification} (its note is safe on the survivor either way)`);
 
+    // delta: derived fields only, which is all that is left to merge once status is out of it.
     const delta = g('delta');
-    if (delta.merges.find((m) => m.field === 'molecules_covered' && Number(m.value) === 9)) {
-      ok('delta keeps the HIGHER molecules_covered (9, not the survivor\'s 1)');
+    const deltaFields = delta.merges.map((m) => m.field);
+    if (deltaFields.includes('booth') && deltaFields.includes('hall')) {
+      ok(`delta fills the derived fields its survivor lacked (${deltaFields.join(', ')})`);
     } else {
-      bad('delta would understate the holder\'s coverage', JSON.stringify(delta.merges));
+      bad('delta drops derived values the survivor did not have', JSON.stringify(delta.merges));
     }
-    if (delta.merges.find((m) => m.field === 'exhibitor_name')) ok('delta fills exhibitor_name, which its survivor lacked');
-    else bad('delta drops an exhibitor_name the survivor did not have');
+    const sv = delta.rows.find((r) => String(r.id) === String(delta.survivor_id));
+    if (Number(sv.molecules_covered) === 9) ok('delta\'s survivor already holds the higher molecules_covered (9)');
+    else bad(`delta's survivor holds molecules_covered=${sv.molecules_covered}`);
 
-    for (const n of ['omega', 'sigma']) {
-      const grp = g(n);
-      if (grp.classification === 'CONFLICT') ok(`${n} is CONFLICT — contradicting human work, no rule can settle it`);
-      else bad(`${n} classified ${grp.classification}, expected CONFLICT`);
-      if (grp.delete_ids.length === 0 || grp.conflicts.length) ok(`${n} carries its reason and is not scheduled for deletion`);
-      else bad(`${n} would be reconciled anyway`);
+    // Only contradicting NOTES are conflicts now.
+    const sigma = g('sigma');
+    if (sigma.classification === 'CONFLICT') ok('sigma is CONFLICT — two different notes, which no rule can merge');
+    else bad(`sigma classified ${sigma.classification}, expected CONFLICT`);
+    // The PLAN FILE must schedule nothing, not merely be skipped at apply time: anything else
+    // consuming this JSON would act on delete_ids.
+    if (sigma.delete_ids.length === 0 && sigma.merges.length === 0) {
+      ok('sigma schedules no deletion and no merge in the plan file itself');
+    } else {
+      bad(`sigma still schedules ${sigma.delete_ids.length} deletion(s) and ${sigma.merges.length} merge(s)`,
+        'a consumer of this plan would act on them');
     }
+    if (sigma.conflicts.length) ok('…and carries its reason');
+    else bad('sigma records no reason');
+
+    const omega = g('omega');
+    if (omega.classification !== 'CONFLICT') ok(`omega is ${omega.classification} — a machine-label disagreement is no longer a human's problem`);
+    else bad('omega is still a CONFLICT');
     if (!plan.groups.find((x) => x.holder_normalized === 'beta')) ok('beta, not duplicated, is not in the plan at all');
     else bad('a non-duplicated holder appears in the plan');
 
@@ -299,16 +331,16 @@ async function main() {
     const noConfirm = reconcile(url, ['--apply', planFile]);
     if (noConfirm.code === 2) ok('refused without --confirm-not-production — exit 2');
     else bad(`exit ${noConfirm.code}, expected 2`, 'it would delete rows on a bare --apply');
-    if (await total(c) === 11) ok('nothing changed by the refused apply');
-    else bad(`the refused apply still mutated: 11 → ${await total(c)}`);
+    if (await total(c) === 13) ok('nothing changed by the refused apply');
+    else bad(`the refused apply still mutated: 13 → ${await total(c)}`);
 
     const r = reconcile(url, ['--apply', planFile, '--confirm-not-production']);
     // Exit 1 is correct here: two CONFLICT groups remain, so the index still cannot be created.
-    if (/3 row\(s\) deleted/.test(r.out)) ok('applied — 3 rows deleted, exactly as planned');
+    if (/5 row\(s\) deleted/.test(r.out)) ok('applied — 5 rows deleted, exactly as planned');
     else bad('the apply did not delete the planned rows', r.out.trim().split('\n').slice(-6).join(' | '));
-    if (/2 skipped/.test(r.out)) ok('the 2 CONFLICT groups were skipped');
-    else bad('conflicting groups were not skipped');
-    if (await total(c) === 8) ok('11 → 8 rows');
+    if (/1 skipped/.test(r.out)) ok('the 1 CONFLICT group was skipped');
+    else bad('the conflicting group was not skipped');
+    if (await total(c) === 8) ok('13 → 8 rows');
     else bad(`expected 8 rows, found ${await total(c)}`);
 
     // THE REQUIREMENT, checked in the data rather than in the log.
@@ -316,23 +348,21 @@ async function main() {
     if (gammaRows.length === 1) ok('gamma is now a single row');
     else bad(`gamma has ${gammaRows.length} rows`);
     if (gammaRows.length && /Met Giulia at the stand/.test(gammaRows[0].entity_note || '')) {
-      ok('…and it carries the note from the row that was deleted — the human sentence survived');
+      ok('…and it still carries its note — the human sentence survived');
     } else {
       bad('THE NOTE WAS LOST', `entity_note is now ${JSON.stringify(gammaRows[0] && gammaRows[0].entity_note)}`);
     }
     const deltaRows = await groupRows(c, 'delta');
-    if (deltaRows.length === 1 && deltaRows[0].review_status === 'confirmed' && Number(deltaRows[0].molecules_covered) === 9) {
-      ok('delta kept its review and the higher molecules_covered');
+    if (deltaRows.length === 1 && Number(deltaRows[0].molecules_covered) === 9 && deltaRows[0].booth === '3C') {
+      ok('delta kept the higher molecules_covered and gained the booth it lacked');
     } else {
-      bad('delta lost its review or its coverage', JSON.stringify(deltaRows.map((x) => [x.review_status, x.molecules_covered])));
+      bad('delta lost coverage or a derived field', JSON.stringify(deltaRows.map((x) => [x.molecules_covered, x.booth])));
     }
     const betaRows = await groupRows(c, 'beta');
     if (betaRows.length === 1 && betaRows[0].entity_note === 'Signed an NDA') ok('beta, never duplicated, is untouched including its note');
     else bad('an unrelated row was modified', JSON.stringify(betaRows));
-    for (const n of ['omega', 'sigma']) {
-      if ((await groupRows(c, n)).length === 2) ok(`${n} still has both rows — conflicts untouched`);
-      else bad(`${n} was reconciled despite being a conflict`);
-    }
+    if ((await groupRows(c, 'sigma')).length === 2) ok('sigma still has both rows — the conflict is untouched');
+    else bad('sigma was reconciled despite being a conflict');
   }
 
   // ── 6. AUDITABLE and RECOVERABLE ───────────────────────────────────────────────────────────────
@@ -340,8 +370,8 @@ async function main() {
   {
     const audit = (await c.query(
       `SELECT * FROM cphi_reconcile_audit WHERE plan_id = $1 ORDER BY id`, [plan.plan_id])).rows;
-    if (audit.length >= 3) ok(`${audit.length} audit row(s) under this plan_id`);
-    else bad(`only ${audit.length} audit row(s)`, '3 deletes and 2 merges were applied');
+    if (audit.length >= 5) ok(`${audit.length} audit row(s) under this plan_id`);
+    else bad(`only ${audit.length} audit row(s)`, '5 deletes plus the merges were applied');
 
     if (audit.every((a) => a.actor === 'harness@example.invalid')) ok('every audit row records who did it');
     else bad('audit rows do not record the actor');
@@ -349,8 +379,8 @@ async function main() {
     else bad('audit rows have no timestamp');
 
     const deletes = audit.filter((a) => a.action === 'delete');
-    if (deletes.length === 3) ok('3 delete actions recorded');
-    else bad(`${deletes.length} delete actions recorded, expected 3`);
+    if (deletes.length === 5) ok('5 delete actions recorded');
+    else bad(`${deletes.length} delete actions recorded, expected 5`);
     if (deletes.every((a) => a.before_row && a.before_row.id)) ok('each holds the COMPLETE prior row as JSON');
     else bad('a delete was recorded without the row it removed');
 
@@ -408,29 +438,107 @@ async function main() {
     const pf = `${temp.base}/drift.json`;
     reconcile(u2, ['--plan-out', pf]);
     const dp = JSON.parse(fs.readFileSync(pf, 'utf8'));
-    const gamma = dp.groups.find((g) => g.holder_normalized === 'gamma');
+    const alphaDrift = dp.groups.find((g) => g.holder_normalized === 'alpha');
 
-    // Somebody reviews the row the plan was going to delete. The plan is now wrong about this group:
-    // deleting that row would discard a review that did not exist when the plan was made.
-    await c2.query(`UPDATE cphi_exhibitor_matches SET review_status = 'confirmed' WHERE id = $1`,
-      [gamma.delete_ids[0]]);
+    // Somebody ANNOTATES the row the plan was going to delete. Under option 2 a note is the only
+    // human-authored field, so the plan is now wrong about this group in the one way that matters:
+    // deleting that row would discard a sentence that did not exist when the plan was written.
+    const target = alphaDrift.delete_ids[0];
+    await c2.query(`UPDATE cphi_exhibitor_matches SET entity_note = $2 WHERE id = $1`,
+      [target, 'Added after the plan was generated']);
 
     const before = await total(c2);
     const r = reconcile(u2, ['--apply', pf, '--confirm-not-production']);
-    if (/REFUSED .*gamma/.test(r.out) || /REFUSED/.test(r.out)) ok('the changed group is REFUSED');
+    if (/REFUSED/.test(r.out)) ok('the changed group is REFUSED');
     else bad('it applied a stale plan', r.out.trim().split('\n').slice(-6).join(' | '));
     if (/changed since the plan was made/.test(r.out)) ok('…and says why, naming both fingerprints');
     else bad('the refusal does not explain itself');
 
-    const gammaRows = await groupRows(c2, 'gamma');
-    if (gammaRows.length === 2) ok('both gamma rows survive — the newly reviewed row was not deleted');
-    else bad(`gamma now has ${gammaRows.length} row(s)`, 'a review created after the plan was discarded');
-    if (gammaRows.some((x) => x.review_status === 'confirmed')) ok('the new review is intact');
-    else bad('the review added after planning was lost');
+    const alphaRowsD = await groupRows(c2, 'alpha');
+    if (alphaRowsD.length === 2) ok('both alpha rows survive — the newly annotated row was not deleted');
+    else bad(`alpha now has ${alphaRowsD.length} row(s)`, 'a note written after the plan was discarded');
+    if (alphaRowsD.some((x) => /Added after the plan/.test(x.entity_note || ''))) ok('the note added after planning is intact');
+    else bad('the note added after planning was lost');
     // Other groups are independent and should still have been applied.
     if (await total(c2) < before) ok('unaffected groups were still reconciled — drift is refused per group, not globally');
     else bad('one drifted group blocked every other group');
     await c2.end();
+  }
+
+  // ── 8b. THE STATUS RULE (ruling 38 item 3) ─────────────────────────────────────────────────────
+  h('8b. STATUS RULE — raise to entity_review, never adopt auto_confirmed, never lose an original');
+  {
+    const { url: u4, c: c4 } = await db(base, 'cphi_status', `${TABLE}${FIXTURE}`);
+    const pf = `${temp.base}/status.json`;
+    const rep = reconcile(u4, ['--plan-out', pf]);
+    const sp = JSON.parse(fs.readFileSync(pf, 'utf8'));
+    const g = (n) => sp.groups.find((x) => x.holder_normalized === n);
+
+    // omega: two machine labels, no note. Under the old predicate this was a CONFLICT a person was
+    // asked to adjudicate despite nobody having written anything.
+    const omega = g('omega');
+    if (omega.classification !== 'CONFLICT') ok(`omega is ${omega.classification}, not CONFLICT — machine labels are not human decisions`);
+    else bad('a machine-label disagreement is still escalated to a person');
+    if (omega.status_disagreement) ok('…and the disagreement is recorded on the group rather than resolved away');
+    else bad('the status disagreement is not recorded');
+    if (omega.original_review_statuses && omega.original_review_statuses.length === 2) {
+      ok(`…with every original value listed (${omega.original_review_statuses.map((x) => x.review_status).join(', ')})`);
+    } else bad('the original review_status values are not carried in the plan');
+    if (/original review_status per row/.test(rep.out)) ok('…and printed in the report');
+    else bad('the report does not show the original per-row statuses');
+
+    // omega's survivor is the newest row, which is entity_review — so no raise is needed there.
+    // kappa is the case that matters: survivor is entity_review, the LOSER is auto_confirmed.
+    const kappa = g('kappa');
+    const adopts = (kappa.merges || []).find((m) => m.field === 'review_status');
+    if (!adopts || adopts.value !== 'auto_confirmed') ok('kappa does NOT adopt auto_confirmed onto its survivor');
+    else bad('auto_confirmed was adopted', 'that asserts machine confidence the survivor never earned');
+
+    // And the raising direction, which must fire: a survivor that is not flagged, in a group that has
+    // a flagged row, must be raised.
+    const raised = sp.groups.filter((x) => (x.merges || []).some((m) => m.field === 'review_status' && m.value === 'entity_review'));
+    const sane = raised.every((x) => x.rows.some((r) => r.review_status === 'entity_review'));
+    if (sane) ok(`${raised.length} group(s) raised to entity_review, every one of which had a flagged row`);
+    else bad('a group was raised to entity_review with no flagged row in it');
+    for (const x of sp.groups) {
+      const sv = x.rows.find((r) => String(r.id) === String(x.survivor_id));
+      const m = (x.merges || []).find((q) => q.field === 'review_status');
+      const finalStatus = m ? m.value : sv.review_status;
+      if (x.rows.some((r) => r.review_status === 'entity_review') && finalStatus !== 'entity_review') {
+        bad(`${x.holder_normalized} ends as ${finalStatus} despite holding a flagged row`, 'the flag was lost');
+      }
+    }
+    ok('no group loses an entity_review flag that any of its rows carried');
+
+    // Apply, then confirm in the data: the audit must still hold both original statuses.
+    reconcile(u4, ['--apply', pf, '--confirm-not-production']);
+    const omegaRows = await groupRows(c4, 'omega');
+    if (omegaRows.length === 1) ok('omega reconciled to one row — no longer blocked on a human');
+    else bad(`omega has ${omegaRows.length} rows`);
+    if (omegaRows.length === 1 && omegaRows[0].review_status === 'entity_review') {
+      ok('…and it is entity_review, the more cautious of the two');
+    } else if (omegaRows.length === 1) {
+      bad(`omega ended as ${omegaRows[0].review_status}`, 'auto_confirmed must never win over entity_review');
+    }
+    const kappaRows = await groupRows(c4, 'kappa');
+    if (kappaRows.length === 1 && kappaRows[0].review_status === 'entity_review') ok('kappa kept its entity_review flag');
+    else bad(`kappa ended as ${kappaRows.length === 1 ? kappaRows[0].review_status : `${kappaRows.length} rows`}`);
+
+    const preserved = (await c4.query(
+      `SELECT DISTINCT before_row->>'review_status' AS s FROM cphi_reconcile_audit
+        WHERE holder_normalized IN ('omega','kappa') ORDER BY 1`)).rows.map((x) => x.s);
+    if (preserved.includes('auto_confirmed')) ok('the audit preserves the auto_confirmed values that no longer appear in the table');
+    else bad('an original review_status was lost', `audit holds: ${preserved.join(', ')}`);
+
+    // Determinism of the rule itself, not just of the plan.
+    const pf2 = `${temp.base}/status2.json`;
+    const { url: u5, c: c5 } = await db(base, 'cphi_status2', `${TABLE}${FIXTURE}`);
+    reconcile(u5, ['--plan-out', pf2]);
+    const sp2 = JSON.parse(fs.readFileSync(pf2, 'utf8'));
+    const shape = (p2) => p2.groups.map((x) => `${x.holder_normalized}:${x.classification}:${x.survivor_id}:${(x.merges || []).filter((m) => m.field === 'review_status').map((m) => m.value).join('+')}`).join('|');
+    if (shape(sp) === shape(sp2)) ok('the status rule is deterministic across independent runs');
+    else bad('the status rule varies between runs', `${shape(sp)}\n          vs ${shape(sp2)}`);
+    await c4.end(); await c5.end();
   }
 
   // ── 9. TRANSACTIONAL — an injected failure must roll the whole group back ──────────────────────
@@ -445,13 +553,13 @@ async function main() {
     const pf = `${temp.base}/tx.json`;
     reconcile(u3, ['--plan-out', pf]);
     const tp = JSON.parse(fs.readFileSync(pf, 'utf8'));
-    const gamma = tp.groups.find((g) => g.holder_normalized === 'gamma');
+    const gamma = tp.groups.find((g) => g.holder_normalized === 'omega');   // merges derived fields AND deletes
     const alpha = tp.groups.find((g) => g.holder_normalized === 'alpha');
 
     // gamma is the group that both MERGES (carries a note) and DELETES, so a rollback has to undo
     // two different kinds of write plus two audit rows.
     if (gamma.merges.length && gamma.delete_ids.length) {
-      ok(`gamma both merges (${gamma.merges.map((m) => m.field).join(', ')}) and deletes #${gamma.delete_ids.join(', ')} — a rollback must undo both`);
+      ok(`omega both merges (${gamma.merges.map((m) => m.field).join(', ')}) and deletes #${gamma.delete_ids.join(', ')} — a rollback must undo both`);
     } else {
       bad('the fixture group does not exercise both a merge and a delete');
     }
@@ -472,17 +580,20 @@ async function main() {
     else bad('the error is not surfaced');
 
     // THE ASSERTIONS THAT MATTER: the group must be byte-for-byte as it was.
-    const gammaRows = await groupRows(c3, 'gamma');
-    if (gammaRows.length === gamma.rows.length) ok(`gamma still has all ${gamma.rows.length} rows — no partial deletion`);
-    else bad(`gamma has ${gammaRows.length} of ${gamma.rows.length} rows`, 'a partial apply is the state that cannot be re-applied');
+    const gammaRows = await groupRows(c3, 'omega');
+    if (gammaRows.length === gamma.rows.length) ok(`omega still has all ${gamma.rows.length} rows — no partial deletion`);
+    else bad(`omega has ${gammaRows.length} of ${gamma.rows.length} rows`, 'a partial apply is the state that cannot be re-applied');
 
     const survivorNow = gammaRows.find((x) => String(x.id) === String(gamma.survivor_id));
-    const noteMerge = gamma.merges.find((m) => m.field === 'entity_note');
-    if (noteMerge && !survivorNow.entity_note) ok('the survivor was NOT merged — the UPDATE rolled back with the DELETE');
-    else if (noteMerge) bad('the merge committed while the delete failed', `entity_note is now ${JSON.stringify(survivorNow.entity_note)}`);
+    const probe = gamma.merges.find((m) => m.field === 'booth' || m.field === 'exhibitor_name');
+    if (probe && (survivorNow[probe.field] == null || survivorNow[probe.field] === '')) {
+      ok(`the survivor was NOT merged (${probe.field} is still empty) — the UPDATE rolled back with the DELETE`);
+    } else if (probe) {
+      bad('the merge committed while the delete failed', `${probe.field} is now ${JSON.stringify(survivorNow[probe.field])}`);
+    }
 
     const auditForGamma = (await c3.query(
-      `SELECT COUNT(*)::int n FROM cphi_reconcile_audit WHERE holder_normalized = 'gamma'`)).rows[0].n;
+      `SELECT COUNT(*)::int n FROM cphi_reconcile_audit WHERE holder_normalized = 'omega'`)).rows[0].n;
     if (auditForGamma === 0) ok('no audit rows were written for the rolled-back group');
     else bad(`${auditForGamma} audit row(s) survive for a group that was never changed`,
       'an audit row claiming a deletion that did not happen is worse than none');
@@ -497,13 +608,13 @@ async function main() {
     // And the rollback must leave the group RE-APPLIABLE rather than stuck: same plan, no trigger.
     await c3.query('DROP TRIGGER t_reconcile_boom ON cphi_exhibitor_matches; DROP FUNCTION reconcile_boom();');
     const again = reconcile(u3, ['--apply', pf, '--confirm-not-production']);
-    const gammaAfter = await groupRows(c3, 'gamma');
-    if (gammaAfter.length === 1) ok('with the fault removed, the SAME plan reconciles gamma — the rollback left it re-appliable, not stuck');
-    else bad(`gamma still has ${gammaAfter.length} rows after a clean re-apply`, again.out.trim().split('\n').slice(-6).join(' | '));
-    if (gammaAfter.length === 1 && /Met Giulia at the stand/.test(gammaAfter[0].entity_note || '')) {
-      ok('…and the note was carried across on that second attempt');
+    const gammaAfter = await groupRows(c3, 'omega');
+    if (gammaAfter.length === 1) ok('with the fault removed, the SAME plan reconciles omega — the rollback left it re-appliable, not stuck');
+    else bad(`omega still has ${gammaAfter.length} rows after a clean re-apply`, again.out.trim().split('\n').slice(-6).join(' | '));
+    if (gammaAfter.length === 1 && gammaAfter[0].review_status === 'entity_review') {
+      ok('…and the entity_review flag stands on the retry');
     } else if (gammaAfter.length === 1) {
-      bad('the note was lost on the retry', JSON.stringify(gammaAfter[0].entity_note));
+      bad('the flag was lost on the retry', JSON.stringify(gammaAfter[0].review_status));
     }
     await c3.end();
   }

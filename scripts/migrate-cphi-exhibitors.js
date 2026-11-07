@@ -62,7 +62,7 @@ async function migrateCphiExhibitors() {
   // halted the chain — with an error message that named the index and not one of the rows.
   //
   // THE DUPLICATES ARE NOT DELETED HERE BY DEFAULT. Two columns carry human work:
-  // `review_status` (anything other than 'unreviewed' is somebody's decision) and `entity_note`
+  // `entity_note` — and ONLY entity_note (ruling 38 option 2). review_status's non-default values on
   // (free text, added by scripts/migrate-cphi-entity-note.js). The rest of the row is derived from a
   // search and is recomputable. A migration that silently picked a survivor could discard a review,
   // and no later run could tell it had.
@@ -71,13 +71,20 @@ async function migrateCphiExhibitors() {
   // with any flag — reconciliation lives in scripts/cphi-reconcile.js, which produces a plan a person
   // reviews, preserves human work by carrying it onto the survivor, records the complete prior
   // contents of everything it changes, and refuses a plan whose rows have since moved.
-  const HUMAN = `(entity_note IS NOT NULL OR review_status <> 'unreviewed')`;
+  // this data are 'entity_review' and 'auto_confirmed', both machine-assigned: four seeding scripts
+  // write 'entity_review' as a literal, migrate-cphi-entity-note.js backfills notes WHERE
+  // review_status='entity_review' AND entity_note IS NULL (the machine marks, the human annotates),
+  // and build-cphi-briefing.js renders it as a "confirm the legal entity" caveat. Counting them as
+  // human work made the real dump report one CONFLICT that was two machine labels disagreeing with
+  // nothing written on either row.
+  const HUMAN = `(entity_note IS NOT NULL AND btrim(entity_note) <> '')`;
   const hasNote = (await query(
     `SELECT COUNT(*)::int n FROM information_schema.columns
       WHERE table_name = 'cphi_exhibitor_matches' AND column_name = 'entity_note'`)).rows[0].n > 0;
   // entity_note is added by a later step, so on a database where that has not run yet the predicate
   // has to fall back to review_status alone rather than erroring on a missing column.
-  const humanPredicate = hasNote ? HUMAN : `(review_status <> 'unreviewed')`;
+  // Without the column there is no human-authored field in this table at all, so nothing is at risk.
+  const humanPredicate = hasNote ? HUMAN : 'false';
 
   const indexExists = (await query(
     `SELECT COUNT(*)::int n FROM pg_indexes

@@ -242,11 +242,15 @@ async function main() {
   }
 
   // ── 4. a conflict is still named as a conflict ─────────────────────────────────────────────────
-  h('4. TWO HUMAN-TOUCHED ROWS IN ONE GROUP — named a CONFLICT, with a query to inspect them');
+  h('4. TWO DIFFERENT NOTES IN ONE GROUP — named a CONFLICT, with a query to inspect them');
   {
+    // Under ruling 38 option 2 the only human-authored field is entity_note, so a conflict needs TWO
+    // DIFFERENT NOTES. A review_status beside a note is no longer a conflict: review_status is
+    // machine-assigned here, and escalating it asked a person to adjudicate between a sentence they
+    // wrote and a label a script applied.
     const { url, c } = await db(base, 'cphi_conflict', `${TABLE}
-      ${ins('cphi-milan-2026', 'alpha', { review: 'confirmed' })}
       ${ins('cphi-milan-2026', 'alpha', { note: 'spoke to them at the stand' })}
+      ${ins('cphi-milan-2026', 'alpha', { note: 'emailed instead, no reply' })}
       ${ins('cphi-milan-2026', 'beta')}`);
 
     const r = runMigration(url);

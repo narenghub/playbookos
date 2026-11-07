@@ -47,6 +47,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const { query, withTransaction } = require('../src/lib/db');
 
 const argv = process.argv.slice(2);
@@ -64,9 +65,53 @@ const DERIVED_FIELDS = ['exhibiting', 'exhibitor_name', 'booth', 'hall', 'match_
 
 const h = (t) => console.log(`\n${'─'.repeat(78)}\n${t}\n${'─'.repeat(78)}`);
 
+// ── WHAT COUNTS AS HUMAN WORK (ruling 38, option 2) ────────────────────────────────────────────────
+//
+// `entity_note`, and nothing else. An earlier version also counted any review_status other than
+// 'unreviewed', which was wrong on this data in a way the production dump made plain: the only values
+// present are 'unreviewed' (247), 'entity_review' (181) and 'auto_confirmed' (39), and BOTH non-default
+// values are machine-assigned —
+//
+//   · 'entity_review' is written as a literal by four seeding scripts, and
+//     migrate-cphi-entity-note.js backfills notes WHERE review_status='entity_review' AND
+//     entity_note IS NULL. The machine marks the row; the human writes the note.
+//   · build-cphi-briefing.js renders 'entity_review' as a "confirm which entity holds the file"
+//     caveat — a derived caution flag, not a decision.
+//   · 'auto_confirmed' says auto on the tin.
+//
+// Treating those as human decisions produced one "CONFLICT" on the real dump that was two machine
+// labels disagreeing with no note on either row, and 47 "MERGE" groups carrying no human text at all.
+// It erred safe, but it asked a person to adjudicate something no person had written.
 const isReviewed = (r) => r.review_status != null && r.review_status !== 'unreviewed';
 const hasNote = (r) => r.entity_note != null && String(r.entity_note).trim() !== '';
-const isHuman = (r) => isReviewed(r) || hasNote(r);
+const isHuman = (r) => hasNote(r);
+
+// ── THE STATUS RULE (ruling 38 item 3) ─────────────────────────────────────────────────────────────
+//
+// Deterministic, stated here, and asymmetric ON PURPOSE. review_status is machine-derived, so the
+// survivor keeps ITS OWN value and never adopts another row's — with exactly one exception, in the
+// one direction that cannot mislead anybody:
+//
+//   if any row in the group is 'entity_review' and the survivor is not, the survivor becomes
+//   'entity_review'.
+//
+// 'entity_review' means "a human should look at this": the DMF holder's name and the name on the
+// stand differ, so the legal entity needs confirming. Raising a row to it only ever asks for more
+// scrutiny. Going the other way — adopting 'auto_confirmed' onto a row that was flagged, or onto an
+// 'unreviewed' row — would assert machine confidence the survivor never earned, which is precisely
+// the "silently reinterpret machine classifications as verified human decisions" that ruling 38
+// forbids. So 'auto_confirmed' is NEVER adopted.
+//
+// Every original value survives in cphi_reconcile_audit.before_row regardless, and a group whose rows
+// disagreed is recorded as such, so the disagreement is never simply resolved away.
+const NEEDS_HUMAN_EYES = 'entity_review';
+function statusFor(survivor, rows) {
+  const anyFlagged = rows.some((r) => r.review_status === NEEDS_HUMAN_EYES);
+  if (anyFlagged && survivor.review_status !== NEEDS_HUMAN_EYES) {
+    return { value: NEEDS_HUMAN_EYES, raised: true };
+  }
+  return { value: survivor.review_status, raised: false };
+}
 
 // Deterministic, and the determinism matters: a plan a person reviewed must be the same plan that is
 // applied. Sorted by id so the fingerprint and the survivor choice cannot vary between runs.
@@ -94,19 +139,24 @@ function planForGroup(rows) {
   const reasons = [];
   const conflicts = [];
 
+  // ONLY contradicting human text is a conflict now. Two machine labels disagreeing is recorded and
+  // handled by the status rule above, not escalated to a person who wrote neither of them.
   if (notes.length > 1) {
-    conflicts.push(`${notes.length} different entity_note values — merging them is a judgement, not a rule`);
+    conflicts.push(`${notes.length} different entity_note values — merging somebody's sentences is a judgement, not a rule`);
   }
-  if (reviews.length > 1) {
-    conflicts.push(`${reviews.length} different review_status values (${reviews.join(', ')}) — only a person can say which stands`);
-  }
-  // Disagreement about whether a holder exhibits at all is substantive. If nobody has reviewed the
-  // group it is a stale-search artifact and the newest check wins; if somebody HAS, the disagreement
-  // may be the thing they were looking at, so it goes to review.
+  // Disagreement about whether a holder exhibits at all is substantive, but only when a person has
+  // actually written something about this holder; otherwise it is a stale-search artifact and the
+  // newest check wins.
   const exhibitingValues = [...new Set(rows.map((r) => r.exhibiting))];
-  if (exhibitingValues.length > 1 && rows.some(isHuman)) {
-    conflicts.push('rows disagree on `exhibiting` and at least one has been reviewed or annotated');
+  if (exhibitingValues.length > 1 && rows.some(hasNote)) {
+    conflicts.push('rows disagree on `exhibiting` and one of them carries a note');
   }
+  // Recorded, never silently resolved: a machine-label disagreement is reported on the group and
+  // every original value is kept in the audit.
+  const statusDisagreement = reviews.length > 1
+    ? `review_status differed across this group (${reviews.join(', ')}) — machine-assigned, so not a conflict; `
+      + 'every original value is preserved in cphi_reconcile_audit.before_row'
+    : null;
 
   // Survivor: the reviewed/annotated row if there is exactly one, else the most recently checked.
   // id DESC as the final tie-break so two rows checked in the same instant still resolve the same
@@ -121,9 +171,10 @@ function planForGroup(rows) {
   const survivor = ranked[0];
   const losers = ranked.slice(1);
 
-  reasons.push(isHuman(survivor)
-    ? `kept #${survivor.id} because it carries human work (${isReviewed(survivor) ? `review_status=${survivor.review_status}` : ''}${isReviewed(survivor) && hasNote(survivor) ? ', ' : ''}${hasNote(survivor) ? 'entity_note' : ''})`
-    : `kept #${survivor.id} as the most recently checked (${new Date(survivor.checked_at).toISOString().slice(0, 10)}); no row in this group carries human work`);
+  reasons.push(hasNote(survivor)
+    ? `kept #${survivor.id} because it carries the group's entity_note — the only human-authored field here`
+    : `kept #${survivor.id} as the most recently checked (${new Date(survivor.checked_at).toISOString().slice(0, 10)}); no row in this group carries a note`);
+  if (statusDisagreement) reasons.push(statusDisagreement);
 
   // Carry human work ACROSS, rather than losing it with the row.
   const merges = [];
@@ -135,12 +186,15 @@ function planForGroup(rows) {
       why: `row #${from.id} carried the only note in this group; it is carried over with its provenance rather than deleted with the row`,
     });
   }
-  if (!isReviewed(survivor) && reviews.length === 1) {
-    const from = losers.find(isReviewed);
+  const status = statusFor(survivor, rows);
+  if (status.raised) {
+    const from = rows.find((r) => r.review_status === NEEDS_HUMAN_EYES);
     merges.push({
       field: 'review_status',
-      value: reviews[0],
-      why: `row #${from.id} held the only review in this group (${reviews[0]})`,
+      value: NEEDS_HUMAN_EYES,
+      why: `row #${from.id} is flagged ${NEEDS_HUMAN_EYES} (holder name and stand name differ, so the legal `
+        + `entity needs confirming) while the survivor is ${JSON.stringify(survivor.review_status)}. Raised to the `
+        + 'more cautious of the two — never the reverse, and auto_confirmed is never adopted',
     });
   }
   // Derived fields: fill only where the survivor has nothing. Never overwrite a present value — a
@@ -200,9 +254,19 @@ function planForGroup(rows) {
     })),
     classification: conflicts.length ? 'CONFLICT' : (merges.length ? 'MERGE' : 'AUTO'),
     conflicts,
+    status_disagreement: statusDisagreement,
+    original_review_statuses: rows.map((r) => ({ id: r.id, review_status: r.review_status })),
     survivor_id: survivor.id,
-    delete_ids: losers.map((l) => l.id),
-    merges,
+    // A CONFLICT group is left untouched, so it must not SCHEDULE anything. These were previously
+    // populated regardless and the apply skipped the group at run time — which was safe in this tool
+    // and a trap in the file: a plan that reads "delete row 11" for a conflicted group would delete a
+    // noted row in the hands of anything else that consumed the JSON. Caught by the harness assertion
+    // that no plan anywhere schedules a noted row for deletion.
+    delete_ids: conflicts.length ? [] : losers.map((l) => l.id),
+    merges: conflicts.length ? [] : merges,
+    // Kept for the report either way, so a conflicted group still shows what WOULD have happened.
+    would_be_survivor: survivor.id,
+    would_delete: losers.map((l) => l.id),
     reasons,
     would_lose_without_merge: wouldLose,
   };
@@ -270,6 +334,10 @@ function report(plan) {
       if (r.searched_terms != null) console.log(`            searched_terms=${JSON.stringify(String(r.searched_terms).slice(0, 100))}`);
     }
     for (const why of g.reasons) console.log(`        · ${why}`);
+    if (g.status_disagreement) {
+      console.log(`        ? original review_status per row: ` +
+        g.original_review_statuses.map((x) => `#${x.id}=${x.review_status}`).join(', '));
+    }
     for (const m of g.merges) {
       console.log(`        + MERGE ${m.field} ← ${JSON.stringify(String(m.value).slice(0, 120))}`);
       console.log(`              ${m.why}`);
@@ -319,7 +387,25 @@ async function applyPlan(file) {
   const plan = JSON.parse(fs.readFileSync(file, 'utf8'));
   await ensureAudit();
 
+  // ── WHICH CODE IS APPLYING THIS (ruling 38 item 4) ──────────────────────────────────────────────
+  //
+  // The apply became transactional in e5fcd03. Before that it ran on autocommit, so a mid-flight
+  // failure could leave a group half-reconciled. The owner's last verification ran from dcd9e4e, one
+  // commit earlier, so "is the transactional version present" is a real question and not a
+  // formality — and the only honest answer is the commit, printed by the code itself into the
+  // transcript that records what it did.
+  let provenance = '(not a git checkout)';
+  try {
+    provenance = execFileSync('git', ['-C', path.join(__dirname, '..'), 'rev-parse', '--short', 'HEAD'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const dirty = execFileSync('git', ['-C', path.join(__dirname, '..'), 'status', '--porcelain'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n').filter(Boolean).length;
+    if (dirty) provenance += ` (+${dirty} uncommitted)`;
+  } catch { /* not a checkout; said so above */ }
+
   h(`APPLYING PLAN ${plan.plan_id}`);
+  console.log(`  code:     ${provenance}  —  transactional per group since e5fcd03`);
+  console.log(`  actor:    ${ACTOR}`);
   let merged = 0; let deleted = 0; let skipped = 0; let refused = 0; let failed = 0;
   const cols = await columnsOf('cphi_exhibitor_matches');
   const noteCol = cols.includes('entity_note') ? 'entity_note' : `NULL::text AS entity_note`;

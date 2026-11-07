@@ -37,6 +37,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 DUMP="${1:-}"
+# Ruling 38 item 8: apply the reconciliation plan to the DISPOSABLE RESTORE, then run the migration.
+# Passed straight through; the readiness harness names the database it acts on.
+RECONCILE_FLAG=""
+for a in "$@"; do [ "$a" = "--reconcile-on-restore" ] && RECONCILE_FLAG="--reconcile-on-restore"; done
 
 if [ -z "$DUMP" ]; then
   cat <<'USAGE'
@@ -152,7 +156,7 @@ fi
 # The readiness harness creates and destroys its own cluster and takes the dump as its argument.
 # Everything below is its work; this wrapper exists so the whole thing is one command.
 cd "$(dirname "$0")/.." || exit 3
-PATH="$BIN:$PATH" node scripts/verify-migration-readiness.js "$DUMP"
+PATH="$BIN:$PATH" node scripts/verify-migration-readiness.js "$DUMP" $RECONCILE_FLAG
 CODE=$?
 
 echo ""

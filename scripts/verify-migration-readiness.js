@@ -39,6 +39,7 @@ const path = require('path');
 const { Client } = require('pg');
 const { pgBinCandidates, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 
+const RECONCILE_ON_RESTORE = process.argv.includes('--reconcile-on-restore');
 const DUMP = process.argv[2] || null;
 const PGPORT = process.env.READINESS_PGPORT || '55455';
 
@@ -343,6 +344,34 @@ async function main() {
           console.log('\n        ── CPHI DUPLICATE RECONCILIATION REPORT (read-only, on the restore) ──');
           for (const l of rout.split('\n')) console.log(`        ${l}`);
           console.log(`        ── end of reconciliation report · plan written to ${planOut} ──\n`);
+
+          // ── RULING 38 ITEM 8: APPLY TO THE ISOLATED RESTORE, THEN MIGRATE ──────────────────────
+          //
+          // Opt-in, and the flag names where it is allowed to act. The database it touches is the
+          // disposable cluster this harness created and destroys at the end, never production — the
+          // decoy test (check-dump-test-isolation.js) is what makes that a fact rather than a claim.
+          if (RECONCILE_ON_RESTORE) {
+            let acode = 0; let aout = '';
+            try {
+              aout = execFileSync(process.execPath,
+                [path.join(__dirname, 'cphi-reconcile.js'), '--apply', planOut, '--confirm-not-production'],
+                { encoding: 'utf8', stdio: 'pipe', maxBuffer: 32 * 1024 * 1024,
+                  env: { ...process.env, DATABASE_URL: urlFor('existing'),
+                    RECONCILE_ACTOR: process.env.RECONCILE_ACTOR || 'verify-prod-dump.sh (isolated restore)' } });
+            } catch (e) { acode = e.status === undefined ? 1 : e.status; aout = `${e.stdout || ''}${e.stderr || ''}`; }
+            console.log('        ── RECONCILIATION APPLIED TO THE ISOLATED RESTORE ──');
+            for (const l of aout.split('\n')) console.log(`        ${l}`);
+            console.log(`        ── apply exit ${acode} (1 means conflicting groups remain, which is not a failure) ──\n`);
+            const remaining = (await q(
+              `SELECT COUNT(*)::int n FROM (
+                 SELECT 1 FROM cphi_exhibitor_matches
+                  GROUP BY event_slug, holder_normalized HAVING COUNT(*) > 1) d`)).rows[0].n;
+            if (remaining === 0) ok('reconciliation cleared every duplicate on the restore — idx_cem_unique can now be created');
+            else bad(`${remaining} duplicate group(s) remain on the restore`, 'those are the CONFLICT groups; they need a decision before the index can exist');
+          } else {
+            console.log('        (read-only. To apply this plan to THIS RESTORE and then migrate:');
+            console.log('         scripts/verify-prod-dump.sh <dump> --reconcile-on-restore)\n');
+          }
         }
       } catch (e) {
         console.log(`        (could not produce the CPHI reconciliation report: ${e.message.split('\n')[0]})`);
