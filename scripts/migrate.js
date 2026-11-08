@@ -24,6 +24,35 @@
 require('dotenv').config();
 
 const { Pool } = require('pg');
+
+// ── THE OVERRIDE MUST HAPPEN BEFORE ANY require() THAT BUILDS A POOL ──────────────────────────────
+//
+// src/lib/migrate-all.js line 30 requires ./db, and src/lib/db builds its Pool from
+// process.env.DATABASE_URL AT REQUIRE TIME, once. 44 of the 53 steps use that pool
+// (`usesOwnPool: true`). So whatever DATABASE_URL holds when that require runs is what those steps
+// will connect to, for the rest of the process.
+//
+// This assignment used to sit 38 lines further down, under a comment asserting it happened
+// "BEFORE src/lib/db is first required". It did not. On 2026-11-08 the production migration halted
+// at step 2 with `getaddrinfo ENOTFOUND postgres.railway.internal`: the pool had been built from
+// Railway's injected private DATABASE_URL, which does not resolve from an operator's machine, while
+// MIGRATION_DATABASE_URL pointed at the reachable proxy. Step 1 passed because it uses this file's
+// own explicit pool, which made the failure look like a step-2 problem rather than an ordering one.
+//
+// NO REHEARSAL COULD HAVE CAUGHT IT. In the readiness harness DATABASE_URL and the migration URL are
+// the same local socket, so an override that arrives late is indistinguishable from one that arrives
+// on time. The two only diverge in production. check-migrate-connection-ordering.js reproduces that
+// divergence deliberately.
+//
+// AND THE WORSE CASE IS THE ONE THAT HAD NOT HAPPENED YET. After the DATABASE_URL cutover, the
+// deployed container's DATABASE_URL is playbookos_app — reachable, but with no DDL rights. The same
+// late override would have built the pool from that role and every pre-deploy migration would have
+// failed with "permission denied", on a deploy where nothing about the migration had changed.
+if (process.env.MIGRATION_DATABASE_URL) {
+  process.env.DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
+}
+
+// eslint-disable-next-line import/order
 const { runAll, SCHEMA_STEPS, SEED_STEPS } = require('../src/lib/migrate-all');
 const schemaReady = require('../src/lib/schema-ready');
 
@@ -60,9 +89,11 @@ const usingMigrationUrl = Boolean(process.env.MIGRATION_DATABASE_URL);
 // The pool used for --check and for the role report. The migration steps themselves go through
 // src/lib/db's own pool, because that is what initDB and the dozen other functions already use —
 // changing every one of them to take a connection would be a far larger diff than this change is
-// worth, and src/lib/db reads DATABASE_URL. So: when MIGRATION_DATABASE_URL is set, it is applied
-// to process.env.DATABASE_URL for this process only, BEFORE src/lib/db is first required.
-if (usingMigrationUrl) process.env.DATABASE_URL = process.env.MIGRATION_DATABASE_URL;
+// worth, and src/lib/db reads DATABASE_URL.
+//
+// The DATABASE_URL override that makes that work now happens at the top of this file, above the
+// requires. It is NOT repeated here: doing it twice would hide the fact that only the first one
+// can possibly matter.
 
 const pool = new Pool({
   connectionString: url,

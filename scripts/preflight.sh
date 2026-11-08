@@ -563,6 +563,7 @@ pf_step "no database dump is sitting in the working tree" node scripts/check-no-
 pf_step "the migration is a pre-deploy step, not part of starting the server" node scripts/check-deploy-ordering.js
 pf_step "the production reconciliation gate cannot be talked past" node scripts/check-cphi-production-path.js
 pf_step "database TLS verification refuses the wrong certificate" node scripts/check-db-tls-verification.js
+pf_step "the migration connects as the migrator, not as DATABASE_URL" node scripts/check-migrate-connection-ordering.js
 
 pf_step "the release posture is still inert where it must be" node scripts/check-release-safety-posture.js
 
