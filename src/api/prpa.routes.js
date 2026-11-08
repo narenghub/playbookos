@@ -19,8 +19,10 @@
 //
 // ── PERMISSIONS ──────────────────────────────────────────────────────────────
 //
-// Federal procurement is the `procurement` tier. Every route carries authMiddleware (mounted by
-// server.js), staffOnly, and a tier check:
+// Federal procurement is the `procurement` tier. Every route carries authMiddleware, staffOnly,
+// and a tier check. authMiddleware is listed explicitly on the `read` and `write` chains below —
+// server.js does NOT mount it, and this comment claiming it did is what hid a total outage of this
+// router for the life of the feature. See the note at `const read`.
 //
 //   read   requireTier('procurement') with GET            → procurement r/rw/own
 //   write  requireTier('procurement') with POST           → procurement rw/w/own
@@ -39,7 +41,7 @@
 
 const express = require('express');
 const { query, withTransaction } = require('../lib/db');
-const { staffOnly, adminOnly, requireTier } = require('../lib/core');
+const { authMiddleware, staffOnly, adminOnly, requireTier } = require('../lib/core');
 const T = require('../lib/office/opportunity-tracker');
 const REG = require('../lib/office/capability-registry');
 const RANK = require('../lib/office/opportunity-rank');
@@ -134,8 +136,24 @@ async function audit(req, fields) {
   return r;
 }
 
-const read = [staffOnly, requireTier('procurement'), resolveCompany];
-const write = [staffOnly, requireTier('procurement'), resolveCompany];
+// authMiddleware IS LISTED HERE, EXPLICITLY, AND MUST STAY.
+//
+// The header of this file used to say "Every route carries authMiddleware (mounted by server.js)".
+// That was never true. server.js applies authMiddleware NOWHERE globally — routes.js passes it as
+// the first handler argument on each of its own routes, and this file did not even
+// import it. So req.user was always undefined here, staffOnly passed it through (it guards with
+// `req.user && req.user.role`), and requireTier threw on `req.user.role` at core.js:136.
+//
+// The result, measured against production on 2026-11-08: every /api/prpa/tracker/* route answered
+// 500 with Express's default HTML error page. The SPA parsed that HTML as JSON and showed "The
+// board could not load — Unexpected token '<'". The federal contracts board and its CSV export had
+// never worked for anyone, authenticated or not, since the feature shipped.
+//
+// It failed CLOSED — no data was served to an anonymous caller — so this was a liveness defect, not
+// a disclosure. But "the comment says a middleware is mounted elsewhere" is not a mounting, and the
+// only way to know is to list it on the chain that needs it.
+const read = [authMiddleware, staffOnly, requireTier('procurement'), resolveCompany];
+const write = [authMiddleware, staffOnly, requireTier('procurement'), resolveCompany];
 
 // ── 1. DATASET PROVENANCE (ruling 27 item 4) ─────────────────────────────────
 // The 253 records are a reproducible DEVELOPMENT dataset, not a live feed. This endpoint is how the
@@ -750,7 +768,7 @@ router.post('/prpa/tracker/duplicates/:id/resolve', write, async (req, res) => {
 // it runs under is the difference between "this is Abiozen's position" and "this is what fixture
 // evidence would have produced". It always runs on the REAL registry here — there is no parameter
 // that would let a fixture basis be requested through HTTP.
-router.post('/prpa/tracker/assess', [staffOnly, adminOnly, resolveCompany], async (req, res) => {
+router.post('/prpa/tracker/assess', [authMiddleware, staffOnly, adminOnly, resolveCompany], async (req, res) => {
   try {
     const today = isoDay(new Date());
     const caps = await REG.activeCapabilities(query, req.prpaCompany.id, { today });

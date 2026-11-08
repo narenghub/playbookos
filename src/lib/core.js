@@ -121,6 +121,7 @@ function staffOnly(req, res, next) {
 // products. admin is a broad internal role held by several people; granting products is the one
 // decision that must stay with the person accountable for the boundary.
 function superAdminOnly(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
   if (req.user.role !== 'super_admin') {
     return res.status(403).json({ error: 'Super admin only' });
   }
@@ -133,6 +134,13 @@ function superAdminOnly(req, res, next) {
 // 'own' filtering. See src/lib/roles.js for the role→tier grid.
 function requireTier(tier) {
   return (req, res, next) => {
+    // A missing req.user means authMiddleware is not on this chain. Answer 401, not a thrown
+    // TypeError: on 2026-11-08 an unguarded `req.user.role` here turned a missing middleware on
+    // src/api/prpa.routes.js into Express's default HTML error page, which the SPA then tried to
+    // parse as JSON. The board reported "Unexpected token '<'" and nobody could see that the real
+    // fault was an unmounted authMiddleware. Failing closed is right; failing closed ILLEGIBLY is
+    // what cost the time.
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
     const access = getRoleTier(req.user.role, tier);
     if (!access) return res.status(403).json({ error: `Role "${req.user.role}" has no ${tier} access` });
     const isWrite = req.method !== 'GET' && req.method !== 'HEAD';
