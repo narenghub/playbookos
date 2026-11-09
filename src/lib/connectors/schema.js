@@ -16,6 +16,7 @@
 //   DROP TABLE IF EXISTS funding_opportunity_versions;
 //   DROP TABLE IF EXISTS funding_opportunities;
 //   DROP TABLE IF EXISTS federal_awards;
+//   DROP TABLE IF EXISTS psc_award_benchmarks;
 //   DROP TABLE IF EXISTS source_sync_runs;
 //   DROP TABLE IF EXISTS source_connectors;
 //
@@ -617,6 +618,54 @@ const DDL = [
      WHERE status IN ('open','in_progress','blocked')`,
 
   // ---------------------------------------------------------------------------------------
+  // WHAT THE GOVERNMENT ACTUALLY PAYS, PER PRODUCT SERVICE CODE.
+  //
+  // Of 149 live solicitations, ZERO carried an estimated value. So the only honest answer to
+  // "what should we bid" comes from award history, and this is where that history is cached.
+  //
+  // GLOBAL, NOT COMPANY-SCOPED. What the government paid for medical laboratory testing is a fact
+  // about the market, identical for every tenant. Scoping it by company would mean storing the
+  // same public figure once per customer and letting the copies drift.
+  //
+  // CACHED because the board must not make three network calls per row on every page load, and
+  // because the underlying figures move slowly — this is three years of award history, not a
+  // price ticker.
+  //
+  // THE LADDER IS ENFORCED BY THE DATABASE. The board presents three bid positions in ascending
+  // order — compete on price, market rate, price on value. Presenting them as a ladder is only
+  // honest if they genuinely ascend, and a writer that transposed two columns would produce a
+  // "competitive" price above the "value" one with nothing to catch it. So the engine refuses
+  // the row instead of trusting the code that computes it.
+  //
+  // ROLLBACK: DROP TABLE psc_award_benchmarks;
+  // ---------------------------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS psc_award_benchmarks (
+     psc_code       TEXT NOT NULL,
+     -- '' rather than NULL: this is half of the primary key, and a nullable key column makes
+     -- "PSC only" and "PSC plus NAICS" indistinguishable to a unique index.
+     naics_code     TEXT NOT NULL DEFAULT '',
+     window_years   INTEGER NOT NULL,
+     award_count    INTEGER NOT NULL,
+     p25_usd        NUMERIC(16,2),
+     median_usd     NUMERIC(16,2),
+     p75_usd        NUMERIC(16,2),
+     source_key     TEXT NOT NULL DEFAULT 'usaspending',
+     computed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     PRIMARY KEY (psc_code, naics_code, window_years),
+     CONSTRAINT psc_bench_count_check  CHECK (award_count >= 0),
+     CONSTRAINT psc_bench_window_check CHECK (window_years BETWEEN 1 AND 20),
+     -- Percentiles ascend or the row is refused.
+     CONSTRAINT psc_bench_ladder_lower CHECK (p25_usd IS NULL OR median_usd IS NULL OR p25_usd <= median_usd),
+     CONSTRAINT psc_bench_ladder_upper CHECK (median_usd IS NULL OR p75_usd IS NULL OR median_usd <= p75_usd),
+     -- A benchmark with figures must say how many awards they rest on; a figure without its
+     -- evidence is the thing this whole feature exists to avoid.
+     CONSTRAINT psc_bench_evidence_check
+       CHECK (median_usd IS NULL OR award_count > 0)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_psc_bench_fresh
+     ON psc_award_benchmarks (computed_at DESC)`,
+
+  // ---------------------------------------------------------------------------------------
   // PR-3 / ruling 7 items 1 and 4 — SAM.GOV SOLICITATIONS, IN THEIR OWN TABLE.
   //
   // A solicitation does NOT go in funding_opportunities. That table is Grants.gov-shaped
@@ -880,6 +929,8 @@ const CONNECTOR_TABLES = Object.freeze([
 
 // source_connectors is deliberately absent from CONNECTOR_TABLES: it holds global facts about
 // public APIs and carries no company_id, as documented at the top of this file.
-const GLOBAL_TABLES = Object.freeze(['source_connectors']);
+// psc_award_benchmarks joins source_connectors here for the same reason: what the government paid
+// for a product service code is a fact about the market, not about any one tenant.
+const GLOBAL_TABLES = Object.freeze(['source_connectors', 'psc_award_benchmarks']);
 
 module.exports = { migrateConnectors, DDL, CONNECTOR_SEED, CONNECTOR_TABLES, GLOBAL_TABLES };

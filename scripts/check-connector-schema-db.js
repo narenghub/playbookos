@@ -760,22 +760,28 @@ const made = { companies: [], runs: [], syncs: [], awards: [], opps: [], vers: [
     else bad('cleanup left fixtures behind', leaks.join('; '));
 
     // ── the documented rollback, actually executed ───────────────────────
-    // Dropped before source_connectors, which they reference. Children first, and the amendment
-    // table before the solicitations it has a composite FK into — the teardown failing with
-    // "cannot drop table source_connectors because other objects depend on it" is how the new
-    // PR-3 tables announced themselves here.
-    await q('DROP TABLE IF EXISTS solicitation_amendments');
-    await q('DROP TABLE IF EXISTS solicitations');
-    await q('DROP TABLE IF EXISTS review_tasks');
-    await q('DROP TABLE IF EXISTS capability_scope_items');
-    await q('DROP TABLE IF EXISTS verified_capabilities');
-    await q('DROP TABLE IF EXISTS eligibility_findings');
-    await q('DROP TABLE IF EXISTS eligibility_assessments');
-    await q('DROP TABLE IF EXISTS funding_opportunity_versions');
-    await q('DROP TABLE IF EXISTS funding_opportunities');
-    await q('DROP TABLE IF EXISTS federal_awards');
-    await q('DROP TABLE IF EXISTS source_sync_runs');
-    await q('DROP TABLE IF EXISTS source_connectors');
+    //
+    // READ OUT OF schema.js, not transcribed here. This block used to be a hand-copied list of
+    // DROP statements, and a thirteenth table was added to the schema without it — so the check
+    // that exists to prove the documented rollback is complete passed on an incomplete copy of
+    // itself, then failed for the wrong reason. Executing the documentation is the only version
+    // of this test that cannot drift from it.
+    //
+    // Order is preserved exactly as written: children before parents, and the amendment table
+    // before the solicitations it has a composite FK into. The teardown failing with "cannot drop
+    // table source_connectors because other objects depend on it" is how the PR-3 tables
+    // announced themselves here, and that failure mode is still live if the order is wrong.
+    const schemaSrc = require('fs').readFileSync(
+      require.resolve('../src/lib/connectors/schema'), 'utf8');
+    const documented = [...schemaSrc.matchAll(/^\/\/\s+(DROP TABLE IF EXISTS [a-z_]+);$/gm)]
+      .map((m) => m[1]);
+    if (documented.length >= [...CONNECTOR_TABLES, ...GLOBAL_TABLES].length) {
+      ok(`the documented rollback lists ${documented.length} table(s)`);
+    } else {
+      bad('the documented rollback is missing tables',
+        `documents ${documented.length}, schema has ${[...CONNECTOR_TABLES, ...GLOBAL_TABLES].length}`);
+    }
+    for (const stmt of documented) await q(stmt);
     const { rows: gone } = await q(
       `SELECT COUNT(*)::int n FROM pg_class WHERE relname = ANY($1) AND relkind = 'r'`,
       [[...CONNECTOR_TABLES, ...GLOBAL_TABLES]]);

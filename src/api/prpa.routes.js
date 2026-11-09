@@ -52,6 +52,8 @@ const { isoDay } = require('../lib/office/iso-day');
 const { fetchDocument } = require('../lib/office/url-guard');
 const { normalizeRow, mapHeaders, contentHash } = require('../lib/office/opportunity-normalize');
 const DATASET = require('../lib/office/prpa-dataset');
+const { assessRelevance } = require('../lib/office/opportunity-relevance');
+const COMP = require('../lib/office/award-comparables');
 
 // ── WHY EVERY PATH HERE IS /prpa/tracker/* AND NOT /prpa/* ──────────────────
 //
@@ -201,11 +203,53 @@ router.get('/prpa/tracker/opportunities', read, async (req, res) => {
     const rows = await T.listOpportunities(query, req.prpaCompany.id, f);
     const caps = await REG.activeCapabilities(query, req.prpaCompany.id, { today });
 
+    // ── THE BOARD SHOWS WORK, NOT EVERYTHING WE HARVESTED ──────────────────
+    //
+    // Owner instruction 2026-11-09: "If you could fetch like 10, 20 high level actively the
+    // contract active in a current market, it's purely fit with my business model."
+    //
+    // Of 149 harvested solicitations, 69 were R&D for defense systems — metal castings, test
+    // ranges, ship simulators. A queue where seven in ten rows are noise is a queue nobody reads.
+    //
+    // Nothing is deleted or hidden: every row keeps its relevance verdict and reasons, and
+    // ?scope=all returns the unfiltered board. The default is simply the work.
+    const scope = String(req.query.scope || 'actionable');
+    const horizonDays = Number(req.query.horizonDays || 90);
+    const horizon = new Date(Date.now() + horizonDays * 24 * 60 * 60 * 1000);
+
+    const withRelevance = rows.map((r) => ({ ...r, relevance: assessRelevance(r) }));
+    const onBoard = scope === 'all' ? withRelevance : withRelevance.filter((r) => {
+      if (r.relevance.verdict !== 'RELEVANT') return false;
+      if (r.status !== 'open') return false;
+      // A deadline we do not know is kept: unknown is not expired, and dropping it would hide a
+      // live contract because of a gap in OUR record rather than anything about the contract.
+      if (!r.response_deadline) return true;
+      const due = new Date(r.response_deadline);
+      return due >= new Date() && due <= horizon;
+    });
+
+    // One query for every benchmark the board needs, not one per row.
+    const pscs = [...new Set(onBoard.map((r) => r.psc_code).filter(Boolean))];
+    const benchmarks = new Map();
+    if (pscs.length) {
+      try {
+        const b = await query(
+          `SELECT psc_code, award_count, p25_usd, median_usd, p75_usd, computed_at
+             FROM psc_award_benchmarks
+            WHERE psc_code = ANY($1) AND naics_code = '' AND window_years = 3`, [pscs]);
+        for (const row of b.rows) benchmarks.set(row.psc_code, row);
+      } catch (e) {
+        // The table may not exist yet on a database that has not run the migration. A board
+        // without prices is still a board; a board that 500s is not.
+        benchmarks.set('__error', e.message);
+      }
+    }
+
     // business_lines comes from the qualify engine's line matcher, not from the stored assessment:
     // assess() returns an empty line list for a sources-sought notice because there is nothing to
     // bid on, and feeding that to rank() would zero the fit score for the very notices that are the
     // way in to a recompete.
-    const enriched = rows.map((r) => ({ ...r, business_lines: r.business_lines || relevantLines(r).lines }));
+    const enriched = onBoard.map((r) => ({ ...r, business_lines: r.business_lines || relevantLines(r).lines }));
     const ranked = RANK.rankAll(enriched, { today, capabilities: caps, supplierQuotes: {} });
 
     res.json({
@@ -213,14 +257,97 @@ router.get('/prpa/tracker/opportunities', read, async (req, res) => {
       today,
       verified_capabilities: caps.length,
       count: ranked.length,
-      opportunities: ranked.map(shapeForBoard),
+      // What the filter did, so a count that looks small can be explained rather than doubted.
+      board: {
+        scope,
+        horizon_days: scope === 'all' ? null : horizonDays,
+        harvested: rows.length,
+        shown: ranked.length,
+        filtered_out: rows.length - ranked.length,
+        relevance_breakdown: withRelevance.reduce((acc, r) => {
+          acc[r.relevance.verdict] = (acc[r.relevance.verdict] || 0) + 1;
+          return acc;
+        }, {}),
+        benchmarks_loaded: benchmarks.size,
+      },
+      opportunities: ranked.map((r) => shapeForBoard(r, benchmarks)),
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Exactly the columns ruling 27 item 2 names, plus what is needed to act on a row. Shaped in one
 // place so the board, the detail view and the export cannot drift apart.
-function shapeForBoard(r) {
+// ── WHAT THEY PAY, AND WHAT WE SHOULD ASK ────────────────────────────────────
+//
+// `their_amount` is what the solicitation states, which on this board is almost never anything:
+// of 149 harvested solicitations, ZERO carried an estimated value. So the usable figure is the
+// benchmark — what the government has actually awarded for this product service code.
+//
+// The three positions are the owner's decision of 2026-11-09: compete on price, market rate,
+// price on value. Below five comparable awards there are NO positions, only the reason.
+function pricingFor(r, benchmarks) {
+  const stated = r.estimated_value_usd == null ? null : Number(r.estimated_value_usd);
+  const b = benchmarks.get(r.psc_code);
+
+  if (!b || b.median_usd == null) {
+    return {
+      their_amount: stated,
+      their_amount_published: stated != null,
+      benchmark: b ? { psc: r.psc_code, n: b.award_count, as_of: b.computed_at } : null,
+      bids: {
+        available: false,
+        strategies: [],
+        why: b
+          ? `insufficient comparable data — ${b.award_count} comparable award(s) for PSC ${r.psc_code}`
+          : `no award benchmark cached for PSC ${r.psc_code || '(none)'}`,
+      },
+      // The regime still matters even with no price: a stated value can decide it on its own.
+      trade_agreements: COMP.taaPosture(stated),
+    };
+  }
+
+  const stats = {
+    n: b.award_count,
+    p25: Number(b.p25_usd),
+    median: Number(b.median_usd),
+    p75: Number(b.p75_usd),
+    banded: false,
+  };
+  const bids = COMP.suggestBids(stats);
+
+  // The regime is judged on the best figure available: what they stated if they stated it,
+  // otherwise what this kind of work is actually awarded for.
+  const forRegime = stated != null ? stated : stats.median;
+
+  return {
+    their_amount: stated,
+    their_amount_published: stated != null,
+    benchmark: {
+      psc: r.psc_code,
+      n: stats.n,
+      p25: stats.p25,
+      median: stats.median,
+      p75: stats.p75,
+      as_of: b.computed_at,
+      source: 'usaspending',
+    },
+    bids,
+    trade_agreements: {
+      ...COMP.taaPosture(forRegime),
+      judged_on: stated != null ? 'the stated value' : 'the median comparable award',
+      // Stated plainly because it is displayed beside a dollar figure, where it reads as advice.
+      disclaimer: 'Indicative only, not legal advice. Country of origin turns on substantial '
+                + 'transformation and a non-availability exception exists.',
+    },
+  };
+}
+
+// `benchmarks` is a Map of psc_code → cached benchmark row. Callers that have no benchmarks pass
+// nothing; the guard below tolerates that AND tolerates a caller that accidentally passes
+// something else, because this function is used from four places and one of them already got it
+// wrong once.
+function shapeForBoard(r, benchmarksArg) {
+  const benchmarks = benchmarksArg instanceof Map ? benchmarksArg : new Map();
   const feas = r.ranking.feasibility;
   return {
     id: r.id,
@@ -266,6 +393,18 @@ function shapeForBoard(r) {
       checks: feas.checks,
     },
     missing_evidence: feas.unknowns || [],
+
+    // Why this row is on the board at all, carried with it so a reviewer can disagree with the
+    // engine rather than wonder what it did.
+    relevance: r.relevance ? {
+      verdict: r.relevance.verdict,
+      score: r.relevance.score,
+      lines: r.relevance.lines,
+      reasons: r.relevance.reasons,
+      vetoes: r.relevance.vetoes,
+    } : null,
+
+    pricing: pricingFor(r, benchmarks),
 
     qualification: {
       verdict: r.verdict || null,
@@ -691,7 +830,10 @@ router.get('/prpa/tracker/review-queue', read, async (req, res) => {
     const ranked = RANK.rankAll(enriched, { today, capabilities: caps, supplierQuotes: {} });
 
     const open = ranked.filter((r) => r.status === 'open' && !r.ranking.bars.length);
-    const shaped = open.map(shapeForBoard);
+    // NOT `open.map(shapeForBoard)`. Array.map passes (element, index, array), so the second
+    // argument arrives as a NUMBER and the `= new Map()` default never applies — which produced
+    // "benchmarks.get is not a function" and a 500 on this route. An arrow keeps the arity honest.
+    const shaped = open.map((r) => shapeForBoard(r));
 
     const dups = (await query(
       `SELECT d.*, a.solicitation_number AS a_sol, a.title AS a_title,

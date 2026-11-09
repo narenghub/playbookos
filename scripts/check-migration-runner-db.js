@@ -23,6 +23,11 @@
 
 const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 const fs = require('fs');
+// Derived, not written down. This assertion was a literal 12 and broke the moment a thirteenth
+// table was added — a check that fails because the schema grew is a check that trains people to
+// edit the check. The schema is the source of truth for how many tables the migration creates.
+const { CONNECTOR_TABLES, GLOBAL_TABLES } = require('../src/lib/connectors/schema');
+const MIGRATION_TABLES = CONNECTOR_TABLES.length + GLOBAL_TABLES.length;
 const { execFileSync } = require('child_process');
 
 let fail = 0;
@@ -133,9 +138,9 @@ async function main() {
     if (applied.code === 0) ok('--apply exits 0');
     else bad(`--apply exited ${applied.code}`, applied.out);
     const after = await tableCount();
-    if (after === beforeCheck + 12 + 1) {
-      ok(`12 connector tables + schema_migrations created (${beforeCheck} → ${after})`);
-    } else bad(`expected ${beforeCheck + 13} tables, found ${after}`);
+    if (after === beforeCheck + MIGRATION_TABLES + 1) {
+      ok(`${MIGRATION_TABLES} connector tables + schema_migrations created (${beforeCheck} → ${after})`);
+    } else bad(`expected ${beforeCheck + MIGRATION_TABLES + 1} tables, found ${after}`);
     const rec = await pool.query('SELECT version FROM schema_migrations');
     if (rec.rows.length === 1) ok(`version recorded: ${rec.rows[0].version}`);
     else bad(`expected 1 recorded version, found ${rec.rows.length}`);
@@ -181,7 +186,7 @@ async function main() {
       'solicitations', 'solicitation_amendments']) {
       if (await has(t)) leftovers.push(t);
     }
-    if (!leftovers.length) ok('ROLLBACK: all 12 tables dropped, in dependency order, with no error');
+    if (!leftovers.length) ok(`ROLLBACK: all ${MIGRATION_TABLES} tables dropped, in dependency order, with no error`);
     else bad(`rollback left ${leftovers.length} table(s) behind: ${leftovers.join(', ')}`);
 
     if (await has('companies') && await has('agent_runs')) {

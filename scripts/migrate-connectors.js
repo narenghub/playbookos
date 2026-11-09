@@ -48,6 +48,9 @@ const ROLLBACK_ORDER = [
   'solicitation_amendments', 'solicitations', 'review_tasks', 'capability_scope_items',
   'verified_capabilities', 'eligibility_findings', 'eligibility_assessments',
   'funding_opportunity_versions', 'funding_opportunities', 'federal_awards',
+  // No foreign keys at all — it holds public market data keyed by product service code — so it
+  // drops anywhere. Listed before source_connectors to keep the file reading children-first.
+  'psc_award_benchmarks',
   'source_sync_runs', 'source_connectors',
 ];
 
@@ -62,7 +65,7 @@ Connector schema migration runner — version ${VERSION}
   --apply      apply the migration, record the version, run verification
   --status     show what is recorded and what exists
   --rollback --i-understand-this-drops-tables
-               drop the 12 tables in dependency order
+               drop the 13 tables in dependency order
 
 Nothing happens without one of these. This runner is deliberately NOT wired into
 server.js: a migration in a boot chain runs on every restart including a crash
@@ -83,7 +86,7 @@ async function preconditions(q) {
   out.push({
     id: 'P1', ok: hasCompanies,
     label: 'companies exists (migrateOffice has run)',
-    detail: hasCompanies ? 'present' : 'ABSENT — 11 of 12 tables reference it; run migrateOffice first',
+    detail: hasCompanies ? 'present' : 'ABSENT — 11 of 13 tables reference it; run migrateOffice first',
   });
 
   // P2 — THE ONE THAT IS EASY TO MISS. source_sync_runs gets a composite FK onto
@@ -160,7 +163,7 @@ async function main() {
 
     if (argv.includes('--rollback')) {
       if (!argv.includes('--i-understand-this-drops-tables')) {
-        console.error('\nREFUSED: --rollback DROPS 12 TABLES AND EVERY ROW IN THEM.');
+        console.error('\nREFUSED: --rollback DROPS 13 TABLES AND EVERY ROW IN THEM.');
         console.error('Re-run with --i-understand-this-drops-tables if that is what you intend.\n');
         return 1;
       }
