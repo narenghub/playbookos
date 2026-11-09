@@ -281,6 +281,30 @@ cron.schedule('20 0,3,6,9,12,15,18,21 * * *', withAlerts('sam-gov-harvest-3h', a
     + `amended=${o.amended.length} unchanged=${o.unchanged.length} batch=${r.batchId}`);
 }));
 
+// Every six hours at :40 — grants.gov funding (NIH, NIA, NSF and the rest).
+//
+// Offset from the SAM.gov harvest on purpose: two federal sources fetching at the same minute
+// would make a slow run of one look like a failure of the other in the logs.
+//
+// Hours are listed rather than written as a step, for the reason given above the SAM.gov cron:
+// the step form closes a block comment and silently blanks this file for the source-reading tests.
+//
+// Grants move far more slowly than solicitations — an announcement stands for weeks — so six
+// hours is already far finer than the data changes.
+cron.schedule('40 1,7,13,19 * * *', withAlerts('grants-gov-harvest-6h', async (firedAt) => {
+  const { runGrantsHarvest } = require('./src/lib/connectors/grants-gov-job');
+  console.log('[CRON] grants.gov harvest starting...');
+  const r = await runGrantsHarvest({
+    log: (s) => console.log(`[CRON]${s}`),
+    now: firedAt instanceof Date ? firedAt : new Date(),
+  });
+  if (!r.ok) throw new Error(r.error);
+  if (r.declined) { console.log('[CRON] grants.gov harvest declined — another run owns this intent'); return; }
+  console.log(`[CRON] grants.gov harvest done — searched=${r.stats.searched} seen=${r.stats.seen} `
+    + `new=${r.stats.inserted} updated=${r.stats.updated} skipped=${r.stats.skipped} `
+    + `forecasts_excluded=${r.stats.forecastsExcluded} errors=${r.stats.errors.length}`);
+}));
+
 // Weekdays 7:00 AM CST: Command Center briefing to admin.
 cron.schedule('0 7 * * 1-5', withAlerts('daily-7cst-command-center-briefing', async () => {
   console.log('[CRON] Daily briefing starting...');
