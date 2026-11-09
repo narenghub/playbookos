@@ -154,7 +154,13 @@ function toRow(rec) {
     Active: rec.isActive ? 'Yes' : 'No',
     AwardNumber: '',
     Link: nid ? `https://sam.gov/opp/${nid}/view` : '',
-    Description: '',
+    // THE SEARCH INDEX CARRIES THE SOLICITATION TEXT. Measured 2026-11-09: 18 of 20 results had a
+    // non-empty descriptions[].content, several over 6,000 characters including period of
+    // performance and amendment notes. The first version of this harvester sent an empty
+    // Description and then fetched every notice's detail record to get it back — 149 extra
+    // requests against an undocumented endpoint for data that had already arrived.
+    Description: htmlToText(((rec.descriptions || [])
+      .map((x) => x && x.content).filter(Boolean).join('\n\n'))).slice(0, 8000),
   };
 }
 
@@ -232,8 +238,16 @@ async function fetchDescriptions(rows, {
     if (have.has(row.NoticeId)) { stats.skipped += 1; continue; }
     try {
       const d = await getJson(SGS_DETAIL + encodeURIComponent(row.NoticeId), { fetchImpl });
-      const descs = ((d && d.data2 && d.data2.descriptions) || []);
-      const text = htmlToText(descs.map((x) => x && x.content).filter(Boolean).join('\n\n'));
+      // TWO SHAPES, BOTH REAL. Some notices carry the text at the TOP level as
+      // description[].body; others under data2.descriptions[].content. Reading only the second
+      // returned "none published" for all 149 notices on 2026-11-09 while the text sat one level
+      // up — a silent empty result rather than an error, which is why it took a payload dump to
+      // see. Both are read, and whichever is present wins.
+      const parts = []
+        .concat(((d && d.description) || []).map((x) => x && x.body))
+        .concat((((d && d.data2 && d.data2.descriptions) || []).map((x) => x && x.content)))
+        .filter(Boolean);
+      const text = htmlToText(parts.join('\n\n'));
       if (text) { row.Description = text.slice(0, 8000); stats.fetched += 1; } else { stats.empty += 1; }
     } catch (e) {
       // A description that cannot be fetched is a thinner row, NOT a failed harvest. The notice

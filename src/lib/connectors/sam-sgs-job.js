@@ -65,8 +65,11 @@ async function runHarvestAndImport(q, { log = () => {}, dryRun = false, harvestO
     }
   } catch { /* table absent: fetch everything, which is correct on a fresh database */ }
 
-  log(`  fetching descriptions (${have.size} already held)…`);
-  stats.descriptions = await SGS.fetchDescriptions(rows, { have, log });
+  // Most descriptions arrive with the search result itself. This only chases the few that did not
+  // — a notice whose text the index omitted — and skips anything already carrying one.
+  const needing = rows.filter((r) => !String(r.Description || '').trim() && !have.has(r.NoticeId));
+  log(`  descriptions: ${rows.length - needing.length} present · fetching ${needing.length} missing`);
+  stats.descriptions = await SGS.fetchDescriptions(needing, { have, log });
   log(`    fetched ${stats.descriptions.fetched} · skipped ${stats.descriptions.skipped} `
     + `· none published ${stats.descriptions.empty} · failed ${stats.descriptions.failed}`);
   const c = await q(COMPANY_SQL, [slug]);
