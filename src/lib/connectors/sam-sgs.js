@@ -49,6 +49,17 @@ const { isoDay } = require('../office/iso-day');
 
 const SGS_SEARCH = 'https://sam.gov/api/prod/sgs/v1/search/';
 
+// The per-notice detail record. The SEARCH index carries no description; this does, under
+// data2.descriptions[].content, as HTML. It is the actual solicitation text — requirements,
+// quantities, delivery terms, period of performance, submission instructions — and without it the
+// board is a list of titles nobody can act on.
+//
+// It costs one request per notice, so descriptions are fetched ONLY for notices we do not already
+// hold one for. A first run pays for the backlog; after that a three-hourly harvest fetches a
+// handful. Hammering an undocumented endpoint 150 times every three hours would be both rude and
+// the fastest way to get the route closed.
+const SGS_DETAIL = 'https://sam.gov/api/prod/opps/v2/opportunities/';
+
 // NO Accept HEADER. This endpoint serves application/hal+json and answers HTTP 406 to a request
 // that asks for application/json specifically. Measured 2026-11-08 — it cost a failed harvest run.
 const HEADERS = { 'User-Agent': 'PlaybookOS/1.0 (+https://app.playnexa.ai)' };
@@ -179,6 +190,64 @@ function redact(url) {
 }
 
 /**
+ * SAM.gov descriptions are HTML. The importer stores TEXT, and the qualification engine reads it
+ * looking for requirements — so tags are removed rather than escaped, entities are decoded, and
+ * block boundaries become newlines so a requirements list does not collapse into one run-on line.
+ */
+function htmlToText(html) {
+  if (!html) return '';
+  return String(html)
+    .replace(/<\s*(br|\/p|\/div|\/li|\/tr|\/h[1-6])\s*\/?>/gi, '\n')
+    .replace(/<\s*li[^>]*>/gi, '\n· ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;|&#38;/gi, '&')
+    .replace(/&lt;|&#60;/gi, '<')
+    .replace(/&gt;|&#62;/gi, '>')
+    .replace(/&quot;|&#34;/gi, '"')
+    .replace(/&rsquo;|&#8217;|&#39;/gi, "'")
+    .replace(/&ldquo;|&rdquo;|&#8220;|&#8221;/gi, '"')
+    .replace(/&mdash;|&#8212;/gi, '—')
+    .replace(/&ndash;|&#8211;/gi, '–')
+    .replace(/&[a-z]+;|&#\d+;/gi, ' ')
+    .replace(/[ \t ]+/g, ' ')
+    .replace(/\n\s*\n\s*\n+/g, '\n\n')
+    .replace(/^\s+|\s+$/g, '');
+}
+
+/**
+ * Fetch the solicitation text for rows that need it.
+ *
+ * @param rows      harvested rows, mutated in place with a Description
+ * @param have      Set of notice ids we already hold a description for — skipped
+ * @param max       hard ceiling on requests for one run, so a backlog cannot become a stampede
+ * @returns {{fetched:number, skipped:number, empty:number, failed:number}}
+ */
+async function fetchDescriptions(rows, {
+  have = new Set(), fetchImpl = fetch, max = 200, pauseMs = 250, log = () => {},
+} = {}) {
+  const stats = { fetched: 0, skipped: 0, empty: 0, failed: 0 };
+  for (const row of rows) {
+    if (stats.fetched >= max) { stats.skipped += 1; continue; }
+    if (have.has(row.NoticeId)) { stats.skipped += 1; continue; }
+    try {
+      const d = await getJson(SGS_DETAIL + encodeURIComponent(row.NoticeId), { fetchImpl });
+      const descs = ((d && d.data2 && d.data2.descriptions) || []);
+      const text = htmlToText(descs.map((x) => x && x.content).filter(Boolean).join('\n\n'));
+      if (text) { row.Description = text.slice(0, 8000); stats.fetched += 1; } else { stats.empty += 1; }
+    } catch (e) {
+      // A description that cannot be fetched is a thinner row, NOT a failed harvest. The notice
+      // itself is still real and still worth showing; losing the whole run over one 404 would
+      // trade the 149 rows that worked for the one that did not.
+      stats.failed += 1;
+      log(`    description failed for ${row.NoticeId}: ${e.message}`);
+    }
+    if (pauseMs) await new Promise((r) => setTimeout(r, pauseMs));
+  }
+  return stats;
+}
+
+/**
  * Harvest currently-active biddable notices.
  *
  * @returns {{rows: object[], stats: object}}
@@ -270,6 +339,6 @@ async function harvest({
 }
 
 module.exports = {
-  SGS_SEARCH, DEFAULT_NAICS, BIDDABLE_TYPES, COLUMNS, HarvestError,
-  harvest, toCsv, toRow, assertShape, deadlineOf,
+  SGS_SEARCH, SGS_DETAIL, DEFAULT_NAICS, BIDDABLE_TYPES, COLUMNS, HarvestError,
+  harvest, toCsv, toRow, assertShape, deadlineOf, fetchDescriptions, htmlToText,
 };

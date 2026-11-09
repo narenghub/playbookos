@@ -44,6 +44,31 @@ async function runHarvestAndImport(q, { log = () => {}, dryRun = false, harvestO
   if (dryRun) return { ok: true, stats, dryRun: true, rows };
 
   const slug = process.env.PRPA_COMPANY_SLUG || 'abiozen';
+
+  // Descriptions we already hold are CARRIED FORWARD onto the row, not left blank.
+  //
+  // importRecords computes a content hash that INCLUDES the description. Sending an empty one for
+  // a notice whose text we already stored would read as a change, raise a false amendment, and
+  // replace the stored text with nothing — losing the very thing this fetch exists to collect.
+  // So the stored description is copied onto the row first, and only the genuinely missing ones
+  // are fetched. One request per notice is affordable for a backlog once; it is not affordable
+  // every three hours forever.
+  const have = new Set();
+  try {
+    const held = await q(
+      `SELECT notice_id, description FROM federal_opportunities
+        WHERE is_current AND description IS NOT NULL AND btrim(description) <> ''`);
+    const byId = new Map(held.rows.map((r) => [r.notice_id, r.description]));
+    for (const row of rows) {
+      const existing = byId.get(row.NoticeId);
+      if (existing) { row.Description = existing; have.add(row.NoticeId); }
+    }
+  } catch { /* table absent: fetch everything, which is correct on a fresh database */ }
+
+  log(`  fetching descriptions (${have.size} already held)…`);
+  stats.descriptions = await SGS.fetchDescriptions(rows, { have, log });
+  log(`    fetched ${stats.descriptions.fetched} · skipped ${stats.descriptions.skipped} `
+    + `· none published ${stats.descriptions.empty} · failed ${stats.descriptions.failed}`);
   const c = await q(COMPANY_SQL, [slug]);
   if (!c.rows.length) {
     return { ok: false, stats, error: `no active company with slug "${slug}"` };

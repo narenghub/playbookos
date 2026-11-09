@@ -161,3 +161,64 @@ test('no Accept header is sent — this endpoint answers 406 to application/json
   const keys = Object.keys(seen).map((k) => k.toLowerCase());
   assert.ok(!keys.includes('accept'), `an Accept header was sent: ${JSON.stringify(seen)}`);
 });
+
+test('htmlToText strips tags, decodes entities and keeps list structure', () => {
+  const html = '<p><strong>Scope:</strong></p><ul><li>HPLC assay</li><li>Stability</li></ul>'
+    + '<p>Due 04:00 PM&nbsp;on 11/11/2026 &amp; no later.</p>';
+  const t = SGS.htmlToText(html);
+  assert.ok(!/</.test(t), `tags survived: ${t}`);
+  assert.ok(!/&nbsp;|&amp;/.test(t), `entities survived: ${t}`);
+  assert.ok(t.includes('· HPLC assay'), t);
+  assert.ok(t.includes('& no later'), t);
+});
+
+test('htmlToText is safe on null and empty input', () => {
+  assert.strictEqual(SGS.htmlToText(null), '');
+  assert.strictEqual(SGS.htmlToText(''), '');
+  assert.strictEqual(SGS.htmlToText(undefined), '');
+});
+
+test('descriptions are skipped for notices already held, and fetched for the rest', async () => {
+  const rows = [{ NoticeId: 'held', Description: 'already here' }, { NoticeId: 'new', Description: '' }];
+  let calls = 0;
+  const fake = async () => {
+    calls += 1;
+    return { ok: true, status: 200,
+      json: async () => ({ data2: { descriptions: [{ content: '<p>Fresh text</p>' }] } }) };
+  };
+  const stats = await SGS.fetchDescriptions(rows, {
+    have: new Set(['held']), fetchImpl: fake, pauseMs: 0,
+  });
+  assert.strictEqual(calls, 1, 'the held notice was re-fetched');
+  assert.strictEqual(stats.fetched, 1);
+  assert.strictEqual(stats.skipped, 1);
+  assert.strictEqual(rows[0].Description, 'already here', 'a held description was overwritten');
+  assert.strictEqual(rows[1].Description, 'Fresh text');
+});
+
+test('a description that cannot be fetched thins one row, it does not fail the harvest', async () => {
+  const rows = [{ NoticeId: 'a', Description: '' }, { NoticeId: 'b', Description: '' }];
+  let n = 0;
+  const flaky = async () => {
+    n += 1;
+    if (n === 1) throw new Error('boom');
+    return { ok: true, status: 200, json: async () => ({ data2: { descriptions: [{ content: 'ok' }] } }) };
+  };
+  const stats = await SGS.fetchDescriptions(rows, { fetchImpl: flaky, pauseMs: 0 });
+  assert.strictEqual(stats.failed, 1);
+  assert.strictEqual(stats.fetched, 1);
+  assert.strictEqual(rows[1].Description, 'ok');
+});
+
+test('the per-run request ceiling is honoured, so a backlog cannot become a stampede', async () => {
+  const rows = Array.from({ length: 10 }, (_, i) => ({ NoticeId: `n${i}`, Description: '' }));
+  let calls = 0;
+  const fake = async () => {
+    calls += 1;
+    return { ok: true, status: 200, json: async () => ({ data2: { descriptions: [{ content: 'x' }] } }) };
+  };
+  const stats = await SGS.fetchDescriptions(rows, { fetchImpl: fake, max: 3, pauseMs: 0 });
+  assert.strictEqual(calls, 3);
+  assert.strictEqual(stats.fetched, 3);
+  assert.strictEqual(stats.skipped, 7);
+});
