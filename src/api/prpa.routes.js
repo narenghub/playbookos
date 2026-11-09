@@ -176,7 +176,7 @@ router.get('/prpa/tracker/dataset', read, async (req, res) => {
          FROM opportunity_import_batches WHERE company_id = $1 ORDER BY imported_at DESC LIMIT 20`,
       [req.prpaCompany.id])).rows;
     res.json({
-      ...DATASET.describe(),
+      ...(await DATASET.describeLive(query)),
       company: { slug: req.prpaCompany.slug, name: req.prpaCompany.name },
       counts,
       batches,
@@ -209,7 +209,7 @@ router.get('/prpa/tracker/opportunities', read, async (req, res) => {
     const ranked = RANK.rankAll(enriched, { today, capabilities: caps, supplierQuotes: {} });
 
     res.json({
-      dataset: DATASET.describe(),
+      dataset: await DATASET.describeLive(query),
       today,
       verified_capabilities: caps.length,
       count: ranked.length,
@@ -307,7 +307,7 @@ router.get('/prpa/tracker/opportunities/:id', read, async (req, res) => {
     const o = { ...h.opportunity, business_lines: relevantLines(h.opportunity).lines };
     const ranking = RANK.rank(o, { today, capabilities: caps, supplierQuotes: {} });
     res.json({
-      dataset: DATASET.describe(),
+      dataset: await DATASET.describeLive(query),
       opportunity: shapeForBoard({ ...o, ranking }),
       versions: h.versions,
       assessments: h.assessments,
@@ -371,7 +371,7 @@ router.post('/prpa/tracker/import/csv', write, async (req, res) => {
 
     res.json({
       ok: true,
-      dataset: DATASET.describe(),
+      dataset: await DATASET.describeLive(query),
       batch_id: r.batchId || null,
       sha256: r.sha256,
       inserted: r.outcome.inserted.length,
@@ -457,7 +457,7 @@ router.post('/prpa/tracker/import/url', write, async (req, res) => {
     }
 
     res.json({
-      ok: true, dataset: DATASET.describe(), notice_id: noticeId,
+      ok: true, dataset: await DATASET.describeLive(query), notice_id: noticeId,
       inserted: out.inserted, amended: out.amended, unchanged: out.unchanged,
       rejected: out.rejected || [],
       warning: record.warnings,
@@ -703,7 +703,7 @@ router.get('/prpa/tracker/review-queue', read, async (req, res) => {
         ORDER BY d.similarity DESC`, [req.prpaCompany.id])).rows;
 
     res.json({
-      dataset: DATASET.describe(),
+      dataset: await DATASET.describeLive(query),
       today,
       // Deadline unconfirmed and a deadline to confirm: nothing can be biddable until this is done.
       awaiting_deadline_confirmation: shaped

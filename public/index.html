@@ -2537,9 +2537,17 @@ function prpaDatasetBanner(d) {
   return '<div class="card" style="border-left:4px solid ' + colour + '">'
     + '<div style="font-weight:700;color:' + colour + ';font-size:13px;letter-spacing:.3px">'
     + prpaEsc(d.label) + '</div>'
+    // staleness_warning is NULL on a healthy live feed and a sentence when something is wrong.
+    // prpaEsc(null) renders the empty string, so an absent warning prints nothing rather than the
+    // word "null" — but the <br> must not be emitted either, or the banner grows a blank line.
     + '<div style="color:var(--gray);font-size:12px;margin-top:6px;line-height:1.6">'
-    + prpaEsc(d.staleness_warning)
-    + '<br>Harvested <b>' + prpaEsc(d.as_of) + '</b> from ' + prpaEsc(d.harvest && d.harvest.source)
+    + (d.staleness_warning ? prpaEsc(d.staleness_warning) + '<br>' : '')
+    + (live && d.last_harvest_at
+      ? 'Last harvest <b>' + prpaEsc(String(d.last_harvest_at).replace('T', ' ').slice(0, 16))
+        + ' UTC</b>'
+        + (d.age_hours !== undefined ? ' (' + prpaEsc(d.age_hours) + 'h ago)' : '')
+        + (d.harvest_runs ? ' · ' + prpaEsc(d.harvest_runs) + ' harvest(s) on record' : '')
+      : 'Harvested <b>' + prpaEsc(d.as_of) + '</b> from ' + prpaEsc(d.harvest && d.harvest.source))
     + ' · refresh: ' + prpaEsc(d.refresh)
     + '</div></div>';
 }

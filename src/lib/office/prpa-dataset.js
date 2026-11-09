@@ -107,4 +107,62 @@ function describe(now = new Date()) {
   };
 }
 
-module.exports = { describe, HARVEST, UNCONFIRMED_FIELDS };
+// The importer the scheduled harvester writes as. Matching on it is how this file tells an
+// automated harvest from a human pasting a CSV — the distinction the banner is about.
+const AUTOMATED_IMPORTER = 'harvest@playbookos';
+
+/**
+ * What the board must say about itself, READ FROM WHAT ACTUALLY HAPPENED.
+ *
+ * describe() above is pure and therefore cannot know whether anything has been harvested since the
+ * fixtures were committed. Until 2026-11-09 that was fine, because nothing ever was. Then the
+ * three-hourly harvester shipped and the banner kept announcing "harvested once, NOT a live feed …
+ * refresh: manual only — there is no scheduled or background harvest, by design" above 149 records
+ * that had arrived automatically that morning. Every clause of it was false, stated with the same
+ * confidence as the true ones, which is the fastest way to teach somebody to stop reading banners.
+ *
+ * So the live state is read from opportunity_import_batches rather than asserted from a constant.
+ * A database with no automated batch still gets the fixture description, which is correct for a
+ * fresh install and for anyone who has only ever imported by hand.
+ */
+async function describeLive(q, now = new Date()) {
+  let row = null;
+  try {
+    row = (await q(
+      `SELECT MAX(imported_at) AS last_at, COUNT(*)::int AS runs
+         FROM opportunity_import_batches
+        WHERE imported_by = $1`, [AUTOMATED_IMPORTER])).rows[0];
+  } catch {
+    // The table does not exist yet (fresh database, migrations not applied). Not an error here:
+    // the fixture description is the honest answer when there is nothing to read.
+    return describe(now);
+  }
+  if (!row || !row.last_at) return describe(now);
+
+  const hours = Math.max(0, (now.getTime() - new Date(row.last_at).getTime()) / 36e5);
+  // The schedule is every three hours. Twice that with nothing new means the harvester is not
+  // running, and the board must say so rather than quietly ageing.
+  const stale = hours > 6.5;
+  return {
+    mode: 'live_harvest',
+    is_live_feed: true,
+    label: 'LIVE — real SAM.gov solicitations, harvested automatically every three hours',
+    as_of: isoDay(new Date(row.last_at)),
+    last_harvest_at: new Date(row.last_at).toISOString(),
+    harvest_runs: row.runs,
+    age_hours: Math.round(hours * 10) / 10,
+    staleness_warning: stale
+      ? `The last automatic harvest was ${Math.round(hours)} hours ago, and the schedule is every `
+        + 'three. The harvester may have stopped — check the deploy logs before trusting this board '
+        + 'to be current.'
+      : null,
+    refresh: 'automatic — every three hours, via the SAM.gov web interface (undocumented route; '
+      + 'it can change without notice, and the job fails loudly rather than returning an empty board)',
+    // Deadline confirmation is unchanged and still required: harvesting a deadline is not the same
+    // as a person checking it against the official notice.
+    unconfirmed_fields: UNCONFIRMED_FIELDS,
+    reproduce: 'node scripts/harvest-sam-gov.js --dry-run   (harvests and reports, writes nothing)',
+  };
+}
+
+module.exports = { describe, describeLive, HARVEST, UNCONFIRMED_FIELDS, AUTOMATED_IMPORTER };
