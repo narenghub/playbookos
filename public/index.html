@@ -2284,10 +2284,11 @@ window.prpaCommandPage = async function prpaCommandPage() {
     '</div>' +
     (!loadFailed && nQualified === 0
       ? '<div style="margin-top:16px;padding:12px 14px;background:#FBF0DC;border-radius:6px;font-size:13px;color:#6B4A12;line-height:1.5">' +
-        '<b>Nothing is qualified, and that is a statement about our evidence, not about the market.</b> ' +
-        'A verdict can only reach QUALIFIED when the mandatory gates pass, and they cannot pass while ' +
-        'the capability registry is empty and no SAM registration is on record. Fix those two and the ' +
-        'same opportunities are re-judged automatically.</div>'
+        '<b>No <i>funding</i> opportunity here is qualified — and that is a statement about this ' +
+        'store, not about the business.</b> ' +
+        'This panel counts grants.gov and USAspending records only. Federal <b>solicitations</b> and ' +
+        'their verdicts are on the Federal Contracts page and are not reflected in these numbers. ' +
+        'A verdict here reaches QUALIFIED when the mandatory gates pass for a funding record.</div>'
       : ''));
 
   // ── REGISTRATION STATUS ──────────────────────────────────────────────────
@@ -2360,10 +2361,19 @@ window.prpaCommandPage = async function prpaCommandPage() {
         'of them can be bid.' +
         (samLive
           ? ''
-          : '<br><br><b>SAM.gov, the only source that supplies solicitations, is NOT ACTIVE.</b> ' +
-            'Until it is, this will stay true however many records arrive — the constraint is ' +
-            'access, not engineering. Note that a live source listed as "procurement" above does ' +
-            'not change this: USAspending reports awards already made to other recipients.') +
+          // The sam_gov CONNECTOR row is inactive and that is accurate: the DOCUMENTED api.sam.gov
+          // paths return empty 404s and were never activated. It does not follow that no
+          // solicitations are reaching the business. Since 2026-11-08 they are harvested every
+          // three hours through the SAM.gov web UI's own JSON backend into federal_opportunities,
+          // and shown on Federal Contracts. Saying "nothing can be responded to" while a qualified
+          // solicitation sits one page away is the kind of confidently wrong summary this file
+          // exists to avoid.
+          : '<br><br><b>The SAM.gov CONNECTOR is not active</b> — the documented api.sam.gov ' +
+            'endpoints return empty 404s and were never switched on. That is a statement about ' +
+            'this connector, not about the pipeline: solicitations are harvested every three hours ' +
+            'through the SAM.gov web interface instead, and appear on the <b>Federal Contracts</b> ' +
+            'page. Nothing on THIS page can be bid, because this page carries grants, forecasts ' +
+            'and historical awards — none of which is a solicitation.') +
         '</div>'
       : ''));
 
@@ -2384,7 +2394,20 @@ window.prpaCommandPage = async function prpaCommandPage() {
     '<div style="margin-bottom:18px"><h2 style="margin:0;color:var(--navy)">Federal Pipeline</h2>' +
     '<div style="font-size:12px;color:var(--gray);margin-top:4px">Evaluated as of ' +
       prpaU((opps && opps.as_of) || (queue && queue.as_of)) +
-      '. Every figure traces to a stored row; anything not known reads <i>unknown</i>, never zero.</div></div>' +
+      '. Every figure traces to a stored row; anything not known reads <i>unknown</i>, never zero.</div>' +
+    // SCOPE, STATED AT THE TOP. This page reads funding_opportunities — the grants.gov and
+    // USAspending store. SAM.gov SOLICITATIONS live in federal_opportunities and are shown on
+    // Federal Contracts. On 2026-11-09 that distinction cost real confusion: this page reported
+    // "no opportunities ingested yet" and "the capability registry is empty" while 149 harvested
+    // solicitations and a verified ISO 9001 capability sat in the other store, one of them already
+    // QUALIFIED. Two pages answering the same question from different tables must each say which
+    // table they are answering from.
+    '<div style="font-size:12px;color:var(--navy);margin-top:8px;padding:9px 12px;background:#EEF4FB;' +
+      'border-radius:6px;line-height:1.5">This page covers <b>grants and funding</b> — grants.gov and ' +
+      'USAspending. <b>SAM.gov solicitations, and the bid verdicts produced from them, are on the ' +
+      '<a href="#" onclick="navigate(\'prpa-tracker\');return false" style="color:var(--teal);font-weight:700">' +
+      'Federal Contracts</a> page</b>, which reads a different store. Counters here say nothing about ' +
+      'what is on that board.</div></div>' +
 
     execSummary +
     regCard +
@@ -2411,7 +2434,9 @@ window.prpaCommandPage = async function prpaCommandPage() {
           'style="font-size:12px;color:var(--teal);font-weight:600">Download CSV</a> ' +
           '<span style="font-size:11px;color:var(--gray)">- columns carry their basis, because a ' +
           'spreadsheet outlives the page it came from</span></div>'
-        : '<div style="color:var(--gray);font-size:13px">No opportunities ingested yet.</div>') +
+        : '<div style="color:var(--gray);font-size:13px">No <b>funding</b> opportunities ingested yet — ' +
+          'this list covers grants.gov and USAspending. Harvested SAM.gov solicitations are on the ' +
+          'Federal Contracts page.</div>') +
 
     card('CAPABILITY REGISTRY',
       'A requirement is satisfied only by a verified row inside its validity window and in scope. ' +
