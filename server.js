@@ -237,6 +237,33 @@ cron.schedule('0 0 * * *', withAlerts('daily-0utc-metrics-snapshot', async () =>
   console.log(`[CRON] Metrics snapshot done — ${snap.snapshot_date}: rev=$${snap.revenue_actual} (${snap.revenue_pct}% of daily target), team=${snap.team_avg_score}, anomaly_seed_written`);
 }));
 
+// Every 3 hours: harvest currently-open federal solicitations from SAM.gov.
+//
+// Owner decision 2026-11-08: ingest automatically from the SAM.gov web UI's JSON backend rather
+// than wait on GSA explaining why the DOCUMENTED api.sam.gov paths return empty 404s. The route is
+// undocumented and carries no compatibility promise, which is why the job THROWS when a harvest
+// sees zero records — withAlerts then raises it. A silent empty harvest would leave a board that
+// looks current and is not, which is the 2026-09-30 failure shape exactly.
+//
+// Minute 20, not 0: the hour boundary is where every other scheduler in the world also fires.
+//
+// THE HOURS ARE LISTED, NOT WRITTEN AS A STEP. The step form of this schedule contains the two
+// characters that close a block comment, and several source-reading tests in this repo strip
+// comments with a regex before scanning. One of those characters in a cron string blanks every
+// line between the previous stray comment opener and this one — which silently hid the intake
+// mount from intake-mount.test.js and made three unrelated assertions fail. Listing the hours is
+// the same schedule and carries no such character.
+cron.schedule('20 0,3,6,9,12,15,18,21 * * *', withAlerts('sam-gov-harvest-3h', async () => {
+  const { runHarvestAndImport } = require('./src/lib/connectors/sam-sgs-job');
+  console.log('[CRON] SAM.gov harvest starting...');
+  const r = await runHarvestAndImport(query, { log: (s) => console.log(`[CRON]${s}`) });
+  if (!r.ok) throw new Error(r.error);
+  const o = r.outcome;
+  console.log(`[CRON] SAM.gov harvest done — seen=${r.stats.recordsSeen} open=${r.stats.biddable} `
+    + `closed_skipped=${r.stats.closedSkipped} inserted=${o.inserted.length} `
+    + `amended=${o.amended.length} unchanged=${o.unchanged.length} batch=${r.batchId}`);
+}));
+
 // Weekdays 7:00 AM CST: Command Center briefing to admin.
 cron.schedule('0 7 * * 1-5', withAlerts('daily-7cst-command-center-briefing', async () => {
   console.log('[CRON] Daily briefing starting...');

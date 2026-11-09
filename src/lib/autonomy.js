@@ -450,6 +450,10 @@ const CRON_SCOPES = {
   // says which supplier correspondence is in an unknown state.
   'hourly-send-reconciliation':              { company: null,      agent: null },
   'daily-0utc-metrics-snapshot':             { company: null,      agent: null },
+  // SAM.gov harvest. company-scoped: it writes federal_opportunities rows for ONE company, so
+  // halting Abiozen must halt it. agent null — it reads a public index and files what it finds;
+  // no agent decides anything, and nothing leaves the system as a result of it running.
+  'sam-gov-harvest-3h':                      { company: 'abiozen', agent: null },
   'daily-7cst-command-center-briefing':      { company: 'abiozen', agent: null },
   'weekly-mon-8utc-goal-engine':             { company: 'abiozen', agent: null },
   'weekly-mon-8utc-growth-agent':            { company: 'abiozen', agent: 'market-intelligence' },
