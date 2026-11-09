@@ -86,6 +86,41 @@ async function runHarvestAndImport(q, { log = () => {}, dryRun = false, harvestO
       + '(SAM.gov web UI backend, no API key, UNDOCUMENTED — see src/lib/connectors/sam-sgs.js)',
   });
 
+  // ── CLOSE WHAT HAS EXPIRED ─────────────────────────────────────────────────
+  //
+  // A notice arrives open and stays open in our database forever, because status comes from the
+  // source and the source stops mentioning a notice once it closes. So a solicitation whose own
+  // deadline passed last night still reads `open` this morning — measured 2026-11-09, where the
+  // soonest deadline on the board was already in the past.
+  //
+  // That is not cosmetic. It inflates the pipeline with work nobody can win, and the owner's
+  // instruction is explicit: an expired contract is nothing we can act on.
+  //
+  // Narrow on purpose. Only rows that are current, only ones still marked open, only ones whose
+  // deadline is both present and genuinely in the past. A NULL deadline is never swept — unknown
+  // is not expired. `awarded` and `cancelled` are left alone: they are more specific than
+  // `closed` and this sweep knows nothing that would justify overwriting them.
+  stats.expired = 0;
+  try {
+    const swept = await q(
+      `UPDATE federal_opportunities
+          SET status = 'closed'
+        WHERE is_current
+          AND status = 'open'
+          AND response_deadline IS NOT NULL
+          AND response_deadline < NOW()
+        RETURNING solicitation_number`);
+    stats.expired = swept.rowCount;
+    if (swept.rowCount) {
+      log(`  expired: closed ${swept.rowCount} past-deadline solicitation(s)`);
+    }
+  } catch (e) {
+    // A failed sweep must not fail a harvest that otherwise succeeded — the imported rows are
+    // still correct and still worth keeping. Reported, never swallowed silently.
+    stats.expiredError = e.message;
+    log(`  expired: sweep FAILED — ${e.message}`);
+  }
+
   return {
     ok: true,
     stats,
