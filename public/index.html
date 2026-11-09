@@ -2572,6 +2572,9 @@ window.prpaTrackerPage = async function prpaTrackerPage() {
 
   window._prpaState.rows = (board && board.opportunities) || [];
   window._prpaState.dataset = (board && board.dataset) || null;
+  // What the filter did. A board showing 21 of 149 should say so on its face — otherwise a small
+  // number reads as a broken harvest rather than as the filter working.
+  window._prpaState.board = (board && board.board) || null;
   window._prpaState.caps = caps && !caps.error ? caps : null;
   window._prpaState.queue = queue && !queue.error ? queue : null;
 
@@ -2766,6 +2769,83 @@ function prpaSetAsideCell(r) {
   return '<span style="font-size:12px">' + prpaEsc(String(r.set_aside).slice(0, 44)) + '</span>';
 }
 
+// ── WHAT TO BID, AND WHETHER WE MAY ──────────────────────────────────────────
+//
+// Of 149 harvested solicitations, ZERO carried an estimated value, so the figures here come from
+// award history — what the government has actually paid for this product service code — not from
+// the notice. Three positions, owner's decision: compete on price, market rate, price on value.
+//
+// The API refuses to produce positions below five comparable awards. That refusal is rendered as
+// the reason, not as a blank: a cell that reads "no benchmark" is true, where an empty cell reads
+// as zero.
+function prpaMoney(n) {
+  if (n === null || n === undefined || isNaN(Number(n))) return '—';
+  return '$' + Math.round(Number(n)).toLocaleString('en-US');
+}
+
+// Abiozen sources from India and China, neither TAA-designated. Above the threshold that is a
+// bar, not a preference — so it is shown on the row, before anybody spends a week on a proposal.
+function prpaTaaChip(t) {
+  if (!t) return '';
+  if (t.regime === 'taa') {
+    return '<div style="font-size:10px;font-weight:700;color:var(--danger);margin-top:3px" title="'
+      + prpaEsc(t.note) + '">⚠ TAA — origin may bar us</div>';
+  }
+  if (t.regime === 'buy_american') {
+    return '<div style="font-size:10px;color:#0B6E4F;margin-top:3px" title="' + prpaEsc(t.note)
+      + '">Buy American — eligible</div>';
+  }
+  return '<div style="font-size:10px;color:var(--gray);margin-top:3px" title="' + prpaEsc(t.note || '')
+    + '">regime unknown</div>';
+}
+
+function prpaBidCell(r) {
+  var p = r.pricing;
+  if (!p) return '<span style="color:var(--gray);font-size:11px">—</span>';
+
+  var stated = p.their_amount_published
+    ? '<div style="font-size:10px;color:var(--gray)">they state ' + prpaMoney(p.their_amount) + '</div>'
+    : '<div style="font-size:10px;color:var(--gray)" title="the notice publishes no estimated value; '
+      + 'this is true of nearly every solicitation on this board">value not published</div>';
+
+  if (!p.bids || !p.bids.available) {
+    return stated
+      + '<div style="font-size:11px;color:var(--warn);margin-top:2px" title="'
+      + prpaEsc((p.bids && p.bids.why) || '') + '">no benchmark</div>'
+      + prpaTaaChip(p.trade_agreements);
+  }
+
+  var rows = p.bids.strategies.map(function (s) {
+    var amt = (s.point !== null && s.point !== undefined)
+      ? prpaMoney(s.point)
+      : prpaMoney(s.low) + ' – ' + prpaMoney(s.high);
+    return '<div style="font-size:11px;white-space:nowrap" title="' + prpaEsc(s.note) + '">'
+      + '<span style="color:var(--gray)">' + prpaEsc(s.label) + '</span> '
+      + '<b>' + amt + '</b></div>';
+  }).join('');
+
+  var basis = '<div style="font-size:10px;color:var(--gray);margin-top:2px" '
+    + 'title="percentiles of base award values from USAspending, excluding modifications">'
+    + p.benchmark.n.toLocaleString('en-US') + ' comparable awards</div>';
+
+  return stated + rows + basis + prpaTaaChip(p.trade_agreements);
+}
+
+// The filter is stated, not implied. Of 149 harvested solicitations 69 were R&D for defense
+// systems; showing 21 without saying what happened to the other 128 invites the reasonable
+// conclusion that the harvest is broken.
+function prpaBoardNote(shown) {
+  var b = window._prpaState && window._prpaState.board;
+  if (!b) return shown + ' row(s).';
+  if (b.scope === 'all') return shown + ' row(s) — every harvested solicitation, unfiltered.';
+  var rb = b.relevance_breakdown || {};
+  var parts = Object.keys(rb).map(function (k) { return rb[k] + ' ' + k.toLowerCase().replace('_', ' '); });
+  return '<b>' + shown + ' of ' + b.harvested + '</b> harvested solicitation(s): relevant to our '
+    + 'business, still open, and closing within ' + b.horizon_days + ' days.'
+    + (parts.length ? ' Across everything harvested: ' + parts.join(', ') + '.' : '')
+    + ' Nothing was discarded — the rest keep their verdicts and reasons.';
+}
+
 function prpaReviewCell(r) {
   if (!r.review) {
     return '<button onclick="window.prpaOpen(\'' + prpaEsc(r.id) + '\')" style="padding:4px 9px;'
@@ -2792,6 +2872,7 @@ window.prpaRenderTable = function prpaRenderTable() {
     + '<th ' + PRPA_TH + '>Solicitation</th>'
     + '<th ' + PRPA_TH + '>Deadline</th>'
     + '<th ' + PRPA_TH + '>Set-aside</th>'
+    + '<th ' + PRPA_TH + '>Bid</th>'
     + '<th ' + PRPA_TH + '>Requested</th>'
     + '<th ' + PRPA_TH + '>Feasibility</th>'
     + '<th ' + PRPA_TH + '>Missing</th>'
@@ -2815,6 +2896,7 @@ window.prpaRenderTable = function prpaRenderTable() {
       + '<td ' + PRPA_TD + '><code style="font-size:11px">' + prpaEsc(r.solicitation_number) + '</code></td>'
       + '<td ' + PRPA_TD + '>' + prpaDeadlineCell(r) + '</td>'
       + '<td ' + PRPA_TD + '>' + prpaSetAsideCell(r) + '</td>'
+      + '<td ' + PRPA_TD + '>' + prpaBidCell(r) + '</td>'
       + '<td ' + PRPA_TD + '>' + prpaRequestedCell(r) + '</td>'
       + '<td ' + PRPA_TD + '>' + prpaFeasChip(r.feasibility) + '</td>'
       + '<td ' + PRPA_TD + '>' + (missing
@@ -2833,8 +2915,8 @@ window.prpaRenderTable = function prpaRenderTable() {
 
   host.innerHTML = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
     + '<thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>'
-    + '<div style="font-size:11px;color:var(--gray);margin-top:10px">' + rows.length
-    + ' row(s). Hover a feasibility verdict, a tier or a flag for the reason behind it.</div>';
+    + '<div style="font-size:11px;color:var(--gray);margin-top:10px">' + prpaBoardNote(rows.length)
+    + ' Hover a feasibility verdict, a bid position, a tier or a flag for the reason behind it.</div>';
 };
 
 // ── the detail panel: one opportunity, its evidence and the two actions ──────
