@@ -237,6 +237,23 @@ cron.schedule('0 0 * * *', withAlerts('daily-0utc-metrics-snapshot', async () =>
   console.log(`[CRON] Metrics snapshot done — ${snap.snapshot_date}: rev=$${snap.revenue_actual} (${snap.revenue_pct}% of daily target), team=${snap.team_avg_score}, anomaly_seed_written`);
 }));
 
+// Every 15 minutes: triage sales@abiozen.com — classify, label, and DRAFT a reply.
+//
+// Owner decision 2026-11-09. Asked for an auto-responder, shown that inquiry-agent.js already is
+// one and has been stopped since 2026-11-03, the owner chose the narrower thing: a reply waiting
+// in the thread for a human to read, edit and send. The email HOLDs stay up and this job does not
+// touch them, because it never attempts to send. src/lib/agents/inquiry-triage.js carries the
+// reasoning and a test that reads its own source to prove it cannot.
+cron.schedule('3,18,33,48 * * * *', withAlerts('inquiry-triage-15m', async () => {
+  const TRIAGE = require('./src/lib/agents/inquiry-triage');
+  const r = await TRIAGE.run({ log: (s) => console.log(`[CRON]${s}`) });
+  if (!r.ok) throw new Error(r.errors.join(' · '));
+  if (r.checked || r.drafted) {
+    console.log(`[CRON] inquiry triage — checked=${r.checked} labelled=${r.labelled} `
+      + `drafted=${r.drafted} skipped=${r.skipped}`);
+  }
+}));
+
 // Every 3 hours: harvest currently-open federal solicitations from SAM.gov.
 //
 // Owner decision 2026-11-08: ingest automatically from the SAM.gov web UI's JSON backend rather

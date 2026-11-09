@@ -454,6 +454,10 @@ const CRON_SCOPES = {
   // halting Abiozen must halt it. agent null — it reads a public index and files what it finds;
   // no agent decides anything, and nothing leaves the system as a result of it running.
   'sam-gov-harvest-3h':                      { company: 'abiozen', agent: null },
+  // Inquiry triage. company-scoped so halting Abiozen halts it; agent 'inquiry-agent' so the
+  // existing per-agent stop reaches it too. It drafts and never sends, but a stop on the inquiry
+  // agent should still silence everything that writes into that mailbox.
+  'inquiry-triage-15m':                      { company: 'abiozen', agent: 'inquiry-agent' },
   'daily-7cst-command-center-briefing':      { company: 'abiozen', agent: null },
   'weekly-mon-8utc-goal-engine':             { company: 'abiozen', agent: null },
   'weekly-mon-8utc-growth-agent':            { company: 'abiozen', agent: 'market-intelligence' },
