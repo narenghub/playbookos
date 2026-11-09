@@ -200,6 +200,36 @@ async function main() {
 
     // ── apply ──────────────────────────────────────────────────────────────
     h('APPLYING');
+
+    // SNAPSHOT BEFORE, SO THE VERIFICATION CAN COMPARE A DELTA RATHER THAN AN ABSOLUTE.
+    //
+    // This block exists because the verification below used to assert that the capability registry
+    // held ZERO verified rows and that ZERO sync runs existed. Both were true only while the
+    // product was unused. On 2026-11-09 Abiozen verified its first capability — a real ISO 9001
+    // certificate — and the next deploy FAILED at the pre-deploy step with "1 capability row(s)
+    // already read as verified". Nothing was wrong with the database; the migration was asserting
+    // that the business had not started.
+    //
+    // CLAUDE.md states the rule this broke: "Never assert a table is empty. Assert *my fixtures
+    // are gone*." and "Where a count has to be compared, compare a DELTA against what was already
+    // there, not an absolute." The thing this check genuinely needs to prove is that MIGRATING
+    // granted no evidence and ingested nothing — which is a before/after comparison, and stays
+    // true for the life of the product.
+    //
+    // Counted with to_regclass so a fresh database, where these tables do not exist yet, reads 0
+    // rather than raising — the first apply must not fail on the absence it is about to fix.
+    const countIfExists = async (table, where) => {
+      const present = (await q('SELECT to_regclass($1) IS NOT NULL AS p', [`public.${table}`])).rows[0].p;
+      if (!present) return 0;
+      return (await q(`SELECT COUNT(*)::int n FROM ${table}${where ? ` WHERE ${where}` : ''}`)).rows[0].n;
+    };
+    const before = {
+      verified: await countIfExists('verified_capabilities', "verification_status='verified'"),
+      syncs: await countIfExists('source_sync_runs'),
+    };
+    console.log(`  before: ${before.verified} verified capabilit${before.verified === 1 ? 'y' : 'ies'}, `
+      + `${before.syncs} sync run(s) — the migration must not change either`);
+
     await recordTable(q);
     const already = (await q('SELECT version FROM schema_migrations WHERE version = $1', [VERSION])).rows[0];
     if (already) {
@@ -245,13 +275,24 @@ async function main() {
       console.log('  ok    sam_gov landed INERT (activated=false, ceiling NULL) — ruling 9 item 7');
     } else { console.log(`  FAIL  sam_gov: ${JSON.stringify(sam)}`); failures += 1; }
 
+    // DELTAS, NOT ABSOLUTES. "The migration granted no evidence" is a statement about what this
+    // run did; "the registry is empty" is a statement about the business, and the migration has no
+    // business asserting that. See the snapshot above for what asserting the absolute cost.
     const verified = (await q("SELECT COUNT(*)::int n FROM verified_capabilities WHERE verification_status='verified'")).rows[0].n;
-    if (verified === 0) console.log('  ok    zero verified capabilities — the migration grants no evidence');
-    else { console.log(`  FAIL  ${verified} capability row(s) already read as verified`); failures += 1; }
+    if (verified === before.verified) {
+      console.log(`  ok    verified capabilities unchanged at ${verified} — the migration grants no evidence`);
+    } else {
+      console.log(`  FAIL  verified capabilities went ${before.verified} → ${verified}: MIGRATING CREATED EVIDENCE`);
+      failures += 1;
+    }
 
     const syncs = (await q('SELECT COUNT(*)::int n FROM source_sync_runs')).rows[0].n;
-    if (syncs === 0) console.log('  ok    zero sync runs — nothing was ingested by migrating');
-    else { console.log(`  FAIL  ${syncs} sync run(s) exist`); failures += 1; }
+    if (syncs === before.syncs) {
+      console.log(`  ok    sync runs unchanged at ${syncs} — nothing was ingested by migrating`);
+    } else {
+      console.log(`  FAIL  sync runs went ${before.syncs} → ${syncs}: MIGRATING INGESTED SOMETHING`);
+      failures += 1;
+    }
 
     console.log('');
     if (failures) {
