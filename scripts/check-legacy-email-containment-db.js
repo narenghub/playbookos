@@ -246,22 +246,48 @@ const RFQ = 'legacy-supplier-rfq-email';
       else bad('the buyer send does not declare a workflow — the stop would never reach it');
       if (new RegExp(`workflow: '${RFQ}'`).test(proc)) ok('the supplier send declares its workflow');
       else bad('the supplier send does not declare a workflow');
+      // THE FORWARDING MOVED, AND THIS ASSERTION FOLLOWED IT RATHER THAN BEING RELAXED.
+      //
+      // It used to look for `...(workflow ? { workflow } : {})` inside mailer.js. That spread now
+      // lives in src/lib/email-gate.js, because the kill-switch decision was extracted so the two
+      // Gmail transports could use the SAME one rather than growing a second copy — the whole of
+      // S1. The old assertion would have gone red for a change that improved coverage, which is
+      // how a guard teaches people to delete it.
+      //
+      // Both halves are checked, because either alone can break the chain: the mailer must HAND
+      // the scope to the gate, and the gate must FORWARD it to checkStopped.
       const mail = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'mailer.js'), 'utf8');
-      if (/\.\.\.\(workflow \? \{ workflow \} : \{\}\)/.test(mail)) {
-        ok('and the mailer forwards it to checkStopped');
-      } else bad('the mailer does not forward the workflow scope');
+      const gate = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'email-gate.js'), 'utf8');
+      if (/assertSendAllowed\(\{[^}]*\bworkflow\b/.test(mail)) {
+        ok('the mailer hands the workflow scope to the gate');
+      } else bad('the mailer no longer passes workflow to assertSendAllowed');
+      if (/\.\.\.\(workflow \? \{ workflow \} : \{\}\)/.test(gate)) {
+        ok('and the gate forwards it to checkStopped');
+      } else bad('the gate does not forward the workflow scope to checkStopped');
     }
 
     // ══ 7. MUTATION CONTROL ════════════════════════════════════════════════
     note('mutation control: stop forwarding the scope, prove the containment disappears');
     {
-      const MAILF = path.join(__dirname, '..', 'src', 'lib', 'mailer.js');
+      // MUTATES src/lib/email-gate.js, NOT mailer.js. The forwarding moved there when the
+      // kill-switch decision was extracted so all three transports could share one. A mutation
+      // control aimed at the file that no longer holds the line proves nothing about the line —
+      // it reports "the control is stale", which is the correct answer and not a passing one.
+      const MAILF = path.join(__dirname, '..', 'src', 'lib', 'email-gate.js');
       const sha = (f) => require('crypto').createHash('sha256').update(fs.readFileSync(f)).digest('hex');
       const before = sha(MAILF); const src = fs.readFileSync(MAILF, 'utf8');
       const anchor = "      ...(workflow ? { workflow } : {}),";
       if (!src.includes(anchor)) bad('M1 could not locate the forwarding — the control is stale');
       else {
         fs.writeFileSync(MAILF, src.replace(anchor, ''));
+        // THE CACHE IS CLEARED HERE, BEFORE THE RE-REQUIRE, NOT ONLY IN THE finally.
+        //
+        // The mutation now lands in email-gate.js, which mailer.js requires at module scope. With
+        // only the trailing cleanup, clearAll() re-required a fresh mailer that then pulled the
+        // STALE gate out of require.cache — so the mutated line was never executed, the send was
+        // refused, and the control reported "the forwarding was not what contained it". The
+        // mutation had applied perfectly; the module graph had not moved.
+        for (const k of Object.keys(require.cache)) if (k.includes(path.join('src', 'lib'))) delete require.cache[k];
         try {
           const { autonomy: a, mailer: m } = await clearAll();
           await a.stop({ scope_type: 'workflow', scope_key: INQ,
@@ -278,8 +304,8 @@ const RFQ = 'legacy-supplier-rfq-email';
           for (const k of Object.keys(require.cache)) if (k.includes(path.join('src', 'lib'))) delete require.cache[k];
         }
       }
-      if (sha(MAILF) !== before) bad('M1 mailer.js was NOT restored byte-for-byte');
-      else ok('M1 mailer.js restored, verified by content hash');
+      if (sha(MAILF) !== before) bad('M1 email-gate.js was NOT restored byte-for-byte');
+      else ok('M1 email-gate.js restored, verified by content hash');
     }
   } catch (e) {
     bad('unexpected error', e.stack || e.message);

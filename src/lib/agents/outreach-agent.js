@@ -22,6 +22,7 @@
 'use strict';
 
 const { query } = require('../db');
+const { assertSendAllowed } = require('../email-gate');
 const { renderNeed, needStepsOf, NEED_CAMPAIGNS } = require('../campaigns/needs');
 const { buildQueue, varsFor } = require('../campaigns/outreach-queue');
 const { gmailClientFor } = require('../gmail/client');
@@ -171,7 +172,7 @@ async function runOutreach(opts = {}) {
   const out = {
     dryRun: !EXECUTE, from: FROM, redirectTo: REDIRECT_TO,
     routed: 0, due: 0, batch: 0, sent: 0, failed: 0, unconfirmed: 0,
-    skipped: {}, declined: [], unfiled: [], repliedNow: [], sentTo: [],
+    skipped: {}, stoppedByPolicy: [], declined: [], unfiled: [], repliedNow: [], sentTo: [],
     bounceRate: 0, stopped: false,
   };
 
@@ -200,6 +201,8 @@ async function runOutreach(opts = {}) {
   const now = new Date();
   const queue = [];
   const skipped = { replied: 0, done: 0, notDue: 0, halted: 0, bounced: 0, cannotRender: 0 };
+  // Refusals, with their reason, surfaced in the run summary beside the counts.
+  const stoppedReasons = [];
 
   for (const r of routed) {
     const st = byKey.get(`${r.channel}\u0000${r.ref}`) || null;
@@ -223,6 +226,7 @@ async function runOutreach(opts = {}) {
   }
 
   out.skipped = skipped;
+  out.stoppedByPolicy = stoppedReasons;
   out.due = queue.length;
   if (!queue.length) return out;
 
@@ -302,6 +306,32 @@ async function runOutreach(opts = {}) {
         references: m.isFollowUp ? refs : [],
         attachments: [],
       });
+
+      // ── THE KILL SWITCH, IMMEDIATELY BEFORE THE PROVIDER CALL ───────────
+      //
+      // This sender had NO kill-switch check at all. It was gated only by OUTREACH_ENABLED, read at
+      // the cron and turned into the EXECUTE flag below — so a row in autonomy_stops, including a
+      // GLOBAL stop, did not reach it. The global stop was not global.
+      //
+      // Checked PER MESSAGE rather than once before the loop: a stop set while a batch is running
+      // must take effect on the next message, not after the batch. The env flag is retained as an
+      // additional control and is never a replacement for this.
+      //
+      // Fail-closed: if the stop state cannot be read, the send is refused. An unreadable kill
+      // switch is an unestablished authorization.
+      const gate = await assertSendAllowed({
+        capability: 'email.send', workflow: 'outreach', agent: 'outreach-agent', to: (REDIRECT_TO || q.email),
+      });
+      if (!gate.allowed) {
+        // `skipped` is a COUNTER OBJECT, not an array — out.skipped is assigned from it at the end
+        // of the run. A push() here would throw inside the send loop, which is a worse failure than
+        // the one being prevented. The reason is kept too: a count of refusals nobody can explain
+        // is the same shape as the silence this whole change exists to remove.
+        skipped.stopped_by_policy = (skipped.stopped_by_policy || 0) + 1;
+        stoppedReasons.push({ who: q.who, why: gate.reason });
+        console.warn(`[STOPPED_BY_POLICY] outreach-agent: ${gate.reason}`);
+        continue;
+      }
 
       const res = await g.gmail.users.messages.send({
         userId: 'me',

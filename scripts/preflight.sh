@@ -235,6 +235,19 @@ pf_step "the legacy RFQ cron cannot send as a departed employee" node scripts/ch
 # briefings too. Every case asserts WHICH scope refused, because `ok === false` would pass when an
 # unrelated gate refused first.
 pf_step "each legacy external sender stops on its own, by name" node scripts/check-legacy-email-containment-db.js
+
+# ── S1: THE GATE MUST BE THE ONLY ROAD TO A MAIL PROVIDER ───────────────────
+#
+# The check above proves that two NAMED senders stop. It is good evidence and it is not coverage:
+# its names were `inquiry-agent` and `procurement-agent`, both Resend, while two Gmail transports
+# sent with no kill-switch check at all. A hand-written list is a claim about the code that was
+# true when it was written — the same defect that let 57 routes go unclassified and eight agents
+# call the model API outside the kill switch, both found on 2026-11-10.
+#
+# This one DISCOVERS the call sites instead, and its own negative controls plant a bypass and
+# require it to be caught. A green scanner proves nothing until it has been shown to go red.
+pf_step "every outbound email transport is behind the kill switch" node scripts/check-email-transport-coverage.js
+pf_step "containment holds under stop, scope, failure and relabelling" env JWT_SECRET=preflight node --test scripts/email-containment.test.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

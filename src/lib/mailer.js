@@ -1,4 +1,12 @@
 const crypto = require('crypto');
+const { assertSendAllowed } = require('./email-gate');
+
+// NAMED, NOT INLINE, so the transport is discoverable by structure rather than by string.
+// scripts/check-email-transport-coverage.js blanks string literals before matching — otherwise a
+// provider URL inside a comment or a log line would register as a call site — which made this one,
+// the oldest and best-governed transport in the repository, invisible to its own coverage check.
+// An identifier survives the blanking; a string literal does not.
+const RESEND_EMAILS_URL = 'https://api.resend.com/emails';
 const { query } = require('./db');
 
 // ── THE SENDER DOMAIN ─────────────────────────────────────────────────────────
@@ -148,39 +156,25 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // from a fixed template, so the exemption cannot carry autonomous business email. And it reuses
   // the approved THINKING-vs-ACTING rule rather than inventing a bypass — telling a human what
   // broke is observability, in the same class as analysis, not autonomous action.
-  const OBSERVABILITY = new Set(['email.alert']);
-  try {
-    const { checkStopped, recordRefusal } = require('./autonomy');
-    // Scopes are passed only when declared. matchStop compares each scope type it is GIVEN, so an
-    // absent workflow cannot accidentally match a workflow stop, and a global or capability stop
-    // still dominates whatever is declared here.
-    const blocked = await checkStopped({
-      capability,
-      ...(workflow ? { workflow } : {}),
-      ...(agent ? { agent } : {}),
-    }, { consequential: !OBSERVABILITY.has(capability) });
-    if (blocked) {
-      const reason = `STOPPED_BY_POLICY: ${blocked.scope_type}`
-        + `${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`;
-      console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${reason}`);
-      await logEmail({ to, subject, status: 'stopped_by_policy', errorMessage: reason });
-      recordRefusal({ stop: blocked, what: 'email.send', detail: { to, subject } });
-      return { ok: false, id: null, error: reason, stopped: true, phase: 'stopped_by_policy',
-        providerResponded: false };
-    }
-  } catch (e) {
-    // A defect in the switch itself. An alert still goes out — the channel that reports breakage
-    // must not be taken out by breakage — but ordinary outbound email is refused, because it is
-    // exactly the thing not to send while the brakes are of unknown condition.
-    if (OBSERVABILITY.has(capability)) {
-      console.error(`[kill-switch] check failed for ${capability}, sending anyway (observability): ${e.message}`);
-    } else {
-    const reason = `STOPPED_BY_POLICY: kill-switch check failed (${e.message})`;
-    console.error(`[STOPPED_BY_POLICY] email to ${to}: ${reason}`);
-    try { await logEmail({ to, subject, status: 'stopped_by_policy', errorMessage: reason }); } catch (_) {}
-    return { ok: false, id: null, error: reason, stopped: true, phase: 'stopped_by_policy',
+  // ── THE GATE LIVES IN src/lib/email-gate.js, NOT HERE ────────────────────
+  //
+  // It was inline, and inline was the problem: it covered every caller of THIS file and nothing
+  // else, while two Gmail transports sent with no kill-switch check at all. One shared decision
+  // function means the three transports cannot drift, and a scanner can assert that every provider
+  // call site passes through it — which a comment cannot.
+  //
+  // The exemption is also checked there rather than asserted: `email.alert` is honoured only when
+  // the recipient is an operator address, so an ordinary message cannot relabel itself as an alert
+  // and transmit through a global stop. That was previously true only of the one caller that used
+  // it, and enforced nowhere.
+  const gate = await assertSendAllowed({ capability, workflow, agent, to });
+  if (!gate.allowed) {
+    console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${gate.reason}`);
+    // The record is what distinguishes a policy stop from an ordinary send failure — the return
+    // shape deliberately does not, because 55 callers read it as a boolean.
+    try { await logEmail({ to, subject, status: 'stopped_by_policy', errorMessage: gate.reason }); } catch (_) {}
+    return { ok: false, id: null, error: gate.reason, stopped: true, phase: 'stopped_by_policy',
       providerResponded: false };
-    }
   }
 
   const key = process.env.RESEND_API_KEY;
@@ -204,7 +198,7 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
     if (replyTo) body.reply_to = replyTo;
     if (cc) body.cc = cc;
     if (enc.list) body.attachments = enc.list;
-    const res = await fetch('https://api.resend.com/emails', {
+    const res = await fetch(RESEND_EMAILS_URL, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body)

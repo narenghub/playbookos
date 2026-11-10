@@ -33,6 +33,7 @@
 'use strict';
 
 const fs = require('fs');
+const { assertSendAllowed } = require('../email-gate');
 const path = require('path');
 const { query } = require('../db');
 const { isEvent } = require('../events/registry');
@@ -80,7 +81,7 @@ async function runFollowups(opts = {}) {
   const out = {
     dryRun: !EXECUTE, event: EVENT, from: FROM_MAILBOX, redirectTo: REDIRECT_TO,
     candidates: 0, due: 0, batch: 0, sent: 0, failed: 0,
-    skipped: {}, needGreeting: [], unfiled: [], folders: null, unconfirmed: 0,
+    skipped: {}, stoppedByPolicy: [], needGreeting: [], unfiled: [], folders: null, unconfirmed: 0,
   };
 
   say(`── CPHI follow-up · ${EXECUTE ? 'SENDING' : 'dry run'} · max ${MAX}\n`);
@@ -127,6 +128,8 @@ async function runFollowups(opts = {}) {
   const now = new Date();
   const queue = [];
   const skipped = { replied: 0, done: 0, notDue: 0, window: 0, noGreeting: 0, noCampaign: 0, halted: 0 };
+  // Refusals, with their reason, surfaced in the run summary beside the counts.
+  const stoppedReasons = [];
   const noCampaignWho = [];
   const needGreeting = [];
 
@@ -170,6 +173,7 @@ async function runFollowups(opts = {}) {
   out.candidates = rows.length;
   out.due = queue.length;
   out.skipped = skipped;
+  out.stoppedByPolicy = stoppedReasons;
   out.noCampaignWho = noCampaignWho;
   out.needGreeting = needGreeting;
 
@@ -302,6 +306,32 @@ async function runFollowups(opts = {}) {
         attachments: def.attach
           ? [{ filename: 'abiozen-model.pdf', contentType: 'application/pdf', content: pdf }] : [],
       });
+
+      // ── THE KILL SWITCH, IMMEDIATELY BEFORE THE PROVIDER CALL ───────────
+      //
+      // This sender had NO kill-switch check at all. It was gated only by CPHI_FOLLOWUP_ENABLED, read at
+      // the cron and turned into the EXECUTE flag below — so a row in autonomy_stops, including a
+      // GLOBAL stop, did not reach it. The global stop was not global.
+      //
+      // Checked PER MESSAGE rather than once before the loop: a stop set while a batch is running
+      // must take effect on the next message, not after the batch. The env flag is retained as an
+      // additional control and is never a replacement for this.
+      //
+      // Fail-closed: if the stop state cannot be read, the send is refused. An unreadable kill
+      // switch is an unestablished authorization.
+      const gate = await assertSendAllowed({
+        capability: 'email.send', workflow: 'cphi-followup', agent: 'cphi-runner', to: (REDIRECT_TO || q.email),
+      });
+      if (!gate.allowed) {
+        // `skipped` is a COUNTER OBJECT, not an array — out.skipped is assigned from it at the end
+        // of the run. A push() here would throw inside the send loop, which is a worse failure than
+        // the one being prevented. The reason is kept too: a count of refusals nobody can explain
+        // is the same shape as the silence this whole change exists to remove.
+        skipped.stopped_by_policy = (skipped.stopped_by_policy || 0) + 1;
+        stoppedReasons.push({ who: q.email, why: gate.reason });
+        console.warn(`[STOPPED_BY_POLICY] cphi-runner: ${gate.reason}`);
+        continue;
+      }
 
       const res = await g.gmail.users.messages.send({
         userId: 'me',
