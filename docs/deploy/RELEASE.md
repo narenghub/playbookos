@@ -88,7 +88,7 @@ scripts/verify-prod-dump.sh ~/Downloads/<the-backup-file>
 echo $?
 ```
 
-It builds a disposable local database from your backup, runs all 53 migration steps against
+It builds a disposable local database from your backup, runs all 54 migration steps against
 **production's real schema**, and reports what changed. **It cannot reach production** — there is no
 connection string in it and it reads none from the environment.
 

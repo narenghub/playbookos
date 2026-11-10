@@ -18,6 +18,15 @@ let DUP = false;         // does a recent alert already exist?
 db.query = async (sql, params = []) => {
   SQL.push({ sql: sql.replace(/\s+/g, ' ').trim(), params });
   if (/INSERT INTO email_log/i.test(sql)) return { rows: [] };
+  // THE LEDGER'S SCHEMA PROBE. mailer now opens an outbound-ledger attempt before the gate and
+  // FAILS CLOSED when the ledger columns are absent — so a fixture that answers "no columns" makes
+  // every consequential send refuse for a reason that has nothing to do with what is being tested.
+  // A migrated database is the honest fixture; the absent-schema case has its own control in
+  // scripts/check-outbound-ledger-db.js.
+  if (/information_schema\.columns/i.test(sql)) {
+    return { rows: [{ n: require('./outbound/ledger-schema').ADDED_COLUMNS.length }] };
+  }
+  if (/UPDATE email_log/i.test(sql)) return { rows: [] };
   if (/SELECT 1 FROM notifications/i.test(sql)) return { rows: DUP ? [{ '?column?': 1 }] : [] };
   if (/INSERT INTO notifications/i.test(sql)) { NOTIFS.push(params); return { rows: [] }; }
   return { rows: [] };

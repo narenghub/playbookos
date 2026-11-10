@@ -127,6 +127,24 @@ const SCHEMA_STEPS = [
     run: (q) => require('./autonomy').migrateAutonomy(q),
   },
   {
+    // ── THE OUTBOUND EXECUTION LEDGER (S1.1) ────────────────────────────────
+    //
+    // email_log gains the columns that make it span every transport rather than only Resend.
+    // REQUIRED, because the ledger fails closed: without these columns a consequential email is
+    // refused rather than sent unrecorded. A database that has not had this step applied does not
+    // send mail, which is the correct failure and a loud one.
+    //
+    // In the chain, so a fresh database gets it and so it is applied by the SAME deliberate
+    // pre-deploy step as everything else — never at boot. scripts/migrate-outbound-ledger.js is
+    // the operator's standalone status/apply/rollback tool over this identical DDL.
+    name: 'outbound execution ledger',
+    required: true,
+    run: async (q) => {
+      for (const sql of require('./outbound/ledger-schema').DDL) await q(sql);
+      return { ok: true };
+    },
+  },
+  {
     name: 'supplier RFQ uniqueness',
     required: true,
     // This one returns a verdict rather than throwing: UNIQUE (rfq_id, supplier_id) cannot be

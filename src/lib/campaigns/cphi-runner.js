@@ -33,6 +33,7 @@
 'use strict';
 
 const fs = require('fs');
+const { beginAttempt } = require('../outbound/ledger');
 const { assertSendAllowed } = require('../email-gate');
 const path = require('path');
 const { query } = require('../db');
@@ -319,10 +320,31 @@ async function runFollowups(opts = {}) {
       //
       // Fail-closed: if the stop state cannot be read, the send is refused. An unreadable kill
       // switch is an unestablished authorization.
+      // ── THE LEDGER ATTEMPT, BEFORE AUTHORIZATION IS DECIDED ─────────────
+      //
+      // This transport wrote NOTHING to email_log — which is why the production checker's
+      // "0 external recipients" was structurally unable to see it. One ledger row per attempt
+      // now, with the same outcome semantics as the Resend path, so a report can compare them.
+      // Fails closed: no record, no send.
+      const att = await beginAttempt({
+        transport: 'gmail_cphi', provider: 'gmail',
+        to: (REDIRECT_TO || q.email), subject: msg.headers && msg.headers.Subject,
+        workflow: 'cphi-followup', agent: 'cphi-runner', claimRef: `cphi_followup_sends:${claimId}`,
+      });
+      if (!att.ok) {
+        skipped.unrecordable = (skipped.unrecordable || 0) + 1;
+        stoppedReasons.push({ who: q.email, why: att.error });
+        console.error(`[LEDGER FAIL-CLOSED] cphi-runner: ${att.error}`);
+        continue;
+      }
+
       const gate = await assertSendAllowed({
         capability: 'email.send', workflow: 'cphi-followup', agent: 'cphi-runner', to: (REDIRECT_TO || q.email),
       });
       if (!gate.allowed) {
+        await att.blocked(gate.reason, gate.stop
+          ? `${gate.stop.scope_type}${gate.stop.scope_key ? `:${gate.stop.scope_key}` : ''}`
+          : 'authorization_undetermined');
         // `skipped` is a COUNTER OBJECT, not an array — out.skipped is assigned from it at the end
         // of the run. A push() here would throw inside the send loop, which is a worse failure than
         // the one being prevented. The reason is kept too: a count of refusals nobody can explain
@@ -333,12 +355,18 @@ async function runFollowups(opts = {}) {
         continue;
       }
 
+      // CLAIMED before the provider call. Gmail cannot unsend, so a crash between here and the
+      // response must read as "an attempt was made, outcome unknown" rather than as nothing.
+      await att.claim();
       const res = await g.gmail.users.messages.send({
         userId: 'me',
         requestBody: { raw: msg.raw, ...(q.thread_id ? { threadId: q.thread_id } : {}) },
       });
 
       const threadId = res.data.threadId;
+      // The provider answered and returned an id. Acceptance by Gmail is NOT proof of delivery,
+      // and the state name says so.
+      await att.accepted(res.data.id || threadId);
 
       // ── FILE IT ────
       // After the send, and reported rather than thrown. By this point the message has left: Gmail
@@ -399,6 +427,10 @@ async function runFollowups(opts = {}) {
       say(`   ✅ ${who}  ${q.campaign}/${q.nextStep}${def.attach ? ' + pdf' : ''}  thread ${threadId}${filedNote}`);
     } catch (e) {
       out.failed += 1;
+      // OUTCOME_UNKNOWN. Gmail may have accepted this before the throw, so this is not a
+      // failure in the sense of "nothing was sent" — it is the state where nobody knows, and it
+      // is never eligible for automatic retry. The domain claim stays for the same reason.
+      await att.unknown((e && e.message) || String(e));
       if (REDIRECT_TO) { say(`   ✗ ${who}: ${(e && e.message) || e}`); continue; }
       // The claim STAYS, carrying the error. It blocks a blind retry and shows up as a row needing
       // a human — which is the right side to err on when the question is "did that actually send?"

@@ -21,7 +21,7 @@ check **begins failing on 2026-11-13**.
 | Gate | Status | Who |
 |---|---|---|
 | **1. Admin password changed, credentials rotated** | **FAIL — unconfirmed** | you |
-| **2. Backup restored, 53 steps validated against production's schema** | **FAIL — performed; 2 defects found and fixed; needs one re-run** | you |
+| **2. Backup restored, 54 steps validated against production's schema** | **FAIL — performed; 2 defects found and fixed; needs one re-run** | you |
 | 3. Migration incompatibility, mutation, permissions, rollback | **PASS** — 2 incompatibilities found by gate 2, both resolved; confirmed by gate 2's re-run | done |
 | 4. Least-privilege role + separate migration credentials | **PASS** (prepared, unapplied) | done / you to apply |
 | 5. Full preflight + end-to-end, actual exit codes | **PASS** | done |
@@ -76,7 +76,7 @@ code, and neither was findable any other way.
 | Behind it | that partner-scope script **was not in the migrator chain at all** — excluded as a "backfill". So a migrator-built database has no `outreach.partner_id`, and the application's own status-change query fails on it. Production works only because somebody ran it there by hand. |
 | Also wrong | the report said *"5 column(s) the application reads are GONE"*. None had been dropped; none had ever existed. The chain had halted before the steps that create them. |
 
-Full account: **`docs/tickets/ENG-004`**. All four are fixed; 47 → **53 steps** (see below).
+Full account: **`docs/tickets/ENG-004`**. All four are fixed; 47 → **54 steps** (see below).
 
 ### Why the re-run should pass
 
@@ -189,7 +189,7 @@ check-previous-release-compat.js   exit=0    13 assertions, the deployed release
 check-startup-without-ddl.js       exit=0    28 assertions, ENG-003
 check-db-role-separation.js        exit=0    least-privilege roles
 verify-migration-readiness.js      exit=0    13 assertions, populated DB + backup/restore
-check-migration-coverage.js        exit=0    53 steps, 152 tables, every script accounted for
+check-migration-coverage.js        exit=0    54 steps, 152 tables, every script accounted for
 check-outreach-unique-repair.js    exit=0    22 assertions, the app's own upsert on 3 real DB shapes
 check-production-shape-readiness.js exit=0   17 assertions, whole gate-2 harness on a prod-shaped dump
 check-inline-constraint-sweep.js   exit=0    14 assertions, negative controls for the sweep
@@ -245,7 +245,7 @@ own verdict.
 
 # ── 4. MIGRATE — before the app starts, as its own step ───────────────────────
 node scripts/migrate.js
-echo $?                      # must be 0. 53 steps. Confirm with `node scripts/migrate.js --plan`. Stop here if it is not.
+echo $?                      # must be 0. 54 steps. Confirm with `node scripts/migrate.js --plan`. Stop here if it is not.
 
 # ── 5. MERGE — this IS the deployment; Railway auto-deploys from main ─────────
 #   (requires your explicit approval; I will not do this)

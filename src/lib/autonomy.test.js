@@ -352,7 +352,30 @@ function withStoppedAutonomy(stop, fn) {
   const realFetch = global.fetch;
   let fetches = 0;
   global.fetch = async (...a) => { fetches += 1; return realFetch(...a); };
-  const done = () => { autonomy.checkStopped = real; autonomy.recordRefusal = realRecord; global.fetch = realFetch; };
+
+  // ── THE LEDGER IS STUBBED AS "MIGRATED" ──────────────────────────────────
+  //
+  // mailer opens an outbound-ledger attempt before consulting the kill switch, and FAILS CLOSED
+  // when the ledger schema is absent. With no database here, every send was refused by the ledger
+  // before the stop was ever reached — so these assertions stopped testing the kill switch and
+  // started testing the ledger, while still passing the "provider was never contacted" check.
+  //
+  // That is the dangerous shape: a test that goes green for a reason other than the one it names.
+  // A migrated database is the honest fixture; the absent-ledger case has its own control in
+  // scripts/check-outbound-ledger-db.js.
+  const db = require('./db');
+  const realQuery = db.query;
+  db.query = async (sql) => {
+    if (/information_schema\.columns/i.test(sql)) {
+      return { rows: [{ n: require('./outbound/ledger-schema').ADDED_COLUMNS.length }] };
+    }
+    return { rows: [] };
+  };
+
+  const done = () => {
+    autonomy.checkStopped = real; autonomy.recordRefusal = realRecord;
+    global.fetch = realFetch; db.query = realQuery;
+  };
   return Promise.resolve(fn(() => fetches)).finally(done);
 }
 

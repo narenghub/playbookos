@@ -64,6 +64,15 @@ const NOT_PLAIN_CREATORS = new Map([
   //
   // The lesson is about this list, not that script: an entry here is a claim that a script changes no
   // schema, and it was accepted on the strength of a summary line. Anything added below is read.
+  //
+  // migrate-outbound-ledger.js DOES change schema, so excluding it on the usual grounds would be
+  // exactly the false claim this note warns about. Its DDL is in the chain, as the step 'outbound
+  // execution ledger', which is what a fresh database gets. This script is the operator's
+  // standalone tool over that identical DDL — --status by default, --apply and --rollback explicit
+  // — and it is excluded because the chain already covers the schema, not because there is none.
+  ['migrate-outbound-ledger.js',
+    "standalone operator tool over DDL that IS in the chain (step 'outbound execution ledger'); "
+    + 'it changes schema and is excluded only because the chain already applies it'],
 ]);
 
 let temp = null;

@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { assertSendAllowed } = require('./email-gate');
+const LEDGER = require('./outbound/ledger');
 
 // NAMED, NOT INLINE, so the transport is discoverable by structure rather than by string.
 // scripts/check-email-transport-coverage.js blanks string literals before matching — otherwise a
@@ -184,14 +185,33 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   }
   // transmitAlert has ALREADY passed the gate as 'email.alert' and built the message itself. Not a
   // bypass: it is the same decision, taken once, by the one path that is allowed to take it.
+  // ── THE LEDGER ATTEMPT OPENS BEFORE AUTHORIZATION IS DECIDED ─────────────
+  //
+  // So that a REFUSAL is recorded as durably as a send. A refusal that leaves no row is a decision
+  // nobody can audit, and the whole point of the containment evidence is being able to say which
+  // attempts were refused and why.
+  //
+  // It also fails CLOSED: no record, no consequential send. Observability mail is the documented
+  // exception, for the same reason the kill switch exempts it.
+  const att = await LEDGER.beginAttempt({
+    transport: 'resend', provider: 'resend', to, subject, html,
+    workflow, agent, consequential: !internal.alertAlreadyAuthorized,
+  });
+  if (!att.ok) {
+    return { ok: false, id: null, error: att.error, phase: 'refused_before_request',
+      providerResponded: false, stopped: false };
+  }
+
   const gate = internal.alertAlreadyAuthorized
     ? { allowed: true, reason: null }
     : await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to });
   if (!gate.allowed) {
     console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${gate.reason}`);
-    // The record is what distinguishes a policy stop from an ordinary send failure — the return
-    // shape deliberately does not, because 55 callers read it as a boolean.
-    try { await logEmail({ to, subject, status: 'stopped_by_policy', errorMessage: gate.reason }); } catch (_) {}
+    // BLOCKED, with the scope that blocked it — the database refuses the row without one. The
+    // return shape deliberately does not change, because 55 callers read it as a boolean.
+    await att.blocked(gate.reason, gate.stop
+      ? `${gate.stop.scope_type}${gate.stop.scope_key ? `:${gate.stop.scope_key}` : ''}`
+      : 'authorization_undetermined');
     return { ok: false, id: null, error: gate.reason, stopped: true, phase: 'stopped_by_policy',
       providerResponded: false };
   }
@@ -217,6 +237,10 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
     if (replyTo) body.reply_to = replyTo;
     if (cc) body.cc = cc;
     if (enc.list) body.attachments = enc.list;
+    // CLAIMED before the provider call. A crash between here and the response leaves a row saying
+    // an attempt was made and its outcome is unknown — which is the truth, and is what stops the
+    // next run reading "never attempted" and sending a second time.
+    await att.claim();
     const res = await fetch(RESEND_EMAILS_URL, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },
@@ -228,7 +252,8 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
     // interesting facts are the filename and the size.
     console.log('Email result:', JSON.stringify(data),
       enc.list ? `(${enc.list.length} attachment(s): ${enc.list.map(a => a.filename).join(', ')})` : '');
-    await logEmail({ to, subject, status: ok ? 'sent' : 'failed', errorMessage: ok ? null : JSON.stringify(data) });
+    if (ok) await att.accepted(data.id);
+    else await att.rejected(data.message || JSON.stringify(data));
     if (!ok) {
       // "not authorized to send emails from X" is the one failure that is about the CHANNEL rather than
       // the message, so it is the one that gets escalated out of the log.
@@ -248,7 +273,11 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
     // provider rejection is exactly what ruling §11 forbids: one means nothing was sent, the other
     // means nobody knows, and a retry decision differs completely between them.
     console.error('Email error:', e.message);
-    await logEmail({ to, subject, status: 'failed', errorMessage: e.message });
+    // OUTCOME_UNKNOWN, not failed. The comment above says this is the known unknown; the row said
+    // 'failed', which is a claim that nothing was sent. The two differ in exactly the way that
+    // decides whether a retry is safe, and the ledger now records the difference instead of
+    // flattening it. Never eligible for automatic retry.
+    await att.unknown(e.message);
     return { ok: false, id: null, error: e.message, phase: 'transport_unknown',
       providerResponded: false, provider: 'resend' };
   }

@@ -33,6 +33,7 @@
 
 const crypto = require('crypto');
 const { assertSendAllowed } = require('../src/lib/email-gate');
+const { beginAttempt } = require('../src/lib/outbound/ledger');
 
 // Distinct from 0 (proven) and 1 (failed): the probe was REFUSED by policy and never ran. A
 // refusal reported as a pass would say the bounce gate is proven when nothing was tested, and
@@ -133,7 +134,22 @@ async function main() {
       html: `<p>This message is a deliverability self-test (${token}). It is addressed to a mailbox `
         + 'that does not exist, so it should fail. Nobody reads this.</p>',
     });
-    await g.gmail.users.messages.send({ userId: 'me', requestBody: { raw: msg.raw } });
+    // Through the ledger like every other transport. An operator-run probe is still a real
+    // message leaving the building, and the coverage report must be able to see it.
+    const att = await beginAttempt({
+      transport: 'gmail_probe', provider: 'gmail', to: target,
+      subject: `Delivery probe ${token}`, workflow: 'bounce-probe',
+      agent: 'verify-bounce-detection', claimRef: `outreach_sends:${sendIds[0]}`,
+    });
+    if (!att.ok) { bad('the probe could not be recorded, so it was not sent', att.error); return; }
+    await att.claim();
+    try {
+      const sent = await g.gmail.users.messages.send({ userId: 'me', requestBody: { raw: msg.raw } });
+      await att.accepted(sent.data && sent.data.id);
+    } catch (e) {
+      await att.unknown((e && e.message) || String(e));
+      throw e;
+    }
     ok('probe sent');
 
     // ── WAIT FOR THE NDR ────

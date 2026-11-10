@@ -248,6 +248,14 @@ pf_step "each legacy external sender stops on its own, by name" node scripts/che
 # require it to be caught. A green scanner proves nothing until it has been shown to go red.
 pf_step "every outbound email transport is behind the kill switch" node scripts/check-email-transport-coverage.js
 pf_step "containment holds under stop, scope, failure and relabelling" env JWT_SECRET=preflight node --test scripts/email-containment.test.js
+
+# ── S1.1: EVERY TRANSPORT IS OBSERVABLE, NOT JUST GOVERNED ──────────────────
+#
+# S1 proved every outbound path is behind the kill switch. It did not make them visible: the
+# production checker's "0 external recipients" reads email_log, which only the Resend path wrote,
+# so the two Gmail senders were structurally invisible to the strongest line of evidence in the
+# report. Coverage and execution are different questions and this is the second one.
+pf_step "every transport records its outcome, and a missing ledger fails closed" node scripts/check-outbound-ledger-db.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

@@ -92,6 +92,14 @@ const RFQ = 'legacy-supplier-rfq-email';
     await require('../src/lib/autonomy').migrateAutonomy(q);
     await q(`CREATE TABLE IF NOT EXISTS email_log (id TEXT PRIMARY KEY, to_email TEXT,
       subject TEXT, status TEXT, error_message TEXT, sent_at TIMESTAMPTZ DEFAULT NOW())`);
+    // THE PRODUCTION SHAPE, NOT A MINIMAL ONE.
+    //
+    // The outbound ledger FAILS CLOSED: with its columns absent, mailer refuses a consequential
+    // send before the kill switch is consulted. A harness that builds a cut-down email_log
+    // therefore sees every send refused for the wrong reason, and "stopped by policy" becomes
+    // indistinguishable from "the ledger is not migrated" — which is precisely the ambiguity this
+    // check exists to remove. Applying the real DDL keeps the fixture honest about production.
+    for (const sql of require('../src/lib/outbound/ledger-schema').DDL) await q(sql);
 
     const autonomy = require('../src/lib/autonomy');
     const mailer = require('../src/lib/mailer');

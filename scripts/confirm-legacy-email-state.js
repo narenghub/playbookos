@@ -279,7 +279,81 @@ function nextTuesday9amChicago(now = new Date()) {
       ok('the provider call is DOWNSTREAM of the kill-switch decision');
     } else bad('the provider call is not provably downstream of the kill switch');
 
-    // ── 8. R1 IS STILL GOVERNED AND EXPLICIT-RELEASE ───────────────────────
+    // ── 7b. EXECUTION FLAGS AND OBSERVED EXECUTION ─────────────────────────
+  //
+  // S1.1 items 1 and 4. Two different questions that looked identical in this report:
+  //
+  //   COVERAGE   is this transport behind the kill switch?        (static, proven by preflight)
+  //   EXECUTION  did it run, and was it refused or allowed?       (observed, needs ledger rows)
+  //
+  // Before this, section 9 answered "0 external recipients" from email_log — which only the Resend
+  // path writes. The two Gmail senders were structurally invisible to it: had they been enabled
+  // and sending, the figure would still have read 0 and would have been telling the truth about
+  // what it could see while being wrong about what left the building.
+  //
+  // A DISABLED FLAG IS NOT PROOF THE KILL SWITCH WORKED. Each cron returns early unless its flag
+  // is true, so "contained" and "never ran" produce the same silence. They are named apart here.
+  console.log('\n  ── 7b. EXECUTION FLAGS AND OBSERVED EXECUTION ──\n');
+  {
+    const LEDGER = require('../src/lib/outbound/ledger');
+    const flagState = (name) => {
+      const raw = process.env[name];
+      if (raw === undefined || raw === '') return { set: false, enabled: false, raw: '(unset)' };
+      return { set: true, enabled: String(raw).toLowerCase() === 'true', raw: String(raw) };
+    };
+
+    const TRANSPORTS = [
+      { transport: 'gmail_cphi', flag: 'CPHI_FOLLOWUP_ENABLED' },
+      { transport: 'gmail_outreach', flag: 'OUTREACH_ENABLED' },
+      { transport: 'resend', flag: null },
+      { transport: 'gmail_probe', flag: null },
+    ];
+
+    const sinceISO = new Date(Date.now() - 30 * 86400000).toISOString();
+    let execution = null;
+    try {
+      execution = await LEDGER.executionByTransport(TRANSPORTS.map((t) => t.transport),
+        { sinceISO }, { query });
+    } catch (e) {
+      field('ledger', `UNREADABLE — ${e.message}`);
+    }
+
+    const schemaOk = await LEDGER.hasSchema({ query }).catch(() => false);
+    field('outbound ledger schema', schemaOk ? 'applied' : 'NOT APPLIED');
+    if (!schemaOk) {
+      note('the ledger schema is not applied, so observed execution is UNKNOWN for every');
+      note('transport — not zero. Consequential email fails closed until it is applied.');
+    }
+
+    for (const t of TRANSPORTS) {
+      const flag = t.flag ? flagState(t.flag) : null;
+      const obs = (execution || []).find((e) => e.transport === t.transport);
+
+      // The four states item 1 asks for, each distinguishable from the others.
+      let state;
+      if (!schemaOk || !obs || !obs.observed) {
+        state = (flag && flag.set && !flag.enabled) ? 'DISABLED' : 'UNKNOWN';
+      } else if (obs.may_have_left > 0) {
+        state = 'ENABLED_AND_ALLOWED';
+      } else if (obs.blocked > 0) {
+        state = 'ENABLED_BUT_STOPPED';
+      } else {
+        state = (flag && flag.set && !flag.enabled) ? 'DISABLED' : 'UNKNOWN';
+      }
+
+      field(`${t.transport}${t.flag ? ` (${t.flag}=${flag.raw})` : ''}`, state);
+      if (obs && obs.observed) {
+        field('  observed (30d)', Object.entries(obs.counts).map(([k, v]) => `${k}=${v}`).join(' '));
+      } else {
+        field('  observed (30d)', 'UNKNOWN — no ledger rows; NOT the same as nothing sent');
+      }
+    }
+
+    note('DISABLED means the sender is not scheduled to transmit. It is NOT evidence that the');
+    note('kill switch was exercised — only ENABLED_BUT_STOPPED is that.');
+  }
+
+  // ── 8. R1 IS STILL GOVERNED AND EXPLICIT-RELEASE ───────────────────────
     console.log('\n  ── 8. THE GOVERNED PATH IS UNCHANGED ──\n');
     const execSrc = fs.readFileSync(
       path.join(__dirname, '..', 'src', 'lib', 'office', 'execute.js'), 'utf8');
