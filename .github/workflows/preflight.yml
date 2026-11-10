@@ -1,0 +1,103 @@
+# ── THE GATE ─────────────────────────────────────────────────────────────────
+#
+# scripts/preflight.sh was a convention. Nothing prevented a push that skipped it, and on
+# 2026-11-09 it caught five real defects in one session — a schema table missing from the
+# documented rollback, two checks that had drifted from the thing they verify, a hard-coded table
+# count, and a 500 introduced that afternoon. Every one of those was caught because somebody chose
+# to run it.
+#
+# This makes that choice unnecessary.
+#
+# ── WHY THE GATE IS "EXIT 0", AND NOTHING ELSE ───────────────────────────────
+#
+# preflight.sh has THREE verdicts, not two, and the distinction is the whole point. On 2026-11-03
+# it printed `ok` for 31 of 44 steps on a Mac while those steps executed NOTHING: the harnesses
+# looked for Postgres in Linux-only directories, found none, returned early and exited 0. So
+# `kill switch stops, propagates and audits` and `cross-company work is refused by the database`
+# both reported a pass having run zero assertions.
+#
+# A step that did not execute now exits 3 and the run is INCOMPLETE, which is not exit 0. This
+# workflow therefore asserts `exit 0` and never `exit <= 3`, because a CI runner missing a
+# dependency is exactly the machine that would otherwise go green having tested nothing.
+#
+# ── WHY NO SECRETS ───────────────────────────────────────────────────────────
+#
+# This repository is PUBLIC. The suite needs none: JWT_SECRET is the literal `preflight`, and the
+# Postgres-backed checks each start their own throwaway cluster via scripts/lib/pg-cluster.js. If
+# a check ever needs a real credential, it does not belong in this gate.
+#
+# ── WHAT THIS DOES NOT DO ────────────────────────────────────────────────────
+#
+# It does not deploy, and it does not block the push — GitHub cannot refuse a push to a branch
+# without a ruleset, and Railway deploys from `main` the moment the push lands. So today this
+# tells you within minutes that main is broken; it does not yet stop main from breaking. Turning
+# on a branch protection rule requiring this check is the second half, and it is a repository
+# setting rather than a file. See the note at the end of the run summary.
+name: preflight
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push while the first is still running makes the first result meaningless.
+concurrency:
+  group: preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    name: scripts/preflight.sh
+    runs-on: ubuntu-latest
+    # The suite spins up real Postgres clusters and reaches live federal sources. 25 minutes is
+    # generous; a hang should fail the run rather than occupy a runner indefinitely.
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # `npm ci` rather than `npm install`: the lockfile is the input, and a gate that silently
+      # resolves a different dependency tree than production is not testing production.
+      - name: Install dependencies
+        run: npm ci
+
+      # pg-cluster.js searches /usr/lib/postgresql/{18..14}/bin for BOTH initdb and postgres —
+      # the presence of initdb alone selects a directory that cannot run a database, which is how
+      # this failed on macOS. Proven here before the suite runs, so a missing server is reported
+      # as a missing server rather than as 33 silent skips.
+      - name: Verify a Postgres server is present
+        run: |
+          set -euo pipefail
+          found=""
+          for d in /usr/lib/postgresql/18/bin /usr/lib/postgresql/17/bin \
+                   /usr/lib/postgresql/16/bin /usr/lib/postgresql/15/bin \
+                   /usr/lib/postgresql/14/bin; do
+            if [ -x "$d/initdb" ] && [ -x "$d/postgres" ]; then found="$d"; break; fi
+          done
+          if [ -z "$found" ]; then
+            echo "No directory contains BOTH initdb and postgres."
+            echo "The Postgres-backed checks would not execute, and a gate that does not execute is not a gate."
+            exit 1
+          fi
+          echo "Postgres server found at $found"
+          "$found/postgres" --version
+
+      # ONE COMMAND, ONE VERDICT, READ AS A NUMBER.
+      #
+      # Deliberately not piped through tee, head or grep. On 2026-09-30 production broke twice in
+      # one session from reading the tail of a multi-line report instead of its exit status, and
+      # `cmd | tee` reports tee's status, not the command's. The log is captured by the runner.
+      - name: Run preflight
+        run: scripts/preflight.sh
+
+      - name: Branch protection reminder
+        if: always()
+        run: |
+          echo "This run reports whether main is sound. It does not PREVENT a broken push."
+          echo "To make it a true gate: Settings -> Rules -> require 'scripts/preflight.sh' to pass."

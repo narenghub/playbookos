@@ -542,6 +542,12 @@ pf_step "existing functionality still works on a migrated database" node scripts
 # RELEASE.md is what the CEO follows at the keyboard, and a migration printing a count he was not
 # expecting is where a release stops and a person starts guessing.
 pf_step "no document quotes a stale migration step count" node --test scripts/doc-step-counts.test.js
+
+# THE GATE THAT GUARDS THE GATE. .github/workflows/preflight.yml is what makes this script
+# mandatory rather than a convention, and it is defeated by one careless character — a `|| true`,
+# a `| tee`, a `continue-on-error: true` added to turn a red build green. Ten such mutations were
+# driven against this check before it was committed; all ten are caught.
+pf_step "the CI gate cannot be quietly disabled" node --test scripts/ci-gate.test.js
 # The production dump halted on `could not create unique index "idx_cem_unique"` — the table already
 # held duplicate (event_slug, holder_normalized) pairs. A standalone CREATE UNIQUE INDEX on a
 # populated table FAILS where an inline constraint would have been silently skipped, and the sweep
