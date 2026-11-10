@@ -256,6 +256,11 @@ pf_step "containment holds under stop, scope, failure and relabelling" env JWT_S
 # so the two Gmail senders were structurally invisible to the strongest line of evidence in the
 # report. Coverage and execution are different questions and this is the second one.
 pf_step "every transport records its outcome, and a missing ledger fails closed" node scripts/check-outbound-ledger-db.js
+
+# The ledger migration must STAY additive, idempotent and reversible. Those are properties of the
+# DDL, not of the day it was written, and the only way they stay true is if an edit that breaks one
+# goes red here rather than halfway through a production run.
+pf_step "the ledger migration is additive, idempotent and reversible" node scripts/verify-ledger-migration-safety.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one
