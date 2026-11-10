@@ -2846,6 +2846,56 @@ function prpaBoardNote(shown) {
     + ' Nothing was discarded — the rest keep their verdicts and reasons.';
 }
 
+// ── WHAT TO DO ABOUT THIS CONTRACT ───────────────────────────────────────────
+//
+// The verdict is computed by rule in src/lib/office/contract-advice.js, never by a model, because
+// it is actionable advice about money. This renders it and the single next step; the full ordered
+// list is on the detail view.
+//
+// BID NOW means "a person should now decide". It never means submitted — nothing in this system
+// submits anything.
+function prpaAdviceCell(r) {
+  var a = r.advice;
+  if (!a) return '<span style="color:var(--gray);font-size:11px">—</span>';
+
+  var colour = a.verdict === 'BID NOW' ? '#0B6E4F'
+    : a.verdict === 'PREPARE' ? 'var(--navy)'
+      : a.verdict === 'WATCH' ? 'var(--warn)' : 'var(--gray)';
+
+  var out = '<div style="font-size:11px;font-weight:700;color:' + colour + ';white-space:nowrap">'
+    + prpaEsc(a.verdict) + '</div>'
+    + '<div style="font-size:10px;color:var(--gray);margin-top:1px">' + prpaEsc(a.headline) + '</div>';
+
+  if (a.steps && a.steps.length) {
+    var s = a.steps[0];
+    out += '<div style="font-size:10px;margin-top:3px" title="' + prpaEsc(s.detail || '') + '">'
+      + '<b>Next:</b> ' + prpaEsc(s.action)
+      + '<span style="color:var(--gray)"> — ' + prpaEsc(s.owner) + '</span></div>';
+    if (a.steps.length > 1) {
+      out += '<div style="font-size:10px;color:var(--gray)">+ ' + (a.steps.length - 1)
+        + ' more step(s)</div>';
+    }
+  }
+  return out;
+}
+
+// One recorded document can unblock a dozen contracts. That is invisible row by row, so it is
+// stated once, at the top, as work rather than as a statistic.
+function prpaLeveragePanel() {
+  var b = window._prpaState && window._prpaState.board;
+  if (!b || !b.leverage || !b.leverage.length) return '';
+  var items = b.leverage.map(function (l) {
+    return '<li style="margin-bottom:4px"><b>' + l.contracts + '</b> contract(s) — '
+      + prpaEsc(l.blocker) + '</li>';
+  }).join('');
+  return '<div class="card" style="border-left:4px solid var(--teal);margin-bottom:14px">'
+    + '<div class="card-title">What would unblock the most contracts</div>'
+    + '<p style="color:var(--gray);font-size:12px;margin:4px 0 8px">Counted across the '
+    + b.shown + ' contract(s) on this board. Clearing the top item converts more work than '
+    + 'reviewing any single row.</p>'
+    + '<ul style="margin:0;padding-left:18px;font-size:13px">' + items + '</ul></div>';
+}
+
 function prpaReviewCell(r) {
   if (!r.review) {
     return '<button onclick="window.prpaOpen(\'' + prpaEsc(r.id) + '\')" style="padding:4px 9px;'
@@ -2872,6 +2922,7 @@ window.prpaRenderTable = function prpaRenderTable() {
     + '<th ' + PRPA_TH + '>Solicitation</th>'
     + '<th ' + PRPA_TH + '>Deadline</th>'
     + '<th ' + PRPA_TH + '>Set-aside</th>'
+    + '<th ' + PRPA_TH + '>Action</th>'
     + '<th ' + PRPA_TH + '>Bid</th>'
     + '<th ' + PRPA_TH + '>Requested</th>'
     + '<th ' + PRPA_TH + '>Feasibility</th>'
@@ -2896,6 +2947,7 @@ window.prpaRenderTable = function prpaRenderTable() {
       + '<td ' + PRPA_TD + '><code style="font-size:11px">' + prpaEsc(r.solicitation_number) + '</code></td>'
       + '<td ' + PRPA_TD + '>' + prpaDeadlineCell(r) + '</td>'
       + '<td ' + PRPA_TD + '>' + prpaSetAsideCell(r) + '</td>'
+      + '<td ' + PRPA_TD + '>' + prpaAdviceCell(r) + '</td>'
       + '<td ' + PRPA_TD + '>' + prpaBidCell(r) + '</td>'
       + '<td ' + PRPA_TD + '>' + prpaRequestedCell(r) + '</td>'
       + '<td ' + PRPA_TD + '>' + prpaFeasChip(r.feasibility) + '</td>'
@@ -2913,7 +2965,8 @@ window.prpaRenderTable = function prpaRenderTable() {
       + '</tr>';
   }).join('');
 
-  host.innerHTML = '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
+  host.innerHTML = prpaLeveragePanel()
+    + '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
     + '<thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>'
     + '<div style="font-size:11px;color:var(--gray);margin-top:10px">' + prpaBoardNote(rows.length)
     + ' Hover a feasibility verdict, a bid position, a tier or a flag for the reason behind it.</div>';

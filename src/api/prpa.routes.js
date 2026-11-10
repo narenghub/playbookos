@@ -54,6 +54,7 @@ const { normalizeRow, mapHeaders, contentHash } = require('../lib/office/opportu
 const DATASET = require('../lib/office/prpa-dataset');
 const { assessRelevance } = require('../lib/office/opportunity-relevance');
 const COMP = require('../lib/office/award-comparables');
+const ADVICE = require('../lib/office/contract-advice');
 
 // ── WHY EVERY PATH HERE IS /prpa/tracker/* AND NOT /prpa/* ──────────────────
 //
@@ -252,6 +253,15 @@ router.get('/prpa/tracker/opportunities', read, async (req, res) => {
     const enriched = onBoard.map((r) => ({ ...r, business_lines: r.business_lines || relevantLines(r).lines }));
     const ranked = RANK.rankAll(enriched, { today, capabilities: caps, supplierQuotes: {} });
 
+    // Shape first, then advise on the shaped row. The advice engine reads the board's own fields
+    // — relevance, pricing, deadline_confirmed, missing_evidence — so there is ONE definition of
+    // each fact rather than two that drift apart.
+    const shaped = ranked.map((r) => {
+      const row = shapeForBoard(r, benchmarks);
+      row.advice = ADVICE.adviseOnContract(row, { now: new Date() });
+      return row;
+    });
+
     res.json({
       dataset: await DATASET.describeLive(query),
       today,
@@ -259,6 +269,11 @@ router.get('/prpa/tracker/opportunities', read, async (req, res) => {
       count: ranked.length,
       // What the filter did, so a count that looks small can be explained rather than doubted.
       board: {
+        // What would unblock the MOST contracts ON THIS BOARD — the actionable window, not the
+        // whole harvest. The single most useful number here and invisible from any one row: one
+        // recorded purchase order is worth more than any amount of per-row scoring when it is the
+        // thing holding back a dozen of them.
+        leverage: ADVICE.unblockingLeverage(shaped, { now: new Date() }).slice(0, 6),
         scope,
         horizon_days: scope === 'all' ? null : horizonDays,
         harvested: rows.length,
@@ -270,7 +285,7 @@ router.get('/prpa/tracker/opportunities', read, async (req, res) => {
         }, {}),
         benchmarks_loaded: benchmarks.size,
       },
-      opportunities: ranked.map((r) => shapeForBoard(r, benchmarks)),
+      opportunities: shaped,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
