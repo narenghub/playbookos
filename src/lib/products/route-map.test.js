@@ -26,14 +26,54 @@ function appLevelRoutes() {
   return out;
 }
 
+// EVERY ROUTER MOUNTED BELOW THE BOUNDARY, read from server.js.
+//
+// This used to be `require('../../api/routes')` and nothing else. src/api/routes.js was the only
+// router when it was written; there are now SIX, and 57 routes across the other five were invisible
+// to the completeness test — seven of them unclassified. The product boundary runs in enforce mode,
+// so an unclassified route resolves to nothing, fails closed, and answers 403 "Forbidden by product
+// boundary" to a legitimate admin. That is how the Decision Queue shipped dead.
+//
+// A test whose coverage silently shrinks as the code grows is worse than no test: it reported
+// completeness over a diminishing fraction of the routes and nobody had reason to doubt it.
+//
+// MOUNT ORDER DECIDES WHAT COUNTS, and it is read rather than assumed. A router mounted ABOVE
+// `productBoundary()` never reaches this gate — src/api/sitenex-intake.routes.js is deliberately
+// one of those, because its callers are unauthenticated clients following an emailed link and the
+// boundary would fail them closed, correctly but uselessly. That bypass has its own guard in
+// src/lib/sitenex/intake-scope.test.js, which asserts the mount stays above the gates AND that
+// every path in it begins with '/intake/'. Exempting it by NAME here would be a second claim about
+// that file which could silently stop being true; taking it from the mount position cannot.
+function routersBelowBoundary() {
+  const src = fs.readFileSync(path.join(__dirname, '../../../server.js'), 'utf8');
+  const boundaryAt = src.indexOf("productBoundary()");
+  assert.ok(boundaryAt > 0, 'server.js no longer mounts productBoundary() — this test cannot locate the gate');
+
+  const mounts = [];
+  for (const m of src.matchAll(/app\.use\(\s*'\/api',\s*(?:require\(\s*'\.\/([^']+)'\s*\)|(\w+))\s*\)/g)) {
+    mounts.push({ at: m.index, file: m[1] || null, ident: m[2] || null });
+  }
+  assert.ok(mounts.length >= 2, `expected several /api routers in server.js, found ${mounts.length}`);
+
+  const below = mounts.filter((x) => x.at > boundaryAt);
+  assert.ok(below.length >= 2,
+    `only ${below.length} router(s) mount below the boundary — the parse is probably wrong`);
+
+  // `app.use('/api', routes)` is the main router, bound to an identifier rather than an inline
+  // require. It is the one mount this file always knew about.
+  return below.map((x) => (x.file ? `../../../${x.file}` : '../../api/routes'));
+}
+
 function mountedRoutes() {
   process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
-  const router = require('../../api/routes');
   const out = [];
-  for (const layer of router.stack || []) {
-    if (!layer.route) continue;
-    for (const m of Object.keys(layer.route.methods)) {
-      if (layer.route.methods[m]) out.push(`${m.toUpperCase()} /api${layer.route.path}`);
+  for (const rel of routersBelowBoundary()) {
+    const router = require(rel.startsWith('../../../') ? path.join(__dirname, rel) : rel);
+    for (const layer of router.stack || []) {
+      if (!layer.route) continue;
+      for (const m of Object.keys(layer.route.methods)) {
+        if (layer.route.methods[m]) out.push(`${m.toUpperCase()} /api${layer.route.path}`);
+      }
     }
   }
   return [...out, ...appLevelRoutes()].sort();

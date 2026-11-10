@@ -167,6 +167,22 @@ const INTERNAL = [
   'GET /api/employee-activity/:user_id', 'GET /api/goals/team-week', 'POST /api/goals/assign-kpis',
   'POST /api/goals/cascade', 'GET /api/agent/tasks/team', 'POST /api/agent/tasks/assign',
   'POST /api/agent/tasks/generate', 'POST /api/agent/tasks/ai-generate', 'POST /api/agent/tasks/ai-commit',
+  // ── CROSS-PRODUCT PLATFORM SURFACES ──────────────────────────────────────
+  //
+  // 'internal' rather than 'shared', and the distinction is the whole reason that value exists.
+  //
+  // GET /api/decisions aggregates every pending human decision in the platform — a held approval,
+  // a federal notice, a buyer inquiry, a performance escalation. It crosses products BY
+  // CONSTRUCTION, so there is no single product to classify it under and no reading of it that is
+  // safe for an outside account.
+  //
+  // GET /api/spend reads llm_spend_log, which is PLATFORM spend on one API key. It is not tenant
+  // data and no share of it belongs to any one product's holder.
+  //
+  // Both routes are already adminOnly. That is the role gate; this is the product gate, and the
+  // point of having two is that they fail INDEPENDENTLY — a role mistake must not be sufficient
+  // to become an exposure.
+  'GET /api/decisions', 'GET /api/spend',
   // agent plumbing and integrations
   'GET /api/agent/activity', 'GET /api/agent/approvals', 'PUT /api/agent/approvals/:id',
   'GET /api/agent/dependencies', 'GET /api/agent/mission-control', 'GET /api/agent/overview',
