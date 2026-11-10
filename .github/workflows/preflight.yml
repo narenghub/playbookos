@@ -67,6 +67,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # PLAYWRIGHT, AND WHY IT IS NOT A DEPENDENCY.
+      #
+      # The first CI run went red with "87 executed and passed · 0 failed · 1 did not execute":
+      # `the Federal Contracts page renders real data` skipped because playwright was absent, and
+      # its harness said so — "SKIP … This proved NOTHING". Exactly the outcome the three-verdict
+      # aggregator exists to surface, found on run one.
+      #
+      # It is installed with --no-save rather than added to package.json because the development
+      # container ships a pre-installed playwright with a matching browser, and a second copy
+      # resolved from node_modules would not find that browser — breaking the check locally in
+      # order to fix it in CI. --no-save leaves package.json and the lockfile untouched, so this
+      # step exists only on the runner.
+      #
+      # The version is pinned to the one the development environment uses, so CI and a developer's
+      # machine are not silently testing against different browser behaviour.
+      - name: Install Playwright for the page-render checks
+        run: |
+          set -euo pipefail
+          npm install --no-save playwright@1.63.0
+          npx playwright install --with-deps chromium
+          node -e "console.log('playwright', require('playwright/package.json').version)"
+
       # pg-cluster.js searches /usr/lib/postgresql/{18..14}/bin for BOTH initdb and postgres —
       # the presence of initdb alone selects a directory that cannot run a database, which is how
       # this failed on macOS. Proven here before the suite runs, so a missing server is reported
