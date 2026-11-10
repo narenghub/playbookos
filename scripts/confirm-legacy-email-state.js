@@ -349,8 +349,48 @@ function nextTuesday9amChicago(now = new Date()) {
       }
     }
 
+    // ── THE GATE DECISION, PROBED DIRECTLY ───────────────────────────────
+    //
+    // Observed execution cannot prove containment on its own, and on 2026-11-10 it did not: both
+    // Gmail senders showed UNKNOWN six hours after the gate shipped, because their gate sits
+    // INSIDE the per-message loop. No due work, no message, no gate call, no ledger row.
+    //
+    // "Nothing was due" and "the gate refused it" are different facts and UNKNOWN is the correct
+    // report for the first. But waiting for a queue to fill is not a verification strategy, and
+    // 25 messages left during the window on the strength of a gate nobody had exercised.
+    //
+    // So the DECISION is probed here, read-only, under the live stops: would this workflow be
+    // permitted to send right now? That plus the ordering assertion above — the gate precedes the
+    // provider call in the deployed source — is containment established rather than awaited.
+    //
+    // It calls the authorization function. It builds no message and contacts no provider.
+    console.log('');
+    try {
+      const { assertSendAllowed } = require('../src/lib/email-gate');
+      for (const probe of [
+        { label: 'cphi-runner', workflow: 'cphi-followup', agent: 'cphi-runner' },
+        { label: 'outreach-agent', workflow: 'outreach', agent: 'outreach-agent' },
+        { label: 'bounce probe', workflow: 'bounce-probe', agent: 'verify-bounce-detection' },
+      ]) {
+        const r = await assertSendAllowed({
+          capability: 'email.send', workflow: probe.workflow, agent: probe.agent,
+          to: 'containment-probe@example.invalid',
+        });
+        if (r.allowed) {
+          bad(`${probe.label} WOULD BE PERMITTED TO SEND RIGHT NOW`,
+            'the kill switch does not refuse this workflow under the current stops');
+        } else {
+          ok(`${probe.label} is refused right now — ${String(r.reason).slice(0, 70)}`);
+        }
+      }
+    } catch (e) {
+      bad('the gate decision could not be probed', e.message);
+    }
+
     note('DISABLED means the sender is not scheduled to transmit. It is NOT evidence that the');
     note('kill switch was exercised — only ENABLED_BUT_STOPPED is that.');
+    note('UNKNOWN with the flag TRUE means the sender is live and nothing was due. The gate probe');
+    note('above is what establishes containment in that case, rather than waiting for a queue.');
   }
 
   // ── 8. R1 IS STILL GOVERNED AND EXPLICIT-RELEASE ───────────────────────
