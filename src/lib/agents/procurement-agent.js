@@ -6,7 +6,7 @@
 const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
-const { sendEmail } = require('../mailer');
+const { sendEmail, sendEmailOrReport } = require('../mailer');
 const { logAgentActivity, enqueueApproval, getCEOUser, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const rfqClaim = require('../idempotency/supplier-rfq');
 // The send-time identity guard. Runs BEFORE the claim; see src/lib/procurement/rfq-identity-guard.js
@@ -568,7 +568,7 @@ async function scoreAndRankSuppliers(rfqId, { notify = true } = {}) {
       <td style="padding:6px 10px;border:1px solid #e2e8f0;font-weight:700">${esc(r.score)}</td></tr>`).join('');
     // Skipped rather than defaulted when nobody holds the role. An internal notification that
     // cannot be addressed is not a reason to invent an addressee.
-    if (sig) await sendEmail({
+    if (sig) await sendEmailOrReport({
       to: sig.email,
       subject: `Supplier comparison ready — ${rfq.molecule_name}`,
       html: `<div style="font-family:Arial;max-width:640px">
@@ -580,7 +580,7 @@ async function scoreAndRankSuppliers(rfqId, { notify = true } = {}) {
         </table>
         <p style="margin-top:14px"><a href="${BASE_URL()}/#procurement-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Review & approve →</a></p>
       </div>`,
-    }).catch(e => console.error('[procurement] comparison email failed:', e.message));
+    }, 'procurement-agent: Supplier comparison ready — rfq.molecule_name').catch(e => console.error('[procurement] comparison email failed:', e.message));
   }
 
   await logAgentActivity({ agent_name: AGENT, action_type: 'suppliers_scored', user_id: rfq.assigned_to_user_id || null,
@@ -606,14 +606,14 @@ async function runProcurementAgent({ dryRun = false, weekStart } = {}) {
   const naresh = await getNaresh();
   if (!dryRun && rfqs.length) {
     const molList = rfqs.map(r => `${r.molecule_name}${r.cas_number ? ' (' + r.cas_number + ')' : ''}`).join(', ');
-    if (sig) await sendEmail({ to: sig.email, subject: `${out.emails_sent} RFQ emails dispatched this week`,
+    if (sig) await sendEmailOrReport({ to: sig.email, subject: `${out.emails_sent} RFQ emails dispatched this week`,
       html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#1B3A6B">Procurement Agent — RFQs sent</h2>
         <p style="font-size:14px">Sent <strong>${out.emails_sent}</strong> RFQ emails to suppliers for <strong>${rfqs.length}</strong> molecules this week.</p>
         <p style="font-size:13px;color:#555">Molecules: ${esc(molList)}</p>
-        <p><a href="${BASE_URL()}/#procurement-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Procurement Agent →</a></p></div>` }).catch(() => {});
+        <p><a href="${BASE_URL()}/#procurement-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Procurement Agent →</a></p></div>` }, 'procurement-agent: out.emails_sent RFQ emails dispatched this we').catch(() => {});
     if (naresh && naresh.email && (!sig || naresh.email !== sig.email)) {
-      await sendEmail({ to: naresh.email, subject: `Procurement Agent: ${rfqs.length} RFQs dispatched this week`,
-        html: `<div style="font-family:Arial"><p>Procurement Agent dispatched <strong>${out.emails_sent}</strong> RFQ emails across <strong>${rfqs.length}</strong> molecules this week (${esc(week)}).</p></div>` }).catch(() => {});
+      await sendEmailOrReport({ to: naresh.email, subject: `Procurement Agent: ${rfqs.length} RFQs dispatched this week`,
+        html: `<div style="font-family:Arial"><p>Procurement Agent dispatched <strong>${out.emails_sent}</strong> RFQ emails across <strong>${rfqs.length}</strong> molecules this week (${esc(week)}).</p></div>` }, 'procurement-agent: Procurement Agent: rfqs.length RFQs dispatche').catch(() => {});
     }
   }
 

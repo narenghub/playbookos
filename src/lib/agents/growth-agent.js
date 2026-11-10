@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
-const { sendEmail } = require('../mailer');
+const { sendEmail, sendEmailOrReport } = require('../mailer');
 const { getCEOUser, extractClaudeText } = require('../agent-core');
 const { sendCronAlert } = require('../cron-alerts');
 const { getGoogleAccessToken: getGoogleToken, SCOPES, serviceAccountConfigured } = require('../google-auth');
@@ -519,7 +519,7 @@ async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
         .slice(0, 5)
         .map((m, i) => `<li>${i + 1}. <b>${m.name}</b> (${m.therapeutic_area || ''}) — $${m.market_size_usd_millions || '?'}M market</li>`).join('');
       const base = process.env.BASE_URL || 'https://playbook.abiozen.com';
-      await sendEmail({
+      await sendEmailOrReport({
         to,
         subject: `Market Intelligence — Week of ${week} — ${rows.length} Molecules Identified`,
         html: `<div style="font-family:Arial;max-width:640px;line-height:1.6;color:#333">
@@ -531,7 +531,7 @@ async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
   <p style="font-size:12px;color:#a00">⚠ CAS numbers are AI-generated and must be verified by procurement before sourcing.</p>
   <p><a href="${base}/#market-intelligence">Open Market Intelligence →</a></p>
 </div>`,
-      });
+      }, 'growth-agent: Market Intelligence — Week of week — rows.l');
     }
   } catch (e) {
     errors.push(`email: ${e.message}`);

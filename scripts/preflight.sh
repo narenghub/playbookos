@@ -548,6 +548,11 @@ pf_step "no document quotes a stale migration step count" node --test scripts/do
 # a `| tee`, a `continue-on-error: true` added to turn a red build green. Ten such mutations were
 # driven against this check before it was committed; all ten are caught.
 pf_step "the CI gate cannot be quietly disabled" node --test scripts/ci-gate.test.js
+
+# 1,113 emails were lost over eight weeks because every layer did the right local thing and the
+# aggregate was silence. sendEmail returns false and does not throw; a caller that drops the
+# boolean cannot tell a delivered message from a refused one. Seventeen did.
+pf_step "no send drops its result" node --test scripts/email-result-handled.test.js
 # The production dump halted on `could not create unique index "idx_cem_unique"` — the table already
 # held duplicate (event_slug, holder_normalized) pairs. A standalone CREATE UNIQUE INDEX on a
 # populated table FAILS where an inline constraint would have been silently skipped, and the sweep

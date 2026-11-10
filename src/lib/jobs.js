@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const { query } = require('./db');
 const { excludeExternalSql } = require('./roles');
 const { syncGitHubForUser, analyzeTeamProgress, scoreTeamMember } = require('./core');
-const { sendEmail } = require('./mailer');
+const { sendEmail, sendEmailOrReport } = require('./mailer');
 
 async function syncGitHubAllDevs() {
   const devUsers = (await query(
@@ -98,11 +98,11 @@ async function checkMilestoneTriggers({ dryRun = false } = {}) {
         await query(`UPDATE milestones SET status='in_progress' WHERE id=$1`, [ms.id]);
         const admin = (await query(`SELECT * FROM users WHERE role='admin' LIMIT 1`)).rows[0];
         if (admin) {
-          await sendEmail({
+          await sendEmailOrReport({
             to: admin.email,
             subject: 'Trigger: $100K revenue — Hire Account Manager now',
             html: `<div style="font-family:Arial;padding:24px"><h2>Milestone Trigger</h2><p>Revenue: $${yearRev.toLocaleString()}</p><p>Action: Begin account manager hiring immediately.</p></div>`
-          });
+          }, 'jobs: Trigger: $100K revenue — Hire Account Manager no');
         }
       }
       triggered.push('$100K milestone triggered');

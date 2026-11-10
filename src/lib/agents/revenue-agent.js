@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
-const { sendEmail } = require('../mailer');
+const { sendEmail, sendEmailOrReport } = require('../mailer');
 
 const DAY_MS = 86400000;
 const todayISO = () => new Date().toISOString().slice(0, 10);
@@ -243,11 +243,11 @@ async function analyzeRevenueTrends({ dryRun = false } = {}) {
     );
     const admin = (await query("SELECT email FROM users WHERE role='admin' AND is_active=1 LIMIT 1")).rows[0];
     if (admin?.email) {
-      await sendEmail({
+      await sendEmailOrReport({
         to: admin.email,
         subject: `Revenue Intelligence — ${data.period.this_month} (${data.velocity.trend}, ${data.monthly.pct}% of target)`,
         html: renderRevenueReport(data, recommendations)
-      });
+      }, 'revenue-agent: Revenue Intelligence — data.period.this_month');
     }
   }
 

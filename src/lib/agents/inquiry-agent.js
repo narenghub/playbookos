@@ -4,7 +4,7 @@
 // to a human when asked or when the deal is large.
 const crypto = require('crypto');
 const { query } = require('../db');
-const { sendEmail } = require('../mailer');
+const { sendEmail, sendEmailOrReport } = require('../mailer');
 const { sendWhatsApp } = require('../whatsapp');
 const { logAgentActivity, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth');
@@ -861,14 +861,14 @@ async function escalateToHuman(inquiryId, reason = 'buyer requested a human') {
   const msgs = (await query('SELECT direction, sender_name, body_text, created_at FROM inquiry_messages WHERE inquiry_id=$1 ORDER BY created_at', [inquiryId])).rows;
   const thread = msgs.map(m => `<div style="margin:8px 0;padding:8px;background:${m.direction === 'inbound' ? '#eff6ff' : '#f8fafc'};border-radius:6px"><strong>${m.direction === 'inbound' ? '⬅ ' + esc(m.sender_name || 'Buyer') : '➡ Abiozen'}</strong><div style="font-size:12px;white-space:pre-wrap;margin-top:4px">${esc(String(m.body_text || '').slice(0, 1500))}</div></div>`).join('');
   const procurement = await getUser('procurement_director');
-  if (procurement) await sendEmail({ to: procurement.email, cc: 'naren@abiozen.com',
+  if (procurement) await sendEmailOrReport({ to: procurement.email, cc: 'naren@abiozen.com',
     subject: `Escalated GMP inquiry — ${inq.buyer_company || inq.buyer_email} — ${inq.molecule_name}`,
     html: `<div style="font-family:Arial;max-width:680px"><h2 style="color:#991B1B">Inquiry escalated to human</h2>
       <p style="font-size:14px"><strong>Buyer:</strong> ${esc(inq.buyer_name)} at ${esc(inq.buyer_company)} (${esc(inq.buyer_email)})<br>
       <strong>Molecule:</strong> ${esc(inq.molecule_name)} · <strong>Qty:</strong> ${esc(inq.quantity_requested)}${esc(inq.quantity_unit)} · <strong>Est. value:</strong> $${Number(value).toLocaleString()}<br>
       <strong>Reason:</strong> ${esc(reason)}</p>
       <h3 style="color:#1B3A6B">Conversation</h3>${thread}
-      <p style="margin-top:12px"><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>` }).catch(() => {});
+      <p style="margin-top:12px"><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>` }, 'inquiry-agent: Escalated GMP inquiry — inq.buyer_company || i').catch(() => {});
 
   // Reassure the buyer.
   await sendAndLog(inq, { subject: inquirySubject(inq, { suffix: false }),
@@ -934,7 +934,7 @@ async function runInquiryAgent({ dryRun = false } = {}) {
 
   if (!dryRun) {
     const naresh = await getNaresh();
-    await sendEmail({ to: naresh.email, subject: `GMP Inquiry Agent — daily summary`,
+    await sendEmailOrReport({ to: naresh.email, subject: `GMP Inquiry Agent — daily summary`,
       html: `<div style="font-family:Arial;max-width:560px"><h2 style="color:#1B3A6B">Inquiry Agent — daily summary</h2>
         <ul style="font-size:14px;line-height:1.7">
           <li><strong>${out.active_inquiries}</strong> active inquiries</li>
@@ -942,7 +942,7 @@ async function runInquiryAgent({ dryRun = false } = {}) {
           <li><strong>${out.orders}</strong> orders placed</li>
           <li><strong>${out.escalations}</strong> awaiting human</li>
           <li>${out.follow_ups_sent} follow-ups sent, ${out.closed} closed inactive today</li>
-        </ul><p><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>` }).catch(e => out.errors.push('email: ' + e.message));
+        </ul><p><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>` }, 'inquiry-agent: GMP Inquiry Agent — daily summary').catch(e => out.errors.push('email: ' + e.message));
     await logAgentActivity({ agent_name: AGENT, action_type: 'inquiry_agent_run', reasoning: `${out.active_inquiries} active, ${out.follow_ups_sent} follow-ups, ${out.closed} closed.`, source_kpi: 'kpi-sg-sales', output_summary: `active=${out.active_inquiries} followups=${out.follow_ups_sent}` }).catch(() => {});
   }
   return out;
@@ -1321,14 +1321,14 @@ async function markPaymentReceived(inquiryId, { amount } = {}) {
     { user_id: naresh.id || null, message_type: 'payment_received' }).catch(() => {});
   // Procurement: start production. Resolved by role; skipped when nobody holds it.
   const procurement = await getUser('procurement_director');
-  if (procurement) await sendEmail({ to: procurement.email, cc: 'naren@abiozen.com',
+  if (procurement) await sendEmailOrReport({ to: procurement.email, cc: 'naren@abiozen.com',
     subject: `START PRODUCTION — ${inq.molecule_name} ${qtyStr} — Payment confirmed`,
     html: `<div style="font-family:Arial;max-width:640px"><h2 style="color:#1B3A6B">Payment confirmed — start production</h2>
       <p style="font-size:14px"><strong>Order:</strong> ${esc(inq.quote_ref || '')} · <strong>Buyer:</strong> ${esc(inq.buyer_company || inq.buyer_email)}<br>
       <strong>Molecule:</strong> ${esc(inq.molecule_name)} (CAS ${esc(inq.cas_number || 'TBC')}) · <strong>Qty:</strong> ${esc(qtyStr)}<br>
       <strong>Advance received:</strong> $${(amount || advance).toLocaleString()} · <strong>Order value:</strong> $${total.toLocaleString()} · <strong>Target delivery:</strong> ${eta}</p>
       <p>Please begin sourcing/production now.</p>
-      <p><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>` }).catch(() => {});
+      <p><a href="${BASE_URL()}/#inquiry-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Inquiry Agent →</a></p></div>` }, 'inquiry-agent: START PRODUCTION — inq.molecule_name qtyStr').catch(() => {});
 
   await logAgentActivity({ agent_name: AGENT, action_type: 'payment_received', reasoning: `Payment received for ${inquiryId} (${inq.quote_ref}) — order ${orderId} in production.`, source_kpi: 'kpi-sg-sales', output_summary: `inquiry=${inquiryId} order=${orderId} status=in_production amount=${amount || advance}` }).catch(() => {});
   return { ok: true, status: 'in_production', order_id: orderId, eta };

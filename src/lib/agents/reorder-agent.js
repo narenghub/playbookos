@@ -10,7 +10,7 @@
 // exists).
 const crypto = require('crypto');
 const { query } = require('../db');
-const { sendEmail } = require('../mailer');
+const { sendEmail, sendEmailOrReport } = require('../mailer');
 const { logAgentActivity, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const { publishSequenceToApollo } = require('./email-engine');
 
@@ -245,12 +245,12 @@ async function runReorderAgent({ dryRun = false, topN = 20 } = {}) {
   if (!dryRun && created.length) {
     const naresh = await getNaresh();
     const rows = created.map(c => `<li style="margin:4px 0"><strong>${esc(c.company || c.contact || 'Buyer')}</strong> — ${esc(c.molecule || 'reorder')} · ${c.daysSince}d since purchase · <span style="color:${c.score >= 90 ? '#166534' : c.score >= 70 ? '#B45309' : '#718096'};font-weight:700">${c.score}</span>${c.apollo ? ' · <span style="color:#0D7377">in Apollo</span>' : ''}</li>`).join('');
-    await sendEmail({ to: naresh.email, subject: `Reorder Agent — ${created.length} campaigns created for review`,
+    await sendEmailOrReport({ to: naresh.email, subject: `Reorder Agent — ${created.length} campaigns created for review`,
       html: `<div style="font-family:Arial;max-width:640px"><div style="background:#1B3A6B;padding:16px 22px;border-radius:8px 8px 0 0"><h2 style="color:#fff;margin:0">Reorder Agent</h2><p style="color:#9FE1CB;margin:4px 0 0;font-size:13px">${created.length} reorder campaigns · ~$${out.estimated_pipeline.toLocaleString()} estimated pipeline</p></div>
         <div style="padding:18px 22px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px">
           <p style="font-size:14px">Reorder candidates and drafted campaigns:</p><ul style="padding-left:18px">${rows}</ul>
           <p style="font-size:13px;color:#991B1B"><strong>Review and activate these sequences in Apollo before they send</strong> — they were created inactive.</p>
-          <p><a href="${BASE_URL()}/#reorder-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Reorder Agent →</a></p></div></div>` }).catch(e => out.errors.push('email: ' + e.message));
+          <p><a href="${BASE_URL()}/#reorder-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Reorder Agent →</a></p></div></div>` }, 'reorder-agent: Reorder Agent — created.length campaigns crea').catch(e => out.errors.push('email: ' + e.message));
   }
 
   await logAgentActivity({ agent_name: AGENT, action_type: 'reorder_agent_run', user_id: null,

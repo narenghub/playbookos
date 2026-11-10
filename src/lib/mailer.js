@@ -247,5 +247,36 @@ async function sendEmail(opts) {
   return r.ok;
 }
 
-module.exports = { sendEmail, sendEmailDetailed, encodeAttachments, MAX_ATTACH_BYTES,
+// ── SEND, AND SAY SO WHEN IT DOES NOT ────────────────────────────────────────
+//
+// sendEmail returns false and does not throw. That is the right local behaviour — a refused
+// message must not crash a cron halfway through work it has already done — and it has one
+// consequence that has cost this project dearly: a caller that ignores the boolean cannot tell a
+// delivered message from a refused one. 1,113 emails were lost over eight weeks exactly that way,
+// and the post-mortem's own words are "every layer did the right local thing and the aggregate
+// was silence".
+//
+// Seventeen call sites still dropped it. Rather than seventeen hand-written console.errors that
+// each say something slightly different, there is one wrapper, so every failure is reported in
+// the same findable shape with the provider's own reason attached.
+//
+// It returns the boolean, so a caller that wants to branch still can. What it removes is the
+// option of not knowing.
+//
+// `context` is what the operator needs in order to find it: which job, about what. "procurement
+// weekly summary", not "email".
+async function sendEmailOrReport(opts, context) {
+  const r = await sendEmailDetailed(opts);
+  if (!r.ok) {
+    // One line, one tag, everything needed to act: what it was, who it was for, why it failed,
+    // and how far it got. `phase` distinguishes "refused before we tried" from "the provider
+    // never answered", which are different problems with different fixes.
+    console.error(
+      `[EMAIL FAIL] ${context || 'unlabelled send'} → ${opts && opts.to} `
+      + `· "${opts && opts.subject}" · ${r.phase || 'unknown phase'} · ${r.error || 'no reason given'}`);
+  }
+  return r.ok;
+}
+
+module.exports = { sendEmail, sendEmailDetailed, sendEmailOrReport, encodeAttachments, MAX_ATTACH_BYTES,
                    defaultFrom, DEFAULT_FROM, alertSendFailure };

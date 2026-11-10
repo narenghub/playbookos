@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const { Pool } = require('pg');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
-const { sendEmail } = require('../mailer');
+const { sendEmail, sendEmailOrReport } = require('../mailer');
 const { fetchGSCData, syncAlgoliaSearchData } = require('./growth-agent');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
 const { logAgentActivity } = require('../agent-core');
@@ -178,11 +178,11 @@ Return ONLY the JSON array.`;
       if (seoUsers.length > 0) {
         const html = renderSEOTasksEmail(tasks);
         for (const u of seoUsers) {
-          await sendEmail({
+          await sendEmailOrReport({
             to: u.email,
             subject: `This week — ${tasks.length} SEO tasks ranked by traffic opportunity`,
             html,
-          });
+          }, 'seo-agent: This week — tasks.length SEO tasks ranked by');
         }
         result.emailed_to = seoUsers.map(u => u.email);
       }

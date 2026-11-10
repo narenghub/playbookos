@@ -6,7 +6,7 @@
 const crypto = require('crypto');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
-const { sendEmail } = require('../mailer');
+const { sendEmail, sendEmailOrReport } = require('../mailer');
 const { logAgentActivity, getCEOUser, parseClaudeJSON } = require('../agent-core');
 
 const AGENT = 'linkedin-agent';
@@ -760,11 +760,11 @@ async function runWeeklyLinkedInCampaign({ dryRun = false } = {}) {
     });
     if (ceo?.email) {
       try {
-        await sendEmail({
+        await sendEmailOrReport({
           to: ceo.email,
           subject: `LinkedIn campaign drafts — week of ${week.monday}`,
           html: renderApprovalEmail(week.monday, drafts.filter(d => d.id)),
-        });
+        }, 'linkedin-agent: LinkedIn campaign drafts — week of week.monday');
       } catch (e) { console.error('[linkedin-agent] approval email failed:', e.message); }
     }
   }
