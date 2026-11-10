@@ -3973,8 +3973,12 @@ pages['prpa-tracker'] = window.prpaTrackerPage;
 // rows are missing, the list is SHORTER, and nothing about a short list invites a second look. So
 // `complete: false` renders a loud red banner naming every source that failed, and the headline
 // the API computes explicitly refuses to say "you are clear" when it does not know.
-// `window.API` returns parsed JSON; a 503 from the route (schema or company missing) throws, and
-// the catch below shows the reason rather than an empty queue.
+// `window.API` DOES NOT THROW ON A NON-2xx. It is `fetch(...).then(r => r.json())`, so a 503 or a
+// 500 arrives as a normal resolved value carrying `{ error, code }` and nothing else. The first
+// version of this page assumed a throw, wrapped the call in try/catch, and the catch was dead code:
+// production answered 503, the error body flowed into the renderer, and the page died on
+// `d.items.length`. The payload is therefore CHECKED, not trusted, and the catch is kept only for a
+// genuine network failure.
 window.dqEsc = function dqEsc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -4097,20 +4101,32 @@ window.decisionsPage = async function decisionsPage() {
   var host = document.getElementById('content');
   host.innerHTML = '<p style="color:#888;padding:20px">Loading the decision queue…</p>';
 
+  // A route-level failure is shown as a failure. An empty queue would read as "you are clear",
+  // which is the one thing this page must never say when it does not know.
+  var fail = function (msg) {
+    host.innerHTML = '<div class="card" style="border-left:4px solid #9A2B2A;background:#FFF5F5">'
+      + '<div class="card-title" style="color:#9A2B2A">The decision queue could not load</div>'
+      + '<p style="font-size:13px;margin:6px 0 0">' + window.dqEsc(msg) + '</p>'
+      + '<p style="font-size:12px;color:var(--gray);margin:6px 0 0">This is not an empty queue. '
+      + 'Nothing about what is waiting has been established.</p></div>';
+  };
+
   var d;
   try {
     var qs = window._dqState.kind ? '?kind=' + encodeURIComponent(window._dqState.kind) : '';
     d = await API('/decisions' + qs);
   } catch (e) {
-    // A route-level failure is shown as a failure. An empty queue would read as "you are clear",
-    // which is the one thing this page must never say when it does not know.
-    host.innerHTML = '<div class="card" style="border-left:4px solid #9A2B2A;background:#FFF5F5">'
-      + '<div class="card-title" style="color:#9A2B2A">The decision queue could not load</div>'
-      + '<p style="font-size:13px;margin:6px 0 0">' + window.dqEsc(e.message) + '</p>'
-      + '<p style="font-size:12px;color:var(--gray);margin:6px 0 0">This is not an empty queue. '
-      + 'Nothing about what is waiting has been established.</p></div>';
+    fail(e && e.message ? e.message : String(e));   // a genuine network failure
     return;
   }
+  // THE PAYLOAD IS CHECKED, NOT TRUSTED. An error body has `error` and no `items`; indexing into
+  // it is what killed this page in production.
+  if (!d || d.error || !Array.isArray(d.items) || !Array.isArray(d.sources)) {
+    fail((d && (d.error || d.detail)) || 'the server returned a response this page cannot read');
+    return;
+  }
+  d.degraded = Array.isArray(d.degraded) ? d.degraded : [];
+  d.by_kind = d.by_kind || {};
   window._dqState.data = d;
 
   var head = '<div style="margin-bottom:14px">'
@@ -4212,19 +4228,31 @@ window.spendPage = async function spendPage() {
   var host = document.getElementById('content');
   host.innerHTML = '<p style="color:#888;padding:20px">Reading the spend ledger…</p>';
 
+  // A missing ledger must NOT render as $0.00 — that is the most expensive wrong answer this page
+  // could give, because it looks exactly like good news.
+  var fail = function (msg, detail) {
+    host.innerHTML = '<div class="card" style="border-left:4px solid #9A2B2A;background:#FFF5F5">'
+      + '<div class="card-title" style="color:#9A2B2A">Spend could not be read</div>'
+      + '<p style="font-size:13px;margin:6px 0 0">' + window.spEsc(msg) + '</p>'
+      + (detail ? '<p style="font-size:12px;color:#444;margin:4px 0 0">' + window.spEsc(detail) + '</p>' : '')
+      + '<p style="font-size:12px;color:var(--gray);margin:6px 0 0">This is not a spend of $0. '
+      + 'Nothing about what has been spent has been established.</p></div>';
+  };
+
   var d;
   try {
     d = await API('/spend?days=' + encodeURIComponent(window._spState.days));
   } catch (e) {
-    // A missing ledger must NOT render as $0.00 — that is the most expensive wrong answer this
-    // page could give, because it looks exactly like good news.
-    host.innerHTML = '<div class="card" style="border-left:4px solid #9A2B2A;background:#FFF5F5">'
-      + '<div class="card-title" style="color:#9A2B2A">Spend could not be read</div>'
-      + '<p style="font-size:13px;margin:6px 0 0">' + window.spEsc(e.message) + '</p>'
-      + '<p style="font-size:12px;color:var(--gray);margin:6px 0 0">This is not a spend of $0. '
-      + 'Nothing about what has been spent has been established.</p></div>';
+    fail(e && e.message ? e.message : String(e));   // a genuine network failure
     return;
   }
+  // CHECKED, NOT TRUSTED — see the note on API at the top of the decision queue page. A 503 for a
+  // ledger that has not been migrated arrives here as a normal value with no `total` on it.
+  if (!d || d.error || !d.total) {
+    fail((d && d.error) || 'the server returned a response this page cannot read', d && d.detail);
+    return;
+  }
+  d.by_agent = d.by_agent || []; d.by_model = d.by_model || []; d.by_day = d.by_day || [];
 
   var t = d.total;
   var pj = d.projection || {};

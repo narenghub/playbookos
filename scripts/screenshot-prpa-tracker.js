@@ -353,6 +353,83 @@ async function main() {
     await page.screenshot({ path: path.join(OUT, 'ai-spend.png'), fullPage: true });
     ok(`ai spend → ${path.join(OUT, 'ai-spend.png')}`);
 
+    // ── THE FAILURE PATH, WHICH IS THE ONE THAT BROKE ────────────────────────
+    //
+    // Both pages shipped green here and died in production on their FIRST load, because
+    // `window.API` is `fetch(...).then(r => r.json())` and does not throw on a non-2xx. A 503
+    // arrived as a normal value carrying `{ error, code }`, the try/catch never fired, and the
+    // renderer indexed into fields that were not there: "Cannot read properties of undefined
+    // (reading 'length')" and "(reading 'usd')".
+    //
+    // Every assertion above exercised the HAPPY path, which is exactly why none of them caught it.
+    // This substitutes an API that answers the way a real 503 does and asserts the pages render a
+    // failure rather than throwing — and, for spend, that the failure is not a confident $0.00.
+    const failModes = await page.evaluate(async () => {
+      // STUBBED AT `fetch`, NOT AT `window.API`. The first version of this check replaced
+      // window.API and changed nothing: API is a module-scoped `const` and the pages close over
+      // that binding, so both pages rendered real data and the check passed against the happy
+      // path it was written to avoid. The pages reach the network through the global `fetch`.
+      const realFetch = window.fetch;
+      const out = {};
+      const errors = [];
+      const onErr = (e) => errors.push(String(e.message || e));
+      window.addEventListener('error', onErr);
+      try {
+        // Exactly the shape src/api/*.routes.js returns on a 503: no items, no total.
+        window.fetch = async (url, init) => {
+          const u = String(url);
+          if (/\/api\/spend/.test(u)) {
+            return new Response(JSON.stringify({
+              error: 'the spend ledger has not been created yet — this is NOT a spend of $0',
+              code: 'ledger_missing', detail: 'run: node scripts/migrate-connectors.js',
+            }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+          }
+          if (/\/api\/decisions/.test(u)) {
+            return new Response(JSON.stringify({
+              error: '2 active companies exist and this system has no user-to-company mapping',
+              code: 'company_unresolved',
+            }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+          }
+          return realFetch(url, init);
+        };
+
+        await window.navigate('decisions');
+        await new Promise((r) => setTimeout(r, 600));
+        out.decisions = document.getElementById('content').innerText;
+
+        await window.navigate('spend');
+        await new Promise((r) => setTimeout(r, 600));
+        out.spend = document.getElementById('content').innerText;
+      } finally {
+        window.fetch = realFetch;
+        window.removeEventListener('error', onErr);
+      }
+      out.errors = errors;
+      return out;
+    });
+
+    if (!failModes.errors.length) ok('neither page throws when the API answers with an error body');
+    else bad(`${failModes.errors.length} error(s) thrown on the failure path`, failModes.errors.join(' | '));
+
+    if (/could not load/i.test(failModes.decisions)) ok('the decision queue renders the server error');
+    else bad('the decision queue did not render the error', failModes.decisions.slice(0, 200));
+    if (/not an empty queue/i.test(failModes.decisions)) {
+      ok('…and refuses to read as "nothing is waiting"');
+    } else bad('the failed decision queue does not say it is not empty');
+    if (/2 active companies/.test(failModes.decisions)) ok('…and shows the actual reason, not a generic message');
+    else bad('the server\'s reason was swallowed', failModes.decisions.slice(0, 200));
+
+    if (/could not be read/i.test(failModes.spend)) ok('the spend page renders the server error');
+    else bad('the spend page did not render the error', failModes.spend.slice(0, 200));
+    if (/not a spend of \$0/i.test(failModes.spend)) {
+      ok('…and refuses to read as $0.00, which would look like good news');
+    } else bad('the failed spend page does not deny a $0 reading');
+    if (/migrate-connectors/.test(failModes.spend)) ok('…and carries the detail that says how to fix it');
+    else bad('the fix detail was dropped', failModes.spend.slice(0, 200));
+
+    await page.screenshot({ path: path.join(OUT, 'failure-paths.png'), fullPage: true });
+    ok(`failure path → ${path.join(OUT, 'failure-paths.png')}`);
+
     if (failedRequests.length) {
       console.log('\n  failing requests:');
       for (const f of failedRequests) console.log(`      ${f}`);
