@@ -52,7 +52,16 @@
 const fs = require('fs');
 const path = require('path');
 
-const ROOT = path.join(__dirname, '..', 'src');
+// BOTH TREES. src/ is the application; scripts/ holds operator-run tools, and one of them —
+// verify-bounce-detection.js — genuinely transmits. CEO authorization 2026-11-10 item A: an
+// operator script is a sender like any other, and a kill switch is only worth something when it
+// is total. Scanning src/ alone was the same "coverage that shrinks as the code grows" this file
+// exists to prevent, one directory up.
+const ROOTS = [
+  { dir: path.join(__dirname, '..', 'src'), base: path.join(__dirname, '..') },
+  { dir: path.join(__dirname, '..', 'scripts'), base: path.join(__dirname, '..') },
+];
+const ROOT = ROOTS[0].dir;
 const EXIT_NOT_EXECUTED = 3;
 
 let pass = 0; let fail = 0;
@@ -97,6 +106,29 @@ function blankNonCode(src) {
   return out.join('');
 }
 
+// Comments only — STRING LITERALS ARE KEPT. Used where the thing being looked for IS a string
+// value, such as `capability: 'email.alert'`. blankNonCode would erase exactly that and leave a
+// check which can never match: a test that passes against a planted bypass, which is worse than
+// no test. (It did. The planted probe below went undetected until this was added.)
+function blankCommentsOnly(src) {
+  const out = src.split('');
+  let i = 0; const n = src.length;
+  const blank = (a, b) => { for (let k = a; k < b && k < n; k += 1) if (out[k] !== '\n') out[k] = ' '; };
+  while (i < n) {
+    const c = src[i]; const d = src[i + 1];
+    if (c === '/' && d === '/') { let j = i; while (j < n && src[j] !== '\n') j += 1; blank(i, j); i = j; continue; }
+    if (c === '/' && d === '*') { let j = i + 2; while (j < n && !(src[j] === '*' && src[j + 1] === '/')) j += 1; blank(i, Math.min(j + 2, n)); i = j + 2; continue; }
+    // Strings are SKIPPED OVER, not blanked — a `//` inside one is not a comment.
+    if (c === '"' || c === "'" || c === '`') {
+      const q = c; let j = i + 1;
+      while (j < n) { if (src[j] === '\\') { j += 2; continue; } if (src[j] === q) break; j += 1; }
+      i = j + 1; continue;
+    }
+    i += 1;
+  }
+  return out.join('');
+}
+
 // ── THE TRANSPORTS ──────────────────────────────────────────────────────────
 //
 // `where` matches the BLANKED source for a call shape; `label` is what a human reads. The Resend
@@ -125,8 +157,15 @@ const MAILER = /require\(\s*['"][^'"]*\/?mailer['"]\s*\)/;
 // An exception is a file that may name a transport without routing through the gate, and each one
 // states why. Absence from this map is not neutrality: an unlisted, ungated call site fails.
 const EXCEPTIONS = {
-  'lib/email-gate.js': 'the gate itself',
-  'lib/mailer.js': 'calls the gate directly; the Resend transport lives here',
+  'src/lib/email-gate.js': 'the gate itself',
+  'src/lib/mailer.js': 'calls the gate directly; the Resend transport lives here',
+  // The scanner and its controls necessarily contain the forbidden shapes — as STRING LITERALS,
+  // which the pre-pass blanks, so neither should appear as a call site at all. Listed anyway: if a
+  // refactor ever moves one of those fixtures out of a string and into live code, the exception
+  // makes that visible as a deliberate decision rather than letting it pass as a discovery.
+  'scripts/check-email-transport-coverage.js': 'the scanner; its patterns and controls are string fixtures',
+  'scripts/email-containment.test.js': 'the negative controls; planted senders are string fixtures',
+  'scripts/confirm-legacy-email-state.js': 'read-only state report; names the Resend URL in a string to locate it in source',
 };
 
 function walk(dir, out = []) {
@@ -142,12 +181,18 @@ function walk(dir, out = []) {
  * Every transport call site under src/, with its governance state.
  * Exported so the test file can reuse the discovery rather than re-implement it.
  */
-function discover(root = ROOT) {
+function discover(roots = ROOTS) {
+  // A bare path is accepted so the negative controls can scan a planted temporary tree.
+  const list = typeof roots === 'string'
+    ? [{ dir: roots, base: path.join(roots, '..') }]
+    : roots;
   const sites = [];
-  for (const file of walk(root)) {
+  for (const { dir, base } of list) {
+    if (!fs.existsSync(dir)) continue;
+    for (const file of walk(dir)) {
     const raw = fs.readFileSync(file, 'utf8');
     const code = blankNonCode(raw);
-    const rel = path.relative(path.join(root, '..'), file);
+    const rel = path.relative(base, file);
     const gated = code.includes(GATE) || MAILER.test(code);
     for (const t of TRANSPORTS) {
       t.re.lastIndex = 0;
@@ -163,18 +208,22 @@ function discover(root = ROOT) {
         });
       }
     }
+    }
   }
   return sites;
 }
 
 function main() {
-  if (!fs.existsSync(ROOT)) {
-    console.log('src/ not found — the scan did not execute.');
-    process.exit(EXIT_NOT_EXECUTED);
+  for (const { dir } of ROOTS) {
+    if (!fs.existsSync(dir)) {
+      console.log(`${dir} not found — the scan did not execute.`);
+      process.exit(EXIT_NOT_EXECUTED);
+    }
   }
 
   const sites = discover();
-  console.log(`\n  ${sites.length} outbound email transport call site(s) discovered under src/\n`);
+  console.log(`\n  ${sites.length} outbound email transport call site(s) discovered `
+    + `across src/ and scripts/\n`);
   for (const s of sites) {
     const state = s.exception ? `EXCEPTION — ${s.exception}` : (s.gated ? 'gated' : 'UNGATED');
     console.log(`    ${s.file}:${s.line}  ${s.label}  →  ${state}`);
@@ -208,6 +257,11 @@ function main() {
     }
   }
 
+  // The walk must actually reach the second tree. A `discover()` that silently scanned only src/
+  // would report every script as compliant by never looking at one.
+  if (sites.some((s) => s.file.startsWith('scripts/'))) ok('the scan reaches scripts/, not only src/');
+  else bad('no call site found under scripts/ — the second tree is not being walked');
+
   const ungated = sites.filter((s) => !s.gated && !s.exception);
   if (!ungated.length) {
     ok('every discovered transport is gated or an explicit exception');
@@ -228,6 +282,6 @@ function main() {
   process.exit(0);
 }
 
-module.exports = { discover, blankNonCode, TRANSPORTS, EXCEPTIONS, GATE };
+module.exports = { discover, blankNonCode, blankCommentsOnly, TRANSPORTS, EXCEPTIONS, GATE, ROOTS };
 
 if (require.main === module) main();

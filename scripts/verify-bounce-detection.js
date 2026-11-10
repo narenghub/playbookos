@@ -32,6 +32,12 @@
 'use strict';
 
 const crypto = require('crypto');
+const { assertSendAllowed } = require('../src/lib/email-gate');
+
+// Distinct from 0 (proven) and 1 (failed): the probe was REFUSED by policy and never ran. A
+// refusal reported as a pass would say the bounce gate is proven when nothing was tested, and
+// reported as a failure would say the detector is broken when it was never exercised.
+const EXIT_REFUSED_BY_POLICY = 3;
 const { initDB, query } = require('../src/lib/db');
 const { gmailClientFor } = require('../src/lib/gmail/client');
 const { buildMessage } = require('../src/lib/gmail/message');
@@ -79,6 +85,32 @@ async function main() {
     const g = await gmailClientFor(FROM);
     if (g.error) { bad('authorise', g.error); return; }
     ok(`authorised as ${g.profile.emailAddress} (${g.scopeSet})`);
+
+    // ── THE KILL SWITCH, BEFORE ANYTHING AT ALL ──────────────────────────
+    //
+    // This script TRANSMITS. It is operator-run rather than a cron, and --execute is required, but
+    // neither of those is the kill switch: a global `email.send` STOP exists precisely so that ONE
+    // instruction halts every outbound path, and an operator script that ignores it is a hole in a
+    // control only worth anything when it is total. CEO authorization 2026-11-10 item A.
+    //
+    // CHECKED BEFORE THE FIXTURE INSERT, not beside the send. A refusal after the insert would
+    // leave an outreach_sends row behind for a probe that never happened — cleanup exists, but the
+    // cheapest way not to leak a fixture is not to create one. Nothing has been written at this
+    // point, so the early return is clean.
+    //
+    // Scoped as its own workflow so a deliberate probe can be permitted while campaigns stay
+    // contained — and refused by a global or capability stop regardless of that.
+    const gate = await assertSendAllowed({
+      capability: 'email.send', workflow: 'bounce-probe', agent: 'verify-bounce-detection',
+      to: target,
+    });
+    if (!gate.allowed) {
+      say(`\n  REFUSED  ${gate.reason}`);
+      say('\n  Nothing was sent and no fixture was written. This is not a failure of the bounce');
+      say('  detector — it is the kill switch doing its job. Lift the stop deliberately if the');
+      say('  probe is wanted. A verification that bypasses the brake verifies nothing.\n');
+      process.exit(EXIT_REFUSED_BY_POLICY);
+    }
 
     // ── THE FIXTURE ────
     // scan-bounces only records a failure for an address in outreach_sends — a bounce naming

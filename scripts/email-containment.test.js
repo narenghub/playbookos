@@ -300,3 +300,133 @@ test('the live repository has no ungated transport', async () => {
   assert.ok(transports.has('gmail.messages.send'), 'the Gmail transport vanished from discovery');
   assert.ok(transports.has('resend.http'), 'the Resend transport vanished from discovery');
 });
+
+// ── B. THE ALERT INTERFACE — FORGERY, BODY, RECIPIENT, BYPASS ───────────────
+//
+// CEO authorization 2026-11-10 item B. A recipient allowlist alone was not enough: it still let a
+// caller put ANY BODY in front of an operator under an exemption that bypasses a hold. So the
+// content is not the caller's either — the interface takes a TYPE and FIELDS and renders the rest.
+
+const ALERTS = require('../src/lib/alerts');
+const MAILER = require('../src/lib/mailer');
+
+test('B1. a forged alert capability is DOWNGRADED, not honoured', async () => {
+  // The general path accepts `capability` as an ordinary parameter. It must never grant the
+  // exemption on the strength of that label.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'mailer.js'), 'utf8');
+  assert.match(src, /capability === 'email\.alert' \? 'email\.send' : capability/,
+    'sendEmailDetailed no longer downgrades a caller-supplied email.alert');
+
+  // And behaviourally: the gate is asked for email.send, so a global stop refuses it.
+  const r = await GATE.assertSendAllowed(
+    { capability: 'email.send', to: 'ops@abiozen.com' },
+    { autonomy: fakeAutonomy([{ scope_type: 'global', scope_key: null, reason: 'hold' }]), env: ENV });
+  assert.strictEqual(r.allowed, false,
+    'a downgraded alert was still treated as non-consequential');
+});
+
+test('B2. the alert interface accepts NO arbitrary body, recipient or subject', async () => {
+  // Not "validates" — ABSENT. A caller cannot express the dangerous message, so there is nothing
+  // to validate and nothing to get wrong later.
+  const built = ALERTS.buildAlert({
+    type: 'cron_failure',
+    fields: { cronName: '<img src=x onerror=alert(1)>', errMsg: 'boom' },
+    // These are not parameters. If they ever become parameters, the assertions below fail.
+    to: 'attacker@example.com', html: '<h1>pay this invoice</h1>', subject: 'Invoice due',
+  }, { env: ENV });
+
+  assert.strictEqual(built.ok, true);
+  assert.deepStrictEqual(built.message.to, ['ops@abiozen.com', 'naren@abiozen.com'],
+    'the recipient came from the caller rather than from the environment');
+  assert.doesNotMatch(built.message.html, /pay this invoice/, 'caller HTML reached the body');
+  assert.doesNotMatch(built.message.subject, /Invoice due/, 'caller subject was used');
+  assert.match(built.message.subject, /Cron failed/);
+  // Fields are escaped with no opt-out.
+  assert.doesNotMatch(built.message.html, /<img src=x/, 'a field was interpolated unescaped');
+  assert.match(built.message.html, /&lt;img src=x/);
+});
+
+test('B3. an unknown alert type is refused — alerts are a fixed set, not a label', () => {
+  const r = ALERTS.buildAlert({ type: 'invoice', fields: {} }, { env: ENV });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /unknown alert type/);
+});
+
+test('B4. with no operator address configured, no alert is sent to a guess', () => {
+  const r = ALERTS.buildAlert({ type: 'cron_failure', fields: {} }, { env: {} });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /no ALERT_EMAIL or ADMIN_EMAIL/);
+});
+
+test('B5. an alert type cannot be used as an unbounded channel', () => {
+  // The exemption from the kill switch is also an exemption from the thing that would stop a loop.
+  const env = { ALERT_EMAIL: 'ops@abiozen.com' };
+  const max = ALERTS.ALERT_TYPES.send_failure.max;
+  let lastOk = 0; let refused = null;
+  for (let i = 0; i < max + 5; i += 1) {
+    const r = ALERTS.buildAlert({ type: 'send_failure', fields: { context: 'x' } }, { env });
+    if (r.ok) lastOk = i + 1; else { refused = r.error; break; }
+  }
+  assert.strictEqual(lastOk, max, `expected exactly ${max} to pass, got ${lastOk}`);
+  assert.match(refused || '', /daily ceiling/);
+  ALERTS._sentToday.clear();
+});
+
+test('B6. the ONLY code that sets email.alert is the privileged path in mailer.js', async () => {
+  // Direct transport bypass: anything else reaching the provider with the exempt capability.
+  const roots = [path.join(__dirname, '..', 'src'), path.join(__dirname, '..', 'scripts')];
+  const offenders = [];
+  const walkAll = (dir, out = []) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walkAll(p, out);
+      else if (e.name.endsWith('.js') && !e.name.endsWith('.test.js')) out.push(p);
+    }
+    return out;
+  };
+  for (const root of roots) {
+    for (const file of walkAll(root)) {
+      const rel = path.relative(path.join(__dirname, '..'), file);
+      if (rel === 'src/lib/mailer.js' || rel === 'src/lib/email-gate.js' || rel === 'src/lib/alerts.js') continue;
+      // COMMENTS ONLY. blankNonCode also erases string literals — and the thing being looked for
+      // IS a string literal, so this check matched nothing and passed against a planted bypass.
+      // Verified by planting one: with blankNonCode it went undetected; with this it is caught.
+      const code = COVERAGE.blankCommentsOnly(fs.readFileSync(file, 'utf8'));
+      if (/capability\s*:\s*['"]email\.alert['"]/.test(code)) offenders.push(rel);
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    `these files name the exempt capability in live code: ${offenders.join(', ')}. `
+    + 'Operator alerts go through sendOperatorAlert(), which takes a type and fields.');
+
+  // NEGATIVE CONTROL. The assertion above is only worth something if the matcher can fire.
+  const planted = COVERAGE.blankCommentsOnly([
+    "// capability: 'email.alert' described in prose",
+    "const x = { capability: 'email.alert' };",
+  ].join('\n'));
+  const hits = (planted.match(/capability\s*:\s*['"]email\.alert['"]/g) || []).length;
+  assert.strictEqual(hits, 1,
+    `the matcher found ${hits} in the control, expected exactly 1 — prose must not count and live code must`);
+});
+
+test('B7. a genuine alert still reaches the operator under a GLOBAL stop', async () => {
+  // The whole reason the exemption exists. If hardening it silenced the oversight channel, the
+  // fix would have re-created the outage it protects against.
+  const r = await GATE.assertSendAllowed({ capability: 'email.alert', to: ['ops@abiozen.com'] },
+    { autonomy: fakeAutonomy([{ scope_type: 'global', scope_key: null, reason: 'hold' }]), env: ENV });
+  assert.strictEqual(r.allowed, true);
+  assert.strictEqual(r.exempt, true);
+});
+
+test('B8. the privileged path exists and takes no content parameters', () => {
+  assert.strictEqual(typeof MAILER.sendOperatorAlert, 'function');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'mailer.js'), 'utf8');
+  const fn = src.slice(src.indexOf('async function sendOperatorAlert'));
+  const sig = fn.slice(0, fn.indexOf(')') + 1);
+  for (const forbidden of ['html', 'subject', 'to', 'capability']) {
+    assert.ok(!new RegExp(`\\b${forbidden}\\b`).test(sig),
+      `sendOperatorAlert accepts '${forbidden}' — the content must not be the caller's`);
+  }
+  assert.match(sig, /type/);
+  assert.match(sig, /fields/);
+});

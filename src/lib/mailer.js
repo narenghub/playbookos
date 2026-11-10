@@ -128,7 +128,7 @@ function encodeAttachments(attachments) {
 // behaves exactly as before, so this adds precision without moving anything that already worked:
 // an undeclared send is still covered by the capability and global scopes.
 async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments,
-  capability = 'email.send', workflow = null, agent = null }) {
+  capability = 'email.send', workflow = null, agent = null }, internal = {}) {
   // ── THE KILL SWITCH, BEFORE THE PROVIDER CALL ────────────────────────────
   //
   // Placed here rather than at each of the ~37 routes and 37 crons that can cause an email, so
@@ -167,7 +167,26 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // the recipient is an operator address, so an ordinary message cannot relabel itself as an alert
   // and transmit through a global stop. That was previously true only of the one caller that used
   // it, and enforced nowhere.
-  const gate = await assertSendAllowed({ capability, workflow, agent, to });
+  // ── THE EXEMPTION CANNOT BE REQUESTED ────────────────────────────────────
+  //
+  // A caller-supplied `email.alert` is DOWNGRADED here, every time, with no way to opt out. The
+  // capability was an ordinary parameter, so any code in this repository could pass it with an
+  // arbitrary recipient and arbitrary HTML and transmit straight through a CEO hold. It was
+  // documented as narrow and enforced nowhere.
+  //
+  // The exemption is now reachable only through sendOperatorAlert() below, which takes a TYPE and
+  // FIELDS — no `to`, no `html`, no `subject`, no `capability`. A caller cannot express the
+  // dangerous message, so there is nothing to validate. CEO authorization 2026-11-10 item B.
+  const effectiveCapability = capability === 'email.alert' ? 'email.send' : capability;
+  if (effectiveCapability !== capability) {
+    console.warn(`[email] a caller requested capability '${capability}' directly; downgraded to `
+      + `'email.send'. Operator alerts go through sendOperatorAlert().`);
+  }
+  // transmitAlert has ALREADY passed the gate as 'email.alert' and built the message itself. Not a
+  // bypass: it is the same decision, taken once, by the one path that is allowed to take it.
+  const gate = internal.alertAlreadyAuthorized
+    ? { allowed: true, reason: null }
+    : await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to });
   if (!gate.allowed) {
     console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${gate.reason}`);
     // The record is what distinguishes a policy stop from an ordinary send failure — the return
@@ -272,5 +291,49 @@ async function sendEmailOrReport(opts, context) {
   return r.ok;
 }
 
+
+// ── THE ONE PRIVILEGED PATH ──────────────────────────────────────────────────
+//
+// It takes a TYPE from a fixed set and a bag of FIELDS. Everything that makes a message dangerous
+// — recipient, subject, body — is constructed by src/lib/alerts.js from a template it owns, with
+// every field escaped. There is no parameter through which a caller can put chosen content in
+// front of an operator under an exemption that bypasses a hold.
+//
+// It calls the transport directly rather than going through sendEmailDetailed, because that
+// function now downgrades `email.alert` unconditionally — which is the point, and would silence
+// this path too.
+async function sendOperatorAlert({ type, fields = {} }, deps = {}) {
+  const ALERTS = deps.alerts || require('./alerts');
+  const built = ALERTS.buildAlert({ type, fields }, { env: deps.env || process.env });
+  if (!built.ok) {
+    console.error(`[ALERT NOT SENT] ${type}: ${built.error}`);
+    return { ok: false, id: null, error: built.error, phase: 'refused_before_request',
+      providerResponded: false };
+  }
+  // Non-consequential by construction, not by request: this is the one call site in the repository
+  // that passes 'email.alert', and the content it carries was built above rather than supplied.
+  return transmitAlert(built.message);
+}
+
+// Separated so the alert path cannot be reached by passing a capability, and so the downgrade in
+// sendEmailDetailed cannot swallow it. Everything else about a send — the provider, the log, the
+// result shape — is shared.
+async function transmitAlert({ to, subject, html }) {
+  const gate = await assertSendAllowed({ capability: 'email.alert', to });
+  if (!gate.allowed) {
+    // A deliberate `capability:email.alert` stop still silences alerts. The exemption is from a
+    // GLOBAL hold, not from oversight of the alert channel itself.
+    console.warn(`[STOPPED_BY_POLICY] operator alert: ${gate.reason}`);
+    try { await logEmail({ to: String(to), subject, status: 'stopped_by_policy', errorMessage: gate.reason }); } catch (_) {}
+    return { ok: false, id: null, error: gate.reason, stopped: true, phase: 'stopped_by_policy',
+      providerResponded: false };
+  }
+  // The provider call, the email_log row and the result shape are shared with every other send —
+  // duplicating them here would be a second, quieter mailer. `__alertAlreadyAuthorized` is a
+  // SECOND POSITIONAL ARGUMENT: sendEmailDetailed's public contract is a single options object, so
+  // no existing caller can reach it by adding a property, and the gate above has already run.
+  return sendEmailDetailed({ to, subject, html }, { alertAlreadyAuthorized: true });
+}
+
 module.exports = { sendEmail, sendEmailDetailed, sendEmailOrReport, encodeAttachments, MAX_ATTACH_BYTES,
-                   defaultFrom, DEFAULT_FROM, alertSendFailure };
+                   defaultFrom, DEFAULT_FROM, alertSendFailure, sendOperatorAlert };

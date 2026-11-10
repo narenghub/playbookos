@@ -1,4 +1,4 @@
-const { sendEmail } = require('./mailer');
+const { sendOperatorAlert } = require('./mailer');
 
 // Wraps a cron callback so thrown exceptions trigger an alert email
 // to ALERT_EMAIL (fallback ADMIN_EMAIL) and never bubble. Phase 1 only
@@ -122,7 +122,15 @@ async function sendCronAlert(cronName, err) {
   // named failure in the log can be found, and a dropped boolean cannot.
   // capability 'email.alert' — observability, not autonomy. See the exemption note in mailer.js: a
   // stop on outbound business email must not silence the channel that reports a cron failing.
-  const ok = await sendEmail({ to, subject, html, capability: 'email.alert' });
+  // THROUGH THE ALERT INTERFACE, not by asking for the capability. `capability: 'email.alert'` is
+  // downgraded for every caller now — the exemption cannot be requested, only reached through
+  // sendOperatorAlert, which builds the recipient, subject and body from a fixed template so no
+  // caller can put chosen content in front of an operator under a hold.
+  const r = await sendOperatorAlert({
+    type: 'cron_failure',
+    fields: { cronName, startedAt, errClass, errMsg, stack },
+  });
+  const ok = r.ok;
   if (ok === false) {
     throw new Error(`alert email for "${cronName}" was refused by the mail provider — `
       + `the cron failure itself is above this line and reached nobody`);

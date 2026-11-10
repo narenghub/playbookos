@@ -15,8 +15,17 @@ let sendResult = true;
 const sent = [];
 Module._load = function patched(request, parent, isMain) {
   if (request === './mailer' || /\/mailer$/.test(request)) {
+    // sendOperatorAlert, NOT sendEmail. The alert path no longer asks for the exempt capability —
+    // it cannot be requested at all now — and goes through the one interface that builds the
+    // recipient, subject and body itself from a fixed template. The stub matches that contract:
+    // it takes { type, fields } and returns the mailer's result object, not a boolean.
     return {
-      sendEmail: async (opts) => { sent.push(opts); return sendResult; },
+      sendOperatorAlert: async (opts) => {
+        sent.push(opts);
+        return sendResult
+          ? { ok: true, id: 'stub-alert', error: null }
+          : { ok: false, id: null, error: 'refused by stub' };
+      },
     };
   }
   return realLoad(request, parent, isMain);
@@ -130,10 +139,17 @@ T('an UNKNOWN kill-state halts the cron AND alerts, because nobody chose it', as
   } finally { console.warn = realWarn; }
 
   assert.equal(ran, 0, 'the cron body ran with the brakes in unknown condition');
-  assert.ok(sent.some((m) => /HALTED — kill-state unknown/.test(m.subject)),
-    `no alert was sent for an unknown kill-state. sent: ${JSON.stringify(sent.map((m) => m.subject))}`);
-  assert.ok(sent.every((m) => m.capability === 'email.alert'),
-    'the alert must use the email.alert capability, or a stop on outbound email would silence it');
+  // THE SHAPE CHANGED, AND THE ASSERTION FOLLOWED IT. The alert path used to hand the mailer a
+  // subject and a `capability: 'email.alert'`. Both are gone from the caller: the exemption can no
+  // longer be REQUESTED, and the subject is rendered from a fixed template, so a caller cannot put
+  // chosen content in front of an operator under a hold. What the caller still supplies — and all
+  // it supplies — is the type and the fields.
+  assert.ok(sent.some((m) => /HALTED — kill-state unknown/.test(m.fields && m.fields.cronName)),
+    `no alert was sent for an unknown kill-state. sent: ${JSON.stringify(sent.map((m) => m && m.fields))}`);
+  assert.ok(sent.every((m) => m.type === 'cron_failure'),
+    'the alert did not go through the one interface that may set the exempt capability');
+  assert.ok(sent.every((m) => !('capability' in m) && !('to' in m) && !('html' in m)),
+    'the caller is supplying capability, recipient or body again — that is the bypass this closed');
   assert.ok(warns.some((l) => /\[STOPPED_BY_POLICY\] failing-job/.test(l)), warns.join('\n'));
 });
 
