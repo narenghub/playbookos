@@ -211,7 +211,19 @@ function nextTuesday9amChicago(now = new Date()) {
     // The mail path must CONSULT the scope, not merely have one defined. A recognized scope that
     // no send path declares is a stop nobody is subject to.
     const mailSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'mailer.js'), 'utf8');
-    const forwards = /\.\.\.\(workflow \? \{ workflow \} : \{\}\)/.test(mailSrc);
+    // THE CHAIN IS NOW TWO FILES, AND BOTH LINKS ARE CHECKED.
+    //
+    // The kill-switch decision moved out of mailer.js into src/lib/email-gate.js so that all four
+    // transports — Resend, the two Gmail crons and the bounce probe — share ONE authorization road
+    // instead of mailer's callers being the only governed ones. This assertion looked for the
+    // forwarding spread inside mailer.js and reported "NO" against a deploy where the scope is
+    // forwarded correctly, one file further down.
+    //
+    // That false alarm is as dangerous as a silent check: it is the evidence for the C gate, and a
+    // checker that cries wolf is one somebody learns to overrule.
+    const gateSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'email-gate.js'), 'utf8');
+    const handsOff = /assertSendAllowed\(\{[^}]*\bworkflow\b/.test(mailSrc);
+    const forwards = handsOff && /\.\.\.\(workflow \? \{ workflow \} : \{\}\)/.test(gateSrc);
     const declaresInq = new RegExp(`workflow: '${INQ_WF}'`).test(inqSrc);
     const declaresRfq = new RegExp(`workflow: '${RFQ_WF}'`).test(agentSrc);
     field('mailer forwards workflow', forwards ? 'yes' : 'NO');
@@ -242,10 +254,28 @@ function nextTuesday9amChicago(now = new Date()) {
 
     // Provider invocation must be downstream of that decision. Asserted on the deployed source:
     // the kill-switch block appears before the fetch to the provider.
-    const killAt = mailSrc.indexOf('const blocked = await checkStopped(');
-    const fetchAt = mailSrc.indexOf("fetch('https://api.resend.com/emails'");
+    // BOTH ANCHORS MOVED, AND REPORTED -1 / -1 — the check could locate neither the decision nor
+    // the provider call and concluded the ordering was unproven, on a deploy where it holds.
+    //
+    //   the decision   is now `await assertSendAllowed(...)` in mailer.js, which calls
+    //                  checkStopped inside email-gate.js
+    //   the fetch      now names RESEND_EMAILS_URL instead of the literal URL, because the
+    //                  transport-coverage scanner blanks string literals before matching and the
+    //                  oldest, best-governed transport in the repository was invisible to it
+    //
+    // An index of -1 is "not found", and -1 < -1 is false, so the ordering test failed closed —
+    // correct behaviour, wrong conclusion. Anchors that can go stale are now asserted to EXIST
+    // before their order is compared, so "moved" cannot be reported as "unsafe".
+    const killAt = mailSrc.indexOf('await assertSendAllowed(');
+    const fetchAt = mailSrc.indexOf('fetch(RESEND_EMAILS_URL');
+    const gateChecks = gateSrc.indexOf('await checkStopped(');
     field('kill check / provider call', `${killAt} / ${fetchAt}`);
-    if (killAt > -1 && fetchAt > -1 && killAt < fetchAt) {
+    if (killAt === -1 || fetchAt === -1 || gateChecks === -1) {
+      bad('this check could not locate the kill-switch decision or the provider call in the '
+        + 'deployed source — the ANCHORS are stale, which says nothing about whether the ordering '
+        + 'holds. Fix this check before drawing a conclusion from it.',
+        `assertSendAllowed=${killAt} fetch=${fetchAt} checkStopped(in gate)=${gateChecks}`);
+    } else if (killAt < fetchAt) {
       ok('the provider call is DOWNSTREAM of the kill-switch decision');
     } else bad('the provider call is not provably downstream of the kill switch');
 

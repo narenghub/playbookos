@@ -141,8 +141,12 @@ const TRANSPORTS = [
     re: /\.users\s*\.\s*drafts\s*\.\s*send\s*\(/g },
   { key: 'resend.sdk', label: 'Resend SDK emails.send',
     re: /\.emails\s*\.\s*send\s*\(/g },
+  // THE CALL FORM ONLY. A bare `RESEND_EMAILS_URL` also matched the constant's DECLARATION, which
+  // is not a transmission — it reported mailer.js:9 as a call site and, because the declaration
+  // sits above the gate, made the ordering check fail on a file where the ordering is correct.
+  // A pattern loose enough to match a definition is a pattern that will mis-locate a call.
   { key: 'resend.http', label: 'Resend HTTP POST /emails',
-    re: /RESEND_EMAILS_URL|fetch\s*\(\s*RESEND/g },
+    re: /fetch\s*\(\s*RESEND_EMAILS_URL/g },
   { key: 'nodemailer', label: 'nodemailer transport.sendMail',
     re: /\.sendMail\s*\(|createTransport\s*\(/g },
 ];
@@ -261,6 +265,28 @@ function main() {
   // would report every script as compliant by never looking at one.
   if (sites.some((s) => s.file.startsWith('scripts/'))) ok('the scan reaches scripts/, not only src/');
   else bad('no call site found under scripts/ — the second tree is not being walked');
+
+  // ── THE GATE MUST COME FIRST, NOT MERELY EXIST ─────────────────────────────
+  //
+  // A file can import the gate, call it, and still reach the provider on a path that does not pass
+  // through it. `gated` above only establishes that the file knows about the gate.
+  //
+  // This also closes a gap the S1 deployment exposed. scripts/confirm-legacy-email-state.js — a
+  // PRODUCTION-ONLY verifier, not run by preflight — held two string anchors into mailer.js to
+  // prove this same ordering. Both moved in S1, it reported `-1 / -1`, and it concluded the
+  // ordering was unproven on a deploy where it holds. Preflight was 93/93 green throughout,
+  // because nothing locally exercised that assumption. Asserting the invariant HERE means the next
+  // move of those anchors goes red on a laptop rather than in a production evidence run.
+  for (const file of new Set(sites.filter((x) => x.gated).map((x) => x.file))) {
+    const code = blankNonCode(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'));
+    const gateAt = code.indexOf(`${GATE}(`);
+    const firstCall = Math.min(...TRANSPORTS.map((t) => {
+      t.re.lastIndex = 0; const m = t.re.exec(code); return m ? m.index : Number.MAX_SAFE_INTEGER;
+    }));
+    if (gateAt === -1) { bad(`${file} is marked gated but does not call ${GATE}()`); continue; }
+    if (gateAt < firstCall) ok(`${file}: the gate precedes the provider call`);
+    else bad(`${file}: a provider call appears BEFORE the gate — the gate is present but not first`);
+  }
 
   const ungated = sites.filter((s) => !s.gated && !s.exception);
   if (!ungated.length) {

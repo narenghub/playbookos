@@ -59,7 +59,16 @@ One file, several inline `<script>` blocks, no build step. It is the whole front
 
 ## Verifying against production
 
-`railway ssh 'node scripts/<name>.js'`. The live `verify-*.js` scripts are self-cleaning: they create
+`railway ssh --service playbookos 'node /app/scripts/<name>.js'`.
+
+**`--service` IS NOT OPTIONAL.** This line used to omit it. The CLI's linked service in this project
+is **Postgres**, so a bare `railway ssh` opens a shell in the database container — where there is no
+`node` and no `/app`, and the error is `node: command not found`. That reads as a broken deploy and
+is nothing of the kind. On 2026-11-10 it cost a round of debugging before the PATH
+(`/usr/lib/postgresql/18/bin`, no `/app`) gave it away. Use the absolute script path too: the
+`verify-*` scripts resolve `require('../src/lib/...')` relative to themselves.
+
+The live `verify-*.js` scripts are self-cleaning: they create
 fixtures, assert, delete in a `finally`, and report leaks. They all exit non-zero on failure.
 
 ## Verification cleanup — delete only what you created, by id
