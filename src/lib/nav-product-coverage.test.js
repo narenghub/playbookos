@@ -148,7 +148,33 @@ test('a gated nav item is gated in NAV_PAGE_REQS, not left to fail open', () => 
     'dashboard', 'apollo-outreach', 'ai-insights', 'team', 'settings', 'performance',
     'employee-activity', 'decision-engine', 'data-pipeline', 'execution-graph',
   ]);
-  const ungated = navIds.filter((id) => !REQS[id] && !OPEN_BY_DESIGN.has(id));
+  // ── A STRONGER GATE THAN A TIER, AND WHY IT COUNTS AS GATED ────────────────
+  //
+  // passesPageReads opens with an admin-only list for pages NO section's `access` can express:
+  // every family list containing an admin also contains directors, and there is no admin-only
+  // section but Platform (super_admin). A page named there is closed to every role but admin and
+  // super_admin — tighter than any NAV_PAGE_REQS entry, and it does not fail open at all.
+  //
+  // THE EXEMPTION IS READ FROM THE GATE ITSELF, not listed by hand. A hand-written exemption set is
+  // a claim that something is gated elsewhere, and a claim is exactly what stops being true: delete
+  // the gate and a hand-written entry here would keep the page exempt while it failed open to three
+  // directors. This reads the page list out of the function, so removing the gate removes the
+  // exemption in the same stroke.
+  const gateFn = HTML.slice(HTML.indexOf('function passesPageReads(pageId, role, tiers) {'));
+  const gateBody = gateFn.slice(0, gateFn.indexOf('\n}\n'));
+  const gateMatch = gateBody.match(/if \(\[([^\]]*)\]\.indexOf\(pageId\) !== -1\) return role === 'admin'/);
+  const ADMIN_ONLY = new Set(gateMatch ? [...gateMatch[1].matchAll(/'([^']+)'/g)].map((m) => m[1]) : []);
+
+  // And it must sit BEFORE the admin short-circuit, or it narrows nothing for the roles it names —
+  // in which case it is not a gate and must not earn an exemption.
+  if (ADMIN_ONLY.size) {
+    const sc = gateBody.indexOf("role === 'admin' || role === 'super_admin') return true");
+    assert.ok(gateBody.indexOf(gateMatch[0]) < sc,
+      'the admin-only gate runs after the admin short-circuit, so the pages it names are not '
+      + `actually gated: ${[...ADMIN_ONLY].join(', ')}`);
+  }
+
+  const ungated = navIds.filter((id) => !REQS[id] && !OPEN_BY_DESIGN.has(id) && !ADMIN_ONLY.has(id));
   assert.deepStrictEqual(ungated, [],
     'nav items with no tier requirement, so they fail OPEN to anyone holding the section: ' +
     ungated.join(', '));

@@ -997,6 +997,10 @@ const NAV_SECTIONS = [
   {title:'EXECUTIVE', access:['admin','director'], items:[
     {id:'command-center', label:'Command Center', icon:'🎯'},
     {id:'dashboard', label:'Dashboard', icon:'📊'},
+    // NOT FIRST, deliberately. firstNavPage() returns the first visible item of the first
+    // visible section, so putting a page at the top of EXECUTIVE changes where every admin
+    // LANDS. Placed here it is one click away and the landing page is unchanged.
+    {id:'decisions', label:'Decision Queue', icon:'🔔'},
     {id:'performance', label:'Performance', icon:'🏆'},
   ]},
   {title:'REVENUE', access:['admin','sales'], items:[
@@ -1147,6 +1151,25 @@ function roleCanRead(tiers, tier) {
 }
 // Does the role pass every implied read of the page? (the intra-section page filter)
 function passesPageReads(pageId, role, tiers) {
+  // ── PAGES NO SECTION CAN EXPRESS ──────────────────────────────────────────────
+  // Every section's `access` is a FAMILY list, and the narrowest family containing an admin also
+  // contains directors — there is no admin-only section but Platform, which is super_admin. The
+  // decision queue aggregates across tiers by construction (a federal notice, a buyer inquiry, a
+  // performance escalation), so its route is adminOnly; drawing it for a director would be a nav
+  // entry whose only outcome is a 403, and widening the route to match the section would be a new
+  // cross-tier read path dressed up as a dashboard.
+  //
+  // DECLARED INSIDE THIS FUNCTION ON PURPOSE. It was a module-level `const NAV_ADMIN_ONLY` first,
+  // and FIVE separate harnesses sandbox the nav by grabbing a hand-written list of declarations out
+  // of this file — verify-classic-nav-parity.js, nav-model, nav-degradation, nav-product-coverage
+  // and partner-role. Every one of them threw ReferenceError, and the next harness written would
+  // have too. Living in the function body, the rule travels with the function all of them already
+  // grab, and cannot be sandboxed without it.
+  //
+  // CHECKED FIRST, before the admin short-circuit below. A narrowing rule placed after it still
+  // works for admins and silently does nothing for everybody else — the entire population it exists
+  // to narrow. It fails closed for every role not named here.
+  if (['decisions'].indexOf(pageId) !== -1) return role === 'admin' || role === 'super_admin';
   if (role === 'admin' || role === 'super_admin') return true; // admins pass every read
   const reqs = NAV_PAGE_REQS[pageId];
   if (!reqs) return true;                 // no tier-gated implied reads -> always passes
@@ -1172,7 +1195,7 @@ function passesPageReads(pageId, role, tiers) {
 // platform + me are NOT products: they render to the right of the product tabs, separated.
 const PRODUCTS = [
   { key:'abiozen',  label:'Abiozen',  icon:'🧪', kind:'product',
-    pages:['command-center','dashboard','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command','prpa-tracker'] },
+    pages:['command-center','dashboard','decisions','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command','prpa-tracker'] },
   { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
   { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
   { key:'linkabl',  label:'Linkabl',  icon:'🧑‍💼', kind:'product', pages:['prospects'] },
@@ -1909,7 +1932,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','prpa-tracker':'Federal Contracts','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {decisions:'Decision Queue',dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','prpa-tracker':'Federal Contracts','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -3934,6 +3957,188 @@ pm2 startup</pre>
 pages['outreach'] = outreachPage;
 pages['prpa-command'] = window.prpaCommandPage;
 pages['prpa-tracker'] = window.prpaTrackerPage;
+
+// ── THE DECISION QUEUE PAGE ───────────────────────────────────────────────────
+//
+// One screen for everything waiting on a person, from seven stores. GET /api/decisions only —
+// there is no action on this page and that is deliberate: every row carries `where`, naming the
+// page that owns its decision, and the button navigates there. The approval gate, the email HOLD
+// and the capability STOPs all sit on those pages. A decide button here would be a second door
+// into guards that several incidents paid for.
+//
+// ── THE DEGRADATION BANNER IS THE MOST IMPORTANT THING ON THE SCREEN ─────────
+//
+// This is the page a person opens to find out whether they are clear. If a store is unreadable its
+// rows are missing, the list is SHORTER, and nothing about a short list invites a second look. So
+// `complete: false` renders a loud red banner naming every source that failed, and the headline
+// the API computes explicitly refuses to say "you are clear" when it does not know.
+// `window.API` returns parsed JSON; a 503 from the route (schema or company missing) throws, and
+// the catch below shows the reason rather than an empty queue.
+window.dqEsc = function dqEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+};
+
+window._dqState = { kind: null, data: null };
+
+window.dqKind = function dqKind(k) {
+  window._dqState.kind = k || null;
+  pages['decisions']();
+};
+
+window.dqGo = function dqGo(page) {
+  // The queue's one and only interaction: go to the page that owns the decision.
+  navigate(page);
+};
+
+function dqRungChip(rung) {
+  var map = {
+    blocking: ['#9A2B2A', 'blocking'],
+    urgent: ['#B45309', 'urgent'],
+    soon: ['#0B6E4F', 'soon'],
+    open: ['#777', 'open'],
+  };
+  var m = map[rung] || map.open;
+  return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:10px;'
+    + 'font-weight:700;color:#fff;background:' + m[0] + '">' + m[1].toUpperCase() + '</span>';
+}
+
+function dqKindLabel(kind) {
+  var map = {
+    approval: 'Approval', agent_action: 'Agent proposal', review: 'Review task',
+    task: 'My task', contract: 'Federal contract', inquiry: 'Buyer inquiry',
+    escalation: 'Performance',
+  };
+  return map[kind] || kind;
+}
+
+function dqWhen(it) {
+  if (it.days_left !== null && it.days_left !== undefined) {
+    if (it.days_left < 0) return 'closed ' + Math.abs(it.days_left) + 'd ago';
+    if (it.days_left === 0) return 'closes today';
+    return 'closes in ' + it.days_left + 'd';
+  }
+  if (it.age_days !== null && it.age_days !== undefined) {
+    return it.age_days === 0 ? 'today' : 'waiting ' + it.age_days + 'd';
+  }
+  return '';
+}
+
+// A failed source is reported in full, by name and reason. Not a count, because a count tells
+// nobody what to fix.
+function dqDegradedBanner(d) {
+  if (d.complete) return '';
+  var rows = d.degraded.map(function (x) {
+    return '<li style="margin-bottom:3px"><b>' + window.dqEsc(x.source) + '</b> — '
+      + window.dqEsc(x.error) + '</li>';
+  }).join('');
+  return '<div class="card" style="border-left:4px solid #9A2B2A;background:#FFF5F5;margin-bottom:14px">'
+    + '<div class="card-title" style="color:#9A2B2A">This list is incomplete</div>'
+    + '<p style="font-size:12px;margin:4px 0 8px;color:#444">'
+    + (d.count === 0
+      ? 'Nothing is shown below, and that does <b>not</b> mean nothing is waiting — '
+      : 'There may be more than what is shown below — ')
+    + d.degraded.length + ' source(s) could not be read:</p>'
+    + '<ul style="margin:0;padding-left:18px;font-size:12px">' + rows + '</ul></div>';
+}
+
+function dqCapsBanner(d) {
+  if (!d.caps || !d.caps.length) return '';
+  var rows = d.caps.map(function (c) {
+    return '<li>' + window.dqEsc(c.source) + ' — ' + window.dqEsc(c.note) + '</li>';
+  }).join('');
+  return '<div class="card" style="border-left:4px solid #B45309;margin-bottom:14px">'
+    + '<div class="card-title">Some counts are a floor, not a total</div>'
+    + '<ul style="margin:6px 0 0;padding-left:18px;font-size:12px">' + rows + '</ul></div>';
+}
+
+function dqFilters(d) {
+  var kinds = Object.keys(d.by_kind).filter(function (k) { return d.by_kind[k] > 0; });
+  var cur = window._dqState.kind;
+  var btn = function (k, label, n) {
+    var on = (cur || null) === k;
+    return '<button onclick="window.dqKind(' + (k ? "'" + k + "'" : 'null') + ')" '
+      + 'style="padding:4px 10px;margin-right:6px;margin-bottom:6px;border-radius:14px;cursor:pointer;'
+      + 'font-size:12px;border:1px solid ' + (on ? 'var(--teal)' : 'var(--border)') + ';'
+      + 'background:' + (on ? 'var(--teal)' : '#fff') + ';color:' + (on ? '#fff' : '#333') + '">'
+      + window.dqEsc(label) + ' <b>' + n + '</b></button>';
+  };
+  return '<div style="margin-bottom:12px">' + btn(null, 'Everything', d.count)
+    + kinds.map(function (k) { return btn(k, dqKindLabel(k), d.by_kind[k]); }).join('') + '</div>';
+}
+
+function dqRow(it) {
+  return '<div class="card" style="margin-bottom:8px;padding:12px 14px;display:flex;'
+    + 'align-items:flex-start;gap:12px">'
+    + '<div style="flex:1;min-width:0">'
+    + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px">'
+    + dqRungChip(it.rung)
+    + '<span style="font-size:11px;color:var(--gray)">' + window.dqEsc(dqKindLabel(it.kind)) + '</span>'
+    + (dqWhen(it) ? '<span style="font-size:11px;color:var(--gray)">· ' + window.dqEsc(dqWhen(it)) + '</span>' : '')
+    + '</div>'
+    + '<div style="font-weight:600;font-size:14px;line-height:1.35">' + window.dqEsc(it.title) + '</div>'
+    // Capped regardless of source. A single row that runs to a paragraph turns a scannable list
+    // back into the five screens this page replaced; the full text is on the page the row links to.
+    + (it.detail ? '<div style="font-size:12px;color:#555;margin-top:3px">'
+        + window.dqEsc(it.detail.length > 180 ? it.detail.slice(0, 177) + '…' : it.detail) + '</div>' : '')
+    // Why it sits where it sits. A person who disagrees with the order can see the rule rather
+    // than guess at a score.
+    + '<div style="font-size:11px;color:var(--gray);margin-top:4px">' + window.dqEsc(it.rung_why) + '</div>'
+    + '</div>'
+    + '<button onclick="window.dqGo(\'' + window.dqEsc(it.where.page) + '\')" '
+    + 'style="padding:6px 12px;border:1px solid var(--border);background:#fff;border-radius:6px;'
+    + 'cursor:pointer;font-size:12px;white-space:nowrap">'
+    + window.dqEsc(it.where.label) + ' →</button>'
+    + '</div>';
+}
+
+window.decisionsPage = async function decisionsPage() {
+  var host = document.getElementById('content');
+  host.innerHTML = '<p style="color:#888;padding:20px">Loading the decision queue…</p>';
+
+  var d;
+  try {
+    var qs = window._dqState.kind ? '?kind=' + encodeURIComponent(window._dqState.kind) : '';
+    d = await API('/decisions' + qs);
+  } catch (e) {
+    // A route-level failure is shown as a failure. An empty queue would read as "you are clear",
+    // which is the one thing this page must never say when it does not know.
+    host.innerHTML = '<div class="card" style="border-left:4px solid #9A2B2A;background:#FFF5F5">'
+      + '<div class="card-title" style="color:#9A2B2A">The decision queue could not load</div>'
+      + '<p style="font-size:13px;margin:6px 0 0">' + window.dqEsc(e.message) + '</p>'
+      + '<p style="font-size:12px;color:var(--gray);margin:6px 0 0">This is not an empty queue. '
+      + 'Nothing about what is waiting has been established.</p></div>';
+    return;
+  }
+  window._dqState.data = d;
+
+  var head = '<div style="margin-bottom:14px">'
+    + '<h2 style="margin:0 0 2px;font-size:19px">' + window.dqEsc(d.headline) + '</h2>'
+    + '<p style="color:var(--gray);font-size:12px;margin:0">'
+    + window.dqEsc(d.performs_nothing) + '</p></div>';
+
+  var body;
+  if (!d.items.length) {
+    body = d.complete
+      ? '<div class="card"><p style="margin:0;font-size:13px;color:#555">'
+        + (d.filtered_to
+          ? 'Nothing of this kind is waiting. ' + d.count + ' other item(s) are.'
+          : 'All seven sources were read and none of them has anything waiting on you.')
+        + '</p></div>'
+      : '';
+  } else {
+    body = d.items.map(dqRow).join('');
+  }
+
+  host.innerHTML = head + dqDegradedBanner(d) + dqCapsBanner(d) + dqFilters(d) + body
+    + '<p style="color:var(--gray);font-size:11px;margin-top:14px">'
+    + 'Read at ' + window.dqEsc(d.as_of) + ' from ' + d.sources.length + ' source(s): '
+    + d.sources.map(function (s) {
+      return window.dqEsc(s.source) + (s.ok ? ' ' + s.count : ' <b style="color:#9A2B2A">unreadable</b>');
+    }).join(' · ') + '</p>';
+};
+
+pages['decisions'] = window.decisionsPage;
 window.orDays = function orDays(d) { window._orDays = d; pages['outreach'](); };
 
 // ── ACTIONS ───────────────────────────────────────────────────────────────────

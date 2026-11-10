@@ -105,6 +105,7 @@ async function main() {
     app.use('/api', authMiddleware);
     app.use('/api', require('../src/api/routes'));
     app.use('/api', require('../src/api/prpa.routes'));
+    app.use('/api', require('../src/api/decisions.routes'));
     app.use(express.static(path.join(__dirname, '..', 'public')));
     server = await new Promise((r) => { const s = app.listen(APPPORT, '127.0.0.1', () => r(s)); });
     ok(`serving the real app on 127.0.0.1:${APPPORT}`);
@@ -252,6 +253,66 @@ async function main() {
       await page.screenshot({ path: path.join(OUT, 'prpa-tracker-detail.png'), fullPage: true });
       ok(`detail → ${path.join(OUT, 'prpa-tracker-detail.png')}`);
     } else bad(`could not open a row: ${opened}`);
+
+    // ── THE DECISION QUEUE, ON THE SAME REAL STACK ───────────────────────────
+    //
+    // Added here rather than in its own harness because the expensive part — a disposable cluster,
+    // the migrator, real routers, a real JWT and imported SAM.gov records — is already standing,
+    // and the queue's largest source is this very board.
+    //
+    // WHY A RENDER CHECK AND NOT JUST THE ROUTE TESTS. On 2026-11-09 I changed the board's API to
+    // return bid positions, reported it done, and the page had no column for them — the owner found
+    // that, not me. Unit tests on the route would have passed. This opens the page.
+    const navDq = await page.evaluate(async () => {
+      if (typeof window.navigate !== 'function') return 'navigate() is not reachable';
+      await window.navigate('decisions');
+      await new Promise((r) => setTimeout(r, 2500));
+      return 'ok';
+    });
+    if (navDq === 'ok') ok('navigate("decisions") is reachable and ran');
+    else bad(`the decision queue is unreachable: ${navDq}`);
+
+    const dq = await page.evaluate(() => document.getElementById('content').innerText);
+
+    // The page must say what it is and that it does not act. Both are rendered from the API
+    // payload, so this also proves the route answered rather than 404ing into the SPA shell.
+    if (/decision/i.test(dq)) ok('the decision queue page rendered');
+    else bad('the decision queue page rendered nothing recognisable');
+    if (/Every decision is made on the page named/i.test(dq)) {
+      ok('…and states on screen that it performs nothing');
+    } else bad('the page does not state that it only shows decisions');
+
+    // THE HEADLINE MUST NOT CLAIM CALM WITHOUT HAVING ESTABLISHED IT. On this fixture every store
+    // exists, so either items are listed or all seven were read and found empty. What must NEVER
+    // appear is an all-clear beside a source that failed.
+    const dqApi = await page.evaluate(async () => {
+      const r = await fetch('/api/decisions', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('pbo_token')}` },
+      });
+      return { status: r.status, body: await r.json().catch(() => null) };
+    });
+    if (dqApi.status === 200) ok('GET /api/decisions answered 200');
+    else bad(`GET /api/decisions answered ${dqApi.status}`, JSON.stringify(dqApi.body).slice(0, 300));
+
+    if (dqApi.body && Array.isArray(dqApi.body.sources)) {
+      const names = dqApi.body.sources.map((x) => x.source);
+      if (names.length === 7) ok(`all seven sources reported: ${names.join(', ')}`);
+      else bad(`${names.length} source(s) reported, expected 7`, names.join(', '));
+
+      const broken = dqApi.body.sources.filter((x) => !x.ok).map((x) => x.source);
+      if (!broken.length) ok('every source was readable on a freshly migrated database');
+      else bad(`source(s) unreadable against a fresh migration: ${broken.join(', ')}`,
+        JSON.stringify(dqApi.body.degraded).slice(0, 400));
+
+      // The invariant, checked against the real payload rather than a unit fixture.
+      const claimsCalm = /Nothing is waiting/.test(dqApi.body.headline || '');
+      if (!claimsCalm || dqApi.body.complete) ok('the headline claims calm only when every source was read');
+      else bad('the headline says nothing is waiting while a source could not be read',
+        `headline="${dqApi.body.headline}" degraded=${JSON.stringify(dqApi.body.degraded)}`);
+    } else bad('the response carries no per-source report, so a failed source would be invisible');
+
+    await page.screenshot({ path: path.join(OUT, 'decision-queue.png'), fullPage: true });
+    ok(`decision queue → ${path.join(OUT, 'decision-queue.png')}`);
 
     if (failedRequests.length) {
       console.log('\n  failing requests:');

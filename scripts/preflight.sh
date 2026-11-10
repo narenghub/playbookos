@@ -553,6 +553,14 @@ pf_step "the CI gate cannot be quietly disabled" node --test scripts/ci-gate.tes
 # aggregate was silence. sendEmail returns false and does not throw; a caller that drops the
 # boolean cannot tell a delivered message from a refused one. Seventeen did.
 pf_step "no send drops its result" node --test scripts/email-result-handled.test.js
+
+# ── THE DECISION QUEUE IS A VIEW ────────────────────────────────────────────
+#
+# It aggregates decisions that sit behind the approval gate, the global email HOLD and three
+# capability STOPs. Those guards are on the execution paths; the queue reaches none of them and
+# must keep reaching none of them. Named here, rather than left to the suite's own discovery,
+# because this is a safety invariant and the verdict list is where somebody looks for those.
+pf_step "the decision queue cannot act" env JWT_SECRET=preflight node --test src/api/decisions-routes.test.js src/lib/office/decision-queue.test.js src/lib/office/decision-sources.test.js
 # The production dump halted on `could not create unique index "idx_cem_unique"` — the table already
 # held duplicate (event_slug, holder_normalized) pairs. A standalone CREATE UNIQUE INDEX on a
 # populated table FAILS where an inline constraint would have been silently skipped, and the sweep

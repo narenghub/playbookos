@@ -140,9 +140,31 @@ console.log(`${roles.length} roles\n`);
 // `scope-europe` IS NO LONGER LISTED. It landed in an earlier commit, so it is the baseline now,
 // and the seven entries that still expected it were the exact drift the note above describes:
 // an expectation of a diff that no longer exists. Recorded here rather than left in EXPECTED.
+// `prpa-tracker` IS NO LONGER LISTED. It landed, so it is the baseline now, and the two entries that
+// still expected it were the same stale-expectation drift this file keeps recording: both admin roles
+// failed against a diff that no longer exists.
+//
+// 2026-11-10, Decision Queue: TWO roles gain `decisions` — super_admin and admin, and only those two.
+// The page sits in the EXECUTIVE section, whose access list is ['admin','director'], so the section
+// alone would have drawn it for three directors as well. It does not, because `decisions` is listed in
+// NAV_ADMIN_ONLY, which narrows passesPageReads for pages no section's `access` can express — every
+// family list containing an admin also contains directors, and there is no admin-only section but
+// Platform, which is super_admin.
+//
+// THAT NARROWING IS THE POINT, AND THIS RUN IS THE PROOF OF IT. The route is adminOnly because the
+// queue crosses tiers by construction: a federal notice (procurement), a buyer inquiry (sales), a
+// performance escalation (team). A director drawn this page would get a 403 — and the alternative,
+// widening the route to match the section, would be a new cross-tier read path dressed up as a
+// dashboard. The twelve other roles are byte-identical, which is what says the gate works rather
+// than that it was intended.
+//
+// WHO IS ABSENT matters most here of all. If `sales_director`, `procurement_director` or
+// `recruitment_director` ever appears in this diff, the admin-only gate has been removed or moved
+// after the admin short-circuit in passesPageReads — where it narrows nothing — and this screen is
+// showing one tier's work to another.
 const EXPECTED = {
-  super_admin:          { gained: ['prpa-tracker'], lost: [] },
-  admin:                { gained: ['prpa-tracker'], lost: [] },
+  super_admin:          { gained: ['decisions'], lost: [] },
+  admin:                { gained: ['decisions'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and

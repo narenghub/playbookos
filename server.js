@@ -222,6 +222,15 @@ app.use('/api', require('./src/api/labconnect.routes'));
 // /api/prpa/export/opportunities.csv — this router deliberately declares none of those.
 app.use('/api', require('./src/api/prpa.routes'));
 
+// The decision queue — ONE read-only route aggregating everything waiting on a human from the seven
+// stores that hold such a thing. Its own router for the same reason as the three above, and the same
+// ordering constraint: no path may be declared both here and in routes.js, because the first mount
+// wins and the second silently becomes dead code. routes.js declares no /api/decisions path.
+//
+// It has no write route by design — see the header of that file. Aggregating the SIGHT of a decision
+// touches no HOLD and no STOP; aggregating the ACT of one would touch every single one.
+app.use('/api', require('./src/api/decisions.routes'));
+
 // SPA fallback ('/' now routes here too, since express.static has index:false)
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
