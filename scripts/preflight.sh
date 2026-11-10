@@ -561,6 +561,13 @@ pf_step "no send drops its result" node --test scripts/email-result-handled.test
 # must keep reaching none of them. Named here, rather than left to the suite's own discovery,
 # because this is a safety invariant and the verdict list is where somebody looks for those.
 pf_step "the decision queue cannot act" env JWT_SECRET=preflight node --test src/api/decisions-routes.test.js src/lib/office/decision-queue.test.js src/lib/office/decision-sources.test.js
+
+# ── NO MODEL CALL GOES UNMETERED ────────────────────────────────────────────
+#
+# Eight agents each carried their own fetch to api.anthropic.com. Every one was outside the
+# `llm.call` kill switch and outside the request timeout, as well as invisible to spend — so this
+# is a safety check before it is an accounting one. Named in the verdict list for that reason.
+pf_step "no model call escapes the meter" env JWT_SECRET=preflight node --test src/lib/llm-spend.test.js src/lib/spend-report.test.js
 # The production dump halted on `could not create unique index "idx_cem_unique"` — the table already
 # held duplicate (event_slug, holder_normalized) pairs. A standalone CREATE UNIQUE INDEX on a
 # populated table FAILS where an inline constraint would have been silently skipped, and the sweep

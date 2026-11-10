@@ -224,9 +224,19 @@ async function syncGitHubForUser(user, dateStr) {
 // "unavailable", so returning an error STRING on failure keeps their behaviour identical.
 // Now built on the shared callClaude wrapper (same model, same max_tokens, same request).
 async function runClaudeAnalysis(prompt) {
+  // Required HERE rather than at module scope: core.js is loaded very early and llm-spend
+  // reaches db.js, so a top-level require would fix the load order of two modules that have no
+  // business depending on each other's timing.
+  const { meteredCall } = require('./llm-spend');
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key || key.includes('REPLACE')) return 'Claude API key not configured.';
-  const r = await callClaude({ model: 'claude-haiku-4-5-20251001', prompt, maxTokens: 1500, apiKey: key });
+  // METERED. This already went through llm.js — so it had the kill switch and the timeout — but
+  // nothing recorded what it cost, and it is called from the team-progress analysis on every
+  // dashboard load and from the weekly review. Same transport, now counted.
+  const r = await meteredCall({
+    agent: 'core', workflow: 'analysis',
+    model: 'claude-haiku-4-5-20251001', prompt, maxTokens: 1500, apiKey: key,
+  });
   if (r.error) return 'Claude API error: ' + r.error;
   return r.text || 'Claude error: no text';
 }

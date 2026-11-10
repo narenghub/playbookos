@@ -231,6 +231,11 @@ app.use('/api', require('./src/api/prpa.routes'));
 // touches no HOLD and no STOP; aggregating the ACT of one would touch every single one.
 app.use('/api', require('./src/api/decisions.routes'));
 
+// Model-API spend — one read-only route over llm_spend_log. Its own router for the same reason as
+// those above, same ordering constraint. It MEASURES and does not cap: stopping spend is the
+// `llm.call` kill switch, reached from Agent Control, not a budget route here.
+app.use('/api', require('./src/api/spend.routes'));
+
 // SPA fallback ('/' now routes here too, since express.static has index:false)
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });

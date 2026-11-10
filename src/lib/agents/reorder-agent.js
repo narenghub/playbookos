@@ -9,6 +9,7 @@
 // syncBuyersFromOrders picks them up (it defensively reads an email column if one
 // exists).
 const crypto = require('crypto');
+const { meteredCall } = require('../llm-spend');
 const { query } = require('../db');
 const { sendEmail, sendEmailOrReport } = require('../mailer');
 const { logAgentActivity, parseClaudeJSON, extractClaudeText } = require('../agent-core');
@@ -21,19 +22,14 @@ const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g,
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const jarr = v => { try { return JSON.parse(v || '[]'); } catch { return []; } };
 
+// THE TRANSPORT IS llm.js, AND THE SPEND IS RECORDED. This was a direct fetch to
+// api.anthropic.com — one of eight near-identical copies, every one of them outside the
+// `llm.call` kill switch, outside the request timeout, and invisible to any spend figure.
+// meteredCall is the one chokepoint; the return envelope below is unchanged so no caller moves.
 async function callClaude(prompt, { maxTokens = 900 } = {}) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return { text: null, error: 'ANTHROPIC_API_KEY not configured' };
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
-    });
-    if (!res.ok) return { text: null, error: `Claude ${res.status}: ${(await res.text()).slice(0, 160)}` };
-    const body = await res.json();
-    return { text: extractClaudeText(body) };
-  } catch (e) { return { text: null, error: e.message }; }
+  const r = await meteredCall({ agent: 'reorder-agent', model: MODEL, prompt, maxTokens });
+  if (r.error) return { text: null, error: r.error };
+  return { text: r.text };
 }
 async function getNaresh() {
   const r = (await query(`SELECT id, name, email FROM users WHERE is_active=1 AND role IN ('admin','super_admin') ORDER BY CASE WHEN LOWER(email) LIKE 'naren%' THEN 0 ELSE 1 END, created_at LIMIT 1`)).rows[0];

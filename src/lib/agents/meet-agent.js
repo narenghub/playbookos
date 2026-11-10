@@ -9,6 +9,7 @@
 //  2. Manual transcript upload (analyzeAndStore from a pre-filled meeting row) — the
 //     reliable fallback: Naresh pastes a transcript and gets the full analysis.
 const crypto = require('crypto');
+const { meteredCall } = require('../llm-spend');
 const { query } = require('../db');
 const { excludeExternalSql } = require('../roles');
 const { sendEmail } = require('../mailer');
@@ -23,20 +24,14 @@ const BASE_URL = () => process.env.BASE_URL || 'https://playbook.abiozen.com';
 const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const isoDate = d => new Date(d).toISOString().slice(0, 10);
 
+// THE TRANSPORT IS llm.js, AND THE SPEND IS RECORDED. This was a direct fetch to
+// api.anthropic.com — one of eight near-identical copies, every one of them outside the
+// `llm.call` kill switch, outside the request timeout, and invisible to any spend figure.
+// meteredCall is the one chokepoint; the return envelope below is unchanged so no caller moves.
 async function callClaude(prompt, { maxTokens = 3000, json = false } = {}) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return { data: null, text: null, error: 'ANTHROPIC_API_KEY not configured' };
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: MEET_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
-    });
-    if (!res.ok) return { data: null, text: null, error: `Claude ${res.status}: ${(await res.text()).slice(0, 160)}` };
-    const body = await res.json();
-    const text = extractClaudeText(body);
-    return { data: json ? parseClaudeJSON(text) : null, text };
-  } catch (e) { return { data: null, text: null, error: e.message }; }
+  const r = await meteredCall({ agent: 'meet-agent', model: MEET_MODEL, prompt, maxTokens });
+  if (r.error) return { data: null, text: null, error: r.error };
+  return { data: json ? parseClaudeJSON(r.text) : null, text: r.text };
 }
 
 // Service-account token (DWD, impersonating naren@abiozen.com) with refresh-token

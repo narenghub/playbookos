@@ -3,6 +3,7 @@
 // documentation/compliance/lead-time questions, sends formal quotes, and escalates
 // to a human when asked or when the deal is large.
 const crypto = require('crypto');
+const { meteredCall } = require('../llm-spend');
 const { query } = require('../db');
 const { sendEmail, sendEmailOrReport } = require('../mailer');
 const { sendWhatsApp } = require('../whatsapp');
@@ -62,20 +63,14 @@ const BASE_URL = () => process.env.BASE_URL || 'https://playbook.abiozen.com';
 const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const htmlWrap = body => `<div style="font-family:Arial;font-size:14px;line-height:1.6;color:#222;white-space:pre-wrap">${esc(body)}</div>`;
 
+// THE TRANSPORT IS llm.js, AND THE SPEND IS RECORDED. This was a direct fetch to
+// api.anthropic.com — one of eight near-identical copies, every one of them outside the
+// `llm.call` kill switch, outside the request timeout, and invisible to any spend figure.
+// meteredCall is the one chokepoint; the return envelope below is unchanged so no caller moves.
 async function callClaude(prompt, { maxTokens = 1200, json = false } = {}) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return { data: null, text: null, error: 'ANTHROPIC_API_KEY not configured' };
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
-    });
-    if (!res.ok) return { data: null, text: null, error: `Claude ${res.status}: ${(await res.text()).slice(0, 160)}` };
-    const body = await res.json();
-    const text = extractClaudeText(body);
-    return { data: json ? parseClaudeJSON(text) : null, text };
-  } catch (e) { return { data: null, text: null, error: e.message }; }
+  const r = await meteredCall({ agent: 'inquiry-agent', model: MODEL, prompt, maxTokens });
+  if (r.error) return { data: null, text: null, error: r.error };
+  return { data: json ? parseClaudeJSON(r.text) : null, text: r.text };
 }
 async function getUser(role) {
   const r = (await query(`SELECT id, name, email, whatsapp_number FROM users WHERE is_active=1 AND role=$1 ORDER BY created_at LIMIT 1`, [role])).rows[0];

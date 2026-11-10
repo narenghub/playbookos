@@ -1001,6 +1001,7 @@ const NAV_SECTIONS = [
     // visible section, so putting a page at the top of EXECUTIVE changes where every admin
     // LANDS. Placed here it is one click away and the landing page is unchanged.
     {id:'decisions', label:'Decision Queue', icon:'🔔'},
+    {id:'spend', label:'AI Spend', icon:'💵'},
     {id:'performance', label:'Performance', icon:'🏆'},
   ]},
   {title:'REVENUE', access:['admin','sales'], items:[
@@ -1169,7 +1170,7 @@ function passesPageReads(pageId, role, tiers) {
   // CHECKED FIRST, before the admin short-circuit below. A narrowing rule placed after it still
   // works for admins and silently does nothing for everybody else — the entire population it exists
   // to narrow. It fails closed for every role not named here.
-  if (['decisions'].indexOf(pageId) !== -1) return role === 'admin' || role === 'super_admin';
+  if (['decisions', 'spend'].indexOf(pageId) !== -1) return role === 'admin' || role === 'super_admin';
   if (role === 'admin' || role === 'super_admin') return true; // admins pass every read
   const reqs = NAV_PAGE_REQS[pageId];
   if (!reqs) return true;                 // no tier-gated implied reads -> always passes
@@ -1195,7 +1196,7 @@ function passesPageReads(pageId, role, tiers) {
 // platform + me are NOT products: they render to the right of the product tabs, separated.
 const PRODUCTS = [
   { key:'abiozen',  label:'Abiozen',  icon:'🧪', kind:'product',
-    pages:['command-center','dashboard','decisions','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command','prpa-tracker'] },
+    pages:['command-center','dashboard','decisions','spend','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command','prpa-tracker'] },
   { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
   { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
   { key:'linkabl',  label:'Linkabl',  icon:'🧑‍💼', kind:'product', pages:['prospects'] },
@@ -1932,7 +1933,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {decisions:'Decision Queue',dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','prpa-tracker':'Federal Contracts','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {decisions:'Decision Queue',spend:'AI Spend',dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','prpa-tracker':'Federal Contracts','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -4139,6 +4140,140 @@ window.decisionsPage = async function decisionsPage() {
 };
 
 pages['decisions'] = window.decisionsPage;
+
+// ── THE SPEND PAGE ────────────────────────────────────────────────────────────
+//
+// 42 crons call the model and there was no figure anywhere. This is the figure.
+//
+// EVERY DOLLAR AMOUNT ON THIS PAGE IS RENDERED BESIDE WHAT IT COULD NOT MEASURE. A call that was
+// attempted but returned no usage block may have spent tokens; it is stored as unknown, never as
+// zero, and a page that summed past it would under-report by exactly the amount it could not see.
+// So `unmeasured_calls` is not a footnote here — where it is non-zero the total is labelled a
+// FLOOR, in those words.
+window.spEsc = function spEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+};
+
+window._spState = { days: 30 };
+window.spDays = function spDays(d) { window._spState.days = d; pages['spend'](); };
+
+// Sub-cent spend is normal here — a haiku call costs a fraction of a cent — and rounding it to
+// $0.00 would make a working meter look broken.
+function spUsd(n) {
+  var v = Number(n || 0);
+  if (v === 0) return '$0.00';
+  if (v < 0.01) return '$' + v.toFixed(4);
+  return '$' + v.toFixed(2);
+}
+function spNum(n) { return Number(n || 0).toLocaleString(); }
+
+function spFloorChip(t) {
+  if (!t || !t.unmeasured_calls) return '';
+  return '<span style="display:inline-block;margin-left:7px;padding:1px 7px;border-radius:9px;'
+    + 'font-size:10px;font-weight:700;color:#fff;background:#B45309">FLOOR</span>';
+}
+
+function spTotalsRow(label, t) {
+  return '<tr><td style="padding:6px 10px">' + window.spEsc(label) + '</td>'
+    + '<td style="padding:6px 10px;text-align:right;font-variant-numeric:tabular-nums">'
+    + spUsd(t.usd) + spFloorChip(t) + '</td>'
+    + '<td style="padding:6px 10px;text-align:right">' + spNum(t.calls) + '</td>'
+    + '<td style="padding:6px 10px;text-align:right;color:' + (t.failed_calls ? '#9A2B2A' : '#777') + '">'
+    + spNum(t.failed_calls) + '</td>'
+    + '<td style="padding:6px 10px;text-align:right;color:' + (t.unmeasured_calls ? '#B45309' : '#777') + '">'
+    + spNum(t.unmeasured_calls) + '</td>'
+    + '<td style="padding:6px 10px;text-align:right;color:#777">'
+    + spNum(t.tokens_input) + ' / ' + spNum(t.tokens_output) + '</td></tr>';
+}
+
+function spTable(title, rows, keyName, note) {
+  if (!rows.length) {
+    return '<div class="card" style="margin-bottom:14px"><div class="card-title">'
+      + window.spEsc(title) + '</div><p style="font-size:12px;color:var(--gray);margin:6px 0 0">'
+      + 'Nothing recorded in this window.</p></div>';
+  }
+  var head = '<tr style="text-align:left;border-bottom:1px solid var(--border);font-size:11px;color:var(--gray)">'
+    + '<th style="padding:6px 10px">' + window.spEsc(keyName) + '</th>'
+    + '<th style="padding:6px 10px;text-align:right">measured</th>'
+    + '<th style="padding:6px 10px;text-align:right">calls</th>'
+    + '<th style="padding:6px 10px;text-align:right">failed</th>'
+    + '<th style="padding:6px 10px;text-align:right">unmeasured</th>'
+    + '<th style="padding:6px 10px;text-align:right">tokens in / out</th></tr>';
+  return '<div class="card" style="margin-bottom:14px"><div class="card-title">'
+    + window.spEsc(title) + '</div>'
+    + (note ? '<p style="font-size:11px;color:var(--gray);margin:4px 0 6px">' + window.spEsc(note) + '</p>' : '')
+    + '<table style="width:100%;border-collapse:collapse;font-size:12px">' + head
+    + rows.map(function (r) { return spTotalsRow(r[keyName] || r.day || '—', r); }).join('')
+    + '</table></div>';
+}
+
+window.spendPage = async function spendPage() {
+  var host = document.getElementById('content');
+  host.innerHTML = '<p style="color:#888;padding:20px">Reading the spend ledger…</p>';
+
+  var d;
+  try {
+    d = await API('/spend?days=' + encodeURIComponent(window._spState.days));
+  } catch (e) {
+    // A missing ledger must NOT render as $0.00 — that is the most expensive wrong answer this
+    // page could give, because it looks exactly like good news.
+    host.innerHTML = '<div class="card" style="border-left:4px solid #9A2B2A;background:#FFF5F5">'
+      + '<div class="card-title" style="color:#9A2B2A">Spend could not be read</div>'
+      + '<p style="font-size:13px;margin:6px 0 0">' + window.spEsc(e.message) + '</p>'
+      + '<p style="font-size:12px;color:var(--gray);margin:6px 0 0">This is not a spend of $0. '
+      + 'Nothing about what has been spent has been established.</p></div>';
+    return;
+  }
+
+  var t = d.total;
+  var pj = d.projection || {};
+  var btn = function (n, label) {
+    var on = Number(window._spState.days) === n;
+    return '<button onclick="window.spDays(' + n + ')" style="padding:4px 10px;margin-right:6px;'
+      + 'border-radius:14px;cursor:pointer;font-size:12px;border:1px solid '
+      + (on ? 'var(--teal)' : 'var(--border)') + ';background:' + (on ? 'var(--teal)' : '#fff')
+      + ';color:' + (on ? '#fff' : '#333') + '">' + label + '</button>';
+  };
+
+  var headline = '<div style="margin-bottom:14px">'
+    + '<h2 style="margin:0 0 2px;font-size:19px">' + spUsd(t.usd)
+    + ' on the model API · last ' + d.window_days + ' days' + spFloorChip(t) + '</h2>'
+    + '<p style="color:var(--gray);font-size:12px;margin:0">' + window.spEsc(t.confidence) + '</p>'
+    + '<p style="color:var(--gray);font-size:12px;margin:2px 0 0">' + window.spEsc(d.measures_only) + '</p>'
+    + '</div>' + '<div style="margin-bottom:12px">' + btn(7, '7 days') + btn(30, '30 days') + btn(90, '90 days') + '</div>';
+
+  var proj = pj.available
+    ? '<div class="card" style="border-left:4px solid var(--teal);margin-bottom:14px">'
+      + '<div class="card-title">At this rate: ' + spUsd(pj.usd_per_30_days) + ' per 30 days</div>'
+      + '<p style="font-size:12px;color:var(--gray);margin:4px 0 0">' + window.spEsc(pj.basis)
+      + ' — ' + window.spEsc(pj.caveat) + '</p></div>'
+    : '<div class="card" style="margin-bottom:14px"><div class="card-title">No projection yet</div>'
+      + '<p style="font-size:12px;color:var(--gray);margin:4px 0 0">' + window.spEsc(pj.why || '') + '</p></div>';
+
+  var fails = (d.recent_failures || []).length
+    ? '<div class="card" style="border-left:4px solid #9A2B2A;margin-bottom:14px">'
+      + '<div class="card-title">Failing calls</div>'
+      + '<p style="font-size:11px;color:var(--gray);margin:4px 0 6px">A run of failures costs input '
+      + 'tokens every time and barely moves the total, so it is invisible in the dollar figure above.</p>'
+      + '<ul style="margin:0;padding-left:18px;font-size:12px">'
+      + d.recent_failures.map(function (f) {
+        return '<li style="margin-bottom:3px"><b>' + spNum(f.n) + '×</b> '
+          + window.spEsc(f.agent) + ' · ' + window.spEsc(f.error) + '</li>';
+      }).join('') + '</ul></div>'
+    : '';
+
+  host.innerHTML = headline + proj + fails
+    + spTable('By agent', d.by_agent, 'agent',
+        'Ordered by measured spend. An agent with no measured spend but many unmeasured calls sorts '
+        + 'high on purpose — something is calling the model and nothing can say what it costs.')
+    + spTable('By model', d.by_model, 'model')
+    + spTable('By day', d.by_day, 'day')
+    + '<p style="color:var(--gray);font-size:11px;margin-top:14px">Read at '
+    + window.spEsc(d.as_of) + ' · window begins ' + window.spEsc(d.since) + '</p>';
+};
+
+pages['spend'] = window.spendPage;
 window.orDays = function orDays(d) { window._orDays = d; pages['outreach'](); };
 
 // ── ACTIONS ───────────────────────────────────────────────────────────────────

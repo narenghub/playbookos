@@ -106,6 +106,7 @@ async function main() {
     app.use('/api', require('../src/api/routes'));
     app.use('/api', require('../src/api/prpa.routes'));
     app.use('/api', require('../src/api/decisions.routes'));
+    app.use('/api', require('../src/api/spend.routes'));
     app.use(express.static(path.join(__dirname, '..', 'public')));
     server = await new Promise((r) => { const s = app.listen(APPPORT, '127.0.0.1', () => r(s)); });
     ok(`serving the real app on 127.0.0.1:${APPPORT}`);
@@ -313,6 +314,44 @@ async function main() {
 
     await page.screenshot({ path: path.join(OUT, 'decision-queue.png'), fullPage: true });
     ok(`decision queue → ${path.join(OUT, 'decision-queue.png')}`);
+
+    // ── AI SPEND, ON THE SAME REAL STACK ─────────────────────────────────────
+    //
+    // The fixture database has no spend rows, which is the MOST important case to render: an empty
+    // ledger must read as "nothing recorded", never as a confident $0.00 — and a MISSING ledger
+    // must not render as $0.00 at all. A page that reports zero spend when it cannot read the
+    // table gives the most expensive wrong answer available to it, because it looks like good news.
+    const navSp = await page.evaluate(async () => {
+      if (typeof window.navigate !== 'function') return 'navigate() is not reachable';
+      await window.navigate('spend');
+      await new Promise((r) => setTimeout(r, 2000));
+      return 'ok';
+    });
+    if (navSp === 'ok') ok('navigate("spend") is reachable and ran');
+    else bad(`the spend page is unreachable: ${navSp}`);
+
+    const sp = await page.evaluate(() => document.getElementById('content').innerText);
+    if (/model API/i.test(sp)) ok('the spend page rendered');
+    else bad('the spend page rendered nothing recognisable', sp.slice(0, 200));
+    if (/does not cap it/i.test(sp)) ok('…and states that it measures rather than caps');
+    else bad('the page does not say it only measures');
+    if (/no calls recorded/i.test(sp)) ok('an empty ledger reads as "no calls recorded", not as a clean $0');
+    else bad('an empty ledger did not state that nothing was recorded', sp.slice(0, 300));
+
+    const spApi = await page.evaluate(async () => {
+      const r = await fetch('/api/spend?days=30', {
+        headers: { Authorization: `Bearer ${localStorage.getItem('pbo_token')}` },
+      });
+      return { status: r.status, body: await r.json().catch(() => null) };
+    });
+    if (spApi.status === 200) ok('GET /api/spend answered 200');
+    else bad(`GET /api/spend answered ${spApi.status}`, JSON.stringify(spApi.body).slice(0, 300));
+    if (spApi.body && spApi.body.total && typeof spApi.body.total.unmeasured_calls === 'number') {
+      ok('the total carries its unmeasured-call count, so a dollar figure cannot be read alone');
+    } else bad('the total does not carry unmeasured_calls');
+
+    await page.screenshot({ path: path.join(OUT, 'ai-spend.png'), fullPage: true });
+    ok(`ai spend → ${path.join(OUT, 'ai-spend.png')}`);
 
     if (failedRequests.length) {
       console.log('\n  failing requests:');

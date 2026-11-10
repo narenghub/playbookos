@@ -16,6 +16,7 @@
 //   DROP TABLE IF EXISTS funding_opportunity_versions;
 //   DROP TABLE IF EXISTS funding_opportunities;
 //   DROP TABLE IF EXISTS federal_awards;
+//   DROP TABLE IF EXISTS llm_spend_log;
 //   DROP TABLE IF EXISTS psc_award_benchmarks;
 //   DROP TABLE IF EXISTS source_sync_runs;
 //   DROP TABLE IF EXISTS source_connectors;
@@ -666,6 +667,72 @@ const DDL = [
      ON psc_award_benchmarks (computed_at DESC)`,
 
   // ---------------------------------------------------------------------------------------
+  // LLM SPEND, RECORDED WHERE THE CALL IS MADE.
+  //
+  // ── WHY THIS IS NOT office_cost_ledger ─────────────────────────────────────────────────
+  //
+  // office_cost_ledger already exists and is the right table for kernel work: it is welded to
+  // (run_id, company_id) by a MATCH FULL foreign key, so every row is attributable to a company
+  // and to the agent run that spent it. That weld is its value and also its limit — a row cannot
+  // exist without an agent_runs row to point at.
+  //
+  // Eight agents in src/lib/agents/ call the Anthropic API on a cron with no run and no company
+  // context. They are not kernel work and giving each one a synthetic run purely to satisfy a
+  // foreign key would make agent_runs lie about what a run is. So their spend is recorded here,
+  // unwelded, and the two tables answer two different questions:
+  //
+  //   office_cost_ledger   what did THIS RUN, for THIS COMPANY, cost?
+  //   llm_spend_log        what is this platform spending on the model API, by agent and by day?
+  //
+  // ── UNKNOWN COST IS A STATE, NOT A ZERO ────────────────────────────────────────────────
+  //
+  // Copied deliberately from the office_cost_ledger design, because the reasoning is identical and
+  // a second table that got it wrong would under-report by exactly the amount it could not see. A
+  // call that was attempted but returned no usage block MAY have spent tokens; filing it as 0 is a
+  // claim that it did not. The CHECK makes the two states mutually exclusive in the database:
+  //
+  //   usage returned            cost_known TRUE,  cost_usd set (0 is a legitimate measurement)
+  //   no call was attempted     cost_known TRUE,  cost_usd 0    (nothing was spent)
+  //   attempted, no usage       cost_known FALSE, cost_usd NULL (tokens may have been spent)
+  //
+  // Any read of this table must therefore report unmeasured CALLS alongside the dollars, and must
+  // never SUM its way past them. A spend figure that silently excludes the calls it could not
+  // measure is the same lie as a monitor that is green because it tested nothing.
+  //
+  // ── NOT COMPANY-SCOPED, AND SAID OUT LOUD ──────────────────────────────────────────────
+  //
+  // This is platform spend on one API key. It is not tenant data, and it must never be served to a
+  // tenant as if it were theirs. The route that reads it is adminOnly for that reason.
+  //
+  // ROLLBACK: DROP TABLE llm_spend_log;
+  // ---------------------------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS llm_spend_log (
+     id            BIGSERIAL PRIMARY KEY,
+     -- WHO SPENT IT. Without these two a total is a number nobody can act on: "we spent $40
+     -- yesterday" prompts exactly one question, and this is the answer to it.
+     agent         TEXT NOT NULL,
+     workflow      TEXT,
+     provider      TEXT NOT NULL DEFAULT 'anthropic',
+     model         TEXT NOT NULL,
+     tokens_input  INTEGER,
+     tokens_output INTEGER,
+     cost_usd      NUMERIC(12,6),
+     cost_known    BOOLEAN NOT NULL DEFAULT TRUE,
+     -- Whether the call produced an answer. A run of failures that each cost input tokens is a
+     -- spend pattern worth seeing, and it is invisible if only successes are recorded.
+     ok            BOOLEAN NOT NULL DEFAULT TRUE,
+     error         TEXT,
+     duration_ms   INTEGER,
+     at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     CONSTRAINT llm_spend_cost_check CHECK (cost_usd IS NULL OR cost_usd >= 0),
+     CONSTRAINT llm_spend_known_shape CHECK (
+       (cost_known AND cost_usd IS NOT NULL) OR (NOT cost_known AND cost_usd IS NULL)),
+     CONSTRAINT llm_spend_agent_check CHECK (length(btrim(agent)) > 0)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_llm_spend_at ON llm_spend_log (at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_llm_spend_agent_at ON llm_spend_log (agent, at DESC)`,
+
+  // ---------------------------------------------------------------------------------------
   // PR-3 / ruling 7 items 1 and 4 — SAM.GOV SOLICITATIONS, IN THEIR OWN TABLE.
   //
   // A solicitation does NOT go in funding_opportunities. That table is Grants.gov-shaped
@@ -931,6 +998,6 @@ const CONNECTOR_TABLES = Object.freeze([
 // public APIs and carries no company_id, as documented at the top of this file.
 // psc_award_benchmarks joins source_connectors here for the same reason: what the government paid
 // for a product service code is a fact about the market, not about any one tenant.
-const GLOBAL_TABLES = Object.freeze(['source_connectors', 'psc_award_benchmarks']);
+const GLOBAL_TABLES = Object.freeze(['source_connectors', 'psc_award_benchmarks', 'llm_spend_log']);
 
 module.exports = { migrateConnectors, DDL, CONNECTOR_SEED, CONNECTOR_TABLES, GLOBAL_TABLES };

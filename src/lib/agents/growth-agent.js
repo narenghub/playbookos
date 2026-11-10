@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { meteredCall } = require('../llm-spend');
 const { query } = require('../db');
 const { runClaudeAnalysis } = require('../core');
 const { getAppId, getSearchKey, getAnalyticsKey } = require('../algolia-keys');
@@ -254,27 +255,20 @@ function mondayOf(date = new Date()) {
 // rest of the codebase (no SDK). Non-streaming with bounded max_tokens; callers
 // keep each batch small (<=~26 items) so the response stays well under the
 // timeout/size envelope. Returns { items, error } and never throws.
+// THE TRANSPORT IS llm.js, AND THE SPEND IS RECORDED. This was a direct fetch to
+// api.anthropic.com — one of eight near-identical copies, every one of them outside the
+// `llm.call` kill switch, outside the request timeout, and invisible to any spend figure.
+// meteredCall is the one chokepoint; the return envelope below is unchanged so no caller moves.
 async function callClaudeJsonArray(prompt, { maxTokens = 8000 } = {}) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return { items: [], error: 'ANTHROPIC_API_KEY not configured' };
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: MI_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      return { items: [], error: `Claude ${res.status}: ${body.slice(0, 200)}` };
-    }
-    const data = await res.json();
-    const text = extractClaudeText(data);
-    const match = text.match(/\[[\s\S]*\]/);
-    if (!match) return { items: [], error: 'no JSON array in Claude response' };
-    return { items: JSON.parse(match[0]) };
-  } catch (e) {
-    return { items: [], error: e.message };
-  }
+  const r = await meteredCall({ agent: 'growth-agent', workflow: 'market-intelligence',
+    model: MI_MODEL, prompt, maxTokens });
+  if (r.error) return { items: [], error: r.error };
+  const match = String(r.text || '').match(/\[[\s\S]*\]/);
+  if (!match) return { items: [], error: 'no JSON array in Claude response' };
+  // JSON.parse still guarded: a model can return something array-SHAPED that is not valid JSON,
+  // and a throw here would take down the agent mid-run.
+  try { return { items: JSON.parse(match[0]) }; }
+  catch (e) { return { items: [], error: `unparseable JSON array from Claude: ${e.message}` }; }
 }
 
 const miNorm = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();

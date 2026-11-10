@@ -3,6 +3,7 @@
 // changes relevant to Abiozen's API marketplace. Every external call degrades
 // gracefully (returns [] + a warning) so a source outage never breaks the run.
 const crypto = require('crypto');
+const { meteredCall } = require('../llm-spend');
 const { query } = require('../db');
 const { sendEmail } = require('../mailer');
 const { logAgentActivity, enqueueApproval, parseClaudeJSON, extractClaudeText } = require('../agent-core');
@@ -14,20 +15,14 @@ const BASE_URL = () => process.env.BASE_URL || 'https://playbook.abiozen.com';
 const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
+// THE TRANSPORT IS llm.js, AND THE SPEND IS RECORDED. This was a direct fetch to
+// api.anthropic.com — one of eight near-identical copies, every one of them outside the
+// `llm.call` kill switch, outside the request timeout, and invisible to any spend figure.
+// meteredCall is the one chokepoint; the return envelope below is unchanged so no caller moves.
 async function callClaude(prompt, { maxTokens = 3000, json = false } = {}) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return { data: null, text: null, error: 'ANTHROPIC_API_KEY not configured' };
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: RESEARCH_MODEL, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] }),
-    });
-    if (!res.ok) return { data: null, text: null, error: `Claude ${res.status}: ${(await res.text()).slice(0, 160)}` };
-    const body = await res.json();
-    const text = extractClaudeText(body);
-    return { data: json ? parseClaudeJSON(text) : null, text };
-  } catch (e) { return { data: null, text: null, error: e.message }; }
+  const r = await meteredCall({ agent: 'research-agent', model: RESEARCH_MODEL, prompt, maxTokens });
+  if (r.error) return { data: null, text: null, error: r.error };
+  return { data: json ? parseClaudeJSON(r.text) : null, text: r.text };
 }
 async function fetchJson(url, opts = {}) {
   try {

@@ -162,9 +162,16 @@ console.log(`${roles.length} roles\n`);
 // `recruitment_director` ever appears in this diff, the admin-only gate has been removed or moved
 // after the admin short-circuit in passesPageReads — where it narrows nothing — and this screen is
 // showing one tier's work to another.
+// 2026-11-10, AI Spend: the same TWO roles, for the same reason and through the same mechanism —
+// `spend` sits beside `decisions` in the admin-only list inside passesPageReads. llm_spend_log is
+// PLATFORM spend on one API key, not tenant data, so serving it to a director would not merely be
+// a 403 waiting to happen; it would be one tenant shown a figure that is not theirs to see.
+// `decisions` IS NO LONGER LISTED — it landed in 73e80be, so it is the baseline. Leaving it in
+// expected a diff that no longer exists and failed both admin roles, which is the third time this
+// file has recorded exactly that. The history block above is where a landed entry goes.
 const EXPECTED = {
-  super_admin:          { gained: ['decisions'], lost: [] },
-  admin:                { gained: ['decisions'], lost: [] },
+  super_admin:          { gained: ['spend'], lost: [] },
+  admin:                { gained: ['spend'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and

@@ -50,6 +50,7 @@ const ROLLBACK_ORDER = [
   'funding_opportunity_versions', 'funding_opportunities', 'federal_awards',
   // No foreign keys at all — it holds public market data keyed by product service code — so it
   // drops anywhere. Listed before source_connectors to keep the file reading children-first.
+  'llm_spend_log',
   'psc_award_benchmarks',
   'source_sync_runs', 'source_connectors',
 ];

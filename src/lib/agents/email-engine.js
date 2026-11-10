@@ -17,6 +17,7 @@
 //
 // Runs Monday 15:30 UTC, after market intelligence (15:00) writes molecule_history.
 const crypto = require('crypto');
+const { meteredCall } = require('../llm-spend');
 const { query } = require('../db');
 const { logAgentActivity, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const { getAppId, getSearchKey } = require('../algolia-keys');
@@ -90,24 +91,17 @@ function sanitizeHtml(html) {
     .replace(/javascript:/gi, '');
 }
 
+// THE TRANSPORT IS llm.js, AND THE SPEND IS RECORDED. This was a direct fetch to
+// api.anthropic.com — one of eight near-identical copies, every one of them outside the
+// `llm.call` kill switch, outside the request timeout, and invisible to any spend figure.
+// meteredCall is the one chokepoint; the return envelope below is unchanged so no caller moves.
 async function callClaudeEmail(prompt) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return { data: null, error: 'ANTHROPIC_API_KEY not configured' };
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': key, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: EMAIL_MODEL, max_tokens: MAX_TOKENS, messages: [{ role: 'user', content: prompt }] }),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      return { data: null, error: `Claude ${res.status}: ${body.slice(0, 200)}` };
-    }
-    const data = await res.json();
-    const parsed = parseClaudeJSON(extractClaudeText(data));
-    if (!parsed) return { data: null, error: 'unparseable JSON from Claude' };
-    return { data: parsed };
-  } catch (e) { return { data: null, error: e.message }; }
+  const r = await meteredCall({ agent: 'email-engine', model: EMAIL_MODEL, prompt,
+    maxTokens: MAX_TOKENS });
+  if (r.error) return { data: null, error: r.error };
+  const parsed = parseClaudeJSON(r.text);
+  if (!parsed) return { data: null, error: 'unparseable JSON from Claude' };
+  return { data: parsed };
 }
 
 // ── Step 1 — demand signals from three sources ────────────────────────────────

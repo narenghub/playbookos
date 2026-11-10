@@ -5,6 +5,7 @@ const { signToken, authMiddleware, adminOnly, superAdminOnly, requireTier, requi
 const { query, withTransaction } = require('../lib/db');
 const autonomy = require('../lib/autonomy');
 const { sendEmail } = require('../lib/mailer');
+const { meteredCall } = require('../lib/llm-spend');
 const { checkMilestoneTriggers } = require('../lib/jobs');
 const { cascadeGoals, assignWeeklyKPIs, assignWeeklyKPIsForAll, mondayOf } = require('../lib/agents/goal-engine');
 const { getWarmLeads, generateOutreachRecommendations } = require('../lib/agents/customer-agent');
@@ -1715,25 +1716,15 @@ Requirements:
 - Do NOT invent specific prices, lot numbers, or regulatory/medical claims. Keep language factual and conservative.
 - Return ONLY the JSON object.`;
 
-    const ares = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 4000,
-        messages: [{ role: 'user', content: prompt }],
-      }),
+    // METERED. This was a raw fetch to api.anthropic.com — outside the `llm.call` kill switch,
+    // outside the request timeout, and invisible to any spend figure. meteredCall is the one
+    // chokepoint; the 502 shape below is unchanged.
+    const ares = await meteredCall({
+      agent: 'seo-content', workflow: 'generate-catalog-page',
+      model: 'claude-haiku-4-5-20251001', maxTokens: 4000, prompt, apiKey,
     });
-    if (!ares.ok) {
-      const body = await ares.text().catch(() => '');
-      return res.status(502).json({ error: `Claude API ${ares.status}: ${body.slice(0, 200)}` });
-    }
-    const adata = await ares.json();
-    const raw = extractClaudeText(adata).trim();
+    if (ares.error) return res.status(502).json({ error: `Claude API: ${ares.error}` });
+    const raw = String(ares.text || '').trim();
     let content;
     try {
       const match = raw.match(/\{[\s\S]*\}/);
@@ -3755,21 +3746,15 @@ Do NOT invent new KPI values.
 ## Admin instruction
 ${instruction}${clarBlock}`;
 
-    const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4000,
-        messages: [{ role: 'user', content: prompt }],
-      }),
+    // METERED. This was a raw fetch to api.anthropic.com — outside the `llm.call` kill switch,
+    // outside the request timeout, and invisible to any spend figure. meteredCall is the one
+    // chokepoint; the 502 shape below is unchanged.
+    const aiRes = await meteredCall({
+      agent: 'admin-instruction', workflow: 'interpret',
+      model: 'claude-sonnet-4-6', maxTokens: 4000, prompt, apiKey,
     });
-    if (!aiRes.ok) {
-      const t = await aiRes.text().catch(() => '');
-      return res.status(502).json({ error: `Claude API ${aiRes.status}: ${t.slice(0, 300)}` });
-    }
-    const aiData = await aiRes.json();
-    const claudeText = extractClaudeText(aiData);
+    if (aiRes.error) return res.status(502).json({ error: `Claude API: ${aiRes.error}` });
+    const claudeText = String(aiRes.text || '');
     const parsed = parseClaudeJSON(claudeText);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return res.status(502).json({ error: 'Claude returned unparseable JSON', raw: claudeText.slice(0, 400) });
