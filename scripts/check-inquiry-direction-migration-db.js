@@ -66,9 +66,13 @@ if (!url) {
 
 let pass = 0;
 let fail = 0;
+let undone = 0;
 const ok = (m) => { pass += 1; console.log(`  ok    ${m}`); };
 const bad = (m, d) => { fail += 1; console.error(`  FAIL  ${m}${d ? `\n        ${d}` : ''}`); };
 const note = (m) => console.log(`  --    ${m}`);
+// A phase that could not run is its own verdict. Counting it as a pass is the failure mode this
+// repo's release discipline exists to prevent, and printing it as a note makes it invisible.
+const incomplete = (m) => { undone += 1; console.error(`  INCOMPLETE  ${m}`); };
 
 // The migration runs as its own process, exactly as it will in production, so what is tested is
 // the shipped entry point rather than a re-implementation of it.
@@ -349,6 +353,100 @@ function runVerifier() {
         else bad('the transaction does not set its own bounds');
       } else bad('no explicit BEGIN/COMMIT found');
     }
+    // ══ 10. THE PREDEPLOY ROLE — CAN RAILWAY RUN THIS AT ALL? ══════════════
+    //
+    // CEO ruling 2026-11-11 step 7: "Confirm the predeploy environment can execute the dedicated
+    // migration with the required database permissions."
+    //
+    // This is a question about MY OWN config change, and it could have been a NO-GO. railway.json
+    // now runs this script as preDeployCommand, which means it runs on EVERY deploy, as whatever
+    // role that environment holds. ENG-003 deliberately made the application role least-privilege
+    // with no DDL — so if preDeploy inherits DATABASE_URL and that role does not own
+    // inquiry_messages, an ALTER is impossible and preDeploy would fail, blocking every future
+    // deploy of the service.
+    //
+    // It does not, for one reason: the idempotence short-circuit is decided from the server's own
+    // constraint definition and returns BEFORE the ownership precondition is read. Once Phase C
+    // has applied the constraint by hand, every later run exits 0 at "ALREADY APPLIED" without
+    // ever needing ALTER rights.
+    //
+    // That ordering was not designed; it fell out of writing the survey before the preconditions.
+    // A property the deploy pipeline depends on cannot be left resting on an accident, so it is
+    // pinned here. If someone moves the ownership check above the short-circuit, this fails — and
+    // what it is really protecting is the deploy, not the test.
+    {
+      const LOW = 'deploy_leastpriv';
+      let lowUrl = null;
+      try {
+        if (!/:\/\/postgres@/.test(url)) throw new Error('not the harness-built cluster');
+        await q(`REVOKE ALL ON inquiry_messages FROM ${LOW}`).catch(() => {});
+        await q(`DROP ROLE IF EXISTS ${LOW}`);
+        await q(`CREATE ROLE ${LOW} LOGIN`);
+        await q(`GRANT USAGE ON SCHEMA public TO ${LOW}`);
+        await q(`GRANT SELECT ON inquiry_messages TO ${LOW}`);
+        lowUrl = url.replace('://postgres@', `://${LOW}@`);
+      } catch (e) {
+        incomplete('phase 10 could not build a least-privilege role, so the predeploy permission '
+          + `question is UNANSWERED by this run: ${(e && e.message) || e}`);
+      }
+
+      if (lowUrl) {
+        const runLow = (args = []) => runMigration(args, { MIGRATION_DATABASE_URL: lowUrl });
+
+        // The role must genuinely lack what an ALTER needs, or everything below proves nothing.
+        const canAlter = (await q(
+          `SELECT pg_has_role($1, rel.relowner, 'USAGE') AS can_alter
+             FROM pg_class rel JOIN pg_namespace n ON n.oid = rel.relnamespace
+            WHERE n.nspname = 'public' AND rel.relname = 'inquiry_messages'`, [LOW])).rows[0].can_alter;
+        if (canAlter === false) ok(`${LOW} does not own inquiry_messages — it cannot ALTER it`);
+        else bad(`${LOW} can ALTER the table, so this phase tests nothing`);
+
+        // ── the case that actually runs in production, on every deploy ──
+        if (!/outbound_pending/.test(await defOf() || '')) runMigration(['--apply']);
+        const applied = runLow(['--apply']);
+        if (applied.code === 0) {
+          ok('against an already-migrated database the least-privilege role exits 0 — preDeploy '
+            + 'cannot fail on permissions after the constraint is applied by hand');
+        } else {
+          bad('the least-privilege role CANNOT run the predeploy command against a migrated '
+            + 'database — railway.json would block every deploy', `code=${applied.code}\n        ${applied.out.slice(0, 400)}`);
+        }
+        if (/ALREADY APPLIED/.test(applied.out)) {
+          ok('and it exits there by idempotence, not by acquiring a lock it has no right to');
+        } else bad('exit 0 did not come from the idempotence short-circuit', applied.out.slice(0, 400));
+        if (/ALTER permitted: NO/.test(applied.out)) {
+          ok('its own survey reports ALTER permitted: NO, and it proceeds anyway — correctly, '
+            + 'because there is nothing left to alter');
+        } else bad('the run did not report the missing ALTER right', applied.out.slice(0, 400));
+        if (!/ADD CONSTRAINT/.test(applied.out.replace(/target\s+CHECK[^\n]*/g, ''))) {
+          ok('and it issued no DDL');
+        } else bad('it attempted DDL as an unprivileged role', applied.out.slice(0, 400));
+
+        // ── the control: UNMIGRATED, same role. It must refuse, loudly. ──
+        //
+        // Without this, a pass above is consistent with the script never checking anything. And
+        // this is the state preDeploy sees if a deploy ever lands BEFORE Phase C is run by hand,
+        // so the refusal has to be legible rather than a stack trace.
+        await q(`DELETE FROM inquiry_messages WHERE direction = 'outbound_pending'`);
+        await q(`ALTER TABLE inquiry_messages DROP CONSTRAINT inquiry_messages_direction_check`);
+        await q(`ALTER TABLE inquiry_messages ADD CONSTRAINT inquiry_messages_direction_check
+                 CHECK (direction IN ('inbound','outbound'))`);
+        const unmig = runLow(['--apply']);
+        if (unmig.code !== 0) {
+          ok('against an UNMIGRATED database the same role refuses with a non-zero exit');
+        } else bad('an unprivileged role reported success on an unmigrated database — the ALTER '
+          + 'either did not happen or was not checked', unmig.out.slice(0, 400));
+        if (/is not a member of/.test(unmig.out) && new RegExp(LOW).test(unmig.out)) {
+          ok('naming the role and the owner, so the operator knows it is a grant and not a bug');
+        } else bad('the refusal does not explain that it is a permissions problem', unmig.out.slice(0, 400));
+        if (!/outbound_pending/.test(await defOf() || '')) {
+          ok('and the constraint is untouched by the refused run');
+        } else bad('the constraint changed during a run that refused');
+
+        await q(`REVOKE ALL ON inquiry_messages FROM ${LOW}`).catch(() => {});
+        await q(`DROP ROLE IF EXISTS ${LOW}`).catch(() => {});
+      }
+    }
   } catch (e) {
     bad(`the harness itself failed: ${(e && e.message) || e}`);
   } finally {
@@ -356,7 +454,13 @@ function runVerifier() {
     stopTemp();
   }
 
-  console.log(`\n  ${pass} assertion(s) passed · ${fail} failed`);
+  console.log(`\n  ${pass} assertion(s) passed · ${fail} failed`
+    + `${undone ? ` · ${undone} phase(s) NOT EXECUTED` : ''}`);
+  if (!fail && undone) {
+    console.log('\nINCOMPLETE  everything that ran passed, but a phase did not run. Read the');
+    console.log('            INCOMPLETE line above; this is not a pass.');
+    process.exit(EXIT_NOT_EXECUTED);
+  }
   if (fail) {
     console.log('\nFAIL  the single-purpose migration is not safe to run on production.');
     process.exit(1);
