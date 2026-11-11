@@ -1009,6 +1009,18 @@ async function migrateSchemas() {
         created_at TEXT DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_inq_msg ON inquiry_messages (inquiry_id, created_at);
+      -- A DRAFTED buyer letter is not an outbound one. S2 (CEO authorization 2026-11-11) makes
+      -- every buyer-directed message wait for a human release, so the thread now contains letters
+      -- that exist and have not been delivered. Recording those as 'outbound' is how "we replied"
+      -- becomes true of something nobody received — the pipeline, the follow-up logic and the
+      -- daily summary all read this column.
+      --
+      -- DROP then ADD, matching inquiries_status_check above. inquiry_messages is small, so the
+      -- ACCESS EXCLUSIVE lock and the validation scan are brief; on a large table this would need
+      -- NOT VALID followed by a separate VALIDATE.
+      ALTER TABLE inquiry_messages DROP CONSTRAINT IF EXISTS inquiry_messages_direction_check;
+      ALTER TABLE inquiry_messages ADD CONSTRAINT inquiry_messages_direction_check
+        CHECK (direction IN ('inbound','outbound','outbound_pending'));
       CREATE TABLE IF NOT EXISTS processed_emails (
         id TEXT PRIMARY KEY,
         source TEXT,

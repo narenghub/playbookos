@@ -128,8 +128,24 @@ function encodeAttachments(attachments) {
 // A caller that declares its workflow can now be stopped by name. A caller that declares nothing
 // behaves exactly as before, so this adds precision without moving anything that already worked:
 // an undeclared send is still covered by the capability and global scopes.
+/**
+ * The digest of a message as the approval boundary computes it. Exported so the controls can drive
+ * it, and so there is ONE expression of "the bytes that are leaving" rather than one here and
+ * another in buyer-email-approval.js.
+ *
+ * It delegates to the LEDGER's digestOf for the same reason: a second implementation of the same
+ * hash is how a binding check quietly stops binding.
+ */
+function approvedDigestOf({ to, subject, html }) {
+  return LEDGER.digestOf({
+    to: Array.isArray(to) ? to.join(', ') : String(to == null ? '' : to),
+    subject, html,
+  });
+}
+
 async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments,
-  capability = 'email.send', workflow = null, agent = null }, internal = {}) {
+  capability = 'email.send', workflow = null, agent = null,
+  approvalId = null, expectedDigest = null }, internal = {}) {
   // ── THE KILL SWITCH, BEFORE THE PROVIDER CALL ────────────────────────────
   //
   // Placed here rather than at each of the ~37 routes and 37 crons that can cause an email, so
@@ -195,11 +211,39 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // exception, for the same reason the kill switch exempts it.
   const att = await LEDGER.beginAttempt({
     transport: 'resend', provider: 'resend', to, subject, html,
-    workflow, agent, consequential: !internal.alertAlreadyAuthorized,
+    workflow, agent, approvalId, consequential: !internal.alertAlreadyAuthorized,
   });
   if (!att.ok) {
     return { ok: false, id: null, error: att.error, phase: 'refused_before_request',
       providerResponded: false, stopped: false };
+  }
+
+  // ── IS THE ARTEFACT THAT WAS APPROVED THE ARTEFACT THAT IS LEAVING? ──────
+  //
+  // An approval boundary that freezes a payload still has one joint: between the release of the
+  // frozen text and the provider call, SOMETHING has to carry it, and whatever carries it could
+  // carry something else. "A human approved email A, email B went out, and the row says approved
+  // either way" is the failure, and it is not hypothetical — office/approval.js exists because the
+  // old queue recorded approvals for actions already taken.
+  //
+  // So the binding is checked HERE, at the last possible moment, against the same digest function
+  // the ledger uses. Not in the agent: a check upstream of the transport leaves exactly the window
+  // it is meant to close. The caller states the digest it had approved; this recomputes it from
+  // the bytes actually about to be transmitted, and refuses if they differ.
+  //
+  // Opt-in by parameter, because 55 callers have no approval boundary and inventing one for them
+  // here would be a different change. When a digest IS supplied, it is enforced absolutely — there
+  // is no mode in which a mismatch proceeds.
+  if (expectedDigest) {
+    const actual = approvedDigestOf({ to, subject, html });
+    if (actual !== expectedDigest) {
+      const why = `approved payload digest ${expectedDigest} does not match the message about to be `
+        + `sent (${actual}) — nothing was transmitted`;
+      console.error(`[DIGEST MISMATCH] ${approvalId || '(no approval id)'}: ${why}`);
+      await att.blocked(why, 'approval:digest_mismatch');
+      return { ok: false, id: null, error: why, phase: 'digest_mismatch',
+        providerResponded: false, stopped: true, approvalId, expectedDigest, actualDigest: actual };
+    }
   }
 
   const gate = internal.alertAlreadyAuthorized
@@ -365,4 +409,5 @@ async function transmitAlert({ to, subject, html }) {
 }
 
 module.exports = { sendEmail, sendEmailDetailed, sendEmailOrReport, encodeAttachments, MAX_ATTACH_BYTES,
-                   defaultFrom, DEFAULT_FROM, alertSendFailure, sendOperatorAlert };
+                   defaultFrom, DEFAULT_FROM, alertSendFailure, sendOperatorAlert,
+                   approvedDigestOf };

@@ -269,6 +269,14 @@ pf_step "the ledger migration is additive, idempotent and reversible" node scrip
 # reality. A gate that works and a report that cannot see it are two different kinds of safe, and
 # only one of them is.
 pf_step "the containment report reads every transport, and UNKNOWN blocks an all-clear" env JWT_SECRET=preflight node --test scripts/containment-reporting.test.js
+
+# S2 (CEO authorization 2026-11-11). `needsApproval` in generateQuote gated NOTHING: it chose the
+# wording of a WhatsApp notice sent AFTER a priced commercial offer had already reached the buyer.
+# Buyer email now prepares a digest-bound approval and only a released, digest-matched payload can
+# reach a provider. Named as its own steps rather than left inside the 2,295-subtest suite, so a
+# regression here is reported as the approval boundary breaking and not as "a test failed".
+pf_step "a buyer quotation cannot be released without a fresh, unchanged, digest-matched approval" env JWT_SECRET=preflight node --test src/lib/agents/buyer-email-approval.test.js
+pf_step "the approval boundary is the ONLY road from the inquiry agent to a buyer" env JWT_SECRET=preflight node --test scripts/buyer-email-boundary.test.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one

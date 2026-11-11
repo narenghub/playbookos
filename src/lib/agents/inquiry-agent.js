@@ -5,7 +5,10 @@
 const crypto = require('crypto');
 const { meteredCall } = require('../llm-spend');
 const { query } = require('../db');
-const { sendEmail, sendEmailOrReport } = require('../mailer');
+const { sendEmail, sendEmailOrReport, sendEmailDetailed } = require('../mailer');
+// The approval boundary for everything this agent says to a buyer. sendAndLog prepares; only
+// sendApprovedBuyerEmail can transmit, and only against a released, digest-matched payload.
+const APPROVAL = require('./buyer-email-approval');
 const { sendWhatsApp } = require('../whatsapp');
 const { logAgentActivity, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth');
@@ -365,7 +368,76 @@ function buildSpecsTable({ molecule, cas: filedCas, grade, purity, quantity, uni
 </td></tr>`;
 }
 
-async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', productTypeLabel, controlled, ctaLabel, ctaUrl } = {}) {
+// ── WHO IS ANSWERABLE FOR A LETTER TO A CUSTOMER ─────────────────────────────
+//
+// The buyer sees "Sarah Chen, Business Development Manager". That is a persona, not a user, and
+// office/approval.js release() revalidates the signatory against `users` — so a payload signed
+// only by the persona could never be released, and should never be: a commercial offer needs a
+// human the company is answerable through.
+//
+// Resolved, never hardcoded. The quotation CC used to name a departed Procurement Director from a
+// literal in the source, on the outside of the company, where no personnel change could correct
+// it. Returns null when nobody active can be resolved, and null means nothing is prepared.
+async function accountableSignatory() {
+  for (const role of ['sales_director', 'account_manager']) {
+    const u = await getUser(role).catch(() => null);
+    if (u && u.id && u.email) return u;
+  }
+  const n = await getNaresh().catch(() => null);
+  // getNaresh falls back to a literal with NO id when no user matches. That object cannot be
+  // revalidated, so it is not a signatory.
+  return (n && n.id && n.email) ? n : null;
+}
+
+// ── THE GOVERNED CONTEXT, OR NOTHING ─────────────────────────────────────────
+//
+// prepare() needs a run that carries a company identity, and office/context.js derives the
+// company from an ACTIVE OBJECTIVE and from nowhere else — there is no parameter through which
+// this agent could name one. A legacy run resolves to NO CONTEXT by design.
+//
+// So buyer email is governed by an objective or it does not go. BUYER_EMAIL_OBJECTIVE_ID is the
+// operator's switch; unset, unresolvable, or an objective that is not active all produce the same
+// answer, which is that no approval can be prepared and therefore nothing can be sent.
+//
+// THAT IS THE INTENDED DEPLOYED STATE. Shipping this code does not start anything: it makes
+// autonomous buyer email unsendable until a human both creates the objective and approves each
+// message. Deploying it while the external-email HOLD stands changes nothing about what leaves.
+async function buyerEmailContext(deps = {}) {
+  const objectiveId = process.env.BUYER_EMAIL_OBJECTIVE_ID;
+  if (!objectiveId) {
+    return { ok: false, reason: 'no_objective_configured',
+      detail: 'BUYER_EMAIL_OBJECTIVE_ID is unset, so no company context can be derived and no '
+        + 'buyer email can be prepared or sent' };
+  }
+  try {
+    const { beginObjectiveRun } = deps.run || require('../office/run');
+    const { cronIntentKey } = deps.runs || require('../runs');
+    const begun = await beginObjectiveRun({
+      objectiveId,
+      trigger: 'cron',
+      triggerDetail: 'inquiry-agent buyer email',
+      workflow: 'buyer-email',
+      agent: AGENT,
+      product: 'sales',
+      // Per FIRING, not per day. The default objective key is a day slot, which would give this
+      // agent one run every 24 hours and refuse every later cycle — and a refused context here
+      // means a buyer never hears back, which is a failure dressed as safety.
+      intentKey: cronIntentKey('inquiry-buyer-email', new Date()),
+    }, deps);
+    if (begun.duplicate || !begun.runId) {
+      return { ok: false, reason: 'run_not_created',
+        detail: 'another run already holds this intent key' };
+    }
+    return { ok: true, ctx: begun.context, runId: begun.runId };
+  } catch (e) {
+    return { ok: false, reason: 'context_unavailable', detail: e.message };
+  }
+}
+
+// Render the letter. Separated from sending because the FROZEN ARTEFACT IS THESE BYTES: prepare
+// renders once, the approver reads this html, and the transport refuses anything whose digest
+// differs. Re-rendering at send time is the gap this split closes.
+async function buildBuyerEmail(inquiry, { subject, body, cc, specsTable = '', productTypeLabel, controlled, ctaLabel, ctaUrl } = {}) {
   let pricing = null;
   if (!productTypeLabel || controlled === undefined) pricing = await findPricing(inquiry.molecule_name, inquiry.cas_number);
   if (!productTypeLabel) productTypeLabel = productTypeLabelFor(pricing, inquiry.molecule_name);
@@ -375,23 +447,144 @@ async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', product
     productTypeLabel, bodyHtml: textToHtml(body), specsTable, controlled, ctaLabel,
     ...(ctaUrl ? { ctaUrl } : {}),
   });
-  // ── THIS IS THE ONE PLACE THIS AGENT EMAILS SOMEBODY OUTSIDE THE COMPANY ──
-  //
-  // Eleven call sites funnel through here, which is why the containment belongs here and not at
-  // each of them. It declares an explicit kill-switch identity so that
-  // `workflow:legacy-inquiry-buyer-email` stops autonomous buyer email on its own — without
-  // silencing the internal briefings, scores and alerts that a `capability:email.send` stop takes
-  // down with it.
-  //
-  // This is containment, not governance. The path still has no approval boundary, no durable
-  // evidence before the external effect and no idempotency comparable to the supplier RFQ claim.
-  // Naming it makes it stoppable; migrating it into the governed architecture is separate work.
-  const ok = await sendEmail({ to: inquiry.buyer_email, subject, html, from: SALES_FROM,
-    replyTo: 'sales@abiozen.com', cc,
-    workflow: 'legacy-inquiry-buyer-email', agent: 'inquiry-agent' });
-  await logMessage(inquiry.id, { direction: 'outbound', sender_name: REP_NAME, sender_email: 'sales@abiozen.com', subject, body_text: body, body_html: html });
-  await query(`UPDATE inquiries SET total_emails_sent=COALESCE(total_emails_sent,0)+1, last_email_at=NOW(), updated_at=NOW() WHERE id=$1`, [inquiry.id]);
-  return ok;
+  return { to: inquiry.buyer_email, cc, from: SALES_FROM, replyTo: 'sales@abiozen.com',
+    subject, body, html };
+}
+
+// ── THIS IS THE ONE PLACE THIS AGENT REACHES SOMEBODY OUTSIDE THE COMPANY ────
+//
+// Eleven call sites funnel through here, which is why the boundary belongs here and not at each of
+// them. It used to SEND. It now PREPARES: every buyer-directed message becomes a durable approval
+// item carrying the exact bytes, and nothing leaves until a human releases it.
+//
+// The kill-switch identity stays: `workflow:legacy-inquiry-buyer-email` stops this path on its own
+// without silencing internal briefings, scores and alerts that a `capability:email.send` stop
+// takes down with it. The gate is now one of four controls rather than the only one.
+//
+// ── THE RETURN SHAPE SAYS "NOT SENT", ON PURPOSE ──────────────────────────────
+//
+// It returns { ok:false, prepared:true }. `ok` is false because NOTHING WAS TRANSMITTED, and every
+// existing caller that treats the result as "did the buyer get this" now gets the correct answer.
+// A truthy return here would have made each of those eleven call sites silently claim a send —
+// which is the exact defect this workstream exists to remove, re-created by its own fix.
+async function sendAndLog(inquiry, { subject, body, cc, specsTable = '', productTypeLabel, controlled, ctaLabel, ctaUrl, commercial = {}, reason = null, ctx: suppliedCtx = null } = {}, deps = {}) {
+  const built = await buildBuyerEmail(inquiry, { subject, body, cc, specsTable, productTypeLabel, controlled, ctaLabel, ctaUrl });
+
+  const signatory = await accountableSignatory();
+  if (!signatory) {
+    console.error(`[buyer-email] inquiry ${inquiry.id}: no active accountable signatory could be `
+      + 'resolved, so nothing was prepared and nothing was sent');
+    return { ok: false, prepared: false, reason: 'no_accountable_signatory' };
+  }
+
+  let ctx = suppliedCtx;
+  if (!ctx) {
+    const c = await buyerEmailContext(deps);
+    if (!c.ok) {
+      console.warn(`[buyer-email] inquiry ${inquiry.id}: ${c.reason} — ${c.detail}. Nothing prepared, nothing sent.`);
+      return { ok: false, prepared: false, reason: c.reason, detail: c.detail };
+    }
+    ctx = c.ctx;
+  }
+
+  const prep = await APPROVAL.prepareBuyerEmail(ctx, {
+    inquiry, to: built.to, cc: built.cc, from: built.from, replyTo: built.replyTo,
+    subject: built.subject, body: built.body, html: built.html,
+    commercial, displayName: REP_NAME, signatory,
+    reason: reason || `buyer email to ${inquiry.buyer_email} for inquiry ${inquiry.id}`,
+  }, deps);
+
+  if (!prep.prepared) {
+    console.error(`[buyer-email] inquiry ${inquiry.id}: ${prep.reason} — ${prep.detail || ''}`);
+    return { ok: false, prepared: false, reason: prep.reason, detail: prep.detail };
+  }
+
+  // The draft is recorded as a message so the thread a human reads is complete. Marked
+  // 'outbound_pending' rather than 'outbound': a drafted letter in the same column as a delivered
+  // one is how "we replied" becomes true of something nobody received.
+  await logMessage(inquiry.id, { direction: 'outbound_pending', sender_name: REP_NAME,
+    sender_email: 'sales@abiozen.com', subject: built.subject, body_text: built.body,
+    body_html: built.html }).catch((e) => console.error(`[buyer-email] draft not logged: ${e.message}`));
+
+  return { ok: false, prepared: true, approvalId: prep.approvalId,
+    transportDigest: prep.transportDigest, alreadyPending: !!prep.alreadyPending };
+}
+
+// ── THE ONLY FUNCTION IN THIS FILE THAT CAN REACH A BUYER ────────────────────
+//
+// release → digest re-check → transport (which rechecks the STOPs and the digest again, and
+// claims the ledger row before the provider call).
+//
+// `total_emails_sent` and `last_email_at` are incremented ONLY on provider acceptance. They used
+// to be incremented unconditionally beside a discarded boolean, so a refused or stopped message
+// still raised the count — and that count is what the follow-up logic and the daily summary read.
+async function sendApprovedBuyerEmail({ approvalId, releasedBy, currentCommercial = null, ctx: suppliedCtx = null }, deps = {}) {
+  if (!approvalId) return { ok: false, reason: 'no_approval_id' };
+  if (!releasedBy) return { ok: false, reason: 'no_releasing_actor' };
+
+  let ctx = suppliedCtx;
+  if (!ctx) {
+    const c = await buyerEmailContext(deps);
+    if (!c.ok) return { ok: false, reason: c.reason, detail: c.detail };
+    ctx = c.ctx;
+  }
+
+  const rel = await APPROVAL.releaseBuyerEmail(ctx, { approvalId, releasedBy, currentCommercial }, deps);
+  if (!rel.released) {
+    console.warn(`[buyer-email] release refused for ${approvalId}: ${rel.reason}`);
+    return { ok: false, released: false, reason: rel.reason, detail: rel.detail,
+      changed: rel.changed, approvalId };
+  }
+
+  const m = rel.message;
+  const r = await sendEmailDetailed({
+    to: m.to, subject: m.subject, html: m.html, from: m.from,
+    ...(m.replyTo ? { replyTo: m.replyTo } : {}),
+    ...(m.cc ? { cc: m.cc } : {}),
+    workflow: 'legacy-inquiry-buyer-email', agent: AGENT,
+    approvalId, expectedDigest: rel.expectedDigest,
+  });
+
+  if (!r.ok) {
+    console.error(`[buyer-email] ${approvalId} released but NOT delivered: ${r.phase} — ${r.error}`);
+    return { ok: false, released: true, delivered: false, approvalId,
+      inquiryId: rel.inquiryId, phase: r.phase, error: r.error,
+      providerResponded: !!r.providerResponded };
+  }
+
+  await recordDeliveredBuyerEmail(rel.inquiryId, {
+    subject: m.subject, body: m.body, html: m.html });
+
+  return { ok: true, released: true, delivered: true, approvalId, providerMessageId: r.id,
+    inquiryId: rel.inquiryId, commercial: rel.commercial, digest: rel.expectedDigest };
+}
+
+// ── RELEASE A QUOTATION. THE ONLY PLACE `quote_sent` IS WRITTEN ──────────────
+//
+// `currentCommercial` is recomputed by the caller from live pricing and compared against the
+// approved terms before the approval is claimed. If a pricing row moved between the decision and
+// the release, this refuses rather than sending the buyer a number nobody approved.
+async function releaseQuote({ approvalId, releasedBy, currentCommercial = null }, deps = {}) {
+  const r = await sendApprovedBuyerEmail({ approvalId, releasedBy, currentCommercial }, deps);
+
+  if (!r.ok) {
+    // The status is NOT advanced. A released-but-undelivered quote stays awaiting approval, which
+    // is the honest description: the human decided, and the buyer still has nothing.
+    return r;
+  }
+
+  await query(`UPDATE inquiries SET status='quote_sent', updated_at=NOW() WHERE id=$1`, [r.inquiryId]);
+  return { ...r, status: 'quote_sent' };
+}
+
+// Record a delivered buyer email against its inquiry. Separate from the send so the caller that
+// knows WHICH inquiry does the bookkeeping — the frozen payload carries the id, but the counters
+// belong to the workflow that owns the conversation, not to the transport.
+async function recordDeliveredBuyerEmail(inquiryId, { subject, body, html }) {
+  if (!inquiryId) return;
+  await logMessage(inquiryId, { direction: 'outbound', sender_name: REP_NAME,
+    sender_email: 'sales@abiozen.com', subject, body_text: body, body_html: html });
+  await query(`UPDATE inquiries SET total_emails_sent=COALESCE(total_emails_sent,0)+1, last_email_at=NOW(), updated_at=NOW() WHERE id=$1`, [inquiryId]);
 }
 
 // ── Function 1 — receive an inquiry ───────────────────────────────────────────
@@ -827,16 +1020,65 @@ ${signatory}`;
   const quoteCc = isResearch
     ? ['naren@abiozen.com']
     : [...(procurementCc && procurementCc.email ? [procurementCc.email] : []), 'naren@abiozen.com'];
-  await sendAndLog(inq, { subject, body, specsTable, productTypeLabel: isResearch ? 'Research Chemical' : 'GMP API', controlled, ctaLabel: 'Reply "ACCEPTED" to Proceed &rarr;', cc: quoteCc });
-  await query(`UPDATE inquiries SET status='quote_sent', order_value_usd=$1, quote_ref=$3, updated_at=NOW() WHERE id=$2`, [total, inquiryId, ref]);
+  // ── THE COMMERCIAL TERMS, FROZEN AND COMPARABLE ──────────────────────────
+  //
+  // Passed explicitly so the approver sees the offer as fields, and so release can refuse if any
+  // of them has moved since the decision. These are the figures, not a description of them.
+  const commercial = {
+    product_name: inq.molecule_name || null,
+    cas_number: quoteCas || null,
+    product_type: isResearch ? 'Research Chemical' : 'GMP API',
+    quantity: qtyKg, quantity_unit: 'kg',
+    unit_price: unitPrice, total, currency: 'USD',
+    payment_terms: '50% advance, 50% before shipment',
+    lead_time_days: pricing.lead_time_days ?? null,
+    valid_until: validUntil, quote_ref: ref,
+    incoterms: null,
+  };
 
-  if (needsApproval || total > ESCALATE_ABOVE) {
+  const prep = await sendAndLog(inq, { subject, body, specsTable,
+    productTypeLabel: commercial.product_type, controlled,
+    ctaLabel: 'Reply "ACCEPTED" to Proceed &rarr;', cc: quoteCc, commercial,
+    reason: `quotation ${ref}: ${inq.molecule_name} ${qtyKg}kg at $${unitPrice}/kg, total `
+      + `$${total.toLocaleString()} USD, to ${inq.buyer_email}` });
+
+  // ── STATUS FOLLOWS WHAT HAPPENED, NOT WHAT WAS ATTEMPTED ─────────────────
+  //
+  // This line read `status='quote_sent'` unconditionally, immediately after a sendAndLog whose
+  // result was discarded. The inquiry was marked as quoted whether the mail was delivered,
+  // refused by the provider or stopped by policy — and 'quote_sent' is read by processInboundReply
+  // to decide the buyer is in a quoted conversation, and by the pipeline the CEO looks at.
+  //
+  // quote_sent is now set in ONE place only: after the provider has accepted the message
+  // (markQuoteDelivered). Everything before that is 'quote_awaiting_approval'.
+  const status = prep.prepared ? 'quote_awaiting_approval' : 'quote_blocked';
+  await query(`UPDATE inquiries SET status=$4, order_value_usd=$1, quote_ref=$3, updated_at=NOW() WHERE id=$2`,
+    [total, inquiryId, ref, status]);
+
+  // The notice says what is true. It used to say "💰 Large quote sent" — past tense, about a
+  // priced offer that a human had never seen and was now being told about after the fact. The
+  // whole point of this workstream is that this message is the thing that happens BEFORE.
+  if (prep.prepared && (needsApproval || total > ESCALATE_ABOVE)) {
     const naresh = await getNaresh();
     if (naresh.whatsapp_number) await sendWhatsApp(naresh.whatsapp_number,
-      `💰 Large quote sent: ${inq.buyer_company || inq.buyer_email} — ${inq.molecule_name} ${qtyKg}kg = $${total.toLocaleString()}${needsApproval ? ' (>10kg — review pricing)' : ''}`,
-      { user_id: naresh.id || null, message_type: 'large_quote' }).catch(() => {});
+      `📝 Quote AWAITING YOUR APPROVAL — nothing sent yet: ${inq.buyer_company || inq.buyer_email} — `
+      + `${inq.molecule_name} ${qtyKg}kg = $${total.toLocaleString()}`
+      + `${needsApproval ? ' (>10kg — review pricing)' : ''}. Approval ${prep.approvalId}`,
+      { user_id: naresh.id || null, message_type: 'quote_awaiting_approval' }).catch(() => {});
   }
-  return { quote_id: quoteId, unit_price: unitPrice, total, tier, needs_approval: needsApproval };
+  if (!prep.prepared) {
+    const naresh = await getNaresh();
+    if (naresh.whatsapp_number) await sendWhatsApp(naresh.whatsapp_number,
+      `⚠️ Quote for ${inq.buyer_company || inq.buyer_email} could NOT be prepared (${prep.reason}). `
+      + 'Nothing was sent and no approval exists.',
+      { user_id: naresh.id || null, message_type: 'quote_blocked' }).catch(() => {});
+  }
+
+  return { quote_id: quoteId, unit_price: unitPrice, total, tier,
+    // `sent` is stated explicitly and is always false here. A caller reading a truthy result as
+    // delivery is the failure mode this whole change exists to remove.
+    sent: false, prepared: !!prep.prepared, approval_id: prep.approvalId || null,
+    status, needs_approval: needsApproval, blocked_reason: prep.prepared ? null : prep.reason };
 }
 
 // ── Function 5 — escalate to a human ──────────────────────────────────────────
@@ -1379,4 +1621,8 @@ module.exports = {
   // boundaries rather than a copy of them. A test that reimplements what it tests proves nothing:
   // on 30 Oct a test of the territory grant passed by grepping the source for its own query text.
   authoritativeCas, renderEmail, buildSpecsTable,
+  // S2: the approval boundary. sendAndLog PREPARES and returns { ok:false, prepared:true };
+  // releaseQuote and sendApprovedBuyerEmail are the only functions here that can reach a buyer.
+  sendAndLog, buildBuyerEmail, sendApprovedBuyerEmail, releaseQuote,
+  recordDeliveredBuyerEmail, buyerEmailContext, accountableSignatory,
 };
