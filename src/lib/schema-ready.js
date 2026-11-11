@@ -39,6 +39,11 @@ const REQUIRED_TABLES = Object.freeze([
   'federal_opportunities', 'opportunity_import_batches', 'opportunity_assessments',
   'opportunity_bid_reviews', 'opportunity_duplicate_candidates', 'opportunity_audit_events',
   'verified_capabilities',
+  // inquiry_messages — added 2026-11-11 with the direction CHECK below. Without the table, that
+  // constraint probe finds nothing and reports "the constraint is absent", which sends a reader
+  // looking for a missing ALTER instead of a missing CREATE. It also belongs here on its own
+  // merits: the inquiry agent writes to it on every message, inbound and outbound.
+  'inquiry_messages',
 ]);
 
 // Columns whose absence means a migration applied only partly — the case a table-existence check
@@ -62,14 +67,32 @@ const REQUIRED_COLUMNS = Object.freeze([
   ['outreach', 'partner_id'],
 ]);
 
+// ── A CHECK CONSTRAINT IS THE THIRD WAY A MIGRATION APPLIES ONLY PARTLY ─────
+//
+// Tables and columns are covered above. A CHECK is neither, and this one is load-bearing: S2 makes
+// every buyer-directed message wait for a human, and records the draft as
+// direction='outbound_pending'. Deploy that code against an unwidened constraint and the server
+// starts, answers /health 200 with db: connected, and silently fails to record a draft that an
+// operator is being asked to approve.
+//
+// That is the shape the note above describes about outreach.partner_id — "green from outside,
+// broken in use" — and the same shape as 2026-09-30. So the constraint is asserted at boot, by its
+// definition rather than its existence: a constraint of the right NAME that forbids the value is
+// exactly as broken as a missing one.
+const REQUIRED_CHECK_VALUES = Object.freeze([
+  ['inquiry_messages', 'inquiry_messages_direction_check', 'outbound_pending'],
+]);
+
 /**
  * Check the schema. Reads only.
  *
- * @returns {{ready: boolean, missingTables: string[], missingColumns: string[], error?: string}}
+ * @returns {{ready: boolean, missingTables: string[], missingColumns: string[],
+ *            staleConstraints: string[], error?: string}}
  */
 async function check(q) {
   const missingTables = [];
   const missingColumns = [];
+  const staleConstraints = [];
   try {
     for (const t of REQUIRED_TABLES) {
       const r = await q(`SELECT to_regclass($1) IS NOT NULL AS present`, [`public.${t}`]);
@@ -86,10 +109,29 @@ async function check(q) {
          ) AS present`, [t, c]);
       if (!r.rows[0] || r.rows[0].present !== true) missingColumns.push(`${t}.${c}`);
     }
+    for (const [t, name, value] of REQUIRED_CHECK_VALUES) {
+      if (missingTables.includes(t)) continue;
+      // pg_get_constraintdef gives the clause as the server holds it, so this cannot be fooled by
+      // a constraint that exists under the right name with the wrong predicate.
+      const r = await q(
+        `SELECT pg_get_constraintdef(c.oid) AS def
+           FROM pg_constraint c
+           JOIN pg_class rel ON rel.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = rel.relnamespace
+          WHERE n.nspname = 'public' AND rel.relname = $1 AND c.conname = $2`, [t, name]);
+      const def = r.rows[0] && r.rows[0].def;
+      if (!def) staleConstraints.push(`${t}.${name} is absent`);
+      else if (!String(def).includes(value)) {
+        staleConstraints.push(`${t}.${name} does not admit '${value}'`);
+      }
+    }
   } catch (e) {
-    return { ready: false, missingTables, missingColumns, error: e.message };
+    return { ready: false, missingTables, missingColumns, staleConstraints, error: e.message };
   }
-  return { ready: !missingTables.length && !missingColumns.length, missingTables, missingColumns };
+  return {
+    ready: !missingTables.length && !missingColumns.length && !staleConstraints.length,
+    missingTables, missingColumns, staleConstraints,
+  };
 }
 
 /**
@@ -101,13 +143,17 @@ async function check(q) {
 async function assertReadyOrExit(q, { log = console.log, err = console.error, exit = process.exit } = {}) {
   const r = await check(q);
   if (r.ready) {
-    log('[boot] schema check: ready — all required tables and columns present (no DDL executed)');
+    log('[boot] schema check: ready — required tables, columns and check constraints all present '
+      + '(no DDL executed)');
     return r;
   }
   err('[boot] SCHEMA NOT READY — refusing to start.');
   if (r.error) err(`[boot]   the check itself failed: ${r.error}`);
   for (const t of r.missingTables) err(`[boot]   missing table:  ${t}`);
   for (const c of r.missingColumns) err(`[boot]   missing column: ${c}`);
+  // Reported in its own words. "stale constraint" and "missing column" send a reader to different
+  // places, and a constraint that exists with the wrong predicate would otherwise be invisible.
+  for (const c of r.staleConstraints) err(`[boot]   stale constraint: ${c}`);
   err('[boot]');
   err('[boot] Migrations are no longer run at boot (ENG-003). Run them as the migrator role:');
   err('[boot]     node scripts/migrate.js');
@@ -118,4 +164,5 @@ async function assertReadyOrExit(q, { log = console.log, err = console.error, ex
   return r;
 }
 
-module.exports = { check, assertReadyOrExit, REQUIRED_TABLES, REQUIRED_COLUMNS };
+module.exports = { check, assertReadyOrExit, REQUIRED_TABLES, REQUIRED_COLUMNS,
+  REQUIRED_CHECK_VALUES };

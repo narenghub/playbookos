@@ -296,6 +296,12 @@ pf_step "a draft cannot be mistaken for a sent message by any downstream reader"
 # claim must be a property of the grant and of a self-scan that can be shown to fail — not of the
 # author's intention. No mailbox is contacted by these controls or by the script without --execute.
 pf_step "the Gmail reconciliation script is read-only by contract, and its scan can go red" node --test scripts/reconcile-breach-gmail.test.js
+# The refusal branches of the boot readiness check. check-previous-release-compat.js runs it
+# against a REAL migrated Postgres and proves it passes; a correctly migrated database has nothing
+# missing, so the refusals can only be driven with the query stubbed. The CHECK-constraint branch
+# matters most: deploying S2 against an unwidened constraint gives a server that answers /health
+# 200 and silently fails to record the draft an operator is being asked to approve.
+pf_step "boot refuses a schema that is only partly migrated, constraints included" node --test src/lib/schema-ready.test.js
 pf_step "every recipient is classified inside or outside the company, both directions" node --test src/lib/outbound/recipients.test.js
 pf_step "the approval boundary is the ONLY road from the inquiry agent to a buyer" env JWT_SECRET=preflight node --test scripts/buyer-email-boundary.test.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
