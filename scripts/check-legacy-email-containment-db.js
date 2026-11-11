@@ -121,10 +121,36 @@ const RFQ = 'legacy-supplier-rfq-email';
       return { autonomy: require('../src/lib/autonomy'), mailer: require('../src/lib/mailer') };
     };
 
-    const send = async (m, { workflow, agent, capability } = {}) => {
+    // ── THE APPROVAL GATE, SATISFIED SO IT DOES NOT MASK WHAT THIS MEASURES ──
+    //
+    // email-gate.js now refuses anything leaving the company without a RELEASED approval whose
+    // payload hashes to the bytes being sent (CEO decision 2026-11-11, priority 1). This harness
+    // sends to buyer@external.invalid, so without an approval EVERY case below refuses — and the
+    // mutation controls, whose whole job is to show that removing the workflow forwarding makes
+    // containment disappear, would report "still refused" and prove nothing.
+    //
+    // That is the masking recorded in office/approval.js: a second gate ordered ahead of the one
+    // under test makes the one under test unmeasurable. So the approval is granted here, and the
+    // approval gate gets its own refusal case at the end of this file.
+    //
+    // The table is built by hand, in the shape the gate reads, exactly as email_log above is —
+    // and with no foreign keys, because the gate only SELECTs.
+    const APPROVAL_ID = 'ap-containment-fixture';
+    const FIXTURE_MSG = { to: 'buyer@external.invalid', subject: 'fixture', html: 'body' };
+    const FIXTURE_DIGEST = require('../src/lib/outbound/ledger').digestOf(FIXTURE_MSG);
+    await q(`CREATE TABLE IF NOT EXISTS office_approvals (id TEXT PRIMARY KEY, status TEXT,
+      released_at TIMESTAMPTZ, action_payload JSONB)`);
+    await q(`INSERT INTO office_approvals (id, status, released_at, action_payload)
+             VALUES ($1, 'approved', NOW(), $2)
+             ON CONFLICT (id) DO UPDATE SET status='approved', released_at=NOW(),
+               action_payload=EXCLUDED.action_payload`,
+      [APPROVAL_ID, JSON.stringify({ transport_digest: FIXTURE_DIGEST })]);
+
+    const send = async (m, { workflow, agent, capability, approve = true } = {}) => {
       provider.length = 0;
       const r = await m.sendEmailDetailed({
-        to: 'buyer@external.invalid', subject: 'fixture', html: 'body',
+        ...FIXTURE_MSG,
+        ...(approve ? { approvalId: APPROVAL_ID } : {}),
         ...(workflow ? { workflow } : {}), ...(agent ? { agent } : {}),
         ...(capability ? { capability } : {}),
       });
@@ -142,6 +168,23 @@ const RFQ = 'legacy-supplier-rfq-email';
       if (r.ok && calls === 1) ok('the buyer path reaches the provider when nothing is stopped');
       else bad('the fixture cannot send at all, so every refusal below would prove nothing',
         JSON.stringify({ ok: r.ok, calls, err: r.error }).slice(0, 200));
+    }
+
+    // ══ 1b. AND WITHOUT THE APPROVAL, THE SAME SEND REFUSES ════════════════
+    //
+    // The complement of the baseline. Section 1 grants an approval so the workflow-scoping
+    // measurements below are not masked; this proves the grant is load-bearing rather than
+    // decorative, and that the recipient-keyed approval gate refuses with NO stop in force.
+    note('an external send with no released approval must refuse, stop or no stop');
+    {
+      const { mailer: m } = await clearAll();
+      const { r, calls } = await send(m, { workflow: INQ, agent: 'inquiry-agent', approve: false });
+      if (!r.ok && calls === 0 && /EXTERNAL_WITHOUT_APPROVAL/.test(r.error || '')) {
+        ok('no approval, no provider call — and the refusal names the approval, not a stop');
+      } else {
+        bad('an external send without an approval reached the provider, or refused for another reason',
+          JSON.stringify({ ok: r.ok, calls, err: (r.error || '').slice(0, 160) }));
+      }
     }
 
     // ══ 2. THE TARGETED STOP REFUSES — AND IT IS THE ONE THAT REFUSED ══════

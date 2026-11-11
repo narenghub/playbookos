@@ -15,9 +15,39 @@ const db = require('../lib/db');
 let SQL = [];            // every query the mailer ran
 let NOTIFS = [];         // rows it inserted into notifications
 let DUP = false;         // does a recent alert already exist?
+
+// ── THE APPROVAL GATE, SATISFIED EXACTLY RATHER THAN WAVED THROUGH ──────────
+//
+// email-gate.js now refuses any send that leaves the company unless a RELEASED approval exists
+// whose frozen payload hashes to the bytes about to be transmitted (CEO decision 2026-11-11,
+// priority 1). Every fixture below addresses a@b.com, which is outside the company, so without
+// an approval all of them would refuse for a reason that has nothing to do with the transport
+// mechanics they exist to test.
+//
+// Two wrong ways to fix that, both of which this avoids. Re-pointing them at an internal address
+// would stop them exercising the external path at all. Having the stub answer "approved" for any
+// digest would make the digest comparison untested here while it looked satisfied — and one
+// fixture ('not-an-address') would then pass for the WRONG REASON, reporting false because of a
+// missing approval rather than because the address is invalid.
+//
+// So the stub CAPTURES the real digest from the ledger's own INSERT, which happens before the
+// gate runs, and serves it back. The comparison is performed against the true value.
+let APPROVE = true;      // is a released approval in force for the message under test?
+let LAST_DIGEST = null;  // payload_digest, as the ledger recorded it for this attempt
+
 db.query = async (sql, params = []) => {
   SQL.push({ sql: sql.replace(/\s+/g, ' ').trim(), params });
-  if (/INSERT INTO email_log/i.test(sql)) return { rows: [] };
+  if (/INSERT INTO email_log/i.test(sql)) {
+    // ledger.beginAttempt: (..., correlation_id, outcome, approval_id, payload_digest, claim_ref)
+    // → payload_digest is the 12th placeholder, params[11].
+    LAST_DIGEST = params[11] || null;
+    return { rows: [] };
+  }
+  if (/released_at, action_payload/i.test(sql)) {
+    if (!APPROVE) return { rows: [] };
+    return { rows: [{ id: params[0], status: 'approved', released_at: new Date(),
+      action_payload: { transport_digest: LAST_DIGEST } }] };
+  }
   // THE LEDGER'S SCHEMA PROBE. mailer now opens an outbound-ledger attempt before the gate and
   // FAILS CLOSED when the ledger columns are absent — so a fixture that answers "no columns" makes
   // every consequential send refuse for a reason that has nothing to do with what is being tested.
@@ -44,7 +74,10 @@ global.fetch = async (url, opts) => {
   return { json: async () => next };
 };
 
-beforeEach(() => { SQL = []; NOTIFS = []; DUP = false; RESPONSES = []; delete process.env.MAIL_FROM; });
+beforeEach(() => {
+  SQL = []; NOTIFS = []; DUP = false; RESPONSES = []; APPROVE = true; LAST_DIGEST = null;
+  delete process.env.MAIL_FROM;
+});
 
 test('the default sender is NOT abiozen.com — the key is not authorized for it', () => {
   assert.doesNotMatch(DEFAULT_FROM, /abiozen\.com/,
@@ -63,11 +96,11 @@ test('MAIL_FROM overrides it, so the domain is fixable without a deploy', () => 
 
 test('a caller with no `from` gets the default; an explicit `from` is untouched', async () => {
   process.env.RESEND_API_KEY = 'test-key';
-  await sendEmail({ to: 'a@b.com', subject: 's', html: '<p>h</p>' });
+  await sendEmail({ to: 'a@b.com', subject: 's', html: '<p>h</p>', approvalId: 'ap-test' });
   assert.equal(global.__lastSend.from, DEFAULT_FROM);
   // The two customer-facing senders pass abiozen.com deliberately — a supplier must not receive an
   // Abiozen RFQ from another company's domain — so the override must not be rewritten.
-  await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', from: 'Palash Das <palash@abiozen.com>' });
+  await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'Palash Das <palash@abiozen.com>' });
   assert.equal(global.__lastSend.from, 'Palash Das <palash@abiozen.com>');
 });
 
@@ -75,7 +108,7 @@ test('a caller with no `from` gets the default; an explicit `from` is untouched'
 test('a domain-authorization 403 RAISES a notification, not just a log row', async () => {
   process.env.RESEND_API_KEY = 'test-key';
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  const ok = await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', from: 'x@abiozen.com' });
+  const ok = await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'x@abiozen.com' });
   assert.equal(ok, false, 'the caller still sees a plain false — nothing throws');
   assert.equal(NOTIFS.length, 1, 'and somebody is told');
   assert.match(NOTIFS[0][0], /Email sending is broken for abiozen\.com/, 'the title names the domain');
@@ -86,7 +119,7 @@ test('a domain-authorization 403 RAISES a notification, not just a log row', asy
 test('the notification is PLATFORM-WIDE, so a partner account never sees it', async () => {
   process.env.RESEND_API_KEY = 'test-key';
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  await sendEmail({ to: 'a@b.com', subject: 's', html: 'h' });
+  await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
   const insert = SQL.find(q => /INSERT INTO notifications/.test(q.sql));
   assert.match(insert.sql, /VALUES \(NULL, 'email_channel'/,
     "product NULL means platform-wide, which requires the 'internal' pseudo-product");
@@ -96,7 +129,7 @@ test('it is deduped — the 6pm agent must not write one row per recipient per e
   process.env.RESEND_API_KEY = 'test-key';
   DUP = true;
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  await sendEmail({ to: 'a@b.com', subject: 's', html: 'h' });
+  await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
   assert.equal(NOTIFS.length, 0, 'a recent alert already exists, so this one is suppressed');
 });
 
@@ -105,7 +138,7 @@ test('an ORDINARY failure does not raise the alarm', async () => {
   // which is the same outcome as not raising at all.
   process.env.RESEND_API_KEY = 'test-key';
   RESPONSES = [{ statusCode: 422, message: 'Invalid `to` field' }];
-  const ok = await sendEmail({ to: 'not-an-address', subject: 's', html: 'h' });
+  const ok = await sendEmail({ to: 'not-an-address', subject: 's', html: 'h', approvalId: 'ap-test' });
   assert.equal(ok, false);
   assert.equal(NOTIFS.length, 0);
 });
@@ -118,7 +151,7 @@ test('a failure to raise the alarm cannot break the send path', async () => {
     return { rows: [] };
   };
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  const ok = await sendEmail({ to: 'a@b.com', subject: 's', html: 'h' });
+  const ok = await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
   assert.equal(ok, false, 'returns normally rather than throwing into the caller');
   db.query = saved;
 });
@@ -126,7 +159,7 @@ test('a failure to raise the alarm cannot break the send path', async () => {
 test('a missing API key is still handled, and is still not an alarm', async () => {
   const saved = process.env.RESEND_API_KEY;
   delete process.env.RESEND_API_KEY;
-  assert.equal(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h' }), false);
+  assert.equal(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
   assert.equal(NOTIFS.length, 0);
   process.env.RESEND_API_KEY = saved;
 });
@@ -177,7 +210,7 @@ test('attachments reach the request body, base64, under `attachments`', async ()
   const realFetch = global.fetch;
   global.fetch = async (url, opts) => { sentBody = JSON.parse(opts.body); return { json: async () => ({ id: 'msg_1' }) }; };
   try {
-    const r = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h',
+    const r = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
       attachments: [{ filename: 'SN-2026-0001.docx', content: Buffer.from('PK\x03\x04x') }] });
     assert.equal(r.ok, true);
     assert.equal(r.id, 'msg_1', 'the provider id is returned, so a caller can prove what it sent');
@@ -195,12 +228,12 @@ test('sendEmail KEEPS its boolean contract — 55 callers depend on it', async (
   const realFetch = global.fetch;
   global.fetch = async () => ({ json: async () => ({ id: 'msg_2' }) });
   try {
-    assert.strictEqual(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h' }), true);
+    assert.strictEqual(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), true);
   } finally { global.fetch = realFetch; }
   global.fetch = async () => ({ json: async () => ({ message: 'nope' }) });
   try {
-    assert.strictEqual(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h' }), false);
-    const d = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h' });
+    assert.strictEqual(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
+    const d = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
     assert.deepEqual([d.ok, d.id, d.error], [false, null, 'nope']);
   } finally { global.fetch = realFetch; }
 });
@@ -211,7 +244,7 @@ test('a refused attachment is logged and sends NOTHING', async () => {
   let called = false;
   global.fetch = async () => { called = true; return { json: async () => ({ id: 'x' }) }; };
   try {
-    const r = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h',
+    const r = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
       attachments: [{ filename: 'empty.docx', content: Buffer.alloc(0) }] });
     assert.equal(r.ok, false);
     assert.equal(called, false, 'the request must not be made at all');

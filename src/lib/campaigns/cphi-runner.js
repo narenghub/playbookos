@@ -342,9 +342,9 @@ async function runFollowups(opts = {}) {
         capability: 'email.send', workflow: 'cphi-followup', agent: 'cphi-runner', to: (REDIRECT_TO || q.email),
       });
       if (!gate.allowed) {
-        await att.blocked(gate.reason, gate.stop
-          ? `${gate.stop.scope_type}${gate.stop.scope_key ? `:${gate.stop.scope_key}` : ''}`
-          : 'authorization_undetermined');
+        // gate.scope, not a locally rebuilt string: an approval refusal has no stop row, and the
+        // old fallback would have filed it as an unreadable kill switch.
+        await att.blocked(gate.reason, gate.scope || 'authorization_undetermined');
         // `skipped` is a COUNTER OBJECT, not an array — out.skipped is assigned from it at the end
         // of the run. A push() here would throw inside the send loop, which is a worse failure than
         // the one being prevented. The reason is kept too: a count of refusals nobody can explain

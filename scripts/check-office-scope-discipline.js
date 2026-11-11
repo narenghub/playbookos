@@ -72,6 +72,12 @@ const EXEMPT = new Set([
   // and reads nothing through a scoped query it could have used instead. Same category as the
   // validators below: a measurement harness, not product code.
   path.join('scripts', 'acceptance-e2e.js'),
+  // Same category. It builds a minimal office_approvals in a DISPOSABLE cluster — by hand, with
+  // no foreign keys, exactly as it already builds email_log — so that the approval gate added on
+  // 2026-11-11 can be SATISFIED and therefore stop masking what that file actually measures:
+  // whether a workflow-scoped stop refuses the legacy buyer path. Fixture, not subject; it
+  // asserts nothing about approvals and never runs against production.
+  path.join('scripts', 'check-legacy-email-containment-db.js'),
   path.join('src', 'lib', 'office', 'scope.js'),
   path.join('src', 'lib', 'office', 'schema.js'),
   path.join('scripts', 'check-office-scope-discipline.js'),
@@ -145,6 +151,75 @@ function sqlUses(src, table) {
   return hits;
 }
 
+// ── THE INDIRECTION THAT GOT PAST THIS CHECK ────────────────────────────────
+//
+// sqlUses looks for `FROM office_approvals`. On 2026-11-11 a verification query was written in
+// src/lib/email-gate.js as:
+//
+//     const APPROVAL_TABLE = 'office_approvals';
+//     ... `SELECT ... FROM ${APPROVAL_TABLE} WHERE id = $1`
+//
+// and this file passed. The table name never appeared next to FROM, so a text search could not
+// see it. It was not an attempt to evade anything — it was a named constant written for tidiness,
+// which is exactly why it matters: the next one will be accidental too.
+//
+// ── AND WHY THIS RULE IS NARROW ─────────────────────────────────────────────
+//
+// The first version of this assertion flagged the table name ANYWHERE in code, and it was wrong.
+// It fired on `source: 'office_approvals'` in decision-sources.js — a label on a queue row saying
+// where the item came from, not a table reference — and this file already carries a deliberate
+// control stating that "prose and identifiers naming kernel tables do NOT trip it". A check that
+// contradicts its own control is a check somebody silences with an exemption.
+//
+// So the rule is the actual defect shape: a binding whose value is a kernel table name, which is
+// then INTERPOLATED into something that reads as SQL. Labels, log lines and information_schema
+// probes are untouched.
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+    .split('\n')
+    .map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1'))
+    .join('\n');
+}
+
+const SQL_KEYWORD = '(?:FROM|JOIN|INTO|UPDATE|TABLE|DELETE\\s+FROM)';
+
+function smuggledTableName(src, table) {
+  // Comments are blanked rather than deleted, so reported line numbers still match the real file.
+  // The first version counted lines in the stripped text and pointed at the wrong ones.
+  const code = stripComments(src);
+  const hits = [];
+  const decl = new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*['"\`]${table}['"\`]`, 'g');
+  let m;
+  while ((m = decl.exec(code)) !== null) {
+    const name = m[1];
+    const interp = new RegExp(`${SQL_KEYWORD}\\s*\\$\\{\\s*${name}\\s*\\}`, 'i');
+    const where = interp.exec(code);
+    if (!where) continue;
+    hits.push({
+      line: code.slice(0, m.index).split('\n').length,
+      usedLine: code.slice(0, where.index).split('\n').length,
+      text: `${name} = '${table}'`,
+    });
+  }
+  return hits;
+}
+
+function scanNames(files) {
+  const out = [];
+  for (const abs of files) {
+    const rel = path.relative(ROOT, abs);
+    if (EXEMPT.has(rel)) continue;
+    const src = fs.readFileSync(abs, 'utf8');
+    for (const table of KERNEL_TABLES) {
+      for (const h of smuggledTableName(src, table)) {
+        out.push(`${rel}:${h.line}  ${h.text}, interpolated into SQL at line ${h.usedLine}`);
+      }
+    }
+  }
+  return out;
+}
+
 function walk(dir, out = []) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_) { return out; }
@@ -200,6 +275,17 @@ if (violations.length) {
   ok('no kernel table is reached in SQL outside the accessor');
 }
 
+const named = scanNames(files);
+if (named.length) {
+  bad(`kernel tables reach SQL through a constant outside the accessor (${named.length})`,
+    `        ${named.join('\n        ')}\n\n`
+    + '        A constant holding a kernel table name hides it from the SQL scan above — which is\n'
+    + '        how a query in email-gate.js passed this check on 2026-11-11. Put the SQL in\n'
+    + '        src/lib/office/scope.js.');
+} else {
+  ok('no kernel table reaches SQL through a constant either');
+}
+
 // ── NEGATIVE CONTROL ────────────────────────────────────────────────────────
 // Platform invariant 1: every reconciliation must have a negative control proving it can detect
 // the defect it claims to detect. Without this, a broken regex, an over-broad exemption or a
@@ -219,6 +305,25 @@ try {
   if (caught.length) ok('negative control: a planted out-of-accessor query IS detected');
   else bad('negative control FAILED — a planted violation was not detected, so a green result here means nothing');
 
+  // The control for the NEW assertion, and it is the real one: the exact shape that got past this
+  // file. If scanNames does not catch a constant, the hole is still open.
+  const smuggledConst = path.join(tmp, 'smuggled.js');
+  fs.writeFileSync(smuggledConst, `
+    const T = 'office_approvals';
+    async function read(query, id) {
+      return (await query(\`SELECT status FROM \${T} WHERE id = $1\`, [id])).rows[0];
+    }
+    module.exports = { read };
+  `);
+  if (scan([smuggledConst]).length) {
+    bad('the SQL scan unexpectedly caught a templated table name — update these controls');
+  } else if (scanNames([smuggledConst]).length) {
+    ok('negative control: a kernel table smuggled through a constant IS detected');
+  } else {
+    bad('negative control FAILED — a kernel table name in a constant is still invisible, so the '
+      + 'indirection that got past this check on 2026-11-11 would get past it again');
+  }
+
   // And a control for the false-positive direction: prose must not trip it, or the next person
   // silences this check with an exemption instead of fixing a real finding.
   const prose = path.join(tmp, 'prose.js');
@@ -228,7 +333,7 @@ try {
     const objectives = [];
     module.exports = { objectives };
   `);
-  const noise = scan([prose]);
+  const noise = [...scan([prose]), ...scanNames([prose])];
   if (noise.length) bad('negative control: prose and identifiers tripped the check (false positive)', noise.join('\n'));
   else ok('negative control: prose and identifiers naming kernel tables do NOT trip it');
 } finally {

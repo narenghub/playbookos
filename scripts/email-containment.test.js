@@ -49,6 +49,29 @@ function fakeAutonomy(stops = [], { throws = false } = {}) {
 }
 
 const ENV = { ALERT_EMAIL: 'ops@abiozen.com', ADMIN_EMAIL: 'naren@abiozen.com' };
+// ── THE APPROVAL GATE, SATISFIED SO THE KILL-SWITCH TESTS STAY ABOUT IT ─────
+//
+// email-gate.js now refuses any send that leaves the company unless a RELEASED approval exists
+// whose payload hashes to the bytes being sent (CEO decision 2026-11-11, priority 1). Every
+// sender below addresses someone outside the company, so the "allowed" assertions would now fail
+// for a reason that has nothing to do with the kill switch.
+//
+// Granting the approval rather than re-pointing these at internal addresses keeps them exercising
+// the external path, and makes each of them prove that BOTH gates have an inside.
+const GRANTED_DIGEST = 'a'.repeat(32);
+function grantedApproval() {
+  return {
+    query: async (sql, params = []) => {
+      if (/released_at, action_payload/i.test(sql)) {
+        return { rows: [{ id: params[0], status: 'approved', released_at: new Date(),
+          action_payload: { transport_digest: GRANTED_DIGEST } }] };
+      }
+      return { rows: [] };
+    },
+  };
+}
+const APPROVED = { approvalId: 'ap-granted', digest: GRANTED_DIGEST };
+
 const SENDERS = [
   { agent: 'cphi-runner', workflow: 'cphi-followup', to: 'buyer@example.com' },
   { agent: 'outreach-agent', workflow: 'outreach', to: 'lead@example.com' },
@@ -74,8 +97,8 @@ test('1b. with no stop, every sender is allowed — the control is not "always f
   // be proving nothing while looking thorough.
   for (const s of SENDERS) {
     const r = await GATE.assertSendAllowed(
-      { capability: 'email.send', workflow: s.workflow, agent: s.agent, to: s.to },
-      { autonomy: fakeAutonomy([]), env: ENV });
+      { capability: 'email.send', workflow: s.workflow, agent: s.agent, to: s.to, ...APPROVED },
+      { autonomy: fakeAutonomy([]), env: ENV, ...grantedApproval() });
     assert.strictEqual(r.allowed, true, `${s.agent} was refused with no stop in force`);
   }
 });
@@ -96,8 +119,9 @@ test('3. an unrelated workflow STOP does NOT block a permitted workflow', async 
   // 6pm scores, the briefings and the team tasks with it.
   const stops = [{ scope_type: 'workflow', scope_key: 'cphi-followup', reason: 'pause CPHI' }];
   const r = await GATE.assertSendAllowed(
-    { capability: 'email.send', workflow: 'outreach', agent: 'outreach-agent', to: 'l@example.com' },
-    { autonomy: fakeAutonomy(stops), env: ENV });
+    { capability: 'email.send', workflow: 'outreach', agent: 'outreach-agent', to: 'l@example.com',
+      ...APPROVED },
+    { autonomy: fakeAutonomy(stops), env: ENV, ...grantedApproval() });
   assert.strictEqual(r.allowed, true, 'a stop aimed at CPHI also blocked outreach');
 });
 
@@ -125,12 +149,14 @@ test('4. if the STOP state cannot be read, the send is REFUSED', async () => {
 // ── 5. LIFTING THE STOP IS NOT, BY ITSELF, AUTHORIZATION ────────────────────
 
 test('5. an allowed gate result does not transmit anything on its own', async () => {
-  // The gate answers one question — is this permitted right now. It is not a send, and it is not
-  // approval. The other controls (the env feature flag, the approval record, the release claim)
-  // remain in force; removing a stop must never be mistakable for turning a sender on.
+  // The gate answers two questions now — is this permitted right now, and for anything leaving
+  // the company, is there a released approval for these exact bytes. It is still not a send. The
+  // other controls (the env feature flag, the release claim, the ledger claim) remain in force;
+  // removing a stop must never be mistakable for turning a sender on.
   const r = await GATE.assertSendAllowed(
-    { capability: 'email.send', workflow: 'cphi-followup', agent: 'cphi-runner', to: 'b@example.com' },
-    { autonomy: fakeAutonomy([]), env: ENV });
+    { capability: 'email.send', workflow: 'cphi-followup', agent: 'cphi-runner', to: 'b@example.com',
+      ...APPROVED },
+    { autonomy: fakeAutonomy([]), env: ENV, ...grantedApproval() });
   assert.strictEqual(r.allowed, true);
 
   for (const k of Object.keys(GATE)) {

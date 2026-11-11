@@ -205,6 +205,17 @@ function fakeAutonomy(stops = [], { throws = false } = {}) {
   };
 }
 
+const GRANTED_DIGEST = 'a'.repeat(32);
+const APPROVED = { approvalId: 'ap-granted', digest: GRANTED_DIGEST };
+function grantedApproval() {
+  return {
+    query: async (sql, params = []) => (/released_at, action_payload/i.test(sql)
+      ? { rows: [{ id: params[0], status: 'approved', released_at: new Date(),
+        action_payload: { transport_digest: GRANTED_DIGEST } }] }
+      : { rows: [] }),
+  };
+}
+
 const BUYER_SEND = { capability: 'email.send', workflow: 'legacy-inquiry-buyer-email',
   agent: 'inquiry-agent', to: 'buyer@acme.test' };
 
@@ -239,9 +250,130 @@ test('STOP: a quotation cannot relabel itself as an operator alert to escape the
   assert.strictEqual(g.exempt, false);
 });
 
-test('STOP: with no stop in force, the buyer workflow is allowed — the control has an inside', async () => {
-  const g = await GATE.assertSendAllowed(BUYER_SEND, { autonomy: fakeAutonomy([]) });
+test('with no stop AND a released approval, the buyer send is allowed — both controls have an inside', async () => {
+  const g = await GATE.assertSendAllowed({ ...BUYER_SEND, ...APPROVED },
+    { autonomy: fakeAutonomy([]), ...grantedApproval() });
   assert.strictEqual(g.allowed, true);
+});
+
+// ── THE APPROVAL GATE (CEO decision 2026-11-11, priority 1) ─────────────────
+//
+// Keyed on the recipient, which no caller chooses, and enforced inside the one function all four
+// transports pass through. The two evasions it closes: a different TRANSPORT (the Gmail outreach
+// path reaching the same buyers) and a different workflow LABEL (a string the caller picks).
+
+test('APPROVAL: an external send with no approval is refused even with no stop in force', async () => {
+  const g = await GATE.assertSendAllowed(BUYER_SEND, { autonomy: fakeAutonomy([]) });
+  assert.strictEqual(g.allowed, false);
+  assert.strictEqual(g.approvalRefusal, 'approval_required');
+  assert.deepStrictEqual(g.external, ['buyer@acme.test']);
+});
+
+test('APPROVAL: relabelling the workflow does not escape it', async () => {
+  // The label evasion, driven. 'outreach' was the label the Gmail path used.
+  for (const workflow of ['outreach', 'cphi-followup', 'anything-i-like', null]) {
+    const g = await GATE.assertSendAllowed({ ...BUYER_SEND, workflow },
+      { autonomy: fakeAutonomy([]) });
+    assert.strictEqual(g.allowed, false, `workflow '${workflow}' escaped the approval boundary`);
+    assert.strictEqual(g.approvalRefusal, 'approval_required');
+  }
+});
+
+test('APPROVAL: an internal send does NOT need one — briefings and scores still work', async () => {
+  for (const to of ['naren@abiozen.com', ['ops@abiozen.com', 'dev@adificetechnologies.com']]) {
+    const g = await GATE.assertSendAllowed({ ...BUYER_SEND, to }, { autonomy: fakeAutonomy([]) });
+    assert.strictEqual(g.allowed, true, `internal recipient ${to} was refused`);
+  }
+});
+
+test('APPROVAL: one external recipient in a mixed list is enough to require one', async () => {
+  const g = await GATE.assertSendAllowed(
+    { ...BUYER_SEND, to: ['naren@abiozen.com', 'buyer@acme.test'] },
+    { autonomy: fakeAutonomy([]) });
+  assert.strictEqual(g.allowed, false);
+  assert.deepStrictEqual(g.external, ['buyer@acme.test']);
+});
+
+test('APPROVAL: every way an approval can fail to authorise these bytes is refused', async () => {
+  const cases = [
+    [[], 'no_such_approval'],
+    [[{ status: 'pending', released_at: null, action_payload: {} }], 'approval_not_granted'],
+    [[{ status: 'superseded', released_at: null, action_payload: {} }], 'approval_not_granted'],
+    [[{ status: 'approved', released_at: null, action_payload: { transport_digest: GRANTED_DIGEST } }],
+      'approval_not_released'],
+    [[{ status: 'approved', released_at: new Date(), action_payload: {} }], 'approval_has_no_digest'],
+    [[{ status: 'approved', released_at: new Date(), action_payload: { transport_digest: 'b'.repeat(32) } }],
+      'approval_digest_mismatch'],
+  ];
+  for (const [rows, expected] of cases) {
+    const g = await GATE.assertSendAllowed({ ...BUYER_SEND, ...APPROVED },
+      { autonomy: fakeAutonomy([]), query: async () => ({ rows }) });
+    assert.strictEqual(g.allowed, false, `${expected} was allowed`);
+    assert.strictEqual(g.approvalRefusal, expected);
+  }
+});
+
+test('APPROVAL: an unreadable approval record refuses — fail closed', async () => {
+  const g = await GATE.assertSendAllowed({ ...BUYER_SEND, ...APPROVED }, {
+    autonomy: fakeAutonomy([]),
+    query: async () => { throw new Error('database unreachable'); },
+  });
+  assert.strictEqual(g.allowed, false);
+  assert.strictEqual(g.approvalRefusal, 'approval_unreadable');
+});
+
+test('APPROVAL: a caller cannot assert its own authorization', async () => {
+  // The relabel defect in another costume. If the gate took a boolean, the assurance would be
+  // supplied by the party it constrains. Every one of these is an invented parameter and none of
+  // them may have any effect.
+  for (const forged of [{ approved: true }, { approvalReleased: true }, { released: true },
+    { humanApproved: true }, { skipApproval: true }, { consequential: false }]) {
+    const g = await GATE.assertSendAllowed({ ...BUYER_SEND, ...forged }, { autonomy: fakeAutonomy([]) });
+    assert.strictEqual(g.allowed, false,
+      `the gate honoured a caller-supplied ${Object.keys(forged)[0]}`);
+  }
+});
+
+test('APPROVAL: the stop check wins when both would refuse', async () => {
+  // Ordering. "A CEO hold is in force" is the useful answer; "no approval was presented" would
+  // send the operator to fix the wrong thing, and fixing it would change nothing.
+  const g = await GATE.assertSendAllowed(BUYER_SEND, {
+    autonomy: fakeAutonomy([{ scope_type: 'global', reason: 'containment' }]) });
+  assert.strictEqual(g.allowed, false);
+  assert.match(g.reason, /STOPPED_BY_POLICY/);
+  assert.strictEqual(g.approvalRefusal, undefined);
+});
+
+test('APPROVAL: a refusal carries a scope the ledger can file it under', async () => {
+  // att.blocked() requires a scope and the database refuses the row without one. The old call
+  // sites rebuilt it from gate.stop and fell back to 'authorization_undetermined' — so an
+  // approval refusal was about to be recorded as an unreadable kill switch.
+  const g = await GATE.assertSendAllowed(BUYER_SEND, { autonomy: fakeAutonomy([]) });
+  assert.strictEqual(g.scope, 'approval:approval_required');
+  const stopped = await GATE.assertSendAllowed(BUYER_SEND, {
+    autonomy: fakeAutonomy([{ scope_type: 'workflow', scope_key: 'legacy-inquiry-buyer-email',
+      reason: 'HOLD' }]) });
+  assert.strictEqual(stopped.scope, 'workflow:legacy-inquiry-buyer-email');
+});
+
+test('APPROVAL: no transport rebuilds the scope string locally any more', () => {
+  for (const f of ['src/lib/mailer.js', 'src/lib/agents/outreach-agent.js',
+    'src/lib/campaigns/cphi-runner.js']) {
+    const src = codeOnly(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'));
+    assert.ok(!/gate\.stop\s*\n?\s*\?/.test(src) && !/scope_type\}\$\{/.test(src),
+      `${f} still builds its own scope string from gate.stop instead of using gate.scope`);
+    assert.ok(/gate\.scope/.test(src), `${f} does not use gate.scope`);
+  }
+});
+
+test('a code fault inside the gate is not reported as an unreadable database', async () => {
+  // Found by causing one: a missing require threw a ReferenceError and the catch announced "the
+  // kill switch could not be read", pointing at Postgres for a bug in a require statement.
+  const g = await GATE.assertSendAllowed(BUYER_SEND, {
+    autonomy: { checkStopped: async () => { throw new TypeError('x is not a function'); } } });
+  assert.strictEqual(g.allowed, false);
+  assert.match(g.reason, /FAULT IN THE AUTHORIZATION CODE ITSELF/);
+  assert.doesNotMatch(g.reason, /kill switch could not be read/);
 });
 
 // ── PROVIDER TIMEOUT AND UNKNOWN OUTCOMES ────────────────────────────────────

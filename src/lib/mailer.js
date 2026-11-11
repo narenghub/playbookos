@@ -234,8 +234,12 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // Opt-in by parameter, because 55 callers have no approval boundary and inventing one for them
   // here would be a different change. When a digest IS supplied, it is enforced absolutely — there
   // is no mode in which a mismatch proceeds.
+  // Computed unconditionally now, not only when an expectedDigest was supplied: the approval gate
+  // in email-gate.js needs it for EVERY external send in order to tie an approval to these bytes.
+  const actualDigest = approvedDigestOf({ to, subject, html });
+
   if (expectedDigest) {
-    const actual = approvedDigestOf({ to, subject, html });
+    const actual = actualDigest;
     if (actual !== expectedDigest) {
       const why = `approved payload digest ${expectedDigest} does not match the message about to be `
         + `sent (${actual}) — nothing was transmitted`;
@@ -248,14 +252,15 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
 
   const gate = internal.alertAlreadyAuthorized
     ? { allowed: true, reason: null }
-    : await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to });
+    : await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to,
+      approvalId, digest: actualDigest });
   if (!gate.allowed) {
     console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${gate.reason}`);
     // BLOCKED, with the scope that blocked it — the database refuses the row without one. The
     // return shape deliberately does not change, because 55 callers read it as a boolean.
-    await att.blocked(gate.reason, gate.stop
-      ? `${gate.stop.scope_type}${gate.stop.scope_key ? `:${gate.stop.scope_key}` : ''}`
-      : 'authorization_undetermined');
+    // gate.scope, not a locally rebuilt string: an approval refusal has no stop row, and the old
+    // fallback would have filed it as an unreadable kill switch.
+    await att.blocked(gate.reason, gate.scope || 'authorization_undetermined');
     return { ok: false, id: null, error: gate.reason, stopped: true, phase: 'stopped_by_policy',
       providerResponded: false };
   }

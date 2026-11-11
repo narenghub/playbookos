@@ -468,6 +468,81 @@ async function claimApprovalRelease(ctx, { approvalId, releasedBy }, deps = {}) 
 
 // Why a release did not happen. 'not_approved' and 'already_released' call for very different
 // operator responses, so they are distinguished rather than collapsed into a single failure.
+// ── THE TRANSPORT'S AUTHORIZATION CHECK, ANSWERED INSIDE THE KERNEL ─────────
+//
+// email-gate.js refuses any send leaving the company unless a RELEASED approval authorises those
+// exact bytes (CEO decision 2026-11-11, priority 1). That check needs office_approvals, and
+// office_approvals is a kernel table, so the SQL lives here — scripts/check-office-scope-discipline.js
+// refuses to exempt product code and is right to: a predicate written at the call site is a
+// predicate somebody can forget.
+//
+// I had this query in email-gate.js first, written as `FROM ${APPROVAL_TABLE}`. The scanner did
+// not flag it, because a constant hides the table name from a text search — I got past a checker
+// by accident, using exactly the indirection this programme keeps finding in its own code. The
+// scanner now also refuses a product file that merely NAMES a kernel table in a constant.
+//
+// ── WHY THIS ONE IS NOT COMPANY-SCOPED, AND WHY THAT IS SAFE ────────────────
+//
+// The transport has no company context: it has a recipient, a capability and an approval id. It
+// cannot be given one without the caller supplying it, which is the thing context.js exists to
+// refuse.
+//
+// So instead of widening the read, this returns a VERDICT and nothing else — {ok} or
+// {ok:false, reason, detail}. No payload, no recipient, no company, no other company's data
+// crosses back. A caller that names an approval id it should not know still learns only whether
+// that id authorises the bytes it already holds, which it could determine by attempting the send.
+//
+// Fail closed on every uncertainty, an unreadable database included.
+async function verifyReleasedApprovalForDigest({ approvalId, digest }, deps = {}) {
+  if (!approvalId) {
+    return { ok: false, reason: 'approval_required',
+      detail: 'this message leaves the company and carries no approval id' };
+  }
+  if (!digest) {
+    return { ok: false, reason: 'digest_required',
+      detail: `approval ${approvalId} was presented without a digest of the message, so nothing `
+        + 'ties the approval to these bytes' };
+  }
+
+  let row;
+  try {
+    row = (await q(deps)(
+      `SELECT id, status, released_at, action_payload FROM office_approvals WHERE id = $1`,
+      [approvalId])).rows[0];
+  } catch (e) {
+    return { ok: false, reason: 'approval_unreadable',
+      detail: `the approval record could not be read (${e && e.message}); an unverifiable `
+        + 'authorization is not an authorization' };
+  }
+
+  if (!row) return { ok: false, reason: 'no_such_approval', detail: `no approval ${approvalId} exists` };
+  if (row.status !== 'approved') {
+    return { ok: false, reason: 'approval_not_granted',
+      detail: `approval ${approvalId} is '${row.status}'` };
+  }
+  // RELEASED, not merely approved. claimApprovalRelease is what claims the single use of a human
+  // decision, and a message reaching a provider without having gone through it has skipped the
+  // one control that stops one decision authorising two sends.
+  if (!row.released_at) {
+    return { ok: false, reason: 'approval_not_released',
+      detail: `approval ${approvalId} is approved but was never released; the transport was `
+        + 'reached without passing through release()' };
+  }
+
+  const payload = row.action_payload || {};
+  if (!payload.transport_digest) {
+    return { ok: false, reason: 'approval_has_no_digest',
+      detail: `approval ${approvalId} records no transport digest, so the approved artefact and `
+        + 'the message about to be sent cannot be compared' };
+  }
+  if (payload.transport_digest !== digest) {
+    return { ok: false, reason: 'approval_digest_mismatch',
+      detail: `approval ${approvalId} authorises ${payload.transport_digest}; the message about `
+        + `to be sent is ${digest}` };
+  }
+  return { ok: true };
+}
+
 async function approvalReleaseState(ctx, approvalId, deps = {}) {
   assertContext(ctx);
   // action_payload is returned so the release path can REVALIDATE the authority the frozen
@@ -621,6 +696,7 @@ async function provenance(ctx, runId, deps = {}) {
 
 module.exports = {
   provenance, spendForObjective, unmeasuredForRun, claimApprovalRelease, approvalReleaseState,
+  verifyReleasedApprovalForDigest,
   bootstrapObjectiveForContext, bootstrapApprovalForExecution, bootstrapApprovalOwner,
   rfqApprovalsForEligibility,
   createObjective, setObjectiveStatus,

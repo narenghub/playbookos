@@ -82,6 +82,26 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'PLACEHOLDER-not-a-secret';
 process.env.RESEND_API_KEY = process.env.RESEND_API_KEY || 'PLACEHOLDER-not-a-key';
 process.env.MAIL_FROM = process.env.MAIL_FROM || 'Fixture <fixture@example.invalid>';
 
+// ── WHY THIS FIXTURE'S DOMAINS COUNT AS INTERNAL ────────────────────────────
+//
+// email-gate.js now refuses anything leaving the company without a RELEASED approval for those
+// exact bytes (CEO decision 2026-11-11, priority 1). This harness sends to
+// legacy@supplier.invalid, and the RFQ body is GENERATED, so the digest cannot be precomputed and
+// an approval row cannot be prepared for it here.
+//
+// Left alone, every send refuses before the mailer — and this file's whole subject is WHO THE
+// LETTER IS FROM, measured by inspecting the From and Reply-To that reach the mailer. The harness
+// said so itself: "nothing was sent with an active signatory, so the From/Reply-To assertions
+// were never measured". A second gate ordered ahead of the one under test makes the one under
+// test unmeasurable, which is the masking recorded in office/approval.js.
+//
+// So the fixture's own invalid domains are declared internal FOR THIS FIXTURE. That removes the
+// approval gate from the measurement without weakening it: the gate's own controls live in
+// scripts/buyer-email-boundary.test.js and scripts/check-legacy-email-containment-db.js, and
+// nothing here asserts anything about approvals. The domains are .invalid, so this setting can
+// never mean anything in production.
+process.env.COMPANY_EMAIL_DOMAINS = 'supplier.invalid,abiozen.invalid,example.invalid';
+
 // ── THE PROVIDER AND MAILER ARE BOTH STUBBED ───────────────────────────────
 // The AI returns a body; the mailer records calls and sends nothing. A real send from this check
 // would be the exact act it exists to prove impossible.
