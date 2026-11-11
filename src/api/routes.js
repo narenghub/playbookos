@@ -2425,9 +2425,33 @@ router.post('/inquiry/:id/reply', authMiddleware, requireAnyTier('sales', 'reven
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── THIS ROUTE PREPARES A QUOTATION. IT DOES NOT SEND ONE ────────────────────
+//
+// S2 (CEO authorization 2026-11-11). generateQuote now builds the letter, freezes it and queues a
+// human decision; nothing reaches the buyer. `success: true` on its own would be read by any
+// caller — and shown by any UI — as "the quote went out", which is the precise reporting failure
+// the authorization forbids: "do not report a quote as sent when it is only prepared or awaiting
+// approval".
+//
+// So the response states the outcome in words, and `sent` is explicit and false. A 202 rather
+// than a 200 because that is what has happened: accepted, not completed.
 router.post('/inquiry/:id/quote', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {
-  try { const r = await generateQuote(req.params.id); if (r.error) return res.status(400).json(r); res.json({ success: true, ...r }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const r = await generateQuote(req.params.id);
+    if (r.error) return res.status(400).json(r);
+    if (!r.prepared) {
+      return res.status(409).json({
+        success: false, sent: false, prepared: false, ...r,
+        message: `The quotation was NOT prepared (${r.blocked_reason}) and nothing was sent. `
+          + 'No approval exists, so there is nothing to release.',
+      });
+    }
+    return res.status(202).json({
+      success: true, ...r,
+      message: `Quotation ${r.quote_id || ''} is prepared and AWAITING APPROVAL. Nothing has been `
+        + `sent to the buyer. Approval id ${r.approval_id}.`,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.post('/inquiry/:id/escalate', authMiddleware, requireAnyTier('sales', 'revenue'), async (req, res) => {

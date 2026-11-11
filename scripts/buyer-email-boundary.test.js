@@ -119,6 +119,29 @@ test('a drafted letter is logged as outbound_pending, never as outbound', () => 
     'the draft is recorded as a delivered outbound message');
 });
 
+// ── WHAT THE API TELLS A HUMAN ───────────────────────────────────────────────
+
+test('the quote route does not report a prepared quotation as sent', () => {
+  const routes = codeOnly(fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'api', 'routes.js'), 'utf8'));
+  const i = routes.indexOf("router.post('/inquiry/:id/quote'");
+  assert.ok(i > 0, 'the quote route is gone — this guard points at a route that no longer exists');
+  // Bounded at the NEXT route, not at a character count. A fixed-width window ran past this
+  // handler into the following ones, where another route's `success: true` tripped the negative
+  // assertion — a guard reporting a defect in code it was not looking at. Same scoping error
+  // containment-reporting.test.js was written to avoid.
+  const next = routes.indexOf('\nrouter.', i + 10);
+  const body = routes.slice(i, next > i ? next : routes.length);
+
+  // A bare `success: true` is read by any caller, and shown by any UI, as "the quote went out".
+  assert.ok(/AWAITING APPROVAL/.test(body),
+    'the response does not say the quotation is awaiting approval');
+  assert.ok(/status\(202\)/.test(body),
+    'the route returns 200 for work that was accepted but not completed');
+  assert.ok(!/res\.json\(\{\s*success:\s*true,\s*\.\.\.r\s*\}\)/.test(body),
+    'the route still answers with a bare success:true spread over the quote result');
+});
+
 // ── THE DIGEST CHECK, AT THE TRANSPORT ───────────────────────────────────────
 
 test('the mailer digest check sits before the provider call', () => {
