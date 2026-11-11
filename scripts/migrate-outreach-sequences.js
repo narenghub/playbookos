@@ -65,6 +65,13 @@ async function main() {
     CREATE INDEX IF NOT EXISTS idx_outreach_state_due
       ON outreach_state (status, next_due_at);
 
+    -- WHY a status was set by hand. cphi_followup_state has carried halted_reason since it was
+    -- created; this table did not, because nothing had ever halted an outreach sequence manually.
+    -- On 2026-11-11 one had to be (incident containment), and a status change with no recorded
+    -- cause is indistinguishable from a bug six months later. ADD COLUMN with no DEFAULT is a
+    -- catalog-only change in PostgreSQL 11+ — no table rewrite, no scan, no lock to speak of.
+    ALTER TABLE outreach_state ADD COLUMN IF NOT EXISTS halted_reason TEXT;
+
     -- ── EVERY MESSAGE, CLAIMED BEFORE IT IS SENT ────
     CREATE TABLE IF NOT EXISTS outreach_sends (
       id          BIGSERIAL PRIMARY KEY,
