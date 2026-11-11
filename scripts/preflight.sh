@@ -261,6 +261,14 @@ pf_step "every transport records its outcome, and a missing ledger fails closed"
 # DDL, not of the day it was written, and the only way they stay true is if an edit that breaks one
 # goes red here rather than halfway through a production run.
 pf_step "the ledger migration is additive, idempotent and reversible" node scripts/verify-ledger-migration-safety.js
+
+# ── THE REPORT MUST NOT BE ABLE TO LIE AGAIN ────────────────────────────────
+#
+# On 2026-11-10 the containment report printed "NO email reached an address outside the company
+# during remediation" while 25 messages had. The sentence was true of email_log and false of
+# reality. A gate that works and a report that cannot see it are two different kinds of safe, and
+# only one of them is.
+pf_step "the containment report reads every transport, and UNKNOWN blocks an all-clear" env JWT_SECRET=preflight node --test scripts/containment-reporting.test.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's
 # identity and another's alias FROM EITHER INSERTION ORDER (two triggers — a test that inserts one
