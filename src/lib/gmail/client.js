@@ -64,10 +64,21 @@ async function gmailClientFor(subject, deps = {}) {
   });
   if (!subject) return { error: 'a subject mailbox is required — never impersonate "me" by default' };
 
-  const preferred = resolved.get(subject);
-  const order = preferred
+  // ── A CALLER MAY DEMAND LESS, NEVER MORE ─────────────────────────────────
+  //
+  // Both default sets include a WRITE power: gmailSend, or gmailModify which permits sending and
+  // a great deal besides. For a read-only task that is the wrong token to hold — "the script
+  // never calls send" is a property of today's code, while a token that cannot send is a property
+  // of the grant.
+  //
+  // So a caller may supply its own sets. The cache is bypassed when it does, because a cached
+  // send-capable set for this mailbox must not be handed to a caller that asked for read-only;
+  // and no caller can widen anything, since what it passes is the whole list to try.
+  const sets = Array.isArray(deps.scopeSets) && deps.scopeSets.length ? deps.scopeSets : null;
+  const preferred = sets ? null : resolved.get(subject);
+  const order = sets || (preferred
     ? [preferred, ...SCOPE_SETS.filter((s) => s.name !== preferred.name)]
-    : SCOPE_SETS;
+    : SCOPE_SETS);
 
   const tried = [];
   for (const set of order) {
@@ -87,7 +98,7 @@ async function gmailClientFor(subject, deps = {}) {
         tried.push(`${set.name}: token is for ${got}, not ${subject}`);
         continue;
       }
-      resolved.set(subject, set);
+      if (!sets) resolved.set(subject, set);
       return { gmail, via: tok.via, scopeSet: set.name, access_token: tok.access_token, profile };
     } catch (e) {
       tried.push(`${set.name}: ${(e && e.message) || String(e)}`);
@@ -99,4 +110,10 @@ async function gmailClientFor(subject, deps = {}) {
 /** Forget the cached scope set — for a test, or after a grant changes. */
 function resetScopeCache() { resolved.clear(); }
 
-module.exports = { gmailClientFor, resetScopeCache, SCOPE_SETS };
+// A read-only-only set, for callers whose whole contract is that they cannot write. Named here
+// rather than built at each call site so there is one definition of "cannot send".
+const READONLY_ONLY = Object.freeze([
+  Object.freeze({ name: 'readonly', scopes: [SCOPES.gmailReadonly] }),
+]);
+
+module.exports = { gmailClientFor, resetScopeCache, SCOPE_SETS, READONLY_ONLY };

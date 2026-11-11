@@ -292,6 +292,10 @@ pf_step "the approval surface cannot send, and cannot say it did" env JWT_SECRET
 # dropped every held deal from its active count, and the pipeline displayed a finished priced
 # quotation as an unqualified lead.
 pf_step "a draft cannot be mistaken for a sent message by any downstream reader" env JWT_SECRET=preflight node --test scripts/inquiry-approval-e2e.test.js
+# Priority 5, 2026-11-11. The breach reconciliation script is PREPARED, NOT EXECUTED. Its read-only
+# claim must be a property of the grant and of a self-scan that can be shown to fail — not of the
+# author's intention. No mailbox is contacted by these controls or by the script without --execute.
+pf_step "the Gmail reconciliation script is read-only by contract, and its scan can go red" node --test scripts/reconcile-breach-gmail.test.js
 pf_step "every recipient is classified inside or outside the company, both directions" node --test src/lib/outbound/recipients.test.js
 pf_step "the approval boundary is the ONLY road from the inquiry agent to a buyer" env JWT_SECRET=preflight node --test scripts/buyer-email-boundary.test.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
