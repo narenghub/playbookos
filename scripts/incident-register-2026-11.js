@@ -35,9 +35,24 @@ const CSV = process.argv.includes('--csv');
 // Words that would make a message commercially consequential rather than exploratory.
 const COMMERCIAL = /\b(quote|quotation|price|pricing|\$|usd|per kg|per gram|invoice|purchase order|\bPO\b|accept|accepted|proceed|confirm your order|terms|payment)\b/i;
 
+// ── WHAT `evidence` ACTUALLY IS, AND WHY THE FIRST VERSION OF THIS OVERSTATED ──
+//
+// outreach_sends.evidence holds ONE SENTENCE — the personalisation opener, e.g. "I came across
+// your work on site-selective catalysis through 2R35GM132092-06 (running to May 2029)." It is not
+// the message body; the body was never retained.
+//
+// The first version of this register reported "no commercial language found" on that basis, and
+// the CEO read a summary line saying 0 of 25 carried commercial language. That is a conclusion
+// about the whole message drawn from its first sentence — absence of evidence presented as
+// evidence of absence, which is the precise error that produced this incident. Corrected rather
+// than left standing: the opening line is reported as what it is, and the rest as unverifiable.
 function classify(text) {
-  if (text === null || text === undefined || String(text).trim() === '') return 'UNKNOWN — body not retained';
-  return COMMERCIAL.test(String(text)) ? 'YES — commercial language present' : 'no commercial language found';
+  if (text === null || text === undefined || String(text).trim() === '') {
+    return 'UNKNOWN — body not retained';
+  }
+  return COMMERCIAL.test(String(text))
+    ? 'YES — commercial language in the opening line'
+    : 'PARTIAL — opening line is clean; remainder of the body was not retained';
 }
 
 (async () => {
@@ -128,6 +143,7 @@ function classify(text) {
     if (r.replied.startsWith('RECORDED')) reasons.push('recipient replied');
     if (r.commercial.startsWith('YES')) reasons.push('commercial language');
     if (r.commercial.startsWith('UNKNOWN')) reasons.push('body not retained — content unverifiable');
+    if (r.commercial.startsWith('PARTIAL')) reasons.push('only the opening line was retained');
     if (/due/.test(r.followed_by) && r.sequence_now === 'active') reasons.push('sequence still active');
     if (reasons.length) needsReview += 1;
 
@@ -146,14 +162,19 @@ function classify(text) {
   console.log(`  ── summary ──\n`);
   console.log(`    total                      ${rows.length}`);
   console.log(`    replies RECORDED           ${rows.filter((r) => r.replied.startsWith('RECORDED')).length}`);
-  console.log(`    commercial language        ${rows.filter((r) => r.commercial.startsWith('YES')).length}`);
-  console.log(`    content unverifiable       ${rows.filter((r) => r.commercial.startsWith('UNKNOWN')).length}`);
+  console.log(`    commercial in opening line ${rows.filter((r) => r.commercial.startsWith('YES')).length}`);
+  console.log(`    opening line clean, rest unknown  ${rows.filter((r) => r.commercial.startsWith('PARTIAL')).length}`);
+  console.log(`    body not retained at all   ${rows.filter((r) => r.commercial.startsWith('UNKNOWN')).length}`);
+  console.log('');
+  console.log('    NO MESSAGE IN THIS REGISTER HAS BEEN FULLY READ. 19 retain one sentence, 6 retain');
+  console.log('    nothing. A count of zero commercial messages cannot be stated from this data.');
   console.log(`    sequences still active     ${rows.filter((r) => r.sequence_now === 'active').length}`);
   console.log(`    REQUIRE HUMAN REVIEW       ${needsReview}\n`);
 
   console.log('  --    "replied" is the platform\'s own record from the reply-sync job, NOT an independent');
   console.log('  --    inbox check. A reply may exist unrecorded. Nothing here opened a mailbox.');
-  console.log('  --    CPHI retains no body, so its commercial classification is UNKNOWN — not "no".');
+  console.log('  --    CPHI retains NO body. outreach retains ONE SENTENCE — the personalisation opener,');
+  console.log('  --    not the message. Neither supports a statement that a message was non-commercial.');
   console.log('  --    Absence of evidence is not evidence of absence; that error is what produced');
   console.log('  --    this incident in the first place.\n');
   process.exit(0);
