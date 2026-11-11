@@ -28,6 +28,67 @@
 // chain.
 'use strict';
 
+// ── WHY THIS ASSERTS A PROPERTY AND NOT A FILENAME ──────────────────────────
+//
+// This check used to require the literal `scripts/migrate.js`, and gave the real reason in its own
+// failure message: that file "reads MIGRATION_DATABASE_URL in preference to DATABASE_URL — that
+// preference is what makes the migration run as the migrator and the application run as the
+// least-privilege role."
+//
+// So the filename was a PROXY for a property, and on 2026-11-11 the proxy became wrong. The S2
+// release needs exactly one schema change, and `migrate.js` applies it along with 53 other steps
+// and THREE SEEDS — one of which, seedMoleculePricing(), INSERTs into molecule_pricing, the table
+// every quotation is priced from. runAll also upserts the company row. Neither belongs in an
+// automatic deploy step.
+//
+// The property is now checked directly: whatever preDeployCommand names must prefer
+// MIGRATION_DATABASE_URL, must not reach the seeds, and must not upsert company data. A migration
+// entry point that satisfies those is acceptable whatever it is called; `migrate.js` itself is
+// acceptable WITH --no-seeds, and unacceptable without it.
+const MIGRATION_ENTRY = /scripts\/(migrate[a-z0-9-]*\.js)/;
+
+function preRunsAMigration(pre) {
+  return pre.some((c) => MIGRATION_ENTRY.test(String(c)));
+}
+
+// Faults in what the configured command would actually DO. Read from the named file, not assumed.
+function preMigrationFaults(pre) {
+  const faults = [];
+  for (const cmd of pre.map(String)) {
+    const m = MIGRATION_ENTRY.exec(cmd);
+    if (!m) continue;
+    const file = path.join(__dirname, m[1]);
+    if (!fs.existsSync(file)) {
+      faults.push({ what: `preDeployCommand names ${m[1]}, which does not exist`,
+        why: 'a deploy would fail at the pre-deploy step with MODULE_NOT_FOUND' });
+      continue;
+    }
+    const src = fs.readFileSync(file, 'utf8');
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n').map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1')).join('\n');
+
+    if (!/MIGRATION_DATABASE_URL/.test(code)) {
+      faults.push({ what: `${m[1]} does not read MIGRATION_DATABASE_URL`,
+        why: 'that preference is what lets the migration hold DDL while the application runs as '
+          + 'the least-privilege role' });
+    }
+    // THE SEEDS. runAll seeds unless --no-seeds is passed, and seedMoleculePricing() writes to
+    // molecule_pricing — business data, on every deploy.
+    const reachesRunAll = /require\(.*migrate-all|runAll/.test(code);
+    if (reachesRunAll && !/--no-seeds/.test(cmd)) {
+      faults.push({ what: `${m[1]} reaches runAll and the command omits --no-seeds (${cmd})`,
+        why: 'every deploy would run seedMoleculePricing(), which INSERTs into molecule_pricing — '
+          + 'the table every quotation is priced from — and ensureCompany(), which upserts the '
+          + 'company row. Business data must not be written by an automatic deploy step.' });
+    }
+    if (/ensureCompany/.test(code) && !reachesRunAll) {
+      faults.push({ what: `${m[1]} upserts the company row directly`,
+        why: 'an automatic deploy step must not write company data' });
+    }
+  }
+  return faults;
+}
+
 const fs = require('fs');
 const path = require('path');
 
@@ -57,13 +118,13 @@ if (!fs.existsSync(cfgPath)) {
     if (!Array.isArray(pre) || !pre.length) {
       bad('deploy.preDeployCommand is absent or not a non-empty array',
         'Railway\'s config reference gives this field as an array of strings, e.g. ["node scripts/migrate.js"]');
-    } else if (!pre.some((c) => /scripts\/migrate\.js/.test(String(c)))) {
-      bad(`deploy.preDeployCommand does not run scripts/migrate.js (${JSON.stringify(pre)})`,
-        'migrate.js is the entry point that reads MIGRATION_DATABASE_URL in preference to '
-        + 'DATABASE_URL — that preference is what makes the migration run as the migrator and the '
-        + 'application run as the least-privilege role');
+    } else if (!preRunsAMigration(pre)) {
+      bad(`deploy.preDeployCommand does not run a migration entry point (${JSON.stringify(pre)})`,
+        'it must name a scripts/migrate*.js file');
+    } else if (preMigrationFaults(pre).length) {
+      for (const f of preMigrationFaults(pre)) bad(f.what, f.why);
     } else {
-      ok(`deploy.preDeployCommand runs the migration: ${JSON.stringify(pre)}`);
+      ok(`deploy.preDeployCommand runs a bounded migration: ${JSON.stringify(pre)}`);
     }
 
     // The healthcheck is what makes a started-but-broken container visible. /health returns the
