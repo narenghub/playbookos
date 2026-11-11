@@ -443,8 +443,45 @@ function nextTuesday9amChicago(now = new Date()) {
     for (const r of externalSent) {
       field('  SENT', `${r.to_email} — ${String(r.subject || '').slice(0, 60)} — ${r.sent_at}`);
     }
-    if (externalSent.length === 0) {
-      ok('NO email reached an address outside the company during remediation');
+    // ── THE GMAIL TRANSPORTS ARE COUNTED HERE TOO, OR THIS LINE LIES ────────
+    //
+    // On 2026-11-10 this section reported "NO email reached an address outside the company during
+    // remediation" while 25 messages had: 19 outreach to university faculty between 3 and 6 Nov,
+    // and 6 CPHI demand-intel messages on 9–10 Nov. Every one confirmed by Gmail with a message id.
+    //
+    // The line was TRUE of email_log and FALSE of reality. email_log is written only by the Resend
+    // path; the two Gmail senders write their own claim tables and nothing else, so the strongest
+    // sentence in this report was structurally incapable of seeing two of four transports.
+    //
+    // A false reassurance is worse than a gap, because it is quoted. So the claim tables are read
+    // here — the same query as scripts/audit-gmail-during-containment.js — and the all-clear is
+    // now conditional on all three sources rather than on the one that happened to be convenient.
+    let gmailSent = 0;
+    const gmailDetail = [];
+    for (const [table, where] of [
+      ['cphi_followup_sends', `sent_at >= $1::timestamptz AND gmail_message_id IS NOT NULL`],
+      ['outreach_sends', `sent_at >= $1::timestamptz AND (confirmed OR rfc822_id IS NOT NULL)`],
+    ]) {
+      try {
+        const present = (await query(`SELECT to_regclass($1) IS NOT NULL AS yes`, [table])).rows[0].yes;
+        if (!present) { gmailDetail.push(`${table}: absent — UNKNOWN, not zero`); continue; }
+        const n = (await query(`SELECT COUNT(*)::int n FROM ${table} WHERE ${where}`, [since])).rows[0].n;
+        gmailSent += n;
+        gmailDetail.push(`${table}: ${n} confirmed`);
+      } catch (e) {
+        gmailDetail.push(`${table}: UNREADABLE — ${e.message}`);
+        gmailSent = -1;   // unknown dominates; an all-clear cannot be given over an unread source
+      }
+    }
+    field('gmail confirmed sends', gmailSent < 0 ? 'UNKNOWN' : gmailSent);
+    for (const d of gmailDetail) field('  ', d);
+
+    if (externalSent.length === 0 && gmailSent === 0) {
+      ok('NO email reached an address outside the company during remediation — across ALL transports');
+    } else if (gmailSent !== 0) {
+      bad(`${gmailSent < 0 ? 'an unknown number of' : gmailSent} message(s) left via GMAIL during `
+        + 'remediation — email_log cannot see these; run scripts/audit-gmail-during-containment.js '
+        + 'for recipients and timestamps');
     } else {
       bad(`${externalSent.length} external recipient(s) received email during remediation — read `
         + 'the rows above and establish what was sent before proceeding');
