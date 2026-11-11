@@ -104,10 +104,22 @@ async function survey(q) {
     `SELECT pg_size_pretty(pg_total_relation_size($1)) AS s`, [`public.${TABLE}`])).rows[0].s;
   const owner = (await q(
     `SELECT pg_get_userbyid(rel.relowner) AS owner, current_user AS me,
+            current_database() AS db,
             pg_has_role(current_user, rel.relowner, 'USAGE') AS can_alter
        FROM pg_class rel JOIN pg_namespace n ON n.oid = rel.relnamespace
       WHERE n.nspname = 'public' AND rel.relname = $1`, [TABLE])).rows[0];
-  return { def, dist, total, incompatible: bad1, pending, size, owner };
+  // ── WHO ELSE IS HOLDING SOMETHING ────────────────────────────────────────
+  //
+  // Surveyed here so the read-only mode answers the whole precheck in one place. A long-running
+  // transaction is the single condition that turns this migration from a 65 ms change into a
+  // table-wide stall, and an operator who has to run a separate query for it is an operator who
+  // sometimes does not.
+  const active = (await q(
+    `SELECT pid, state, now() - xact_start AS age, left(query, 60) AS q
+       FROM pg_stat_activity
+      WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'
+      ORDER BY xact_start NULLS LAST`)).rows;
+  return { def, dist, total, incompatible: bad1, pending, size, owner, active };
 }
 
 const admits = (def, value) => !!def && String(def).includes(value);
@@ -159,6 +171,7 @@ async function main() {
 
     say(`\n── ${TABLE}.${CONSTRAINT}${APPLY || ROLLBACK ? '' : '   ** READ-ONLY — pass --apply to change it **'}\n`);
     say(`   role ${who.role} · database ${who.db} · CREATE ${who.can_create ? 'yes' : 'NO'}`);
+    say(`   server ${String((await q('SELECT version() v')).rows[0].v).split(' on ')[0]}`);
 
     let before;
     try {
@@ -180,6 +193,14 @@ async function main() {
     for (const d of before.dist) say(`     ${String(d.direction === null ? '(null)' : d.direction).padEnd(18)} ${d.n}`);
     say(`   incompatible with the new predicate: ${before.incompatible}`);
     say(`   rows already '${NEW_VALUE}': ${before.pending}`);
+    say(`   other active sessions: ${before.active.length}`);
+    for (const a of before.active) {
+      say(`     pid ${a.pid} ${a.state} age=${a.age || '?'} ${a.q}`);
+    }
+    if (before.active.length) {
+      say('     ^ a long-running transaction here will block the ALTER; the bound makes it fail');
+      say('       fast rather than stall the table, but it is worth clearing first');
+    }
     say(`\n   current  ${before.def || '(no such constraint)'}`);
     say(`   target   ${definition(ROLLBACK ? PRIOR : ALLOWED)}`);
 
