@@ -182,7 +182,13 @@ const INTERNAL = [
   // Both routes are already adminOnly. That is the role gate; this is the product gate, and the
   // point of having two is that they fail INDEPENDENTLY — a role mistake must not be sufficient
   // to become an exposure.
+  // The approval surface is 'internal' for the same reason. office_approvals holds held actions
+  // across every product — a supplier RFQ, a buyer quotation, a federal notice — so there is no
+  // single product to classify it under, and the detail route serves THE RENDERED MESSAGE, which
+  // is the most disclosing payload in this platform. Already adminOnly and company-scoped; this
+  // is the product gate, and the point of having both is that they fail independently.
   'GET /api/decisions', 'GET /api/spend',
+  'GET /api/approvals', 'GET /api/approvals/:id', 'POST /api/approvals/:id/decide',
   // agent plumbing and integrations
   'GET /api/agent/activity', 'GET /api/agent/approvals', 'PUT /api/agent/approvals/:id',
   'GET /api/agent/dependencies', 'GET /api/agent/mission-control', 'GET /api/agent/overview',

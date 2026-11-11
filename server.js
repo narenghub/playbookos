@@ -235,6 +235,9 @@ app.use('/api', require('./src/api/decisions.routes'));
 // those above, same ordering constraint. It MEASURES and does not cap: stopping spend is the
 // `llm.call` kill switch, reached from Agent Control, not a budget route here.
 app.use('/api', require('./src/api/spend.routes'));
+// The one door a human decides through (CEO decision 2026-11-11, priority 2). It approves and
+// rejects; it cannot send. A released approval must still pass every STOP at the transport.
+app.use('/api', require('./src/api/approvals.routes'));
 
 // SPA fallback ('/' now routes here too, since express.static has index:false)
 app.get('*', (req, res) => {

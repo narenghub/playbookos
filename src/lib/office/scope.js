@@ -468,6 +468,49 @@ async function claimApprovalRelease(ctx, { approvalId, releasedBy }, deps = {}) 
 
 // Why a release did not happen. 'not_approved' and 'already_released' call for very different
 // operator responses, so they are distinguished rather than collapsed into a single failure.
+// ── THE REVIEW SURFACE'S READS (CEO decision 2026-11-11, priority 2) ───────
+//
+// src/api/approvals.routes.js had these inline and the scope-discipline check refused it within
+// minutes — correctly, and for the reason its own message gives: "a predicate written at the call
+// site is a predicate somebody can forget." A forgotten company_id on THIS read would show one
+// tenant another's held commercial letters, including the rendered message.
+//
+// listPendingApprovals already exists and is not enough here: a review screen needs the
+// resolution and release columns, and needs to show decided items too, so that "why can I not
+// approve this" is answerable on the screen.
+
+/** Held actions for a review screen. Company-scoped; `statuses` is a whitelist, not free text. */
+async function approvalsForReview(ctx, { statuses = ['pending'] } = {}, deps = {}) {
+  assertContext(ctx);
+  const allowed = ['pending', 'approved', 'rejected', 'superseded', 'expired'];
+  const want = (Array.isArray(statuses) ? statuses : [statuses])
+    .map((x) => String(x).toLowerCase())
+    .filter((x) => allowed.includes(x));
+  if (!want.length) return [];
+  return (await q(deps)(
+    `SELECT id, company_id, run_id, action_kind, action_payload, status, owner_user_id, reason,
+            created_at, resolved_at, resolved_by, resolution, released_at, released_by
+       FROM office_approvals
+      WHERE company_id = $1 AND status = ANY($2)
+      ORDER BY created_at`, [ctx.companyId, want])).rows;
+}
+
+/**
+ * One held action, for review or for a decision.
+ *
+ * Company-scoped, so "another company's approval" and "no such approval" are indistinguishable to
+ * the caller — which is the wanted behaviour: a 404 that differs from a 403 is an enumeration
+ * oracle for other tenants' approval ids.
+ */
+async function approvalForReview(ctx, approvalId, deps = {}) {
+  assertContext(ctx);
+  return (await q(deps)(
+    `SELECT id, company_id, run_id, action_kind, action_payload, status, owner_user_id, reason,
+            created_at, resolved_at, resolved_by, resolution, released_at, released_by
+       FROM office_approvals WHERE company_id = $1 AND id = $2`,
+    [ctx.companyId, approvalId])).rows[0] || null;
+}
+
 // ── THE TRANSPORT'S AUTHORIZATION CHECK, ANSWERED INSIDE THE KERNEL ─────────
 //
 // email-gate.js refuses any send leaving the company unless a RELEASED approval authorises those
@@ -696,7 +739,7 @@ async function provenance(ctx, runId, deps = {}) {
 
 module.exports = {
   provenance, spendForObjective, unmeasuredForRun, claimApprovalRelease, approvalReleaseState,
-  verifyReleasedApprovalForDigest,
+  verifyReleasedApprovalForDigest, approvalsForReview, approvalForReview,
   bootstrapObjectiveForContext, bootstrapApprovalForExecution, bootstrapApprovalOwner,
   rfqApprovalsForEligibility,
   createObjective, setObjectiveStatus,
