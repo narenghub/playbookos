@@ -1,11 +1,22 @@
 #!/usr/bin/env node
 // ── TAKE ONE PERSON OUT OF AN AUTOMATED SEQUENCE ─────────────────────────────
 //
-//   railway ssh 'node scripts/halt-contact.js --event=scope-europe-2026 --email=paul@muralhealth.com'
-//   railway ssh 'node scripts/halt-contact.js --event=... --email=... --reason="replying by hand" --execute'
-//   railway ssh 'node scripts/halt-contact.js --event=... --email=... --resume --execute'
+//   railway ssh --service playbookos 'node /app/scripts/halt-contact.js \
+//     --event=scope-europe-2026 --email=paul@muralhealth.com'
+//   ... plus --reason="replying by hand" --execute
+//   ... plus --resume --execute   to put them back
 //
 // Dry run unless --execute. Sends nothing, ever.
+//
+// `--service playbookos` is not optional and the path must be absolute. The CLI's linked service
+// in this project is Postgres, where there is no node and no /app; a bare `railway ssh` fails with
+// `node: command not found`, which reads as a broken deploy and is nothing of the kind. This
+// header carried the shorter form, which is where that mistake came from.
+//
+// NOTE: this halts a CPHI campaign (cphi_followup_state). The need-based outreach runner keeps its
+// state in outreach_state and does not consult these tables — use
+// scripts/halt-outreach-sequence.js for that. Pointing this script at an outreach recipient
+// reports "no contact" and halts nothing, which reads like a successful no-op.
 //
 // ── WHY THIS EXISTS ──────────────────────────────────────────────────────────
 //
