@@ -137,6 +137,10 @@ async function main() {
     log(`\n  schema ready: ${r.ready ? 'YES' : 'NO'}`);
     for (const t of r.missingTables) log(`    missing table:  ${t}`);
     for (const c of r.missingColumns) log(`    missing column: ${c}`);
+    // A stale CHECK constraint is neither a missing table nor a missing column, and omitting it
+    // here made --check report "schema ready: NO" with NOTHING UNDER IT. A read-only precheck that
+    // states a verdict and withholds the reason is the shape an operator works around.
+    for (const c of r.staleConstraints || []) log(`    stale constraint: ${c}`);
     if (r.error) log(`    check error: ${r.error}`);
     log('');
     await pool.end();
@@ -162,6 +166,7 @@ async function main() {
     log('FAIL  every step reported success, but the readiness check the SERVER runs still fails:');
     for (const t of ready.missingTables) log(`        missing table:  ${t}`);
     for (const c of ready.missingColumns) log(`        missing column: ${c}`);
+    for (const c of ready.staleConstraints || []) log(`        stale constraint: ${c}`);
     log('      That means a step is not creating what this check expects. Reconcile them before');
     log('      deploying — the server will refuse to start in this state.');
     log('');

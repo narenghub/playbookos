@@ -22,9 +22,24 @@ const { validCas } = require('../catalogue/cas');
 
 const AGENT = 'inquiry-agent';
 const MODEL = 'claude-opus-4-8';
-const REP_NAME = 'Sarah Chen';
-const REP_TITLE = 'Business Development Manager';
-const SALES_FROM = `${REP_NAME} · Abiozen <sales@abiozen.com>`;
+// ── WHO THESE LETTERS ARE FROM ───────────────────────────────────────────────
+//
+// 'Sarah Chen, Business Development Manager' until 2026-11-11. No such employee exists. Every
+// quotation, every price, every payment instruction went to a pharmaceutical buyer signed by an
+// invented person, and the voice prompt instructed the model never to imply it was automated
+// unless asked outright.
+//
+// CEO decision 2026-11-11 item 9: "replacing any unverified human employee identity with an
+// authorized Abiozen business identity." A company may write to its customers as itself. It may
+// not invent a colleague for them to correspond with, and a priced commercial offer signed by
+// someone who does not exist is the kind of thing that is discovered at the worst possible moment.
+//
+// This is the DISPLAY identity — what the buyer reads. It is deliberately separate from the
+// ACCOUNTABLE SIGNATORY frozen into every approval payload, which is a real active user that
+// office/approval.js revalidates before release. Both now point at something real.
+const REP_NAME = 'Abiozen Sales';
+const REP_TITLE = 'Sales Team, Abiozen LLC';
+const SALES_FROM = `Abiozen Sales <sales@abiozen.com>`;
 const DOC_FEE = 150;
 const ESCALATE_ABOVE = 50000;
 // Export-controlled destinations that force human review (Stage 8).
@@ -103,8 +118,9 @@ async function haveWeEmailed(email) {
   } catch (e) { return undefined; }
 }
 
-// Real people at Abiozen, for the spam gate's "greets a name that isn't ours" signal.
-// The sales persona counts as ours. Cached for a poll cycle; failure yields [] so the
+// Real people at Abiozen, for the spam gate's "greets a name that isn't ours" signal. The sales
+// identity counts as ours — it is now the company's own name rather than an invented employee's,
+// which is the point of the change above. Cached for a poll cycle; failure yields [] so the
 // signal simply doesn't fire (it can never invent a spam verdict on its own).
 let _employeeNamesCache = { at: 0, names: null };
 async function employeeNames() {
@@ -228,9 +244,9 @@ async function logMessage(inquiryId, m) {
 // ── Professional email template ───────────────────────────────────────────────
 const productTypeLabelFor = (pricing, molecule) => (productType(pricing, molecule) === 'research_chemical' ? 'Research Chemical' : 'GMP API');
 // Shared persona + voice for all AI-written inquiry emails.
-const VOICE = `You are ${REP_NAME}, ${REP_TITLE} at Abiozen LLC — a warm, knowledgeable, confident human salesperson. Write in the first person as Sarah. NEVER say or imply you are an AI, a bot, automated, or a system; only if the buyer directly asks "are you an AI/bot/real person?" do you answer honestly and briefly.
+const VOICE = `You are writing on behalf of the Abiozen LLC sales team. Write as the company ("we", "Abiozen"), not as a named individual, and never invent an employee name, title or signature. Do not claim to be a person, and do not deny being automated: if the buyer asks whether they are dealing with a person or a system, say plainly that this is Abiozen's automated sales assistant and that a colleague can pick the conversation up.
 Voice: confident, specific, and value-focused — executive pharma, never generic, hedging, or fluffy. Where it reads naturally (never forced), draw on Abiozen's real proof points: ISO 9001 & ISO 27001 certification, rigorous US-based quality control, and an established APAC manufacturing/sourcing network. Never fabricate specifics, and never claim a product is FDA-approved unless explicitly told it is.
-End with a brief warm sign-off signed "${REP_NAME}" (optionally with "${REP_TITLE}, Abiozen LLC") — do NOT append a postal address, phone, or bank block; the email footer carries the company details.`;
+End with a brief warm sign-off from "${REP_NAME}" (the team, not a person) — do NOT invent a personal name, and do NOT append a postal address, phone, or bank block; the email footer carries the company details.`;
 
 // AI plain-text body → styled HTML paragraphs for the {EMAIL_BODY_HTML} slot.
 function textToHtml(text) {
@@ -373,7 +389,7 @@ function buildSpecsTable({ molecule, cas: filedCas, grade, purity, quantity, uni
 
 // ── WHO IS ANSWERABLE FOR A LETTER TO A CUSTOMER ─────────────────────────────
 //
-// The buyer sees "Sarah Chen, Business Development Manager". That is a persona, not a user, and
+// The buyer sees the DISPLAY identity (now the company itself). That is not a user, and
 // office/approval.js release() revalidates the signatory against `users` — so a payload signed
 // only by the persona could never be released, and should never be: a commercial offer needs a
 // human the company is answerable through.
@@ -879,7 +895,7 @@ Return ONLY JSON:
   return { intent, action };
 }
 
-// Stage 3 — send the KYB / compliance request (verbatim block, Sarah's voice).
+// Stage 3 — send the KYB / compliance request (verbatim block, company voice).
 async function sendKYBRequest(inq, productTypeLabel) {
   const body = `Hi ${inq.buyer_name || 'there'},\n\nThank you — I have what I need on your ${moleculePhrase(inq.molecule_name)} requirement, and I'd love to get your formal quotation over quickly.\n\n${KYB_BLOCK}\n\nAs soon as these clear, I'll send your quotation with pricing, documentation, and lead time.\n\nWarm regards,\n${REP_NAME}`;
   await sendAndLog(inq, { subject: inquirySubject(inq), body, productTypeLabel });
@@ -1023,8 +1039,11 @@ async function generateQuote(inquiryId) {
   const gradeLabel = isResearch ? `research grade, ${pricing.purity || '98%+'}` : 'GMP grade';
   const docsLine = isResearch ? 'COA + SDS' : `COA + GMP cert (DMF/CEP ${pricing.dmf_available ? 'available' : 'on request'})`;
   const discountNote = mult < 1 ? `A ${Math.round((1 - mult) * 100)}% quantity discount is already reflected in the unit price at your volume.` : (tier === 'sample' ? 'This reflects our small-quantity / evaluation rate.' : 'Volume discounts apply on larger quantities.');
-  const signatory = 'Warm regards,\nSarah Chen\nBusiness Development Manager, Abiozen LLC';
-  const prompt = `Write the COVER NOTE for a formal ${isResearch ? 'research-chemical' : 'pharmaceutical API'} quotation from Abiozen LLC, written by Sarah Chen. A full specification & pricing TABLE is rendered directly below your text, so do NOT re-list every line item. Return ONLY the cover-note body as plain text (no subject).
+  // The signature on the most consequential document this agent produces. It read 'Sarah Chen,
+  // Business Development Manager' — an invented employee signing a priced commercial offer. The
+  // quotation now comes from the company, which is a thing that exists.
+  const signatory = `Warm regards,\n${REP_NAME}\n${REP_TITLE}`;
+  const prompt = `Write the COVER NOTE for a formal ${isResearch ? 'research-chemical' : 'pharmaceutical API'} quotation from Abiozen LLC, written by the Abiozen sales team as the company. A full specification & pricing TABLE is rendered directly below your text, so do NOT re-list every line item. Return ONLY the cover-note body as plain text (no subject).
 
 Quote reference: ${ref}
 Buyer: ${inq.buyer_name || 'there'} at ${inq.buyer_company || 'your organization'}

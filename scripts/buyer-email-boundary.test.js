@@ -119,6 +119,47 @@ test('a drafted letter is logged as outbound_pending, never as outbound', () => 
     'the draft is recorded as a delivered outbound message');
 });
 
+// ── THE LETTERS COME FROM THE COMPANY, NOT AN INVENTED COLLEAGUE ────────────
+//
+// CEO decision 2026-11-11 item 9. Until that day every quotation, price and payment instruction
+// went to a pharmaceutical buyer signed 'Sarah Chen, Business Development Manager' — no such
+// employee — and the voice prompt told the model never to imply it was automated unless asked
+// outright. A company may write to its customers as itself; it may not invent a colleague for
+// them to correspond with.
+
+test('the display identity is the company, not a person', () => {
+  const name = /const REP_NAME = '([^']+)'/.exec(agentCode);
+  const from = /const SALES_FROM = `([^`]+)`/.exec(agentCode);
+  assert.ok(name && from, 'the sender identity constants are gone');
+  assert.match(name[1], /Abiozen/, 'REP_NAME no longer names the company');
+  assert.match(from[1], /Abiozen/);
+  assert.ok(!/Sarah Chen/.test(agentCode.replace(/REP_NAME|REP_TITLE/g, '')),
+    'an invented employee name is back in the code');
+});
+
+test('the quotation is signed by the company', () => {
+  const sig = /const signatory = `([^`]+)`/.exec(agentCode);
+  assert.ok(sig, 'the quotation signatory is gone');
+  assert.match(sig[1], /\$\{REP_NAME\}/,
+    'the quotation signature is a literal again rather than the resolved company identity');
+});
+
+test('the voice prompt does not instruct the model to deny being automated', () => {
+  assert.ok(!/NEVER say or imply you are an AI/i.test(agentSrc),
+    'the prompt still tells the model to conceal that it is automated');
+  assert.match(agentSrc, /automated sales assistant/,
+    'the prompt no longer says what to answer when a buyer asks whether this is a person');
+  assert.ok(!/first person as Sarah/i.test(agentSrc));
+});
+
+test('the accountable signatory stays separate from the display identity', () => {
+  // Both now point at something real, and they are still different things: one is what the buyer
+  // reads, the other is the active user office/approval.js revalidates before any release.
+  assert.match(agentCode, /displayName: REP_NAME/);
+  assert.match(agentCode, /signatory,/, 'the accountable signatory is no longer passed to prepare');
+  assert.match(agentCode, /accountableSignatory\(/);
+});
+
 // ── AN APPROVAL CANNOT SUBSTITUTE FOR IDENTITY (priority 3) ─────────────────
 
 test('the identity check runs BEFORE anything is prepared', () => {

@@ -17,6 +17,8 @@
 
 const assert = require('node:assert');
 const { test } = require('node:test');
+const fs = require('node:fs');
+const path = require('node:path');
 const SR = require('./schema-ready');
 
 // A stub that answers every readiness probe healthily, with hooks to break one thing at a time.
@@ -93,6 +95,21 @@ test('a stale constraint is named in the boot output', async () => {
   assert.ok(lines.some((l) => /stale constraint/.test(l)), 'the stale constraint is not reported');
   assert.ok(lines.some((l) => /node scripts\/migrate\.js/.test(l)),
     'the output does not say how to fix it');
+});
+
+test('every reporter of a readiness failure surfaces stale constraints', () => {
+  // Three places render this result: assertReadyOrExit (boot), migrate.js --check (the read-only
+  // precheck an operator runs BEFORE migrating), and migrate.js's post-apply report. The first
+  // version of staleConstraints was rendered by only one of them, so the other two would have
+  // printed "schema ready: NO" with nothing under it — a verdict with the reason withheld, which
+  // is the shape an operator works around rather than acts on.
+  const mig = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'migrate.js'), 'utf8');
+  const sr = fs.readFileSync(path.join(__dirname, 'schema-ready.js'), 'utf8');
+  const hits = (mig.match(/staleConstraints/g) || []).length;
+  assert.ok(hits >= 2,
+    `migrate.js renders staleConstraints in ${hits} place(s); both --check and the post-apply `
+    + 'report need it');
+  assert.match(sr, /stale constraint: \$\{c\}/, 'assertReadyOrExit does not render it');
 });
 
 test('the readiness check runs SELECTs only — boot holds no DDL', async () => {
