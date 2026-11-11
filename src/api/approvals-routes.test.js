@@ -219,7 +219,15 @@ function codeOnly(src) {
 test('the frozen message is rendered in a frame with no script and no same-origin access', () => {
   const code = codeOnly(HTML);
   const i = code.indexOf('window.apOpen');
-  const body = code.slice(i, code.indexOf('window.apDecide', i));
+  const j = code.indexOf('window.apDecide', i);
+  // Stripping /* */ across a 12,000-line HTML file removes about a third of it: a `/*` inside
+  // CSS, a string or a regex literal opens a phantom block that swallows real code. These two
+  // anchors survive it today, and asserting that is the difference between a guard and a guard
+  // that cannot fail — a -1 from indexOf would slice from the end of the file and assert nothing.
+  assert.ok(i > 0 && j > i,
+    'the apOpen handler could not be located in the stripped source, so this assertion would '
+    + 'have examined the wrong region');
+  const body = code.slice(i, j);
   assert.match(body, /<iframe sandbox /,
     'the payload is dropped into a page holding an admin session without a sandbox');
   assert.ok(!/allow-scripts/.test(body), 'the sandbox allows scripts');

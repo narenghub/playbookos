@@ -793,8 +793,22 @@ async function processInboundReply(inquiryId, emailText, { dryRun = false, messa
   }
 
   // Stages 2-4 — Claude-driven qualify → KYB → quote.
+  // ── A DRAFT IS LABELLED AS ONE IN THE MODEL'S OWN PROMPT ─────────────────
+  //
+  // This fed `[${m.direction}]` straight into the prompt, so after S2 the thread handed to the
+  // model contained `[outbound_pending] Dear Buyer, please find quotation QT-… ` — a letter the
+  // buyer has never received, in the position where every other line IS something they received.
+  // The model would then quite reasonably write "as I mentioned in my quotation" to somebody who
+  // has seen no quotation.
+  //
+  // 'outbound_pending' means nothing to a model. The label has to say what it means.
   const history = (await query('SELECT direction, body_text FROM inquiry_messages WHERE inquiry_id=$1 ORDER BY created_at', [inquiryId])).rows
-    .map(m => `[${m.direction}] ${String(m.body_text || '').slice(0, 500)}`).join('\n');
+    .map((m) => {
+      const label = m.direction === 'outbound_pending'
+        ? 'DRAFT — AWAITING HUMAN APPROVAL, THE BUYER HAS NOT RECEIVED THIS'
+        : m.direction;
+      return `[${label}] ${String(m.body_text || '').slice(0, 500)}`;
+    }).join('\n');
   const pricing = await findPricing(inq.molecule_name, inq.cas_number);
   const isResearch = productType(pricing, inq.molecule_name) === 'research_chemical';
   const ptl = isResearch ? 'Research Chemical' : 'GMP API';
@@ -1196,7 +1210,13 @@ async function runInquiryAgent({ dryRun = false } = {}) {
     } catch (e) { out.errors.push(`${inq.id}: ${e.message}`); }
   }
   const stats = (await query(`SELECT
-      COUNT(*) FILTER (WHERE status IN ('new','in_conversation','kyb_pending','kyb_passed','quote_sent','negotiating','human_requested'))::int active,
+      -- quote_awaiting_approval and quote_blocked ARE active work: a drafted quotation waiting on
+      -- a human is the most active thing in this pipeline. Omitted, they vanished from the daily
+      -- summary the CEO reads, which would have under-reported the pipeline by exactly the deals
+      -- S2 holds back.
+      COUNT(*) FILTER (WHERE status IN ('new','in_conversation','kyb_pending','kyb_passed','quote_sent','negotiating','human_requested','quote_awaiting_approval','quote_blocked'))::int active,
+      COUNT(*) FILTER (WHERE status = 'quote_awaiting_approval')::int awaiting_approval,
+      COUNT(*) FILTER (WHERE status = 'quote_blocked')::int quote_blocked,
       COUNT(*) FILTER (WHERE status='human_requested')::int escalations,
       COUNT(*) FILTER (WHERE status IN ('accepted','payment_pending','payment_received','in_production','shipped','completed','order_placed'))::int orders FROM inquiries`)).rows[0];
   out.active_inquiries = stats.active; out.escalations = stats.escalations; out.orders = stats.orders;
@@ -1618,18 +1638,42 @@ async function handleStripeEvent(event) {
 }
 
 // Sales pipeline: kanban columns + weighted revenue forecast (Stage view).
+// ── A DRAFTED QUOTE IS NOT A QUOTED DEAL ─────────────────────────────────────
+//
+// S2 introduced two statuses that did not exist when these columns were written:
+// quote_awaiting_approval and quote_blocked. Both describe a quotation the BUYER HAS NOT SEEN.
+//
+// Left unlisted they fell through colOf's `|| 'qualifying'` and appeared as unqualified leads at
+// 0.10 — a finished, priced quotation shown as an early enquiry. Adding them to `quoted` would be
+// the opposite error at 0.35, a forecast weighted as though a buyer were considering an offer
+// nobody has sent them.
+//
+// So each gets its own column. awaiting_approval sits BELOW quoted deliberately: the work is done
+// and the buyer still knows nothing. blocked is weighted at ZERO — it cannot progress until a
+// person acts on it, and putting forecast on stuck work is how a pipeline stops being a forecast.
 const PIPELINE_COLS = {
   qualifying: ['new', 'in_conversation', 'kyb_pending', 'kyb_passed'],
+  awaiting_approval: ['quote_awaiting_approval'],
+  blocked: ['quote_blocked'],
   quoted: ['quote_sent', 'negotiating'],
   accepted: ['accepted'],
   payment: ['payment_link_sent', 'payment_pending', 'payment_received'],
   production: ['in_production'],
   shipped: ['shipped', 'completed'],
 };
-const STAGE_PROB = { qualifying: 0.10, quoted: 0.35, accepted: 0.70, payment: 0.85, production: 0.95, shipped: 1.0 };
+const STAGE_PROB = { qualifying: 0.10, awaiting_approval: 0.20, blocked: 0.0,
+  quoted: 0.35, accepted: 0.70, payment: 0.85, production: 0.95, shipped: 1.0 };
 async function getPipeline() {
   const rows = (await query(`SELECT id, molecule_name, buyer_company, buyer_email, buyer_name, status, order_value_usd, quote_ref, quantity_requested, quantity_unit, updated_at FROM inquiries WHERE status <> 'closed' ORDER BY updated_at DESC`)).rows;
-  const colOf = s => Object.keys(PIPELINE_COLS).find(c => PIPELINE_COLS[c].includes(s)) || 'qualifying';
+  // `|| 'qualifying'` used to be here, and it is how two S2 statuses came to be displayed as
+  // unqualified leads with no indication that anything was unrecognised. An unknown status is now
+  // REPORTED. A silent default on a status map is a map that quietly stops describing the system.
+  const unclassified = [];
+  const colOf = (st) => {
+    const c = Object.keys(PIPELINE_COLS).find((k) => PIPELINE_COLS[k].includes(st));
+    if (!c) { unclassified.push(st); return 'qualifying'; }
+    return c;
+  };
   const columns = {};
   for (const c of Object.keys(PIPELINE_COLS)) columns[c] = { items: [], value: 0, weighted: 0, prob: STAGE_PROB[c] };
   for (const r of rows) {
@@ -1639,9 +1683,14 @@ async function getPipeline() {
     columns[c].value += v; columns[c].weighted += v * (STAGE_PROB[c] || 0);
   }
   const total_pipeline = rows.reduce((s, r) => s + (Number(r.order_value_usd) || 0), 0);
+  const unknownStatuses = [...new Set(unclassified)];
   const weighted_forecast = Math.round(Object.keys(columns).reduce((s, c) => s + columns[c].weighted, 0));
   const won = (await query(`SELECT COALESCE(SUM(order_value_usd),0) v FROM inquiries WHERE status IN ('payment_received','in_production','shipped','completed')`)).rows[0].v;
-  return { columns, total_pipeline, weighted_forecast, won_value: Number(won), count: rows.length };
+  return { columns, total_pipeline, weighted_forecast, won_value: Number(won), count: rows.length,
+    // Surfaced rather than swallowed. A status this map does not know is counted in 'qualifying'
+    // at 0.10, which is a guess — so the payload says which statuses were guessed at, and a reader
+    // can tell "no unknowns" from "three unknowns quietly averaged in".
+    unclassified_statuses: unknownStatuses };
 }
 
 module.exports = {

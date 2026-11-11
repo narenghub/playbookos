@@ -10730,7 +10730,11 @@ if(typeof pages !== 'undefined') {
         </div>`;
     } else if (window._iqTab==='pipeline') {
       const p = pipeData||{columns:{}};
-      const cols=[['qualifying','Qualifying','#94a3b8'],['quoted','Quoted','#EF9F27'],['accepted','Accepted','#6B2D8B'],['payment','Payment','#0D7377'],['production','Production','#1B3A6B'],['shipped','Shipped','#1D9E75']];
+      // awaiting_approval and blocked are listed HERE as well as in PIPELINE_COLS. This array is
+      // hardcoded, so a column added only on the server is silently dropped from the page — the
+      // deal would be counted in the forecast and invisible in the board, which is worse than the
+      // misfiling it replaced.
+      const cols=[['qualifying','Qualifying','#94a3b8'],['awaiting_approval','Awaiting approval','#B8860B'],['blocked','Blocked','#9A2B2A'],['quoted','Quoted','#EF9F27'],['accepted','Accepted','#6B2D8B'],['payment','Payment','#0D7377'],['production','Production','#1B3A6B'],['shipped','Shipped','#1D9E75']];
       const summary=`<div class="metric-grid">
         <div class="metric"><div class="label">Total pipeline value</div><div class="value">${iqMoney(p.total_pipeline)}</div><div class="sub">${p.count||0} open</div></div>
         <div class="metric amber"><div class="label">Weighted forecast</div><div class="value">${iqMoney(p.weighted_forecast)}</div><div class="sub">stage-probability adjusted</div></div>
