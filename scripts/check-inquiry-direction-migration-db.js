@@ -79,6 +79,17 @@ function runMigration(args = [], env = {}) {
   return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
 }
 
+// The INDEPENDENT verifier, driven as its own process. CEO ruling 2026-11-11: the constraint must
+// be inspected by a separate read-only query rather than by asking the migration script whether
+// its own change happened. Exercised here in BOTH states, because a verifier that only ever sees
+// the migrated database cannot be shown to detect the unmigrated one.
+function runVerifier() {
+  const r = require('child_process').spawnSync(
+    process.execPath, [path.join(__dirname, 'verify-inquiry-direction-constraint.js')],
+    { env: { ...process.env, MIGRATION_DATABASE_URL: url }, encoding: 'utf8' });
+  return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
+}
+
 (async () => {
   const { Pool } = require('pg');
   const P = new Pool({ connectionString: url, ssl: false });
@@ -136,6 +147,20 @@ function runMigration(args = [], env = {}) {
       }
     }
 
+    // ══ 1c. THE INDEPENDENT VERIFIER SEES THE UNMIGRATED STATE ═════════════
+    {
+      const v = runVerifier();
+      if (v.code === 1 && /does NOT admit/.test(v.out)) {
+        ok('the independent verifier reports FAIL before the migration (exit 1)');
+      } else {
+        bad('the independent verifier does not detect the unmigrated constraint',
+          `code=${v.code}\n${v.out.slice(0, 300)}`);
+      }
+      if (/admits: inbound, outbound$/m.test(v.out)) {
+        ok('and it names the values it parsed, rather than only a verdict');
+      } else bad('the verifier does not report the parsed value set', v.out.slice(0, 300));
+    }
+
     // ══ 2. APPLY ═══════════════════════════════════════════════════════════
     {
       const t0 = Date.now();
@@ -151,6 +176,30 @@ function runMigration(args = [], env = {}) {
       const n = (await q(`SELECT COUNT(*)::int n FROM inquiry_messages`)).rows[0].n;
       if (n === 5) ok('all 5 rows survived, unmodified');
       else bad(`row count is ${n}, expected 5`);
+    }
+
+    // ══ 2b. AND IT SEES THE MIGRATED STATE, BY ITS OWN QUERY ═══════════════
+    {
+      const v = runVerifier();
+      if (v.code === 0 && /PASS — the constraint admits exactly/.test(v.out)) {
+        ok('the independent verifier reports PASS after the migration (exit 0)');
+      } else {
+        bad('the independent verifier does not confirm the migrated constraint',
+          `code=${v.code}\n${v.out.slice(0, 300)}`);
+      }
+      // It must be genuinely independent: no shared module with the thing it verifies.
+      // Comments stripped first. The verifier's own header NAMES the migration script, in the
+      // sentence explaining that it shares no code with it — so a raw grep matched prose and
+      // failed a correct file. Third time today that a guard has read a comment as code.
+      const vsRaw = fs.readFileSync(path.join(__dirname, 'verify-inquiry-direction-constraint.js'), 'utf8');
+      const vs = vsRaw.replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n').map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1')).join('\n');
+      if (!/migrate-inquiry-direction-check/.test(vs)) {
+        ok('and it requires nothing from the migration script — two readings, not one taken twice');
+      } else bad('the verifier imports the migration script, so it is not independent');
+      if (/default_transaction_read_only/.test(vsRaw)) {
+        ok('and it declares the session read-only at the server');
+      } else bad('the verifier does not declare itself read-only');
     }
 
     // ══ 3. THE NEW VALUE IS NOW ACCEPTED, AND NOTHING ELSE IS ══════════════
