@@ -276,6 +276,12 @@ pf_step "the containment report reads every transport, and UNKNOWN blocks an all
 # reach a provider. Named as its own steps rather than left inside the 2,295-subtest suite, so a
 # regression here is reported as the approval boundary breaking and not as "a test failed".
 pf_step "a buyer quotation cannot be released without a fresh, unchanged, digest-matched approval" env JWT_SECRET=preflight node --test src/lib/agents/buyer-email-approval.test.js
+# Priority 3, 2026-11-11. An approval must not substitute for identity: a human approving a
+# quotation reads a greeting, a table and a total, and cannot see that the price in that table came
+# from a different substance. The shared-CAS defect is fixed in findPricing; what remained was the
+# quotation printing the BUYER'S well-formed CAS beside OUR price with nothing comparing the two.
+pf_step "a quotation with unresolved identity or price is blocked before any approval exists" env JWT_SECRET=preflight node --test src/lib/agents/quote-identity.test.js
+pf_step "every recipient is classified inside or outside the company, both directions" node --test src/lib/outbound/recipients.test.js
 pf_step "the approval boundary is the ONLY road from the inquiry agent to a buyer" env JWT_SECRET=preflight node --test scripts/buyer-email-boundary.test.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the
 # four things that keep two substances apart once rows exist: that a name cannot be one molecule's

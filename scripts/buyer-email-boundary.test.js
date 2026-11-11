@@ -119,6 +119,56 @@ test('a drafted letter is logged as outbound_pending, never as outbound', () => 
     'the draft is recorded as a delivered outbound message');
 });
 
+// ── AN APPROVAL CANNOT SUBSTITUTE FOR IDENTITY (priority 3) ─────────────────
+
+test('the identity check runs BEFORE anything is prepared', () => {
+  const start = agentCode.indexOf('async function generateQuote(');
+  assert.ok(start > 0, 'generateQuote is gone');
+  const end = agentCode.indexOf('\nasync function escalateToHuman', start);
+  const body = agentCode.slice(start, end > start ? end : start + 9000);
+
+  const check = body.indexOf('assessQuoteIdentity(');
+  const prepare = body.indexOf('sendAndLog(');
+  assert.ok(check > 0, 'generateQuote no longer assesses identity');
+  assert.ok(prepare > 0, 'generateQuote no longer prepares anything');
+  assert.ok(check < prepare,
+    'identity is assessed AFTER the letter is prepared, so a human could be handed an approval '
+    + 'for a quotation whose price came from another substance');
+});
+
+test('a blocked quotation returns before preparing, so no approval can exist', () => {
+  const start = agentCode.indexOf('async function generateQuote(');
+  const body = agentCode.slice(start, start + 3000);
+  const i = body.indexOf('if (!identity.ok)');
+  assert.ok(i > 0, 'the identity verdict is computed and not acted on');
+  const block = body.slice(i, i + 700);
+  assert.ok(/return \{/.test(block), 'a blocked identity does not return early');
+  assert.ok(/identity_unresolved: true/.test(block),
+    'the caller cannot tell an identity block from any other failure');
+  assert.ok(!/sendAndLog|prepareBuyerEmail/.test(block),
+    'the blocked path still prepares something');
+});
+
+test('the printed CAS comes from the identity assessment, not the raw buyer value', () => {
+  // authoritativeCas asked only "does this pass its own checksum", so a well-formed registry
+  // number belonging to a different substance reached a priced commercial document.
+  assert.ok(/const quoteCas = identity\.cas;/.test(agentCode),
+    'the quotation still takes its CAS from a checksum test rather than a corroborated one');
+  const start = agentCode.indexOf('async function generateQuote(');
+  const end = agentCode.indexOf('\nasync function escalateToHuman', start);
+  const body = agentCode.slice(start, end > start ? end : start + 9000);
+  assert.ok(!/authoritativeCas\(/.test(body),
+    'generateQuote still calls authoritativeCas, which cannot detect a conflicting CAS');
+});
+
+test('what could not be established reaches the approver, not just a log', () => {
+  const start = agentCode.indexOf('async function generateQuote(');
+  const end = agentCode.indexOf('\nasync function escalateToHuman', start);
+  const body = agentCode.slice(start, end > start ? end : start + 9000);
+  assert.ok(/identity\.confidence/.test(body),
+    'the confidence notes are computed and never shown to the person deciding');
+});
+
 // ── WHAT THE API TELLS A HUMAN ───────────────────────────────────────────────
 
 test('the quote route does not report a prepared quotation as sent', () => {

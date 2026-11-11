@@ -9,6 +9,9 @@ const { sendEmail, sendEmailOrReport, sendEmailDetailed } = require('../mailer')
 // The approval boundary for everything this agent says to a buyer. sendAndLog prepares; only
 // sendApprovedBuyerEmail can transmit, and only against a released, digest-matched payload.
 const APPROVAL = require('./buyer-email-approval');
+// Identity and price confidence, settled before an approval can exist. An approver reading an
+// email cannot see that its price came from another substance.
+const QUOTE_IDENTITY = require('./quote-identity');
 const { sendWhatsApp } = require('../whatsapp');
 const { logAgentActivity, parseClaudeJSON, extractClaudeText } = require('../agent-core');
 const { getGoogleAccessToken: getGoogleToken, SCOPES } = require('../google-auth');
@@ -947,7 +950,25 @@ async function generateQuote(inquiryId) {
   const inq = (await query('SELECT * FROM inquiries WHERE id=$1', [inquiryId])).rows[0];
   if (!inq) return { error: 'inquiry not found' };
   const pricing = await findPricing(inq.molecule_name, inq.cas_number);
-  if (!pricing) return { error: 'no pricing for this molecule' };
+
+  // ── IDENTITY AND PRICE ARE SETTLED BEFORE ANYTHING IS PREPARED ───────────
+  //
+  // CEO decision 2026-11-11 priority 3: an approval must not be able to substitute for correct
+  // molecule identity or a reliable price. So an unresolved quotation produces NO APPROVAL AT ALL
+  // rather than an approval a human is invited to grant.
+  //
+  // The reason it belongs here and not in the review screen: a human approving a quotation is
+  // reading an email — a greeting, a table, a total. They cannot see that the price in that table
+  // came from a different substance, and asking them to look for it transfers a machine's failure
+  // onto a reader with no way to detect it.
+  const identity = QUOTE_IDENTITY.assessQuoteIdentity({ inquiry: inq, pricing });
+  if (!identity.ok) {
+    console.warn(`[quote] inquiry ${inquiryId} BLOCKED (${identity.reason}): ${identity.detail}`);
+    await query(`UPDATE inquiries SET status='quote_blocked', updated_at=NOW() WHERE id=$1`,
+      [inquiryId]).catch(() => {});
+    return { error: identity.detail, blocked_reason: identity.reason,
+      identity_unresolved: true, prepared: false, sent: false };
+  }
 
   const qty = Number(inq.quantity_requested) || (pricing.min_quantity_g || 1000) / 1000;
   const qtyKg = inq.quantity_unit === 'kg' ? qty : qty / 1000;
@@ -967,8 +988,14 @@ async function generateQuote(inquiryId) {
   // The quote is a commercial record whose cas_number feeds the customer-visible document, so a
   // malformed value is not stored on it as though authoritative. The inquiry keeps the filed value
   // as evidence, which is what makes a suppression observable: a quote with a NULL CAS whose
-  // inquiry holds a non-null one that fails the checksum is exactly this guard having fired.
-  const quoteCas = authoritativeCas(inq.cas_number);
+  // inquiry holds a non-null one is exactly this guard having fired.
+  //
+  // It now comes from assessQuoteIdentity, which is a STRICTER test than authoritativeCas. That
+  // function asked only "does this pass its own checksum" — so a well-formed registry number
+  // belonging to a different substance than the one being priced went onto the quotation as
+  // though it described the goods. A number is printed only where the catalogue corroborates it,
+  // or where it IS the catalogue's own value for the exact name the buyer gave.
+  const quoteCas = identity.cas;
   const quoteId = crypto.randomUUID();
   await query(
     `INSERT INTO inquiry_quotes (id, inquiry_id, molecule_name, cas_number, quantity_kg, unit_price_usd,
@@ -1040,7 +1067,13 @@ ${signatory}`;
     productTypeLabel: commercial.product_type, controlled,
     ctaLabel: 'Reply "ACCEPTED" to Proceed &rarr;', cc: quoteCc, commercial,
     reason: `quotation ${ref}: ${inq.molecule_name} ${qtyKg}kg at $${unitPrice}/kg, total `
-      + `$${total.toLocaleString()} USD, to ${inq.buyer_email}` });
+      + `$${total.toLocaleString()} USD, to ${inq.buyer_email}`
+      // What could NOT be established, in front of the person deciding. A note that only reaches
+      // a log is a note that reaches nobody, and "this is fine, and here is what we could not
+      // corroborate" is information a decision deserves.
+      + (identity.confidence.length
+        ? `\n\nNot established: ${identity.confidence.join('; ')}.`
+        : '') });
 
   // ── STATUS FOLLOWS WHAT HAPPENED, NOT WHAT WAS ATTEMPTED ─────────────────
   //
