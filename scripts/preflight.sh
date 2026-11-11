@@ -302,6 +302,12 @@ pf_step "the Gmail reconciliation script is read-only by contract, and its scan 
 # matters most: deploying S2 against an unwidened constraint gives a server that answers /health
 # 200 and silently fails to record the draft an operator is being asked to approve.
 pf_step "boot refuses a schema that is only partly migrated, constraints included" node --test src/lib/schema-ready.test.js
+# CEO decision 2026-11-11 task 2. The single-purpose migration, against a disposable cluster built
+# with the PREVIOUS-RELEASE schema and representative records. It drives read-only, apply, repeat,
+# the incompatible-row refusal, the rollback refusal that must never relabel a draft as sent, and a
+# real held ACCESS EXCLUSIVE lock. That lock case found the migration stalling in its own read-only
+# survey, which no amount of reading the file would have shown.
+pf_step "the single-purpose constraint migration is safe, bounded and idempotent" node scripts/check-inquiry-direction-migration-db.js
 pf_step "every recipient is classified inside or outside the company, both directions" node --test src/lib/outbound/recipients.test.js
 pf_step "the approval boundary is the ONLY road from the inquiry agent to a buyer" env JWT_SECRET=preflight node --test scripts/buyer-email-boundary.test.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the

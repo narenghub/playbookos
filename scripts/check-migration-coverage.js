@@ -73,6 +73,24 @@ const NOT_PLAIN_CREATORS = new Map([
   ['migrate-outbound-ledger.js',
     "standalone operator tool over DDL that IS in the chain (step 'outbound execution ledger'); "
     + 'it changes schema and is excluded only because the chain already applies it'],
+  //
+  // migrate-inquiry-direction-check.js is the same shape, and the same caution applies: it DOES
+  // change schema. It executes exactly two statements —
+  //   ALTER TABLE inquiry_messages DROP CONSTRAINT IF EXISTS inquiry_messages_direction_check;
+  //   ALTER TABLE inquiry_messages ADD CONSTRAINT inquiry_messages_direction_check
+  //     CHECK (direction IN ('inbound','outbound','outbound_pending'));
+  // — inside one explicit transaction with lock_timeout and statement_timeout bounded, plus
+  // read-only survey queries. No CREATE TABLE, no ADD COLUMN, and no data statement of any kind;
+  // check-inquiry-direction-migration-db.js asserts that against the file.
+  //
+  // That identical DDL is already in the chain, inside step 'schema migrations (migrateSchemas)'
+  // in src/lib/db.js, which is what a fresh database gets. This script exists because the chain
+  // runs 54 steps with no transaction and no lock bound anywhere, and applying one constraint to a
+  // LIVE table deserves neither that surface nor an unbounded ACCESS EXCLUSIVE wait.
+  ['migrate-inquiry-direction-check.js',
+    "standalone operator tool over DDL that IS in the chain (step 'schema migrations "
+    + "(migrateSchemas)'); it executes two ALTER TABLE statements on one CHECK constraint, in one "
+    + 'bounded transaction, and is excluded only because the chain already applies them'],
 ]);
 
 let temp = null;
