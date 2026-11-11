@@ -281,6 +281,11 @@ pf_step "a buyer quotation cannot be released without a fresh, unchanged, digest
 # from a different substance. The shared-CAS defect is fixed in findPricing; what remained was the
 # quotation printing the BUYER'S well-formed CAS beside OUR price with nothing comparing the two.
 pf_step "a quotation with unresolved identity or price is blocked before any approval exists" env JWT_SECRET=preflight node --test src/lib/agents/quote-identity.test.js
+# Priority 2, 2026-11-11. The review surface. The failure this guards is not "approval is missing"
+# but a surface that LOOKS like it sent something: the notice this workstream came from read
+# "Large quote sent" about mail nobody had approved, and a screen saying "Sent!" after setting a
+# status would be the same lie with a better interface.
+pf_step "the approval surface cannot send, and cannot say it did" env JWT_SECRET=preflight node --test src/api/approvals-routes.test.js
 pf_step "every recipient is classified inside or outside the company, both directions" node --test src/lib/outbound/recipients.test.js
 pf_step "the approval boundary is the ONLY road from the inquiry agent to a buyer" env JWT_SECRET=preflight node --test scripts/buyer-email-boundary.test.js
 # Molecule identity (E1). The unit tests prove the naming rules against strings and cannot prove the

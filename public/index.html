@@ -1001,6 +1001,9 @@ const NAV_SECTIONS = [
     // visible section, so putting a page at the top of EXECUTIVE changes where every admin
     // LANDS. Placed here it is one click away and the landing page is unchanged.
     {id:'decisions', label:'Decision Queue', icon:'🔔'},
+    // Where a held action is actually decided. The Decision Queue only POINTS at decisions; this
+    // is the one surface that takes one.
+    {id:'approvals', label:'Approvals', icon:'✍️'},
     {id:'spend', label:'AI Spend', icon:'💵'},
     {id:'performance', label:'Performance', icon:'🏆'},
   ]},
@@ -1170,7 +1173,13 @@ function passesPageReads(pageId, role, tiers) {
   // CHECKED FIRST, before the admin short-circuit below. A narrowing rule placed after it still
   // works for admins and silently does nothing for everybody else — the entire population it exists
   // to narrow. It fails closed for every role not named here.
-  if (['decisions', 'spend'].indexOf(pageId) !== -1) return role === 'admin' || role === 'super_admin';
+  // 'approvals' joins them for a stronger reason than the other two. The detail view renders the
+  // FROZEN MESSAGE of a held commercial action, and the decision route is adminOnly and
+  // company-scoped server-side — so a nav rule that let a lower role see the link would offer a
+  // door that 403s, and a nav rule that let them THROUGH would be a disclosure change dressed as
+  // a sidebar entry. Named here rather than given tier requirements because tiers describe
+  // product reads, and this page is not a product's.
+  if (['decisions', 'spend', 'approvals'].indexOf(pageId) !== -1) return role === 'admin' || role === 'super_admin';
   if (role === 'admin' || role === 'super_admin') return true; // admins pass every read
   const reqs = NAV_PAGE_REQS[pageId];
   if (!reqs) return true;                 // no tier-gated implied reads -> always passes
@@ -1196,7 +1205,7 @@ function passesPageReads(pageId, role, tiers) {
 // platform + me are NOT products: they render to the right of the product tabs, separated.
 const PRODUCTS = [
   { key:'abiozen',  label:'Abiozen',  icon:'🧪', kind:'product',
-    pages:['command-center','dashboard','decisions','spend','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command','prpa-tracker'] },
+    pages:['command-center','dashboard','decisions','approvals','spend','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command','prpa-tracker'] },
   { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
   { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
   { key:'linkabl',  label:'Linkabl',  icon:'🧑‍💼', kind:'product', pages:['prospects'] },
@@ -1933,7 +1942,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {decisions:'Decision Queue',spend:'AI Spend',dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','prpa-tracker':'Federal Contracts','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {decisions:'Decision Queue',approvals:'Approvals',spend:'AI Spend',dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','prpa-tracker':'Federal Contracts','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -4156,6 +4165,242 @@ window.decisionsPage = async function decisionsPage() {
 };
 
 pages['decisions'] = window.decisionsPage;
+
+// ── THE APPROVALS PAGE ────────────────────────────────────────────────────────
+//
+// Where a human reads a held action and decides it. CEO decision 2026-11-11, priority 2.
+//
+// ── IT SHOWS THE MESSAGE, NOT A SUMMARY OF ONE ───────────────────────────────
+//
+// The whole mechanism rests on the artefact a human read being the artefact that gets executed. A
+// summary would break that at the only point where it matters, so the detail view renders the
+// frozen HTML itself, inside a sandboxed iframe — the payload is a letter this platform composed,
+// but it is served back from the database and dropped into a page that holds an admin session, so
+// it is displayed as untrusted content with no script, no forms and no same-origin access.
+//
+// ── AND IT NEVER SAYS "SENT" ─────────────────────────────────────────────────
+//
+// Approving sets a status. Release is a separate claim that rechecks every STOP, and the
+// external-email HOLD refuses it today. This page says so after every approval, because that is
+// the moment a person is most likely to believe the message has gone — the same failure as the
+// WhatsApp notice that used to read "💰 Large quote sent" about mail nobody had approved.
+//
+// All of these are declared BEFORE being attached to `pages`, and every handler reachable from an
+// inline onclick is assigned to `window.` — Annex B hoists a plain function out of a block but NOT
+// an async one, and a block-scoped async handler throws ReferenceError on click and does nothing
+// visible.
+window.apEsc = function apEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+};
+
+window._apState = { status: 'pending', open: null };
+
+window.apMoney = function apMoney(n, currency) {
+  if (n === null || n === undefined || n === '' || isNaN(Number(n))) return '—';
+  return (currency || 'USD') + ' ' + Number(n).toLocaleString();
+};
+
+// Validity reasons, rendered as what WILL happen rather than as a status word. "stale" means
+// nothing to a reader; "it will be refused at release and needs re-preparing" is actionable.
+window.apValidity = function apValidity(v) {
+  if (!v || !v.reasons || !v.reasons.length) return '';
+  return '<div style="background:#FDF6E3;border-left:3px solid #B8860B;padding:10px 12px;margin:10px 0;border-radius:4px">'
+    + '<div style="font-size:11px;font-weight:700;color:#7A5C00;letter-spacing:.04em">WHY THIS CANNOT BE APPROVED AS IT STANDS</div>'
+    + v.reasons.map(function (r) {
+      return '<div style="font-size:12px;color:#5A4500;margin-top:5px"><b>' + window.apEsc(r.code)
+        + '</b> — ' + window.apEsc(r.detail) + '</div>';
+    }).join('')
+    + '</div>';
+};
+
+window.apSelfBanner = function apSelfBanner(a) {
+  if (!a.self_approval) return '';
+  return '<div style="background:#EEF4FF;border-left:3px solid #2F5FA8;padding:10px 12px;margin:10px 0;border-radius:4px;font-size:12px;color:#1B3A6B">'
+    + '<b>You are the owner or the signatory of this action.</b> Deciding it yourself is recorded '
+    + 'as a self-approval in the stored resolution. It is blocked only where policy forbids it '
+    + '(APPROVAL_FORBID_SELF).</div>';
+};
+
+window.apTerms = function apTerms(c) {
+  if (!c) return '';
+  var rows = [
+    ['Product', c.product_name], ['CAS', c.cas_number || 'to confirm'], ['Type', c.product_type],
+    ['Quantity', (c.quantity === null || c.quantity === undefined ? '—' : c.quantity) + ' ' + (c.quantity_unit || '')],
+    ['Unit price', window.apMoney(c.unit_price, c.currency)],
+    ['Total', window.apMoney(c.total, c.currency)],
+    ['Payment terms', c.payment_terms], ['Lead time', c.lead_time_days ? c.lead_time_days + ' days' : null],
+    ['Valid until', c.valid_until], ['Quote ref', c.quote_ref], ['Incoterms', c.incoterms],
+  ];
+  return '<table style="width:100%;border-collapse:collapse;margin:10px 0;font-size:13px">'
+    + rows.map(function (r) {
+      return '<tr><td style="padding:6px 10px;color:#64748b;width:38%;border-bottom:1px solid #eee">'
+        + window.apEsc(r[0]) + '</td><td style="padding:6px 10px;border-bottom:1px solid #eee;font-weight:600">'
+        + window.apEsc(r[1] === null || r[1] === undefined || r[1] === '' ? '—' : r[1]) + '</td></tr>';
+    }).join('') + '</table>';
+};
+
+// Transmission, with UNKNOWN said out loud. "No rows" is not "nothing was sent".
+window.apTransmission = function apTransmission(t) {
+  if (!t) return '';
+  var tone = { MAY_HAVE_LEFT: '#9A2B2A', UNKNOWN: '#B8860B', NOT_ATTEMPTED: '#555', NOT_TRANSMITTED: '#1D7A4D' };
+  var label = {
+    MAY_HAVE_LEFT: 'AT LEAST ONE ATTEMPT MAY HAVE REACHED THE RECIPIENT',
+    UNKNOWN: 'THE LEDGER COULD NOT BE READ — THIS IS NOT EVIDENCE THAT NOTHING WAS SENT',
+    NOT_ATTEMPTED: 'No outbound attempt carries this approval',
+    NOT_TRANSMITTED: 'Attempts recorded, none transmitted',
+  };
+  var out = '<div style="margin:14px 0 4px;font-size:11px;font-weight:700;letter-spacing:.04em;color:'
+    + (tone[t.state] || '#555') + '">' + window.apEsc(label[t.state] || t.state) + '</div>';
+  if (t.why) out += '<div style="font-size:12px;color:#555">' + window.apEsc(t.why) + '</div>';
+  (t.attempts || []).forEach(function (r) {
+    out += '<div style="font-size:12px;color:#444;margin-top:4px">' + window.apEsc(r.sent_at)
+      + ' · <b>' + window.apEsc(r.outcome) + '</b>'
+      + (r.stop_scope ? ' · stopped by ' + window.apEsc(r.stop_scope) : '')
+      + (r.provider_message_id ? ' · provider id ' + window.apEsc(r.provider_message_id) : '')
+      + (r.error_message ? ' · ' + window.apEsc(r.error_message) : '') + '</div>';
+  });
+  return out;
+};
+
+window.apRow = function apRow(a) {
+  var c = a.commercial || {};
+  return '<div class="card" style="margin-bottom:10px">'
+    + '<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">'
+    + '<div><div style="font-weight:700;font-size:14px">' + window.apEsc(a.subject || a.action_kind) + '</div>'
+    + '<div style="font-size:12px;color:#64748b;margin-top:3px">to ' + window.apEsc(a.to || '—')
+    + (a.cc && a.cc.length ? ' · cc ' + window.apEsc(a.cc.join(', ')) : '')
+    + '</div>'
+    + '<div style="font-size:12px;color:#64748b">from ' + window.apEsc(a.from || '—')
+    + ' · signed by ' + window.apEsc(a.signed_by || 'NOBODY RECORDED') + '</div>'
+    + '</div>'
+    + '<div style="text-align:right"><div style="font-weight:700">' + window.apMoney(c.total, c.currency) + '</div>'
+    + '<div style="font-size:12px;color:#64748b">' + window.apEsc(a.status) + '</div></div>'
+    + '</div>'
+    + '<div style="font-size:12px;color:#444;margin-top:8px;white-space:pre-wrap">' + window.apEsc(a.reason) + '</div>'
+    + window.apValidity(a.validity)
+    + '<div style="margin-top:10px"><button class="btn" onclick="window.apOpen(\'' + window.apEsc(a.id) + '\')">Review this</button>'
+    + '<span style="font-size:11px;color:#64748b;margin-left:10px">' + window.apEsc(a.id) + '</span></div>'
+    + '</div>';
+};
+
+window.apOpen = async function apOpen(id) {
+  window._apState.open = id;
+  var host = document.getElementById('ap-detail');
+  if (host) host.innerHTML = '<div class="card"><p style="margin:0">Loading the message…</p></div>';
+  var d = await API('/approvals/' + encodeURIComponent(id));
+  // API does not throw on a non-2xx: a 403 or 503 arrives as a RESOLVED value carrying
+  // {error, code}. The payload is checked, never trusted — a try/catch here would be dead code,
+  // which is exactly how the first versions of the decisions and spend pages shipped broken.
+  if (!d || d.error) {
+    host.innerHTML = '<div class="card"><p style="margin:0;color:#9A2B2A"><b>This approval could not be read.</b></p>'
+      + '<p style="margin:6px 0 0;font-size:12px;color:#555">' + window.apEsc((d && (d.error || d.code)) || 'no response') + '</p></div>';
+    return;
+  }
+  var can = d.validity && d.validity.actionable;
+  host.innerHTML = '<div class="card">'
+    + '<div style="font-weight:700;font-size:15px">' + window.apEsc(d.subject || d.action_kind) + '</div>'
+    + '<div style="font-size:12px;color:#64748b;margin-top:4px">'
+    + 'from ' + window.apEsc(d.from || '—') + '<br>to ' + window.apEsc(d.to || '—')
+    + (d.cc && d.cc.length ? '<br>cc ' + window.apEsc(d.cc.join(', ')) : '')
+    + '<br>company ' + window.apEsc(d.company_id) + ' · run ' + window.apEsc(d.run_id)
+    + '<br>signed by ' + window.apEsc(d.signed_by || 'NOBODY RECORDED')
+    + (d.display_name ? ' · appears to the recipient as ' + window.apEsc(d.display_name) : '')
+    + '<br>digest ' + window.apEsc(d.transport_digest || 'NONE RECORDED')
+    + '</div>'
+    + window.apSelfBanner(d) + window.apValidity(d.validity)
+    + '<div style="margin:14px 0 4px;font-size:11px;font-weight:700;letter-spacing:.04em;color:#1B3A6B">COMMERCIAL TERMS AS APPROVED</div>'
+    + window.apTerms(d.commercial)
+    + '<div style="margin:14px 0 4px;font-size:11px;font-weight:700;letter-spacing:.04em;color:#1B3A6B">THE MESSAGE, EXACTLY AS IT WOULD BE SENT</div>'
+    + (d.html
+      // sandbox with no allow-scripts and no allow-same-origin: the body is served back from the
+      // database into a page holding an admin session, so it is rendered as untrusted content.
+      ? '<iframe sandbox style="width:100%;height:460px;border:1px solid #ddd;border-radius:6px;background:#fff" srcdoc="'
+        + window.apEsc(d.html) + '"></iframe>'
+      : '<p style="font-size:12px;color:#9A2B2A;margin:0">This payload carries no rendered message.</p>')
+    + window.apTransmission(d.transmission)
+    + '<div style="margin-top:16px;border-top:1px solid #eee;padding-top:14px">'
+    + '<div style="font-size:12px;color:#444;margin-bottom:6px">Why are you deciding this way? Recorded with the verdict.</div>'
+    + '<textarea id="ap-resolution" rows="3" style="width:100%;font-size:13px;padding:8px;border:1px solid #ccc;border-radius:5px" placeholder="e.g. price and lead time confirmed against the supplier quote"></textarea>'
+    + '<div id="ap-msg" style="font-size:12px;margin:8px 0"></div>'
+    + (can
+      ? '<button class="btn" onclick="window.apDecide(\'' + window.apEsc(d.id) + '\',\'approved\')">Approve</button>'
+        + '<button class="btn" style="margin-left:8px;background:#9A2B2A" onclick="window.apDecide(\'' + window.apEsc(d.id) + '\',\'rejected\')">Reject</button>'
+      : '<p style="font-size:12px;color:#555;margin:0">No decision can be taken on this action in its current state.</p>')
+    + '<p style="font-size:11px;color:#64748b;margin:10px 0 0">Approving does not send. A released approval must still pass every STOP at the transport, and the external-email HOLD currently refuses that step.</p>'
+    + '</div></div>';
+};
+
+window.apDecide = async function apDecide(id, decision) {
+  var msg = document.getElementById('ap-msg');
+  var box = document.getElementById('ap-resolution');
+  var resolution = box ? String(box.value || '').trim() : '';
+  if (!resolution) {
+    if (msg) msg.innerHTML = '<span style="color:#9A2B2A">A resolution is required — it is what an audit reads.</span>';
+    return;
+  }
+  if (msg) msg.innerHTML = 'Recording your decision…';
+  var r = await API('/approvals/' + encodeURIComponent(id) + '/decide', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: decision, resolution: resolution }),
+  });
+  if (!r || r.error) {
+    if (msg) {
+      msg.innerHTML = '<span style="color:#9A2B2A"><b>Not recorded.</b> '
+        + window.apEsc((r && (r.error || r.code)) || 'no response') + '</span>';
+    }
+    return;
+  }
+  if (msg) {
+    msg.innerHTML = '<span style="color:#1D7A4D"><b>' + window.apEsc(r.status) + '.</b> '
+      + window.apEsc(r.note || '') + '</span>';
+  }
+  await window.approvalsPage();
+  await window.apOpen(id);
+};
+
+window.apSetStatus = function apSetStatus(v) { window._apState.status = v; window.approvalsPage(); };
+
+window.approvalsPage = async function approvalsPage() {
+  var host = document.getElementById('page-content');
+  if (!host) return;
+  host.innerHTML = '<h2 style="margin:0 0 4px">Approvals</h2>'
+    + '<p style="color:var(--gray);font-size:13px;margin:0 0 14px">Reading what is waiting…</p>';
+
+  var d = await API('/approvals?status=' + encodeURIComponent(window._apState.status));
+  if (!d || d.error) {
+    // A failure here must never look like an empty queue. An empty list that means "the kernel is
+    // not migrated" reads as "you are clear", which is the silence the 1,113 lost emails were
+    // made of.
+    host.innerHTML = '<h2 style="margin:0 0 10px">Approvals</h2>'
+      + '<div class="card"><p style="margin:0;color:#9A2B2A"><b>The approval queue could not be read. '
+      + 'This is NOT an empty queue.</b></p>'
+      + '<p style="margin:6px 0 0;font-size:12px;color:#555">' + window.apEsc((d && (d.error || d.code)) || 'no response') + '</p></div>';
+    return;
+  }
+
+  var tabs = ['pending', 'approved', 'rejected', 'all'].map(function (v) {
+    var on = window._apState.status === v;
+    return '<button class="btn" style="margin-right:6px;' + (on ? '' : 'background:#eee;color:#333')
+      + '" onclick="window.apSetStatus(\'' + v + '\')">' + v + '</button>';
+  }).join('');
+
+  host.innerHTML = '<h2 style="margin:0 0 4px">Approvals</h2>'
+    + '<p style="color:var(--gray);font-size:13px;margin:0 0 12px">' + window.apEsc(d.note || '') + '</p>'
+    + '<div style="margin-bottom:12px">' + tabs + '</div>'
+    + (d.approvals.length
+      ? d.approvals.map(window.apRow).join('')
+      : '<div class="card"><p style="margin:0;font-size:13px;color:#555">Nothing with this status is waiting. '
+        + 'All ' + d.count + ' were read from the kernel for company ' + window.apEsc(d.company_id) + '.</p></div>')
+    + '<div id="ap-detail" style="margin-top:16px"></div>';
+
+  if (window._apState.open) await window.apOpen(window._apState.open);
+};
+
+pages['approvals'] = window.approvalsPage;
+
 
 // ── THE SPEND PAGE ────────────────────────────────────────────────────────────
 //

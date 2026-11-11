@@ -169,9 +169,20 @@ console.log(`${roles.length} roles\n`);
 // `decisions` IS NO LONGER LISTED — it landed in 73e80be, so it is the baseline. Leaving it in
 // expected a diff that no longer exists and failed both admin roles, which is the third time this
 // file has recorded exactly that. The history block above is where a landed entry goes.
+// 2026-11-11, Approvals: the same TWO roles again, through the same mechanism — 'approvals' sits
+// beside 'decisions' and 'spend' in the admin-only list inside passesPageReads. The reason is
+// stronger here than for either of those: the detail view renders the FROZEN MESSAGE of a held
+// commercial action, so a nav rule that let a director through would be a disclosure change
+// dressed as a sidebar entry, and one that merely showed them the link would offer a door that
+// 403s. If any director role ever appears in this diff, that gate has been removed or moved after
+// the admin short-circuit, where it narrows nothing.
+//
+// `spend` IS NO LONGER LISTED — it landed, so it is the baseline. Leaving it in expected a diff
+// that no longer exists, which is the fourth time this file has recorded exactly that drift. The
+// history block above is where a landed entry goes.
 const EXPECTED = {
-  super_admin:          { gained: ['spend'], lost: [] },
-  admin:                { gained: ['spend'], lost: [] },
+  super_admin:          { gained: ['approvals'], lost: [] },
+  admin:                { gained: ['approvals'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and

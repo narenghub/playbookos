@@ -75,13 +75,20 @@ function isSelfApproval(row, actor) {
  */
 function validity(row, { now = new Date(), ttlMinutes = APPROVAL.APPROVAL_TTL_MINUTES } = {}) {
   const reasons = [];
-  if (row.status === 'rejected') reasons.push({ code: 'rejected', detail: 'already rejected' });
+  if (row.status === 'rejected') {
+    reasons.push({ code: 'rejected',
+      detail: 'already rejected; rejection is terminal and a new preparation is required' });
+  }
   if (row.status === 'superseded') {
     reasons.push({ code: 'superseded',
       detail: 'superseded after approval and before any external execution; terminal, a new '
         + 'preparation is required' });
   }
-  if (row.status === 'expired') reasons.push({ code: 'expired', detail: 'expired' });
+  if (row.status === 'expired') {
+    reasons.push({ code: 'expired',
+      detail: 'this action expired before anyone decided it; it is terminal and the work needs '
+        + 're-preparing with current figures' });
+  }
   if (row.released_at) {
     reasons.push({ code: 'already_released',
       detail: `claimed for execution at ${new Date(row.released_at).toISOString()} — one decision `
