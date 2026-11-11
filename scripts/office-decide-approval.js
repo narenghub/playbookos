@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 // ── THE HUMAN DECISION: APPROVE OR REJECT A PREPARED ACTION ─────────────────
 //
-//   railway ssh 'node scripts/office-decide-approval.js --approval=<id> --reject --reason="..."'
-//   railway ssh 'node scripts/office-decide-approval.js --approval=<id> --approve --reason="..."'
+//   railway ssh --service playbookos 'node /app/scripts/office-decide-approval.js \
+//     --approval=<id> --approve --reason="..."'
+//   ... --reject --reason="..."   to refuse it
+//
+// `--service playbookos` is not optional and the path must be absolute: the CLI's linked service in
+// this project is Postgres, where there is no node and no /app, and a bare `railway ssh` fails with
+// `node: command not found` — which reads as a broken deploy and is nothing of the kind.
 //
 // This records a decision. IT DOES NOT RELEASE AND IT CANNOT SEND — no mailer, WhatsApp, outreach
 // or supplier-claim module is reachable from this path, which validate-k7-k9-deployed.js asserts
