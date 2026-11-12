@@ -78,7 +78,14 @@ const MAX_KNOWN_VIOLATIONS = 3;
 // what tests 14 and 15 assert.
 const BASELINE_FILE = process.env.OUTBOUND_BASELINE_FILE
   || path.join(__dirname, 'outbound-known-violations.json');
-const BASELINE_SHA256 = 'ec48eb3086dd4f2587fb5062c02c9da5e5e797e49fe7aaefb78bbed5d93bb4fe';
+// Re-pinned 2026-11-12 for the AST migration. The three tracked violations are the same three
+// call sites with the same three violations; what changed is that a fingerprint covers the callee
+// expression, and that expression is now taken from the parse tree rather than from a regex match.
+// Re-fingerprinting is the procedure this file prescribes for a violation that MOVED, and it is
+// deliberately three edits — the baseline, this digest, and the ceiling — so that it cannot happen
+// quietly. The ceiling did NOT move: still 3.
+// Previous: ec48eb3086dd4f2587fb5062c02c9da5e5e797e49fe7aaefb78bbed5d93bb4fe
+const BASELINE_SHA256 = '142d988f405e6e737447ec47f3c9774dad89d470834c08c873e35bfd512f10c5';
 
 // BOTH TREES. src/ is the application; scripts/ holds operator-run tools, and one of them —
 // verify-bounce-detection.js — genuinely transmits. CEO authorization 2026-11-10 item A: an
@@ -111,6 +118,14 @@ const bad = (m, d) => { fail += 1; console.log(`  FAIL  ${m}${d ? `\n          $
 // scripts/js-lex.js, which also REFUSES TO GUESS: anything it cannot classify comes back as a
 // concern, and unreadableReasons() below turns a concern into "not executed" rather than a pass.
 const { blankNonCode, blankCommentsOnly, lex } = require('./js-lex');
+// ── AND NOW A REAL PARSER ───────────────────────────────────────────────────
+//
+// CEO decision 2026-11-12: the security-critical discovery and ordering analysis is AST-based.
+// js-lex.js stays for discoverRest(), which looks for STRING VALUES (a URL template) rather than
+// structure, and for the permanent controls that pin the historical defects. It is no longer what
+// decides whether an outbound path is governed.
+const ASTLIB = require('./js-ast');
+const OUTBOUND = require('./outbound-ast-analysis');
 
 // ── THE TRANSPORTS ──────────────────────────────────────────────────────────
 //
@@ -300,6 +315,24 @@ function walk(dir, out = []) {
  * Every transport call site under src/, with its governance state.
  * Exported so the test file can reuse the discovery rather than re-implement it.
  */
+// ── A PARSED FILE, ONCE ─────────────────────────────────────────────────────
+//
+// Parsing is the expensive part, and three separate questions are asked of every file. One cache,
+// keyed by absolute path, so the tree is built once per run.
+const TREES = new Map();
+function treeFor(abs, rel) {
+  if (TREES.has(abs)) return TREES.get(abs);
+  const src = fs.readFileSync(abs, 'utf8');
+  let entry;
+  try {
+    entry = { src, ast: ASTLIB.parse(src, rel), error: null };
+  } catch (e) {
+    entry = { src, ast: null, error: e };
+  }
+  TREES.set(abs, entry);
+  return entry;
+}
+
 function discover(roots = ROOTS) {
   // A bare path is accepted so the negative controls can scan a planted temporary tree.
   const list = typeof roots === 'string'
@@ -309,75 +342,47 @@ function discover(roots = ROOTS) {
   for (const { dir, base } of list) {
     if (!fs.existsSync(dir)) continue;
     for (const file of walk(dir)) {
-    const raw = fs.readFileSync(file, 'utf8');
-    const code = blankNonCode(raw);
-    const rel = path.relative(base, file);
-    const gated = code.includes(GATE) || MAILER.test(code);
-    // Deliberately NOT satisfied by requiring mailer.js. A caller that reaches the mailer without
-    // supplying an approval id and expected digest is not approval-bound, and treating the import
-    // as sufficient would report exactly that caller as compliant.
-    const approvalBound = APPROVAL_ANCHORS.some((re) => re.test(code));
-    for (const t of TRANSPORTS) {
-      t.re.lastIndex = 0;
-      let m;
-      while ((m = t.re.exec(code)) !== null) {
+      const rel = path.relative(base, file);
+      const { src, ast, error } = treeFor(file, rel);
+      // A file that does not parse yields no sites. main() turns that into INCOMPLETE — it is NOT
+      // treated as "no transports here", which is the mistake that let an erased function read as
+      // a clean one.
+      if (error || !ast) continue;
+      const r = OUTBOUND.analyseFile({ file: rel, src, ast, exception: EXCEPTIONS[rel] || null });
+      for (const site of r.sites) {
         sites.push({
-          file: rel,
-          line: raw.slice(0, m.index).split('\n').length,
-          transport: t.key,
-          label: t.label,
-          gated,
-          approvalBound,
-          enclosing: enclosingFunctionAt(code, m.index),
-          expression: m[0],
+          ...site,
           fingerprint: AL.fingerprint({
-            file: rel, enclosing: enclosingFunctionAt(code, m.index), expression: m[0],
+            file: site.file, enclosing: site.enclosing, expression: site.expression,
           }),
-          exception: EXCEPTIONS[rel] || null,
         });
       }
-    }
     }
   }
   return sites;
 }
 
-// ── FAIL CLOSED ON ANYTHING THE LEXER CANNOT READ ───────────────────────────
-//
-// CEO decision 2026-11-12, M1 correction item 4. A hand-written lexer is the weakest link in every
-// control built on it, so the control must distinguish "I looked and it is clean" from "I could
-// not look". Three preconditions, each of which makes this scanner report NOT EXECUTED (exit 3)
-// rather than PASS:
-//
-//   1. the file COMPILES — `new vm.Script(src)` proves the input is syntactically valid JavaScript
-//      of the form the lexer was written for. Compiling is not running; nothing is executed.
-//   2. the lexer raised NO CONCERN — no unterminated literal, no undecidable slash.
-//   3. no transport pattern hides inside a TEMPLATE INTERPOLATION, which the pre-pass blanks along
-//      with its template. That is a declared limitation of the lexer, so it is checked here rather
-//      than assumed away.
-//
-// Why exit 3 and not exit 1: a failure means "an outbound path is ungoverned", which is a finding.
-// This means "this scanner does not know", which is a different thing and must not be reported as
-// either a pass or a finding. preflight treats 3 as INCOMPLETE.
-function unreadableReasons(file, src) {
+function unreadableReasons(file, src, parsed = null) {
   const out = [];
-  try {
-    new vm.Script(src, { filename: file });
-  } catch (e) {
-    out.push(`${file} does not compile (${e.message.slice(0, 90)}) — no hand-written lexer should `
-      + 'be trusted on it');
+  if (!ASTLIB.parserAvailable()) {
+    out.push(ASTLIB.parserMissingReason());
+    return out;
   }
-  const { concerns, interpolations } = lex(src);
-  for (const c of concerns) out.push(`${file}:${c.line} the lexer could not classify it: ${c.why}`);
-  for (const p of interpolations) {
-    const inside = src.slice(p.start, p.end);
-    for (const t of TRANSPORTS) {
-      t.re.lastIndex = 0;
-      if (t.re.test(inside)) {
-        out.push(`${file} has a ${t.label} inside a template interpolation, which the pre-pass `
-          + 'blanks — this scanner cannot see it, so it will not claim to have checked it');
-      }
+  let ast = parsed;
+  if (!ast) {
+    try {
+      ast = ASTLIB.parse(src, file);
+    } catch (e) {
+      out.push(`${file} does not parse: ${String(e.message).slice(0, 140)} — this scanner will not `
+        + 'report on a file it could not read');
+      return out;
     }
+  }
+  // Item 4: computed dispatch on a provider path, and a provider method whose VALUE is taken. Both
+  // would make a call invisible to any name-matching analysis, so they are returned as unprovable
+  // rather than as clean.
+  for (const u of OUTBOUND.analyseFile({ file, src, ast }).unprovable) {
+    out.push(`${file}${u.line ? `:${u.line}` : ''} cannot be proven safe (${u.why}): ${u.detail}`);
   }
   return out;
 }
@@ -510,10 +515,16 @@ function main() {
   // a concern, or this scanner reports NOT EXECUTED instead of a verdict. The alternative is what
   // happened on 2026-11-12: a pre-pass quietly ate a function and the output said PASS.
   const unreadable = [];
+  if (!ASTLIB.parserAvailable()) unreadable.push(ASTLIB.parserMissingReason());
   for (const { dir, base } of ROOTS) {
     for (const abs of walk(dir)) {
       const rel = path.relative(base, abs);
-      for (const why of unreadableReasons(rel, fs.readFileSync(abs, 'utf8'))) unreadable.push(why);
+      const { src, ast, error } = treeFor(abs, rel);
+      if (error) {
+        unreadable.push(`${rel} does not parse: ${String(error.message).slice(0, 140)}`);
+        continue;
+      }
+      for (const why of unreadableReasons(rel, src, ast)) unreadable.push(why);
     }
   }
   if (unreadable.length) {
@@ -581,8 +592,10 @@ function main() {
   // THAT PREDECESSOR'S DEFECT WAS REPEATED HERE, and the replacement lives in gateOrdering()
   // above — see its header for what went wrong and why the question is now asked per call site.
   for (const file of new Set(sites.filter((x) => x.gated).map((x) => x.file))) {
-    const code = blankNonCode(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'));
-    for (const f of gateOrdering(file, code)) {
+    const abs = path.join(__dirname, '..', file);
+    const { src, ast } = treeFor(abs, file);
+    if (!ast) { bad(`${file}: could not be parsed, so its ordering is unproven`); continue; }
+    for (const f of OUTBOUND.analyseFile({ file, src, ast }).findings) {
       if (f.ok) ok(f.message); else bad(f.message, f.detail);
     }
   }
@@ -701,6 +714,6 @@ function main() {
   process.exit(0);
 }
 
-module.exports = { discover, discoverRest, gateOrdering, unreadableReasons, enclosingFunctionAt, firstArgument, methodOf, blankNonCode, blankCommentsOnly, TRANSPORTS, EXCEPTIONS, GATE, ROOTS };
+module.exports = { discover, discoverRest, gateOrdering, unreadableReasons, treeFor, enclosingFunctionAt, firstArgument, methodOf, blankNonCode, blankCommentsOnly, TRANSPORTS, EXCEPTIONS, GATE, ROOTS };
 
 if (require.main === module) main();

@@ -26,5 +26,8 @@
     "resend": "^6.10.0",
     "uuid": "^9.0.1",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "acorn": "8.14.0"
   }
 }

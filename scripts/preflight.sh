@@ -270,6 +270,19 @@ pf_step "the scanner's lexer reads code as code, and refuses what it cannot clas
   node --test scripts/js-lex.test.js
 pf_step "both original scanner defects go red against the original scanner" \
   node --test scripts/m1-scanner-corrective.test.js
+
+# ── AND THE SAME QUESTIONS, ASKED OF A PARSE TREE ───────────────────────────
+#
+# The lexer above is no longer what decides whether an outbound path is governed: discovery and the
+# authorization-ordering analysis are AST-based (acorn, dev dependency, exact-pinned). This step
+# holds the controls for that layer — the regex-literal defect, postfix division, hidden provider
+# calls, the C-4 caller-skippable gate, transport-coverage parity with the old regex list, and the
+# cases that must come back INCOMPLETE rather than clean.
+#
+# It includes the control that caught a real regression during the migration: the first draft
+# carried four of the scanner's five transports across and silently dropped nodemailer.
+pf_step "the AST scanner catches every historical defect, and nothing it cannot prove" \
+  node --test scripts/ast-scanner-controls.test.js
 # THE SECOND LEG. The scanner above discovers transports by the shapes it knows; it cannot see one
 # nobody anticipated. This asks a different question — what has the code gained the ABILITY to
 # call — and a mail SDK cannot be used before it is installed. Neither check is offered as proof

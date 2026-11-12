@@ -47,6 +47,27 @@ const EXIT_NOT_EXECUTED = 3;
 // Adding a package means adding a line HERE, which puts it in the diff next to the reason. That is
 // the whole mechanism — it does not prevent an addition, it prevents a silent one.
 const REVIEWED = Object.freeze({
+  // ── DEV ONLY, AND REVIEWED 2026-11-12 ────────────────────────────────────
+  //
+  // acorn parses JavaScript for the outbound transport scanner, replacing a hand-written lexer
+  // that did not understand regex literals — a quote inside one erased a function declaration and
+  // the scanner reported PASS over code it had never read. A planted ungated Gmail sender placed
+  // after such a regex produced ZERO discovered call sites.
+  //
+  // Why it is acceptable in a security path: NO network capability of any kind, ZERO transitive
+  // dependencies, MIT, exact-pinned with an integrity hash in the lockfile, and it is the parser
+  // Node itself vendors internally. It never executes the source it reads.
+  //
+  // Why DEV and not runtime: nothing under src/ imports the scanner — email-gate.js and mailer.js
+  // only mention it in comments — and its only consumers are preflight and the test suites.
+  // Verified before adding: no verify-* script (those are what run in production over
+  // `railway ssh`), no cron and no boot path reaches it, so a production install without dev
+  // dependencies loses nothing.
+  //
+  // And it does NOT fall back: if the parser is absent the scanner reports INCOMPLETE rather than
+  // reverting to the lexer it replaced. A quiet fallback to the thing being replaced is how this
+  // defect class survived three attempts at fixing it.
+  acorn: 'DEV ONLY — JavaScript parser for the outbound transport scanner. No network, no transitive deps.',
   'adm-zip': 'zip handling for document export',
   bcryptjs: 'password hashing',
   'better-sqlite3': 'local fixture databases in tests',

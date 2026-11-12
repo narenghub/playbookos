@@ -31,6 +31,10 @@
 const assert = require('node:assert');
 const { test } = require('node:test');
 
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
 const NEW = require('./js-lex');
 const COVERAGE = require('./check-email-transport-coverage');
 
@@ -130,9 +134,6 @@ test('1b. and the CORRECTED lexer finds it', () => {
 test('1c. the whole pipeline finds the planted sender, and calls it ungated', async () => {
   // End to end through discover(), because that is what the verdict is built from. Before the fix
   // this returned an empty list and the scanner printed PASS.
-  const fs = require('node:fs');
-  const os = require('node:os');
-  const path = require('node:path');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm1-corrective-'));
   try {
     fs.mkdirSync(path.join(dir, 'lib'), { recursive: true });
@@ -145,34 +146,68 @@ test('1c. the whole pipeline finds the planted sender, and calls it ungated', as
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('1d. a template interpolation holding a transport makes the scanner REFUSE, not miss it', () => {
-  // A declared limitation of the lexer: interpolations are blanked with their template. So it is
-  // checked rather than assumed away — the scanner reports NOT EXECUTED for such a file.
+// ── UPDATED 2026-11-12 FOR THE AST MIGRATION ───────────────────────────────
+//
+// 1d, 1e and 1f asserted the LEXER's fail-closed behaviour. Two of those limitations no longer
+// exist, so the assertions below are stronger, not looser — which is the only acceptable reason to
+// change a security control's test:
+//
+//   · a transport inside a template interpolation was REFUSED (the lexer blanked interpolations
+//     along with their template, so it could not see in). The parser reads the interpolation as the
+//     code it is, so the call is now DISCOVERED and reported ungated. Found beats refused.
+//   · ESM was refused because `new vm.Script` rejects `import`. acorn parses it as a module, so the
+//     operational tripwire — "adding one ESM file stops preflight" — is gone.
+//
+// What has NOT changed: a file that genuinely cannot be read still produces INCOMPLETE. That is
+// tested below and it is the property that matters.
+
+test('1d. a transport inside a template interpolation is now DISCOVERED, not refused', () => {
   const src = [
     "const g = require('./gmail');",
     'async function run(m) {',
     '  const log = `sent ${ await g.gmail.users.messages.send(m) }`;',
     '  return log;',
     '}',
+    'module.exports = { run };',
   ].join('\n');
-  const reasons = COVERAGE.unreadableReasons('lib/interp.js', src);
-  assert.ok(reasons.some((r) => /template interpolation/.test(r)),
-    `expected a refusal naming the interpolation, got ${JSON.stringify(reasons)}`);
+
+  assert.deepStrictEqual(COVERAGE.unreadableReasons('lib/interp.js', src), [],
+    'the parser should read an interpolation as code rather than refusing the file');
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'm1-interp-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'lib', 'interp.js'), src);
+    const site = COVERAGE.discover(dir).find((s) => /interp/.test(s.file));
+    assert.ok(site, 'the transport inside the interpolation was not discovered');
+    assert.strictEqual(site.transport, 'gmail.messages.send');
+    assert.strictEqual(site.enclosing, 'run', 'the enclosing function was not resolved');
+    assert.strictEqual(site.gated, false, 'an ungated sender must be reported as ungated');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('1e. an unterminated literal makes the scanner refuse the file', () => {
+test('1d2. and an ESM file is analysed rather than stopping the scan', () => {
+  // The tripwire that is now gone: under the lexer, one ESM file anywhere under src/ or scripts/
+  // turned the whole scanner INCOMPLETE, which stops preflight rather than failing it and looks
+  // like an unrelated breakage to whoever hits it.
+  const esm = ["import { gmail } from './g.js';", 'export async function run(m) {',
+    '  await gmail.users.messages.send(m);', '}'].join('\n');
+  assert.deepStrictEqual(COVERAGE.unreadableReasons('lib/esm.js', esm), [],
+    'an ESM file should parse as a module');
+});
+
+test('1e. an unterminated literal still makes the scanner refuse the file', () => {
   // The old pre-pass blanked from the opening quote to end of file and carried on scanning the
   // remains. Whatever it then concluded was about a file it had partly erased.
   const reasons = COVERAGE.unreadableReasons('lib/bad.js', "const s = 'oops;\nasync function run() {}");
-  assert.ok(reasons.some((r) => /unterminated-string/.test(r)),
-    `expected a refusal naming the unterminated string, got ${JSON.stringify(reasons)}`);
-  assert.ok(reasons.some((r) => /does not compile/.test(r)),
-    'a file that cannot be parsed by Node should also be reported as not compiling');
+  assert.ok(reasons.length, 'an unreadable file must not be reported as clean');
+  assert.ok(reasons.some((r) => /does not parse/.test(r)),
+    `expected a refusal saying the file does not parse, got ${JSON.stringify(reasons)}`);
 });
 
-test('1f. a file that does not compile is refused, not lexed anyway', () => {
+test('1f. a file that does not parse is refused, not analysed anyway', () => {
   const reasons = COVERAGE.unreadableReasons('lib/broken.js', 'function f( { return 1 }');
-  assert.ok(reasons.some((r) => /does not compile/.test(r)), JSON.stringify(reasons));
+  assert.ok(reasons.some((r) => /does not parse/.test(r)), JSON.stringify(reasons));
 });
 
 test('1g. and a healthy file is NOT refused — the control is not "refuse everything"', () => {
