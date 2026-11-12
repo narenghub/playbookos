@@ -254,6 +254,22 @@ pf_step "each legacy external sender stops on its own, by name" node scripts/che
 # This one DISCOVERS the call sites instead, and its own negative controls plant a bypass and
 # require it to be caught. A green scanner proves nothing until it has been shown to go red.
 pf_step "every outbound email transport is behind the kill switch" node scripts/check-email-transport-coverage.js
+
+# ── THE SCANNER'S OWN FOUNDATIONS ───────────────────────────────────────────
+#
+# The check above is only as good as its idea of which characters are code. Its pre-pass did not
+# understand regex literals, so a quote inside one swallowed the rest of the file up to the next
+# quote — and on 2026-11-12 that hid a whole function declaration, after which the ordering check
+# reported "all 1 caller(s) gate first" about a function with two. A planted ungated Gmail sender
+# placed after such a regex produced ZERO discovered call sites and the scanner printed PASS.
+#
+# Two steps, because they fail for different reasons and a reader should be told which:
+#   · the lexer is correct and finishes, and hides no declaration anywhere in the tree;
+#   · both original defects still go red against the original implementations, kept verbatim.
+pf_step "the scanner's lexer reads code as code, and refuses what it cannot classify" \
+  node --test scripts/js-lex.test.js
+pf_step "both original scanner defects go red against the original scanner" \
+  node --test scripts/m1-scanner-corrective.test.js
 # THE SECOND LEG. The scanner above discovers transports by the shapes it knows; it cannot see one
 # nobody anticipated. This asks a different question — what has the code gained the ABILITY to
 # call — and a mail SDK cannot be used before it is installed. Neither check is offered as proof

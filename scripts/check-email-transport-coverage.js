@@ -51,6 +51,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 const crypto = require('crypto');
 const AL = require('./outbound-endpoint-allowlist');
 
@@ -95,66 +96,21 @@ let pass = 0; let fail = 0;
 const ok = (m) => { pass += 1; console.log(`  ok    ${m}`); };
 const bad = (m, d) => { fail += 1; console.log(`  FAIL  ${m}${d ? `\n          ${d}` : ''}`); };
 
-// ── THE PRE-PASS ────────────────────────────────────────────────────────────
+// ── THE PRE-PASS NOW LIVES IN ONE PLACE ─────────────────────────────────────
 //
-// Blanks comments and string/template literals, preserving newlines and length so reported line
-// numbers stay true. Written as a character scanner rather than a chain of regexes because a regex
-// cannot tell a `//` inside a string from a comment, and `'https://api.resend.com'` contains one.
-function blankNonCode(src) {
-  const out = src.split('');
-  let i = 0;
-  const n = src.length;
-  const blank = (from, to) => {
-    for (let k = from; k < to && k < n; k += 1) if (out[k] !== '\n') out[k] = ' ';
-  };
-  while (i < n) {
-    const c = src[i];
-    const d = src[i + 1];
-    if (c === '/' && d === '/') {
-      let j = i; while (j < n && src[j] !== '\n') j += 1;
-      blank(i, j); i = j; continue;
-    }
-    if (c === '/' && d === '*') {
-      let j = i + 2; while (j < n && !(src[j] === '*' && src[j + 1] === '/')) j += 1;
-      blank(i, Math.min(j + 2, n)); i = j + 2; continue;
-    }
-    if (c === '"' || c === "'" || c === '`') {
-      const quote = c;
-      let j = i + 1;
-      while (j < n) {
-        if (src[j] === '\\') { j += 2; continue; }
-        if (src[j] === quote) break;
-        j += 1;
-      }
-      blank(i, Math.min(j + 1, n)); i = j + 1; continue;
-    }
-    i += 1;
-  }
-  return out.join('');
-}
-
-// Comments only — STRING LITERALS ARE KEPT. Used where the thing being looked for IS a string
-// value, such as `capability: 'email.alert'`. blankNonCode would erase exactly that and leave a
-// check which can never match: a test that passes against a planted bypass, which is worse than
-// no test. (It did. The planted probe below went undetected until this was added.)
-function blankCommentsOnly(src) {
-  const out = src.split('');
-  let i = 0; const n = src.length;
-  const blank = (a, b) => { for (let k = a; k < b && k < n; k += 1) if (out[k] !== '\n') out[k] = ' '; };
-  while (i < n) {
-    const c = src[i]; const d = src[i + 1];
-    if (c === '/' && d === '/') { let j = i; while (j < n && src[j] !== '\n') j += 1; blank(i, j); i = j; continue; }
-    if (c === '/' && d === '*') { let j = i + 2; while (j < n && !(src[j] === '*' && src[j + 1] === '/')) j += 1; blank(i, Math.min(j + 2, n)); i = j + 2; continue; }
-    // Strings are SKIPPED OVER, not blanked — a `//` inside one is not a comment.
-    if (c === '"' || c === "'" || c === '`') {
-      const q = c; let j = i + 1;
-      while (j < n) { if (src[j] === '\\') { j += 2; continue; } if (src[j] === q) break; j += 1; }
-      i = j + 1; continue;
-    }
-    i += 1;
-  }
-  return out.join('');
-}
+// It was two near-identical character scanners right here, and neither understood REGEX LITERALS.
+// A quote inside `/...([^"'\s]+)/` opened a phantom string that ran to the next quote in the file;
+// on 2026-11-12 that span covered a whole `async function sendEmailDetailed(` declaration, and the
+// ordering check below then attributed that function's provider call to the function above it and
+// reported "all 1 caller(s) gate first" about a function with two callers. A planted ungated Gmail
+// sender placed after such a regex produced ZERO discovered call sites: an unauthorized sender
+// invisible to the control whose entire job is finding unauthorized senders.
+//
+// This file argues at length that one shared decision function is what stops two transports
+// drifting apart, and then carried two copies of its own lexer. They are now one module,
+// scripts/js-lex.js, which also REFUSES TO GUESS: anything it cannot classify comes back as a
+// concern, and unreadableReasons() below turns a concern into "not executed" rather than a pass.
+const { blankNonCode, blankCommentsOnly, lex } = require('./js-lex');
 
 // ── THE TRANSPORTS ──────────────────────────────────────────────────────────
 //
@@ -386,12 +342,187 @@ function discover(roots = ROOTS) {
   return sites;
 }
 
+// ── FAIL CLOSED ON ANYTHING THE LEXER CANNOT READ ───────────────────────────
+//
+// CEO decision 2026-11-12, M1 correction item 4. A hand-written lexer is the weakest link in every
+// control built on it, so the control must distinguish "I looked and it is clean" from "I could
+// not look". Three preconditions, each of which makes this scanner report NOT EXECUTED (exit 3)
+// rather than PASS:
+//
+//   1. the file COMPILES — `new vm.Script(src)` proves the input is syntactically valid JavaScript
+//      of the form the lexer was written for. Compiling is not running; nothing is executed.
+//   2. the lexer raised NO CONCERN — no unterminated literal, no undecidable slash.
+//   3. no transport pattern hides inside a TEMPLATE INTERPOLATION, which the pre-pass blanks along
+//      with its template. That is a declared limitation of the lexer, so it is checked here rather
+//      than assumed away.
+//
+// Why exit 3 and not exit 1: a failure means "an outbound path is ungoverned", which is a finding.
+// This means "this scanner does not know", which is a different thing and must not be reported as
+// either a pass or a finding. preflight treats 3 as INCOMPLETE.
+function unreadableReasons(file, src) {
+  const out = [];
+  try {
+    new vm.Script(src, { filename: file });
+  } catch (e) {
+    out.push(`${file} does not compile (${e.message.slice(0, 90)}) — no hand-written lexer should `
+      + 'be trusted on it');
+  }
+  const { concerns, interpolations } = lex(src);
+  for (const c of concerns) out.push(`${file}:${c.line} the lexer could not classify it: ${c.why}`);
+  for (const p of interpolations) {
+    const inside = src.slice(p.start, p.end);
+    for (const t of TRANSPORTS) {
+      t.re.lastIndex = 0;
+      if (t.re.test(inside)) {
+        out.push(`${file} has a ${t.label} inside a template interpolation, which the pre-pass `
+          + 'blanks — this scanner cannot see it, so it will not claim to have checked it');
+      }
+    }
+  }
+  return out;
+}
+
+// ── IS THE GATE FIRST ON EVERY ROAD TO THE PROVIDER? ────────────────────────
+//
+// THE DEFECT THIS REPLACES. The check was two indexes into the whole file:
+//
+//     const gateAt    = code.indexOf(`${GATE}(`);
+//     const firstCall = Math.min(...TRANSPORTS.map(...));
+//     if (gateAt < firstCall) ok(...); else bad('a provider call appears BEFORE the gate');
+//
+// That is file ORDER standing in for execution order. It held only while the gate and the provider
+// call sat in one function in one arrangement. On 2026-11-12 the C-4 patch extracted the provider
+// half of the send into a module-private `deliverAuthorized` and placed it above the gated
+// function: the gate still ran first, and was now UNCONDITIONAL rather than skippable by a caller,
+// and this check went red reporting "a provider call appears BEFORE the gate".
+//
+// A control that fails on a patch which strengthens the invariant gets silenced by whoever is
+// holding the patch, and the tempting silencing move — move the function back down — protects
+// nothing. The paragraph above this check in the original already recorded that its PREDECESSOR
+// failed because its string anchors moved. It then implemented the same class of thing one level
+// up.
+//
+// So the question is asked per CALL SITE, about the function the call is in:
+//
+//   · the gate is called in that same function, before the call  → gated, directly;
+//   · otherwise the enclosing function must be MODULE-PRIVATE — an exported function that
+//     transmits without gating is callable by every importer, which is C-4 with a different
+//     spelling — and EVERY call to it inside the file must itself be preceded by a gate call in
+//     the function making it → gated, by one PROVEN level of indirection.
+//
+// One level, not a general call graph: deeper chains are refused rather than guessed at, which
+// keeps the answer something this scanner can actually establish. Extracted and exported so it can
+// be handed a planted file and REQUIRED TO GO RED — while it was inline, the only input it ever
+// saw was this repository, so neither defect it shipped with could be caught by a test.
+function gateOrdering(file, code) {
+  const out = [];
+  const say = (good, message, detail) => out.push({ ok: good, message, detail });
+  if (code.indexOf(`${GATE}(`) === -1) {
+    say(false, `${file} is marked gated but does not call ${GATE}()`);
+    return out;
+  }
+
+  // Top-level declarations, in order. The enclosing function of an offset is the last declaration
+  // that starts before it; its body ends where the next one starts.
+  const DECL = /\n(?:async )?function (\w+)\s*\(/g;
+  const decls = [];
+  for (let m = DECL.exec(code); m; m = DECL.exec(code)) decls.push({ name: m[1], at: m.index });
+  const enclosing = (i) => {
+    let found = null;
+    for (const d of decls) { if (d.at < i) found = d; else break; }
+    if (!found) return null;
+    const next = decls.find((d) => d.at > found.at);
+    return { name: found.name, start: found.at, end: next ? next.at : code.length };
+  };
+  const gatedBefore = (start, before) => code.slice(start, before).includes(`${GATE}(`);
+
+  const callsIn = [];
+  for (const t of TRANSPORTS) {
+    t.re.lastIndex = 0;
+    for (let m = t.re.exec(code); m; m = t.re.exec(code)) {
+      callsIn.push({ at: m.index, label: t.label });
+    }
+  }
+  if (!callsIn.length) {
+    say(false, `${file}: marked gated but no transport call site was re-located`);
+    return out;
+  }
+
+  for (const call of callsIn) {
+    const fn = enclosing(call.at);
+    if (!fn) {
+      say(false, `${file}: a ${call.label} call sits outside any function — it runs at import time`);
+      continue;
+    }
+    if (gatedBefore(fn.start, call.at)) {
+      say(true, `${file}: ${fn.name}() calls the gate before reaching ${call.label}`);
+      continue;
+    }
+    const expAt = code.indexOf('module.exports');
+    const exported = expAt !== -1 && new RegExp(`\\b${fn.name}\\b`).test(code.slice(expAt));
+    if (exported) {
+      say(false,
+        `${file}: ${fn.name}() reaches ${call.label} without calling the gate, and is EXPORTED`,
+        'An exported function that transmits without gating is callable by every module that '
+        + 'imports this file — which is the C-4 bypass with a different spelling.');
+      continue;
+    }
+    const callers = [];
+    const CALL = new RegExp(`\\b${fn.name}\\s*\\(`, 'g');
+    for (let m = CALL.exec(code); m; m = CALL.exec(code)) {
+      if (m.index >= fn.start && m.index < fn.end) continue;     // its own declaration and body
+      const c = enclosing(m.index);
+      if (c) callers.push({ fn: c, at: m.index });
+    }
+    if (!callers.length) {
+      say(false,
+        `${file}: ${fn.name}() reaches ${call.label} without the gate and has no in-file caller`,
+        'Nothing in this file calls it, so there is no path on which the gate can be shown to run '
+        + 'first. If it is dead code, delete it.');
+      continue;
+    }
+    const ungated = callers.filter((c) => !gatedBefore(c.fn.start, c.at));
+    if (ungated.length) {
+      say(false,
+        `${file}: ${fn.name}() reaches ${call.label} and ${ungated.length} of its `
+        + `${callers.length} caller(s) do not gate first`,
+        ungated.map((c) => `${c.fn.name}() calls ${fn.name}() with no ${GATE}() before it`)
+          .join('\n          '));
+      continue;
+    }
+    say(true, `${file}: ${call.label} is reached only through ${fn.name}(), and all `
+      + `${callers.length} caller(s) gate first`);
+  }
+  return out;
+}
+
 function main() {
   for (const { dir } of ROOTS) {
     if (!fs.existsSync(dir)) {
       console.log(`${dir} not found — the scan did not execute.`);
       process.exit(EXIT_NOT_EXECUTED);
     }
+  }
+
+  // ── BEFORE ANY CONCLUSION: CAN THIS SCANNER READ WHAT IT IS SCANNING? ─────
+  //
+  // M1 correction item 4. Every .js file under the scanned roots must compile and must lex without
+  // a concern, or this scanner reports NOT EXECUTED instead of a verdict. The alternative is what
+  // happened on 2026-11-12: a pre-pass quietly ate a function and the output said PASS.
+  const unreadable = [];
+  for (const { dir, base } of ROOTS) {
+    for (const abs of walk(dir)) {
+      const rel = path.relative(base, abs);
+      for (const why of unreadableReasons(rel, fs.readFileSync(abs, 'utf8'))) unreadable.push(why);
+    }
+  }
+  if (unreadable.length) {
+    console.log(`  INCOMPLETE  ${unreadable.length} file(s) could not be read with certainty:\n`);
+    for (const why of unreadable.slice(0, 20)) console.log(`      ${why}`);
+    if (unreadable.length > 20) console.log(`      … and ${unreadable.length - 20} more`);
+    console.log('\nINCOMPLETE  the scan did not execute over the whole tree, so its silence means '
+      + 'nothing.\n            This is NOT a pass and NOT a finding.\n');
+    process.exit(EXIT_NOT_EXECUTED);
   }
 
   const sites = discover();
@@ -446,15 +577,14 @@ function main() {
   // ordering was unproven on a deploy where it holds. Preflight was 93/93 green throughout,
   // because nothing locally exercised that assumption. Asserting the invariant HERE means the next
   // move of those anchors goes red on a laptop rather than in a production evidence run.
+  //
+  // THAT PREDECESSOR'S DEFECT WAS REPEATED HERE, and the replacement lives in gateOrdering()
+  // above — see its header for what went wrong and why the question is now asked per call site.
   for (const file of new Set(sites.filter((x) => x.gated).map((x) => x.file))) {
     const code = blankNonCode(fs.readFileSync(path.join(__dirname, '..', file), 'utf8'));
-    const gateAt = code.indexOf(`${GATE}(`);
-    const firstCall = Math.min(...TRANSPORTS.map((t) => {
-      t.re.lastIndex = 0; const m = t.re.exec(code); return m ? m.index : Number.MAX_SAFE_INTEGER;
-    }));
-    if (gateAt === -1) { bad(`${file} is marked gated but does not call ${GATE}()`); continue; }
-    if (gateAt < firstCall) ok(`${file}: the gate precedes the provider call`);
-    else bad(`${file}: a provider call appears BEFORE the gate — the gate is present but not first`);
+    for (const f of gateOrdering(file, code)) {
+      if (f.ok) ok(f.message); else bad(f.message, f.detail);
+    }
   }
 
   const ungated = sites.filter((s) => !s.gated && !s.exception);
@@ -571,6 +701,6 @@ function main() {
   process.exit(0);
 }
 
-module.exports = { discover, discoverRest, enclosingFunctionAt, firstArgument, methodOf, blankNonCode, blankCommentsOnly, TRANSPORTS, EXCEPTIONS, GATE, ROOTS };
+module.exports = { discover, discoverRest, gateOrdering, unreadableReasons, enclosingFunctionAt, firstArgument, methodOf, blankNonCode, blankCommentsOnly, TRANSPORTS, EXCEPTIONS, GATE, ROOTS };
 
 if (require.main === module) main();
