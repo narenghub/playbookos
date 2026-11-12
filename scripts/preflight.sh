@@ -254,6 +254,11 @@ pf_step "each legacy external sender stops on its own, by name" node scripts/che
 # This one DISCOVERS the call sites instead, and its own negative controls plant a bypass and
 # require it to be caught. A green scanner proves nothing until it has been shown to go red.
 pf_step "every outbound email transport is behind the kill switch" node scripts/check-email-transport-coverage.js
+# THE SECOND LEG. The scanner above discovers transports by the shapes it knows; it cannot see one
+# nobody anticipated. This asks a different question — what has the code gained the ABILITY to
+# call — and a mail SDK cannot be used before it is installed. Neither check is offered as proof
+# on its own, and both say so in their own output.
+pf_step "no unreviewed dependency has been added" node scripts/check-dependency-additions.js
 pf_step "containment holds under stop, scope, failure and relabelling" env JWT_SECRET=preflight node --test scripts/email-containment.test.js
 
 # ── S1.1: EVERY TRANSPORT IS OBSERVABLE, NOT JUST GOVERNED ──────────────────

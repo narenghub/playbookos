@@ -1,0 +1,32 @@
+[
+  {
+    "fingerprint": "4a1e311b2730c9f57d7849fd86ab1601",
+    "file": "src/lib/agents/outreach-agent.js",
+    "line_hint": 361,
+    "transport": "gmail-sdk",
+    "violation": "no-approval-boundary",
+    "reason": "Reaches buyers over Gmail with the kill switch and OUTREACH_ENABLED, but no approval and no digest binding. One of the two transports that produced the 3-10 November containment breach.",
+    "fix_in": "Spec A milestone 5 - route through dispatch.js",
+    "recorded": "2026-11-12"
+  },
+  {
+    "fingerprint": "78c6b2639bf29a15fa1c0cd23b8d72b9",
+    "file": "src/lib/campaigns/cphi-runner.js",
+    "line_hint": 361,
+    "transport": "gmail-sdk",
+    "violation": "no-approval-boundary",
+    "reason": "Same shape as outreach-agent. Kill switch and CPHI_FOLLOWUP_ENABLED, no approval boundary. The other transport in the containment breach.",
+    "fix_in": "Spec A milestone 5 - route through dispatch.js",
+    "recorded": "2026-11-12"
+  },
+  {
+    "fingerprint": "890340692884093761bb24e8e570f5a3",
+    "file": "scripts/verify-bounce-detection.js",
+    "line_hint": 147,
+    "transport": "gmail-sdk",
+    "violation": "sends-outside-dispatch",
+    "reason": "A verification script that genuinely transmits. Not an agent, so no agent-level control applies to it.",
+    "fix_in": "route through dispatch, or retire the script",
+    "recorded": "2026-11-12"
+  }
+]
