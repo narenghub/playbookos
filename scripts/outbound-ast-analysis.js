@@ -156,6 +156,131 @@ function skippability(gate, fnRecord, call = null) {
   return { conditional: true, callerControlled, by };
 }
 
+
+// ── AND IS THE GATE'S ANSWER ACTUALLY OBEYED? ───────────────────────────────
+//
+// CEO review 2026-11-12, item 2: "Verify that the authorization analysis does not accept a provider
+// call merely because assertSendAllowed() executed. A denial must actually prevent delivery."
+//
+// THE GAP THIS CLOSES, and it was real. Until this check existed, both of these were accepted:
+//
+//     await assertSendAllowed({ ... });                  // result discarded
+//     await g.gmail.users.messages.send(opts);
+//
+//     const gate = await assertSendAllowed({ ... });      // bound, never read
+//     await g.gmail.users.messages.send(opts);
+//
+// In each, the gate runs unconditionally on every path — and a refusal changes nothing. The
+// analysis proved the call happened and called that authorization. That is the fourth instance in
+// this series of proving a weaker property than the one that matters, and it was caught in review
+// rather than by me.
+//
+// What counts as obeying the answer: the result must be bound (or read inline), tested, and the
+// failing branch must END the path before the provider call — `return`, `throw`, `continue`,
+// `break`, or `process.exit()`. All five appear in this repository: mailer.js returns,
+// outreach-agent.js and cphi-runner.js `continue` inside their send loops, and
+// verify-bounce-detection.js exits with its own refused-by-policy code.
+//
+// Where the shape is recognisable and wrong, that is a FINDING. Where it is simply unrecognisable,
+// that is UNPROVABLE and the scanner reports INCOMPLETE — it does not guess, in either direction.
+
+const TERMINATORS = new Set(['ReturnStatement', 'ThrowStatement', 'ContinueStatement',
+  'BreakStatement']);
+
+/**
+ * Does this subtree end the current path? Nested functions are ignored: a `return` inside a
+ * callback returns from the callback, not from the sender, and treating it as a terminator would
+ * accept a guard that does nothing.
+ */
+function endsThePath(node) {
+  let found = false;
+  AST.walk(node, (n, ancestors) => {
+    if (found) return;
+    if (ancestors.some((a) => AST.FUNCTION_TYPES.has(a.type))) return;
+    if (TERMINATORS.has(n.type)) { found = true; return; }
+    if (n.type === 'CallExpression' && AST.dottedName(n.callee) === 'process.exit') found = true;
+  });
+  return found;
+}
+
+/** What the gate's return value was bound to, if anything. */
+function gateBinding(gate) {
+  let idx = gate.ancestors.length - 1;
+  let child = gate.node;
+  while (idx >= 0 && gate.ancestors[idx].type === 'AwaitExpression') {
+    child = gate.ancestors[idx];
+    idx -= 1;
+  }
+  const holder = gate.ancestors[idx];
+  if (!holder) return { kind: 'unknown' };
+  if (holder.type === 'VariableDeclarator' && holder.init === child) {
+    if (holder.id.type === 'Identifier') return { kind: 'binding', names: [holder.id.name] };
+    // `const { allowed } = await assertSendAllowed(...)`
+    return { kind: 'binding', names: AST.paramNames(holder.id) };
+  }
+  if (holder.type === 'AssignmentExpression' && holder.right === child) {
+    const n = AST.dottedName(holder.left);
+    return n ? { kind: 'binding', names: [n.split('.')[0]] } : { kind: 'unknown' };
+  }
+  // `if (!(await assertSendAllowed(...)).allowed) return;`
+  if (holder.type === 'MemberExpression' && holder.object === child) return { kind: 'inline' };
+  if (holder.type === 'UnaryExpression' || holder.type === 'LogicalExpression') return { kind: 'inline' };
+  if (holder.type === 'ExpressionStatement') return { kind: 'discarded' };
+  return { kind: 'unknown' };
+}
+
+/**
+ * Is a denial from `gate` guaranteed to prevent `call`?
+ *
+ * Returns { ok: true } proven, { ok: false, why } proven NOT honoured, or { ok: null, why } when it
+ * cannot be established — which the caller turns into INCOMPLETE.
+ */
+function resultHonoured(gate, call, fnRecord) {
+  const b = gateBinding(gate);
+
+  if (b.kind === 'discarded') {
+    return { ok: false, why: 'the gate\'s return value is discarded entirely, so a refusal cannot '
+      + 'reach any branch and nothing can stop the send' };
+  }
+
+  if (b.kind === 'inline') {
+    // Read directly inside a test. The enclosing `if` must end the path.
+    const guards = gate.ancestors.filter((a) => a.type === 'IfStatement'
+      || a.type === 'ConditionalExpression');
+    const ends = guards.some((a) => (a.consequent && endsThePath(a.consequent))
+      || (a.alternate && endsThePath(a.alternate)));
+    if (ends) return { ok: true };
+    return { ok: null, why: 'the gate result is read inline but no branch around it ends the path' };
+  }
+
+  if (b.kind === 'unknown') {
+    return { ok: null, why: 'the gate result is used in a shape this analysis does not recognise' };
+  }
+
+  // Bound. Look for a guard between the gate and the call that tests the binding and ends the path.
+  let guard = null;
+  let referenced = false;
+  AST.walk(fnRecord.node, (n, ancestors) => {
+    if (ancestors.some((a) => AST.FUNCTION_TYPES.has(a.type) && a !== fnRecord.node)) return;
+    if (n.type === 'Identifier' && b.names.includes(n.name)
+        && n.start > gate.start && n.start < call.start) referenced = true;
+    if (n.type !== 'IfStatement') return;
+    if (!(n.start > gate.start && n.start < call.start)) return;
+    const ids = new Set();
+    AST.walk(n.test, (t) => { if (t.type === 'Identifier') ids.add(t.name); });
+    if (!b.names.some((nm) => ids.has(nm))) return;
+    if (endsThePath(n.consequent) || (n.alternate && endsThePath(n.alternate))) guard = n;
+  });
+
+  if (guard) return { ok: true };
+  if (referenced) {
+    return { ok: null, why: `\`${b.names.join(', ')}\` is read before the send but no branch on it `
+      + 'ends the path, so it cannot be shown that a refusal stops delivery' };
+  }
+  return { ok: false, why: `the gate's result is bound to \`${b.names.join(', ')}\` and never read `
+    + 'before the send, so a refusal changes nothing' };
+}
+
 /**
  * Analyse one file. Returns:
  *   { sites, findings, unprovable }
@@ -212,6 +337,7 @@ function analyseFile({ file, src, ast, exception = null }) {
     providerSuffixes: PROVIDER_SUFFIXES,
     providerRoots: PROVIDER_ROOTS,
   }).map((u) => ({ ...u, file }));
+  // Gate-result findings append to this list too, below.
 
   const findings = [];
   const say = (ok, message, detail) => findings.push({ ok, message, detail });
@@ -233,7 +359,29 @@ function analyseFile({ file, src, ast, exception = null }) {
     const conditional = inSameFn.filter((g) => !guaranteedBefore(g, call));
 
     if (unconditional.length) {
-      say(true, `${file}: ${fn.name}() calls the gate on every path to ${call.label}`);
+      // The gate RUNS. Item 2 of the 2026-11-12 review: that is not the same as the gate being
+      // OBEYED, and until this check existed a discarded result was accepted as authorization.
+      const honoured = unconditional
+        .map((g) => ({ g, h: resultHonoured(g, call, fn) }))
+        .sort((a, b2) => (a.h.ok === true ? -1 : 0) - (b2.h.ok === true ? -1 : 0));
+      const best = honoured[0];
+      if (best.h.ok === true) {
+        say(true, `${file}: ${fn.name}() calls the gate on every path to ${call.label}, and a `
+          + 'refusal ends the path before it');
+      } else if (best.h.ok === false) {
+        say(false,
+          `${file}: ${fn.name}() calls the gate before ${call.label} but DOES NOT ACT ON THE ANSWER`,
+          `${best.h.why}. A gate that is consulted and ignored is not a gate: the kill switch, the `
+          + 'approval boundary and the recipient restriction all return a decision that nothing '
+          + 'enforces.');
+      } else {
+        unprovable.push({ why: 'gate-result-unproven', file, line: call.line,
+          detail: `${fn.name}() calls the gate before ${call.label}, but ${best.h.why}` });
+        say(false,
+          `${file}: ${fn.name}() reaches ${call.label} and it cannot be proven that a refusal `
+          + 'stops it',
+          `${best.h.why}. Reported as unprovable rather than as either a pass or a finding.`);
+      }
       continue;
     }
 
@@ -284,25 +432,57 @@ function analyseFile({ file, src, ast, exception = null }) {
         + 'delete it.');
       continue;
     }
-    const bad = callers.filter((c) => {
-      if (!c.fn) return true;
-      const g = gates.filter((x) => x.enclosing === c.call.enclosing);
-      return !g.some((x) => guaranteedBefore(x, c.call));
+    // Each caller must gate unconditionally AND act on the answer. The second half was missing
+    // here too: a caller that consulted the gate and ignored it would have been accepted, which is
+    // item 2 of the review arriving by the indirect road.
+    const verdicts = callers.map((c) => {
+      if (!c.fn) return { c, state: 'no-function' };
+      const g = gates.filter((x) => x.enclosing === c.call.enclosing && guaranteedBefore(x, c.call));
+      if (!g.length) return { c, state: 'ungated' };
+      const h = g.map((x) => resultHonoured(x, c.call, c.fn))
+        .sort((a, b2) => (a.ok === true ? -1 : 0) - (b2.ok === true ? -1 : 0))[0];
+      if (h.ok === true) return { c, state: 'ok' };
+      if (h.ok === false) return { c, state: 'ignores-answer', why: h.why };
+      return { c, state: 'unproven', why: h.why };
     });
-    if (bad.length) {
+    const ungated = verdicts.filter((v) => v.state === 'ungated' || v.state === 'no-function');
+    const ignoring = verdicts.filter((v) => v.state === 'ignores-answer');
+    const unproven = verdicts.filter((v) => v.state === 'unproven');
+    const named = (v) => (v.c.fn ? `${v.c.fn.name}()` : 'an anonymous function');
+
+    if (ungated.length) {
       say(false,
-        `${file}: ${fn.name}() reaches ${call.label} and ${bad.length} of its ${callers.length} `
+        `${file}: ${fn.name}() reaches ${call.label} and ${ungated.length} of its ${callers.length} `
         + 'caller(s) do not gate unconditionally first',
-        bad.map((c) => `${c.fn ? `${c.fn.name}()` : 'an anonymous function'} calls ${fn.name}() `
-          + `with no unconditional ${GATE}() before it`).join('\n          '));
+        ungated.map((v) => `${named(v)} calls ${fn.name}() with no unconditional ${GATE}() before it`)
+          .join('\n          '));
+      continue;
+    }
+    if (ignoring.length) {
+      say(false,
+        `${file}: ${fn.name}() reaches ${call.label} and ${ignoring.length} of its `
+        + `${callers.length} caller(s) consult the gate WITHOUT ACTING ON THE ANSWER`,
+        ignoring.map((v) => `${named(v)}: ${v.why}`).join('\n          '));
+      continue;
+    }
+    if (unproven.length) {
+      for (const v of unproven) {
+        unprovable.push({ why: 'gate-result-unproven', file, line: v.c.call.line,
+          detail: `${named(v)} calls ${fn.name}(), but ${v.why}` });
+      }
+      say(false,
+        `${file}: ${fn.name}() reaches ${call.label} and for ${unproven.length} of its `
+        + `${callers.length} caller(s) it cannot be proven that a refusal stops the send`,
+        unproven.map((v) => `${named(v)}: ${v.why}`).join('\n          '));
       continue;
     }
     say(true, `${file}: ${call.label} is reached only through ${fn.name}(), and all `
-      + `${callers.length} caller(s) gate unconditionally first`);
+      + `${callers.length} caller(s) gate unconditionally and refuse on a denial`);
   }
 
   return { sites, findings, unprovable, gated, approvalBound };
 }
 
-module.exports = { analyseFile, providerCalls, gateCalls, skippability, guaranteedBefore, TRANSPORT_SHAPES,
+module.exports = { analyseFile, providerCalls, gateCalls, skippability, guaranteedBefore,
+  resultHonoured, gateBinding, endsThePath, TRANSPORT_SHAPES,
   PROVIDER_ROOTS, PROVIDER_SUFFIXES, GATE, RESEND_URL_IDENT };

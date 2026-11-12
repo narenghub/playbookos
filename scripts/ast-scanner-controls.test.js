@@ -451,3 +451,138 @@ test('7b. the parser-missing path produces a reason, not an empty result', () =>
   assert.match(reasonSource, /NOT fall back/,
     'the parser-missing reason must say plainly that there is no fallback');
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. A DENIAL MUST ACTUALLY PREVENT DELIVERY
+//
+// CEO review 2026-11-12, item 2: "Verify that the authorization analysis does not accept a provider
+// call merely because assertSendAllowed() executed. A denial must actually prevent delivery."
+//
+// It was a real gap, and these are the two shapes that were accepted before it was closed. In both
+// the gate runs unconditionally on every path, and a refusal changes nothing — the analysis proved
+// the call HAPPENED and called that authorization.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SENDER = (gateBody) => [
+  "const { assertSendAllowed } = require('./email-gate');",
+  "const g = require('./gmail');",
+  'async function send(opts) {',
+  gateBody,
+  '  await g.gmail.users.messages.send(opts);',
+  '  return true;',
+  '}',
+  'module.exports = { send };',
+].join('\n');
+
+const verdictOf = (src, file = 'lib/honour.js') => {
+  const r = OUTBOUND.analyseFile({ file, src });
+  const f = r.findings[0] || null;
+  if (f && f.ok) return { state: 'ok', f, r };
+  if (r.unprovable.length) return { state: 'incomplete', f, r };
+  return { state: 'fail', f, r };
+};
+
+test('8. a gate whose result is DISCARDED is a finding, not a pass', () => {
+  const v = verdictOf(SENDER('  await assertSendAllowed({ capability: "email.send" });'));
+  assert.strictEqual(v.state, 'fail',
+    `a discarded gate result was accepted as authorization: ${v.f && v.f.message}`);
+  assert.match(v.f.message, /DOES NOT ACT ON THE ANSWER/);
+  assert.match(v.f.detail, /discarded entirely/);
+});
+
+test('8b. a gate result that is bound but never read is a finding', () => {
+  const v = verdictOf(SENDER('  const gate = await assertSendAllowed({ capability: "email.send" });'));
+  assert.strictEqual(v.state, 'fail',
+    `an unread gate result was accepted as authorization: ${v.f && v.f.message}`);
+  assert.match(v.f.detail, /never read before the send/);
+});
+
+test('8c. a gate result read but with no branch ending the path is UNPROVABLE', () => {
+  // Not a finding: the code might prevent delivery in a way this analysis cannot see. It is
+  // reported as unprovable, which makes the scanner INCOMPLETE rather than green.
+  const v = verdictOf(SENDER([
+    '  const gate = await assertSendAllowed({});',
+    '  if (!gate.allowed) { console.warn("refused"); }',
+  ].join('\n')));
+  assert.strictEqual(v.state, 'incomplete', `expected INCOMPLETE, got ${v.state}`);
+  assert.ok(v.r.unprovable.some((u) => u.why === 'gate-result-unproven'), JSON.stringify(v.r.unprovable));
+});
+
+test('8d. every real refusal form in this repository is accepted', () => {
+  // The positive control, and it has to cover all of them or the check condemns working code:
+  // mailer.js returns, outreach-agent.js and cphi-runner.js `continue`, verify-bounce-detection.js
+  // calls process.exit with its own refused-by-policy code.
+  const forms = {
+    return: '  const gate = await assertSendAllowed({});\n  if (!gate.allowed) return false;',
+    throw: '  const gate = await assertSendAllowed({});\n  if (!gate.allowed) throw new Error(gate.reason);',
+    'process.exit': '  const gate = await assertSendAllowed({});\n  if (!gate.allowed) { process.exit(3); }',
+    destructured: '  const { allowed } = await assertSendAllowed({});\n  if (!allowed) return false;',
+    inline: '  if (!(await assertSendAllowed({})).allowed) return false;',
+  };
+  for (const [label, body] of Object.entries(forms)) {
+    const v = verdictOf(SENDER(body));
+    assert.strictEqual(v.state, 'ok', `the ${label} refusal form was rejected: ${v.f && v.f.message}`);
+    assert.match(v.f.message, /a refusal ends the path before it/);
+  }
+});
+
+test('8e. `continue` inside a send loop is accepted — the real agent shape', () => {
+  const src = [
+    "const { assertSendAllowed } = require('./email-gate');",
+    "const g = require('./gmail');",
+    'async function run(queue) {',
+    '  for (const q of queue) {',
+    '    const gate = await assertSendAllowed({ to: q.email });',
+    '    if (!gate.allowed) continue;',
+    '    await g.gmail.users.messages.send(q.msg);',
+    '  }',
+    '}',
+    'module.exports = { run };',
+  ].join('\n');
+  const v = verdictOf(src, 'lib/loop.js');
+  assert.strictEqual(v.state, 'ok', `the real agent shape was rejected: ${v.f && v.f.message}`);
+});
+
+test('8f. a `return` inside a callback does NOT count as ending the path', () => {
+  // It returns from the callback, not from the sender. Accepting it would accept a guard that does
+  // nothing — the same category of mistake as accepting a gate that merely executed.
+  const v = verdictOf(SENDER([
+    '  const gate = await assertSendAllowed({});',
+    '  if (!gate.allowed) { [1].forEach(() => { return 1; }); }',
+  ].join('\n')));
+  assert.notStrictEqual(v.state, 'ok',
+    'a return inside a callback was accepted as a refusal path');
+});
+
+test('8g. the indirection path enforces it too', () => {
+  // A private helper reached by two callers, one of which consults the gate and ignores it. Without
+  // this, item 2 would arrive by the indirect road.
+  const src = [
+    "const { assertSendAllowed } = require('./email-gate');",
+    "const g = require('./gmail');",
+    'async function deliver(m) { await g.gmail.users.messages.send(m); }',
+    'async function sendOne(m) {',
+    '  const gate = await assertSendAllowed({});',
+    '  if (!gate.allowed) return false;',
+    '  return deliver(m);',
+    '}',
+    'async function sendTwo(m) {',
+    '  const gate = await assertSendAllowed({});',
+    '  return deliver(m);',
+    '}',
+    'module.exports = { sendOne, sendTwo };',
+  ].join('\n');
+  const v = verdictOf(src, 'lib/indirect.js');
+  assert.strictEqual(v.state, 'fail', `expected a finding, got ${v.state}: ${v.f && v.f.message}`);
+  assert.match(v.f.message, /WITHOUT ACTING ON THE ANSWER/);
+  assert.match(v.f.detail, /sendTwo\(\)/, 'the finding does not name the offending caller');
+});
+
+test('8h. and the real mailer passes, with the stronger statement', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'mailer.js'), 'utf8');
+  const r = OUTBOUND.analyseFile({ file: 'src/lib/mailer.js', src });
+  assert.deepStrictEqual(r.findings.filter((f) => !f.ok), [],
+    JSON.stringify(r.findings.map((f) => f.message)));
+  assert.match(r.findings[0].message, /refuse on a denial/,
+    'the mailer finding no longer asserts that its callers act on the gate answer');
+});
