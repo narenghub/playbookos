@@ -1,0 +1,281 @@
+// ── ONE ROAD OUT. ────────────────────────────────────────────────────────────
+//
+//   const { dispatch } = require('./outbound/dispatch');
+//
+// Spec A milestone 5. Every outbound message to a person outside this company passes through
+// dispatch() or it does not go.
+//
+// ── WHAT THIS FIXES ──────────────────────────────────────────────────────────
+//
+// Today there are two shapes of buyer-facing send, and only one is governed.
+//
+//   GOVERNED (inquiry-agent):
+//     prepareBuyerEmail → a human approves → releaseBuyerEmail → frozen message + digest
+//                       → sendEmailDetailed({ …, approvalId, expectedDigest })
+//
+//   UNGOVERNED (outreach-agent, cphi-runner):
+//     own ledger attempt → assertSendAllowed → g.gmail.users.messages.send(…)
+//
+// The second has no approval boundary and no digest binding, and it does not go through the mailer
+// at all — it talks to Gmail directly. Those two senders are what reached 25 real people between
+// 3 and 10 November, and they are why `capability:email.send` holds ALL platform email today:
+// with no per-path boundary, the only way to stop one sender was to silence every sender,
+// including the 6pm scores, the briefings and the operator alerts.
+//
+// ── THE ONE DECISION THAT MATTERS HERE ───────────────────────────────────────
+//
+// In mailer.js, `approvalId` and `expectedDigest` are OPTIONAL parameters. That was deliberate and
+// correct at the time — 55 callers had no approval boundary and inventing one for them inside the
+// transport would have been a different change. But optional means the dangerous path is the
+// default: a caller who simply does not pass them gets an ungoverned send.
+//
+// Here they are MANDATORY for any external recipient. Not "checked when supplied" — REQUIRED.
+// A caller that omits them is refused before anything else happens. That inversion is the whole
+// point of this module, and everything below is in service of it.
+//
+// ── CREDENTIAL ISOLATION ─────────────────────────────────────────────────────
+//
+// dispatch() takes no API key, no token, no password, and reads none from the environment. It
+// resolves a TRANSPORT BY NAME from a registry and calls `send(message)`. The credential lives
+// with the transport, which is today an in-process adapter and is intended to become a separate
+// sender service holding the only copy of the provider credential. When that lands, nothing in
+// this file changes: the registry entry is swapped for a client, and the application can no longer
+// reach a provider even if every other control fails.
+//
+// ── FAIL CLOSED, EVERYWHERE ──────────────────────────────────────────────────
+//
+// Unknown transport, unclassifiable recipient, missing approval, digest mismatch, unreadable kill
+// state, unavailable ledger, duplicate claim — every one of these REFUSES. There is no path
+// through this function that reaches a provider without the approval, the digest and the gate all
+// having been checked, and no parameter that can skip any of them.
+
+'use strict';
+
+const GATE = require('../email-gate');
+const LEDGER = require('./ledger');
+const RECIPIENTS = require('./recipients');
+
+// ── THE TRANSPORT REGISTRY ──────────────────────────────────────────────────
+//
+// Name → { send(message) → { ok, id, error, providerResponded } }. A transport NEVER decides
+// authorization; by the time it is called, every check has passed. Keeping it that dumb is what
+// makes it safe to move out of process later.
+const TRANSPORTS = Object.create(null);
+
+function registerTransport(name, impl) {
+  if (typeof name !== 'string' || !name) throw new Error('a transport needs a name');
+  if (!impl || typeof impl.send !== 'function') throw new Error(`transport ${name} has no send()`);
+  TRANSPORTS[name] = impl;
+}
+
+function knownTransports() {
+  return Object.keys(TRANSPORTS).sort();
+}
+
+// ── THE PAYLOAD DIGEST ──────────────────────────────────────────────────────
+//
+// Computed from the bytes about to leave, not from what the caller claims to be sending.
+//
+// It DELEGATES to the ledger's digestOf, and the first draft of this file did not — it wrote its
+// own sha256 over a slightly different string. That is the defect mailer.js names in the comment
+// above its own approvedDigestOf: "a second implementation of the same hash is how a binding check
+// quietly stops binding." Concretely, a message frozen by the approval boundary would have hashed
+// one way at release and another way here, so every approved external send would have been refused
+// as tampered — or, with the comparison written the other way round, none would have been bound at
+// all. One expression of "the bytes that are leaving", and the test suite asserts the two agree.
+function payloadDigest({ to, subject, html }) {
+  return LEDGER.digestOf({
+    to: Array.isArray(to) ? to.join(', ') : String(to == null ? '' : to),
+    subject, html,
+  });
+}
+
+const refuse = (phase, error, extra = {}) => ({
+  ok: false, id: null, phase, error, providerResponded: false, dispatched: false, ...extra,
+});
+
+/**
+ * The only governed road to an outbound provider.
+ *
+ * @param {object}  m                  the message: { to, subject, html, from?, replyTo?, cc? }
+ * @param {string}  transport          a registered transport name
+ * @param {string}  idempotencyKey     stable per logical message; a repeat is refused, not resent
+ * @param {string}  [approvalId]       REQUIRED when any recipient is external
+ * @param {string}  [expectedDigest]   REQUIRED when any recipient is external
+ * @param {string}  [workflow]         kill-switch scope
+ * @param {string}  [agent]            kill-switch scope
+ * @param {string}  [companyId]
+ * @param {object}  [deps]             { gate, ledger, recipients, env, transports } for tests
+ */
+async function dispatch({
+  message, transport, idempotencyKey,
+  approvalId = null, expectedDigest = null,
+  workflow = null, agent = null, companyId = null,
+} = {}, deps = {}) {
+  const env = deps.env || process.env;
+  const gate = deps.gate || GATE;
+  const ledger = deps.ledger || LEDGER;
+  const recipients = deps.recipients || RECIPIENTS;
+  const registry = deps.transports || TRANSPORTS;
+
+  // ── 1. THE CALL ITSELF MUST BE WELL FORMED ────────────────────────────────
+  if (!message || typeof message !== 'object') {
+    return refuse('refused_before_request', 'dispatch requires a message object');
+  }
+  const { to, subject, html } = message;
+  if (!to || !subject || !html) {
+    return refuse('refused_before_request',
+      'a message needs a recipient, a subject and a body — a partial message is not a draft, it is a bug');
+  }
+  if (!idempotencyKey || typeof idempotencyKey !== 'string') {
+    return refuse('refused_before_request',
+      'dispatch requires an idempotencyKey: without one a retry cannot be told from a second message');
+  }
+
+  // ── 2. THE TRANSPORT MUST BE KNOWN ────────────────────────────────────────
+  //
+  // By name, from the registry. An unknown name is refused rather than defaulted — defaulting a
+  // transport is how a message ends up leaving by a road nobody audited.
+  const impl = registry[transport];
+  if (!impl) {
+    return refuse('refused_before_request',
+      `unknown transport ${JSON.stringify(transport)}; registered: ${Object.keys(registry).sort().join(', ') || '(none)'}`);
+  }
+
+  // ── 3. INSIDE OR OUTSIDE? THIS DECIDES WHETHER APPROVAL IS MANDATORY ──────
+  //
+  // Refused if it cannot be decided. "I could not tell whether this leaves the company" is not a
+  // reason to send it.
+  let external;
+  try {
+    external = recipients.isExternal(to, env);
+  } catch (e) {
+    return refuse('refused_before_request',
+      `the recipients could not be classified as inside or outside the company (${e.message})`);
+  }
+
+  // ── 4. THE INVERSION: APPROVAL AND DIGEST ARE REQUIRED, NOT OPTIONAL ──────
+  if (external && (!approvalId || !expectedDigest)) {
+    return refuse('refused_before_request',
+      'an external recipient requires BOTH an approvalId and an expectedDigest. This is not a '
+      + 'check that fires when they are supplied — they are required, and a caller that omits '
+      + 'them is refused. Prepare the message through the approval boundary and release it.',
+      { external: true, needsApproval: true });
+  }
+
+  // ── 5. THE LEDGER OPENS BEFORE AUTHORIZATION IS DECIDED ───────────────────
+  //
+  // So a REFUSAL is as durable as a send. A refusal nobody can audit is indistinguishable from a
+  // bug, and the containment evidence is built from these rows.
+  const actualDigest = payloadDigest({ to, subject, html });
+  let att;
+  try {
+    att = await ledger.beginAttempt({
+      transport, provider: transport, to, subject, html,
+      workflow, agent, companyId, approvalId,
+      claimRef: idempotencyKey,
+      consequential: true,
+    }, deps.ledgerDeps);
+  } catch (e) {
+    return refuse('refused_before_request', `the outbound ledger could not be reached (${e.message})`);
+  }
+  if (!att || !att.ok) {
+    return refuse('refused_before_request',
+      `the outbound ledger refused the attempt: ${(att && att.error) || 'no record created'}`);
+  }
+
+  // ── 6. IDEMPOTENCY — A REPEAT IS REFUSED, NEVER RESENT ────────────────────
+  //
+  // Gmail cannot unsend and Resend cannot either. If a prior attempt under this key already
+  // CLAIMED responsibility, the honest answer is "this may already have gone", and sending again
+  // to find out is the duplicate-RFQ defect wearing a different hat.
+  // NOT `if (typeof ledger.priorClaim === 'function')`. That is what this was, and the real ledger
+  // had no priorClaim — so the duplicate check existed in the tests, where the fake ledger supplied
+  // one, and did nothing whatsoever in production. A control that is present in the double and
+  // absent in the thing that runs is worse than no control, because it reads as covered.
+  if (typeof ledger.priorClaim !== 'function') {
+    await att.blocked('the ledger cannot answer whether this was already sent', 'idempotency_unknown');
+    return refuse('refused_before_request',
+      'this ledger provides no priorClaim(), so a duplicate cannot be distinguished from a first '
+      + 'attempt — failing closed rather than risking a second send');
+  }
+  let prior;
+  try {
+    prior = await ledger.priorClaim(idempotencyKey, { excludeId: att.id }, deps.ledgerDeps);
+  } catch (e) {
+    await att.blocked(`idempotency could not be established (${e.message})`, 'idempotency_unknown');
+    return refuse('refused_before_request',
+      `whether this message was already sent could not be established (${e.message})`);
+  }
+  if (prior) {
+    await att.blocked(`duplicate of ${prior.id} (${prior.outcome})`, 'duplicate_dispatch');
+    return refuse('refused_duplicate',
+      `a message with this idempotencyKey already reached ${prior.outcome}; not sending again`,
+      { duplicateOf: prior.id, priorOutcome: prior.outcome });
+  }
+
+  // ── 7. THE APPROVAL MUST COVER THESE EXACT BYTES ──────────────────────────
+  //
+  // Checked here, at the last possible moment, against the bytes about to be transmitted. A
+  // boundary that freezes a payload still has a joint between release and transmission, and
+  // whatever carries it could carry something else.
+  if (expectedDigest && actualDigest !== expectedDigest) {
+    const why = `the approved payload digest ${expectedDigest} does not match the message about to `
+      + `be sent (${actualDigest}) — nothing was transmitted`;
+    await att.blocked(why, 'approval:digest_mismatch');
+    return refuse('digest_mismatch', why,
+      { stopped: true, approvalId, expectedDigest, actualDigest });
+  }
+
+  // ── 8. THE POLICY GATE. UNCONDITIONAL. ────────────────────────────────────
+  //
+  // No parameter of this function can prevent this call from happening — the lesson of C-4, where
+  // a caller-supplied flag replaced the gate result with `{ allowed: true }`.
+  let decision;
+  try {
+    decision = await gate.assertSendAllowed({
+      capability: 'email.send', workflow, agent, company: companyId, to,
+      approvalId, digest: actualDigest,
+    }, deps.gateDeps);
+  } catch (e) {
+    await att.blocked(`the authorization gate could not be consulted (${e.message})`,
+      'authorization_undetermined');
+    return refuse('refused_before_request',
+      `the authorization gate could not be consulted (${e.message}) — failing closed`);
+  }
+  if (!decision || !decision.allowed) {
+    const why = (decision && decision.reason) || 'the gate returned no decision';
+    await att.blocked(why, (decision && decision.scope) || 'authorization_undetermined');
+    return refuse('stopped_by_policy', why, { stopped: true });
+  }
+
+  // ── 9. CLAIM, THEN TRANSMIT ───────────────────────────────────────────────
+  //
+  // Durable responsibility BEFORE the provider call. A crash between here and the response leaves
+  // a row saying an attempt was made and its outcome is unknown — which is the truth, and is what
+  // stops the next run reading "never attempted" and sending a second time.
+  await att.claim();
+
+  let result;
+  try {
+    result = await impl.send({ ...message, _dispatch: { approvalId, digest: actualDigest, workflow, agent } });
+  } catch (e) {
+    // The request may have reached the provider before this threw. OUTCOME_UNKNOWN, never
+    // "failed" — the two differ in exactly the way that decides whether a retry is safe.
+    await att.unknown(e.message);
+    return { ok: false, id: null, phase: 'transport_unknown', error: e.message,
+      providerResponded: false, dispatched: true, transport };
+  }
+
+  if (result && result.ok) {
+    await att.accepted(result.id || null);
+    return { ok: true, id: result.id || null, phase: 'provider_accepted', error: null,
+      providerResponded: true, dispatched: true, transport, approvalId, digest: actualDigest };
+  }
+  await att.rejected((result && result.error) || 'the transport reported no result');
+  return { ok: false, id: null, phase: 'provider_rejected',
+    error: (result && result.error) || 'the transport reported no result',
+    providerResponded: !!(result && result.providerResponded), dispatched: true, transport };
+}
+
+module.exports = { dispatch, registerTransport, knownTransports, payloadDigest, TRANSPORTS };

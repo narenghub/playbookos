@@ -164,6 +164,54 @@ async function beginAttempt({
 }
 
 /**
+ * Has a message under this claim_ref already got far enough that it may have left?
+ *
+ * Spec A milestone 5 needs this to make dispatch idempotent, and "idempotent" here means a repeat
+ * is REFUSED, not retried: Gmail cannot unsend and nor can Resend.
+ *
+ * What counts as "may have left" is deliberately wider than MAY_HAVE_LEFT. That list is for
+ * reports and holds PROVIDER_ACCEPTED and OUTCOME_UNKNOWN. A row sitting at CLAIMED is a process
+ * that claimed responsibility and then stopped — a crash mid-send — and the honest reading of it
+ * is "something may have gone and nobody knows", which is exactly the case where sending again to
+ * find out turns one uncertain message into two real ones. RECONCILED is included for the same
+ * reason: a human established what happened, and a machine must not re-open that on its own.
+ *
+ * So the refusing set is everything except DEFINITELY_NOT_SENT, computed by subtraction from
+ * OUTCOMES rather than listed by hand — an outcome added later is then unsafe by default instead
+ * of silently permitted.
+ *
+ * THROWS if the answer cannot be established (schema absent, query failure). The caller must treat
+ * a throw as a refusal: returning null here would read as "no prior claim" and permit the send.
+ *
+ * @returns {Promise<{id,outcome,status,claimedAt}|null>} the prior row, or null if there is none
+ */
+const UNSAFE_TO_REPEAT = Object.freeze(
+  SCHEMA.OUTCOMES.filter((o) => !SCHEMA.DEFINITELY_NOT_SENT.includes(o)));
+
+async function priorClaim(claimRef, { excludeId = null } = {}, deps = {}) {
+  if (!claimRef) throw new Error('priorClaim requires a claimRef');
+
+  const ready = await hasSchema(deps);
+  if (!ready) {
+    throw new Error('the outbound ledger schema is not applied, so a duplicate cannot be ruled out');
+  }
+
+  const r = await q(deps)(
+    `SELECT id, outcome, status, claimed_at
+       FROM ${SCHEMA.TABLE}
+      WHERE claim_ref = $1
+        AND outcome = ANY($2)
+        AND ($3::text IS NULL OR id::text <> $3)
+      ORDER BY claimed_at DESC NULLS LAST
+      LIMIT 1`,
+    [claimRef, UNSAFE_TO_REPEAT, excludeId]);
+
+  if (!r.rows.length) return null;
+  const row = r.rows[0];
+  return { id: row.id, outcome: row.outcome, status: row.status, claimedAt: row.claimed_at };
+}
+
+/**
  * Coverage and execution, reported SEPARATELY (authorization item 4).
  *
  * "This transport has never been observed" and "this transport sent nothing" are different facts,
@@ -199,7 +247,8 @@ async function executionByTransport(transports, { sinceISO } = {}, deps = {}) {
 }
 
 module.exports = {
-  beginAttempt, executionByTransport, digestOf, hasSchema, _resetSchemaCache,
+  beginAttempt, priorClaim, executionByTransport, digestOf, hasSchema, _resetSchemaCache,
+  UNSAFE_TO_REPEAT,
   OUTCOMES: SCHEMA.OUTCOMES, MAY_HAVE_LEFT: SCHEMA.MAY_HAVE_LEFT,
   DEFINITELY_NOT_SENT: SCHEMA.DEFINITELY_NOT_SENT,
 };
