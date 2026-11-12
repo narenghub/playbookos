@@ -235,13 +235,51 @@ test('the quote route does not report a prepared quotation as sent', () => {
 
 // ── THE DIGEST CHECK, AT THE TRANSPORT ───────────────────────────────────────
 
-test('the mailer digest check sits before the provider call', () => {
-  const check = mailerCode.indexOf('expectedDigest');
-  const provider = mailerCode.search(/RESEND_EMAILS_URL\s*,/);
+// This guard used to compare two indexes in the whole file: the digest check had to appear earlier
+// in the TEXT than `RESEND_EMAILS_URL`. That read as an execution-order assertion and was not one.
+// On 2026-11-12 the C-4 patch extracted the provider half of the send into `deliverAuthorized` and
+// placed it ABOVE `sendEmailDetailed` in the file. Execution order was unchanged — the digest check
+// still runs, still before the handoff — but the proxy inverted and this test went red. A test that
+// fails on a refactor which preserves the property is measuring the wrong thing, and the tempting
+// fix (move the function back down) would have been file housekeeping dressed up as safety.
+//
+// So it now asserts the two facts that actually make the check unskippable, both scoped to
+// sendEmailDetailed's own body:
+//   1. the digest comparison precedes the handoff to the provider half, and
+//   2. sendEmailDetailed cannot reach the provider by any other route — the provider URL does not
+//      appear in its body at all, so the handoff is the only road.
+// Together these say what the old single index comparison was reaching for, and they survive the
+// function being moved anywhere in the file.
+function bodyOf(code, name) {
+  const start = code.indexOf(`async function ${name}(`);
+  assert.ok(start > 0, `${name} could not be located — update this guard`);
+  // The next top-level `async function`/`function` declaration ends the body. Declarations in this
+  // file are all at column 0, which is what the anchor requires.
+  const after = code.slice(start + 10).search(/\n(?:async )?function \w+\(/);
+  return after === -1 ? code.slice(start) : code.slice(start, start + 10 + after);
+}
+
+test('the mailer digest check sits before the handoff to the provider', () => {
+  const body = bodyOf(mailerCode, 'sendEmailDetailed');
+  const check = body.indexOf('if (expectedDigest)');
+  const handoff = body.indexOf('deliverAuthorized(');
   assert.ok(check > 0, 'the mailer no longer checks an expected digest');
-  assert.ok(provider > 0, 'the provider call site could not be located — update this guard');
-  assert.ok(check < provider,
-    'the digest comparison now sits AFTER the provider call, which means it cannot prevent anything');
+  assert.ok(handoff > 0, 'the handoff to the provider half could not be located — update this guard');
+  assert.ok(check < handoff,
+    'the digest comparison now sits AFTER the handoff to the provider, so it cannot prevent anything');
+});
+
+test('sendEmailDetailed cannot reach the provider except through deliverAuthorized', () => {
+  const body = bodyOf(mailerCode, 'sendEmailDetailed');
+  assert.ok(!/RESEND_EMAILS_URL/.test(body),
+    'sendEmailDetailed names the provider URL directly — there is now a road to the provider that '
+    + 'does not pass the digest check and the gate above it');
+  assert.ok(!/\bfetch\s*\(/.test(body),
+    'sendEmailDetailed calls fetch directly, which is a second transport inside the gated function');
+  // And the half it hands off to is unreachable from outside this module, so no caller can skip
+  // the gate by calling it themselves. (The C-4 test file asserts the same from the export side.)
+  assert.ok(!/module\.exports[\s\S]*deliverAuthorized/.test(mailerCode),
+    'deliverAuthorized is exported — the bypass C-4 removed would be reachable again, by name');
 });
 
 test('a digest mismatch has no mode in which it proceeds', () => {

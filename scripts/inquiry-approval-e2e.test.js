@@ -194,13 +194,51 @@ test('STAGE: approval, then release, then the STOP check, then the provider', ()
 
   // And the STOP check plus the ledger claim live inside the transport, ahead of the provider —
   // asserted there rather than here, because that is where they are.
+  //
+  // ── WHY THIS IS SCOPED TO A FUNCTION BODY AND NOT THE FILE ───────────────
+  //
+  // These three were compared as indexes into the WHOLE FILE, with `provider > gate` standing in
+  // for "the gate runs first". On 2026-11-12 the C-4 patch extracted the provider half of the send
+  // into `deliverAuthorized` and placed it above `sendEmailDetailed`, so the provider URL now
+  // appears EARLIER in the text while still executing strictly later. Execution order did not
+  // change; the proxy inverted, and this assertion went red on a patch that tightened the very
+  // property it was guarding.
+  //
+  // The honest statement needs two scopes, because the sequence now spans two functions:
+  //   · in sendEmailDetailed — the attempt opens, then the gate, then the handoff, and the
+  //     provider URL does not appear at all, so there is no other road;
+  //   · in deliverAuthorized — the ledger claim precedes the provider call.
+  // Together those say what one file-wide comparison was reaching for, and they survive either
+  // function being moved anywhere in the file.
   const mailer = codeOnly(fs.readFileSync(
     path.join(__dirname, '..', 'src', 'lib', 'mailer.js'), 'utf8'));
-  const claim = mailer.indexOf('LEDGER.beginAttempt(');
-  const gate = mailer.indexOf('assertSendAllowed(');
-  const provider = mailer.search(/RESEND_EMAILS_URL\s*,/);
+  const bodyOf = (name) => {
+    const i = mailer.indexOf(`async function ${name}(`);
+    assert.ok(i > 0, `${name} could not be located in mailer.js — update this guard`);
+    const rest = mailer.slice(i + 10).search(/\n(?:async )?function \w+\(/);
+    return rest === -1 ? mailer.slice(i) : mailer.slice(i, i + 10 + rest);
+  };
+
+  const gated = bodyOf('sendEmailDetailed');
+  const claim = gated.indexOf('LEDGER.beginAttempt(');
+  const gate = gated.indexOf('assertSendAllowed(');
+  const handoff = gated.indexOf('deliverAuthorized(');
   assert.ok(claim > 0 && gate > claim, 'the ledger attempt opens after the authorization check');
-  assert.ok(provider > gate, 'the provider is called before the authorization check');
+  assert.ok(handoff > gate, 'the provider half is reached before the authorization check');
+  assert.ok(!/RESEND_EMAILS_URL/.test(gated),
+    'the gated function names the provider URL directly — a road to the provider that does not '
+    + 'pass the gate above it');
+
+  const delivery = bodyOf('deliverAuthorized');
+  const innerClaim = delivery.indexOf('att.claim(');
+  const provider = delivery.search(/RESEND_EMAILS_URL\s*,/);
+  assert.ok(provider > 0, 'the provider call site could not be located — update this guard');
+  assert.ok(innerClaim > 0 && innerClaim < provider,
+    'the ledger claim does not precede the provider call, so a crash mid-send leaves no record '
+    + 'that anything may have left');
+  assert.ok(!/assertSendAllowed\(/.test(delivery),
+    'the provider half decides authorization — it must contain none, or there are two gates and '
+    + 'they can disagree');
 });
 
 test('STAGE: a released-but-undelivered message does not advance the inquiry', () => {

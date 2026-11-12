@@ -143,128 +143,31 @@ function approvedDigestOf({ to, subject, html }) {
   });
 }
 
-async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments,
-  capability = 'email.send', workflow = null, agent = null,
-  approvalId = null, expectedDigest = null }, internal = {}) {
-  // ── THE KILL SWITCH, BEFORE THE PROVIDER CALL ────────────────────────────
-  //
-  // Placed here rather than at each of the ~37 routes and 37 crons that can cause an email, so
-  // every path is covered and a path added tomorrow is covered by default.
-  //
-  // The return contract is deliberately unchanged: { ok:false, id:null, error }. sendEmail() still
-  // returns false and its 55 callers are untouched — changing the shape here is how the eight-week
-  // outage documented above would be re-created. What makes a policy stop distinguishable from an
-  // ordinary send failure is not the return value but the record: email_log gets
-  // status='stopped_by_policy' where somebody looks for a send, and autonomy_events gets a REFUSED
-  // row that cannot later be read as a provider problem.
-  //
-  // ── ONE EXEMPTION, AND WHY IT IS NOT A LOOPHOLE ──────────────────────────
-  //
-  // `email.alert` — the cron-failure channel — is checked as NON-consequential, which means a
-  // global/company/agent/workflow stop does not silence it, and neither does an unreadable
-  // kill-state. It remains stoppable by an explicit `capability:email.alert` stop.
-  //
-  // Without this the oversight channel dies with the database: Postgres goes down, every cron is
-  // halted fail-closed, the alert explaining that is ALSO refused, and a total outage becomes
-  // silence plus a console line. That is precisely the failure commit 1eba5e9 fixed this morning,
-  // re-created by the safety control.
-  //
-  // It is narrow by construction, not by promise: an alert goes only to ALERT_EMAIL/ADMIN_EMAIL
-  // from a fixed template, so the exemption cannot carry autonomous business email. And it reuses
-  // the approved THINKING-vs-ACTING rule rather than inventing a bypass — telling a human what
-  // broke is observability, in the same class as analysis, not autonomous action.
-  // ── THE GATE LIVES IN src/lib/email-gate.js, NOT HERE ────────────────────
-  //
-  // It was inline, and inline was the problem: it covered every caller of THIS file and nothing
-  // else, while two Gmail transports sent with no kill-switch check at all. One shared decision
-  // function means the three transports cannot drift, and a scanner can assert that every provider
-  // call site passes through it — which a comment cannot.
-  //
-  // The exemption is also checked there rather than asserted: `email.alert` is honoured only when
-  // the recipient is an operator address, so an ordinary message cannot relabel itself as an alert
-  // and transmit through a global stop. That was previously true only of the one caller that used
-  // it, and enforced nowhere.
-  // ── THE EXEMPTION CANNOT BE REQUESTED ────────────────────────────────────
-  //
-  // A caller-supplied `email.alert` is DOWNGRADED here, every time, with no way to opt out. The
-  // capability was an ordinary parameter, so any code in this repository could pass it with an
-  // arbitrary recipient and arbitrary HTML and transmit straight through a CEO hold. It was
-  // documented as narrow and enforced nowhere.
-  //
-  // The exemption is now reachable only through sendOperatorAlert() below, which takes a TYPE and
-  // FIELDS — no `to`, no `html`, no `subject`, no `capability`. A caller cannot express the
-  // dangerous message, so there is nothing to validate. CEO authorization 2026-11-10 item B.
-  const effectiveCapability = capability === 'email.alert' ? 'email.send' : capability;
-  if (effectiveCapability !== capability) {
-    console.warn(`[email] a caller requested capability '${capability}' directly; downgraded to `
-      + `'email.send'. Operator alerts go through sendOperatorAlert().`);
-  }
-  // transmitAlert has ALREADY passed the gate as 'email.alert' and built the message itself. Not a
-  // bypass: it is the same decision, taken once, by the one path that is allowed to take it.
-  // ── THE LEDGER ATTEMPT OPENS BEFORE AUTHORIZATION IS DECIDED ─────────────
-  //
-  // So that a REFUSAL is recorded as durably as a send. A refusal that leaves no row is a decision
-  // nobody can audit, and the whole point of the containment evidence is being able to say which
-  // attempts were refused and why.
-  //
-  // It also fails CLOSED: no record, no consequential send. Observability mail is the documented
-  // exception, for the same reason the kill switch exempts it.
-  const att = await LEDGER.beginAttempt({
-    transport: 'resend', provider: 'resend', to, subject, html,
-    workflow, agent, approvalId, consequential: !internal.alertAlreadyAuthorized,
-  });
-  if (!att.ok) {
-    return { ok: false, id: null, error: att.error, phase: 'refused_before_request',
-      providerResponded: false, stopped: false };
-  }
-
-  // ── IS THE ARTEFACT THAT WAS APPROVED THE ARTEFACT THAT IS LEAVING? ──────
-  //
-  // An approval boundary that freezes a payload still has one joint: between the release of the
-  // frozen text and the provider call, SOMETHING has to carry it, and whatever carries it could
-  // carry something else. "A human approved email A, email B went out, and the row says approved
-  // either way" is the failure, and it is not hypothetical — office/approval.js exists because the
-  // old queue recorded approvals for actions already taken.
-  //
-  // So the binding is checked HERE, at the last possible moment, against the same digest function
-  // the ledger uses. Not in the agent: a check upstream of the transport leaves exactly the window
-  // it is meant to close. The caller states the digest it had approved; this recomputes it from
-  // the bytes actually about to be transmitted, and refuses if they differ.
-  //
-  // Opt-in by parameter, because 55 callers have no approval boundary and inventing one for them
-  // here would be a different change. When a digest IS supplied, it is enforced absolutely — there
-  // is no mode in which a mismatch proceeds.
-  // Computed unconditionally now, not only when an expectedDigest was supplied: the approval gate
-  // in email-gate.js needs it for EVERY external send in order to tie an approval to these bytes.
-  const actualDigest = approvedDigestOf({ to, subject, html });
-
-  if (expectedDigest) {
-    const actual = actualDigest;
-    if (actual !== expectedDigest) {
-      const why = `approved payload digest ${expectedDigest} does not match the message about to be `
-        + `sent (${actual}) — nothing was transmitted`;
-      console.error(`[DIGEST MISMATCH] ${approvalId || '(no approval id)'}: ${why}`);
-      await att.blocked(why, 'approval:digest_mismatch');
-      return { ok: false, id: null, error: why, phase: 'digest_mismatch',
-        providerResponded: false, stopped: true, approvalId, expectedDigest, actualDigest: actual };
-    }
-  }
-
-  const gate = internal.alertAlreadyAuthorized
-    ? { allowed: true, reason: null }
-    : await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to,
-      approvalId, digest: actualDigest });
-  if (!gate.allowed) {
-    console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${gate.reason}`);
-    // BLOCKED, with the scope that blocked it — the database refuses the row without one. The
-    // return shape deliberately does not change, because 55 callers read it as a boolean.
-    // gate.scope, not a locally rebuilt string: an approval refusal has no stop row, and the old
-    // fallback would have filed it as an unreadable kill switch.
-    await att.blocked(gate.reason, gate.scope || 'authorization_undetermined');
-    return { ok: false, id: null, error: gate.reason, stopped: true, phase: 'stopped_by_policy',
-      providerResponded: false };
-  }
-
+// ── EVERYTHING AFTER A SEND HAS BEEN AUTHORIZED ──────────────────────────────
+//
+// MODULE-PRIVATE. NOT EXPORTED. Contains NO authorization logic, and has no way to express one.
+//
+// This exists because the alert path and the ordinary path share a provider call, a ledger row
+// and a result shape, and the previous way of sharing them was a second positional argument on the
+// EXPORTED sendEmailDetailed:
+//
+//     const gate = internal.alertAlreadyAuthorized ? { allowed: true } : await assertSendAllowed(...)
+//
+// Any of the 22 modules that import this file could pass it and transmit with no kill switch, no
+// approval boundary, no recipient restriction and no digest check. The comment beside it said no
+// existing caller could reach it, which was true of the callers that existed and is not a
+// mechanism. There is no test that would have caught a new one.
+//
+// A module-private Symbol as the key would have closed the forgery and left the exported function
+// still holding a bypass mode. Extracting the shared half instead means there is no bypass to
+// reach, by any key: the gate in sendEmailDetailed is not conditional on anything a caller can
+// supply, because the branch no longer exists.
+//
+// The body below is a MOVE, not a rewrite — byte-identical to what sendEmailDetailed ran after its
+// gate — so provider behaviour, email_log, the ledger transitions and the returned object are
+// unchanged. `att` is PASSED IN rather than re-created: the claim must be written against the same
+// row the caller opened, or a refusal and its send would be two different attempts.
+async function deliverAuthorized({ to, subject, html, from, replyTo, cc, attachments }, att) {
   const key = process.env.RESEND_API_KEY;
   if (!key) {
     console.log('No RESEND_API_KEY');
@@ -330,6 +233,137 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
     return { ok: false, id: null, error: e.message, phase: 'transport_unknown',
       providerResponded: false, provider: 'resend' };
   }
+}
+
+async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments,
+  capability = 'email.send', workflow = null, agent = null,
+  approvalId = null, expectedDigest = null }) {
+  // ── THE KILL SWITCH, BEFORE THE PROVIDER CALL ────────────────────────────
+  //
+  // Placed here rather than at each of the ~37 routes and 37 crons that can cause an email, so
+  // every path is covered and a path added tomorrow is covered by default.
+  //
+  // The return contract is deliberately unchanged: { ok:false, id:null, error }. sendEmail() still
+  // returns false and its 55 callers are untouched — changing the shape here is how the eight-week
+  // outage documented above would be re-created. What makes a policy stop distinguishable from an
+  // ordinary send failure is not the return value but the record: email_log gets
+  // status='stopped_by_policy' where somebody looks for a send, and autonomy_events gets a REFUSED
+  // row that cannot later be read as a provider problem.
+  //
+  // ── ONE EXEMPTION, AND WHY IT IS NOT A LOOPHOLE ──────────────────────────
+  //
+  // `email.alert` — the cron-failure channel — is checked as NON-consequential, which means a
+  // global/company/agent/workflow stop does not silence it, and neither does an unreadable
+  // kill-state. It remains stoppable by an explicit `capability:email.alert` stop.
+  //
+  // Without this the oversight channel dies with the database: Postgres goes down, every cron is
+  // halted fail-closed, the alert explaining that is ALSO refused, and a total outage becomes
+  // silence plus a console line. That is precisely the failure commit 1eba5e9 fixed this morning,
+  // re-created by the safety control.
+  //
+  // It is narrow by construction, not by promise: an alert goes only to ALERT_EMAIL/ADMIN_EMAIL
+  // from a fixed template, so the exemption cannot carry autonomous business email. And it reuses
+  // the approved THINKING-vs-ACTING rule rather than inventing a bypass — telling a human what
+  // broke is observability, in the same class as analysis, not autonomous action.
+  // ── THE GATE LIVES IN src/lib/email-gate.js, NOT HERE ────────────────────
+  //
+  // It was inline, and inline was the problem: it covered every caller of THIS file and nothing
+  // else, while two Gmail transports sent with no kill-switch check at all. One shared decision
+  // function means the three transports cannot drift, and a scanner can assert that every provider
+  // call site passes through it — which a comment cannot.
+  //
+  // The exemption is also checked there rather than asserted: `email.alert` is honoured only when
+  // the recipient is an operator address, so an ordinary message cannot relabel itself as an alert
+  // and transmit through a global stop. That was previously true only of the one caller that used
+  // it, and enforced nowhere.
+  // ── THE EXEMPTION CANNOT BE REQUESTED ────────────────────────────────────
+  //
+  // A caller-supplied `email.alert` is DOWNGRADED here, every time, with no way to opt out. The
+  // capability was an ordinary parameter, so any code in this repository could pass it with an
+  // arbitrary recipient and arbitrary HTML and transmit straight through a CEO hold. It was
+  // documented as narrow and enforced nowhere.
+  //
+  // The exemption is now reachable only through sendOperatorAlert() below, which takes a TYPE and
+  // FIELDS — no `to`, no `html`, no `subject`, no `capability`. A caller cannot express the
+  // dangerous message, so there is nothing to validate. CEO authorization 2026-11-10 item B.
+  const effectiveCapability = capability === 'email.alert' ? 'email.send' : capability;
+  if (effectiveCapability !== capability) {
+    console.warn(`[email] a caller requested capability '${capability}' directly; downgraded to `
+      + `'email.send'. Operator alerts go through sendOperatorAlert().`);
+  }
+  // The downgrade now has NO exception. It used to be paired with a note saying transmitAlert had
+  // already passed the gate and was therefore exempt from everything below — which described the
+  // bypass as though the bypass were the safeguard. transmitAlert no longer calls this function at
+  // all: it gates, opens its own attempt, and calls deliverAuthorized(). So every caller that
+  // reaches this line is gated here, and the question of who is exempt does not arise.
+  // ── THE LEDGER ATTEMPT OPENS BEFORE AUTHORIZATION IS DECIDED ─────────────
+  //
+  // So that a REFUSAL is recorded as durably as a send. A refusal that leaves no row is a decision
+  // nobody can audit, and the whole point of the containment evidence is being able to say which
+  // attempts were refused and why.
+  //
+  // It also fails CLOSED: no record, no consequential send. Observability mail is the documented
+  // exception, for the same reason the kill switch exempts it.
+  const att = await LEDGER.beginAttempt({
+    transport: 'resend', provider: 'resend', to, subject, html,
+    // ALWAYS consequential. This was `!internal.alertAlreadyAuthorized`, so a caller could
+    // downgrade the ledger's own classification of its send in the same argument that skipped
+    // the gate. The alert path opens its own non-consequential attempt in transmitAlert().
+    workflow, agent, approvalId, consequential: true,
+  });
+  if (!att.ok) {
+    return { ok: false, id: null, error: att.error, phase: 'refused_before_request',
+      providerResponded: false, stopped: false };
+  }
+
+  // ── IS THE ARTEFACT THAT WAS APPROVED THE ARTEFACT THAT IS LEAVING? ──────
+  //
+  // An approval boundary that freezes a payload still has one joint: between the release of the
+  // frozen text and the provider call, SOMETHING has to carry it, and whatever carries it could
+  // carry something else. "A human approved email A, email B went out, and the row says approved
+  // either way" is the failure, and it is not hypothetical — office/approval.js exists because the
+  // old queue recorded approvals for actions already taken.
+  //
+  // So the binding is checked HERE, at the last possible moment, against the same digest function
+  // the ledger uses. Not in the agent: a check upstream of the transport leaves exactly the window
+  // it is meant to close. The caller states the digest it had approved; this recomputes it from
+  // the bytes actually about to be transmitted, and refuses if they differ.
+  //
+  // Opt-in by parameter, because 55 callers have no approval boundary and inventing one for them
+  // here would be a different change. When a digest IS supplied, it is enforced absolutely — there
+  // is no mode in which a mismatch proceeds.
+  // Computed unconditionally now, not only when an expectedDigest was supplied: the approval gate
+  // in email-gate.js needs it for EVERY external send in order to tie an approval to these bytes.
+  const actualDigest = approvedDigestOf({ to, subject, html });
+
+  if (expectedDigest) {
+    const actual = actualDigest;
+    if (actual !== expectedDigest) {
+      const why = `approved payload digest ${expectedDigest} does not match the message about to be `
+        + `sent (${actual}) — nothing was transmitted`;
+      console.error(`[DIGEST MISMATCH] ${approvalId || '(no approval id)'}: ${why}`);
+      await att.blocked(why, 'approval:digest_mismatch');
+      return { ok: false, id: null, error: why, phase: 'digest_mismatch',
+        providerResponded: false, stopped: true, approvalId, expectedDigest, actualDigest: actual };
+    }
+  }
+
+  // UNCONDITIONAL. No parameter of this function can prevent this call from happening.
+  const gate = await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to,
+    approvalId, digest: actualDigest });
+  if (!gate.allowed) {
+    console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${gate.reason}`);
+    // BLOCKED, with the scope that blocked it — the database refuses the row without one. The
+    // return shape deliberately does not change, because 55 callers read it as a boolean.
+    // gate.scope, not a locally rebuilt string: an approval refusal has no stop row, and the old
+    // fallback would have filed it as an unreadable kill switch.
+    await att.blocked(gate.reason, gate.scope || 'authorization_undetermined');
+    return { ok: false, id: null, error: gate.reason, stopped: true, phase: 'stopped_by_policy',
+      providerResponded: false };
+  }
+
+  // The gate above has run. Nothing below decides authorization.
+  return deliverAuthorized({ to, subject, html, from, replyTo, cc, attachments }, att);
 }
 
 // The original contract, unchanged: a boolean. Every existing caller keeps working.
@@ -407,10 +441,24 @@ async function transmitAlert({ to, subject, html }) {
       providerResponded: false };
   }
   // The provider call, the email_log row and the result shape are shared with every other send —
-  // duplicating them here would be a second, quieter mailer. `__alertAlreadyAuthorized` is a
-  // SECOND POSITIONAL ARGUMENT: sendEmailDetailed's public contract is a single options object, so
-  // no existing caller can reach it by adding a property, and the gate above has already run.
-  return sendEmailDetailed({ to, subject, html }, { alertAlreadyAuthorized: true });
+  // duplicating them here would be a second, quieter mailer. So this path opens its OWN ledger
+  // attempt and calls the shared second half directly. It does NOT route through
+  // sendEmailDetailed: that function's gate is now unconditional by design, and the gate it would
+  // run is `email.send` (the alert capability is downgraded there), which the global STOP refuses.
+  // The authorization for this send is the `email.alert` gate ABOVE, eight lines up, and it is the
+  // only one that applies.
+  const att = await LEDGER.beginAttempt({
+    transport: 'resend', provider: 'resend', to, subject, html,
+    workflow: null, agent: null, approvalId: null,
+    // Operator alerts are not consequential: nobody outside the operator addresses receives them,
+    // and the recipient restriction is what makes that true rather than a claim.
+    consequential: false,
+  });
+  if (!att.ok) {
+    return { ok: false, id: null, error: att.error, phase: 'refused_before_request',
+      providerResponded: false, stopped: false };
+  }
+  return deliverAuthorized({ to, subject, html }, att);
 }
 
 module.exports = { sendEmail, sendEmailDetailed, sendEmailOrReport, encodeAttachments, MAX_ATTACH_BYTES,

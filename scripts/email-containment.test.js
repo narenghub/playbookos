@@ -456,3 +456,194 @@ test('B8. the privileged path exists and takes no content parameters', () => {
   assert.match(sig, /type/);
   assert.match(sig, /fields/);
 });
+
+// ── C1. THE PRE-PASS MUST NOT EAT CODE ──────────────────────────────────────
+//
+// Found 2026-11-12, while the C-4 patch was tripping the ordering check. blankNonCode() blanks
+// comments and string literals so that a `//` inside 'https://api.resend.com' is not read as a
+// comment. It did not understand REGEX LITERALS, and mailer.js contains one with quotes in it:
+//
+//     /not authorized to send emails from ([^"'\s]+)/i
+//
+// The `"` opened a phantom string that ran to the next `"` in the file. Before the C-4 patch the
+// swallowed span was harmless; the patch moved that line above `sendEmailDetailed`, and the span
+// then covered that function's entire declaration. The scanner did not fail — it simply could not
+// see the function, attributed its provider call to the function above, skipped it as a
+// self-reference, and reported "all 1 caller(s) gate first" about a function with two. One of the
+// two roads to the provider was unchecked, and the output said PASS.
+//
+// This file exists because a transport that exists and cannot be seen is the failure mode. A
+// pre-pass that silently erases code is that failure mode in the one place nobody audits, so it
+// gets a control of its own.
+
+test('C1. a regex literal containing quotes does not swallow the code after it', () => {
+  const src = [
+    'async function first() {',
+    '  const m = /not authorized to send emails from ([^"\'\\s]+)/i.exec(x);',
+    '  return m;',
+    '}',
+    'async function second() {',
+    '  return 1;',
+    '}',
+  ].join('\n');
+  const code = COVERAGE.blankNonCode(src);
+
+  assert.strictEqual(code.length, src.length, 'the pre-pass changed the length — line numbers lie');
+  assert.ok(code.includes('async function second('),
+    'the declaration after a quote-bearing regex was erased — the scanner cannot see that function, '
+    + 'and a function it cannot see is a path it cannot check');
+  assert.ok(code.includes('async function first('), 'the declaration before it was erased too');
+  assert.ok(!/not authorized/.test(code), 'the regex body itself survived and can match as code');
+});
+
+test('C1b. and division is still division — the control is not "blank every slash"', () => {
+  const code = COVERAGE.blankNonCode('const half = total / 2; const r = count/n;');
+  assert.ok(code.includes('total / 2'), 'a division was mistaken for a regex literal');
+  assert.ok(code.includes('count/n'), 'a division without spaces was mistaken for a regex literal');
+});
+
+test('C1c. every function in mailer.js is visible to the pre-pass', () => {
+  // The specific thing that went wrong, asserted against the real file rather than a fixture, so
+  // it cannot regress by someone adding another quote-bearing regex above a declaration.
+  const raw = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'mailer.js'), 'utf8');
+  const declared = [...raw.matchAll(/\n(?:async )?function (\w+)\s*\(/g)].map((m) => m[1]);
+  const visible = [...COVERAGE.blankNonCode(raw).matchAll(/\n(?:async )?function (\w+)\s*\(/g)]
+    .map((m) => m[1]);
+  assert.ok(declared.length >= 10, `only ${declared.length} declarations found — update this guard`);
+  assert.deepStrictEqual(visible, declared,
+    `the pre-pass hid ${declared.filter((d) => !visible.includes(d)).join(', ') || '(none)'} from `
+    + 'the scanner');
+});
+
+test('C1d. an ungated sender hiding after a quote-bearing regex is still discovered', async () => {
+  // THE CONSEQUENCE, not the mechanism — and the reason this control is the most valuable one in
+  // the file. Before the fix, the pre-pass swallowed everything from the `"` inside the regex to
+  // the next quote, so `discover()` found NO call site in this file at all and the scanner printed
+  // PASS. An ungated transport that the scanner reports as absent is precisely the failure this
+  // whole file was written for, arriving through the scanner's own blind spot.
+  //
+  // Measured on the real pre-pass on 2026-11-12: 0 call sites before the fix, 1 after.
+  const dir = plant({
+    'lib/hidden-sender.js': [
+      "const g = require('./gmail');",
+      'function parse(s) {',
+      '  const m = /not authorized to send emails from ([^"\'\\s]+)/i.exec(s);',
+      '  return m;',
+      '}',
+      'async function run(msg) {',
+      '  await g.gmail.users.messages.send(msg);',
+      '}',
+      'module.exports = { run, parse };',
+    ].join('\n'),
+  });
+  try {
+    const sites = COVERAGE.discover(dir);
+    const site = sites.find((s) => /hidden-sender/.test(s.file));
+    assert.ok(site,
+      'the sender after the regex was not discovered at all — the pre-pass ate it, and an ungated '
+      + `transport is invisible to this scanner. Sites found: ${JSON.stringify(sites)}`);
+    assert.strictEqual(site.transport, 'gmail.messages.send');
+    assert.strictEqual(site.gated, false, 'the planted sender is ungated and must be reported so');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ── C2. THE ORDERING CHECK MUST BE ABOUT EXECUTION, NOT FILE ORDER ──────────
+//
+// It compared two indexes into the whole file. The C-4 patch moved the provider half above the
+// gated function, execution order unchanged, and it reported "a provider call appears BEFORE the
+// gate" — red on a patch that made the gate unconditional. It now asks the question per call site,
+// about the enclosing function, and accepts one proven level of indirection. These two controls
+// pin both halves of that: the indirection is accepted when every caller gates, and refused when
+// one of them does not.
+
+test('C2. an ungated caller of a private transport helper is caught', async () => {
+  const dir = plant({
+    'lib/split-sender.js': [
+      "const { assertSendAllowed } = require('./email-gate');",
+      "const g = require('./gmail');",
+      'async function deliver(msg) {',
+      '  await g.gmail.users.messages.send(msg);',   // no gate here
+      '}',
+      'async function properSend(msg) {',
+      '  const gate = await assertSendAllowed({ capability: "email.send" });',
+      '  if (!gate.allowed) return false;',
+      '  return deliver(msg);',
+      '}',
+      'async function sloppySend(msg) {',
+      '  return deliver(msg);',                      // and none here either
+      '}',
+      'module.exports = { properSend, sloppySend };',
+    ].join('\n'),
+  });
+  try {
+    const sites = COVERAGE.discover(dir);
+    const site = sites.find((s) => /split-sender/.test(s.file));
+    assert.ok(site, `the planted sender was not discovered: ${JSON.stringify(sites)}`);
+    // The file imports and calls the gate, so the coarse "is this file gated" axis says yes. The
+    // whole point of the per-call-site check is that this is not enough.
+    assert.strictEqual(site.gated, true,
+      'the fixture must look gated at file level, or it does not exercise the ordering check');
+
+    // And the ordering check itself must refuse it. This is why gateOrdering() is exported: while
+    // it was inline in main(), the only input it ever saw was this repository, so neither of the
+    // two defects it shipped with could be caught by a test.
+    const src = fs.readFileSync(path.join(dir, 'lib', 'split-sender.js'), 'utf8');
+    const findings = COVERAGE.gateOrdering('lib/split-sender.js', COVERAGE.blankNonCode(src));
+    const refusals = findings.filter((f) => !f.ok);
+    assert.strictEqual(refusals.length, 1,
+      `expected exactly one refusal, got ${JSON.stringify(findings.map((f) => f.message))}`);
+    assert.match(refusals[0].message, /deliver\(\) reaches .* and 1 of its 2 caller\(s\) do not gate first/);
+    assert.match(refusals[0].detail, /sloppySend\(\) calls deliver\(\)/,
+      'the refusal does not name WHICH caller failed to gate, which is what someone has to fix');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('C2b. and the same shape with BOTH callers gating is accepted', () => {
+  // The positive half. Without it, C2 would pass against an ordering check that refuses every
+  // indirection — which would be a check nobody could satisfy, and the first person to hit it
+  // would delete it. This is the exact shape mailer.js now has after the C-4 patch.
+  const src = [
+    "const { assertSendAllowed } = require('./email-gate');",
+    "const g = require('./gmail');",
+    'async function deliver(msg) {',
+    '  await g.gmail.users.messages.send(msg);',
+    '}',
+    'async function sendOne(msg) {',
+    '  const gate = await assertSendAllowed({ capability: "email.send" });',
+    '  if (!gate.allowed) return false;',
+    '  return deliver(msg);',
+    '}',
+    'async function sendAlert(msg) {',
+    '  const gate = await assertSendAllowed({ capability: "email.alert" });',
+    '  if (!gate.allowed) return false;',
+    '  return deliver(msg);',
+    '}',
+    'module.exports = { sendOne, sendAlert };',
+  ].join('\n');
+  const findings = COVERAGE.gateOrdering('lib/ok-sender.js', COVERAGE.blankNonCode(src));
+  assert.deepStrictEqual(findings.filter((f) => !f.ok), [],
+    'a correctly gated indirection was refused');
+  assert.match(findings[0].message, /all 2 caller\(s\) gate first/);
+});
+
+test('C2c. a private helper that transmits and is EXPORTED is refused', () => {
+  // The indirection is only acceptable because the helper cannot be called from outside the file.
+  // Export it and the argument collapses — this is C-4 by another spelling.
+  const src = [
+    "const { assertSendAllowed } = require('./email-gate');",
+    "const g = require('./gmail');",
+    'async function deliver(msg) {',
+    '  await g.gmail.users.messages.send(msg);',
+    '}',
+    'async function sendOne(msg) {',
+    '  const gate = await assertSendAllowed({ capability: "email.send" });',
+    '  if (!gate.allowed) return false;',
+    '  return deliver(msg);',
+    '}',
+    'module.exports = { sendOne, deliver };',
+  ].join('\n');
+  const findings = COVERAGE.gateOrdering('lib/leaky.js', COVERAGE.blankNonCode(src));
+  const refusals = findings.filter((f) => !f.ok);
+  assert.strictEqual(refusals.length, 1, JSON.stringify(findings.map((f) => f.message)));
+  assert.match(refusals[0].message, /is EXPORTED/);
+});

@@ -277,6 +277,17 @@ pf_step "both original scanner defects go red against the original scanner" \
 pf_step "no unreviewed dependency has been added" node scripts/check-dependency-additions.js
 pf_step "containment holds under stop, scope, failure and relabelling" env JWT_SECRET=preflight node --test scripts/email-containment.test.js
 
+# ── C-4: THE GATE CANNOT BE SKIPPED BY ASKING ───────────────────────────────
+#
+# `sendEmailDetailed` took a second positional argument, `{ alertAlreadyAuthorized: true }`, which
+# replaced the gate result with `{ allowed: true }` — no kill switch, no approval, no recipient
+# restriction, and a ledger row marked non-consequential. It is exported, and 22 modules import it.
+# Removing it had to leave operator alerts working under a hold, so the suite asserts both
+# directions with PROVIDER INVOCATION COUNTS, and carries a structural ratchet: the gate call must
+# not sit inside a conditional on any parameter, and the private provider half must stay unexported.
+pf_step "the send gate cannot be skipped by a caller, and alerts still reach the operator" \
+  env JWT_SECRET=preflight node --test scripts/mailer-authorization-bypass.test.js
+
 # ── S1.1: EVERY TRANSPORT IS OBSERVABLE, NOT JUST GOVERNED ──────────────────
 #
 # S1 proved every outbound path is behind the kill switch. It did not make them visible: the
