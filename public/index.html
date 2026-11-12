@@ -4195,7 +4195,14 @@ window.apEsc = function apEsc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 };
 
-window._apState = { status: 'pending', open: null };
+// ── THE APPROVALS SCREEN'S OWN STATE ─────────────────────────────────────────
+//
+// `_apvState`, not `_apState`. A screen far below this one declares
+// `window._apState = { total:0, pageSize:50, ... }` at top level, and because it runs later it
+// won. This page then read `.status` off the OTHER screen's object, got `undefined`, and asked the
+// server for `?status=undefined`. Two unrelated screens sharing a global is a collision that no
+// test sees until one of them is wrong at runtime.
+window._apvState = { status: 'pending', open: null };
 
 window.apMoney = function apMoney(n, currency) {
   if (n === null || n === undefined || n === '' || isNaN(Number(n))) return '—';
@@ -4286,7 +4293,7 @@ window.apRow = function apRow(a) {
 };
 
 window.apOpen = async function apOpen(id) {
-  window._apState.open = id;
+  window._apvState.open = id;
   var host = document.getElementById('ap-detail');
   if (host) host.innerHTML = '<div class="card"><p style="margin:0">Loading the message…</p></div>';
   var d = await API('/approvals/' + encodeURIComponent(id));
@@ -4361,15 +4368,20 @@ window.apDecide = async function apDecide(id, decision) {
   await window.apOpen(id);
 };
 
-window.apSetStatus = function apSetStatus(v) { window._apState.status = v; window.approvalsPage(); };
+window.apSetStatus = function apSetStatus(v) { window._apvState.status = v; window.approvalsPage(); };
 
 window.approvalsPage = async function approvalsPage() {
-  var host = document.getElementById('page-content');
+  // 'content', not 'page-content'. There is no element with id 'page-content' anywhere in this
+  // file — the shell's host is `<div id="content">` and 56 other screens target it. With a null
+  // host this function returned cleanly, having painted nothing, so navigate()'s guards saw a
+  // render that neither threw nor rejected and left the shell's "Loading..." on screen for ever.
+  // That is the silent-failure shape this file already learned once, reached a third way.
+  var host = document.getElementById('content');
   if (!host) return;
   host.innerHTML = '<h2 style="margin:0 0 4px">Approvals</h2>'
     + '<p style="color:var(--gray);font-size:13px;margin:0 0 14px">Reading what is waiting…</p>';
 
-  var d = await API('/approvals?status=' + encodeURIComponent(window._apState.status));
+  var d = await API('/approvals?status=' + encodeURIComponent(window._apvState.status));
   if (!d || d.error) {
     // A failure here must never look like an empty queue. An empty list that means "the kernel is
     // not migrated" reads as "you are clear", which is the silence the 1,113 lost emails were
@@ -4382,7 +4394,7 @@ window.approvalsPage = async function approvalsPage() {
   }
 
   var tabs = ['pending', 'approved', 'rejected', 'all'].map(function (v) {
-    var on = window._apState.status === v;
+    var on = window._apvState.status === v;
     return '<button class="btn" style="margin-right:6px;' + (on ? '' : 'background:#eee;color:#333')
       + '" onclick="window.apSetStatus(\'' + v + '\')">' + v + '</button>';
   }).join('');
@@ -4396,7 +4408,7 @@ window.approvalsPage = async function approvalsPage() {
         + 'All ' + d.count + ' were read from the kernel for company ' + window.apEsc(d.company_id) + '.</p></div>')
     + '<div id="ap-detail" style="margin-top:16px"></div>';
 
-  if (window._apState.open) await window.apOpen(window._apState.open);
+  if (window._apvState.open) await window.apOpen(window._apvState.open);
 };
 
 pages['approvals'] = window.approvalsPage;

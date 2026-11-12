@@ -35,6 +35,13 @@ echo "── preflight"
 pf_step "test suite" env JWT_SECRET=preflight node --test $(find src scripts -name '*.test.js')
 pf_step "SPA parses (local file)" node scripts/check-spa-parse.js
 pf_step "classic nav parity" node scripts/verify-classic-nav-parity.js
+# PARSING IS NOT RENDERING, AND REGISTRATION IS NOT RENDERING.
+# The Approvals screen shipped on 2026-11-11 reading `getElementById('page-content')`, an id that
+# exists nowhere, and returned on its own null-host guard having painted nothing. The two checks
+# directly above were both green: the file parses, and the page is registered in `pages`. The
+# screen never worked. This one drives the real dispatcher in a real browser and looks at what the
+# user would see. It exits 3 (NOT EXECUTED) without a browser rather than passing quietly.
+pf_step "the Approvals screen actually renders" node scripts/check-approvals-page-renders.js
 # Executes the shipped molecule-search SQL on a real Postgres. The parsers above cannot tell whether
 # a query RUNS — `column "name" does not exist` shipped past all of them once. SKIPs cleanly (exit 0)
 # where no server is available, so this never blocks a laptop without Postgres installed.
