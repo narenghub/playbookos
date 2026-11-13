@@ -116,7 +116,7 @@ db.query = async (sql, params = []) => {
 const realBeginAttempt = LEDGER.beginAttempt;
 LEDGER.beginAttempt = async (args = {}, deps) => {
   ATTEMPTS.push({ consequential: args.consequential, to: args.to, approvalId: args.approvalId,
-    workflow: args.workflow, agent: args.agent });
+    workflow: args.workflow, agent: args.agent, claimRef: args.claimRef });
   return realBeginAttempt(args, deps);
 };
 
@@ -468,4 +468,45 @@ test('7d. transmitAlert does not route through the exported function', () => {
     'transmitAlert calls sendEmailDetailed, whose gate will refuse it under a global STOP');
   assert.ok(/deliverAuthorized\s*\(/.test(body),
     'transmitAlert no longer reaches the shared provider half — it may have grown a second transport');
+});
+
+// ══ PROVENANCE ON THE ALERT PATH ═══════════════════════════════════════════
+
+test('an operator alert records WHICH alert it was, and still bypasses only the global hold', async () => {
+  // CEO direction 2026-11-13 item 4. Found during containment verification: the single
+  // PROVIDER_ACCEPTED row in production carried null workflow and null agent, so an alert was
+  // attributable only by transport — and an alert is the one send that still happens under a total
+  // hold, which makes it the one whose provenance matters most.
+  //
+  // Uses this file's OWN GLOBAL_STOP and ALERT fixtures. My first version invented its own, with
+  // scope_key '' where the shared one uses null, and the gate's breadth logic treats those
+  // differently — so it failed for a reason that had nothing to do with provenance.
+  STOPS = GLOBAL_STOP;
+
+  const r = await MAILER.sendOperatorAlert(ALERT);
+  assert.strictEqual(r.ok, true, `the alert was not delivered under a global STOP: ${r.error}`);
+
+  const att = ATTEMPTS[ATTEMPTS.length - 1];
+  assert.ok(att, 'the alert opened no ledger attempt');
+  assert.strictEqual(att.workflow, 'operator-alert',
+    'the alert row carries no workflow, so it is attributable only by transport');
+  assert.strictEqual(att.agent, `alert:${ALERT.type}`,
+    'the alert row does not record WHICH alert it was');
+
+  // UNCHANGED, asserted rather than assumed: still non-consequential, still no claimRef.
+  assert.strictEqual(att.consequential, false,
+    'the alert became consequential — the channel that reports breakage must not be taken out by it');
+  assert.ok(!att.claimRef,
+    'the alert was given a claimRef: the claim-uniqueness index would then make a SECOND alert of '
+    + 'the same kind collide with the first and be refused, silencing the channel');
+});
+
+test('…and a deliberate email.alert stop still silences it', async () => {
+  // The other half of "the exemption is unchanged": it exempts alerts from a GLOBAL hold, never
+  // from oversight of the alert channel itself.
+  STOPS = [{ scope_type: 'capability', scope_key: 'email.alert', reason: 'alert channel held' }];
+  const before = SENDS.length;
+  const r = await MAILER.sendOperatorAlert(ALERT);
+  assert.strictEqual(r.ok, false, 'a capability:email.alert stop did not silence the alert path');
+  assert.strictEqual(SENDS.length, before, 'the provider was invoked despite the alert stop');
 });

@@ -431,13 +431,13 @@ async function sendOperatorAlert({ type, fields = {} }, deps = {}) {
   }
   // Non-consequential by construction, not by request: this is the one call site in the repository
   // that passes 'email.alert', and the content it carries was built above rather than supplied.
-  return transmitAlert(built.message);
+  return transmitAlert(built.message, { type });
 }
 
 // Separated so the alert path cannot be reached by passing a capability, and so the downgrade in
 // sendEmailDetailed cannot swallow it. Everything else about a send — the provider, the log, the
 // result shape — is shared.
-async function transmitAlert({ to, subject, html }) {
+async function transmitAlert({ to, subject, html }, { type = null } = {}) {
   const gate = await assertSendAllowed({ capability: 'email.alert', to });
   if (!gate.allowed) {
     // A deliberate `capability:email.alert` stop still silences alerts. The exemption is from a
@@ -456,7 +456,24 @@ async function transmitAlert({ to, subject, html }) {
   // only one that applies.
   const att = await LEDGER.beginAttempt({
     transport: 'resend', provider: 'resend', to, subject, html,
-    workflow: null, agent: null, approvalId: null,
+    // ── PROVENANCE, WITHOUT TOUCHING THE EXEMPTION ──────────────────────────
+    //
+    // These were both null, so an alert appeared in the ledger as a PROVIDER_ACCEPTED row
+    // attributable only by transport — and an alert is the one send that still happens under a
+    // total hold, which makes it the one whose provenance matters most. The 2026-11-11 row found
+    // during containment verification was exactly that: real, correct, and identifiable only by
+    // elimination.
+    //
+    // This changes NOTHING about authorization. The gate above is still `email.alert`, still the
+    // only one that applies here, and a deliberate `capability:email.alert` stop still silences
+    // this path. Only the row is more legible.
+    workflow: 'operator-alert',
+    agent: type ? `alert:${type}` : 'alert:unspecified',
+    approvalId: null,
+    // DELIBERATELY NO claimRef. The claim-uniqueness index covers claim_ref, so giving alerts one
+    // would make a second alert of the same kind collide with the first and be refused — turning a
+    // provenance improvement into a mechanism that silences the channel that reports breakage.
+    // Alerts are not idempotent by key and must not be made to look as though they are.
     // Operator alerts are not consequential: nobody outside the operator addresses receives them,
     // and the recipient restriction is what makes that true rather than a claim.
     consequential: false,
