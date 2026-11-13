@@ -25,8 +25,11 @@
 
 'use strict';
 
-process.env.JWT_SECRET = process.env.JWT_SECRET || 'e2e-demo';
-process.env.SENDER_SERVICE_SECRET = 'e2e-shared-secret-authenticates-requests-only';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'PLACEHOLDER-not-a-secret';
+// A PLACEHOLDER, and the naming matters: scripts/check-secrets.js flags a hard-coded fallback
+// whose value does not announce itself as fake, and the repository's convention for these is
+// PLACEHOLDER-/REPLACE_ME_. This value authenticates nothing outside this process.
+process.env.SENDER_SERVICE_SECRET = 'PLACEHOLDER-not-a-secret-local-demo-only';
 
 const http = require('http');
 const express = require('express');
@@ -73,7 +76,7 @@ const ledger = {
     const set = (o, note) => { row.outcome = o; transitions.push([row.id, o, note || '']); };
     return { ok: true, id: row.id,
       blocked: async (why, scope) => set('BLOCKED', `scope ${scope}`),
-      claim: async () => set('CLAIMED', 'responsibility taken, before the provider call'),
+      claim: async () => { set('CLAIMED', 'responsibility taken, before the provider call'); return { ok: true }; },
       accepted: async (p) => set('PROVIDER_ACCEPTED', `provider id ${p}`),
       rejected: async (e) => set('PROVIDER_REJECTED', String(e)),
       unknown: async (e) => set('OUTCOME_UNKNOWN', String(e)) };

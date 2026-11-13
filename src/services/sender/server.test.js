@@ -49,7 +49,7 @@ function fakeLedger({ priorClaim = null, beginFails = false, throwOnBegin = fals
       if (beginFails) return { ok: false, error: 'schema not applied' };
       return { ok: true, id: 'att-1',
         blocked: async (why, scope) => rows.push({ kind: 'BLOCKED', scope, why }),
-        claim: async () => rows.push({ kind: 'CLAIMED' }),
+        claim: async () => { rows.push({ kind: 'CLAIMED' }); return { ok: true }; },
         accepted: async (id) => rows.push({ kind: 'PROVIDER_ACCEPTED', id }),
         rejected: async (e) => rows.push({ kind: 'PROVIDER_REJECTED', e }),
         unknown: async (e) => rows.push({ kind: 'OUTCOME_UNKNOWN', e }) };
@@ -379,7 +379,7 @@ test('8. dispatch through the REAL service, over one shared ledger, sends exactl
       rows.push(row);
       const set = (o) => { row.outcome = o; };
       return { ok: true, id: row.id,
-        blocked: async () => set('BLOCKED'), claim: async () => set('CLAIMED'),
+        blocked: async () => set('BLOCKED'), claim: async () => { set('CLAIMED'); return { ok: true }; },
         accepted: async () => set('PROVIDER_ACCEPTED'), rejected: async () => set('PROVIDER_REJECTED'),
         unknown: async () => set('OUTCOME_UNKNOWN') };
     },
@@ -433,7 +433,7 @@ test('8b. and a REPLAYED request to the service is still refused as a duplicate'
   }), {
     env: ENV, gate: allow, handlers: { gmail_cphi: c.send },
     ledger: {
-      beginAttempt: async (a) => { rows.push({ id: 'att-new', claimRef: a.claimRef, outcome: 'PREPARED' }); return { ok: true, id: 'att-new', blocked: async () => {}, claim: async () => {}, accepted: async () => {}, rejected: async () => {}, unknown: async () => {} }; },
+      beginAttempt: async (a) => { rows.push({ id: 'att-new', claimRef: a.claimRef, outcome: 'PREPARED' }); return { ok: true, id: 'att-new', blocked: async () => {}, claim: async () => ({ ok: true }), accepted: async () => {}, rejected: async () => {}, unknown: async () => {} }; },
       priorClaim: async (ref, { excludeId } = {}) => rows.find((r) => r.claimRef === ref && r.id !== excludeId && r.outcome === 'CLAIMED') || null,
     },
   });

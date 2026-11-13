@@ -46,7 +46,7 @@ function fakeLedger({ priorClaim = null, beginFails = false, throwOnBegin = fals
         ok: true,
         id,
         blocked: async (reason, scope) => rows.push({ kind: 'blocked', id, reason, scope }),
-        claim: async () => rows.push({ kind: 'claim', id }),
+        claim: async () => { rows.push({ kind: 'claim', id }); return { ok: true }; },
         accepted: async (pid) => rows.push({ kind: 'accepted', id, pid }),
         rejected: async (e) => rows.push({ kind: 'rejected', id, e }),
         unknown: async (e) => rows.push({ kind: 'unknown', id, e }),

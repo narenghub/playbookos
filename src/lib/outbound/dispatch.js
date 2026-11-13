@@ -208,12 +208,27 @@ async function dispatch({
   // So a REFUSAL is as durable as a send. A refusal nobody can audit is indistinguishable from a
   // bug, and the containment evidence is built from these rows.
   const actualDigest = transmittedDigest(message);
+
+  // ── THE STABLE DISPATCH IDENTIFIER ────────────────────────────────────────
+  //
+  // One logical submission, one id, written to correlation_id by BOTH layers. The application and
+  // the sender service each keep their own audit row — separate responsibilities, neither removed —
+  // and this is what lets a report tell "two records of one submission" from "two submissions".
+  //
+  // DERIVED from the idempotency key, not random. A random id per call would correlate the two
+  // layers of ONE attempt and nothing more; derived, a retry under the same key lands on the same
+  // correlation, so one key is one transmission by construction rather than by arithmetic. It is
+  // hashed rather than used raw because the key is caller-supplied and correlation_id is indexed:
+  // a bounded, opaque value keeps the index predictable and keeps recipient-shaped strings out of
+  // a column that is read in bulk.
+  const dispatchId = dispatchIdFor(idempotencyKey);
   let att;
   try {
     att = await ledger.beginAttempt({
       transport, provider: transport, to, subject, html,
       workflow, agent, companyId, approvalId,
       claimRef: idempotencyKey,
+      correlationId: dispatchId,
       consequential: true,
     }, deps.ledgerDeps);
   } catch (e) {
@@ -294,7 +309,21 @@ async function dispatch({
   // Durable responsibility BEFORE the provider call. A crash between here and the response leaves
   // a row saying an attempt was made and its outcome is unknown — which is the truth, and is what
   // stops the next run reading "never attempted" and sending a second time.
-  await att.claim();
+  // ── THE CLAIM IS THE ARBITRATION POINT, AND ITS ANSWER IS OBEYED ──────────
+  //
+  // priorClaim() above gives the honest reason for the ordinary case, but it cannot be the
+  // guarantee: two concurrent dispatches can both read "no prior claim" before either writes. The
+  // claim itself decides, in one statement, against a unique index — and a gate whose answer is
+  // computed and ignored is not a gate, which is the finding this repository has already recorded
+  // once about assertSendAllowed.
+  const claimed = await att.claim();
+  if (!claimed || !claimed.ok) {
+    return refuse(claimed && claimed.lost ? 'refused_duplicate' : 'refused_before_request',
+      claimed && claimed.lost
+        ? 'another attempt under this idempotencyKey claimed responsibility first; not sending again'
+        : `responsibility could not be recorded (${(claimed && claimed.error) || 'unknown'}) — nothing was sent`,
+      claimed && claimed.lost ? { concurrentClaim: true } : {});
+  }
 
   let result;
   try {
@@ -307,7 +336,8 @@ async function dispatch({
     // side's own suite could see it, because each was correct about itself.
     result = await impl.send({
       ...message,
-      _dispatch: { approvalId, digest: actualDigest, workflow, agent, idempotencyKey, companyId },
+      _dispatch: { approvalId, digest: actualDigest, workflow, agent, idempotencyKey, companyId,
+        dispatchId },
     });
   } catch (e) {
     // The request may have reached the provider before this threw. OUTCOME_UNKNOWN, never
@@ -321,6 +351,7 @@ async function dispatch({
     await att.accepted(result.id || null);
     return { ok: true, id: result.id || null, phase: 'provider_accepted', error: null,
       providerResponded: true, dispatched: true, transport, approvalId, digest: actualDigest,
+      dispatchId,
       // Provider-specific facts the caller needs and dispatch must not interpret — a Gmail
       // threadId, for instance, which the agent stores and threads its next follow-up onto.
       meta: (result && result.meta) || null };
@@ -331,5 +362,10 @@ async function dispatch({
     providerResponded: !!(result && result.providerResponded), dispatched: true, transport };
 }
 
+/** The stable identifier for one logical submission. Exported so reports and controls agree. */
+function dispatchIdFor(idempotencyKey) {
+  return LEDGER.digestOf({ to: 'dispatch', subject: idempotencyKey, html: '' });
+}
+
 module.exports = { dispatch, registerTransport, knownTransports, payloadDigest,
-                   transmittedDigest, TRANSPORTS };
+                   transmittedDigest, dispatchIdFor, TRANSPORTS };

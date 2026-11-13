@@ -56,7 +56,10 @@ db.query = async (sql, params = []) => {
   if (/information_schema\.columns/i.test(sql)) {
     return { rows: [{ n: require('./outbound/ledger-schema').ADDED_COLUMNS.length }] };
   }
-  if (/UPDATE email_log/i.test(sql)) return { rows: [] };
+  // RETURNING id, as a real UPDATE of an existing row does. claim() is the arbitration point now
+  // and reads the returned row to know whether IT won the claim, so a stub answering every UPDATE
+  // with zero rows makes the mailer refuse every send for a reason unrelated to these tests.
+  if (/UPDATE email_log/i.test(sql)) return { rows: [{ id: params[0] }] };
   if (/SELECT 1 FROM notifications/i.test(sql)) return { rows: DUP ? [{ '?column?': 1 }] : [] };
   if (/INSERT INTO notifications/i.test(sql)) { NOTIFS.push(params); return { rows: [] }; }
   return { rows: [] };

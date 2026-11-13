@@ -66,7 +66,7 @@ function world({ stopped = false } = {}) {
       const set = (o, x = {}) => { row.outcome = o; Object.assign(row, x); };
       return { ok: true, id: row.id,
         blocked: async (why, scope) => set('BLOCKED', { scope, why }),
-        claim: async () => set('CLAIMED'),
+        claim: async () => { set('CLAIMED'); return { ok: true }; },
         accepted: async (p) => set('PROVIDER_ACCEPTED', { provider_id: p }),
         rejected: async (e) => set('PROVIDER_REJECTED', { e }),
         unknown: async (e) => set('OUTCOME_UNKNOWN', { e }) };

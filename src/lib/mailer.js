@@ -192,7 +192,14 @@ async function deliverAuthorized({ to, subject, html, from, replyTo, cc, attachm
     // CLAIMED before the provider call. A crash between here and the response leaves a row saying
     // an attempt was made and its outcome is unknown — which is the truth, and is what stops the
     // next run reading "never attempted" and sending a second time.
-    await att.claim();
+    // claim() now ARBITRATES and reports, so its answer must be read here too: a second attempt
+    // under the same claimRef loses the claim and must not reach Resend.
+    const claimed = await att.claim();
+    if (claimed && claimed.ok === false) {
+      return { ok: false, id: null, error: claimed.error, stopped: false,
+        providerResponded: false, dispatched: false,
+        duplicate: !!claimed.lost };
+    }
     const res = await fetch(RESEND_EMAILS_URL, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${key}`, 'Content-Type': 'application/json' },

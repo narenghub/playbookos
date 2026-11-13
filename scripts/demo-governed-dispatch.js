@@ -47,7 +47,7 @@ function mockLedger({ priorClaim = null } = {}) {
       const id = `att-${rows.length}`;
       return { ok: true, id,
         blocked: async (why, scope) => rows.push({ kind: 'BLOCKED', scope, why }),
-        claim: async () => rows.push({ kind: 'CLAIMED', id }),
+        claim: async () => { rows.push({ kind: 'CLAIMED', id }); return { ok: true }; },
         accepted: async (pid) => rows.push({ kind: 'PROVIDER_ACCEPTED', pid }),
         rejected: async (e) => rows.push({ kind: 'PROVIDER_REJECTED', e }),
         unknown: async (e) => rows.push({ kind: 'OUTCOME_UNKNOWN', e }) };

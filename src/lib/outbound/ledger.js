@@ -145,8 +145,40 @@ async function beginAttempt({
       outcome: 'BLOCKED', status: 'stopped_by_policy',
       stop_scope: scope || 'unspecified', error_message: reason || null,
     }),
-    // Durable responsibility, before the provider call.
-    claim: () => write({ outcome: 'CLAIMED', status: 'claimed', claimed_at: new Date() }),
+    // ── DURABLE RESPONSIBILITY, AND THE ARBITRATION POINT ──────────────────
+    //
+    // Returns { ok: true } if THIS attempt took responsibility, { ok: false, lost: true } if
+    // another attempt under the same claim_ref already had it. THE CALLER MUST CHECK, and must not
+    // touch a provider on ok:false — twelve concurrent dispatches under one key passed priorClaim
+    // together and four of them sent, which is what this return value exists to prevent.
+    //
+    // The decision is the partial unique index on claim_ref, in one statement, because two
+    // transactions can both read "no prior claim" before either writes. A unique violation here is
+    // not an error to log and continue past: it is the answer.
+    claim: async () => {
+      try {
+        const r = await q(deps)(
+          `UPDATE ${SCHEMA.TABLE} SET outcome = 'CLAIMED', status = 'claimed', claimed_at = NOW()
+            WHERE id = $1 RETURNING id`, [id]);
+        if (!r.rows.length) {
+          return { ok: false, lost: false,
+            error: 'the attempt row vanished before it could be claimed' };
+        }
+        return { ok: true };
+      } catch (e) {
+        const msg = (e && e.message) || String(e);
+        if (/duplicate key|unique constraint|idx_email_log_one_claim_per_ref/i.test(msg)) {
+          console.warn(`[ledger] ${transport} attempt ${id}: another attempt already holds `
+            + `claim ${recipients ? '' : ''}${JSON.stringify(claimRef)} — refusing`);
+          return { ok: false, lost: true,
+            error: 'another attempt under this idempotency key already claimed responsibility' };
+        }
+        // Any other failure means responsibility was NOT recorded. A consequential send must not
+        // proceed on an unrecorded claim, so this is a refusal too, not a warning.
+        console.error(`[ledger] ${transport} attempt ${id}: claim failed: ${msg}`);
+        return { ok: false, lost: false, error: `the claim could not be recorded: ${msg}` };
+      }
+    },
     accepted: (messageId) => write({
       outcome: 'PROVIDER_ACCEPTED', status: 'sent',
       provider_message_id: messageId || null, provider_responded_at: new Date(),
@@ -225,6 +257,54 @@ async function executionByTransport(transports, { sinceISO } = {}, deps = {}) {
       WHERE sent_at >= $1 AND transport IS NOT NULL
       GROUP BY transport, outcome`, [sinceISO]);
 
+  // ── ONE PROVIDER SUBMISSION IS ONE TRANSMISSION ───────────────────────────
+  //
+  // Counting rows double-counts every send, and that became true the moment the sender moved out
+  // of process: the application writes its own audit row and the service writes its own, by
+  // design, because they are separate audit responsibilities and neither may be removed. Two
+  // records, one submission.
+  //
+  // So transmissions are counted on DISTINCT correlation_id, which dispatch() sets to a stable
+  // identifier derived from the idempotency key and passes to the service, which writes the same
+  // value. One logical submission therefore has one correlation across both rows, and a retry
+  // under the same key lands on the same correlation too.
+  //
+  // A row with correlation_id NULL cannot be correlated with anything, so it counts ON ITS OWN —
+  // COUNT(DISTINCT col) ignores NULLs, which would silently drop it, and a dropped send is the one
+  // direction a containment report must never err in. Hence the explicit NULL arm.
+  const submissions = await q(deps)(
+    `SELECT transport,
+            COUNT(DISTINCT correlation_id) FILTER (WHERE correlation_id IS NOT NULL)
+              + COUNT(*) FILTER (WHERE correlation_id IS NULL) AS n
+       FROM ${SCHEMA.TABLE}
+      WHERE sent_at >= $1 AND transport IS NOT NULL
+        AND outcome = ANY($2)
+      GROUP BY transport`,
+    [sinceISO, SCHEMA.MAY_HAVE_LEFT]);
+
+  const submitted = new Map(submissions.rows.map((r) => [r.transport, Number(r.n) || 0]));
+
+  // ── THE GAP BETWEEN THE TWO BUCKETS ───────────────────────────────────────
+  //
+  // CLAIMED is in NEITHER MAY_HAVE_LEFT nor DEFINITELY_NOT_SENT, and that is right — it means
+  // responsibility was taken and what happened next is unknown. But it also meant a crashed
+  // mid-send was INVISIBLE to this report: counted as neither sent nor not-sent, so a transport
+  // that died between the claim and the response read as NO_TRANSMISSION while a message may have
+  // gone. Found by simulating exactly that state.
+  //
+  // Unresolved claims are therefore counted and reported SEPARATELY. Not folded into transmissions
+  // — "one provider submission is one transmission" and a claim is not a submission — and not
+  // dropped either. RECONCILED is the outcome a reconciliation job writes when it resolves one.
+  const unresolved = await q(deps)(
+    `SELECT transport,
+            COUNT(DISTINCT correlation_id) FILTER (WHERE correlation_id IS NOT NULL)
+              + COUNT(*) FILTER (WHERE correlation_id IS NULL) AS n
+       FROM ${SCHEMA.TABLE}
+      WHERE sent_at >= $1 AND transport IS NOT NULL
+        AND outcome = 'CLAIMED'
+      GROUP BY transport`, [sinceISO]);
+  const unresolvedBy = new Map(unresolved.rows.map((r) => [r.transport, Number(r.n) || 0]));
+
   const seen = new Map();
   for (const r of rows.rows) {
     if (!seen.has(r.transport)) seen.set(r.transport, {});
@@ -237,17 +317,67 @@ async function executionByTransport(transports, { sinceISO } = {}, deps = {}) {
       return { transport: t, observed: false, state: 'UNKNOWN',
         why: 'no ledger rows — this transport has not been observed, which is NOT the same as having sent nothing' };
     }
-    const mayHaveLeft = SCHEMA.MAY_HAVE_LEFT.reduce((a, k) => a + (counts[k] || 0), 0);
+    // Rows that may have left, which is what it has always been, and is now reported as what it
+    // is: a count of RECORDS, not of messages.
+    const rowsMayHaveLeft = SCHEMA.MAY_HAVE_LEFT.reduce((a, k) => a + (counts[k] || 0), 0);
     const blocked = counts.BLOCKED || 0;
+    const transmissions = submitted.get(t) || 0;
+
     return {
-      transport: t, observed: true, counts, blocked, may_have_left: mayHaveLeft,
-      state: mayHaveLeft > 0 ? 'TRANSMITTED' : (blocked > 0 ? 'BLOCKED_ONLY' : 'NO_TRANSMISSION'),
+      transport: t, observed: true, counts, blocked,
+      // THE ANSWER TO "how many messages may have reached somebody".
+      transmissions,
+      // The record count, kept and renamed rather than removed: the gap between the two is how a
+      // reader notices that a layer stopped writing its row.
+      rows_may_have_left: rowsMayHaveLeft,
+      // Retained under its original name because existing callers and checks read it, and it must
+      // keep meaning the same thing to them — but it now carries the de-duplicated figure, which
+      // is what every one of those callers was trying to ask for.
+      may_have_left: transmissions,
+      audit_records_per_submission: transmissions > 0
+        ? Number((rowsMayHaveLeft / transmissions).toFixed(2)) : null,
+      // Claims nobody resolved. A crash mid-send leaves one, and it must not read as silence.
+      unresolved_claims: unresolvedBy.get(t) || 0,
+      state: transmissions > 0
+        ? 'TRANSMITTED'
+        : ((unresolvedBy.get(t) || 0) > 0
+          ? 'UNRESOLVED_CLAIM'
+          : (blocked > 0 ? 'BLOCKED_ONLY' : 'NO_TRANSMISSION')),
     };
   });
 }
 
+/**
+ * Every submission in the window, with the rows that recorded it. For reconciliation and for the
+ * controls that assert reporting matches reality.
+ *
+ * One entry per correlation_id, so `length` is the number of provider submissions that may have
+ * left. An uncorrelated row appears as its own entry, for the reason given above.
+ */
+async function submissionsByCorrelation({ sinceISO, transports = null } = {}, deps = {}) {
+  const res = await q(deps)(
+    `SELECT COALESCE(correlation_id, 'uncorrelated:' || id::text) AS correlation,
+            transport,
+            COUNT(*)::int AS records,
+            MIN(sent_at) AS first_seen,
+            ARRAY_AGG(DISTINCT outcome) AS outcomes,
+            ARRAY_AGG(DISTINCT claim_ref) FILTER (WHERE claim_ref IS NOT NULL) AS claim_refs
+       FROM ${SCHEMA.TABLE}
+      WHERE sent_at >= $1
+        AND outcome = ANY($2)
+        AND ($3::text[] IS NULL OR transport = ANY($3))
+      GROUP BY correlation, transport
+      ORDER BY first_seen`,
+    [sinceISO, SCHEMA.MAY_HAVE_LEFT, transports]);
+  return res.rows.map((r) => ({
+    correlation: r.correlation, transport: r.transport, records: r.records,
+    outcomes: r.outcomes || [], claim_refs: r.claim_refs || [], first_seen: r.first_seen,
+  }));
+}
+
 module.exports = {
-  beginAttempt, priorClaim, executionByTransport, digestOf, hasSchema, _resetSchemaCache,
+  beginAttempt, priorClaim, executionByTransport, submissionsByCorrelation,
+  digestOf, hasSchema, _resetSchemaCache,
   UNSAFE_TO_REPEAT,
   OUTCOMES: SCHEMA.OUTCOMES, MAY_HAVE_LEFT: SCHEMA.MAY_HAVE_LEFT,
   DEFINITELY_NOT_SENT: SCHEMA.DEFINITELY_NOT_SENT,

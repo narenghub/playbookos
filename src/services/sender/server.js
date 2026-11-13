@@ -104,7 +104,7 @@ async function handleSend({ raw, signature, timestamp, method = 'POST', path: p 
     return refuse(400, 'malformed', `the request body is not JSON (${e.message})`);
   }
   const { message, transport, idempotencyKey, approvalId = null, expectedDigest = null,
-    workflow = null, agent = null, companyId = null } = req || {};
+    workflow = null, agent = null, companyId = null, dispatchId = null } = req || {};
 
   if (!message || typeof message !== 'object') {
     return refuse(400, 'malformed', 'a send request needs a message object');
@@ -174,7 +174,20 @@ async function handleSend({ raw, signature, timestamp, method = 'POST', path: p 
     att = await ledger.beginAttempt({
       transport, provider: 'gmail', to, subject,
       workflow, agent, companyId, approvalId,
-      claimRef, consequential: true,
+      claimRef,
+      // ── THE SHARED CORRELATION ──────────────────────────────────────────────
+      //
+      // The caller's dispatchId, written to this row's correlation_id so this service's record and
+      // the application's record of the SAME submission share one key. Both rows are kept — they
+      // are separate audit responsibilities — and the correlation is what stops a report counting
+      // one provider submission as two transmissions.
+      //
+      // When the caller supplies none, the ledger mints its own and the rows simply do not
+      // correlate. That is honest and not silently wrong: an uncorrelated row is counted on its
+      // own, which over-counts rather than under-counts, and over-counting a send is the safe
+      // direction for a containment report to err in.
+      correlationId: dispatchId || null,
+      consequential: true,
     }, deps.ledgerDeps);
   } catch (e) {
     return refuse(503, 'ledger_unreachable',
@@ -237,7 +250,17 @@ async function handleSend({ raw, signature, timestamp, method = 'POST', path: p 
   }
 
   // ── 9. CLAIM, THEN TRANSMIT ───────────────────────────────────────────────
-  await att.claim();
+  // Same arbitration, independently. Two concurrent requests to this service under one key —
+  // a retried HTTP call, a duplicate click that beat the application's own check — are decided
+  // here by the unique index, not by the priorClaim read above.
+  const claimed = await att.claim();
+  if (!claimed || !claimed.ok) {
+    return refuse(claimed && claimed.lost ? 409 : 503,
+      claimed && claimed.lost ? 'refused_duplicate' : 'claim_unrecordable',
+      claimed && claimed.lost
+        ? 'another request under this idempotency key already claimed responsibility; not sending again'
+        : `responsibility could not be recorded (${(claimed && claimed.error) || 'unknown'}) — nothing was sent`);
+  }
   let result;
   try {
     result = await send(message, deps.transportDeps);

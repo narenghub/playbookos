@@ -70,7 +70,7 @@ const ledger = (() => {
       const set = (outcome, extra = {}) => { row.outcome = outcome; Object.assign(row, extra); };
       return { ok: true, id: row.id,
         blocked: async (why, scope) => set('BLOCKED', { scope, why }),
-        claim: async () => set('CLAIMED'),
+        claim: async () => { set('CLAIMED'); return { ok: true }; },
         accepted: async (pid) => set('PROVIDER_ACCEPTED', { provider_id: pid }),
         rejected: async (e) => set('PROVIDER_REJECTED', { e }),
         unknown: async (e) => set('OUTCOME_UNKNOWN', { e }) };

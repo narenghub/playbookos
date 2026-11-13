@@ -357,6 +357,16 @@ pf_step "the send gate cannot be skipped by a caller, and alerts still reach the
 # report. Coverage and execution are different questions and this is the second one.
 pf_step "every transport records its outcome, and a missing ledger fails closed" node scripts/check-outbound-ledger-db.js
 
+# ── DOES THE REPORT COUNT WHAT ACTUALLY LEFT? ───────────────────────────────
+#
+# CEO decision 2026-11-12. Against REAL Postgres in a disposable cluster, because the de-duplication
+# is a SQL expression and a JavaScript double would prove nothing about it. Every scenario asserts
+# reported transmissions === actual provider invocations, across one send, a duplicate, a timeout,
+# a retry after an unknown outcome, a crash mid-send, three kinds of refusal, and 24 concurrent
+# sends. Section 10 asserts the claim arbitration DETERMINISTICALLY, because the concurrency
+# scenario passed even with the unique index removed.
+pf_step "reported transmissions equal actual provider invocations" node scripts/check-ledger-accounting-db.js
+
 # The ledger migration must STAY additive, idempotent and reversible. Those are properties of the
 # DDL, not of the day it was written, and the only way they stay true is if an edit that breaks one
 # goes red here rather than halfway through a production run.

@@ -114,6 +114,10 @@ function transportFor(transport, opts = {}) {
         workflow: d.workflow || null,
         agent: d.agent || null,
         companyId: d.companyId || null,
+        // The stable dispatch id. The service writes it to correlation_id too, so one logical
+        // submission has one correlation across both audit rows and a report can tell two records
+        // of one submission from two submissions.
+        dispatchId: d.dispatchId || null,
       };
 
       const raw = JSON.stringify(payload);

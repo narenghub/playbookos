@@ -121,11 +121,35 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_email_log_outcome ON ${TABLE} (outcome, sent_at)`,
   `CREATE INDEX IF NOT EXISTS idx_email_log_transport ON ${TABLE} (transport, sent_at)`,
   `CREATE INDEX IF NOT EXISTS idx_email_log_correlation ON ${TABLE} (correlation_id)`,
+  // ── THE CLAIM IS ARBITRATED BY THE DATABASE ────────────────────────────────
+  //
+  // One claimed row per claim_ref. Without this, idempotency was a read-then-write race:
+  // beginAttempt → priorClaim (nobody has claimed yet) → claim → send, with twelve concurrent
+  // dispatches under one key all passing the read and FOUR of them reaching the provider. Measured,
+  // not theorised: scripts/check-ledger-accounting-db.js produced exactly that.
+  //
+  // priorClaim() is kept — it gives the honest refusal reason for the ordinary sequential case, and
+  // it catches a retry minutes later. But it cannot be the guarantee, because two transactions can
+  // both read "no prior claim" before either writes. The guarantee is this index: the second
+  // UPDATE to CLAIMED under the same claim_ref violates it and the caller refuses.
+  //
+  // PARTIAL, over the outcomes that mean responsibility was taken. A PREPARED row carries a
+  // claim_ref too and there may legitimately be many of those under one key — every refused
+  // duplicate writes one — so a plain unique index would reject the refusals as well.
+  //
+  // DEPLOYMENT NOTE: CREATE UNIQUE INDEX fails if the table already holds two claimed rows under
+  // one claim_ref. Production has had no such constraint, so the migration must be run with that
+  // possibility in mind; scripts/check-claim-uniqueness-live.js reports it read-only first.
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_email_log_one_claim_per_ref
+     ON ${TABLE} (claim_ref)
+     WHERE claim_ref IS NOT NULL
+       AND outcome IN ('CLAIMED', 'PROVIDER_ACCEPTED', 'OUTCOME_UNKNOWN', 'RECONCILED')`,
 ];
 
 // ROLLBACK, documented and executable. Drops only what this migration added — email_log itself and
 // its original columns are older than this and are never touched.
 const ROLLBACK = [
+  'DROP INDEX IF EXISTS idx_email_log_one_claim_per_ref',
   'DROP INDEX IF EXISTS idx_email_log_correlation',
   'DROP INDEX IF EXISTS idx_email_log_transport',
   'DROP INDEX IF EXISTS idx_email_log_outcome',

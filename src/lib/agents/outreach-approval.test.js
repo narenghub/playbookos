@@ -221,7 +221,7 @@ test('4. the released message passes dispatch, and a tampered one does not', asy
     gate: { assertSendAllowed: async () => ({ allowed: true }) },
     ledger: {
       beginAttempt: async () => ({ ok: true, id: 'att-1',
-        blocked: async () => {}, claim: async () => {}, accepted: async () => {},
+        blocked: async () => {}, claim: async () => ({ ok: true }), accepted: async () => {},
         rejected: async () => {}, unknown: async () => {} }),
       priorClaim: async () => null,
     },

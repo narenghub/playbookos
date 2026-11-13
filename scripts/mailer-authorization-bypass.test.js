@@ -95,7 +95,11 @@ db.query = async (sql, params = []) => {
     // reading a value that never contains a scope. The same mistake as measuring the wrong thing
     // in the test it was written to support.
     BLOCKED.push(params.filter((p) => typeof p === 'string').join(' | '));
-    return { rows: [] };
+    // RETURNING id, as a real UPDATE of an existing row does. claim() is now the ARBITRATION
+    // POINT — it returns { ok:false } when no row came back, because that means responsibility was
+    // not recorded — so a stub that answers every UPDATE with zero rows makes the mailer refuse
+    // every send, for a reason that has nothing to do with what these tests measure.
+    return { rows: [{ id: params[0] }] };
   }
   // The per-type daily ceiling on alerts counts previous sends. No previous sends.
   if (/count\(\*\)|COUNT\(\*\)/i.test(sql)) return { rows: [{ n: 0, count: '0' }] };
