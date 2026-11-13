@@ -105,9 +105,9 @@ async function main(deps = {}) {
     rows = await ro(
       `SELECT id, correlation_id, claim_ref, transport, outcome, to_email, subject, sent_at
          FROM ${SCHEMA.TABLE}
-        WHERE sent_at >= $1
+        WHERE sent_at::timestamptz >= $1::timestamptz
           AND outcome IN ('CLAIMED', 'OUTCOME_UNKNOWN')
-        ORDER BY sent_at DESC
+        ORDER BY sent_at::timestamptz DESC
         LIMIT 500`, [sinceISO]);
   } catch (e) {
     console.log(`  FAIL  the unresolved claims could not be read: ${e.message}`);

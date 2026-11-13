@@ -116,7 +116,7 @@ if (!url) {
     // correct for a non-consequential write, and meant the fixture was wrong rather than loud.
     await query(`CREATE TABLE IF NOT EXISTS email_log (
       id TEXT PRIMARY KEY, to_email TEXT NOT NULL, subject TEXT NOT NULL,
-      trigger_type TEXT, sent_at TIMESTAMPTZ DEFAULT NOW(), status TEXT, error_message TEXT)`);
+      trigger_type TEXT, sent_at TEXT DEFAULT NOW(), status TEXT, error_message TEXT)`);
     for (const stmt of SCHEMA.DDL) await query(stmt);
     LEDGER._resetSchemaCache();
     if (await LEDGER.hasSchema({ query })) ok('the ledger schema is applied by its own migration');
@@ -608,6 +608,57 @@ if (!url) {
             'a gate whose result is computed and ignored is not a gate — and with the unique index '
             + 'present, ignoring it means the duplicate is logged and the message sent anyway');
         }
+      }
+    }
+
+    // ══ 13. DOES THE FIXTURE MATCH PRODUCTION? ═══════════════════════════
+    head('the fixture must have production\'s column types, or it finds the wrong bugs');
+    //
+    // THE DEFECT THIS EXISTS FOR, found by running a query against production that had passed here
+    // for days. db.js creates `sent_at TEXT DEFAULT NOW()`; every fixture in this repository created
+    // it as TIMESTAMPTZ. So `WHERE sent_at >= $1` compared a timestamp here and two differently
+    // formatted STRINGS there — lexicographically, differing at the separator — and a one-hour
+    // window returned ZERO rows in production while returning the right answer in every test.
+    //
+    // A containment report that returns zero reads as "nothing was sent". The fixture was not
+    // merely imprecise; it was incapable of finding the bug.
+    {
+      const fsy = require('fs');
+      const pathy = require('path');
+      const dbSrc = fsy.readFileSync(pathy.join(__dirname, '..', 'src', 'lib', 'db.js'), 'utf8');
+      const decl = dbSrc.slice(dbSrc.indexOf('CREATE TABLE IF NOT EXISTS email_log'));
+      const prodDecl = decl.slice(0, decl.indexOf(');'));
+      const prodType = (prodDecl.match(/sent_at\s+(\w+)/) || [])[1];
+
+      const live = await query(
+        `SELECT data_type FROM information_schema.columns
+          WHERE table_name = 'email_log' AND column_name = 'sent_at'`);
+      const fixtureType = live.rows[0] && live.rows[0].data_type;
+
+      if (prodType && fixtureType) {
+        const same = (prodType.toLowerCase() === 'text' && fixtureType === 'text')
+          || (prodType.toLowerCase().startsWith('timestamp') && /timestamp/.test(fixtureType));
+        if (same) {
+          ok(`this fixture declares sent_at as ${fixtureType}, as db.js does (${prodType})`);
+        } else {
+          bad(`the fixture has sent_at ${fixtureType} but db.js creates it ${prodType}`,
+            'a fixture that does not match production can only find the bugs production does not '
+            + 'have — this exact divergence hid a live defect in executionByTransport');
+        }
+      } else {
+        bad('could not establish both types', `db.js: ${prodType}, fixture: ${fixtureType}`);
+      }
+
+      // And the behaviour, not just the declaration: a SHORT window must still find today's rows.
+      // Uncast against a text column this returns zero, which is how the defect presented.
+      const shortWindow = await LEDGER.executionByTransport([TRANSPORT],
+        { sinceISO: new Date(Date.now() - 3600000).toISOString() }, { query });
+      if (shortWindow[0] && shortWindow[0].observed) {
+        ok('a one-hour window still sees the rows written during this run');
+      } else {
+        bad('a one-hour window reports this transport as UNOBSERVED',
+          'rows written seconds ago fall outside an hour-long window — the comparison is '
+          + 'lexicographic again, and a report that returns zero reads as "nothing was sent"');
       }
     }
 

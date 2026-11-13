@@ -87,7 +87,7 @@ const PROD_STOPPED = 135;
     // The LEGACY shape, exactly as src/lib/db.js creates it plus the two ALTERs that exist today.
     await q(`CREATE TABLE email_log (
       id TEXT PRIMARY KEY, to_email TEXT NOT NULL, subject TEXT NOT NULL,
-      trigger_type TEXT, sent_at TIMESTAMPTZ DEFAULT NOW())`);
+      trigger_type TEXT, sent_at TEXT DEFAULT NOW())`);
     await q(`ALTER TABLE email_log ADD COLUMN IF NOT EXISTS status TEXT`);
     await q(`ALTER TABLE email_log ADD COLUMN IF NOT EXISTS error_message TEXT`);
 

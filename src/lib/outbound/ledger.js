@@ -250,11 +250,32 @@ async function priorClaim(claimRef, { excludeId = null } = {}, deps = {}) {
  * and a report that cannot tell them apart invites reading an unmonitored sender as a quiet one.
  * A transport with no rows is reported UNKNOWN, never zero.
  */
+// ── sent_at IS TEXT IN PRODUCTION ───────────────────────────────────────────
+//
+// db.js creates email_log with `sent_at TEXT DEFAULT NOW()`, and the ledger migration does not
+// change it. So the column holds strings like "2026-11-13 13:43:38.373024+00", while every caller
+// passes an ISO string like "2026-11-13T13:43:38.373Z".
+//
+// Uncast, `sent_at >= $1` is a LEXICOGRAPHIC comparison between those two formats. They differ at
+// position 10 — a space versus a T — and a space sorts BELOW T, so a row written today is "less
+// than" a cutoff from today. Measured against production's schema: a one-hour window returns ZERO
+// rows. A thirty-day window happens to be right only because the date part dominates before the
+// separator is reached.
+//
+// A containment report that returns zero reads as "nothing was sent". This was live, it predates
+// the accounting work, and every local fixture hid it by creating sent_at as TIMESTAMPTZ — the
+// fixtures have been corrected to match production.
+//
+// Casting both sides fixes it for either column type: a no-op where the column is already
+// timestamptz, correct where it is text, and a LOUD error if a row holds something unparseable —
+// which is the right failure mode for a report whose zero is read as evidence.
+const SENT_AT = 'sent_at::timestamptz';
+
 async function executionByTransport(transports, { sinceISO } = {}, deps = {}) {
   const rows = await q(deps)(
     `SELECT transport, outcome, COUNT(*)::int n
        FROM ${SCHEMA.TABLE}
-      WHERE sent_at >= $1 AND transport IS NOT NULL
+      WHERE sent_at::timestamptz >= $1::timestamptz AND transport IS NOT NULL
       GROUP BY transport, outcome`, [sinceISO]);
 
   // ── ONE PROVIDER SUBMISSION IS ONE TRANSMISSION ───────────────────────────
@@ -277,7 +298,7 @@ async function executionByTransport(transports, { sinceISO } = {}, deps = {}) {
             COUNT(DISTINCT correlation_id) FILTER (WHERE correlation_id IS NOT NULL)
               + COUNT(*) FILTER (WHERE correlation_id IS NULL) AS n
        FROM ${SCHEMA.TABLE}
-      WHERE sent_at >= $1 AND transport IS NOT NULL
+      WHERE sent_at::timestamptz >= $1::timestamptz AND transport IS NOT NULL
         AND outcome = ANY($2)
       GROUP BY transport`,
     [sinceISO, SCHEMA.MAY_HAVE_LEFT]);
@@ -300,7 +321,7 @@ async function executionByTransport(transports, { sinceISO } = {}, deps = {}) {
             COUNT(DISTINCT correlation_id) FILTER (WHERE correlation_id IS NOT NULL)
               + COUNT(*) FILTER (WHERE correlation_id IS NULL) AS n
        FROM ${SCHEMA.TABLE}
-      WHERE sent_at >= $1 AND transport IS NOT NULL
+      WHERE sent_at::timestamptz >= $1::timestamptz AND transport IS NOT NULL
         AND outcome = 'CLAIMED'
       GROUP BY transport`, [sinceISO]);
   const unresolvedBy = new Map(unresolved.rows.map((r) => [r.transport, Number(r.n) || 0]));
@@ -359,11 +380,11 @@ async function submissionsByCorrelation({ sinceISO, transports = null } = {}, de
     `SELECT COALESCE(correlation_id, 'uncorrelated:' || id::text) AS correlation,
             transport,
             COUNT(*)::int AS records,
-            MIN(sent_at) AS first_seen,
+            MIN(sent_at::timestamptz) AS first_seen,
             ARRAY_AGG(DISTINCT outcome) AS outcomes,
             ARRAY_AGG(DISTINCT claim_ref) FILTER (WHERE claim_ref IS NOT NULL) AS claim_refs
        FROM ${SCHEMA.TABLE}
-      WHERE sent_at >= $1
+      WHERE sent_at::timestamptz >= $1::timestamptz
         AND outcome = ANY($2)
         AND ($3::text[] IS NULL OR transport = ANY($3))
       GROUP BY correlation, transport

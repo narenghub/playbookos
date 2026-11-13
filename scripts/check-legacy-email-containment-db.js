@@ -91,7 +91,7 @@ const RFQ = 'legacy-supplier-rfq-email';
   try {
     await require('../src/lib/autonomy').migrateAutonomy(q);
     await q(`CREATE TABLE IF NOT EXISTS email_log (id TEXT PRIMARY KEY, to_email TEXT,
-      subject TEXT, status TEXT, error_message TEXT, sent_at TIMESTAMPTZ DEFAULT NOW())`);
+      subject TEXT, status TEXT, error_message TEXT, sent_at TEXT DEFAULT NOW())`);
     // THE PRODUCTION SHAPE, NOT A MINIMAL ONE.
     //
     // The outbound ledger FAILS CLOSED: with its columns absent, mailer refuses a consequential

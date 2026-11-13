@@ -70,9 +70,11 @@ if (!url) {
   const rowsFor = async (id) => (await query(`SELECT * FROM email_log WHERE id = $1`, [id])).rows[0];
 
   try {
+    // sent_at TEXT, exactly as db.js creates it in production. It was TIMESTAMPTZ here, and that
+    // divergence hid a live defect in executionByTransport for as long as this fixture existed.
     await query(`CREATE TABLE email_log (
       id TEXT PRIMARY KEY, to_email TEXT NOT NULL, subject TEXT NOT NULL,
-      trigger_type TEXT, sent_at TIMESTAMPTZ DEFAULT NOW(), status TEXT, error_message TEXT)`);
+      trigger_type TEXT, sent_at TEXT DEFAULT NOW(), status TEXT, error_message TEXT)`);
 
     // ── 3. MISSING AUDIT STORAGE FAILS CLOSED ────────────────────────────────
     //

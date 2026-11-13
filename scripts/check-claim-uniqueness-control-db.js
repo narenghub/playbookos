@@ -119,8 +119,11 @@ if (!url) {
   try {
     // ══ A. BEFORE THE LEDGER MIGRATION ═══════════════════════════════════
     head('the ledger migration has not been applied');
+    // sent_at TEXT, as production has it. These fixtures used TIMESTAMPTZ, which is what let a
+    // lexicographic-comparison defect live in executionByTransport unnoticed: a fixture that does
+    // not match production is a fixture that can only find the bugs production does not have.
     await query(`CREATE TABLE email_log (id TEXT PRIMARY KEY, to_email TEXT NOT NULL,
-      subject TEXT NOT NULL, trigger_type TEXT, sent_at TIMESTAMPTZ DEFAULT NOW(),
+      subject TEXT NOT NULL, trigger_type TEXT, sent_at TEXT DEFAULT NOW(),
       status TEXT, error_message TEXT)`);
     const a = await quiet({ query });
     if (a.code === 3) ok('INCOMPLETE — not a clearance');
