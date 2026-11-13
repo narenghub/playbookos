@@ -367,6 +367,16 @@ pf_step "every transport records its outcome, and a missing ledger fails closed"
 # scenario passed even with the unique index removed.
 pf_step "reported transmissions equal actual provider invocations" node scripts/check-ledger-accounting-db.js
 
+# ── CAN THE CLAIM-UNIQUENESS MIGRATION BE APPLIED? ──────────────────────────
+#
+# scripts/check-claim-uniqueness-live.js is the READ-ONLY production query that decides whether
+# CREATE UNIQUE INDEX may be attempted. This is its control: it drives that check through six
+# database states in a disposable cluster and then asks POSTGRES whether it agrees with each
+# verdict — a check that says CLEAR where the index would fail is worse than no check, because a
+# migration gets attempted on its word. It also asserts the recipient inside a claim_ref is masked
+# and that the read-only wrapper refuses every write shape, including a writing CTE.
+pf_step "the pre-migration claim check is right in every state" node scripts/check-claim-uniqueness-control-db.js
+
 # The ledger migration must STAY additive, idempotent and reversible. Those are properties of the
 # DDL, not of the day it was written, and the only way they stay true is if an edit that breaks one
 # goes red here rather than halfway through a production run.
