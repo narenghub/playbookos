@@ -546,6 +546,71 @@ if (!url) {
       else bad(`only ${refused} of 3 write shapes were refused`);
     }
 
+    // ══ 12. IS THE INDEX RETAINED ACROSS A ROLLBACK? ═════════════════════
+    head('the unique index survives a code rollback — and is inert under one');
+    //
+    // CEO readiness item 4. Two halves, and the second is the one that decides the rollback policy.
+    {
+      const fsx = require('fs');
+      const pathx = require('path');
+      const LEX = require('./js-lex');
+      const src = (rel) => LEX.blankCommentsOnly(fsx.readFileSync(pathx.join(__dirname, '..', rel), 'utf8'));
+
+      // (a) NOTHING DROPS IT. The index is schema state; a code deploy does not touch schema. The
+      //     DROP exists only in SCHEMA.ROLLBACK, reachable only behind an explicit --rollback flag,
+      //     and the migration is never run at boot.
+      const mig = src('scripts/migrate-outbound-ledger.js');
+      if (/--rollback/.test(mig) && /MODE === .apply. \? SCHEMA\.DDL : SCHEMA\.ROLLBACK/.test(mig)) {
+        ok('the DROP is reachable only through an explicit --rollback flag');
+      } else {
+        bad('the rollback path is no longer gated on an explicit flag',
+          'a deploy that could drop this index would silently restore the duplicate-send defect');
+      }
+      const boot = src('server.js');
+      if (!/migrate-outbound-ledger/.test(boot)) {
+        ok('the migration is not run at boot, so starting any build cannot alter the index');
+      } else {
+        bad('server.js runs the outbound migration at boot');
+      }
+
+      // (b) APPLYING IT AGAIN IS A NO-OP, so re-running the migration after a rollback is safe.
+      const before = (await query(
+        `SELECT COUNT(*)::int n FROM pg_indexes WHERE indexname = $1`,
+        ['idx_email_log_one_claim_per_ref'])).rows[0].n;
+      const idxStmt = require('../src/lib/outbound/ledger-schema').DDL
+        .find((x) => /one_claim_per_ref/.test(x));
+      await query(idxStmt);
+      await query(idxStmt);
+      const after = (await query(
+        `SELECT COUNT(*)::int n FROM pg_indexes WHERE indexname = $1`,
+        ['idx_email_log_one_claim_per_ref'])).rows[0].n;
+      if (before >= 1 && after === 1) ok('re-applying the migration leaves exactly one index');
+      else bad(`index count went ${before} → ${after} on re-apply`);
+
+      // (c) AND IT IS INERT UNDER ROLLED-BACK CODE. This is the finding.
+      //
+      //     The index refuses the second UPDATE. Whether that refusal STOPS anything depends on
+      //     the caller reading it. The deployed build (fda00b4) calls `await att.claim()` and
+      //     discards the result — claim() was a write() that caught its own errors — so with the
+      //     index in place and that build running, a duplicate claim fails, is logged, and the
+      //     message is sent anyway.
+      //
+      //     So: the index is RETAINED by a rollback and NOT OBEYED by one. Asserted here on the
+      //     current tree, where all three callers must read it.
+      const callers = ['src/lib/outbound/dispatch.js', 'src/services/sender/server.js', 'src/lib/mailer.js'];
+      for (const rel of callers) {
+        const code = src(rel);
+        const m = code.match(/const\s+claimed\s*=\s*await\s+att\.claim\(\)/);
+        const checks = /claimed\s*(&&|\|\|)?[^;]*\.ok/.test(code);
+        if (m && checks) ok(`${rel} reads the claim's answer`);
+        else {
+          bad(`${rel} does not check what claim() returned`,
+            'a gate whose result is computed and ignored is not a gate — and with the unique index '
+            + 'present, ignoring it means the duplicate is logged and the message sent anyway');
+        }
+      }
+    }
+
     // ══ CLEANUP: BY ID, ONLY WHAT WAS MADE HERE ══════════════════════════
     await trackIds();
     for (const id of made) await query(`DELETE FROM email_log WHERE id = $1`, [id]);

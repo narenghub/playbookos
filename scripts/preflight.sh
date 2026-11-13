@@ -441,6 +441,43 @@ pf_step "the sender smoke test fails a service that is wrong" sh -c '
   echo "  ok    wrong service rejected (1), unreachable reported INCOMPLETE (3)"
 '
 
+# ── CAN THE SENDER SERVICE BE DEPLOYED ON ITS OWN? ──────────────────────────
+#
+# Boots the REAL entry point as a separate process with NO provider credential, and asks what a
+# deployment has to answer first: does it start, does it refuse to start unauthenticated, is it
+# loopback-only so exposing it is an explicit act, does it refuse unsigned callers. A service that
+# answers /health is not the same as a service that is safe to expose.
+pf_step "the sender service is deployable standalone and private by default" node scripts/check-sender-deployability.js
+
+# The production duplicate-claim audit is RENDERED from the committed payload, never transcribed.
+# The generator refuses a payload containing an apostrophe, which would break the shell quoting of
+# the command it produces — and it refused the first version of that file.
+pf_step "the production claim audit renders from its committed payload" sh -c '
+  set -e
+  node scripts/make-claim-audit-command.js > /tmp/claim-cmd.txt
+  tail -1 /tmp/claim-cmd.txt | sed -E "s/^.*echo ([A-Za-z0-9+\/=]+) \| base64.*$/\1/" \
+    | base64 -d > /tmp/claim-rendered.js
+  if ! cmp -s scripts/inline/claim-audit-payload.js /tmp/claim-rendered.js; then
+    echo "  FAIL  the rendered command does not carry the committed payload"
+    exit 1
+  fi
+  printf "x = 1; // it\047s here\n" > /tmp/claim-bad.js
+  if node -e "
+    const fs = require(\"fs\");
+    const p = \"scripts/inline/claim-audit-payload.js\";
+    const keep = fs.readFileSync(p);
+    fs.copyFileSync(\"/tmp/claim-bad.js\", p);
+    const r = require(\"child_process\").spawnSync(process.execPath, [\"scripts/make-claim-audit-command.js\"]);
+    fs.writeFileSync(p, keep);
+    process.exit(r.status === 1 ? 0 : 1);
+  "; then
+    echo "  ok    rendered command matches the payload, and an apostrophe is refused"
+  else
+    echo "  FAIL  a payload containing an apostrophe was rendered into a command anyway"
+    exit 1
+  fi
+'
+
 # The ledger migration must STAY additive, idempotent and reversible. Those are properties of the
 # DDL, not of the day it was written, and the only way they stay true is if an edit that breaks one
 # goes red here rather than halfway through a production run.
