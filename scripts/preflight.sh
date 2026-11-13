@@ -297,6 +297,14 @@ pf_step "no unreviewed dependency has been added" node scripts/check-dependency-
 # it acceptable: it proves the transport is unreachable except through dispatch, whose gate call is
 # unconditional and whose denial provably ends the path. Delete this control and the exception must
 # go with it.
+# ── SPEC A MILESTONE 6: THE OUT-OF-PROCESS SENDER ───────────────────────────
+#
+# The service holds the only send-capable email credential and re-checks every invariant for
+# itself — STOPs, approval, digest, idempotency, ledger — because the threat model is that the
+# caller is NOT dispatch(). Includes the structural control that exactly ONE module in the tree
+# imports the send-capable transport, and an end-to-end exchange over a real socket.
+pf_step "the sender service refuses nine ways and holds the only credential" env JWT_SECRET=preflight node --test src/services/sender/server.test.js
+
 pf_step "nothing reaches a provider except through dispatch" env JWT_SECRET=preflight node --test scripts/dispatch-chokepoint.test.js
 
 # Mocked transport, no database, no network, no credential. Exits non-zero if any scenario does not

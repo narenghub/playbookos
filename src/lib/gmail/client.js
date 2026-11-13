@@ -116,4 +116,17 @@ const READONLY_ONLY = Object.freeze([
   Object.freeze({ name: 'readonly', scopes: [SCOPES.gmailReadonly] }),
 ]);
 
-module.exports = { gmailClientFor, resetScopeCache, SCOPE_SETS, READONLY_ONLY };
+/**
+ * A READ-ONLY client, for a caller whose whole contract is that it cannot write.
+ *
+ * It lives HERE, next to READONLY_ONLY, and not in the Gmail transport — because after milestone 6
+ * the transport is the only module holding a send-capable credential and runs in a separate
+ * process. An agent that had to import the transport to get a read-only client would be importing
+ * the sender, which defeats the separation it is asking for.
+ */
+async function readOnlyClientFor(subject, deps = {}) {
+  const make = deps.gmailClientFor || gmailClientFor;
+  return make(subject, { ...deps, scopeSets: READONLY_ONLY });
+}
+
+module.exports = { gmailClientFor, readOnlyClientFor, resetScopeCache, SCOPE_SETS, READONLY_ONLY };

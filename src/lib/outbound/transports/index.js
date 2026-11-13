@@ -21,11 +21,24 @@ let done = false;
 /** Register every known transport. Idempotent. */
 function registerDefaults() {
   if (done) return knownTransports();
-  const gmail = require('./gmail');
 
-  // The two legacy external senders, migrated onto the chokepoint (Spec A milestone 5, item 2).
-  registerTransport('gmail_cphi', gmail.transport);
-  registerTransport('gmail_outreach', gmail.transport);
+  // THE SERVICE CLIENT, not the in-process Gmail transport (milestone 6, item 1). This module is
+  // loaded by the application; requiring transports/gmail here would pull the send-capable
+  // credential back into the application process and undo the separation.
+  //
+  // The client holds no credential. It signs a request with SENDER_SERVICE_SECRET — which
+  // authenticates a conversation, not an action — and the sender service re-checks the STOPs, the
+  // approval, the digest and the idempotency for itself before anything leaves.
+  const client = require('./sender-client');
+
+  // The two legacy external senders, migrated onto the chokepoint (milestone 5, item 2).
+  registerTransport('gmail_cphi', client.transportFor('gmail_cphi'));
+  registerTransport('gmail_outreach', client.transportFor('gmail_outreach'));
+
+  // The deliverability probe (milestone 6, item 4). An operator-run script, not an agent, but a
+  // real message leaves the building — so it goes through the same boundary, the same service and
+  // the same coverage report. Its recipient is a non-existent mailbox on our own domain.
+  registerTransport('gmail_probe', client.transportFor('gmail_probe'));
 
   done = true;
   return knownTransports();

@@ -71,7 +71,13 @@ const AL = require('./outbound-endpoint-allowlist');
 // and requiring a written reason. The only enforcement that actually holds is outside the artifact
 // — branch protection and CODEOWNERS on this file and the JSON — and that is owner configuration,
 // not code. Until it exists, this comment is the accurate description of the control's strength.
-const MAX_KNOWN_VIOLATIONS = 1;
+// ── ZERO ────────────────────────────────────────────────────────────────────
+//
+// Spec A milestones 5 and 6 closed all three. This is a RATCHET: it only ever goes down without a
+// deliberate three-edit act, and at zero any new ungoverned outbound path fails this check on the
+// commit that introduces it. There is no longer a permitted exception to "every send goes through
+// dispatch".
+const MAX_KNOWN_VIOLATIONS = 0;
 // The path is overridable ONLY so the negative controls can drive a planted baseline. The
 // pinned digest and MAX_KNOWN_VIOLATIONS are not overridable, which is what keeps the seam
 // from becoming the bypass: a planted baseline still fails both of those, which is exactly
@@ -85,7 +91,7 @@ const BASELINE_FILE = process.env.OUTBOUND_BASELINE_FILE
 // deliberately three edits — the baseline, this digest, and the ceiling — so that it cannot happen
 // quietly. The ceiling did NOT move: still 3.
 // Previous: ec48eb3086dd4f2587fb5062c02c9da5e5e797e49fe7aaefb78bbed5d93bb4fe
-const BASELINE_SHA256 = '3087f1b98dc9aba069c83bf127dd32d332d2c3fe62976dc6ba34411a7d83ae5f';
+const BASELINE_SHA256 = '37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570';
 
 // BOTH TREES. src/ is the application; scripts/ holds operator-run tools, and one of them —
 // verify-bounce-detection.js — genuinely transmits. CEO authorization 2026-11-10 item A: an
@@ -96,6 +102,23 @@ const ROOTS = [
   { dir: path.join(__dirname, '..', 'src'), base: path.join(__dirname, '..') },
   { dir: path.join(__dirname, '..', 'scripts'), base: path.join(__dirname, '..') },
 ];
+
+// ── A CONTROLS-ONLY EXTRA ROOT ──────────────────────────────────────────────
+//
+// Overridable for the same narrow reason as BASELINE_FILE, and the same argument applies: the
+// pinned digest and the ceiling are NOT overridable, so a planted tree still fails both.
+//
+// It exists because milestones 5 and 6 took the repository to ZERO tracked violations, and two
+// negative controls were written when zero was impossible: "a planted baseline fails the pinned
+// digest" and "an EMPTY baseline fails as stale rather than passing as clean" both need a tree
+// that HAS a violation to surface. With none left in the real tree they began asserting nothing —
+// a control whose premise the code outgrew. They now plant one here.
+if (process.env.OUTBOUND_EXTRA_ROOT) {
+  ROOTS.push({
+    dir: process.env.OUTBOUND_EXTRA_ROOT,
+    base: path.join(process.env.OUTBOUND_EXTRA_ROOT, '..'),
+  });
+}
 const ROOT = ROOTS[0].dir;
 const EXIT_NOT_EXECUTED = 3;
 
@@ -333,6 +356,17 @@ function walk(dir, out = []) {
 // Parsing is the expensive part, and three separate questions are asked of every file. One cache,
 // keyed by absolute path, so the tree is built once per run.
 const TREES = new Map();
+
+// ── WHAT THE WALK ACTUALLY READ ─────────────────────────────────────────────
+//
+// Separate from the sites it found, and that distinction is the point. "No call site under
+// scripts/" used to be the proof that the second tree was being walked — which worked only while
+// a violation happened to live there. Milestone 6 removed the last one, and the proof went with
+// it: a scanner that silently stopped scanning scripts/ would then look identical to a clean
+// scripts/. Recording the files PARSED separates the two for good.
+const SCANNED = new Set();
+function scannedFiles() { return [...SCANNED].sort(); }
+
 function treeFor(abs, rel) {
   if (TREES.has(abs)) return TREES.get(abs);
   const src = fs.readFileSync(abs, 'utf8');
@@ -356,6 +390,7 @@ function discover(roots = ROOTS) {
     if (!fs.existsSync(dir)) continue;
     for (const file of walk(dir)) {
       const rel = path.relative(base, file);
+      SCANNED.add(rel);
       const { src, ast, error } = treeFor(file, rel);
       // A file that does not parse yields no sites. main() turns that into INCOMPLETE — it is NOT
       // treated as "no transports here", which is the mistake that let an erased function read as
@@ -587,8 +622,27 @@ function main() {
 
   // The walk must actually reach the second tree. A `discover()` that silently scanned only src/
   // would report every script as compliant by never looking at one.
-  if (sites.some((s) => s.file.startsWith('scripts/'))) ok('the scan reaches scripts/, not only src/');
-  else bad('no call site found under scripts/ — the second tree is not being walked');
+  //
+  // Asserted on files PARSED, not on sites found. The old form required a call site under
+  // scripts/, which stopped being true when milestone 6 routed the deliverability probe through
+  // dispatch — and "the tree is clean" and "the tree is not being read" would then have produced
+  // identical output, which is the exact failure mode this whole file exists to prevent.
+  //
+  // Named files, not a count, for the reason argued above about transports: a count passes while
+  // the thing you care about has gone invisible.
+  const scanned = scannedFiles();
+  const mustHaveRead = [
+    'scripts/verify-bounce-detection.js',   // the probe: sends for real, via dispatch
+    'scripts/check-email-transport-coverage.js', // this file, an explicit EXCEPTION entry
+  ];
+  const unread = mustHaveRead.filter((f) => !scanned.includes(f));
+  if (!unread.length) {
+    ok(`the scan reaches scripts/, not only src/ (${scanned.filter((f) => f.startsWith('scripts/')).length} files parsed there)`);
+  } else {
+    bad(`these files under scripts/ were never parsed: ${unread.join(', ')}`,
+      'The second tree is not being walked. Every script would be reported compliant by never '
+      + 'being looked at, and a clean tree and an unread tree would read the same.');
+  }
 
   // ── THE GATE MUST COME FIRST, NOT MERELY EXIST ─────────────────────────────
   //
@@ -727,6 +781,6 @@ function main() {
   process.exit(0);
 }
 
-module.exports = { discover, discoverRest, gateOrdering, unreadableReasons, treeFor, enclosingFunctionAt, firstArgument, methodOf, blankNonCode, blankCommentsOnly, TRANSPORTS, EXCEPTIONS, GATE, ROOTS };
+module.exports = { discover, scannedFiles, discoverRest, gateOrdering, unreadableReasons, treeFor, enclosingFunctionAt, firstArgument, methodOf, blankNonCode, blankCommentsOnly, TRANSPORTS, EXCEPTIONS, GATE, ROOTS };
 
 if (require.main === module) main();

@@ -53,12 +53,27 @@ const codeOf = (rel) => LEX.blankNonCode(fs.readFileSync(path.join(ROOT, rel), '
 test('1. only the registry imports the Gmail transport', () => {
   // A require of this module is the only way to obtain its send(). If an agent can import it, the
   // chokepoint is advisory — the agent could call send() directly and skip dispatch entirely.
-  const importers = SOURCES.filter((rel) => {
-    if (rel === TRANSPORT) return false;
-    return /require\([`'"][^`'"]*transports\/gmail[`'"]\)/.test(codeOf(rel));
-  });
+  // codeOf() blanks string literals, which includes the path inside require('...'), so this
+  // regex run over blanked code matched NOTHING and the assertion below passed vacuously. Found
+  // when the same mistake was repeated in the sender service's control, where the expected list
+  // was non-empty and the vacuous pass therefore showed up as a failure.
+  const commentsOnly = (rel) => LEX.blankCommentsOnly(fs.readFileSync(path.join(ROOT, rel), 'utf8'));
+  const requiresTransport = (rel) =>
+    /require\(\s*[`'"][^`'"]*transports\/gmail[`'"]\s*\)/.test(commentsOnly(rel));
 
-  const permitted = new Set([REGISTRY, 'src/lib/outbound/dispatch.test.js', __filename.replace(ROOT + path.sep, '')]);
+  // The precondition: the detector must see the one importer known to exist.
+  assert.ok(requiresTransport('src/services/sender/server.js'),
+    'the require detector matches nothing, so the assertion below would prove nothing');
+
+  // Test files are excluded, and the exclusion is narrow rather than convenient: a control file
+  // must be able to import the thing it is controlling, and test code does not run in production.
+  // The same exclusion is made, for the same reason, in the sender service's own control.
+  const importers = SOURCES.filter((rel) =>
+    rel !== TRANSPORT && !rel.endsWith('.test.js') && requiresTransport(rel));
+
+  // After milestone 6 the ONLY permitted importer is the out-of-process sender service. The
+  // registry wires the service CLIENT, which holds no credential.
+  const permitted = new Set(['src/services/sender/server.js']);
   const unexpected = importers.filter((f) => !permitted.has(f));
 
   assert.deepStrictEqual(unexpected, [],

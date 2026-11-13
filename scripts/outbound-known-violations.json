@@ -1,13 +1,1 @@
-[
-  {
-    "fingerprint": "7f09462d73644cfd3010c4e3ac1f2859",
-    "file": "scripts/verify-bounce-detection.js",
-    "line_hint": 147,
-    "transport": "gmail-sdk",
-    "violation": "sends-outside-dispatch",
-    "reason": "A verification script that genuinely transmits. Not an agent, so no agent-level control applies to it.",
-    "fix_in": "route through dispatch, or retire the script",
-    "recorded": "2026-11-12",
-    "refingerprinted": "2026-11-12: AST migration. Same call site, same violation; the fingerprint covers the callee expression, which is now derived from the parse tree rather than from a regex match. Previous: 890340692884093761bb24e8e570f5a3"
-  }
-]
+[]

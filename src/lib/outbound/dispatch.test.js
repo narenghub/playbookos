@@ -398,10 +398,13 @@ test('11. the agents cannot obtain a send-capable Gmail client', () => {
 });
 
 test('11b. readOnlyClientFor forces READONLY_ONLY — the grant refuses the write, not the code', async () => {
-  const T = require('./transports/gmail');
-  const { READONLY_ONLY } = require('../gmail/client');
+  // It lives in gmail/client.js, not in the transport. Milestone 6 moved it: after the sender went
+  // out of process, an agent that had to import the transport to obtain a READ-ONLY client would
+  // be importing the module holding the send credential — asking for less and being handed the
+  // means to do more.
+  const { readOnlyClientFor, READONLY_ONLY } = require('../gmail/client');
   let askedFor = null;
-  await T.readOnlyClientFor('naren@abiozen.com', {
+  await readOnlyClientFor('naren@abiozen.com', {
     gmailClientFor: async (subject, d) => { askedFor = d.scopeSets; return { gmail: {} }; },
   });
   assert.deepStrictEqual(askedFor, READONLY_ONLY,

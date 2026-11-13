@@ -43,7 +43,11 @@ const fs = require('fs');
 // That refusal is not a regression to work around. This sender and outreach-agent are the two that
 // reached 25 real people between 3 and 10 November, precisely because each governed itself.
 const { dispatch } = require('../outbound/dispatch');
-const GMAIL = require('../outbound/transports/gmail');
+// NOT transports/gmail: that module holds the send-capable credential and now runs in its own
+// process. This agent talks to the sender service, and gets its read-only client from gmail/client
+// — so there is no code path from here to a provider at all (milestone 6, item 1).
+const GMAIL = require('../outbound/transports/sender-client');
+const { readOnlyClientFor } = require('../gmail/client');
 const path = require('path');
 const { query } = require('../db');
 const { isEvent } = require('../events/registry');

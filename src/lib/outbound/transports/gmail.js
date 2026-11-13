@@ -41,7 +41,7 @@
 
 'use strict';
 
-const { gmailClientFor, READONLY_ONLY } = require('../../gmail/client');
+const { gmailClientFor } = require('../../gmail/client');
 const { labelThread, ensureNeedLabels, ensureCampaignLabels } = require('../../gmail/labels');
 
 // The two label sets the two senders use. Named here so a caller picks one by NAME and cannot pass
@@ -67,17 +67,6 @@ async function sendCapableClient(mailbox, deps = {}) {
   if (g.error) return g;
   senders.set(mailbox, g);
   return g;
-}
-
-/**
- * A READ-ONLY Gmail client, for an agent that reads its inbox and must not be able to send.
- *
- * This is what the agents call instead of gmailClientFor. It forces READONLY_ONLY, so the token
- * handed back lacks gmail.send AND gmail.modify — the grant refuses the write, not this code.
- */
-async function readOnlyClientFor(mailbox, deps = {}) {
-  const make = deps.gmailClientFor || gmailClientFor;
-  return make(mailbox, { ...deps, scopeSets: READONLY_ONLY });
 }
 
 /**
@@ -157,6 +146,5 @@ module.exports = {
   send,
   fileThread,
   ensureLabels,
-  readOnlyClientFor,
   _resetSenders,
 };

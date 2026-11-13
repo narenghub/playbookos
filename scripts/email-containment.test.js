@@ -320,7 +320,22 @@ test('the live repository has no ungated transport', async () => {
   const sites = COVERAGE.discover();
   const ungated = sites.filter((s) => !s.gated && !s.exception);
   assert.deepStrictEqual(ungated.map((s) => `${s.file}:${s.line}`), []);
-  assert.ok(sites.length >= 3, `only ${sites.length} site(s) discovered in src/`);
+  // ── NO COUNT HERE ANY MORE ────────────────────────────────────────────────
+  //
+  // This asserted `sites.length >= 3`, and it began failing when Spec A milestones 5 and 6 moved
+  // outreach-agent, cphi-runner and verify-bounce-detection off their direct provider calls: the
+  // number went 4 → 2 BECAUSE the ungoverned paths were removed. A floor on the count punishes
+  // exactly the change it should reward, and it is the proxy the scanner's own comments reject:
+  // "A COUNT IS NOT A SANITY CHECK ... Each transport KNOWN to exist in this repository is named
+  // and must be found."
+  //
+  // Named files and named transports instead. Those are what a vanishing pattern breaks.
+  const files = new Set(sites.map((s) => s.file));
+  for (const f of ['src/lib/mailer.js', 'src/lib/outbound/transports/gmail.js']) {
+    assert.ok(files.has(f),
+      `${f} contains a provider call and was NOT discovered — the pattern no longer matches it, `
+      + 'which is the failure this file exists to catch');
+  }
 
   const transports = new Set(sites.map((s) => s.transport));
   assert.ok(transports.has('gmail.messages.send'), 'the Gmail transport vanished from discovery');

@@ -338,28 +338,70 @@ test('a FOURTH baseline entry fails CI, even with a valid-looking fingerprint', 
 });
 
 test('a planted baseline fails the pinned digest even when the count is unchanged', () => {
-  const real = JSON.parse(fs.readFileSync(path.join(__dirname, 'outbound-known-violations.json'), 'utf8'));
+  // ── WHY THIS NO LONGER EDITS A REAL ENTRY ─────────────────────────────────
+  //
+  // It used to read the real baseline and quietly soften `edited[0].reason` — three entries in,
+  // three out, one reason changed, so only the digest could catch it. Milestones 5 and 6 took the
+  // baseline to ZERO entries and `edited[0]` became undefined, so the control threw instead of
+  // asserting.
+  //
+  // At zero the property is expressible more purely than before: same entry COUNT, different
+  // BYTES. Whitespace is the smallest possible edit that leaves the count identical, and if the
+  // digest is what is load-bearing rather than the count, it must still fail.
+  const real = fs.readFileSync(path.join(__dirname, 'outbound-known-violations.json'), 'utf8');
+  const edited = `${real.trimEnd()}  \n`;   // same JSON, same count, different bytes
+  assert.notStrictEqual(edited, real, 'the planted baseline is byte-identical to the real one');
+  assert.deepStrictEqual(JSON.parse(edited), JSON.parse(real),
+    'the plant must not change the entries — this control is about the digest, not the count');
+
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'baseline-'));
   const f = path.join(dir, 'planted.json');
-  // Same three entries, one reason quietly softened. Count unchanged, digest changed.
-  const edited = JSON.parse(JSON.stringify(real));
-  edited[0].reason = 'nothing to see here';
-  fs.writeFileSync(f, JSON.stringify(edited, null, 2));
+  fs.writeFileSync(f, edited);
   const r = runScanner({ OUTBOUND_BASELINE_FILE: f });
   fs.rmSync(dir, { recursive: true, force: true });
   assert.notStrictEqual(r.code, 0, 'an edited baseline passed CI');
   assert.match(r.out, /pinned digest was not updated/);
 });
 
+/**
+ * A temporary tree holding one ungated sender, plus a baseline file.
+ *
+ * These two controls were written when the repository always had tracked violations, so emptying
+ * or corrupting the baseline necessarily surfaced one. Milestones 5 and 6 took the real tree to
+ * ZERO, and both controls quietly started proving nothing: with no violation anywhere, a stale
+ * baseline and a clean repository produce the same exit 0. So they plant their own.
+ */
+function plantedTree(baselineContent) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'planted-'));
+  const tree = path.join(dir, 'planted');
+  fs.mkdirSync(tree, { recursive: true });
+  fs.writeFileSync(path.join(tree, 'rogue-sender.js'),
+    'async function go(g) { await g.gmail.users.messages.send({ userId: "me" }); }\nmodule.exports={go};\n');
+  const baseline = path.join(dir, 'baseline.json');
+  fs.writeFileSync(baseline, baselineContent);
+  return { dir, tree, baseline, clean: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
 test('an EMPTY baseline fails as stale rather than passing as clean', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'baseline-'));
-  const f = path.join(dir, 'empty.json');
-  fs.writeFileSync(f, '[]');
-  const r = runScanner({ OUTBOUND_BASELINE_FILE: f });
-  fs.rmSync(dir, { recursive: true, force: true });
-  assert.notStrictEqual(r.code, 0);
-  assert.match(r.out, /NEW outbound path/,
-    'emptying the baseline must surface the violations, not hide them');
+  const p = plantedTree('[]');
+  try {
+    const r = runScanner({ OUTBOUND_BASELINE_FILE: p.baseline, OUTBOUND_EXTRA_ROOT: p.tree });
+    assert.notStrictEqual(r.code, 0,
+      'a tree containing an ungated sender passed with an empty baseline');
+    assert.match(r.out, /NEW outbound path/,
+      'emptying the baseline must surface the violations, not hide them');
+  } finally { p.clean(); }
+});
+
+test('…and the planted sender is genuinely discovered, or the two controls above prove nothing', () => {
+  // The precondition for both. If the plant is not seen, "it failed" would be true for some other
+  // reason and the controls would be measuring the wrong thing.
+  const p = plantedTree('[]');
+  try {
+    const sites = require('./check-email-transport-coverage').discover(p.tree);
+    assert.strictEqual(sites.length, 1, `expected 1 planted site, got ${sites.length}`);
+    assert.strictEqual(sites[0].gated, false);
+  } finally { p.clean(); }
 });
 
 // ══ THE DEPENDENCY GATE ═══════════════════════════════════════════════════

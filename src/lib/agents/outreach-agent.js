@@ -29,7 +29,11 @@ const { query } = require('../db');
 // decision — and dispatch refuses any external recipient with no approval and no matching digest,
 // which is every recipient here. One of the two senders behind the 3-10 November breach.
 const { dispatch } = require('../outbound/dispatch');
-const GMAIL = require('../outbound/transports/gmail');
+// NOT transports/gmail: that module holds the send-capable credential and now runs in its own
+// process. This agent talks to the sender service, and gets its read-only client from gmail/client
+// — so there is no code path from here to a provider at all (milestone 6, item 1).
+const GMAIL = require('../outbound/transports/sender-client');
+const { readOnlyClientFor } = require('../gmail/client');
 const { renderNeed, needStepsOf, NEED_CAMPAIGNS } = require('../campaigns/needs');
 const { buildQueue, varsFor } = require('../campaigns/outreach-queue');
 const { buildMessage } = require('../gmail/message');
@@ -103,7 +107,7 @@ async function scanBounces(opts = {}) {
   out.sent = (await query('SELECT COUNT(*)::int n FROM outreach_sends')).rows[0].n;
   if (!ours.size) { say('   nothing sent yet, so nothing can have bounced'); return out; }
 
-  const g = opts.gmail ? { gmail: opts.gmail } : await GMAIL.readOnlyClientFor(mailbox);
+  const g = opts.gmail ? { gmail: opts.gmail } : await readOnlyClientFor(mailbox);
   if (g.error) throw new Error(`cannot read ${mailbox}: ${g.error}`);
 
   const after = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10).replace(/-/g, '/');
@@ -251,7 +255,7 @@ async function runOutreach(opts = {}) {
   // READ-ONLY: this client lists and reads threads. It cannot send, by scope rather than by
   // control flow, and it cannot label either — both are writes, and both live with the credential
   // in the sender service.
-  const g = await GMAIL.readOnlyClientFor(FROM);
+  const g = await readOnlyClientFor(FROM);
   if (g.error) throw new Error(`cannot act as ${FROM}: ${g.error} — nothing is sent until that is fixed`);
   say(`   authorised as ${g.profile.emailAddress} via ${g.via} (${g.scopeSet})`);
 

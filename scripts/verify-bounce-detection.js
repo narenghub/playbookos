@@ -32,15 +32,28 @@
 'use strict';
 
 const crypto = require('crypto');
-const { assertSendAllowed } = require('../src/lib/email-gate');
-const { beginAttempt } = require('../src/lib/outbound/ledger');
+// ── SPEC A MILESTONE 6, ITEM 4: THE LAST REAL-SEND PATH ─────────────────────
+//
+// This was the final tracked outbound violation: a script that genuinely transmits, outside
+// dispatch, with its own gate and its own ledger attempt. It is not an agent, so no agent-level
+// control reached it.
+//
+// It now routes through dispatch() like everything else. Note what that costs here: NOTHING. The
+// probe's recipient is `<token>@abiozen.com` — a non-existent mailbox on OUR OWN domain, which is
+// the whole point of the probe and which recipients.isExternal() classifies as INTERNAL. So
+// dispatch applies the STOPs, the ledger, the idempotency key and the digest, and does not demand
+// an approval the probe has no business holding.
+//
+// The script keeps its own three-way exit (0 proven / 1 failed / 3 refused by policy), because
+// "the kill switch refused the probe" must never read as "the bounce detector is broken".
+const { dispatch } = require('../src/lib/outbound/dispatch');
 
 // Distinct from 0 (proven) and 1 (failed): the probe was REFUSED by policy and never ran. A
 // refusal reported as a pass would say the bounce gate is proven when nothing was tested, and
 // reported as a failure would say the detector is broken when it was never exercised.
 const EXIT_REFUSED_BY_POLICY = 3;
 const { initDB, query } = require('../src/lib/db');
-const { gmailClientFor } = require('../src/lib/gmail/client');
+const { readOnlyClientFor } = require('../src/lib/gmail/client');
 const { buildMessage } = require('../src/lib/gmail/message');
 
 const argv = process.argv.slice(2);
@@ -83,7 +96,9 @@ async function main() {
   const bounceIds = [];
 
   try {
-    const g = await gmailClientFor(FROM);
+    // READ-ONLY. This script reads the mailbox to find the NDR; it cannot send with this client,
+    // and does not need to — dispatch does the sending.
+    const g = await readOnlyClientFor(FROM);
     if (g.error) { bad('authorise', g.error); return; }
     ok(`authorised as ${g.profile.emailAddress} (${g.scopeSet})`);
 
@@ -101,7 +116,10 @@ async function main() {
     //
     // Scoped as its own workflow so a deliberate probe can be permitted while campaigns stay
     // contained — and refused by a global or capability stop regardless of that.
-    const gate = await assertSendAllowed({
+    // Asked BEFORE the fixture insert, so a refusal leaves no outreach_sends row behind for a
+    // probe that never happened. dispatch asks again at the moment of sending — this is not a
+    // substitute for that check, it is an early exit that avoids creating a fixture for nothing.
+    const gate = await require('../src/lib/email-gate').assertSendAllowed({
       capability: 'email.send', workflow: 'bounce-probe', agent: 'verify-bounce-detection',
       to: target,
     });
@@ -134,22 +152,34 @@ async function main() {
       html: `<p>This message is a deliverability self-test (${token}). It is addressed to a mailbox `
         + 'that does not exist, so it should fail. Nobody reads this.</p>',
     });
-    // Through the ledger like every other transport. An operator-run probe is still a real
-    // message leaving the building, and the coverage report must be able to see it.
-    const att = await beginAttempt({
-      transport: 'gmail_probe', provider: 'gmail', to: target,
-      subject: `Delivery probe ${token}`, workflow: 'bounce-probe',
-      agent: 'verify-bounce-detection', claimRef: `outreach_sends:${sendIds[0]}`,
+    const sent = await dispatch({
+      message: {
+        to: target,
+        subject: `Delivery probe ${token}`,
+        html: msg.headers ? '' : '',
+        mailbox: FROM,
+        raw: msg.raw,
+      },
+      transport: 'gmail_probe',
+      idempotencyKey: `outreach_sends:${sendIds[0]}`,
+      workflow: 'bounce-probe',
+      agent: 'verify-bounce-detection',
     });
-    if (!att.ok) { bad('the probe could not be recorded, so it was not sent', att.error); return; }
-    await att.claim();
-    try {
-      const sent = await g.gmail.users.messages.send({ userId: 'me', requestBody: { raw: msg.raw } });
-      await att.accepted(sent.data && sent.data.id);
-    } catch (e) {
-      await att.unknown((e && e.message) || String(e));
-      throw e;
+
+    if (!sent.ok) {
+      if (sent.stopped) {
+        say(`\n  REFUSED  ${sent.error}`);
+        say('\n  Nothing was sent. This is the kill switch, not a broken detector.\n');
+        process.exit(EXIT_REFUSED_BY_POLICY);
+      }
+      if (sent.dispatched) {
+        bad('the probe may have been transmitted but the outcome is unknown', sent.error);
+        return;
+      }
+      bad('the probe was refused before transmission, so the detector was not exercised', sent.error);
+      return;
     }
+    const res = { data: { id: (sent.meta && sent.meta.messageId) || sent.id } };
     ok('probe sent');
 
     // ── WAIT FOR THE NDR ────
