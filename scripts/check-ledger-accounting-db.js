@@ -449,6 +449,103 @@ if (!url) {
       }
     }
 
+    // ══ 11. RECONCILIATION ACROSS THE BOUNDARY ═══════════════════════════
+    head('resolving what the application lost but the service recorded');
+    //
+    // Final readiness item 4, the reconciliation half. This is the common production case: the
+    // provider took the message, the sender service recorded PROVIDER_ACCEPTED, and the
+    // application's own knowledge of that was lost — a timeout, a container restart, a reset
+    // between the two processes. The correlation makes the answer already present in the database.
+    {
+      const RECON = require('./reconcile-outbound-claims');
+      const quiet = async (deps) => {
+        const log = console.log; const lines = [];
+        console.log = (...a) => lines.push(a.join(' '));
+        try { return { code: await RECON.run(deps), out: lines.join('\n') }; } finally { console.log = log; }
+      };
+
+      // (a) THE RESOLVABLE CASE, built the way production builds it: an application row left at
+      //     OUTCOME_UNKNOWN, and the service's row under the SAME correlation saying accepted.
+      const key = 'acct-recon';
+      const corr = D.dispatchIdFor(key);
+      const appAtt = await LEDGER.beginAttempt({
+        transport: TRANSPORT, provider: 'gmail', to: EXTERNAL, subject: 'lost answer',
+        claimRef: key, correlationId: corr, consequential: true }, { query });
+      await appAtt.claim();
+      await appAtt.unknown('socket hang up');
+
+      const svcAtt = await LEDGER.beginAttempt({
+        transport: TRANSPORT, provider: 'gmail', to: EXTERNAL, subject: 'lost answer',
+        claimRef: `sender:${key}`, correlationId: corr, consequential: true }, { query });
+      await svcAtt.claim();
+      await svcAtt.accepted('prov-recon-1');
+      await trackIds();
+
+      const r1 = await quiet({ query, windowHours: 1 });
+      if (/1 claim\(s\) can be resolved FROM THE LEDGER/.test(r1.out)) {
+        ok('the lost outcome is resolved from the service\'s own row, with no provider query');
+      } else {
+        bad('a resolvable claim was not recognised', r1.out.split('\n').slice(-6).join(' | '));
+      }
+      if (/UPDATE email_log SET outcome = 'RECONCILED'/.test(r1.out)
+          && r1.out.includes(appAtt.id)) {
+        ok('…and it emits the exact UPDATE, by id, for a human to run');
+      } else bad('the proposed SQL does not target the row by id');
+      // The VERDICT here is ATTENTION, not CLEAR, and that is correct: section 4 deliberately left
+      // a crashed claim in this same cluster and section 9 left an uncorrelated row, both with no
+      // sibling. I expected CLEAR and was wrong about the fixture, not about the reconciler. The
+      // verdict is asserted at (b) instead, where a claim with no sibling is introduced
+      // deliberately and the transition is the thing under test.
+      if (r1.code === 1) {
+        ok('…and the verdict is ATTENTION, because earlier sections left claims needing evidence');
+      } else {
+        bad(`the verdict was ${r1.code} while a crashed claim from section 4 is outstanding`);
+      }
+
+      // (b) IT MUST NOT CLAIM TO RESOLVE WHAT IT CANNOT. An application row whose correlation has
+      //     no sibling: the request may never have arrived, or the service died before its insert,
+      //     and those are indistinguishable from here.
+      const lone = 'acct-recon-lone';
+      const loneAtt = await LEDGER.beginAttempt({
+        transport: TRANSPORT, provider: 'gmail', to: EXTERNAL, subject: 'no sibling',
+        claimRef: lone, correlationId: D.dispatchIdFor(lone), consequential: true }, { query });
+      await loneAtt.claim();
+      await trackIds();
+
+      const r2 = await quiet({ query, windowHours: 1 });
+      if (/NEEDS PROVIDER/.test(r2.out)) ok('a claim with no sibling row is reported as NEEDS PROVIDER');
+      else bad('an unresolvable claim was not distinguished from a resolvable one');
+      if (r2.code === 1) ok('…and the verdict becomes ATTENTION, not CLEAR');
+      else bad(`the verdict stayed ${r2.code} with a claim needing outside evidence`);
+      if (!/l\.segala|@acme-pharma\.test/.test(r2.out)) {
+        ok('…and no recipient address appears in the output');
+      } else bad('a recipient address was printed by a script meant to be run against production');
+
+      // (c) IT WRITES NOTHING. The point of a reconciler that proposes rather than acts.
+      const beforeOutcome = (await query(
+        `SELECT outcome FROM email_log WHERE id = $1`, [appAtt.id])).rows[0].outcome;
+      await quiet({ query, windowHours: 1 });
+      const afterOutcome = (await query(
+        `SELECT outcome FROM email_log WHERE id = $1`, [appAtt.id])).rows[0].outcome;
+      if (beforeOutcome === 'OUTCOME_UNKNOWN' && afterOutcome === 'OUTCOME_UNKNOWN') {
+        ok('running it twice changes no row — it proposes, it does not resolve');
+      } else {
+        bad(`the reconciler MUTATED a row (${beforeOutcome} → ${afterOutcome})`,
+          'RECONCILED means a human established what happened; a script writing it from an '
+          + 'inference puts a guess where the schema promises a finding');
+      }
+
+      // (d) AND ITS READ-ONLY WRAPPER REFUSES WRITES.
+      const ro = RECON.makeReadOnly(query);
+      let refused = 0;
+      for (const sql of ['UPDATE email_log SET outcome = NULL', 'DELETE FROM email_log',
+        'SELECT 1; DELETE FROM email_log']) {
+        try { await ro(sql); } catch (e) { if (/refused/.test(e.message)) refused += 1; }
+      }
+      if (refused === 3) ok('and its read-only wrapper refuses every write shape');
+      else bad(`only ${refused} of 3 write shapes were refused`);
+    }
+
     // ══ CLEANUP: BY ID, ONLY WHAT WAS MADE HERE ══════════════════════════
     await trackIds();
     for (const id of made) await query(`DELETE FROM email_log WHERE id = $1`, [id]);

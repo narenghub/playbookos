@@ -377,6 +377,33 @@ pf_step "reported transmissions equal actual provider invocations" node scripts/
 # and that the read-only wrapper refuses every write shape, including a writing CTE.
 pf_step "the pre-migration claim check is right in every state" node scripts/check-claim-uniqueness-control-db.js
 
+# ── CREDENTIAL ISOLATION, MEASURED IN WHICHEVER PROCESS IT RUNS IN ──────────
+#
+# Run with --expect app in the application and --expect sender in the service; the two answers must
+# differ. Here it asserts the NEGATIVE case is reachable: an environment with no send-capable
+# credential reports isolation complete, so the check is not hard-wired to pass. Milestone 6 proved
+# the structural half (exactly one module imports the transport); this measures the credential half,
+# which is NOT closed today — the application still holds the Google identity it reads inboxes with,
+# and that identity can mint a send scope.
+pf_step "the credential-isolation check can report both states" sh -c '
+  set -e
+  env -u GOOGLE_SERVICE_ACCOUNT_JSON -u GOOGLE_CLIENT_ID -u GOOGLE_CLIENT_SECRET \
+      -u GOOGLE_REFRESH_TOKEN -u RESEND_API_KEY \
+      SENDER_SERVICE_URL=http://sender.invalid SENDER_SERVICE_SECRET=PLACEHOLDER-not-a-secret \
+      node scripts/check-credential-isolation.js --expect app >/dev/null
+  if env GOOGLE_SERVICE_ACCOUNT_JSON={} SENDER_SERVICE_URL=http://sender.invalid \
+      SENDER_SERVICE_SECRET=PLACEHOLDER-not-a-secret \
+      node scripts/check-credential-isolation.js --expect app >/dev/null 2>&1; then
+    echo "  FAIL  an application holding a send-capable credential was reported as isolated"
+    exit 1
+  fi
+  if node scripts/check-credential-isolation.js >/dev/null 2>&1; then
+    echo "  FAIL  no expectation was stated and it still returned a pass"
+    exit 1
+  fi
+  echo "  ok    isolated reports pass, credential-holding reports fail, unstated is not judged"
+'  
+
 # The ledger migration must STAY additive, idempotent and reversible. Those are properties of the
 # DDL, not of the day it was written, and the only way they stay true is if an edit that breaks one
 # goes red here rather than halfway through a production run.
