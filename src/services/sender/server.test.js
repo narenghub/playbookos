@@ -313,7 +313,13 @@ test('5. the client and the service agree over HTTP — refused, then permitted'
       http.get(`${url}/health`, (r) => { let b = ''; r.on('data', (x) => { b += x; }); r.on('end', () => res(JSON.parse(b))); }).on('error', rej);
     });
     assert.strictEqual(health.ok, true);
-    assert.deepStrictEqual(health.transports.sort(), ['gmail_cphi', 'gmail_outreach', 'gmail_probe']);
+    // THE HANDLERS THIS SERVICE IS RUNNING WITH — one, here, because that is what was injected.
+    // This asserted all three, which passed only because /health reported the module constant
+    // regardless of what the process actually served: a server serving one transport announced
+    // three, and the deployment smoke test's transport check was reading a compile-time fact as a
+    // runtime one. The expectation encoded the bug.
+    assert.deepStrictEqual(health.transports, ['gmail_cphi'],
+      '/health does not report the handlers this service is actually running with');
   } finally {
     await new Promise((r) => server.close(r));
   }

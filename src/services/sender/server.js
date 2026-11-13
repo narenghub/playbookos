@@ -375,7 +375,14 @@ function createServer(deps = {}) {
     // Liveness only. It says nothing about whether sending is permitted — a STOP in force is not
     // a sick service, and conflating the two is how a held channel reads as an outage.
     if (req.method === 'GET' && req.url === '/health') {
-      return reply(200, { ok: true, service: 'sender', transports: Object.keys(HANDLERS) });
+      // THE HANDLERS THIS SERVICE IS ACTUALLY RUNNING WITH, not the module constant. It reported
+      // Object.keys(HANDLERS) regardless of what was injected, so /health listed three transports
+      // while the process served one — and the deployment smoke test's transport check was reading
+      // a constant rather than reality. A health endpoint that reports a compile-time fact as a
+      // runtime one is the same shape as the 2026-09-30 outage, where /health was green for hours
+      // while the application served nothing.
+      return reply(200, { ok: true, service: 'sender',
+        transports: Object.keys(deps.handlers || HANDLERS) });
     }
     const isSend = req.method === 'POST' && req.url === '/send';
     const isWrite = req.method === 'POST' && req.url === '/write';

@@ -404,6 +404,43 @@ pf_step "the credential-isolation check can report both states" sh -c '
   echo "  ok    isolated reports pass, credential-holding reports fail, unstated is not judged"
 '  
 
+# ── THE DEPLOYMENT SMOKE TEST, PROVEN TO BITE ───────────────────────────────
+#
+# scripts/smoke-sender-service.sh is what gets run against the deployed service. It is only worth
+# its exit code if it FAILS on a service that is wrong, so this boots a real service with ONE
+# transport and asserts the smoke test rejects it — the check used to pass there, because /health
+# reported the module constant rather than the handlers the process was running with.
+pf_step "the sender smoke test fails a service that is wrong" sh -c '
+  set -u
+  PORT=8096
+  SENDER_SERVICE_SECRET=PLACEHOLDER-not-a-secret node -e "
+    const S = require(\"./src/services/sender/server\");
+    const ledger = { beginAttempt: async () => ({ ok: true, id: \"a\", blocked: async () => {},
+      claim: async () => ({ ok: true }), accepted: async () => {}, rejected: async () => {},
+      unknown: async () => {} }), priorClaim: async () => null };
+    S.createServer({ env: { SENDER_SERVICE_SECRET: \"PLACEHOLDER-not-a-secret\" },
+      gate: { assertSendAllowed: async () => ({ allowed: true }) }, ledger,
+      handlers: { gmail_cphi: async () => ({ ok: true }) } })
+      .listen($PORT, \"127.0.0.1\", () => setTimeout(() => process.exit(0), 20000));
+  " >/dev/null 2>&1 &
+  BOOT=$!
+  sleep 2
+  scripts/smoke-sender-service.sh "http://127.0.0.1:$PORT" >/dev/null 2>&1
+  INCOMPLETE_ON_ONE=$?
+  scripts/smoke-sender-service.sh "http://127.0.0.1:1" >/dev/null 2>&1
+  UNREACHABLE=$?
+  kill $BOOT 2>/dev/null
+  if [ "$INCOMPLETE_ON_ONE" != "1" ]; then
+    echo "  FAIL  a service serving ONE transport was not rejected (exit $INCOMPLETE_ON_ONE)"
+    exit 1
+  fi
+  if [ "$UNREACHABLE" != "3" ]; then
+    echo "  FAIL  an unreachable service did not report INCOMPLETE (exit $UNREACHABLE)"
+    exit 1
+  fi
+  echo "  ok    wrong service rejected (1), unreachable reported INCOMPLETE (3)"
+'
+
 # The ledger migration must STAY additive, idempotent and reversible. Those are properties of the
 # DDL, not of the day it was written, and the only way they stay true is if an edit that breaks one
 # goes red here rather than halfway through a production run.
