@@ -431,3 +431,25 @@ test('11d. the transport makes no authorization decision', () => {
       `the gmail transport references ${t} — authorization belongs to dispatch, in one place`);
   }
 });
+
+test('9c. a raw-only message is well formed — the body may be raw OR html', async () => {
+  // A live defect, caught by the approval lifecycle's end-to-end control. dispatch required `html`
+  // specifically, which is right for Resend and wrong for every Gmail path, where the body IS
+  // `raw`. The deliverability probe passes raw with no html and was refused as malformed on every
+  // run — a well-formed message rejected for being well formed in the other shape.
+  const { c, deps } = harness();
+  const m = { to: INTERNAL, subject: 'Delivery probe', raw: 'UkFXLU9OTFk', mailbox: 'sales@abiozen.com' };
+  const r = await D.dispatch({ message: m, transport: 'resend', idempotencyKey: 'probe-1' }, deps);
+  assert.strictEqual(r.ok, true, `a raw-only message was refused: ${r.error}`);
+  assert.strictEqual(c.sends.length, 1);
+});
+
+test('9d. …and a message with NEITHER body is still refused', async () => {
+  // The other half: the clause above widened what passes, so the negative case needs asserting or
+  // `(html || raw)` is one edit from `|| true`.
+  const { c, deps } = harness();
+  const r = await D.dispatch({ message: { to: INTERNAL, subject: 'x' }, transport: 'resend',
+    idempotencyKey: 'empty-1' }, deps);
+  assert.strictEqual(c.sends.length, 0, 'a message with no body at all was transmitted');
+  assert.strictEqual(r.ok, false);
+});

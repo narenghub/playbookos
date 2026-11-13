@@ -311,6 +311,17 @@ pf_step "nothing reaches a provider except through dispatch" env JWT_SECRET=pref
 # behave as it claims — including every expected ZERO provider call.
 pf_step "the governed boundary refuses five ways and permits one" node scripts/demo-governed-dispatch.js
 
+# The approval lifecycle the two legacy senders never had (milestone 6, item 2). The control that
+# matters most is that an approved payload altered IN THE STORE is refused at release — dispatch and
+# the sender service both recompute the digest, but they compare it against the digest travelling
+# WITH the payload, so an edited row would carry its own consistent digest and satisfy them both.
+pf_step "an approved outreach message cannot become a different message" env JWT_SECRET=preflight node --test src/lib/agents/outreach-approval.test.js
+
+# One supplier workflow end to end (milestone 6, item 3): discovery, draft, refusal, approval,
+# delivery, ledger, follow-up. Real campaign copy, real MIME builder, real approval lifecycle, real
+# dispatch; mocked store, ledger and transport. Exits non-zero if any stage check fails.
+pf_step "one supplier workflow runs end to end in dry run" node scripts/demo-autonomous-workflow.js
+
 pf_step "containment holds under stop, scope, failure and relabelling" env JWT_SECRET=preflight node --test scripts/email-containment.test.js
 
 # ── C-4: THE GATE CANNOT BE SKIPPED BY ASKING ───────────────────────────────

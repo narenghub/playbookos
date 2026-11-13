@@ -156,7 +156,6 @@ async function main() {
       message: {
         to: target,
         subject: `Delivery probe ${token}`,
-        html: msg.headers ? '' : '',
         mailbox: FROM,
         raw: msg.raw,
       },

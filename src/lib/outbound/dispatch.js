@@ -156,10 +156,16 @@ async function dispatch({
   if (!message || typeof message !== 'object') {
     return refuse('refused_before_request', 'dispatch requires a message object');
   }
-  const { to, subject, html } = message;
-  if (!to || !subject || !html) {
+  const { to, subject, html, raw } = message;
+  // A BODY IN EITHER FORM. This required `html` specifically, which is right for the Resend path
+  // and wrong for every Gmail one: there the body is `raw`, a prepared RFC822 blob, and `html` is
+  // at best a copy of it. The deliverability probe passes raw with an empty html and would have
+  // been refused as malformed on every run — a check that rejected a perfectly well-formed
+  // message because it was well-formed in the other shape.
+  if (!to || !subject || !(html || raw)) {
     return refuse('refused_before_request',
-      'a message needs a recipient, a subject and a body — a partial message is not a draft, it is a bug');
+      'a message needs a recipient, a subject and a body (html or raw) — a partial message is not '
+      + 'a draft, it is a bug');
   }
   if (!idempotencyKey || typeof idempotencyKey !== 'string') {
     return refuse('refused_before_request',

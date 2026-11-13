@@ -29,6 +29,7 @@ const { query } = require('../db');
 // decision — and dispatch refuses any external recipient with no approval and no matching digest,
 // which is every recipient here. One of the two senders behind the 3-10 November breach.
 const { dispatch } = require('../outbound/dispatch');
+const { prepareOutreachEmail, outreachApprovalContext } = require('./outreach-approval');
 // NOT transports/gmail: that module holds the send-capable credential and now runs in its own
 // process. This agent talks to the sender service, and gets its read-only client from gmail/client
 // — so there is no code path from here to a provider at all (milestone 6, item 1).
@@ -100,6 +101,9 @@ async function scanBounces(opts = {}) {
   const days = Math.max(1, Math.min(90, opts.days || 14));
   const execute = !!opts.execute;
   const say = opts.log || (() => {});
+  // One governed run context for this whole run, created on first use (milestone 6, item 2).
+  let approvalCtx = null;
+
   const out = { scanned: 0, found: [], recorded: 0, unmatched: 0, stopped: 0, rate: 0, sent: 0 };
 
   const ours = new Set(
@@ -357,9 +361,57 @@ async function runOutreach(opts = {}) {
 
       if (!sent.ok) {
         if (sent.needsApproval) {
-          skipped.needs_approval = (skipped.needs_approval || 0) + 1;
-          stoppedReasons.push({ who: q.who, why: sent.error });
-          console.warn(`[NEEDS_APPROVAL] outreach-agent: ${sent.error}`);
+          // ── QUEUE A DECISION, DO NOT JUST DECLINE (milestone 6, item 2) ────
+          //
+          // Milestone 5 made this path refuse, which was correct and also useless: a channel that
+          // looks alive and silently sends nothing is how the 3-10 November breach was able to run
+          // unnoticed in the first place, in reverse. So the message a human would have to approve
+          // is PREPARED here, and the human decides.
+          //
+          // The approval freezes the RAW BYTES. Approving a rendered preview and transmitting
+          // something else is the failure this binding exists to prevent.
+          // Acquired lazily and ONCE per run: a run that turns out to have nothing to queue
+          // should not open a governed run for nothing, and fifty queued messages should not open
+          // fifty runs.
+          if (!approvalCtx) {
+            approvalCtx = await outreachApprovalContext(
+              { workflow: 'outreach', agent: 'outreach-agent', intentName: 'outreach-approval' }, deps.approvalDeps);
+          }
+          if (!approvalCtx.ok) {
+            skipped.approval_unavailable = (skipped.approval_unavailable || 0) + 1;
+            stoppedReasons.push({ who: q.who, why: `${approvalCtx.reason}: ${approvalCtx.detail || ''}` });
+            console.error(`[APPROVAL_UNAVAILABLE] outreach-agent: ${approvalCtx.reason} — ${approvalCtx.detail || ''}`);
+            continue;
+          }
+
+          const queued = await prepareOutreachEmail(approvalCtx.ctx, {
+            to: (REDIRECT_TO || q.email),
+            subject: msg.headers && msg.headers.Subject,
+            raw: msg.raw,
+            mailbox: FROM,
+            transport: 'gmail_outreach',
+            threadId: (st && st.thread_id) || null,
+            campaign: q.route.need,
+            step: q.nextStep,
+            contactRef: String(q.who),
+            preview: m.html,
+            reason: `outreach-agent wants to email ${REDIRECT_TO || q.email}`,
+          }, deps.approvalDeps);
+
+          if (queued.prepared) {
+            skipped.queued_for_approval = (skipped.queued_for_approval || 0) + 1;
+            out.awaitingApproval = out.awaitingApproval || [];
+            out.awaitingApproval.push({ who: q.who, approvalId: queued.approvalId,
+              alreadyPending: !!queued.alreadyPending });
+            say(`   ⏸ ${who}  queued for approval (${queued.approvalId})`);
+          } else {
+            // Could not even queue it. Counted apart from a refusal: "nobody has decided yet" and
+            // "this could not be put in front of anybody" are different states, and collapsing
+            // them would hide the second behind the first.
+            skipped.approval_unavailable = (skipped.approval_unavailable || 0) + 1;
+            stoppedReasons.push({ who: q.who, why: `${queued.reason}: ${queued.detail || ''}` });
+            console.error(`[APPROVAL_UNAVAILABLE] outreach-agent: ${queued.reason}`);
+          }
         } else if (sent.stopped) {
           skipped.stopped_by_policy = (skipped.stopped_by_policy || 0) + 1;
           stoppedReasons.push({ who: q.who, why: sent.error });
