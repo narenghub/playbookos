@@ -124,6 +124,13 @@ const EXEMPT = new Set([
   // act" — a GLOBAL question across every company, which a company-scoped accessor cannot ask.
   // Read-only: it writes nothing and sends nothing.
   path.join('scripts', 'confirm-legacy-email-state.js'),
+  // Same category, and it reads SOURCE rather than the database. It asserts that
+  // scope.claimApprovalRelease() is still ONE arbitrated UPDATE — the statement that makes a
+  // duplicate dispatch click safe — so it must name office_approvals in order to check the SQL it
+  // is looking at. It opens no connection, writes nothing, and is the reason the Approvals dispatch
+  // action's ten-simultaneous-clicks control means anything: that control runs against a double
+  // which MODELS the claim, so something has to assert the real one still arbitrates.
+  path.join('scripts', 'approvals-release-arbitration.test.js'),
 ]);
 
 // Product code may never be exempt. The only permitted exemptions under src/ are the accessor and

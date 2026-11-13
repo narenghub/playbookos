@@ -151,12 +151,30 @@ async function handleSend({ raw, signature, timestamp, method = 'POST', path: p 
     html: String(payload),
   });
 
+  // ── THE CLAIM NAMESPACE IS THE SERVICE'S OWN ──────────────────────────────
+  //
+  // `sender:<key>`, NOT the bare key. This is not cosmetic — with the bare key, every send through
+  // this service was refused as a duplicate of itself.
+  //
+  // dispatch() opens a ledger attempt with claimRef = idempotencyKey and CLAIMS it before calling
+  // the transport, which is correct: responsibility must be durable before the provider call. The
+  // transport is then this service, which opened its own attempt under the same claimRef, ran
+  // priorClaim, found dispatch's CLAIMED row, and refused. Both layers were right about
+  // themselves; the collision only exists when they share one email_log, which in production they
+  // do. Neither unit suite could see it — each tested its layer alone — and it surfaced on the
+  // first end-to-end run over a socket.
+  //
+  // Namespacing keeps each layer idempotent within itself, which is what each one actually owns:
+  // dispatch refuses a duplicate DISPATCH, this service refuses a duplicate REQUEST TO SEND. A
+  // replayed HTTP call still finds this service's own prior claim and is refused.
+  const claimRef = `sender:${idempotencyKey}`;
+
   let att;
   try {
     att = await ledger.beginAttempt({
       transport, provider: 'gmail', to, subject,
       workflow, agent, companyId, approvalId,
-      claimRef: idempotencyKey, consequential: true,
+      claimRef, consequential: true,
     }, deps.ledgerDeps);
   } catch (e) {
     return refuse(503, 'ledger_unreachable',
@@ -176,7 +194,7 @@ async function handleSend({ raw, signature, timestamp, method = 'POST', path: p 
   }
   let prior;
   try {
-    prior = await ledger.priorClaim(idempotencyKey, { excludeId: att.id }, deps.ledgerDeps);
+    prior = await ledger.priorClaim(claimRef, { excludeId: att.id }, deps.ledgerDeps);
   } catch (e) {
     await att.blocked(`idempotency could not be established (${e.message})`, 'idempotency_unknown');
     return refuse(503, 'idempotency_unknown',

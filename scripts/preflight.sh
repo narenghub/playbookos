@@ -322,6 +322,20 @@ pf_step "an approved outreach message cannot become a different message" env JWT
 # dispatch; mocked store, ledger and transport. Exits non-zero if any stage check fails.
 pf_step "one supplier workflow runs end to end in dry run" node scripts/demo-autonomous-workflow.js
 
+# ── THE LAST MILE: THE APPROVALS DISPATCH ACTION ────────────────────────────
+#
+# Item 4 of the last mile: denial, tampering, duplicate clicks and STOP activation must each
+# produce ZERO provider invocations. Driven over real HTTP against the real router, including TEN
+# SIMULTANEOUS dispatch requests — nothing here depends on the browser disabling a button, which is
+# a courtesy to the operator and not a control.
+pf_step "a click on Approvals cannot send what it should not" env JWT_SECRET=preflight node --test src/api/approvals-dispatch.test.js
+
+# Item 6: the whole thing, two processes and one socket, with the provider as a counter. This is
+# the run that found both cross-layer defects — the missing idempotency key in the transport
+# envelope, and the service refusing every send as a duplicate of dispatch's own claim. Neither
+# layer's own suite could see either, because each layer was correct about itself.
+pf_step "approve, release and dispatch end to end over HTTP" node scripts/demo-approval-dispatch-e2e.js
+
 pf_step "containment holds under stop, scope, failure and relabelling" env JWT_SECRET=preflight node --test scripts/email-containment.test.js
 
 # ── C-4: THE GATE CANNOT BE SKIPPED BY ASKING ───────────────────────────────

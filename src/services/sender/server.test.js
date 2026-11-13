@@ -353,3 +353,90 @@ test('6b. the write endpoint is authenticated too', async () => {
     { env: ENV });
   assert.strictEqual(r.status, 401);
 });
+
+// ═══ 8. THE TWO LAYERS, OVER ONE LEDGER — THE CROSS-LAYER CONTROLS ═════════
+//
+// Both defects below were invisible to every unit suite in this repository, because each layer's
+// suite exercises that layer alone and each layer was correct about itself. They appeared on the
+// first run of dispatch() and the service together, sharing one email_log, as production does.
+
+test('8. dispatch through the REAL service, over one shared ledger, sends exactly once', async () => {
+  // THE DEFECT THIS ENCODES. dispatch opens a ledger attempt with claimRef = idempotencyKey and
+  // CLAIMS it before calling the transport — correct, responsibility must be durable first. The
+  // transport is this service, which opened its own attempt under THE SAME claimRef, ran
+  // priorClaim, found dispatch's CLAIMED row, and refused. Every send through the service was a
+  // duplicate of itself.
+  const D = require('../../lib/outbound/dispatch');
+  const CLIENT = require('../../lib/outbound/transports/sender-client');
+
+  const calls = [];
+  const rows = [];
+  const UNSAFE = ['CLAIMED', 'PROVIDER_ACCEPTED', 'OUTCOME_UNKNOWN', 'RECONCILED'];
+  const shared = {
+    rows,
+    beginAttempt: async (a) => {
+      const row = { id: `att-${rows.length + 1}`, outcome: 'PREPARED', claimRef: a.claimRef };
+      rows.push(row);
+      const set = (o) => { row.outcome = o; };
+      return { ok: true, id: row.id,
+        blocked: async () => set('BLOCKED'), claim: async () => set('CLAIMED'),
+        accepted: async () => set('PROVIDER_ACCEPTED'), rejected: async () => set('PROVIDER_REJECTED'),
+        unknown: async () => set('OUTCOME_UNKNOWN') };
+    },
+    priorClaim: async (ref, { excludeId } = {}) => rows.find((r) =>
+      r.claimRef === ref && r.id !== excludeId && UNSAFE.includes(r.outcome)) || null,
+  };
+
+  const server = S.createServer({
+    env: ENV, gate: allow, ledger: shared,
+    handlers: { gmail_cphi: async (m) => { calls.push(m.to); return { ok: true, id: 'g-1', providerResponded: true, meta: { threadId: 't-1' } }; } },
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+
+  try {
+    const url = `http://127.0.0.1:${server.address().port}`;
+    const m = { to: EXTERNAL, subject: 'Quotation QT-9001', raw: 'UkFXLUJZVEVT', mailbox: 'sales@abiozen.com' };
+    const r = await D.dispatch({
+      message: m, transport: 'gmail_cphi', idempotencyKey: 'xlayer-1',
+      approvalId: 'apv-1', expectedDigest: D.transmittedDigest(m),
+    }, {
+      env: ENV, gate: allow, ledger: shared,
+      transports: { gmail_cphi: CLIENT.transportFor('gmail_cphi', { url, secret: SECRET }) },
+    });
+
+    assert.strictEqual(r.ok, true,
+      `a send through the real service was refused: ${r.error}. If this says "refused_duplicate" `
+      + 'or names a duplicate, the two layers are sharing a claim namespace again.');
+    assert.strictEqual(calls.length, 1, `${calls.length} provider invocations for one send`);
+
+    // Two audit rows, one per layer, distinguishable. Independent auditability is a milestone
+    // requirement, so the service's row must not depend on the application's.
+    const app = rows.filter((x) => x.claimRef === 'xlayer-1');
+    const svc = rows.filter((x) => x.claimRef === 'sender:xlayer-1');
+    assert.strictEqual(app.length, 1, 'dispatch wrote no row of its own');
+    assert.strictEqual(svc.length, 1, 'the service wrote no row of its own, so it is not independent');
+    assert.strictEqual(svc[0].outcome, 'PROVIDER_ACCEPTED');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('8b. and a REPLAYED request to the service is still refused as a duplicate', async () => {
+  // The other half: namespacing must not have switched the service's own idempotency off. It
+  // protects against a duplicate REQUEST TO SEND, which is the threat this layer owns.
+  const rows = [{ id: 'att-prior', claimRef: 'sender:replay-1', outcome: 'CLAIMED' }];
+  const c = counter();
+  const out = await S.handleSend(signed({
+    message: { to: EXTERNAL, subject: 'S', raw: 'UkFX', mailbox: 'sales@abiozen.com' },
+    transport: 'gmail_cphi', idempotencyKey: 'replay-1',
+    approvalId: 'apv-1', expectedDigest: digestOf({ to: EXTERNAL, subject: 'S', raw: 'UkFX' }),
+  }), {
+    env: ENV, gate: allow, handlers: { gmail_cphi: c.send },
+    ledger: {
+      beginAttempt: async (a) => { rows.push({ id: 'att-new', claimRef: a.claimRef, outcome: 'PREPARED' }); return { ok: true, id: 'att-new', blocked: async () => {}, claim: async () => {}, accepted: async () => {}, rejected: async () => {}, unknown: async () => {} }; },
+      priorClaim: async (ref, { excludeId } = {}) => rows.find((r) => r.claimRef === ref && r.id !== excludeId && r.outcome === 'CLAIMED') || null,
+    },
+  });
+  assert.strictEqual(c.sends.length, 0, 'a replayed request to the service was served again');
+  assert.strictEqual(out.body.phase, 'refused_duplicate');
+});

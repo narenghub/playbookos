@@ -4316,6 +4316,7 @@ window.apOpen = async function apOpen(id) {
     + (d.display_name ? ' · appears to the recipient as ' + window.apEsc(d.display_name) : '')
     + '<br>digest ' + window.apEsc(d.transport_digest || 'NONE RECORDED')
     + '</div>'
+    + '<div style="margin-top:10px">' + window.apStateChip(d.ui_state) + '</div>'
     + window.apSelfBanner(d) + window.apValidity(d.validity)
     + '<div style="margin:14px 0 4px;font-size:11px;font-weight:700;letter-spacing:.04em;color:#1B3A6B">COMMERCIAL TERMS AS APPROVED</div>'
     + window.apTerms(d.commercial)
@@ -4335,8 +4336,91 @@ window.apOpen = async function apOpen(id) {
       ? '<button class="btn" onclick="window.apDecide(\'' + window.apEsc(d.id) + '\',\'approved\')">Approve</button>'
         + '<button class="btn" style="margin-left:8px;background:#9A2B2A" onclick="window.apDecide(\'' + window.apEsc(d.id) + '\',\'rejected\')">Reject</button>'
       : '<p style="font-size:12px;color:#555;margin:0">No decision can be taken on this action in its current state.</p>')
-    + '<p style="font-size:11px;color:#64748b;margin:10px 0 0">Approving does not send. A released approval must still pass every STOP at the transport, and the external-email HOLD currently refuses that step.</p>'
-    + '</div></div>';
+    + '<p style="font-size:11px;color:#64748b;margin:10px 0 0">Approving does not send. Dispatching is a second, deliberate act below, and it is not an override: every STOP still runs underneath it.</p>'
+    + '</div>'
+    // ── DISPATCH: A SECOND ACT, ON AN ALREADY APPROVED ARTEFACT ──────────────
+    //
+    // Shown only when the SERVER says can_dispatch. The screen does not work that out from
+    // status + released_at + action_kind: two readers of the same row would disagree, and this is
+    // where an operator forms their belief about whether a message went out.
+    + (d.can_dispatch
+      ? '<div style="margin-top:16px;border-top:1px solid #eee;padding-top:14px">'
+        + '<div style="font-size:11px;font-weight:700;letter-spacing:.04em;color:#1B3A6B;margin-bottom:6px">DISPATCH THIS APPROVED MESSAGE</div>'
+        + '<div style="font-size:12px;color:#444;margin-bottom:8px">Releases this approval once and hands the frozen payload to the governed dispatch path. The digest is re-verified against the exact bytes transmitted; a STOP will refuse it and nothing will be sent.</div>'
+        + '<button class="btn" id="ap-dispatch-btn" onclick="window.apDispatch(\'' + window.apEsc(d.id) + '\')">Release and dispatch</button>'
+        + '<div id="ap-dispatch-msg" style="margin-top:10px"></div>'
+        + '</div>'
+      : (d.status === 'approved' && d.released_at
+        ? '<div style="margin-top:16px;border-top:1px solid #eee;padding-top:14px">'
+          + window.apStateChip('delivered_or_unknown')
+          + '<div style="font-size:12px;color:#444;margin-top:7px">Claimed for execution at '
+          + window.apEsc(d.released_at) + ' by ' + window.apEsc(d.released_by || 'unknown')
+          + '. One decision authorises one send, so there is nothing further to do here.</div>'
+          + '</div>'
+        : ''))
+    + '</div>';
+};
+
+window.apStateChip = function apStateChip(state) {
+  // The six states, named by the SERVER and only rendered here. 'dispatching' is the exception:
+  // it exists for the window between the click and the answer and is the browser's to hold.
+  var m = {
+    pending:               ['#8A6D1F', '#FDF6E3', 'PENDING — nobody has decided yet'],
+    approved:              ['#1D7A4D', '#EDF7F1', 'APPROVED — decided, not yet dispatched'],
+    dispatching:           ['#1B3A6B', '#EEF2F9', 'DISPATCHING — asking the sender service…'],
+    delivered_to_provider: ['#1D7A4D', '#EDF7F1', 'DELIVERED TO PROVIDER — acknowledged with an id'],
+    delivered_or_unknown:  ['#8A6D1F', '#FDF6E3', 'ALREADY CLAIMED — one decision authorises one send'],
+    blocked:               ['#9A2B2A', '#FBEDED', 'BLOCKED — refused by policy or state'],
+    failed:                ['#9A2B2A', '#FBEDED', 'FAILED — see the detail below'],
+  };
+  var c = m[state] || ['#444', '#F3F4F6', String(state || 'UNKNOWN').toUpperCase()];
+  return '<span style="display:inline-block;font-size:11px;font-weight:700;letter-spacing:.04em;'
+    + 'padding:3px 9px;border-radius:11px;color:' + c[0] + ';background:' + c[1]
+    + ';border:1px solid ' + c[0] + '33">' + window.apEsc(c[2]) + '</span>';
+};
+
+window.apDispatch = async function apDispatch(id) {
+  // ASSIGNED TO window, as an async function expression. Annex B hoists a plain `function` out of
+  // a block but NOT an `async function`, so a block-scoped async handler throws ReferenceError on
+  // click and does nothing visible. See CLAUDE.md.
+  var msg = document.getElementById('ap-dispatch-msg');
+  var btn = document.getElementById('ap-dispatch-btn');
+
+  // Disabling the button is a COURTESY, not a control. The guarantee against a duplicate click is
+  // the release claim on the server and an idempotency key derived from the approval id — both of
+  // which hold even if this line never ran, or the operator pressed Enter twice, or retried the
+  // request by hand.
+  if (btn) { btn.disabled = true; btn.textContent = 'Dispatching…'; }
+  if (msg) msg.innerHTML = window.apStateChip('dispatching');
+
+  var r = await API('/approvals/' + encodeURIComponent(id) + '/dispatch', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+
+  // API resolves on a non-2xx with {error, code, ui_state}, so the payload is CHECKED rather than
+  // trusted and a try/catch here would be dead code.
+  var state = (r && r.ui_state) || 'failed';
+  var detail = (r && (r.detail || r.error || r.code)) || 'no response from the server';
+  var calls = (r && typeof r.provider_invocations === 'number') ? r.provider_invocations : null;
+
+  if (msg) {
+    msg.innerHTML = window.apStateChip(state)
+      + '<div style="font-size:12px;color:#444;margin-top:7px">' + window.apEsc(detail) + '</div>'
+      + ((r && r.provider_id)
+        ? '<div style="font-size:11px;color:#64748b;margin-top:4px">provider id '
+          + window.apEsc(r.provider_id) + (r.digest ? ' · digest ' + window.apEsc(r.digest) : '') + '</div>'
+        : '')
+      + (calls !== null
+        ? '<div style="font-size:11px;color:#64748b;margin-top:4px">provider invocations: '
+          + calls + '</div>'
+        : '');
+  }
+  if (btn) { btn.disabled = true; btn.textContent = 'Dispatched'; }
+
+  // Re-read, so the row and the detail show the state the SERVER now holds rather than the one
+  // this function just rendered.
+  await window.approvalsPage();
+  await window.apOpen(id);
 };
 
 window.apDecide = async function apDecide(id, decision) {

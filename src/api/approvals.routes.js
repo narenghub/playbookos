@@ -73,6 +73,41 @@ function isSelfApproval(row, actor) {
  * Reported for a PENDING row too, because an approval that has already gone stale is exactly the
  * one a reviewer should not be nudged into granting.
  */
+// ── THE SIX STATES THE SCREEN SHOWS ─────────────────────────────────────────
+//
+// pending · approved · dispatching · delivered_to_provider · blocked · failed
+//
+// `dispatching` is the only one that is not a property of the row: it exists for the window
+// between the click and the answer, and it is the browser's to hold. Everything else is decided
+// here, from the row, so the screen renders a verdict rather than computing one.
+//
+// delivered_to_provider is named for what it means. The provider acknowledged and returned an id;
+// that is acknowledgement, NOT proof that anybody received anything, and a state called "sent"
+// would quietly claim more than is known.
+function uiStateOf(row) {
+  if (row.status === 'pending') return 'pending';
+  if (row.status === 'rejected' || row.status === 'superseded' || row.status === 'expired') return 'blocked';
+  if (row.released_at) return 'delivered_or_unknown';
+  if (row.status === 'approved') return 'approved';
+  return 'blocked';
+}
+
+/**
+ * May this screen dispatch this artefact?
+ *
+ * Only an approved, unreleased OUTREACH approval. A buyer quotation is excluded deliberately: the
+ * inquiry agent releases those after re-comparing the commercial terms against current figures,
+ * and releasing one from here would skip that comparison — approving one offer and sending another
+ * with extra steps.
+ */
+function canDispatch(row) {
+  const OUTREACH = require('../lib/agents/outreach-approval');
+  if (row.action_kind !== OUTREACH.ACTION_KIND) return false;
+  if (row.status !== 'approved') return false;
+  if (row.released_at) return false;
+  return true;
+}
+
 function validity(row, { now = new Date(), ttlMinutes = APPROVAL.APPROVAL_TTL_MINUTES } = {}) {
   const reasons = [];
   if (row.status === 'rejected') {
@@ -244,6 +279,13 @@ router.get('/approvals/:id', authMiddleware, adminOnly, async (req, res) => {
       released_at: row.released_at, released_by: row.released_by,
       self_approval: isSelfApproval(row, req.user || {}),
       validity: validity(row),
+      // ── THE STATE, NAMED BY THE SERVER ─────────────────────────────────────
+      //
+      // Not inferred by the browser from status + released_at + action_kind. Two readers of the
+      // same row would otherwise disagree about which of the six states it is in, and this screen
+      // is where an operator forms their belief about whether a message went out.
+      ui_state: uiStateOf(row),
+      can_dispatch: canDispatch(row),
       // THE ARTEFACT. A reviewer approving a quotation must read the quotation.
       html: p.html || null,
       body_text: p.body_text || null,
@@ -334,7 +376,188 @@ router.post('/approvals/:id/decide', authMiddleware, adminOnly, async (req, res)
   }
 });
 
+// ── DISPATCH ─────────────────────────────────────────────────────────────────
+//
+//   POST /api/approvals/:id/dispatch
+//
+// Spec A milestone 6 last mile: the action that connects an approved decision to the frozen payload
+// and the governed dispatch path.
+//
+// ── WHY THIS IS A SECOND ACT AND NOT PART OF /decide ─────────────────────────
+//
+// The header of this file argues that approving is not sending, and that collapsing the two would
+// make a click on a review screen an override of a containment hold. That argument still holds, so
+// this does NOT fold dispatch into the approve decision. It is a separate, deliberate request
+// against an ALREADY approved artefact.
+//
+// What it is not: an override. Every gate still runs underneath it, and the STOPs still refuse.
+// With capability:email.send held, pressing this button reports STOPPED_BY_POLICY and transmits
+// nothing — which is the correct and observable behaviour, not a failure of the button.
+//
+// ── WHAT GUARANTEES WHAT ─────────────────────────────────────────────────────
+//
+// ONE-TIME RELEASE     approval.release() claims the row in one arbitrated statement; a second
+//                      request gets already_released and never reaches a provider. Two reviewers
+//                      clicking at once is the case that statement exists for, and it is why no
+//                      prior SELECT here is treated as arbitration.
+// DIGEST               release recomputes it from the stored payload and compares with the frozen
+//                      value; dispatch recomputes it from the bytes it is about to transmit; the
+//                      sender service recomputes it a third time from the request body.
+// IDEMPOTENCY          the key is derived from the APPROVAL ID, so a duplicate click, a retried
+//                      request and a double-submitted form all collapse onto one ledger claim and
+//                      the second is refused rather than resent.
+// STOPS                dispatch's gate, then the sender service's own read of autonomy_stops.
+// CONCURRENCY          the release claim is the serialisation point. Nothing here depends on the
+//                      UI disabling a button — that is a courtesy to the operator, not a control.
+router.post('/approvals/:id/dispatch', authMiddleware, adminOnly, async (req, res) => {
+  const ctx = await companyOr503(req, res);
+  if (!ctx) return undefined;
+
+  const actor = (req.user && (req.user.email || req.user.id)) || null;
+  if (!actor) {
+    return res.status(401).json({ error: 'a releasing actor is required', code: 'no_actor' });
+  }
+
+  let row;
+  try {
+    row = await SCOPE.approvalForReview(ctx, req.params.id, { query });
+  } catch (e) {
+    return res.status(500).json({ error: e.message, code: 'approval_read_failed' });
+  }
+  if (!row) return res.status(404).json({ error: 'no such approval for this company' });
+
+  // Only an APPROVED artefact may be dispatched. Reported with the state so the screen can say
+  // which of the six it is in rather than "failed".
+  if (row.status !== 'approved') {
+    return res.status(409).json({
+      error: `this approval is ${row.status}, so there is nothing to dispatch`,
+      code: 'not_approved', status: row.status, ui_state: row.status === 'pending' ? 'pending' : 'blocked',
+      validity: validity(row), provider_invocations: 0,
+    });
+  }
+  const v = validity(row);
+  if (v.reasons.some((r) => r.code === 'already_released')) {
+    // The courteous answer to a duplicate click that arrives before the first has finished. The
+    // actual guarantee is the release claim below; this is only a clearer message.
+    return res.status(409).json({
+      error: 'this approval has already been claimed for execution — one decision authorises one send',
+      code: 'already_released', ui_state: 'delivered_or_unknown', validity: v, provider_invocations: 0,
+    });
+  }
+
+  // ── WHICH LIFECYCLE OWNS THIS ARTEFACT ────────────────────────────────────
+  //
+  // Two action kinds, two modules, and the wrong one must not be able to release the other's
+  // payload: each release() checks the action kind it was handed, and an approval for anything
+  // else is refused rather than coerced.
+  const OUTREACH = require('../lib/agents/outreach-approval');
+  const kind = row.action_kind;
+  const lifecycle = kind === OUTREACH.ACTION_KIND ? OUTREACH : null;
+  if (!lifecycle) {
+    return res.status(400).json({
+      error: `this screen cannot dispatch an approval of kind ${JSON.stringify(kind)}`,
+      code: 'unsupported_action_kind', action_kind: kind, provider_invocations: 0,
+      detail: kind && kind.startsWith('buyer.email')
+        ? 'buyer quotations are released by the inquiry agent, which re-checks the commercial terms '
+          + 'against current figures — releasing one from here would skip that comparison'
+        : undefined,
+    });
+  }
+
+  // ── RELEASE: ONE DECISION, ONE SEND ───────────────────────────────────────
+  let released;
+  try {
+    released = await lifecycle.releaseOutreachEmail(ctx, { approvalId: row.id, releasedBy: actor },
+      { query });
+  } catch (e) {
+    return res.status(500).json({ error: e.message, code: 'release_failed', provider_invocations: 0 });
+  }
+  if (!released.released) {
+    const blocked = ['approved_payload_altered', 'wrong_action_kind', 'approval_stale'];
+    return res.status(409).json({
+      error: `the approved message could not be released: ${released.reason}`,
+      code: released.reason, detail: released.detail || null,
+      ui_state: blocked.includes(released.reason) ? 'blocked' : 'failed',
+      provider_invocations: 0,
+    });
+  }
+
+  // ── DISPATCH: EVERY GATE, UNDERNEATH ──────────────────────────────────────
+  //
+  // The idempotency key is derived from the APPROVAL, not from this request, so a duplicate click
+  // and a retry collapse onto one claim.
+  const { dispatch } = require('../lib/outbound/dispatch');
+  let sent;
+  try {
+    sent = await dispatch({
+      message: released.message,
+      transport: released.transport,
+      idempotencyKey: `approval:${row.id}`,
+      approvalId: released.approvalId,
+      expectedDigest: released.expectedDigest,
+      workflow: row.workflow || null,
+      agent: row.agent || null,
+      companyId: ctx.companyId || null,
+    });
+  } catch (e) {
+    // A throw out of dispatch means nothing is known about whether the provider received it.
+    return res.status(502).json({
+      error: `the outcome is unknown: ${e.message}`, code: 'outcome_unknown',
+      ui_state: 'failed', provider_responded: false, dispatched: true,
+      detail: 'the message may or may not have been transmitted; the ledger row is the authority '
+        + 'and this will never be retried automatically',
+    });
+  }
+
+  // ── THE SIX UI STATES, NAMED HERE RATHER THAN INFERRED BY THE SCREEN ──────
+  //
+  // The browser must not be deciding what a phase means: two readers of the same response would
+  // then disagree, and the screen is where an operator forms their belief about whether a message
+  // went out.
+  if (sent.ok) {
+    return res.json({
+      ok: true, ui_state: 'delivered_to_provider',
+      approval_id: row.id, provider_id: sent.id, digest: sent.digest,
+      transport: sent.transport, meta: sent.meta || null,
+      provider_invocations: 1,
+      detail: 'the provider acknowledged and returned an id. That is acknowledgement, NOT proof of '
+        + 'inbox delivery, and the state name says so.',
+    });
+  }
+  if (sent.stopped) {
+    return res.status(409).json({
+      ok: false, ui_state: 'blocked', code: 'stopped_by_policy', error: sent.error,
+      approval_id: row.id, provider_invocations: 0,
+      detail: 'a STOP refused this. The approval is spent either way — one decision authorises one '
+        + 'attempt — so lifting the stop requires a fresh preparation and a fresh decision.',
+    });
+  }
+  if (sent.phase === 'refused_duplicate') {
+    return res.status(409).json({
+      ok: false, ui_state: 'delivered_or_unknown', code: 'refused_duplicate', error: sent.error,
+      approval_id: row.id, duplicate_of: sent.duplicateOf || null, provider_invocations: 0,
+      detail: 'a message under this approval already claimed responsibility, so this was not sent '
+        + 'again. Check the ledger row for what became of the first attempt.',
+    });
+  }
+  if (sent.dispatched) {
+    return res.status(502).json({
+      ok: false, ui_state: 'failed', code: sent.phase, error: sent.error,
+      approval_id: row.id, provider_responded: !!sent.providerResponded,
+      detail: sent.providerResponded
+        ? 'the provider answered and refused it; nothing was transmitted'
+        : 'the outcome is unknown and will never be retried automatically',
+    });
+  }
+  return res.status(409).json({
+    ok: false, ui_state: 'blocked', code: sent.phase, error: sent.error,
+    approval_id: row.id, provider_invocations: 0,
+  });
+});
+
 module.exports = router;
 module.exports.validity = validity;
 module.exports.isSelfApproval = isSelfApproval;
 module.exports.summarise = summarise;
+module.exports.uiStateOf = uiStateOf;
+module.exports.canDispatch = canDispatch;

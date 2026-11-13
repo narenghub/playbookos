@@ -298,7 +298,17 @@ async function dispatch({
 
   let result;
   try {
-    result = await impl.send({ ...message, _dispatch: { approvalId, digest: actualDigest, workflow, agent } });
+    // ── THE ENVELOPE A TRANSPORT RECEIVES ───────────────────────────────────
+    //
+    // idempotencyKey and companyId belong here, and were MISSING. In-process transports ignore the
+    // envelope entirely, so every unit test passed; the out-of-process sender client reads it to
+    // build its request, forwarded `undefined` as the idempotency key, and the service refused
+    // every real send as malformed. Found only by running the two together over a socket — neither
+    // side's own suite could see it, because each was correct about itself.
+    result = await impl.send({
+      ...message,
+      _dispatch: { approvalId, digest: actualDigest, workflow, agent, idempotencyKey, companyId },
+    });
   } catch (e) {
     // The request may have reached the provider before this threw. OUTCOME_UNKNOWN, never
     // "failed" — the two differ in exactly the way that decides whether a retry is safe.

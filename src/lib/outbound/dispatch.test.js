@@ -453,3 +453,27 @@ test('9d. …and a message with NEITHER body is still refused', async () => {
   assert.strictEqual(c.sends.length, 0, 'a message with no body at all was transmitted');
   assert.strictEqual(r.ok, false);
 });
+
+test('12. the transport envelope carries the idempotency key and company', async () => {
+  // THE DEFECT THIS ENCODES. dispatch passed only { approvalId, digest, workflow, agent } to the
+  // transport. In-process transports ignore the envelope entirely, so every test here passed —
+  // but the out-of-process sender client READS it to build its HTTP request, forwarded `undefined`
+  // as the idempotency key, and the service refused every real send as malformed. Each side was
+  // correct about itself and the pair was broken.
+  let seen = null;
+  const deps = {
+    env: ENV, gate: allow, ledger: fakeLedger(),
+    transports: { resend: { send: async (m) => { seen = m._dispatch; return { ok: true, id: 'p-1' }; } } },
+  };
+  const r = await D.dispatch({
+    message: { to: INTERNAL, subject: 's', html: '<p>b</p>' },
+    transport: 'resend', idempotencyKey: 'env-1', companyId: 'abiozen',
+    workflow: 'w', agent: 'a',
+  }, deps);
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(seen.idempotencyKey, 'env-1',
+    'the transport cannot see the idempotency key, so an out-of-process transport cannot forward it');
+  assert.strictEqual(seen.companyId, 'abiozen');
+  assert.strictEqual(seen.workflow, 'w');
+  assert.strictEqual(seen.agent, 'a');
+});

@@ -189,6 +189,11 @@ const INTERNAL = [
   // is the product gate, and the point of having both is that they fail independently.
   'GET /api/decisions', 'GET /api/spend',
   'GET /api/approvals', 'GET /api/approvals/:id', 'POST /api/approvals/:id/decide',
+  // The dispatch action is 'internal' for the same reasons and one more: it is the single most
+  // consequential button in the platform, the only place a human act becomes an external message.
+  // There is no product to scope it under — the approval it spends may belong to any of them — and
+  // the product gate failing independently of adminOnly is worth most exactly here.
+  'POST /api/approvals/:id/dispatch',
   // agent plumbing and integrations
   'GET /api/agent/activity', 'GET /api/agent/approvals', 'PUT /api/agent/approvals/:id',
   'GET /api/agent/dependencies', 'GET /api/agent/mission-control', 'GET /api/agent/overview',
