@@ -288,6 +288,21 @@ pf_step "the AST scanner catches every historical defect, and nothing it cannot 
 # call — and a mail SDK cannot be used before it is installed. Neither check is offered as proof
 # on its own, and both say so in their own output.
 pf_step "no unreviewed dependency has been added" node scripts/check-dependency-additions.js
+# ── SPEC A MILESTONE 5: THE GOVERNED OUTBOUND CHOKEPOINT ────────────────────
+#
+# The first of these PAYS FOR an exception. check-email-transport-coverage.js excepts
+# src/lib/outbound/transports/gmail.js, because that file names a provider and deliberately does
+# not consult the kill switch — dispatch() holds every authorization decision. That exception is a
+# real loss of coverage on the one file that touches the provider, and this control is what makes
+# it acceptable: it proves the transport is unreachable except through dispatch, whose gate call is
+# unconditional and whose denial provably ends the path. Delete this control and the exception must
+# go with it.
+pf_step "nothing reaches a provider except through dispatch" env JWT_SECRET=preflight node --test scripts/dispatch-chokepoint.test.js
+
+# Mocked transport, no database, no network, no credential. Exits non-zero if any scenario does not
+# behave as it claims — including every expected ZERO provider call.
+pf_step "the governed boundary refuses five ways and permits one" node scripts/demo-governed-dispatch.js
+
 pf_step "containment holds under stop, scope, failure and relabelling" env JWT_SECRET=preflight node --test scripts/email-containment.test.js
 
 # ── C-4: THE GATE CANNOT BE SKIPPED BY ASKING ───────────────────────────────

@@ -485,13 +485,41 @@ test('APPROVAL: a refusal carries a scope the ledger can file it under', async (
   assert.strictEqual(stopped.scope, 'workflow:legacy-inquiry-buyer-email');
 });
 
-test('APPROVAL: no transport rebuilds the scope string locally any more', () => {
-  for (const f of ['src/lib/mailer.js', 'src/lib/agents/outreach-agent.js',
-    'src/lib/campaigns/cphi-runner.js']) {
+test('APPROVAL: no caller of the gate rebuilds the scope string locally any more', () => {
+  // ── WHY THIS LIST SHRANK (Spec A milestone 5) ──────────────────────────────
+  //
+  // It used to name mailer.js, outreach-agent.js and cphi-runner.js — the three files that each
+  // consulted the gate themselves and each had to file the refusal under a scope. Two of them no
+  // longer consult the gate at all: they dispatch, and dispatch decides. So "does it use
+  // gate.scope rather than rebuilding one" is no longer a question about them, and asserting it
+  // would be asserting the presence of code whose absence is the improvement.
+  //
+  // The property is therefore checked where it now lives — every file that reads a gate decision —
+  // and the complementary property is checked below: the migrated senders cannot misfile a scope
+  // because they never see one.
+  for (const f of ['src/lib/mailer.js', 'src/lib/outbound/dispatch.js']) {
     const src = codeOnly(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'));
     assert.ok(!/gate\.stop\s*\n?\s*\?/.test(src) && !/scope_type\}\$\{/.test(src),
-      `${f} still builds its own scope string from gate.stop instead of using gate.scope`);
-    assert.ok(/gate\.scope/.test(src), `${f} does not use gate.scope`);
+      `${f} builds its own scope string from gate.stop instead of reading it off the decision`);
+    // mailer names the decision `gate`, dispatch names it `decision`. What matters is that the
+    // scope comes OFF THE DECISION, not that it is spelled one particular way.
+    assert.ok(/(gate|decision)\.scope/.test(src),
+      `${f} never reads .scope off the gate's decision, so a refusal has nothing to be filed under`);
+  }
+});
+
+test('APPROVAL: the migrated senders hold no gate decision to misfile', () => {
+  // The other half, and the stronger half. outreach-agent and cphi-runner reached buyers with the
+  // kill switch and no approval boundary; they were two of the three files above. They now make no
+  // authorization decision whatsoever — which is why there is one place for that logic to be wrong
+  // instead of three.
+  for (const f of ['src/lib/agents/outreach-agent.js', 'src/lib/campaigns/cphi-runner.js']) {
+    const src = codeOnly(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'));
+    assert.ok(!/assertSendAllowed/.test(src),
+      `${f} still consults the gate itself — authorization belongs to dispatch, in one place`);
+    assert.ok(!/beginAttempt/.test(src),
+      `${f} still opens its own ledger attempt, so its row and dispatch's can disagree`);
+    assert.ok(/dispatch\s*\(/.test(src), `${f} does not route through dispatch()`);
   }
 });
 

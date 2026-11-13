@@ -1,27 +1,5 @@
 [
   {
-    "fingerprint": "23d53431dbf78bc9b774c69926b89dc3",
-    "file": "src/lib/agents/outreach-agent.js",
-    "line_hint": 361,
-    "transport": "gmail-sdk",
-    "violation": "no-approval-boundary",
-    "reason": "Reaches buyers over Gmail with the kill switch and OUTREACH_ENABLED, but no approval and no digest binding. One of the two transports that produced the 3-10 November containment breach.",
-    "fix_in": "Spec A milestone 5 - route through dispatch.js",
-    "recorded": "2026-11-12",
-    "refingerprinted": "2026-11-12: AST migration. Same call site, same violation; the fingerprint covers the callee expression, which is now derived from the parse tree rather than from a regex match. Previous: 4a1e311b2730c9f57d7849fd86ab1601"
-  },
-  {
-    "fingerprint": "534514c0f645e7bb97e998891105ba51",
-    "file": "src/lib/campaigns/cphi-runner.js",
-    "line_hint": 361,
-    "transport": "gmail-sdk",
-    "violation": "no-approval-boundary",
-    "reason": "Same shape as outreach-agent. Kill switch and CPHI_FOLLOWUP_ENABLED, no approval boundary. The other transport in the containment breach.",
-    "fix_in": "Spec A milestone 5 - route through dispatch.js",
-    "recorded": "2026-11-12",
-    "refingerprinted": "2026-11-12: AST migration. Same call site, same violation; the fingerprint covers the callee expression, which is now derived from the parse tree rather than from a regex match. Previous: 78c6b2639bf29a15fa1c0cd23b8d72b9"
-  },
-  {
     "fingerprint": "7f09462d73644cfd3010c4e3ac1f2859",
     "file": "scripts/verify-bounce-detection.js",
     "line_hint": 147,

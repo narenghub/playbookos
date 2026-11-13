@@ -337,3 +337,94 @@ test('9b. an unclassifiable recipient is refused — 0 invocations', async () =>
     'it could not be determined whether this leaves the company, and it was sent');
   assert.match(r.error, /could not be classified/);
 });
+
+// ═══ 10. THE GMAIL PATH: THE DIGEST MUST BIND THE BYTES THAT LEAVE ═════════
+
+test('10. a tampered raw with consistent headers is refused — 0 invocations', async () => {
+  // The hole this closes was mine and was found while writing the Gmail transport. The digest
+  // covered to/subject/html, which for the Resend path IS the message — but on the Gmail path the
+  // transmitted bytes are `raw`, so altering `raw` while keeping the headers consistent passed the
+  // binding check and sent a different message.
+  const { c, deps } = harness();
+  const approved = { to: EXTERNAL, subject: 'Quotation QT-9001', html: '<p>12 kg</p>',
+    mailbox: 'sales@abiozen.com', raw: 'UkFXLU9SSUdJTkFM' };
+  const expectedDigest = D.transmittedDigest(approved);
+  const tampered = { ...approved, raw: 'UkFXLVRBTVBFUkVE' };   // same headers, different bytes
+
+  const r = await D.dispatch({ message: tampered, transport: 'gmail',
+    idempotencyKey: 'cphi-1', approvalId: 'apv-1', expectedDigest }, deps);
+
+  assert.strictEqual(c.sends.length, 0, 'the raw payload was altered after approval and still went');
+  assert.strictEqual(r.phase, 'digest_mismatch');
+});
+
+test('10b. with no raw, transmittedDigest is byte-identical to the mailer digest', () => {
+  // So migrating the Gmail path did not quietly change the binding on the inquiry path.
+  const mailer = require('../mailer');
+  assert.strictEqual(D.transmittedDigest(MSG), mailer.approvedDigestOf(MSG));
+  assert.strictEqual(D.transmittedDigest(MSG), D.payloadDigest(MSG));
+});
+
+test('10c. a raw message and its description do NOT hash the same', () => {
+  const base = { to: EXTERNAL, subject: 'x', html: '<p>y</p>' };
+  assert.notStrictEqual(D.transmittedDigest({ ...base, raw: 'Ymx1cmI' }), D.transmittedDigest(base),
+    'adding raw did not change the digest, so raw is not covered by it');
+});
+
+test('10d. the transport result\'s meta reaches the caller', async () => {
+  // The agents need the Gmail threadId to thread the next follow-up onto. If dispatch swallowed
+  // it, the migration would silently break threading.
+  const deps = {
+    env: ENV, gate: allow, ledger: fakeLedger(),
+    transports: { gmail: { send: async () => ({ ok: true, id: 'm-1', meta: { threadId: 't-99' } }) } },
+  };
+  const m = { to: INTERNAL, subject: 's', html: '<p>b</p>', mailbox: 'a@abiozen.com', raw: 'Ug' };
+  const r = await D.dispatch({ message: m, transport: 'gmail', idempotencyKey: 'k-1' }, deps);
+  assert.strictEqual(r.ok, true, r.error);
+  assert.strictEqual(r.meta.threadId, 't-99');
+});
+
+// ═══ 11. CREDENTIAL ISOLATION (milestone 5, item 3) ════════════════════════
+
+test('11. the agents cannot obtain a send-capable Gmail client', () => {
+  const T = require('./transports/gmail');
+  assert.strictEqual(typeof T.sendCapableClient, 'undefined',
+    'the send-capable client factory is exported, so an agent can get a token that sends');
+  const src = fs.readFileSync(path.join(__dirname, 'transports', 'gmail.js'), 'utf8');
+  const code = require('../../../scripts/js-lex').blankNonCode(src);
+  assert.ok(/function sendCapableClient/.test(code), 'the private factory is gone — check this test');
+  assert.ok(!/module\.exports[\s\S]*sendCapableClient/.test(code),
+    'sendCapableClient appears in the export list');
+});
+
+test('11b. readOnlyClientFor forces READONLY_ONLY — the grant refuses the write, not the code', async () => {
+  const T = require('./transports/gmail');
+  const { READONLY_ONLY } = require('../gmail/client');
+  let askedFor = null;
+  await T.readOnlyClientFor('naren@abiozen.com', {
+    gmailClientFor: async (subject, d) => { askedFor = d.scopeSets; return { gmail: {} }; },
+  });
+  assert.deepStrictEqual(askedFor, READONLY_ONLY,
+    'the agent was handed something other than a read-only scope set');
+});
+
+test('11c. a missing send credential is PROVIDER_REJECTED, never OUTCOME_UNKNOWN', async () => {
+  // Nothing was transmitted because nothing could be. Recording that as "unknown" would leave a
+  // row a human must chase, for a send that provably never happened.
+  const T = require('./transports/gmail');
+  T._resetSenders();
+  const r = await T.send({ mailbox: 'x@abiozen.com', raw: 'Ug' },
+    { gmailClientFor: async () => ({ error: 'no usable Gmail scope' }) });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.providerResponded, false);
+  assert.match(r.error, /no send-capable Gmail credential/);
+});
+
+test('11d. the transport makes no authorization decision', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'transports', 'gmail.js'), 'utf8');
+  const code = require('../../../scripts/js-lex').blankNonCode(src);
+  for (const t of ['assertSendAllowed', 'autonomy_stops', 'approvalId', 'expectedDigest']) {
+    assert.ok(!code.includes(t),
+      `the gmail transport references ${t} — authorization belongs to dispatch, in one place`);
+  }
+});

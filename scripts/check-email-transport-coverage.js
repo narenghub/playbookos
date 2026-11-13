@@ -71,7 +71,7 @@ const AL = require('./outbound-endpoint-allowlist');
 // and requiring a written reason. The only enforcement that actually holds is outside the artifact
 // — branch protection and CODEOWNERS on this file and the JSON — and that is owner configuration,
 // not code. Until it exists, this comment is the accurate description of the control's strength.
-const MAX_KNOWN_VIOLATIONS = 3;
+const MAX_KNOWN_VIOLATIONS = 1;
 // The path is overridable ONLY so the negative controls can drive a planted baseline. The
 // pinned digest and MAX_KNOWN_VIOLATIONS are not overridable, which is what keeps the seam
 // from becoming the bypass: a planted baseline still fails both of those, which is exactly
@@ -85,7 +85,7 @@ const BASELINE_FILE = process.env.OUTBOUND_BASELINE_FILE
 // deliberately three edits — the baseline, this digest, and the ceiling — so that it cannot happen
 // quietly. The ceiling did NOT move: still 3.
 // Previous: ec48eb3086dd4f2587fb5062c02c9da5e5e797e49fe7aaefb78bbed5d93bb4fe
-const BASELINE_SHA256 = '142d988f405e6e737447ec47f3c9774dad89d470834c08c873e35bfd512f10c5';
+const BASELINE_SHA256 = '3087f1b98dc9aba069c83bf127dd32d332d2c3fe62976dc6ba34411a7d83ae5f';
 
 // BOTH TREES. src/ is the application; scripts/ holds operator-run tools, and one of them —
 // verify-bounce-detection.js — genuinely transmits. CEO authorization 2026-11-10 item A: an
@@ -161,6 +161,19 @@ const MAILER = /require\(\s*['"][^'"]*\/?mailer['"]\s*\)/;
 const EXCEPTIONS = {
   'src/lib/email-gate.js': 'the gate itself',
   'src/lib/mailer.js': 'calls the gate directly; the Resend transport lives here',
+  // ── THE GMAIL TRANSPORT (Spec A milestone 5) ───────────────────────────────
+  //
+  // Unlike mailer.js, this file does NOT call the gate, and must not: dispatch() holds every
+  // authorization decision so there is ONE place for that logic to be wrong. Its own test suite
+  // asserts the transport references neither assertSendAllowed nor expectedDigest.
+  //
+  // That makes this exception a REAL loss of coverage on the one file that touches the provider,
+  // and it is only acceptable because a narrower, stronger control replaces it:
+  // scripts/dispatch-chokepoint.test.js proves the transport is unreachable except through
+  // dispatch(), whose gate call is unconditional. File-level "does this file mention the gate"
+  // is traded for "can anything reach this send without passing the gate". If that control is
+  // deleted, this exception must be deleted with it.
+  'src/lib/outbound/transports/gmail.js': 'the Gmail transport; reachable only via dispatch(), proved by scripts/dispatch-chokepoint.test.js',
   // The scanner and its controls necessarily contain the forbidden shapes — as STRING LITERALS,
   // which the pre-pass blanks, so neither should appear as a call site at all. Listed anyway: if a
   // refactor ever moves one of those fixtures out of a string and into live code, the exception

@@ -22,11 +22,16 @@
 'use strict';
 
 const { query } = require('../db');
-const { beginAttempt } = require('../outbound/ledger');
-const { assertSendAllowed } = require('../email-gate');
+// ── SPEC A MILESTONE 5 ──────────────────────────────────────────────────────
+//
+// Was: own ledger attempt → assertSendAllowed → g.gmail.users.messages.send(...). All three are
+// dispatch()'s job now. This agent no longer touches a provider, a credential, or an authorization
+// decision — and dispatch refuses any external recipient with no approval and no matching digest,
+// which is every recipient here. One of the two senders behind the 3-10 November breach.
+const { dispatch } = require('../outbound/dispatch');
+const GMAIL = require('../outbound/transports/gmail');
 const { renderNeed, needStepsOf, NEED_CAMPAIGNS } = require('../campaigns/needs');
 const { buildQueue, varsFor } = require('../campaigns/outreach-queue');
-const { gmailClientFor } = require('../gmail/client');
 const { buildMessage } = require('../gmail/message');
 const { replyState } = require('../gmail/thread');
 const { labelForNeed, labelThread, ensureNeedLabels } = require('../gmail/labels');
@@ -98,7 +103,7 @@ async function scanBounces(opts = {}) {
   out.sent = (await query('SELECT COUNT(*)::int n FROM outreach_sends')).rows[0].n;
   if (!ours.size) { say('   nothing sent yet, so nothing can have bounced'); return out; }
 
-  const g = opts.gmail ? { gmail: opts.gmail } : await gmailClientFor(mailbox);
+  const g = opts.gmail ? { gmail: opts.gmail } : await GMAIL.readOnlyClientFor(mailbox);
   if (g.error) throw new Error(`cannot read ${mailbox}: ${g.error}`);
 
   const after = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10).replace(/-/g, '/');
@@ -243,11 +248,14 @@ async function runOutreach(opts = {}) {
     return out;
   }
 
-  const g = await gmailClientFor(FROM);
+  // READ-ONLY: this client lists and reads threads. It cannot send, by scope rather than by
+  // control flow, and it cannot label either — both are writes, and both live with the credential
+  // in the sender service.
+  const g = await GMAIL.readOnlyClientFor(FROM);
   if (g.error) throw new Error(`cannot act as ${FROM}: ${g.error} — nothing is sent until that is fixed`);
   say(`   authorised as ${g.profile.emailAddress} via ${g.via} (${g.scopeSet})`);
 
-  const folders = await ensureNeedLabels(g.gmail, FROM);
+  const folders = await GMAIL.ensureLabels({ mailbox: FROM, set: 'needs' });
   if (!folders.ok) {
     say('   ⚠ folders could not be set up — threads will be UNFILED, and an unfiled thread is one');
     say('     whose reply never stops the sequence:');
@@ -320,56 +328,59 @@ async function runOutreach(opts = {}) {
       //
       // Fail-closed: if the stop state cannot be read, the send is refused. An unreadable kill
       // switch is an unestablished authorization.
-      // ── THE LEDGER ATTEMPT, BEFORE AUTHORIZATION IS DECIDED ─────────────
+      // ── ONE GOVERNED ROAD OUT ───────────────────────────────────────────
       //
-      // This transport wrote NOTHING to email_log — which is why the production checker's
-      // "0 external recipients" was structurally unable to see it. One ledger row per attempt
-      // now, with the same outcome semantics as the Resend path, so a report can compare them.
-      // Fails closed: no record, no send.
-      const att = await beginAttempt({
-        transport: 'gmail_outreach', provider: 'gmail',
-        to: (REDIRECT_TO || q.email), subject: m.subject,
-        workflow: 'outreach', agent: 'outreach-agent', claimRef: null,
-      });
-      if (!att.ok) {
-        skipped.unrecordable = (skipped.unrecordable || 0) + 1;
-        stoppedReasons.push({ who: q.who, why: att.error });
-        console.error(`[LEDGER FAIL-CLOSED] outreach-agent: ${att.error}`);
+      // The digest binds `raw`, the bytes actually transmitted, not to/subject/html which merely
+      // describe them. Approval is MANDATORY here because every recipient is external, so without
+      // an approval boundary this sender now refuses — the correct state for it, and the reason the
+      // STOPs can eventually be narrowed from "all platform email" to this path alone.
+      const sent = await dispatch({
+        message: {
+          to: (REDIRECT_TO || q.email),
+          subject: m.subject,
+          html: m.html,
+          mailbox: FROM,
+          raw: msg.raw,
+          ...(st && st.thread_id ? { threadId: st.thread_id } : {}),
+        },
+        transport: 'gmail_outreach',
+        idempotencyKey: opts.idempotencyKey || `outreach:${q.who}:${q.route.need}:${q.nextStep}`,
+        approvalId: opts.approvalId || null,
+        expectedDigest: opts.expectedDigest || null,
+        workflow: 'outreach',
+        agent: 'outreach-agent',
+      }, opts.dispatchDeps);
+
+      if (!sent.ok) {
+        if (sent.needsApproval) {
+          skipped.needs_approval = (skipped.needs_approval || 0) + 1;
+          stoppedReasons.push({ who: q.who, why: sent.error });
+          console.warn(`[NEEDS_APPROVAL] outreach-agent: ${sent.error}`);
+        } else if (sent.stopped) {
+          skipped.stopped_by_policy = (skipped.stopped_by_policy || 0) + 1;
+          stoppedReasons.push({ who: q.who, why: sent.error });
+          console.warn(`[STOPPED_BY_POLICY] outreach-agent: ${sent.error}`);
+        } else if (sent.phase === 'refused_duplicate') {
+          skipped.duplicate = (skipped.duplicate || 0) + 1;
+          stoppedReasons.push({ who: q.who, why: sent.error });
+        } else if (sent.dispatched) {
+          out.unconfirmed = (out.unconfirmed || 0) + 1;
+          stoppedReasons.push({ who: q.who, why: sent.error });
+          console.error(`[OUTCOME_UNKNOWN] outreach-agent: ${sent.error}`);
+        } else {
+          skipped.unrecordable = (skipped.unrecordable || 0) + 1;
+          stoppedReasons.push({ who: q.who, why: sent.error });
+          console.error(`[REFUSED] outreach-agent: ${sent.error}`);
+        }
         continue;
       }
 
-      const gate = await assertSendAllowed({
-        capability: 'email.send', workflow: 'outreach', agent: 'outreach-agent', to: (REDIRECT_TO || q.email),
-      });
-      if (!gate.allowed) {
-        // gate.scope, not a locally rebuilt string: an approval refusal has no stop row, and the
-        // old fallback would have filed it as an unreadable kill switch.
-        await att.blocked(gate.reason, gate.scope || 'authorization_undetermined');
-        // `skipped` is a COUNTER OBJECT, not an array — out.skipped is assigned from it at the end
-        // of the run. A push() here would throw inside the send loop, which is a worse failure than
-        // the one being prevented. The reason is kept too: a count of refusals nobody can explain
-        // is the same shape as the silence this whole change exists to remove.
-        skipped.stopped_by_policy = (skipped.stopped_by_policy || 0) + 1;
-        stoppedReasons.push({ who: q.who, why: gate.reason });
-        console.warn(`[STOPPED_BY_POLICY] outreach-agent: ${gate.reason}`);
-        continue;
-      }
-
-      // CLAIMED before the provider call. Gmail cannot unsend, so a crash between here and the
-      // response must read as "an attempt was made, outcome unknown" rather than as nothing.
-      await att.claim();
-      const res = await g.gmail.users.messages.send({
-        userId: 'me',
-        requestBody: { raw: msg.raw, ...(st && st.thread_id ? { threadId: st.thread_id } : {}) },
-      });
-      const threadId = res.data.threadId;
-      // The provider answered and returned an id. Acceptance by Gmail is NOT proof of delivery,
-      // and the state name says so.
-      await att.accepted(res.data.id || threadId);
+      const threadId = sent.meta && sent.meta.threadId;
+      const res = { data: { id: (sent.meta && sent.meta.messageId) || sent.id, threadId } };
 
       const folder = labelForNeed(q.route.need);
       let filed = null;
-      if (folder) filed = await labelThread(g.gmail, FROM, threadId, folder);
+      if (folder) filed = await GMAIL.fileThread({ mailbox: FROM, threadId, folder });
       if (!folder || !filed.ok) {
         out.unfiled.push({ who: q.who, threadId, why: folder ? filed.error : 'no folder' });
       }
@@ -409,7 +420,8 @@ async function runOutreach(opts = {}) {
       // OUTCOME_UNKNOWN. Gmail may have accepted this before the throw, so this is not a
       // failure in the sense of "nothing was sent" — it is the state where nobody knows, and it
       // is never eligible for automatic retry. The domain claim stays for the same reason.
-      await att.unknown((e && e.message) || String(e));
+      // No att.unknown() here: dispatch owns the ledger row and recorded the outcome already.
+      // A throw reaching this point is in the code AROUND the send, not in the transmission.
       // The claim row stays, unconfirmed. Deliberate: it records that a send was attempted and we
       // do not know whether it left. A human decides, rather than the next run guessing.
       if (claimId) out.unconfirmed += 1;

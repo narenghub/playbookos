@@ -244,12 +244,34 @@ if (!url) {
         'src/lib/agents/outreach-agent.js': 'gmail_outreach',
         'scripts/verify-bounce-detection.js': 'gmail_probe',
       };
-      const missing = Object.keys(srcs).filter((f) => {
-        const code = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
-        return !/beginAttempt\(/.test(code);
-      });
-      if (!missing.length) ok('every live transport opens a ledger attempt');
+      // ── WHAT "HAS A LEDGER ATTEMPT" MEANS AFTER MILESTONE 5 ────────────────
+      //
+      // This used to require `beginAttempt(` in each sender's own source, which was right while
+      // every sender governed itself. cphi-runner and outreach-agent now route through dispatch(),
+      // which opens the attempt for them — so demanding the call in their source would demand the
+      // duplication the chokepoint exists to remove, and two attempt rows for one message is worse
+      // than one.
+      //
+      // The property is unchanged: EVERY send is recorded. What satisfies it is now either of two
+      // things — and a sender that does neither still fails.
+      const hasRecord = (code) => {
+        const ownAttempt = /beginAttempt\(/.test(code);
+        const viaDispatch = /require\(['"`][^'"`]*outbound\/dispatch['"`]\)/.test(code)
+          && /dispatch\s*\(/.test(code);
+        return ownAttempt || viaDispatch;
+      };
+      const missing = Object.keys(srcs).filter((f) =>
+        !hasRecord(fs.readFileSync(path.join(__dirname, '..', f), 'utf8')));
+      if (!missing.length) ok('every live transport opens a ledger attempt, itself or via dispatch');
       else bad(`transports with no ledger attempt: ${missing.join(', ')}`);
+
+      // The negative control, because the clause above WIDENED what passes. Without it, the
+      // disjunction could be loosened to `|| true` and nothing here would notice.
+      if (!hasRecord('async function go(g) { await g.gmail.users.messages.send({}); }')) {
+        ok('…and a sender that does neither is still caught');
+      } else {
+        bad('the widened ledger-attempt test accepts a sender that records nothing at all');
+      }
     }
 
     // ── 8. A LOGGING FAILURE CANNOT SILENTLY PERMIT TRANSMISSION ─────────────

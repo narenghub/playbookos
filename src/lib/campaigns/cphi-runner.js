@@ -33,12 +33,20 @@
 'use strict';
 
 const fs = require('fs');
-const { beginAttempt } = require('../outbound/ledger');
-const { assertSendAllowed } = require('../email-gate');
+// ── SPEC A MILESTONE 5 ──────────────────────────────────────────────────────
+//
+// This sender used to do its own governance: its own ledger attempt, its own assertSendAllowed,
+// then g.gmail.users.messages.send(...) directly. It no longer touches a provider or an
+// authorization decision. Everything outbound goes through dispatch(), which is the ONLY road out
+// — and which refuses any external recipient without an approval and a matching digest.
+//
+// That refusal is not a regression to work around. This sender and outreach-agent are the two that
+// reached 25 real people between 3 and 10 November, precisely because each governed itself.
+const { dispatch } = require('../outbound/dispatch');
+const GMAIL = require('../outbound/transports/gmail');
 const path = require('path');
 const { query } = require('../db');
 const { isEvent } = require('../events/registry');
-const { gmailClientFor } = require('../gmail/client');
 const { buildMessage } = require('../gmail/message');
 const { replyState } = require('../gmail/thread');
 const { ensureCampaignLabels, labelThread, labelForCampaign } = require('../gmail/labels');
@@ -74,7 +82,10 @@ async function runFollowups(opts = {}) {
   const [SPACE_MIN, SPACE_MAX] = opts.spacingMs || [40000, 90000];
   const say = opts.log || (() => {});
   const deps = opts.deps || {};
-  const getClient = deps.gmailClientFor || gmailClientFor;
+  // READ-ONLY, deliberately. This client lists and reads; it cannot send, and that is a property
+  // of the token's scope rather than of this file's control flow. Sending and labelling — both
+  // writes — go through the sender service, which holds the only send-capable credential.
+  const getClient = deps.readOnlyClientFor || GMAIL.readOnlyClientFor;
 
   if (!isEvent(EVENT)) throw new Error(`"${EVENT}" is not an event`);
   if (!Number.isInteger(MAX) || MAX < 1) throw new Error('max must be a positive integer');
@@ -237,7 +248,8 @@ async function runFollowups(opts = {}) {
   // ── THE THREE FOLDERS ────
   // Made now, before anything is sent, so a scope problem is reported once at the top rather than
   // once per message — and so the sidebar is right even on a run where nothing turns out to be due.
-  const folders = await ensureCampaignLabels(g.gmail, FROM_MAILBOX);
+  // A write, so the agent's read-only client cannot do it: the sender service can.
+  const folders = await GMAIL.ensureLabels({ mailbox: FROM_MAILBOX, set: 'campaigns' }, deps);
   out.folders = folders;
   if (folders.ok) {
     const made = Object.values(folders.labels).filter((l) => l.created).map((l) => l.name);
@@ -308,65 +320,73 @@ async function runFollowups(opts = {}) {
           ? [{ filename: 'abiozen-model.pdf', contentType: 'application/pdf', content: pdf }] : [],
       });
 
-      // ── THE KILL SWITCH, IMMEDIATELY BEFORE THE PROVIDER CALL ───────────
+      // ── ONE GOVERNED ROAD OUT ───────────────────────────────────────────
       //
-      // This sender had NO kill-switch check at all. It was gated only by CPHI_FOLLOWUP_ENABLED, read at
-      // the cron and turned into the EXECUTE flag below — so a row in autonomy_stops, including a
-      // GLOBAL stop, did not reach it. The global stop was not global.
+      // This block used to be: own ledger attempt → assertSendAllowed → messages.send. All three
+      // are now dispatch()'s job, in one place, for every sender. What changed in substance, not
+      // just in shape:
       //
-      // Checked PER MESSAGE rather than once before the loop: a stop set while a batch is running
-      // must take effect on the next message, not after the batch. The env flag is retained as an
-      // additional control and is never a replacement for this.
-      //
-      // Fail-closed: if the stop state cannot be read, the send is refused. An unreadable kill
-      // switch is an unestablished authorization.
-      // ── THE LEDGER ATTEMPT, BEFORE AUTHORIZATION IS DECIDED ─────────────
-      //
-      // This transport wrote NOTHING to email_log — which is why the production checker's
-      // "0 external recipients" was structurally unable to see it. One ledger row per attempt
-      // now, with the same outcome semantics as the Resend path, so a report can compare them.
-      // Fails closed: no record, no send.
-      const att = await beginAttempt({
-        transport: 'gmail_cphi', provider: 'gmail',
-        to: (REDIRECT_TO || q.email), subject: msg.headers && msg.headers.Subject,
-        workflow: 'cphi-followup', agent: 'cphi-runner', claimRef: `cphi_followup_sends:${claimId}`,
-      });
-      if (!att.ok) {
-        skipped.unrecordable = (skipped.unrecordable || 0) + 1;
-        stoppedReasons.push({ who: q.email, why: att.error });
-        console.error(`[LEDGER FAIL-CLOSED] cphi-runner: ${att.error}`);
+      //   - The digest binds the RAW BYTES, not a description of them. This sender transmits a
+      //     prepared RFC822 blob, so binding to/subject/html would have left the message itself
+      //     unbound.
+      //   - APPROVAL IS MANDATORY. Every recipient here is external, so dispatch refuses unless an
+      //     approvalId and a matching digest are supplied. This sender has no approval boundary
+      //     yet, so in production it now refuses — which is the correct state for the sender that
+      //     caused the November breach, and is why the STOPs can eventually become per-path
+      //     instead of holding all platform email.
+      //   - The idempotency key is the claim row, so a repeat is REFUSED rather than resent.
+      const sent = await dispatch({
+        message: {
+          to: (REDIRECT_TO || q.email),
+          subject: msg.headers && msg.headers.Subject,
+          html: rendered.html,
+          mailbox: FROM_MAILBOX,
+          raw: msg.raw,
+          ...(q.thread_id ? { threadId: q.thread_id } : {}),
+        },
+        transport: 'gmail_cphi',
+        idempotencyKey: `cphi_followup_sends:${claimId}`,
+        approvalId: opts.approvalId || null,
+        expectedDigest: opts.expectedDigest || null,
+        workflow: 'cphi-followup',
+        agent: 'cphi-runner',
+      }, deps.dispatchDeps);
+
+      if (!sent.ok) {
+        // Refused, or the outcome is unknown. Either way nothing further is recorded against this
+        // contact and the loop moves on — the counters keep the cases apart so a run that sent
+        // nothing says WHY, rather than reading as a quiet day.
+        if (sent.needsApproval) {
+          skipped.needs_approval = (skipped.needs_approval || 0) + 1;
+          stoppedReasons.push({ who: q.email, why: sent.error });
+          console.warn(`[NEEDS_APPROVAL] cphi-runner: ${sent.error}`);
+        } else if (sent.stopped) {
+          skipped.stopped_by_policy = (skipped.stopped_by_policy || 0) + 1;
+          stoppedReasons.push({ who: q.email, why: sent.error });
+          console.warn(`[STOPPED_BY_POLICY] cphi-runner: ${sent.error}`);
+        } else if (sent.phase === 'refused_duplicate') {
+          skipped.duplicate = (skipped.duplicate || 0) + 1;
+          stoppedReasons.push({ who: q.email, why: sent.error });
+        } else if (sent.dispatched) {
+          // The provider may have received it. NOT counted as skipped: something may have left and
+          // the ledger row says so.
+          out.unconfirmed += 1;
+          stoppedReasons.push({ who: q.email, why: sent.error });
+          console.error(`[OUTCOME_UNKNOWN] cphi-runner: ${sent.error}`);
+        } else {
+          skipped.unrecordable = (skipped.unrecordable || 0) + 1;
+          stoppedReasons.push({ who: q.email, why: sent.error });
+          console.error(`[REFUSED] cphi-runner: ${sent.error}`);
+        }
         continue;
       }
 
-      const gate = await assertSendAllowed({
-        capability: 'email.send', workflow: 'cphi-followup', agent: 'cphi-runner', to: (REDIRECT_TO || q.email),
-      });
-      if (!gate.allowed) {
-        // gate.scope, not a locally rebuilt string: an approval refusal has no stop row, and the
-        // old fallback would have filed it as an unreadable kill switch.
-        await att.blocked(gate.reason, gate.scope || 'authorization_undetermined');
-        // `skipped` is a COUNTER OBJECT, not an array — out.skipped is assigned from it at the end
-        // of the run. A push() here would throw inside the send loop, which is a worse failure than
-        // the one being prevented. The reason is kept too: a count of refusals nobody can explain
-        // is the same shape as the silence this whole change exists to remove.
-        skipped.stopped_by_policy = (skipped.stopped_by_policy || 0) + 1;
-        stoppedReasons.push({ who: q.email, why: gate.reason });
-        console.warn(`[STOPPED_BY_POLICY] cphi-runner: ${gate.reason}`);
-        continue;
-      }
-
-      // CLAIMED before the provider call. Gmail cannot unsend, so a crash between here and the
-      // response must read as "an attempt was made, outcome unknown" rather than as nothing.
-      await att.claim();
-      const res = await g.gmail.users.messages.send({
-        userId: 'me',
-        requestBody: { raw: msg.raw, ...(q.thread_id ? { threadId: q.thread_id } : {}) },
-      });
+      const res = { data: { id: (sent.meta && sent.meta.messageId) || sent.id,
+                            threadId: sent.meta && sent.meta.threadId } };
 
       const threadId = res.data.threadId;
-      // The provider answered and returned an id. Acceptance by Gmail is NOT proof of delivery,
-      // and the state name says so.
-      await att.accepted(res.data.id || threadId);
+      // No att.accepted() here: dispatch recorded PROVIDER_ACCEPTED before returning ok. Acceptance
+      // by Gmail is still NOT proof of delivery, and the ledger's state name says so.
 
       // ── FILE IT ────
       // After the send, and reported rather than thrown. By this point the message has left: Gmail
@@ -378,7 +398,7 @@ async function runFollowups(opts = {}) {
       if (folder) {
         // The whole thread, not just this message: their reply arrives in the same thread, and
         // threads.modify is what makes a `label:supplier` search match it too.
-        filed = await labelThread(g.gmail, FROM_MAILBOX, threadId, folder);
+        filed = await GMAIL.fileThread({ mailbox: FROM_MAILBOX, threadId, folder }, deps);
       }
       const filedNote = folder
         ? (filed.ok ? `  → ${folder}` : `  ⚠ UNFILED (${filed.error})`)
@@ -430,7 +450,9 @@ async function runFollowups(opts = {}) {
       // OUTCOME_UNKNOWN. Gmail may have accepted this before the throw, so this is not a
       // failure in the sense of "nothing was sent" — it is the state where nobody knows, and it
       // is never eligible for automatic retry. The domain claim stays for the same reason.
-      await att.unknown((e && e.message) || String(e));
+      // No att.unknown() here any more: dispatch owns the ledger row and has already recorded
+      // the outcome. A throw reaching this point is in the code AROUND the send (rendering,
+      // recording, filing), not in the transmission.
       if (REDIRECT_TO) { say(`   ✗ ${who}: ${(e && e.message) || e}`); continue; }
       // The claim STAYS, carrying the error. It blocks a blind retry and shows up as a row needing
       // a human — which is the right side to err on when the question is "did that actually send?"

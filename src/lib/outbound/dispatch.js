@@ -90,6 +90,27 @@ function payloadDigest({ to, subject, html }) {
   });
 }
 
+// ── THE DIGEST OF WHAT ACTUALLY LEAVES ──────────────────────────────────────
+//
+// payloadDigest above covers `to`, `subject` and `html`, which for the Resend path IS the message.
+// The Gmail path is different: the bytes transmitted are `raw`, a prepared RFC822 blob, and
+// `to`/`subject`/`html` are then only a description of it. Binding the description would leave the
+// thing itself unbound — alter `raw`, keep the headers consistent, and the check passes while a
+// different message goes. Found while writing the Gmail transport, which is the first caller where
+// the two can differ.
+//
+// So the comparison is always against the payload that will be handed to the transport. With no
+// `raw` this is byte-identical to payloadDigest, which keeps the mailer/approval-boundary path
+// unchanged and is asserted by the test suite.
+function transmittedDigest(message) {
+  const { to, subject, html, raw } = message || {};
+  const recipients = Array.isArray(to) ? to.join(', ') : String(to == null ? '' : to);
+  if (!raw) return LEDGER.digestOf({ to: recipients, subject, html });
+  // `raw` is authoritative, and the recipients are kept in the hash so a redirect is caught even
+  // if two messages share a body.
+  return LEDGER.digestOf({ to: recipients, subject: `raw:${subject || ''}`, html: String(raw) });
+}
+
 const refuse = (phase, error, extra = {}) => ({
   ok: false, id: null, phase, error, providerResponded: false, dispatched: false, ...extra,
 });
@@ -117,6 +138,19 @@ async function dispatch({
   const ledger = deps.ledger || LEDGER;
   const recipients = deps.recipients || RECIPIENTS;
   const registry = deps.transports || TRANSPORTS;
+
+  // Populate the registry on first use. Required lazily and only when the caller did not supply
+  // its own registry, so importing this module does not pull googleapis into every process, a
+  // test can register fakes without the real transports loading, and the require cycle between
+  // this file and ./transports resolves in one direction only.
+  if (!deps.transports) {
+    try { require('./transports').registerDefaults(); } catch (e) {
+      // A transport that cannot even be loaded must not read as "unknown transport" further down,
+      // which would send a reader looking for a typo in a name that is perfectly correct.
+      return refuse('refused_before_request',
+        `the transport registry could not be loaded (${e.message}) — nothing was sent`);
+    }
+  }
 
   // ── 1. THE CALL ITSELF MUST BE WELL FORMED ────────────────────────────────
   if (!message || typeof message !== 'object') {
@@ -167,7 +201,7 @@ async function dispatch({
   //
   // So a REFUSAL is as durable as a send. A refusal nobody can audit is indistinguishable from a
   // bug, and the containment evidence is built from these rows.
-  const actualDigest = payloadDigest({ to, subject, html });
+  const actualDigest = transmittedDigest(message);
   let att;
   try {
     att = await ledger.beginAttempt({
@@ -270,7 +304,10 @@ async function dispatch({
   if (result && result.ok) {
     await att.accepted(result.id || null);
     return { ok: true, id: result.id || null, phase: 'provider_accepted', error: null,
-      providerResponded: true, dispatched: true, transport, approvalId, digest: actualDigest };
+      providerResponded: true, dispatched: true, transport, approvalId, digest: actualDigest,
+      // Provider-specific facts the caller needs and dispatch must not interpret — a Gmail
+      // threadId, for instance, which the agent stores and threads its next follow-up onto.
+      meta: (result && result.meta) || null };
   }
   await att.rejected((result && result.error) || 'the transport reported no result');
   return { ok: false, id: null, phase: 'provider_rejected',
@@ -278,4 +315,5 @@ async function dispatch({
     providerResponded: !!(result && result.providerResponded), dispatched: true, transport };
 }
 
-module.exports = { dispatch, registerTransport, knownTransports, payloadDigest, TRANSPORTS };
+module.exports = { dispatch, registerTransport, knownTransports, payloadDigest,
+                   transmittedDigest, TRANSPORTS };
