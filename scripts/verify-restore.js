@@ -225,6 +225,51 @@ async function main() {
       }
     }
 
+    // ── 2b. DOES THE RESTORED COPY COME BACK CONTAINED? ────────────────────
+    //
+    // The question nothing asked until the first end-to-end run of the drill, 2026-11-14.
+    //
+    // autonomy_stops holds the email HOLD and the capability STOPs. A restored database that comes
+    // back WITHOUT those rows comes back UNCONTAINED: the application boots, /health is green,
+    // every other check on this page passes, and the first scheduled agent run sends. Recovery
+    // from a disaster would silently undo the containment the 2026-11-03 incident put in place,
+    // and the restore would look like a complete success while doing it.
+    //
+    // Asserted only against an EXPECTATION the caller supplies, because this script cannot know
+    // what the source held. `--expect-stops=3` makes it a hard check; without it the count is
+    // reported and explicitly NOT asserted, so a silent zero cannot pass as a verified restore.
+    // Same discipline as check-credential-isolation.js's --expect: a check that invents its own
+    // expectation is not checking anything.
+    h('2b. CONTAINMENT — DID THE STOPS SURVIVE THE RESTORE?');
+    const hasStops = q("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='autonomy_stops')");
+    const expectArg = process.argv.slice(3).find((a) => a.startsWith('--expect-stops='));
+    const expected = expectArg ? Number(expectArg.split('=')[1]) : null;
+
+    if (hasStops !== 't') {
+      if (expected !== null && expected > 0) {
+        bad(`autonomy_stops is ABSENT but ${expected} stop row(s) were expected`,
+          'a restore from this dump would come back with no kill-switch state at all');
+      } else {
+        note('autonomy_stops is ABSENT in this dump — the kill switch was never migrated here.');
+        note('For a PRODUCTION dump that would itself be the finding.');
+      }
+    } else {
+      const n = Number(q('SELECT COUNT(*) FROM autonomy_stops'));
+      const detail = q("SELECT scope_type || ' | ' || COALESCE(NULLIF(scope_key,''),'(global)') FROM autonomy_stops ORDER BY scope_type, scope_key");
+      console.log(`  stop rows restored : ${n}`);
+      if (detail) for (const line of detail.split('\n')) console.log(`    ${line}`);
+      if (expected === null) {
+        note('');
+        note('NOT ASSERTED — no --expect-stops=N was given, so this is a report, not a verdict.');
+        note('Production holds three. Pass --expect-stops=3 to make this a check that can fail.');
+      } else if (n === expected) {
+        ok(`${n} stop row(s), exactly as expected — the restored copy comes back CONTAINED`);
+      } else {
+        bad(`${n} stop row(s) restored but ${expected} expected — THE RESTORED COPY IS NOT CONTAINED`,
+          'the application would boot green on this data and the next agent run would send');
+      }
+    }
+
     // ── 3. THE TENANCY ANSWER, from the restored copy ──────────────────────
     //
     // This is ruling 10 item 1's question, answerable from a backup without touching production.

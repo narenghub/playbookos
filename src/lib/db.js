@@ -28,8 +28,47 @@ const { Pool } = require('pg');
 // public key, a stronger claim than "some CA vouched for this name". DATABASE_SSL_FINGERPRINT, when
 // set, is additionally required to equal the presented certificate's SHA-256, so the pin is
 // asserted at the point of use rather than assumed from the file on disk.
+// ── ONE STRUCTURAL EXCEPTION: A UNIX-DOMAIN SOCKET ───────────────────────────
+//
+// Found by running scripts/restore-drill-synthetic.sh, which is the first end-to-end execution of
+// the recovery procedure. It failed at the first step with "The server does not support SSL
+// connections", and the cause is here: sslConfig() returns an SSL object whenever DATABASE_URL is
+// set, so the migrator and server.js both attempt TLS against a local cluster that offers none.
+//
+// That made the whole recovery path unusable. verify-restore.js boots server.js against a
+// disposable local cluster, and the application could never connect — so "the application never
+// answered /health" was the only outcome the instrument could ever produce. It had never been run
+// end to end, which is why nobody knew.
+//
+// THE EXCEPTION IS A UNIX SOCKET AND NOTHING ELSE, and the distinction is the point. These URLs
+// carry `?host=/var/tmp/...` — a filesystem path, which pg uses as a socket directory. A
+// unix-domain socket is local inter-process communication with no network hop to intercept, so TLS
+// protects nothing there. It is also impossible to reach a remote host that way, which is what
+// makes this safe to decide structurally rather than with a flag.
+//
+// WHAT THIS DELIBERATELY DOES NOT DO: honour `sslmode=disable` in the URL. Production's
+// DATABASE_URL contains exactly that, and today the explicit `ssl` option overrides it, so the
+// deployed application IS using TLS. Honouring sslmode would silently turn production's transport
+// OFF while looking like a tidy-up. A flag such as DATABASE_SSL_DISABLE would be the same hazard
+// with an extra step. Ruling 49 item 2 says preserve the deployed behaviour; a TCP connection's
+// behaviour is unchanged by this, and db.test.js asserts that.
+function isUnixSocketUrl(raw) {
+  const s = String(raw || '');
+  // `?host=/path` or `&host=/path`, percent-encoded or not. A hostname cannot begin with a slash,
+  // so a leading slash after decoding is unambiguous.
+  const m = s.match(/[?&]host=([^&]*)/);
+  if (m) {
+    let v = m[1];
+    try { v = decodeURIComponent(v); } catch { /* use it raw */ }
+    if (v.startsWith('/')) return true;
+  }
+  // The other spelling pg accepts: the socket directory as the authority, percent-encoded.
+  return /^postgres(ql)?:\/\/[^/@]*@?%2[Ff]/.test(s);
+}
+
 function sslConfig() {
   if (!process.env.DATABASE_URL) return false;
+  if (isUnixSocketUrl(process.env.DATABASE_URL)) return false;
 
   const pem = process.env.DATABASE_CA_CERT
     || (process.env.DATABASE_CA_CERT_FILE
@@ -1243,4 +1282,4 @@ async function migrateResearchIntelligencePhase3() {
   } catch (e) { console.error('Research-intel Phase 3 migration error:', e.message); }
 }
 
-module.exports = { query, withTransaction, listen, initDB, initPhase2, migrateSchemas, migrateResearchIntelligence, migrateResearchIntelligencePhase3 };
+module.exports = { query, withTransaction, listen, initDB, initPhase2, migrateSchemas, migrateResearchIntelligence, migrateResearchIntelligencePhase3, isUnixSocketUrl, sslConfig };
