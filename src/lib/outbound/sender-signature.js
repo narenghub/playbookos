@@ -20,13 +20,31 @@
 //   timestamp  so an intercepted request cannot be replayed later (the service bounds the skew)
 //   body       so a valid signature cannot be moved onto a DIFFERENT message, which is what makes
 //              this authentication of a request rather than a password
+//   nonce      OPTIONAL, and only the worker path uses it. A timestamp bounds a replay to the skew
+//              window; it does not prevent one inside it. A nonce the verifier records once turns
+//              "recently signed" into "signed and not seen before".
+//
+// ── WHY THE NONCE IS OPTIONAL HERE RATHER THAN A SECOND MODULE ───────────────
+//
+// A worker-only copy of this function would be a second implementation of the same signature,
+// which the first paragraph exists to prevent. So the nonce is additive instead: with no nonce the
+// returned string is BYTE-IDENTICAL to what it has always been, so the sender service and its
+// client are untouched. sender-signature.test.js pins that byte for byte.
+//
+// One consequence, stated because it is the kind of thing that is obvious only after it bites.
+// `M\nP\nT\nnonce=abc\nBODY` can be produced two ways: nonce `abc` with body `BODY`, or no nonce
+// with a body beginning `nonce=abc\n`. That collision is unreachable because no endpoint accepts
+// both forms — the sender service never passes a nonce, worker authentication REQUIRES one of a
+// fixed shape, and `path` is itself signed, so a signature cannot move between them. Tested
+// rather than argued.
 
 'use strict';
 
 const crypto = require('crypto');
 
-function signingString({ method, path, timestamp, body }) {
-  return `${method}\n${path}\n${timestamp}\n${body}`;
+function signingString({ method, path, timestamp, nonce, body }) {
+  const n = (nonce === undefined || nonce === null || nonce === '') ? '' : `nonce=${nonce}\n`;
+  return `${method}\n${path}\n${timestamp}\n${n}${body}`;
 }
 
 function sign(secret, parts) {

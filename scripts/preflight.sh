@@ -141,6 +141,17 @@ pf_step "kill switch stops, propagates and audits" node scripts/check-autonomy-s
 # vocabularies are DERIVED from CRON_SCOPES/CAPABILITIES and every key in them is accepted by
 # ENUMERATION, not by sampling two. A refused stop must also leave no row behind.
 pf_step "a stop that protects nothing is refused" node scripts/check-autonomy-scope-validation-db.js
+# M7.1. A machine identity is not a row in `users` and not a seven-day JWT. The unit tests cover the
+# ORDER of the checks against a fake; this covers what only Postgres can arbitrate — the enrollment
+# token's single use and the nonce's uniqueness — because a fake that emulates ON CONFLICT emulates
+# the thing under test, which is how `priorClaim` came to exist in a fake ledger and not in the real
+# one. Both guarantees are proven three ways: sequentially, concurrently, and by CONTROL — the
+# mechanism is DROPPED and the same test re-run, so a guarantee that survives the removal of its own
+# constraint is reported as a FAILURE rather than a pass. The replay control asks "did the behaviour
+# change", not "did the replay get through": ON CONFLICT names a constraint, so a database missing it
+# fails closed rather than silently accepting replays. The first version of that control asserted the
+# weaker outcome, failed, and was corrected — which is the control doing its job on itself.
+pf_step "a worker identity cannot be replayed, reused or revived" node scripts/check-worker-identity-db.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither

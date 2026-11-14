@@ -51,7 +51,16 @@ const SCOPE_TYPES = ['global', 'company', 'agent', 'workflow', 'capability'];
 // Stable capability identifiers, not implementation function names. Reserved but NOT implemented in
 // P0.2: deployment.execute, quote.send, payment.execute, external.post. The namespace is preserved
 // so adding one later is a row, not a migration.
-const CAPABILITIES = ['email.send', 'whatsapp.send', 'llm.call'];
+//
+// `worker.execute` added in M7.1 — the capability a macOS worker acts under. It is DELIBERATELY
+// separate from the reserved `deployment.execute`: running a bounded worker task must never
+// implicitly grant permission to deploy software. The two are never aliased and never collapsed
+// for convenience; src/lib/worker/auth.js refuses outright if asked to act under the latter.
+//
+// Adding the name here is what makes a stop on it EXPRESSIBLE and unbypassable. It is not what
+// makes anything consult it — that is authorizeWorkerAction, and its absence from a call site is a
+// test case rather than a code-review note.
+const CAPABILITIES = ['email.send', 'whatsapp.send', 'llm.call', 'worker.execute'];
 
 const TTL_CONSEQUENTIAL_MS = 1000;
 const TTL_READONLY_MS = 15000;
