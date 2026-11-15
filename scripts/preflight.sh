@@ -192,6 +192,17 @@ pf_step "a real worker executes, is cancellable mid-flight, and never re-execute
 # a guard that refused everything (and so made M7.5 impossible) would fail too. Verified to catch a
 # planted TLS bypass, a planted ten-minute DELETE, and a host quietly removed from the list.
 pf_step "the M7.5 hardware scripts refuse production and cannot fake evidence" node scripts/check-m7-5-guards.js
+# The whole operator sequence for the M7 dev environment, executed on a throwaway cluster: the
+# dev-only migration, the dev API's refusals, the 42-cron containment, and then THE COMPOSITION —
+# the worker must still execute with that containment in force. Each half is proven elsewhere;
+# "42 crons are stopped" and "the worker runs" are two true statements that do not imply the third,
+# and that composition is the failure that would waste a trip to the hardware. Carries the converse
+# control too: stopping worker.execute must actually stop it, or the permission proved nothing.
+# Also pins that scripts/worker-liveness.js writes nothing and calls out nowhere.
+# Found that scripts/migrate.js creates NONE of the M7 tables — its 54 steps do not include them —
+# so a dev database migrated the documented way had no worker tables and enrolment would have
+# failed at the hardware.
+pf_step "the M7 dev environment stands up, and containment does not stop the worker" node scripts/check-m7-dev-environment-db.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither
