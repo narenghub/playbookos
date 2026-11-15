@@ -164,6 +164,18 @@ pf_step "a worker identity cannot be replayed, reused or revived" node scripts/c
 # defects in the claim path — hard-coded attempt numbering that collided with
 # uq_agent_runs_intent_attempt, and a catch that named one index and rethrew the other.
 pf_step "one worker lease per task, and an expired lease is not a reset" node scripts/check-worker-leasing-db.js
+# M7.3. The worker API over a real socket against a real Postgres, because three things only an
+# end-to-end run establishes: that the signature the worker computes is the one the server checks
+# (express reports the path as originalUrl, and a mismatch would fail every request as
+# bad_signature); that a nonce COMMITS even when the operation it authenticated rolls back, which is
+# why authentication sits outside the operation's transaction; and that every refusal leaves an
+# audit row — an audit sink that can only record successes is silent about every attack. It also
+# asserts the API CANNOT be mounted by accident: the module exports a factory rather than a router,
+# so the idiom every other router uses fails; the factory refuses unless WORKER_API_ENABLED is
+# exactly 'true'; and server.js does not mention the file. This check found two defects — a denial
+# that dropped the cancel instruction the worker needed, and a redundant audit field that tripped
+# the leak scan.
+pf_step "the worker API refuses, cancels, audits, and cannot be mounted by accident" node scripts/check-worker-api-db.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither
