@@ -112,7 +112,7 @@ async function until(label, fn, { timeoutMs = 45_000, everyMs = 500 } = {}) {
 
 // Everything this script creates, so cleanup removes exactly that and nothing else — by id, never
 // by timestamp, never by pattern, never by "recent".
-const made = { taskIds: [], intentKeys: [], workerIds: [], stopIds: [] };
+const made = { taskIds: [], intentKeys: [], workerIds: [], stops: [] };
 
 async function cleanup() {
   for (const id of made.taskIds) {
@@ -122,8 +122,14 @@ async function cleanup() {
   for (const k of made.intentKeys) {
     try { await query(`DELETE FROM agent_runs WHERE intent_key = $1`, [k]); } catch (_) {}
   }
-  for (const id of made.stopIds) {
-    try { await query(`DELETE FROM autonomy_stops WHERE id = $1`, [id]); } catch (_) {}
+  // autonomy_stops has no id column: its identity IS (scope_type, scope_key), which is the primary
+  // key. So this is still "delete exactly the row I recorded creating" — the recorded identity just
+  // happens to be two columns. It is NOT a widening.
+  for (const s of made.stops) {
+    try {
+      await query(`DELETE FROM autonomy_stops WHERE scope_type = $1 AND scope_key = $2`,
+        [s.scopeType, s.scopeKey]);
+    } catch (_) {}
   }
   // Worker identities are NOT deleted: one of them was deliberately revoked and that record is the
   // evidence. Leaving it also means a rerun cannot silently reuse a revoked credential.
@@ -132,9 +138,11 @@ async function cleanup() {
     const r = await one(`SELECT COUNT(*)::int n FROM worker_tasks WHERE id = $1`, [id]);
     if (Number(r.n)) leaked.push(id);
   }
-  for (const id of made.stopIds) {
-    const r = await one(`SELECT COUNT(*)::int n FROM autonomy_stops WHERE id = $1`, [id]);
-    if (Number(r.n)) leaked.push(`stop:${id}`);
+  for (const s of made.stops) {
+    const r = await one(
+      `SELECT COUNT(*)::int n FROM autonomy_stops WHERE scope_type = $1 AND scope_key = $2`,
+      [s.scopeType, s.scopeKey]);
+    if (Number(r.n)) leaked.push(`stop:${s.scopeType}:${s.scopeKey}`);
   }
   if (leaked.length) {
     console.log(`\n  LEAK  ${leaked.length} fixture(s) could not be removed: ${leaked.join(', ')}`);
@@ -144,15 +152,21 @@ async function cleanup() {
 }
 
 async function setStop(scopeType, scopeKey, reason) {
-  const r = await one(
+  // Recorded BEFORE the insert. If the insert succeeds and then something throws, cleanup must
+  // still know this row exists — a fixture recorded only on the success path is a fixture that
+  // leaks on exactly the runs where it matters.
+  const handle = { scopeType, scopeKey };
+  made.stops.push(handle);
+  await query(
     `INSERT INTO autonomy_stops (scope_type, scope_key, reason, set_by)
-     VALUES ($1,$2,$3,'m7-5-dev-driver') RETURNING id`, [scopeType, scopeKey, reason]);
-  made.stopIds.push(r.id);
-  return r.id;
+     VALUES ($1,$2,$3,'m7-5-dev-driver')
+     ON CONFLICT (scope_type, scope_key) DO NOTHING`, [scopeType, scopeKey, reason]);
+  return handle;
 }
-async function clearStop(id) {
-  await query(`DELETE FROM autonomy_stops WHERE id = $1`, [id]);
-  made.stopIds = made.stopIds.filter((x) => x !== id);
+async function clearStop(handle) {
+  await query(`DELETE FROM autonomy_stops WHERE scope_type = $1 AND scope_key = $2`,
+    [handle.scopeType, handle.scopeKey]);
+  made.stops = made.stops.filter((s) => s !== handle);
 }
 
 async function enqueue(intentKey, payload) {
@@ -232,11 +246,16 @@ async function cmdScenarios() {
     ok('the agent_run is SUCCEEDED, attributed to this worker, with both timestamps set');
   } else bad('the agent_run linkage is wrong', JSON.stringify(run));
 
+  // Columns are endpoint/outcome/code and the time column is `at`. This read `event` and
+  // `created_at`, neither of which exists — it would have thrown on the Mac, in the middle of a
+  // hardware run, and been indistinguishable from a worker problem. Found by EXPLAINing every
+  // statement in this file against the real schema during the local rehearsal.
   const aud = (await query(
-    `SELECT event, run_id, worker_id FROM worker_audit
-      WHERE worker_id = $1 ORDER BY created_at DESC LIMIT 20`, [workerId])).rows;
+    `SELECT endpoint, outcome, code, run_id, worker_id FROM worker_audit
+      WHERE worker_id = $1 ORDER BY at DESC LIMIT 20`, [workerId])).rows;
   if (aud.length) {
-    ok(`${aud.length} audit row(s) for this worker: ${[...new Set(aud.map((a) => a.event))].join(', ')}`);
+    const shapes = [...new Set(aud.map((a) => `${a.endpoint}:${a.outcome}`))];
+    ok(`${aud.length} audit row(s) for this worker: ${shapes.join(', ')}`);
   } else bad('nothing was audited for a worker that just executed a task');
   const linked = aud.filter((a) => a.run_id === (run && run.run_id));
   if (linked.length) ok(`and ${linked.length} of them link to that exact run_id`);

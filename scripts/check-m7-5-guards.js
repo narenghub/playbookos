@@ -21,6 +21,7 @@
 
 const path = require('path');
 const { execFileSync, spawnSync } = require('child_process');
+const LEX = require('./js-lex');
 
 const REPO = path.join(__dirname, '..');
 const DRIVER = path.join(REPO, 'scripts', 'm7-5-dev-driver.js');
@@ -142,10 +143,103 @@ if (legitUrl.code === 2 && !/is production|must be https/.test(legitUrl.out)) {
 } else bad('a legitimate development URL was refused as production',
   `exit ${legitUrl.code}: ${legitUrl.out}`);
 
+// ── 2b. THE DEV API ENTRY POINT ─────────────────────────────────────────────
+head('2b. dev-worker-api-server.js refuses anything production-shaped');
+
+const DEVAPI = path.join(REPO, 'scripts', 'dev-worker-api-server.js');
+const SEAL64 = 'd4'.repeat(32);
+function devapi(extra = {}) {
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME, ...extra };
+  const r = spawnSync(process.execPath, [DEVAPI], { env, encoding: 'utf8', timeout: 20_000 });
+  return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
+}
+const DEV_OK = {
+  M7_DEV_API: 'yes',
+  WORKER_API_ENABLED: 'true',
+  WORKER_SECRET_SEAL_KEY: SEAL64,
+  DATABASE_URL: 'postgresql://u:p@127.0.0.1:59998/devdb',
+};
+
+for (const [name, env, expect] of [
+  ['without M7_DEV_API', { ...DEV_OK, M7_DEV_API: undefined }, /M7_DEV_API=yes/],
+  ['with NODE_ENV=production', { ...DEV_OK, NODE_ENV: 'production' }, /NODE_ENV=production/],
+  ['pointed at the production Postgres',
+    { ...DEV_OK, DATABASE_URL: 'postgresql://u:p@postgres.railway.internal:5432/railway' },
+    /production database host/],
+  ['pointed at the Abiozen production DB',
+    { ...DEV_OK, DATABASE_URL: 'postgresql://u:p@interchange.proxy.rlwy.net:18553/railway' },
+    /production database host/],
+  ['without WORKER_API_ENABLED=true', { ...DEV_OK, WORKER_API_ENABLED: undefined }, /WORKER_API_ENABLED/],
+  ['with WORKER_API_ENABLED=TRUE (not exactly true)', { ...DEV_OK, WORKER_API_ENABLED: 'TRUE' }, /WORKER_API_ENABLED/],
+  ['without a seal key', { ...DEV_OK, WORKER_SECRET_SEAL_KEY: undefined }, /64 hex/],
+  ['with a short seal key', { ...DEV_OK, WORKER_SECRET_SEAL_KEY: 'abcd' }, /64 hex/],
+]) {
+  const cleaned = {};
+  for (const [k, v] of Object.entries(env)) if (v !== undefined) cleaned[k] = v;
+  const r = devapi(cleaned);
+  if (r.code === 2 && expect.test(r.out)) ok(`refuses to start ${name}`);
+  else bad(`started ${name}`, `exit ${r.code}: ${r.out.slice(0, 160)}`);
+}
+
+// Every provider credential must block startup on its own, because any one of them being present
+// means this file is running somewhere it should not be.
+const PROVIDERS = ['RESEND_API_KEY', 'TWILIO_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY',
+  'APOLLO_API_KEY', 'LINKEDIN_ACCESS_TOKEN', 'ALGOLIA_API_KEY', 'GOOGLE_REFRESH_TOKEN',
+  'ABIOZEN_DATABASE_URL'];
+const notRefused = [];
+for (const v of PROVIDERS) {
+  const r = devapi({ ...DEV_OK, [v]: 'x' });
+  if (!(r.code === 2 && /provider credential/.test(r.out))) notRefused.push(v);
+}
+if (notRefused.length === 0) {
+  ok(`refuses to start with ANY of the ${PROVIDERS.length} provider credentials present`);
+} else bad(`${notRefused.length} provider credential(s) do not block startup`, notRefused.join(', '));
+
+// ANTI-VACUITY. A correct dev environment must get past every guard above and fail only on the
+// database connection, which is a different failure. Without this, a file that refused everything
+// would pass — and would make the dev environment impossible to stand up.
+const good = devapi(DEV_OK);
+if (good.code !== 2) {
+  ok('control: a correct development configuration clears every refusal');
+} else bad('a correct development configuration was refused, so the dev API cannot be started',
+  good.out.slice(0, 200));
+
+// ── 2c. THE CONTAINMENT SEED ────────────────────────────────────────────────
+head('2c. m7-dev-seed-containment.js will not touch production');
+
+const SEED = path.join(REPO, 'scripts', 'm7-dev-seed-containment.js');
+function seed(extra = {}) {
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME, ...extra };
+  const r = spawnSync(process.execPath, [SEED], { env, encoding: 'utf8', timeout: 20_000 });
+  return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
+}
+for (const [name, env, expect] of [
+  ['the production Postgres',
+    { DATABASE_URL: 'postgresql://u:p@postgres.railway.internal:5432/railway', M7_5_DEV_CONFIRM: 'yes' },
+    /production database/],
+  ['the Abiozen production DB',
+    { DATABASE_URL: 'postgresql://u:p@interchange.proxy.rlwy.net:18553/railway', M7_5_DEV_CONFIRM: 'yes' },
+    /production database/],
+  ['an unconfirmed database', { DATABASE_URL: 'postgresql://u:p@127.0.0.1:59998/devdb' }, /M7_5_DEV_CONFIRM/],
+]) {
+  const r = seed(env);
+  if (r.code === 2 && expect.test(r.out)) ok(`refuses ${name}`);
+  else bad(`did not refuse ${name}`, `exit ${r.code}: ${r.out.slice(0, 160)}`);
+}
+
+// The seed's whole purpose is one workflow stop per cron and NO global stop, because a global stop
+// would halt the worker. Pinned here as source structure, since the behaviour needs a database.
+const seedSrc = LEX.blankCommentsOnly(require('fs').readFileSync(SEED, 'utf8'));
+if (/scope_type='workflow'|'workflow', \$1/.test(seedSrc) && !/VALUES \('global'/.test(seedSrc)) {
+  ok('it writes workflow stops and never a global stop');
+} else bad('the seed writes a global stop, which would halt the worker it exists to enable');
+if (/Object\.keys\(autonomy\.CRON_SCOPES\)/.test(seedSrc)) {
+  ok('and the cron list is generated from autonomy.CRON_SCOPES, not typed');
+} else bad('the cron list is hand-maintained and will drift silently when a cron is added');
+
 // ── 3. NO TLS BYPASS ANYWHERE IN EITHER SCRIPT ──────────────────────────────
 head('3. neither script can disable certificate verification');
 
-const LEX = require('./js-lex');
 const fs = require('fs');
 let bypasses = 0;
 for (const f of ['scripts/m7-5-dev-driver.js', 'scripts/m7-5-acceptance.sh']) {
@@ -185,11 +279,25 @@ for (const forbidden of [
   const deletes = driverSrc.split('\n').filter((l) => /DELETE FROM/i.test(l) && l.includes(needle));
   if (deletes.length) bad(`cleanup uses ${what}`, deletes[0].trim());
 }
-const byId = driverSrc.split('\n').filter((l) => /DELETE FROM/i.test(l));
-if (byId.length && byId.every((l) => /WHERE\s+\w+\s*=\s*\$1/i.test(l))) {
-  ok(`all ${byId.length} DELETE statements are "WHERE <col> = $1"`);
-} else bad('a DELETE is not keyed to a single recorded id',
-  byId.find((l) => !/WHERE\s+\w+\s*=\s*\$1/i.test(l)));
+// Two accepted shapes, both naming a RECORDED identity, and nothing else:
+//   WHERE <col> = $1                          — a surrogate key (worker_tasks.id, agent_runs.intent_key)
+//   WHERE scope_type = $1 AND scope_key = $2  — autonomy_stops, whose PRIMARY KEY is those two columns
+// The second is listed explicitly rather than by loosening the first into "any WHERE with a
+// placeholder". A rule relaxed to accommodate one table stops catching the thing it was written for.
+const KEYED = /WHERE\s+\w+\s*=\s*\$1\s*$/i;
+const KEYED_COMPOSITE = /WHERE\s+scope_type\s*=\s*\$1\s+AND\s+scope_key\s*=\s*\$2\s*$/i;
+const deleteLines = driverSrc.split('\n')
+  .map((l) => l.replace(/`.*$/, (m) => m))       // keep the line as written
+  .filter((l) => /DELETE FROM/i.test(l));
+const unkeyed = deleteLines.filter((l) => {
+  const sql = (l.match(/DELETE FROM[^`]*/i) || [''])[0].trim();
+  return !KEYED.test(sql) && !KEYED_COMPOSITE.test(sql);
+});
+if (deleteLines.length && unkeyed.length === 0) {
+  ok(`all ${deleteLines.length} DELETE statements name a recorded identity`);
+} else if (!deleteLines.length) {
+  bad('no DELETE statements found at all — the cleanup this check exists to police has moved');
+} else bad(`${unkeyed.length} DELETE statement(s) are not keyed to a recorded identity`, unkeyed[0].trim());
 
 if (/COUNT\(\*\)::int n FROM worker_tasks WHERE id = \$1/.test(driverSrc)) {
   ok('and it verifies its own fixtures are gone, not that the tables are empty');
