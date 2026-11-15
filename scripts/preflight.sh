@@ -185,6 +185,13 @@ pf_step "the worker API refuses, cancels, audits, and cannot be mounted by accid
 # time, which is the first number anyone asks for about an aborted run.
 # macOS installation is syntax-checked ONLY. Nothing here has run on Apple hardware.
 pf_step "a real worker executes, is cancellable mid-flight, and never re-executes" node scripts/check-worker-runtime-db.js
+# The two M7.5 hardware-acceptance scripts cannot run here — one requires macOS, the other a
+# development database — but their REFUSALS can, and those refusals are the only thing standing
+# between a hardware test and production: the dev driver cancels tasks, sets a STOP and revokes a
+# credential. This executes every guard rather than grepping for the word, and carries controls so
+# a guard that refused everything (and so made M7.5 impossible) would fail too. Verified to catch a
+# planted TLS bypass, a planted ten-minute DELETE, and a host quietly removed from the list.
+pf_step "the M7.5 hardware scripts refuse production and cannot fake evidence" node scripts/check-m7-5-guards.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither
