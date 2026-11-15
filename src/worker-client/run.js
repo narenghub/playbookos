@@ -61,26 +61,43 @@ function config(env = process.env) {
   return { baseUrl, workerId, problems };
 }
 
-/** Readiness, without contacting the server and without reading the secret. */
-function doctor(env = process.env) {
+/**
+ * Readiness, without contacting the server and without exposing the secret.
+ *
+ * `keychainState` replaced a bare `keychainItemPresent` boolean. That boolean could not express
+ * "the credential IS there and macOS refused to hand it over", so it reported "absent" — and the
+ * obvious response to absent is to re-enrol, which spends a single-use token and fixes nothing.
+ * See the comment above probeSecret() in keychain.js for the macOS 26.4+ defect that makes this
+ * the likely first failure on a current macOS.
+ */
+function doctor(env = process.env, deps = {}) {
   const cfg = config(env);
   const caps = EXEC.capabilities();
-  const key = cfg.workerId ? KEYCHAIN.hasSecret({ workerId: cfg.workerId }) : { present: false, reason: 'no WORKER_ID' };
+  const key = KEYCHAIN.probeSecret({ workerId: cfg.workerId }, deps);
+
+  // Only `readable` means the worker can actually start. `unknown` deliberately counts as neither
+  // ready nor missing.
+  const credentialUsable = key.state === KEYCHAIN.STATE.READABLE;
+
   return {
     platform: process.platform,
     node: process.version,
     baseUrlConfigured: Boolean(cfg.baseUrl),
     baseUrlIsHttps: /^https:\/\//.test(cfg.baseUrl),
     workerIdConfigured: Boolean(cfg.workerId),
-    // present/absent only. The value is never read here, let alone printed.
+    // missing | readable | unreadable | unknown | not_macos — never a boolean standing in for these.
+    keychainState: key.state,
+    keychainStatus: key.status,
+    keychainDetail: key.detail,
+    keychainRecovery: key.hint,
+    // Kept for continuity, and null where the honest answer is "we do not know".
     keychainItemPresent: key.present,
-    keychainDetail: key.present ? null : key.reason,
     implementedTaskTypes: caps.implemented,
     declaredButNotImplemented: caps.declaredButNotImplemented,
     maxOutputBytes: caps.maxOutputBytes,
     inboundListeners: 0,
     problems: cfg.problems,
-    ready: cfg.problems.length === 0 && key.present,
+    ready: cfg.problems.length === 0 && credentialUsable,
   };
 }
 
@@ -96,11 +113,31 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     return 2;
   }
 
+  // ── THE LINE A RESTART LOOP REPEATS EVERY MINUTE ──────────────────────────
+  //
+  // launchd restarts this process on a non-zero exit, throttled to 60s. If the credential cannot be
+  // read, that is the line an operator will see sixty times an hour, so it has to say WHICH failure
+  // it is. It used to say `no_credential` for every case — including the macOS 26.4+ state where the
+  // credential is present and macOS refuses to release it, where "no credential" is simply false and
+  // points at re-enrolment, which spends a token and changes nothing.
   let secret;
+  const probe = KEYCHAIN.probeSecret({ workerId: cfg.workerId });
+  if (probe.state !== KEYCHAIN.STATE.READABLE) {
+    logLine({
+      at: 'credential_unavailable',
+      keychainState: probe.state,
+      keychainStatus: probe.status,
+      detail: probe.detail,
+      recovery: probe.short,
+    });
+    return 2;
+  }
   try {
     secret = KEYCHAIN.readSecret({ workerId: cfg.workerId });
   } catch (e) {
-    logLine({ at: 'no_credential', detail: String(e.message).slice(0, 200) });
+    // The probe said readable and the read then failed: a race, or the state changed between them.
+    // Reported as its own case rather than folded into either of the two above.
+    logLine({ at: 'credential_read_failed_after_probe', detail: String(e.message).slice(0, 200) });
     return 2;
   }
 

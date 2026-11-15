@@ -172,19 +172,59 @@ cmd_logs() {
   fi
 }
 
-# Reports readiness and contacts nothing. It prints whether the Keychain item EXISTS; it never
-# reads or prints its value.
+# ── READINESS. CONTACTS NOTHING. NEVER READS OUT THE CREDENTIAL. ────────────
+#
+# This used to report the Keychain as present/absent. A boolean cannot say "the credential IS there
+# and macOS refused to release it", which on macOS 26.4 and later is a real and persistent state
+# (errSecAuthFailed / -25293) — and reporting it as absent sends you to re-enrol, which spends a
+# single-use token and fixes nothing. The four states are now distinguished, with the real macOS
+# status preserved, and the value itself is never read out.
 cmd_doctor() {
-  local url wid
+  local url wid out state status detail recovery
   url="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:WORKER_API_BASE_URL' "$PLIST" 2>/dev/null || true)"
   wid="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:WORKER_ID' "$PLIST" 2>/dev/null || true)"
-  say "platform        : $(uname -s) $(uname -m)"
+  say "platform        : $(uname -s) $(uname -m) $(sw_vers -productVersion 2>/dev/null || true)"
   say "node            : $(command -v node || echo 'NOT FOUND') $(node -v 2>/dev/null || true)"
   say "plist installed : $([ -f "$PLIST" ] && echo yes || echo no)"
   say "account         : $(id -un) (admin: $(id -Gn | tr ' ' '\n' | grep -qx admin && echo YES || echo no))"
   say "log dir         : $([ -d "$LOG_DIR" ] && echo "$LOG_DIR" || echo 'absent')"
   say ""
-  WORKER_API_BASE_URL="$url" WORKER_ID="$wid" node "$WORKER_DIR/src/worker-client/run.js" --doctor
+
+  out="$(WORKER_API_BASE_URL="$url" WORKER_ID="$wid" \
+    node "$WORKER_DIR/src/worker-client/run.js" --doctor 2>&1)"
+  printf '%s\n' "$out"
+
+  # Pull the fields back out and say what they mean, because a JSON blob is not an answer to
+  # "why will the worker not start".
+  state="$(printf '%s' "$out" | sed -n 's/.*"keychainState": *"\([^"]*\)".*/\1/p' | head -1)"
+  status="$(printf '%s' "$out" | sed -n 's/.*"keychainStatus": *\([^,}]*\).*/\1/p' | head -1)"
+  detail="$(printf '%s' "$out" | sed -n 's/.*"keychainDetail": *"\([^"]*\)".*/\1/p' | head -1)"
+  recovery="$(printf '%s' "$out" | sed -n 's/.*"keychainRecovery": *"\([^"]*\)".*/\1/p' | head -1)"
+
+  say ""
+  say "── credential ──"
+  case "$state" in
+    readable)
+      say "  READABLE. The worker can start." ;;
+    missing)
+      say "  MISSING. No credential is stored for this worker id."
+      say "  Enrol it:  workerctl enroll ${url:-<api-base-url>}" ;;
+    unreadable)
+      say "  PRESENT BUT UNREADABLE — macOS refused the read (status ${status:-unknown})."
+      say "  THIS IS NOT 'not enrolled'. Re-enrolling spends a single-use token and will not fix it."
+      [ -n "$detail" ] && say "  macOS said: $detail"
+      [ -n "$recovery" ] && say "  $recovery" ;;
+    unknown)
+      say "  UNKNOWN (status ${status:-unknown}). The lookup failed in a way this tool does not"
+      say "  recognise, so NOTHING is concluded about whether the credential exists."
+      [ -n "$detail" ] && say "  macOS said: $detail"
+      say "  Do not re-enrol on the strength of this. Run the lookup by hand and report the output:"
+      say "    security find-generic-password -s ${LABEL} -a ${LABEL}:${wid:-<wkr_id>}" ;;
+    not_macos)
+      say "  Not macOS, so the Keychain was not consulted." ;;
+    *)
+      say "  could not determine the credential state from the diagnostic output above" ;;
+  esac
 }
 
 cmd_uninstall() {

@@ -417,9 +417,14 @@ let server = null;
   const doc = RUNJS.doctor({ WORKER_API_BASE_URL: baseUrl, WORKER_ID: W.workerId });
   if (JSON.stringify(doc).indexOf(W.secret) === -1) ok('the diagnostic contains no secret');
   else bad('doctor() leaked the secret');
-  if (doc.keychainItemPresent === false && /not macOS/.test(String(doc.keychainDetail))) {
-    ok(`doctor() reports the Keychain honestly off-darwin: "${doc.keychainDetail}"`);
+  // Now asserts the STATE, not a boolean. The boolean could not distinguish "absent" from
+  // "present and macOS refused to release it", which is a real persistent state on macOS 26.4+.
+  if (doc.keychainState === 'not_macos' && /not macOS/.test(String(doc.keychainDetail))) {
+    ok(`doctor() reports the Keychain state honestly off-darwin: "${doc.keychainState}"`);
   } else bad('doctor() misreported Keychain state', JSON.stringify(doc));
+  if (doc.keychainState !== 'missing') {
+    ok('and does NOT claim the credential is missing merely because this is not macOS');
+  } else bad('doctor() reported "missing" off-darwin, which is the defect this replaced');
   if (doc.inboundListeners === 0) ok('and reports zero inbound listeners');
 
   for (const fn of ['readSecret', 'writeSecret', 'deleteSecret']) {
