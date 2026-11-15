@@ -213,7 +213,22 @@ async function revokeWorker(workerId, { reason, actor = null } = {}, deps = {}) 
     [String(workerId), actor, String(reason).trim()],
   );
   if (!r.rows.length) return { ok: false, code: 'unknown_or_already_revoked' };
-  return { ok: true, workerId: r.rows[0].id, label: r.rows[0].label };
+
+  // Refinement 2: revocation must reach a LIVE LEASE, not wait for its ceiling. Lazily required so
+  // that identity.js carries no load-time dependency on the task layer — a worker can be enrolled
+  // and revoked in a deployment where the task tables do not exist yet, and that must not throw.
+  let leases = { closed: [], tasks: [] };
+  try {
+    leases = await require('./leases').releaseLeasesOfWorker(
+      String(workerId), { reason: `revoked: ${String(reason).trim()}` }, deps);
+  } catch (e) {
+    // A revocation that half-succeeds must still be a revocation: the identity is already dead
+    // above, and authentication refuses it from here on. The lease cleanup failing is reported
+    // rather than swallowed, and the reaper remains the backstop.
+    leases = { closed: [], tasks: [], error: e.message };
+  }
+
+  return { ok: true, workerId: r.rows[0].id, label: r.rows[0].label, leases };
 }
 
 // ── HOUSEKEEPING ─────────────────────────────────────────────────────────────

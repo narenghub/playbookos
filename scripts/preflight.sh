@@ -152,6 +152,18 @@ pf_step "a stop that protects nothing is refused" node scripts/check-autonomy-sc
 # fails closed rather than silently accepting replays. The first version of that control asserted the
 # weaker outcome, failed, and was corrected — which is the control doing its job on itself.
 pf_step "a worker identity cannot be replayed, reused or revived" node scripts/check-worker-identity-db.js
+# M7.2. A lease is an agent_runs row — run identity already separates intent from attempt, and its
+# arbiter is a partial unique index rather than code, so a worker_leases table would have been a
+# second implementation of the governance layer. This proves the parts only Postgres can decide:
+# twelve concurrent claims produce one winner; a result is counted once by a primary key; revoking a
+# worker closes the lease it HOLDS rather than waiting out its ceiling; and an expired lease leaves
+# the task NEEDS_RESOLUTION, never PENDING — because expiry means the outcome is UNKNOWN, not that
+# the work did not happen. The expiry case runs the REAL reaper from office/recovery.js rather than
+# setting ABANDONED by hand, so it tests that the reaper and the queue agree. Its control drops
+# uq_agent_runs_one_active to establish WHICH control serialises a claim; that control found two
+# defects in the claim path — hard-coded attempt numbering that collided with
+# uq_agent_runs_intent_attempt, and a catch that named one index and rethrew the other.
+pf_step "one worker lease per task, and an expired lease is not a reset" node scripts/check-worker-leasing-db.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither
