@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  PlayNexa worker — per-user LaunchAgent.
+
+  A LaunchAgent, not a LaunchDaemon. A daemon runs as root before login and would have no Keychain
+  of its own to read; an agent runs as the worker account, which is the account the Keychain item is
+  bound to. The worker needs no privilege beyond that account.
+
+  THERE IS NO SECRET IN THIS FILE. A plist in ~/Library/LaunchAgents is readable by every process
+  the user runs and is copied into Time Machine backups. WORKER_ID and the URL are not secrets;
+  the credential is read from the Keychain at startup. See src/worker-client/keychain.js.
+
+  KeepAlive is conditional, not unconditional. `SuccessfulExit false` restarts the worker when it
+  exits non-zero — a crash, a lost database, a bad deploy — and LEAVES IT STOPPED when it exits 0,
+  which is what a deliberate shutdown does. Unconditional KeepAlive would fight `workerctl stop`.
+
+  ThrottleInterval is 60 rather than the default 10. A worker that cannot read its credential exits
+  2 immediately, and at the default this would respawn six times a minute for ever, filling the log
+  with the same line and making the real problem harder to see.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.playnexa.worker</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__WORKER_DIR__/src/worker-client/run.js</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKER_DIR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>WORKER_API_BASE_URL</key>
+    <string>__API_BASE_URL__</string>
+    <key>WORKER_ID</key>
+    <string>__WORKER_ID__</string>
+    <key>NODE_ENV</key>
+    <string>production</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/worker.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/worker.err.log</string>
+</dict>
+</plist>

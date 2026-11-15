@@ -176,6 +176,15 @@ pf_step "one worker lease per task, and an expired lease is not a reset" node sc
 # that dropped the cancel instruction the worker needed, and a redundant audit field that tripped
 # the leak scan.
 pf_step "the worker API refuses, cancels, audits, and cannot be mounted by accident" node scripts/check-worker-api-db.js
+# The worker RUNS: a real WorkerClient over a real socket against the real API and a real Postgres.
+# It enrols, executes synthetic.echo, is cancelled mid-execution, STOPped mid-execution, revoked
+# mid-execution, and in every one of those reports NOTHING rather than guessing an outcome. Two of
+# its sections carry controls, because "aborted and reported nothing" and "found nothing to do" are
+# both satisfied by a worker that does nothing at all — the controls prove it was actually running
+# and that its next claim still works. One of them found that the abort path dropped the elapsed
+# time, which is the first number anyone asks for about an aborted run.
+# macOS installation is syntax-checked ONLY. Nothing here has run on Apple hardware.
+pf_step "a real worker executes, is cancellable mid-flight, and never re-executes" node scripts/check-worker-runtime-db.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither

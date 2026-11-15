@@ -151,6 +151,72 @@ function createWorkerRouter(deps = {}) {
     return result;
   }
 
+  // ── ENROLMENT — THE ONE UNAUTHENTICATED ROUTE, AND WHY ───────────────────
+  //
+  // Found missing while writing M7.4's installer: a worker with no secret cannot sign a request,
+  // so every other endpoint is unreachable to it, and M7.3 shipped no way to obtain the first
+  // credential. `workerctl enroll` had nothing to call.
+  //
+  // So this route is NOT HMAC-authenticated — it cannot be. What authenticates it instead is the
+  // single-use enrollment token, and the bounds on that are what make the exception acceptable:
+  //
+  //   * 32 bytes of CSPRNG, so guessing is not a practical attack;
+  //   * only its SHA-256 digest is stored, so a database read cannot enrol a worker;
+  //   * single use, arbitrated by `UPDATE … WHERE consumed_at IS NULL RETURNING` in Postgres
+  //     rather than by a read-then-write;
+  //   * short-lived (15 minutes by default);
+  //   * every attempt audited, success or failure.
+  //
+  // It returns the secret EXACTLY ONCE and it is never recoverable afterwards. Over anything but
+  // HTTPS that hands the credential to the network, which is why run.js refuses a non-loopback
+  // http:// base URL.
+  //
+  // The refusal codes distinguish unknown, used and expired tokens. That is more than the minimum,
+  // and it is the right trade: an operator whose token expired needs to know that rather than
+  // guessing, and the token space is far too large for the distinction to help an attacker.
+  router.post('/worker/enroll', async (req, res) => {
+    const token = (req.body && req.body.token) || null;
+    const hostFingerprint = (req.body && req.body.hostFingerprint) || null;
+
+    if (!token) {
+      return deny(res, req, { status: 400, code: 'no_token', detail: 'an enrollment token is required' });
+    }
+
+    let out;
+    try {
+      out = await withTx(async (client) => require('../lib/worker/identity').consumeEnrollmentToken(
+        { token, hostFingerprint }, { ...opDeps, query: (sql, p) => client.query(sql, p) }));
+    } catch (e) {
+      return deny(res, req, { status: 500, code: 'enroll_failed', detail: e.message });
+    }
+
+    if (!out.ok) {
+      // The token itself is NEVER written to the audit — not even a prefix. `detail` carries the
+      // code and nothing else.
+      return deny(res, req, {
+        status: out.code === 'cannot_seal' ? 503 : 401,
+        code: out.code, detail: out.detail || 'the enrollment token was not accepted',
+      });
+    }
+
+    await AUDIT.record({
+      workerId: out.workerId, endpoint: signedPath(req), outcome: 'GRANTED',
+      code: 'enrolled', httpStatus: 200, detail: { label: out.label },
+    }, { query });
+
+    // The secret appears here and nowhere else, ever — not in a log, not in the audit, not in a
+    // second response. grant() is deliberately not used: it would route the body through the
+    // audit helper's argument, and a secret should not pass through a function whose job is to
+    // write things down.
+    return res.status(200).json({
+      ok: true,
+      workerId: out.workerId,
+      secret: out.secret,
+      label: out.label,
+      note: 'store this in the Keychain now. It cannot be retrieved again.',
+    });
+  });
+
   // ── CLAIM ─────────────────────────────────────────────────────────────────
   router.post('/worker/claim', async (req, res) => {
     const who = await authenticate(req, res);

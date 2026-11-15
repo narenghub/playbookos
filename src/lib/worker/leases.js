@@ -49,6 +49,13 @@ const TYPES = require('./task-types');
 const AUTH = require('./auth');
 
 const q = (deps) => deps.query || require('../db').query;
+
+/**
+ * The server's own ceiling on a result body. Deliberately larger than the client's 64 KiB, so a
+ * client at its limit is never refused by a server that happens to be stricter — the two bounds
+ * are independent controls rather than one number duplicated in two places.
+ */
+const MAX_RESULT_BYTES = 256 * 1024;
 const newTaskId = () => `wtask_${crypto.randomBytes(12).toString('hex')}`;
 
 const refuse = (code, detail, extra = {}) => ({ ok: false, code, detail, ...extra });
@@ -329,6 +336,24 @@ async function submitResult({
     return refuse('bad_status', "status must be 'SUCCEEDED' or 'FAILED'");
   }
 
+  // ── THE SERVER BOUNDS THE RESULT TOO, NOT ONLY THE CLIENT ────────────────
+  //
+  // executor.js refuses to submit output over its own limit, which protects a well-behaved worker
+  // from itself. It does nothing about a worker that is compromised, modified, or simply older
+  // than this limit — and "the client checks it" is a statement about the client.
+  //
+  // Refused rather than truncated: a stored result that is silently half a result is worse than a
+  // refusal that says why, because a later reader cannot tell the difference between the two.
+  let serialisedOutput;
+  try { serialisedOutput = JSON.stringify(output == null ? {} : output); } catch (e) {
+    return refuse('unserialisable_output', `the output could not be serialised: ${e.message}`);
+  }
+  const outputBytes = Buffer.byteLength(serialisedOutput, 'utf8');
+  if (outputBytes > MAX_RESULT_BYTES) {
+    return refuse('output_too_large',
+      `the result is ${outputBytes} bytes and the limit is ${MAX_RESULT_BYTES}`, { outputBytes });
+  }
+
   const lease = await query(
     `SELECT run_id, state, intent_key FROM agent_runs
       WHERE run_id = $1 AND trigger = $2 AND trigger_detail = $3`,
@@ -384,7 +409,7 @@ async function submitResult({
      VALUES ($1, $2, $3, $4, $5::jsonb)
      ON CONFLICT (run_id) DO NOTHING
      RETURNING run_id`,
-    [runId, task.id, workerId, status, JSON.stringify(output)]);
+    [runId, task.id, workerId, status, serialisedOutput]);
 
   if (!inserted.rows.length) {
     return { ok: true, duplicate: true, taskId: task.id,
@@ -535,6 +560,6 @@ function reattemptEligibility(taskType, { overrideReason = null } = {}) {
 module.exports = {
   migrateWorkerTasks,
   enqueueTask, claimTask, heartbeat, submitResult, cancelTask,
-  reflectAbandonedLeases, reattemptEligibility, releaseLeasesOfWorker,
+  reflectAbandonedLeases, reattemptEligibility, releaseLeasesOfWorker, MAX_RESULT_BYTES,
   newTaskId,
 };
