@@ -203,6 +203,14 @@ pf_step "the M7.5 hardware scripts refuse production and cannot fake evidence" n
 # so a dev database migrated the documented way had no worker tables and enrolment would have
 # failed at the hardware.
 pf_step "the M7 dev environment stands up, and containment does not stop the worker" node scripts/check-m7-dev-environment-db.js
+# The dev API's isolation from the cron server, verified by LOADING it in a child process and
+# inspecting the real require cache — not by reading the source for `require('../server')`, because
+# the risk is transitive. server.js registers 42 crons at module load, four of which email people or
+# connect to the Abiozen production database. Also pins that the production railway.json is
+# unchanged and that railway.dev.json (a name Railway does not auto-detect) starts only the dev API
+# with no pre-deploy command. It CANNOT prove which config Railway applies to a given service; that
+# is confirmed from the first deploy log.
+pf_step "the dev API cannot reach server.js, node-cron, or any provider client" node scripts/check-dev-api-isolation.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither

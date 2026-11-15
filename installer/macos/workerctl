@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ── PlayNexa worker control ──────────────────────────────────────────────────
 #
-#   workerctl install   <api-base-url> <worker-id>   write the LaunchAgent and load it
-#   workerctl enroll    <worker-id>                  exchange an enrollment token for a secret
+#   workerctl enroll    <api-base-url>              FIRST  — token in, worker identity out
+#   workerctl install   <api-base-url> <worker-id>  SECOND — write the LaunchAgent and load it
 #   workerctl start | stop | restart | status | logs | doctor | uninstall
 #
 # ── WRITTEN BUT NOT EXECUTED ON APPLE HARDWARE ──────────────────────────────
@@ -84,26 +84,70 @@ cmd_install() {
   launchctl bootstrap "$(uid_target)" "$PLIST" || die "launchctl bootstrap failed"
   say "loaded ${LABEL}"
   say ""
-  say "NOTE: the worker will exit 2 until its Keychain item exists."
-  say "      run: workerctl enroll ${wid}"
+  # Install is the SECOND step. If the Keychain item is missing, enrolment either has not happened
+  # or produced a different id than the one just written into the plist — and the second case is the
+  # one worth catching, because the worker would simply exit 2 in a loop and the plist would look
+  # perfectly correct.
+  if security find-generic-password -s "${LABEL}" -a "${LABEL}:${wid}" >/dev/null 2>&1; then
+    say "The Keychain holds a secret for ${wid}. The worker can start."
+  else
+    say "WARNING: there is NO Keychain secret for ${wid}."
+    say "         The worker will exit 2 on every launch until there is one."
+    say "         Enrol first, then install with the id enrolment printed:"
+    say "           workerctl enroll ${url}"
+    say "         If you have already enrolled, the id does not match what you enrolled as."
+  fi
 }
 
+# ── ENROL FIRST, INSTALL SECOND ─────────────────────────────────────────────
+#
+# This took a <worker-id> argument and passed NO URL to enroll.js, which requires one. Both halves
+# were wrong:
+#
+#   - enroll.js reads its URL from --url or WORKER_API_BASE_URL. This passed neither, and nothing
+#     sets that variable, so EVERY enrolment would have failed with "no API base URL".
+#   - the worker id does not exist before enrolment. The SERVER assigns it in exchange for the
+#     token. Demanding it as an argument made the first run impossible.
+#
+# So the URL is the required argument, and the id is an optional guard for re-enrolling an identity
+# you already have. Enrolment creates the identity and PRINTS its id; install then consumes it.
 cmd_enroll() {
   require_macos; refuse_privilege
-  local wid="${1:-}"
-  [ -n "$wid" ] || die "usage: workerctl enroll <worker-id>"
+  local url="${1:-}" wid="${2:-}"
+  if [ -z "$url" ]; then
+    die "usage: workerctl enroll <api-base-url> [existing-worker-id]
+  The URL is required: enrolment is a request TO the API, and the worker id does not
+  exist until that request returns it. Enrol first, then install with the id it prints."
+  fi
+  case "$url" in
+    https://*) ;;
+    http://127.0.0.1*|http://localhost*) say "NOTE: enrolling over loopback HTTP — tests only." ;;
+    *) die "the API base URL must be https:// (loopback http is permitted for tests only)" ;;
+  esac
+  if [ -n "$wid" ]; then
+    case "$wid" in wkr_*) ;; *) die "the optional worker id must look like wkr_<32 hex>" ;; esac
+  fi
 
   # The TOKEN is read from the terminal with `read -s` and never appears in argv, so it cannot be
   # captured by `ps` or land in shell history. The same applies to the secret it is exchanged for.
   say "Paste the enrollment token (it will not be echoed), then press return:"
   local token; IFS= read -rs token
+  say ""
   [ -n "$token" ] || die "no token given"
 
   say "exchanging it for a worker secret…"
-  WORKER_ENROLL_TOKEN="$token" node "$WORKER_DIR/installer/macos/enroll.js" "$wid" \
-    || die "enrolment failed"
+  if [ -n "$wid" ]; then
+    WORKER_ENROLL_TOKEN="$token" node "$WORKER_DIR/installer/macos/enroll.js" --url "$url" "$wid" \
+      || die "enrolment failed"
+  else
+    WORKER_ENROLL_TOKEN="$token" node "$WORKER_DIR/installer/macos/enroll.js" --url "$url" \
+      || die "enrolment failed"
+  fi
   unset WORKER_ENROLL_TOKEN token
-  say "stored in the login Keychain. The token is now spent and cannot be reused."
+  say ""
+  say "The token is now spent and cannot be reused."
+  say "Next, with the worker id printed above:"
+  say "  workerctl install $url <that-wkr_id>"
 }
 
 cmd_start()   { require_macos; launchctl kickstart "$(uid_target)/${LABEL}" && say "started"; }
@@ -173,8 +217,8 @@ case "${1:-}" in
     cat <<USAGE
 PlayNexa worker control
 
-  workerctl install <https-api-base-url> <wkr_id>   write and load the LaunchAgent
-  workerctl enroll  <wkr_id>                        exchange an enrollment token for a secret
+  workerctl enroll  <https-api-base-url> [wkr_id]   FIRST:  token in, worker identity out
+  workerctl install <https-api-base-url> <wkr_id>   SECOND: write and load the LaunchAgent
   workerctl start | stop | restart                  control the service
   workerctl status                                  launchd state, pid, last exit code
   workerctl logs [lines]                            tail the worker log

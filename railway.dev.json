@@ -1,0 +1,13 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "_comment_1": "M7 DEVELOPMENT SERVICE ONLY. Nothing reads this file unless a service's Config-as-Code path is explicitly set to /railway.dev.json. It is deliberately NOT named railway.json or railway.toml, because those names are auto-detected and would then apply to every service built from this repo, production included.",
+  "_comment_2": "Why it exists: the root railway.json sets startCommand 'node server.js', and Railway's own documentation states that configuration defined in code always overrides values set in the dashboard. So setting the dev service's start command in the dashboard is NOT sufficient on its own - if the dev service reads the root railway.json, it would run the production cron server with all 42 scheduled jobs, including the ones that email the team and the one that connects to the Abiozen Django production database.",
+  "_comment_3": "There is deliberately NO preDeployCommand here. The root config runs a production migration before every deploy; the dev database is migrated explicitly by the operator with scripts/m7-dev-migrate.js, so that a deploy never silently changes the schema under a hardware test in progress.",
+  "_comment_4": "VERIFY EMPIRICALLY. Documentation about precedence is not evidence about your project. After the first dev deploy, read the deploy log: it must contain the four [m7-dev-worker-api] lines and no cron registration. That log is the proof, not this file.",
+  "deploy": {
+    "startCommand": "node scripts/dev-worker-api-server.js",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 120,
+    "restartPolicyType": "ON_FAILURE"
+  }
+}

@@ -37,6 +37,7 @@
 'use strict';
 
 const MODE_VERIFY = process.argv.includes('--verify');
+const MODE_ROLLBACK = process.argv.includes('--rollback');
 
 const FORBIDDEN_HOSTS = ['postgres.railway.internal', 'interchange.proxy.rlwy.net'];
 
@@ -124,8 +125,59 @@ async function observe() {
   };
 }
 
+// ── ROLLBACK: TASK STATE ONLY, AND IT SAYS SO ───────────────────────────────
+//
+// task-schema and audit export a ROLLBACK. identity-schema does NOT — there is no DDL anywhere in
+// this repo that drops worker_identities, worker_enrollment_tokens or worker_request_nonces.
+//
+// So a "full rollback" does not exist and this does not pretend to be one. It drops the task,
+// result and audit tables and KEEPS the identities, which during hardware testing is the behaviour
+// you want: test state is reset and the Mac does NOT need re-enrolling, because its Keychain secret
+// still matches a live identity.
+//
+// For a total reset, delete the disposable dev Postgres service. That is the only complete teardown,
+// and it is one click.
+async function rollback() {
+  head('rollback: dropping task, result and audit tables');
+
+  const TASK = require('../src/lib/worker/task-schema');
+  const AUDIT = require('../src/lib/worker/audit');
+
+  const before = await observe();
+  const kept = ['worker_identities', 'worker_enrollment_tokens', 'worker_request_nonces']
+    .filter((t) => before.tables.has(t));
+
+  for (const stmt of [].concat(TASK.ROLLBACK, AUDIT.ROLLBACK)) {
+    await query(String(stmt));
+  }
+
+  const after = await observe();
+  for (const t of ['worker_tasks', 'worker_results', 'worker_audit']) {
+    if (!after.tables.has(t)) ok(`${t} dropped`);
+    else bad(`${t} is still present after rollback`);
+  }
+  for (const t of kept) {
+    if (after.tables.has(t)) ok(`${t} KEPT — the Mac does not need re-enrolling`);
+    else bad(`${t} was dropped; it should not have been`);
+  }
+  if (after.tables.has('agent_runs')) {
+    ok('agent_runs KEPT — it is not an M7 table and other subsystems use it');
+  }
+
+  console.log('');
+  console.log('  This is a PARTIAL rollback and that is deliberate. There is no DDL in this repo');
+  console.log('  that drops the three identity tables, so this does not claim to remove them.');
+  console.log('  Re-apply with:  node scripts/m7-dev-migrate.js');
+  console.log('  Total teardown: delete the dev Postgres service in Railway.');
+}
+
 (async () => {
   console.log(`\n══ M7 DEV MIGRATION — ${host} ══`);
+
+  if (MODE_ROLLBACK) {
+    await rollback();
+    return;
+  }
 
   if (!MODE_VERIFY) {
     head('applying the six migrations the worker subsystem needs');
@@ -245,9 +297,17 @@ async function observe() {
     await pool.end().catch(() => {});
     console.log();
     if (fail) {
-      console.log(`FAIL  ${fail} expected artifact(s) are missing. The dev database is NOT ready;`);
-      console.log('      enrolment from the Mac would fail against it.');
+      if (MODE_ROLLBACK) {
+        console.log(`FAIL  the rollback did not leave the database in the expected shape (${fail} problem(s)).`);
+      } else {
+        console.log(`FAIL  ${fail} expected artifact(s) are missing. The dev database is NOT ready;`);
+        console.log('      enrolment from the Mac would fail against it.');
+      }
       process.exit(1);
+    }
+    if (MODE_ROLLBACK) {
+      console.log('PASS  task, result and audit tables dropped; identities kept.');
+      process.exit(0);
     }
     console.log('PASS  every M7 table, index, constraint and trigger derived from the DDL is present,');
     console.log('      and each artifact the design depends on was checked by name as well.');
