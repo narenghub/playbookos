@@ -482,6 +482,15 @@ pf_step "the production claim audit renders from its committed payload" sh -c '
 # DDL, not of the day it was written, and the only way they stay true is if an edit that breaks one
 # goes red here rather than halfway through a production run.
 pf_step "the ledger migration is additive, idempotent and reversible" node scripts/verify-ledger-migration-safety.js
+# 2026-11-15: on the day of the production migration `--status` printed "APPLIED … exit 0" while
+# idx_email_log_one_claim_per_ref did not exist — it counted COLUMNS and never looked at indexes or
+# constraints, so it answered confidently about the migration's least consequential half. The
+# post-apply verdict had the same blind spot. This reproduces that exact database — all 15 columns,
+# no index, no constraint — and asserts BOTH that the corrected logic says PARTIAL and that the old
+# column-only rule still says APPLIED, which is what makes it a regression test rather than a
+# feature test. It also builds an index that is present but not UNIQUE, present without its
+# predicate, and present with one outcome missing: three states a check on indexname alone passes.
+pf_step "a half-applied migration cannot report itself APPLIED" node scripts/check-migration-status-completeness-db.js
 
 # ── THE REPORT MUST NOT BE ABLE TO LIE AGAIN ────────────────────────────────
 #
