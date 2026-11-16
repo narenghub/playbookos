@@ -118,28 +118,63 @@ A **global** stop here would halt the worker too. If one appears, stop and repor
 
 ## Step 5 — the dev API service
 
-In the Railway dashboard, inside `playnexa-m7-dev`:
+**Config as Code is refused for new services.** Railway rejects setting a config path with:
 
-1. Add a service from GitHub `narenghub/playbookos`, branch `feat/m7-mac-mini-worker`
-2. Set its **Config-as-Code path** to `/railway.dev.json` if that option exists; otherwise set the
-   **start command** to `node scripts/dev-worker-api-server.js`
-3. Variables — **exactly these five**:
+```
+Failed to update service: Config as Code (railway.json / railway.toml) is deprecated.
+Use Infrastructure as Code (.railway/railway.ts) instead.
+```
+
+So `railway.dev.json` cannot be attached to this service, and the **dashboard start command is the
+mechanism**. Do NOT add `.railway/railway.ts` to this repository to work around it: its scoping
+semantics are unverified, a file at the repo root could change how PRODUCTION deploys, and it is
+not needed — see the safety argument below.
+
+In the Railway dashboard, inside `playnexa-m7-dev`, on the service `m7-dev-worker-api`:
+
+1. Connect the source: GitHub `narenghub/playbookos`, **and select branch
+   `feat/m7-mac-mini-worker` as you connect it** — not afterwards. Connecting without choosing the
+   branch builds `main` immediately.
+2. Confirm the start command is `node scripts/dev-worker-api-server.js` and the health check is
+   `/health`.
+3. Variables — **exactly these five**, nothing else:
 
 ```
 M7_DEV_API=yes
 WORKER_API_ENABLED=true
 WORKER_SECRET_SEAL_KEY=<openssl rand -hex 32 — generate it, never print or paste it>
-DATABASE_URL=<reference the Postgres service in THIS project>
+DATABASE_URL=${{Postgres.DATABASE_URL}}
 NODE_ENV=development
 ```
 
-Nothing else. The service **refuses to start** if any of `RESEND_API_KEY`, `TWILIO_*`,
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `APOLLO_API_KEY`, `LINKEDIN_*`, `ALGOLIA_*`, `GOOGLE_*` or
+`${{Postgres.DATABASE_URL}}` is this project's own private address. That is correct and intended:
+Railway's private DNS is project-scoped, so it is the DEV database, and the identity gate verifies
+what it actually holds at boot rather than trusting the name.
+
+The service refuses to start if any of `RESEND_API_KEY`, `TWILIO_*`, `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `APOLLO_API_KEY`, `LINKEDIN_*`, `ALGOLIA_*`, `GOOGLE_*` or
 `ABIOZEN_DATABASE_URL` is present.
 
-### Step 5a — read the first deploy log and check it carefully
+### Why the start command is enough, even if the root railway.json is still read
 
-**Required in the log:**
+The open question is whether a new service auto-detects the repo-root `railway.json`, whose
+`startCommand` is `node server.js`. Railway's refusal above says Config as Code is deprecated but
+does not say whether the root file is still read. Only the deploy log settles it — and either way
+the outcome is safe:
+
+- **`server.js` refuses to start when `M7_DEV_API=yes` is set.** It exits 2 before `node-cron`, the
+  mailer, WhatsApp, the routes or the `pg` driver are loaded, so no schedule can register and
+  nothing can be sent. Verified by inspecting the real require cache: zero repo modules and one
+  package loaded at the point of refusal.
+- The root config's `preDeployCommand` targets `inquiry_messages`, a table that **does not exist**
+  in this database. It would fail rather than change anything.
+
+So the worst case is a failed deploy, which is loud, visible and harmless — not a cron server
+quietly running against dev data.
+
+### Step 5a — read the first deploy log
+
+**Required:**
 
 ```
 [m7-dev-worker-api] listening on <port>
@@ -147,12 +182,15 @@ Nothing else. The service **refuses to start** if any of `RESEND_API_KEY`, `TWIL
 [m7-dev-worker-api] provider clients constructed: 0
 ```
 
-**If you see cron registration instead, STOP.** It means Railway applied the root `railway.json`
-(whose `startCommand` is `node server.js`) rather than `railway.dev.json`. `server.js` registers 42
-scheduled jobs, four of which email people or connect to the Abiozen production database.
+Plus an identity line from the boot gate confirming the database was identified as development.
 
-`server.js` refuses to start when `M7_DEV_API=yes` is set, so the expected failure mode is a
-refusal in the log, not a running cron server — but confirm it rather than assuming.
+**Two tells that the root `railway.json` won**, either of which means report and stop:
+
+1. `REFUSED: M7_DEV_API=yes marks this as the M7 development worker service` — that is `server.js`
+   refusing, which is the guard working but means the wrong start command was applied.
+2. Any mention of `migrate-inquiry-direction-check` — that is the production `preDeployCommand`.
+
+**And the one that must never appear:** any cron registration at all.
 
 ## Step 6 — verify the deployed API
 
