@@ -43,16 +43,46 @@ railway status
 ```
 
 Report the commit SHA and the `railway status` output. **Confirm the project is `playnexa-m7-dev`
-and NOT `meticulous-laughter` before continuing.**
+before continuing.**
+
+Note on names: the production project appears in `railway list` as **"Playbook OS"**. Older
+documents call it `meticulous-laughter`; that is the same thing under its earlier name. Identify the
+dev project by its ID — `a3d1f2d7-cf15-4feb-a079-e1539eaad77f` — rather than by name, since its only
+environment is also called `production` (Railway's default for every project) and that is
+confusing on sight.
 
 ## Step 2 — open a tunnel to the dev database
 
+**`--tunnel-only` requires Railway CLI v5.** A Homebrew install may be on v4.57.1, where the flag
+does not exist and `railway connect` has no tunnel mode at all. **Do not upgrade the global CLI to
+get it** — the same binary is used for production (`railway ssh --service playbookos`), and that is
+the owner's decision, not a step in this runbook. Use `npx` for this one command instead:
+
 ```sh
-railway connect Postgres --tunnel-only
+cd ~/playnexa-worker
+npx -y @railway/cli@5 whoami                              # should show the existing login
+npx -y @railway/cli@5 connect Postgres --tunnel-only
 ```
 
-Leave it running in its own terminal. It prints a local host and port. The resulting
-`DATABASE_URL` points at `127.0.0.1`, which every script here accepts.
+Authentication lives in the home directory and is shared between installs, so the npx'd v5 should
+see the existing session. If `whoami` says unauthorized, stop and report rather than logging in.
+
+From the v5 help, verbatim:
+
+```
+--tunnel-only  Open the local tunnel without launching a database client. Prints connection
+               details for external tools ... and holds the tunnel open until Ctrl+C. Implies --ssh
+--ssh          Tunnel to the database over SSH instead of a public TCP proxy.
+               Works without a public domain; auto-enabled when the service has no public proxy URL
+```
+
+**The tunnel goes over SSH, not the public TCP proxy** — which is why Public Access must stay off
+and nothing here needs it. If something suggests enabling `railway tcp-proxy` or Public Access to
+make this work, that is the wrong branch: stop and report.
+
+Leave the tunnel running in its own terminal. It prints a local host and port. The resulting
+`DATABASE_URL` points at `127.0.0.1`, which every script here accepts, and which the database
+identity gate treats like any other address — it still has to prove what it is.
 
 ## Step 3 — identify and migrate the database
 
