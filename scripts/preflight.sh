@@ -211,6 +211,13 @@ pf_step "the M7 dev environment stands up, and containment does not stop the wor
 # with no pre-deploy command. It CANNOT prove which config Railway applies to a given service; that
 # is confirmed from the first deploy log.
 pf_step "the dev API cannot reach server.js, node-cron, or any provider client" node scripts/check-dev-api-isolation.js
+# Found on the FIRST run of `workerctl doctor` on real hardware: with no plist present, PlistBuddy
+# writes "File Doesn't Exist, Will Create: …" to STDOUT and exits 0, and that sentence was captured
+# as both the API base URL and the worker id. Nothing crashed; the diagnostic reported
+# baseUrlConfigured: true for a URL that was an error message, and ran a Keychain lookup against an
+# account name made of English prose. This drives plist_value directly with a stubbed PlistBuddy
+# and is verified to fail when the sanitisation is removed.
+pf_step "workerctl doctor cannot report a tool's chatter as a configured value" node scripts/check-workerctl-doctor.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither

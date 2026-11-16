@@ -179,10 +179,36 @@ cmd_logs() {
 # (errSecAuthFailed / -25293) — and reporting it as absent sends you to re-enrol, which spends a
 # single-use token and fixes nothing. The four states are now distinguished, with the real macOS
 # status preserved, and the value itself is never read out.
+# ── READING A VALUE OUT OF THE PLIST, WITHOUT BELIEVING THE TOOL ────────────
+#
+# On a machine with no plist, `PlistBuddy -c Print …` prints
+#
+#     File Doesn't Exist, Will Create: /Users/<you>/Library/LaunchAgents/ai.playnexa.worker.plist
+#
+# on STDOUT, not stderr, and exits 0. So `v="$(PlistBuddy … 2>/dev/null || true)"` captured that
+# sentence AS THE VALUE. The first run of `workerctl doctor` on real hardware fed it to the
+# diagnostic as both the API URL and the worker id, which then reported `baseUrlConfigured: true`
+# for a URL that was an error message.
+#
+# So: do not call PlistBuddy at all unless the file exists, and validate the shape of whatever comes
+# back rather than trusting it. A value that does not match is discarded, not passed on — a wrong
+# value is worse than no value, because no value is reported honestly as "not configured".
+plist_value() {
+  local key="$1" shape="$2" v
+  [ -f "$PLIST" ] || return 0
+  v="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:${key}" "$PLIST" 2>/dev/null)" || return 0
+  v="$(printf '%s' "$v" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  case "$v" in
+    *"Doesn't Exist"*|*'Does Not Exist'*|*'Will Create'*) return 0 ;;
+  esac
+  printf '%s' "$v" | grep -Eq "$shape" || return 0
+  printf '%s' "$v"
+}
+
 cmd_doctor() {
   local url wid out state status detail recovery
-  url="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:WORKER_API_BASE_URL' "$PLIST" 2>/dev/null || true)"
-  wid="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables:WORKER_ID' "$PLIST" 2>/dev/null || true)"
+  url="$(plist_value WORKER_API_BASE_URL '^https?://[A-Za-z0-9._:-]+')"
+  wid="$(plist_value WORKER_ID '^wkr_[0-9a-f]{32}$')"
   say "platform        : $(uname -s) $(uname -m) $(sw_vers -productVersion 2>/dev/null || true)"
   say "node            : $(command -v node || echo 'NOT FOUND') $(node -v 2>/dev/null || true)"
   say "plist installed : $([ -f "$PLIST" ] && echo yes || echo no)"
@@ -242,6 +268,10 @@ cmd_uninstall() {
   say "access; deleting the local copy only makes it stop working."
   say "  then, if you want the local item gone:  security delete-generic-password -s ai.playnexa.worker"
 }
+
+# Sourcing with WORKERCTL_LIB=1 defines the functions without dispatching, so the shell logic in
+# this file can be tested rather than only read. scripts/check-workerctl-doctor.js does that.
+if [ "${WORKERCTL_LIB:-}" = "1" ]; then return 0 2>/dev/null || true; fi
 
 case "${1:-}" in
   install)   shift; cmd_install "$@" ;;
