@@ -1,5 +1,37 @@
 // server.js — PlaybookOS main server
 require('dotenv').config();
+
+// ── THIS PROCESS REFUSES TO BE THE M7 DEVELOPMENT WORKER SERVICE ────────────
+//
+// Railway's documentation states that configuration defined in code always overrides values set in
+// the dashboard. The repository root holds railway.json, whose startCommand is `node server.js`. So
+// if the M7 development service reads that file — and whether a newly created service does is not
+// something the documentation settles — it would run THIS process whatever its dashboard says.
+//
+// That is not a cosmetic mix-up. Below this line, 42 cron jobs are registered at module load. Among
+// them: performance scoring, which emails coaching to the team; the command-centre briefing, which
+// emails the owner; the GitHub sync; and the product shadow read, which connects to the Abiozen
+// Django PRODUCTION database. Pointed at a development environment those would still reach the real
+// outside world, because a schedule does not know which database it was handed.
+//
+// Reading the first deploy log was the previous plan. A log is read AFTER the crons have registered,
+// by someone who remembers to look. This is that check made structural: the dev service carries
+// M7_DEV_API=yes, scripts/dev-worker-api-server.js REQUIRES that marker, and this process REFUSES
+// it. Whichever config Railway decides to apply, exactly one of the two can start.
+//
+// Placed above every other require so nothing loads, no cron registers and no database connection
+// opens before the decision is made. Production never sets this variable; if it ever appears there,
+// refusing to boot is the right answer to that too.
+if (process.env.M7_DEV_API === 'yes') {
+  console.error('REFUSED: M7_DEV_API=yes marks this as the M7 development worker service, and');
+  console.error('server.js is the production server — it registers 42 scheduled jobs, four of which');
+  console.error('email people or connect to the Abiozen production database.');
+  console.error('');
+  console.error('Start the development service with:  node scripts/dev-worker-api-server.js');
+  console.error('If this IS production, M7_DEV_API must not be set here. Remove it.');
+  process.exit(2);
+}
+
 // ── BOOT DOES NOT MIGRATE (ENG-003) ─────────────────────────────────────────
 // This line used to be the entire migration chain: initDB → initPhase2 → migrateSchemas → about a
 // dozen more, each applying DDL. That is why the application connected to Postgres as a SUPERUSER,

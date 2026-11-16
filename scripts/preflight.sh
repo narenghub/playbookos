@@ -218,6 +218,16 @@ pf_step "the dev API cannot reach server.js, node-cron, or any provider client" 
 # account name made of English prose. This drives plist_value directly with a stubbed PlistBuddy
 # and is verified to fail when the sanitisation is removed.
 pf_step "workerctl doctor cannot report a tool's chatter as a configured value" node scripts/check-workerctl-doctor.js
+# Exactly one of the two servers can start. The M7 dev service carries M7_DEV_API=yes;
+# dev-worker-api-server.js REQUIRES it and server.js REFUSES it. This exists because Railway's docs
+# say config-in-code overrides the dashboard, the repo root holds railway.json with
+# `startCommand: node server.js`, and whether a NEW service reads that file is not settled by the
+# documentation. Rather than "read the first deploy log and hope someone looks", the wrong process
+# refuses to boot. The assertion that matters is not the exit code but WHEN: verified against the
+# real require cache that node-cron, the mailer, WhatsApp, the routes and the pg driver are all
+# unreached, so no schedule can have registered. Verified to fail if the guard is moved below the
+# node-cron require, or removed.
+pf_step "only one of server.js and the dev API can start" node scripts/check-dev-marker-mutual-exclusion.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither
