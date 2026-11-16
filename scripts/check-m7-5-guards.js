@@ -67,10 +67,19 @@ console.log('\n══ M7.5 GUARDS ══');
 // ── 1. THE DEV DRIVER ───────────────────────────────────────────────────────
 head('1. m7-5-dev-driver.js refuses every production database');
 
+// ── WHAT A HOSTNAME CAN AND CANNOT SETTLE ──────────────────────────────────
+//
+// `postgres.railway.internal` used to be on this list and is deliberately gone. Railway's private
+// DNS is project-scoped, so inside playnexa-m7-dev that name is the DEVELOPMENT database — blocking
+// it forced the only available workaround, giving the dev database a public internet address.
+// A hostname also says nothing about a dev database RESTORED FROM production.
+//
+// So the list keeps only hosts that are publicly reachable AND unambiguously production, and
+// scripts/lib/db-identity.js answers the real question by asking the database what it holds.
+// check-db-identity-db.js covers that; this covers what remains name-blockable.
 const PROD_DBS = [
-  ['postgresql://u:p@postgres.railway.internal:5432/railway', 'the production Postgres'],
   ['postgresql://u:p@interchange.proxy.rlwy.net:18553/railway', 'the Abiozen Django production DB'],
-  ['postgresql://u:p@replica.postgres.railway.internal:5432/railway', 'a subdomain of a production host'],
+  ['postgresql://u:p@replica.interchange.proxy.rlwy.net:18553/railway', 'a subdomain of it'],
 ];
 for (const [url, what] of PROD_DBS) {
   const r = driver(url, { M7_5_DEV_CONFIRM: 'yes' });   // confirmation must NOT buy a way through
@@ -163,9 +172,6 @@ const DEV_OK = {
 for (const [name, env, expect] of [
   ['without M7_DEV_API', { ...DEV_OK, M7_DEV_API: undefined }, /M7_DEV_API=yes/],
   ['with NODE_ENV=production', { ...DEV_OK, NODE_ENV: 'production' }, /NODE_ENV=production/],
-  ['pointed at the production Postgres',
-    { ...DEV_OK, DATABASE_URL: 'postgresql://u:p@postgres.railway.internal:5432/railway' },
-    /production database host/],
   ['pointed at the Abiozen production DB',
     { ...DEV_OK, DATABASE_URL: 'postgresql://u:p@interchange.proxy.rlwy.net:18553/railway' },
     /production database host/],
@@ -198,11 +204,27 @@ if (notRefused.length === 0) {
 // ANTI-VACUITY. A correct dev environment must get past every guard above and fail only on the
 // database connection, which is a different failure. Without this, a file that refused everything
 // would pass — and would make the dev environment impossible to stand up.
+// The control, re-pointed. A correct configuration must clear every STATIC refusal — the marker,
+// the activation flag, the seal key, the provider-credential scan and the host list — and then stop
+// at the database identity stage, because the URL here points at nothing. Reaching that stage is
+// the proof: it means nothing earlier rejected it.
+//
+// Asserting `code !== 2` no longer works and must not be restored: an unreachable database is now
+// `cannot_tell`, which is a refusal, so exit 2 is correct here. What distinguishes a good config is
+// WHICH refusal it reaches.
 const good = devapi(DEV_OK);
-if (good.code !== 2) {
-  ok('control: a correct development configuration clears every refusal');
-} else bad('a correct development configuration was refused, so the dev API cannot be started',
-  good.out.slice(0, 200));
+const reachedIdentity = /could not be positively identified as development|cannot_tell/.test(good.out);
+const staticRefusal = /M7_DEV_API|WORKER_API_ENABLED|64 hex|provider credential|production database host/
+  .test(good.out);
+if (reachedIdentity && !staticRefusal) {
+  ok('control: a correct development configuration clears every static refusal and reaches the');
+  ok('         database identity stage — which is where an unreachable URL should stop it');
+} else if (staticRefusal) {
+  bad('a correct development configuration was rejected before the identity stage',
+    good.out.slice(0, 300));
+} else {
+  bad('the dev API neither refused nor reached the identity stage', good.out.slice(0, 300));
+}
 
 // ── 2c. THE CONTAINMENT SEED ────────────────────────────────────────────────
 head('2c. m7-dev-seed-containment.js will not touch production');
@@ -214,9 +236,6 @@ function seed(extra = {}) {
   return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
 }
 for (const [name, env, expect] of [
-  ['the production Postgres',
-    { DATABASE_URL: 'postgresql://u:p@postgres.railway.internal:5432/railway', M7_5_DEV_CONFIRM: 'yes' },
-    /production database/],
   ['the Abiozen production DB',
     { DATABASE_URL: 'postgresql://u:p@interchange.proxy.rlwy.net:18553/railway', M7_5_DEV_CONFIRM: 'yes' },
     /production database/],

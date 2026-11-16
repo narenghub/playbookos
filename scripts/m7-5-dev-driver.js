@@ -37,8 +37,10 @@ const head = (m) => console.log(`\n  ── ${m} ──\n`);
 //
 // Named hosts and database names, not a substring search for "prod". A list is auditable; a guess
 // about the shape of a hostname is how a guard ends up not firing on the one URL that mattered.
+// postgres.railway.internal is deliberately absent — Railway's private DNS is project-scoped, so
+// that name means "this project's database". scripts/lib/db-identity.js asks the database what
+// it holds instead, which is the question that actually matters. See m7-dev-migrate.js.
 const FORBIDDEN_HOSTS = [
-  'postgres.railway.internal',
   'interchange.proxy.rlwy.net',
   'app.playnexa.ai',
   'playbook.abiozen.com',
@@ -219,6 +221,14 @@ async function cmdScenarios() {
   }
   console.log(`\n══ M7.5 SCENARIOS — dev database ${where.host}/${where.name} ══`);
   console.log(`   driving worker ${workerId}, which must be RUNNING on the Mac mini now.\n`);
+
+  // The scenarios cancel tasks, set a STOP and revoke a credential. Identify the database first.
+  const DBID = require('./lib/db-identity');
+  const identified = await DBID.assertDevelopmentDatabase(query, { log: console.log });
+  if (!identified.ok) {
+    console.log(`\n  INCOMPLETE  the database was not identified as development (${identified.verdict}).`);
+    process.exit(3);
+  }
 
   const w = await IDENTITY.findWorker(workerId, deps);
   if (!w) { console.log(`  INCOMPLETE  no such worker identity in this database.`); process.exit(3); }

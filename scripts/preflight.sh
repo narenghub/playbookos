@@ -228,6 +228,15 @@ pf_step "workerctl doctor cannot report a tool's chatter as a configured value" 
 # unreached, so no schedule can have registered. Verified to fail if the guard is moved below the
 # node-cron require, or removed.
 pf_step "only one of server.js and the dev API can start" node scripts/check-dev-marker-mutual-exclusion.js
+# The dev scripts used to refuse a production database by HOSTNAME. That was wrong in both
+# directions: `postgres.railway.internal` inside the dev Railway project is the DEVELOPMENT database
+# (private DNS is project-scoped), and the only workaround was to give that database a public
+# internet address — weakening a real system to satisfy a check aimed at the wrong thing. A hostname
+# also says nothing about a dev database RESTORED FROM a production dump. The database is now asked
+# what it holds. Development is claimed only for an empty or M7-only database; production STOP rows,
+# populated business tables, an unfamiliar shape and an unreadable database are all refusals.
+# This check caught M7_TABLES being short by seven tables, and now guards that list against drift.
+pf_step "a database is positively identified before anything is migrated" node scripts/check-db-identity-db.js
 # One RFQ per supplier per request. Until 27 Oct the procurement agent deduplicated with a SELECT
 # before the send and wrote its log row AFTER it, with no unique constraint behind the read — so a
 # send whose record was lost, or two overlapping runs, both emailed a real supplier twice. Neither

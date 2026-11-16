@@ -33,8 +33,16 @@ const express = require('express');
 
 // ── REFUSALS, BEFORE A SOCKET IS OPENED ─────────────────────────────────────
 
+// postgres.railway.internal is deliberately NOT here. Railway's private DNS is scoped to a project
+// and environment, so inside playnexa-m7-dev that name is the DEVELOPMENT Postgres and cannot reach
+// production's. Blocking it forced the only workaround available — giving the dev database a public
+// internet address — which weakened a real system to satisfy a check aimed at the wrong thing.
+//
+// Identity is established below instead, at boot, by asking the database what it contains. That
+// answer holds for any URL, and unlike a hostname it catches a dev database restored from a
+// production dump. This list keeps only hosts that are publicly reachable AND unambiguously
+// production.
 const FORBIDDEN_DB_HOSTS = [
-  'postgres.railway.internal',
   'interchange.proxy.rlwy.net',
 ];
 
@@ -142,18 +150,47 @@ app.use((req, res) => {
   });
 });
 
+// ── IDENTIFY THE DATABASE BEFORE SERVING A SINGLE REQUEST ──────────────────
+//
+// The worker API writes: it leases tasks, records results and writes audit rows. So it establishes
+// what it is connected to before it accepts anything, and exits rather than serving against a
+// database it cannot identify as development. A refusal at boot is visible in the deploy log; a
+// wrong database discovered later is visible in somebody's data.
+const IDENTITY = require('./lib/db-identity');
+
 const port = Number(process.env.PORT) || 3100;
-const server = app.listen(port, () => {
+let server = null;
+
+(async () => {
+  const identified = await IDENTITY.assertDevelopmentDatabase(query,
+    { log: (m) => console.log(`[m7-dev-worker-api]${m ? ` ${m}` : ''}`) });
+  if (!identified.ok) {
+    console.error(`REFUSED: the database was not identified as development `
+      + `(${identified.verdict}). Nothing is served.`);
+    await pool.end().catch(() => {});
+    process.exit(2);
+  }
+  start();
+})().catch(async (e) => {
+  console.error(`REFUSED: the database could not be identified: ${String(e.message).slice(0, 200)}`);
+  await pool.end().catch(() => {});
+  process.exit(2);
+});
+
+function start() {
+server = app.listen(port, () => {
   console.log(`[m7-dev-worker-api] listening on ${port}`);
   console.log(`[m7-dev-worker-api] database host: ${dbHost}`);
   console.log('[m7-dev-worker-api] crons registered: 0 (server.js is not loaded by this process)');
   console.log('[m7-dev-worker-api] provider clients constructed: 0');
   console.log('[m7-dev-worker-api] routes: GET /health, POST /api/worker/{enroll,claim,heartbeat,result}, GET /api/worker/lease/:runId');
 });
+}
 
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     console.log(`[m7-dev-worker-api] ${sig} — closing`);
+    if (!server) { pool.end().then(() => process.exit(0), () => process.exit(0)); return; }
     server.close(() => pool.end().then(() => process.exit(0), () => process.exit(0)));
     setTimeout(() => process.exit(0), 10_000).unref();
   });

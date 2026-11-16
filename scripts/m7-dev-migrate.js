@@ -39,7 +39,20 @@
 const MODE_VERIFY = process.argv.includes('--verify');
 const MODE_ROLLBACK = process.argv.includes('--rollback');
 
-const FORBIDDEN_HOSTS = ['postgres.railway.internal', 'interchange.proxy.rlwy.net'];
+// ── WHY postgres.railway.internal IS NOT ON THIS LIST ───────────────────────
+//
+// It used to be. Railway's private DNS is scoped to a project and environment, so that name inside
+// playnexa-m7-dev resolves to the DEVELOPMENT Postgres and cannot reach production's. Blocking it
+// treated a name that means "this project's database" as if it meant production, and the workaround
+// on offer was to give the dev database a public internet address — weakening a real system to
+// satisfy a check aimed at the wrong thing.
+//
+// What replaces it is stronger: scripts/lib/db-identity.js asks the DATABASE what it contains,
+// which holds for any URL, including localhost at the end of a `railway connect` tunnel. A hostname
+// never could have caught a dev database restored from a production dump; the content check does.
+//
+// This list now holds only hosts that are publicly reachable AND unambiguously production.
+const FORBIDDEN_HOSTS = ['interchange.proxy.rlwy.net'];
 
 function refuse(msg, extra) {
   process.stderr.write(`REFUSED: ${msg}\n`);
@@ -177,6 +190,17 @@ async function rollback() {
   if (MODE_ROLLBACK) {
     await rollback();
     return;
+  }
+
+  // ── POSITIVELY IDENTIFY THE TARGET BEFORE TOUCHING IT ─────────────────────
+  //
+  // Before any DDL, and before --verify reports anything. "Not obviously production" is not an
+  // identification; this refuses unless the database affirmatively looks like a scratch one.
+  head('identifying the database before anything is applied');
+  const IDENTITY = require('./lib/db-identity');
+  const identified = await IDENTITY.assertDevelopmentDatabase(query, { log: console.log });
+  if (!identified.ok) {
+    throw new Error(`the database was not identified as development (${identified.verdict})`);
   }
 
   if (!MODE_VERIFY) {

@@ -143,10 +143,14 @@ let server = null;
     const r = spawnSync(process.execPath, [DEVAPI], { env, encoding: 'utf8', timeout: 15_000 });
     return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
   };
-  const prodDb = start({ DATABASE_URL: 'postgresql://u:p@postgres.railway.internal:5432/railway' });
+  // The Abiozen Django production DB is publicly reachable and unambiguously production, so it is
+  // still refused by name. `postgres.railway.internal` is no longer on that list — project-scoped
+  // DNS means it is the DEV database from inside the dev project — and is covered instead by
+  // scripts/lib/db-identity.js, which check-db-identity-db.js exercises against real databases.
+  const prodDb = start({ DATABASE_URL: 'postgresql://u:p@interchange.proxy.rlwy.net:18553/railway' });
   if (prodDb.code === 2 && /production database host/.test(prodDb.out)) {
-    ok('refuses the production database by host');
-  } else bad('did not refuse the production database', `exit ${prodDb.code}`);
+    ok('refuses the Abiozen production database by host');
+  } else bad('did not refuse the Abiozen production database', `exit ${prodDb.code}`);
 
   const withCred = start({ RESEND_API_KEY: 'x' });
   if (withCred.code === 2 && /provider credential/.test(withCred.out)) {
