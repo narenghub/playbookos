@@ -124,9 +124,20 @@ const STATE = Object.freeze({
   READABLE: 'readable',         // the item exists and its value came back
   UNREADABLE: 'unreadable',     // it is there, or being refused — NOT absent
   MISSING: 'missing',           // a not-found signature was genuinely observed
-  UNKNOWN: 'unknown',           // something else; details preserved, nothing concluded
+  UNKNOWN: 'unknown',           // a lookup HAPPENED and failed inexplicably
+  NOT_CONFIGURED: 'not_configured', // no worker id, so no lookup was attempted
   NOT_MACOS: 'not_macos',
 });
+
+// ── THE INVARIANT, ENFORCED BY TEST ─────────────────────────────────────────
+//
+//   present === false   if and only if   state === MISSING
+//
+// Every other state means "we are not asserting that the credential is absent", and that is `null`.
+// `false` is read by a human as "it is not there", which is the whole defect this module exists to
+// remove — and it survived in the no-worker-id branch after the first fix, which is why it is now
+// an invariant with a test that walks every state rather than a convention.
+const assertsAbsence = (state) => state === STATE.MISSING;
 
 // Matched on the text `security` prints, not on exit codes: the CLI's numeric codes are not
 // documented as a stable mapping of OSStatus, and guessing one would be the same mistake in a new
@@ -185,16 +196,24 @@ const SIGNATURES = [
 function probeSecret({ workerId } = {}, deps = {}) {
   const platform = deps.platform || process.platform;
   if (platform !== 'darwin') {
-    return { state: STATE.NOT_MACOS, present: false, status: null,
+    // `null`, not false: off macOS there is no Keychain to consult, which is "not applicable"
+    // rather than "the credential is absent".
+    return { state: STATE.NOT_MACOS, present: null, status: null,
       detail: `not macOS (${platform})`,
       short: `not macOS (${platform})`,
       hint: 'The Keychain is only consulted on macOS. Nothing is wrong here.' };
   }
   if (!workerId) {
-    return { state: STATE.UNKNOWN, present: false, status: null,
-      detail: 'no worker id was supplied, so nothing could be looked up',
-      short: 'no WORKER_ID set',
-      hint: 'Set WORKER_ID, or pass the id the LaunchAgent plist carries.' };
+    // NOT `unknown`. Unknown means a lookup happened and failed in a way we cannot classify; this
+    // is "nothing is configured yet, so no lookup was attempted", which is the normal state before
+    // enrolment and must not read as a fault. The first version returned UNKNOWN here, so a fresh
+    // machine was told its credential state was inexplicable and handed a recovery procedure
+    // referring to a worker id it did not have.
+    return { state: STATE.NOT_CONFIGURED, present: null, status: null,
+      detail: 'no worker id is configured, so no Keychain lookup was attempted',
+      short: 'no WORKER_ID configured',
+      hint: 'Nothing is enrolled or installed yet. This is the expected state before enrolment: '
+        + 'enrol first, which assigns the worker id, then install with it.' };
   }
   const exec = deps.exec || ((args, opts) => execFileSync('/usr/bin/security', args, opts));
   const account = `${ACCOUNT_LABEL}:${workerId}`;
@@ -277,6 +296,6 @@ function hasSecret({ workerId } = {}, deps = {}) {
 }
 
 module.exports = {
-  SERVICE, ACCOUNT_LABEL, isDarwin, STATE, SIGNATURES,
+  SERVICE, ACCOUNT_LABEL, isDarwin, STATE, SIGNATURES, assertsAbsence,
   readSecret, writeSecret, deleteSecret, hasSecret, probeSecret,
 };

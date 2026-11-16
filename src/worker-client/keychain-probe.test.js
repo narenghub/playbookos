@@ -202,12 +202,67 @@ test('off macOS: not_macos, and not a failure', () => {
   assert.strictEqual(v.state, KEYCHAIN.STATE.NOT_MACOS);
   assert.ok(/not macOS/i.test(v.detail));
   assert.ok(/Nothing is wrong/i.test(v.hint));
+  // Not applicable is not absent.
+  assert.strictEqual(v.present, null);
 });
 
-test('no worker id: unknown, not missing', () => {
+test('no worker id: not_configured — a lookup was never attempted', () => {
   const v = KEYCHAIN.probeSecret({}, { platform: 'darwin' });
-  assert.strictEqual(v.state, KEYCHAIN.STATE.UNKNOWN);
-  assert.ok(/WORKER_ID/.test(v.hint));
+  // NOT `unknown`. Unknown means a lookup happened and could not be classified. This is the normal
+  // pre-enrolment state, and calling it unknown told a fresh machine its credential state was
+  // inexplicable while handing it a recovery procedure for a worker id it did not have.
+  assert.strictEqual(v.state, KEYCHAIN.STATE.NOT_CONFIGURED);
+  assert.strictEqual(v.status, null, 'no call was made, so there is no status');
+  assert.ok(/expected state before enrolment/i.test(v.hint), v.hint);
+  assert.ok(!/do not re-?enrol/i.test(v.hint), 'must not warn against re-enrolling; enrolling is the next step');
+});
+
+// ── THE INVARIANT THAT THE FIRST FIX MISSED ─────────────────────────────────
+//
+// `present === false` means "the credential is not there". Any other state must be `null`, because
+// a human reads false as absent. The first version of this module returned `present: false` from
+// the no-worker-id branch, and the test for that branch asserted only its STATE — so the exact
+// defect the module exists to remove survived in one path and was found on hardware, not here.
+//
+// This walks EVERY state rather than trusting each case to remember the rule.
+test('present === false if and only if the state is missing — across every state', () => {
+  const cases = [
+    ['readable', { meta: { ok: true }, value: { ok: true, stdout: SECRET } }],
+    ['missing', { meta: { ok: false, status: 44, stderr: MSG_NOT_FOUND },
+      value: { ok: false, status: 44, stderr: MSG_NOT_FOUND } }],
+    ['unreadable/auth', { meta: { ok: false, status: 51, stderr: MSG_AUTH_FAILED },
+      value: { ok: false, status: 51, stderr: MSG_AUTH_FAILED } }],
+    ['unreadable/interaction', { meta: { ok: true },
+      value: { ok: false, status: 36, stderr: MSG_NO_INTERACTION } }],
+    ['unreadable/locked', { meta: { ok: false, status: 36, stderr: MSG_LOCKED },
+      value: { ok: false, status: 36, stderr: MSG_LOCKED } }],
+    ['unknown', { meta: { ok: false, status: 99, stderr: 'never seen' },
+      value: { ok: false, status: 99, stderr: 'never seen' } }],
+  ];
+  const seen = new Set();
+  for (const [label, plan] of cases) {
+    const { verdict } = probe(plan);
+    seen.add(verdict.state);
+    const claimsAbsent = verdict.present === false;
+    const shouldClaim = KEYCHAIN.assertsAbsence(verdict.state);
+    assert.strictEqual(claimsAbsent, shouldClaim,
+      `${label}: state=${verdict.state} present=${JSON.stringify(verdict.present)} — `
+      + `present:false is permitted ONLY for "missing"`);
+  }
+  // And the two states reached without a lookup.
+  for (const [label, v] of [
+    ['not_configured', KEYCHAIN.probeSecret({}, { platform: 'darwin' })],
+    ['not_macos', KEYCHAIN.probeSecret({ workerId: WID }, { platform: 'linux' })],
+  ]) {
+    seen.add(v.state);
+    assert.notStrictEqual(v.present, false,
+      `${label}: present:false claims the credential is absent, and no lookup was made`);
+  }
+  // Anti-vacuity: the walk must actually cover every state the module declares, or a future state
+  // could be added with present:false and this test would still pass.
+  for (const s of Object.values(KEYCHAIN.STATE)) {
+    assert.ok(seen.has(s), `state "${s}" is never exercised by this invariant test`);
+  }
 });
 
 test('the metadata probe never asks for the value', () => {
@@ -290,6 +345,13 @@ test('doctor reports the state and is not ready unless the credential is readabl
   assert.strictEqual(dUnk.keychainState, KEYCHAIN.STATE.UNKNOWN);
   assert.strictEqual(dUnk.ready, false, 'unknown must not count as ready');
   assert.strictEqual(dUnk.keychainItemPresent, null, 'unknown must not count as missing');
+
+  // Nothing configured at all: the state a fresh machine reports, and it must not look like a fault.
+  const dFresh = RUN.doctor({ WORKER_API_BASE_URL: '', WORKER_ID: '' }, { platform: 'darwin' });
+  assert.strictEqual(dFresh.keychainState, KEYCHAIN.STATE.NOT_CONFIGURED);
+  assert.strictEqual(dFresh.keychainItemPresent, null,
+    'a fresh machine must not be told its credential is absent');
+  assert.strictEqual(dFresh.ready, false);
 
   const missing = stub({
     meta: { ok: false, status: 44, stderr: MSG_NOT_FOUND },

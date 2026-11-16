@@ -227,30 +227,67 @@ cmd_doctor() {
   detail="$(printf '%s' "$out" | sed -n 's/.*"keychainDetail": *"\([^"]*\)".*/\1/p' | head -1)"
   recovery="$(printf '%s' "$out" | sed -n 's/.*"keychainRecovery": *"\([^"]*\)".*/\1/p' | head -1)"
 
+  # ── EVERY BRANCH ENDS ON A DEFINITE SUCCESS ───────────────────────────────
+  #
+  # These were written as `[ -n "$x" ] && say …` chains. With no `set -e` that does not abort, but
+  # the chain's exit status becomes the FUNCTION's exit status when it is the last statement in a
+  # branch — so `workerctl doctor; echo "exit=$?"` printed exit=1 whenever an optional field
+  # happened to be empty. A diagnostic that reports failure because a field was blank teaches the
+  # operator to ignore its exit code, which is the one thing it must not do.
+  #
+  # Hence: `if` statements, and an explicit `return 0` at the end.
   say ""
   say "── credential ──"
   case "$state" in
     readable)
-      say "  READABLE. The worker can start." ;;
+      say "  READABLE. The worker can start."
+      ;;
     missing)
       say "  MISSING. No credential is stored for this worker id."
-      say "  Enrol it:  workerctl enroll ${url:-<api-base-url>}" ;;
+      say "  Enrol it:  workerctl enroll ${url:-<https-api-base-url>}"
+      ;;
     unreadable)
       say "  PRESENT BUT UNREADABLE — macOS refused the read (status ${status:-unknown})."
       say "  THIS IS NOT 'not enrolled'. Re-enrolling spends a single-use token and will not fix it."
-      [ -n "$detail" ] && say "  macOS said: $detail"
-      [ -n "$recovery" ] && say "  $recovery" ;;
+      if [ -n "$detail" ]; then say "  macOS said: $detail"; fi
+      if [ -n "$recovery" ]; then say "  $recovery"; fi
+      ;;
+    not_configured)
+      # The normal state before enrolment. It is not a fault and must not be dressed as one.
+      say "  NOT CONFIGURED. No worker id is set, so no Keychain lookup was attempted."
+      if [ -n "$detail" ]; then say "  $detail"; fi
+      say "  This is expected before enrolment. Enrol first — that assigns the worker id — then"
+      say "  install with the id it prints:"
+      say "    workerctl enroll ${url:-<https-api-base-url>}"
+      ;;
     unknown)
-      say "  UNKNOWN (status ${status:-unknown}). The lookup failed in a way this tool does not"
-      say "  recognise, so NOTHING is concluded about whether the credential exists."
-      [ -n "$detail" ] && say "  macOS said: $detail"
+      say "  UNKNOWN (status ${status:-unknown}). A lookup WAS attempted and failed in a way this"
+      say "  tool does not recognise, so NOTHING is concluded about whether the credential exists."
+      # "macOS said" only when macOS actually said it — i.e. a real call returned a status. Our own
+      # explanatory text was previously printed under that label, which is a small lie that would
+      # send someone hunting a macOS problem that did not exist.
+      if [ -n "$detail" ]; then
+        if [ -n "$status" ] && [ "$status" != "null" ]; then
+          say "  macOS said: $detail"
+        else
+          say "  $detail"
+        fi
+      fi
       say "  Do not re-enrol on the strength of this. Run the lookup by hand and report the output:"
-      say "    security find-generic-password -s ${LABEL} -a ${LABEL}:${wid:-<wkr_id>}" ;;
+      if [ -n "$wid" ]; then
+        say "    security find-generic-password -s ${LABEL} -a ${LABEL}:${wid}"
+      else
+        say "    (no worker id is known, so there is no lookup to run by hand)"
+      fi
+      ;;
     not_macos)
-      say "  Not macOS, so the Keychain was not consulted." ;;
+      say "  NOT APPLICABLE. This is not macOS, so the Keychain was not consulted."
+      ;;
     *)
-      say "  could not determine the credential state from the diagnostic output above" ;;
+      say "  could not determine the credential state from the diagnostic output above"
+      ;;
   esac
+  return 0
 }
 
 cmd_uninstall() {
