@@ -254,8 +254,9 @@ cmd_doctor() {
       ;;
     not_configured)
       # The normal state before enrolment. It is not a fault and must not be dressed as one.
+      # The detail is deliberately NOT echoed here: it says the same thing as the line above, and a
+      # diagnostic that repeats itself reads as though two separate things were wrong.
       say "  NOT CONFIGURED. No worker id is set, so no Keychain lookup was attempted."
-      if [ -n "$detail" ]; then say "  $detail"; fi
       say "  This is expected before enrolment. Enrol first — that assigns the worker id — then"
       say "  install with the id it prints:"
       say "    workerctl enroll ${url:-<https-api-base-url>}"
