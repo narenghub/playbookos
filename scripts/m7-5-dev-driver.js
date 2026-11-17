@@ -28,8 +28,24 @@ const CMD = ARGV[0];
 const arg = (n) => { const i = ARGV.indexOf(n); return i >= 0 && ARGV[i + 1] ? ARGV[i + 1] : null; };
 
 let fail = 0;
+// UNTESTED IS NOT PASSED AND IT IS NOT FAILED.
+//
+// On 2026-11-17 scenario 7's manual `kill -9` was never performed, and the script reported two
+// FAILs for a crash that never happened. Both were meaningless, and one of them -- "a crashed task
+// was re-executed after the restart" -- reads as a serious correctness defect. A reader skimming
+// the transcript would have chased a bug that does not exist, while the real state of crash
+// recovery (nobody knows) went unrecorded.
+//
+// A scenario whose preconditions did not occur produces UNTESTED. Acceptance requires zero
+// failures AND zero untested, so this can never be mistaken for a pass.
+let untestedCount = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
 const bad = (m, d) => { fail += 1; console.log(`  FAIL  ${m}`); if (d) console.log(`          ${String(d).slice(0, 240)}`); };
+const untested = (m, why) => {
+  untestedCount += 1;
+  console.log(`  UNTESTED  ${m}`);
+  if (why) console.log(`          ${String(why).slice(0, 400)}`);
+};
 const note = (m) => console.log(`  --    ${m}`);
 const head = (m) => console.log(`\n  ── ${m} ──\n`);
 
@@ -101,8 +117,38 @@ const deps = { query, withTransaction, env: process.env };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const one = async (sql, p) => (await query(sql, p)).rows[0];
 
+// ── DEADLINES ARE DERIVED, NOT GUESSED ──────────────────────────────────────
+//
+// The 2026-11-17 run failed six scenarios against a correct worker because `until()` defaulted to
+// a flat 45s while the worker's cycle was ~51s. That number was not arbitrary on the worker's
+// side: leases.js issues `heartbeatEveryMs = max(15_000, (ceiling * 60_000) / 6)`, which is 50s at
+// a five-minute ceiling, and Defect 6 made every task wait out one full interval before reporting.
+//
+// A test window that happens to be longer than an unrelated interval is fragile even when it
+// passes. So the budget is now COMPOSED from the parts of the wait that actually exist:
+//
+//     the task's own delay  +  time to claim it  +  time to report it
+//
+// Defect 6 is fixed, so REPORT_GRACE_MS is small on purpose. If a future change reintroduces a
+// per-task interval wait, these scenarios should FAIL — loudly and quickly — rather than being
+// papered over by a window wide enough to hide it.
+const CLAIM_GRACE_MS = 20_000;   // idle poll, claim round trip, and slack for a loaded machine
+const REPORT_GRACE_MS = 15_000;  // execution end -> result recorded. Was ~50s under Defect 6.
+const budget = (delayMs = 0) => Number(delayMs || 0) + CLAIM_GRACE_MS + REPORT_GRACE_MS;
+
+// CANCELLATION AND STOP ARRIVE ON THE HEARTBEAT, so their worst case is one whole interval —
+// legitimately, by design, and for a completely different reason from Defect 6. A scenario that
+// waits on a signalled stop must budget for that or it will fail against a correct worker.
+//
+// leases.js: `heartbeatEveryMs = max(15_000, (ceiling * 60_000) / 6)`, which is 50s at the
+// five-minute ceiling the dev API issues. Stated here as a derivation rather than a magic number,
+// so that changing the ceiling makes the arithmetic visible instead of silently invalidating it.
+const LEASE_CEILING_MIN = 5;
+const HEARTBEAT_MS = Math.max(15_000, Math.floor((LEASE_CEILING_MIN * 60_000) / 6));
+const signalBudget = () => HEARTBEAT_MS + REPORT_GRACE_MS + 10_000;
+
 /** Waits for a predicate on a fresh read, so nothing here depends on a guessed sleep. */
-async function until(label, fn, { timeoutMs = 45_000, everyMs = 500 } = {}) {
+async function until(label, fn, { timeoutMs = budget(0), everyMs = 500 } = {}) {
   const started = Date.now();
   for (;;) {
     const v = await fn();
@@ -110,6 +156,61 @@ async function until(label, fn, { timeoutMs = 45_000, everyMs = 500 } = {}) {
     if (Date.now() - started > timeoutMs) return { ok: false, ms: Date.now() - started, label };
     await sleep(everyMs);
   }
+}
+
+// ── A TIMEOUT IS NOT A DIAGNOSIS ────────────────────────────────────────────
+//
+// `{"ok":false,"ms":45213,"label":"the task completes"}` was the entire evidence offered for four
+// of the 2026-11-17 failures. It says a deadline passed. It does not say whether the worker never
+// claimed the task, claimed it and is still running it, finished it and failed to report, lost the
+// lease, or was correctly refused — and those are five different problems with five different
+// owners.
+//
+// So every timeout is now classified from the row state itself, in the vocabulary the owner asked
+// for: execution failure, reporting delay, lease expiry, expected rejection, test orchestration.
+async function diagnose(taskId) {
+  let t = null; let results = 0;
+  try { t = await one(`SELECT * FROM worker_tasks WHERE id = $1`, [taskId]); } catch (e) {
+    return `TEST ORCHESTRATION: the task row could not be read (${String(e.message).slice(0, 120)})`;
+  }
+  if (!t) return 'TEST ORCHESTRATION: no such task row — the fixture was never created';
+  try {
+    const r = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id = $1`, [taskId]);
+    results = Number(r && r.n) || 0;
+  } catch (_) { /* a missing count must not mask the state below */ }
+
+  const state = String(t.state || '').toUpperCase();
+  const where = `state=${state}, result rows=${results}`;
+
+  if (state === 'PENDING') {
+    return `EXECUTION FAILURE: the worker never claimed it (${where}). The worker is not polling, `
+      + 'is not running, holds no capability for this task type, or is stopped.';
+  }
+  if (state === 'LEASED') {
+    return results > 0
+      ? `TEST ORCHESTRATION: a result exists but the task is still LEASED (${where}) — the `
+        + 'predicate is watching the wrong column'
+      : `REPORTING DELAY: claimed but nothing reported (${where}). The worker holds the lease. `
+        + 'Under Defect 6 this is what a full heartbeat interval of dead time looked like.';
+  }
+  if (state === 'NEEDS_RESOLUTION') {
+    return `LEASE EXPIRY: the lease was abandoned or expired (${where}). The outcome is uncertain `
+      + 'by design, and a human resolves it — this is not the same as a failure to execute.';
+  }
+  if (state === 'CANCELLED' || state === 'STOPPED' || state === 'REVOKED') {
+    return `EXPECTED REJECTION: the task reached ${state} (${where}). If the scenario expected `
+      + 'completion, the refusal is the finding, not the timeout.';
+  }
+  if (state === 'DONE' || state === 'SUCCEEDED' || state === 'COMPLETED') {
+    return `TEST ORCHESTRATION: the task actually completed (${where}) — the deadline expired `
+      + 'before the predicate observed it, or the predicate is wrong.';
+  }
+  return `UNCLASSIFIED: ${where}. Report this state rather than guessing at it.`;
+}
+
+/** A timeout reported WITH its diagnosis. Never a bare `{ok:false,ms:…}` again. */
+async function badTimeout(label, res, taskId) {
+  bad(label, `${JSON.stringify(res)}\n          ${await diagnose(taskId)}`);
 }
 
 // Everything this script creates, so cleanup removes exactly that and nothing else — by id, never
@@ -244,7 +345,7 @@ async function cmdScenarios() {
       && done.value.output.echoed && done.value.output.echoed.n === 41) {
     ok(`executed by the Mac and reported in ${done.ms}ms`);
     note(`output: ${JSON.stringify(done.value.output).slice(0, 90)}`);
-  } else bad('the Mac worker did not execute and report an echo task', JSON.stringify(done));
+  } else await badTimeout('the Mac worker did not execute and report an echo task', done, t1.taskId);
 
   // ── 2. AUDIT AND agent_run LINKAGE ────────────────────────────────────────
   head('2. audit and agent_run linkage');
@@ -288,12 +389,13 @@ async function cmdScenarios() {
     ok(`claimed after ${claimed.ms}ms`);
     const cx = await LEASES.cancelTask(t2.taskId, { reason: 'M7.5 live cancellation' }, deps);
     if (!cx.ok) bad('cancel was refused', JSON.stringify(cx));
+    // Budget composed from THIS task's own delay, not a flat number that happened to work once.
     const stopped = await until('it stops', async () => {
       const r = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t2.taskId]);
       return r && r.state === 'CANCELLED' ? r : null;
-    });
+    }, { timeoutMs: signalBudget() });
     if (stopped.ok) ok(`the task is CANCELLED (${stopped.ms}ms after the cancel)`);
-    else bad('the task did not reach CANCELLED', JSON.stringify(stopped));
+    else await badTimeout('the task did not reach CANCELLED', stopped, t2.taskId);
 
     await sleep(4000);     // long enough for a worker that was going to report to have reported
     const res = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t2.taskId]);
@@ -313,12 +415,12 @@ async function cmdScenarios() {
       const r = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t3.taskId]);
       const t = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t3.taskId]);
       return (t && t.state !== 'LEASED') || Number(r.n) > 0 ? { t, r } : null;
-    });
+    }, { timeoutMs: signalBudget() });
     if (halted.ok && Number(halted.value.r.n) === 0) {
       ok(`the STOP ended execution in ${halted.ms}ms and nothing was reported`);
     } else if (halted.ok) {
       bad('a STOPped task still produced a result', JSON.stringify(halted.value));
-    } else bad('the worker kept going after a STOP', JSON.stringify(halted));
+    } else await badTimeout('the worker kept going after a STOP', halted, t3.taskId);
     await clearStop(sid);
     ok('STOP cleared — it was a fixture STOP in a dev database, never one of the three');
   }
@@ -353,7 +455,7 @@ async function cmdScenarios() {
   const t5 = await enqueue('m75-dup', { hello: 'dup' });
   const dres = await until('it completes', async () =>
     await one(`SELECT status FROM worker_results WHERE task_id=$1`, [t5.taskId]));
-  if (!dres.ok) bad('the duplicate-submission task never completed');
+  if (!dres.ok) await badTimeout('the duplicate-submission task never completed', dres, t5.taskId);
   else {
     const r = await one(`SELECT run_id FROM agent_runs WHERE intent_key='m75-dup'`);
     const again = await LEASES.submitResult(
@@ -379,26 +481,64 @@ async function cmdScenarios() {
     console.log('    >>> launchd should restart it within ThrottleInterval (60s).');
     console.log('    >>> This script waits up to 4 minutes.');
     console.log('');
+    // Sampled BEFORE the wait so "did the worker stop beating" is answerable afterwards.
+    const beatBefore = await (async () => {
+      const r = await one(
+        `SELECT heartbeat_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
+        ['m75-crash']);
+      return r && r.heartbeat_at ? new Date(r.heartbeat_at).getTime() : null;
+    })();
     const settled = await until('the abandoned lease is reflected', async () => {
       await require('../src/lib/office/recovery').reap({ dryRun: false, limit: 50 }, deps);
       await LEASES.reflectAbandonedLeases({}, deps);
       const r = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t6.taskId]);
       return r.state === 'NEEDS_RESOLUTION' ? r : null;
     }, { timeoutMs: 240_000, everyMs: 5000 });
-    if (settled.ok) ok(`the crashed task is NEEDS_RESOLUTION after ${Math.round(settled.ms / 1000)}s`);
-    else bad('the crashed task never settled', JSON.stringify(settled));
 
-    const dup = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t6.taskId]);
-    if (Number(dup.n) === 0) ok('and the restarted worker did NOT re-execute it');
-    else bad('a crashed task was re-executed after the restart', `${dup.n} result row(s)`);
+    // ── DID THE CRASH ACTUALLY HAPPEN? ────────────────────────────────────
+    //
+    // On 2026-11-17 the `kill -9` above was never performed, and this scenario reported two FAILs
+    // for a crash that did not occur — one of them "a crashed task was re-executed after the
+    // restart", which reads as a correctness defect and is not one. The task had simply completed
+    // late, under Defect 6.
+    //
+    // A live worker keeps advancing `heartbeat_at` on its run. A killed one stops. So the question
+    // "was this scenario actually exercised" is answerable from data already being written, rather
+    // than taken on trust from whoever was at the keyboard.
+    const beatAt = async () => {
+      const r = await one(
+        `SELECT heartbeat_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
+        ['m75-crash']);
+      return r && r.heartbeat_at ? new Date(r.heartbeat_at).getTime() : null;
+    };
+    const beatNow = await beatAt();
+    const neverStopped = !settled.ok && beatBefore !== null && beatNow !== null && beatNow > beatBefore;
 
-    // Control: the restarted worker must still be alive, or the line above proves nothing.
-    const t7 = await enqueue('m75-crash-control', { hello: 'after-restart' });
-    const alive = await until('the restarted worker takes new work', async () =>
-      await one(`SELECT status FROM worker_results WHERE task_id=$1`, [t7.taskId]),
-    { timeoutMs: 120_000, everyMs: 2000 });
-    if (alive.ok) ok('control: the restarted worker executes NEW work — it really did come back');
-    else bad('the worker never came back, so "did not re-execute" proved nothing', JSON.stringify(alive));
+    if (settled.ok) {
+      ok(`the crashed task is NEEDS_RESOLUTION after ${Math.round(settled.ms / 1000)}s`);
+
+      const dup = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t6.taskId]);
+      if (Number(dup.n) === 0) ok('and the restarted worker did NOT re-execute it');
+      else bad('a crashed task was re-executed after the restart', `${dup.n} result row(s)`);
+
+      // Control: the restarted worker must still be alive, or the line above proves nothing.
+      const t7 = await enqueue('m75-crash-control', { hello: 'after-restart' });
+      const alive = await until('the restarted worker takes new work', async () =>
+        await one(`SELECT status FROM worker_results WHERE task_id=$1`, [t7.taskId]),
+      { timeoutMs: 120_000, everyMs: 2000 });
+      if (alive.ok) ok('control: the restarted worker executes NEW work — it really did come back');
+      else await badTimeout('the worker never came back, so "did not re-execute" proved nothing',
+        alive, t7.taskId);
+    } else if (neverStopped) {
+      untested('crash recovery — the manual kill -9 was NOT performed',
+        'The run\'s heartbeat_at kept advancing throughout the wait, so the worker never died. '
+        + 'Nothing about crash recovery was exercised: neither re-execution nor restart was tested. '
+        + 'Re-run this scenario and perform the kill while the task is LEASED.');
+    } else {
+      await badTimeout('the crashed task never settled', settled, t6.taskId);
+      untested('the re-execution and restart checks were skipped',
+        'They only mean something once the abandoned lease has been reflected.');
+    }
   }
 
   // ── 8. REVOCATION ─────────────────────────────────────────────────────────
@@ -448,8 +588,18 @@ async function cmdScenarios() {
     await pool.end().catch(() => {});
     if (CMD !== 'scenarios') process.exit(0);
     console.log('');
-    if (fail) {
-      console.log(`FAIL  ${fail} scenario expectation(s) did not hold. M7.5 is not accepted.`);
+    // ACCEPTANCE REQUIRES ZERO FAILURES **AND** ZERO UNTESTED.
+    //
+    // An untested scenario is not a weaker pass. Crash recovery going unexercised on 2026-11-17
+    // meant nobody knew whether this machine survives being killed — and the transcript's two
+    // confident FAILs made it look as though somebody did know, and that it was broken.
+    if (fail || untestedCount) {
+      if (fail) console.log(`FAIL  ${fail} scenario expectation(s) did not hold.`);
+      if (untestedCount) {
+        console.log(`UNTESTED  ${untestedCount} scenario(s) never ran. Their preconditions did not`);
+        console.log('          occur, so they are neither passed nor failed — they are unknown.');
+      }
+      console.log('M7.5 is not accepted.');
       process.exit(1);
     }
     console.log('PASS  the Mac worker executed over the network, was cancelled, STOPped, expired,');
