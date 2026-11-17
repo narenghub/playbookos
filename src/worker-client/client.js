@@ -137,6 +137,45 @@ class WorkerClient {
     return { ...last, attempts: maxAttempts, exhausted: true };
   }
 
+  // ── A WAIT THAT ACTUALLY OBSERVES THE SIGNAL ──────────────────────────────
+  //
+  // DEFECT 6 (found on real hardware, 2026-11-17). The heartbeat loop used to begin each pass with
+  // a bare `await this.sleep(everyMs)`. `this.sleep` is a plain timer and ignores the signal, so
+  // `ac.abort()` after execution released nothing: `await beat` then blocked until that timer
+  // expired on its own. Observed on the office iMac — every task, including one whose handler
+  // returns immediately, took ~51s between `leased` and `reported`, because the server issues a
+  // ~50s heartbeat interval. Nothing was wrong with the task, the network or the server.
+  //
+  // `handlers/synthetic-echo.js` already documents this exact trap for handler authors — "A sleep
+  // that actually wakes on abort rather than resolving late and checking afterwards" — and the
+  // handler got it right while the client did not.
+  //
+  // WHY IT RESOLVES AND NEVER REJECTS. Its callers are loop guards, not work: each re-checks
+  // `beating` and `signal.aborted` immediately afterwards and decides there. A rejecting wait
+  // would turn an ordinary abort into an exception on a path whose whole job is to exit quietly,
+  // and an abandoned rejection is an unhandled rejection.
+  //
+  // It WRAPS `this.sleep` rather than replacing it, so an injected clock still controls the timing
+  // while the abort becomes observable — which is what makes the regression test deterministic
+  // instead of a race against a real timer.
+  _sleepUntilAborted(ms, signal) {
+    if (!signal) return Promise.resolve(this.sleep(ms));
+    if (signal.aborted) return Promise.resolve();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener('abort', finish);
+        resolve();
+      };
+      signal.addEventListener('abort', finish, { once: true });
+      // `.then(finish, finish)`: a sleep that throws must not leave the loop waiting for ever, and
+      // must not surface as a rejection nobody is positioned to catch.
+      Promise.resolve(this.sleep(ms)).then(finish, finish);
+    });
+  }
+
   // ── ONE FULL CYCLE ────────────────────────────────────────────────────────
 
   /**
@@ -167,7 +206,9 @@ class WorkerClient {
 
     const beat = (async () => {
       while (beating && !ac.signal.aborted) {
-        await this.sleep(everyMs);
+        await this._sleepUntilAborted(everyMs, ac.signal);
+        // Re-checked AFTER the wait, because the wait is exactly where completion happens. This is
+        // what stops a heartbeat being sent for a task that has already finished.
         if (!beating || ac.signal.aborted) break;
         const hb = await this.call('POST', '/api/worker/heartbeat', { runId });
 
@@ -200,9 +241,17 @@ class WorkerClient {
     })();
 
     const result = await EXEC.execute({ taskType, payload, leaseExpiresInMinutes, signal: ac.signal });
+    const executedAt = this.now();
     beating = false;
-    ac.abort();              // release the heartbeat loop's sleep
+    ac.abort();              // releases the heartbeat loop's wait — see _sleepUntilAborted
+    // STILL AWAITED, DELIBERATELY. The wait now wakes on abort, but a heartbeat REQUEST already in
+    // flight when execution finished is not cancelled by the abort: it is a network call with its
+    // own timeout. Dropping this await would let `runOnce` return — and the next claim begin —
+    // while a heartbeat for the finished run is still outstanding, which is the race the original
+    // await existed to prevent. Keeping it costs at most one request timeout and only when a
+    // heartbeat was genuinely mid-flight.
     await beat.catch(() => {});
+    const beatDrainMs = this.now() - executedAt;
 
     // ── ABORTED: REPORT NOTHING ───────────────────────────────────────────
     //
@@ -214,8 +263,9 @@ class WorkerClient {
       this.unresolved.push({ runId, taskId, taskType, reason, at: this.now() });
       // `ms` matters most on exactly this path: how far a task got before it was stopped is the
       // first question asked about an aborted run, and dropping it leaves only "something aborted".
-      this.log({ at: 'aborted', runId, taskId, reason, ms: result.ms });
-      return { did: 'aborted', runId, taskId, taskType, reason, reportedAnything: false, ms: result.ms };
+      this.log({ at: 'aborted', runId, taskId, reason, ms: result.ms, beatDrainMs });
+      return { did: 'aborted', runId, taskId, taskType, reason, reportedAnything: false,
+        ms: result.ms, beatDrainMs };
     }
 
     // ── A KNOWN OUTCOME IS REPORTED, WITH RETRIES ─────────────────────────
@@ -230,12 +280,19 @@ class WorkerClient {
         : { failure: { code: result.code || 'failed', error: String(result.error || '').slice(0, 500) } },
     };
 
+    // LATENCY IS RECORDED, NOT INFERRED. Defect 6 was invisible for as long as it was because the
+    // only evidence was the gap between two log lines' timestamps, which reads as "the task took a
+    // minute" rather than "the client waited for nothing". Three separate numbers now say where
+    // the time went: execution, draining the heartbeat, and the report call itself.
+    const reportStartedAt = this.now();
     const rep = await this.callWithRetry('POST', '/api/worker/result', body);
+    const reportMs = this.now() - reportStartedAt;
 
     if (rep.status === 200 && rep.json && rep.json.ok) {
-      this.log({ at: 'reported', runId, taskId, status, duplicate: Boolean(rep.json.duplicate) });
+      this.log({ at: 'reported', runId, taskId, status, duplicate: Boolean(rep.json.duplicate),
+        ms: result.ms, beatDrainMs, reportMs });
       return { did: 'reported', runId, taskId, taskType, status,
-        duplicate: Boolean(rep.json.duplicate), ms: result.ms };
+        duplicate: Boolean(rep.json.duplicate), ms: result.ms, beatDrainMs, reportMs };
     }
 
     if (rep.transportError || rep.exhausted) {
