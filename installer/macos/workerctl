@@ -28,6 +28,18 @@
 set -uo pipefail
 
 LABEL="ai.playnexa.worker"
+# ── DEFECT 5 (found on the office iMac, 2026-11-17) ─────────────────────────
+#
+# The Keychain SERVICE is the label; the ACCOUNT is NOT. src/worker-client/keychain.js writes
+# `-s ai.playnexa.worker -a worker-secret:<wkr_id>`, and this script used to look under
+# `-a ai.playnexa.worker:<wkr_id>`. The item was therefore never found, and a correct install
+# printed "there is NO Keychain secret for <id> … The worker will exit 2 on every launch" while
+# the worker was running perfectly — advice which, followed, burns a fresh enrolment token per
+# attempt and fixes nothing.
+#
+# Named once here, and kept honest by src/worker-client/workerctl-keychain-naming.test.js, which
+# fails if this literal and ACCOUNT_LABEL in keychain.js ever disagree again.
+SECRET_ACCOUNT_PREFIX="worker-secret"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/playnexa-worker"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -88,7 +100,7 @@ cmd_install() {
   # or produced a different id than the one just written into the plist — and the second case is the
   # one worth catching, because the worker would simply exit 2 in a loop and the plist would look
   # perfectly correct.
-  if security find-generic-password -s "${LABEL}" -a "${LABEL}:${wid}" >/dev/null 2>&1; then
+  if security find-generic-password -s "${LABEL}" -a "${SECRET_ACCOUNT_PREFIX}:${wid}" >/dev/null 2>&1; then
     say "The Keychain holds a secret for ${wid}. The worker can start."
   else
     say "WARNING: there is NO Keychain secret for ${wid}."
@@ -276,7 +288,7 @@ cmd_doctor() {
       fi
       say "  Do not re-enrol on the strength of this. Run the lookup by hand and report the output:"
       if [ -n "$wid" ]; then
-        say "    security find-generic-password -s ${LABEL} -a ${LABEL}:${wid}"
+        say "    security find-generic-password -s ${LABEL} -a ${SECRET_ACCOUNT_PREFIX}:${wid}"
       else
         say "    (no worker id is known, so there is no lookup to run by hand)"
       fi
