@@ -213,6 +213,17 @@ async function badTimeout(label, res, taskId) {
   bad(label, `${JSON.stringify(res)}\n          ${await diagnose(taskId)}`);
 }
 
+// ── EVERY INVOCATION GETS ITS OWN INTENT NAMESPACE ─────────────────────────
+//
+// See scripts/lib/m75-intent-keys.js for why. Short version: on 2026-11-19 three ABANDONED
+// agent_runs for m75-expire / m75-cancel / m75-stop were sitting in the development database with
+// zero tasks, so the queue looked clean — and would have refused scenarios 3, 4 and 5's claims
+// with `override_reason_required`, reporting three product FAILs for a governance guard doing its
+// job. Keys are now per-run, the guard is untouched, and no overrideReason is passed anywhere.
+const KEYS = require('./lib/m75-intent-keys');
+const RUN_ID = KEYS.newRunId();
+const IK = (scenario) => KEYS.intentKey(RUN_ID, scenario);
+
 // Everything this script creates, so cleanup removes exactly that and nothing else — by id, never
 // by timestamp, never by pattern, never by "recent".
 const made = { taskIds: [], intentKeys: [], workerIds: [], stops: [] };
@@ -367,7 +378,10 @@ async function cmdScenarios() {
     process.exit(2);
   }
   console.log(`\n══ M7.5 SCENARIOS — dev database ${where.host}/${where.name} ══`);
-  console.log(`   driving worker ${workerId}, which must be RUNNING on the Mac mini now.\n`);
+  console.log(`   driving worker ${workerId}, which must be RUNNING on the Mac mini now.`);
+  // The run id goes in the transcript BEFORE anything is created, so a reader can find this run's
+  // rows afterwards even if the run dies halfway and never reaches its own summary.
+  console.log(`   run id ${RUN_ID} — every intent key this run creates is m75-${RUN_ID}-<scenario>\n`);
 
   // The scenarios cancel tasks, set a STOP and revoke a credential. Identify the database first.
   const DBID = require('./lib/db-identity');
@@ -397,7 +411,7 @@ async function cmdScenarios() {
     `SELECT id, intent_key, state FROM worker_tasks
       WHERE intent_key LIKE $1 AND state IN ('PENDING','LEASED')
       ORDER BY created_at`,
-    ['m75-%'])).rows;
+    [KEYS.LIKE_PATTERN])).rows;
 
   if (staleRows.length) {
     console.log(`\n  ${staleRows.length} CLAIMABLE acceptance task(s) from a previous run:\n`);
@@ -438,7 +452,7 @@ async function cmdScenarios() {
 
   // ── 1. END TO END ─────────────────────────────────────────────────────────
   head('1. synthetic.echo, end to end, worker on separate hardware');
-  const t1 = await enqueue('m75-echo', { hello: 'mac', n: 41 });
+  const t1 = await enqueue(IK('echo'), { hello: 'mac', n: 41 });
   const done = await until('the task completes', async () =>
     await one(`SELECT status, output FROM worker_results WHERE task_id=$1`, [t1.taskId]));
   if (done.ok && done.value.status === 'SUCCEEDED' && done.value.output
@@ -451,7 +465,7 @@ async function cmdScenarios() {
   head('2. audit and agent_run linkage');
   const run = await one(
     `SELECT run_id, state, trigger, trigger_detail, started_at, ended_at
-       FROM agent_runs WHERE intent_key='m75-echo'`);
+       FROM agent_runs WHERE intent_key=$1`, [IK('echo')]);
   if (run && run.trigger === 'worker' && run.trigger_detail === workerId
       && run.state === 'SUCCEEDED' && run.started_at && run.ended_at) {
     ok('the agent_run is SUCCEEDED, attributed to this worker, with both timestamps set');
@@ -480,7 +494,7 @@ async function cmdScenarios() {
 
   // ── 3. LIVE CANCELLATION ──────────────────────────────────────────────────
   head('3. live cancellation while the Mac is executing');
-  const t2 = await enqueue('m75-cancel', { delayMs: 20_000 });
+  const t2 = await enqueue(IK('cancel'), { delayMs: 20_000 });
   const claimed = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t2.taskId]));
   if (!claimed.ok) {
@@ -505,7 +519,7 @@ async function cmdScenarios() {
 
   // ── 4. GLOBAL STOP MID-EXECUTION ──────────────────────────────────────────
   head('4. a STOP while the Mac is executing');
-  const t3 = await enqueue('m75-stop', { delayMs: 20_000 });
+  const t3 = await enqueue(IK('stop'), { delayMs: 20_000 });
   const claimed3 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t3.taskId]));
   if (!claimed3.ok) await neverClaimed('STOP enforcement mid-execution', t3.taskId);
@@ -527,7 +541,7 @@ async function cmdScenarios() {
 
   // ── 5. EXPIRY ─────────────────────────────────────────────────────────────
   head('5. an expired lease is not a reset');
-  const t4 = await enqueue('m75-expire', { delayMs: 25_000 });
+  const t4 = await enqueue(IK('expire'), { delayMs: 25_000 });
   const claimed4 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t4.taskId]));
   if (!claimed4.ok) await neverClaimed('expired lease is not a reset', t4.taskId);
@@ -535,7 +549,7 @@ async function cmdScenarios() {
     await query(
       `UPDATE agent_runs SET heartbeat_at = NOW() - INTERVAL '6 hours',
                              started_at   = NOW() - INTERVAL '6 hours'
-        WHERE intent_key = 'm75-expire'`);
+        WHERE intent_key = $1`, [IK('expire')]);
     await require('../src/lib/office/recovery').reap({ dryRun: false, limit: 50 }, deps);
     await LEASES.reflectAbandonedLeases({}, deps);
     const st = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t4.taskId]);
@@ -552,7 +566,7 @@ async function cmdScenarios() {
 
   // ── 6. DUPLICATE RESULT SUBMISSION ────────────────────────────────────────
   head('6. a duplicate result is recognised, not re-recorded');
-  const t5 = await enqueue('m75-dup', { hello: 'dup' });
+  const t5 = await enqueue(IK('dup'), { hello: 'dup' });
   const dres = await until('it completes', async () =>
     await one(`SELECT status FROM worker_results WHERE task_id=$1`, [t5.taskId]));
   if (!dres.ok) {
@@ -568,7 +582,7 @@ async function cmdScenarios() {
     }
   }
   else {
-    const r = await one(`SELECT run_id FROM agent_runs WHERE intent_key='m75-dup'`);
+    const r = await one(`SELECT run_id FROM agent_runs WHERE intent_key=$1`, [IK('dup')]);
     const again = await LEASES.submitResult(
       { workerId, runId: r.run_id, status: 'SUCCEEDED', output: { echoed: { hello: 'dup' }, steps: 0 } }, deps);
     const count = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t5.taskId]);
@@ -597,7 +611,7 @@ async function cmdScenarios() {
   //   the worker is not armed  → it REPORTS a FAILED result with `crash_test_refused`, which is
   //                              not a product defect and not a pass. UNTESTED, with the reason.
   note('The crash is a gated self-SIGKILL triggered by leasing the task — no manual timing.');
-  const t6 = await enqueue('m75-crash',
+  const t6 = await enqueue(IK('crash'),
     { confirm: 'crash-this-worker', workerId }, 'synthetic.crash_test');
   const claimed6 = await until('the Mac claims the crash task', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t6.taskId]));
@@ -628,7 +642,7 @@ async function cmdScenarios() {
       const beatBefore = await (async () => {
         const r = await one(
           `SELECT heartbeat_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
-          ['m75-crash']);
+          [IK('crash')]);
         return r && r.heartbeat_at ? new Date(r.heartbeat_at).getTime() : null;
       })();
       const settled = await until('the abandoned lease is reflected', async () => {
@@ -647,7 +661,7 @@ async function cmdScenarios() {
       const beatAt = async () => {
         const r = await one(
           `SELECT heartbeat_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
-          ['m75-crash']);
+          [IK('crash')]);
         return r && r.heartbeat_at ? new Date(r.heartbeat_at).getTime() : null;
       };
       const beatNow = await beatAt();
@@ -664,7 +678,7 @@ async function cmdScenarios() {
         // uniqueness constraint and silently blocks that intent for ever.
         const run = await one(
           `SELECT state, ended_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
-          ['m75-crash']);
+          [IK('crash')]);
         if (run && run.state && run.state !== 'RUNNING') {
           ok(`and the agent_run is ${run.state}, not left RUNNING`);
         } else {
@@ -673,7 +687,7 @@ async function cmdScenarios() {
 
         // Control: launchd must have brought the worker back, or "did not re-execute" is just a
         // statement that a dead worker did nothing.
-        const t7 = await enqueue('m75-crash-control', { hello: 'after-restart' });
+        const t7 = await enqueue(IK('crash-control'), { hello: 'after-restart' });
         const alive = await until('the restarted worker takes new work', async () =>
           await one(`SELECT status FROM worker_results WHERE task_id=$1`, [t7.taskId]),
         { timeoutMs: 180_000, everyMs: 2000 });
@@ -696,7 +710,7 @@ async function cmdScenarios() {
   // ── 8. REVOCATION ─────────────────────────────────────────────────────────
   head('8. revocation ends access');
   note('This is LAST because it ends this identity. Everything above needed it alive.');
-  const t8 = await enqueue('m75-revoke', { delayMs: 20_000 });
+  const t8 = await enqueue(IK('revoke'), { delayMs: 20_000 });
   const claimed8 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t8.taskId]));
   if (!claimed8.ok) await neverClaimed('revocation ends access', t8.taskId);
@@ -712,7 +726,7 @@ async function cmdScenarios() {
     if (Number(res8.n) === 0) ok('and it reported nothing');
     else bad('a revoked worker still reported a result');
 
-    const t9 = await enqueue('m75-revoke-control', { hello: 'should-never-run' });
+    const t9 = await enqueue(IK('revoke-control'), { hello: 'should-never-run' });
     const stillWorking = await until('a revoked worker claims nothing', async () =>
       await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t9.taskId]),
     { timeoutMs: 20_000, everyMs: 2000 });
@@ -724,6 +738,15 @@ async function cmdScenarios() {
   const clean = await cleanup();
   console.log('');
   if (clean) ok('every fixture this script created was removed, by id');
+
+  // Requirement: the report names the run id and the exact fixture ids. Printed whether cleanup
+  // succeeded or not — if anything survived, these are the ids to go and look at, and the previous
+  // two runs showed that reconstructing them afterwards is not reliably possible.
+  console.log('');
+  console.log(`  run id      : ${RUN_ID}`);
+  console.log(`  intent keys : ${made.intentKeys.length ? made.intentKeys.join(', ') : '(none)'}`);
+  console.log(`  task ids    : ${made.taskIds.length ? made.taskIds.join(', ') : '(none)'}`);
+  console.log(`  worker      : ${workerId}`);
   console.log('');
   console.log('  The revoked identity was deliberately LEFT in place as evidence. Mint a new one');
   console.log('  for any further testing: node scripts/m7-5-dev-driver.js mint');

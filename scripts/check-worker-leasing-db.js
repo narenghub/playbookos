@@ -299,6 +299,82 @@ if (!url) {
   if (!reclaim.ok) ok(`an unresolved task is not claimable (${reclaim.code})`);
   else bad('an unresolved task was leased again automatically');
 
+  // ── 6b. AN ABANDONED RUN BLOCKS ITS OWN INTENT, AND ONLY ITS OWN ─────────
+  //
+  // M7.5, 2026-11-19. The development database held three ABANDONED agent_runs for m75-expire,
+  // m75-cancel and m75-stop — the intent keys the acceptance driver reused — with zero tasks, so
+  // the queue looked clean. It was not: the next run's claims for those intents would have been
+  // refused with `override_reason_required`, and reported as three product FAILs for a governance
+  // guard working exactly as designed.
+  //
+  // The fix was per-run intent keys (scripts/lib/m75-intent-keys.js). This is the half that
+  // static analysis cannot reach: that the database really does refuse a REUSED key and really
+  // does permit a FRESH one. Both directions, because either alone is consistent with the guard
+  // being broken — if only the fresh key were tested, a guard that had stopped refusing anything
+  // would pass.
+  //
+  // `dying.runId` above is now genuinely ABANDONED, via the real reaper. Its intent is
+  // 'intent-expire'.
+  head('6b. per-run intent isolation: an ABANDONED predecessor blocks its own intent only');
+
+  // The fixture has to reproduce the REAL shape, which is an ABANDONED run whose task no longer
+  // exists — the driver's cleanup deletes tasks by id and deletes runs by intent key, and on
+  // 2026-11-19 the task deletions had landed while three runs had not. Piggybacking on t5 instead
+  // got `nothing_to_do` from uq_worker_tasks_intent handing back the existing NEEDS_RESOLUTION
+  // task, which never reached the retry guard at all and would have recorded the wrong mechanism.
+  const isoA = await LEASES.enqueueTask(
+    { taskType: 'synthetic.sleep', intentKey: 'intent-iso-a' }, deps);
+  const isoLease = await LEASES.claimTask({ workerId: worker, taskId: isoA.taskId }, deps);
+  if (!isoLease.ok) bad('could not lease the isolation fixture', JSON.stringify(isoLease));
+  await query(
+    `UPDATE agent_runs SET heartbeat_at = NOW() - INTERVAL '10 hours',
+                           started_at   = NOW() - INTERVAL '10 hours'
+      WHERE run_id = $1`, [isoLease.runId]);
+  await RECOVERY.reap({ dryRun: false, limit: 50 }, deps);
+  const isoState = await one(`SELECT state FROM agent_runs WHERE run_id=$1`, [isoLease.runId]);
+  if (isoState.state !== 'ABANDONED') {
+    bad(`the isolation fixture's run is ${isoState.state}`, 'expected ABANDONED');
+  }
+  // The task goes, the run stays. Exactly what the development database looked like.
+  await query(`DELETE FROM worker_results WHERE task_id = $1`, [isoA.taskId]);
+  await query(`DELETE FROM worker_tasks WHERE id = $1`, [isoA.taskId]);
+
+  const reused = await LEASES.enqueueTask(
+    { taskType: 'synthetic.sleep', intentKey: 'intent-iso-a' }, deps);
+  const reusedClaim = await LEASES.claimTask({ workerId: worker, taskId: reused.taskId }, deps);
+  if (!reusedClaim.ok && /override_reason_required|retry_refused|not_reexecutable/.test(reusedClaim.code)) {
+    ok(`reusing the intent of an ABANDONED run is refused (${reusedClaim.code})`);
+    note('this is the governance guard, not a bug: the previous outcome is unknown and a human');
+    note('must own accepting that. The acceptance driver must NOT pass overrideReason to get past');
+    note('it — it isolates its keys instead.');
+  } else {
+    bad('an ABANDONED predecessor did not block a claim on its own intent',
+      JSON.stringify(reusedClaim).slice(0, 200));
+  }
+
+  const fresh = await LEASES.enqueueTask(
+    { taskType: 'synthetic.sleep', intentKey: 'intent-iso-b' }, deps);
+  const freshClaim = await LEASES.claimTask({ workerId: worker, taskId: fresh.taskId }, deps);
+  if (freshClaim.ok) {
+    ok('a DIFFERENT intent key claims normally, so per-run isolation is sufficient');
+  } else {
+    bad('a fresh intent key was refused even though its predecessor belongs to another intent',
+      JSON.stringify(freshClaim).slice(0, 200));
+  }
+
+  // And the attempt numbering proves the two are genuinely separate histories rather than the
+  // same one renamed: the fresh intent starts at attempt 1.
+  if (freshClaim.ok) {
+    const a = await one(`SELECT attempt, predecessor_run_id FROM agent_runs WHERE run_id=$1`,
+      [freshClaim.runId]);
+    if (Number(a.attempt) === 1 && a.predecessor_run_id === null) {
+      ok('and it starts at attempt 1 with no predecessor — a clean history, not an inherited one');
+    } else {
+      bad(`the fresh intent inherited attempt ${a.attempt} / predecessor ${a.predecessor_run_id}`,
+        'per-run keys must not chain onto another run');
+    }
+  }
+
   // ── 7. THE CRASHED WORKER COMES BACK ────────────────────────────────────
   head('7. a worker that finishes AFTER its lease expired cannot commit');
   const late = await LEASES.submitResult(
