@@ -40,11 +40,34 @@ function driver(dbUrl, extra = {}) {
   return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
 }
 
-/** Runs the acceptance script. On Linux the Darwin gate fires first, so for the host cases we
- *  neutralise exactly that one line — nothing else — and leave every other guard intact. */
-function accept(baseUrl, { stubDarwin = false } = {}) {
+// ── A PLATFORM GATE MUST BE TESTABLE ON BOTH PLATFORMS ──────────────────────
+//
+// `fakeUname` puts a one-line `uname` ahead of the real one on PATH, so the gate's own conditional
+// — `[ "$(uname -s)" != "Darwin" ]` — executes for real against an answer this file chooses.
+//
+// It exists because the clause below used to run the script UNSTUBBED and assert that the gate
+// fired. That can only hold on a non-Darwin host. The variable was even called `onLinux`. On the
+// office iMac on 2026-11-18 it failed — so `preflight.sh` could never exit 0 on the one machine
+// whose evidence the gate exists to protect, and the only check that could not pass there was the
+// check about hardware evidence. Every sibling clause already neutralised the gate to reach what
+// it wanted to test; this one depended on the build machine's identity instead.
+function fakeUname(kernel) {
+  const fs = require('fs');
+  const dir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'm75-uname-'));
+  const p = path.join(dir, 'uname');
+  // Answers -s with the requested kernel and -m with something plausible, because a shim that
+  // only handles the exact flag under test breaks the moment the script asks anything else.
+  fs.writeFileSync(p, `#!/bin/sh\ncase "\${1:-}" in\n  -m) echo x86_64 ;;\n  *) echo ${kernel} ;;\nesac\n`);
+  fs.chmodSync(p, 0o755);
+  return dir;
+}
+
+/** Runs the acceptance script. `unameAs` shims the kernel so the Darwin gate can be exercised from
+ *  either platform; `stubDarwin` neutralises that one line so the guards AFTER it can be reached. */
+function accept(baseUrl, { stubDarwin = false, unameAs = null } = {}) {
   const env = { PATH: process.env.PATH, HOME: process.env.HOME };
   if (baseUrl !== undefined) env.WORKER_API_BASE_URL = baseUrl;
+  if (unameAs) env.PATH = `${fakeUname(unameAs)}:${env.PATH}`;
   let script = ACCEPT;
   if (stubDarwin) {
     const src = require('fs').readFileSync(ACCEPT, 'utf8');
@@ -118,10 +141,40 @@ if (legit.code !== 2 || !/production host|M7_5_DEV_CONFIRM|not set/.test(legit.o
 // ── 2. THE ACCEPTANCE SCRIPT ────────────────────────────────────────────────
 head('2. m7-5-acceptance.sh refuses to produce fake hardware evidence');
 
-const onLinux = accept('https://dev-playnexa.example.com');
-if (onLinux.code === 2 && /not Darwin/.test(onLinux.out)) {
+// Runs on macOS and on Linux alike: the kernel is a shim, not the host.
+const asForeign = accept('https://dev-playnexa.example.com', { unameAs: 'Linux' });
+if (asForeign.code === 2 && /not Darwin/.test(asForeign.out)) {
   ok('refuses to run anywhere but macOS — a transcript from Linux is not hardware evidence');
-} else bad('ran on a non-Darwin host', `exit ${onLinux.code}: ${onLinux.out}`);
+} else {
+  bad('the Darwin gate did not fire for a non-Darwin kernel',
+    `exit ${asForeign.code}: ${asForeign.out}`);
+}
+
+// ── NEGATIVE CONTROL: WOULD WE NOTICE IF THE GATE WERE DELETED? ─────────────
+//
+// The clause above passes if the script refuses. It would ALSO pass if `uname` shimming silently
+// failed and the real Linux host made it refuse for the ordinary reason — which is exactly how the
+// old version looked healthy for weeks. So: neutralise the gate line, shim the kernel to Linux,
+// and require that it now gets PAST the host check. If this fails, the clause above is measuring
+// the build machine rather than the guard.
+const gateRemoved = accept('https://dev-playnexa.example.com', { stubDarwin: true, unameAs: 'Linux' });
+if (gateRemoved.code !== 2 || !/not Darwin/.test(gateRemoved.out)) {
+  ok('control: with that one line removed it gets past the host check, so the clause above is '
+    + 'testing the gate and not the host');
+} else {
+  bad('the host check still fired with its own line neutralised',
+    'the Darwin refusal above cannot be attributed to the gate — it may be the real host. '
+    + `exit ${gateRemoved.code}: ${gateRemoved.out}`);
+}
+
+// And the shim itself must be load-bearing: claiming Darwin on a Linux host has to clear the gate.
+const asDarwin = accept('https://dev-playnexa.example.com', { unameAs: 'Darwin' });
+if (!/not Darwin/.test(asDarwin.out)) {
+  ok('control: the uname shim is effective — claiming Darwin clears the host check');
+} else {
+  bad('the uname shim is not on PATH ahead of the real uname',
+    `the gate still saw a non-Darwin kernel. exit ${asDarwin.code}: ${asDarwin.out}`);
+}
 
 const PROD_URLS = [
   ['https://app.playnexa.ai', 'production'],

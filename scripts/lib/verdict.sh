@@ -35,9 +35,77 @@ PF_SKIP_N=0
 PF_EXIT_NOT_EXECUTED=3
 PF_LOG="${PF_LOG:-/tmp/preflight-step.log}"
 
+# ── SCOPES: ONE GATE, TWO MACHINES ──────────────────────────────────────────
+#
+# On 2026-11-18 preflight on the office iMac reported 56 executed, 3 failed and 75 that DID NOT
+# EXECUTE — nearly all for want of a local Postgres. The aggregator was right to refuse to call
+# that a pass, but the result is a gate the worker hardware can never satisfy, which in practice
+# means nobody runs it there at all.
+#
+# So a run may declare a SCOPE: an explicit list of step names, and only those run. Everything else
+# is EXCLUDED — deliberately not the same word as SKIP. A skip is a check that should have run and
+# did not; an exclusion was never part of this verdict. Conflating those two is precisely how
+# "nothing failed" became "everything passed" on 2026-11-03.
+#
+# PF_ONLY holds newline-delimited EXACT names, never a pattern. `pf_scope_integrity` then fails the
+# run if a requested name matches no step — otherwise renaming a step would silently shrink the Mac
+# gate to nothing while still printing PASS, which is the same defect wearing a different hat.
+# ── AND THE SCOPE MUST NOT BE VISIBLE TO THE STEPS ──────────────────────────
+#
+# The first version of this took PF_ONLY straight from the exported environment. preflight.sh's
+# FIRST step is the node test suite — which includes scripts/preflight-verdict.test.js, this
+# aggregator's own negative control. That test sources this file and drives it with synthetic exit
+# codes, and it inherited the exported PF_ONLY, so every synthetic step it created was filtered out
+# as out-of-scope and three of its assertions failed.
+#
+# The aggregator's own test caught a defect in the aggregator, which is what it is for. The lesson
+# is narrower than "unset variables": a scope decides WHICH STEPS RUN and must not be able to
+# change HOW A STEP BEHAVES. So it is captured once, here, and removed from the environment before
+# a single step is executed.
+PF_ONLY_LIST="${PF_ONLY:-}"
+PF_SCOPE_LABEL="${PF_SCOPE_NAME:-}"
+unset PF_ONLY
+unset PF_SCOPE_NAME
+PF_EXCLUDED_N=0
+PF_MATCHED_NAMES=''
+
+pf_in_scope () {
+  [ -n "$PF_ONLY_LIST" ] || return 0
+  printf '%s\n' "$PF_ONLY_LIST" | grep -Fxq -- "$1"
+}
+
+pf_scope_integrity () {
+  [ -n "$PF_ONLY_LIST" ] || return 0
+  pf_missing=''
+  pf_old_ifs="$IFS"
+  IFS='
+'
+  for pf_want in $PF_ONLY_LIST; do
+    [ -n "$pf_want" ] || continue
+    if ! printf '%s\n' "$PF_MATCHED_NAMES" | grep -Fxq -- "$pf_want"; then
+      pf_missing="${pf_missing}
+  - $pf_want"
+    fi
+  done
+  IFS="$pf_old_ifs"
+  [ -z "$pf_missing" ] && return 0
+  echo '' >&2
+  echo "SCOPE ERROR  this run named step(s) that do not exist in preflight.sh:$pf_missing" >&2
+  echo '      A scope that matches nothing is a gate that checks nothing while printing PASS.' >&2
+  echo '      Fix the name in the scope wrapper, or the step it refers to.' >&2
+  return 1
+}
+
 # pf_step <name> <command...>
 pf_step () {
-  pf_name="$1"; shift
+  pf_name="$1"
+  if ! pf_in_scope "$pf_name"; then
+    PF_EXCLUDED_N=$(( PF_EXCLUDED_N + 1 ))
+    return 0
+  fi
+  PF_MATCHED_NAMES="${PF_MATCHED_NAMES}
+${pf_name}"
+  shift
   if "$@" >"$PF_LOG" 2>&1; then
     pf_rc=0
   else
@@ -63,9 +131,17 @@ pf_step () {
 
 # pf_verdict — prints the verdict and RETURNS the exit code the caller must exit with.
 pf_verdict () {
+  if ! pf_scope_integrity; then
+    echo '      DO NOT PUSH.' >&2
+    return 1
+  fi
   pf_total=$(( PF_PASS_N + PF_FAIL_N + PF_SKIP_N ))
   echo ''
   echo "── $pf_total checks: $PF_PASS_N executed and passed · $PF_FAIL_N failed · $PF_SKIP_N did not execute"
+  if [ "$PF_EXCLUDED_N" -ne 0 ]; then
+    echo "   scope: ${PF_SCOPE_LABEL:-a subset} — $PF_EXCLUDED_N further step(s) were EXCLUDED from this run"
+    echo "   An excluded step is not a passed step. This verdict covers only the $pf_total above."
+  fi
   if [ "$PF_FAIL_N" -ne 0 ]; then
     echo '' >&2
     echo "FAIL  $PF_FAIL_N check(s) failed:$PF_FAIL_NAMES" >&2
@@ -85,6 +161,15 @@ pf_verdict () {
     return 2
   fi
   echo ''
+  if [ "$PF_EXCLUDED_N" -ne 0 ]; then
+    # A scoped run must never say "safe to push". It did not look at most of the tree, and the
+    # whole reason this file exists is that a verdict which overstates its own coverage is worse
+    # than no verdict.
+    echo "PASS (${PF_SCOPE_LABEL:-scoped})  every check IN THIS SCOPE executed and passed."
+    echo "      This is NOT the push gate: $PF_EXCLUDED_N step(s) were excluded. Run"
+    echo '      scripts/preflight.sh with no scope before pushing.'
+    return 0
+  fi
   echo 'PASS  every check executed and passed — safe to push.'
   echo '      Then run scripts/smoke-deployed.sh as its own command.'
   return 0
