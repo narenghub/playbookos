@@ -307,11 +307,41 @@ let server = null;
     ok('and the reason is structured in the result, not only in a log');
   } else bad('the failure reason was not recorded', JSON.stringify(f5));
 
+  // ── THE INVARIANT, NOT THE COUNT ──────────────────────────────────────────
+  //
+  // This asserted `caps.implemented.length === 1`. Adding `synthetic.crash_test` on 2026-11-19
+  // broke it — correctly by its own terms, but the property worth protecting was never "there is
+  // exactly one handler". It is that `capabilities()` tells the truth about which declared types
+  // this build can actually run: the two lists must partition the registry exactly, with no
+  // overlap and nothing invented. A hardcoded count tests the author's memory of the build on the
+  // day; the partition tests the property, and goes on testing it as handlers are added.
   const caps = EXEC.capabilities();
-  if (caps.implemented.length === 1 && caps.declaredButNotImplemented.includes('synthetic.sleep')) {
-    ok(`the executor is honest about its coverage: ${caps.implemented.length} implemented, `
-      + `${caps.declaredButNotImplemented.length} declared but not`);
-  } else bad('capabilities() misreports what is implemented', JSON.stringify(caps));
+  const TASK_TYPES = require('../src/lib/worker/task-types');
+  const handlerNames = Object.keys(EXEC.HANDLERS).sort();
+  const impl = [...caps.implemented].sort();
+  const notImpl = [...caps.declaredButNotImplemented].sort();
+  const union = [...impl, ...notImpl].sort();
+  const registry = [...TASK_TYPES.KNOWN].sort();
+
+  const capProblems = [];
+  if (JSON.stringify(impl) !== JSON.stringify(handlerNames)) {
+    capProblems.push(`implemented ${JSON.stringify(impl)} != HANDLERS ${JSON.stringify(handlerNames)}`);
+  }
+  if (JSON.stringify(union) !== JSON.stringify(registry)) {
+    capProblems.push(`the two lists do not partition the registry: ${JSON.stringify(union)} vs ${JSON.stringify(registry)}`);
+  }
+  const bothLists = impl.filter((t) => notImpl.includes(t));
+  if (bothLists.length) capProblems.push(`a type is in both lists: ${bothLists.join(', ')}`);
+  // Kept as a named case: a declared-but-unimplemented type must exist, or the second list is
+  // only ever empty and the distinction this clause exists to check goes untested.
+  if (!notImpl.includes('synthetic.sleep')) {
+    capProblems.push('synthetic.sleep is declared and unimplemented, and must be reported as such');
+  }
+
+  if (!capProblems.length) {
+    ok(`the executor is honest about its coverage: ${impl.length} implemented, `
+      + `${notImpl.length} declared but not, partitioning all ${registry.length} declared types`);
+  } else bad('capabilities() misreports what is implemented', `${capProblems.join('; ')} — ${JSON.stringify(caps)}`);
 
   // ── 8. DISPATCH IS CLOSED ───────────────────────────────────────────────
   head('8. nothing can make it run arbitrary code');

@@ -37,6 +37,12 @@ const TYPES = require('../lib/worker/task-types');
 
 const HANDLERS = Object.freeze({
   'synthetic.echo': require('./handlers/synthetic-echo'),
+  // Statically required and statically registered, like every other handler — this table stays a
+  // closed object. Its safety is NOT that it is conditionally absent: it refuses unless four
+  // explicit conditions hold, none of them true by default. A conditionally-registered handler
+  // would make this table depend on the environment, which is the very property this file's
+  // header exists to protect. See handlers/synthetic-crash-test.js.
+  'synthetic.crash_test': require('./handlers/synthetic-crash-test'),
 });
 
 /** Output larger than this is refused rather than submitted. */

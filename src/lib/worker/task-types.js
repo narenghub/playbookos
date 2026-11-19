@@ -56,6 +56,28 @@ const TASK_TYPES = Object.freeze({
     readOnly: true,
     ceilingMinutes: 10,
   },
+  // ── The acceptance handshake that replaces a manually timed `kill -9` ──
+  //
+  // Executing this type MEANS dying: the worker SIGKILLs itself while holding the lease. It exists
+  // because M7.5 scenario 7 depended on an operator's timing twice and produced nothing both
+  // times — once with the crash never happening at all (and two phantom FAILs reported for it),
+  // once with it happening 33 seconds early and taking six later scenarios down with it.
+  //
+  // `reexecutable: false` is the substance here, not bookkeeping. The outcome of this work can
+  // never be confirmed by the worker that performed it, so the server must resolve the abandoned
+  // lease WITHOUT handing the task to anybody again. That is the property the scenario verifies.
+  //
+  // It writes nothing, and the handler refuses unless four independent conditions hold — see
+  // src/worker-client/handlers/synthetic-crash-test.js. It lives in this registry rather than
+  // being conditionally registered, because a vocabulary that changes shape with the environment
+  // is not a closed vocabulary.
+  'synthetic.crash_test': {
+    summary: 'the worker SIGKILLs itself while holding the lease — development-only, and refused '
+      + 'unless explicitly armed for this exact worker id',
+    reexecutable: false,
+    readOnly: true,
+    ceilingMinutes: 5,
+  },
   'report.daily_operations': {
     summary: 'renders an internal operations summary from data already in the database',
     reexecutable: true,

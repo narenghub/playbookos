@@ -272,12 +272,58 @@ async function clearStop(handle) {
   made.stops = made.stops.filter((s) => s !== handle);
 }
 
-async function enqueue(intentKey, payload) {
-  const t = await LEASES.enqueueTask(
-    { taskType: 'synthetic.echo', payload, intentKey }, deps);
+async function enqueue(intentKey, payload, taskType = 'synthetic.echo') {
+  const t = await LEASES.enqueueTask({ taskType, payload, intentKey }, deps);
   made.taskIds.push(t.taskId);
   made.intentKeys.push(intentKey);
   return t;
+}
+
+// ── IS THERE A WORKER AT ALL? ───────────────────────────────────────────────
+//
+// On 2026-11-18 the operator's `kill -9` landed 33 seconds early, during scenario 2. Scenarios 3
+// to 8 then each reported FAIL with "the Mac never claimed the task" — six product failures
+// alleged against a product that was not running. The diagnosis text was right there and the
+// verdict still said FAIL.
+//
+// `worker_identities.last_seen_at` advances on every authenticated request, so a polling worker
+// moves it every few seconds whether or not it has work. If it does not advance, there is nothing
+// to test, and the honest word for that is UNTESTED.
+async function workerLastSeen() {
+  const r = await one(`SELECT last_seen_at FROM worker_identities WHERE id = $1`, [workerId]);
+  return r && r.last_seen_at ? new Date(r.last_seen_at).getTime() : null;
+}
+
+const LIVENESS_WINDOW_MS = 8_000;
+
+/** True only if the worker demonstrably made a request during the window. */
+async function workerIsPolling() {
+  const before = await workerLastSeen();
+  await sleep(LIVENESS_WINDOW_MS);
+  const after = await workerLastSeen();
+  return {
+    polling: before !== null && after !== null && after > before,
+    before, after,
+  };
+}
+
+/**
+ * A scenario whose task was never claimed. Distinguishes "the worker is here and did not do its
+ * job" (a product FAIL) from "there was no worker" (UNTESTED). Never guesses.
+ */
+async function neverClaimed(scenario, taskId) {
+  const live = await workerIsPolling();
+  if (!live.polling) {
+    untested(`${scenario} — no worker was polling`,
+      `worker_identities.last_seen_at did not advance over ${LIVENESS_WINDOW_MS}ms `
+      + `(${live.before ? new Date(live.before).toISOString() : 'never seen'} → `
+      + `${live.after ? new Date(live.after).toISOString() : 'never seen'}). `
+      + 'The worker is stopped, crashed, or cannot authenticate. This scenario\'s precondition '
+      + 'did not hold, so it is neither a pass nor a product failure.');
+    return;
+  }
+  await badTimeout(`${scenario} — the Mac never claimed the task`,
+    { ok: false, ms: 0, label: 'claim' }, taskId);
 }
 
 // ── mint ────────────────────────────────────────────────────────────────────
@@ -336,6 +382,60 @@ async function cmdScenarios() {
   if (w.revoked_at) { console.log(`  INCOMPLETE  that identity is already revoked.`); process.exit(3); }
   made.workerIds.push(workerId);
 
+  // ── STALE FIXTURES FROM A PREVIOUS RUN ──────────────────────────────────
+  //
+  // On 2026-11-18 a freshly enrolled identity claimed two PENDING tasks left behind when the
+  // 2026-11-17 run was abandoned mid-scenario. It executed them, and those leases looked for all
+  // the world like evidence of a run that had not started — I read them as exactly that and said
+  // so twice before the database corrected me.
+  //
+  // A run that begins with another run's claimable work in the queue cannot attribute its own
+  // first scenarios. So this refuses to start, and names the ids. It does NOT delete them by
+  // default: deleting is the owner's decision, and a driver that tidies production-adjacent state
+  // on its own initiative is how the ten-minute DELETE got written in the first place.
+  const staleRows = (await query(
+    `SELECT id, intent_key, state FROM worker_tasks
+      WHERE intent_key LIKE $1 AND state IN ('PENDING','LEASED')
+      ORDER BY created_at`,
+    ['m75-%'])).rows;
+
+  if (staleRows.length) {
+    console.log(`\n  ${staleRows.length} CLAIMABLE acceptance task(s) from a previous run:\n`);
+    for (const t of staleRows) {
+      console.log(`    ${t.id}  ${String(t.intent_key).padEnd(20)} ${t.state}`);
+    }
+    if (!ARGV.includes('--clean-stale')) {
+      console.log('\n  INCOMPLETE  this worker would claim them, and the first scenarios would be');
+      console.log('              measuring the previous run instead of this one.');
+      console.log('\n  Re-run with --clean-stale to delete exactly the ids above (and the');
+      console.log('  agent_runs and worker_results that belong to them), or clear them yourself.');
+      console.log('  Nothing has been changed.');
+      process.exit(3);
+    }
+    // Exactly the ids listed above. Recorded first, then removed, then verified — the same
+    // discipline the rest of this script's cleanup follows.
+    const staleIds = staleRows.map((t) => t.id);
+    const staleKeys = [...new Set(staleRows.map((t) => t.intent_key))];
+    for (const id of staleIds) {
+      await query(`DELETE FROM worker_results WHERE task_id = $1`, [id]);
+      await query(`DELETE FROM worker_tasks WHERE id = $1`, [id]);
+    }
+    for (const k of staleKeys) {
+      await query(`DELETE FROM agent_runs WHERE intent_key = $1`, [k]);
+    }
+    const left = (await query(
+      `SELECT COUNT(*)::int n FROM worker_tasks WHERE id = ANY($1)`, [staleIds])).rows[0].n;
+    if (Number(left) === 0) {
+      ok(`cleared ${staleIds.length} stale fixture(s) by id — the queue starts clean`);
+    } else {
+      bad(`${left} stale fixture(s) survived their own deletion`, staleIds.join(' '));
+      console.log('\n  INCOMPLETE  refusing to run with an unclean queue.');
+      process.exit(3);
+    }
+  } else {
+    ok('no stale acceptance fixtures — this run starts from a clean queue');
+  }
+
   // ── 1. END TO END ─────────────────────────────────────────────────────────
   head('1. synthetic.echo, end to end, worker on separate hardware');
   const t1 = await enqueue('m75-echo', { hello: 'mac', n: 41 });
@@ -384,7 +484,7 @@ async function cmdScenarios() {
   const claimed = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t2.taskId]));
   if (!claimed.ok) {
-    bad('the Mac never claimed the cancellation task; the rest of this scenario cannot run');
+    await neverClaimed('live cancellation', t2.taskId);
   } else {
     ok(`claimed after ${claimed.ms}ms`);
     const cx = await LEASES.cancelTask(t2.taskId, { reason: 'M7.5 live cancellation' }, deps);
@@ -408,7 +508,7 @@ async function cmdScenarios() {
   const t3 = await enqueue('m75-stop', { delayMs: 20_000 });
   const claimed3 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t3.taskId]));
-  if (!claimed3.ok) bad('the Mac never claimed the STOP task');
+  if (!claimed3.ok) await neverClaimed('STOP enforcement mid-execution', t3.taskId);
   else {
     const sid = await setStop('capability', 'worker.execute', 'M7.5 live STOP test');
     const halted = await until('the worker stops', async () => {
@@ -430,7 +530,7 @@ async function cmdScenarios() {
   const t4 = await enqueue('m75-expire', { delayMs: 25_000 });
   const claimed4 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t4.taskId]));
-  if (!claimed4.ok) bad('the Mac never claimed the expiry task');
+  if (!claimed4.ok) await neverClaimed('expired lease is not a reset', t4.taskId);
   else {
     await query(
       `UPDATE agent_runs SET heartbeat_at = NOW() - INTERVAL '6 hours',
@@ -455,7 +555,18 @@ async function cmdScenarios() {
   const t5 = await enqueue('m75-dup', { hello: 'dup' });
   const dres = await until('it completes', async () =>
     await one(`SELECT status FROM worker_results WHERE task_id=$1`, [t5.taskId]));
-  if (!dres.ok) await badTimeout('the duplicate-submission task never completed', dres, t5.taskId);
+  if (!dres.ok) {
+    // Routed through the liveness probe for the same reason as the claim failures: on 2026-11-18
+    // this printed FAIL with a diagnosis that said, in the same breath, "the worker is not
+    // running". A verdict that contradicts its own detail line is the thing to fix.
+    const live = await workerIsPolling();
+    if (!live.polling) {
+      untested('duplicate-submission protection — no worker was polling',
+        'The task was never executed, so there was no first result to duplicate.');
+    } else {
+      await badTimeout('the duplicate-submission task never completed', dres, t5.taskId);
+    }
+  }
   else {
     const r = await one(`SELECT run_id FROM agent_runs WHERE intent_key='m75-dup'`);
     const again = await LEASES.submitResult(
@@ -470,74 +581,113 @@ async function cmdScenarios() {
 
   // ── 7. CRASH RECOVERY ─────────────────────────────────────────────────────
   head('7. crash recovery');
-  note('The crash itself is a MANUAL step: kill -9 the worker on the Mac while it holds a lease.');
-  const t6 = await enqueue('m75-crash', { delayMs: 30_000 });
-  const claimed6 = await until('the Mac claims it', async () =>
+  // ── THE CRASH IS NOW A TASK, NOT A KEYSTROKE ──────────────────────────────
+  //
+  // Twice this scenario produced nothing. On 2026-11-17 the manual `kill -9` never happened and
+  // two FAILs were reported for a crash that did not occur. On 2026-11-18 it happened 33 seconds
+  // early, during scenario 2, and took the six scenarios after it down as collateral.
+  //
+  // So the worker kills itself, when and only when it leases a `synthetic.crash_test` task that
+  // names it — and the kill therefore happens, by construction, while the lease is held. No
+  // operator timing, no remote execution path: see src/worker-client/handlers/synthetic-crash-test.js.
+  //
+  // The handshake has exactly two possible answers, and both are informative:
+  //
+  //   the worker is armed      → it dies holding the lease, and recovery is what we measure
+  //   the worker is not armed  → it REPORTS a FAILED result with `crash_test_refused`, which is
+  //                              not a product defect and not a pass. UNTESTED, with the reason.
+  note('The crash is a gated self-SIGKILL triggered by leasing the task — no manual timing.');
+  const t6 = await enqueue('m75-crash',
+    { confirm: 'crash-this-worker', workerId }, 'synthetic.crash_test');
+  const claimed6 = await until('the Mac claims the crash task', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t6.taskId]));
-  if (!claimed6.ok) bad('the Mac never claimed the crash task');
+  if (!claimed6.ok) await neverClaimed('crash recovery', t6.taskId);
   else {
-    console.log('');
-    console.log('    >>> ON THE MAC, NOW:  kill -9 $(pgrep -f worker-client/run.js)');
-    console.log('    >>> launchd should restart it within ThrottleInterval (60s).');
-    console.log('    >>> This script waits up to 4 minutes.');
-    console.log('');
-    // Sampled BEFORE the wait so "did the worker stop beating" is answerable afterwards.
-    const beatBefore = await (async () => {
+    ok('the crash task is LEASED — whatever happens next happens while the lease is held');
+
+    // A refusal arrives as a reported result, and fast. Check for it before spending four minutes
+    // waiting for a death that is never coming.
+    const refusal = await until('the worker either dies or refuses', async () => {
       const r = await one(
-        `SELECT heartbeat_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
-        ['m75-crash']);
-      return r && r.heartbeat_at ? new Date(r.heartbeat_at).getTime() : null;
-    })();
-    const settled = await until('the abandoned lease is reflected', async () => {
-      await require('../src/lib/office/recovery').reap({ dryRun: false, limit: 50 }, deps);
-      await LEASES.reflectAbandonedLeases({}, deps);
-      const r = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t6.taskId]);
-      return r.state === 'NEEDS_RESOLUTION' ? r : null;
-    }, { timeoutMs: 240_000, everyMs: 5000 });
+        `SELECT status, error FROM worker_results WHERE task_id=$1`, [t6.taskId]);
+      return r || null;
+    }, { timeoutMs: 45_000, everyMs: 2_000 });
 
-    // ── DID THE CRASH ACTUALLY HAPPEN? ────────────────────────────────────
-    //
-    // On 2026-11-17 the `kill -9` above was never performed, and this scenario reported two FAILs
-    // for a crash that did not occur — one of them "a crashed task was re-executed after the
-    // restart", which reads as a correctness defect and is not one. The task had simply completed
-    // late, under Defect 6.
-    //
-    // A live worker keeps advancing `heartbeat_at` on its run. A killed one stops. So the question
-    // "was this scenario actually exercised" is answerable from data already being written, rather
-    // than taken on trust from whoever was at the keyboard.
-    const beatAt = async () => {
-      const r = await one(
-        `SELECT heartbeat_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
-        ['m75-crash']);
-      return r && r.heartbeat_at ? new Date(r.heartbeat_at).getTime() : null;
-    };
-    const beatNow = await beatAt();
-    const neverStopped = !settled.ok && beatBefore !== null && beatNow !== null && beatNow > beatBefore;
-
-    if (settled.ok) {
-      ok(`the crashed task is NEEDS_RESOLUTION after ${Math.round(settled.ms / 1000)}s`);
-
-      const dup = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t6.taskId]);
-      if (Number(dup.n) === 0) ok('and the restarted worker did NOT re-execute it');
-      else bad('a crashed task was re-executed after the restart', `${dup.n} result row(s)`);
-
-      // Control: the restarted worker must still be alive, or the line above proves nothing.
-      const t7 = await enqueue('m75-crash-control', { hello: 'after-restart' });
-      const alive = await until('the restarted worker takes new work', async () =>
-        await one(`SELECT status FROM worker_results WHERE task_id=$1`, [t7.taskId]),
-      { timeoutMs: 120_000, everyMs: 2000 });
-      if (alive.ok) ok('control: the restarted worker executes NEW work — it really did come back');
-      else await badTimeout('the worker never came back, so "did not re-execute" proved nothing',
-        alive, t7.taskId);
-    } else if (neverStopped) {
-      untested('crash recovery — the manual kill -9 was NOT performed',
-        'The run\'s heartbeat_at kept advancing throughout the wait, so the worker never died. '
-        + 'Nothing about crash recovery was exercised: neither re-execution nor restart was tested. '
-        + 'Re-run this scenario and perform the kill while the task is LEASED.');
+    if (refusal.ok && /crash_test_refused/.test(String(refusal.value.error || ''))) {
+      untested('crash recovery — the worker is not armed for the crash handshake',
+        `It refused and reported instead of dying: ${String(refusal.value.error).slice(0, 160)}. `
+        + 'Arm it on the Mac with:  workerctl install <url> <wkr_id> --env development --crash-test '
+        + 'then re-run. Nothing about crash recovery was exercised.');
+    } else if (refusal.ok) {
+      bad('the crash task completed normally instead of crashing the worker',
+        JSON.stringify(refusal.value).slice(0, 200));
     } else {
-      await badTimeout('the crashed task never settled', settled, t6.taskId);
-      untested('the re-execution and restart checks were skipped',
-        'They only mean something once the abandoned lease has been reflected.');
+      // Sampled BEFORE the wait so "did the worker stop beating" stays answerable afterwards.
+      const beatBefore = await (async () => {
+        const r = await one(
+          `SELECT heartbeat_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
+          ['m75-crash']);
+        return r && r.heartbeat_at ? new Date(r.heartbeat_at).getTime() : null;
+      })();
+      const settled = await until('the abandoned lease is reflected', async () => {
+        await require('../src/lib/office/recovery').reap({ dryRun: false, limit: 50 }, deps);
+        await LEASES.reflectAbandonedLeases({}, deps);
+        const r = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t6.taskId]);
+        return r.state === 'NEEDS_RESOLUTION' ? r : null;
+      }, { timeoutMs: 240_000, everyMs: 5000 });
+
+      // ── DID THE CRASH ACTUALLY HAPPEN? ──────────────────────────────────
+      //
+      // The handshake makes the crash deterministic, but "deterministic" is a claim about the
+      // design, not an observation of this run. A live worker keeps advancing `heartbeat_at`; a
+      // killed one stops. So the question stays answerable from data the system was already
+      // writing, rather than from the design being believed.
+      const beatAt = async () => {
+        const r = await one(
+          `SELECT heartbeat_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
+          ['m75-crash']);
+        return r && r.heartbeat_at ? new Date(r.heartbeat_at).getTime() : null;
+      };
+      const beatNow = await beatAt();
+      const neverStopped = !settled.ok && beatBefore !== null && beatNow !== null && beatNow > beatBefore;
+
+      if (settled.ok) {
+        ok(`the abandoned lease was reflected after ${Math.round(settled.ms / 1000)}s — the task is NEEDS_RESOLUTION`);
+
+        const dup = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t6.taskId]);
+        if (Number(dup.n) === 0) ok('and nothing re-executed it — reexecutable:false was honoured');
+        else bad('a crashed task was re-executed after the restart', `${dup.n} result row(s)`);
+
+        // The task's terminal state is only half of it. A run left ACTIVE holds the per-intent
+        // uniqueness constraint and silently blocks that intent for ever.
+        const run = await one(
+          `SELECT state, ended_at FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
+          ['m75-crash']);
+        if (run && run.state && run.state !== 'RUNNING') {
+          ok(`and the agent_run is ${run.state}, not left RUNNING`);
+        } else {
+          bad('the agent_run is still RUNNING after its lease was abandoned', JSON.stringify(run));
+        }
+
+        // Control: launchd must have brought the worker back, or "did not re-execute" is just a
+        // statement that a dead worker did nothing.
+        const t7 = await enqueue('m75-crash-control', { hello: 'after-restart' });
+        const alive = await until('the restarted worker takes new work', async () =>
+          await one(`SELECT status FROM worker_results WHERE task_id=$1`, [t7.taskId]),
+        { timeoutMs: 180_000, everyMs: 2000 });
+        if (alive.ok) ok('control: launchd restarted the worker and it executes NEW work');
+        else await badTimeout('the worker never came back, so "did not re-execute" proved nothing',
+          alive, t7.taskId);
+      } else if (neverStopped) {
+        untested('crash recovery — the worker never died',
+          'The run\'s heartbeat_at kept advancing throughout the wait, so the worker was alive the '
+          + 'whole time, yet it neither crashed nor reported a refusal. The handshake did not take '
+          + 'effect. Nothing about crash recovery was exercised.');
+      } else {
+        await badTimeout('the crashed task never settled', settled, t6.taskId);
+        untested('the re-execution, terminal-state and restart checks were skipped',
+          'They only mean something once the abandoned lease has been reflected.');
+      }
     }
   }
 
@@ -547,7 +697,7 @@ async function cmdScenarios() {
   const t8 = await enqueue('m75-revoke', { delayMs: 20_000 });
   const claimed8 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t8.taskId]));
-  if (!claimed8.ok) bad('the Mac never claimed the revocation task');
+  if (!claimed8.ok) await neverClaimed('revocation ends access', t8.taskId);
   else {
     await IDENTITY.revokeWorker(workerId, { reason: 'M7.5 revocation test' }, deps);
     const after = await until('it stops', async () => {
