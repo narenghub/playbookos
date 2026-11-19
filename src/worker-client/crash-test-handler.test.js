@@ -24,10 +24,12 @@ const TYPES = require('../lib/worker/task-types');
 const EXEC = require('./executor');
 
 const WID = `wkr_${'a1b2'.repeat(8)}`;
+const NOW = 1_800_000_000_000;                      // a fixed clock, so expiry is not flaky
+const DEADLINE = Math.floor(NOW / 1000) + 600;      // ten minutes of arming
 const armedEnv = () => ({
   PLAYNEXA_WORKER_ENV: 'development',
   WORKER_ID: WID,
-  WORKER_ALLOW_CRASH_TEST: WID,
+  WORKER_ALLOW_CRASH_TEST: `${WID}:${DEADLINE}`,
 });
 const goodPayload = () => ({ confirm: 'crash-this-worker', workerId: WID });
 
@@ -41,6 +43,7 @@ function spy() {
     deps: {
       env: armedEnv(),
       pid: 4242,
+      now: NOW,
       kill: (pid, sig) => kills.push([pid, sig]),
       log: (l) => lines.push(l),
     },
@@ -76,9 +79,19 @@ const refusals = [
   ['PLAYNEXA_WORKER_ENV is production', (e) => { e.PLAYNEXA_WORKER_ENV = 'production'; }, {}, /not "development"/],
   ['PLAYNEXA_WORKER_ENV is a near-miss', (e) => { e.PLAYNEXA_WORKER_ENV = 'dev'; }, {}, /not "development"/],
   ['WORKER_ID is malformed', (e) => { e.WORKER_ID = 'worker-1'; }, {}, /WORKER_ID is absent or malformed/],
-  ['the arming variable is absent', (e) => { delete e.WORKER_ALLOW_CRASH_TEST; }, {}, /does not equal this worker/],
-  ['the arming variable is a boolean', (e) => { e.WORKER_ALLOW_CRASH_TEST = 'yes'; }, {}, /does not equal this worker/],
-  ['the arming variable names another worker', (e) => { e.WORKER_ALLOW_CRASH_TEST = `wkr_${'f'.repeat(32)}`; }, {}, /does not equal this worker/],
+  ['the arming variable is absent', (e) => { delete e.WORKER_ALLOW_CRASH_TEST; }, {}, /absent or malformed/],
+  ['the arming variable is a boolean', (e) => { e.WORKER_ALLOW_CRASH_TEST = 'yes'; }, {}, /absent or malformed/],
+  ['the arming variable has no deadline', (e) => { e.WORKER_ALLOW_CRASH_TEST = WID; }, {}, /absent or malformed/],
+  ['the deadline is not a number', (e) => { e.WORKER_ALLOW_CRASH_TEST = `${WID}:soon`; }, {}, /absent or malformed/],
+  ['the arming variable names another worker', (e) => { e.WORKER_ALLOW_CRASH_TEST = `wkr_${'f'.repeat(32)}:${DEADLINE}`; }, {}, /arms a different worker/],
+  ['the arming window has expired', (e) => { e.WORKER_ALLOW_CRASH_TEST = `${WID}:${Math.floor(NOW / 1000) - 1}`; }, {}, /arming window has expired/],
+  // Found on 2026-11-19 by demonstrating the expiry instead of trusting the shapes I had thought
+  // of. A millisecond value is what Date.now() returns and the obvious slip for a hand edit; it
+  // matched \d{10,} and read as epoch SECONDS in the year 58,000, arming the worker for ever —
+  // the deadline defeating itself.
+  ['the deadline is milliseconds, not seconds', (e) => { e.WORKER_ALLOW_CRASH_TEST = `${WID}:${NOW}`; }, {}, /more than a day away/],
+  ['the deadline is a plausible 10-digit far future', (e) => { e.WORKER_ALLOW_CRASH_TEST = `${WID}:9999999999`; }, {}, /more than a day away/],
+  ['the window is 25 hours', (e) => { e.WORKER_ALLOW_CRASH_TEST = `${WID}:${Math.floor(NOW / 1000) + 90_000}`; }, {}, /more than a day away/],
   ['the payload is not confirmed', null, { confirm: 'yes' }, /payload\.confirm must be/],
   ['the payload confirms nothing at all', null, { confirm: undefined }, /payload\.confirm must be/],
   ['the payload names a different worker', null, { workerId: `wkr_${'e'.repeat(32)}` }, /names a different worker/],
@@ -145,13 +158,22 @@ test('output claiming the kill succeeded is refused as a contradiction', () => {
 // ── CONTROLS ────────────────────────────────────────────────────────────────
 
 test('CONTROL: the real process environment is NOT armed', () => {
-  const v = H.decide(goodPayload(), process.env);
+  const v = H.decide(goodPayload(), process.env, NOW);
   assert.equal(v.allowed, false,
     'if this ever passes, any crash_test task reaching this build would kill it');
 });
 
+test('CONTROL: a window at the installer\'s own 24-hour ceiling is still honoured', () => {
+  // Without this, "refuse anything far away" could be refusing everything, and the ceiling would
+  // read as working while having disabled the feature.
+  const env = armedEnv();
+  env.WORKER_ALLOW_CRASH_TEST = `${WID}:${Math.floor(NOW / 1000) + (24 * 60 * 60)}`;
+  const v = H.decide(goodPayload(), env, NOW);
+  assert.equal(v.allowed, true, v.reason);
+});
+
 test('CONTROL: decide() does allow the armed case, so the refusals are not unconditional', () => {
-  const v = H.decide(goodPayload(), armedEnv());
+  const v = H.decide(goodPayload(), armedEnv(), NOW);
   assert.equal(v.allowed, true);
   assert.equal(v.reason, null);
   assert.equal(v.workerId, WID);
@@ -161,7 +183,14 @@ test('CONTROL: the handler contains no shell, no dynamic require and no payload-
   const src = require('node:fs').readFileSync(
     require('node:path').join(__dirname, 'handlers', 'synthetic-crash-test.js'), 'utf8',
   );
-  for (const forbidden of ['child_process', 'exec(', 'spawn(', 'eval(', 'new Function']) {
+  // `exec(` alone was too naive: it fired on ARMED_SHAPE.exec(), a regex method with nothing to do
+  // with processes. The property is "no way to run anything", so the patterns name the actual
+  // process-spawning and code-evaluating APIs instead of a substring that several innocent things
+  // contain.
+  for (const forbidden of [
+    'child_process', 'execSync', 'execFile', 'spawn(', 'spawnSync', 'fork(',
+    'eval(', 'new Function', 'require(`', "require('./handlers", 'process.argv',
+  ]) {
     assert.ok(!src.includes(forbidden), `the crash handler must not contain ${forbidden}`);
   }
   // The only kill target in the file is the process's own pid.

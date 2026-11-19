@@ -74,7 +74,14 @@ ${whenZero}`;
 esac`);
   // Stands in for enroll.js's interpreter. Records the LENGTH of the token it was handed, never
   // the token — the same rule the real flow follows.
-  sh('node', `echo "node args=$* token_len=\${#WORKER_ENROLL_TOKEN}" >> "${log}"; exit 0`);
+  sh('node', `echo "node args=$* token_len=\${#WORKER_ENROLL_TOKEN}" >> "${log}"
+case "$*" in
+  *--doctor*)
+    # The smallest output cmd_doctor can parse. Enough for its credential branch to resolve, so the
+    # arming lines around it are reached.
+    printf '{ "keychainState": "readable", "keychainStatus": 0, "keychainDetail": "stub", "keychainRecovery": null }\\n' ;;
+esac
+exit 0`);
   sh('launchctl', `echo "launchctl $*" >> "${log}"
 case "\${1:-}" in
   print) ${countdown('print_loaded',
@@ -88,6 +95,25 @@ esac`);
 ${countdown('pgrep_alive', 'echo 4242; exit 0', 'exit 1')}`);
   sh('security', `echo "security $*" >> "${log}"; exit ${keychain}`);
   sh('plutil', 'exit 0');
+  // PlistBuddy does not exist on Linux. Without this, `disarm` and `doctor` would read nothing
+  // back, report "already disarmed", and their tests would pass having never reached the code
+  // under test — a shim is the difference between testing the command and testing its absence.
+  const pb = path.join(root, 'plistbuddy');
+  fs.writeFileSync(pb, `#!/bin/sh
+cmd="$2"; file="$3"
+key=$(printf '%s' "$cmd" | sed -n 's/^Print :EnvironmentVariables:\\(.*\\)$/\\1/p')
+[ -n "$key" ] || exit 1
+[ -f "$file" ] || exit 1
+v=$(awk -v k="$key" '
+  $0 ~ ("<key>" k "</key>") { found=1; next }
+  found && match($0, /<string>.*<\\/string>/) {
+    print substr($0, RSTART+8, RLENGTH-17); exit
+  }' "$file")
+if [ -z "$v" ]; then echo "Print: Entry, \\":EnvironmentVariables:$key\\", Does Not Exist"; exit 1; fi
+printf '%s\\n' "$v"
+`);
+  fs.chmodSync(pb, 0o755);
+
   // Real sleeps would make this suite take minutes. The loops are bounded by the countdowns and
   // by the timeout env vars, not by wall clock.
   sh('sleep', `echo "sleep $*" >> "${log}"; exit 0`);
@@ -100,6 +126,7 @@ ${countdown('pgrep_alive', 'echo 4242; exit 0', 'exit 1')}`);
         HOME: root,
         WORKERCTL_TEARDOWN_TIMEOUT_S: '3',
         WORKERCTL_STOP_TIMEOUT_S: '3',
+        WORKERCTL_PLISTBUDDY: pb,
       },
       encoding: 'utf8',
       ...(input === undefined ? {} : { input }),
@@ -247,16 +274,113 @@ test('--env development labels it development and still arms nothing', () => {
   assert.match(r.out, /environment : development/, r.out);
 });
 
-test('--crash-test arms it with this worker\'s own id, not a boolean', () => {
+test('--crash-test arms it with this worker\'s own id AND a deadline, not a boolean', () => {
   const h = harness({ printLoaded: 0 });
   const wid = `wkr_${'b'.repeat(32)}`;
+  const before = Math.floor(Date.now() / 1000);
   const r = h.run('install', 'https://dev.example.com', wid, '--env=development', '--crash-test');
   assert.equal(r.code, 0, r.out);
   const plist = plistOf(h);
-  assert.match(plist, new RegExp(`<key>WORKER_ALLOW_CRASH_TEST</key>\\s*<string>${wid}</string>`),
-    'arming must be per-identity so a leftover variable cannot arm a different worker');
+
+  const m = plist.match(
+    new RegExp(`<key>WORKER_ALLOW_CRASH_TEST</key>\\s*<string>${wid}:(\\d+)</string>`));
+  assert.ok(m, `arming must be <worker id>:<deadline>, got:\n${plist}`);
+
+  // Default window is 120 minutes. Asserted as a RANGE against the clock rather than an exact
+  // value, because an exact expected timestamp would make this test fail on a slow machine.
+  const deadline = Number(m[1]);
+  assert.ok(deadline >= before + (119 * 60) && deadline <= before + (121 * 60) + 5,
+    `deadline ${deadline} is not ~120 minutes after ${before}`);
+
   assert.doesNotMatch(plist, /WORKER_ALLOW_CRASH_TEST<\/key>\s*<string>(true|yes|1)<\/string>/);
   assert.match(r.out, /crash test {2}: ARMED/, r.out);
+  assert.match(r.out, /Expires in 120 minute\(s\)/, r.out);
+});
+
+test('--crash-test=<minutes> bounds the window, and refuses an unbounded one', () => {
+  const h = harness({ printLoaded: 0 });
+  const wid = `wkr_${'b'.repeat(32)}`;
+  const before = Math.floor(Date.now() / 1000);
+  const r = h.run('install', 'https://dev.example.com', wid, '--env=development', '--crash-test=15');
+  assert.equal(r.code, 0, r.out);
+  const m = plistOf(h).match(new RegExp(`${wid}:(\\d+)`));
+  assert.ok(m);
+  const deadline = Number(m[1]);
+  assert.ok(deadline >= before + (14 * 60) && deadline <= before + (16 * 60) + 5,
+    `deadline ${deadline} is not ~15 minutes after ${before}`);
+
+  for (const bad of ['--crash-test=0', '--crash-test=1441', '--crash-test=forever']) {
+    const x = harness({ printLoaded: 0 });
+    const rx = x.run('install', 'https://dev.example.com', wid, '--env=development', bad);
+    assert.notEqual(rx.code, 0, `${bad} must be refused`);
+    assert.ok(!fs.existsSync(path.join(x.root, 'Library', 'LaunchAgents', 'ai.playnexa.worker.plist')),
+      `${bad} must be refused before anything is written`);
+  }
+});
+
+test('disarm removes the key and VERIFIES it is gone', () => {
+  const h = harness({ printLoaded: 0 });
+  const wid = `wkr_${'b'.repeat(32)}`;
+  assert.equal(
+    h.run('install', 'https://dev.example.com', wid, '--env=development', '--crash-test').code, 0);
+  assert.match(plistOf(h), /WORKER_ALLOW_CRASH_TEST/, 'precondition: it is armed');
+
+  const d = h.run('disarm');
+  assert.equal(d.code, 0, d.out);
+  assert.doesNotMatch(plistOf(h), /WORKER_ALLOW_CRASH_TEST/, 'the key must be gone');
+  assert.match(d.out, /disarmed: WORKER_ALLOW_CRASH_TEST is absent/, d.out);
+  // It must preserve everything else it read back out of the plist.
+  assert.match(plistOf(h), /<key>PLAYNEXA_WORKER_ENV<\/key>\s*<string>development<\/string>/,
+    'disarming must not quietly relabel the worker as production');
+  assert.match(plistOf(h), new RegExp(`<string>${wid}</string>`), 'nor change its identity');
+});
+
+test('doctor reports an armed window, and reports it as EXPIRED once it has passed', () => {
+  const h = harness({ printLoaded: 0 });
+  const wid = `wkr_${'b'.repeat(32)}`;
+  assert.equal(
+    h.run('install', 'https://dev.example.com', wid, '--env=development', '--crash-test=30').code, 0);
+
+  const live = h.run('doctor');
+  assert.match(live.out, /crash test\s+: ARMED for this worker until /, live.out);
+  assert.match(live.out, /minute\(s\) left/, live.out);
+  assert.match(live.out, /environment\s+: development/, live.out);
+
+  // Wind the deadline into the past. The handler refuses on the clock; doctor must SAY so rather
+  // than keep reporting an arming that can no longer fire.
+  const plistPath = path.join(h.root, 'Library', 'LaunchAgents', 'ai.playnexa.worker.plist');
+  const past = Math.floor(Date.now() / 1000) - 60;
+  fs.writeFileSync(plistPath,
+    plistOf(h).replace(new RegExp(`${wid}:\\d+`), `${wid}:${past}`));
+
+  const stale = h.run('doctor');
+  assert.match(stale.out, /crash test\s+: EXPIRED at /, stale.out);
+  assert.match(stale.out, /workerctl disarm/, 'and it must say how to tidy it');
+});
+
+test('doctor refuses to call a malformed arming key "not armed"', () => {
+  const h = harness({ printLoaded: 0 });
+  const wid = `wkr_${'b'.repeat(32)}`;
+  assert.equal(h.run('install', 'https://dev.example.com', wid, '--env=development').code, 0);
+
+  // The shape that shipped in cd5a748: an id with no deadline. The handler refuses it; doctor must
+  // not report "not armed", because the key IS there and a reader needs to know to clear it.
+  const plistPath = path.join(h.root, 'Library', 'LaunchAgents', 'ai.playnexa.worker.plist');
+  fs.writeFileSync(plistPath, plistOf(h).replace(
+    '<key>PLAYNEXA_WORKER_ENV</key>',
+    `<key>WORKER_ALLOW_CRASH_TEST</key>\n    <string>${wid}</string>\n    <key>PLAYNEXA_WORKER_ENV</key>`));
+
+  const d = h.run('doctor');
+  assert.match(d.out, /MALFORMED/, d.out);
+  assert.doesNotMatch(d.out, /crash test\s+: not armed/, d.out);
+});
+
+test('disarm on an unarmed worker says so instead of reinstalling', () => {
+  const h = harness({ printLoaded: 0 });
+  assert.equal(install(h).code, 0);
+  const d = h.run('disarm');
+  assert.equal(d.code, 0, d.out);
+  assert.match(d.out, /already disarmed/, d.out);
 });
 
 test('--crash-test is refused without --env development, and writes nothing', () => {

@@ -66,10 +66,51 @@ const WORKER_ID_SHAPE = /^wkr_[0-9a-f]{32}$/;
 const REFUSED = Object.freeze({
   NOT_DEVELOPMENT: 'crash_test_refused: PLAYNEXA_WORKER_ENV is not "development"',
   NO_WORKER_ID: 'crash_test_refused: WORKER_ID is absent or malformed',
-  NOT_ARMED: 'crash_test_refused: WORKER_ALLOW_CRASH_TEST does not equal this worker\'s id',
+  NOT_ARMED: 'crash_test_refused: WORKER_ALLOW_CRASH_TEST is absent or malformed '
+    + '(expected wkr_<32 hex>:<unix seconds>)',
+  WRONG_WORKER_ARMED: 'crash_test_refused: WORKER_ALLOW_CRASH_TEST arms a different worker',
+  EXPIRED: 'crash_test_refused: the arming window has expired',
+  WINDOW_TOO_LONG: 'crash_test_refused: the arming deadline is more than a day away, so it is not '
+    + 'a test window (a millisecond value mistaken for seconds looks exactly like this)',
   NOT_CONFIRMED: `crash_test_refused: payload.confirm must be "${CONFIRM_PHRASE}"`,
   WRONG_WORKER: 'crash_test_refused: payload.workerId names a different worker',
 });
+
+// ── ARMING EXPIRES BY THE CLOCK, NOT BY SOMEBODY REMEMBERING ────────────────
+//
+// The owner's requirement: *"The crash-test capability must be explicitly disarmed after testing,
+// including on failure or interruption."*
+//
+// A runbook step cannot deliver that. A shell `trap` cannot either — it does not fire on a power
+// cut, a kernel panic, or an operator closing the lid and going home, and this machine is meant to
+// sit in an office running unattended. Anything that depends on a human completing a sequence has
+// already failed the "or interruption" half of the requirement.
+//
+// So the arming variable carries a DEADLINE: `wkr_<32 hex>:<unix seconds>`. Past it the handler
+// refuses, whatever else is true. An acceptance run that crashes, hangs, or is abandoned halfway
+// leaves a worker that disarms itself — and a worker found armed days later cannot fire.
+//
+// A bare `wkr_<id>` with no deadline is REFUSED rather than treated as "armed forever". That form
+// shipped briefly in cd5a748; failing closed on it means the upgrade cannot silently leave an
+// unbounded arming behind.
+const ARMED_SHAPE = /^(wkr_[0-9a-f]{32}):(\d{10,})$/;
+
+// ── AND THE DEADLINE ITSELF IS BOUNDED ──────────────────────────────────────
+//
+// Found on 2026-11-19 by demonstrating the expiry rather than trusting the tests that covered it:
+// `WORKER_ALLOW_CRASH_TEST=<id>:1763575000000` — a MILLISECOND value, which is what Date.now()
+// returns and the obvious slip for anyone editing this by hand — matched `\d{10,}` and was read as
+// epoch SECONDS. That is the year 58,000. The arming would never expire, which is the exact thing
+// the deadline exists to prevent, arriving through the deadline itself.
+//
+// A tighter regex is not the fix: 10 digits reaches the year 2286, so `<id>:9999999999` would slip
+// past any shape check while being just as unbounded in practice. The fix is semantic — a window
+// longer than a day is not a test window, and the installer already refuses to WRITE one
+// (`--crash-test=<minutes>` is capped at 1440). This refuses to HONOUR one, so a plist edited by
+// hand, or written by an older version, cannot grant more than the installer would.
+//
+// The slack covers the gap between the installer computing the deadline and the worker reading it.
+const MAX_ARMING_MS = (24 * 60 * 60 * 1000) + (5 * 60 * 1000);
 
 /**
  * Decides, without doing anything. Separated from `run` so the decision is testable without a
@@ -77,7 +118,7 @@ const REFUSED = Object.freeze({
  *
  * @returns {{allowed: boolean, reason: string|null, workerId: string|null}}
  */
-function decide(payload = {}, env = process.env) {
+function decide(payload = {}, env = process.env, now = Date.now()) {
   const workerId = String(env.WORKER_ID || '');
 
   if (env.PLAYNEXA_WORKER_ENV !== 'development') {
@@ -86,8 +127,27 @@ function decide(payload = {}, env = process.env) {
   if (!WORKER_ID_SHAPE.test(workerId)) {
     return { allowed: false, reason: REFUSED.NO_WORKER_ID, workerId: null };
   }
-  if (env.WORKER_ALLOW_CRASH_TEST !== workerId) {
+  const armed = ARMED_SHAPE.exec(String(env.WORKER_ALLOW_CRASH_TEST || ''));
+  if (!armed) {
     return { allowed: false, reason: REFUSED.NOT_ARMED, workerId: null };
+  }
+  if (armed[1] !== workerId) {
+    return { allowed: false, reason: REFUSED.WRONG_WORKER_ARMED, workerId: null };
+  }
+  const deadlineMs = Number(armed[2]) * 1000;
+  if (!Number.isFinite(deadlineMs) || now > deadlineMs) {
+    return {
+      allowed: false,
+      reason: `${REFUSED.EXPIRED} (expired ${new Date(deadlineMs).toISOString()})`,
+      workerId: null,
+    };
+  }
+  if (deadlineMs - now > MAX_ARMING_MS) {
+    return {
+      allowed: false,
+      reason: `${REFUSED.WINDOW_TOO_LONG} (deadline ${new Date(deadlineMs).toISOString()})`,
+      workerId: null,
+    };
   }
   if (payload.confirm !== CONFIRM_PHRASE) {
     return { allowed: false, reason: REFUSED.NOT_CONFIRMED, workerId: null };
@@ -107,10 +167,11 @@ async function run(payload = {}, deps = {}) {
     env = process.env,
     kill = (pid, sig) => process.kill(pid, sig),
     pid = process.pid,
+    now = Date.now(),
     log = (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
   } = deps;
 
-  const verdict = decide(payload, env);
+  const verdict = decide(payload, env, now);
   if (!verdict.allowed) throw new Error(verdict.reason);
 
   // Written BEFORE dying, and flushed by the write itself, so the log carries proof that the crash
@@ -151,4 +212,6 @@ function validateOutput(out) {
   return problems;
 }
 
-module.exports = { run, validateOutput, decide, CONFIRM_PHRASE, REFUSED, WORKER_ID_SHAPE };
+module.exports = {
+  run, validateOutput, decide, CONFIRM_PHRASE, REFUSED, WORKER_ID_SHAPE, ARMED_SHAPE,
+};

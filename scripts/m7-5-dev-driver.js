@@ -617,7 +617,9 @@ async function cmdScenarios() {
       untested('crash recovery — the worker is not armed for the crash handshake',
         `It refused and reported instead of dying: ${String(refusal.value.error).slice(0, 160)}. `
         + 'Arm it on the Mac with:  workerctl install <url> <wkr_id> --env development --crash-test '
-        + 'then re-run. Nothing about crash recovery was exercised.');
+        + '(the arming window expires — default 120 minutes — so if a previous run armed it hours '
+        + 'ago it has disarmed itself and must be re-armed). Then re-run. Nothing about crash '
+        + 'recovery was exercised.');
     } else if (refusal.ok) {
       bad('the crash task completed normally instead of crashing the worker',
         JSON.stringify(refusal.value).slice(0, 200));

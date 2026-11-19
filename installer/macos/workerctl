@@ -118,12 +118,16 @@ cmd_install() {
   # Unstated means production. That is the direction that fails safe: a worker installed without
   # a decision cannot take any development-only path, and nothing is inferred from the URL (the
   # dev API's own hostname contains the word "production" — see the plist template).
-  local worker_env="production" crash_test="no"
+  # Arming is time-boxed. See the ARMED_SHAPE comment in handlers/synthetic-crash-test.js: a
+  # deadline is the only form of "disarmed on interruption" that survives the operator's terminal
+  # dying, the Mac rebooting, or everyone going home.
+  local worker_env="production" crash_test="no" crash_minutes="120"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --env)         shift; worker_env="${1:-}" ;;
       --env=*)       worker_env="${1#--env=}" ;;
-      --crash-test)  crash_test="yes" ;;
+      --crash-test)       crash_test="yes" ;;
+      --crash-test=*)     crash_test="yes"; crash_minutes="${1#--crash-test=}" ;;
       *) die "unknown install option: $1
   usage: workerctl install <api-base-url> <worker-id> [--env development|production] [--crash-test]" ;;
     esac
@@ -137,6 +141,13 @@ cmd_install() {
     die "--crash-test requires --env development.
   It arms the M7.5 scenario-7 handshake, which makes the worker SIGKILL itself when it leases a
   synthetic.crash_test task. That belongs nowhere near a production worker."
+  fi
+  case "$crash_minutes" in
+    ''|*[!0-9]*) die "--crash-test=<minutes> must be a whole number of minutes (got '${crash_minutes}')" ;;
+  esac
+  if [ "$crash_minutes" -lt 1 ] || [ "$crash_minutes" -gt 1440 ]; then
+    die "--crash-test=<minutes> must be between 1 and 1440. An arming window longer than a day is
+  not a test window, it is a standing capability."
   fi
 
   local node_bin; node_bin="$(command -v node)" || die "node is not on PATH"
@@ -154,8 +165,11 @@ cmd_install() {
   # key at all, which the rendering tests assert.
   local extra; extra="$(mktemp)" || { rm -f "$tmp"; die "mktemp failed"; }
   : > "$extra"
+  local crash_deadline=''
   if [ "$crash_test" = "yes" ]; then
-    printf '    <key>WORKER_ALLOW_CRASH_TEST</key>\n    <string>%s</string>\n' "$wid" >> "$extra"
+    crash_deadline="$(( $(date +%s) + (crash_minutes * 60) ))"
+    printf '    <key>WORKER_ALLOW_CRASH_TEST</key>\n    <string>%s:%s</string>\n' \
+      "$wid" "$crash_deadline" >> "$extra"
   fi
 
   sed -e "s|__NODE_BIN__|${node_bin}|g" \
@@ -176,7 +190,9 @@ cmd_install() {
   say "environment : ${worker_env}"
   if [ "$crash_test" = "yes" ]; then
     say "crash test  : ARMED for ${wid} — a synthetic.crash_test task will SIGKILL this worker."
-    say "              Disarm by re-running install without --crash-test."
+    say "              Expires in ${crash_minutes} minute(s), at $(date -r "$crash_deadline" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "epoch ${crash_deadline}")."
+    say "              After that it refuses even if nobody disarms it. To disarm now:"
+    say "                workerctl disarm"
   fi
 
   # Idempotent: bootout first, ignoring the failure when it was not loaded. Then WAIT — see
@@ -354,6 +370,42 @@ cmd_stop() {
   return 0
 }
 
+# ── DISARM, EXPLICITLY AND IMMEDIATELY ──────────────────────────────────────
+#
+# The deadline in the arming value means an abandoned run disarms itself. This is the other half:
+# the deliberate "we are finished testing" step, which should not require remembering the install
+# command, the URL or the worker id.
+#
+# It re-renders the plist from what the plist already says, minus the arming key, and then CHECKS
+# that the key is gone — because "I ran the disarm command" is not the same claim as "this worker
+# is disarmed", and this file has already been caught making that substitution twice.
+cmd_disarm() {
+  require_macos; refuse_privilege
+  [ -f "$PLIST" ] || die "not installed; there is nothing to disarm"
+
+  local url wid penv armed
+  armed="$(plist_value WORKER_ALLOW_CRASH_TEST '.')"
+  if [ -z "$armed" ]; then
+    say "already disarmed — the plist has no WORKER_ALLOW_CRASH_TEST key."
+    return 0
+  fi
+  url="$(plist_value WORKER_API_BASE_URL '^https?://[A-Za-z0-9._:/-]+$')"
+  wid="$(plist_value WORKER_ID '^wkr_[0-9a-f]{32}$')"
+  penv="$(plist_value PLAYNEXA_WORKER_ENV '^(development|production)$')"
+  [ -n "$url" ] && [ -n "$wid" ] || die "could not read the API URL and worker id back from $PLIST.
+  Disarm by reinstalling explicitly:  workerctl install <url> <wkr_id> --env development"
+
+  say "disarming ${wid} (was armed: ${armed})"
+  cmd_install "$url" "$wid" --env "${penv:-production}" || die "the reinstall failed; the worker may still be armed — check 'workerctl doctor'"
+
+  if [ -n "$(plist_value WORKER_ALLOW_CRASH_TEST '.')" ]; then
+    die "the plist STILL contains WORKER_ALLOW_CRASH_TEST after disarming. Do not leave it: edit
+  $PLIST by hand, remove that key, and run 'workerctl install' again."
+  fi
+  say ""
+  say "disarmed: WORKER_ALLOW_CRASH_TEST is absent from the plist."
+}
+
 cmd_status() {
   require_macos
   if [ ! -f "$PLIST" ]; then say "not installed"; return 1; fi
@@ -393,10 +445,17 @@ cmd_logs() {
 # So: do not call PlistBuddy at all unless the file exists, and validate the shape of whatever comes
 # back rather than trusting it. A value that does not match is discarded, not passed on — a wrong
 # value is worse than no value, because no value is reported honestly as "not configured".
+# The absolute path is deliberate: PlistBuddy lives there on every macOS and resolving it through
+# PATH would let anything earlier on PATH answer questions about the LaunchAgent. The override
+# exists so the test harness can drive this file on Linux, where PlistBuddy does not exist at all —
+# without it, `disarm` and `doctor` would report "nothing to do" off-darwin and their tests would
+# pass by never reaching the code under test. Nothing in production sets it.
+PLISTBUDDY="${WORKERCTL_PLISTBUDDY:-/usr/libexec/PlistBuddy}"
+
 plist_value() {
   local key="$1" shape="$2" v
   [ -f "$PLIST" ] || return 0
-  v="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:${key}" "$PLIST" 2>/dev/null)" || return 0
+  v="$("$PLISTBUDDY" -c "Print :EnvironmentVariables:${key}" "$PLIST" 2>/dev/null)" || return 0
   v="$(printf '%s' "$v" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   case "$v" in
     *"Doesn't Exist"*|*'Does Not Exist'*|*'Will Create'*) return 0 ;;
@@ -420,15 +479,28 @@ cmd_doctor() {
   # answered by reading a plist by hand.
   local penv armed
   penv="$(plist_value PLAYNEXA_WORKER_ENV '^(development|production)$')"
-  armed="$(plist_value WORKER_ALLOW_CRASH_TEST '^wkr_[0-9a-f]{32}$')"
+  armed="$(plist_value WORKER_ALLOW_CRASH_TEST '^wkr_[0-9a-f]{32}:[0-9]{10,}$')"
   say "environment     : ${penv:-not labelled (treated as production)}"
   if [ -n "$armed" ]; then
-    if [ "$armed" = "$wid" ]; then
-      say "crash test      : ARMED for this worker — a synthetic.crash_test task will SIGKILL it."
-      say "                  Disarm with: workerctl install <url> ${wid}   (no --crash-test)"
+    local armed_id armed_until now_s
+    armed_id="${armed%%:*}"
+    armed_until="${armed##*:}"
+    now_s="$(date +%s)"
+    if [ "$armed_id" != "$wid" ]; then
+      say "crash test      : arms ${armed_id}, which is NOT this worker (${wid:-none}) — inert."
+    elif [ "$now_s" -gt "$armed_until" ]; then
+      say "crash test      : EXPIRED at $(date -r "$armed_until" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "epoch ${armed_until}") — refuses, but the key is still in the plist."
+      say "                  Tidy it with: workerctl disarm"
     else
-      say "crash test      : armed for ${armed}, which is NOT this worker (${wid:-none}) — inert."
+      say "crash test      : ARMED for this worker until $(date -r "$armed_until" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "epoch ${armed_until}")"
+      say "                  ($(( (armed_until - now_s) / 60 )) minute(s) left). A synthetic.crash_test task will SIGKILL it."
+      say "                  Disarm now with: workerctl disarm"
     fi
+  elif [ -n "$(plist_value WORKER_ALLOW_CRASH_TEST '.')" ]; then
+    # Present but not in wid:deadline form — the handler refuses it, and saying "not armed" would
+    # be a measurement of the regex rather than of the plist.
+    say "crash test      : a WORKER_ALLOW_CRASH_TEST key is present but MALFORMED — the handler"
+    say "                  refuses it. Clear it with: workerctl disarm"
   else
     say "crash test      : not armed"
   fi
@@ -535,6 +607,7 @@ case "${1:-}" in
   start)     cmd_start ;;
   stop)      cmd_stop ;;
   restart)   cmd_restart ;;
+  disarm)    cmd_disarm ;;
   status)    cmd_status ;;
   logs)      shift; cmd_logs "$@" ;;
   doctor)    cmd_doctor ;;
@@ -546,6 +619,7 @@ PlayNexa worker control
   workerctl enroll  <https-api-base-url> [wkr_id]   FIRST:  token in, worker identity out
   workerctl install <https-api-base-url> <wkr_id>   SECOND: write and load the LaunchAgent
   workerctl start | stop | restart                  control the service
+  workerctl disarm                                  remove the crash-test arming now
   workerctl status                                  launchd state, pid, last exit code
   workerctl logs [lines]                            tail the worker log
   workerctl doctor                                  readiness; contacts nothing
