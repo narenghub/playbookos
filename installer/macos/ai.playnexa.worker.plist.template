@@ -39,8 +39,27 @@
     <string>__API_BASE_URL__</string>
     <key>WORKER_ID</key>
     <string>__WORKER_ID__</string>
+    <!--
+      NODE_ENV and PLAYNEXA_WORKER_ENV answer different questions, and conflating them is how a
+      development worker ends up with production's behaviour or production with development's.
+
+      NODE_ENV=production means "run optimized" — it is what node and the libraries read. It stays
+      `production` on a development worker ON PURPOSE: flipping it would change library behaviour
+      and the development worker would stop resembling the thing being certified.
+
+      PLAYNEXA_WORKER_ENV is this repo's own label, and nothing infers it. `workerctl install`
+      writes `production` unless given `--env development`, so an unstated environment is treated
+      as production and every development-only path stays shut.
+
+      It is deliberately NOT derived from the API URL. The development API's hostname is
+      `m7-dev-worker-api-production.up.railway.app` — it contains the word "production". A guard
+      that read the environment out of that string would be wrong in the dangerous direction.
+    -->
     <key>NODE_ENV</key>
     <string>production</string>
+    <key>PLAYNEXA_WORKER_ENV</key>
+    <string>__WORKER_ENV__</string>
+__ENV_EXTRA__
   </dict>
 
   <key>RunAtLoad</key>

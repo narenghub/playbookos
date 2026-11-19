@@ -64,12 +64,80 @@ refuse_privilege() {
 
 uid_target() { printf 'gui/%s' "$(id -u)"; }
 
+# ── DEFECT 7 (found on the office iMac, 2026-11-18) ─────────────────────────
+#
+# `cmd_install` used to boot out a RUNNING agent and bootstrap immediately. launchd had not
+# finished removing the job, so bootstrap failed with
+#
+#     Bootstrap failed: 5: Input/output error
+#
+# which names nothing that is actually wrong. The log timestamps settled it: SIGTERM at
+# 23:51:47.476Z, the process exiting at 23:51:48.887Z, and bootstrap attempted in the 1.4s
+# between. A retry minutes later succeeded — because time had passed, not because of anything
+# the operator did in between. Worse, `wrote $PLIST` had already printed, so the machine was left
+# holding a NEW plist with NO loaded agent.
+#
+# After bootout, wait until launchd agrees the label is gone, with a bound. On timeout, report
+# what launchd actually says rather than guessing at a cause.
+TEARDOWN_TIMEOUT_S="${WORKERCTL_TEARDOWN_TIMEOUT_S:-120}"
+STOP_TIMEOUT_S="${WORKERCTL_STOP_TIMEOUT_S:-120}"
+
+job_loaded() { launchctl print "$(uid_target)/${LABEL}" >/dev/null 2>&1; }
+
+# Scoped to this uid and to run.js, so it cannot match another account's worker. `|| true` because
+# pgrep exits 1 on no match and that is the normal, expected case.
+worker_pids() { pgrep -u "$(id -u)" -f 'worker-client/run\.js' 2>/dev/null || true; }
+
+# 0 = launchd no longer holds the label. 1 = it still did when the bound expired.
+wait_for_teardown() {
+  local waited=0
+  while job_loaded; do
+    [ "$waited" -lt "$TEARDOWN_TIMEOUT_S" ] || return 1
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+
+report_stuck_job() {
+  say "launchctl still reports ${LABEL} after ${TEARDOWN_TIMEOUT_S}s:"
+  launchctl print "$(uid_target)/${LABEL}" 2>&1 \
+    | grep -E '^[[:space:]]*(state|pid|last exit code) ' || say "  (launchctl print said nothing useful)"
+}
+
 cmd_install() {
   require_macos; refuse_privilege
   local url="${1:-}" wid="${2:-}"
-  [ -n "$url" ] && [ -n "$wid" ] || die "usage: workerctl install <api-base-url> <worker-id>"
+  [ -n "$url" ] && [ -n "$wid" ] || die "usage: workerctl install <api-base-url> <worker-id> [--env development|production] [--crash-test]"
   case "$url" in https://*) ;; *) die "the API base URL must be https://" ;; esac
   case "$wid" in wkr_*) ;; *) die "the worker id must look like wkr_<32 hex>" ;; esac
+  shift 2
+
+  # ── EXPLICIT ENVIRONMENT, DEFAULTING TO PRODUCTION ────────────────────────
+  #
+  # Unstated means production. That is the direction that fails safe: a worker installed without
+  # a decision cannot take any development-only path, and nothing is inferred from the URL (the
+  # dev API's own hostname contains the word "production" — see the plist template).
+  local worker_env="production" crash_test="no"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --env)         shift; worker_env="${1:-}" ;;
+      --env=*)       worker_env="${1#--env=}" ;;
+      --crash-test)  crash_test="yes" ;;
+      *) die "unknown install option: $1
+  usage: workerctl install <api-base-url> <worker-id> [--env development|production] [--crash-test]" ;;
+    esac
+    shift
+  done
+  case "$worker_env" in
+    development|production) ;;
+    *) die "--env must be exactly 'development' or 'production' (got '${worker_env}')" ;;
+  esac
+  if [ "$crash_test" = "yes" ] && [ "$worker_env" != "development" ]; then
+    die "--crash-test requires --env development.
+  It arms the M7.5 scenario-7 handshake, which makes the worker SIGKILL itself when it leases a
+  synthetic.crash_test task. That belongs nowhere near a production worker."
+  fi
 
   local node_bin; node_bin="$(command -v node)" || die "node is not on PATH"
   [ -f "$TEMPLATE" ] || die "missing template: $TEMPLATE"
@@ -79,21 +147,55 @@ cmd_install() {
   # Written to a temp file and moved, so an interrupted install never leaves a half-written plist
   # that launchd would then refuse in a confusing way.
   local tmp; tmp="$(mktemp)" || die "mktemp failed"
+
+  # The crash-test arming variable is written ONLY when asked for, and its value is this worker's
+  # own id rather than a boolean — so a variable left behind on one machine cannot arm a different
+  # worker, and re-enrolling (which changes the id) disarms it. Default installs contain no such
+  # key at all, which the rendering tests assert.
+  local extra; extra="$(mktemp)" || { rm -f "$tmp"; die "mktemp failed"; }
+  : > "$extra"
+  if [ "$crash_test" = "yes" ]; then
+    printf '    <key>WORKER_ALLOW_CRASH_TEST</key>\n    <string>%s</string>\n' "$wid" >> "$extra"
+  fi
+
   sed -e "s|__NODE_BIN__|${node_bin}|g" \
       -e "s|__WORKER_DIR__|${WORKER_DIR}|g" \
       -e "s|__API_BASE_URL__|${url}|g" \
       -e "s|__WORKER_ID__|${wid}|g" \
+      -e "s|__WORKER_ENV__|${worker_env}|g" \
       -e "s|__LOG_DIR__|${LOG_DIR}|g" \
-      "$TEMPLATE" > "$tmp" || die "could not render the plist"
+      -e "/__ENV_EXTRA__/r ${extra}" \
+      -e "/__ENV_EXTRA__/d" \
+      "$TEMPLATE" > "$tmp" || { rm -f "$extra"; die "could not render the plist"; }
+  rm -f "$extra"
 
   plutil -lint "$tmp" >/dev/null || { rm -f "$tmp"; die "the rendered plist is not valid"; }
   mv "$tmp" "$PLIST" || die "could not install the plist"
   chmod 644 "$PLIST"
   say "wrote $PLIST"
+  say "environment : ${worker_env}"
+  if [ "$crash_test" = "yes" ]; then
+    say "crash test  : ARMED for ${wid} — a synthetic.crash_test task will SIGKILL this worker."
+    say "              Disarm by re-running install without --crash-test."
+  fi
 
-  # Idempotent: bootout first, ignoring the failure when it was not loaded.
-  launchctl bootout "$(uid_target)/${LABEL}" 2>/dev/null || true
-  launchctl bootstrap "$(uid_target)" "$PLIST" || die "launchctl bootstrap failed"
+  # Idempotent: bootout first, ignoring the failure when it was not loaded. Then WAIT — see
+  # DEFECT 7 above. bootout returns before launchd has finished, and bootstrapping into a domain
+  # that still holds the label fails with an error that reads like a broken machine.
+  if job_loaded; then
+    say "an agent is already loaded; booting it out and waiting for launchd to release the label"
+    launchctl bootout "$(uid_target)/${LABEL}" 2>/dev/null || true
+  fi
+  if ! wait_for_teardown; then
+    report_stuck_job
+    die "launchd has not released ${LABEL}, so bootstrap would fail with 'Input/output error'.
+  The previous agent is still shutting down. The new plist IS written; re-run
+  'workerctl install' once 'workerctl status' reports it gone."
+  fi
+  launchctl bootstrap "$(uid_target)" "$PLIST" || die "launchctl bootstrap failed.
+  The label was confirmed absent first, so this is not the teardown race. Check whether the
+  label is disabled: launchctl print-disabled $(uid_target) | grep ${LABEL}
+  If it is, 'launchctl enable $(uid_target)/${LABEL}' and install again."
   say "loaded ${LABEL}"
   say ""
   # Install is the SECOND step. If the Keychain item is missing, enrolment either has not happened
@@ -125,9 +227,9 @@ cmd_install() {
 # you already have. Enrolment creates the identity and PRINTS its id; install then consumes it.
 cmd_enroll() {
   require_macos; refuse_privilege
-  local url="${1:-}" wid="${2:-}"
+  local url="${1:-}" wid='' token_file=''
   if [ -z "$url" ]; then
-    die "usage: workerctl enroll <api-base-url> [existing-worker-id]
+    die "usage: workerctl enroll <api-base-url> [existing-worker-id] [--token-file <path>]
   The URL is required: enrolment is a request TO the API, and the worker id does not
   exist until that request returns it. Enrol first, then install with the id it prints."
   fi
@@ -136,16 +238,58 @@ cmd_enroll() {
     http://127.0.0.1*|http://localhost*) say "NOTE: enrolling over loopback HTTP — tests only." ;;
     *) die "the API base URL must be https:// (loopback http is permitted for tests only)" ;;
   esac
-  if [ -n "$wid" ]; then
-    case "$wid" in wkr_*) ;; *) die "the optional worker id must look like wkr_<32 hex>" ;; esac
-  fi
+  shift
 
-  # The TOKEN is read from the terminal with `read -s` and never appears in argv, so it cannot be
-  # captured by `ps` or land in shell history. The same applies to the secret it is exchanged for.
-  say "Paste the enrollment token (it will not be echoed), then press return:"
-  local token; IFS= read -rs token
-  say ""
-  [ -n "$token" ] || die "no token given"
+  # The worker id is optional and the flags may come in any order, so the id is recognised by SHAPE
+  # rather than by position. Taking $2 as the id unconditionally would have made
+  # `workerctl enroll <url> --token-file f` die with "the optional worker id must look like wkr_…".
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --token-file)   shift; token_file="${1:-}"; [ -n "$token_file" ] || die "--token-file needs a path" ;;
+      --token-file=*) token_file="${1#--token-file=}"; [ -n "$token_file" ] || die "--token-file needs a path" ;;
+      wkr_*)          wid="$1" ;;
+      *) die "unknown enroll argument: $1
+  usage: workerctl enroll <api-base-url> [existing-worker-id] [--token-file <path>]" ;;
+    esac
+    shift
+  done
+
+  # ── HOW THE TOKEN GETS IN ─────────────────────────────────────────────────
+  #
+  # A silent `read -rs` was the only way in, and on 2026-11-18 it cost three failed attempts and
+  # one wasted token. macOS Terminal sends bracketed-paste markers; zsh re-enables that at every
+  # prompt, so disabling it once does nothing; a silent read echoes nothing, so a mangled paste is
+  # indistinguishable from a good one until the API answers. One attempt sent 112 bytes — the token
+  # plus 43 bytes of adjacent screen text — and the only reason we found out was that the API
+  # distinguishes `unknown_token` from `token_expired`.
+  #
+  # So --token-file reads the token from a file and EXTRACTS it by shape, then checks the length
+  # BEFORE spending it. The token still never appears in argv (only the path does), so `ps` and
+  # shell history are no worse off than before, and the file is the caller's to remove.
+  local token=''
+  if [ -n "$token_file" ]; then
+    [ -f "$token_file" ] || die "no such token file: $token_file"
+    token="$(grep -oE 'wet_[A-Za-z0-9]{64}' "$token_file" | head -1)"
+    if [ -z "$token" ]; then
+      die "no enrollment token found in $token_file.
+  Expected a wet_ token of 68 characters somewhere in the file. The file holds $(wc -c < "$token_file" | tr -d ' ') byte(s),
+  which is reported instead of its contents on purpose."
+    fi
+    say "read a ${#token}-character token from ${token_file} (not echoed)"
+  else
+    say "Paste the enrollment token (it will not be echoed), then press return:"
+    IFS= read -rs token
+    say ""
+    [ -n "$token" ] || die "no token given"
+    # Length only. A token of the wrong length is a mangled paste, and saying so before the request
+    # is the difference between one retry and three.
+    if [ "${#token}" -ne 68 ]; then
+      die "that is ${#token} characters; an enrollment token is 68.
+  Almost certainly a mangled paste — bracketed-paste markers, or surrounding text that came along
+  with it. Nothing was sent, so the token is unspent. Try again, or use:
+      workerctl enroll $url --token-file <file>"
+    fi
+  fi
 
   say "exchanging it for a worker secret…"
   if [ -n "$wid" ]; then
@@ -163,8 +307,52 @@ cmd_enroll() {
 }
 
 cmd_start()   { require_macos; launchctl kickstart "$(uid_target)/${LABEL}" && say "started"; }
-cmd_stop()    { require_macos; launchctl bootout "$(uid_target)/${LABEL}" 2>/dev/null; say "stopped"; }
 cmd_restart() { require_macos; launchctl kickstart -k "$(uid_target)/${LABEL}" && say "restarted"; }
+
+# ── DEFECT 8 (found the same morning, 2026-11-18) ───────────────────────────
+#
+# This printed "stopped" unconditionally, immediately after `bootout`. The first stop of the day
+# printed it while `status` still showed `state = SIGTERMed`, `pid = 5277`, `last exit code =
+# (never exited)`. The word was a statement about having issued a command, not about anything
+# having stopped — which is the whole defect class this repo keeps finding.
+#
+# "Stopped" now means two things, both checked: launchd no longer holds the label, AND no worker
+# process survives. Either one unmet is a non-zero exit, because a caller that goes on to install
+# over a still-running agent walks straight into DEFECT 7.
+cmd_stop() {
+  require_macos
+  local before; before="$(worker_pids | tr '\n' ' ')"
+
+  launchctl bootout "$(uid_target)/${LABEL}" 2>/dev/null || true
+
+  if ! wait_for_teardown; then
+    report_stuck_job
+    say "NOT stopped: launchd still holds ${LABEL}."
+    return 1
+  fi
+
+  # The label being gone does not mean the process is gone. A worker mid-request, or one ignoring
+  # SIGTERM, outlives its job entry.
+  local waited=0 remaining
+  remaining="$(worker_pids | tr '\n' ' ')"
+  while [ -n "${remaining// /}" ]; do
+    if [ "$waited" -ge "$STOP_TIMEOUT_S" ]; then
+      say "NOT stopped: worker process(es) still running after ${STOP_TIMEOUT_S}s: ${remaining}"
+      say "  The LaunchAgent is unloaded, so launchd will not restart them, but they are alive."
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+    remaining="$(worker_pids | tr '\n' ' ')"
+  done
+
+  if [ -n "${before// /}" ]; then
+    say "stopped (pid(s) ${before}exited after ${waited}s)"
+  else
+    say "stopped (nothing was running)"
+  fi
+  return 0
+}
 
 cmd_status() {
   require_macos
@@ -226,6 +414,24 @@ cmd_doctor() {
   say "plist installed : $([ -f "$PLIST" ] && echo yes || echo no)"
   say "account         : $(id -un) (admin: $(id -Gn | tr ' ' '\n' | grep -qx admin && echo YES || echo no))"
   say "log dir         : $([ -d "$LOG_DIR" ] && echo "$LOG_DIR" || echo 'absent')"
+  # The environment label and the crash-test arming are both invisible otherwise, and an armed
+  # worker left behind after an acceptance run is a machine that will SIGKILL itself the next time
+  # a crash_test task appears in the queue. Reported here so "is this thing armed?" never has to be
+  # answered by reading a plist by hand.
+  local penv armed
+  penv="$(plist_value PLAYNEXA_WORKER_ENV '^(development|production)$')"
+  armed="$(plist_value WORKER_ALLOW_CRASH_TEST '^wkr_[0-9a-f]{32}$')"
+  say "environment     : ${penv:-not labelled (treated as production)}"
+  if [ -n "$armed" ]; then
+    if [ "$armed" = "$wid" ]; then
+      say "crash test      : ARMED for this worker — a synthetic.crash_test task will SIGKILL it."
+      say "                  Disarm with: workerctl install <url> ${wid}   (no --crash-test)"
+    else
+      say "crash test      : armed for ${armed}, which is NOT this worker (${wid:-none}) — inert."
+    fi
+  else
+    say "crash test      : not armed"
+  fi
   say ""
 
   out="$(WORKER_API_BASE_URL="$url" WORKER_ID="$wid" \
