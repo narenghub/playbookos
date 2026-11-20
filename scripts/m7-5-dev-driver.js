@@ -258,6 +258,30 @@ const RETAINED_BY_DESIGN = [
     + 'keeping it also stops a rerun silently reusing a revoked credential'],
   ['worker_audit', 'the GRANTED/DENIED audit trail for this run — governance history, deleting it '
     + 'would destroy the evidence scenarios 2 and 8 produced'],
+  // Added 2026-11-20, after the fourth run. These two are not a choice:
+  //
+  //   ERROR  agent_run_events: agent_run_events is append-only: DELETE is not permitted
+  //   ERROR  agent_runs: violates foreign key constraint "agent_run_events_run_id_fkey"
+  //
+  // `trg_agent_run_events_append_only` (src/lib/runs.js) raises on UPDATE or DELETE, the same
+  // mechanism as autonomy_events and lead_outcomes: "the database refuses, so no future call path
+  // can quietly rewrite history." Events therefore cannot be deleted by anyone, and a run that
+  // emitted any event cannot be deleted either, because the FK has no CASCADE.
+  //
+  // The previous version deleted children before parents, which was the right ordering for a
+  // deletable child and the wrong premise entirely. It then reported 12 surviving rows as a
+  // FIXTURE LEAK and failed the run for them — blaming the harness for an immutability guarantee
+  // working exactly as designed.
+  //
+  // So run history is retained, deliberately, and said so. That is also what the Phase 3
+  // instruction asked for: preserve legitimate audit history. Retention is safe because every run
+  // ends terminal (uq_agent_runs_one_active only constrains non-terminal rows) and because per-run
+  // intent keys mean no later run inherits these as a predecessor.
+  ['agent_runs', 'run history for this acceptance run — a run that emitted any event CANNOT be '
+    + 'deleted (agent_run_events is append-only and its FK has no CASCADE), so this is retained '
+    + 'rather than attempted and reported as a leak'],
+  ['agent_run_events', 'append-only by database trigger: DELETE raises. This is the immutability '
+    + 'guarantee working, not a cleanup failure'],
 ];
 
 async function cleanup() {
@@ -287,18 +311,12 @@ async function cleanup() {
   for (const id of made.taskIds) {
     await del('worker_results', `DELETE FROM worker_results WHERE task_id = $1`, [id]);
   }
+  // This run's own run ids, resolved for REPORTING only. Nothing below deletes them: see
+  // RETAINED_BY_DESIGN above for why the database will not permit it and why that is correct.
   if (made.intentKeys.length) {
-    // Resolved and RECORDED before either delete, so both statements below name ids this run is
-    // on the record as owning. Resolving by this run's own intent keys is what keeps another
-    // run's rows out of the list.
     for (const r of (await query(
       `SELECT run_id FROM agent_runs WHERE intent_key = ANY($1)`, [made.intentKeys])).rows) {
       if (!made.runIds.includes(r.run_id)) made.runIds.push(r.run_id);
-    }
-    if (made.runIds.length) {
-      await del('agent_run_events',
-        `DELETE FROM agent_run_events WHERE run_id = ANY($1)`, [made.runIds]);
-      await del('agent_runs', `DELETE FROM agent_runs WHERE run_id = ANY($1)`, [made.runIds]);
     }
   }
   for (const id of made.taskIds) {
@@ -326,13 +344,19 @@ async function cleanup() {
     leaked += await survivors('worker_results',
       `SELECT COUNT(*)::int n FROM worker_results WHERE task_id = ANY($1)`, [made.taskIds]);
   }
+  // agent_runs and agent_run_events are counted, not judged: they are retained on purpose and
+  // reported under RETAINED_BY_DESIGN with their counts. Counting them as leaks is what failed
+  // the fourth run for the database's own immutability guarantee.
+  let auditRuns = 0;
+  let auditEvents = 0;
   if (made.intentKeys.length) {
-    leaked += await survivors('agent_runs',
-      `SELECT COUNT(*)::int n FROM agent_runs WHERE intent_key = ANY($1)`, [made.intentKeys]);
-    leaked += await survivors('agent_run_events',
+    auditRuns = Number((await one(
+      `SELECT COUNT(*)::int n FROM agent_runs WHERE intent_key = ANY($1)`, [made.intentKeys])).n);
+    auditEvents = Number((await one(
       `SELECT COUNT(*)::int n FROM agent_run_events e
         WHERE EXISTS (SELECT 1 FROM agent_runs r
-                       WHERE r.run_id = e.run_id AND r.intent_key = ANY($1))`, [made.intentKeys]);
+                       WHERE r.run_id = e.run_id AND r.intent_key = ANY($1))`,
+      [made.intentKeys])).n);
   }
   for (const st of made.stops) {
     leaked += await survivors('autonomy_stops',
@@ -344,8 +368,13 @@ async function cleanup() {
   // with "leaked".
   const auditN = made.taskIds.length ? (await one(
     `SELECT COUNT(*)::int n FROM worker_audit WHERE task_id = ANY($1)`, [made.taskIds])).n : 0;
+  const retainedCount = {
+    worker_audit: `${auditN} row(s)`,
+    agent_runs: `${auditRuns} row(s)`,
+    agent_run_events: `${auditEvents} row(s)`,
+  };
   for (const [table, why] of RETAINED_BY_DESIGN) {
-    retained.push({ table, what: table === 'worker_audit' ? `${auditN} row(s)` : 'all rows', why });
+    retained.push({ table, what: retainedCount[table] || 'all rows', why });
   }
 
   // ── nothing claimable is left behind, for ANY acceptance run ──
@@ -365,7 +394,7 @@ async function cleanup() {
 
   // ── the report ──
   console.log('\n  fixture cleanup, by table:');
-  const tablesTouched = ['worker_results', 'agent_run_events', 'agent_runs', 'worker_tasks', 'autonomy_stops'];
+  const tablesTouched = ['worker_results', 'worker_tasks', 'autonomy_stops'];
   for (const t of tablesTouched) {
     console.log(`    ${t.padEnd(18)} deleted ${String(deleted.get(t) || 0).padStart(3)}`);
   }
@@ -1044,12 +1073,47 @@ async function cmdScenarios() {
           [IK('crash')]);
         return r && r.heartbeat_at ? new Date(r.heartbeat_at).getTime() : null;
       })();
+      // ── WHY THIS IS NOT A 240-SECOND WAIT ANY MORE ──────────────────────
+      //
+      // The fourth run FAILED here after 240s with "the crashed task never settled". It could not
+      // have succeeded. `claimTask` writes `max_runtime_minutes = ceilingFor(task_type)` onto the
+      // lease — 5 minutes for synthetic.crash_test — and `recovery.reap` only abandons a run that
+      // is OVER its ceiling. So the test waited 4 minutes for something that cannot happen before
+      // 5, on any hardware, ever. The crash, the SIGKILL and the relaunch had all worked: the iMac
+      // log showed `crash_test_self_kill` at 18:43:43.493 and `started` 249ms later.
+      //
+      // That is the same defect as scenario 4's contradiction, in time rather than in logic: a
+      // pass condition the test's own budget forbids.
+      //
+      // The fix is the one scenario 5 already uses — age THIS run past its own declared ceiling
+      // and then reap. The reaper's timing is scenario 5's subject; what scenario 7 is about is
+      // that a lease whose worker died reaches a terminal disposition and is not re-executed. The
+      // ceiling is READ FROM THE ROW rather than assumed, so changing ceilingFor() cannot quietly
+      // reintroduce the mismatch, and the margin is asserted out loud.
+      const run7 = await one(
+        `SELECT run_id, max_runtime_minutes FROM agent_runs
+          WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`, [IK('crash')]);
+      const ceilingMin = run7 && run7.max_runtime_minutes != null
+        ? Number(run7.max_runtime_minutes) : null;
+      if (ceilingMin === null) {
+        bad('the crash lease declared no ceiling, so the reaper has nothing to go on',
+          JSON.stringify(run7));
+      } else {
+        const ageMin = ceilingMin + 10;
+        note(`the lease declares a ${ceilingMin}-minute ceiling; ageing this run by ${ageMin} `
+          + 'minutes so the reaper is entitled to act. Waiting out a real ceiling would mean a '
+          + `${ceilingMin}-minute test, and the 4-minute budget it replaced could never pass.`);
+        await query(
+          `UPDATE agent_runs SET started_at   = NOW() - ($2::int * INTERVAL '1 minute'),
+                                 heartbeat_at = NOW() - ($2::int * INTERVAL '1 minute')
+            WHERE run_id = $1`, [run7.run_id, ageMin]);
+      }
       const settled = await until('the abandoned lease is reflected', async () => {
         await require('../src/lib/office/recovery').reap({ dryRun: false, limit: 50 }, deps);
         await LEASES.reflectAbandonedLeases({}, deps);
         const r = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t6.taskId]);
         return r.state === 'NEEDS_RESOLUTION' ? r : null;
-      }, { timeoutMs: 240_000, everyMs: 5000 });
+      }, { timeoutMs: 60_000, everyMs: 5000 });
 
       // ── DID THE CRASH ACTUALLY HAPPEN? ──────────────────────────────────
       //

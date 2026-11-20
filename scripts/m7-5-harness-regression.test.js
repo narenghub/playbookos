@@ -266,7 +266,12 @@ test('DECISIVE: every table cleanup deletes from is also verified', () => {
     [...body.matchAll(/DELETE FROM ([a-z_]+)/g)].map((m) => m[1]));
   const verified = new Set(
     [...body.matchAll(/survivors\('([a-z_]+)'/g)].map((m) => m[1]));
-  assert.ok(deletedFrom.size >= 4, `expected several tables, found ${[...deletedFrom]}`);
+  // Three since 2026-11-20: worker_results, worker_tasks, autonomy_stops. agent_runs and
+  // agent_run_events left the list because the database refuses to delete them, not because
+  // anyone chose to stop checking — the test above pins that, and this one pins the rest.
+  assert.ok(deletedFrom.size >= 3, `expected several tables, found ${[...deletedFrom]}`);
+  assert.ok(!deletedFrom.has('agent_runs') && !deletedFrom.has('agent_run_events'),
+    'append-only audit tables must not be in the delete set at all');
   const unchecked = [...deletedFrom].filter((t) => !verified.has(t));
   assert.deepEqual(unchecked, [],
     'these tables are written and never verified, which is exactly what produced '
@@ -289,19 +294,83 @@ test('CONTROL: the original cleanup fails both of those assertions', () => {
     'and must still delete from more tables than it verifies');
 });
 
-test('cleanup deletes children before parents, because the FK has no CASCADE', () => {
+test('DECISIVE: cleanup does not attempt deletes the database refuses', () => {
+  // The fourth run's cleanup failed with
+  //   ERROR agent_run_events: agent_run_events is append-only: DELETE is not permitted
+  //   ERROR agent_runs: violates foreign key constraint "agent_run_events_run_id_fkey"
+  // and then reported 12 retained rows as a FIXTURE LEAK, failing the run for an immutability
+  // guarantee working exactly as designed. Ordering children before parents was the right fix for
+  // a deletable child and the wrong premise: this child cannot be deleted by anyone.
   const body = cleanupBody();
-  const iEvents = body.indexOf('DELETE FROM agent_run_events');
-  const iRuns = body.indexOf('DELETE FROM agent_runs');
-  assert.ok(iEvents !== -1 && iRuns !== -1, 'both deletes must exist');
-  assert.ok(iEvents < iRuns,
-    'agent_run_events references agent_runs with no ON DELETE CASCADE, so the child goes first');
+  assert.ok(!/DELETE FROM agent_run_events/.test(body),
+    'agent_run_events is append-only; a DELETE against it can only ever raise');
+  assert.ok(!/DELETE FROM agent_runs/.test(body),
+    'a run that emitted any event cannot be deleted either — the FK has no CASCADE');
+  assert.match(SRC, /\['agent_runs',/, 'run history must be declared retained by design');
+  assert.match(SRC, /\['agent_run_events',/, 'and so must its events');
+});
 
+test('CONTROL: the append-only trigger and the un-CASCADEd FK are both still there', () => {
+  // The assertion above is about strings in the driver. This is about the schema, so the rule
+  // cannot keep passing after the database stops enforcing it — at which point deleting fixture
+  // runs becomes possible again and should be reconsidered deliberately, not inherited.
   const runs = fs.readFileSync(path.join(__dirname, '..', 'src/lib/runs.js'), 'utf8');
+  assert.match(runs, /agent_run_events is append-only/,
+    'if this trigger is ever removed, revisit the cleanup policy on purpose');
+  assert.match(runs, /BEFORE UPDATE OR DELETE ON agent_run_events/);
   const fk = /run_id\s+UUID NOT NULL REFERENCES agent_runs\(run_id\)([^\n]*)/.exec(runs);
   assert.ok(fk, 'the agent_run_events FK must still be there');
   assert.ok(!/ON DELETE CASCADE/i.test(fk[1]),
-    'if a CASCADE is ever added, this ordering requirement can be relaxed deliberately');
+    'a CASCADE would change what is deletable, and the policy with it');
+});
+
+test('retained audit rows are reported with real counts, not as leaks', () => {
+  const body = cleanupBody();
+  assert.match(body, /auditRuns/, 'run history must be counted');
+  assert.match(body, /auditEvents/, 'and its events');
+  assert.ok(!/survivors\('agent_run/.test(body),
+    'counting audit rows as survivors is what failed the fourth run');
+});
+
+// ── SCENARIO 7 — THE BUDGET THAT COULD NOT SATISFY ITS OWN CONDITION ────────
+
+test('DECISIVE: scenario 7 does not wait less than the ceiling it waits for', () => {
+  // The fourth run FAILED after 240s. `claimTask` writes max_runtime_minutes = ceilingFor(type)
+  // onto the lease — 5 minutes for synthetic.crash_test — and recovery.reap only abandons a run
+  // OVER its ceiling. 240s < 300s, so the pass condition was unreachable on any hardware. The
+  // crash itself had worked: crash_test_self_kill, then started 249ms later.
+  const s = code(scenario(7));
+  assert.match(s, /max_runtime_minutes/,
+    'the ceiling must be read from the row, never assumed');
+  assert.match(s, /UPDATE agent_runs SET started_at/,
+    'and the run aged past it, the way scenario 5 already does');
+  assert.match(s, /ceilingMin \+ 10/, 'with an explicit margin');
+
+  const types = fs.readFileSync(path.join(__dirname, '..', 'src/lib/worker/task-types.js'), 'utf8');
+  const block = /'synthetic\.crash_test':\s*\{([\s\S]*?)\}/.exec(types);
+  assert.ok(block, 'synthetic.crash_test must still declare a ceiling');
+  const ceiling = /ceilingMinutes:\s*(\d+)/.exec(block[1]);
+  assert.ok(ceiling, 'ceilingMinutes not found');
+  const ceilingMs = Number(ceiling[1]) * 60_000;
+
+  // Any remaining wait in the scenario must either be irrelevant to the reaper or exceed the
+  // ceiling. The ageing above is what makes the short budget legitimate; this check makes the
+  // RELATIONSHIP explicit so removing the ageing fails here rather than on hardware.
+  const budgets = [...s.matchAll(/timeoutMs:\s*([0-9_]+)/g)].map((m) => Number(m[1].replace(/_/g, '')));
+  const settleBudget = budgets.find((b) => b >= 30_000);
+  assert.ok(settleBudget, `expected a settle budget, found ${JSON.stringify(budgets)}`);
+  if (settleBudget < ceilingMs) {
+    assert.match(s, /UPDATE agent_runs SET started_at/,
+      `the settle budget is ${settleBudget}ms against a ${ceilingMs}ms ceiling, so the run MUST be `
+      + 'aged or the condition is unreachable');
+  }
+});
+
+test('CONTROL: the 240s-against-a-5-minute-ceiling shape is still detectable', () => {
+  const broken = "const settled = await until('x', async () => {}, { timeoutMs: 240_000 });";
+  const budget = Number(/timeoutMs:\s*([0-9_]+)/.exec(broken)[1].replace(/_/g, ''));
+  assert.ok(budget < 5 * 60_000 && !/UPDATE agent_runs SET started_at/.test(broken),
+    'a short budget with no ageing must remain recognisable, or the test above is decoration');
 });
 
 test('cleanup reports per table, and never claims more than it verified', () => {
