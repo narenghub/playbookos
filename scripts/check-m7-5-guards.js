@@ -358,12 +358,25 @@ for (const forbidden of [
 // placeholder". A rule relaxed to accommodate one table stops catching the thing it was written for.
 const KEYED = /WHERE\s+\w+\s*=\s*\$1\s*$/i;
 const KEYED_COMPOSITE = /WHERE\s+scope_type\s*=\s*\$1\s+AND\s+scope_key\s*=\s*\$2\s*$/i;
+// A batched delete over a RECORDED list of ids. Added when cleanup had to delete agent_run_events
+// before agent_runs — that FK has no ON DELETE CASCADE, and a row-at-a-time delete over two
+// parent tables is both slower and harder to read than one keyed by the list.
+//
+// The list is not taken on trust. `= ANY($1)` counts as keyed only when the statement's parameter
+// is drawn from `made.` — the record of what this run created. A delete keyed to a local variable
+// the guard cannot trace is NOT accepted, because "it was derived from recorded ids" is a claim
+// about code the guard has not read, and that is precisely the kind of claim this file exists to
+// stop taking at face value.
+const KEYED_ANY = /WHERE\s+\w+\s*=\s*ANY\(\$1\)\s*$/i;
+const RECORDED_PARAM = /\[\s*made\.\w+\s*\]/;
 const deleteLines = driverSrc.split('\n')
   .map((l) => l.replace(/`.*$/, (m) => m))       // keep the line as written
   .filter((l) => /DELETE FROM/i.test(l));
 const unkeyed = deleteLines.filter((l) => {
   const sql = (l.match(/DELETE FROM[^`]*/i) || [''])[0].trim();
-  return !KEYED.test(sql) && !KEYED_COMPOSITE.test(sql);
+  if (KEYED.test(sql) || KEYED_COMPOSITE.test(sql)) return false;
+  if (KEYED_ANY.test(sql)) return !RECORDED_PARAM.test(l);
+  return true;
 });
 if (deleteLines.length && unkeyed.length === 0) {
   ok(`all ${deleteLines.length} DELETE statements name a recorded identity`);
@@ -371,9 +384,31 @@ if (deleteLines.length && unkeyed.length === 0) {
   bad('no DELETE statements found at all — the cleanup this check exists to police has moved');
 } else bad(`${unkeyed.length} DELETE statement(s) are not keyed to a recorded identity`, unkeyed[0].trim());
 
-if (/COUNT\(\*\)::int n FROM worker_tasks WHERE id = \$1/.test(driverSrc)) {
+// Either keyed shape satisfies this: what matters is that the verification names the fixtures,
+// never that a table is empty. The requirement is the WHERE clause, not the operator in it.
+if (/COUNT\(\*\)::int n FROM worker_tasks WHERE id = (?:\$1|ANY\(\$1\))/.test(driverSrc)) {
   ok('and it verifies its own fixtures are gone, not that the tables are empty');
 } else bad('cleanup does not verify its fixtures by id');
+
+// Added 2026-11-20. The cleanup wrote four tables and verified two, over an empty catch, and
+// reported success — so the per-table rule is now enforced here as well as in the regression
+// suite. A guard that checks only the tables somebody remembered to list is the same defect.
+{
+  const body = driverSrc.slice(driverSrc.indexOf('async function cleanup() {'),
+    driverSrc.indexOf('\nasync function setStop'));
+  const written = new Set([...body.matchAll(/DELETE FROM ([a-z_]+)/g)].map((m) => m[1]));
+  const checked = new Set([...body.matchAll(/survivors\('([a-z_]+)'/g)].map((m) => m[1]));
+  const missing = [...written].filter((t) => !checked.has(t));
+  if (written.size && !missing.length) {
+    ok(`every table cleanup writes (${written.size}) is also verified by id`);
+  } else if (!written.size) {
+    bad('cleanup appears to delete nothing — this check has lost its subject');
+  } else bad(`${missing.length} table(s) are deleted from but never verified`, missing.join(', '));
+
+  if (/catch\s*\(\s*_\s*\)\s*\{\s*\}/.test(body)) {
+    bad('cleanup swallows an exception', 'the agent_runs FK failure hid behind exactly this');
+  } else ok('and no cleanup exception is swallowed');
+}
 
 if (!/COUNT\(\*\)[^\n]*FROM (worker_tasks|autonomy_stops)\s*`\s*\)/.test(driverSrc)) {
   ok('no unqualified table count is asserted anywhere');

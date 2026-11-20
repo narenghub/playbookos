@@ -192,6 +192,14 @@ pf_step "a real worker executes, is cancellable mid-flight, and never re-execute
 # a guard that refused everything (and so made M7.5 impossible) would fail too. Verified to catch a
 # planted TLS bypass, a planted ten-minute DELETE, and a host quietly removed from the list.
 pf_step "the M7.5 hardware scripts refuse production and cannot fake evidence" node scripts/check-m7-5-guards.js
+# The third hardware acceptance run aborted twenty minutes in, on hardware, with an armed crash
+# test, because a statement named a column that does not exist — written from memory and never
+# executed. Nothing but running it could have caught that, so the harness's SQL is now resolved
+# against the schema the application itself creates, statically, here. --self-test runs first: a
+# linter nobody has seen reject anything is decoration, and this one is verified to reject both
+# statements that actually failed on hardware and to accept their corrected forms.
+pf_step "the acceptance harness's SQL checker discriminates" node scripts/check-driver-sql.js --self-test
+pf_step "every table and column the acceptance harness names exists" node scripts/check-driver-sql.js
 # The whole operator sequence for the M7 dev environment, executed on a throwaway cluster: the
 # dev-only migration, the dev API's refusals, the 42-cron containment, and then THE COMPOSITION —
 # the worker must still execute with that containment in force. Each half is proven elsewhere;

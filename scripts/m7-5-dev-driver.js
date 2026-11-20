@@ -111,6 +111,7 @@ const withTransaction = async (fn) => {
 
 const IDENTITY = require('../src/lib/worker/identity');
 const LEASES = require('../src/lib/worker/leases');
+const AUTH = require('../src/lib/worker/auth');   // scenario 4 asks the authority the way heartbeat() does
 const autonomy = require('../src/lib/autonomy');
 const deps = { query, withTransaction, env: process.env };
 
@@ -226,43 +227,166 @@ const IK = (scenario) => KEYS.intentKey(RUN_ID, scenario);
 
 // Everything this script creates, so cleanup removes exactly that and nothing else — by id, never
 // by timestamp, never by pattern, never by "recent".
-const made = { taskIds: [], intentKeys: [], workerIds: [], stops: [] };
+// Every fixture identity this run creates or resolves, recorded as it happens. `runIds` is
+// populated by cleanup() the moment it resolves this run's intent keys to run ids, BEFORE
+// anything is deleted — so every DELETE names an id held in `made`, and the M7.5 guard can see
+// that it does rather than having to trace a local variable.
+const made = { taskIds: [], intentKeys: [], workerIds: [], runIds: [], stops: [] };
+
+// ── FIXTURE CLEANUP, REPORTED PER TABLE ─────────────────────────────────────
+//
+// The previous version of this function wrapped every statement in `try { … } catch (_) {}` and
+// then verified only `worker_tasks` and `autonomy_stops`. It printed "every fixture this script
+// created was removed, by id".
+//
+// It could not have known that. Two of the four tables it wrote were never checked, and the
+// exception that would have told it was discarded unread.
+//
+// And one of them was failing. `agent_run_events.run_id REFERENCES agent_runs(run_id)` carries NO
+// ON DELETE CASCADE (src/lib/runs.js), so deleting a fixture run that recorded any event raises a
+// foreign-key violation. Every run that got as far as emitting events therefore left its
+// `agent_runs` row behind, silently, under a success message — which is exactly where the four
+// leftover `m75-%` ABANDONED rows found on 2026-11-19 came from. The residue that forced per-run
+// intent isolation was manufactured by this function's own swallowed exception.
+//
+// So: children before parents, no swallowing, a count from every statement, and a per-table
+// verification that names what survived. Nothing here widens beyond ids this run recorded
+// creating, and nothing here touches another run's records.
+const RETAINED_BY_DESIGN = [
+  ['worker_identities', 'one identity was deliberately revoked; that record IS the evidence, and '
+    + 'keeping it also stops a rerun silently reusing a revoked credential'],
+  ['worker_audit', 'the GRANTED/DENIED audit trail for this run — governance history, deleting it '
+    + 'would destroy the evidence scenarios 2 and 8 produced'],
+];
 
 async function cleanup() {
+  const deleted = new Map();      // table -> rows removed
+  const retained = [];            // { table, what, why }
+  const errors = [];              // { table, detail }  — never swallowed
+  const del = async (table, sql, params) => {
+    try {
+      const r = await query(sql, params);
+      deleted.set(table, (deleted.get(table) || 0) + (r.rowCount || 0));
+    } catch (e) {
+      // Recorded and carried on, so one blocked delete cannot abandon the remaining fixtures —
+      // but it is reported, and it fails the cleanup.
+      errors.push({ table, detail: String((e && e.message) || e).slice(0, 200) });
+    }
+  };
+
+  // What was already here, so the preservation claim at the end is a comparison rather than a
+  // hope. These are other runs' records: this run must leave them exactly as it found them.
+  const foreign = await query(
+    `SELECT run_id, intent_key, state FROM agent_runs
+      WHERE intent_key LIKE $1 AND NOT (intent_key = ANY($2))
+      ORDER BY intent_key`,
+    [KEYS.LIKE_PATTERN, made.intentKeys.length ? made.intentKeys : ['']]);
+
+  // ── children first ──
   for (const id of made.taskIds) {
-    try { await query(`DELETE FROM worker_results WHERE task_id = $1`, [id]); } catch (_) {}
-    try { await query(`DELETE FROM worker_tasks WHERE id = $1`, [id]); } catch (_) {}
+    await del('worker_results', `DELETE FROM worker_results WHERE task_id = $1`, [id]);
   }
-  for (const k of made.intentKeys) {
-    try { await query(`DELETE FROM agent_runs WHERE intent_key = $1`, [k]); } catch (_) {}
+  if (made.intentKeys.length) {
+    // Resolved and RECORDED before either delete, so both statements below name ids this run is
+    // on the record as owning. Resolving by this run's own intent keys is what keeps another
+    // run's rows out of the list.
+    for (const r of (await query(
+      `SELECT run_id FROM agent_runs WHERE intent_key = ANY($1)`, [made.intentKeys])).rows) {
+      if (!made.runIds.includes(r.run_id)) made.runIds.push(r.run_id);
+    }
+    if (made.runIds.length) {
+      await del('agent_run_events',
+        `DELETE FROM agent_run_events WHERE run_id = ANY($1)`, [made.runIds]);
+      await del('agent_runs', `DELETE FROM agent_runs WHERE run_id = ANY($1)`, [made.runIds]);
+    }
+  }
+  for (const id of made.taskIds) {
+    await del('worker_tasks', `DELETE FROM worker_tasks WHERE id = $1`, [id]);
   }
   // autonomy_stops has no id column: its identity IS (scope_type, scope_key), which is the primary
   // key. So this is still "delete exactly the row I recorded creating" — the recorded identity just
   // happens to be two columns. It is NOT a widening.
-  for (const s of made.stops) {
-    try {
-      await query(`DELETE FROM autonomy_stops WHERE scope_type = $1 AND scope_key = $2`,
-        [s.scopeType, s.scopeKey]);
-    } catch (_) {}
+  for (const st of made.stops) {
+    await del('autonomy_stops',
+      `DELETE FROM autonomy_stops WHERE scope_type = $1 AND scope_key = $2`,
+      [st.scopeType, st.scopeKey]);
   }
-  // Worker identities are NOT deleted: one of them was deliberately revoked and that record is the
-  // evidence. Leaving it also means a rerun cannot silently reuse a revoked credential.
-  const leaked = [];
-  for (const id of made.taskIds) {
-    const r = await one(`SELECT COUNT(*)::int n FROM worker_tasks WHERE id = $1`, [id]);
-    if (Number(r.n)) leaked.push(id);
+
+  // ── verification, per table, by id ──
+  const survivors = async (table, sql, params) => {
+    const r = await one(sql, params);
+    if (Number(r.n) > 0) retained.push({ table, what: `${r.n} row(s)`, why: 'NOT REMOVED — fixture leak' });
+    return Number(r.n);
+  };
+  let leaked = 0;
+  if (made.taskIds.length) {
+    leaked += await survivors('worker_tasks',
+      `SELECT COUNT(*)::int n FROM worker_tasks WHERE id = ANY($1)`, [made.taskIds]);
+    leaked += await survivors('worker_results',
+      `SELECT COUNT(*)::int n FROM worker_results WHERE task_id = ANY($1)`, [made.taskIds]);
   }
-  for (const s of made.stops) {
-    const r = await one(
+  if (made.intentKeys.length) {
+    leaked += await survivors('agent_runs',
+      `SELECT COUNT(*)::int n FROM agent_runs WHERE intent_key = ANY($1)`, [made.intentKeys]);
+    leaked += await survivors('agent_run_events',
+      `SELECT COUNT(*)::int n FROM agent_run_events e
+        WHERE EXISTS (SELECT 1 FROM agent_runs r
+                       WHERE r.run_id = e.run_id AND r.intent_key = ANY($1))`, [made.intentKeys]);
+  }
+  for (const st of made.stops) {
+    leaked += await survivors('autonomy_stops',
       `SELECT COUNT(*)::int n FROM autonomy_stops WHERE scope_type = $1 AND scope_key = $2`,
-      [s.scopeType, s.scopeKey]);
-    if (Number(r.n)) leaked.push(`stop:${s.scopeType}:${s.scopeKey}`);
+      [st.scopeType, st.scopeKey]);
   }
-  if (leaked.length) {
-    console.log(`\n  LEAK  ${leaked.length} fixture(s) could not be removed: ${leaked.join(', ')}`);
-    return false;
+
+  // Records this run keeps ON PURPOSE, counted and named so that "retained" is never confused
+  // with "leaked".
+  const auditN = made.taskIds.length ? (await one(
+    `SELECT COUNT(*)::int n FROM worker_audit WHERE task_id = ANY($1)`, [made.taskIds])).n : 0;
+  for (const [table, why] of RETAINED_BY_DESIGN) {
+    retained.push({ table, what: table === 'worker_audit' ? `${auditN} row(s)` : 'all rows', why });
   }
-  return true;
+
+  // ── nothing claimable is left behind, for ANY acceptance run ──
+  const claimable = await one(
+    `SELECT COUNT(*)::int n FROM worker_tasks
+      WHERE intent_key LIKE $1 AND state = 'PENDING' AND cancel_requested_at IS NULL`,
+    [KEYS.LIKE_PATTERN]);
+
+  // ── other runs' records are exactly as they were ──
+  const after = await query(
+    `SELECT run_id, intent_key, state FROM agent_runs
+      WHERE intent_key LIKE $1 AND NOT (intent_key = ANY($2))
+      ORDER BY intent_key`,
+    [KEYS.LIKE_PATTERN, made.intentKeys.length ? made.intentKeys : ['']]);
+  const fp = (rows) => rows.map((r) => `${r.intent_key}:${r.state}`).join('|');
+  const preserved = fp(foreign.rows) === fp(after.rows);
+
+  // ── the report ──
+  console.log('\n  fixture cleanup, by table:');
+  const tablesTouched = ['worker_results', 'agent_run_events', 'agent_runs', 'worker_tasks', 'autonomy_stops'];
+  for (const t of tablesTouched) {
+    console.log(`    ${t.padEnd(18)} deleted ${String(deleted.get(t) || 0).padStart(3)}`);
+  }
+  for (const r of retained) {
+    console.log(`    ${r.table.padEnd(18)} retained ${r.what} — ${r.why}`);
+  }
+  for (const e of errors) {
+    console.log(`    ERROR  ${e.table}: ${e.detail}`);
+  }
+  console.log(`    claimable m75-% tasks remaining: ${claimable.n}`);
+  console.log(`    other acceptance runs' records: ${foreign.rows.length} before, `
+    + `${after.rows.length} after — ${preserved ? 'unchanged' : 'CHANGED'}`);
+
+  const ok_ = errors.length === 0 && leaked === 0 && Number(claimable.n) === 0 && preserved;
+  if (!ok_) {
+    console.log('\n  CLEANUP NOT CLEAN:');
+    if (errors.length) console.log(`    ${errors.length} statement(s) failed — see ERROR above`);
+    if (leaked) console.log(`    ${leaked} fixture row(s) survived`);
+    if (Number(claimable.n)) console.log(`    ${claimable.n} claimable acceptance task(s) remain`);
+    if (!preserved) console.log('    another run\'s records changed — investigate before any rerun');
+  }
+  return ok_;
 }
 
 async function setStop(scopeType, scopeKey, reason) {
@@ -335,6 +459,36 @@ async function neverClaimed(scenario, taskId) {
   }
   await badTimeout(`${scenario} — the Mac never claimed the task`,
     { ok: false, ms: 0, label: 'claim' }, taskId);
+}
+
+/**
+ * Drive an abandoned lease to its documented disposition and report where it landed.
+ *
+ * This is the path scenario 5 proves end to end for expiry. Scenarios 3 and 4 reuse it because
+ * cancellation and STOP both leave a LEASED task deliberately LEASED — the worker's exit is what
+ * resolves it, and the reaper is what notices. Without this, "the task is still LEASED" would be
+ * indistinguishable from a task that stays LEASED for ever.
+ *
+ * Ageing the run is a fixture operation on THIS run's own intent key, never a time-window sweep.
+ */
+async function resolveAbandonedLease(intentKey, taskId) {
+  await query(
+    `UPDATE agent_runs SET heartbeat_at = NOW() - INTERVAL '6 hours',
+                           started_at   = NOW() - INTERVAL '6 hours'
+      WHERE intent_key = $1`, [intentKey]);
+  await require('../src/lib/office/recovery').reap({ dryRun: false, limit: 50 }, deps);
+  await LEASES.reflectAbandonedLeases({}, deps);
+  const t = await one(`SELECT state FROM worker_tasks WHERE id = $1`, [taskId]);
+  const r = await one(
+    `SELECT state FROM agent_runs WHERE intent_key = $1 ORDER BY started_at DESC LIMIT 1`,
+    [intentKey]);
+  return { task: t && t.state, run: r && r.state };
+}
+
+/** Every (scope_type, scope_key) currently stopped, as a sorted list. */
+async function stopInventory() {
+  const r = await query(`SELECT scope_type, scope_key FROM autonomy_stops`);
+  return r.rows.map((x) => `${x.scope_type}:${x.scope_key}`).sort();
 }
 
 // ── mint ────────────────────────────────────────────────────────────────────
@@ -493,8 +647,26 @@ async function cmdScenarios() {
   else bad(`${leak.n} audit row(s) carry something credential-shaped`);
 
   // ── 3. LIVE CANCELLATION ──────────────────────────────────────────────────
+  // ── WHAT THIS SCENARIO ASSERTS, AND WHY IT CHANGED ───────────────────────
+  //
+  // The 2026-11-19 run FAILED here, waiting 75 seconds for the task to reach CANCELLED. That
+  // transition is one the implementation deliberately refuses to make. leases.js cancelTask:
+  //
+  //     "A LEASED task stays LEASED until its worker stops: the heartbeat delivers the
+  //      cancellation and submitResult refuses the result. Flipping it to CANCELLED here would
+  //      claim the worker had stopped, which nothing has established."
+  //
+  // So the test demanded the one thing the design says would be a lie. What follows asserts the
+  // contract as written, in four parts: the cancellation is RECORDED, the worker OBSERVES it, no
+  // successful result is ACCEPTED, and the lease reaches its documented DISPOSITION.
+  //
+  // The delay is 60s, not 20s. Cancellation is delivered inside a heartbeat RESPONSE, and the
+  // heartbeat interval is max(15s, ceiling/6) = 50s for a 5-minute ceiling. A 20-second task
+  // finishes before any heartbeat is due, so the cancel could never be delivered mid-flight and
+  // the scenario tested the refusal path instead of the cancellation path. 60s is the handler's
+  // own cap, and it leaves one heartbeat inside the execution window.
   head('3. live cancellation while the Mac is executing');
-  const t2 = await enqueue(IK('cancel'), { delayMs: 20_000 });
+  const t2 = await enqueue(IK('cancel'), { delayMs: 60_000 });
   const claimed = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t2.taskId]));
   if (!claimed.ok) {
@@ -503,40 +675,169 @@ async function cmdScenarios() {
     ok(`claimed after ${claimed.ms}ms`);
     const cx = await LEASES.cancelTask(t2.taskId, { reason: 'M7.5 live cancellation' }, deps);
     if (!cx.ok) bad('cancel was refused', JSON.stringify(cx));
-    // Budget composed from THIS task's own delay, not a flat number that happened to work once.
-    const stopped = await until('it stops', async () => {
-      const r = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t2.taskId]);
-      return r && r.state === 'CANCELLED' ? r : null;
+
+    // 1. RECORDED — durable, on the task, with the reason.
+    const rec = await one(
+      `SELECT state, cancel_requested_at, cancel_reason FROM worker_tasks WHERE id = $1`,
+      [t2.taskId]);
+    if (rec && rec.cancel_requested_at && /M7\.5 live cancellation/.test(String(rec.cancel_reason))) {
+      ok(`the cancellation is durably recorded, with its reason`);
+      note(`the task is still ${rec.state}, which is CORRECT — see the comment above. A CANCELLED`);
+      note('state here would assert the worker had stopped before anything had established it.');
+    } else bad('the cancellation was not recorded on the task', JSON.stringify(rec));
+
+    // 2. OBSERVED — the cancel travels in a heartbeat response, so a heartbeat landing AFTER
+    //    cancel_requested_at is the server having told this worker to stop. Nothing weaker is
+    //    evidence: "no result appeared" is equally consistent with a worker that finished and was
+    //    refused, which is a different behaviour entirely.
+    const observed = await until('a heartbeat lands after the cancel', async () => {
+      const r = await one(
+        `SELECT r.run_id, r.heartbeat_at, t.cancel_requested_at
+           FROM agent_runs r
+           JOIN worker_tasks t ON t.intent_key = r.intent_key
+          WHERE t.id = $1 AND r.trigger_detail = $2
+          ORDER BY r.started_at DESC LIMIT 1`,
+        [t2.taskId, workerId]);
+      return (r && r.heartbeat_at && r.cancel_requested_at
+        && new Date(r.heartbeat_at) > new Date(r.cancel_requested_at)) ? r : null;
     }, { timeoutMs: signalBudget() });
-    if (stopped.ok) ok(`the task is CANCELLED (${stopped.ms}ms after the cancel)`);
-    else await badTimeout('the task did not reach CANCELLED', stopped, t2.taskId);
+    if (observed.ok) {
+      ok(`the worker heartbeated ${Math.round(observed.ms / 1000)}s after the cancel — that `
+        + 'response carried cancel:true');
+    } else {
+      await badTimeout('no heartbeat reached the server after the cancel, so nothing establishes '
+        + 'that the worker was told', observed, t2.taskId);
+    }
+
+    // 3. NOT ACCEPTED — asserted by ATTEMPTING it. A count of zero only says nobody tried.
+    const runRow = await one(
+      `SELECT run_id FROM agent_runs
+        WHERE intent_key = $1 AND trigger_detail = $2 ORDER BY started_at DESC LIMIT 1`,
+      [IK('cancel'), workerId]);
+    if (runRow && runRow.run_id) {
+      const late = await LEASES.submitResult(
+        { workerId, runId: runRow.run_id, status: 'SUCCEEDED', output: { echoed: {}, steps: 0 } },
+        deps);
+      if (!late.ok && late.code === 'cancelled') {
+        ok(`a SUCCEEDED result for a cancelled task is refused (${late.code})`);
+      } else {
+        bad('a result was accepted for a cancelled task', JSON.stringify(late).slice(0, 200));
+      }
+    } else bad('could not find this worker\'s run for the cancelled task');
 
     await sleep(4000);     // long enough for a worker that was going to report to have reported
     const res = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t2.taskId]);
-    if (Number(res.n) === 0) ok('and the Mac reported NOTHING for it — not even a FAILED');
+    if (Number(res.n) === 0) ok('and the Mac reported NOTHING of its own — not even a FAILED');
     else bad('a cancelled task got a result row', `${res.n} row(s)`);
+
+    // 4. DISPOSITION — the documented end state for a lease whose worker stopped without
+    //    reporting. Same path scenario 5 proves for expiry; asserted here so "the task stays
+    //    LEASED" cannot hide a task that stays LEASED FOR EVER.
+    const settled = await resolveAbandonedLease(IK('cancel'), t2.taskId);
+    if (settled.task === 'NEEDS_RESOLUTION') {
+      ok(`and the lease resolves to NEEDS_RESOLUTION (run ${settled.run}), not back to PENDING`);
+    } else {
+      bad(`the cancelled lease ended as ${settled.task}`, JSON.stringify(settled));
+    }
   }
 
   // ── 4. GLOBAL STOP MID-EXECUTION ──────────────────────────────────────────
+  // ── WHAT THIS SCENARIO ASSERTS, AND WHY IT CHANGED ───────────────────────
+  //
+  // The 2026-11-19 FAIL here was a contradiction inside the test itself. The WAIT condition
+  // accepted "a result row exists" as the signal that the worker had stopped; the PASS condition
+  // then required that there be NO result row. So the fastest way to satisfy the wait was for the
+  // worker to report — and a worker that reported was the failure. The two halves could only agree
+  // by timing out, and a timeout is also a FAIL. It could not pass.
+  //
+  // Worse, neither half asserted what a STOP actually does. A STOP does not change the task; it
+  // makes heartbeat() answer cancel:true and submitResult() refuse with code `stopped`. Those are
+  // the observables, and they are asserted directly below.
   head('4. a STOP while the Mac is executing');
-  const t3 = await enqueue(IK('stop'), { delayMs: 20_000 });
+  const stopsBefore = await stopInventory();
+  const t3 = await enqueue(IK('stop'), { delayMs: 60_000 });
   const claimed3 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t3.taskId]));
   if (!claimed3.ok) await neverClaimed('STOP enforcement mid-execution', t3.taskId);
   else {
+    ok(`claimed after ${claimed3.ms}ms`);
     const sid = await setStop('capability', 'worker.execute', 'M7.5 live STOP test');
-    const halted = await until('the worker stops', async () => {
-      const r = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t3.taskId]);
-      const t = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t3.taskId]);
-      return (t && t.state !== 'LEASED') || Number(r.n) > 0 ? { t, r } : null;
+
+    // 1. RECORDED IN THE SCOPE THE WORKER PATH ACTUALLY CONSULTS. Asserted by asking the
+    //    authority the way the worker's own heartbeat asks it — not by reading back the row I
+    //    just wrote, which would only prove the INSERT worked.
+    const gate = await AUTH.authorizeWorkerAction({ workerId }, deps);
+    if (gate.allowed === false && gate.stop && gate.stop.scope_type === 'capability') {
+      ok(`the authority now refuses this worker (scope ${gate.stop.scope_type}:`
+        + `${gate.stop.scope_key || 'worker.execute'}) — the same call heartbeat() makes`);
+    } else {
+      bad('the fixture STOP is not in the scope the worker path consults',
+        JSON.stringify(gate).slice(0, 200));
+    }
+
+    // 2. OBSERVED AND HONOURED. The STOP reaches the worker in a heartbeat RESPONSE, so a
+    //    heartbeat landing after the STOP was written is the worker being told to halt.
+    const stopRow = await one(
+      `SELECT set_at FROM autonomy_stops WHERE scope_type = $1 AND scope_key = $2`,
+      ['capability', 'worker.execute']);
+    const observed = await until('a heartbeat lands after the STOP', async () => {
+      const r = await one(
+        `SELECT r.heartbeat_at FROM agent_runs r
+          WHERE r.intent_key = $1 AND r.trigger_detail = $2
+          ORDER BY r.started_at DESC LIMIT 1`, [IK('stop'), workerId]);
+      if (!r || !r.heartbeat_at) return null;
+      const after = stopRow && stopRow.set_at
+        ? new Date(r.heartbeat_at) > new Date(stopRow.set_at) : false;
+      return after ? r : null;
     }, { timeoutMs: signalBudget() });
-    if (halted.ok && Number(halted.value.r.n) === 0) {
-      ok(`the STOP ended execution in ${halted.ms}ms and nothing was reported`);
-    } else if (halted.ok) {
-      bad('a STOPped task still produced a result', JSON.stringify(halted.value));
-    } else await badTimeout('the worker kept going after a STOP', halted, t3.taskId);
+    if (observed.ok) {
+      ok(`the worker heartbeated ${Math.round(observed.ms / 1000)}s after the STOP — that `
+        + 'response carried cancel:true with the stop scope');
+    } else {
+      await badTimeout('no heartbeat reached the server after the STOP, so nothing establishes '
+        + 'that the worker was told to halt', observed, t3.taskId);
+    }
+
+    // 3. NO PROHIBITED RESULT. Asserted by attempting one, then by counting.
+    const runRow = await one(
+      `SELECT run_id FROM agent_runs
+        WHERE intent_key = $1 AND trigger_detail = $2 ORDER BY started_at DESC LIMIT 1`,
+      [IK('stop'), workerId]);
+    if (runRow && runRow.run_id) {
+      const late = await LEASES.submitResult(
+        { workerId, runId: runRow.run_id, status: 'SUCCEEDED', output: { echoed: {}, steps: 0 } },
+        deps);
+      if (!late.ok && late.code === 'stopped') {
+        ok(`a result submitted under a STOP is refused (${late.code})`);
+      } else {
+        bad('a result was accepted while the worker was STOPped', JSON.stringify(late).slice(0, 200));
+      }
+    } else bad('could not find this worker\'s run for the STOPped task');
+
+    await sleep(4000);
+    const res = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t3.taskId]);
+    if (Number(res.n) === 0) ok('and the Mac reported nothing of its own');
+    else bad('a STOPped task produced a result row', `${res.n} row(s)`);
+
+    // 4. THE FIXTURE STOP IS RESTORED, AND ONLY IT.
     await clearStop(sid);
-    ok('STOP cleared — it was a fixture STOP in a dev database, never one of the three');
+    const stopsAfter = await stopInventory();
+    if (stopsAfter.join('|') === stopsBefore.join('|')) {
+      ok(`the stop table is byte-for-byte as it was: ${stopsAfter.length} STOP(s), the same ones`);
+    } else {
+      const added = stopsAfter.filter((x) => !stopsBefore.includes(x));
+      const removed = stopsBefore.filter((x) => !stopsAfter.includes(x));
+      bad('the fixture STOP changed the containment inventory',
+        `added ${JSON.stringify(added)}, removed ${JSON.stringify(removed)}`);
+    }
+
+    // 5. DISPOSITION through the real lifecycle, for the same reason as scenario 3.
+    const settled = await resolveAbandonedLease(IK('stop'), t3.taskId);
+    if (settled.task === 'NEEDS_RESOLUTION') {
+      ok(`and the halted lease resolves to NEEDS_RESOLUTION (run ${settled.run})`);
+    } else {
+      bad(`the STOPped lease ended as ${settled.task}`, JSON.stringify(settled));
+    }
   }
 
   // ── 5. EXPIRY ─────────────────────────────────────────────────────────────
@@ -622,14 +923,23 @@ async function cmdScenarios() {
     // A refusal arrives as a reported result, and fast. Check for it before spending four minutes
     // waiting for a death that is never coming.
     const refusal = await until('the worker either dies or refuses', async () => {
+      // `worker_results` has NO `error` column. Its columns are run_id, task_id, worker_id,
+      // status, output, submitted_at (src/lib/worker/task-schema.js). The failure detail lives
+      // INSIDE `output`, which client.js builds as
+      //     { failure: { code, error } }
+      // so that is what gets read. The 2026-11-19 run aborted here with
+      // `column "error" does not exist` — written from memory, never executed before hardware.
       const r = await one(
-        `SELECT status, error FROM worker_results WHERE task_id=$1`, [t6.taskId]);
+        `SELECT status, output FROM worker_results WHERE task_id=$1`, [t6.taskId]);
       return r || null;
     }, { timeoutMs: 45_000, everyMs: 2_000 });
 
-    if (refusal.ok && /crash_test_refused/.test(String(refusal.value.error || ''))) {
+    // The refusal text may be in output.failure.error or output.failure.code depending on how the
+    // handler surfaced it, so the whole output is searched rather than one guessed field.
+    const refusalText = refusal.ok ? JSON.stringify(refusal.value.output || {}) : '';
+    if (refusal.ok && /crash_test_refused/.test(refusalText)) {
       untested('crash recovery — the worker is not armed for the crash handshake',
-        `It refused and reported instead of dying: ${String(refusal.value.error).slice(0, 160)}. `
+        `It refused and reported instead of dying: ${refusalText.slice(0, 200)}. `
         + 'Arm it on the Mac with:  workerctl install <url> <wkr_id> --env development --crash-test '
         + '(the arming window expires — default 120 minutes — so if a previous run armed it hours '
         + 'ago it has disarmed itself and must be re-armed). Then re-run. Nothing about crash '
@@ -737,7 +1047,16 @@ async function cmdScenarios() {
 
   const clean = await cleanup();
   console.log('');
-  if (clean) ok('every fixture this script created was removed, by id');
+  // The claim is now made only when the per-table verification supports it, and a failure counts
+  // against the run instead of being printed and passed over. The previous version said nothing
+  // at all when cleanup failed, so a leak could not change the verdict.
+  if (clean) {
+    ok('every fixture this run created was removed — verified by id in every table it wrote');
+  } else {
+    bad('fixture cleanup did not complete',
+      'see the per-table accounting above: a leak, a failed statement, a claimable task left '
+      + 'behind, or another run\'s records changed. Any of those can corrupt the next run.');
+  }
 
   // Requirement: the report names the run id and the exact fixture ids. Printed whether cleanup
   // succeeded or not — if anything survived, these are the ids to go and look at, and the previous
