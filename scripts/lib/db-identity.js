@@ -64,6 +64,29 @@ const M7_TABLES = [
   'worker_tasks', 'worker_results', 'worker_audit',
 ];
 
+// ── THE M7.6 PILOT TABLES ───────────────────────────────────────────────────
+//
+// Added 2026-11-20, immediately after `m76-migrate-dev.js --apply` made this very check refuse:
+//
+//     verdict: unidentified
+//     4 table(s) that are neither empty nor part of M7: m76_goals, m76_plan_steps, …
+//
+// which is the failure mode the comment above predicts, and the check behaving correctly: the
+// database contained tables it did not recognise, so it declined to call it development rather
+// than guessing. Every script that gates on this then refused, which is the right order of events.
+//
+// IMPORTED, not hand-copied. The list above is hand-written and says so, and that cost seven
+// missing entries once. `src/lib/m76/schema.js` is the single declaration of the pilot's tables and
+// the migration applies exactly it, so taking the names from there means the two cannot disagree.
+//
+// This is a narrow addition of a DECLARED set, not the widening the refusal message warns against.
+// That warning is about accommodating tables nobody can account for; these are four tables created
+// by an authorized development-only migration whose DDL is in the repository.
+const M76_PILOT_TABLES = require('../../src/lib/m76/schema').TABLES;
+
+/** Everything a legitimately-migrated development database may contain. */
+const EXPECTED_TABLES = [...M7_TABLES, ...M76_PILOT_TABLES];
+
 const VERDICT = Object.freeze({
   DEVELOPMENT: 'development',
   PRODUCTION_FINGERPRINT: 'production_fingerprint',
@@ -133,14 +156,20 @@ async function identifyDatabase(query) {
   // ── 3. POSITIVE IDENTIFICATION ────────────────────────────────────────────
   //
   // Not "no fingerprint found, carry on". Something must affirmatively say development.
-  const unexpected = tables.filter((t) => !M7_TABLES.includes(t));
+  const unexpected = tables.filter((t) => !EXPECTED_TABLES.includes(t));
   if (tables.length === 0) {
     return { verdict: VERDICT.DEVELOPMENT, findings, tables,
       detail: 'the database is empty — nothing has been created here yet' };
   }
   if (unexpected.length === 0) {
+    // Counted separately, so the operator can see at a glance whether the pilot schema is present
+    // — "16 tables, all M7" and "20 tables, 4 of them the M7.6 pilot" are different situations.
+    const pilot = tables.filter((t) => M76_PILOT_TABLES.includes(t));
     return { verdict: VERDICT.DEVELOPMENT, findings, tables,
-      detail: `${tables.length} table(s), all of them created by the M7 worker subsystem` };
+      detail: pilot.length
+        ? `${tables.length} table(s): ${tables.length - pilot.length} from the M7 worker subsystem `
+          + `and ${pilot.length} from the M7.6 development pilot`
+        : `${tables.length} table(s), all of them created by the M7 worker subsystem` };
   }
 
   return {
@@ -187,6 +216,7 @@ async function assertDevelopmentDatabase(query, { log = console.log } = {}) {
 }
 
 module.exports = {
+  M76_PILOT_TABLES, EXPECTED_TABLES,
   VERDICT, PRODUCTION_TABLES, PRODUCTION_STOPS, M7_TABLES,
   identifyDatabase, assertDevelopmentDatabase,
 };
