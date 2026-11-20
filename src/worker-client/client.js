@@ -60,6 +60,31 @@ function backoffMs(attempt, { baseBackoffMs, maxBackoffMs }) {
   return Math.floor(Math.random() * cap);
 }
 
+// ── A REVOKED CREDENTIAL IS NOT A TRANSIENT FAILURE ─────────────────────────
+//
+// Measured on 2026-11-20, 50 minutes after M7.5 scenario 8 revoked the office iMac's identity:
+//
+//     outcome  code       rows  last
+//     DENIED   revoked    574   2026-11-20T20:28:19.933Z
+//
+// The client had retried every ~5s for an hour and would have continued for ever — roughly 690
+// audit rows per hour, for a credential that cannot come back without a human minting a new token
+// and enrolling it. `callWithRetry` already knows not to retry a 4xx decision, but the SERVICE
+// LOOP retried the whole cycle regardless, which is the same mistake one level up.
+//
+// So this code is terminal: the loop stops. The process then exits ZERO, which matters, because
+// `KeepAlive { SuccessfulExit false }` relaunches a non-zero exit and leaves a zero exit alone.
+// Exiting non-zero here would turn a retry loop into a respawn loop at 1/minute.
+//
+// ONLY `revoked` is listed. `unknown_worker` and `bad_signature` are arguably terminal too, but a
+// list is a decision about each member: those two are left to retry deliberately, because the one
+// that is certain is enough to fix the measured defect, and widening it without evidence is how a
+// worker ends up refusing to start over something transient. Recorded as a follow-up instead.
+const TERMINAL_AUTH_CODES = Object.freeze(['revoked']);
+
+/** Syntactically valid, cannot exist. Used by the auth probe so it cannot touch real work. */
+const NIL_RUN_ID = '00000000-0000-0000-0000-000000000000';
+
 class WorkerClient {
   constructor({
     baseUrl, workerId, secret, fetchImpl = null, log = null, now = null, sleep = null, ...opts
@@ -80,6 +105,8 @@ class WorkerClient {
     this.stopped = false;
     /** Locally recorded uncertainty. Never resolved by guessing; surfaced by the diagnostic. */
     this.unresolved = [];
+    /** Set when a refusal arrives that retrying cannot fix. Stops the loop; see TERMINAL_AUTH_CODES. */
+    this.terminal = null;
   }
 
   /** One signed request. No retry here — retry policy belongs to the caller, per-operation. */
@@ -315,6 +342,40 @@ class WorkerClient {
       status: rep.status, code: rep.json && rep.json.code };
   }
 
+  /**
+   * Is this credential accepted RIGHT NOW? One signed request, no side effect.
+   *
+   * A heartbeat for the nil run id authenticates and is then refused `lease_not_live`, because the
+   * UPDATE matches no row. That is the point: it exercises exactly the authentication path the
+   * worker depends on without claiming work, writing a result or touching a real lease. It spends
+   * one nonce and writes one audit row, both of which are honest records that a diagnostic ran.
+   *
+   * `workerctl doctor` could not answer this question before — it reported `ready: true` on a
+   * worker whose identity had been revoked, and on one that had been dead for eleven minutes,
+   * because it checked environment variables and the Keychain and contacted nothing.
+   */
+  async probeAuth() {
+    const r = await this.call('POST', '/api/worker/heartbeat', { runId: NIL_RUN_ID });
+    const code = (r.json && r.json.code) || null;
+    if (r.transportError || r.status === 0) {
+      return { state: 'unreachable', code: null,
+        detail: r.transportError || 'no response from the worker API' };
+    }
+    if (r.status === 401 || r.status === 403) {
+      return {
+        state: code === 'revoked' ? 'revoked' : 'rejected',
+        code,
+        detail: code === 'revoked'
+          ? 'this worker identity has been revoked; a new identity must be enrolled'
+          : `the server rejected this credential (HTTP ${r.status}${code ? `, ${code}` : ''})`,
+      };
+    }
+    // Anything else means the signature, the nonce and the identity were all accepted. The refusal
+    // that follows is about the nil lease, which is expected and is not an auth result.
+    return { state: 'authenticated', code,
+      detail: `the credential was accepted (HTTP ${r.status}${code ? `, ${code}` : ''})` };
+  }
+
   /** The service loop. One task at a time: a single worker does not fan out. */
   async loop({ maxCycles = Infinity } = {}) {
     let cycles = 0;
@@ -329,15 +390,27 @@ class WorkerClient {
         this.log({ at: 'cycle_error', error: out.error });
       }
       outcomes.push(out);
+
+      // Terminal before the sleep, so a revoked worker stops on its FIRST refusal rather than
+      // after one more pointless wait.
+      if (out.code && TERMINAL_AUTH_CODES.includes(out.code)) {
+        this.terminal = { code: out.code, status: out.status || null, at: this.now() };
+        this.log({ at: 'credential_terminal', code: out.code, status: out.status || null,
+          cycles,
+          note: 'this refusal cannot be fixed by retrying; stopping. The process exits 0 so launchd '
+            + 'leaves it stopped. A human must enrol a new identity.' });
+        break;
+      }
+
       if (out.did === 'nothing' || out.did === 'not_claimed') {
         await this.sleep(this.cfg.idlePollMs);
       }
     }
-    return { cycles, outcomes, unresolved: this.unresolved };
+    return { cycles, outcomes, unresolved: this.unresolved, terminal: this.terminal || null };
   }
 
   /** Graceful shutdown: finish nothing new, let the current task observe its own cancellation. */
   stop() { this.stopped = true; }
 }
 
-module.exports = { WorkerClient, backoffMs, freshNonce, DEFAULTS };
+module.exports = { WorkerClient, backoffMs, freshNonce, DEFAULTS, TERMINAL_AUTH_CODES, NIL_RUN_ID };

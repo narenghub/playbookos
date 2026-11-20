@@ -101,10 +101,110 @@ function doctor(env = process.env, deps = {}) {
   };
 }
 
+// ── WHAT `READY` MUST MEAN, AND WHY `doctor()` IS LEFT ALONE ────────────────
+//
+// `doctor()` above answers one question — is this machine CONFIGURED and is the credential
+// readable — and it answers it without contacting anything. That is a useful question and other
+// code depends on its shape, so it keeps its name and its meaning.
+//
+// What it cannot answer, and was being read as though it could:
+//
+//   2026-11-20  `ready: true, problems: []` while the worker had been dead for eleven minutes
+//   2026-11-20  `ready: true` while the identity was revoked and 574 requests had been refused
+//
+// Both true to the letter. Neither is operational readiness. So `diagnose()` reports FOUR separate
+// facts, each labelled by what it measures, and derives an overall verdict from all of them:
+//
+//   configuration    env vars present and well-shaped        (no network, no processes)
+//   credential       the Keychain item is readable           (no network)
+//   process          is a worker actually running             (pgrep, excluding this diagnostic)
+//   authentication   does the server accept this credential   (one signed, side-effect-free call)
+//
+// A fact that could not be established is reported as such and is never counted as a pass — the
+// same rule the acceptance driver follows with UNTESTED.
+
+const WORKER_PROCESS_PATTERN = 'worker-client/run.js';
+
+/**
+ * Is a worker process running for this user, not counting the one asking?
+ *
+ * `--doctor` is itself a `run.js` process, so an unfiltered pgrep reports the diagnostic as the
+ * worker and would say "running" on a machine where nothing is.
+ */
+function processState(deps = {}) {
+  const run = deps.exec || ((cmd, args) => require('node:child_process')
+    .execFileSync(cmd, args, { encoding: 'utf8' }));
+  try {
+    const out = String(run('pgrep', ['-u', String(process.getuid()), '-f', WORKER_PROCESS_PATTERN]));
+    const pids = out.split('\n').map((x) => x.trim()).filter(Boolean)
+      .map(Number).filter((n) => Number.isInteger(n) && n !== process.pid);
+    return { alive: pids.length > 0, pids, detail: pids.length ? null : 'no worker process is running' };
+  } catch (e) {
+    // pgrep exits 1 when nothing matches, which is an answer, not a failure.
+    const status = e && typeof e.status === 'number' ? e.status : null;
+    if (status === 1) return { alive: false, pids: [], detail: 'no worker process is running' };
+    return { alive: null, pids: [], detail: `pgrep could not run (${status === null ? 'unknown' : status})` };
+  }
+}
+
+/**
+ * The full operational picture. Async, because authentication cannot be established without
+ * asking the server.
+ */
+async function diagnose(env = process.env, deps = {}) {
+  const base = doctor(env, deps);
+  const proc = deps.processState ? deps.processState() : processState(deps);
+
+  let auth = { state: 'skipped', code: null,
+    detail: 'the authentication probe was skipped (--no-network)' };
+  const wantNetwork = !(deps.noNetwork === true);
+  if (wantNetwork && base.baseUrlConfigured && base.workerIdConfigured
+      && base.keychainState === KEYCHAIN.STATE.READABLE) {
+    try {
+      const probe = deps.probeAuth
+        ? await deps.probeAuth()
+        : await (async () => {
+          const cfg = config(env);
+          const secret = KEYCHAIN.readSecret({ workerId: cfg.workerId });
+          const { WorkerClient } = require('./client');
+          return new WorkerClient({ baseUrl: cfg.baseUrl, workerId: cfg.workerId, secret })
+            .probeAuth();
+        })();
+      auth = probe;
+    } catch (e) {
+      auth = { state: 'unreachable', code: null,
+        detail: `the probe could not be made: ${String(e && e.message).slice(0, 160)}` };
+    }
+  } else if (wantNetwork) {
+    auth = { state: 'skipped', code: null,
+      detail: 'not probed: the configuration or the credential is not usable yet' };
+  }
+
+  // Each reason names the fact that failed, so the verdict is never a bare false.
+  const reasons = [];
+  if (base.problems.length) reasons.push(`configuration: ${base.problems.join('; ')}`);
+  if (base.keychainState !== KEYCHAIN.STATE.READABLE) {
+    reasons.push(`credential: ${base.keychainState}`);
+  }
+  if (proc.alive !== true) reasons.push(`process: ${proc.detail || 'not running'}`);
+  if (auth.state !== 'authenticated') reasons.push(`authentication: ${auth.state}`);
+
+  return {
+    ...base,
+    process: proc,
+    authentication: auth,
+    operational: { ready: reasons.length === 0, reasons },
+  };
+}
+
 async function main(argv = process.argv.slice(2), env = process.env) {
   if (argv.includes('--doctor')) {
-    process.stdout.write(`${JSON.stringify(doctor(env), null, 2)}\n`);
-    return doctor(env).ready ? 0 : 1;
+    // A superset of doctor()'s fields, so every existing reader keeps working, plus the three
+    // facts it could not establish. The exit code follows OPERATIONAL readiness: a stopped or
+    // revoked worker exits non-zero here, which is the whole point of the change.
+    const d = await diagnose(env, { noNetwork: argv.includes('--no-network') });
+    process.stdout.write(`${JSON.stringify(d, null, 2)}\n`);
+    return d.operational.ready ? 0 : 1;
   }
 
   const cfg = config(env);
@@ -169,11 +269,22 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     logLine({ at: 'unresolved', runId: u.runId, taskId: u.taskId, executed: Boolean(u.executed),
       reason: u.reason });
   }
-  logLine({ at: 'stopped', cycles: res.cycles, unresolved: res.unresolved.length });
+  logLine({ at: 'stopped', cycles: res.cycles, unresolved: res.unresolved.length,
+    terminal: res.terminal ? res.terminal.code : null });
+  if (res.terminal) {
+    // Exit 0 DELIBERATELY. `KeepAlive { SuccessfulExit false }` relaunches a non-zero exit, so
+    // exiting 2 here would convert an every-5-seconds retry loop into an every-60-seconds respawn
+    // loop and keep writing audit rows for a credential that needs a human.
+    logLine({ at: 'stopped_terminal', code: res.terminal.code,
+      note: 'exiting 0 so launchd leaves this worker stopped; enrol a new identity to resume' });
+  }
   return 0;
 }
 
-module.exports = { main, config, doctor, logLine, SHUTDOWN_GRACE_MS, DROP_FROM_LOGS };
+module.exports = {
+  main, config, doctor, diagnose, processState, logLine,
+  SHUTDOWN_GRACE_MS, DROP_FROM_LOGS, WORKER_PROCESS_PATTERN,
+};
 
 if (require.main === module) {
   main().then((code) => process.exit(code)).catch((e) => {

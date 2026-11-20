@@ -43,6 +43,10 @@ const HANDLERS = Object.freeze({
   // would make this table depend on the environment, which is the very property this file's
   // header exists to protect. See handlers/synthetic-crash-test.js.
   'synthetic.crash_test': require('./handlers/synthetic-crash-test'),
+  // M7.6. The first handler that computes something a person would read. Pure function of its
+  // payload: no database handle, no network, no filesystem — see the file's own header for why the
+  // facts arrive in the payload rather than being fetched.
+  'report.daily_operations': require('./handlers/report-daily-operations'),
 });
 
 /** Output larger than this is refused rather than submitted. */
