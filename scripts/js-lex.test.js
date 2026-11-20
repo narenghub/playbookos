@@ -254,6 +254,13 @@ test('6b. no function declaration anywhere under src/ or scripts/ is hidden', ()
     'scripts/outbound-allowlist.test.js':
       'plants provider call sites as template-literal fixtures, so its `function gapi(` and '
       + '`function go(` are string values',
+    // Reviewed 2026-11-20. Its scope guard needs both the broken and the corrected form of a
+    // helper as text to test itself against — the defect was `async function workerClaimAt(taskId)`
+    // reading a `workerId` it never received, which threw ReferenceError eleven minutes into a
+    // hardware run. Both occurrences are template-literal fixtures, not code this repo runs.
+    'scripts/m7-5-harness-regression.test.js':
+      'plants the broken and corrected forms of workerClaimAt as template-literal fixtures, so '
+      + 'its `function workerClaimAt(` occurrences are string values the scope guard judges',
   };
 
   const DECL = /\n(?:async )?function (\w+)\s*\(/g;

@@ -425,7 +425,7 @@ async function enqueue(intentKey, payload, taskType = 'synthetic.echo') {
 // `worker_identities.last_seen_at` advances on every authenticated request, so a polling worker
 // moves it every few seconds whether or not it has work. If it does not advance, there is nothing
 // to test, and the honest word for that is UNTESTED.
-async function workerLastSeen() {
+async function workerLastSeen(workerId) {
   const r = await one(`SELECT last_seen_at FROM worker_identities WHERE id = $1`, [workerId]);
   return r && r.last_seen_at ? new Date(r.last_seen_at).getTime() : null;
 }
@@ -433,10 +433,10 @@ async function workerLastSeen() {
 const LIVENESS_WINDOW_MS = 8_000;
 
 /** True only if the worker demonstrably made a request during the window. */
-async function workerIsPolling() {
-  const before = await workerLastSeen();
+async function workerIsPolling(workerId) {
+  const before = await workerLastSeen(workerId);
   await sleep(LIVENESS_WINDOW_MS);
-  const after = await workerLastSeen();
+  const after = await workerLastSeen(workerId);
   return {
     polling: before !== null && after !== null && after > before,
     before, after,
@@ -447,8 +447,8 @@ async function workerIsPolling() {
  * A scenario whose task was never claimed. Distinguishes "the worker is here and did not do its
  * job" (a product FAIL) from "there was no worker" (UNTESTED). Never guesses.
  */
-async function neverClaimed(scenario, taskId) {
-  const live = await workerIsPolling();
+async function neverClaimed(scenario, taskId, workerId) {
+  const live = await workerIsPolling(workerId);
   if (!live.polling) {
     untested(`${scenario} — no worker was polling`,
       `worker_identities.last_seen_at did not advance over ${LIVENESS_WINDOW_MS}ms `
@@ -497,7 +497,7 @@ async function resolveAbandonedLease(intentKey, taskId) {
 // hardcoded mount prefix.
 
 /** Times the worker called an endpoint for one run — granted or denied. Any attempt counts. */
-async function workerEndpointCalls(runId, kind) {
+async function workerEndpointCalls(runId, kind, workerId) {
   const r = await one(
     `SELECT COUNT(*)::int n FROM worker_audit
       WHERE run_id = $1 AND worker_id = $2 AND endpoint LIKE $3`,
@@ -506,7 +506,7 @@ async function workerEndpointCalls(runId, kind) {
 }
 
 /** When the worker was GRANTED a lease on this task, in ms — i.e. when it became free. */
-async function workerClaimAt(taskId) {
+async function workerClaimAt(taskId, workerId) {
   const r = await one(
     `SELECT at FROM worker_audit
       WHERE task_id = $1 AND worker_id = $2 AND outcome = 'GRANTED' AND endpoint LIKE $3
@@ -519,7 +519,7 @@ async function workerClaimAt(taskId) {
  * Claim attempts this worker made that the authority REFUSED as stopped. The positive evidence
  * that a STOP was enforced on the worker, as distinct from the worker happening to be idle.
  */
-async function deniedClaims(since) {
+async function deniedClaims(since, workerId) {
   const r = await one(
     `SELECT COUNT(*)::int n FROM worker_audit
       WHERE worker_id = $1 AND outcome = 'DENIED' AND code = $2
@@ -728,7 +728,7 @@ async function cmdScenarios() {
   const claimed = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t2.taskId]));
   if (!claimed.ok) {
-    await neverClaimed('live cancellation', t2.taskId);
+    await neverClaimed('live cancellation', t2.taskId, workerId);
   } else {
     ok(`claimed after ${claimed.ms}ms`);
     const run2 = await one(
@@ -767,7 +767,7 @@ async function cmdScenarios() {
     // until the 60s elapses. Instant task, so the claim timestamp is the worker becoming free.
     const probe = await enqueue(IK('cancel-probe'), { hello: 'after-cancel' });
     const probeClaim = await until('the worker takes the follow-up task', async () =>
-      await workerClaimAt(probe.taskId), { timeoutMs: signalBudget(), everyMs: 500 });
+      await workerClaimAt(probe.taskId, workerId), { timeoutMs: signalBudget(), everyMs: 500 });
     const probeClaimedAt = probeClaim.ok ? probeClaim.value : null;
 
     // THE SERVER-SIDE CONTRACT CHECK, preserved and kept separate: it is about the server.
@@ -782,7 +782,7 @@ async function cmdScenarios() {
     // DID THE WORKER TRY TO REPORT? The discriminator. Sampled after the probe so a slow
     // submission has had its chance to arrive.
     const workerResultAttempts = run2 && run2.run_id
-      ? await workerEndpointCalls(run2.run_id, 'result') : 0;
+      ? await workerEndpointCalls(run2.run_id, 'result', workerId) : 0;
 
     const projectedCompletionAt = run2 && run2.started_at
       ? new Date(run2.started_at).getTime() + CANCEL_DELAY_MS : 0;
@@ -834,7 +834,7 @@ async function cmdScenarios() {
   const t3 = await enqueue(IK('stop'), { delayMs: 60_000 });
   const claimed3 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t3.taskId]));
-  if (!claimed3.ok) await neverClaimed('STOP enforcement mid-execution', t3.taskId);
+  if (!claimed3.ok) await neverClaimed('STOP enforcement mid-execution', t3.taskId, workerId);
   else {
     ok(`claimed after ${claimed3.ms}ms`);
     const run3 = await one(
@@ -871,13 +871,13 @@ async function cmdScenarios() {
     // being refused. The attempt is the positive evidence; the task's state is the control.
     const stopProbe = await enqueue(IK('stop-probe'), { hello: 'during-stop' });
     const refused = await until('the worker is refused a claim', async () =>
-      (await deniedClaims(stopSetAt)) > 0 ? true : null,
+      (await deniedClaims(stopSetAt, workerId)) > 0 ? true : null,
     { timeoutMs: signalBudget(), everyMs: 1000 });
-    const deniedClaimAttempts = await deniedClaims(stopSetAt);
+    const deniedClaimAttempts = await deniedClaims(stopSetAt, workerId);
     const probeDuring = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [stopProbe.taskId]);
 
     const workerResultAttempts3 = run3 && run3.run_id
-      ? await workerEndpointCalls(run3.run_id, 'result') : 0;
+      ? await workerEndpointCalls(run3.run_id, 'result', workerId) : 0;
 
     // ── RESTORE, THEN THE RESUME CONTROL ──────────────────────────────────
     await clearStop(sid);
@@ -934,7 +934,7 @@ async function cmdScenarios() {
   const t4 = await enqueue(IK('expire'), { delayMs: 25_000 });
   const claimed4 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t4.taskId]));
-  if (!claimed4.ok) await neverClaimed('expired lease is not a reset', t4.taskId);
+  if (!claimed4.ok) await neverClaimed('expired lease is not a reset', t4.taskId, workerId);
   else {
     await query(
       `UPDATE agent_runs SET heartbeat_at = NOW() - INTERVAL '6 hours',
@@ -963,7 +963,7 @@ async function cmdScenarios() {
     // Routed through the liveness probe for the same reason as the claim failures: on 2026-11-18
     // this printed FAIL with a diagnosis that said, in the same breath, "the worker is not
     // running". A verdict that contradicts its own detail line is the thing to fix.
-    const live = await workerIsPolling();
+    const live = await workerIsPolling(workerId);
     if (!live.polling) {
       untested('duplicate-submission protection — no worker was polling',
         'The task was never executed, so there was no first result to duplicate.');
@@ -1005,7 +1005,7 @@ async function cmdScenarios() {
     { confirm: 'crash-this-worker', workerId }, 'synthetic.crash_test');
   const claimed6 = await until('the Mac claims the crash task', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t6.taskId]));
-  if (!claimed6.ok) await neverClaimed('crash recovery', t6.taskId);
+  if (!claimed6.ok) await neverClaimed('crash recovery', t6.taskId, workerId);
   else {
     ok('the crash task is LEASED — whatever happens next happens while the lease is held');
 
@@ -1112,7 +1112,7 @@ async function cmdScenarios() {
   const t8 = await enqueue(IK('revoke'), { delayMs: 20_000 });
   const claimed8 = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t8.taskId]));
-  if (!claimed8.ok) await neverClaimed('revocation ends access', t8.taskId);
+  if (!claimed8.ok) await neverClaimed('revocation ends access', t8.taskId, workerId);
   else {
     await IDENTITY.revokeWorker(workerId, { reason: 'M7.5 revocation test' }, deps);
     const after = await until('it stops', async () => {

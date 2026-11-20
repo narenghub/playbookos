@@ -357,3 +357,91 @@ test('the SQL checker covers the driver, and finds statements in it', () => {
   const hard = findings.filter((f) => f.kind !== 'INTERPOLATED');
   assert.deepEqual(hard, [], `unresolved SQL identifiers: ${JSON.stringify(hard, null, 2)}`);
 });
+
+// ── THE DEFECT THAT ABORTED THE FOURTH RUN ──────────────────────────────────
+//
+// `ReferenceError: workerId is not defined`, at scenario 3, eleven minutes into a run with an
+// armed crash test. `workerId` is a `const` inside cmdScenarios, and three helpers added at module
+// scope referenced it as if it were global.
+//
+// Nothing could have caught it. `node --check` validates syntax, not scope. The SQL checker reads
+// statements, not JavaScript bindings. Every unit test passes, because none of them executes the
+// driver — it has no `require.main` guard, so importing it runs it.
+//
+// Worse: `workerLastSeen()` had the SAME bug and was NOT new. That is the liveness probe, added
+// after six scenarios reported product FAILs against a worker that was not running, so that a
+// missing worker reports UNTESTED instead. It would have thrown instead of reporting, and it had
+// never once executed.
+//
+// So the rule is enforced statically and precisely: a function at module scope may not reference
+// `workerId` unless it takes it as a parameter.
+
+/** Top-level `async function name(args) { … }` blocks, by brace matching. */
+function topLevelFunctions(src) {
+  const out = [];
+  const re = /^(?:async )?function ([A-Za-z0-9_]+)\(([^)]*)\) \{/gm;
+  let m;
+  while ((m = re.exec(src))) {
+    let depth = 0, i = re.lastIndex - 1;
+    for (; i < src.length; i++) {
+      if (src[i] === '{') depth++;
+      else if (src[i] === '}') { depth--; if (depth === 0) break; }
+    }
+    out.push({ name: m[1], params: m[2], body: src.slice(re.lastIndex, i) });
+  }
+  return out;
+}
+
+test('DECISIVE: no module-scope helper reads workerId as if it were global', () => {
+  const fns = topLevelFunctions(SRC);
+  assert.ok(fns.length > 8, `expected the driver's helpers, found ${fns.length}`);
+  const offenders = fns
+    .filter((f) => /\bworkerId\b/.test(code(f.body)))
+    .filter((f) => !/\bworkerId\b/.test(f.params))
+    // cmdScenarios declares it itself; that is where it comes from.
+    .filter((f) => !new RegExp('const workerId\\s*=').test(f.body))
+    .map((f) => f.name);
+  assert.deepEqual(offenders, [],
+    'these functions reference workerId without receiving it, which is a ReferenceError the moment '
+    + 'they run: ' + offenders.join(', '));
+});
+
+test('CONTROL: the shape that actually failed is still detected', () => {
+  const broken = `
+async function workerClaimAt(taskId) {
+  const r = await one(\`SELECT at FROM worker_audit WHERE task_id = $1 AND worker_id = $2\`,
+    [taskId, workerId]);
+  return r;
+}
+`;
+  const fns = topLevelFunctions(broken);
+  assert.equal(fns.length, 1);
+  const offends = /\bworkerId\b/.test(fns[0].body) && !/\bworkerId\b/.test(fns[0].params);
+  assert.ok(offends, 'if this stops detecting, the assertion above has gone blind');
+});
+
+test('CONTROL: the corrected shape is accepted', () => {
+  const fixed = `
+async function workerClaimAt(taskId, workerId) {
+  const r = await one(\`SELECT at FROM worker_audit WHERE task_id = $1\`, [taskId, workerId]);
+  return r;
+}
+`;
+  const fns = topLevelFunctions(fixed);
+  const offends = /\bworkerId\b/.test(fns[0].body) && !/\bworkerId\b/.test(fns[0].params);
+  assert.ok(!offends, 'the fix must not be flagged, or the rule is unusable');
+});
+
+test('the liveness probe takes the worker it is asking about', () => {
+  // Specifically named because this one was not new, and because it is the check that decides
+  // whether a silent worker is reported as UNTESTED or as a product failure. It has to work on
+  // the one run where it is needed, and until now it would have crashed.
+  assert.match(SRC, /async function workerLastSeen\(workerId\)/);
+  assert.match(SRC, /async function workerIsPolling\(workerId\)/);
+  assert.match(SRC, /async function neverClaimed\(scenario, taskId, workerId\)/);
+  const calls = SRC.match(/await neverClaimed\([^)]*\)/g) || [];
+  assert.ok(calls.length >= 5, `expected a call per claim-dependent scenario, found ${calls.length}`);
+  for (const c of calls) {
+    assert.match(c, /workerId\)/, `this call omits the worker: ${c}`);
+  }
+});
