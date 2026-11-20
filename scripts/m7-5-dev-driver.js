@@ -112,6 +112,7 @@ const withTransaction = async (fn) => {
 const IDENTITY = require('../src/lib/worker/identity');
 const LEASES = require('../src/lib/worker/leases');
 const AUTH = require('../src/lib/worker/auth');   // scenario 4 asks the authority the way heartbeat() does
+const BEHAVIOUR = require('./lib/m75-worker-behaviour');   // the three-verdict judgements
 const autonomy = require('../src/lib/autonomy');
 const deps = { query, withTransaction, env: process.env };
 
@@ -485,6 +486,48 @@ async function resolveAbandonedLease(intentKey, taskId) {
   return { task: t && t.state, run: r && r.state };
 }
 
+// ── WHAT THE WORKER ITSELF DID ──────────────────────────────────────────────
+//
+// `worker_audit` is written only by the HTTP route layer (src/api/worker.routes.js), so every row
+// in it is a request the REAL worker made over the network. This driver calls `LEASES.*` in
+// process and bypasses the routes, so nothing it does can appear here. That separation is what
+// makes these three helpers evidence about the machine in the office rather than about the driver.
+//
+// The endpoint column holds the request path, so it is matched by suffix rather than by a
+// hardcoded mount prefix.
+
+/** Times the worker called an endpoint for one run — granted or denied. Any attempt counts. */
+async function workerEndpointCalls(runId, kind) {
+  const r = await one(
+    `SELECT COUNT(*)::int n FROM worker_audit
+      WHERE run_id = $1 AND worker_id = $2 AND endpoint LIKE $3`,
+    [runId, workerId, `%worker/${kind}`]);
+  return Number(r.n);
+}
+
+/** When the worker was GRANTED a lease on this task, in ms — i.e. when it became free. */
+async function workerClaimAt(taskId) {
+  const r = await one(
+    `SELECT at FROM worker_audit
+      WHERE task_id = $1 AND worker_id = $2 AND outcome = 'GRANTED' AND endpoint LIKE $3
+      ORDER BY at ASC LIMIT 1`,
+    [taskId, workerId, '%worker/claim']);
+  return r && r.at ? new Date(r.at).getTime() : null;
+}
+
+/**
+ * Claim attempts this worker made that the authority REFUSED as stopped. The positive evidence
+ * that a STOP was enforced on the worker, as distinct from the worker happening to be idle.
+ */
+async function deniedClaims(since) {
+  const r = await one(
+    `SELECT COUNT(*)::int n FROM worker_audit
+      WHERE worker_id = $1 AND outcome = 'DENIED' AND code = $2
+        AND endpoint LIKE $3 AND at >= $4`,
+    [workerId, 'stopped', '%worker/claim', since]);
+  return Number(r.n);
+}
+
 /** Every (scope_type, scope_key) currently stopped, as a sorted list. */
 async function stopInventory() {
   const r = await query(`SELECT scope_type, scope_key FROM autonomy_stops`);
@@ -647,92 +690,125 @@ async function cmdScenarios() {
   else bad(`${leak.n} audit row(s) carry something credential-shaped`);
 
   // ── 3. LIVE CANCELLATION ──────────────────────────────────────────────────
-  // ── WHAT THIS SCENARIO ASSERTS, AND WHY IT CHANGED ───────────────────────
   //
-  // The 2026-11-19 run FAILED here, waiting 75 seconds for the task to reach CANCELLED. That
-  // transition is one the implementation deliberately refuses to make. leases.js cancelTask:
+  // ── WHAT THIS SCENARIO ASSERTS, AND WHY IT CHANGED TWICE ─────────────────
+  //
+  // The 2026-11-19 run FAILED here waiting 75s for the task to reach CANCELLED — a transition
+  // leases.js refuses to make on purpose:
   //
   //     "A LEASED task stays LEASED until its worker stops: the heartbeat delivers the
   //      cancellation and submitResult refuses the result. Flipping it to CANCELLED here would
   //      claim the worker had stopped, which nothing has established."
   //
-  // So the test demanded the one thing the design says would be a lie. What follows asserts the
-  // contract as written, in four parts: the cancellation is RECORDED, the worker OBSERVES it, no
-  // successful result is ACCEPTED, and the lease reaches its documented DISPOSITION.
+  // The corrected version asserted the real contract, but its worker evidence was still an
+  // ABSENCE — no result row — which two different behaviours satisfy:
   //
-  // The delay is 60s, not 20s. Cancellation is delivered inside a heartbeat RESPONSE, and the
-  // heartbeat interval is max(15s, ceiling/6) = 50s for a 5-minute ceiling. A 20-second task
-  // finishes before any heartbeat is due, so the cancel could never be delivered mid-flight and
-  // the scenario tested the refusal path instead of the cancellation path. 60s is the handler's
-  // own cap, and it leaves one heartbeat inside the execution window.
+  //     the worker aborted when the cancel arrived             (compliance)
+  //     it ignored the cancel, finished, reported, was refused (non-compliance)
+  //
+  // The refusal is what removes the row in the second case, so the absence cannot tell them apart.
+  // And the submitResult assertion is the DRIVER submitting as the worker: a true statement about
+  // the server, and no statement at all about the machine in the office.
+  //
+  // What discriminates is `worker_audit`, written only by the HTTP route layer, so it records the
+  // real worker's requests and cannot be contaminated by this driver's in-process calls. A worker
+  // that ignores a cancel MUST run to completion and MUST then call the result endpoint, and that
+  // call is audited whether granted or denied. A worker that aborts never makes it.
+  //
+  // The verdict comes from scripts/lib/m75-worker-behaviour.js, which can also answer UNTESTED —
+  // the case where the worker became free only after the task would have ended anyway, and this
+  // run genuinely cannot tell an abort from indifference.
+  //
+  // The delay is 60s, the handler's cap. Cancellation rides a heartbeat response and the interval
+  // is max(15s, ceiling/6) = 50s for the 5-minute ceiling, so a shorter task finishes before any
+  // heartbeat is due and the cancellation path is never exercised at all.
   head('3. live cancellation while the Mac is executing');
-  const t2 = await enqueue(IK('cancel'), { delayMs: 60_000 });
+  const CANCEL_DELAY_MS = 60_000;
+  const t2 = await enqueue(IK('cancel'), { delayMs: CANCEL_DELAY_MS });
   const claimed = await until('the Mac claims it', async () =>
     await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t2.taskId]));
   if (!claimed.ok) {
     await neverClaimed('live cancellation', t2.taskId);
   } else {
     ok(`claimed after ${claimed.ms}ms`);
+    const run2 = await one(
+      `SELECT run_id, started_at FROM agent_runs
+        WHERE intent_key = $1 AND trigger_detail = $2 ORDER BY started_at DESC LIMIT 1`,
+      [IK('cancel'), workerId]);
+    if (!run2 || !run2.run_id) bad('could not find this worker\'s run for the cancelled task');
+
     const cx = await LEASES.cancelTask(t2.taskId, { reason: 'M7.5 live cancellation' }, deps);
     if (!cx.ok) bad('cancel was refused', JSON.stringify(cx));
 
-    // 1. RECORDED — durable, on the task, with the reason.
     const rec = await one(
       `SELECT state, cancel_requested_at, cancel_reason FROM worker_tasks WHERE id = $1`,
       [t2.taskId]);
-    if (rec && rec.cancel_requested_at && /M7\.5 live cancellation/.test(String(rec.cancel_reason))) {
-      ok(`the cancellation is durably recorded, with its reason`);
-      note(`the task is still ${rec.state}, which is CORRECT — see the comment above. A CANCELLED`);
-      note('state here would assert the worker had stopped before anything had established it.');
-    } else bad('the cancellation was not recorded on the task', JSON.stringify(rec));
+    const recorded = Boolean(rec && rec.cancel_requested_at
+      && /M7\.5 live cancellation/.test(String(rec.cancel_reason)));
+    if (recorded) {
+      note(`recorded at ${new Date(rec.cancel_requested_at).toISOString()}; the task is still `
+        + `${rec.state}, which is CORRECT — see above.`);
+    }
 
-    // 2. OBSERVED — the cancel travels in a heartbeat response, so a heartbeat landing AFTER
-    //    cancel_requested_at is the server having told this worker to stop. Nothing weaker is
-    //    evidence: "no result appeared" is equally consistent with a worker that finished and was
-    //    refused, which is a different behaviour entirely.
+    // DELIVERY. A heartbeat later than cancel_requested_at is the server having told this worker.
     const observed = await until('a heartbeat lands after the cancel', async () => {
       const r = await one(
-        `SELECT r.run_id, r.heartbeat_at, t.cancel_requested_at
-           FROM agent_runs r
-           JOIN worker_tasks t ON t.intent_key = r.intent_key
+        `SELECT r.heartbeat_at, t.cancel_requested_at
+           FROM agent_runs r JOIN worker_tasks t ON t.intent_key = r.intent_key
           WHERE t.id = $1 AND r.trigger_detail = $2
-          ORDER BY r.started_at DESC LIMIT 1`,
-        [t2.taskId, workerId]);
+          ORDER BY r.started_at DESC LIMIT 1`, [t2.taskId, workerId]);
       return (r && r.heartbeat_at && r.cancel_requested_at
         && new Date(r.heartbeat_at) > new Date(r.cancel_requested_at)) ? r : null;
     }, { timeoutMs: signalBudget() });
-    if (observed.ok) {
-      ok(`the worker heartbeated ${Math.round(observed.ms / 1000)}s after the cancel — that `
-        + 'response carried cancel:true');
-    } else {
-      await badTimeout('no heartbeat reached the server after the cancel, so nothing establishes '
-        + 'that the worker was told', observed, t2.taskId);
+    const heartbeatAfterCancelAt = observed.ok
+      ? new Date(observed.value.heartbeat_at).getTime() : null;
+
+    // THE FOLLOW-UP ECHO. A worker that aborted is free now; one that ignored the cancel is busy
+    // until the 60s elapses. Instant task, so the claim timestamp is the worker becoming free.
+    const probe = await enqueue(IK('cancel-probe'), { hello: 'after-cancel' });
+    const probeClaim = await until('the worker takes the follow-up task', async () =>
+      await workerClaimAt(probe.taskId), { timeoutMs: signalBudget(), everyMs: 500 });
+    const probeClaimedAt = probeClaim.ok ? probeClaim.value : null;
+
+    // THE SERVER-SIDE CONTRACT CHECK, preserved and kept separate: it is about the server.
+    let serverRefusalCode = null;
+    if (run2 && run2.run_id) {
+      const late = await LEASES.submitResult(
+        { workerId, runId: run2.run_id, status: 'SUCCEEDED', output: { echoed: {}, steps: 0 } },
+        deps);
+      serverRefusalCode = late && late.ok === false ? late.code : null;
     }
 
-    // 3. NOT ACCEPTED — asserted by ATTEMPTING it. A count of zero only says nobody tried.
-    const runRow = await one(
-      `SELECT run_id FROM agent_runs
-        WHERE intent_key = $1 AND trigger_detail = $2 ORDER BY started_at DESC LIMIT 1`,
-      [IK('cancel'), workerId]);
-    if (runRow && runRow.run_id) {
-      const late = await LEASES.submitResult(
-        { workerId, runId: runRow.run_id, status: 'SUCCEEDED', output: { echoed: {}, steps: 0 } },
-        deps);
-      if (!late.ok && late.code === 'cancelled') {
-        ok(`a SUCCEEDED result for a cancelled task is refused (${late.code})`);
-      } else {
-        bad('a result was accepted for a cancelled task', JSON.stringify(late).slice(0, 200));
-      }
-    } else bad('could not find this worker\'s run for the cancelled task');
+    // DID THE WORKER TRY TO REPORT? The discriminator. Sampled after the probe so a slow
+    // submission has had its chance to arrive.
+    const workerResultAttempts = run2 && run2.run_id
+      ? await workerEndpointCalls(run2.run_id, 'result') : 0;
 
-    await sleep(4000);     // long enough for a worker that was going to report to have reported
+    const projectedCompletionAt = run2 && run2.started_at
+      ? new Date(run2.started_at).getTime() + CANCEL_DELAY_MS : 0;
+    const v = BEHAVIOUR.judgeCancellation({
+      recorded, serverRefusalCode, heartbeatAfterCancelAt, workerResultAttempts,
+      probeClaimedAt, projectedCompletionAt,
+    });
+
+    note(`evidence: heartbeat-after-cancel=${heartbeatAfterCancelAt
+      ? new Date(heartbeatAfterCancelAt).toISOString() : 'none'}`);
+    note(`          worker result-endpoint calls for this run=${workerResultAttempts}`
+      + ` (worker_audit; this driver's own submission is not in it)`);
+    note(`          worker free at=${probeClaimedAt ? new Date(probeClaimedAt).toISOString() : 'never'}`
+      + `, task would have finished at=${new Date(projectedCompletionAt).toISOString()}`);
+    note(`          server refusal code=${serverRefusalCode}`);
+    note(`correlate on the iMac:  run ${run2 && run2.run_id}  task ${t2.taskId}  worker ${workerId}`);
+    note('          grep that run id in ~/Library/Logs/playnexa-worker for cancel_signalled and');
+    note('          aborted, whose ms says how far the task got before it stopped.');
+
+    if (v.verdict === BEHAVIOUR.PASS) ok(`cancellation is honoured by the worker — ${v.why}`);
+    else if (v.verdict === BEHAVIOUR.UNTESTED) untested('live cancellation', v.why);
+    else bad('live cancellation', v.why);
+
     const res = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t2.taskId]);
-    if (Number(res.n) === 0) ok('and the Mac reported NOTHING of its own — not even a FAILED');
-    else bad('a cancelled task got a result row', `${res.n} row(s)`);
+    if (Number(res.n) !== 0) bad('a cancelled task got a result row', `${res.n} row(s)`);
 
-    // 4. DISPOSITION — the documented end state for a lease whose worker stopped without
-    //    reporting. Same path scenario 5 proves for expiry; asserted here so "the task stays
-    //    LEASED" cannot hide a task that stays LEASED FOR EVER.
     const settled = await resolveAbandonedLease(IK('cancel'), t2.taskId);
     if (settled.task === 'NEEDS_RESOLUTION') {
       ok(`and the lease resolves to NEEDS_RESOLUTION (run ${settled.run}), not back to PENDING`);
@@ -741,18 +817,18 @@ async function cmdScenarios() {
     }
   }
 
-  // ── 4. GLOBAL STOP MID-EXECUTION ──────────────────────────────────────────
-  // ── WHAT THIS SCENARIO ASSERTS, AND WHY IT CHANGED ───────────────────────
+  // ── 4. MID-FLIGHT STOP ────────────────────────────────────────────────────
   //
-  // The 2026-11-19 FAIL here was a contradiction inside the test itself. The WAIT condition
-  // accepted "a result row exists" as the signal that the worker had stopped; the PASS condition
-  // then required that there be NO result row. So the fastest way to satisfy the wait was for the
-  // worker to report — and a worker that reported was the failure. The two halves could only agree
-  // by timing out, and a timeout is also a FAIL. It could not pass.
+  // The 2026-11-19 FAIL here was a contradiction inside the test: the WAIT accepted "a result row
+  // exists" as the signal that the worker had stopped, and the PASS required that there be none.
+  // The fastest way to satisfy the wait was the thing that failed the test, so the two halves
+  // could only agree by timing out — which is also a FAIL. It could not pass.
   //
-  // Worse, neither half asserted what a STOP actually does. A STOP does not change the task; it
-  // makes heartbeat() answer cancel:true and submitResult() refuse with code `stopped`. Those are
-  // the observables, and they are asserted directly below.
+  // A STOP does not change the task. It makes heartbeat() answer cancel:true, and it makes
+  // claimTask refuse with code `stopped` (leases.js consults the same authority on both paths).
+  // Those are the observables, and the refused CLAIM is the one that matters most: an idle worker
+  // and a stopped worker both claim nothing, so only a refusal attributable to this worker tells
+  // them apart. Inactivity is not compliance.
   head('4. a STOP while the Mac is executing');
   const stopsBefore = await stopInventory();
   const t3 = await enqueue(IK('stop'), { delayMs: 60_000 });
@@ -761,82 +837,95 @@ async function cmdScenarios() {
   if (!claimed3.ok) await neverClaimed('STOP enforcement mid-execution', t3.taskId);
   else {
     ok(`claimed after ${claimed3.ms}ms`);
-    const sid = await setStop('capability', 'worker.execute', 'M7.5 live STOP test');
-
-    // 1. RECORDED IN THE SCOPE THE WORKER PATH ACTUALLY CONSULTS. Asserted by asking the
-    //    authority the way the worker's own heartbeat asks it — not by reading back the row I
-    //    just wrote, which would only prove the INSERT worked.
-    const gate = await AUTH.authorizeWorkerAction({ workerId }, deps);
-    if (gate.allowed === false && gate.stop && gate.stop.scope_type === 'capability') {
-      ok(`the authority now refuses this worker (scope ${gate.stop.scope_type}:`
-        + `${gate.stop.scope_key || 'worker.execute'}) — the same call heartbeat() makes`);
-    } else {
-      bad('the fixture STOP is not in the scope the worker path consults',
-        JSON.stringify(gate).slice(0, 200));
-    }
-
-    // 2. OBSERVED AND HONOURED. The STOP reaches the worker in a heartbeat RESPONSE, so a
-    //    heartbeat landing after the STOP was written is the worker being told to halt.
-    const stopRow = await one(
-      `SELECT set_at FROM autonomy_stops WHERE scope_type = $1 AND scope_key = $2`,
-      ['capability', 'worker.execute']);
-    const observed = await until('a heartbeat lands after the STOP', async () => {
-      const r = await one(
-        `SELECT r.heartbeat_at FROM agent_runs r
-          WHERE r.intent_key = $1 AND r.trigger_detail = $2
-          ORDER BY r.started_at DESC LIMIT 1`, [IK('stop'), workerId]);
-      if (!r || !r.heartbeat_at) return null;
-      const after = stopRow && stopRow.set_at
-        ? new Date(r.heartbeat_at) > new Date(stopRow.set_at) : false;
-      return after ? r : null;
-    }, { timeoutMs: signalBudget() });
-    if (observed.ok) {
-      ok(`the worker heartbeated ${Math.round(observed.ms / 1000)}s after the STOP — that `
-        + 'response carried cancel:true with the stop scope');
-    } else {
-      await badTimeout('no heartbeat reached the server after the STOP, so nothing establishes '
-        + 'that the worker was told to halt', observed, t3.taskId);
-    }
-
-    // 3. NO PROHIBITED RESULT. Asserted by attempting one, then by counting.
-    const runRow = await one(
+    const run3 = await one(
       `SELECT run_id FROM agent_runs
         WHERE intent_key = $1 AND trigger_detail = $2 ORDER BY started_at DESC LIMIT 1`,
       [IK('stop'), workerId]);
-    if (runRow && runRow.run_id) {
-      const late = await LEASES.submitResult(
-        { workerId, runId: runRow.run_id, status: 'SUCCEEDED', output: { echoed: {}, steps: 0 } },
-        deps);
-      if (!late.ok && late.code === 'stopped') {
-        ok(`a result submitted under a STOP is refused (${late.code})`);
-      } else {
-        bad('a result was accepted while the worker was STOPped', JSON.stringify(late).slice(0, 200));
-      }
-    } else bad('could not find this worker\'s run for the STOPped task');
 
-    await sleep(4000);
-    const res = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t3.taskId]);
-    if (Number(res.n) === 0) ok('and the Mac reported nothing of its own');
-    else bad('a STOPped task produced a result row', `${res.n} row(s)`);
+    const sid = await setStop('capability', 'worker.execute', 'M7.5 live STOP test');
+    const stopRow = await one(
+      `SELECT set_at FROM autonomy_stops WHERE scope_type = $1 AND scope_key = $2`,
+      ['capability', 'worker.execute']);
+    const stopSetAt = stopRow && stopRow.set_at ? new Date(stopRow.set_at) : new Date();
 
-    // 4. THE FIXTURE STOP IS RESTORED, AND ONLY IT.
+    // IN THE SCOPE THE WORKER PATH CONSULTS — asked the way heartbeat() and claimTask() ask it,
+    // not by reading back the row this driver just wrote.
+    const gate = await AUTH.authorizeWorkerAction({ workerId }, deps);
+    const stopInScope = gate.allowed === false && Boolean(gate.stop);
+    if (stopInScope) {
+      note(`the authority refuses this worker at scope ${gate.stop.scope_type}:`
+        + `${gate.stop.scope_key || 'worker.execute'} — the same call heartbeat() makes`);
+    }
+
+    const observed3 = await until('a heartbeat lands after the STOP', async () => {
+      const r = await one(
+        `SELECT heartbeat_at FROM agent_runs
+          WHERE intent_key = $1 AND trigger_detail = $2 ORDER BY started_at DESC LIMIT 1`,
+        [IK('stop'), workerId]);
+      return (r && r.heartbeat_at && new Date(r.heartbeat_at) > stopSetAt) ? r : null;
+    }, { timeoutMs: signalBudget() });
+    const heartbeatAfterStopAt = observed3.ok
+      ? new Date(observed3.value.heartbeat_at).getTime() : null;
+
+    // A TASK OFFERED DURING THE STOP must stay PENDING, and the worker must be seen TRYING and
+    // being refused. The attempt is the positive evidence; the task's state is the control.
+    const stopProbe = await enqueue(IK('stop-probe'), { hello: 'during-stop' });
+    const refused = await until('the worker is refused a claim', async () =>
+      (await deniedClaims(stopSetAt)) > 0 ? true : null,
+    { timeoutMs: signalBudget(), everyMs: 1000 });
+    const deniedClaimAttempts = await deniedClaims(stopSetAt);
+    const probeDuring = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [stopProbe.taskId]);
+
+    const workerResultAttempts3 = run3 && run3.run_id
+      ? await workerEndpointCalls(run3.run_id, 'result') : 0;
+
+    // ── RESTORE, THEN THE RESUME CONTROL ──────────────────────────────────
     await clearStop(sid);
     const stopsAfter = await stopInventory();
-    if (stopsAfter.join('|') === stopsBefore.join('|')) {
-      ok(`the stop table is byte-for-byte as it was: ${stopsAfter.length} STOP(s), the same ones`);
+    const inventoryUnchanged = stopsAfter.join('|') === stopsBefore.join('|');
+    if (inventoryUnchanged) {
+      note(`the stop table is as it was: ${stopsAfter.length} STOP(s), the same ones`);
     } else {
       const added = stopsAfter.filter((x) => !stopsBefore.includes(x));
       const removed = stopsBefore.filter((x) => !stopsAfter.includes(x));
       bad('the fixture STOP changed the containment inventory',
         `added ${JSON.stringify(added)}, removed ${JSON.stringify(removed)}`);
     }
+    // Without this, "it claimed nothing while stopped" is satisfied perfectly by a worker that
+    // was already dead before the STOP was written.
+    const resumed = await until('the worker resumes permitted work', async () =>
+      await one(`SELECT status FROM worker_results WHERE task_id=$1`, [stopProbe.taskId]),
+    { timeoutMs: signalBudget(), everyMs: 1000 });
+    const resumedCompleted = Boolean(resumed.ok && resumed.value
+      && resumed.value.status === 'SUCCEEDED');
 
-    // 5. DISPOSITION through the real lifecycle, for the same reason as scenario 3.
-    const settled = await resolveAbandonedLease(IK('stop'), t3.taskId);
-    if (settled.task === 'NEEDS_RESOLUTION') {
-      ok(`and the halted lease resolves to NEEDS_RESOLUTION (run ${settled.run})`);
+    const v3 = BEHAVIOUR.judgeStop({
+      stopInScope, inventoryUnchanged, heartbeatAfterStopAt,
+      workerResultAttempts: workerResultAttempts3,
+      deniedClaimAttempts,
+      probeStateWhileStopped: (probeDuring && probeDuring.state) || 'MISSING',
+      resumedCompleted,
+    });
+
+    note(`evidence: heartbeat-after-stop=${heartbeatAfterStopAt
+      ? new Date(heartbeatAfterStopAt).toISOString() : 'none'}`);
+    note(`          claims refused with code 'stopped'=${deniedClaimAttempts}`
+      + ` (worker_audit, after ${stopSetAt.toISOString()})`);
+    note(`          task offered during the STOP was ${probeDuring && probeDuring.state}`
+      + `, and after clearing it ${resumedCompleted ? 'completed' : 'did NOT complete'}`);
+    note(`          worker result-endpoint calls for the stopped run=${workerResultAttempts3}`);
+    note(`correlate on the iMac:  run ${run3 && run3.run_id}  task ${t3.taskId}  worker ${workerId}`);
+
+    if (v3.verdict === BEHAVIOUR.PASS) ok(`the STOP is honoured by the worker — ${v3.why}`);
+    else if (v3.verdict === BEHAVIOUR.UNTESTED) untested('mid-flight STOP', v3.why);
+    else bad('mid-flight STOP', v3.why);
+    if (!refused.ok) note('the refused-claim wait timed out; the verdict above reflects that.');
+
+    const settled3 = await resolveAbandonedLease(IK('stop'), t3.taskId);
+    if (settled3.task === 'NEEDS_RESOLUTION') {
+      ok(`and the halted lease resolves to NEEDS_RESOLUTION (run ${settled3.run})`);
     } else {
-      bad(`the STOPped lease ended as ${settled.task}`, JSON.stringify(settled));
+      bad(`the STOPped lease ended as ${settled3.task}`, JSON.stringify(settled3));
     }
   }
 

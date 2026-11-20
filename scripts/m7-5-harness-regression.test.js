@@ -82,10 +82,16 @@ test('scenario 3 asserts the contract that DOES hold: recorded, observed, refuse
   assert.match(s, /heartbeat_at/,
     'the worker observing the cancel is a heartbeat landing after it — nothing weaker is evidence');
   assert.match(s, /submitResult/,
-    'refusal must be asserted by ATTEMPTING a submission, not by counting zero rows');
-  assert.match(s, /'cancelled'/, 'and by checking the documented refusal code');
+    'the server-side refusal must be asserted by ATTEMPTING a submission');
   assert.match(s, /resolveAbandonedLease/,
     '"still LEASED" must be distinguished from "LEASED for ever"');
+  // The refusal CODE moved into the judge on 2026-11-20, because a correct server refusal must
+  // not be able to rescue a scenario whose worker evidence is missing. Asserted where it now
+  // lives, so this test tracks the architecture instead of a string that used to be here.
+  assert.match(s, /BEHAVIOUR\.judgeCancellation/, 'the verdict must come from the judge');
+  const judge = fs.readFileSync(path.join(__dirname, 'lib/m75-worker-behaviour.js'), 'utf8');
+  assert.match(judge, /serverRefusalCode !== 'cancelled'/,
+    'and the judge must still require the documented refusal code');
 });
 
 test('scenario 3 gives the cancel long enough to be delivered at all', () => {
@@ -93,10 +99,78 @@ test('scenario 3 gives the cancel long enough to be delivered at all', () => {
   // Cancellation arrives inside a heartbeat RESPONSE. The interval is max(15s, ceiling/6) = 50s
   // for the 5-minute ceiling, so a 20-second task finishes before any heartbeat is due and the
   // cancellation path is never exercised — the test would be measuring the refusal path instead.
-  const delay = /delayMs:\s*([0-9_]+)/.exec(s);
-  assert.ok(delay, 'scenario 3 must set an explicit delay');
-  assert.ok(Number(delay[1].replace(/_/g, '')) >= 55_000,
-    `the task must outlive one heartbeat interval; got ${delay[1]}`);
+  //
+  // The delay is a named constant now, because the same number also sets the projected completion
+  // the worker has to beat. Two copies of it would be two chances to disagree.
+  const named = /const CANCEL_DELAY_MS = ([0-9_]+)/.exec(SRC);
+  assert.ok(named, 'scenario 3 must declare its delay as a constant');
+  const ms = Number(named[1].replace(/_/g, ''));
+  assert.ok(ms >= 55_000, `the task must outlive one heartbeat interval; got ${ms}`);
+  assert.match(s, /delayMs: CANCEL_DELAY_MS/, 'and the task must actually use it');
+  assert.match(s, /CANCEL_DELAY_MS/, 'as must the projected completion the worker must beat');
+});
+
+// ── THE WORKER-BEHAVIOUR EVIDENCE (added 2026-11-20) ────────────────────────
+
+test('DECISIVE: scenarios 3 and 4 judge the WORKER, not only the server', () => {
+  // The gap the owner caught: zero result rows is satisfied both by a worker that aborted and by
+  // one that finished and was refused, and the submitResult assertion is this driver submitting
+  // as the worker — a statement about the server.
+  // The first version of this test matched /worker_audit|.../ anywhere in the scenario — and
+  // PASSED after the audit query was deleted, because a note() log line mentions "worker_audit"
+  // in its text. A test satisfied by a log message is the same defect it was written to catch, so
+  // the required CALLS are named explicitly below.
+  const required = {
+    3: [/await workerEndpointCalls\(/, /await workerClaimAt\(/, /BEHAVIOUR\.judgeCancellation\(/],
+    4: [/await deniedClaims\(/, /await workerEndpointCalls\(/, /BEHAVIOUR\.judgeStop\(/],
+  };
+  for (const n of [3, 4]) {
+    const s = code(scenario(n));
+    for (const re of required[n]) {
+      assert.match(s, re, `scenario ${n} must actually call ${re} — only the real worker's HTTP `
+        + 'requests appear in worker_audit, so this is its only evidence about the worker');
+    }
+    assert.match(s, /untested\(/,
+      `scenario ${n} must be able to answer UNTESTED when the evidence cannot discriminate`);
+  }
+
+  // And the judge's inputs must be ASSIGNED FROM the helpers. Matching the call anywhere in the
+  // scenario was not enough: hardcoding `deniedClaimAttempts = 1` passed, because the helper was
+  // still called a few lines above inside the wait. The evidence has to be the thing that decides.
+  assert.match(code(scenario(3)), /workerResultAttempts\s*=\s*run2[\s\S]{0,120}workerEndpointCalls\(/,
+    'scenario 3 must take its attempt count from worker_audit, not a literal');
+  assert.match(code(scenario(4)), /deniedClaimAttempts\s*=\s*await deniedClaims\(/,
+    'scenario 4 must take its refused-claim count from worker_audit, not a literal');
+  assert.match(code(scenario(4)), /workerResultAttempts3\s*=\s*run3[\s\S]{0,120}workerEndpointCalls\(/,
+    'and its result-attempt count likewise');
+});
+
+test('CONTROL: a scenario that only MENTIONS the audit fails the test above', () => {
+  // The exact shape that slipped through: the word present in a log line, the query gone.
+  const pretend = "note(`result-endpoint calls (worker_audit; not the driver)`); const n = 0;";
+  assert.ok(!/await workerEndpointCalls\(/.test(pretend),
+    'if this ever matches, the assertion above has gone back to matching prose');
+});
+
+test('scenario 3 corroborates with a follow-up task, and 4 with a resume', () => {
+  const s3 = code(scenario(3));
+  assert.match(s3, /cancel-probe/, 'a worker that aborted is free before the task would have ended');
+  assert.match(s3, /workerClaimAt/, 'and the claim timestamp is when it became free');
+  const s4 = code(scenario(4));
+  assert.match(s4, /stop-probe/, 'a task offered during the STOP must stay PENDING');
+  assert.match(s4, /resumedCompleted/, 'and the resume is the control against a dead worker');
+});
+
+test('the audit helpers cannot be contaminated by the driver itself', () => {
+  // worker_audit is written in the HTTP route layer only. If the library started writing it, the
+  // driver's own in-process LEASES calls would appear as worker activity and the discriminator
+  // would silently invert.
+  const routes = fs.readFileSync(path.join(__dirname, '../src/api/worker.routes.js'), 'utf8');
+  assert.match(routes, /AUDIT\.record/, 'the route layer must be what records the audit');
+  const leases = fs.readFileSync(path.join(__dirname, '../src/lib/worker/leases.js'), 'utf8');
+  assert.ok(!/INSERT INTO worker_audit/i.test(leases),
+    'if leases.js ever writes worker_audit, scenarios 3 and 4 need rethinking: this driver calls '
+    + 'leases.js directly, so its own submissions would become "worker" evidence');
 });
 
 // ── SCENARIO 4 — STOP ───────────────────────────────────────────────────────
