@@ -41,6 +41,8 @@ const TARGETS = [
   'scripts/m7-5-state-report.js',
   'scripts/check-worker-leasing-db.js',
   'scripts/check-worker-runtime-db.js',
+  'scripts/m7-6-dev-driver.js',
+  'scripts/check-worker-availability.js',
 ];
 
 // ── 1. THE CATALOG ─────────────────────────────────────────────────────────

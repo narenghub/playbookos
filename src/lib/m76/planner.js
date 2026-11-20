@@ -74,6 +74,29 @@ const RECOGNISED_GOALS = Object.freeze([
   }),
 ]);
 
+/**
+ * Stable JSON: keys sorted at every depth, so the digest of a payload does not depend on the order
+ * a JSON parser happened to produce. `JSON.stringify` preserves insertion order, and a payload
+ * that has been through Postgres JSONB comes back in a different order from the one it went in
+ * with — so digesting raw stringify output would report tampering on every round trip.
+ */
+function canonical(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`).join(',')}}`;
+}
+
+/**
+ * The digest a step's payload is validated under. Dispatch recomputes it from the PERSISTED row
+ * and refuses if it differs, so a payload altered between validation and dispatch cannot be sent:
+ * the plan that policy passed is the plan that runs, or nothing runs.
+ */
+function digestOf(payload) {
+  return crypto.createHash('sha256').update(canonical(payload === undefined ? null : payload))
+    .digest('hex');
+}
+
 const newId = (prefix) => `${prefix}_${crypto.randomBytes(9).toString('hex')}`;
 
 /**
@@ -104,12 +127,14 @@ function plan({ goalId, text, asOf, seed = 'm76', factCount = SYNTHETIC.DEFAULT_
   const planId = newId('m76plan');
   const steps = recognised.steps.map((stepType, i) => {
     const def = STEP_VOCABULARY[stepType];
+    const payload = def.payloadFor({ asOf, facts });
     return {
       stepId: `s${i + 1}`,
       ordinal: i + 1,
       stepType,
       taskType: def.taskType,
-      payload: def.payloadFor({ asOf, facts }),
+      payload,
+      payloadDigest: digestOf(payload),
       // Per-plan, so two plans for the same goal cannot collide on `uq_worker_tasks_intent` and
       // cannot inherit each other's attempt history — the lesson from the M7.5 acceptance runs.
       intentKey: `m76-${planId}-s${i + 1}`,
@@ -166,10 +191,18 @@ function validateShape(candidate) {
     if (s.intentKey && !String(s.intentKey).startsWith(`m76-${candidate.planId}-`)) {
       problems.push(`step '${s.stepId}' has an intentKey outside its own plan's namespace`);
     }
+    // The digest must be present AND must match the payload it travels with. A plan whose digest
+    // was recomputed after the payload changed would validate against itself and prove nothing.
+    if (!s.payloadDigest) {
+      problems.push(`step '${s.stepId}' has no payloadDigest`);
+    } else if (s.payloadDigest !== digestOf(s.payload)) {
+      problems.push(`step '${s.stepId}' payloadDigest does not match its payload`);
+    }
   }
   return problems;
 }
 
 module.exports = {
-  plan, validateShape, STEP_VOCABULARY, RECOGNISED_GOALS, PLANNER_VERSION,
+  plan, validateShape, digestOf, canonical,
+  STEP_VOCABULARY, RECOGNISED_GOALS, PLANNER_VERSION,
 };

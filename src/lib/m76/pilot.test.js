@@ -52,6 +52,19 @@ function fakeQuery(answers = {}) {
 
 const noStops = { checkStopped: async () => null };
 
+/**
+ * A query stub that also answers the persisted-payload read dispatch now performs. Dispatch
+ * verifies the stored payload against the digest policy validated, so a stub that returns no row
+ * is a plan that was never persisted — which it correctly refuses.
+ */
+function persistedQuery(plan, extra = {}) {
+  const byStep = new Map(plan.steps.map((s) => [s.stepId, s.payload]));
+  return fakeQuery({
+    'SELECT payload FROM m76_plan_steps': (params) => [{ payload: byStep.get(params[1]) }],
+    ...extra,
+  });
+}
+
 // ── GOAL → PLAN ─────────────────────────────────────────────────────────────
 
 test('a recognised goal becomes a bounded two-step plan', () => {
@@ -193,7 +206,7 @@ test('dispatch enqueues one task per step, in ordinal order', async () => {
       return { taskId: `wtask_${seen.length}` };
     },
   };
-  const f = fakeQuery();
+  const f = persistedQuery(p);
   const r = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
   assert.equal(r.dispatched.length, 2);
   assert.deepEqual(seen.map((s) => s.taskType), ['synthetic.echo', 'report.daily_operations']);
@@ -210,7 +223,7 @@ test('DECISIVE: re-dispatch creates no second task', async () => {
       return { taskId: byIntent.get(intentKey), existing: true };
     },
   };
-  const f = fakeQuery();
+  const f = persistedQuery(p);
   const first = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
   const again = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
   assert.equal(byIntent.size, 2, 'a second dispatch created extra tasks');
@@ -218,10 +231,11 @@ test('DECISIVE: re-dispatch creates no second task', async () => {
 });
 
 test('dispatch fails loudly if enqueue returns no task id', async () => {
+  const p = okPlan();
   const leases = { enqueueTask: async () => ({ ok: false, code: 'nothing_to_do' }) };
   await assert.rejects(
-    () => PIPELINE.dispatchPlan(okPlan(), { validated: true },
-      { query: fakeQuery().query, leases }),
+    () => PIPELINE.dispatchPlan(p, { validated: true },
+      { query: persistedQuery(p).query, leases }),
     /returned no task id/);
 });
 
@@ -429,4 +443,115 @@ test('the schema can be rolled back completely', () => {
   assert.ok(order.indexOf('m76_reports') < order.indexOf('m76_plans'));
   assert.ok(order.indexOf('m76_plan_steps') < order.indexOf('m76_plans'));
   assert.ok(order.indexOf('m76_plans') < order.indexOf('m76_goals'));
+});
+
+// ── S9: THE PAYLOAD THAT RUNS IS THE PAYLOAD THAT WAS VALIDATED ─────────────
+
+test('every planned step carries a digest of its own payload', () => {
+  const p = okPlan();
+  for (const step of p.steps) {
+    assert.ok(step.payloadDigest, `step ${step.stepId} has no digest`);
+    assert.equal(step.payloadDigest, PLANNER.digestOf(step.payload));
+  }
+});
+
+test('the digest is canonical, so a JSONB round trip does not look like tampering', () => {
+  // JSONB does not preserve key order. A raw JSON.stringify comparison would report tampering on
+  // every single dispatch, which would make the check useless and then switched off.
+  assert.equal(PLANNER.digestOf({ a: 1, b: { c: 2, d: 3 } }),
+    PLANNER.digestOf({ b: { d: 3, c: 2 }, a: 1 }));
+  assert.notEqual(PLANNER.digestOf({ a: 1 }), PLANNER.digestOf({ a: 2 }));
+  assert.notEqual(PLANNER.digestOf([1, 2]), PLANNER.digestOf([2, 1]),
+    'array order is meaningful and must change the digest');
+});
+
+test('a plan whose digest does not match its payload is refused by shape', () => {
+  const p = okPlan();
+  p.steps[1].payload = { asOf: '2026-11-20', facts: [] };    // payload swapped, digest left alone
+  assert.ok(PLANNER.validateShape(p).some((x) => /payloadDigest does not match/.test(x)));
+});
+
+test('a step with no digest at all is refused', () => {
+  const p = okPlan();
+  delete p.steps[0].payloadDigest;
+  assert.ok(PLANNER.validateShape(p).some((x) => /no payloadDigest/.test(x)));
+});
+
+test('DECISIVE: dispatch refuses when the PERSISTED payload was altered', async () => {
+  const p = okPlan();
+  const leases = { enqueueTask: async () => ({ taskId: 'wtask_1' }) };
+  // The row comes back with a different payload from the one policy validated.
+  const f = fakeQuery({
+    'SELECT payload FROM m76_plan_steps': [{ payload: { tampered: true } }],
+  });
+  await assert.rejects(
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    /does not match the digest policy validated/);
+  assert.ok(!f.calls.some((c) => /UPDATE m76_plan_steps SET task_id/i.test(c.sql)),
+    'nothing may be recorded as dispatched when the payload was altered');
+});
+
+test('CONTROL: dispatch proceeds when the persisted payload matches', async () => {
+  const p = okPlan();
+  const sent = [];
+  const leases = {
+    enqueueTask: async ({ payload }) => { sent.push(payload); return { taskId: `wtask_${sent.length}` }; },
+  };
+  const f = persistedQuery(p);
+  const r = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
+  assert.equal(r.dispatched.length, 2);
+  assert.equal(sent.length, 2, 'the payload dispatched is the one read back from the row');
+});
+
+test('dispatch refuses if the plan was never persisted', async () => {
+  const leases = { enqueueTask: async () => ({ taskId: 'x' }) };
+  await assert.rejects(
+    () => PIPELINE.dispatchPlan(okPlan(), { validated: true },
+      { query: fakeQuery().query, leases }),
+    /no persisted row to dispatch/);
+});
+
+test('the digest is not stored beside the payload it protects', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'pipeline.js'), 'utf8');
+  assert.ok(!/INSERT INTO m76_plan_steps[\s\S]{0,400}payload_digest/i.test(src),
+    'a digest in the same row as its payload would be rewritten by whatever rewrote the payload');
+});
+
+// ── R6: BOUNDED RETRY, ON TOP OF THE DATABASE'S OWN GOVERNANCE ──────────────
+
+test('a non-reexecutable step may never be retried', async () => {
+  const r = await PIPELINE.mayRetry(
+    { taskType: 'proposal.draft_once', intentKey: 'm76-x-s1' }, { query: fakeQuery().query });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'not_reexecutable');
+});
+
+test('DECISIVE: retries are capped, and the cap escalates rather than loops', async () => {
+  const atCap = fakeQuery({ 'AS attempts': [{ attempts: PIPELINE.MAX_ATTEMPTS, runs: 3 }] });
+  const r = await PIPELINE.mayRetry(
+    { taskType: 'report.daily_operations', intentKey: 'm76-x-s2' }, { query: atCap.query });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'retry_cap_exceeded');
+  assert.match(r.detail, new RegExp(`cap is ${PIPELINE.MAX_ATTEMPTS}`));
+});
+
+test('CONTROL: a first failure IS retryable', async () => {
+  const fresh = fakeQuery({ 'AS attempts': [{ attempts: 1, runs: 1 }] });
+  const r = await PIPELINE.mayRetry(
+    { taskType: 'report.daily_operations', intentKey: 'm76-x-s2' }, { query: fresh.query });
+  assert.equal(r.ok, true);
+});
+
+test('attempts are counted from agent_runs, not from a counter the pilot keeps', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'pipeline.js'), 'utf8');
+  const fn = src.slice(src.indexOf('async function attemptsFor'));
+  assert.match(fn.slice(0, fn.indexOf('\n}')), /FROM agent_runs/,
+    'a pilot-maintained counter can disagree with the lease lifecycle; agent_runs cannot');
+});
+
+test('the retry cap does not reach around the database guard', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'pipeline.js'), 'utf8');
+  const code = src.split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+  assert.ok(!/overrideReason/.test(code));
+  assert.ok(!/retry_override_reason/.test(code));
 });

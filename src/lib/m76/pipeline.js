@@ -31,6 +31,7 @@ const crypto = require('crypto');
 const LEASES = require('../worker/leases');
 const SCHEMA = require('./schema');
 const POLICY = require('./policy');
+const PLANNER = require('./planner');
 
 const newId = (prefix) => `${prefix}_${crypto.randomBytes(9).toString('hex')}`;
 const q = (deps) => (deps && deps.query) || require('../db').query;
@@ -62,6 +63,8 @@ async function recordPlan(plan, { state = 'PROPOSED', refusedReason = null }, de
        ON CONFLICT (plan_id, step_id) DO NOTHING`,
       [plan.planId, s.stepId, s.ordinal, s.stepType, s.taskType,
         JSON.stringify(s.payload || {}), s.intentKey]);
+    // The digest is NOT stored. It belongs to the validated plan object, and a digest kept in the
+    // same row as the payload it protects would be rewritten by whatever rewrote the payload.
   }
   return { planId: plan.planId, state };
 }
@@ -84,9 +87,31 @@ async function dispatchPlan(plan, { workerId = null, validated = false } = {}, d
   const leases = deps.leases || LEASES;
   const dispatched = [];
   for (const s of [...plan.steps].sort((a, b) => a.ordinal - b.ordinal)) {
+    // ── THE PAYLOAD THAT RUNS IS THE PAYLOAD THAT WAS VALIDATED ───────────
+    //
+    // Read back from the PERSISTED row and re-digested. Dispatching `s.payload` from memory would
+    // make this check circular — it would compare the plan against itself. Reading the row is what
+    // makes an alteration between validation and dispatch detectable, whether it came from another
+    // process, a concurrent operator, or a bug in recordPlan.
+    //
+    // The digest is over canonical JSON, because JSONB does not preserve key order and a raw
+    // stringify comparison would report tampering on every round trip.
+    const stored = await query(
+      `SELECT payload FROM m76_plan_steps WHERE plan_id = $1 AND step_id = $2`,
+      [plan.planId, s.stepId]);
+    if (!stored.rows.length) {
+      throw new Error(`step ${s.stepId}: no persisted row to dispatch — recordPlan did not run`);
+    }
+    const storedDigest = PLANNER.digestOf(stored.rows[0].payload);
+    if (!s.payloadDigest || storedDigest !== s.payloadDigest) {
+      throw new Error(`step ${s.stepId}: the persisted payload does not match the digest policy `
+        + `validated (${s.payloadDigest ? s.payloadDigest.slice(0, 12) : 'none'} vs `
+        + `${storedDigest.slice(0, 12)}). Nothing was dispatched.`);
+    }
+
     const t = await leases.enqueueTask({
       taskType: s.taskType,
-      payload: s.payload || {},
+      payload: stored.rows[0].payload,
       intentKey: s.intentKey,
       workflow: POLICY.PILOT_WORKFLOW,
       createdBy: 'm76-pilot',
@@ -137,6 +162,49 @@ async function collect(plan, deps = {}) {
     });
   }
   return out;
+}
+
+// ── BOUNDED RETRY ───────────────────────────────────────────────────────────
+//
+// `report.daily_operations` declares `reexecutable: true`, so an attempt whose worker died may be
+// retried. "May" is not "for ever": without a cap, a step that fails for a reason retrying cannot
+// fix becomes an infinite loop that looks like activity. Three attempts, then a human.
+//
+// This cap is the pilot's own policy and it sits ON TOP of the database's retry governance, which
+// is stricter and cannot be reached around: `trg_agent_runs_retry_guard` still demands a recorded
+// reason of at least 10 characters over an ABANDONED predecessor, and nothing here supplies one.
+// A step whose predecessor was abandoned therefore needs a human regardless of this count.
+const MAX_ATTEMPTS = 3;
+
+/**
+ * How many attempts has this step had, and may it have another?
+ *
+ * Counted from `agent_runs.attempt` — the authoritative record written by the lease lifecycle —
+ * never from a counter the pilot keeps, which could disagree with reality.
+ */
+async function attemptsFor(intentKey, deps = {}) {
+  const query = q(deps);
+  const r = await query(
+    `SELECT COALESCE(MAX(attempt), 0)::int AS attempts, COUNT(*)::int AS runs
+       FROM agent_runs WHERE intent_key = $1`, [intentKey]);
+  return { attempts: Number(r.rows[0].attempts), runs: Number(r.rows[0].runs) };
+}
+
+/**
+ * @returns {{ok: true}} | {{ok: false, reason: string, detail: string}}
+ */
+async function mayRetry(step, deps = {}) {
+  const TYPES = require('../worker/task-types');
+  if (!TYPES.isReexecutable(step.taskType)) {
+    return { ok: false, reason: 'not_reexecutable',
+      detail: `${step.taskType} declares reexecutable:false; repeating it is not safe` };
+  }
+  const { attempts } = await attemptsFor(step.intentKey, deps);
+  if (attempts >= MAX_ATTEMPTS) {
+    return { ok: false, reason: 'retry_cap_exceeded',
+      detail: `${attempts} attempt(s) already made; the pilot cap is ${MAX_ATTEMPTS}` };
+  }
+  return { ok: true, attempts };
 }
 
 // ── independent validation of the report body ───────────────────────────────
@@ -305,5 +373,6 @@ function decisionSource(deps = {}) {
 
 module.exports = {
   recordGoal, recordPlan, dispatchPlan, collect, validateReportBody, assemble,
-  escalate, escalationItem, decisionSource, SCHEMA,
+  escalate, escalationItem, decisionSource, attemptsFor, mayRetry,
+  MAX_ATTEMPTS, SCHEMA,
 };
