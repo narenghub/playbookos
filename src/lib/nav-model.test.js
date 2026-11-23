@@ -63,7 +63,8 @@ const ALL = GRANTABLE;
 // ── the model ───────────────────────────────────────────────────────────────────
 test('a user sees the products they HOLD, plus Me — and nothing else', () => {
   const c = shell();
-  assert.deepEqual(c.tabs('admin', ['abiozen', 'golfnex', 'internal']), ['abiozen', 'golfnex', 'me']);
+  // 'platform' rides along for an admin from 2026-11-23 — see "Platform is ADMIN AND SUPER ADMIN" below.
+  assert.deepEqual(c.tabs('admin', ['abiozen', 'golfnex', 'internal']), ['abiozen', 'golfnex', 'platform', 'me']);
   assert.deepEqual(c.tabs('business_dev', ['abiozen', 'internal']), ['abiozen', 'me']);
   assert.deepEqual(c.tabs('partner', ['sitenex']), ['sitenex', 'me']);
 });
@@ -84,7 +85,10 @@ test('a product NOT held is never shown, however permissive the role', () => {
   for (const p of ['golfnex', 'favly', 'linkabl', 'aros', 'sitenex']) {
     assert.ok(!tabs.includes(p), `admin does not hold ${p} and must not see it`);
   }
-  assert.deepEqual(tabs, ['abiozen', 'me']);
+  // 'platform' is not a held PRODUCT and never was — it is role-gated, and admin now passes that gate.
+  // The property under test is about grants, so it is asserted against the product tabs only.
+  assert.deepEqual(tabs.filter(t => t !== 'platform' && t !== 'me'), ['abiozen']);
+  assert.deepEqual(tabs, ['abiozen', 'platform', 'me']);
 });
 
 test('Me is unconditional — everybody has their own tasks', () => {
@@ -96,22 +100,64 @@ test('Me is unconditional — everybody has their own tasks', () => {
 });
 
 // ── Platform ────────────────────────────────────────────────────────────────────
-test('Platform is SUPER ADMIN ONLY', () => {
+//
+// Until 2026-11-23 this tab was super-admin-only, and the test below asserted it role by role. That
+// rule had a hole nobody had looked through: Agent Control is the only surface carrying MANUAL TASK
+// ASSIGNMENT, its endpoint `POST /agent/tasks/assign` is `adminOnly`, and the tab is the only route to
+// the page under the product nav. So an `admin` account was admitted by the API and refused by the
+// sidebar, and the only assignment that could happen was the Google Meet agent's automatic one.
+//
+// Admin is now admitted to the TAB. The assertions that matter are the two below it: an admin's
+// Platform holds exactly the two pages the classic sidebar already gave them, and every role beneath
+// admin is still refused — the "five roles were shown Platform" regression, which is what the old test
+// was really protecting and is still protected.
+test('Platform is ADMIN AND SUPER ADMIN — and nobody else', () => {
   const c = shell();
   assert.ok(c.tabs('super_admin', ALL).includes('platform'));
+  assert.ok(c.tabs('admin', ALL).includes('platform'),
+    'an admin must reach Platform: Agent Control is the only manual-assignment surface');
   for (const role of Object.keys(BUILT_IN_ROLES)) {
-    if (role === 'super_admin') continue;
+    if (role === 'super_admin' || role === 'admin') continue;
     assert.ok(!c.tabs(role, ALL).includes('platform'),
       `${role} must not see Platform — five roles used to, through the admin short-circuit`);
   }
 });
 
+test('DECISIVE: an admin reaches Team Management and Agent Control, and NOTHING else in Platform', () => {
+  // The whole safety of the change. Admitting a role to the tab must not admit it to the tab's
+  // CONTENTS: the five administration pages sit in a NAV_SECTION whose access is ['superadmin'], a
+  // value navSectionVisible checks before the admin short-circuit. If somebody ever "simplifies" that
+  // section's access to ['admin'], or moves one of those pages into an admin-visible section, this
+  // fails — which is the only reason the list is written out literally rather than derived.
+  const c = shell();
+  assert.deepEqual(c.pagesOf('platform', 'admin').sort(), ['agent-control', 'team']);
+  for (const id of ['settings', 'sku-economics', 'decision-engine', 'data-pipeline', 'execution-graph']) {
+    assert.ok(!c.pagesOf('platform', 'admin').includes(id),
+      `${id} is a super-admin page and must stay out of an admin's Platform`);
+  }
+  // and the super admin still gets all seven
+  assert.equal(c.pagesOf('platform', 'super_admin').length, 7);
+});
+
+test('the two pages an admin gains were ALREADY theirs in the classic sidebar', () => {
+  // So this closes a gap between the two navs rather than granting anything new. If it were a genuine
+  // grant, it would belong in the permissions template, not in the sidebar.
+  const c = shell();
+  const team = c.SECTIONS.find(s => s.title === 'TEAM');
+  assert.ok(team, 'a TEAM section exists');
+  assert.deepEqual(team.items.map(i => i.id).sort(), ['agent-control', 'team']);
+  assert.ok(team.access.includes('admin'),
+    'the classic TEAM section already admitted admin — the product nav was the one disagreeing');
+});
+
 test("holding 'internal' does not buy Platform", () => {
   // The distinction the old model could not make: 'internal' is the staff flag for DATA, Platform is the
-  // administration surface. Every staff account holds 'internal'.
+  // administration surface. Every staff account holds 'internal'. Unchanged by the admin admission:
+  // what buys Platform is the ROLE, and dev_team is not one of the two roles that do.
   const c = shell();
-  assert.ok(!c.tabs('admin', ALL).includes('platform'));
   assert.ok(!c.tabs('dev_team', ['internal']).includes('platform'));
+  assert.ok(!c.tabs('sales_director', ALL).includes('platform'),
+    'a director holds plenty and administers nothing');
 });
 
 test('the three previously-unreachable pages are now IN Platform', () => {
@@ -154,13 +200,18 @@ test('products UNKNOWN shows no product tabs, never all of them', () => {
   const c = shell();
   assert.deepEqual(c.tabs('super_admin', null), ['platform', 'me'],
     'even a super admin gets no PRODUCT tabs from missing data — Platform is role-based, so it stays');
-  assert.deepEqual(c.tabs('admin', null), ['me']);
-  assert.deepEqual(c.tabs('admin', undefined), ['me']);
+  // Same for an admin, and for the same reason: Platform is role-based, so missing PRODUCT data cannot
+  // take it away. A role with no administration claim still gets nothing but Me.
+  assert.deepEqual(c.tabs('admin', null), ['platform', 'me']);
+  assert.deepEqual(c.tabs('admin', undefined), ['platform', 'me']);
+  assert.deepEqual(c.tabs('sales_director', null), ['me'],
+    'missing products must not become a free product tab for a non-administrator');
 });
 
 test('an empty product list is respected, not treated as unknown', () => {
   const c = shell();
-  assert.deepEqual(c.tabs('admin', []), ['me'], 'holding nothing is a real state');
+  assert.deepEqual(c.tabs('admin', []), ['platform', 'me'], 'holding nothing is a real state');
+  assert.deepEqual(c.tabs('sales_team', []), ['me']);
 });
 
 test('the product shell is ON by default, with ?productNav=0 as the escape hatch', () => {

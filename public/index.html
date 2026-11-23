@@ -1258,17 +1258,35 @@ function heldProductKeys() {
 
 // THE NAV MODEL.
 //   every user      the products they hold, plus Me
-//   super admin     every product, plus Platform, plus Me
+//   admin           every product, plus Platform (Team Management + Agent Control only), plus Me
+//   super admin     every product, plus Platform (all of it), plus Me
 //
 // 'platform' is gated on the ROLE, because it is not a product and holding 'internal' is not the same as
 // being able to administer the platform. 'me' is unconditional: everybody has their own tasks.
 // A product tab still only appears if at least one of its pages is visible to the role — a held product
 // with no reachable page would render an empty tab.
+//
+// WHY ADMIN IS ADMITTED HERE, from 2026-11-23. The tab was super-admin-only, which left an `admin`
+// account unable to reach Agent Control — the ONLY surface carrying manual task assignment
+// (`POST /agent/tasks/assign`, which is `adminOnly` and would have accepted her) and the team task
+// board. The API admitted her; the sidebar gave her no door, so the Google Meet agent's automatic
+// assignment was the only assignment that could happen. An admin who cannot assign work by hand is
+// not an admin.
+//
+// This does NOT widen Platform's CONTENTS by one page. The tab lists its pages through
+// productVisiblePages → pageVisibleToRole, which intersects the page's CLASSIC section access with its
+// tier reads, and the five administration pages (settings, sku-economics, decision-engine,
+// data-pipeline, execution-graph) live in a NAV_SECTION whose access is ['superadmin'] — a value
+// navSectionVisible checks BEFORE the admin short-circuit, precisely so an admin cannot reach them
+// through it. What an admin gains is 'team' and 'agent-control', both already ['admin','director'] in
+// the classic sidebar. So this closes a gap between the two navs rather than opening a new one, and
+// the "five roles were shown Platform" regression stays closed: every role below admin is still
+// refused, which nav-model.test.js asserts role by role.
 function visibleProducts(role, tiers) {
   const held = heldProductKeys();
   return PRODUCTS.filter(p => {
     if (p.key === 'me') return true;
-    if (p.key === 'platform') return role === 'super_admin';
+    if (p.key === 'platform') return role === 'admin' || role === 'super_admin';
     if (held === null) return false;            // products unknown → no product tabs, never all of them
     if (!held.includes(p.key)) return false;    // not held → not shown, whatever the role allows
     return productVisiblePages(p, role, tiers).length > 0;
