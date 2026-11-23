@@ -100,6 +100,8 @@ function judgeCancellation(ev) {
  * @param {string}  ev.probeStateWhileStopped    the state of a task offered during the STOP
  * @param {boolean} ev.resumedCompleted          that same task completed after the STOP cleared
  * @param {boolean} ev.inventoryUnchanged        the containment STOPs are as they were
+ * @param {?number} ev.resumeClaimedAt           ms: when the worker claimed work after the STOP
+ * @param {?number} ev.projectedCompletionAt     ms: when the stopped task would have finished alone
  */
 function judgeStop(ev) {
   if (!ev.stopInScope) {
@@ -123,19 +125,54 @@ function judgeStop(ev) {
       why: `a task offered during the STOP went to ${ev.probeStateWhileStopped} — the worker took `
         + 'new work while execution was stopped' };
   }
-  if (ev.deniedClaimAttempts === 0) {
-    return { verdict: UNTESTED,
-      why: 'the worker made no claim attempt that the authority refused, so nothing distinguishes '
-        + 'a stopped worker from an idle one. Inactivity is not compliance' };
-  }
+  // The resume is the LIVENESS CONTROL and is checked before any positive evidence is weighed:
+  // without it, "the worker claimed nothing" is equally explained by a worker that was already
+  // dead. Order matters, so it is asserted by a test.
   if (!ev.resumedCompleted) {
     return { verdict: FAIL,
       why: 'the worker never resumed after the STOP cleared, so "it claimed nothing" is equally '
         + 'explained by a worker that was already dead. The resume is the control' };
   }
+
+  // ── TWO SUFFICIENT DISCRIMINATORS, BECAUSE ONE OF THEM IS UNREACHABLE HERE ──
+  //
+  // Until 2026-11-23 this required `deniedClaimAttempts > 0` — a claim the authority refused. The
+  // M7.6 run reported R5 UNTESTED on exactly that, and the reason is structural rather than bad
+  // luck: a mid-flight STOP lands on a worker that is BUSY executing a 60-second task, so it is
+  // not polling, so there is no claim for the authority to refuse. The condition could almost
+  // never be satisfied by the scenario that needs it.
+  //
+  // So either of two things now settles it, and the weaker measurements keep their own branches:
+  //
+  //   A. a refused claim           direct evidence the authority turned the worker away
+  //   B. the R4 discriminator      the worker took new work BEFORE the stopped task could have
+  //                               finished on its own, so it abandoned it rather than running it
+  //                               out. This is the same reasoning R4 proves works in practice.
+  //
+  // What has NOT been loosened: every FAIL above stands, the liveness control above stands, and
+  // with neither A nor B the verdict is still UNTESTED. "The probe stayed PENDING" remains
+  // insufficient on its own — it is satisfied by a stopped worker AND by a merely busy one, which
+  // is the ambiguity that produced the UNTESTED in the first place.
+  if (ev.deniedClaimAttempts > 0) {
+    return { verdict: PASS,
+      why: 'the STOP was delivered in a heartbeat, the worker attempted to claim and was refused, it '
+        + 'never reported for the stopped run, and it resumed when the STOP cleared' };
+  }
+  if (ev.resumeClaimedAt === null || ev.resumeClaimedAt === undefined
+      || ev.projectedCompletionAt === null || ev.projectedCompletionAt === undefined) {
+    return { verdict: UNTESTED,
+      why: 'no claim was refused, and there is no timing to compare: without either, nothing '
+        + 'distinguishes a stopped worker from an idle or busy one. Inactivity is not compliance' };
+  }
+  if (ev.resumeClaimedAt >= ev.projectedCompletionAt) {
+    return { verdict: UNTESTED,
+      why: 'the worker took new work only after the stopped task would have finished on its own, so '
+        + 'this run cannot tell a halt from a task that simply ran out. Not a pass' };
+  }
   return { verdict: PASS,
-    why: 'the STOP was delivered in a heartbeat, the worker attempted to claim and was refused, it '
-      + 'never reported for the stopped run, and it resumed when the STOP cleared' };
+    why: 'the STOP was delivered in a heartbeat, the worker never reported for the stopped run, it '
+      + 'took new work before that task could have completed — so it abandoned it rather than '
+      + 'running it out — and it resumed when the STOP cleared' };
 }
 
 module.exports = { judgeCancellation, judgeStop, PASS, FAIL, UNTESTED };

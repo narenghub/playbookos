@@ -283,3 +283,49 @@ test('the driver is not in migrate-all and applies no schema of its own', () => 
   assert.match(CODE, /information_schema\.tables/,
     'it must REFUSE when the pilot tables are absent rather than creating them');
 });
+
+// ── S6'S ENROLMENT CONTRACT ────────────────────────────────────────────────
+//
+// The 2026-11-23 run reported S6 UNTESTED with `IDENTITY.enrollWorker is not a function`. No such
+// export exists. These guards are cheap, and they fail here rather than twenty minutes into an
+// armed 45-minute window on the office iMac, which is what the first failure cost.
+
+test('DECISIVE: S6 calls only functions the identity module actually exports', () => {
+  const IDENTITY = require('../src/lib/worker/identity');
+  const called = [...SRC.matchAll(/IDENTITY\.(\w+)\s*\(/g)].map((m) => m[1]);
+  assert.ok(called.length, 'the driver should call the identity module at all');
+  for (const fn of new Set(called)) {
+    assert.equal(typeof IDENTITY[fn], 'function',
+      `IDENTITY.${fn} is not exported — this is the enrollWorker mistake again`);
+  }
+  assert.ok(called.includes('consumeEnrollmentToken'),
+    'enrolment goes through consumeEnrollmentToken, the function that exists');
+  assert.ok(!called.includes('enrollWorker'), 'enrollWorker has never existed');
+});
+
+test('DECISIVE: the driver never touches a fixture secret', () => {
+  // consumeEnrollmentToken returns `secret` here and nowhere else in the system. This driver's
+  // output becomes acceptance evidence, and a credential has no business in it.
+  assert.ok(!/\.secret\b/.test(CODE),
+    'the driver must not read, log or carry an enrolment secret');
+});
+
+test('the fixture identity label is not an intent key, and is not m76-prefixed', () => {
+  // A guard that scans this file for intent keys once read the label `m76-fixture-revocation` as
+  // one. The label is deliberately unprefixed now, and that is asserted so it stays that way.
+  assert.match(CODE, /FIXTURE_IDENTITY_LABEL\s*=\s*'fixture-revocation'/);
+  assert.ok(!/'m76-fixture/.test(CODE), 'the label must not look like an intent key');
+});
+
+// ── R5'S DISCRIMINATOR ─────────────────────────────────────────────────────
+
+test('DECISIVE: R5 supplies the timing evidence its judge needs', () => {
+  // Without both fields judgeStop returns UNTESTED by design, so a driver that forgets to pass
+  // them produces an unexplained UNTESTED twenty minutes into a hardware run.
+  const call = /judgeStop\(\{[\s\S]*?\n\s*\}\)/.exec(CODE);
+  assert.ok(call, 'the driver must call judgeStop');
+  assert.match(call[0], /resumeClaimedAt:/, 'R5 must pass resumeClaimedAt');
+  assert.match(call[0], /projectedCompletionAt:/, 'R5 must pass projectedCompletionAt');
+  assert.match(CODE, /SELECT run_id, started_at FROM agent_runs/,
+    "the projection needs the run's started_at, read from the server rather than timed locally");
+});

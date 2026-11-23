@@ -33,6 +33,9 @@
 const { Pool } = require('pg');
 
 const ACCEPTANCE_INTENT_PREFIX = 'm75-';
+// The M7.6 pilot's keys. Kept as a separate constant rather than broadening the one above, because
+// the M7.5 counters are read as M7.5 counters and must keep meaning exactly that.
+const PILOT_INTENT_PREFIX = 'm76-';
 const CLAIMABLE = ['PENDING', 'LEASED'];
 
 async function main() {
@@ -120,6 +123,55 @@ async function main() {
     console.log('\n    node scripts/m7-5-dev-driver.js scenarios --worker <id> --clean-stale\n');
     console.log('  which deletes exactly the ids listed above and nothing else.');
   }
+
+  // ── 3b. THE M7.6 PILOT, COUNTED SEPARATELY ────────────────────────────────
+  //
+  // Added 2026-11-23. Everything above matches `m75-%`, so it is BLIND to the M7.6 pilot, whose
+  // intent keys are `m76-<planId>-<stepId>`. That mattered the moment this report was used to
+  // close out an M7.6 acceptance run: its "23 run(s)" was unchanged before and after, which looks
+  // like proof that nothing was disturbed and is actually proof of nothing at all — the counter
+  // cannot see M7.6 either way. The only evidence of M7.6 audit retention was the driver's own
+  // self-report, which is not independent of the thing it reports on.
+  //
+  // The M7.5 counters above are deliberately untouched: same prefix, same meaning, same numbers.
+  // This is a second, separately labelled section, not a widened filter.
+  console.log('\n── M7.6 pilot (counted separately; the figures above are M7.5 only) ──\n');
+  const m76Tasks = await rows(
+    `SELECT state, COUNT(*)::int n FROM worker_tasks
+      WHERE intent_key LIKE $1 GROUP BY state ORDER BY state`, [`${PILOT_INTENT_PREFIX}%`]);
+  const m76Claimable = m76Tasks.filter((t) => CLAIMABLE.includes(t.state))
+    .reduce((a, t) => a + Number(t.n), 0);
+  const m76TaskTotal = m76Tasks.reduce((a, t) => a + Number(t.n), 0);
+  if (!m76TaskTotal) console.log('  tasks   : none — the pilot queue is clean');
+  else {
+    for (const t of m76Tasks) {
+      console.log(`  tasks   : ${String(t.state).padEnd(17)} ${t.n}`
+        + (CLAIMABLE.includes(t.state) ? '  <-- CLAIMABLE BY THE NEXT WORKER' : ''));
+    }
+  }
+
+  const m76Runs = await rows(
+    `SELECT state, COUNT(*)::int n FROM agent_runs
+      WHERE intent_key LIKE $1 GROUP BY state ORDER BY state`, [`${PILOT_INTENT_PREFIX}%`]);
+  const m76RunTotal = m76Runs.reduce((a, r) => a + Number(r.n), 0);
+  console.log(`  runs    : ${m76RunTotal} retained`
+    + (m76Runs.length ? ` (${m76Runs.map((r) => `${r.state}=${r.n}`).join(', ')})` : ''));
+
+  // The audit trail is the governance evidence, and it is append-only by design: this is the
+  // INDEPENDENT check that an acceptance run's cleanup retained it rather than tidying it away.
+  const m76Audit = await rows(
+    `SELECT COUNT(*)::int n FROM worker_audit a
+      WHERE EXISTS (SELECT 1 FROM agent_runs r
+                     WHERE r.run_id = a.run_id AND r.intent_key LIKE $1)`,
+    [`${PILOT_INTENT_PREFIX}%`]);
+  const m76Events = await rows(
+    `SELECT COUNT(*)::int n FROM agent_run_events e
+      WHERE EXISTS (SELECT 1 FROM agent_runs r
+                     WHERE r.run_id = e.run_id AND r.intent_key LIKE $1)`,
+    [`${PILOT_INTENT_PREFIX}%`]);
+  console.log(`  audit   : ${m76Audit[0] ? m76Audit[0].n : 0} worker_audit row(s), `
+    + `${m76Events[0] ? m76Events[0].n : 0} agent_run_events row(s) — retained, append-only`);
+  console.log(`  claimable m76 tasks: ${m76Claimable} (0 expected between runs)`);
 
   // ── 4. CONTAINMENT ────────────────────────────────────────────────────────
   console.log('\n── containment ──\n');

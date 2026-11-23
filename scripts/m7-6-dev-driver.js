@@ -119,6 +119,10 @@ const untested = (id, m, why) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Budgets derived from the system's own numbers, never guessed. */
+// S6's throwaway identity. Deliberately NOT prefixed `m76-`: a guard that scans this file for
+// intent keys once read the label `m76-fixture-revocation` as one, and a label is not an intent key.
+const FIXTURE_IDENTITY_LABEL = 'fixture-revocation';
+
 const HEARTBEAT_MS = 50_000;          // max(15s, ceiling/6) for a 5-minute ceiling
 const REPORT_GRACE_MS = 15_000;
 const signalBudget = () => HEARTBEAT_MS + REPORT_GRACE_MS + 10_000;
@@ -474,8 +478,10 @@ async function main() {
       await diagnose(stopStep.intentKey);
       untested('S4', 'the worker never claimed the STOP fixture', 'nothing about STOP was exercised');
     } else {
+      // started_at is selected because R5's timing discriminator needs it — the projected
+      // completion of the stopped task is the server's start time plus the handler's 60s delay.
       const run = await one(
-        `SELECT run_id FROM agent_runs WHERE intent_key=$1 AND trigger_detail=$2
+        `SELECT run_id, started_at FROM agent_runs WHERE intent_key=$1 AND trigger_detail=$2
           ORDER BY started_at DESC LIMIT 1`, [stopStep.intentKey, workerId]);
       const sid = await setStop('capability', 'worker.execute', 'M7.6 acceptance STOP');
       const stopRow = await one(
@@ -512,6 +518,22 @@ async function main() {
                     WHERE wt.intent_key=$1`, [probeStep.intentKey]),
       { timeoutMs: signalBudget(), everyMs: 1_000 });
 
+      // ── THE SAME DISCRIMINATOR R4 PROVES WORKS ────────────────────────────
+      //
+      // WHEN the worker took this probe matters, not only that it eventually did. The stopped task
+      // was a 60s echo: if the worker picked up new work before that task could have finished on
+      // its own, it ABANDONED it. If it picked up afterwards, the task may simply have run out and
+      // this run cannot tell a halt from indifference — which is an UNTESTED, and the judge says so.
+      //
+      // `started_at` is read from the run row rather than timed in this process: the clock that
+      // matters is the server's, and a driver-side Date.now() would be measuring the wrong machine.
+      const probeTaskRow = await one(
+        `SELECT id FROM worker_tasks WHERE intent_key = $1`, [probeStep.intentKey]);
+      const resumeClaimedAt = probeTaskRow ? await workerClaimAt(probeTaskRow.id, workerId) : null;
+      const projectedStopCompletion = run && run.started_at
+        ? new Date(run.started_at).getTime() + 60_000
+        : null;
+
       const v = BEHAVIOUR.judgeStop({
         stopInScope: true,
         inventoryUnchanged: unchanged,
@@ -520,10 +542,15 @@ async function main() {
         deniedClaimAttempts: refusedClaims,
         probeStateWhileStopped: 'PENDING',
         resumedCompleted: Boolean(resumed.ok && resumed.value.status === 'SUCCEEDED'),
+        resumeClaimedAt: resumeClaimedAt || null,
+        projectedCompletionAt: projectedStopCompletion,
       });
       note(`evidence: heartbeat-after-stop=${observed.ok ? 'yes' : 'none'}, `
         + `claims refused as stopped=${refusedClaims}, result-endpoint calls=${resultCalls}, `
-        + `resumed=${resumed.ok ? resumed.value.status : 'no'}`);
+        + `resumed=${resumed.ok ? resumed.value.status : 'no'}, took new work at=`
+        + `${resumeClaimedAt ? new Date(resumeClaimedAt).toISOString() : 'never'}, `
+        + `stopped task would have finished=`
+        + `${projectedStopCompletion ? new Date(projectedStopCompletion).toISOString() : 'unknown'}`);
       note(`correlate on the iMac: run ${run && run.run_id} task ${claimed.value.id}`);
       if (v.verdict === BEHAVIOUR.PASS) ok('R5', `the STOP is honoured by the worker — ${v.why}`);
       else if (v.verdict === BEHAVIOUR.UNTESTED) { await diagnose(stopStep.intentKey); untested('R5', 'mid-flight STOP', v.why); }
@@ -638,13 +665,36 @@ async function main() {
   head('S6. a revoked identity is refused — tested on a FIXTURE, not the operational worker');
   note('M7.5 scenario 8 revoked the live worker and burned three operational identities. This');
   note('creates its own, revokes that, and leaves the office iMac able to work afterwards.');
+  // ── THE ENROLMENT CONTRACT, READ RATHER THAN GUESSED ──────────────────────
+  //
+  // The 2026-11-23 run reported S6 UNTESTED with `IDENTITY.enrollWorker is not a function`. There
+  // is no such export. The module exposes a two-step exchange:
+  //
+  //   createEnrollmentToken({ label })  -> { token, expiresAt, label, capabilities }   (throws on no label)
+  //   consumeEnrollmentToken({ token }) -> { ok: true, workerId, secret } | { ok: false, code }
+  //
+  // The old code also tried `tok.token || tok.plaintext || tok.value`, which is the same guess
+  // wearing a disguise: a fallback chain across three field names nobody had looked up. It is now
+  // `tok.token`, because that is the field.
+  //
+  // `secret` is returned HERE AND NOWHERE ELSE in the system. It is deliberately not captured, not
+  // logged and not carried into `made` — this driver's output goes into acceptance evidence, and a
+  // fixture's secret has no business in it. The static guard in m7-6-driver-guards.test.js fails the
+  // build if this file ever references `.secret`.
   let fixtureId = null;
   try {
-    const tok = await IDENTITY.createEnrollmentToken({ label: 'fixture-revocation' }, deps);
-    const enrolled = await IDENTITY.enrollWorker(
-      { token: tok.token || tok.plaintext || tok.value, label: 'fixture-revocation' }, deps);
-    fixtureId = enrolled && (enrolled.workerId || enrolled.id);
-    if (fixtureId) made.identities.push(fixtureId);
+    const tok = await IDENTITY.createEnrollmentToken(
+      { label: FIXTURE_IDENTITY_LABEL, createdBy: 'm7-6-acceptance' }, deps);
+    const enrolled = await IDENTITY.consumeEnrollmentToken({ token: tok.token }, deps);
+    if (!enrolled || enrolled.ok !== true) {
+      // A refusal is a code, not an exception — `cannot_seal` in particular means the dev
+      // environment lacks the sealing key, which is a configuration answer and not a product one.
+      note(`the fixture identity was refused: ${(enrolled && enrolled.code) || 'no result'}`);
+    } else {
+      fixtureId = enrolled.workerId;
+      made.identities.push(fixtureId);
+      note(`fixture identity ${fixtureId} enrolled for this scenario only`);
+    }
   } catch (e) {
     note(`the fixture identity could not be enrolled in-process: ${String(e.message).slice(0, 140)}`);
   }

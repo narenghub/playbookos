@@ -135,10 +135,94 @@ test('the boundary is not a pass either', () => {
 
 test('REQUIRED: inactivity alone is UNTESTED for STOP, not a pass', () => {
   // The owner's words: "Do not treat inactivity alone as proof that STOP was honored." An idle
-  // worker and a gated worker both claim nothing; only a refused attempt tells them apart.
+  // worker and a gated worker both claim nothing. From 2026-11-23 there are TWO things that can
+  // tell them apart — a refused claim, or the timing below — and with NEITHER it is still UNTESTED,
+  // which is what this asserts: no denied claims and no timing supplied.
   const r = judgeStop({ ...goodStop(), deniedClaimAttempts: 0 });
   assert.equal(r.verdict, UNTESTED);
   assert.match(r.why, /Inactivity is not compliance/);
+});
+
+// ── THE SECOND DISCRIMINATOR, ADDED 2026-11-23 ──────────────────────────────
+//
+// The M7.6 run reported R5 UNTESTED on `deniedClaimAttempts === 0`, and that was structural: a
+// mid-flight STOP lands on a worker BUSY with a 60-second task, so it is not polling, so there is
+// no claim to refuse. The condition could essentially never be met by the scenario needing it.
+// R4 already proves a reachable discriminator: the worker took new work before the stopped task
+// could have finished, so it abandoned rather than ran it out.
+
+/** A worker that attempted no claim, but demonstrably became free EARLY. */
+const stopByTiming = () => ({
+  ...goodStop(),
+  deniedClaimAttempts: 0,
+  resumeClaimedAt: T0 + 40_000,
+  projectedCompletionAt: T0 + 60_000,
+});
+
+test('DECISIVE: taking new work BEFORE the stopped task could finish is a PASS', () => {
+  const r = judgeStop(stopByTiming());
+  assert.equal(r.verdict, PASS, r.why);
+  assert.match(r.why, /before that task could have completed/);
+});
+
+test('DECISIVE: becoming free only AFTER it would have finished is UNTESTED', () => {
+  // The task may simply have run out. That is indistinguishable from a halt, so it is not a pass.
+  const r = judgeStop({ ...stopByTiming(), resumeClaimedAt: T0 + 61_000 });
+  assert.equal(r.verdict, UNTESTED);
+  assert.match(r.why, /ran out/);
+});
+
+test('timing that is absent or half-present is UNTESTED, never assumed', () => {
+  for (const partial of [
+    { resumeClaimedAt: null, projectedCompletionAt: T0 + 60_000 },
+    { resumeClaimedAt: T0 + 40_000, projectedCompletionAt: null },
+    { resumeClaimedAt: undefined, projectedCompletionAt: undefined },
+  ]) {
+    const r = judgeStop({ ...stopByTiming(), ...partial });
+    assert.equal(r.verdict, UNTESTED, JSON.stringify({ partial, r }));
+  }
+});
+
+test('DECISIVE: the liveness control outranks the timing evidence', () => {
+  // A worker that never resumed cannot be shown to have been alive, and good timing must not
+  // paper over that. Order is a property here, not an implementation detail.
+  const r = judgeStop({ ...stopByTiming(), resumedCompleted: false });
+  assert.equal(r.verdict, FAIL);
+  assert.match(r.why, /already dead/);
+});
+
+test('DECISIVE: every FAIL still outranks the new discriminator', () => {
+  // The risk in adding a second way to pass is that it becomes a way to pass ANYWAY. These are the
+  // behaviours that must stay failures even with perfect timing evidence attached.
+  const cases = [
+    [{ workerResultAttempts: 1 }, /kept working through the STOP/],
+    [{ probeStateWhileStopped: 'LEASED' }, /took new work while execution was stopped/],
+    [{ stopInScope: false }, /never a STOP/],
+    [{ inventoryUnchanged: false }, /inventory changed/],
+  ];
+  for (const [override, why] of cases) {
+    const r = judgeStop({ ...stopByTiming(), ...override });
+    assert.equal(r.verdict, FAIL, JSON.stringify({ override, r }));
+    assert.match(r.why, why);
+  }
+});
+
+test('the timing path is not a rubber stamp: exactly one of these variants passes', () => {
+  const variants = [
+    stopByTiming(),                                                       // the only pass
+    { ...stopByTiming(), resumeClaimedAt: T0 + 61_000 },
+    { ...stopByTiming(), resumeClaimedAt: null },
+    { ...stopByTiming(), projectedCompletionAt: null },
+    { ...stopByTiming(), resumedCompleted: false },
+    { ...stopByTiming(), workerResultAttempts: 2 },
+    { ...stopByTiming(), probeStateWhileStopped: 'LEASED' },
+    { ...stopByTiming(), heartbeatAfterStopAt: null },
+  ];
+  assert.equal(variants.filter((e) => judgeStop(e).verdict === PASS).length, 1);
+  for (const e of variants) {
+    const r = judgeStop(e);
+    assert.ok(r.why && r.why.length > 20, `every verdict needs a reason: ${JSON.stringify(r)}`);
+  }
 });
 
 test('no heartbeat after the STOP is UNTESTED', () => {
