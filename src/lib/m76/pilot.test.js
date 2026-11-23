@@ -22,6 +22,7 @@ const path = require('node:path');
 const PLANNER = require('./planner');
 const POLICY = require('./policy');
 const PIPELINE = require('./pipeline');
+const LEASES = require('../worker/leases');
 const SYNTHETIC = require('./synthetic');
 const SCHEMA = require('./schema');
 const HANDLER = require('../../worker-client/handlers/report-daily-operations');
@@ -62,6 +63,28 @@ function persistedQuery(plan, extra = {}) {
   return fakeQuery({
     'SELECT payload FROM m76_plan_steps': (params) => [{ payload: byStep.get(params[1]) }],
     ...extra,
+  });
+}
+
+/**
+ * persistedQuery, plus the worker_tasks read that re-dispatch performs when enqueueTask refuses a
+ * duplicate. `byIntent` is the task-id-per-intent-key map the caller's enqueueTask fake maintains,
+ * so the two stubs cannot disagree about which tasks exist. `over` corrupts one field of the
+ * returned row, which is how the adoption refusals are exercised.
+ */
+function adoptableQuery(plan, byIntent, over = {}) {
+  const stepOf = new Map(plan.steps.map((s) => [s.intentKey, s]));
+  return persistedQuery(plan, {
+    'FROM worker_tasks WHERE intent_key': (params) => {
+      const s = stepOf.get(params[0]);
+      if (!s || !byIntent.has(params[0])) return [];
+      return [{
+        id: byIntent.get(params[0]),
+        payload: 'payloadOverride' in over ? over.payloadOverride : s.payload,
+        workflow: over.workflow || POLICY.PILOT_WORKFLOW,
+        task_type: over.taskType || s.taskType,
+      }];
+    },
   });
 }
 
@@ -213,21 +236,135 @@ test('dispatch enqueues one task per step, in ordinal order', async () => {
   for (const s of seen) assert.equal(s.workflow, POLICY.PILOT_WORKFLOW);
 });
 
-test('DECISIVE: re-dispatch creates no second task', async () => {
+// ── RE-DISPATCH: THE CONTRACT, NOT A MODEL OF IT ────────────────────────────
+//
+// The first M7.6 acceptance run (2026-11-23) stopped at F6 with exit 3, on a re-dispatch that
+// threw. A test by this name existed and passed. It passed because its fake returned
+// `{ taskId, existing: true }` — "the existing one handed back" — and dispatchPlan read
+// `t.existing`. The CODE and the FAKE were written from the same assumption about enqueueTask, so
+// they agreed with each other and neither agreed with the module. 49 unit tests could not catch
+// it, because the thing being described was never in the loop. The hardware run caught it on
+// contact, at the cost of an armed window.
+//
+// A fake is a claim about another module. The first test below pins that claim against the REAL
+// enqueueTask, so if the contract moves, something fails HERE rather than on the iMac.
+
+test('DECISIVE: the real enqueueTask REFUSES a duplicate intent — it does not hand the task back', async () => {
+  // No database needed: the injected query raises the unique violation by name, which is what
+  // Postgres does and what enqueueTask pattern-matches on.
+  const dup = async () => {
+    throw new Error('duplicate key value violates unique constraint "uq_worker_tasks_intent"');
+  };
+  const r = await LEASES.enqueueTask(
+    { taskType: 'synthetic.echo', payload: {}, intentKey: 'm76-p-s1' }, { query: dup });
+
+  assert.equal(r.ok, false, 'a duplicate must be a refusal');
+  assert.equal(r.code, 'duplicate_intent');
+  assert.equal(r.taskId, undefined, 'a refusal carries no task id');
+  assert.equal(r.id, undefined);
+  assert.ok(!('existing' in r),
+    'nothing may depend on an `existing` field — dispatchPlan did, and that was the defect');
+});
+
+test('DECISIVE: re-dispatch ADOPTS the existing task and creates no second one', async () => {
   const p = okPlan();
-  // Models what the database does: one task per intent key, the existing one handed back.
   const byIntent = new Map();
+  let inserts = 0;
   const leases = {
     enqueueTask: async ({ intentKey }) => {
-      if (!byIntent.has(intentKey)) byIntent.set(intentKey, `wtask_${byIntent.size + 1}`);
-      return { taskId: byIntent.get(intentKey), existing: true };
+      if (byIntent.has(intentKey)) {
+        return { ok: false, code: 'duplicate_intent', detail: 'a task already exists for that intent key' };
+      }
+      inserts += 1;
+      byIntent.set(intentKey, `wtask_${byIntent.size + 1}`);
+      return { ok: true, taskId: byIntent.get(intentKey) };
     },
   };
-  const f = persistedQuery(p);
+  const f = adoptableQuery(p, byIntent);
   const first = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
   const again = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
-  assert.equal(byIntent.size, 2, 'a second dispatch created extra tasks');
-  assert.deepEqual(first.dispatched.map((d) => d.taskId), again.dispatched.map((d) => d.taskId));
+
+  assert.equal(inserts, 2, 'the second dispatch inserted something');
+  assert.equal(byIntent.size, 2);
+  assert.deepEqual(first.dispatched.map((d) => d.taskId), again.dispatched.map((d) => d.taskId),
+    'the same task ids, so the plan still points at the work that exists');
+  assert.deepEqual(again.dispatched.map((d) => d.reused), [true, true],
+    're-dispatch must report steps as reused, not as freshly created');
+  assert.deepEqual(first.dispatched.map((d) => d.reused), [false, false]);
+});
+
+test('DECISIVE: a dispatch interrupted halfway can be retried to completion', async () => {
+  // The failure that makes this worth fixing rather than papering over. Step 1 is enqueued, the
+  // process dies before step 2, and the retry has to finish the job. Before the fix the retry
+  // threw on step 1, so step 2 never got a task at all: a plan wedged for good, and an error
+  // message nowhere near the real cause.
+  const p = okPlan();
+  const byIntent = new Map();
+  const ordered = [...p.steps].sort((a, b) => a.ordinal - b.ordinal);
+  byIntent.set(ordered[0].intentKey, 'wtask_pre_existing');   // what the crashed attempt left
+
+  const leases = {
+    enqueueTask: async ({ intentKey }) => {
+      if (byIntent.has(intentKey)) {
+        return { ok: false, code: 'duplicate_intent', detail: 'a task already exists for that intent key' };
+      }
+      byIntent.set(intentKey, `wtask_${byIntent.size + 1}`);
+      return { ok: true, taskId: byIntent.get(intentKey) };
+    },
+  };
+  const r = await PIPELINE.dispatchPlan(p, { validated: true },
+    { query: adoptableQuery(p, byIntent).query, leases });
+
+  assert.equal(r.dispatched.length, 2, 'every step must end up dispatched');
+  assert.equal(r.dispatched.find((d) => d.intentKey === ordered[0].intentKey).taskId,
+    'wtask_pre_existing', 'the surviving task is adopted, not duplicated');
+  assert.ok(r.dispatched.some((d) => d.reused === false), 'the missing step was actually enqueued');
+});
+
+// ── ADOPTION IS CHECKED, NOT ASSUMED ────────────────────────────────────────
+//
+// Adoption is the one place this pipeline takes a row it did not create and treats it as its own.
+// Without the refusals below, the fix would have replaced a loud throw with a silent "use whatever
+// holds that key", which would defeat the digest check dispatchPlan performs immediately before —
+// the check that exists so an alteration between validation and dispatch is detectable.
+
+test('DECISIVE: a task whose payload is not the validated one is NOT adopted', async () => {
+  const p = okPlan();
+  const byIntent = new Map(p.steps.map((s) => [s.intentKey, `wtask_${s.stepId}`]));
+  const leases = { enqueueTask: async () => ({ ok: false, code: 'duplicate_intent' }) };
+  const f = adoptableQuery(p, byIntent, { payloadOverride: { tampered: true } });
+  await assert.rejects(
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    /Nothing was adopted/);
+});
+
+test("another workflow's task is NOT adopted", async () => {
+  const p = okPlan();
+  const byIntent = new Map(p.steps.map((s) => [s.intentKey, `wtask_${s.stepId}`]));
+  const leases = { enqueueTask: async () => ({ ok: false, code: 'duplicate_intent' }) };
+  const f = adoptableQuery(p, byIntent, { workflow: 'some-other-workflow' });
+  await assert.rejects(
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    /is held by a task in workflow/);
+});
+
+test('a task of a different task_type is NOT adopted', async () => {
+  const p = okPlan();
+  const byIntent = new Map(p.steps.map((s) => [s.intentKey, `wtask_${s.stepId}`]));
+  const leases = { enqueueTask: async () => ({ ok: false, code: 'duplicate_intent' }) };
+  const f = adoptableQuery(p, byIntent, { taskType: 'synthetic.sleep' });
+  await assert.rejects(
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    /is a 'synthetic\.sleep'/);
+});
+
+test('duplicate_intent with NO task holding the key refuses rather than inventing one', async () => {
+  const p = okPlan();
+  const leases = { enqueueTask: async () => ({ ok: false, code: 'duplicate_intent' }) };
+  const f = persistedQuery(p, { 'FROM worker_tasks WHERE intent_key': () => [] });
+  await assert.rejects(
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    /no task holds that intent key/);
 });
 
 test('dispatch fails loudly if enqueue returns no task id', async () => {

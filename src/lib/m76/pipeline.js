@@ -116,14 +116,65 @@ async function dispatchPlan(plan, { workerId = null, validated = false } = {}, d
       workflow: POLICY.PILOT_WORKFLOW,
       createdBy: 'm76-pilot',
     }, deps);
-    const taskId = t && (t.taskId || t.id);
+    let taskId = t && (t.taskId || t.id);
+    let reused = false;
+
+    // ── A RE-DISPATCH IS SAFE, NOT FATAL ──────────────────────────────────
+    //
+    // Found by the first M7.6 acceptance run (2026-11-23, exit 3 at F6). This function was
+    // written against an enqueueTask that returns the EXISTING task on a duplicate — the old
+    // `reused: Boolean(t && t.existing)` below depended on a `t.existing` field that no return
+    // path of enqueueTask has ever set. The real contract is
+    // `refuse('duplicate_intent', …)` -> {ok:false, code, detail}, with no task id, so every
+    // re-dispatch threw.
+    //
+    // The DATA was never at risk: `uq_worker_tasks_intent` refused the duplicate, which is why
+    // no second task was created and nothing could double-execute. What was broken is
+    // RETRYABILITY, and for an unattended office that is the more dangerous half. Dispatch is a
+    // loop: crash after step 1 is enqueued and step 2 is not, and the retry throws on step 1 and
+    // never reaches step 2 — the plan sits with state != 'DISPATCHED' and step 2 holding no
+    // task id, forever. A system that cannot retry its own dispatch wedges itself.
+    //
+    // So a duplicate is ADOPTED rather than re-created, and adoption is checked rather than
+    // assumed. Intent keys are namespaced `m76-<planId>-<stepId>`, so a collision can only be
+    // this plan's own step; the three refusals below are what keeps "can only be" from being
+    // the kind of reasoning this repo keeps finding to be wrong. A task whose payload is not the
+    // payload policy validated is NOT adopted — silently adopting it would defeat the
+    // digest check immediately above, which is the whole point of reading the persisted row.
+    if (!taskId && t && t.code === 'duplicate_intent') {
+      const existing = await query(
+        `SELECT id, payload, workflow, task_type FROM worker_tasks WHERE intent_key = $1`,
+        [s.intentKey]);
+      const row = existing.rows[0];
+      if (!row) {
+        throw new Error(`step ${s.stepId}: enqueueTask refused ${s.intentKey} as duplicate_intent, `
+          + 'but no task holds that intent key. Refusing to invent one.');
+      }
+      if (row.workflow !== POLICY.PILOT_WORKFLOW) {
+        throw new Error(`step ${s.stepId}: intent key ${s.intentKey} is held by a task in workflow `
+          + `'${row.workflow}', not '${POLICY.PILOT_WORKFLOW}'. Not adopting another workflow's task.`);
+      }
+      if (row.task_type !== s.taskType) {
+        throw new Error(`step ${s.stepId}: the task holding ${s.intentKey} is a '${row.task_type}', `
+          + `not a '${s.taskType}'. Not adopting it.`);
+      }
+      const existingDigest = PLANNER.digestOf(row.payload);
+      if (existingDigest !== s.payloadDigest) {
+        throw new Error(`step ${s.stepId}: a task already holds ${s.intentKey} but its payload digest `
+          + `(${existingDigest.slice(0, 12)}) is not the one policy validated `
+          + `(${String(s.payloadDigest).slice(0, 12)}). Nothing was adopted.`);
+      }
+      taskId = row.id;
+      reused = true;
+    }
+
     if (!taskId) {
       throw new Error(`step ${s.stepId}: enqueueTask returned no task id (${JSON.stringify(t).slice(0, 160)})`);
     }
     await query(
       `UPDATE m76_plan_steps SET task_id = $3, state = 'DISPATCHED'
         WHERE plan_id = $1 AND step_id = $2`, [plan.planId, s.stepId, taskId]);
-    dispatched.push({ stepId: s.stepId, intentKey: s.intentKey, taskId, reused: Boolean(t && t.existing) });
+    dispatched.push({ stepId: s.stepId, intentKey: s.intentKey, taskId, reused });
   }
   await query(`UPDATE m76_plans SET state = 'DISPATCHED' WHERE plan_id = $1`, [plan.planId]);
   return { planId: plan.planId, dispatched };

@@ -368,10 +368,19 @@ async function main() {
   const after6 = await one(
     `SELECT COUNT(*)::int n FROM worker_tasks WHERE intent_key = ANY($1)`,
     [plan.steps.map((s) => s.intentKey)]);
-  if (Number(before6.n) === Number(after6.n) && again.dispatched.length === 2) {
-    ok('F6', `still ${after6.n} task(s) after a second dispatch — uq_worker_tasks_intent refused duplicates`);
-  } else {
+  // `reused` is asserted, not only the count. A count that does not move is satisfied both by
+  // adoption and by a dispatch that quietly did nothing — and on 2026-11-23 this scenario's
+  // earlier form could not distinguish either from a THROW, which propagated out of main and
+  // ended the run at exit 3 before R1 ever ran.
+  const allReused = again.dispatched.length === 2 && again.dispatched.every((d) => d.reused === true);
+  if (Number(before6.n) === Number(after6.n) && allReused) {
+    ok('F6', `still ${after6.n} task(s) after a second dispatch, both steps reported reused — `
+      + 'uq_worker_tasks_intent refused the duplicates and dispatch adopted the existing tasks');
+  } else if (Number(before6.n) !== Number(after6.n)) {
     bad('F6', `task count went ${before6.n} → ${after6.n} on re-dispatch`);
+  } else {
+    bad('F6', 'the task count held but re-dispatch did not report the steps as reused: '
+      + JSON.stringify(again.dispatched.map((d) => ({ s: d.stepId, reused: d.reused }))));
   }
 
   // ════════════════ F7: DETERMINISTIC REPLAY ════════════════
