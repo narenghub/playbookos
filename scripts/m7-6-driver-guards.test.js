@@ -23,6 +23,17 @@ const SRC = fs.readFileSync(DRIVER, 'utf8');
 /** Comment lines stripped, so a guard never trips over the prose that documents it. */
 const CODE = SRC.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
+/**
+ * The EXECUTABLE lines of the S6 block. The section banners are comments, so they do not survive
+ * into CODE — locating the block therefore has to happen in SRC, with comments stripped afterwards.
+ */
+function s6Code() {
+  const from = SRC.indexOf('S6. a revoked identity');
+  const to = SRC.indexOf('S7. the output bound');
+  if (from === -1 || to === -1 || to <= from) return '';
+  return SRC.slice(from, to).split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+}
+
 // ── IT CANNOT RUN AGAINST PRODUCTION ───────────────────────────────────────
 
 test('DECISIVE: the driver refuses production hosts, production NODE_ENV and an unconfirmed database', () => {
@@ -201,7 +212,11 @@ test('DECISIVE: S6 revokes a FIXTURE identity, never the operational worker', ()
 
 test('S6 carries a control, so the refusal is not always true', () => {
   const s6 = SRC.slice(SRC.indexOf('S6. a revoked identity'), SRC.indexOf('S7. the output bound'));
-  assert.match(s6, /beforeRevoke/, 'the identity must be shown permitted BEFORE revocation');
+  // Was `beforeRevoke`, which called authorizeWorkerAction — a STOP check that never consulted
+  // revocation, so the "control" was measuring the wrong thing. The control is now a real signed
+  // request that must AUTHENTICATE before revocation.
+  assert.match(s6, /before\.authenticated/,
+    'the identity must be shown to authenticate successfully BEFORE revocation');
 });
 
 // ── PER-RUN ISOLATION ──────────────────────────────────────────────────────
@@ -234,7 +249,21 @@ test('DECISIVE: the driver requires no outbound primitive', () => {
     assert.ok(!/mailer|whatsapp|services\/sender|node-fetch|office\/execute/.test(r),
       `the driver requires ${r}`);
   }
-  assert.ok(!/\bfetch\s*\(/.test(CODE), 'the driver calls fetch()');
+  // ── THE LOOPBACK EXCEPTION, NARROWED RATHER THAN REMOVED ─────────────────
+  //
+  // This assertion used to be `no fetch( at all`. S6 now has to prove revocation is enforced on the
+  // path a real worker uses, which is a signed HTTP request, so a fetch exists. The PROPERTY being
+  // guarded was never "contains no fetch" — it is "cannot reach anything outside this container".
+  // So every call site must target the loopback literal, and there may be only one.
+  const fetchLines = CODE.split('\n').filter((l) => /\bfetch\s*\(/.test(l));
+  assert.ok(fetchLines.length <= 1,
+    `at most one fetch call site is permitted (S6's loopback probe); found ${fetchLines.length}`);
+  for (const line of fetchLines) {
+    assert.match(line, /http:\/\/127\.0\.0\.1:/,
+      `every fetch must target loopback explicitly: ${line.trim()}`);
+    assert.ok(!/\$\{(?!port\b)[A-Za-z_]/.test(line.replace(/\$\{S6_PROBE_PATH\}/g, '')),
+      `the probe URL's host must be a literal, not interpolated: ${line.trim()}`);
+  }
   // A REQUIRE of it, not the word: `child_process` appears inside S3's own forbidden-list regex,
   // and the first version of this assertion flagged the driver for containing the check that
   // forbids it. That is the third time today a guard has tripped over the text documenting it.
@@ -303,11 +332,88 @@ test('DECISIVE: S6 calls only functions the identity module actually exports', (
   assert.ok(!called.includes('enrollWorker'), 'enrollWorker has never existed');
 });
 
-test('DECISIVE: the driver never touches a fixture secret', () => {
-  // consumeEnrollmentToken returns `secret` here and nowhere else in the system. This driver's
-  // output becomes acceptance evidence, and a credential has no business in it.
-  assert.ok(!/\.secret\b/.test(CODE),
-    'the driver must not read, log or carry an enrolment secret');
+// ── THE FIXTURE SECRET: ONE NARROW, TESTED EXCEPTION ───────────────────────
+//
+// S6 must prove revocation is enforced on the path a real worker uses, which means a SIGNED
+// request, which means the fixture's secret. The owner's condition was that the exception be
+// scoped to the S6 in-memory fixture and that secrets be proven unable to reach logs or serialized
+// output. These four tests are that proof. The secret is never persisted, never added to `made`,
+// never passed to an output call, and never serialized.
+
+test('DECISIVE: the ONLY secret read is the scoped S6 fixture exception', () => {
+  const reads = [...CODE.matchAll(/\.secret\b/g)];
+  assert.equal(reads.length, 1,
+    `exactly one .secret read is permitted (the S6 fixture); found ${reads.length}`);
+  assert.match(CODE, /fixtureSecret = enrolled\.secret/,
+    'the single read must be the S6 fixture enrolment');
+});
+
+test('DECISIVE: the secret never reaches an output call', () => {
+  // note/ok/bad/untested/head all print. console and JSON.stringify both serialize. If the holding
+  // identifier appears inside any of them, the secret can reach acceptance evidence.
+  for (const line of CODE.split('\n')) {
+    if (!/fixtureSecret/.test(line)) continue;
+    assert.ok(!/\b(note|ok|bad|untested|head|console\.\w+|JSON\.stringify)\s*\(/.test(line),
+      `the fixture secret must not appear on a line that prints or serializes: ${line.trim()}`);
+  }
+});
+
+test('DECISIVE: the secret is never persisted or carried in run state', () => {
+  assert.ok(!/made\.\w+\.push\([^)]*fixtureSecret/.test(CODE),
+    'the secret must not enter `made`, which is printed in the cleanup accounting');
+  assert.ok(!/(writeFileSync|appendFileSync|createWriteStream)[^\n]*fixtureSecret/.test(CODE),
+    'the secret must never be written to disk');
+  // And it must not be returned out of the probe, which the caller does print from.
+  assert.match(CODE, /return \{\s*\n?\s*reachable: true,/,
+    'the probe returns a fixed shape');
+  const probe = /async function signedAuthProbe[\s\S]*?\n\}/.exec(CODE);
+  assert.ok(probe, 'the probe helper must exist');
+  assert.ok(!/return[^;]*\bsecret\b/.test(probe[0]),
+    'the probe must not return the secret it signed with');
+});
+
+test('the secret is used for exactly one purpose: signing', () => {
+  const uses = [...CODE.matchAll(/fixtureSecret/g)];
+  // declaration, assignment, and the two probe calls — nothing else.
+  assert.ok(uses.length <= 5, `the secret identifier appears ${uses.length} times; keep it minimal`);
+  assert.match(CODE, /signedAuthProbe\(fixtureId, fixtureSecret\)/,
+    'it must be passed only to the signing probe');
+  assert.match(CODE, /AUTH\.signRequest\(secret,/,
+    'and the probe must hand it straight to AUTH.signRequest');
+});
+
+// ── S6 MUST TEST THE LAYER THAT ENFORCES REVOCATION ────────────────────────
+
+test('DECISIVE: S6 probes the authentication layer, not claimTask', () => {
+  // The 2026-11-23 false PASS. claimTask has no identity predicate, so its `nothing_to_do` was an
+  // empty queue and the scenario could not fail.
+  assert.match(CODE, /S6_PROBE_PATH\s*=\s*'\/api\/worker\/heartbeat'/,
+    'S6 must reach the worker API over HTTP');
+  assert.match(CODE, /AUTH\.signRequest\(/, 'with a real signed request');
+  // The section banners are COMMENTS, so they are absent from CODE — the first version of this
+  // test searched CODE for them and matched nothing, which is a guard that cannot fire. The block
+  // is located in SRC and then stripped of comments, so the assertions below are about executable
+  // code rather than about the prose describing it.
+  assert.ok(s6Code(), 'the S6 block must be locatable');
+  assert.ok(!/LEASES\.claimTask/.test(s6Code()),
+    'S6 must not use claimTask as revocation evidence — it does not consult revocation');
+});
+
+test('DECISIVE: S6 requires a pre-revocation control and an audit row', () => {
+  const s6 = s6Code();
+  assert.match(s6, /before\.authenticated/,
+    'a refusal after revocation means nothing without authentication succeeding before it');
+  assert.match(s6, /FROM worker_audit/,
+    'the refusal must be corroborated by the governance trail, independently of this driver');
+  assert.match(s6, /after\.code === 'revoked'/,
+    'the refusal must be the revoked code specifically, not any refusal');
+  assert.match(s6, /untested\('S6'/, 'and it must still be able to report UNTESTED');
+});
+
+test('a fresh nonce per probe, because a replay would read as a revocation', () => {
+  const probe = /async function signedAuthProbe[\s\S]*?\n\}/.exec(CODE)[0];
+  assert.match(probe, /randomBytes\(16\)\.toString\('hex'\)/,
+    'the nonce must be 32 lowercase hex, freshly generated — SCHEMA.NONCE_SHAPE rejects a UUID');
 });
 
 test('the fixture identity label is not an intent key, and is not m76-prefixed', () => {

@@ -123,6 +123,67 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // intent keys once read the label `m76-fixture-revocation` as one, and a label is not an intent key.
 const FIXTURE_IDENTITY_LABEL = 'fixture-revocation';
 
+// ── S6'S SIGNED HTTP PROBE ──────────────────────────────────────────────────
+//
+// Reaches the development worker API this driver runs beside, in the same container. 127.0.0.1 is
+// deliberate: the probe must hit THIS deployment's authentication layer, not whatever a public
+// hostname currently resolves to.
+//
+// /api/worker/heartbeat with the nil run id is the minimal authenticated call — it authenticates,
+// finds no live lease, and answers 409 lease_not_live. That makes a successful authentication
+// distinguishable from a refused one by the CODE rather than by the status alone, which matters
+// because 'revoked' and 'lease_not_live' are both refusals of the request and only one of them is
+// a refusal of the identity.
+const S6_PROBE_PATH = '/api/worker/heartbeat';
+const S6_NIL_RUN_ID = '00000000-0000-0000-0000-000000000000';
+/** Codes that mean the IDENTITY was rejected, as opposed to the request being unsatisfiable. */
+const AUTH_REJECTION_CODES = Object.freeze([
+  'unsigned', 'malformed_worker_id', 'malformed_nonce', 'stale_signature',
+  'unknown_worker', 'revoked', 'bad_signature', 'replayed_nonce',
+  'unsupported_scheme', 'identity_unavailable',
+]);
+
+/**
+ * One signed request as a real worker would send it. `secret` is used here and is never returned,
+ * logged or stored — the caller gets only the status, the code and whether authentication passed.
+ */
+async function signedAuthProbe(workerId, secret) {
+  const body = JSON.stringify({ runId: S6_NIL_RUN_ID });
+  const headers = AUTH.signRequest(secret, {
+    workerId,
+    method: 'POST',
+    path: S6_PROBE_PATH,
+    timestamp: Date.now(),
+    // 32 lowercase hex, which SCHEMA.NONCE_SHAPE requires and a UUID would fail. A fresh one per
+    // probe, because the nonce is committed on every attempt whatever the outcome — the same
+    // signed request twice would be refused as a replay, which would read as a revocation.
+    nonce: require('node:crypto').randomBytes(16).toString('hex'),
+    body,
+  });
+  const port = Number(process.env.PORT) || 3100;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}${S6_PROBE_PATH}`, {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body,
+    });
+    let payload = null;
+    try { payload = await res.json(); } catch (_) { payload = null; }
+    const code = payload && payload.code ? String(payload.code) : null;
+    return {
+      reachable: true,
+      status: res.status,
+      code,
+      // Authenticated means the identity was accepted. A 409 lease_not_live is the expected answer
+      // for a valid identity with no live lease, and is therefore a PASS of the auth layer.
+      authenticated: !AUTH_REJECTION_CODES.includes(code),
+      error: null,
+    };
+  } catch (e) {
+    return { reachable: false, status: null, code: null, authenticated: false, error: String(e.message).slice(0, 120) };
+  }
+}
+
 const HEARTBEAT_MS = 50_000;          // max(15s, ceiling/6) for a 5-minute ceiling
 const REPORT_GRACE_MS = 15_000;
 const signalBudget = () => HEARTBEAT_MS + REPORT_GRACE_MS + 10_000;
@@ -677,11 +738,40 @@ async function main() {
   // wearing a disguise: a fallback chain across three field names nobody had looked up. It is now
   // `tok.token`, because that is the field.
   //
-  // `secret` is returned HERE AND NOWHERE ELSE in the system. It is deliberately not captured, not
-  // logged and not carried into `made` — this driver's output goes into acceptance evidence, and a
-  // fixture's secret has no business in it. The static guard in m7-6-driver-guards.test.js fails the
-  // build if this file ever references `.secret`.
+  // ── WHY THIS GOES OVER HTTP, AND NOT THROUGH claimTask ────────────────────
+  //
+  // The 2026-11-23 run reported S6 as PASS: `a revoked fixture identity cannot claim
+  // (nothing_to_do)`. That pass did not hold, and the code was the tell. Reading the three layers:
+  //
+  //   LEASES.claimTask            does NOT consult revocation. Its selection is
+  //                               `WHERE state='PENDING' AND cancel_requested_at IS NULL` — no
+  //                               identity predicate at all. `nothing_to_do` meant the QUEUE WAS
+  //                               EMPTY, which is what a valid identity would also have received,
+  //                               because cleanup had just drained it.
+  //   AUTH.authorizeWorkerAction  does NOT either. It asks autonomy.checkStopped — STOPs, not
+  //                               revocation. So the old "before revocation it was permitted"
+  //                               control was measuring the wrong thing too.
+  //   AUTH.authenticateWorker     DOES, at auth.js step 4, before the secret is even opened.
+  //
+  // The old assertion was `claimAfter.ok === false`, which an empty queue satisfies, so S6 could
+  // not have failed. The database said so independently afterwards: the fixture identity's row read
+  // `last seen never`, and last_seen_at advances on EVERY successful authentication — so the
+  // enforcement path was never reached even once.
+  //
+  // So the probe is now a real signed HTTP request to the development worker API, which this driver
+  // runs alongside inside the same container. That exercises the layer that enforces revocation,
+  // and the router's deny() writes a worker_audit row — giving database evidence of the refusal
+  // that is independent of anything this driver reports about itself.
+  //
+  // ── THE FIXTURE SECRET ────────────────────────────────────────────────────
+  //
+  // Signing needs the secret, which consumeEnrollmentToken returns here and nowhere else. It is
+  // held in a local, passed only to AUTH.signRequest, and never logged, persisted, serialized,
+  // added to `made`, or included in any note/assertion/diagnostic. The guards in
+  // m7-6-driver-guards.test.js pin that: the single `.secret` read is the scoped exception, and
+  // the holding identifier is asserted to appear nowhere near an output call.
   let fixtureId = null;
+  let fixtureSecret = null;
   try {
     const tok = await IDENTITY.createEnrollmentToken(
       { label: FIXTURE_IDENTITY_LABEL, createdBy: 'm7-6-acceptance' }, deps);
@@ -692,30 +782,61 @@ async function main() {
       note(`the fixture identity was refused: ${(enrolled && enrolled.code) || 'no result'}`);
     } else {
       fixtureId = enrolled.workerId;
+      fixtureSecret = enrolled.secret;      // scoped exception: see the guards test
       made.identities.push(fixtureId);
       note(`fixture identity ${fixtureId} enrolled for this scenario only`);
     }
   } catch (e) {
     note(`the fixture identity could not be enrolled in-process: ${String(e.message).slice(0, 140)}`);
   }
-  if (!fixtureId) {
+  if (!fixtureId || !fixtureSecret) {
     untested('S6', 'no fixture identity could be created',
       'revocation was NOT tested against the operational worker on purpose — doing so would revoke '
       + 'the identity the iMac is running and require a new enrolment, which is the defect this '
       + 'scenario exists to avoid. The server-side refusal remains covered by src/lib/worker/auth.test.js.');
   } else {
-    const beforeRevoke = await AUTH.authorizeWorkerAction({ workerId: fixtureId }, deps);
+    const before = await signedAuthProbe(fixtureId, fixtureSecret);
     await IDENTITY.revokeWorker(fixtureId, { reason: 'M7.6 acceptance fixture revocation' }, deps);
-    const row = await one(`SELECT revoked_at, revoked_reason FROM worker_identities WHERE id=$1`, [fixtureId]);
-    const claimAfter = await LEASES.claimTask({ workerId: fixtureId }, deps);
-    if (row && row.revoked_at && claimAfter && claimAfter.ok === false) {
-      ok('S6', `a revoked fixture identity cannot claim (${claimAfter.code}); `
-        + `the operational worker ${workerId} is untouched`);
-      note(`before revocation the same identity was ${beforeRevoke.allowed ? 'permitted' : 'refused'} `
-        + '— the control, so the refusal is not simply always true');
+    const row = await one(
+      `SELECT revoked_at, revoked_reason FROM worker_identities WHERE id=$1`, [fixtureId]);
+    const after = await signedAuthProbe(fixtureId, fixtureSecret);
+    // The independent half: the router audited its own refusal.
+    // `at`, not `created_at` — check-driver-sql.js caught that before this ever reached hardware,
+    // which is the whole reason it exists. There is also an index on (worker_id, at DESC).
+    const audited = await one(
+      `SELECT code, http_status, outcome FROM worker_audit
+        WHERE worker_id = $1 AND outcome = 'DENIED' AND code = 'revoked'
+        ORDER BY at DESC LIMIT 1`, [fixtureId]);
+
+    note(`probe before revocation: HTTP ${before.status} ${before.code || ''} `
+      + `(authentication ${before.authenticated ? 'SUCCEEDED' : 'did not succeed'})`);
+    note(`probe after revocation : HTTP ${after.status} ${after.code || ''}`);
+    note(`worker_audit: ${audited ? `DENIED ${audited.code} (${audited.http_status})` : 'no DENIED revoked row'}`);
+
+    if (!before.reachable || !after.reachable) {
+      untested('S6', 'the development worker API could not be reached over HTTP',
+        `probe transport failed (${before.error || after.error}); without an authenticated request `
+        + 'there is no evidence about the authentication layer, and claimTask does not consult '
+        + 'revocation at all, so nothing weaker may stand in for this');
+    } else if (!before.authenticated) {
+      untested('S6', 'the fixture could not authenticate BEFORE revocation',
+        `the pre-revocation control did not pass (HTTP ${before.status} ${before.code}), so a `
+        + 'refusal afterwards would not be attributable to revocation. The control is what makes '
+        + 'the refusal meaningful');
+    } else if (!row || !row.revoked_at) {
+      bad('S6', 'the revocation was not recorded', JSON.stringify(row));
+    } else if (after.status === 401 && after.code === 'revoked' && audited) {
+      ok('S6', `a revoked fixture identity is refused by the authentication layer `
+        + `(HTTP 401 revoked), audited as DENIED, and it authenticated successfully before `
+        + `revocation (HTTP ${before.status} ${before.code}) — the operational worker ${workerId} `
+        + 'is untouched');
+    } else if (after.status === 401 && after.code === 'revoked') {
+      untested('S6', 'the refusal was not audited',
+        'the authentication layer refused the revoked identity, but no DENIED/revoked row was '
+        + 'written, so the governance trail does not corroborate it');
     } else {
-      bad('S6', 'a revoked identity was not refused',
-        JSON.stringify({ row, claimAfter }).slice(0, 200));
+      bad('S6', 'a revoked identity was NOT refused by the authentication layer',
+        `HTTP ${after.status} ${after.code} — revocation is not enforced on the path a real worker uses`);
     }
   }
 
