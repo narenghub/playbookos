@@ -126,8 +126,13 @@ test('2. the digest is over raw, and matches what dispatch will compute', async 
   const r = await A.prepareOutreachEmail(CTX, MSG, s);
   const released = await A.releaseOutreachEmail(CTX, { approvalId: r.approvalId, releasedBy: 'naren' }, s);
   assert.strictEqual(released.released, true, released.reason);
+  // The transport and the mailbox are part of the binding now (B7.6): which provider account
+  // carries the message is as much a part of what was approved as the bytes are. So the comparison
+  // supplies them exactly as dispatch will — and if it did not, this assertion would be checking
+  // that two incomplete bindings agree.
   assert.strictEqual(released.expectedDigest,
-    D.transmittedDigest({ to: MSG.to, subject: MSG.subject, raw: RAW }),
+    D.transmittedDigest({ to: MSG.to, subject: MSG.subject, raw: RAW, mailbox: MSG.mailbox },
+      { transport: MSG.transport, companyId: CTX.companyId }),
     'the approval and dispatch compute different digests for the same bytes');
 });
 
@@ -229,10 +234,13 @@ test('4. the released message passes dispatch, and a tampered one does not', asy
   };
 
   // (a) exactly as approved → transmitted
+  // `companyId: rel.companyId` — the release hands back the company it bound, so the dispatch
+  // binds the same one. Omitting it is what first surfaced the gap: the release bound 'abiozen'
+  // and the dispatch bound null, and a correct binding on each side disagreed with the other.
   const ok = await D.dispatch({
     message: { ...rel.message, mailbox: MSG.mailbox },
     transport: rel.transport, idempotencyKey: 'cphi:4821:2',
-    approvalId: rel.approvalId, expectedDigest: rel.expectedDigest,
+    approvalId: rel.approvalId, expectedDigest: rel.expectedDigest, companyId: rel.companyId,
   }, deps);
   assert.strictEqual(ok.ok, true, ok.error);
   assert.strictEqual(sends.length, 1);
@@ -242,7 +250,7 @@ test('4. the released message passes dispatch, and a tampered one does not', asy
     message: { ...rel.message, mailbox: MSG.mailbox,
       raw: Buffer.from('swapped after release').toString('base64url') },
     transport: rel.transport, idempotencyKey: 'cphi:4821:2b',
-    approvalId: rel.approvalId, expectedDigest: rel.expectedDigest,
+    approvalId: rel.approvalId, expectedDigest: rel.expectedDigest, companyId: rel.companyId,
   }, deps);
   assert.strictEqual(tampered.ok, false);
   assert.strictEqual(tampered.phase, 'digest_mismatch');

@@ -1,6 +1,10 @@
 const crypto = require('crypto');
 const { assertSendAllowed } = require('./email-gate');
 const LEDGER = require('./outbound/ledger');
+// The CANONICAL approval digest (B7.6). Separate module from the ledger because the ledger's
+// digestOf is an audit fingerprint and this is an authorization binding — one function serving
+// both is how the binding quietly stopped binding.
+const DIGEST = require('./outbound/approval-digest');
 
 // NAMED, NOT INLINE, so the transport is discoverable by structure rather than by string.
 // scripts/check-email-transport-coverage.js blanks string literals before matching — otherwise a
@@ -129,17 +133,44 @@ function encodeAttachments(attachments) {
 // behaves exactly as before, so this adds precision without moving anything that already worked:
 // an undeclared send is still covered by the capability and global scopes.
 /**
- * The digest of a message as the approval boundary computes it. Exported so the controls can drive
- * it, and so there is ONE expression of "the bytes that are leaving" rather than one here and
- * another in buyer-email-approval.js.
+ * The digest of a message as the approval boundary computes it — CANONICAL v2.
  *
- * It delegates to the LEDGER's digestOf for the same reason: a second implementation of the same
- * hash is how a binding check quietly stops binding.
+ * Exported so the controls can drive it, and so there is ONE expression of "the bytes that are
+ * leaving" rather than one here and another in buyer-email-approval.js.
+ *
+ * ── WHAT CHANGED, AND WHY IT HAD TO ──────────────────────────────────────────
+ *
+ * This used to be `LEDGER.digestOf({ to, subject, html })`, which bound the recipients in TO, the
+ * subject and one body. It bound neither CC nor BCC — and on 2026-11-24 the gate was found not to
+ * be reading CC either, so an outside address could be added to a message after approval and
+ * nothing in the system would have noticed. It bound no company, so an approval for one company
+ * authorized the same bytes sent as another. It bound no sender identity and no provider account,
+ * so from/reply-to were caller-controlled and unbound. And `html || text` meant the text
+ * alternative could be swapped freely.
+ *
+ * Every one of those fields reaches the recipient. A binding that omits them is a measurement
+ * standing in for the property it claims to check.
+ *
+ * ── THE SENDER IS RESOLVED BEFORE THE DIGEST, NOT AFTER ──────────────────────
+ *
+ * `from` defaults inside deliverAuthorized (`from || defaultFrom()`). If the digest were computed
+ * from the raw argument, every send that relies on the default would bind `from=null` while the
+ * provider received a real address — the digest would have a sender field in it and still not bind
+ * the sender. So sendEmailDetailed resolves the sender first and passes the resolved value both
+ * here and onward. The default is left in place downstream as idempotent defence.
+ *
+ * `providerAccount` carries NO SECRET. It is the transport and the sending identity
+ * (`resend:<from>`), never the API key: a key must not become a hash input that travels with
+ * approval records and log lines.
  */
-function approvedDigestOf({ to, subject, html }) {
-  return LEDGER.digestOf({
-    to: Array.isArray(to) ? to.join(', ') : String(to == null ? '' : to),
-    subject, html,
+function approvedDigestOf({ to, subject, html, text = null, cc = null, bcc = null,
+  from = null, replyTo = null, companyId = null, attachments = null }) {
+  return DIGEST.approvalDigest({
+    companyId, from, replyTo,
+    // providerAccountOf, not a local expression: three producers each wrote their own and two of
+    // them disagreed across a process boundary. The transport here is always Resend.
+    providerAccount: DIGEST.providerAccountOf({ transport: 'resend', from }),
+    to, cc, bcc, subject, html, text, attachments,
   });
 }
 
@@ -311,12 +342,33 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   //
   // It also fails CLOSED: no record, no consequential send. Observability mail is the documented
   // exception, for the same reason the kill switch exempts it.
+  // THE SENDER AND THE BINDING, COMPUTED BEFORE THE LEDGER ROW IS OPENED.
+  //
+  // Order matters for two separate reasons, both learned the hard way.
+  //
+  // `from` defaults inside deliverAuthorized (`from || defaultFrom()`). Computing the binding from
+  // the raw argument would bind `from=null` on every send that relies on the default, while the
+  // provider received a real address — a digest with a sender field in it that does not bind the
+  // sender. So the sender is resolved ONCE, here, and the resolved value goes to the binding, to
+  // the ledger and to the transport.
+  //
+  // And the binding is computed before `beginAttempt` so the ledger's `payload_digest` IS the
+  // canonical digest rather than the v1 fingerprint. Otherwise the audit row and the approval it
+  // names describe the same message in two different languages.
+  const resolvedFrom = from || defaultFrom();
+  const actualDigest = approvedDigestOf({
+    to, cc, bcc: null, subject, html, text: null,
+    from: resolvedFrom, replyTo: replyTo || null,
+    companyId: companyContext && companyContext.companyId ? companyContext.companyId : null,
+    attachments,
+  });
+
   const att = await LEDGER.beginAttempt({
     transport: 'resend', provider: 'resend', to, subject, html,
     // ALWAYS consequential. This was `!internal.alertAlreadyAuthorized`, so a caller could
     // downgrade the ledger's own classification of its send in the same argument that skipped
     // the gate. The alert path opens its own non-consequential attempt in transmitAlert().
-    workflow, agent, approvalId, consequential: true,
+    workflow, agent, approvalId, consequential: true, payloadDigest: actualDigest,
   });
   if (!att.ok) {
     return { ok: false, id: null, error: att.error, phase: 'refused_before_request',
@@ -341,17 +393,34 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // is no mode in which a mismatch proceeds.
   // Computed unconditionally now, not only when an expectedDigest was supplied: the approval gate
   // in email-gate.js needs it for EVERY external send in order to tie an approval to these bytes.
-  const actualDigest = approvedDigestOf({ to, subject, html });
-
   if (expectedDigest) {
-    const actual = actualDigest;
-    if (actual !== expectedDigest) {
-      const why = `approved payload digest ${expectedDigest} does not match the message about to be `
-        + `sent (${actual}) — nothing was transmitted`;
-      console.error(`[DIGEST MISMATCH] ${approvalId || '(no approval id)'}: ${why}`);
-      await att.blocked(why, 'approval:digest_mismatch');
+    // compareDigests, not `!==`. A string comparison answers "do these differ" and cannot tell
+    // apart the three cases that need different handling, which is why it was replaced:
+    //
+    //   legacy_version     the approval carries a v1 digest. It bound TO, the subject and one
+    //                      body, so it CANNOT establish the company, sender, provider account,
+    //                      CC/BCC, both bodies or attachments of the message it supposedly
+    //                      authorized. It is REFUSED and fresh approval is required. Nothing about
+    //                      the message has necessarily changed — the approval was never specific
+    //                      enough to show that it hadn't. Accepting it "because the bytes look the
+    //                      same" would mean honouring a binding that does not bind, which is the
+    //                      whole defect B7.6 exists to close.
+    //   actual_not_current a PRODUCER has not been migrated. Refused rather than compared: two
+    //                      different definitions of "the message" must never authorize a send.
+    //   mismatch           the ordinary case — the bytes changed after approval.
+    //
+    // This refusal is safe to make strictly because `capability/email.send` is STOPPED in
+    // production and has been since 2026-11-03, so no live approval is in flight behind it. A
+    // stored v1 approval becomes a re-approval request, not a lost send.
+    const verdict = DIGEST.compareDigests({ approved: expectedDigest, actual: actualDigest });
+    if (!verdict.ok) {
+      const why = `approved payload digest ${expectedDigest} cannot authorize the message about to `
+        + `be sent (${actualDigest}): ${verdict.code} — ${verdict.detail}. Nothing was transmitted.`;
+      console.error(`[DIGEST ${verdict.code.toUpperCase()}] ${approvalId || '(no approval id)'}: ${why}`);
+      await att.blocked(why, `approval:digest_${verdict.code}`);
       return { ok: false, id: null, error: why, phase: 'digest_mismatch',
-        providerResponded: false, stopped: true, approvalId, expectedDigest, actualDigest: actual };
+        digestVerdict: verdict.code, needsFreshApproval: verdict.code === 'legacy_version',
+        providerResponded: false, stopped: true, approvalId, expectedDigest, actualDigest };
     }
   }
 
@@ -391,7 +460,10 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   }
 
   // The gate above has run. Nothing below decides authorization.
-  return deliverAuthorized({ to, subject, html, from, replyTo, cc, attachments }, att);
+  // `from: resolvedFrom`, not `from`. The digest above bound resolvedFrom; handing the raw `from`
+  // down here would let defaultFrom() be applied a second time, and the ONE thing a binding must
+  // guarantee is that the value it hashed is the value that goes.
+  return deliverAuthorized({ to, subject, html, from: resolvedFrom, replyTo, cc, attachments }, att);
 }
 
 // The original contract, unchanged: a boolean. Every existing caller keeps working.

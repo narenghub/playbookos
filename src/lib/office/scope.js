@@ -29,6 +29,25 @@
 
 const { assertContext } = require('./context');
 
+/**
+ * The canonical approval binding (B7.6). This module holds the PRIMARY consumer — the gate's
+ * released-approval check — so it compares through the same module every producer writes with.
+ *
+ * REQUIRED LAZILY, and not for the usual require.cache reason. check-office-k2-db.js asserts that
+ * the Executive Agent cannot reach a consequential capability, and it does so by crawling
+ * require.cache for anything under `outbound/`. A top-level require here put
+ * outbound/approval-digest.js into the agent's module graph and failed that check.
+ *
+ * The honest fix is this, not an exemption. The check's rule is deliberately blunt — ANYTHING in
+ * outbound/ — and that bluntness is why it works: it catches a module nobody thought to list. A
+ * pure hash function is harmless, but carving out the first exception is how a crawl like this
+ * stops catching things, and the module genuinely has no business being loaded until an approval
+ * is actually being verified.
+ */
+function digestModule() {
+  return require('../outbound/approval-digest');
+}
+
 function lazyQuery() {
   return require('../db').query;
 }
@@ -578,10 +597,24 @@ async function verifyReleasedApprovalForDigest({ approvalId, digest }, deps = {}
       detail: `approval ${approvalId} records no transport digest, so the approved artefact and `
         + 'the message about to be sent cannot be compared' };
   }
-  if (payload.transport_digest !== digest) {
-    return { ok: false, reason: 'approval_digest_mismatch',
+  // compareDigests, not `!==`. THIS IS THE PRIMARY APPROVAL CONSUMER — the gate consults it before
+  // every external send — so the three failure cases must be told apart here most of all:
+  //
+  //   legacy_version     a stored v1 digest. It bound TO, the subject and one body, so it cannot
+  //                      establish the company, the sender identity, the provider account, CC/BCC,
+  //                      both bodies or the attachments of the message it supposedly approved.
+  //                      FRESH APPROVAL is required, and reporting "mismatch" would send somebody
+  //                      hunting for tampering that never happened.
+  //   actual_not_current a producer was not migrated. Refused rather than compared, because two
+  //                      definitions of "the message" must never jointly authorize a send.
+  //   mismatch           the real thing: these are not the bytes that were approved.
+  const verdict = digestModule().compareDigests({
+    approved: payload.transport_digest, actual: digest });
+  if (!verdict.ok) {
+    return { ok: false, reason: `approval_digest_${verdict.code}`,
+      needsFreshApproval: verdict.code === 'legacy_version',
       detail: `approval ${approvalId} authorises ${payload.transport_digest}; the message about `
-        + `to be sent is ${digest}` };
+        + `to be sent is ${digest} — ${verdict.detail}` };
   }
   return { ok: true };
 }

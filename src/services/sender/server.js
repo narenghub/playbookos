@@ -45,6 +45,33 @@ const http = require('http');
 
 const GATE = require('../../lib/email-gate');
 const LEDGER = require('../../lib/outbound/ledger');
+// The canonical approval binding, shared with dispatch.js and mailer.js. A separate process must
+// use the same MODULE, not an equivalent expression — see requestDigest below.
+const DIGEST = require('../../lib/outbound/approval-digest');
+
+/**
+ * The binding this service computes for a request. EXPORTED, and exported on purpose.
+ *
+ * Its own test used to carry a copy of this expression — `LEDGER.digestOf({ to, subject:
+ * 'raw:'+subject, html: raw })` — which meant the fixture and the service could drift together and
+ * the suite would keep passing while the service disagreed with everybody else. A test that
+ * reimplements the thing it is testing proves only that two copies of one mistake match.
+ *
+ * So the test calls THIS, and asserts it equals what dispatch.js computes for the same message.
+ * That is the cross-process half of the B7.6 lockstep requirement, and it is now an assertion
+ * rather than a sentence in a commit message.
+ */
+function requestDigest({ companyId = null, to, subject, raw, transport = null, mailbox = null }) {
+  return DIGEST.approvalDigest({
+    companyId, to, subject, raw: String(raw),
+    // providerAccountOf, NOT `String(transport)`. This process computed the bare transport name
+    // while dispatch.js — the process that produced the approval — computed `resend:<from>`. Both
+    // were v2 and they disagreed, so every external send across this boundary refused with what
+    // read as a tampering alarm. Caught by the cross-layer test, which is the only test in the
+    // suite that runs both producers against one message.
+    providerAccount: DIGEST.providerAccountOf({ transport, mailbox }),
+  });
+}
 const RECIPIENTS = require('../../lib/outbound/recipients');
 const GMAIL = require('../../lib/outbound/transports/gmail');
 const { sign, signingString, sameSignature } = require('../../lib/outbound/sender-signature');
@@ -109,7 +136,9 @@ async function handleSend({ raw, signature, timestamp, method = 'POST', path: p 
   if (!message || typeof message !== 'object') {
     return refuse(400, 'malformed', 'a send request needs a message object');
   }
-  const { to, subject, raw: payload } = message;
+  // `mailbox` is read because the binding covers WHICH PROVIDER ACCOUNT sends, and the mailbox is
+  // half of that. dispatch.js reads it off the same message, so both sides bind the same pair.
+  const { to, subject, raw: payload, mailbox = null } = message;
   if (!to || !subject || !payload) {
     return refuse(400, 'malformed',
       'a message needs a recipient, a subject and a prepared payload');
@@ -145,11 +174,19 @@ async function handleSend({ raw, signature, timestamp, method = 'POST', path: p 
   }
 
   // ── 5. THE LEDGER, WRITTEN BY THIS PROCESS ────────────────────────────────
-  const actualDigest = LEDGER.digestOf({
-    to: Array.isArray(to) ? to.join(', ') : String(to),
-    subject: `raw:${subject}`,
-    html: String(payload),
-  });
+  // CANONICAL v2 (B7.6), FROM THE SAME MODULE AS THE OTHER FOUR PRODUCERS.
+  //
+  // This runs in a SEPARATE PROCESS from the one that computed the approval, which is precisely why
+  // the owner required it be checked against the same contract rather than assumed to share it. It
+  // previously hashed `subject: 'raw:'+subject, html: payload` through the ledger's v1 fingerprint
+  // — its own recipe, in its own process, for the same job. Two recipes is how a producer and a
+  // consumer each stay internally consistent and still disagree, and across a process boundary
+  // nobody would notice until a real external send refused.
+  //
+  // `raw` is a field of the one definition now, so this process and dispatch.js produce the
+  // identical string for the identical message. server.test.js asserts that against dispatch's own
+  // producer rather than against a copy of this expression.
+  const actualDigest = requestDigest({ companyId, to, subject, raw: payload, transport, mailbox });
 
   // ── THE CLAIM NAMESPACE IS THE SERVICE'S OWN ──────────────────────────────
   //
@@ -414,4 +451,5 @@ function createServer(deps = {}) {
   });
 }
 
-module.exports = { createServer, handleSend, handleWrite, HANDLERS, WRITES, MAX_SKEW_MS };
+module.exports = { createServer, handleSend, handleWrite, HANDLERS, WRITES, MAX_SKEW_MS,
+                   requestDigest };

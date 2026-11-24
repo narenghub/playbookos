@@ -93,12 +93,23 @@ function fakeKernel({ status = 'approved', payload, approvedAt = new Date(), rel
 
 // ── THE ARTEFACT, AND THE DIGEST THAT BINDS IT ───────────────────────────────
 
-test('the frozen payload hashes the bytes the buyer will read, with the ledger\'s own function', () => {
+test('the frozen payload binds every field it records, not only the three it used to', () => {
   const { payload, transportDigest } = frozen();
-  // One hash function, used at both ends. Two implementations of "the same" digest is how a
-  // binding check quietly stops binding.
-  assert.strictEqual(transportDigest, LEDGER.digestOf({
-    to: MESSAGE.to, subject: MESSAGE.subject, html: MESSAGE.html }));
+  // This asserted `LEDGER.digestOf({ to, subject, html })` — which was true, and was the problem.
+  // The payload records `from`, `reply_to`, `cc` and `body_text` as well, so a binding over three
+  // of its fields let a release go out from a different sender, or with an added cc, and still
+  // hash correctly. The frozen artefact knew more about the message than its own binding did.
+  //
+  // Asserted by calling the MAILER'S producer rather than a local expression: the freeze and the
+  // send have to agree, and the only way to assert agreement is to ask the other side.
+  assert.strictEqual(transportDigest, require('../mailer').approvedDigestOf({
+    companyId: null,
+    from: payload.from, replyTo: payload.reply_to,
+    to: payload.to, cc: payload.cc, bcc: null,
+    subject: payload.subject, html: payload.html, text: payload.body_text,
+    attachments: [],
+  }), 'the frozen binding must be exactly what the mailer recomputes at the transport');
+  assert.match(transportDigest, /^v2:[0-9a-f]{64}$/);
   assert.strictEqual(payload.html, MESSAGE.html, 'the html is frozen verbatim, not re-rendered');
   assert.deepStrictEqual(payload.attachments, [], 'attachments are an explicit empty, not absent');
 });

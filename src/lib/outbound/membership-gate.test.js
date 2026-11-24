@@ -37,7 +37,11 @@ const ENV = { COMPANY_EMAIL_DOMAINS: 'abiozen.com,adificetechnologies.com',
 // Keep it consistent with EMPLOYED below: somebody employed at a company must appear here too.
 const ACTIVE = ['naren@abiozen.com', 'prasanthi@adificetechnologies.com',
   'someone-else@adificetechnologies.com', 'shared@abiozen.com'];
-const DIGEST = 'd'.repeat(32);
+// v2-SHAPED. Since B7.6 the gate tells a stored V1 digest apart from a mismatched one: a 32-hex
+// value is a validly shaped v1 digest and is refused as needing FRESH APPROVAL, because it could
+// never have bound the company, the sender, the provider account, CC/BCC, both bodies or the
+// attachments. These tests are about membership, so their approval has to be one the gate honours.
+const DIGEST = `v2:${'d'.repeat(64)}`;
 const APPROVED = { approvalId: 'ap-1', digest: DIGEST };
 
 const noStops = { checkStopped: async () => null, recordRefusal: () => {} };

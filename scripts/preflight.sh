@@ -306,6 +306,10 @@ pf_step "company membership holds its ruled properties" node scripts/check-compa
 # predicate, a composite foreign key or a partial unique index.
 pf_step "agent memory is isolated per company" node scripts/check-office-memory-db.js
 pf_step "the workflow-company proposal cannot assign anything" node --test scripts/proposal-is-readonly.test.js
+# B7.6. Six producers in four modules and two processes bind approvals. They agree or every
+# approved external send refuses, and each local expression of "the message" is locally correct —
+# which is why a reviewer cannot catch a second one and a scanner can.
+pf_step "one definition of the message a human approved" node scripts/check-approval-digest-discipline.js
 # Is the K1 PRODUCTION validator trustworthy? It runs once against production and its verdict is
 # what decides PRODUCTION VALIDATED, so three things need proving first: it writes nothing durable
 # (a fixture left on production could not be removed — agent_run_events is append-only); it goes red

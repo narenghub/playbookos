@@ -54,6 +54,9 @@
 const GATE = require('../email-gate');
 const LEDGER = require('./ledger');
 const RECIPIENTS = require('./recipients');
+// The canonical approval binding (B7.6). The ledger's digestOf is an audit fingerprint; this is
+// what authorizes a send. Both roads — here and mailer.js — use this one module.
+const DIGEST = require('./approval-digest');
 
 // ── THE TRANSPORT REGISTRY ──────────────────────────────────────────────────
 //
@@ -83,10 +86,22 @@ function knownTransports() {
 // one way at release and another way here, so every approved external send would have been refused
 // as tampered — or, with the comparison written the other way round, none would have been bound at
 // all. One expression of "the bytes that are leaving", and the test suite asserts the two agree.
-function payloadDigest({ to, subject, html }) {
-  return LEDGER.digestOf({
-    to: Array.isArray(to) ? to.join(', ') : String(to == null ? '' : to),
-    subject, html,
+// CANONICAL v2 since B7.6, and it still DELEGATES rather than hashing locally — now to
+// approval-digest.js, the module mailer.js uses. The two roads therefore agree by construction,
+// and the test suite asserts they produce the identical string for the same message. That
+// assertion is what made this change safe to make at all: migrate one producer and leave the
+// other, and every approved external send on the other road refuses.
+function payloadDigest({ to, subject, html, text = null, cc = null, bcc = null,
+  from = null, replyTo = null, companyId = null, attachments = null, raw = null,
+  transport = null, mailbox = null }) {
+  return DIGEST.approvalDigest({
+    companyId, from, replyTo,
+    // providerAccountOf, NOT a local expression. This call site had its own — `resend:<from>` —
+    // while the sender service, recomputing the same binding in another process, used the bare
+    // transport name. Both v2, both defensible, and every external send over that road refused
+    // with what looked like a tampering alarm. One definition, in the digest module.
+    providerAccount: DIGEST.providerAccountOf({ transport, mailbox, from }),
+    to, cc, bcc, subject, html, text, attachments, raw,
   });
 }
 
@@ -102,13 +117,24 @@ function payloadDigest({ to, subject, html }) {
 // So the comparison is always against the payload that will be handed to the transport. With no
 // `raw` this is byte-identical to payloadDigest, which keeps the mailer/approval-boundary path
 // unchanged and is asserted by the test suite.
-function transmittedDigest(message) {
-  const { to, subject, html, raw } = message || {};
-  const recipients = Array.isArray(to) ? to.join(', ') : String(to == null ? '' : to);
-  if (!raw) return LEDGER.digestOf({ to: recipients, subject, html });
-  // `raw` is authoritative, and the recipients are kept in the hash so a redirect is caught even
-  // if two messages share a body.
-  return LEDGER.digestOf({ to: recipients, subject: `raw:${subject || ''}`, html: String(raw) });
+// CANONICAL v2 since B7.6. `raw` is now a FIELD OF THE ONE DEFINITION rather than a second hash
+// shape — the previous version smuggled it in as `subject: 'raw:'+subject, html: raw`, which meant
+// a with-raw message and a without-raw message were hashed by two different recipes. Two recipes
+// is how a producer and a consumer each stay internally consistent and still disagree.
+//
+// With no `raw` this is byte-identical to payloadDigest, which keeps the mailer/approval-boundary
+// path unchanged, and the test suite asserts that identity rather than trusting this sentence.
+function transmittedDigest(message, { transport = null, companyId = null } = {}) {
+  const { to, subject, html, text, cc, bcc, from, replyTo, raw, mailbox,
+    attachments } = message || {};
+  return payloadDigest({ to, subject, html, text, cc, bcc, from, replyTo, attachments, raw,
+    // The transport and the company come from the DISPATCH CALL, not from the message. A message
+    // is data a caller hands over; which transport carries it and which company is making the
+    // send are decisions the governed path owns, and binding a caller-supplied value would let the
+    // caller choose what its own approval covers.
+    transport: transport || (message && message.transport) || null,
+    companyId: companyId !== null ? companyId : ((message && message.companyId) || null),
+    mailbox });
 }
 
 const refuse = (phase, error, extra = {}) => ({
@@ -207,7 +233,10 @@ async function dispatch({
   //
   // So a REFUSAL is as durable as a send. A refusal nobody can audit is indistinguishable from a
   // bug, and the containment evidence is built from these rows.
-  const actualDigest = transmittedDigest(message);
+  // transport and companyId come from the dispatch call, so the binding covers which provider
+  // account carries the message and which company is making the send — neither of which a caller
+  // can choose by putting a field in `message`.
+  const actualDigest = transmittedDigest(message, { transport, companyId });
 
   // ── THE STABLE DISPATCH IDENTIFIER ────────────────────────────────────────
   //
@@ -274,12 +303,22 @@ async function dispatch({
   // Checked here, at the last possible moment, against the bytes about to be transmitted. A
   // boundary that freezes a payload still has a joint between release and transmission, and
   // whatever carries it could carry something else.
-  if (expectedDigest && actualDigest !== expectedDigest) {
-    const why = `the approved payload digest ${expectedDigest} does not match the message about to `
-      + `be sent (${actualDigest}) — nothing was transmitted`;
-    await att.blocked(why, 'approval:digest_mismatch');
-    return refuse('digest_mismatch', why,
-      { stopped: true, approvalId, expectedDigest, actualDigest });
+  //
+  // compareDigests, not `!==`, and for the same three reasons as mailer.js: a v1 approval cannot
+  // establish the complete message and must be refused as needing FRESH APPROVAL rather than
+  // reported as tampering; an actual digest that is not v2 means a producer was left behind and
+  // two definitions of "the message" must never authorize a send; and only the third case is an
+  // ordinary mismatch. A string comparison collapses all three into one unhelpful answer.
+  if (expectedDigest) {
+    const verdict = DIGEST.compareDigests({ approved: expectedDigest, actual: actualDigest });
+    if (!verdict.ok) {
+      const why = `the approved payload digest ${expectedDigest} cannot authorize the message about `
+        + `to be sent (${actualDigest}): ${verdict.code} — ${verdict.detail}. Nothing was transmitted.`;
+      await att.blocked(why, `approval:digest_${verdict.code}`);
+      return refuse('digest_mismatch', why,
+        { stopped: true, approvalId, expectedDigest, actualDigest,
+          digestVerdict: verdict.code, needsFreshApproval: verdict.code === 'legacy_version' });
+    }
   }
 
   // ── 8. THE POLICY GATE. UNCONDITIONAL. ────────────────────────────────────
@@ -362,9 +401,17 @@ async function dispatch({
     providerResponded: !!(result && result.providerResponded), dispatched: true, transport };
 }
 
-/** The stable identifier for one logical submission. Exported so reports and controls agree. */
+/**
+ * The stable identifier for one logical submission. Exported so reports and controls agree.
+ *
+ * `idempotencyHash`, NOT `digestOf`. This was `digestOf({ to: 'dispatch', subject: key, html: '' })`
+ * — never a message digest, but it meant one function served both "these are the bytes a human
+ * approved" and "this is a dedupe key". Moving the approval binding to v2 would then have silently
+ * changed every dispatch id, and dispatch ids are what duplicate detection and the reports join
+ * on. Two purposes, two functions; this one is deliberately unchanged by B7.6.
+ */
 function dispatchIdFor(idempotencyKey) {
-  return LEDGER.digestOf({ to: 'dispatch', subject: idempotencyKey, html: '' });
+  return LEDGER.idempotencyHash(idempotencyKey);
 }
 
 module.exports = { dispatch, registerTransport, knownTransports, payloadDigest,

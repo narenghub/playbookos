@@ -27,8 +27,15 @@ const CONTACT = 'l.segala@nordkem.test';
 const RAW = Buffer.from('From: naren@abiozen.com\r\nTo: l.segala@nordkem.test\r\n\r\nHi Luca.').toString('base64url');
 const ENV = { COMPANY_DOMAINS: 'abiozen.com,adificetechnologies.com' };
 
-const digestOf = (m) => LEDGER.digestOf({
-  to: m.to, subject: `raw:${m.subject}`, html: String(m.raw),
+// DISPATCH'S OWN PRODUCER, not a copy of its expression. This was
+// `LEDGER.digestOf({ to, subject: 'raw:'+subject, html: raw })` — a third local reimplementation of
+// the approval binding, and that duplication is why the v1 gap survived as long as it did: a
+// fixture that reimplements the producer cannot notice the producer changing.
+// `companyId: 'abiozen'` matches the approval row below and the context the route builds from it.
+// The binding covers the company (B7.6), so a fixture that bound null would make every send in
+// this file refuse — correctly, which is how the requirement enforces itself.
+const digestOf = (m) => D.transmittedDigest(m, {
+  transport: m.transport || 'gmail_cphi', companyId: m.companyId || 'abiozen',
 });
 
 // ── THE WORLD, MOCKED ───────────────────────────────────────────────────────

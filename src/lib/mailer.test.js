@@ -297,21 +297,71 @@ test('DECISIVE: an external cc is refused — the gate is actually given it', as
   } finally { global.fetch = realFetch; APPROVE = saved; }
 });
 
-test('KNOWN LIMITATION: the approval digest does not bind cc, so an approved send can widen', async () => {
-  // Deliberately asserting what the code does TODAY, and naming it, rather than leaving it to be
-  // rediscovered. approvedDigestOf hashes { to, subject, html } — cc is not in it. So a released
-  // approval for a message authorises the same bytes sent to ADDITIONAL cc'd recipients, because
-  // the digest is unchanged by adding them. The classification hole above is closed; this binding
-  // hole is not, and closing it means changing the digest shape at five independent call sites in
-  // lockstep (mailer.js, services/sender/server.js, buyer-email-approval.js x2, dispatch.js x2) —
-  // they must agree or every external send refuses. Tracked as its own change, not half-done here.
-  //
-  // When that change lands, this test should FAIL and be rewritten as the positive assertion.
+// ── THE BINDING HOLE, NOW CLOSED (B7.6) ─────────────────────────────────────
+//
+// This replaces a test called "KNOWN LIMITATION: the approval digest does not bind cc, so an
+// approved send can widen", which asserted the gap on purpose and said: "when that change lands,
+// this test should FAIL and be rewritten as the positive assertion." It landed, it failed, and
+// this is that assertion.
+//
+// v1 hashed `[to, subject, html || text || '']`. Each case below changes something that REACHES
+// THE RECIPIENT and left that hash untouched, so a released approval authorized all of them.
+test('the approval digest binds every field that reaches the recipient', async () => {
   process.env.RESEND_API_KEY = 'test-key';
-  const digestOfTo = require('./mailer').approvedDigestOf(
-    { to: 'buyer@acme.test', subject: 's', html: 'h' });
-  const digestWithCc = require('./mailer').approvedDigestOf(
-    { to: 'buyer@acme.test', subject: 's', html: 'h', cc: 'someone-else@acme.test' });
-  assert.equal(digestWithCc, digestOfTo,
-    'adding a cc does not change the digest — which is exactly why it must be bound');
+  const D = require('./mailer').approvedDigestOf;
+  const base = { to: 'buyer@acme.test', subject: 's', html: 'h',
+    from: 'A <a@adificetechnologies.com>', companyId: 'co-abiozen' };
+  const b = D(base);
+
+  const widened = [
+    ['a cc nobody approved', { ...base, cc: 'someone-else@acme.test' }],
+    ['a bcc nobody approved', { ...base, bcc: 'quiet@acme.test' }],
+    ['a different company making the same send', { ...base, companyId: 'co-adifice' }],
+    ['a different sender identity', { ...base, from: 'B <b@adificetechnologies.com>' }],
+    ['a reply-to pointing somewhere else', { ...base, replyTo: 'elsewhere@acme.test' }],
+    ['a text alternative swapped under an unchanged html part', { ...base, text: 'different' }],
+    ['an attachment added', { ...base, attachments: [{ filename: 'x.pdf', content: Buffer.from('x') }] }],
+    ['an attachment\'s CONTENT changed under the same filename',
+      { ...base, attachments: [{ filename: 'x.pdf', content: Buffer.from('y') }] }],
+    ['a second recipient added to to', { ...base, to: ['buyer@acme.test', 'extra@acme.test'] }],
+  ];
+  for (const [label, variant] of widened) {
+    assert.notEqual(D(variant), b, `${label} must change the digest — v1 did not notice it`);
+  }
+
+  // And the binding must be STABLE, or every external send refuses for a reason unrelated to
+  // authorization: address order and letter case are not part of the message.
+  assert.equal(
+    D({ ...base, to: ['buyer@acme.test', 'extra@acme.test'] }),
+    D({ ...base, to: ['EXTRA@acme.test', 'Buyer@Acme.test'] }),
+    'recipient order and case must not change the binding',
+  );
+  assert.match(b, /^v2:[0-9a-f]{64}$/, 'and it is the canonical versioned digest');
+});
+
+test('a v1 approval cannot authorize a send — it asks for fresh approval instead', async () => {
+  // The security decision in this change. A stored v1 digest bound TO, the subject and one body,
+  // so it cannot establish the company, sender, provider account, CC/BCC, both bodies or the
+  // attachments of the message it supposedly approved. Honouring it would mean honouring a binding
+  // that does not bind.
+  //
+  // Refusing is safe to do strictly because capability/email.send has been STOPPED in production
+  // since 2026-11-03, so no live approval sits behind this: a stored v1 approval becomes a
+  // re-approval request, not a lost send.
+  process.env.RESEND_API_KEY = 'test-key';
+  const realFetch = global.fetch;
+  let called = false;
+  global.fetch = async () => { called = true; return { json: async () => ({ id: 'x' }) }; };
+  try {
+    const legacy = require('./outbound/ledger').digestOf(
+      { to: 'buyer@acme.test', subject: 's', html: 'h' });
+    assert.match(legacy, /^[0-9a-f]{32}$/, 'the fixture really is a v1 digest');
+    const r = await sendEmailDetailedX({ to: 'buyer@acme.test', subject: 's', html: 'h',
+      approvalId: 'ap-legacy', expectedDigest: legacy });
+    assert.equal(r.ok, false);
+    assert.equal(r.digestVerdict, 'legacy_version');
+    assert.equal(r.needsFreshApproval, true,
+      'the caller is told this needs re-approval, not that the bytes changed');
+    assert.equal(called, false, 'and nothing was transmitted');
+  } finally { global.fetch = realFetch; }
 });

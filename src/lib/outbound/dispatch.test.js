@@ -20,6 +20,12 @@ const EXTERNAL = 'buyer@acme-pharma.test';
 const INTERNAL = 'ops@abiozen.com';
 const MSG = { to: EXTERNAL, subject: 'Quotation QT-9001', html: '<p>12 kg, USD 48,150</p>' };
 
+// The binding covers which provider account carries the message (B7.6), and every dispatch in this
+// file uses the `resend` transport. Named once here rather than repeated at each comparison, so a
+// fixture cannot drift from the dispatch call it is meant to match.
+const RESEND = { transport: 'resend' };
+const DIG = (m = MSG) => D.payloadDigest({ ...m, ...RESEND });
+
 // ── THE HARNESS ──────────────────────────────────────────────────────────────
 
 function counter() {
@@ -81,7 +87,10 @@ const GOOD = (m = MSG) => ({
   transport: 'resend',
   idempotencyKey: 'inq-1001-quote-v1',
   approvalId: 'apv-1001',
-  expectedDigest: D.payloadDigest(m),
+  // DIG(m), so the fixture's approval binds the same provider account the dispatch below uses. A
+  // bare payloadDigest(m) would bind `unknown:` and every one of these sends would refuse — which
+  // is the correct behaviour, and is how the lockstep requirement enforces itself.
+  expectedDigest: DIG(m),
   workflow: 'inquiry',
   agent: 'inquiry-agent',
 });
@@ -130,7 +139,7 @@ test('2c. an INTERNAL recipient needs no approval — alerts and ops mail still 
 
 test('3. a tampered body after approval is refused — 0 invocations', async () => {
   const { c, deps } = harness();
-  const approvedFor = D.payloadDigest(MSG);
+  const approvedFor = DIG();
   const tampered = { ...MSG, html: '<p>12 kg, USD 4,815</p>' };   // one digit moved
   const r = await D.dispatch({ ...GOOD(tampered), expectedDigest: approvedFor }, deps);
   assert.strictEqual(c.sends.length, 0, 'a message altered after approval was transmitted');
@@ -140,7 +149,7 @@ test('3. a tampered body after approval is refused — 0 invocations', async () 
 
 test('3b. a swapped recipient after approval is refused — 0 invocations', async () => {
   const { c, deps } = harness();
-  const approvedFor = D.payloadDigest(MSG);
+  const approvedFor = DIG();
   const redirected = { ...MSG, to: 'someone-else@elsewhere.test' };
   const r = await D.dispatch({ ...GOOD(redirected), expectedDigest: approvedFor }, deps);
   assert.strictEqual(c.sends.length, 0, 'an approved message was redirected and still sent');
@@ -151,7 +160,7 @@ test('3c. the digest matches mailer.js, so one frozen message hashes the same on
   // If these diverge, a message frozen by the approval boundary would be refused here as tampered.
   const mailer = require('../mailer');
   assert.strictEqual(typeof mailer.approvedDigestOf, 'function');
-  assert.strictEqual(D.payloadDigest(MSG), mailer.approvedDigestOf(MSG),
+  assert.strictEqual(DIG(), mailer.approvedDigestOf(MSG),
     'dispatch and mailer compute different digests for identical bytes — an approved message '
     + 'would be refused on one road and accepted on the other');
 });
@@ -361,8 +370,8 @@ test('10. a tampered raw with consistent headers is refused — 0 invocations', 
 test('10b. with no raw, transmittedDigest is byte-identical to the mailer digest', () => {
   // So migrating the Gmail path did not quietly change the binding on the inquiry path.
   const mailer = require('../mailer');
-  assert.strictEqual(D.transmittedDigest(MSG), mailer.approvedDigestOf(MSG));
-  assert.strictEqual(D.transmittedDigest(MSG), D.payloadDigest(MSG));
+  assert.strictEqual(D.transmittedDigest(MSG, RESEND), mailer.approvedDigestOf(MSG));
+  assert.strictEqual(D.transmittedDigest(MSG, RESEND), DIG());
 });
 
 test('10c. a raw message and its description do NOT hash the same', () => {

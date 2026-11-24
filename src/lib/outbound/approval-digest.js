@@ -151,7 +151,7 @@ function encode(parts) {
 function approvalDigest({
   companyId = null, from = null, replyTo = null, providerAccount = null,
   to = null, cc = null, bcc = null, subject = null, html = null, text = null,
-  attachments = null,
+  attachments = null, raw = null,
 } = {}) {
   return PREFIX + encode([
     `version=${VERSION}`,
@@ -168,6 +168,16 @@ function approvalDigest({
     'html', str(html),
     'text', str(text),
     'attachments', attachmentDigests(attachments),
+    // RAW RFC822, for the Gmail path, where the bytes transmitted ARE `raw` and to/subject/html
+    // are only a description of them. Binding the description would leave the thing itself
+    // unbound: alter `raw`, keep the headers consistent, and a check over the description passes
+    // while a different message goes out.
+    //
+    // Always present in the encoding even when null, so there is exactly ONE definition of a
+    // message rather than a with-raw definition and a without-raw one. Two encodings would mean a
+    // producer and a consumer could each be internally consistent and still disagree, which is the
+    // failure mode this whole module exists to remove.
+    'raw', str(raw),
   ]);
 }
 
@@ -183,6 +193,25 @@ function approvalDigest({
  *   mismatch         → the bytes about to be sent are not the bytes that were approved.
  *   unrecognised     → the stored value is not a digest this system produces at all.
  */
+/**
+ * WHICH PROVIDER ACCOUNT SENDS THIS — one definition, because two is how producers disagree.
+ *
+ * Added after the cross-layer test caught exactly that. dispatch.js was computing
+ * `resend:<from>` while the sender service — a SEPARATE PROCESS recomputing the same binding —
+ * was computing the bare transport name. Both were defensible; both were v2; and every external
+ * send over that road refused with a digest mismatch that looked like tampering. That is the
+ * failure B7.6 exists to prevent, reproduced inside B7.6 by leaving one field's meaning to each
+ * call site.
+ *
+ * The account is the transport plus the mailbox or sender identity it sends as, because that pair
+ * is what actually determines whose name is on the message. Binding it means an approval to send
+ * from the CPHI mailbox cannot be redeemed by the direct SMTP transport, or from another mailbox.
+ */
+function providerAccountOf({ transport = null, mailbox = null, from = null } = {}) {
+  const who = mailbox || from || '';
+  return `${String(transport || 'unknown').toLowerCase()}:${String(who).toLowerCase()}`;
+}
+
 function compareDigests({ approved, actual }) {
   const a = classifyDigest(approved);
   const b = classifyDigest(actual);
@@ -214,6 +243,7 @@ function compareDigests({ approved, actual }) {
 
 module.exports = {
   approvalDigest,
+  providerAccountOf,
   compareDigests,
   classifyDigest,
   VERSION,

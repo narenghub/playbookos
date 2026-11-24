@@ -147,7 +147,11 @@ if (!url) {
         mailbox: 'sales@abiozen.com', ...(over.message || {}) };
       return D.dispatch({
         message: m, transport: TRANSPORT, idempotencyKey: key,
-        approvalId: `apv-${key}`, expectedDigest: over.badDigest ? 'deadbeef' : D.transmittedDigest(m),
+        // `{ transport: TRANSPORT }` — the same transport this dispatch names. B7.6 binds which
+        // provider account carries the message, so a digest computed without it describes a
+        // different authorization and every permitted send here would refuse.
+        approvalId: `apv-${key}`,
+        expectedDigest: over.badDigest ? 'deadbeef' : D.transmittedDigest(m, { transport: TRANSPORT }),
         workflow: 'cphi-followup', agent: 'cphi-runner',
       }, { ...deps, transports: over.transports || transports });
     };

@@ -27,11 +27,20 @@ const ENV = { SENDER_SERVICE_SECRET: SECRET, COMPANY_DOMAINS: 'abiozen.com,adifi
 
 const MESSAGE = { to: EXTERNAL, subject: 'Quotation QT-9001', raw: 'UkFXLUJZVEVT', mailbox: 'sales@abiozen.com' };
 
-/** The digest the service computes, from the bytes in the request. */
-const digestOf = (m) => LEDGER.digestOf({
-  to: Array.isArray(m.to) ? m.to.join(', ') : String(m.to),
-  subject: `raw:${m.subject}`,
-  html: String(m.raw),
+// THE SERVICE'S OWN PRODUCER, not a copy of its expression.
+//
+// This was a local re-implementation — `LEDGER.digestOf({ to, subject: 'raw:'+subject, html: raw })`
+// — so the fixture and the service could drift together while the suite kept passing and the
+// service disagreed with every other producer. A test that reimplements the thing it tests proves
+// only that two copies of one mistake match.
+// The transport is a DEFAULTED ARGUMENT because the binding includes the provider account, and
+// the transport is what selects it: a message approved to leave by one provider must not leave by
+// another. Every request in this file uses gmail_cphi except the unknown-transport case, which is
+// refused by the transport registry before the digest is reached.
+const { requestDigest } = require('./server');
+const digestOf = (m, transport = 'gmail_cphi') => requestDigest({
+  to: m.to, subject: m.subject, raw: m.raw, transport,
+  mailbox: m.mailbox || null, companyId: m.companyId || null,
 });
 
 function counter() {
@@ -404,7 +413,11 @@ test('8. dispatch through the REAL service, over one shared ledger, sends exactl
     const m = { to: EXTERNAL, subject: 'Quotation QT-9001', raw: 'UkFXLUJZVEVT', mailbox: 'sales@abiozen.com' };
     const r = await D.dispatch({
       message: m, transport: 'gmail_cphi', idempotencyKey: 'xlayer-1',
-      approvalId: 'apv-1', expectedDigest: D.transmittedDigest(m),
+      // `{ transport: 'gmail_cphi' }` — the same transport the dispatch names. The binding covers
+      // which provider account carries the message, and THIS TEST is the only one that runs both
+      // producers, in both processes, over one message: it is what caught dispatch and the service
+      // having each invented their own expression for that field.
+      approvalId: 'apv-1', expectedDigest: D.transmittedDigest(m, { transport: 'gmail_cphi' }),
     }, {
       env: ENV, gate: allow, ledger: shared,
       transports: { gmail_cphi: CLIENT.transportFor('gmail_cphi', { url, secret: SECRET }) },

@@ -74,7 +74,11 @@ function recipientsString(to) {
  * sent.
  */
 function freezeOutreachEmail({ to, subject, raw, mailbox, transport, threadId = null,
-  campaign = null, step = null, contactRef = null, preview = null }, deps = {}) {
+  campaign = null, step = null, contactRef = null, preview = null,
+  // THE COMPANY, from the governed context the caller is running under — never a field a caller
+  // chooses. B7.6 binds it, because the same bytes sent for a different company are a different
+  // authorization, and B7.8 settled where a company id is allowed to come from.
+  companyId = null }, deps = {}) {
   const missing = Object.entries({ to, subject, raw, mailbox, transport })
     .filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) {
@@ -98,9 +102,13 @@ function freezeOutreachEmail({ to, subject, raw, mailbox, transport, threadId = 
     preview: preview ? String(preview).slice(0, 4000) : null,
   };
 
+  // The transport and the mailbox are bound too, not only the bytes. B7.6: the binding covers which
+  // provider account carries the message, so an approval to leave from the CPHI mailbox cannot be
+  // redeemed by the direct SMTP transport, or from a different mailbox. The payload has recorded
+  // both of them a dozen lines above all along — they just were not in the digest.
   const transportDigest = dispatchOf(deps).transmittedDigest({
-    to: payload.to, subject: payload.subject, raw: payload.raw,
-  });
+    to: payload.to, subject: payload.subject, raw: payload.raw, mailbox: payload.mailbox,
+  }, { transport: payload.transport, companyId });
 
   return { payload: { ...payload, transport_digest: transportDigest }, transportDigest };
 }
@@ -125,7 +133,10 @@ async function prepareOutreachEmail(ctx, {
   let frozen;
   try {
     frozen = freezeOutreachEmail({ to, subject, raw, mailbox, transport, threadId,
-      campaign, step, contactRef, preview }, deps);
+      campaign, step, contactRef, preview,
+      // From the CONTEXT, not from the arguments. ctx is the governed run this preparation belongs
+      // to, so the company it binds is read from stored state rather than chosen by whoever called.
+      companyId: ctx.companyId || null }, deps);
   } catch (e) {
     return { prepared: false, reason: 'payload_incomplete', detail: e.message };
   }
@@ -222,13 +233,25 @@ async function releaseOutreachEmail(ctx, {
   // request body — but each check covers a different joint, and this one covers the approval store
   // itself: a payload altered in the database between prepare and release would otherwise travel
   // with its own stale digest and satisfy every later check.
-  const expectedDigest = dispatchOf(deps).transmittedDigest(message);
+  // `{ transport: p.transport }` from THE STORED PAYLOAD, like every other field here. The binding
+  // covers which provider account carries the message, so recomputing it without the transport
+  // would check a narrower message than the one that was frozen — and that is how a revalidation
+  // starts agreeing with itself instead of with the freeze.
+  const expectedDigest = dispatchOf(deps).transmittedDigest(message,
+    { transport: p.transport, companyId: ctx.companyId || null });
   if (p.transport_digest && expectedDigest !== p.transport_digest) {
     return { released: false, reason: 'approved_payload_altered',
       detail: `the stored payload hashes to ${expectedDigest} but was approved as ${p.transport_digest}` };
   }
 
+  // `companyId` is RETURNED, not left for the caller to supply again. The binding above covers the
+  // company, so a dispatch made with a different one — or with none — computes a different digest
+  // and refuses with what reads as a tampering alarm. Handing back the value that was bound means
+  // the caller cannot get it wrong by omission, which is how this was first discovered: the
+  // release bound the company and the dispatch bound null, and the two never met until a test ran
+  // both halves.
   return { released: true, message, expectedDigest, approvalId, transport: p.transport,
+    companyId: ctx.companyId || null,
     campaign: p.campaign || null, step: p.step || null, contactRef: p.contact_ref || null };
 }
 

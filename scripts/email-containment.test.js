@@ -58,7 +58,10 @@ const ENV = { ALERT_EMAIL: 'ops@abiozen.com', ADMIN_EMAIL: 'naren@abiozen.com' }
 //
 // Granting the approval rather than re-pointing these at internal addresses keeps them exercising
 // the external path, and makes each of them prove that BOTH gates have an inside.
-const GRANTED_DIGEST = 'a'.repeat(32);
+// v2-SHAPED. The fixture's job is "an approval that covers these bytes", and since B7.6 a value
+// that is not a current-version digest is refused as needing fresh approval rather than compared —
+// a 32-hex string is a validly shaped V1 digest, so the old fixture became a legacy-approval case.
+const GRANTED_DIGEST = `v2:${'a'.repeat(64)}`;
 function grantedApproval() {
   return {
     query: async (sql, params = []) => {

@@ -30,6 +30,8 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'preflight';
 const GATE = require('../src/lib/email-gate');
 const MAILER = require('../src/lib/mailer');
 const LEDGER = require('../src/lib/outbound/ledger');
+const DISPATCH = require('../src/lib/outbound/dispatch');
+const DIGEST = require('../src/lib/outbound/approval-digest');
 
 const AGENT_FILE = path.join(__dirname, '..', 'src', 'lib', 'agents', 'inquiry-agent.js');
 const MAILER_FILE = path.join(__dirname, '..', 'src', 'lib', 'mailer.js');
@@ -293,14 +295,62 @@ test('a digest mismatch has no mode in which it proceeds', () => {
     + 'the environment is not a control');
 });
 
-test('the approval boundary and the transport compute the same digest', () => {
-  const msg = { to: 'buyer@acme.test', subject: 'Quotation QT-1', html: '<div>$48,150</div>' };
-  // Three expressions of one hash must agree, or the binding is decorative.
-  assert.strictEqual(MAILER.approvedDigestOf(msg), LEDGER.digestOf(msg));
+test('every approval producer computes the same digest for the same message', () => {
+  // THIS ASSERTION IS WHAT MADE B7.6 SAFE TO DO. Five independent producers bind approvals, in
+  // four modules and two PROCESSES. Migrate one and leave another and every approved external send
+  // on the unmigrated road refuses — so they move together or not at all, and "together" has to be
+  // something a test can state.
+  //
+  // It used to assert `MAILER.approvedDigestOf(msg) === LEDGER.digestOf(msg)`: the approval binding
+  // equals the ledger's audit fingerprint. That equality is now deliberately FALSE. They answer
+  // different questions — "did a human authorize exactly these bytes" and "what went out" — and
+  // one function serving both is precisely why the binding bound neither cc, company, sender,
+  // provider account, attachments nor the text part. The fingerprint keeps its own name and its
+  // own test below.
+  const msg = {
+    to: 'buyer@acme.test', subject: 'Quotation QT-1', html: '<div>$48,150</div>',
+    from: 'Palash Das <palash@abiozen.com>', cc: 'ops@acme.test', companyId: 'co-abiozen',
+  };
+  // `transport: 'resend'` on the dispatch side, because the binding covers WHICH PROVIDER ACCOUNT
+  // carries the message and the mailer road is always Resend. Omitting it here is how this test
+  // caught the real defect: dispatch and the sender service had each invented their own expression
+  // for that field and disagreed across a process boundary.
+  const viaMailer = MAILER.approvedDigestOf(msg);
+  const viaDispatch = DISPATCH.payloadDigest({ ...msg, transport: 'resend' });
+  const viaTransmitted = DISPATCH.transmittedDigest(msg, { transport: 'resend',
+    companyId: msg.companyId });
+  const viaCanonical = DIGEST.approvalDigest({
+    ...msg, providerAccount: DIGEST.providerAccountOf({ transport: 'resend', from: msg.from }),
+  });
+
+  assert.strictEqual(viaDispatch, viaMailer, 'the approval boundary and dispatch must agree');
+  assert.strictEqual(viaTransmitted, viaMailer,
+    'with no raw payload, the transmitted digest is the payload digest — the mailer road is unchanged');
+  assert.strictEqual(viaCanonical, viaMailer, 'and all of them are the canonical module');
+  assert.match(viaMailer, /^v2:[0-9a-f]{64}$/);
+
   assert.strictEqual(
-    MAILER.approvedDigestOf({ ...msg, to: ['buyer@acme.test'] }),
-    LEDGER.digestOf(msg),
+    MAILER.approvedDigestOf({ ...msg, to: ['buyer@acme.test'] }), viaMailer,
     'an array recipient must hash identically to the same single recipient');
+});
+
+test('the raw path binds the raw bytes, not the description of them', () => {
+  // The Gmail/sender road transmits `raw`. Binding to/subject/html there would bind a DESCRIPTION
+  // of the message: alter raw, keep the headers consistent, and the check passes while different
+  // bytes go out.
+  const base = { to: 'buyer@acme.test', subject: 'S' };
+  const opts = { transport: 'gmail_cphi', companyId: 'co-abiozen' };
+  const a = DISPATCH.transmittedDigest({ ...base, raw: 'RAW-ONE' }, opts);
+  const b = DISPATCH.transmittedDigest({ ...base, raw: 'RAW-TWO' }, opts);
+  assert.notStrictEqual(a, b, 'changing the transmitted bytes must change the binding');
+  assert.notStrictEqual(a, DISPATCH.transmittedDigest(base, opts),
+    'a raw message and a bodyless one are not the same message');
+  assert.notStrictEqual(a, DISPATCH.transmittedDigest({ ...base, raw: 'RAW-ONE' },
+    { ...opts, transport: 'smtp_direct' }),
+    'the same bytes by a DIFFERENT transport is a different authorization');
+  assert.notStrictEqual(a, DISPATCH.transmittedDigest({ ...base, raw: 'RAW-ONE' },
+    { ...opts, companyId: 'co-adifice' }),
+    'the same bytes for a DIFFERENT company is a different authorization');
 });
 
 test('NEGATIVE: the digest functions disagree when the message differs', () => {
@@ -311,6 +361,22 @@ test('NEGATIVE: the digest functions disagree when the message differs', () => {
   const c = MAILER.approvedDigestOf({ to: 'other@acme.test', subject: 'S', html: '<p>48150</p>' });
   assert.notStrictEqual(a, b, 'a changed total hashes the same');
   assert.notStrictEqual(a, c, 'a changed recipient hashes the same');
+});
+
+test('the ledger fingerprint and the approval binding are DIFFERENT things', () => {
+  // Stated rather than left to be rediscovered. digestOf survives for the ledger's content
+  // fingerprint and for recognising a stored v1 digest well enough to refuse it; it is not what
+  // authorizes anything, and a future reader comparing the two columns should find this test.
+  const msg = { to: 'buyer@acme.test', subject: 'S', html: '<p>h</p>' };
+  assert.notStrictEqual(MAILER.approvedDigestOf(msg), LEDGER.digestOf(msg));
+  assert.match(LEDGER.digestOf(msg), /^[0-9a-f]{32}$/, 'v1: 32 hex, unversioned');
+  assert.match(MAILER.approvedDigestOf(msg), /^v2:[0-9a-f]{64}$/, 'v2: versioned and complete');
+  const verdict = DIGEST.compareDigests({
+    approved: LEDGER.digestOf(msg), actual: MAILER.approvedDigestOf(msg),
+  });
+  assert.strictEqual(verdict.ok, false);
+  assert.strictEqual(verdict.code, 'legacy_version',
+    'a v1 value presented as an approval asks for fresh approval, not a tampering alarm');
 });
 
 // ── STOP ENFORCEMENT ON THE BUYER WORKFLOW ───────────────────────────────────
@@ -334,7 +400,10 @@ function fakeAutonomy(stops = [], { throws = false } = {}) {
   };
 }
 
-const GRANTED_DIGEST = 'a'.repeat(32);
+// v2-SHAPED. The fixture's job is "an approval that covers these bytes", and since B7.6 a value
+// that is not a current-version digest is refused as needing fresh approval rather than compared —
+// a 32-hex string is a validly shaped V1 digest, so the old fixture became a legacy-approval case.
+const GRANTED_DIGEST = `v2:${'a'.repeat(64)}`;
 const APPROVED = { approvalId: 'ap-granted', digest: GRANTED_DIGEST };
 function grantedApproval() {
   return {
@@ -482,8 +551,20 @@ test('APPROVAL: every way an approval can fail to authorise these bytes is refus
     [[{ status: 'approved', released_at: null, action_payload: { transport_digest: GRANTED_DIGEST } }],
       'approval_not_released'],
     [[{ status: 'approved', released_at: new Date(), action_payload: {} }], 'approval_has_no_digest'],
-    [[{ status: 'approved', released_at: new Date(), action_payload: { transport_digest: 'b'.repeat(32) } }],
+    // A DIFFERENT CURRENT-VERSION digest is the ordinary mismatch: these are not the approved
+    // bytes. It must be v2-shaped, because a v1-shaped value is a different refusal with a
+    // different remedy — see the two cases below it.
+    [[{ status: 'approved', released_at: new Date(), action_payload: { transport_digest: `v2:${'b'.repeat(64)}` } }],
       'approval_digest_mismatch'],
+    // A STORED V1 DIGEST asks for FRESH APPROVAL rather than raising a tampering alarm. It bound
+    // TO, the subject and one body, so it cannot establish the company, sender, provider account,
+    // CC/BCC, both bodies or the attachments of the message it supposedly approved — and nothing
+    // about that message has necessarily changed.
+    [[{ status: 'approved', released_at: new Date(), action_payload: { transport_digest: 'b'.repeat(32) } }],
+      'approval_digest_legacy_version'],
+    // Not a digest this system has ever produced.
+    [[{ status: 'approved', released_at: new Date(), action_payload: { transport_digest: 'not-a-digest' } }],
+      'approval_digest_unrecognised'],
   ];
   for (const [rows, expected] of cases) {
     const g = await GATE.assertSendAllowed({ ...BUYER_SEND, ...APPROVED },

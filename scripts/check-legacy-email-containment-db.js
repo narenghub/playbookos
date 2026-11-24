@@ -137,7 +137,17 @@ const RFQ = 'legacy-supplier-rfq-email';
     // and with no foreign keys, because the gate only SELECTs.
     const APPROVAL_ID = 'ap-containment-fixture';
     const FIXTURE_MSG = { to: 'buyer@external.invalid', subject: 'fixture', html: 'body' };
-    const FIXTURE_DIGEST = require('../src/lib/outbound/ledger').digestOf(FIXTURE_MSG);
+    // THE MAILER'S OWN PRODUCER, not the ledger's v1 fingerprint. This fixture stored a v1 digest,
+    // and once the gate learned to tell a legacy approval from a tampered message it refused this
+    // one — correctly — as needing fresh approval, so the containment check could no longer show
+    // the path recovering after a stop was lifted. The approval here has to be one the gate would
+    // honour, or the scenario measures the digest rather than the stop.
+    //
+    // The mailer applies defaultFrom() before binding, so the fixture does too: the binding covers
+    // the sender identity now, and a digest computed without it would not match the send.
+    const FIXTURE_DIGEST = require('../src/lib/mailer').approvedDigestOf({
+      ...FIXTURE_MSG, from: require('../src/lib/mailer').defaultFrom(),
+    });
     await q(`CREATE TABLE IF NOT EXISTS office_approvals (id TEXT PRIMARY KEY, status TEXT,
       released_at TIMESTAMPTZ, action_payload JSONB)`);
     await q(`INSERT INTO office_approvals (id, status, released_at, action_payload)

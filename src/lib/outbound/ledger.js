@@ -42,17 +42,55 @@ function q(deps) {
 }
 
 /**
- * A digest of what is being sent — never the body.
+ * V1. THE AUDIT FINGERPRINT — and NOT the approval binding any more.
  *
- * It answers the only question an audit needs about content: is the artefact that was approved the
- * artefact that went? Comparing two digests answers it; storing the HTML does not, and storing the
- * HTML is how a log becomes a copy of everyone's correspondence.
+ * A digest of what is being sent, never the body: it answers the question an audit needs, "is the
+ * artefact that was approved the artefact that went", without a log becoming a copy of everyone's
+ * correspondence.
+ *
+ * ── WHY THIS IS NO LONGER WHAT AUTHORIZES A SEND ──────────────────────────────
+ *
+ * Read what it hashes: `[to, subject, html || text || '']`. It binds the recipients in TO, the
+ * subject, and ONE body. It therefore does not bind CC, BCC, the company the send is made for, the
+ * FROM or REPLY-TO identity, the provider account, the attachments, or the text alternative when
+ * html is present — `html || text` means the text part can be replaced without changing the digest
+ * at all.
+ *
+ * That was the measured gap behind B7.6. Every one of those fields reaches the recipient, so an
+ * approval that binds none of them cannot establish what a human approved. The canonical binding
+ * is src/lib/outbound/approval-digest.js (`v2:<64hex>`), and every approval producer and consumer
+ * uses it. scripts/check-approval-digest-discipline.js fails the build if an approval path comes
+ * back here.
+ *
+ * This function survives for two uses that are NOT authorization: the ledger's own content
+ * fingerprint, and recognising a stored v1 digest well enough to REFUSE it and ask for fresh
+ * approval. Keeping it is deliberate — deleting it would turn a stored legacy approval into
+ * "unrecognised" rather than "needs re-approval", which is a worse answer for whoever has to act.
  */
 function digestOf({ to, subject, html, text }) {
   return crypto.createHash('sha256')
     .update(JSON.stringify([to, subject, html || text || '']))
     .digest('hex')
     .slice(0, 32);
+}
+
+/**
+ * A hash of an idempotency key. SEPARATE FROM `digestOf` ON PURPOSE.
+ *
+ * dispatch.js used to reach for `digestOf({ to: 'dispatch', subject: idempotencyKey, html: '' })`
+ * to fold a key into the ledger's digest column. That is not a message digest and never was — but
+ * it meant one function served both "these are the bytes a human approved" and "this is a dedupe
+ * key", so a change to the first would silently have changed the second. Two purposes, two
+ * functions, and now the approval one could move to v2 without touching dedupe behaviour.
+ */
+function idempotencyHash(key) {
+  // BYTE-IDENTICAL to what dispatch.js computed before, deliberately. The first version of this
+  // function hashed a cleaner string — and would have changed every dispatch id in existence.
+  // Dispatch ids are what duplicate detection and the reports join on, so a "tidier" hash here
+  // would have made every historical submission unrecognisable and every prior send eligible to
+  // go again. This change is a RENAME: it gives the purpose its own name so the approval binding
+  // could move to v2 without touching dedupe, and it moves no value at all.
+  return digestOf({ to: 'dispatch', subject: key, html: '' });
 }
 
 // Has the migration been applied? Cached per process after the first successful check: this is
@@ -87,6 +125,16 @@ async function beginAttempt({
   transport, provider, to, subject, html, text,
   workflow = null, agent = null, companyId = null, approvalId = null, claimRef = null,
   consequential = true, correlationId = null,
+  // THE CANONICAL APPROVAL DIGEST, when the caller has one.
+  //
+  // Added with B7.6. Without it this row recorded `digestOf(to, subject, html)` while the approval
+  // it names recorded the v2 binding — two different definitions of "this message" in the audit
+  // trail, so anyone reconciling the ledger row against its approval would compare a fingerprint
+  // with a binding and find a mismatch that means nothing. The caller that computed the binding
+  // passes it, and the row says the same thing the approval does.
+  //
+  // Still defaulted, because non-approval transports (the alert path) legitimately have none.
+  payloadDigest = null,
 } = {}, deps = {}) {
   if (!transport) throw new Error('beginAttempt requires a transport: an unattributed send is unauditable');
   const id = crypto.randomUUID();
@@ -124,7 +172,8 @@ async function beginAttempt({
             correlation_id, outcome, approval_id, payload_digest, claim_ref)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PREPARED',$11,$12,$13)`,
         [id, recipients, subject || '(no subject)', 'prepared', transport, provider || null,
-          workflow, agent, companyId, corr, approvalId, digestOf({ to: recipients, subject, html, text }),
+          workflow, agent, companyId, corr, approvalId,
+          payloadDigest || digestOf({ to: recipients, subject, html, text }),
           claimRef]);
     } catch (e) {
       console.error(`[ledger] could not open an attempt for ${transport}: ${e && e.message}`);
@@ -398,7 +447,7 @@ async function submissionsByCorrelation({ sinceISO, transports = null } = {}, de
 
 module.exports = {
   beginAttempt, priorClaim, executionByTransport, submissionsByCorrelation,
-  digestOf, hasSchema, _resetSchemaCache,
+  digestOf, idempotencyHash, hasSchema, _resetSchemaCache,
   UNSAFE_TO_REPEAT,
   OUTCOMES: SCHEMA.OUTCOMES, MAY_HAVE_LEFT: SCHEMA.MAY_HAVE_LEFT,
   DEFINITELY_NOT_SENT: SCHEMA.DEFINITELY_NOT_SENT,

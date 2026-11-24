@@ -255,6 +255,9 @@ const deps = () => ({
     idempotencyKey: `cphi_followup_sends:${contact.id}:${nextStep}`,
     approvalId: released.approvalId,
     expectedDigest: released.expectedDigest,
+    // `companyId: released.companyId` — the release hands back the company it bound, and B7.6
+    // binds the company, so dispatching without it is a different authorization and refuses.
+    companyId: released.companyId,
     workflow: 'cphi-followup', agent: 'cphi-runner',
   }, deps());
 
@@ -272,6 +275,7 @@ const deps = () => ({
     transport: released.transport,
     idempotencyKey: `cphi_followup_sends:${contact.id}:${nextStep}:t`,
     approvalId: released.approvalId, expectedDigest: released.expectedDigest,
+    companyId: released.companyId,
   }, deps());
   check(tampered.phase === 'digest_mismatch' && transport.sends.length === 1,
     'swapping the bytes after release is refused', `provider calls still ${transport.sends.length}`);
@@ -282,6 +286,7 @@ const deps = () => ({
     transport: released.transport,
     idempotencyKey: `cphi_followup_sends:${contact.id}:${nextStep}`,
     approvalId: released.approvalId, expectedDigest: released.expectedDigest,
+    companyId: released.companyId,
   }, deps());
   check(repeat.phase === 'refused_duplicate' && transport.sends.length === 1,
     'running the agent again does not send it twice', `provider calls still ${transport.sends.length}`);
@@ -293,6 +298,7 @@ const deps = () => ({
     transport: released.transport,
     idempotencyKey: `cphi_followup_sends:${contact.id}:${nextStep}:s`,
     approvalId: released.approvalId, expectedDigest: released.expectedDigest,
+    companyId: released.companyId,
   }, deps());
   gate.allowed = true;
   check(stopped.stopped === true && transport.sends.length === 1,

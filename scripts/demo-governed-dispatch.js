@@ -103,7 +103,10 @@ async function scenario(name, { call, gate = gateAllowing, ledger = mockLedger()
     mailbox: 'naren@abiozen.com',
     raw: 'UkVBTC1SRkM4MjItQllURVMtRk9SLVRIRS1XSVJF',
   };
-  const digest = D.transmittedDigest(message);
+  // `{ transport: 'gmail_cphi' }` — the transport every scenario below dispatches on. B7.6 binds
+  // which provider account carries the message, so a digest computed without it describes a
+  // different authorization and the one permitted scenario would refuse.
+  const digest = D.transmittedDigest(message, { transport: 'gmail_cphi' });
 
   line('── 1. WHAT THE MIGRATED AGENT DOES TODAY, WITH NO APPROVAL PATH ─────────────');
   line();

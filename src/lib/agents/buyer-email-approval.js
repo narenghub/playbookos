@@ -46,6 +46,8 @@
 
 const crypto = require('crypto');
 const LEDGER = require('../outbound/ledger');
+// The canonical approval binding (B7.6), shared with mailer.js, dispatch.js and the sender service.
+const DIGEST = require('../outbound/approval-digest');
 
 // The office kernel, reached through a seam. Not for convenience: the controls below must be able
 // to drive release() through every refusal it can produce — stale, superseded, already-released,
@@ -164,7 +166,20 @@ function freezeBuyerEmail({
     signed_by_email: signatory.email,
     signed_by_name: signatory.name || null,
 
-    transport_digest: LEDGER.digestOf({ to: recipients, subject, html }),
+    // CANONICAL v2 (B7.6). This was `digestOf({ to: recipients, subject, html })` — a payload that
+    // records `from`, `reply_to` and `cc` a dozen lines above, and then bound none of them. The
+    // frozen artefact knew more about the message than its own binding did, so a release could
+    // have gone out from a different sender, or with an added cc, and still hashed correctly.
+    //
+    // `body_text` is bound too: v1's `html || text` meant the text alternative could be replaced
+    // freely under an unchanged html part.
+    transport_digest: DIGEST.approvalDigest({
+      companyId: (inquiry && inquiry.company_id) || null,
+      from, replyTo: replyTo || null,
+      providerAccount: DIGEST.providerAccountOf({ transport: 'resend', from }),
+      to: recipients, cc: ccList, bcc: null,
+      subject, html, text: body || null, attachments: [],
+    }),
     frozen_at: new Date().toISOString(),
   };
 
@@ -293,7 +308,18 @@ async function releaseBuyerEmail(ctx, {
   // The database trigger makes action_payload immutable, so this should be impossible. It is
   // checked anyway, because "should be impossible" is the category every defect in this
   // repository has come from, and the cost of checking is one hash.
-  const recomputed = LEDGER.digestOf({ to: p.to, subject: p.subject, html: p.html });
+  // Recomputed from THE STORED PAYLOAD'S OWN FIELDS, every one of them, so this check reads the
+  // same message the freeze bound. Recomputing from a subset would re-create the v1 gap on the
+  // verification side: the payload could differ in cc, sender or the text part and still "hash to
+  // what it claims".
+  const recomputed = DIGEST.approvalDigest({
+    companyId: p.company_id || null,
+    from: p.from, replyTo: p.reply_to || null,
+    providerAccount: DIGEST.providerAccountOf({ transport: 'resend', from: p.from }),
+    to: p.to, cc: p.cc || null, bcc: null,
+    subject: p.subject, html: p.html, text: p.body_text || null,
+    attachments: p.attachments || [],
+  });
   if (!p.transport_digest || recomputed !== p.transport_digest) {
     return { released: false, reason: 'payload_digest_mismatch', approvalId,
       detail: `the released payload hashes to ${recomputed} but records ${p.transport_digest || 'nothing'} — `
