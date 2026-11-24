@@ -114,6 +114,39 @@ async function main() {
     const admin = (await oq(`SELECT id, email, role FROM users WHERE role IN ('admin','super_admin') LIMIT 1`)).rows[0];
     const token = signToken(admin);
 
+    // ── THIS PERSON NEEDS A COMPANY MEMBERSHIP (B7.8, 2026-11-24) ──────────
+    //
+    // /api/decisions resolves a company from the signed-in user's live memberships. With none, it
+    // answers 503 company_unresolved — correctly, and this harness started failing on exactly
+    // that. The fix is to give the fixture admin a real membership, not to relax the endpoint.
+    //
+    // It is granted BY A SEPARATE FIXTURE SUPER ADMIN, because an actor may not grant their own
+    // membership: the authority being checked and the authority being changed would be the same
+    // row. That constraint is the reason this is six lines instead of one, and it is the same
+    // bootstrap problem a production backfill has — which is why that backfill is a reviewed
+    // migration with a named human rather than a runtime self-grant.
+    const company = (await oq(
+      `SELECT id FROM companies WHERE status = 'active' ORDER BY created_at, id LIMIT 1`)).rows[0];
+    if (company && admin) {
+      const granter = 'shotfix-granter';
+      await oq(
+        `INSERT INTO users (id, email, name, role, is_active) VALUES ($1,$2,$3,'super_admin',1)
+         ON CONFLICT (id) DO NOTHING`,
+        [granter, 'shotfix-granter@example.invalid', 'Screenshot fixture granter']);
+      try {
+        await require('../src/lib/identity/company-membership').grantMembership({
+          userId: admin.id, companyId: company.id, companyRole: 'admin',
+          grantedBy: granter, grantedReason: 'screenshot harness fixture',
+        }, { query: oq });
+        ok(`granted the fixture admin a membership of ${company.id}`);
+      } catch (e) {
+        if (/duplicate key/i.test(e.message)) ok('the fixture admin already holds a membership');
+        else bad('could not grant the fixture admin a company membership', e.message);
+      }
+    } else {
+      bad('no active company to grant a membership in — /api/decisions will refuse');
+    }
+
     // Import and assess through the real endpoints, so the page shows what the product produces.
     const csv = fs.readFileSync(path.join(__dirname, '..', 'fixtures', 'sam-opportunities-real-2026-11-06.csv'), 'utf8');
     const post = (p, body) => new Promise((resolve, reject) => {
@@ -386,7 +419,7 @@ async function main() {
           }
           if (/\/api\/decisions/.test(u)) {
             return new Response(JSON.stringify({
-              error: '2 active companies exist and this system has no user-to-company mapping',
+              error: 'u-7 holds no active company membership, so there is no pipeline to show',
               code: 'company_unresolved',
             }), { status: 503, headers: { 'Content-Type': 'application/json' } });
           }
@@ -416,7 +449,7 @@ async function main() {
     if (/not an empty queue/i.test(failModes.decisions)) {
       ok('…and refuses to read as "nothing is waiting"');
     } else bad('the failed decision queue does not say it is not empty');
-    if (/2 active companies/.test(failModes.decisions)) ok('…and shows the actual reason, not a generic message');
+    if (/no active company membership/.test(failModes.decisions)) ok('…and shows the actual reason, not a generic message');
     else bad('the server\'s reason was swallowed', failModes.decisions.slice(0, 200));
 
     if (/could not be read/i.test(failModes.spend)) ok('the spend page renders the server error');

@@ -118,47 +118,97 @@ function assertContext(ctx) {
 // has no stored answer, and inventing one would be the guess that ruling 7 item 3 forbids —
 // applied at read time rather than at migration time, but the same mistake.
 //
-// SO THIS RESOLVES ONLY WHEN THE ANSWER IS UNAMBIGUOUS:
+// ── THAT MAPPING NOW EXISTS (owner ruling 2026-11-24, B7.8) ─────────────────
 //
-//   exactly one company   → that company. There is nothing to choose between.
-//   zero companies        → refuse. The kernel is not configured.
-//   two or more           → REFUSE, and say so. With no mapping, picking one would show a person
-//                           another tenant's pipeline, prices and review queue. "The first row"
-//                           is not a tenancy model.
+// The paragraph above said: "when that day comes the fix is a real user-to-company mapping, which
+// is a ruling, not a patch here." The ruling arrived and the mapping is `user_companies`, reached
+// only through src/lib/identity/company-membership.js. So this no longer asks "how many companies
+// exist" — a question whose answer was never about this person — but "which companies is THIS
+// PERSON currently authorized for":
 //
-// The refusal is the feature. It keeps the single-tenant deployment working today and turns the
-// day a second company appears into a loud, immediate failure rather than a silent cross-tenant
-// read. When that day comes the fix is a real user-to-company mapping, which is a ruling, not a
-// patch here.
-async function resolveCompanyForReadSession({ userId }, deps = {}) {
-  const query = deps.query || lazyQuery();
+//   unreadable membership   → REFUSE. Unknowable is not "none", and it is certainly not "all".
+//   zero authorized         → REFUSE. Not a member of anything is not a licence to read anything.
+//   exactly one             → that company.
+//   two or more, none asked → REFUSE, and name the authorized ones so the caller can offer a
+//                             choice. "The first row" is still not a tenancy model.
+//   a company was asked for → granted ONLY if it is among this person's live memberships.
+//
+// ── THE REQUESTED COMPANY IS CHECKED, NOT TRUSTED (req 4) ───────────────────
+//
+// `requestedCompanyId` comes from a request parameter, which means it comes from whoever is
+// talking to us. It is never used as the answer; it is used as a LOOKUP KEY into the memberships
+// this module just read from the database. Passing another tenant's id gets a refusal naming it,
+// not that tenant's pipeline. This is also why the parameter is not merged into the returned
+// context before validation — an object assembled first and checked second is how a check gets
+// skipped on one branch.
+//
+// ── NOTHING HERE IS CACHED, AND THAT IS A REQUIREMENT (req 5, req 6) ────────
+//
+// Membership is resolved on EVERY call. A deactivation or a revocation therefore takes effect on
+// the next request without anyone invalidating anything, because there is nothing to invalidate.
+// `resolvedAt` is stamped on the context so a consumer that holds one can tell how old its
+// authorization is, and so a queued task carrying a context cannot pass itself off as freshly
+// authorized — a queued task must re-resolve before it acts, which is the dispatch-time
+// revalidation rule rather than a property of this object.
+//
+// ── A NOTE FOR DEPLOYMENT, STATED RATHER THAN DISCOVERED ────────────────────
+//
+// There are no membership rows yet. Until a reviewed backfill grants them, every read session
+// refuses — including the five PRPA dashboard endpoints. That is the ruled behaviour ("No
+// automatic membership grants based on email domain"; "Do not infer or grant production
+// memberships automatically"), not an oversight: inventing a membership here would be the same
+// guess the old code refused to make, moved one layer down. The refusal names the remedy.
+async function resolveCompanyForReadSession({ userId, requestedCompanyId = null }, deps = {}) {
   if (!userId) throw new NoCompanyContext('a read session requires a userId');
 
-  const { rows } = await query(
-    `SELECT id FROM companies WHERE status = 'active' ORDER BY created_at, id`,
-  );
+  const MEMBERSHIP = deps.membership || require('../identity/company-membership');
+  const held = await MEMBERSHIP.membershipsOf(userId, deps);
 
-  if (rows.length === 0) {
+  if (held === MEMBERSHIP.UNKNOWN) {
     throw new NoCompanyContext(
-      'no active company exists, so there is no pipeline to show. This is a configuration gap, '
-      + 'not an empty result: the office kernel has not been given a company.',
+      'company membership could not be read, so which companies this person may see is UNKNOWN. '
+      + 'Refusing rather than guessing: an unreadable membership table is not an empty one.',
     );
   }
-  if (rows.length > 1) {
+  if (held.length === 0) {
     throw new NoCompanyContext(
-      `${rows.length} active companies exist and this system has no user-to-company mapping, so `
-      + 'which one this person may see is UNKNOWN. Refusing rather than showing a tenant that may '
-      + 'not be theirs. Resolving this needs a membership model, not a default.',
+      `${userId} holds no active company membership, so there is no pipeline to show. If this is a `
+      + 'new deployment, memberships have not been granted yet — they are granted explicitly by an '
+      + 'authorized administrator (src/lib/identity/company-membership.js grantMembership), never '
+      + 'inferred from an email domain or defaulted to the only company.',
     );
   }
+
+  let chosen;
+  if (requestedCompanyId) {
+    chosen = held.find((m) => m.companyId === String(requestedCompanyId));
+    if (!chosen) {
+      throw new NoCompanyContext(
+        `${userId} is not an authorized member of ${requestedCompanyId}. A company named in a `
+        + 'request is a lookup key against this person\'s memberships, never the answer.',
+      );
+    }
+  } else if (held.length === 1) {
+    [chosen] = held;
+  } else {
+    throw new NoCompanyContext(
+      `${userId} is authorized for ${held.length} companies `
+      + `(${held.map((m) => m.companyId).join(', ')}) and selected none. Which one to show must be `
+      + 'chosen explicitly — picking one would show a tenant they did not ask for.',
+    );
+  }
+
   return Object.freeze({
-    companyId: rows[0].id,
+    companyId: chosen.companyId,
+    companyRole: chosen.companyRole,
     objectiveId: null,
     // Named so a reader of a log or a stack can tell this apart from a run-derived context. A
     // read session must never be handed to a kernel WRITER; assertContext guards the write path
     // and this object is deliberately not produced by resolveCompanyContext.
     source: 'read_session',
     userId,
+    resolvedAt: new Date().toISOString(),
+    authorizedCompanyIds: Object.freeze(held.map((m) => m.companyId)),
   });
 }
 

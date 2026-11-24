@@ -120,6 +120,7 @@ function runScript(rel, { refusalIsSuccess = null, args = [] } = {}) {
 const SCHEMA_STEPS = [
   { name: 'core tables (initDB)', required: true, usesOwnPool: true, run: () => db.initDB() },
   { name: 'phase 2 tables (initPhase2)', required: true, usesOwnPool: true, run: () => db.initPhase2() },
+
   { name: 'schema migrations (migrateSchemas)', required: true, usesOwnPool: true, run: () => db.migrateSchemas() },
   {
     name: 'autonomy kill switch',
@@ -170,6 +171,25 @@ const SCHEMA_STEPS = [
     name: 'AI office kernel (K1)',
     required: true,
     run: (q) => require('./office/schema').migrateOffice(q),
+  },
+  {
+    // AFTER BOTH core tables and the office kernel, because user_companies sits at the junction of
+    // the two: its foreign keys point at `users` (core, step 1) and `companies` (kernel).
+    //
+    // It took two preflight runs to get this right, and both failures were the same shape in
+    // opposite directions. First the DDL lived inside the kernel's own statement list, so its
+    // reference to `users` broke the ten harnesses that migrate the kernel alone. Moved out and
+    // ordered right after core tables, it then could not see `companies`. A table that depends on
+    // two subsystems belongs after both of them and inside neither.
+    //
+    // Kept as its own step rather than folded into either: the office kernel is
+    // objectives/cost/approvals/outcomes, and this is identity. And 42P01 stays non-ignorable, so
+    // a future reordering fails loudly instead of silently skipping the table that decides company
+    // access — a silent skip would make every membership lookup return nothing, which reads
+    // exactly like "nobody is employed".
+    name: 'identity: company membership',
+    required: true,
+    run: (q) => require('./identity/schema').migrateIdentity(q),
   },
   { name: 'research intelligence', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligence() },
   { name: 'research intelligence phase 3', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligencePhase3() },

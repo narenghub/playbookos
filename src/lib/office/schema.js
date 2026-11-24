@@ -60,6 +60,7 @@ const DDL = [
      CONSTRAINT companies_status_check CHECK (status IN ('active','suspended','archived'))
    )`,
 
+
   // ---------------------------------------------------------------------------------------
   // K2 — the CEO control object. Carries exactly the ruled identity and nothing invented.
   // UNIQUE (id, company_id) exists to be a composite FK target; it is not a second key.
