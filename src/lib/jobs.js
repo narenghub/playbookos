@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 const { query } = require('./db');
 const { excludeExternalSql } = require('./roles');
+// businessToday(): the team's calendar day in America/Chicago. See scoreAllAndCoach — the UTC day
+// and the business day are different questions, and this job was answering the wrong one.
+const { businessToday } = require('./agent-core');
 const { syncGitHubForUser, analyzeTeamProgress, scoreTeamMember } = require('./core');
 const { sendEmail, sendEmailOrReport } = require('./mailer');
 
@@ -112,7 +115,25 @@ async function checkMilestoneTriggers({ dryRun = false } = {}) {
 }
 
 async function scoreAllAndCoach({ dryRun = false, date = null } = {}) {
-  const scoreDate = date || new Date().toISOString().slice(0, 10);
+  // ── THE BUSINESS DAY, NOT THE UTC DAY ──────────────────────────────────────
+  //
+  // This was `new Date().toISOString().slice(0, 10)` — the UTC date. The OTHER half of the same
+  // cron, orchestrator.runPerformanceCheck, uses businessToday() (America/Chicago). Two halves of
+  // one nightly job, with two definitions of "today".
+  //
+  // It was latent only because that cron fires at 18:00 UTC, which is midday in Chicago, so both
+  // answers happened to land on the same calendar day. Pinning the cron to 18:00 America/Chicago —
+  // the intended 6 PM — makes it 00:00 UTC on the NEXT day, at which point the two halves would
+  // have written one evening's work under two different dates: this one under UTC's tomorrow,
+  // runPerformanceCheck under Chicago's today.
+  //
+  // So the timezone fix could not be made without this one, and a cron moved without it would have
+  // split the performance record in two.
+  //
+  // isoDay() is NOT the right helper here, and the distinction is the general rule: isoDay converts
+  // a STORED TIMESTAMP to a day and is correctly UTC-based; businessToday answers "what business
+  // day is it now", which is a question about the team's calendar, not the server's.
+  const scoreDate = date || businessToday();
   // excludeExternalSql: a partner account is not scored and is not coached, by virtue of its ROLE —
   // not by virtue of somebody having ticked excluded_from_scoring on the row.
   const users = (await query(

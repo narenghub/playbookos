@@ -70,14 +70,36 @@ const NOT_EXTERNAL = `${excludeExternalSql('u')}${excludeExternalSql('uc')
 /**
  * The live-membership predicate, written once.
  *
- * $1 is the instant to evaluate at. Every condition here is a ruled requirement; see the header.
+ * $1 is the instant to evaluate at, or NULL to mean "now" — and "now" is the DATABASE's now.
+ * Every condition here is a ruled requirement; see the header.
+ *
+ * ── WHY "NOW" COMES FROM THE DATABASE WHEN THE CALLER NAMES NO INSTANT ──────
+ *
+ * `COALESCE($1::timestamptz, NOW())`, not a client-side default. These accessors used to default
+ * `at` to JavaScript's `new Date()`, and that was measured wrong **71% of the time**.
+ *
+ * `effective_from` is written by Postgres `NOW()`, which keeps MICROSECONDS —
+ * `2026-11-24 21:03:32.893066+00`. A JavaScript Date keeps only milliseconds, so the same instant
+ * arrives as `.893000`, and `.893066 <= .893000` is FALSE. A membership was therefore invisible to
+ * the code that had just created it, in 142 of 200 measured trials.
+ *
+ * It would have mattered most where it was least expected: the B7.18 backfill grants memberships
+ * and then verifies them, so most of its verification reads would have returned empty — and the
+ * obvious misreading of that is "the backfill did not work".
+ *
+ * The B7.8 database check could not have found it. That check evaluates at a FIXED instant with an
+ * explicitly past `effective_from`, which is good practice and sidesteps the bug entirely. The
+ * defect lived only in the default, which is the one path no test pinned — two clocks, one
+ * comparison, and the faster clock wrote the column.
+ *
+ * A caller that genuinely means another instant still passes `at`, and is unaffected.
  */
 const LIVE = `
        u.is_active = 1                         -- req 4: global deactivation overrides all
    AND uc.status = 'active'                    -- req 5: scoped revocation
    AND uc.revoked_at IS NULL
-   AND uc.effective_from <= $1                 -- req 3: effective dates
-   AND (uc.effective_to IS NULL OR uc.effective_to > $1)
+   AND uc.effective_from <= COALESCE($1::timestamptz, NOW())    -- req 3: effective dates
+   AND (uc.effective_to IS NULL OR uc.effective_to > COALESCE($1::timestamptz, NOW()))
    AND c.status = 'active'                     -- a suspended company authorizes nobody
    ${NOT_EXTERNAL}                             -- req 9: a partner is not an employee
 `;
@@ -93,7 +115,7 @@ const FROM = `
  *
  * @returns {Promise<Array<{companyId:string, companyRole:string}>|null>} null when unknowable.
  */
-async function membershipsOf(userId, { at = new Date(), ...deps } = {}) {
+async function membershipsOf(userId, { at = null, ...deps } = {}) {
   if (!userId) return [];
   try {
     const r = await q(deps)(
@@ -113,7 +135,7 @@ async function membershipsOf(userId, { at = new Date(), ...deps } = {}) {
  *
  * @returns {Promise<boolean|null>} null when unknowable — the caller must refuse, not assume.
  */
-async function isActiveMember({ userId, companyId }, { at = new Date(), ...deps } = {}) {
+async function isActiveMember({ userId, companyId }, { at = null, ...deps } = {}) {
   if (!userId || !companyId) return false;
   try {
     const r = await q(deps)(
@@ -137,7 +159,7 @@ async function isActiveMember({ userId, companyId }, { at = new Date(), ...deps 
  *
  * @returns {Promise<Set<string>|null>} lowercased addresses; null when unknowable.
  */
-async function activeMemberAddresses(addresses, { companyId, at = new Date(), ...deps } = {}) {
+async function activeMemberAddresses(addresses, { companyId, at = null, ...deps } = {}) {
   const wanted = [...new Set((addresses || []).map((a) => String(a).toLowerCase()))].filter(Boolean);
   if (!wanted.length) return new Set();
   // No companyId is not "any company" — it is an unanswerable question, and answering it as
@@ -194,7 +216,7 @@ const MEMBERSHIP_MANAGER_ROLES = Object.freeze(['super_admin', 'admin']);
  * written the bug this exists to prevent, and a thrown error cannot be ignored by omission.
  */
 async function assertActorMayManage({ actorUserId, companyId, subjectUserId },
-  { at = new Date(), ...deps } = {}) {
+  { at = null, ...deps } = {}) {
   if (!actorUserId) throw new Error('membership changes require actorUserId — an access grant with no actor is unauthorized by definition');
   if (!companyId) throw new Error('membership changes require companyId');
 

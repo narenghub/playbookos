@@ -51,11 +51,16 @@ const REFUSAL = Object.freeze({
 // A live mapping: active, not revoked, inside its window, and pointing at an ACTIVE company. A
 // suspended or archived company authorizes nothing, exactly as in the membership predicate — the
 // two rules are deliberately the same shape so neither drifts into being the lenient one.
+// $1 is the instant to evaluate at, or NULL meaning "now" — and "now" is the DATABASE's now, for
+// the reason set out at length over company-membership.js's own LIVE predicate: `effective_from` is
+// written by Postgres NOW() with microsecond precision, a JavaScript Date carries only
+// milliseconds, and a client-supplied default therefore excluded a row it had itself just written
+// in 142 of 200 measured trials. Two clocks, one comparison, and the faster clock wrote the column.
 const LIVE = `
        wc.status = 'active'
    AND wc.revoked_at IS NULL
-   AND wc.effective_from <= $1
-   AND (wc.effective_to IS NULL OR wc.effective_to > $1)
+   AND wc.effective_from <= COALESCE($1::timestamptz, NOW())
+   AND (wc.effective_to IS NULL OR wc.effective_to > COALESCE($1::timestamptz, NOW()))
    AND c.status = 'active'
 `;
 
@@ -69,7 +74,7 @@ const FROM = `
  *
  * @returns {Promise<string[]|null>} company ids, ascending; null when unknowable.
  */
-async function companiesForWorkflow(workflow, { at = new Date(), ...deps } = {}) {
+async function companiesForWorkflow(workflow, { at = null, ...deps } = {}) {
   if (!workflow) return [];
   try {
     const r = await q(deps)(
@@ -169,7 +174,7 @@ async function unmapWorkflow({ workflow, companyId, revokedBy, revokedReason = n
 }
 
 /** Every live mapping, for the reviewable proposal and for an operator reading current state. */
-async function allMappings({ at = new Date(), ...deps } = {}) {
+async function allMappings({ at = null, ...deps } = {}) {
   try {
     const r = await q(deps)(
       `SELECT wc.workflow, wc.company_id AS "companyId", wc.granted_by AS "grantedBy",

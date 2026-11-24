@@ -278,6 +278,38 @@ app.get('*', (req, res) => {
 });
 
 // ── CRON JOBS ─────────────────────────────────────────────────────────────────
+//
+// ── WHY EIGHT OF THESE NOW CARRY A TIMEZONE, AND WHAT THEIR NAMES LIE ABOUT ──
+//
+// node-cron with no timezone argument fires in the PROCESS timezone, and TZ is pinned nowhere in
+// this repository — not a Dockerfile, not Railway config, not code. So eight jobs whose comments
+// stated a local business hour were firing in whatever timezone the container happened to have,
+// which on Railway means UTC:
+//
+//   intended 6 PM Chicago  → fired 18:00 UTC = 12:00 PM CST / 1:00 PM CDT
+//   intended Monday 8 AM   → fired 08:00 UTC =  2:00 AM CST / 3:00 AM CDT
+//   intended Monday 9 AM   → fired 09:00 UTC =  3:00 AM CST / 4:00 AM CDT
+//
+// Five to six hours early — and, the part a fixed UTC hour cannot fix, the Chicago-local fire time
+// MOVED BY AN HOUR at every DST transition. 6 PM Chicago is 00:00 UTC in winter and 23:00 UTC in
+// summer, so it is not expressible as a constant UTC hour at all. The timezone argument is the
+// only correct form.
+//
+// WHAT IT COST. `daily-18utc-performance-scoring` scores task completion (40 of 100 points), mails
+// coaching and fires L1–L4 escalations. Firing at midday meant every team member was scored on a
+// working day that was half over, every day. That is an independent, measured cause of the zero
+// KPIs alongside the email refusals — which is why the standing instruction is not to attribute
+// every zero score to one cause.
+//
+// THE NAMES ARE NOW INACCURATE AND ARE DELIBERATELY LEFT ALONE.
+// `daily-18utc-performance-scoring` now fires at 18:00 CHICAGO, not 18:00 UTC. That name is the key
+// in CRON_SCOPES, in production STOP rows, in run-ledger intent keys and in `workflow_companies`,
+// so renaming is a coordinated migration that touches production rows — and rewriting production
+// STOPs is not authorized. The rename belongs in the restoration package, not smuggled in here.
+//
+// Untouched on purpose: jobs named *utc whose comments state UTC (the 00:00 snapshot), interval
+// jobs with no local-time intent, and the github-sync run-ledger canary.
+const CHICAGO = { timezone: 'America/Chicago' };
 
 // Daily 00:00 UTC: Layer 5 — write a metrics_snapshots row for the day that just ended
 cron.schedule('0 0 * * *', withAlerts('daily-0utc-metrics-snapshot', async () => {
@@ -379,7 +411,7 @@ cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8utc-goal-engine', async () =>
     console.error('[CRON] Weekly KPI assignment error:', e.message);
     await sendCronAlert('weekly-mon-8utc-goal-engine/kpi-assignment', e);
   }
-}));
+}), CHICAGO);
 
 // Monday 8 AM: Growth Agent — Algolia search sync then SEO recommendations
 cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8utc-growth-agent', async () => {
@@ -399,7 +431,7 @@ cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8utc-growth-agent', async () =
     console.error('[CRON] SEO recommendations error:', e.message);
     await sendCronAlert('weekly-mon-8utc-growth-agent/recommendations', e);
   }
-}));
+}), CHICAGO);
 
 // Monday 8 AM: SEO Agent — rank tracking, content-gap tasks for seo_specialist, missing-from-catalog Algolia rollup
 cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8utc-seo-agent', async () => {
@@ -428,9 +460,16 @@ cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8utc-seo-agent', async () => {
     console.error('[CRON] Algolia no-results error:', e.message);
     await sendCronAlert('weekly-mon-8utc-seo-agent/no-results', e);
   }
-}));
+}), CHICAGO);
 
-// Daily 8 AM: sync GitHub for all dev users
+// Daily 08:00 UTC: sync GitHub for all dev users.
+//
+// The comment used to say "Daily 8 AM", which scripts/check-cron-timezone-intent.js correctly
+// flagged: it fires at 08:00 UTC, which is 2 AM Chicago. Unlike the eight jobs that were pinned,
+// this one's INTENT is genuinely "once a day" — it is the run-ledger canary precisely because a
+// missed run costs one day of commit statistics and nothing else, so no business hour is implied
+// and moving its slot would change the canary's intent keys for no benefit. The comment was the
+// inaccurate part, so the comment is what changed.
 // ── P0.3 ITEM 5: THE RUN-LEDGER CANARY. THIS CRON ONLY. ──────────────────────
 //
 // The other 36 withAlerts jobs are deliberately untouched. This one was chosen because it has no
@@ -481,7 +520,7 @@ cron.schedule('0 9 * * 1', withAlerts('weekly-mon-9utc-weekly-analysis', async (
   console.log('[CRON] Weekly AI analysis...');
   const result = await runWeeklyAnalysis();
   console.log(`[CRON] Weekly analysis done — ${result.thisMonth}, $${result.monthRevenue.toLocaleString()} of $${result.monthTarget.toLocaleString()} (${result.pct}%), emailed=${result.emailed}`);
-}));
+}), CHICAGO);
 
 // Monday 9 AM: revenue intelligence + procurement priorities (chained, alongside the weekly analysis)
 cron.schedule('0 9 * * 1', withAlerts('weekly-mon-9utc-revenue-intel', async () => {
@@ -491,7 +530,7 @@ cron.schedule('0 9 * * 1', withAlerts('weekly-mon-9utc-revenue-intel', async () 
   const proc = await getProcurementPriorities();
   if (proc.skipped) console.log(`[CRON] Procurement priorities skipped — ${proc.reason}`);
   else console.log(`[CRON] Procurement priorities done — ${proc.items.length} SKUs, emailed ${proc.emailed} of ${proc.recipients.length} procurement users`);
-}));
+}), CHICAGO);
 
 // Monday 9:00 AM CST — weekly Market Intelligence: 150 molecules
 // (100 research chemicals + 50 GMP APIs). Its own slot, not chained to the 09:00
@@ -537,7 +576,7 @@ cron.schedule('0 18 * * *', withAlerts('daily-18utc-milestone-triggers', async (
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${secret}` }
     });
   } catch {}
-}));
+}), CHICAGO);
 
 // Daily 6 PM: AI performance scoring + per-user coaching email.
 // Legacy scoreAllAndCoach kept intentionally for daily "Your day at Abiozen" emails.
@@ -572,7 +611,7 @@ cron.schedule('0 18 * * *', withAlerts('daily-18utc-performance-scoring', async 
     console.error('[CRON] Performance Accountability error:', e.message);
     await sendCronAlert('daily-18utc-performance-scoring/new-accountability', e);
   }
-}));
+}), CHICAGO);
 
 // Daily 6 PM: Goal Engine — 15% divergence check, auto-recalc if exceeded
 cron.schedule('0 18 * * *', withAlerts('daily-18utc-goal-divergence', async () => {
@@ -580,7 +619,7 @@ cron.schedule('0 18 * * *', withAlerts('daily-18utc-goal-divergence', async () =
   const result = await checkAndRecalc();
   if (result.skipped) console.log(`[CRON] Divergence check skipped — ${result.reason}`);
   else console.log(`[CRON] Divergence check fired — ${result.month} ${result.direction} by ${result.divergence_pct.toFixed(1)}%, recalc triggered`);
-}));
+}), CHICAGO);
 
 // ── AI Agent System crons (timezone: America/Chicago / CST) ───────────────────
 // The orchestrator routes each segment to its specialized agents at the local

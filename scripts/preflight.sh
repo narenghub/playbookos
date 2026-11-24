@@ -305,6 +305,14 @@ pf_step "company membership holds its ruled properties" node scripts/check-compa
 # another decided. Proved against a real server because every property that matters here is a
 # predicate, a composite foreign key or a partial unique index.
 pf_step "agent memory is isolated per company" node scripts/check-office-memory-db.js
+# A scheduled job that claims a local business hour and passes no timezone fires in whatever
+# timezone the container has. Eight did, five to six hours early, with the local time drifting an
+# hour at each DST transition — including the one that scores and escalates the whole team.
+pf_step "every cron that claims a local hour is pinned to a timezone" node scripts/check-cron-timezone-intent.js
+# Owner condition on the workflow mappings: company-scoped queries, not merely recipients that pass
+# the gate. A tripwire — green while nothing is mapped, red the moment a company label is applied
+# to a workflow whose implementation has no notion of a company.
+pf_step "no workflow wears a company label its queries ignore" node scripts/check-workflow-company-scoping-db.js
 pf_step "the workflow-company proposal cannot assign anything" node --test scripts/proposal-is-readonly.test.js
 # B7.6. Six producers in four modules and two processes bind approvals. They agree or every
 # approved external send refuses, and each local expression of "the message" is locally correct —

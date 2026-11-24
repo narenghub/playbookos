@@ -72,6 +72,10 @@ const EXEMPT = new Map([
     'NAMES the table in its report text and recommendation; reads live mappings only through '
     + 'workflow-company.js allMappings(). scripts/proposal-is-readonly.test.js asserts it cannot '
     + 'INSERT, UPDATE, DELETE or call the accessor\'s writers.'],
+  ['scripts/check-workflow-company-scoping-db.js',
+    'inserts the four approved mappings as FIXTURES to prove its tripwire fires, then removes them '
+    + 'BY ID. It reads live mappings only through workflow-company.js allMappings(); the direct SQL '
+    + 'is the fixture cleanup, which must not depend on the accessor it is testing around.'],
   ['src/lib/office/memory.js',
     'THE accessor for agent_memory, and its DDL. Its whole purpose is to own that table — and it '
     + 'is the only module that may, because every function it exports takes a resolved company '

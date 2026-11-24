@@ -626,6 +626,54 @@ const LATER = new Date('2026-12-31T00:00:00Z');
       bad('a revocation without revoked_at/revoked_by was accepted by the database');
     }
 
+    // ── REQ: A MEMBERSHIP IS VISIBLE TO THE CODE THAT JUST CREATED IT ───────
+    //
+    // The regression test for a defect THIS CHECK COULD NOT HAVE FOUND, which is the part worth
+    // spelling out. Every assertion above evaluates at a FIXED instant (`AT`) with an explicitly
+    // past `effectiveFrom` — good practice, and it sidesteps the bug completely.
+    //
+    // The bug lived in the DEFAULT. `effective_from` is written by Postgres NOW() with microsecond
+    // precision (`…21:03:32.893066+00`); the accessors defaulted `at` to JavaScript's `new Date()`,
+    // which carries only milliseconds, so the same instant arrived as `.893000` and
+    // `.893066 <= .893000` is false. Measured against a real cluster: a row was invisible to its
+    // own creator in **142 of 200 trials**.
+    //
+    // It would have surfaced first in the B7.18 backfill — grant, then verify — where most reads
+    // would have returned empty, and the obvious misreading of that is "the backfill did not work".
+    //
+    // THE PAIRING IS THE TEST. The first version of this assertion granted ONE membership and then
+    // read it back forty times — and it passed even with the fix reverted, which the mutation run
+    // caught. Forty reads spread over several milliseconds are all comfortably LATER than the
+    // insert, so only the first could ever have raced, and `grantMembership` does an authorization
+    // round trip after NOW() is evaluated, so even that one had time to drift clear.
+    //
+    // The defect only appears when the read happens in the SAME MILLISECOND as the write. So each
+    // trial must be a fresh grant-then-immediately-read pair. My own test shape standing in for
+    // the defect's shape is the same class of error this file exists to catch.
+    const TRIALS = 25;
+    let invisible = 0;
+    for (let i = 0; i < TRIALS; i++) {
+      const u = await mkUser(`race${i}`);
+      const row = await M.grantMembership({
+        userId: u, companyId: abiozen, companyRole: 'admin',
+        grantedBy: owner, grantedReason: 'clock-race regression',
+        // effectiveFrom deliberately OMITTED: grantMembership writes COALESCE($5, NOW()), so the
+        // column gets Postgres's microsecond clock. That is the whole point.
+      }, deps);
+      made.memberships.push(row.id);
+      // No `at`: the accessor must resolve "now" against the clock that wrote the column.
+      const live = await M.isActiveMember({ userId: u, companyId: abiozen }, deps);
+      if (live !== true) invisible++;
+    }
+    if (invisible === 0) {
+      ok(`a membership is visible to its own creator on all ${TRIALS} immediate reads — "now" is `
+        + 'resolved by the database, not by a millisecond-truncated client clock');
+    } else {
+      bad(`a just-created membership was INVISIBLE on ${invisible}/${TRIALS} immediate reads. The `
+        + 'default instant is being read from the client clock again, which is coarser than the '
+        + 'clock that wrote effective_from', { invisible, trials: TRIALS });
+    }
+
   } catch (e) {
     bad('the check threw', e && e.message);
   } finally {
