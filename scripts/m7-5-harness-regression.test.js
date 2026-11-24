@@ -509,8 +509,33 @@ test('the liveness probe takes the worker it is asking about', () => {
   assert.match(SRC, /async function workerIsPolling\(workerId\)/);
   assert.match(SRC, /async function neverClaimed\(scenario, taskId, workerId\)/);
   const calls = SRC.match(/await neverClaimed\([^)]*\)/g) || [];
-  assert.ok(calls.length >= 5, `expected a call per claim-dependent scenario, found ${calls.length}`);
+  // Was `>= 5`. Scenario 8 stopped waiting for a HARDWARE claim on 2026-11-23: it now creates a
+  // disposable fixture identity and leases the task to it in-process, so there is no Mac claim for
+  // `neverClaimed` to report on. One fewer claim-dependent scenario is the intended consequence of
+  // that change, not a regression — and lowering a threshold because a test started failing is the
+  // move this repository warns about, so the reason is written down rather than assumed obvious.
+  //
+  // The threshold was always the weaker half of this test. The PROPERTY is the loop below: every
+  // call passes the worker it is asking about, which is what crashed the fourth acceptance run with
+  // `ReferenceError: workerId is not defined`. That is unchanged and enforced on every call.
+  assert.ok(calls.length >= 4, `expected a call per claim-dependent scenario, found ${calls.length}`);
   for (const c of calls) {
     assert.match(c, /workerId\)/, `this call omits the worker: ${c}`);
   }
+});
+
+test('DECISIVE: scenario 8 revokes a FIXTURE, never the operational identity', () => {
+  // The defect this replaces burned imac-office-3, -4 and -5 — each one needing a human to enrol a
+  // replacement and reinstall the LaunchAgent before testing could continue.
+  assert.match(SRC, /revokeWorker\(revokeFixtureId/,
+    'scenario 8 must revoke the fixture identity it created');
+  assert.ok(!/revokeWorker\(workerId/.test(SRC),
+    'revoking `workerId` burns the identity the office iMac is running');
+  assert.match(SRC, /consumeEnrollmentToken/,
+    'the fixture must come from the real enrolment contract, not an invented helper');
+  assert.ok(!/IDENTITY\.enrollWorker/.test(SRC),
+    'enrollWorker has never existed — this is the mistake M7.6 S6 made');
+  // The secret returned by enrolment must not be captured here: this driver needs no credential.
+  assert.ok(!/\.secret\b/.test(SRC),
+    'the M7.5 driver has no reason to hold an enrolment secret');
 });

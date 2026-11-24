@@ -1170,32 +1170,108 @@ async function cmdScenarios() {
     }
   }
 
-  // ── 8. REVOCATION ─────────────────────────────────────────────────────────
-  head('8. revocation ends access');
-  note('This is LAST because it ends this identity. Everything above needed it alive.');
-  const t8 = await enqueue(IK('revoke'), { delayMs: 20_000 });
-  const claimed8 = await until('the Mac claims it', async () =>
-    await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t8.taskId]));
-  if (!claimed8.ok) await neverClaimed('revocation ends access', t8.taskId, workerId);
-  else {
-    await IDENTITY.revokeWorker(workerId, { reason: 'M7.5 revocation test' }, deps);
-    const after = await until('it stops', async () => {
-      const t = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t8.taskId]);
-      return t.state !== 'LEASED' ? t : null;
-    }, { timeoutMs: 60_000 });
-    if (after.ok) ok(`execution ended ${after.ms}ms after revocation (task is ${after.value.state})`);
-    else bad('a revoked worker kept its lease', JSON.stringify(after));
-    const res8 = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t8.taskId]);
-    if (Number(res8.n) === 0) ok('and it reported nothing');
-    else bad('a revoked worker still reported a result');
+  // ── 8. REVOCATION, ON A DISPOSABLE FIXTURE IDENTITY ───────────────────────
+  //
+  // THIS SCENARIO USED TO REVOKE THE OPERATIONAL IDENTITY. It burned three of them —
+  // imac-office-3, -4 and -5 — each one requiring a human to enrol a replacement and reinstall
+  // the LaunchAgent on the office iMac before any further testing could happen. The note it
+  // carried, "this is LAST because it ends this identity", was an accurate description of a
+  // defect rather than a design.
+  //
+  // WHAT IT ACTUALLY MEASURES, which is why a fixture works identically. Every assertion below
+  // reads a SERVER-SIDE row:
+  //
+  //     worker_tasks.state != 'LEASED'              the lease ended
+  //     COUNT(*) FROM worker_results = 0            nothing was reported
+  //     the control task is never executed          no new work is claimed
+  //
+  // None of them observes the worker process. The scenario never needed the identity the iMac is
+  // running — it needed AN identity holding a lease that it could revoke. `revokeWorker` calls
+  // `leases.releaseLeasesOfWorker`, so the lease is ended by the SERVER on revocation rather than
+  // by the client noticing; that is what makes the property independent of whose identity it is.
+  //
+  // WHAT THIS NO LONGER PROVES DIRECTLY, stated rather than quietly dropped: that the worker
+  // PROCESS on the iMac stops when its credential is revoked. That is a client property and it is
+  // covered elsewhere, on hardware:
+  //
+  //   • src/worker-client/revoked-terminal.test.js — `revoked` is terminal; the client stops and
+  //     exits 0 so launchd leaves it stopped instead of relaunching it into a refusal loop.
+  //   • Observed on the office iMac on 2026-11-20 at 22:06:19: 1,079 refused attempts before the
+  //     change, one cycle after it. Recorded in claude/m7-5-acceptance-verdict-2026-11-20.md.
+  //   • M7.6 scenario S6 (2026-11-23) proves the AUTHENTICATION layer refuses a revoked identity
+  //     with 401 `revoked`, audited as DENIED, with a pre-revocation control.
+  //
+  // So the coverage is preserved and the operational identity survives. The cost is that this
+  // scenario is no longer a hardware scenario, and it says so in its own output.
+  head('8. revocation ends access — on a FIXTURE identity, not the operational worker');
+  note('This used to revoke the live identity and burned imac-office-3, -4 and -5.');
+  let revokeFixtureId = null;
+  try {
+    const tok = await IDENTITY.createEnrollmentToken(
+      { label: 'fixture-revocation-m75', createdBy: 'm7-5-acceptance' }, deps);
+    const enrolled = await IDENTITY.consumeEnrollmentToken({ token: tok.token }, deps);
+    if (!enrolled || enrolled.ok !== true) {
+      note(`the fixture identity was refused: ${(enrolled && enrolled.code) || 'no result'}`);
+    } else {
+      revokeFixtureId = enrolled.workerId;        // the secret is deliberately not captured
+      made.workerIds.push(revokeFixtureId);
+      note(`fixture identity ${revokeFixtureId} created for this scenario only`);
+    }
+  } catch (e) {
+    note(`the fixture identity could not be created: ${String(e.message).slice(0, 140)}`);
+  }
 
-    const t9 = await enqueue(IK('revoke-control'), { hello: 'should-never-run' });
-    const stillWorking = await until('a revoked worker claims nothing', async () =>
-      await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t9.taskId]),
-    { timeoutMs: 20_000, everyMs: 2000 });
-    const n9 = stillWorking.ok ? Number(stillWorking.value.n) : 0;
-    if (n9 === 0) ok('control: it claims no NEW work either — revocation is total');
-    else bad('a revoked worker executed a new task');
+  if (!revokeFixtureId) {
+    untested('revocation ends access',
+      'no fixture identity could be created, and revoking the OPERATIONAL identity to test this is '
+      + 'the defect this scenario was changed to avoid. The server-side refusal remains covered by '
+      + 'src/lib/worker/auth.test.js and by M7.6 scenario S6.');
+  } else {
+    const t8 = await enqueue(IK('revoke'), { delayMs: 20_000 });
+    // Leased to the FIXTURE in-process, by task id, rather than waiting for the Mac to claim it.
+    // The Mac must not take this task: it is about to belong to an identity being revoked.
+    const lease8 = await LEASES.claimTask(
+      { workerId: revokeFixtureId, taskId: t8.taskId }, deps);
+    const leased8 = lease8 && lease8.ok !== false
+      ? await one(`SELECT id FROM worker_tasks WHERE id=$1 AND state='LEASED'`, [t8.taskId])
+      : null;
+
+    if (!leased8) {
+      untested('revocation ends access',
+        `the fixture could not take a lease (${(lease8 && lease8.code) || 'no result'}), so there `
+        + 'was no live lease for revocation to end. Nothing was exercised.');
+    } else {
+      await IDENTITY.revokeWorker(revokeFixtureId, { reason: 'M7.5 revocation test (fixture)' }, deps);
+      const after = await until('the lease ends', async () => {
+        const t = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t8.taskId]);
+        return t && t.state !== 'LEASED' ? t : null;
+      }, { timeoutMs: 60_000 });
+      if (after.ok) ok(`the lease ended ${after.ms}ms after revocation (task is ${after.value.state})`);
+      else bad('a revoked identity kept its lease', JSON.stringify(after));
+
+      const res8 = await one(`SELECT COUNT(*)::int n FROM worker_results WHERE task_id=$1`, [t8.taskId]);
+      if (Number(res8.n) === 0) ok('and no result was recorded for it');
+      else bad('a result was recorded for a revoked identity\'s task');
+
+      // Control: the revoked fixture must not be able to take new work either. Asked directly,
+      // because an unattended fixture is not polling and "it executed nothing" would otherwise be
+      // satisfied by an identity that never tried — the inactivity-is-not-compliance problem.
+      const t9 = await enqueue(IK('revoke-control'), { hello: 'should-never-run' });
+      const claimAfter = await LEASES.claimTask(
+        { workerId: revokeFixtureId, taskId: t9.taskId }, deps);
+      const t9row = await one(`SELECT state FROM worker_tasks WHERE id=$1`, [t9.taskId]);
+      if (claimAfter && claimAfter.ok === false && t9row && t9row.state === 'PENDING') {
+        ok(`control: the revoked fixture cannot claim new work (${claimAfter.code}); `
+          + `the operational worker ${workerId} is untouched and still live`);
+      } else {
+        bad('a revoked identity claimed new work',
+          JSON.stringify({ claimAfter, state: t9row && t9row.state }).slice(0, 200));
+      }
+
+      note('the worker PROCESS stopping on revocation is a CLIENT property, covered by '
+        + 'src/worker-client/revoked-terminal.test.js and observed on the iMac 2026-11-20 22:06:19 '
+        + '— not by this scenario, which is server-side by design');
+    }
   }
 
   const clean = await cleanup();
