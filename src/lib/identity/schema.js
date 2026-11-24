@@ -90,6 +90,59 @@ const DDL = [
 
   `CREATE INDEX IF NOT EXISTS user_companies_by_company
      ON user_companies (company_id) WHERE status = 'active'`,
+
+  // ---------------------------------------------------------------------------------------
+  // WHICH COMPANY A SCHEDULED WORKFLOW ACTS FOR. Owner decision 2026-11-24: Option A, the
+  // transitional bridge to governed runs (Option B).
+  //
+  // THE PROBLEM THIS SOLVES. Agent work resolves its company from the run row, and a person's
+  // session resolves it from their membership. A CRON has neither: no authenticated subject, no
+  // run. The 7am CEO briefing, the 8am assignments and the 6pm coaching mail are exactly those,
+  // and without a company they cannot be classified as internal — so they stay stopped no matter
+  // what else is fixed.
+  //
+  // WHAT IT IS NOT. It is not a default, not "the only active company", and not derived from an
+  // email domain. Each row is an explicit authorization somebody is accountable for, which is the
+  // same rule as user_companies: deriving a company from a mailbox is the inference that stopped
+  // all company email on 2026-11-03.
+  //
+  // MULTIPLE COMPANIES ARE ROWS, NOT A CHOICE AT RUN TIME. A workflow authorized for two companies
+  // gets two rows, and the scheduler runs it once per company — separate company-scoped
+  // executions, so a single run never spans tenants and a resolver never has to pick. The
+  // resolver therefore REFUSES on ambiguity rather than selecting.
+  //
+  // TRANSITIONAL BY DESIGN. Option B migrates these workflows into governed runs; when a workflow's
+  // governed replacement is verified, its mapping row is revoked and the bridge is gone for that
+  // workflow. `retired_for_governed_run` records that this is why, so retirement is visible rather
+  // than looking like a revoked authorization.
+  // ---------------------------------------------------------------------------------------
+  `CREATE TABLE IF NOT EXISTS workflow_companies (
+     id                        TEXT PRIMARY KEY,
+     workflow                  TEXT NOT NULL,
+     company_id                TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+     status                    TEXT NOT NULL DEFAULT 'active',
+     effective_from            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     effective_to              TIMESTAMPTZ,
+     granted_by                TEXT NOT NULL,
+     granted_reason            TEXT,
+     revoked_at                TIMESTAMPTZ,
+     revoked_by                TEXT,
+     revoked_reason            TEXT,
+     retired_for_governed_run  BOOLEAN NOT NULL DEFAULT FALSE,
+     created_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     CONSTRAINT workflow_companies_status_check CHECK (status IN ('active','revoked')),
+     CONSTRAINT workflow_companies_revocation_recorded CHECK (
+       (status = 'revoked' AND revoked_at IS NOT NULL AND revoked_by IS NOT NULL)
+       OR (status = 'active' AND revoked_at IS NULL AND revoked_by IS NULL)
+     ),
+     CONSTRAINT workflow_companies_window CHECK (effective_to IS NULL OR effective_to > effective_from)
+   )`,
+
+  `CREATE UNIQUE INDEX IF NOT EXISTS workflow_companies_one_active
+     ON workflow_companies (workflow, company_id) WHERE status = 'active'`,
+
+  `CREATE INDEX IF NOT EXISTS workflow_companies_by_workflow
+     ON workflow_companies (workflow) WHERE status = 'active'`,
 ];
 
 async function migrateIdentity(query) {
@@ -107,4 +160,4 @@ async function migrateIdentity(query) {
   return { ok: true };
 }
 
-module.exports = { migrateIdentity, DDL, IDENTITY_TABLES: Object.freeze(['user_companies']) };
+module.exports = { migrateIdentity, DDL, IDENTITY_TABLES: Object.freeze(['user_companies', 'workflow_companies']) };

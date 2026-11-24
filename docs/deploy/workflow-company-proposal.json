@@ -1,0 +1,308 @@
+{
+  "generatedAt": "2026-11-24T16:32:39.947Z",
+  "note": "PROPOSAL ONLY. Nothing here has been applied. Each row becomes a workflow_companies authorization only when an authorized administrator maps it, which is a separate, audited action.",
+  "registeredWorkflows": 42,
+  "counts": {
+    "proposed": 33,
+    "needsDecision": 9,
+    "alreadyMapped": 0
+  },
+  "divergenceBetweenCronScopesAndMappings": [],
+  "recommendation": "Make workflow_companies authoritative and derive or retire CRON_SCOPES[*].company. Two places naming a company for the same workflow will disagree the first time one is edited and the other is not, and the static one cannot be revoked by an administrator.",
+  "rows": [
+    {
+      "workflow": "quarter-hourly-office-recovery",
+      "declaredCompanySlug": null,
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "NEEDS_A_DECISION"
+    },
+    {
+      "workflow": "hourly-send-reconciliation",
+      "declaredCompanySlug": null,
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "NEEDS_A_DECISION"
+    },
+    {
+      "workflow": "daily-0utc-metrics-snapshot",
+      "declaredCompanySlug": null,
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "NEEDS_A_DECISION"
+    },
+    {
+      "workflow": "sam-gov-harvest-3h",
+      "declaredCompanySlug": "abiozen",
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "grants-gov-harvest-6h",
+      "declaredCompanySlug": "abiozen",
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "inquiry-triage-15m",
+      "declaredCompanySlug": "abiozen",
+      "agent": "inquiry-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-7cst-command-center-briefing",
+      "declaredCompanySlug": "abiozen",
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-mon-8utc-goal-engine",
+      "declaredCompanySlug": "abiozen",
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-mon-8utc-growth-agent",
+      "declaredCompanySlug": "abiozen",
+      "agent": "market-intelligence",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-mon-8utc-seo-agent",
+      "declaredCompanySlug": "abiozen",
+      "agent": "seo-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-8utc-github-sync",
+      "declaredCompanySlug": null,
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "NEEDS_A_DECISION"
+    },
+    {
+      "workflow": "weekly-mon-9utc-weekly-analysis",
+      "declaredCompanySlug": "abiozen",
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-mon-9utc-revenue-intel",
+      "declaredCompanySlug": "abiozen",
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-mon-9cst-market-intelligence",
+      "declaredCompanySlug": "abiozen",
+      "agent": "market-intelligence",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-mon-930cst-email-engine",
+      "declaredCompanySlug": "abiozen",
+      "agent": "email-engine",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "hourly-17-sales-replies",
+      "declaredCompanySlug": "abiozen",
+      "agent": "sales-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-18utc-milestone-triggers",
+      "declaredCompanySlug": "abiozen",
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-18utc-performance-scoring",
+      "declaredCompanySlug": null,
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "NEEDS_A_DECISION"
+    },
+    {
+      "workflow": "daily-18utc-goal-divergence",
+      "declaredCompanySlug": "abiozen",
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-tue-9cst-procurement-rfqs",
+      "declaredCompanySlug": "abiozen",
+      "agent": "procurement-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-9cst-inquiry-agent",
+      "declaredCompanySlug": "abiozen",
+      "agent": "inquiry-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "hourly-45-inquiry-poll",
+      "declaredCompanySlug": "abiozen",
+      "agent": "inquiry-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-12cst-product-shadow-read",
+      "declaredCompanySlug": null,
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "NEEDS_A_DECISION"
+    },
+    {
+      "workflow": "weekly-wed-10cst-reorder-agent",
+      "declaredCompanySlug": "abiozen",
+      "agent": "reorder-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-sun-20cst-reorder-agent",
+      "declaredCompanySlug": "abiozen",
+      "agent": "reorder-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "nightly-23cst-research-agent",
+      "declaredCompanySlug": "abiozen",
+      "agent": "research-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-mon-8cst-research-digest",
+      "declaredCompanySlug": "abiozen",
+      "agent": "research-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-2cst-research-intel",
+      "declaredCompanySlug": "abiozen",
+      "agent": "research-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-mon-11cst-meet-agent",
+      "declaredCompanySlug": "abiozen",
+      "agent": "meet-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-fri-16cst-meet-agent",
+      "declaredCompanySlug": "abiozen",
+      "agent": "meet-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "biz-hours-2h-gemini-notes",
+      "declaredCompanySlug": "abiozen",
+      "agent": "meet-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-thu-9cst-procurement-followup",
+      "declaredCompanySlug": "abiozen",
+      "agent": "procurement-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-2230cst-procurement-ist-briefing",
+      "declaredCompanySlug": "abiozen",
+      "agent": "procurement-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-130cst-dev-seo-ist-briefing",
+      "declaredCompanySlug": "abiozen",
+      "agent": "seo-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "daily-7cst-ceo-briefing",
+      "declaredCompanySlug": null,
+      "agent": "ceo-agent",
+      "sendsExternally": false,
+      "proposal": "NEEDS_A_DECISION"
+    },
+    {
+      "workflow": "weekly-mon-10cst-linkedin-content",
+      "declaredCompanySlug": "abiozen",
+      "agent": "linkedin-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekdays-8cst-us-team-briefing",
+      "declaredCompanySlug": null,
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "NEEDS_A_DECISION"
+    },
+    {
+      "workflow": "hourly-05-cphi-followup",
+      "declaredCompanySlug": "abiozen",
+      "agent": "cphi-followup",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "hourly-25-cphi-reply-sync",
+      "declaredCompanySlug": "abiozen",
+      "agent": "cphi-followup",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekly-mon-7cst-data-accuracy",
+      "declaredCompanySlug": null,
+      "agent": null,
+      "sendsExternally": false,
+      "proposal": "NEEDS_A_DECISION"
+    },
+    {
+      "workflow": "weekly-mon-620cst-research-ingest",
+      "declaredCompanySlug": "abiozen",
+      "agent": "research-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    },
+    {
+      "workflow": "weekday-910cst-outreach-agent",
+      "declaredCompanySlug": "abiozen",
+      "agent": "outreach-agent",
+      "sendsExternally": false,
+      "proposal": "map_to_declared_company"
+    }
+  ]
+}

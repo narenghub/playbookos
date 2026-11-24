@@ -528,6 +528,118 @@ const LATER = new Date('2026-12-31T00:00:00Z');
       bad('an unreadable actor membership was treated as authority');
     }
 
+    // ── WHICH COMPANY A SCHEDULED WORKFLOW ACTS FOR (Option A bridge) ──────
+    const WF = require('../src/lib/identity/workflow-company');
+    const CTX = require('../src/lib/office/context');
+    const wfIds = [];
+    const map = async (workflow, companyId, by = owner) => {
+      // effectiveFrom is explicit for the same reason every membership fixture sets it: the
+      // default is NOW(), and these assertions evaluate at AT (noon), so a mapping left to default
+      // has not started yet at AT. That is the effective-date rule working — and it is the second
+      // time in this check that defaulting it produced a confusing "did not resolve".
+      const row = await WF.mapWorkflowToCompany({ workflow, companyId, grantedBy: by,
+        grantedReason: 'fixture', effectiveFrom: EARLIER }, deps);
+      wfIds.push(row.id);
+      return row;
+    };
+
+    // An UNMAPPED workflow refuses, and says which of the four refusals it is.
+    const unmapped = await WF.resolveWorkflowCompany('mbrchk-unmapped', { at: AT, ...deps });
+    if (unmapped.ok === false && unmapped.code === WF.REFUSAL.NOT_MAPPED) {
+      ok('an unmapped scheduled workflow refuses with an actionable code, not a default company');
+    } else {
+      bad('an unmapped workflow did not refuse correctly', unmapped);
+    }
+
+    await map('mbrchk-ceo-briefing', abiozen);
+    const one = await WF.resolveWorkflowCompany('mbrchk-ceo-briefing', { at: AT, ...deps });
+    if (one.ok && one.companyId === abiozen) ok('a mapped workflow resolves to exactly its company');
+    else bad('a mapped workflow did not resolve', one);
+
+    // Two companies → REFUSE, and name them, because the scheduler runs it once per company.
+    await map('mbrchk-ceo-briefing', adifice);
+    const amb = await WF.resolveWorkflowCompany('mbrchk-ceo-briefing', { at: AT, ...deps });
+    if (amb.ok === false && amb.code === WF.REFUSAL.AMBIGUOUS && amb.candidates.length === 2) {
+      ok('DECISIVE: a workflow authorized for two companies REFUSES rather than choosing one');
+    } else {
+      bad('an ambiguous workflow mapping was resolved to a single company', amb);
+    }
+    const both = await WF.companiesForWorkflow('mbrchk-ceo-briefing', { at: AT, ...deps });
+    if (both && both.length === 2) ok('…and both authorizations are visible, so a scheduler can fan out per company');
+    else bad('the two company mappings did not both resolve', both);
+
+    // A suspended company authorizes no workflow either.
+    await q(`UPDATE companies SET status = 'suspended' WHERE id = $1`, [adifice]);
+    const nowOne = await WF.resolveWorkflowCompany('mbrchk-ceo-briefing', { at: AT, ...deps });
+    if (nowOne.ok && nowOne.companyId === abiozen) {
+      ok('a suspended company drops out of a workflow mapping — same rule as membership');
+    } else {
+      bad('a suspended company still counted toward a workflow mapping', nowOne);
+    }
+    await q(`UPDATE companies SET status = 'active' WHERE id = $1`, [adifice]);
+
+    // The TRUSTED context a cron actually gets.
+    await WF.unmapWorkflow({ workflow: 'mbrchk-ceo-briefing', companyId: adifice,
+      revokedBy: owner, revokedReason: 'fixture: collapse to one' }, deps);
+    // Caught, not allowed to abort: a refusal here is an assertion failure about the product, and
+    // an uncaught throw would skip every assertion below it AND the cleanup — which is how a
+    // mutation run leaves fixtures behind and reports "cleanup failed" instead of the defect.
+    let sched = null;
+    try {
+      sched = await CTX.resolveCompanyForScheduledWorkflow(
+        { workflow: 'mbrchk-ceo-briefing' }, deps);
+    } catch (e) {
+      bad('the scheduled-workflow context was refused for a workflow mapped to exactly one '
+        + 'company', `${e.refusal || '(no code)'}: ${e.message}`);
+    }
+    if (sched && CTX.isTrustedContext(sched) && sched.companyId === abiozen
+        && sched.source === 'scheduled_workflow') {
+      ok('DECISIVE: a cron obtains a TRUSTED branded context from stored configuration');
+    } else {
+      bad('the scheduled-workflow context was not trusted or not the mapped company', sched);
+    }
+    let schedRefused = null;
+    try {
+      await CTX.resolveCompanyForScheduledWorkflow({ workflow: 'mbrchk-unmapped' }, deps);
+    } catch (e) { schedRefused = e.refusal; }
+    if (schedRefused === WF.REFUSAL.NOT_MAPPED) {
+      ok('…and an unmapped workflow throws a refusal carrying the actionable code');
+    } else {
+      bad('the scheduled-workflow refusal carried no actionable code', schedRefused);
+    }
+
+    // Retirement is recorded as retirement, not as a revoked authorization (Option B).
+    await WF.unmapWorkflow({ workflow: 'mbrchk-ceo-briefing', companyId: abiozen,
+      revokedBy: owner, revokedReason: 'governed run verified', retiredForGovernedRun: true }, deps);
+    const retired = (await q(
+      `SELECT retired_for_governed_run r, status FROM workflow_companies
+        WHERE workflow = $1 AND company_id = $2`, ['mbrchk-ceo-briefing', abiozen])).rows[0];
+    if (retired && retired.r === true && retired.status === 'revoked') {
+      ok('a mapping retired because its governed replacement works is recorded as such');
+    } else {
+      bad('retirement was indistinguishable from revocation', retired);
+    }
+
+    // An unauthorized actor cannot point a workflow at a company.
+    let wfRefused = false;
+    try {
+      await WF.mapWorkflowToCompany({ workflow: 'mbrchk-sneaky', companyId: abiozen,
+        grantedBy: outsiderActor }, deps);
+    } catch (e) { wfRefused = /not authorized/.test(e.message); }
+    if (wfRefused) ok('DECISIVE: an unauthorized actor cannot map a workflow to a company');
+    else bad('a non-administrator mapped a workflow to a company');
+
+    // And an admin of one company cannot map a workflow into another.
+    let wfCross = false;
+    try {
+      await WF.mapWorkflowToCompany({ workflow: 'mbrchk-cross', companyId: adifice,
+        grantedBy: abiozenAdmin }, deps);
+    } catch (e) { wfCross = /not authorized/.test(e.message); }
+    if (wfCross) ok('…and mapping authority is company-scoped, like membership management');
+    else bad('an admin of one company mapped a workflow into another');
+
+    made.workflowMappings = wfIds;
+
     // ── THE REVOCATION-ATTRIBUTION CONSTRAINT IS IN THE DATABASE ───────────
     let dbRefused = false;
     try {
@@ -544,6 +656,7 @@ const LATER = new Date('2026-12-31T00:00:00Z');
   } finally {
     // ── CLEANUP: ONLY WHAT THIS SCRIPT CREATED, BY ID ──────────────────────
     try {
+      for (const id of (made.workflowMappings || [])) await q(`DELETE FROM workflow_companies WHERE id = $1`, [id]);
       for (const id of made.memberships) await q(`DELETE FROM user_companies WHERE id = $1`, [id]);
       for (const id of made.users) await q(`DELETE FROM users WHERE id = $1`, [id]);
       for (const id of made.companies) await q(`DELETE FROM companies WHERE id = $1`, [id]);

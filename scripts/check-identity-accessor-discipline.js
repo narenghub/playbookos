@@ -35,21 +35,31 @@ const path = require('node:path');
 const { blankNonCode } = require('./js-lex');
 
 const ROOT = path.join(__dirname, '..');
-const TABLE = 'user_companies';
+// Both identity tables, each with the ONE module allowed to touch it. Generalised when
+// workflow_companies arrived: a second copy of this check, differing only in a table name, is the
+// duplication these single-accessor rules exist to prevent.
+const TABLES = Object.freeze({
+  user_companies: 'src/lib/identity/company-membership.js',
+  workflow_companies: 'src/lib/identity/workflow-company.js',
+});
 
 // Each exemption carries the reason it is one. A list of bare paths becomes a place to add a file
 // rather than a decision somebody made.
 const EXEMPT = new Map([
   ['src/lib/identity/company-membership.js',
-    'THE accessor. Its whole purpose is to own this table.'],
+    'THE accessor for user_companies. Its whole purpose is to own that table.'],
+  ['src/lib/identity/workflow-company.js',
+    'THE accessor for workflow_companies — which company a scheduled workflow acts for.'],
   ['src/lib/identity/schema.js',
     'the DDL that creates the table and its indexes.'],
   ['scripts/check-company-membership-db.js',
     'asserts the DATABASE constraints directly — a CHECK constraint cannot be proved through an '
     + 'accessor that is written to satisfy it, and its fixtures are removed by id.'],
-  ['scripts/check-membership-accessor-discipline.js',
+  ['scripts/check-identity-accessor-discipline.js',
     'this file.'],
   ['src/lib/identity/company-membership.test.js',
+    'unit tests for the accessor itself.'],
+  ['src/lib/identity/workflow-company.test.js',
     'unit tests for the accessor itself.'],
 ]);
 
@@ -72,21 +82,24 @@ for (const dir of ['src', 'scripts']) {
     const rel = path.relative(ROOT, abs);
     if (EXEMPT.has(rel)) { checked.push(`exempt  ${rel} — ${EXEMPT.get(rel)}`); continue; }
     const raw = fs.readFileSync(abs, 'utf8');
-    if (!raw.includes(TABLE)) continue;                 // cheap path: most files never mention it
+    const present = Object.keys(TABLES).filter((t) => raw.includes(t));
+    if (!present.length) continue;                 // cheap path: most files never mention it
     // Comments AND string literals blanked: a SQL string is where the table name would actually
     // appear, so this would hide the violation — hence the second pass below on raw lines that
     // survive comment-stripping only.
     const codeOnly = blankNonCode(raw);
     const commentsStripped = require('./js-lex').blankCommentsOnly(raw);
-    if (codeOnly.includes(TABLE) || commentsStripped.includes(TABLE)) {
-      const lines = commentsStripped.split('\n')
-        .map((l, i) => (l.includes(TABLE) ? `${rel}:${i + 1}` : null))
-        .filter(Boolean);
-      violations.push(`${rel} queries ${TABLE} outside the accessor (${lines.join(', ') || 'in code'}). `
-        + 'Use src/lib/identity/company-membership.js: the live-membership predicate is six '
-        + 'conditions long and a second copy of it will drift from this one.');
-    } else {
-      checked.push(`ok      ${rel} mentions ${TABLE} only in comments`);
+    for (const table of present) {
+      if (codeOnly.includes(table) || commentsStripped.includes(table)) {
+        const lines = commentsStripped.split('\n')
+          .map((l, i) => (l.includes(table) ? `${rel}:${i + 1}` : null))
+          .filter(Boolean);
+        violations.push(`${rel} queries ${table} outside its accessor (${lines.join(', ') || 'in code'}). `
+          + `Use ${TABLES[table]}: the live predicate is several conditions long and a second copy `
+          + 'of it will drift from this one.');
+      } else {
+        checked.push(`ok      ${rel} mentions ${table} only in comments`);
+      }
     }
   }
 }
@@ -97,5 +110,5 @@ if (violations.length) {
   for (const v of violations) console.error(`  - ${v}`);
   process.exit(1);
 }
-console.log(`\nOK: ${TABLE} is reached only through its accessor.`);
+console.log(`\nOK: ${Object.keys(TABLES).join(' and ')} are reached only through their accessors.`);
 process.exit(0);

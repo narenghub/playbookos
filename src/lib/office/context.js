@@ -153,6 +153,53 @@ function assertContext(ctx) {
   return ctx;
 }
 
+// ── A SCHEDULED WORKFLOW'S COMPANY, READ FROM STORED CONFIGURATION ──────────
+//
+// Owner decision 2026-11-24: Option A as the transitional bridge to governed runs. A cron has no
+// authenticated subject and no run, so neither resolveCompanyContext nor
+// resolveCompanyForReadSession can serve it — and until something can, the 7am briefing, the 8am
+// assignments and the 6pm coaching mail cannot be classified as internal and stay stopped.
+//
+// The caller names a WORKFLOW. The company comes from `workflow_companies`, through its accessor.
+// Nothing about the caller's input becomes the company, which is the whole distinction from the
+// `companyId` string that dispatch.js accepts today.
+//
+// Ambiguity REFUSES rather than selecting: a workflow authorized for two companies is executed
+// once per company by the scheduler, each with its own resolved context, so one execution never
+// spans tenants.
+//
+// The refusal carries the accessor's structured code (`not_mapped`, `ambiguous`, `unresolvable`)
+// on the error, so the caller can file an actionable audit row instead of logging "no company".
+async function resolveCompanyForScheduledWorkflow({ workflow }, deps = {}) {
+  if (!workflow) throw new NoCompanyContext('a scheduled workflow context requires a workflow name');
+
+  const WF = deps.workflowCompany || require('../identity/workflow-company');
+  const r = await WF.resolveWorkflowCompany(workflow, deps);
+
+  if (!r.ok) {
+    const e = new NoCompanyContext(
+      `scheduled workflow "${workflow}" has no resolved company: ${r.detail}`);
+    // Structured, so the scheduler can record WHICH refusal this was. An operator told only "no
+    // company" cannot tell an unreadable table from an unmapped workflow, and those need
+    // different action.
+    e.refusal = r.code;
+    e.workflow = r.workflow;
+    e.candidates = r.candidates;
+    throw e;
+  }
+
+  return sealContext({
+    companyId: r.companyId,
+    objectiveId: null,
+    // Named so a log or a stack says what kind of context this is. It is NOT a run context and
+    // must not be handed to a kernel writer expecting one; it exists so a scheduled send can be
+    // authorized against a company at all.
+    source: 'scheduled_workflow',
+    workflow: String(workflow),
+    resolvedAt: new Date().toISOString(),
+  });
+}
+
 // ── DERIVING A CONTEXT FROM A TRUSTED ONE ───────────────────────────────────
 //
 // Legitimate and common: office/run.js resolves a context from an objective, creates a run, and
@@ -327,6 +374,7 @@ module.exports = {
   resolveCompanyContext,
   resolveObjectiveContext,
   resolveCompanyForReadSession,
+  resolveCompanyForScheduledWorkflow,
   assertContext,
   isTrustedContext,
   deriveContext,
