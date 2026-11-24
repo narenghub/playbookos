@@ -61,6 +61,14 @@ const EXEMPT = new Map([
     'unit tests for the accessor itself.'],
   ['src/lib/identity/workflow-company.test.js',
     'unit tests for the accessor itself.'],
+  ['scripts/propose-workflow-company-mappings.js',
+    'NAMES the table in its report text and recommendation; reads live mappings only through '
+    + 'workflow-company.js allMappings(). scripts/proposal-is-readonly.test.js asserts it cannot '
+    + 'INSERT, UPDATE, DELETE or call the accessor\'s writers.'],
+  ['scripts/proposal-is-readonly.test.js',
+    'the table name appears inside the REGEXES that assert the proposal tool cannot write to it — '
+    + 'a test whose whole subject is "no SQL against this table" must be allowed to quote the SQL '
+    + 'it forbids.'],
 ]);
 
 const violations = [];
