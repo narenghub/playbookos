@@ -35,6 +35,15 @@ let DUP = false;         // does a recent alert already exist?
 let APPROVE = true;      // is a released approval in force for the message under test?
 let LAST_DIGEST = null;  // payload_digest, as the ledger recorded it for this attempt
 
+// WHO IS EMPLOYED. Since 2026-11-24 the gate decides "internal" by ACTIVE MEMBERSHIP rather than
+// by domain, because a departed employee's address is still on the company domain — the hole that
+// has had all company email stopped since 3 November at a cost of 369 refused sends. A fixture
+// that answers nothing here is asserting that nobody is employed, so a colleague's address refuses
+// as a deactivated account and a test about transport mechanics fails for a reason that has
+// nothing to do with transport. Every fixture below addresses a@b.com, which is outside the
+// company either way, so this list exists for the cc tests at the end of the file.
+let MEMBERS = ['naren@abiozen.com'];
+
 db.query = async (sql, params = []) => {
   SQL.push({ sql: sql.replace(/\s+/g, ' ').trim(), params });
   if (/INSERT INTO email_log/i.test(sql)) {
@@ -59,6 +68,10 @@ db.query = async (sql, params = []) => {
   // RETURNING id, as a real UPDATE of an existing row does. claim() is the arbitration point now
   // and reads the returned row to know whether IT won the claim, so a stub answering every UPDATE
   // with zero rows makes the mailer refuse every send for a reason unrelated to these tests.
+  if (/FROM users\s+WHERE is_active = 1/.test(sql)) {
+    const wanted = params[0] || [];
+    return { rows: MEMBERS.filter((e) => wanted.includes(e)).map((email) => ({ email })) };
+  }
   if (/UPDATE email_log/i.test(sql)) return { rows: [{ id: params[0] }] };
   if (/SELECT 1 FROM notifications/i.test(sql)) return { rows: DUP ? [{ '?column?': 1 }] : [] };
   if (/INSERT INTO notifications/i.test(sql)) { NOTIFS.push(params); return { rows: [] }; }
@@ -66,6 +79,7 @@ db.query = async (sql, params = []) => {
 };
 
 const { sendEmail, defaultFrom, DEFAULT_FROM } = require('./mailer');
+const { sendEmailDetailed: sendEmailDetailedX } = require('./mailer');
 
 // Resend, faked at the fetch boundary.
 let RESPONSES = [];
@@ -252,4 +266,52 @@ test('a refused attachment is logged and sends NOTHING', async () => {
     assert.equal(r.ok, false);
     assert.equal(called, false, 'the request must not be made at all');
   } finally { global.fetch = realFetch; }
+});
+
+// ── THE GATE MUST BE GIVEN THE cc, NOT MERELY BE CAPABLE OF JUDGING IT ──────
+//
+// Until 2026-11-24 sendEmailDetailed accepted `cc`, forwarded it to the provider as body.cc, and
+// called assertSendAllowed with `to` ALONE — so an outside address in cc was transmitted without
+// ever being classified, and the external-approval boundary never saw it.
+//
+// These two tests sit HERE, driving the real sendEmailDetailed, rather than in the gate's own
+// suite, because every behavioural test of the gate passes while this bug is present: such a test
+// hands the gate the very parameter the caller was forgetting to hand it. What has to be proved is
+// the wiring. scripts/check-email-gate-recipient-coverage.js proves the same property at the call
+// site, which catches a field added tomorrow; this proves it end to end today.
+
+test('DECISIVE: an external cc is refused — the gate is actually given it', async () => {
+  process.env.RESEND_API_KEY = 'test-key';
+  const realFetch = global.fetch;
+  let called = false;
+  global.fetch = async () => { called = true; return { json: async () => ({ id: 'x' }) }; };
+  const saved = APPROVE;
+  APPROVE = false;                       // no approval in force for anybody
+  try {
+    const r = await sendEmailDetailedX({ to: 'naren@abiozen.com', subject: 's', html: 'h',
+      cc: 'buyer@acme.test' });
+    assert.equal(r.ok, false, 'an outside party in cc must not ride out on an internal to');
+    assert.equal(r.stopped, true);
+    assert.match(r.error, /EXTERNAL_WITHOUT_APPROVAL/);
+    assert.equal(called, false, 'and the provider is never called');
+  } finally { global.fetch = realFetch; APPROVE = saved; }
+});
+
+test('KNOWN LIMITATION: the approval digest does not bind cc, so an approved send can widen', async () => {
+  // Deliberately asserting what the code does TODAY, and naming it, rather than leaving it to be
+  // rediscovered. approvedDigestOf hashes { to, subject, html } — cc is not in it. So a released
+  // approval for a message authorises the same bytes sent to ADDITIONAL cc'd recipients, because
+  // the digest is unchanged by adding them. The classification hole above is closed; this binding
+  // hole is not, and closing it means changing the digest shape at five independent call sites in
+  // lockstep (mailer.js, services/sender/server.js, buyer-email-approval.js x2, dispatch.js x2) —
+  // they must agree or every external send refuses. Tracked as its own change, not half-done here.
+  //
+  // When that change lands, this test should FAIL and be rewritten as the positive assertion.
+  process.env.RESEND_API_KEY = 'test-key';
+  const digestOfTo = require('./mailer').approvedDigestOf(
+    { to: 'buyer@acme.test', subject: 's', html: 'h' });
+  const digestWithCc = require('./mailer').approvedDigestOf(
+    { to: 'buyer@acme.test', subject: 's', html: 'h', cc: 'someone-else@acme.test' });
+  assert.equal(digestWithCc, digestOfTo,
+    'adding a cc does not change the digest — which is exactly why it must be bound');
 });

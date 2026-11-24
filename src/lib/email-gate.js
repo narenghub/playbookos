@@ -47,7 +47,31 @@
 
 'use strict';
 
-const { classifyRecipients } = require('./outbound/recipients');
+const { classifyRecipients, addressesOf } = require('./outbound/recipients');
+const { classifyByMembership } = require('./outbound/membership');
+
+// ── EVERY ADDRESS THAT RECEIVES THE MESSAGE, NOT JUST THE ONES IN `to` ───────
+//
+// Found 2026-11-24 while auditing the containment reason. sendEmailDetailed accepted `cc` and
+// deliverAuthorized put it straight into the provider payload as body.cc — but the gate was called
+// with `to` ALONE. So an email addressed to a colleague with an outside address in `cc` passed the
+// approval boundary untouched and the cc'd party received it with no approval. Not hypothetical:
+// sitenex-phase3.routes.js:536 cc's a partner address, procurement-rfq.js cc's `copyTo` on supplier
+// RFQs, and buyer-email-approval.js cc's whatever a stored payload holds.
+//
+// Same defect class as the Gmail transports described above — a gate that is real, and is not the
+// only road. There the second road was another provider; here it is another FIELD on the same
+// provider call. The useful question is not "is the gate called" but "does the gate see everything
+// that will receive this": a parameter the gate never reads is a recipient it cannot judge.
+//
+// `bcc` is read here although sendEmailDetailed does not destructure it, so nothing reaches the
+// provider that way today. Callers already pass it (procurement-rfq.js:637 sends `bcc: []`), so one
+// added parameter in mailer.js is all that separates today's safe accident from a third unjudged
+// channel. Reading it now costs nothing and removes that step.
+const ALL_RECIPIENT_FIELDS = ['to', 'cc', 'bcc'];
+function allRecipientsOf(args) {
+  return ALL_RECIPIENT_FIELDS.map((f) => args[f]);   // addressesOf flattens and splits comma lists
+}
 
 // Capabilities that survive a global stop. Exactly one, and it is not a promise — see the recipient
 // constraint, which is what makes it narrow by construction.
@@ -143,16 +167,19 @@ function recipientsOf(to) {
  * reported as a refusal, which is the fail-closed half of the contract.
  */
 async function assertSendAllowed({ capability = 'email.send', workflow = null, agent = null,
-  company = null, to = null, approvalId = null, digest = null } = {}, deps = {}) {
+  company = null, to = null, cc = null, bcc = null, approvalId = null,
+  digest = null } = {}, deps = {}) {
   const env = deps.env || process.env;
+  const everyone = allRecipientsOf({ to, cc, bcc });
 
   // The exemption is claimed, then CHECKED. A message claiming to be an alert while addressed
-  // somewhere else is not an alert.
+  // somewhere else is not an alert — and `to` alone was the wrong place to check that, because an
+  // alert with an outside address in cc is not an alert either. Checked against every field now.
   const claimsExempt = OBSERVABILITY.has(capability);
   let exempt = false;
   if (claimsExempt) {
     const operators = operatorRecipients(env);
-    const rcpts = recipientsOf(to);
+    const rcpts = addressesOf(everyone);
     // No configured operator address means the exemption cannot be verified, so it is not granted.
     // An alert that cannot prove where it is going is an ordinary send.
     exempt = operators.size > 0 && rcpts.length > 0 && rcpts.every((r) => operators.has(r));
@@ -191,7 +218,76 @@ async function assertSendAllowed({ capability = 'email.send', workflow = null, a
     // The observability exemption passes through: an operator alert is verified by this file to
     // be addressed to ALERT_EMAIL/ADMIN_EMAIL, which are company addresses, so it is internal by
     // the recipient rule as well. It gets no second pass here.
-    const rcpt = classifyRecipients(to, env);
+    // ── INTERNAL MEANS AN ACTIVE PERSON, NOT A FAMILIAR DOMAIN ────────────
+    //
+    // classifyRecipients answers this by DOMAIN, and that is the hole which has had all company
+    // email stopped since 2026-11-03: a departed employee's address is still on the company
+    // domain, so it classified as internal, so it needed no approval, so mail reached somebody who
+    // should no longer receive it. The containment reason names exactly that. The only control
+    // broad enough to catch it was a capability-wide stop on email.send, which has since refused
+    // 369 sends in 21 days and taken the briefings, the 8am assignments, the coaching mail and
+    // every escalation with them.
+    //
+    // outbound/membership.js narrows the question from "is that domain ours" to "is that person
+    // ours, now", against users.is_active plus an explicit shared-mailbox allowlist. It returns
+    // null membership — not an empty set — when the question cannot be answered, and this refuses
+    // on that rather than falling back to domain matching, which would silently restore the
+    // behaviour being replaced at the one moment nobody can see what it is doing.
+    const rcpt = await classifyByMembership(everyone, env, deps);
+
+    const refuseRecipients = (scopeKey, detailWhy, addresses) => {
+      const why2 = `${scopeKey.toUpperCase()}: ${detailWhy} — ${addresses.join(', ')}`;
+      console.warn(`[membership-gate] refusing ${capability}: ${why2}`);
+      try {
+        const { recordRefusal } = deps.autonomy || require('./autonomy');
+        recordRefusal({
+          stop: { scope_type: 'membership', scope_key: scopeKey, reason: detailWhy },
+          what: capability,
+          detail: { workflow, agent, addresses, approvalId: approvalId || null },
+        });
+      } catch (_) { /* the refusal record must not become the reason a refusal fails */ }
+      return { allowed: false, reason: why2, stop: null, exempt: false,
+        scope: `membership:${scopeKey}`, membershipRefusal: scopeKey, addresses };
+    };
+
+    // ── WHAT AN UNREADABLE MEMBERSHIP TABLE DOES, AND WHAT IT MUST NOT DO ──
+    //
+    // Nothing, here. It needs no branch of its own, because classifyByMembership already resolves
+    // it the only safe way: when membership cannot be read, NOTHING is internal, so every
+    // recipient falls to the approval boundary below and an internal send with no approval —
+    // a briefing, a score, an assignment — is refused. That is the fail-closed requirement, met by
+    // the classifier rather than by a second rule here.
+    //
+    // A refusal branch at this point was written first and removed, because it was WORSE than no
+    // branch: it refused outright what the approval boundary would have judged, so a buyer email
+    // carrying a validly released approval for exactly those bytes — a human decision, already
+    // made — would have been blocked by a database outage that could not have changed the answer.
+    // Fail closed means refusing what cannot be established, not refusing what has already been
+    // established by other means.
+    //
+    // ── AN APPROVAL DOES NOT REINSTATE A DEACTIVATED EMPLOYEE ─────────────
+    //
+    // Refused BEFORE the approval boundary and unconditionally, because the external-approval path
+    // would otherwise become an automatic override of a deactivation: a released approval would
+    // make a departed colleague's address sendable exactly as if it were any outside party, which
+    // is the opposite of why the account was deactivated. CEO instruction, 2026-11-24: "Departed
+    // employees must be denied internal operational communications. Do not treat external approval
+    // as an automatic override of employee deactivation."
+    //
+    // There is no bypass parameter. The two ways to permit such a send are both deliberate and
+    // auditable: reactivate the user record, or add the address to INTERNAL_MAILBOXES because it is
+    // a shared mailbox rather than a person.
+    // Guarded by membershipUnknown, and that guard is load-bearing. With the table unreadable
+    // EVERY company address lands in departedOrUnknown, so without it an outage would refuse all
+    // internal mail with the reason "a deactivated account" — naming a departure that never
+    // happened and sending whoever reads the refusal looking for one. The send still stops, by the
+    // approval boundary below; what the guard protects is the honesty of the stated cause.
+    if (!rcpt.membershipUnknown && rcpt.departedOrUnknown.length && !exempt) {
+      return refuseRecipients('not_active_member',
+        'on a company domain but not an active member — a deactivated or unknown account',
+        rcpt.departedOrUnknown);
+    }
+
     if (rcpt.external.length && !exempt) {
       const appr = await verifyReleasedApproval({ approvalId, digest }, deps);
       if (!appr.ok) {

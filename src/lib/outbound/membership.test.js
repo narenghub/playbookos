@@ -18,16 +18,33 @@ const assert = require('node:assert');
 
 const M = require('./membership');
 
-const ENV = { WORKSPACE_DOMAINS: 'abiozen.com', INTERNAL_MAILBOXES: 'sales@abiozen.com' };
+// COMPANY_EMAIL_DOMAINS, which is what recipients.js `companyDomains` actually reads. An earlier
+// draft of this file set WORKSPACE_DOMAINS — a real variable, but one read only by meet-agent.js
+// and workspace-activity.js — so every test here passed by falling through to
+// DEFAULT_COMPANY_DOMAINS (abiozen.com, adificetechnologies.com, playnexa.ai). Green, and green
+// for a reason other than the one stated, which is the failure this suite exists to prevent
+// elsewhere. It also silently voided the premise of the "another company domain" test below.
+const ENV = { COMPANY_EMAIL_DOMAINS: 'abiozen.com', INTERNAL_MAILBOXES: 'sales@abiozen.com' };
 
-/** A users table holding exactly these active addresses. */
-function usersStub(activeEmails) {
+/**
+ * A users table holding exactly these active addresses, all on internal roles.
+ *
+ * Pass `{ roles: { 'a@b.com': 'partner' } }` to give one of them an external role; the stub then
+ * applies the role exclusion the real query applies, so a partner is absent from the result.
+ */
+function usersStub(activeEmails, { roles = {} } = {}) {
   return async (sql, params) => {
-    assert.match(sql, /FROM users WHERE is_active = 1/, 'membership must read ACTIVE users only');
+    assert.match(sql, /FROM users\s+WHERE is_active = 1/,
+      'membership must read ACTIVE users only');
+    // The real query carries roles.js's exclusion fragment. Asserting it is present here is what
+    // stops this stub from quietly modelling a more permissive query than the one that ships.
+    assert.match(sql, /NOT IN \('partner'\)/,
+      'membership must exclude external roles — a partner account is not a colleague');
     const wanted = params[0];
     return { rows: activeEmails
       .map((e) => e.toLowerCase())
       .filter((e) => wanted.includes(e))
+      .filter((e) => roles[e] !== 'partner')
       .map((email) => ({ email })) };
   };
 }
@@ -56,13 +73,39 @@ test('CONTROL: an ACTIVE employee on the company domain is INTERNAL', async () =
 });
 
 test('an active employee on ANOTHER company domain is internal — membership, not domain', async () => {
-  // Prasanthi is @adificetechnologies.com, which is not in WORKSPACE_DOMAINS. She is an active
-  // member, so she is internal. This is the point: the question is the person, not the domain.
+  // Prasanthi is @adificetechnologies.com, which ENV deliberately leaves OUT of
+  // COMPANY_EMAIL_DOMAINS. She is an active member, so she is internal. That is the whole point:
+  // the question is the person, not the domain. While this file set the wrong variable, her domain
+  // sat in DEFAULT_COMPANY_DOMAINS and this test proved nothing of the kind.
   const r = await M.classifyByMembership('prasanthi@adificetechnologies.com', ENV,
     { query: usersStub(ACTIVE) });
   assert.deepEqual(r.internal, ['prasanthi@adificetechnologies.com']);
   assert.equal(r.allInternal, true);
   assert.deepEqual(r.departedOrUnknown, [], 'not on a company domain, so not that class');
+});
+
+// ── A ROW IN `users` IS NOT THE SAME THING AS A COLLEAGUE ───────────────────
+
+test('DECISIVE: an ACTIVE PARTNER is external — a portal login is not employment', async () => {
+  // `users` holds outside parties: the `partner` role is flagged external in roles.js so a partner
+  // agency can sign in to its own portal. Classifying such an account as internal would let mail
+  // reach them with NO approval — a wider hole than the departed-employee one this module closes,
+  // and in the same direction. The first draft of membership.js had exactly that hole and
+  // src/lib/external-roles.test.js caught it.
+  const r = await M.classifyByMembership('agency@partneragency.test', ENV,
+    { query: usersStub([...ACTIVE, 'agency@partneragency.test'],
+      { roles: { 'agency@partneragency.test': 'partner' } }) });
+  assert.deepEqual(r.internal, [], 'an active partner row must not make them a colleague');
+  assert.deepEqual(r.external, ['agency@partneragency.test']);
+  assert.equal(r.allInternal, false);
+});
+
+test('CONTROL: the same address on an INTERNAL role is internal', async () => {
+  // Without this, the test above is satisfied by a stub that drops everybody, and the exclusion
+  // would be indistinguishable from a broken query.
+  const r = await M.classifyByMembership('agency@partneragency.test', ENV,
+    { query: usersStub([...ACTIVE, 'agency@partneragency.test']) });
+  assert.deepEqual(r.internal, ['agency@partneragency.test']);
 });
 
 // ── SHARED MAILBOXES ────────────────────────────────────────────────────────
@@ -152,6 +195,6 @@ test('the mailbox allowlist tolerates spacing and case', async () => {
 
 test('no allowlist configured means no shared mailbox is internal', async () => {
   const r = await M.classifyByMembership('sales@abiozen.com',
-    { WORKSPACE_DOMAINS: 'abiozen.com' }, { query: usersStub(ACTIVE) });
+    { COMPANY_EMAIL_DOMAINS: 'abiozen.com' }, { query: usersStub(ACTIVE) });
   assert.deepEqual(r.external, ['sales@abiozen.com'], 'an absent allowlist grants nothing');
 });

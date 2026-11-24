@@ -1,8 +1,8 @@
 // ── WHO COUNTS AS INTERNAL ───────────────────────────────────────────────────
 //
 // `classifyRecipients` in recipients.js decides "internal" by DOMAIN: an address whose domain is in
-// WORKSPACE_DOMAINS is internal, and anything else is external. That is the right first cut and it
-// has one hole, which is the hole that has had all company email stopped since 2026-11-03:
+// COMPANY_EMAIL_DOMAINS is internal, and anything else is external. That is the right first cut
+// and it has one hole, which has had all company email stopped since 2026-11-03:
 //
 //     A DEPARTED EMPLOYEE'S ADDRESS IS STILL ON THE COMPANY DOMAIN.
 //
@@ -45,6 +45,7 @@
 'use strict';
 
 const { addressesOf, domainOf, companyDomains } = require('./recipients');
+const { excludeExternalSql } = require('../roles');
 
 const q = (deps) => (deps && deps.query) || require('../db').query;
 
@@ -70,8 +71,21 @@ async function activeMembers(addresses, deps = {}) {
   const wanted = [...new Set(addresses.map((a) => String(a).toLowerCase()))].filter(Boolean);
   if (!wanted.length) return new Set();
   try {
+    // ── A ROW IN `users` IS NOT THE SAME THING AS A COLLEAGUE ──────────────
+    //
+    // `users` holds outside parties too. The `partner` role is flagged `external: true` in
+    // src/lib/roles.js, and those accounts exist so a partner agency can sign in to its own
+    // portal. Without this exclusion an active partner would classify as INTERNAL, and mail to
+    // them would need no approval — which is a WIDER hole than the departed-employee one this
+    // module was written to close, and in the same direction.
+    //
+    // Found by src/lib/external-roles.test.js, whose sweep exists for precisely this: a query in
+    // src/lib that reads the whole roster without excluding external roles. The first draft of
+    // this file failed it. The fragment is taken from roles.js rather than written here, so a role
+    // marked external tomorrow is excluded without anyone remembering this query exists.
     const r = await q(deps)(
-      `SELECT lower(email) AS email FROM users WHERE is_active = 1 AND lower(email) = ANY($1)`,
+      `SELECT lower(email) AS email FROM users
+         WHERE is_active = 1${excludeExternalSql('')} AND lower(email) = ANY($1)`,
       [wanted]);
     return new Set(r.rows.map((x) => x.email));
   } catch (_) {

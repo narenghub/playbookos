@@ -348,6 +348,35 @@ function grantedApproval() {
 const BUYER_SEND = { capability: 'email.send', workflow: 'legacy-inquiry-buyer-email',
   agent: 'inquiry-agent', to: 'buyer@acme.test' };
 
+// ── WHO IS INTERNAL IS NOW A DATABASE FACT, SO A TEST HAS TO STATE IT ───────
+//
+// Until 2026-11-24 the gate decided internal-ness from the address string alone, so a test could
+// assert it without a database. It now asks whether the address belongs to an ACTIVE user, because
+// a departed employee's address is still on the company domain — the hole that has had all company
+// email stopped since 3 November. Any test asserting an internal send is ALLOWED must therefore
+// say who is employed; without this stub the classifier cannot read membership, nothing is
+// internal, and the send is refused for want of an approval. That refusal is correct behaviour and
+// a misleading test result, which is why the stub is explicit rather than defaulted.
+//
+// Dispatches on the SQL so one stub serves both reads: membership here, the approval record via
+// `rest`. The default `rest` answers empty, which the approval read means as "not granted".
+function fakeMembers(activeEmails, rest = async () => ({ rows: [] })) {
+  return {
+    query: async (sql, params = []) => {
+      if (/FROM users\s+WHERE is_active = 1/.test(sql)) {
+        const wanted = params[0] || [];
+        return { rows: activeEmails
+          .map((e) => e.toLowerCase())
+          .filter((e) => wanted.includes(e))
+          .map((email) => ({ email })) };
+      }
+      return rest(sql, params);
+    },
+  };
+}
+
+const TEAM = ['naren@abiozen.com', 'ops@abiozen.com', 'dev@adificetechnologies.com'];
+
 test('STOP: the buyer workflow stop refuses a released quotation', async () => {
   const g = await GATE.assertSendAllowed(BUYER_SEND, {
     autonomy: fakeAutonomy([{ scope_type: 'workflow', scope_key: 'legacy-inquiry-buyer-email',
@@ -410,7 +439,8 @@ test('APPROVAL: relabelling the workflow does not escape it', async () => {
 
 test('APPROVAL: an internal send does NOT need one — briefings and scores still work', async () => {
   for (const to of ['naren@abiozen.com', ['ops@abiozen.com', 'dev@adificetechnologies.com']]) {
-    const g = await GATE.assertSendAllowed({ ...BUYER_SEND, to }, { autonomy: fakeAutonomy([]) });
+    const g = await GATE.assertSendAllowed({ ...BUYER_SEND, to },
+      { autonomy: fakeAutonomy([]), ...fakeMembers(TEAM) });
     assert.strictEqual(g.allowed, true, `internal recipient ${to} was refused`);
   }
 });
@@ -418,7 +448,7 @@ test('APPROVAL: an internal send does NOT need one — briefings and scores stil
 test('APPROVAL: one external recipient in a mixed list is enough to require one', async () => {
   const g = await GATE.assertSendAllowed(
     { ...BUYER_SEND, to: ['naren@abiozen.com', 'buyer@acme.test'] },
-    { autonomy: fakeAutonomy([]) });
+    { autonomy: fakeAutonomy([]), ...fakeMembers(TEAM) });
   assert.strictEqual(g.allowed, false);
   assert.deepStrictEqual(g.external, ['buyer@acme.test']);
 });

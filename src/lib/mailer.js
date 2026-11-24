@@ -356,7 +356,13 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   }
 
   // UNCONDITIONAL. No parameter of this function can prevent this call from happening.
-  const gate = await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to,
+  //
+  // `cc` is passed because deliverAuthorized transmits it (body.cc, line ~190) and until
+  // 2026-11-24 the gate was called with `to` alone — so an outside address in cc reached the
+  // provider without ever being classified, and the external-approval boundary never saw it. Any
+  // field below that reaches the provider must appear in this call; that is the whole contract of
+  // this line, and check-email-gate-recipient-coverage.js is what keeps it true.
+  const gate = await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to, cc,
     approvalId, digest: actualDigest });
   if (!gate.allowed) {
     console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${gate.reason}`);

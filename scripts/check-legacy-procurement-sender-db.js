@@ -102,6 +102,30 @@ process.env.MAIL_FROM = process.env.MAIL_FROM || 'Fixture <fixture@example.inval
 // never mean anything in production.
 process.env.COMPANY_EMAIL_DOMAINS = 'supplier.invalid,abiozen.invalid,example.invalid';
 
+// ── AND WHY THE RECIPIENT ALSO HAS TO BE NAMED, SINCE 2026-11-24 ────────────
+//
+// Declaring the domain internal is no longer sufficient. email-gate.js now decides "internal" by
+// ACTIVE MEMBERSHIP rather than by domain, because a departed employee's address is still on the
+// company domain — the hole that has had all company email stopped since 3 November. So
+// legacy@supplier.invalid sits on a domain this fixture declares internal while belonging to no
+// active user, which is precisely the class the new refusal exists to catch, and the send stopped
+// at `membership:not_active_member`.
+//
+// The harness caught that and refused to pretend otherwise: "nothing was sent with an active
+// signatory, so the From/Reply-To assertions were never measured — the fixture must reach the
+// mailer for this case to mean anything", and the mutation control reported that it had measured
+// NOTHING rather than reporting a pass. That is the anti-masking guard above doing its job.
+//
+// INTERNAL_MAILBOXES is the designed escape for an internal destination that is not a person
+// (sales@, support@) — explicit and auditable rather than inferred. Using it here keeps the
+// membership gate fully intact everywhere else while putting this fixture's recipient back inside
+// the company, so the measurement this file exists for can happen. The address is .invalid, so
+// like the line above it can never mean anything in production.
+//
+// Inserting a fake ACTIVE user row would also have worked, and was rejected: it would assert that
+// a supplier is an employee, which is the exact confusion the membership rule exists to remove.
+process.env.INTERNAL_MAILBOXES = 'legacy@supplier.invalid';
+
 // ── THE PROVIDER AND MAILER ARE BOTH STUBBED ───────────────────────────────
 // The AI returns a body; the mailer records calls and sends nothing. A real send from this check
 // would be the exact act it exists to prove impossible.
