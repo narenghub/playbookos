@@ -79,6 +79,12 @@ const AUTHORIZED_COMPANY_ID_TABLES = new Set([
   // RESTRICT, and a composite foreign key makes the database refuse a correction chain that
   // crosses companies.
   'agent_memory',
+  // B2.5a: a named, time-bounded, audited exception that lets ONE objective execute autonomously
+  // without a measured budget. company_id is carried for one reason only — the composite foreign
+  // key `(objective_id, company_id) REFERENCES objectives (id, company_id)` makes the database
+  // refuse an exception granted for another company's objective. The column is therefore part of
+  // the welding, not a scope filter the application could get wrong.
+  'office_budget_exceptions',
 ]);
 const REAL_CONSTRAINT_CODES = new Set(['23503', '23502', '23514', '23505']);
 const SENTINEL = '__k1_validation_rollback__';

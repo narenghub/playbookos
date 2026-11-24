@@ -59,6 +59,10 @@ const M7_TABLES = [
   // office
   'companies', 'objectives', 'office_approvals', 'office_cost_ledger',
   'office_exceptions', 'office_outcomes', 'office_recoveries',
+  // B2.5a (2026-11-24): named, time-bounded budget exceptions. Listed in the same change that
+  // created the table — until it was, a freshly migrated database read as `unidentified` and every
+  // subsequent run was refused, which is exactly the drift this check exists to catch.
+  'office_budget_exceptions',
   // M7.1 / M7.2 / M7.3
   'worker_identities', 'worker_enrollment_tokens', 'worker_request_nonces',
   'worker_tasks', 'worker_results', 'worker_audit',

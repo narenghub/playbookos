@@ -45,6 +45,10 @@
 
 const crypto = require('crypto');
 const SCHEMA = require('./task-schema');
+// B4.3 reads the claiming worker's declared capabilities, which live on worker_identities — a
+// different schema module from the task tables, so it is named rather than assumed to be in
+// SCHEMA.TABLES (where it is not, and the first version of this code looked for it there).
+const IDENTITY_SCHEMA = require('./identity-schema');
 const TYPES = require('./task-types');
 const AUTH = require('./auth');
 
@@ -145,16 +149,73 @@ async function claimTask({ workerId, taskId = null, overrideReason = null } = {}
       { stop: gate.stop });
   }
 
-  // ── 2. PICK A CLAIMABLE TASK ─────────────────────────────────────────────
+  // ── 2. WHAT MAY THIS WORKER EXECUTE AT ALL? (B4.1/B4.3) ──────────────────
+  //
+  // Owner instruction: "Hardware-only work must queue safely without consuming retry attempts or
+  // being claimed by cloud workers."
+  //
+  // The filter is in the PICK, and that placement is the whole mechanism. A task this worker may
+  // not execute is never selected, so it stays PENDING, untouched, with its attempt count
+  // unchanged — "queues safely" falls out of not being chosen rather than needing a special path.
+  // The alternative shape — pick it, then refuse it — would consume an attempt and record a
+  // failure against work that was never wrong, which is how a correct task gets reaped.
+  //
+  // A worker with no declared execution capabilities may run cloud-eligible work and nothing else.
+  // Fail-closed on purpose: treating an undeclared worker as able to do everything would make the
+  // classification vacuous for every worker enrolled before it existed, which is all of them.
+  const ident = await query(
+    `SELECT capabilities FROM ${IDENTITY_SCHEMA.TABLES.identities} WHERE id = $1`, [workerId]);
+  const workerCaps = ident.rows.length ? (ident.rows[0].capabilities || []) : [];
+  const claimable = TYPES.claimableTypesFor(workerCaps);
+  if (!claimable.length) {
+    return refuse('nothing_to_do',
+      'this worker declares no capability matching any known task type');
+  }
+
+  // ── 3. PICK A CLAIMABLE TASK ─────────────────────────────────────────────
+  // Two DIFFERENT guards sit on this path and both must stay load-bearing:
+  //
+  //   the capability filter  — a KNOWN type this worker may not execute is never selected, so it
+  //                            stays PENDING with its attempts unconsumed (the point of B4.3);
+  //   the allowlist refusal  — a row naming a type that is not in the registry at all is refused
+  //                            BY NAME at claim, below, before anything executes.
+  //
+  // So the pick must admit an unknown type. Filtering on `task_type = ANY(claimable)` alone made
+  // the second guard unreachable: an undeclared type was simply never picked, and the refusal that
+  // a check asserts by name silently became non-selection. Non-selection is the right answer for
+  // work belonging to another worker and the WRONG answer for a row nobody should ever run — that
+  // one must be seen and named, not quietly skipped, because it is a defect in the queue and not a
+  // routing decision. Hence: claimable types, OR anything the registry does not know.
   const pick = await query(
     `SELECT id, task_type, payload, intent_key, company_id, workflow
        FROM ${SCHEMA.TABLES.tasks}
       WHERE state = 'PENDING' AND cancel_requested_at IS NULL
+        AND (task_type = ANY($2) OR NOT (task_type = ANY($3)))
         AND ($1::text IS NULL OR id = $1)
       ORDER BY created_at
       LIMIT 1`,
-    [taskId]);
-  if (!pick.rows.length) return refuse('nothing_to_do', 'no claimable task');
+    [taskId, claimable, TYPES.KNOWN]);
+  if (!pick.rows.length) {
+    // Distinguish "nothing to do" from "there is work, but not for this worker". The second is a
+    // normal, expected state for a cloud worker while hardware-only work waits, and reporting it
+    // as an empty queue would hide a backlog that an operator needs to see.
+    // Only KNOWN types count as "waiting for another worker". An unknown type is not work a
+    // capable worker will come along and take; it is a row that should not exist, and counting it
+    // here would report a phantom backlog nobody can ever drain.
+    const waiting = await query(
+      `SELECT COUNT(*)::int n FROM ${SCHEMA.TABLES.tasks}
+        WHERE state = 'PENDING' AND cancel_requested_at IS NULL
+          AND task_type = ANY($2) AND NOT (task_type = ANY($1))`,
+      [claimable, TYPES.KNOWN]);
+    const n = waiting.rows[0].n;
+    if (n > 0) {
+      return refuse('nothing_claimable_by_this_worker',
+        `${n} task(s) are waiting that this worker is not capable of executing — they remain `
+        + 'PENDING with their attempts unconsumed, for a worker that declares the capability',
+        { waitingForOtherWorkers: n, workerCapabilities: workerCaps });
+    }
+    return refuse('nothing_to_do', 'no claimable task');
+  }
   const task = pick.rows[0];
 
   // The allowlist again, on the row as it actually is. Enqueue checked the caller's intent; this

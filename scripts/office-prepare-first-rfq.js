@@ -255,9 +255,14 @@ const stop = (why, detail) => {
     ok('the recipient set matches the policy for this workflow: supplier + the company principal');
 
     // ══ 4. WHAT THE BUDGET WOULD ALLOW, BEFORE SPENDING ════════════════════
-    const bctx = CTX_DOOR({ companyId: company.id, objectiveId: OBJECTIVE_ID, runId: null });
+    // The budget travels on the CONTEXT since B2.5a, not as a parameter — enforceHierarchy no
+    // longer has one, so passing `objectiveBudgetUsd` here silently did nothing and this driver
+    // reported "NO authorized budget" for an objective whose row says $10. The figure comes from
+    // the objectives row this script already read, which is where it is authorized.
+    const bctx = CTX_DOOR({ companyId: company.id, objectiveId: OBJECTIVE_ID, runId: null,
+      budgetUsd: obj.budget_usd === null ? null : Number(obj.budget_usd) });
     const before = await budget.enforceHierarchy(bctx, {
-      objectiveId: OBJECTIVE_ID, criticality: 'routine', objectiveBudgetUsd: Number(obj.budget_usd),
+      objectiveId: OBJECTIVE_ID, criticality: 'routine',
     });
     console.log('');
     field('budget decision', before.allow ? 'ALLOWED' : `REFUSED (${before.scope}): ${before.reason}`);

@@ -107,10 +107,36 @@ function raisedByOne(tier) {
     } else bad('approval release does not consult the release gate — unknown cost would not fail closed');
 
     // The ceiling must not be expressible by a caller: no cap parameter in the spec at all.
-    const specBlock = aiSrc.slice(aiSrc.indexOf('async function governedCall'), iGate);
-    if (/capUsd|objectiveBudgetUsd|budgetUsd/.test(specBlock)) {
-      bad('governedCall accepts a budget parameter — an agent could raise its own ceiling');
-    } else ok('governedCall exposes NO cap parameter — the ceiling comes from the stored objective');
+    //
+    // THIS USED TO GREP THE WHOLE FUNCTION PREAMBLE, COMMENTS INCLUDED. It therefore measured the
+    // prose rather than the parameters, and it went red on 2026-11-24 for a comment that merely
+    // EXPLAINED that `objectiveBudgetUsd` had been removed. A check that fails when someone
+    // documents the property it is checking is measuring the wrong thing — and the shape of the
+    // mistake matters more than the false alarm: the same blindness means a cap parameter named in
+    // a comment would have satisfied it just as well as one in the signature.
+    //
+    // So the assertion now reads the DESTRUCTURED NAMES of `spec`, which is the caller's whole
+    // surface, with comments stripped first.
+    const specStart = aiSrc.indexOf('const {', aiSrc.indexOf('async function governedCall'));
+    const specEnd = aiSrc.indexOf('} = spec', specStart);
+    if (specStart < 0 || specEnd < 0 || specEnd > iGate) {
+      bad('could not locate governedCall\'s spec destructuring — this assertion cannot be made, and '
+        + 'an unmeasurable assertion is not a passing one');
+    } else {
+      const specNames = aiSrc.slice(specStart + 'const {'.length, specEnd)
+        .replace(/\/\*[\s\S]*?\*\//g, '')          // block comments
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1')      // line comments
+        .split(',')
+        .map((s) => s.split(/[=:]/)[0].trim())
+        .filter(Boolean);
+      const caps = specNames.filter((n) => /capUsd|objectiveBudgetUsd|budgetUsd|cap$/i.test(n));
+      if (caps.length) {
+        bad(`governedCall accepts a budget parameter (${caps.join(', ')}) — an agent could raise its own ceiling`);
+      } else {
+        ok('governedCall exposes NO cap parameter — the ceiling comes from the stored objective');
+        console.log(`        spec accepts: ${specNames.join(', ')}`);
+      }
+    }
 
     // ══ 3. REAL SPEND IS INCLUDED — CROSS-CHECKED BY A SECOND PATH ═════════
     console.log('\n  MEASURED SPEND, FROM PRODUCTION\n');

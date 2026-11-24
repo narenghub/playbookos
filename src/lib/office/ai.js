@@ -134,10 +134,12 @@ async function governedCall(ctx, spec, deps = {}) {
   // consequentialReleaseGate, because blocking the AI call would destroy the text and the cost row
   // a human is meant to review. Unmeasured calls still raise the tier by one, so they tighten the
   // assessment without inventing a dollar figure.
+  // `objectiveBudgetUsd` is no longer passed — enforceHierarchy READS it off the context now, so
+  // the comment above ("no parameter through which a caller could raise its own ceiling") is true
+  // of the function's signature and not only of this call site. See B2.5a in budget.js.
   const budgetDecision = await budget.enforceHierarchy(ctx, {
     objectiveId: ctx.objectiveId || null,
     criticality,
-    objectiveBudgetUsd: ctx.budgetUsd === undefined ? null : ctx.budgetUsd,
   }, deps);
 
   if (!budgetDecision.allow) {

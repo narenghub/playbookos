@@ -593,25 +593,33 @@ globalThis.fetch = async (u, opts) => {
 
     // ══ RULING §10: BUDGET HIERARCHY — BOTH CAPS ═══════════════════════════
     note('§10: a $10 objective may not consume enterprise headroom');
-    const hier = await budget.enforceHierarchy(ctx, { objectiveId: OA, criticality: 'routine',
-      capUsd: 1e9, objectiveBudgetUsd: 0.000001 }, deps);
+    // THE BUDGET IS ON THE CONTEXT NOW, not a parameter (B2.5a): enforceHierarchy reads
+    // ctx.budgetUsd, so a delegated child agent cannot raise its own ceiling by passing a bigger
+    // number. deriveContext mints a real context with the budget this case needs — which also
+    // makes the assertion more faithful than the old parameter did, because it exercises the
+    // value the production path actually reads.
+    const CTXMOD = require('../src/lib/office/context');
+    const tinyObjective = CTXMOD.deriveContext(ctx, { budgetUsd: 0.000001 });
+    const hier = await budget.enforceHierarchy(tinyObjective, { objectiveId: OA,
+      criticality: 'routine', capUsd: 1e9 }, deps);
     if (hier.allow) bad('§10 an exhausted OBJECTIVE budget was permitted because enterprise headroom remained');
     else if (hier.scope !== 'objective') bad(`§10 refused at the wrong scope: ${hier.scope}`);
     else ok('§10 an exhausted objective budget refuses even with unlimited enterprise headroom');
-    const hier2 = await budget.enforceHierarchy(ctx, { objectiveId: OA, criticality: 'routine',
-      capUsd: 0.000001, objectiveBudgetUsd: 1e9 }, deps);
+    const richObjective = CTXMOD.deriveContext(ctx, { budgetUsd: 1e9 });
+    const hier2 = await budget.enforceHierarchy(richObjective, { objectiveId: OA,
+      criticality: 'routine', capUsd: 0.000001 }, deps);
     if (hier2.allow) bad('§10 an exhausted ENTERPRISE cap was permitted because the objective had budget');
     else if (hier2.scope !== 'enterprise') bad(`§10 refused at the wrong scope: ${hier2.scope}`);
     else ok('§10 an exhausted enterprise cap refuses even with objective budget remaining');
-    const hier3 = await budget.enforceHierarchy(ctx, { objectiveId: OA, criticality: 'recovery',
-      capUsd: 0.000001, objectiveBudgetUsd: 0.000001 }, deps);
+    const hier3 = await budget.enforceHierarchy(tinyObjective, { objectiveId: OA,
+      criticality: 'recovery', capUsd: 0.000001 }, deps);
     if (!hier3.allow) bad('§10 recovery work was refused by the hierarchy — an accounting limit became an outage');
     else ok('§10 recovery work remains exempt from BOTH caps');
 
     // ══ RULING §9: UNKNOWN COST FAILS CLOSED AT RELEASE ════════════════════
     note('§9: unknown cost preserves the AI result as evidence but BLOCKS consequential release');
     const gate = await budget.consequentialReleaseGate(ctx, { runId: ctx.runId,
-      objectiveId: OA, objectiveBudgetUsd: 1e9, capUsd: 1e9 }, deps);
+      objectiveId: OA, capUsd: 1e9 }, deps);
     if (gate.allow) bad('§9 release was permitted on a run carrying unmeasured AI cost');
     else if (gate.reason !== 'unmeasured_ai_cost') bad(`§9 blocked for the wrong reason: ${gate.reason}`);
     else ok(`§9 consequential release is BLOCKED while ${gate.unmeasured} AI call(s) on the run are unmeasured`);
@@ -632,7 +640,7 @@ globalThis.fetch = async (u, opts) => {
     ids.approvals.push(prepared2.approvalId);
     await scope.decideApproval(ctx, { id: prepared2.approvalId, decision: 'approved', resolvedBy: 'naresh' }, deps);
     const blockedRel = await approval.release(ctx, { approvalId: prepared2.approvalId,
-      releasedBy: 'agent', objectiveId: OA, objectiveBudgetUsd: 1e9, capUsd: 1e9 }, deps);
+      releasedBy: 'agent', objectiveId: OA, capUsd: 1e9 }, deps);
     if (blockedRel.released) bad('§9 an APPROVED consequential action released despite unmeasured AI cost');
     else if (blockedRel.reason !== 'unmeasured_ai_cost') bad(`§9 release blocked for the wrong reason: ${blockedRel.reason}`);
     else if (!blockedRel.exception_id) bad('§9 the blocked release filed no exception — a consequential action that silently did not happen');
@@ -1040,7 +1048,7 @@ globalThis.fetch = async (u, opts) => {
       // Now the signatory leaves.
       await q(`UPDATE users SET is_active = 0 WHERE id = 'sig-dir2'`);
       const blocked = await approval.release(relCtx, { approvalId: relPrep.approvalId,
-        releasedBy: 'agent', consequential: true, objectiveId: OREL, objectiveBudgetUsd: 5 }, deps);
+        releasedBy: 'agent', consequential: true, objectiveId: OREL }, deps);
       if (blocked.released) {
         bad('AN APPROVED LETTER RELEASED OVER THE NAME OF SOMEBODY WHO HAD LEFT');
       } else if (blocked.reason === 'signatory_no_longer_active') {
@@ -1374,7 +1382,10 @@ globalThis.fetch = async (u, opts) => {
     // An agent passing a bigger number in its spec must not be able to buy itself more room.
     const forged = await ai.governedCall(tightCtx, { capability: 'fast', prompt: 'x', maxTokens: 20,
       workflow: 'budget-activation-fixture', agent: 'test-agent',
-      budgetUsd: 1000, objectiveBudgetUsd: 1000, capUsd: 1000 }, deps);
+      // `objectiveBudgetUsd` is GONE from the signature with B2.5a, so this assertion now holds
+      // structurally rather than by being ignored — strictly stronger. `budgetUsd` and `capUsd`
+      // stay in the spec to prove an agent's own numbers still buy it nothing.
+      budgetUsd: 1000, capUsd: 1000 }, deps);
     if (!forged.ok && forged.refusedBy === 'budget') ok('a spec carrying its own budget is ignored — the ceiling comes from the stored objective');
     else bad('a caller raised its own spending ceiling through the spec');
 
@@ -1748,12 +1759,17 @@ globalThis.fetch = async (u, opts) => {
         if (!p7.ok) bad('M7 fixture could not be prepared', p7.refusal);
         else {
           ids.runs.push(p7.runId); ids.approvals.push(p7.approvalId);
-          const c7 = CTX_DOOR({ companyId: C7, objectiveId: ORL2, runId: p7.runId });
+          // `budgetUsd: 5` matches the objective created above. B2.5a made the budget come from
+          // the CONTEXT, and a context with no budget now refuses autonomous execution — so a
+          // fixture context that omits it refuses for a budget reason and this M7 control would
+          // measure nothing. The resolver fills this field from the objectives row; a test
+          // context has to fill it too, or it is less complete than the thing it stands in for.
+          const c7 = CTX_DOOR({ companyId: C7, objectiveId: ORL2, runId: p7.runId, budgetUsd: 5 });
           await scope.decideApproval(c7, { id: p7.approvalId, decision: 'approved',
             resolvedBy: 'ceo', resolution: 'M7 control: approved while active' }, deps);
           await q(`UPDATE users SET is_active = 0 WHERE id = 'sig-dir3'`);
           const leak7 = await mutatedAppr.release(c7, { approvalId: p7.approvalId,
-            releasedBy: 'agent', consequential: true, objectiveId: ORL2, objectiveBudgetUsd: 5 }, deps);
+            releasedBy: 'agent', consequential: true, objectiveId: ORL2 }, deps);
           if (leak7.released) {
             ok('M7 without the revalidation an approved letter from a DEPARTED signatory releases — the check is load-bearing');
           } else if (leak7.reason === 'signatory_no_longer_active') {

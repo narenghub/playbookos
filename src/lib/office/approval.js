@@ -63,8 +63,11 @@ async function prepare(ctx, { id, actionKind, actionPayload, reason, ownerUserId
  * Never throws for a refusal — a refusal is an expected outcome, and a caller that treats an
  * exception as the only failure mode would act on an undefined payload.
  */
+// `objectiveBudgetUsd` was removed from this signature with B2.5a. The budget is read off the
+// resolved objective context by budget.enforceHierarchy, so no caller — including a delegated
+// child agent — can raise the ceiling it is released under by passing a number.
 async function release(ctx, { approvalId, releasedBy, consequential = true,
-  objectiveId = null, objectiveBudgetUsd = null, capUsd = undefined }, deps = {}) {
+  objectiveId = null, capUsd = undefined }, deps = {}) {
   assertContext(ctx);
   if (!approvalId) return { released: false, reason: 'no_approval_id' };
   if (!releasedBy) return { released: false, reason: 'no_releasing_actor' };
@@ -174,8 +177,40 @@ async function release(ctx, { approvalId, releasedBy, consequential = true,
     const budget = require('./budget');
     let gate;
     try {
-      gate = await budget.consequentialReleaseGate(ctx, {
-        runId: ctx.runId, objectiveId, objectiveBudgetUsd,
+      // ── THE BUDGET IS READ HERE, FROM THE OBJECTIVE ROW (B2.5a) ──────────
+      //
+      // enforceHierarchy now takes the objective's budget off the context instead of as a
+      // parameter, which is what stops a delegated child from naming its own ceiling. The release
+      // path then has to make sure the context it hands over actually carries that budget: the
+      // executor's context is resolved for the RUN, and a caller may legitimately hold one minted
+      // before the objective's budget mattered. With `budgetUsd` absent, the release of an
+      // approved action on a $0.01 objective that had already spent $0.02 was ALLOWED — the
+      // objective cap was simply not consulted, because "no budget configured" and "budget not
+      // present on this context" were indistinguishable. Measured in
+      // scripts/check-office-release-db.js, which releases that exact fixture.
+      //
+      // So the value is read from stored state, inside this function, through the kernel accessor.
+      // It is not a parameter and not something the caller can influence: `objectiveBudgetUsd` is
+      // gone from this signature, and a caller passing a larger figure is ignored. `deriveContext`
+      // refuses to change the company, so this cannot be used to cross a boundary either.
+      let gateCtx = ctx;
+      if (objectiveId) {
+        const row = await scope.bootstrapObjectiveForContext(objectiveId, deps);
+        if (!row) {
+          return { released: false, reason: 'objective_missing',
+            detail: `approval ${approvalId} names objective ${objectiveId}, which does not exist — `
+              + 'its authorized budget cannot be read, and an unreadable budget is not permission' };
+        }
+        if (row.company_id !== ctx.companyId) {
+          return { released: false, reason: 'objective_company_mismatch',
+            detail: `objective ${objectiveId} belongs to another company — refusing to release` };
+        }
+        gateCtx = require('./context').deriveContext(ctx, {
+          budgetUsd: row.budget_usd === null ? null : Number(row.budget_usd),
+        });
+      }
+      gate = await budget.consequentialReleaseGate(gateCtx, {
+        runId: ctx.runId, objectiveId,
         ...(capUsd === undefined ? {} : { capUsd }),
       }, deps);
     } catch (e) {

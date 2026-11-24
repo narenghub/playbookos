@@ -148,12 +148,70 @@ async function enforce(ctx, { criticality = 'routine', capUsd = DAILY_CAP_USD,
 // and resets; an objective's budget is a TOTAL for its whole life. A $10 objective that has spent
 // $10 is finished even on a day when the enterprise has spent nothing.
 async function enforceHierarchy(ctx, { objectiveId, criticality = 'routine',
-  capUsd = DAILY_CAP_USD, objectiveBudgetUsd = null, refuseOnUnmeasured = false } = {}, deps = {}) {
+  capUsd = DAILY_CAP_USD, refuseOnUnmeasured = false, autonomous = true } = {}, deps = {}) {
   assertContext(ctx);
+
+  // ── THE BUDGET COMES FROM THE CONTEXT, NOT FROM A PARAMETER (B2.5a) ──────
+  //
+  // `objectiveBudgetUsd` used to be an argument. src/lib/office/ai.js passed `ctx.budgetUsd` and
+  // its comment said "There is no parameter through which a caller could raise its own ceiling" —
+  // which was true of that one caller and false of this function's signature. Any other caller,
+  // including a delegated child agent, could simply pass a larger number.
+  //
+  // That is the owner's requirement in B2.5a: "A child agent must not create a new budget that
+  // bypasses its parent's authorized spending limit." A promise in a comment does not stop it; a
+  // missing parameter does. The budget is now READ off the resolved objective context, which
+  // office/context.js minted from the objectives row, so a caller wanting a different budget must
+  // resolve a context for an objective that actually has one — the same structural choice as the
+  // company never being caller-supplied.
+  const objectiveBudgetUsd = ctx.budgetUsd === undefined ? null : ctx.budgetUsd;
 
   const enterprise = await enforce(ctx, { criticality, capUsd, refuseOnUnmeasured }, deps);
   if (NEVER_REFUSED.includes(criticality)) return { allow: true, exempt: true, criticality, enterprise };
   if (!enterprise.allow) return { allow: false, scope: 'enterprise', criticality, enterprise, reason: enterprise.reason };
+
+  // ── A MISSING BUDGET REFUSES AUTONOMOUS EXECUTION (B2.5a) ────────────────
+  //
+  // This block used to be skipped entirely when no objective budget was configured, returning
+  // `{ allow: true, objective: null }`. So an autonomous run against an objective with no budget
+  // was permitted and UNMETERED, bounded only by the enterprise daily cap — which is a shared
+  // ceiling, not this objective's authorization. The tracker recorded "a null ceiling means
+  // unmetered, not zero" as a passing assertion without noting that this is the consequence.
+  //
+  // Now: no budget, no autonomous spend — unless a named, time-bounded, audited exception says
+  // otherwise. The exception is consulted through the kernel accessor, so it is company-scoped and
+  // cannot be asserted by a caller.
+  //
+  // `autonomous` defaults to TRUE because that is the safe default for this function: everything
+  // that reaches it today is a governed office run acting on its own. A human-initiated call that
+  // genuinely should proceed without an objective budget must say so explicitly, and say it at a
+  // call site a reviewer can see.
+  if (objectiveId && objectiveBudgetUsd == null) {
+    if (!autonomous) {
+      return { allow: true, criticality, enterprise, objective: null,
+        note: 'no objective budget, and this call declared itself non-autonomous' };
+    }
+    let exception = null;
+    try {
+      exception = await scope.activeBudgetException(ctx, objectiveId, deps);
+    } catch (e) {
+      // Could not tell. An outage is not permission — the same rule the membership accessor
+      // follows when it returns UNKNOWN rather than "not a member".
+      return { allow: false, scope: 'objective', criticality, enterprise, objective: null,
+        reason: `objective ${objectiveId} has no budget and the exception record could not be read `
+          + `(${e.message}) — an unreadable exception is not an exception` };
+    }
+    if (!exception) {
+      return { allow: false, scope: 'objective', criticality, enterprise, objective: null,
+        needsBudgetOrException: true,
+        reason: `objective ${objectiveId} has NO authorized budget, so autonomous execution is `
+          + 'refused. Set a finite objective budget, or record a named, time-bounded budget '
+          + 'exception against it.' };
+    }
+    return { allow: true, criticality, enterprise, objective: null, budgetException: exception,
+      note: `unmetered under budget exception ${exception.id}, granted by ${exception.grantedBy}, `
+        + `expiring ${new Date(exception.effectiveTo).toISOString()}` };
+  }
 
   if (objectiveId && objectiveBudgetUsd != null) {
     const o = await scope.spendForObjective(ctx, objectiveId, deps);
@@ -212,7 +270,7 @@ async function enforceHierarchy(ctx, { objectiveId, criticality = 'routine',
 // Non-consequential observability and recovery work is not gated here — "unknown cost may be
 // recorded without causing an outage".
 async function consequentialReleaseGate(ctx, { runId, objectiveId = null,
-  capUsd = DAILY_CAP_USD, objectiveBudgetUsd = null } = {}, deps = {}) {
+  capUsd = DAILY_CAP_USD } = {}, deps = {}) {
   assertContext(ctx);
 
   const u = await scope.unmeasuredForRun(ctx, runId, deps);
@@ -223,8 +281,26 @@ async function consequentialReleaseGate(ctx, { runId, objectiveId = null,
       unmeasured: Number(u.unknown_calls) };
   }
 
+  // ── WHY THIS GATE IS DECLARED NON-AUTONOMOUS (B2.5a) ─────────────────────
+  //
+  // `autonomous` defaults to true in enforceHierarchy, and leaving that default here would have
+  // made every governed release of a human-approved action refuse whenever its objective carried
+  // no budget. That is the wrong answer, and wrong in the dangerous direction: it would have left
+  // "set a budget figure, any figure" as the only way to send an email a named person had already
+  // approved — a check that pressures the next operator toward a worse fix (CLAUDE.md).
+  //
+  // The reason it is non-autonomous is not convenience. This gate runs AFTER a named human
+  // approved this specific action, and that approval is the authorization; the budget rule exists
+  // to stop UNATTENDED spend committing the company to money nobody sanctioned. The enterprise
+  // daily cap and the refuse-on-unmeasured rule above are still enforced in full, so a release
+  // still cannot happen while spend is over cap or unproven — only the "no objective budget at
+  // all" refusal is answered by the human approval instead.
+  //
+  // Both halves are pinned in scripts/check-finite-budget-db.js: an autonomous AI call against a
+  // budgetless objective is refused, and a human-approved release against the same objective is
+  // not. If that distinction ever stops being true, those two assertions disagree.
   const h = await enforceHierarchy(ctx, { objectiveId, criticality: 'routine', capUsd,
-    objectiveBudgetUsd, refuseOnUnmeasured: true }, deps);
+    refuseOnUnmeasured: true, autonomous: false }, deps);
   if (!h.allow) return { allow: false, reason: `budget_${h.scope}`, detail: h.reason, hierarchy: h };
 
   return { allow: true, hierarchy: h };

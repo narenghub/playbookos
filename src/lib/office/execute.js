@@ -185,7 +185,10 @@ async function executeApprovedAction(approvalId, { releasedBy, requireExplicitRe
   const released = await approvalMod.release(ctx, {
     approvalId, releasedBy, consequential: true,
     objectiveId: row.objective_id,
-    objectiveBudgetUsd: row.budget_usd === null ? null : Number(row.budget_usd),
+    // `objectiveBudgetUsd` was passed here until B2.5a and is gone from release's signature now:
+    // release reads the objective's authorized budget itself, from the objectives row, so no
+    // caller — this one included — can name the ceiling it will be judged against. Leaving the
+    // dead argument here would have read as though it still did something.
   }, deps);
 
   if (!released.released) {

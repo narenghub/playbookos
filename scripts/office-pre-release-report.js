@@ -96,7 +96,11 @@ function canonical(v) {
     if (!a) { console.error(`  no approval ${APPROVAL_ID}\n`); process.exit(1); }
 
     const p = a.action_payload || {};
+    // `budgetUsd` since B2.5a: the objective cap is read off the context, not passed as a
+    // parameter. Without it on this context the report would print a budget verdict that never
+    // consulted the objective's cap at all — a green line standing in for a check that did not run.
     const ctx = CTX_DOOR({ companyId: a.company_id, objectiveId: a.objective_id, runId: a.run_id,
+      budgetUsd: a.budget_usd === null || a.budget_usd === undefined ? null : Number(a.budget_usd),
     });
 
     // ══ 1. THE APPROVAL ════════════════════════════════════════════════════
@@ -230,7 +234,7 @@ function canonical(v) {
     let gate = null;
     try {
       gate = await budget.consequentialReleaseGate(ctx, {
-        runId: a.run_id, objectiveId: a.objective_id, objectiveBudgetUsd: a.budget_usd,
+        runId: a.run_id, objectiveId: a.objective_id,
       });
     } catch (e) { field('budget gate', `UNAVAILABLE — ${e.message}`); }
     if (!gate) {

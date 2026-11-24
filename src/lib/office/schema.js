@@ -347,6 +347,47 @@ const DDL = [
 
   // The exception queue. "A counter on a dashboard is not a work queue" — so every ruled field is
   // here, and an email is NOT the record: notifications point to this row, they are not it.
+  // ── B2.5a: A NAMED, TIME-BOUNDED, AUDITED BUDGET EXCEPTION ───────────────
+  //
+  // Owner instruction: "A missing budget must refuse autonomous execution unless a separately
+  // authorized, named, time-bounded and audited exception exists."
+  //
+  // Every word of that is a column. `granted_by` and `reason` make it named and accountable;
+  // `effective_to` is NOT NULL so it cannot be open-ended — an exception that never expires is a
+  // policy change wearing an exception's clothes; `revoked_at`/`revoked_by` let it be withdrawn
+  // before expiry; and the partial unique index allows exactly one ACTIVE exception per objective
+  // while keeping every expired and revoked row, so the history of who permitted unmetered
+  // execution and why survives.
+  //
+  // The composite foreign key is the same device agent_memory uses: the exception must point at an
+  // objective OF THE SAME COMPANY, enforced by the database rather than by the accessor, so an
+  // exception granted for one company's objective can never authorize another's.
+  `CREATE TABLE IF NOT EXISTS office_budget_exceptions (
+     id              TEXT PRIMARY KEY,
+     company_id      TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+     objective_id    TEXT NOT NULL,
+     granted_by      TEXT NOT NULL,
+     reason          TEXT NOT NULL,
+     effective_from  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     effective_to    TIMESTAMPTZ NOT NULL,
+     revoked_at      TIMESTAMPTZ,
+     revoked_by      TEXT,
+     revoked_reason  TEXT,
+     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     CONSTRAINT office_budget_exceptions_window CHECK (effective_to > effective_from),
+     CONSTRAINT office_budget_exceptions_revocation_recorded CHECK (
+       (revoked_at IS NULL AND revoked_by IS NULL)
+       OR (revoked_at IS NOT NULL AND revoked_by IS NOT NULL)
+     ),
+     CONSTRAINT office_budget_exceptions_reason_not_blank CHECK (length(btrim(reason)) > 0),
+     CONSTRAINT office_budget_exceptions_same_company
+       FOREIGN KEY (objective_id, company_id) REFERENCES objectives (id, company_id)
+       ON DELETE RESTRICT
+   )`,
+
+  `CREATE UNIQUE INDEX IF NOT EXISTS office_budget_exceptions_one_active
+     ON office_budget_exceptions (objective_id) WHERE revoked_at IS NULL`,
+
   `CREATE TABLE IF NOT EXISTS office_exceptions (
      id            TEXT PRIMARY KEY,
      company_id    TEXT NOT NULL REFERENCES companies(id),
@@ -413,6 +454,9 @@ async function migrateOffice(query) {
 // requiring somebody to remember to list it twice.
 const KERNEL_TABLES = Object.freeze([
   'objectives',
+  // B2.5a. Company-scoped like every other kernel table, so it is read through scope.js and a
+  // caller cannot ask "is there an exception" without a resolved context.
+  'office_budget_exceptions',
   'office_cost_ledger',
   'office_approvals',
   'office_exceptions',

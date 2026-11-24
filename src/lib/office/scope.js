@@ -648,6 +648,44 @@ async function recordOutcome(ctx, { id, runId, outcome, businessEffect, effectRe
 // Objective-level spend, measured and unmeasured, for the whole life of the objective. The
 // enterprise cap is per DAY; an objective's budget is a TOTAL — a $10 objective that has spent
 // $10 is finished whether that happened today or last week.
+/**
+ * The ACTIVE budget exception for one objective, or null. B2.5a.
+ *
+ * "Active" means: not revoked, and now is inside its window. All three conditions are in the SQL
+ * rather than split between SQL and JavaScript, because a half-expressed predicate is how an
+ * expired exception keeps authorizing spend.
+ *
+ * `NOW()` rather than a client timestamp, for the reason measured on 2026-11-24 in the identity
+ * accessors: `effective_from` is written by Postgres with microsecond precision, a JavaScript Date
+ * carries milliseconds, and comparing one clock's write against another clock's read hid a row
+ * from its own creator in 142 of 200 trials. An exception granted and immediately consulted — which
+ * is exactly how an operator would use it — would have appeared not to exist.
+ *
+ * Returns null for "no active exception" and throws for "could not tell". A caller must not read an
+ * outage as permission; that is why this does not swallow.
+ */
+async function activeBudgetException(ctx, objectiveId, deps = {}) {
+  assertContext(ctx);
+  if (!objectiveId) return null;
+  const res = await q(deps)(
+    `SELECT id, granted_by, reason, effective_from, effective_to
+       FROM office_budget_exceptions
+      WHERE company_id = $1
+        AND objective_id = $2
+        AND revoked_at IS NULL
+        AND effective_from <= NOW()
+        AND effective_to   >  NOW()
+      LIMIT 1`,
+    [ctx.companyId, objectiveId]
+  );
+  if (!res.rows.length) return null;
+  const r = res.rows[0];
+  return Object.freeze({
+    id: r.id, grantedBy: r.granted_by, reason: r.reason,
+    effectiveFrom: r.effective_from, effectiveTo: r.effective_to,
+  });
+}
+
 async function spendForObjective(ctx, objectiveId, deps = {}) {
   assertContext(ctx);
   const res = await q(deps)(
@@ -771,6 +809,7 @@ async function provenance(ctx, runId, deps = {}) {
 }
 
 module.exports = {
+  activeBudgetException,
   provenance, spendForObjective, unmeasuredForRun, claimApprovalRelease, approvalReleaseState,
   verifyReleasedApprovalForDigest, approvalsForReview, approvalForReview,
   bootstrapObjectiveForContext, bootstrapApprovalForExecution, bootstrapApprovalOwner,

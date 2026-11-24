@@ -321,6 +321,15 @@ pf_step "no workflow wears a company label its queries ignore" node scripts/chec
 # employee query would have selected the right people and then read every company's tasks, scores
 # and revenue. The central property: an UNATTRIBUTED row is visible to NO company, not to all.
 pf_step "operational records belong to a company" node scripts/check-record-ownership-db.js
+# B2.5a. A missing objective budget used to mean UNMETERED autonomous execution, bounded only by a
+# shared enterprise daily cap. And the budget was a caller-supplied parameter, so a delegated child
+# agent could pass a bigger number. Both closed; the exception that permits unmetered work must be
+# named, time-bounded, audited and revocable.
+pf_step "autonomous execution needs a finite authorized budget" node scripts/check-finite-budget-db.js
+# B4.1/B4.3. Every capability declares where it may execute, and the filter is in the PICK — so
+# hardware-only work a cloud worker cannot do is never selected, and therefore queues with its
+# attempts unconsumed rather than being claimed and failed.
+pf_step "work executes only where it is eligible to" node scripts/check-execution-eligibility-db.js
 pf_step "the workflow-company proposal cannot assign anything" node --test scripts/proposal-is-readonly.test.js
 # B7.6. Six producers in four modules and two processes bind approvals. They agree or every
 # approved external send refuses, and each local expression of "the message" is locally correct —

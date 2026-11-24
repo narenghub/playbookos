@@ -285,6 +285,13 @@ function contextForTests__TEST_ONLY(fields) {
   if (!fields || !fields.companyId) {
     throw new Error('contextForTests__TEST_ONLY needs at least a companyId');
   }
+  // NOTE ON `budgetUsd`, since B2.5a: a context with no budget now REFUSES autonomous execution,
+  // because the alternative — permitting unmetered spend bounded only by a shared enterprise cap —
+  // is the gap B2.5a closed. `resolveObjectiveContext` fills this field from the objectives row, so
+  // a test context that omits it is LESS COMPLETE than the thing it stands in for and will refuse
+  // for a budget reason rather than the reason under test. No default is invented here: this
+  // function cannot know the objective's budget without a query, and guessing one would be exactly
+  // the caller-supplied ceiling B2.5a removed. Tests that exercise a budgeted path pass it.
   return sealContext({ objectiveId: null, source: 'test', ...fields });
 }
 

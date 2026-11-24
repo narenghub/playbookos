@@ -93,6 +93,13 @@ const EXEMPT = new Set([
   // intercepting named statements, which requires naming them. Disposable cluster; fixtures
   // removed by the ids it created. Same category as the K2 checks above.
   path.join('scripts', 'check-office-memory-integration-db.js'),
+  // B2.5a. Asserts office_budget_exceptions' DATABASE guarantees directly, which is the whole
+  // point of them: a NOT NULL expiry, a CHECK that the window runs forwards, a CHECK that a
+  // reason is not blank, and a composite FK refusing an exception for another company's
+  // objective. None of those can be proved through an accessor written to satisfy them — the
+  // accessor only ever reads ACTIVE exceptions, so it cannot even see a malformed one. It also
+  // charges cost-ledger rows and opens runs as fixtures. Disposable cluster, fixtures by id.
+  path.join('scripts', 'check-finite-budget-db.js'),
   path.join('scripts', 'check-office-recovery-db.js'),
   path.join('scripts', 'validate-k4-activation-deployed.js'),
   path.join('scripts', 'check-office-governed-ai-db.js'),

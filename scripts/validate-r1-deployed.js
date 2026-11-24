@@ -250,9 +250,12 @@ const SRC = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', .
     console.log('\n  BUDGET\n');
     for (const o of objs.filter((x) => x.status === 'active')) {
       const row = (await query(`SELECT company_id, budget_usd FROM objectives WHERE id=$1`, [o.id])).rows[0];
-      const ctx = CTX_DOOR({ companyId: row.company_id, objectiveId: o.id, runId: null });
-      const h = await budget.enforceHierarchy(ctx, { objectiveId: o.id, criticality: 'routine',
-        objectiveBudgetUsd: row.budget_usd === null ? null : Number(row.budget_usd) });
+      // Since B2.5a the budget travels on the CONTEXT, read from this objectives row. The
+      // parameter is gone, so passing one here would have reported every budgeted objective as
+      // having no budget at all.
+      const ctx = CTX_DOOR({ companyId: row.company_id, objectiveId: o.id, runId: null,
+        budgetUsd: row.budget_usd === null ? null : Number(row.budget_usd) });
+      const h = await budget.enforceHierarchy(ctx, { objectiveId: o.id, criticality: 'routine' });
       field(o.id, h.allow ? 'ALLOWED' : `REFUSED (${h.scope}): ${h.reason}`);
     }
 
