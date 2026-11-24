@@ -93,9 +93,41 @@ async function readOnly(url, fn) {
   }
 }
 
+// ── THE GOVERNANCE SCHEMA THIS REPORT DEPENDS ON ────────────────────────────
+//
+// Added after the first production run of this script errored with
+// `relation "autonomy_stops" does not exist`. A report that dies on the absence of the thing it
+// was asked about is less useful than one that says what is absent — and that absence turned out
+// to be the most important thing the run had to tell anybody.
+//
+// `pg_tables`/`tablename`, not information_schema: a stub written against information_schema once
+// returned an empty table list here and four assertions passed for the wrong reason.
+const GOVERNANCE_TABLES = [
+  'autonomy_stops', 'autonomy_events',       // the kill switch and its history
+  'agent_runs', 'agent_run_events',          // the run ledger
+  'approval_queue',                          // the approval boundary
+  'worker_identities', 'worker_tasks', 'worker_audit',   // M7
+];
+
+async function tablePresence(q) {
+  const r = await q(
+    `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = ANY($1)`,
+    [GOVERNANCE_TABLES]);
+  const present = new Set(r.rows.map((x) => x.tablename));
+  return GOVERNANCE_TABLES.map((t) => ({ table: t, present: present.has(t) }));
+}
+
 /** Reads the stop rows and the host identity. Nothing else. */
 async function gather(q) {
   const where = await q('SELECT current_database() AS db, inet_server_addr()::text AS addr');
+  const schema = await tablePresence(q);
+  const missing = schema.filter((s) => !s.present).map((s) => s.table);
+
+  // Without the kill-switch table there is nothing to inventory, and saying so IS the answer.
+  if (missing.includes('autonomy_stops')) {
+    return { where: where.rows[0] || {}, stops: null, events: null, schema, missing };
+  }
+
   const stops = await q(
     `SELECT scope_type, scope_key, reason, set_by, set_at
        FROM autonomy_stops
@@ -106,7 +138,7 @@ async function gather(q) {
     const r = await q('SELECT COUNT(*)::int AS n FROM autonomy_events');
     events = r.rows[0] ? r.rows[0].n : null;
   } catch (_) { events = null; }
-  return { where: where.rows[0] || {}, stops: stops.rows, events };
+  return { where: where.rows[0] || {}, stops: stops.rows, events, schema, missing };
 }
 
 function fmtScope(s) {
@@ -121,7 +153,34 @@ async function main() {
 
   console.log('\n══ STOP INVENTORY (read-only) ══\n');
   console.log(`  database : ${primary.where.db || '(unknown)'}`);
-  console.log(`  rows     : ${primary.stops.length} stop row(s)`);
+
+  // ── GOVERNANCE SCHEMA ────────────────────────────────────────────────────
+  console.log('\n── governance schema ──');
+  for (const s of primary.schema) {
+    console.log(`  ${s.table.padEnd(20)} ${s.present ? 'present' : 'ABSENT'}`);
+  }
+
+  if (primary.stops === null) {
+    console.log(`\n  THE KILL SWITCH TABLE IS ABSENT from this database.`);
+    console.log('  There is no STOP inventory to report, because there is no table to hold one.');
+    console.log('\n  What that means, from autonomy.js checkStopped():');
+    console.log('    a missing table makes kill-state UNKNOWABLE, and the code FAILS CLOSED —');
+    console.log('    every CONSEQUENTIAL action returns a synthetic global stop reading');
+    console.log('    "kill-state could not be determined ... refusing consequential action".');
+    console.log('    Read-only analysis continues (consequential:false returns null).');
+    console.log('\n  So any path that consults the kill switch is refusing here, and any path that');
+    console.log('  does NOT consult it is running with no kill switch at all. Which of those is');
+    console.log('  true for a given workflow is the thing to establish next, per workflow.');
+    console.log(`\n  Registered scopes that therefore have NO enforceable stop:`);
+    for (const type of SCOPE_TYPES_TO_LIST) {
+      const known = AUTONOMY.knownScopeKeys(type) || [];
+      console.log(`    ${type.padEnd(12)} ${known.length}`);
+    }
+    console.log('\nread-only report complete. No row was inserted, updated or deleted.\n');
+    return;
+  }
+
+  console.log(`\n  rows     : ${primary.stops.length} stop row(s)`);
   console.log(`  history  : ${primary.events === null ? 'autonomy_events not present' : `${primary.events} event(s)`}`);
 
   // ── 1 + 2 + 3. REGISTERED SCOPES, STOPS, AND THE GAPS ────────────────────
