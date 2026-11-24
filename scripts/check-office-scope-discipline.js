@@ -86,6 +86,13 @@ const EXEMPT = new Set([
   path.join('scripts', 'check-k1-validator-runs.js'),
   path.join('scripts', 'check-office-k2-db.js'),
   path.join('scripts', 'validate-k2-deployed.js'),
+  // B3.1a/B3.1b. Drives the REAL Executive Agent, then asks two questions the accessor cannot
+  // answer: whether a FAILED review left a memory behind, and whether ANY fixture row survived.
+  // Both are counts over raw tables, and the second deliberately includes rows the live predicate
+  // would filter out — a leak the accessor would politely hide. It also forces failures by
+  // intercepting named statements, which requires naming them. Disposable cluster; fixtures
+  // removed by the ids it created. Same category as the K2 checks above.
+  path.join('scripts', 'check-office-memory-integration-db.js'),
   path.join('scripts', 'check-office-recovery-db.js'),
   path.join('scripts', 'validate-k4-activation-deployed.js'),
   path.join('scripts', 'check-office-governed-ai-db.js'),

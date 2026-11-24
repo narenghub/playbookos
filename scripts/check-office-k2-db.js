@@ -119,6 +119,11 @@ async function refused(fn) {
   try {
     await migrateRuns(q);
     await migrateOffice(q);
+    // B3.1a: the Executive Agent now recalls and records company-isolated memory, so agent_memory
+    // is a real schema dependency of the agent this check exercises. Omitting it produced
+    // `relation "agent_memory" does not exist` — the loud failure working as intended, since 42P01
+    // is not among the ignorable migration codes.
+    await require('../src/lib/office/memory').migrateMemory(q);
     ok('schema applied (runs + office)');
 
     // ── 1. STRUCTURAL: the Executive Agent has no way out of the process ──
@@ -356,6 +361,16 @@ async function refused(fn) {
       if (!trg || trg.tgenabled === 'D') bad('the append-only trigger was left DISABLED after cleanup');
       else ok('the append-only trigger is enabled again after cleanup');
 
+      // B3.1a: the agent now records a memory per review, and agent_memory references companies
+      // ON DELETE RESTRICT — so the company delete below failed until this existed. Scoped to THE
+      // FIXTURE COMPANIES THIS RUN CREATED, which is still "delete only what you created, by
+      // explicit id": the id is one of ours, and nothing belonging to anyone else can match it.
+      // Never by timestamp, never by pattern. The supersedes chain is unlinked first, because a
+      // correction points at the memory it replaced under the same RESTRICT.
+      if (ids.companies.length) {
+        await q(`UPDATE agent_memory SET supersedes = NULL WHERE company_id = ANY($1)`, [ids.companies]);
+        await q(`DELETE FROM agent_memory WHERE company_id = ANY($1)`, [ids.companies]);
+      }
       for (const id of ids.objectives) await q(`DELETE FROM objectives WHERE id = $1`, [id]);
       for (const id of ids.companies) await q(`DELETE FROM companies WHERE id = $1`, [id]);
 

@@ -122,6 +122,9 @@ const POSITIVES = [
   try {
     await migrateRuns(query);
     await migrateOffice(query);
+    // B3.1a: the deployed Executive Agent now recalls and records company-isolated memory, so
+    // agent_memory is part of a "correctly migrated database" for the K2 validator it drives.
+    await require('../src/lib/office/memory').migrateMemory(query);
     // Historical runs, unattributed — exactly the production shape the validator must find.
     for (const id of HISTORICAL) {
       // created_at is set explicitly to a PRE-CUTOVER date. The validator's ruling-7 assertion is
@@ -191,7 +194,7 @@ const POSITIVES = [
 
     await sabotage('composite FK dropped',
       () => query(`ALTER TABLE agent_runs DROP CONSTRAINT fk_agent_runs_objective_company`),
-      () => migrateOffice(query),
+      async () => { await migrateOffice(query); await require('../src/lib/office/memory').migrateMemory(query); },
       /fk_agent_runs_objective_company is ABSENT|was ACCEPTED by production/);
 
     await sabotage('MATCH FULL downgraded to MATCH SIMPLE',

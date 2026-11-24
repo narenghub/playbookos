@@ -76,6 +76,24 @@ const EXEMPT = new Map([
     'inserts the four approved mappings as FIXTURES to prove its tripwire fires, then removes them '
     + 'BY ID. It reads live mappings only through workflow-company.js allMappings(); the direct SQL '
     + 'is the fixture cleanup, which must not depend on the accessor it is testing around.'],
+  ['scripts/check-office-memory-integration-db.js',
+    'drives the REAL Executive Agent against a disposable cluster, so its raw SQL is fixture setup and cleanup for rows this run created: it counts memories and outcomes by the fixture COMPANY IDS it inserted, and forces failures by intercepting specific statements to prove a failed review writes nothing. The agent itself reaches the tables only through the accessors — that is what is being verified.'],
+  ['scripts/check-office-k2-db.js',
+    'deletes the agent_memory rows ITS OWN agent run produced, scoped to the fixture company ids '
+    + 'it created, because agent_memory references companies ON DELETE RESTRICT and the company '
+    + 'cleanup fails without it. Still by an id this run made: never by timestamp, never by '
+    + 'pattern. It reads nothing from the table.'],
+  ['scripts/validate-k1-deployed.js',
+    'NAMES the three company-scoped tables in AUTHORIZED_COMPANY_ID_TABLES, which is a list of '
+    + 'table names compared against information_schema — it is the authoritative record of which '
+    + 'tables may carry company_id, not a query against any of them. A validator whose whole job '
+    + 'is to notice an unauthorized company_id column must be allowed to name the authorized ones.'],
+  ['scripts/validate-k2-deployed.js',
+    'COUNTS leftover agent_memory rows for the fixture companies it created, as part of proving '
+    + 'that nothing survived its rollback. The accessor cannot serve that: the question is whether '
+    + 'ANY row remains, including one the live predicate would filter out as superseded or expired '
+    + '— a leak the accessor would politely hide. It reads only a COUNT, writes nothing, and '
+    + 'guards the table name with to_regclass so an unmigrated production database reads as zero.'],
   ['src/lib/office/memory.js',
     'THE accessor for agent_memory, and its DDL. Its whole purpose is to own that table — and it '
     + 'is the only module that may, because every function it exports takes a resolved company '

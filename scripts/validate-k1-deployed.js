@@ -53,9 +53,32 @@ const bad = (m, d) => {
 };
 const note = (m) => console.log(`  --    ${m}`);
 
+// WHICH TABLES MAY CARRY company_id — the authoritative list, where each entry is a ruling.
+//
+// Section 2 compares the live schema against this set, so it is not a convenience list: a table
+// appearing here is a statement that somebody authorized it to be company-scoped.
+//
+// The last three were added 2026-11-24 and would otherwise have turned this validator RED the
+// moment their migrations reached production — a false security alarm about approved work. Worth
+// noting as a property of the check: it is strict enough that LEGITIMATE growth trips it, which is
+// the right trade, and the fix is to record the authorization rather than loosen the rule.
 const AUTHORIZED_COMPANY_ID_TABLES = new Set([
+  // K1 kernel: the objective, the run welded to it, and the four durable records of what a run
+  // cost, approved, excepted and achieved.
   'objectives', 'agent_runs',
   'office_cost_ledger', 'office_approvals', 'office_exceptions', 'office_outcomes',
+  // B7.8 (owner ruling, 2026-11-24): many-to-many identity. `user_companies` IS the table that
+  // decides company scope, so it is deliberately NOT a kernel table — routing it through the
+  // accessor whose predicate is the company scope would be circular. It gets single-accessor
+  // discipline from src/lib/identity/company-membership.js instead.
+  'user_companies',
+  // B7.8c: which company a scheduled workflow acts for. Supersedes CRON_SCOPES[*].company for
+  // authorization purposes.
+  'workflow_companies',
+  // B3.1: persistent company-isolated agent memory. company_id is NOT NULL with ON DELETE
+  // RESTRICT, and a composite foreign key makes the database refuse a correction chain that
+  // crosses companies.
+  'agent_memory',
 ]);
 const REAL_CONSTRAINT_CODES = new Set(['23503', '23502', '23514', '23505']);
 const SENTINEL = '__k1_validation_rollback__';

@@ -267,13 +267,26 @@ const REAL_CONSTRAINT_CODES = new Set(['23503', '23502', '23514', '23505', 'P000
     await gone('companies', 'id', fixtures.companies);
     await gone('objectives', 'id', fixtures.objectives);
     await gone('agent_runs', 'run_id', fixtures.runs);
+    // `agent_memory` joined this sweep because B3.1a made the Executive Agent record a memory per
+    // review. Everything here runs inside a transaction that is rolled back, so no row should
+    // survive — but an artefact nobody counts is an artefact nobody notices, and this is the sweep
+    // that would have to notice it.
+    //
+    // to_regclass rather than a bare count: on a production database where B3.1's migration has not
+    // yet been applied the table legitimately does not exist, and a missing table must read as
+    // "nothing to count" rather than as a failure of this validator.
     const strays = (await query(
       `SELECT (SELECT COUNT(*)::int FROM objectives WHERE created_by='validate-k2') AS o,
-              (SELECT COUNT(*)::int FROM office_outcomes WHERE company_id = ANY($1)) AS oc`,
+              (SELECT COUNT(*)::int FROM office_outcomes WHERE company_id = ANY($1)) AS oc,
+              (SELECT CASE WHEN to_regclass('public.agent_memory') IS NULL THEN 0
+                           ELSE (SELECT COUNT(*)::int FROM agent_memory
+                                  WHERE company_id = ANY($1)) END) AS mem`,
       [fixtures.companies]
     )).rows[0];
-    if (strays.o || strays.oc) bad(`validation artefacts survived: objectives=${strays.o} outcomes=${strays.oc}`);
-    else ok('no validation artefact of any kind survived the rollback');
+    if (strays.o || strays.oc || strays.mem) {
+      bad(`validation artefacts survived: objectives=${strays.o} outcomes=${strays.oc} `
+        + `memories=${strays.mem}`);
+    } else ok('no validation artefact of any kind survived the rollback — agent memory included');
 
     const post = (await query(
       `SELECT COUNT(*)::int n FROM agent_runs WHERE created_at >= '2026-11-01T12:00:00Z'::timestamptz AND company_id IS NOT NULL`

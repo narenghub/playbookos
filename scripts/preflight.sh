@@ -305,6 +305,10 @@ pf_step "company membership holds its ruled properties" node scripts/check-compa
 # another decided. Proved against a real server because every property that matters here is a
 # predicate, a composite foreign key or a partial unique index.
 pf_step "agent memory is isolated per company" node scripts/check-office-memory-db.js
+# B3.1a/B3.1b. The memory LOOP inside a real agent run: remember, recall in a later run, use it,
+# keep provenance — and a memory that asserts authority changes nothing. None of that is provable
+# with a stubbed query, and the adversarial half is the half that matters.
+pf_step "an agent's memory informs it without authorizing it" node scripts/check-office-memory-integration-db.js
 # A scheduled job that claims a local business hour and passes no timezone fires in whatever
 # timezone the container has. Eight did, five to six hours early, with the local time drifting an
 # hour at each DST transition — including the one that scores and escalates the whole team.
