@@ -28,9 +28,10 @@ const {
   lastWatermark, SyncRefused,
 } = require('./sync-run');
 const { normalizeAward } = require('./usaspending');
+const { contextForTests__TEST_ONLY: CTX_FOR_TESTS } = require('../office/context');
 
-const CTX = Object.freeze({ companyId: 'company-abiozen' });
-const OTHER = Object.freeze({ companyId: 'company-cro360' });
+const CTX = CTX_FOR_TESTS({ companyId: 'company-abiozen' });
+const OTHER = CTX_FOR_TESTS({ companyId: 'company-cro360' });
 const RUN = '8f2b1c44-0000-4000-8000-000000000001';
 
 // A recording fake. Returns whatever the scripted handler gives and keeps every statement so the
@@ -115,10 +116,20 @@ test('a sync cannot happen outside an agent_run', async () => {
 
 test('an unresolved company context is refused before any lookup happens', async () => {
   const db = fakeDb([[/FROM source_connectors/, connector()]]);
+  // Since 2026-11-24 a context is trusted by PROVENANCE, not by shape: office/context.js stamps a
+  // module-private Symbol a caller cannot obtain, so all three of these refuse with the same
+  // answer — this module did not produce you. The guard previously checked `Object.isFrozen` plus a
+  // `companyId`, which meant the third case below was ACCEPTED.
   await assert.rejects(beginSync({ companyId: 'x' }, { sourceKey: 'usaspending', runId: RUN }, db),
-    /frozen object/, 'an unfrozen context is not a resolved context');
+    /not produced by/, 'a bare object is not a resolved context');
   await assert.rejects(beginSync(Object.freeze({}), { sourceKey: 'usaspending', runId: RUN }, db),
-    /no companyId/);
+    /not produced by/, 'nor is a frozen one with nothing in it');
+  await assert.rejects(
+    beginSync(Object.freeze({ companyId: 'company-someone-elses' }),
+      { sourceKey: 'usaspending', runId: RUN }, db),
+    /not produced by/,
+    'DECISIVE: nor a FROZEN object naming another company — which is exactly the shape a caller '
+    + "wanting to sync someone else's connector would construct");
   assert.equal(db.find(/FROM source_connectors/).length, 0, 'nothing was read');
 });
 

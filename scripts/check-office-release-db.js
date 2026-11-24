@@ -42,6 +42,11 @@ const { execFileSync, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -159,7 +164,7 @@ const freshOffice = () => {
         deadline: '2026-12-31', budgetUsd: budget, autonomyTier: 'supervised',
         approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
       await q(`UPDATE objectives SET status='active', release_mode=$2 WHERE id=$1`, [OID, releaseMode]);
-      const ctx0 = Object.freeze({ companyId: CO, objectiveId: OID, runId: null });
+      const ctx0 = CTX_DOOR({ companyId: CO, objectiveId: OID, runId: null });
       const begun = await require('../src/lib/office/run').beginObjectiveRun({
         objectiveId: OID, trigger: 'manual', workflow: 'governed-rfq-generation',
         agent: 'procurement-agent', intentKey: `r1-${n}` }, deps);

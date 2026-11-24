@@ -58,6 +58,11 @@ const { beginObjectiveRun } = require('../src/lib/office/run');
 const { resolveObjectiveContext } = require('../src/lib/office/context');
 const { query } = require('../src/lib/db');
 const { ledger } = require('../src/lib/run-ledger');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 // The approved objective, verbatim from the ruling. Part A compares production against this.
 const APPROVED = Object.freeze({
@@ -180,7 +185,7 @@ const field = (k, v) => console.log(`    ${String(k).padEnd(20)} ${v === null ||
       note(`validation fixture ${FIXTURE_ID} already exists (${fx.rows[0].status}) — reusing it`);
     }
 
-    const fxCtxForStatus = Object.freeze({ companyId: company.id, objectiveId: FIXTURE_ID, runId: null });
+    const fxCtxForStatus = CTX_DOOR({ companyId: company.id, objectiveId: FIXTURE_ID, runId: null });
     await scope.setObjectiveStatus(fxCtxForStatus, { id: FIXTURE_ID, status: 'active' });
 
     // The run. Company is DERIVED from the fixture objective; there is no parameter for it.

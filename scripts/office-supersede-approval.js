@@ -35,6 +35,11 @@
 const crypto = require('crypto');
 const scope = require('../src/lib/office/scope');
 const { query } = require('../src/lib/db');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -135,8 +140,7 @@ const digestOf = (p) => crypto.createHash('sha256').update(canonical(p)).digest(
     }
 
     // ── THE SINGLE AUTHORIZED TRANSITION ───────────────────────────────────
-    const ctx = Object.freeze({
-      companyId: row.company_id, objectiveId: row.objective_id, runId: row.run_id,
+    const ctx = CTX_DOOR({ companyId: row.company_id, objectiveId: row.objective_id, runId: row.run_id,
     });
     const done = await scope.supersedeApproval(ctx, {
       approvalId: APPROVAL_ID, supersededBy: ACTOR, reason: REASON.trim(),

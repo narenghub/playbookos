@@ -30,6 +30,11 @@ const path = require('path');
 const budget = require('../src/lib/office/budget');
 const scope = require('../src/lib/office/scope');
 const { query } = require('../src/lib/db');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 const APPROVED_OBJECTIVE = 'obj-abiozen-first-governed-rfq';
 
@@ -111,7 +116,7 @@ function raisedByOne(tier) {
     console.log('\n  MEASURED SPEND, FROM PRODUCTION\n');
     const company = (await query(`SELECT id, display_name FROM companies WHERE slug='abiozen'`)).rows[0];
     if (!company) { bad('no abiozen company — nothing to assess'); process.exit(1); }
-    const ctx = Object.freeze({ companyId: company.id, objectiveId: null, runId: null });
+    const ctx = CTX_DOOR({ companyId: company.id, objectiveId: null, runId: null });
 
     const a = await budget.assess(ctx, {});
     field('company', `${company.display_name} (${company.id})`);

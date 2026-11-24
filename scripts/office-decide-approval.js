@@ -30,6 +30,11 @@
 
 const scope = require('../src/lib/office/scope');
 const { query } = require('../src/lib/db');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 const argv = process.argv.slice(2);
 const arg = (n) => {
@@ -117,7 +122,7 @@ const stop = (why, detail) => {
     // ── THE DECISION ────────────────────────────────────────────────────────
     const status = APPROVE ? 'approved' : 'rejected';
     const decided = await scope.decideApproval(
-      Object.freeze({ companyId: row.company_id, objectiveId: row.objective_id, runId: row.run_id }),
+      CTX_DOOR({ companyId: row.company_id, objectiveId: row.objective_id, runId: row.run_id }),
       { id: APPROVAL_ID, decision: status, resolvedBy: BY, resolution: REASON }
     );
     if (!decided) { bad('the decision did not apply'); process.exit(1); }

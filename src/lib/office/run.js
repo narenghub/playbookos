@@ -67,14 +67,10 @@ async function beginObjectiveRun({ objectiveId, trigger, triggerDetail = null, w
     duplicate: false,
     runId: created.runId,
     rootRunId: created.rootRunId,
-    context: Object.freeze({
-      companyId: ctx.companyId,
-      objectiveId: ctx.objectiveId,
-      runId: created.runId,
-      autonomyTier: ctx.autonomyTier,
-      approvalPolicy: ctx.approvalPolicy,
-      budgetUsd: ctx.budgetUsd,
-    }),
+    // deriveContext, not a bare Object.freeze: office/context.js brands contexts with a
+    // module-private Symbol, and a hand-built copy — however frozen — is refused by assertContext
+    // as "not produced by". Deriving keeps the brand and cannot change the company.
+    context: require('./context').deriveContext(ctx, { runId: created.runId }),
   };
 }
 

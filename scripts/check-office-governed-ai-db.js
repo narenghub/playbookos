@@ -37,6 +37,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -160,7 +165,7 @@ globalThis.fetch = async (u, opts) => {
       createdBy: 'ceo',
     }, deps);
     ids.objectives.push(OA);
-    const ctxA0 = Object.freeze({ companyId: A, objectiveId: OA, runId: null });
+    const ctxA0 = CTX_DOOR({ companyId: A, objectiveId: OA, runId: null });
     await scope.setObjectiveStatus(ctxA0, { id: OA, status: 'active' }, deps);
     ok(`CEO objective created and activated (${created.company_id === A ? 'company fixed' : 'WRONG COMPANY'})`);
 
@@ -450,7 +455,7 @@ globalThis.fetch = async (u, opts) => {
     else ok('H action_kind is immutable: approving one action is not approving another');
 
     // A human decides, company-scoped.
-    const ctxB = Object.freeze({ companyId: B, objectiveId: null, runId: null });
+    const ctxB = CTX_DOOR({ companyId: B, objectiveId: null, runId: null });
     if (await scope.decideApproval(ctxB, { id: prepared.approvalId, decision: 'approved', resolvedBy: 'intruder' }, deps)) {
       bad('H company B approved company A action');
     } else ok('H company B cannot approve company A action');
@@ -791,7 +796,7 @@ globalThis.fetch = async (u, opts) => {
       deadline: '2026-12-31', budgetUsd: 5, autonomyTier: 'supervised',
       approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
     ids.objectives.push(OENTRY);
-    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OENTRY, runId: null }),
+    await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: OENTRY, runId: null }),
       { id: OENTRY, status: 'active' }, deps);
 
     const gp = await freshRfq.runGovernedProcurement({ objectiveId: OENTRY, rfqId: 'rfq-k56',
@@ -860,7 +865,7 @@ globalThis.fetch = async (u, opts) => {
           priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
           autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
         ids.objectives.push(ORACE);
-        await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: ORACE, runId: null }),
+        await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: ORACE, runId: null }),
           { id: ORACE, status: 'active' }, deps);
         await q(`INSERT INTO suppliers (id, name, country, contact_email)
                  VALUES ('sup-race','Race Labs','India','race@sup.invalid')
@@ -965,7 +970,7 @@ globalThis.fetch = async (u, opts) => {
       priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
       autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
     ids.objectives.push(OSIG);
-    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OSIG, runId: null }),
+    await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: OSIG, runId: null }),
       { id: OSIG, status: 'active' }, deps);
     await q(`INSERT INTO suppliers (id, name, country, contact_email)
              VALUES ('sup-sig','Signatory Labs','India','x@sig.invalid') ON CONFLICT (id) DO NOTHING`);
@@ -1019,7 +1024,7 @@ globalThis.fetch = async (u, opts) => {
       priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
       autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
     ids.objectives.push(OREL);
-    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OREL, runId: null }),
+    await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: OREL, runId: null }),
       { id: OREL, status: 'active' }, deps);
     await q(`INSERT INTO suppliers (id, name, country, contact_email)
              VALUES ('sup-rel','Release Labs','India','y@rel.invalid') ON CONFLICT (id) DO NOTHING`);
@@ -1028,7 +1033,7 @@ globalThis.fetch = async (u, opts) => {
     if (!relPrep.ok) bad('the release fixture could not be prepared', relPrep.refusal);
     else {
       ids.runs.push(relPrep.runId); ids.approvals.push(relPrep.approvalId);
-      const relCtx = Object.freeze({ companyId: A, objectiveId: OREL, runId: relPrep.runId });
+      const relCtx = CTX_DOOR({ companyId: A, objectiveId: OREL, runId: relPrep.runId });
       await scope.decideApproval(relCtx, { id: relPrep.approvalId, decision: 'approved',
         resolvedBy: 'ceo', resolution: 'approved while the signatory was still active' }, deps);
 
@@ -1145,7 +1150,7 @@ globalThis.fetch = async (u, opts) => {
         kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
         autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
       ids.objectives.push(OCC);
-      await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OCC, runId: null }),
+      await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: OCC, runId: null }),
         { id: OCC, status: 'active' }, deps);
       await q(`INSERT INTO suppliers (id, name, country, contact_email)
                VALUES ('sup-cc','CC Labs','India','cc@sup.invalid') ON CONFLICT (id) DO NOTHING`);
@@ -1284,7 +1289,7 @@ globalThis.fetch = async (u, opts) => {
       createdBy: 'test',
     }, deps);
     ids.objectives.push(OTIGHT);
-    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OTIGHT, runId: null }),
+    await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: OTIGHT, runId: null }),
       { id: OTIGHT, status: 'active' }, deps);
     const tightRun = await beginObjectiveRun({ objectiveId: OTIGHT, trigger: 'office',
       workflow: 'budget-activation-fixture', agent: 'test-agent', maxRuntimeMinutes: 5 }, deps);
@@ -1353,7 +1358,7 @@ globalThis.fetch = async (u, opts) => {
       autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test',
     }, deps);
     ids.objectives.push(OZERO);
-    await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OZERO, runId: null }),
+    await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: OZERO, runId: null }),
       { id: OZERO, status: 'active' }, deps);
     const zRun = await beginObjectiveRun({ objectiveId: OZERO, trigger: 'office',
       workflow: 'budget-activation-fixture', agent: 'test-agent', maxRuntimeMinutes: 5 }, deps);
@@ -1467,7 +1472,7 @@ globalThis.fetch = async (u, opts) => {
         priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
         autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
       ids.objectives.push(ORP);
-      await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: ORP, runId: null }),
+      await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: ORP, runId: null }),
         { id: ORP, status: 'active' }, deps);
       await q(`INSERT INTO suppliers (id, name, country, contact_email)
                VALUES ('sup-recip','Recipient Labs','India','recip@sup.invalid')
@@ -1536,7 +1541,7 @@ globalThis.fetch = async (u, opts) => {
         priority: 'P3', kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
         autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
       ids.objectives.push(ORP2);
-      await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: ORP2, runId: null }),
+      await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: ORP2, runId: null }),
         { id: ORP2, status: 'active' }, deps);
       await q(`INSERT INTO suppliers (id, name, country, contact_email)
                VALUES ('sup-recip2','Recipient Labs Two','India','recip2@sup.invalid')
@@ -1593,7 +1598,7 @@ globalThis.fetch = async (u, opts) => {
         kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
         autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
       ids.objectives.push(OS1);
-      await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OS1, runId: null }),
+      await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: OS1, runId: null }),
         { id: OS1, status: 'active' }, deps);
       await q(`INSERT INTO suppliers (id, name, country, contact_email)
                VALUES ('sup-sender','Sender Labs','India','snd@sup.invalid')
@@ -1636,7 +1641,7 @@ globalThis.fetch = async (u, opts) => {
         } else bad('a second preparation was allowed while one was pending', JSON.stringify(p2));
 
         // ── REJECT IT, AND THE INTENT IS ALIVE AGAIN ─────────────────────
-        await scope.decideApproval(Object.freeze({ companyId: A, objectiveId: OS1, runId: p1.runId }),
+        await scope.decideApproval(CTX_DOOR({ companyId: A, objectiveId: OS1, runId: p1.runId }),
           { id: p1.approvalId, decision: 'rejected', resolvedBy: 'ceo',
             resolution: 'Superseded — prepared before sender identity was included in the payload' }, deps);
 
@@ -1665,7 +1670,7 @@ globalThis.fetch = async (u, opts) => {
           } else bad('the superseded attempt was altered', JSON.stringify(pl1.status));
 
           // ── AN APPROVED, UNRELEASED ATTEMPT BLOCKS A THIRD ─────────────
-          await scope.decideApproval(Object.freeze({ companyId: A, objectiveId: OS1, runId: p3.runId }),
+          await scope.decideApproval(CTX_DOOR({ companyId: A, objectiveId: OS1, runId: p3.runId }),
             { id: p3.approvalId, decision: 'approved', resolvedBy: 'ceo',
               resolution: 'approved in fixture' }, deps);
           const p4 = await freshRfq.runGovernedProcurement(
@@ -1729,7 +1734,7 @@ globalThis.fetch = async (u, opts) => {
           kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
           autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
         ids.objectives.push(ORL2);
-        await scope.setObjectiveStatus(Object.freeze({ companyId: C7, objectiveId: ORL2, runId: null }),
+        await scope.setObjectiveStatus(CTX_DOOR({ companyId: C7, objectiveId: ORL2, runId: null }),
           { id: ORL2, status: 'active' }, deps);
         // A DISTINCT supplier: the approval id is deterministic on (rfq, supplier), so reusing
         // sup-rel collided with test 7's approval on the primary key — and because the throw
@@ -1743,7 +1748,7 @@ globalThis.fetch = async (u, opts) => {
         if (!p7.ok) bad('M7 fixture could not be prepared', p7.refusal);
         else {
           ids.runs.push(p7.runId); ids.approvals.push(p7.approvalId);
-          const c7 = Object.freeze({ companyId: C7, objectiveId: ORL2, runId: p7.runId });
+          const c7 = CTX_DOOR({ companyId: C7, objectiveId: ORL2, runId: p7.runId });
           await scope.decideApproval(c7, { id: p7.approvalId, decision: 'approved',
             resolvedBy: 'ceo', resolution: 'M7 control: approved while active' }, deps);
           await q(`UPDATE users SET is_active = 0 WHERE id = 'sig-dir3'`);
@@ -1789,7 +1794,7 @@ globalThis.fetch = async (u, opts) => {
           kpiMetric: 'q', kpiTarget: 1, deadline: '2026-12-31', budgetUsd: 5,
           autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'test' }, deps);
         ids.objectives.push(OM12);
-        await scope.setObjectiveStatus(Object.freeze({ companyId: A, objectiveId: OM12, runId: null }),
+        await scope.setObjectiveStatus(CTX_DOOR({ companyId: A, objectiveId: OM12, runId: null }),
           { id: OM12, status: 'active' }, deps);
         await q(`INSERT INTO suppliers (id, name, country, contact_email)
                  VALUES ('sup-m12','M12 Labs','India','m12@sup.invalid') ON CONFLICT (id) DO NOTHING`);

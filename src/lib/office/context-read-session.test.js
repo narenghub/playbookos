@@ -138,8 +138,11 @@ test('req 6: a context carries when it was resolved, so a held one cannot pass a
 
 test('req 7: DECISIVE — a hand-made object with the right shape is refused by assertContext', async () => {
   // This is what an agent, or a careless caller, would construct.
-  assert.throws(() => CTX.assertContext({ companyId: 'co-abiozen' }), /NoCompanyContext|frozen/);
-  assert.throws(() => CTX.assertContext(Object.freeze({})), /carries no companyId/);
+  // The BRAND is checked first, deliberately, so both of these refuse on provenance rather than on
+  // shape. An object that is merely missing a companyId and an object impersonating a context get
+  // the same answer: this module did not produce you.
+  assert.throws(() => CTX.assertContext({ companyId: 'co-abiozen' }), /not produced by/);
+  assert.throws(() => CTX.assertContext(Object.freeze({})), /not produced by/);
 });
 
 test('req 7: a read-session context is frozen, so it cannot be widened after the fact', async () => {
@@ -166,4 +169,54 @@ test('a read-session context is not accepted on the kernel write path', async ()
   const ctx = await resolve({ userId: 'u1' }, [ABIOZEN]);
   assert.equal(ctx.source, 'read_session');
   assert.equal(ctx.objectiveId, null, 'a person browsing is not executing against an objective');
+});
+
+// ── REQ 7, PROPERLY: A CONTEXT IS TRUSTED BY PROVENANCE, NOT BY SHAPE ───────
+//
+// assertContext required `Object.isFrozen` plus a `companyId`, and its own comment said the point
+// was to accept only "a context this module produced, not an object that merely has the right
+// shape". Those are different claims, and a one-line probe on 2026-11-24 showed the gap:
+//
+//   assertContext(Object.freeze({ companyId: 'co-someone-elses-company' }))   // → ACCEPTED
+//
+// Frozen-ness is something any caller can supply. Every company-isolation rule in the system rests
+// on this check, so it now requires a module-private Symbol that cannot be obtained from outside.
+
+test('DECISIVE: a FROZEN hand-made object with a companyId is refused', async () => {
+  const forged = Object.freeze({ companyId: 'co-someone-elses-company', objectiveId: null });
+  assert.throws(() => CTX.assertContext(forged), /not produced by/);
+  assert.equal(CTX.isTrustedContext(forged), false);
+});
+
+test('CONTROL: a context this module resolved IS trusted', async () => {
+  // Without this, the test above is satisfied by an assertContext that refuses everything — which
+  // would stop every kernel write in the system rather than only the forged ones.
+  const ctx = await resolve({ userId: 'u1' }, [ABIOZEN]);
+  assert.equal(CTX.isTrustedContext(ctx), true);
+  assert.equal(CTX.assertContext(ctx), ctx, 'and it passes the write-path guard unchanged');
+});
+
+test('the brand cannot be copied off a real context by spreading it', async () => {
+  // A Symbol-keyed property IS copied by object spread, so this pins the one case where a caller
+  // could launder a real context into a modified one: spreading a genuine context and changing the
+  // company. The copy carries the brand, so it must be caught by something else — it is not frozen.
+  const real = await resolve({ userId: 'u1' }, [ABIOZEN]);
+  const laundered = { ...real, companyId: 'co-someone-elses-company' };
+  assert.equal(CTX.isTrustedContext(laundered), false, 'an unfrozen copy is not a context');
+  assert.throws(() => CTX.assertContext(laundered), /frozen/);
+});
+
+test('…and a FROZEN spread copy with a changed company is still a forgery risk — documented', async () => {
+  // Honest limit, stated rather than hidden: Object.freeze({ ...real, companyId: 'other' }) carries
+  // the brand AND is frozen, so provenance alone cannot catch it. Spreading a trusted context is
+  // therefore a code-review concern, and the defence is that no caller is given a real context for
+  // a company it may not act for in the first place — the resolvers only ever return one the
+  // authenticated subject is authorized for. Asserted so that if this ever becomes catchable, the
+  // test changes deliberately rather than by accident.
+  const real = await resolve({ userId: 'u1' }, [ABIOZEN]);
+  const laundered = Object.freeze({ ...real, companyId: 'co-someone-elses-company' });
+  assert.equal(CTX.isTrustedContext(laundered), true,
+    'KNOWN LIMIT: a frozen spread of a genuine context passes provenance. The resolvers never hand '
+    + 'out a context for an unauthorized company, which is what makes this hard to exploit, not the '
+    + 'brand. If a non-spreadable carrier is introduced, update this test.');
 });

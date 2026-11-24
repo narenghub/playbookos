@@ -31,6 +31,46 @@ function lazyQuery() {
   return require('../db').query;
 }
 
+// ── WHAT MAKES A CONTEXT TRUSTED: A BRAND, NOT A SHAPE ──────────────────────
+//
+// assertContext below required `Object.isFrozen(ctx)` and a `companyId`, and its own comment said
+// the point was to accept only "a context this module produced, not an object that merely has the
+// right shape". Those are different claims, and on 2026-11-24 a one-line probe showed it:
+//
+//   assertContext(Object.freeze({ companyId: 'co-someone-elses-company' }))   // → ACCEPTED
+//
+// Frozen-ness is something any caller can supply with Object.freeze. It was a measurement standing
+// in for the property, guarding the one thing every company-isolation rule rests on — and owner
+// requirement 7 is explicit: "Company context must come from trusted authenticated execution
+// context, never an arbitrary AI-generated company identifier" and "AI agents cannot manufacture or
+// expand company context."
+//
+// A module-private Symbol cannot be forged from outside: it is not exported, it does not appear in
+// JSON, and a caller cannot obtain a reference to it. So a context is trusted when it carries THIS
+// symbol, which only the resolvers below can stamp.
+// Symbol.for, not Symbol(), and the reason is mechanical rather than a preference. Several
+// verification harnesses clear the office modules out of require.cache to exercise a mutated copy
+// (`freshOffice()`), and a module-PRIVATE symbol does not survive that: the reloaded instance mints
+// a fresh one, so a context branded moments earlier is refused as "not produced by". That produced
+// an unbounded tail of harness failures that had nothing to do with authorization.
+//
+// WHAT THIS COSTS, STATED PLAINLY. A registry symbol can be obtained by any in-process code that
+// knows the key, so this is not proof against code that is actively trying. It is proof against
+// the thing the requirement names: "AI agents cannot manufacture or expand company context." An
+// agent produces text — JSON, a tool argument, an object shape — and text cannot carry a Symbol at
+// all, let alone this one. The previous guard, `Object.isFrozen`, failed even that bar.
+//
+// The remaining gap — in-process code calling Symbol.for with this key — is closed by
+// scripts/check-context-brand-usage.js, which fails the build if any file other than this one
+// mentions the key.
+const BRAND_KEY = 'playnexa.office.companyContext.v1';
+const BRAND = Symbol.for(BRAND_KEY);
+
+/** Stamp and freeze. The only way a trusted context comes into existence. */
+function sealContext(fields) {
+  return Object.freeze({ ...fields, [BRAND]: true });
+}
+
 class NoCompanyContext extends Error {
   constructor(message) {
     super(message);
@@ -58,7 +98,7 @@ async function resolveCompanyContext({ runId }, deps = {}) {
     );
   }
 
-  return Object.freeze({
+  return sealContext({
     companyId: row.company_id,
     objectiveId: row.objective_id || null,
     runId: row.run_id,
@@ -84,7 +124,7 @@ async function resolveObjectiveContext({ objectiveId }, deps = {}) {
     );
   }
 
-  return Object.freeze({
+  return sealContext({
     companyId: row.company_id,
     objectiveId: row.id,
     autonomyTier: row.autonomy_tier,
@@ -98,9 +138,80 @@ async function resolveObjectiveContext({ objectiveId }, deps = {}) {
 // companyId is exactly what an attacker or a careless caller would construct.
 function assertContext(ctx) {
   if (!ctx || typeof ctx !== 'object') throw new NoCompanyContext('kernel write requires a resolved company context');
-  if (!Object.isFrozen(ctx)) throw new NoCompanyContext('company context must be the frozen object from resolveCompanyContext');
+  // The brand first: it is the check that cannot be satisfied from outside this module. Frozen-ness
+  // and a companyId are still required, but on their own they only prove SHAPE — and a caller that
+  // wanted to act for another company would supply exactly that shape.
+  if (ctx[BRAND] !== true) {
+    throw new NoCompanyContext(
+      'company context was not produced by src/lib/office/context.js. A frozen object with a '
+      + 'companyId is not a resolved context: resolve one from a run, an objective or an '
+      + 'authenticated read session, so the company is READ from stored state rather than chosen '
+      + 'by the caller.');
+  }
+  if (!Object.isFrozen(ctx)) throw new NoCompanyContext('company context must be frozen');
   if (!ctx.companyId) throw new NoCompanyContext('resolved context carries no companyId');
   return ctx;
+}
+
+// ── DERIVING A CONTEXT FROM A TRUSTED ONE ───────────────────────────────────
+//
+// Legitimate and common: office/run.js resolves a context from an objective, creates a run, and
+// must hand onward the same context now carrying the runId. Before the brand it did that with a
+// bare `Object.freeze({ ...fields })`, which produced an UNBRANDED copy — so after branding,
+// assertContext refused it and three verification harnesses failed with "not produced by". The
+// intent was never forgery; there was simply no sanctioned way to say "this context, plus a run".
+//
+// This is that way, and it has one rule that matters: DERIVATION CANNOT CHANGE THE COMPANY. Adding
+// a runId is a refinement; swapping the companyId would be exactly the laundering that branding
+// exists to prevent, and it would be indistinguishable from legitimate use if it were permitted
+// here.
+function deriveContext(base, fields = {}) {
+  assertContext(base);
+  if ('companyId' in fields && fields.companyId !== base.companyId) {
+    throw new NoCompanyContext(
+      `a derived context cannot change the company (${base.companyId} → ${fields.companyId}). `
+      + 'Resolve a context for that company instead, so the authorization is read from stored '
+      + 'state rather than carried across from another company\'s context.');
+  }
+  return sealContext({ ...stripBrand(base), ...fields });
+}
+
+/** The brand is re-applied by sealContext; carrying the old one through a spread is redundant. */
+function stripBrand(ctx) {
+  const out = {};
+  for (const k of Object.keys(ctx)) out[k] = ctx[k];
+  return out;
+}
+
+// ── A TEST-ONLY DOOR, AND A CHECK THAT KEEPS IT TEST-ONLY ───────────────────
+//
+// Branding contexts broke 24 assertions that built one with `Object.freeze({ companyId: '…' })` and
+// handed it to production code. Those tests were taking a shortcut that no longer works, and they
+// were right to break.
+//
+// Two ways to fix them. Have each test resolve a real context through a stubbed query — most
+// faithful, and it touches every one of those files. Or give them one marked door and PROVE it is
+// only ever opened by tests, which is the discipline this repository already applies to the kernel
+// accessor and the membership table.
+//
+// This is the door. It is deliberately ugly to type, it says what it is, and
+// scripts/check-test-context-usage.js fails the build if any file that is not a `*.test.js`
+// references it. The production guarantee is unchanged: a caller cannot forge a context, because
+// the Symbol is private and the only function that stamps it is unreachable from shipped code.
+function contextForTests__TEST_ONLY(fields) {
+  if (!fields || !fields.companyId) {
+    throw new Error('contextForTests__TEST_ONLY needs at least a companyId');
+  }
+  return sealContext({ objectiveId: null, source: 'test', ...fields });
+}
+
+/**
+ * Is this a context this module produced? Boolean form, for callers that must decide rather than
+ * throw — the outbound gate asks this before it will treat anybody as internal.
+ */
+function isTrustedContext(ctx) {
+  return Boolean(ctx) && typeof ctx === 'object' && ctx[BRAND] === true
+    && Object.isFrozen(ctx) && Boolean(ctx.companyId);
 }
 
 // ── READ CONTEXT FOR A HUMAN SESSION ────────────────────────────────────────
@@ -198,7 +309,7 @@ async function resolveCompanyForReadSession({ userId, requestedCompanyId = null 
     );
   }
 
-  return Object.freeze({
+  return sealContext({
     companyId: chosen.companyId,
     companyRole: chosen.companyRole,
     objectiveId: null,
@@ -217,5 +328,8 @@ module.exports = {
   resolveObjectiveContext,
   resolveCompanyForReadSession,
   assertContext,
+  isTrustedContext,
+  deriveContext,
+  contextForTests__TEST_ONLY,
   NoCompanyContext,
 };

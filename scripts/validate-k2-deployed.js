@@ -35,6 +35,11 @@
 const path = require('path');
 const crypto = require('crypto');
 const { query, withTransaction } = require('../src/lib/db');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -155,8 +160,8 @@ const REAL_CONSTRAINT_CODES = new Set(['23503', '23502', '23514', '23505', 'P000
           await attempt(() => beginObjectiveRun({ objectiveId: OA, trigger: 'office' }, deps)));
 
         // ── activation, then durability through the scoped accessor ──
-        const ctxA = Object.freeze({ companyId: A, objectiveId: OA, runId: null });
-        const ctxB = Object.freeze({ companyId: B, objectiveId: OB, runId: null });
+        const ctxA = CTX_DOOR({ companyId: A, objectiveId: OA, runId: null });
+        const ctxB = CTX_DOOR({ companyId: B, objectiveId: OB, runId: null });
         const act = await scope.setObjectiveStatus(ctxA, { id: OA, status: 'active' }, deps);
         if (!act || act.status !== 'active') bad('the CEO could not activate the objective');
         else ok('the CEO activates the objective as a separate, deliberate act');

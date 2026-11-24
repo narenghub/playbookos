@@ -210,7 +210,11 @@ async function recoverRun(runId, deps = {}) {
   let exceptionId = null;
   if (classification === 'known_unknown' && cur.company_id && cur.objective_id) {
     try {
-      const ctx = Object.freeze({ companyId: cur.company_id, objectiveId: cur.objective_id, runId: cur.run_id });
+      // RESOLVED, not fabricated. office/context.js brands contexts with a module-private Symbol,
+      // so a hand-built object — even one assembled from the correct row, as this was — is refused
+      // by assertContext. The resolver reads the same agent_runs row, which means the company is
+      // read from stored state through the one path that can vouch for it.
+      const ctx = await require('./context').resolveCompanyContext({ runId: cur.run_id }, { query });
       exceptionId = `ex-recovery-${runId}`;
       await require('./scope').openException(ctx, {
         id: exceptionId,

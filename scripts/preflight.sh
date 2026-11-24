@@ -290,6 +290,8 @@ pf_step "kernel tables are reached only through the scoped accessor" node script
 # predicate IS the company scope would be circular. It gets the same single-accessor discipline
 # from its own module and its own check.
 pf_step "the membership table is reached only through its accessor" node scripts/check-membership-accessor-discipline.js
+pf_step "only tests can manufacture a company context" node scripts/check-test-context-usage.js
+pf_step "only context.js can mint a company context" node scripts/check-context-brand-usage.js
 pf_step "company membership holds its ruled properties" node scripts/check-company-membership-db.js
 # Is the K1 PRODUCTION validator trustworthy? It runs once against production and its verdict is
 # what decides PRODUCTION VALIDATED, so three things need proving first: it writes nothing durable

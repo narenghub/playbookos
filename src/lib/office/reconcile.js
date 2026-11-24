@@ -81,9 +81,11 @@ async function reconcile({ olderThanMinutes = 15, limit = 200, dryRun = true } =
       continue;
     }
 
-    const ctx = Object.freeze({
-      companyId: owner.company_id, objectiveId: owner.objective_id, runId: owner.run_id,
-    });
+    // RESOLVED from the run, not assembled from the row. office/context.js brands contexts with a
+    // registry Symbol, so a hand-built object is refused by the assertContext inside openException
+    // — and before branding, that assertion could not fail, because the context was built to
+    // satisfy it. The resolver reads the same agent_runs row this code already trusts.
+    const ctx = await require('./context').resolveCompanyContext({ runId: owner.run_id }, { query });
     try {
       await scope.openException(ctx, {
         id: exceptionId,

@@ -20,6 +20,11 @@ const budget = require('../src/lib/office/budget');
 const scope = require('../src/lib/office/scope');
 const rfqClaim = require('../src/lib/idempotency/supplier-rfq');
 const { query } = require('../src/lib/db');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -245,7 +250,7 @@ const SRC = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', .
     console.log('\n  BUDGET\n');
     for (const o of objs.filter((x) => x.status === 'active')) {
       const row = (await query(`SELECT company_id, budget_usd FROM objectives WHERE id=$1`, [o.id])).rows[0];
-      const ctx = Object.freeze({ companyId: row.company_id, objectiveId: o.id, runId: null });
+      const ctx = CTX_DOOR({ companyId: row.company_id, objectiveId: o.id, runId: null });
       const h = await budget.enforceHierarchy(ctx, { objectiveId: o.id, criticality: 'routine',
         objectiveBudgetUsd: row.budget_usd === null ? null : Number(row.budget_usd) });
       field(o.id, h.allow ? 'ALLOWED' : `REFUSED (${h.scope}): ${h.reason}`);

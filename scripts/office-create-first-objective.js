@@ -22,6 +22,11 @@
 const crypto = require('crypto');
 const { query } = require('../src/lib/db');
 const scope = require('../src/lib/office/scope');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 // The approved objective, exactly as ruled.
 const OBJECTIVE = Object.freeze({
@@ -129,7 +134,7 @@ const note = (m) => console.log(`  --    ${m}`);
 
     // ══ STEP 2: THE OBJECTIVE, IN DRAFT ════════════════════════════════════
     console.log('');
-    const ctx = Object.freeze({ companyId: company.id, objectiveId: OBJECTIVE_ID, runId: null });
+    const ctx = CTX_DOOR({ companyId: company.id, objectiveId: OBJECTIVE_ID, runId: null });
     let objective = await scope.getObjective(ctx, OBJECTIVE_ID);
     if (objective) {
       note(`objective ${OBJECTIVE_ID} already exists — not creating a second one`);

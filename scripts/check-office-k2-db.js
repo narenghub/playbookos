@@ -39,6 +39,11 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
@@ -182,7 +187,7 @@ async function refused(fn) {
     else ok('no run can be opened against a draft objective');
 
     // ── 4. Activation, and durability ─────────────────────────────────────
-    const ctxA = Object.freeze({ companyId: A, objectiveId: OA, runId: null });
+    const ctxA = CTX_DOOR({ companyId: A, objectiveId: OA, runId: null });
     const activated = await scope.setObjectiveStatus(ctxA, { id: OA, status: 'active' }, deps);
     if (!activated || activated.status !== 'active') bad('the CEO could not activate the objective');
     else ok('the CEO activates the objective as a separate, deliberate act');
@@ -196,7 +201,7 @@ async function refused(fn) {
     } else ok('the objective is durable with its full control identity (budget, autonomy tier, approval policy)');
 
     // Cross-company read of the objective: the substitution attack on the READ side.
-    const ctxB = Object.freeze({ companyId: B, objectiveId: OB, runId: null });
+    const ctxB = CTX_DOOR({ companyId: B, objectiveId: OB, runId: null });
     if (await scope.getObjective(ctxB, OA, deps)) bad('company B read company A objective by id');
     else ok('company B cannot read company A objective by substituting its id');
     // And B cannot activate or pause A's objective.

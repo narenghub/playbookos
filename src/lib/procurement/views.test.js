@@ -16,6 +16,7 @@ const views = require('./views');
 const { opportunityStage, assertScoped, STAGES } = views;
 const rt = require('./review-tasks');
 const ex = require('./export');
+const { contextForTests__TEST_ONLY: CTX_FOR_TESTS } = require('../office/context');
 
 const TODAY = '2026-11-05';
 const CO = 'company-abiozen';
@@ -193,7 +194,7 @@ test('the task status vocabulary cannot express a decision', () => {
 });
 
 test('updateTask refuses an approval-shaped status by name', async () => {
-  const ctx = Object.freeze({ companyId: CO });
+  const ctx = CTX_FOR_TESTS({ companyId: CO });
   for (const word of ['approved', 'authorised', 'submitted', 'sent']) {
     await assert.rejects(rt.updateTask(ctx, 't1', { status: word }, { query: async () => ({ rows: [] }) }),
       /is not a task status and never will be/, word);
@@ -201,7 +202,7 @@ test('updateTask refuses an approval-shaped status by name', async () => {
 });
 
 test('closing a task requires a name and a reason', async () => {
-  const ctx = Object.freeze({ companyId: CO });
+  const ctx = CTX_FOR_TESTS({ companyId: CO });
   const db = { query: async () => ({ rows: [{ id: 't1' }] }) };
   await assert.rejects(rt.updateTask(ctx, 't1', { status: 'done' }, db), /requires closedBy/);
   await assert.rejects(rt.updateTask(ctx, 't1', { status: 'done', closedBy: 'x' }, db), /requires closureNote/);
@@ -213,7 +214,7 @@ test('closing a task requires a name and a reason', async () => {
 test('reopening a task clears its closure', async () => {
   const calls = [];
   const db = { query: async (sql, v) => { calls.push(sql.replace(/\s+/g, ' ')); return { rows: [{ id: 't1' }] }; } };
-  await rt.updateTask(Object.freeze({ companyId: CO }), 't1', { status: 'open' }, db);
+  await rt.updateTask(CTX_FOR_TESTS({ companyId: CO }), 't1', { status: 'open' }, db);
   assert.match(calls[0], /closed_at = NULL, closed_by = NULL, closure_note = NULL/,
     'a reopened task must not carry a stale "resolved by"');
 });
@@ -242,7 +243,7 @@ test('this module writes to no approval table', () => {
 });
 
 test('openTask validates its inputs rather than storing nonsense', async () => {
-  const ctx = Object.freeze({ companyId: CO });
+  const ctx = CTX_FOR_TESTS({ companyId: CO });
   const db = { query: async () => ({ rows: [{ id: 't' }] }) };
   await assert.rejects(rt.openTask(ctx, { subjectKind: 'bid', subjectId: 'x', title: 't' }, db), /subjectKind/);
   await assert.rejects(rt.openTask(ctx, { subjectKind: 'funding_opportunity', title: 't' }, db), /subjectId/);

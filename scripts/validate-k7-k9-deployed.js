@@ -28,6 +28,11 @@ const path = require('path');
 const scope = require('../src/lib/office/scope');
 const autonomy = require('../src/lib/autonomy');
 const { query } = require('../src/lib/db');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 const APPROVED_OBJECTIVE = 'obj-abiozen-first-governed-rfq';
 
@@ -48,7 +53,7 @@ const SRC = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', .
 
     const company = (await query(`SELECT id, display_name FROM companies WHERE slug='abiozen'`)).rows[0];
     if (!company) { bad('no abiozen company'); process.exit(1); }
-    const ctx = Object.freeze({ companyId: company.id, objectiveId: null, runId: null });
+    const ctx = CTX_DOOR({ companyId: company.id, objectiveId: null, runId: null });
 
     // ══ 1. THE APPROVAL OBJECT IS DEPLOYED, AND IMMUTABLE ══════════════════
     console.log('  K7 · THE DURABLE APPROVAL OBJECT\n');

@@ -38,6 +38,11 @@ const { execFileSync } = require('child_process');
 const { migrateConnectors } = require('../src/lib/connectors/schema');
 const gg = require('../src/lib/connectors/grants-gov');
 const sync = require('../src/lib/connectors/sync-run');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 const arg = (n, d) => {
   const h = process.argv.find((a) => a.startsWith(`--${n}=`));
@@ -122,7 +127,7 @@ const CLAIMED = ['opportunityId', 'opportunityNumber', 'title', 'agencyCode', 'a
   const { Pool } = require('pg');
   const pool = new Pool({ connectionString: url, max: 4 });
   const q = (sql, params) => pool.query(sql, params);
-  const ctx = Object.freeze({ companyId: CO });
+  const ctx = CTX_DOOR({ companyId: CO });
   const deps = { query: q };
 
   try {

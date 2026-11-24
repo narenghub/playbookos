@@ -393,12 +393,17 @@ async function refused(fn) {
     // M4 — let context.js accept a caller-supplied company. P9 must then fail.
     const ctxBefore = sha(CTX_FILE);
     const ctxSrc = fs.readFileSync(CTX_FILE, 'utf8');
-    const ctxNeedle = `  return Object.freeze({
+    // The needle tracks context.js: since 2026-11-24 the resolvers return sealContext(...), which
+    // stamps a module-private Symbol so a context cannot be forged, rather than a bare
+    // Object.freeze. This control reported "the mutation control is stale and proves nothing" the
+    // moment that changed, which is the behaviour a mutation control is for — it refused to pass
+    // while measuring nothing.
+    const ctxNeedle = `  return sealContext({
     companyId: row.company_id,`;
     if (!ctxSrc.includes(ctxNeedle)) {
       bad('M4 could not locate the context return in context.js — the mutation control is stale and proves nothing');
     } else {
-      fs.writeFileSync(CTX_FILE, ctxSrc.replace(ctxNeedle, `  return Object.freeze({
+      fs.writeFileSync(CTX_FILE, ctxSrc.replace(ctxNeedle, `  return sealContext({
     companyId: arguments[0].companyId || row.company_id,`));
       try {
         const mutated = freshOffice();
@@ -428,7 +433,14 @@ async function refused(fn) {
     [objectiveId]`));
       try {
         const mutated = freshOffice();
-        const leak = await mutated.scope.getObjective(ctxA, OB, { query: q });
+        // The context must come from the MUTATED module instance, not the outer one. Since
+        // 2026-11-24 a context carries a module-private Symbol, and freshOffice() reloads
+        // office/context.js — a fresh instance mints a fresh Symbol, so the outer ctxA is
+        // correctly refused as "not produced by" that instance. That is the brand working, not a
+        // defect: a branded context is not portable across module instances, which is precisely
+        // why it cannot be forged. Resolve one from the same instance.
+        const ctxAm = await mutated.context.resolveCompanyContext({ runId: RA }, { query: q });
+        const leak = await mutated.scope.getObjective(ctxAm, OB, { query: q });
         if (leak) ok('M5 removing the company predicate leaks the other company\'s objective — the predicate is load-bearing');
         else bad('M5 the unscoped read returned nothing — P8 may be passing because the row is unreachable anyway');
       } finally {
@@ -440,7 +452,10 @@ async function refused(fn) {
 
     // Re-prove P8 against the restored file, so the suite does not end on a mutated module.
     const reFresh = freshOffice();
-    const reStolen = await reFresh.scope.getObjective(ctxA, OB, { query: q });
+    // Same instance for the context as for the scope being exercised — see the note at M5: a
+    // branded context belongs to the module instance that minted it.
+    const ctxAre = await reFresh.context.resolveCompanyContext({ runId: RA }, { query: q });
+    const reStolen = await reFresh.scope.getObjective(ctxAre, OB, { query: q });
     if (reStolen) bad('after restore P8 still leaks');
     else ok('after restore P8 holds again');
 

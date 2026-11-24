@@ -101,9 +101,12 @@ async function executeApprovedAction(approvalId, { releasedBy, requireExplicitRe
       note: 'R1 executes supplier RFQ email only. Another action kind needs its own authorized executor.' };
   }
 
-  const ctx = Object.freeze({
-    companyId: row.company_id, objectiveId: row.objective_id, runId: row.run_id,
-  });
+  // RESOLVED, not assembled-then-blessed. This built a context from row fields and called
+  // assertContext on its own construction — a guard checking the thing that had just been made to
+  // satisfy it, which could not fail. Since office/context.js brands contexts, the resolver is the
+  // only way to obtain one, and it reads the company from the same agent_runs row this code already
+  // trusts. The assertion below is now a real check rather than a tautology.
+  const ctx = await require('./context').resolveCompanyContext({ runId: row.run_id }, { query });
   assertContext(ctx);
 
   const payload = row.action_payload || {};

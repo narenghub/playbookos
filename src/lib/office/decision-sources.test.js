@@ -16,6 +16,7 @@ const assert = require('node:assert');
 const { test } = require('node:test');
 const S = require('./decision-sources');
 const Q = require('./decision-queue');
+const { contextForTests__TEST_ONLY: CTX_FOR_TESTS } = require('./context');
 
 const NOW = new Date('2026-11-10T00:00:00Z');
 const TODAY = '2026-11-10';
@@ -23,7 +24,7 @@ const TODAY = '2026-11-10';
 // The frozen context scope.js's accessors require, and a stand-in for the ONE accessor this module
 // is allowed to reach office_approvals through. Injected rather than stubbed on the real module, so
 // these tests cannot accidentally pass against a hand-written kernel predicate.
-const CTX = Object.freeze({ companyId: 'co-abiozen', objectiveId: null, source: 'read_session' });
+const CTX = CTX_FOR_TESTS({ companyId: 'co-abiozen', objectiveId: null, source: 'read_session' });
 const fakeApprovals = (rows) => {
   const seen = [];
   const fn = async (ctx, deps) => { seen.push({ ctx, deps }); return rows; };

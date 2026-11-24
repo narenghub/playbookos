@@ -31,6 +31,11 @@ const guard = require('../src/lib/procurement/rfq-identity-guard');
 const scope = require('../src/lib/office/scope');
 const budget = require('../src/lib/office/budget');
 const { query } = require('../src/lib/db');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 const OBJECTIVE_ID = 'obj-abiozen-first-governed-rfq';
 
@@ -250,7 +255,7 @@ const stop = (why, detail) => {
     ok('the recipient set matches the policy for this workflow: supplier + the company principal');
 
     // ══ 4. WHAT THE BUDGET WOULD ALLOW, BEFORE SPENDING ════════════════════
-    const bctx = Object.freeze({ companyId: company.id, objectiveId: OBJECTIVE_ID, runId: null });
+    const bctx = CTX_DOOR({ companyId: company.id, objectiveId: OBJECTIVE_ID, runId: null });
     const before = await budget.enforceHierarchy(bctx, {
       objectiveId: OBJECTIVE_ID, criticality: 'routine', objectiveBudgetUsd: Number(obj.budget_usd),
     });

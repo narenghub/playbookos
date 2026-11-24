@@ -46,6 +46,11 @@ const autonomy = require('../src/lib/autonomy');
 const rfqClaim = require('../src/lib/idempotency/supplier-rfq');
 const { ledger: makeLedger } = require('../src/lib/run-ledger');
 const { query } = require('../src/lib/db');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 // Mirrors execute.js. Named here rather than imported so this report cannot pull the executor
 // into the require graph — a read-only script must not be one `require` away from the mailer.
@@ -91,8 +96,7 @@ function canonical(v) {
     if (!a) { console.error(`  no approval ${APPROVAL_ID}\n`); process.exit(1); }
 
     const p = a.action_payload || {};
-    const ctx = Object.freeze({
-      companyId: a.company_id, objectiveId: a.objective_id, runId: a.run_id,
+    const ctx = CTX_DOOR({ companyId: a.company_id, objectiveId: a.objective_id, runId: a.run_id,
     });
 
     // ══ 1. THE APPROVAL ════════════════════════════════════════════════════

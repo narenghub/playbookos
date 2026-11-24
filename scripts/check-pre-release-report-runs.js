@@ -34,6 +34,11 @@ const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+// A company context for a VERIFICATION HARNESS. office/context.js brands contexts with a
+// module-private Symbol so application code cannot fabricate one; a harness already holds a
+// Postgres connection and could insert any company's rows directly, so this grants it nothing
+// new. scripts/check-test-context-usage.js forbids src/ from reaching this.
+const { contextForTests__TEST_ONLY: CTX_DOOR } = require('../src/lib/office/context');
 
 const REPO = path.join(__dirname, '..');
 let fail = 0;
@@ -191,7 +196,7 @@ function runReport(id = AP) {
       priority: 'P3', kpiMetric: 'qualified_supplier_quotes_received', kpiTarget: 1,
       deadline: '2026-12-31', budgetUsd: 10, autonomyTier: 'supervised',
       approvalPolicy: 'all_consequential', createdBy: 'rehearsal' }, deps);
-    await scope.setObjectiveStatus(Object.freeze({ companyId: CO, objectiveId: OB, runId: null }),
+    await scope.setObjectiveStatus(CTX_DOOR({ companyId: CO, objectiveId: OB, runId: null }),
       { id: OB, status: 'active' }, deps);
     await q(`UPDATE objectives SET release_mode = 'explicit' WHERE id = $1`, [OB]);
 

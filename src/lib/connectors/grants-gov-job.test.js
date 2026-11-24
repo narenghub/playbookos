@@ -10,8 +10,9 @@
 const assert = require('node:assert');
 const { test } = require('node:test');
 const JOB = require('./grants-gov-job');
+const { contextForTests__TEST_ONLY: CTX_FOR_TESTS } = require('../office/context');
 
-const CTX = Object.freeze({ companyId: 'co-1', objectiveId: JOB.OBJECTIVE_ID, runId: 'run-1' });
+const CTX = CTX_FOR_TESTS({ companyId: 'co-1', objectiveId: JOB.OBJECTIVE_ID, runId: 'run-1' });
 
 // A fake sync lifecycle that records what it was asked to do.
 function fakeSync(over = {}) {

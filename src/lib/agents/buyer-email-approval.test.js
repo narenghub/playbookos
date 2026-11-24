@@ -25,6 +25,7 @@ const assert = require('node:assert');
 const { test } = require('node:test');
 const APPROVAL = require('./buyer-email-approval');
 const LEDGER = require('../outbound/ledger');
+const { contextForTests__TEST_ONLY: CTX_FOR_TESTS } = require('../office/context');
 
 const INQUIRY = Object.freeze({
   id: 'inq-1', buyer_email: 'buyer@acme-pharma.test', buyer_company: 'Acme Pharma',
@@ -37,7 +38,7 @@ const COMMERCIAL = Object.freeze({
   payment_terms: '50% advance, 50% before shipment', lead_time_days: 45,
   valid_until: '2026-12-11', quote_ref: 'QT-2026-INQ001', incoterms: null,
 });
-const CTX = Object.freeze({ companyId: 'co-1', runId: 'run-1', objectiveId: 'obj-1' });
+const CTX = CTX_FOR_TESTS({ companyId: 'co-1', runId: 'run-1', objectiveId: 'obj-1' });
 
 const MESSAGE = {
   to: INQUIRY.buyer_email, cc: ['naren@abiozen.com'], from: 'Sarah Chen · Abiozen <sales@abiozen.com>',
