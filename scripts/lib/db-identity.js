@@ -63,6 +63,8 @@ const M7_TABLES = [
   // created the table — until it was, a freshly migrated database read as `unidentified` and every
   // subsequent run was refused, which is exactly the drift this check exists to catch.
   'office_budget_exceptions',
+  // B3.2 (2026-11-24): decomposed plans and their per-step verdicts.
+  'office_plans', 'office_plan_steps',
   // M7.1 / M7.2 / M7.3
   'worker_identities', 'worker_enrollment_tokens', 'worker_request_nonces',
   'worker_tasks', 'worker_results', 'worker_audit',

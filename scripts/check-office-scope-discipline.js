@@ -100,6 +100,13 @@ const EXEMPT = new Set([
   // accessor only ever reads ACTIVE exceptions, so it cannot even see a malformed one. It also
   // charges cost-ledger rows and opens runs as fixtures. Disposable cluster, fixtures by id.
   path.join('scripts', 'check-finite-budget-db.js'),
+  // B3.2. Asserts office_plans' own CHECK constraints — that a `proposed` row cannot carry a
+  // verdict, that a `refused` one must name a reason, and that the composite FK refuses a plan
+  // against another company's objective. An accessor cannot demonstrate any of those: createPlan
+  // takes no status argument, so the only way to try inserting a pre-authorized plan is to write
+  // the INSERT. It also alters objective rows and charges a cost-ledger row as fixtures.
+  // Disposable cluster, fixtures deleted by id.
+  path.join('scripts', 'check-office-decomposition-db.js'),
   path.join('scripts', 'check-office-recovery-db.js'),
   path.join('scripts', 'validate-k4-activation-deployed.js'),
   path.join('scripts', 'check-office-governed-ai-db.js'),

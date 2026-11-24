@@ -280,12 +280,20 @@ const REAL_CONSTRAINT_CODES = new Set(['23503', '23502', '23514', '23505', 'P000
               (SELECT COUNT(*)::int FROM office_outcomes WHERE company_id = ANY($1)) AS oc,
               (SELECT CASE WHEN to_regclass('public.agent_memory') IS NULL THEN 0
                            ELSE (SELECT COUNT(*)::int FROM agent_memory
-                                  WHERE company_id = ANY($1)) END) AS mem`,
+                                  WHERE company_id = ANY($1)) END) AS mem,
+              -- B3.2. Added with the TABLE, not after the agent starts writing to it: an
+              -- authorized- or counted-table list that grows later than the schema is the shape
+              -- that let office_budget_exceptions turn a freshly migrated database into an
+              -- unidentified one. Counted now so it cannot be forgotten when decomposition is
+              -- wired into the agent this validator runs.
+              (SELECT CASE WHEN to_regclass('public.office_plans') IS NULL THEN 0
+                           ELSE (SELECT COUNT(*)::int FROM office_plans
+                                  WHERE company_id = ANY($1)) END) AS plans`,
       [fixtures.companies]
     )).rows[0];
-    if (strays.o || strays.oc || strays.mem) {
+    if (strays.o || strays.oc || strays.mem || strays.plans) {
       bad(`validation artefacts survived: objectives=${strays.o} outcomes=${strays.oc} `
-        + `memories=${strays.mem}`);
+        + `memories=${strays.mem} plans=${strays.plans}`);
     } else ok('no validation artefact of any kind survived the rollback — agent memory included');
 
     const post = (await query(

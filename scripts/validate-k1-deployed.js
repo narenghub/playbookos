@@ -85,6 +85,11 @@ const AUTHORIZED_COMPANY_ID_TABLES = new Set([
   // refuse an exception granted for another company's objective. The column is therefore part of
   // the welding, not a scope filter the application could get wrong.
   'office_budget_exceptions',
+  // B3.2: a decomposed plan and its steps. company_id is on both for the composite foreign keys —
+  // the plan must point at an objective AND a run of the same company, and a step must belong to a
+  // plan of the same company. As with the budget exception, the column is part of the welding
+  // rather than a filter the application could forget to apply.
+  'office_plans', 'office_plan_steps',
 ]);
 const REAL_CONSTRAINT_CODES = new Set(['23503', '23502', '23514', '23505']);
 const SENTINEL = '__k1_validation_rollback__';

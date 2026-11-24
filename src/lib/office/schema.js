@@ -388,6 +388,93 @@ const DDL = [
   `CREATE UNIQUE INDEX IF NOT EXISTS office_budget_exceptions_one_active
      ON office_budget_exceptions (objective_id) WHERE revoked_at IS NULL`,
 
+  // ── B3.2: A PLAN IS A PROPOSAL, AND THE RECORD SAYS SO ───────────────────
+  //
+  // Owner instruction: "Agent-generated plans are proposals, not authorization. Every proposed
+  // step must be independently validated against company scope, capability permissions, execution
+  // eligibility, STOP controls, approval requirements and budget."
+  //
+  // So the plan is stored with a `status` that starts at 'proposed' and a `verdict` that is written
+  // only by the validator. There is no column a proposer can set to make a plan authorized, and no
+  // default that means authorized: 'proposed' is the only value the insert can produce, enforced by
+  // a CHECK, so a plan that was never validated cannot be mistaken for one that passed.
+  //
+  // `proposer` records WHAT produced it — 'deterministic' or the model behind a governed call —
+  // because a plan's origin is part of its evidence and an AI-proposed plan is exactly the one a
+  // reviewer wants to find later.
+  `CREATE TABLE IF NOT EXISTS office_plans (
+     id            TEXT PRIMARY KEY,
+     company_id    TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+     objective_id  TEXT NOT NULL,
+     run_id        UUID NOT NULL,
+     proposer      TEXT NOT NULL,
+     planner       TEXT NOT NULL,
+     status        TEXT NOT NULL DEFAULT 'proposed',
+     verdict       TEXT,
+     refusal_code  TEXT,
+     refusal_detail TEXT,
+     validated_at  TIMESTAMPTZ,
+     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     CONSTRAINT office_plans_status CHECK (status IN ('proposed','validated','refused')),
+     -- A verdict without a validation time, or the reverse, would make "has this been validated?"
+     -- answerable two contradictory ways.
+     CONSTRAINT office_plans_verdict_paired CHECK (
+       (verdict IS NULL AND validated_at IS NULL) OR (verdict IS NOT NULL AND validated_at IS NOT NULL)
+     ),
+     -- 'proposed' means not yet judged. A row cannot sit in that state carrying a verdict.
+     CONSTRAINT office_plans_proposed_has_no_verdict CHECK (
+       status <> 'proposed' OR verdict IS NULL
+     ),
+     -- A refusal must say why. "Refused" with no code is the shape that loses the reason.
+     CONSTRAINT office_plans_refusal_has_code CHECK (
+       status <> 'refused' OR refusal_code IS NOT NULL
+     ),
+     CONSTRAINT office_plans_same_company
+       FOREIGN KEY (objective_id, company_id) REFERENCES objectives (id, company_id)
+       ON DELETE RESTRICT,
+     CONSTRAINT office_plans_run_same_company
+       FOREIGN KEY (run_id, company_id) REFERENCES agent_runs (run_id, company_id) MATCH FULL
+       ON DELETE RESTRICT,
+     -- The composite target a step's own foreign key points at, so a step cannot be attached to a
+     -- plan of another company.
+     CONSTRAINT office_plans_id_company UNIQUE (id, company_id)
+   )`,
+
+  // One row per proposed step, with the validator's per-step verdict beside the proposal. Both are
+  // kept: a refused step and the reason it was refused are the evidence that validation happened,
+  // and deleting the refused steps would leave only plans that passed.
+  `CREATE TABLE IF NOT EXISTS office_plan_steps (
+     plan_id        TEXT NOT NULL,
+     company_id     TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+     step_id        TEXT NOT NULL,
+     ordinal        INT NOT NULL,
+     step_type      TEXT NOT NULL,
+     task_type      TEXT,
+     capability     TEXT,
+     consequential  BOOLEAN NOT NULL,
+     execution_class TEXT NOT NULL,
+     payload        JSONB NOT NULL,
+     payload_digest TEXT NOT NULL,
+     intent_key     TEXT NOT NULL,
+     requires_approval BOOLEAN NOT NULL,
+     verdict        TEXT,
+     refusal_code   TEXT,
+     refusal_detail TEXT,
+     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     PRIMARY KEY (plan_id, step_id),
+     CONSTRAINT office_plan_steps_ordinal_positive CHECK (ordinal > 0),
+     CONSTRAINT office_plan_steps_same_company
+       FOREIGN KEY (plan_id, company_id) REFERENCES office_plans (id, company_id)
+       ON DELETE RESTRICT
+   )`,
+  // An intent key is what stops the same step being executed twice. Unique across the whole table,
+  // not per plan: two plans that proposed the same key would collide at dispatch, and finding that
+  // out at dispatch means finding it out after one of them has already run.
+  `CREATE UNIQUE INDEX IF NOT EXISTS office_plan_steps_intent
+     ON office_plan_steps (intent_key)`,
+  `CREATE INDEX IF NOT EXISTS idx_office_plans_objective
+     ON office_plans (company_id, objective_id, created_at DESC)`,
+
   `CREATE TABLE IF NOT EXISTS office_exceptions (
      id            TEXT PRIMARY KEY,
      company_id    TEXT NOT NULL REFERENCES companies(id),
@@ -457,6 +544,11 @@ const KERNEL_TABLES = Object.freeze([
   // B2.5a. Company-scoped like every other kernel table, so it is read through scope.js and a
   // caller cannot ask "is there an exception" without a resolved context.
   'office_budget_exceptions',
+  // B3.2. A plan and its steps are company-scoped kernel records: read through scope.js so a
+  // caller cannot ask for "the plan" without a resolved context, which is what keeps one company's
+  // decomposition out of another's reach.
+  'office_plans',
+  'office_plan_steps',
   'office_cost_ledger',
   'office_approvals',
   'office_exceptions',

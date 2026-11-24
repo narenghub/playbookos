@@ -645,6 +645,100 @@ async function recordOutcome(ctx, { id, runId, outcome, businessEffect, effectRe
   return res.rows[0];
 }
 
+// ── B3.2: PLANS AND THEIR STEPS ─────────────────────────────────────────────
+//
+// Every one of these composes its predicate from `ctx`, so a caller holding a context for company A
+// cannot name a plan of company B's — and the composite foreign keys mean the database refuses it
+// even if one of these queries were written wrongly.
+
+/**
+ * Record a proposed plan. `status` is not a parameter: a plan can only be born 'proposed', and the
+ * CHECK constraint refuses anything else. Making it an argument would be the one line a future
+ * caller could use to insert a pre-authorized plan.
+ */
+async function createPlan(ctx, { id, runId, proposer, planner }, deps = {}) {
+  assertContext(ctx);
+  if (!ctx.objectiveId) throw new Error('a plan must belong to an objective');
+  const res = await q(deps)(
+    `INSERT INTO office_plans (id, company_id, objective_id, run_id, proposer, planner)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     RETURNING id, status, proposer, planner, created_at`,
+    [id, ctx.companyId, ctx.objectiveId, runId, proposer, planner]
+  );
+  return res.rows[0];
+}
+
+/** Record one proposed step. The validator's verdict is written separately, by setStepVerdict. */
+async function recordPlanStep(ctx, s, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `INSERT INTO office_plan_steps
+       (plan_id, company_id, step_id, ordinal, step_type, task_type, capability, consequential,
+        execution_class, payload, payload_digest, intent_key, requires_approval)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13)
+     RETURNING plan_id, step_id, ordinal`,
+    [s.planId, ctx.companyId, s.stepId, s.ordinal, s.stepType, s.taskType ?? null,
+      s.capability ?? null, s.consequential === true, s.executionClass,
+      JSON.stringify(s.payload ?? {}), s.payloadDigest, s.intentKey, s.requiresApproval === true]
+  );
+  return res.rows[0];
+}
+
+/** The validator's verdict for one step. */
+async function setStepVerdict(ctx, { planId, stepId, verdict, refusalCode = null, refusalDetail = null },
+  deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `UPDATE office_plan_steps SET verdict = $4, refusal_code = $5, refusal_detail = $6
+      WHERE company_id = $1 AND plan_id = $2 AND step_id = $3
+      RETURNING step_id, verdict, refusal_code`,
+    [ctx.companyId, planId, stepId, verdict, refusalCode, refusalDetail]
+  );
+  return res.rows[0] || null;
+}
+
+/**
+ * The plan-level verdict, written ONLY by the validator.
+ *
+ * `validated_at` is set by the database's NOW() in the same statement, so a plan cannot carry a
+ * verdict without the time it was reached, and the time cannot come from a caller's clock.
+ */
+async function setPlanVerdict(ctx, { planId, status, verdict, refusalCode = null, refusalDetail = null },
+  deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `UPDATE office_plans
+        SET status = $3, verdict = $4, refusal_code = $5, refusal_detail = $6, validated_at = NOW()
+      WHERE company_id = $1 AND id = $2
+      RETURNING id, status, verdict, refusal_code, validated_at`,
+    [ctx.companyId, planId, status, verdict, refusalCode, refusalDetail]
+  );
+  return res.rows[0] || null;
+}
+
+async function getPlan(ctx, planId, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `SELECT id, objective_id, run_id, proposer, planner, status, verdict, refusal_code,
+            refusal_detail, validated_at, created_at
+       FROM office_plans WHERE company_id = $1 AND id = $2`,
+    [ctx.companyId, planId]
+  );
+  return res.rows[0] || null;
+}
+
+async function listPlanSteps(ctx, planId, deps = {}) {
+  assertContext(ctx);
+  return (await q(deps)(
+    `SELECT plan_id, step_id, ordinal, step_type, task_type, capability, consequential,
+            execution_class, payload, payload_digest, intent_key, requires_approval,
+            verdict, refusal_code, refusal_detail
+       FROM office_plan_steps WHERE company_id = $1 AND plan_id = $2
+      ORDER BY ordinal`,
+    [ctx.companyId, planId]
+  )).rows;
+}
+
 // Objective-level spend, measured and unmeasured, for the whole life of the objective. The
 // enterprise cap is per DAY; an objective's budget is a TOTAL — a $10 objective that has spent
 // $10 is finished whether that happened today or last week.
@@ -818,4 +912,5 @@ module.exports = {
   listObjectives, getObjective, listOpenExceptions, listPendingApprovals, spendToday, listOutcomes,
   recordCost, openException, resolveException, requestApproval, decideApproval, supersedeApproval,
   recordOutcome,
+  createPlan, recordPlanStep, setStepVerdict, setPlanVerdict, getPlan, listPlanSteps,
 };

@@ -40,6 +40,12 @@ echo "── preflight"
 pf_step "disposable test infrastructure is healthy" node scripts/pg-cleanup.js
 pf_step "the disposable cluster lifecycle holds" node --test scripts/pg-disposable.test.js
 pf_step "test suite" env JWT_SECRET=preflight node --test $(find src scripts -name '*.test.js')
+# EVERY .js FILE PARSES. Cheap, and it goes early because a file that does not parse cannot run at
+# all. On 2026-11-24 a backtick inside a template literal made validate-k2-deployed.js unloadable;
+# it surfaced only because another driver happens to execute that validator. The scripts nothing
+# drives are the production-only validators, whose first execution is one run against production
+# over SSH, where a SyntaxError reads exactly like a broken deploy.
+pf_step "every JavaScript file parses" node scripts/check-scripts-parse.js
 pf_step "SPA parses (local file)" node scripts/check-spa-parse.js
 pf_step "classic nav parity" node scripts/verify-classic-nav-parity.js
 # PARSING IS NOT RENDERING, AND REGISTRATION IS NOT RENDERING.
@@ -330,6 +336,11 @@ pf_step "autonomous execution needs a finite authorized budget" node scripts/che
 # hardware-only work a cloud worker cannot do is never selected, and therefore queues with its
 # attempts unconsumed rather than being claimed and failed.
 pf_step "work executes only where it is eligible to" node scripts/check-execution-eligibility-db.js
+# B3.2. An objective decomposes into a bounded plan, and the plan is a PROPOSAL: every step is
+# independently validated against company scope, capability permission, execution eligibility, STOP
+# controls, approval requirement and budget. A proposal that states any of those — a model's
+# included — is refused by name rather than sanitised.
+pf_step "a plan is a proposal, not an authorization" node scripts/check-office-decomposition-db.js
 pf_step "the workflow-company proposal cannot assign anything" node --test scripts/proposal-is-readonly.test.js
 # B7.6. Six producers in four modules and two processes bind approvals. They agree or every
 # approved external send refuses, and each local expression of "the message" is locally correct —
