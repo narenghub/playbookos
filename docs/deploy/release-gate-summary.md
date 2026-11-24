@@ -247,7 +247,7 @@ own verdict.
 
 # ── 4. MIGRATE — before the app starts, as its own step ───────────────────────
 node scripts/migrate.js
-echo $?                      # must be 0. 56 steps. Confirm with `node scripts/migrate.js --plan`. Stop here if it is not.
+echo $?                      # must be 0. 57 steps. Confirm with `node scripts/migrate.js --plan`. Stop here if it is not.
 
 # ── 5. MERGE — this IS the deployment; Railway auto-deploys from main ─────────
 #   (requires your explicit approval; I will not do this)

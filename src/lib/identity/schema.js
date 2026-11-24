@@ -160,4 +160,106 @@ async function migrateIdentity(query) {
   return { ok: true };
 }
 
-module.exports = { migrateIdentity, DDL, IDENTITY_TABLES: Object.freeze(['user_companies', 'workflow_companies']) };
+// ── B7.21: COMPANY OWNERSHIP ON THE OPERATIONAL RECORDS ─────────────────────
+//
+// Owner instruction: "Filtering employees alone is insufficient. The underlying tasks, orders,
+// objectives and performance records must also belong to the authorized company."
+//
+// Measured: thirteen operational tables carried no company ownership of any kind. This adds it to
+// the ones the eight named areas actually read. The policy — which table can be attributed how, and
+// which cannot be attributed at all — lives in src/lib/identity/record-ownership.js.
+//
+// ── NULLABLE, AND THAT IS THE POINT ─────────────────────────────────────────
+//
+// `company_id` is added NULLABLE, with no default and no backfill. A NOT NULL column would have
+// forced a value onto every existing row, and the only values available are guesses — exactly what
+// "do not infer ownership or silently assign ambiguous records to ABIOZEN" forbids.
+//
+// NULL therefore means "ownership not yet established", and the accessor treats that as visible to
+// NO company rather than to all. The NOT NULL constraint arrives with the reviewed attribution,
+// once there is something true to put in the column.
+const OWNERSHIP_DDL = [
+  // One statement per table rather than a loop, so each is visible in a diff and a failure names
+  // the table it failed on.
+  `ALTER TABLE daily_tasks        ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE RESTRICT`,
+  `ALTER TABLE performance_scores ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE RESTRICT`,
+  `ALTER TABLE weekly_kpis        ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE RESTRICT`,
+  `ALTER TABLE activity_logs      ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE RESTRICT`,
+  `ALTER TABLE milestones         ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE RESTRICT`,
+  `ALTER TABLE targets            ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE RESTRICT`,
+  `ALTER TABLE orders             ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE RESTRICT`,
+
+  // Every company-scoped read filters company_id first, so it leads each index.
+  `CREATE INDEX IF NOT EXISTS daily_tasks_by_company        ON daily_tasks (company_id)`,
+  `CREATE INDEX IF NOT EXISTS performance_scores_by_company ON performance_scores (company_id, score_date DESC)`,
+  `CREATE INDEX IF NOT EXISTS weekly_kpis_by_company        ON weekly_kpis (company_id, week_start DESC)`,
+  `CREATE INDEX IF NOT EXISTS activity_logs_by_company      ON activity_logs (company_id, log_date DESC)`,
+  `CREATE INDEX IF NOT EXISTS milestones_by_company         ON milestones (company_id)`,
+  `CREATE INDEX IF NOT EXISTS targets_by_company            ON targets (company_id)`,
+  `CREATE INDEX IF NOT EXISTS orders_by_company             ON orders (company_id, order_date DESC)`,
+
+  // ── performance_scores: ONE SCORE PER PERSON PER DAY BLOCKED SHARED EMPLOYEES ──
+  //
+  // MEASURED while verifying this change: `UNIQUE(user_id, score_date)`. So a shared employee
+  // CANNOT hold two scores for one day — one for ABIOZEN and one for Adifice — and per-company
+  // performance scoring for them was structurally impossible, not merely unimplemented. Prasanthi
+  // is an admin of both companies; her Tuesday could only ever have one score, belonging to
+  // whichever workflow wrote first.
+  //
+  // THE SAME NULL TRAP as metrics_snapshots below, and it is worth stating twice because it is the
+  // kind of widening that looks obviously right: replacing the constraint with
+  // UNIQUE(user_id, score_date, company_id) would let the SAME person accumulate unlimited
+  // NULL-company scores for one day, because NULLs are distinct in a Postgres unique index. Two
+  // partial indexes keep both guarantees:
+  //   · one UNATTRIBUTED score per person per day (company_id IS NULL) — the legacy shape, intact
+  //   · one score per person per company per day  (company_id IS NOT NULL) — what B7.21 needs
+  `ALTER TABLE performance_scores DROP CONSTRAINT IF EXISTS performance_scores_user_id_score_date_key`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS performance_scores_one_unattributed_per_day
+     ON performance_scores (user_id, score_date) WHERE company_id IS NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS performance_scores_one_per_company_per_day
+     ON performance_scores (user_id, score_date, company_id) WHERE company_id IS NOT NULL`,
+
+  // ── metrics_snapshots: THE AGGREGATE THAT CANNOT BE SPLIT ────────────────
+  //
+  // It was `snapshot_date TEXT NOT NULL UNIQUE` — one row per day for the whole platform, built by
+  // summing orders and averaging scores across every company. An aggregate cannot be decomposed
+  // back into its parts, so the existing rows are PORTFOLIO-level and always were; labelling them
+  // ABIOZEN's would be the silent assignment the owner forbids.
+  //
+  // THE TRAP, AND WHY TWO PARTIAL INDEXES RATHER THAN ONE WIDER KEY. Replacing
+  // UNIQUE(snapshot_date) with UNIQUE(snapshot_date, company_id) is the obvious widening and would
+  // have DESTROYED the daily guarantee: in Postgres NULLs are distinct in a unique index, so every
+  // existing portfolio row — all of which have company_id NULL — would have been free to
+  // duplicate. Two partial indexes keep both guarantees exactly:
+  //   · one portfolio row per day   (company_id IS NULL)
+  //   · one row per company per day (company_id IS NOT NULL)
+  `ALTER TABLE metrics_snapshots ADD COLUMN IF NOT EXISTS company_id TEXT REFERENCES companies(id) ON DELETE RESTRICT`,
+  `ALTER TABLE metrics_snapshots DROP CONSTRAINT IF EXISTS metrics_snapshots_snapshot_date_key`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS metrics_snapshots_one_portfolio_per_day
+     ON metrics_snapshots (snapshot_date) WHERE company_id IS NULL`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS metrics_snapshots_one_company_per_day
+     ON metrics_snapshots (snapshot_date, company_id) WHERE company_id IS NOT NULL`,
+];
+
+async function migrateRecordOwnership(query) {
+  for (const stmt of OWNERSHIP_DDL) {
+    try {
+      await query(stmt);
+    } catch (e) {
+      // The same narrow ignorable set as the rest of this file. 42P01 — a missing table — is NOT
+      // ignorable: these ALTERs depend on core tables from initDB and on `companies` from the
+      // office kernel, and a silent skip would leave the column absent while every scoped read
+      // quietly returned nothing, which reads exactly like "this company has no data".
+      if (!['42710', '42P07', '42701'].includes(e.code)) {
+        throw new Error(`record-ownership schema failed on [${stmt.slice(0, 72).replace(/\s+/g, ' ')}…]: ${e.message}`);
+      }
+    }
+  }
+  return { ok: true };
+}
+
+module.exports = {
+  migrateIdentity, DDL,
+  migrateRecordOwnership, OWNERSHIP_DDL,
+  IDENTITY_TABLES: Object.freeze(['user_companies', 'workflow_companies']),
+};

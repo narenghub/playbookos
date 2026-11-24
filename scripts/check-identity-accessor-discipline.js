@@ -94,6 +94,15 @@ const EXEMPT = new Map([
     + 'ANY row remains, including one the live predicate would filter out as superseded or expired '
     + '— a leak the accessor would politely hide. It reads only a COUNT, writes nothing, and '
     + 'guards the table name with to_regclass so an unmigrated production database reads as zero.'],
+  ['src/lib/identity/scoped-operations.js',
+    'THE accessor for the company_id columns B7.21 added to the operational tables, and it reads '
+    + 'the roster through company-membership.js rather than writing a second predicate. Every '
+    + 'function takes a resolved context and none takes a company id.'],
+  ['scripts/check-record-ownership-db.js',
+    'asserts the DATABASE constraints directly and goes around the accessor on purpose: two '
+    + 'partial unique indexes and the NULL-is-invisible property cannot be proved through code '
+    + 'written to satisfy them, and the central assertion is that an UNATTRIBUTED row is returned '
+    + 'to nobody — which requires inserting one. Disposable cluster; fixtures removed by id.'],
   ['src/lib/office/memory.js',
     'THE accessor for agent_memory, and its DDL. Its whole purpose is to own that table — and it '
     + 'is the only module that may, because every function it exports takes a resolved company '

@@ -159,6 +159,36 @@ async function isActiveMember({ userId, companyId }, { at = null, ...deps } = {}
  *
  * @returns {Promise<Set<string>|null>} lowercased addresses; null when unknowable.
  */
+/**
+ * Every live member of one company, with the role they hold there. B7.21's employee selection.
+ *
+ * It lives HERE rather than in scoped-operations.js because this module owns the six-condition live
+ * predicate, and "who is an active employee of this company" must not have a second expression —
+ * the owner's ruling was explicit that there be no competing company authorization model, and two
+ * roster queries are two models the day one is edited and the other is not.
+ *
+ * Returns UNKNOWN (null) when the table cannot be read. An outage is not an empty company: a caller
+ * that read null as [] would score nobody and report it as a quiet day.
+ */
+async function membersOfCompany(companyId, { at = null, ...deps } = {}) {
+  // No companyId is not "every company" — it is an unanswerable question, and answering it as
+  // "everyone" is the cross-tenant leak this table exists to prevent.
+  if (!companyId) return UNKNOWN;
+  try {
+    const r = await q(deps)(
+      `SELECT u.id, u.email, u.name, u.role, uc.company_role
+       ${FROM}
+       WHERE uc.company_id = $2 AND ${LIVE}
+       ORDER BY u.name`,
+      [at, String(companyId)]);
+    return r.rows.map((x) => Object.freeze({
+      id: x.id, email: x.email, name: x.name, role: x.role, companyRole: x.company_role,
+    }));
+  } catch (_) {
+    return UNKNOWN;
+  }
+}
+
 async function activeMemberAddresses(addresses, { companyId, at = null, ...deps } = {}) {
   const wanted = [...new Set((addresses || []).map((a) => String(a).toLowerCase()))].filter(Boolean);
   if (!wanted.length) return new Set();
@@ -309,6 +339,7 @@ module.exports = {
   membershipsOf,
   isActiveMember,
   activeMemberAddresses,
+  membersOfCompany,
   grantMembership,
   revokeMembership,
   assertActorMayManage,

@@ -203,6 +203,19 @@ const SCHEMA_STEPS = [
     required: true,
     run: (q) => require('./office/memory').migrateMemory(q),
   },
+  {
+    // AFTER core tables (initDB), phase 2 (initPhase2) and the office kernel, because it ALTERs
+    // operational tables from the first two and references `companies` from the third.
+    //
+    // B7.21. Owner instruction: "the underlying tasks, orders, objectives and performance records
+    // must also belong to the authorized company". company_id is added NULLABLE with no backfill —
+    // a NOT NULL column would have forced an invented owner onto every existing row, which is the
+    // inference the ruling forbids. NULL means "ownership not established" and is visible to NO
+    // company; the attribution is a separate, reviewed step.
+    name: 'identity: company ownership on operational records (B7.21)',
+    required: true,
+    run: (q) => require('./identity/schema').migrateRecordOwnership(q),
+  },
   { name: 'research intelligence', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligence() },
   { name: 'research intelligence phase 3', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligencePhase3() },
 

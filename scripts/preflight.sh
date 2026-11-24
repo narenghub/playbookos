@@ -317,6 +317,10 @@ pf_step "every cron that claims a local hour is pinned to a timezone" node scrip
 # the gate. A tripwire — green while nothing is mapped, red the moment a company label is applied
 # to a workflow whose implementation has no notion of a company.
 pf_step "no workflow wears a company label its queries ignore" node scripts/check-workflow-company-scoping-db.js
+# B7.21. Thirteen operational tables carried no company ownership at all, so scoping only the
+# employee query would have selected the right people and then read every company's tasks, scores
+# and revenue. The central property: an UNATTRIBUTED row is visible to NO company, not to all.
+pf_step "operational records belong to a company" node scripts/check-record-ownership-db.js
 pf_step "the workflow-company proposal cannot assign anything" node --test scripts/proposal-is-readonly.test.js
 # B7.6. Six producers in four modules and two processes bind approvals. They agree or every
 # approved external send refuses, and each local expression of "the message" is locally correct —
