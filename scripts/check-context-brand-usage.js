@@ -35,6 +35,12 @@ const KEY = 'playnexa.office.companyContext';
 const ALLOWED = new Set([
   path.join('src', 'lib', 'office', 'context.js'),      // defines and stamps it
   path.join('scripts', 'check-context-brand-usage.js'), // this file
+  // The adversarial closure tests. They QUOTE the key in order to prove that holding it buys
+  // nothing: a hand-built object bearing this Symbol is refused, because trust is object identity
+  // rather than a mark. A test whose subject is "the published key is not a credential" must be
+  // allowed to use the published key — and it is the second time a scanner has flagged a test for
+  // demonstrating exactly what the scanner exists to prevent.
+  path.join('src', 'lib', 'office', 'context-read-session.test.js'),
 ]);
 
 const violations = [];
