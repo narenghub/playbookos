@@ -48,11 +48,27 @@ const PREFIX = 'm75';
 
 /**
  * Time-ordered and random. The timestamp makes a run's fixtures sortable and recognisable by eye
- * when reading the database afterwards; the random suffix is what guarantees two invocations
- * cannot collide — including two started in the same second, which is exactly what a retried run
- * after a failure looks like.
+ * when reading the database afterwards; the random suffix is what keeps two invocations apart —
+ * including two started in the same millisecond, which is exactly what a retried run after a
+ * failure looks like.
+ *
+ * ── WIDENED FROM 3 BYTES TO 8 ON 2026-11-24 ─────────────────────────────────
+ *
+ * This said the random part "guarantees two invocations cannot collide", and at 3 bytes that was a
+ * stronger claim than the code delivered: 24 bits is 16,777,216 values, so keys sharing a
+ * millisecond collide by the birthday problem. The suite proved it rather than argued it —
+ * `DECISIVE: two invocations never share a key` builds 2,000 keys in a few milliseconds and came
+ * back with 1,999, having collided once. It had passed minutes earlier on identical code, which is
+ * the signature of a probabilistic failure and the reason it had survived this long: a check that
+ * fails one run in a few hundred reads as a flake rather than as the arithmetic it is.
+ *
+ * Two real runs starting in the same millisecond were never the practical risk (~1 in 16.7M). The
+ * cost was a push gate that failed intermittently for a reason unrelated to whatever was being
+ * pushed, which is corrosive in its own way: it teaches whoever reads the output to re-run rather
+ * than to look. 64 bits removes both, and keeps the key lowercase alphanumeric, time-ordered, and
+ * matched by the unchanged `m75-%` inspection pattern.
  */
-function newRunId(now = Date.now(), rand = () => crypto.randomBytes(3).toString('hex')) {
+function newRunId(now = Date.now(), rand = () => crypto.randomBytes(8).toString('hex')) {
   return `${now.toString(36)}${rand()}`;
 }
 
