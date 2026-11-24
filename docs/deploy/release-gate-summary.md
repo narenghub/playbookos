@@ -21,7 +21,7 @@ check **begins failing on 2026-11-13**.
 | Gate | Status | Who |
 |---|---|---|
 | **1. Admin password changed, credentials rotated** | **FAIL — unconfirmed** | you |
-| **2. Backup restored, 55 steps validated against production's schema** | **FAIL — performed; 2 defects found and fixed; needs one re-run** | you |
+| **2. Backup restored, 54 steps validated against production's schema** | **FAIL — performed; 2 defects found and fixed; needs one re-run** | you | <!-- as-executed: 2026-11-10 — recorded result of a gate run. Do not update to the current chain length; this states what was verified on the day. --><!-- /as-executed -->
 | 3. Migration incompatibility, mutation, permissions, rollback | **PASS** — 2 incompatibilities found by gate 2, both resolved; confirmed by gate 2's re-run | done |
 | 4. Least-privilege role + separate migration credentials | **PASS** (prepared, unapplied) | done / you to apply |
 | 5. Full preflight + end-to-end, actual exit codes | **PASS** | done |
@@ -182,6 +182,7 @@ Validated locally by `check-db-role-separation.js` (**exit 0**) and `check-start
 
 Each run bare, as its own command, `$?` read. No pipes.
 
+<!-- as-executed: 2026-11-10 — recorded result of a gate run. Do not update to the current chain length; this states what was verified on the day. -->
 ```
 prpa-e2e-demo.js                   exit=0    46 assertions, import → … → Excel over HTTP
 prpa-tracker-demo.js               exit=0    253 records end to end
@@ -189,7 +190,7 @@ check-previous-release-compat.js   exit=0    13 assertions, the deployed release
 check-startup-without-ddl.js       exit=0    28 assertions, ENG-003
 check-db-role-separation.js        exit=0    least-privilege roles
 verify-migration-readiness.js      exit=0    13 assertions, populated DB + backup/restore
-check-migration-coverage.js        exit=0    55 steps, 152 tables, every script accounted for
+check-migration-coverage.js        exit=0    54 steps, 152 tables, every script accounted for
 check-outreach-unique-repair.js    exit=0    22 assertions, the app's own upsert on 3 real DB shapes
 check-production-shape-readiness.js exit=0   17 assertions, whole gate-2 harness on a prod-shaped dump
 check-inline-constraint-sweep.js   exit=0    14 assertions, negative controls for the sweep
@@ -205,6 +206,7 @@ check-secrets.js                   exit=0    working tree only — see gate 1
 check-secrets.js --history         exit=0    exposure TRACKED, not resolved — see gate 1
 check-release-blockers.js          exit=0    1 open blocker, reported
 ```
+<!-- /as-executed -->
 
 ### Preflight
 

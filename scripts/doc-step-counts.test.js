@@ -56,39 +56,146 @@ const HISTORICAL = /(?:\d{2}\s*(?:→|->|to)\s*\*{0,2}\d{2}|\bwas\s+\d{2}\b|\bfr
 //   "31 of 44 steps"  — a ratio about some other population, never the chain's length
 //   a line mentioning preflight / checks / assertions — a different kind of step entirely
 const RATIO = /\b\d{1,3}\s+of\s+\d{2,3}\s+steps?\b/gi;
+
+// ── A RECORDED RESULT IS NOT A CLAIM ABOUT THE CHAIN TODAY ─────────────────────────────────────────
+//
+// Owner decision 2026-11-24: "Historical acceptance records must reflect exactly what was implemented
+// and verified at the time of execution. Do not rewrite historical evidence to satisfy a current
+// schema-count scanner."
+//
+// On 2026-11-24 the chain grew from 54 to 55 steps and this checker named ten stale lines. Seven were
+// current — instructions and present-tense claims — and were corrected. THREE WERE TRANSCRIPTS of gate
+// runs performed on 2026-11-10, when the chain genuinely had 54 steps: "exit=0  54 steps, 152 tables".
+// They were "corrected" too, which falsified the evidence: the run did not validate 55 steps, and a
+// record saying it did is worse than a stale number because nothing in the repository disagrees with it.
+//
+// So a line inside an `as-executed` region, or carrying the marker itself, states what was true then and
+// is exempt from the current count. The marker is DATED and greppable
+// (`grep -rn as-executed docs/`), so an exemption is visible in the document it applies to rather than
+// buried in a list here.
+//
+// WHY THIS IS A LINE/REGION RULE AND NOT A FILE OR DIRECTORY ONE. Owner item 4: "Avoid broad directory
+// exclusions that could conceal stale current documentation." release-gate-summary.md is the proof that
+// matters — it holds a historical gate transcript AND, 50 lines later, a live operator instruction
+// ("must be 0. 55 steps. Confirm with `node scripts/migrate.js --plan`"). Exempting the file would stop
+// checking an instruction someone follows at the keyboard. The region covers the transcript; the
+// instruction is still checked.
+const AS_EXECUTED_OPEN = /<!--\s*as-executed:\s*(\d{4}-\d{2}-\d{2})/;
+const AS_EXECUTED_CLOSE = /<!--\s*\/as-executed\s*-->/;
+
+/**
+ * Scan one document. Exported shape so the regression test below can drive it with fixtures instead
+ * of re-implementing the classification — a second copy of this rule would be the thing it exists to
+ * prevent.
+ *
+ * Returns { wrong: string[], exempt: string[] }.
+ */
+function scanDoc(rel, raw, n) {
+  const wrong = [];
+  const exempt = [];
+  const src = raw
+    .replace(HISTORICAL, (m) => ' '.repeat(m.length))
+    .replace(RATIO, (m) => ' '.repeat(m.length));
+
+  let inAsExecuted = false;
+  src.split('\n').forEach((line, i) => {
+    const opens = AS_EXECUTED_OPEN.test(line);
+    const closes = AS_EXECUTED_CLOSE.test(line);
+    // A line may carry both (a table row marks itself) — then it is exempt and the region does not
+    // stay open. Opening and closing are evaluated before the claim check so the marker line itself
+    // is covered.
+    const coveredNow = inAsExecuted || opens;
+    if (opens && !closes) inAsExecuted = true;
+    if (closes) inAsExecuted = false;
+
+    if (OTHER_POPULATION.test(line)) return;
+    CLAIM.lastIndex = 0;
+    let m;
+    while ((m = CLAIM.exec(line)) !== null) {
+      const claimed = Number(m[1]);
+      if (claimed < 30 || claimed > 99) continue;
+      if (claimed === n) continue;
+      if (coveredNow) {
+        exempt.push(`${rel}:${i + 1} records ${claimed} steps as-executed (chain is now ${n})`);
+        continue;
+      }
+      wrong.push(`${rel}:${i + 1} claims ${claimed} steps — the migrator has ${n}: ${line.trim().slice(0, 110)}`);
+    }
+  });
+  return { wrong, exempt };
+}
+
 const OTHER_POPULATION = /\b(preflight|check\(s\)|checks|assertion|assertions)\b/i;
 
 test('every step count in the docs matches SCHEMA_STEPS', () => {
   const n = SCHEMA_STEPS.length;
   const wrong = [];
+  const exempt = [];
 
   for (const rel of DOCS) {
     const abs = path.join(ROOT, rel);
     if (!fs.existsSync(abs)) continue;
-    const raw = fs.readFileSync(abs, 'utf8');
-    // Blank out the historical forms first, so "47 → 53 steps" does not read as a claim of 47.
-    const src = raw
-      .replace(HISTORICAL, (m) => ' '.repeat(m.length))
-      .replace(RATIO, (m) => ' '.repeat(m.length));
-
-    src.split('\n').forEach((line, i) => {
-      if (OTHER_POPULATION.test(line)) return;
-      CLAIM.lastIndex = 0;
-      let m;
-      while ((m = CLAIM.exec(line)) !== null) {
-        const claimed = Number(m[1]);
-        // Only counts in the plausible range for this chain; "12 roles" and "28 assertions" are not
-        // step counts, and `step` is required by the pattern, so this is a narrow guard against a
-        // number that happens to precede the word.
-        if (claimed < 30 || claimed > 99) continue;
-        if (claimed !== n) wrong.push(`${rel}:${i + 1} claims ${claimed} steps — the migrator has ${n}: ${line.trim().slice(0, 110)}`);
-      }
-    });
+    const r = scanDoc(rel, fs.readFileSync(abs, 'utf8'), n);
+    wrong.push(...r.wrong);
+    exempt.push(...r.exempt);
   }
+
+  // Printed, not silent: an exemption that nobody ever sees is how a stale current number eventually
+  // hides behind one. This is the census of every historical record being honoured.
+  if (exempt.length) console.log(`  as-executed records honoured (${exempt.length}):\n    ${exempt.join('\n    ')}`);
 
   assert.deepStrictEqual(wrong, [],
     `\n${wrong.join('\n')}\n\nSCHEMA_STEPS is ${n}. Correct the prose, or stop quoting a number and `
-    + 'point at `node scripts/migrate.js --plan` instead.\n');
+    + 'point at `node scripts/migrate.js --plan` instead. If the line is a RECORDED RESULT of a past '
+    + 'run, do not change the number — wrap it in `<!-- as-executed: YYYY-MM-DD -->` … '
+    + '`<!-- /as-executed -->` so it keeps stating what was true then.\n');
+});
+
+test('REGRESSION: historical counts stay valid while wrong CURRENT counts are still caught', () => {
+  // Owner item 5. Both halves matter and they pull in opposite directions: an exemption that is too
+  // broad stops catching stale instructions, and one that is too narrow goes back to falsifying
+  // evidence. Driven through scanDoc, the same function the real scan uses, with fixtures rather than
+  // real files so this keeps working when the chain's length changes again.
+  const n = SCHEMA_STEPS.length;
+  const stale = n === 54 ? 53 : 54;
+
+  const historicalRegion = [
+    '# A gate record',
+    '<!-- as-executed: 2026-11-10 -->',
+    '```',
+    `check-migration-coverage.js  exit=0  ${stale} steps, 152 tables`,
+    '```',
+    '<!-- /as-executed -->',
+  ].join('\n');
+  assert.deepStrictEqual(scanDoc('fixture-historical.md', historicalRegion, n).wrong, [],
+    'a transcript inside an as-executed region must NOT be reported — that is the evidence');
+  assert.strictEqual(scanDoc('fixture-historical.md', historicalRegion, n).exempt.length, 1,
+    'and it must be reported as an honoured exemption, not silently skipped');
+
+  const selfMarkedRow = `| 2. Backup restored, ${stale} steps validated | PASS | <!-- as-executed: 2026-11-10 --><!-- /as-executed -->`;
+  assert.deepStrictEqual(scanDoc('fixture-row.md', selfMarkedRow, n).wrong, [],
+    'a single line may mark itself, for a table row');
+
+  // THE OTHER HALF: the same file, after the region closes, is still checked.
+  const mixed = [
+    '<!-- as-executed: 2026-11-10 -->',
+    `recorded: ${stale} steps`,
+    '<!-- /as-executed -->',
+    `run the migrator: all ${stale} migration steps apply`,
+  ].join('\n');
+  const r = scanDoc('fixture-mixed.md', mixed, n);
+  assert.strictEqual(r.exempt.length, 1, 'the recorded line is exempt');
+  assert.strictEqual(r.wrong.length, 1, 'the CURRENT instruction after the region is still caught');
+  assert.match(r.wrong[0], /fixture-mixed\.md:4/, 'and it is the line after the region that is named');
+
+  // An unmarked stale current claim is caught, which is the original purpose.
+  assert.strictEqual(scanDoc('fixture-current.md', `all ${stale} migration steps`, n).wrong.length, 1);
+  // A correct current claim is not.
+  assert.strictEqual(scanDoc('fixture-ok.md', `all ${n} migration steps`, n).wrong.length, 0);
+  // An undated marker is not a marker: the date is what makes a record identifiable.
+  assert.strictEqual(
+    scanDoc('fixture-undated.md', `<!-- as-executed -->\n${stale} steps`, n).wrong.length, 1,
+    'an undated as-executed marker must not exempt anything');
 });
 
 test('scripts/expected-schema-steps.txt matches the migrator', () => {

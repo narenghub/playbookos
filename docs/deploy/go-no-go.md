@@ -149,6 +149,7 @@ tell you what it would and would not mean.
 
 Every exit code read from a log or a bare run, never from a pipe, never from a terminal summary line.
 
+<!-- as-executed: 2026-11-10 — recorded result of a gate run. Do not update to the current chain length; this states what was verified on the day. -->
 ```
 preflight.sh                        see §Preflight in release-gate-summary.md
 check-behavioral-regression.js      exit=0   32 assertions — auth, roles, product permissions,
@@ -157,7 +158,7 @@ check-dump-test-isolation.js        exit=0   10 assertions — decoy untouched
 check-outreach-unique-repair.js     exit=0   23 assertions — the app's own upsert, 3 DB shapes
 check-production-shape-readiness.js exit=0   17 assertions — gate-2 harness on a prod-shaped dump
 check-previous-release-compat.js    exit=0   13 assertions — the deployed release on the new schema
-check-migration-coverage.js         exit=0   55 steps, 152 tables, all 43 scripts accounted for
+check-migration-coverage.js         exit=0   54 steps, 152 tables, all 43 scripts accounted for
 check-startup-without-ddl.js        exit=0   28 assertions — ENG-003
 check-inline-constraint-sweep.js    exit=0   14 assertions — controls for the constraint sweep
 screenshot-prpa-tracker.js          exit=0   17 assertions — the page renders real data
@@ -166,6 +167,7 @@ check-secrets.js                    exit=0   working tree only — see blocker 1
 check-secrets.js --history          exit=0   exposure TRACKED, not resolved — see blocker 1
 check-release-blockers.js           exit=0   1 open blocker (ENG-003), reported
 ```
+<!-- /as-executed -->
 
 ENG-003 remains an open release blocker by design and is reported rather than suppressed; its code half
 is done — boot applies no DDL and the app runs as a role with no superuser, no DDL and no RLS bypass.
