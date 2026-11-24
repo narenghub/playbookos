@@ -138,7 +138,25 @@ async function gather(q) {
     const r = await q('SELECT COUNT(*)::int AS n FROM autonomy_events');
     events = r.rows[0] ? r.rows[0].n : null;
   } catch (_) { events = null; }
-  return { where: where.rows[0] || {}, stops: stops.rows, events, schema, missing };
+
+  // Refusals, grouped. `action` and `scope_type`/`scope_key` are the recorded columns; the shape
+  // comes from the DDL in autonomy.js, not from memory.
+  let refusals = null;
+  if (events !== null) {
+    try {
+      const byScope = await q(
+        `SELECT scope_type, scope_key, COUNT(*)::int AS n,
+                MIN(at) AS first_at, MAX(at) AS last_at
+           FROM autonomy_events
+          WHERE action = 'REFUSED'
+          GROUP BY scope_type, scope_key
+          ORDER BY n DESC`);
+      const byAction = await q(
+        `SELECT action, COUNT(*)::int AS n FROM autonomy_events GROUP BY action ORDER BY n DESC`);
+      refusals = { byScope: byScope.rows, byAction: byAction.rows };
+    } catch (_) { refusals = null; }
+  }
+  return { where: where.rows[0] || {}, stops: stops.rows, events, schema, missing, refusals };
 }
 
 function fmtScope(s) {
@@ -239,6 +257,37 @@ async function main() {
     for (const s of primary.stops) {
       console.log(`  ${fmtScope(s).padEnd(44)} set_by=${s.set_by || '(null)'}  ${new Date(s.set_at).toISOString()}`);
       if (s.reason) console.log(`      reason: ${String(s.reason).slice(0, 110)}`);
+    }
+  }
+
+  // ── WHAT THE STOPS HAVE ACTUALLY BEEN STOPPING ───────────────────────────
+  //
+  // A stop row says what is forbidden. It does not say whether anything tried. Those are different
+  // facts and only one of them tells you whether a workflow has been silently refused for weeks.
+  //
+  // Added because `capability/email.send` has been stopped in production since 2026-11-03, and the
+  // daily CEO briefing calls mailer.sendEmail, which gates through email-gate.assertSendAllowed.
+  // `email.send` is NOT in that gate's OBSERVABILITY exemption (only `email.alert` is), and
+  // matchStop applies capability stops even to non-consequential checks. So the briefing should
+  // have been generated and stored every morning and never delivered. This section is how to find
+  // out, instead of inferring it from a page that shows a stored briefing.
+  if (primary.refusals) {
+    console.log('\n── refusals recorded (autonomy_events) ──');
+    if (!primary.refusals.byScope.length) {
+      console.log('  none — nothing has been refused, which means either nothing tried');
+      console.log('  or the paths that tried do not consult the kill switch at all');
+    } else {
+      for (const r of primary.refusals.byScope) {
+        console.log(`  ${(r.scope_type + (r.scope_key ? `/${r.scope_key}` : '')).padEnd(34)}`
+          + ` ${String(r.n).padStart(5)} refusal(s)   first ${r.first_at && new Date(r.first_at).toISOString().slice(0, 10)}`
+          + `  last ${r.last_at && new Date(r.last_at).toISOString().slice(0, 10)}`);
+      }
+    }
+    if (primary.refusals.byAction.length) {
+      console.log('\n  all event actions:');
+      for (const a of primary.refusals.byAction) {
+        console.log(`    ${String(a.action).padEnd(20)} ${String(a.n).padStart(5)}`);
+      }
     }
   }
 
