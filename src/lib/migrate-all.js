@@ -191,6 +191,18 @@ const SCHEMA_STEPS = [
     required: true,
     run: (q) => require('./identity/schema').migrateIdentity(q),
   },
+  {
+    // AFTER the office kernel, for `companies`. Its own step for the same reason identity has one:
+    // a table whose rows decide what an agent believes about a company is not kernel bookkeeping.
+    //
+    // No foreign key to `users`, deliberately — a memory's author is `agent:ceo-agent` at least as
+    // often as `user:<id>`, so a users FK would be wrong on the merits as well as reintroducing
+    // the two-subsystem coupling that broke ten harnesses when user_companies lived in the
+    // kernel's own DDL.
+    name: 'AI office: company-isolated agent memory (B3.1)',
+    required: true,
+    run: (q) => require('./office/memory').migrateMemory(q),
+  },
   { name: 'research intelligence', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligence() },
   { name: 'research intelligence phase 3', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligencePhase3() },
 

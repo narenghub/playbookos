@@ -35,12 +35,19 @@ const path = require('node:path');
 const { blankNonCode } = require('./js-lex');
 
 const ROOT = path.join(__dirname, '..');
-// Both identity tables, each with the ONE module allowed to touch it. Generalised when
+// Each company-scoped table, with the ONE module allowed to touch it. Generalised when
 // workflow_companies arrived: a second copy of this check, differing only in a table name, is the
 // duplication these single-accessor rules exist to prevent.
+//
+// `agent_memory` (B3.1) joined on that argument rather than getting a third copy of this file. It
+// is not an identity table, but it is governed by the identical rule and fails the identical way:
+// it is company-scoped, so a read that forgets `AND company_id = $n` is a cross-tenant disclosure
+// with a primary-key index on it. What these tables have in common is not their subject — it is
+// that one missing predicate crosses a company boundary.
 const TABLES = Object.freeze({
   user_companies: 'src/lib/identity/company-membership.js',
   workflow_companies: 'src/lib/identity/workflow-company.js',
+  agent_memory: 'src/lib/office/memory.js',
 });
 
 // Each exemption carries the reason it is one. A list of bare paths becomes a place to add a file
@@ -65,6 +72,14 @@ const EXEMPT = new Map([
     'NAMES the table in its report text and recommendation; reads live mappings only through '
     + 'workflow-company.js allMappings(). scripts/proposal-is-readonly.test.js asserts it cannot '
     + 'INSERT, UPDATE, DELETE or call the accessor\'s writers.'],
+  ['src/lib/office/memory.js',
+    'THE accessor for agent_memory, and its DDL. Its whole purpose is to own that table — and it '
+    + 'is the only module that may, because every function it exports takes a resolved company '
+    + 'context and reads the company off it rather than accepting one.'],
+  ['scripts/check-office-memory-db.js',
+    'asserts the DATABASE constraints directly, going around the accessor on purpose: a composite '
+    + 'foreign key and a partial unique index cannot be proved through code written to satisfy '
+    + 'them. Its fixtures are recorded and removed by id, and it reports leaks.'],
   ['scripts/proposal-is-readonly.test.js',
     'the table name appears inside the REGEXES that assert the proposal tool cannot write to it — '
     + 'a test whose whole subject is "no SQL against this table" must be allowed to quote the SQL '

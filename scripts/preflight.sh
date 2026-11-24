@@ -300,6 +300,11 @@ pf_step "the identity tables are reached only through their accessors" node scri
 pf_step "only tests can manufacture a company context" node scripts/check-test-context-usage.js
 pf_step "only context.js can mint a company context" node scripts/check-context-brand-usage.js
 pf_step "company membership holds its ruled properties" node scripts/check-company-membership-db.js
+# B3.1. Persistent agent memory is where company isolation stops being a boundary and becomes a
+# body of knowledge: one leaked WHERE clause does not expose a row, it tells one company what
+# another decided. Proved against a real server because every property that matters here is a
+# predicate, a composite foreign key or a partial unique index.
+pf_step "agent memory is isolated per company" node scripts/check-office-memory-db.js
 pf_step "the workflow-company proposal cannot assign anything" node --test scripts/proposal-is-readonly.test.js
 # Is the K1 PRODUCTION validator trustworthy? It runs once against production and its verdict is
 # what decides PRODUCTION VALIDATED, so three things need proving first: it writes nothing durable
