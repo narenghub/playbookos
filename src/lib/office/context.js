@@ -66,9 +66,41 @@ function lazyQuery() {
 const BRAND_KEY = 'playnexa.office.companyContext.v1';
 const BRAND = Symbol.for(BRAND_KEY);
 
-/** Stamp and freeze. The only way a trusted context comes into existence. */
+// ── IDENTITY, NOT A MARK: THE REGISTRY THAT CLOSES SUBSTITUTION ─────────────
+//
+// The brand alone was not enough, and the gap was recorded rather than fixed: Symbols survive
+// object spread, so `Object.freeze({ ...realContext, companyId: 'other' })` carried the brand, was
+// frozen, and PASSED. That is context substitution — the most plausible attack here, because it
+// needs no knowledge of a key, only a context the caller already legitimately holds.
+//
+// A WeakSet of the actual objects this module minted answers the right question. Not "does this
+// object bear a mark" — a mark copies — but "is this THE object we created". A spread is a new
+// object and is not in the set. A hand-built object with the right Symbol is not in the set
+// either, so direct brand fabrication dies with the same check.
+//
+// WHY IT HANGS OFF globalThis. The harnesses clear office modules from require.cache, and a
+// module-level WeakSet would be replaced on reload, instantly invalidating every live context —
+// the exact failure that pushed the brand from Symbol() to Symbol.for(). The registry therefore
+// lives on globalThis under a registry Symbol, so all instances share one set.
+//
+// WHAT AN ATTACKER WITH IN-PROCESS CODE CAN STILL DO. They can reach globalThis and add their own
+// object to the set. Nothing in JavaScript prevents that, and this file does not pretend otherwise.
+// What is now closed is the realistic path: copying, spreading or re-freezing a context, and
+// fabricating one from the published key. Both are refused by object identity.
+const REGISTRY_KEY = Symbol.for('playnexa.office.companyContextRegistry.v1');
+if (!globalThis[REGISTRY_KEY]) globalThis[REGISTRY_KEY] = new WeakSet();
+const MINTED = globalThis[REGISTRY_KEY];
+
+/**
+ * Stamp, freeze, and REGISTER. The only way a trusted context comes into existence.
+ *
+ * The brand is kept for diagnostics and for a cheap first check; membership of MINTED is what
+ * actually confers trust, because object identity cannot be copied.
+ */
 function sealContext(fields) {
-  return Object.freeze({ ...fields, [BRAND]: true });
+  const ctx = Object.freeze({ ...fields, [BRAND]: true });
+  MINTED.add(ctx);
+  return ctx;
 }
 
 class NoCompanyContext extends Error {
@@ -141,11 +173,15 @@ function assertContext(ctx) {
   // The brand first: it is the check that cannot be satisfied from outside this module. Frozen-ness
   // and a companyId are still required, but on their own they only prove SHAPE — and a caller that
   // wanted to act for another company would supply exactly that shape.
-  if (ctx[BRAND] !== true) {
+  // Object IDENTITY first. A spread, a re-freeze, or a hand-built object bearing the right Symbol
+  // are all different objects from the ones this module minted, so all three are refused here.
+  if (!MINTED.has(ctx)) {
     throw new NoCompanyContext(
       'company context was not produced by src/lib/office/context.js. A frozen object with a '
-      + 'companyId is not a resolved context: resolve one from a run, an objective or an '
-      + 'authenticated read session, so the company is READ from stored state rather than chosen '
+      + 'companyId is not a resolved context — and neither is a COPY of a real one: spreading a '
+      + 'context to change its company produces a new object, which is not the object that was '
+      + 'resolved. Resolve one from a run, an objective, an authenticated read session, or a '
+      + 'mapped scheduled workflow, so the company is READ from stored state rather than chosen '
       + 'by the caller.');
   }
   if (!Object.isFrozen(ctx)) throw new NoCompanyContext('company context must be frozen');
@@ -257,8 +293,8 @@ function contextForTests__TEST_ONLY(fields) {
  * throw — the outbound gate asks this before it will treat anybody as internal.
  */
 function isTrustedContext(ctx) {
-  return Boolean(ctx) && typeof ctx === 'object' && ctx[BRAND] === true
-    && Object.isFrozen(ctx) && Boolean(ctx.companyId);
+  return Boolean(ctx) && typeof ctx === 'object' && MINTED.has(ctx)
+    && ctx[BRAND] === true && Object.isFrozen(ctx) && Boolean(ctx.companyId);
 }
 
 // ── READ CONTEXT FOR A HUMAN SESSION ────────────────────────────────────────

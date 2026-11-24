@@ -39,60 +39,35 @@ const bad = (m, extra) => {
 };
 const note = (m) => console.log(`  --    ${m}`);
 
-// A PORT CHOSEN PER RUN, NOT A CONSTANT.
+// ── CLUSTER LIFECYCLE: THE SHARED UTILITY, NOT A LOCAL COPY ─────────────────
 //
-// This used the fixed port 55991, copied from a sibling check. When an earlier run was killed
-// before its cleanup, its cluster kept running and held that port — so every later run failed to
-// bind, startTemp returned null, and the check reported "no Postgres available" and exited 3. It
-// was not unavailable; it was blocked by this script's own orphan, and the honest-looking NOT
-// EXECUTED verdict hid a self-inflicted failure. A per-run port makes an orphan harmless.
-const PORT = 50000 + (process.pid % 15000);
-let startError = null;
+// This file used to carry its own startTemp/stopTemp — a per-run port, an explicit pg_ctl logfile,
+// and a cleanup that ran only on the happy path. Every DB check carries a version of the same
+// thing, and on 2026-11-24 the accumulated orphans from killed runs filled the disk to 100% and
+// preflight reported it as "database TLS verification refuses the wrong certificate".
+//
+// scripts/lib/pg-disposable.js owns that lifecycle now: unique directory and port per run, an
+// ownership marker recording the pid AND its start time, signal-handler cleanup as well as normal
+// cleanup, and a reclaim path that demands positive ownership evidence. This is the first check
+// migrated to it; the rest follow incrementally.
+const DISPOSABLE = require('./lib/pg-disposable');
 
-function startTemp() {
-  const dir = pgBin();
-  if (!dir) { startError = 'initdb not found on PATH'; return null; }
-  const base = fs.mkdtempSync(path.join(require('os').tmpdir(), 'mbrchk-'));
-  const asRoot = process.getuid && process.getuid() === 0;
-  try {
-    if (asRoot) {
-      execFileSync('sh', ['-c', `chown -R postgres ${base}`], { stdio: 'pipe' });
-      execFileSync('sh', ['-c',
-        `su postgres -c "PATH=${dir}:\\$PATH initdb -D ${base}/data ${INITDB_FLAGS}" `
-        + `&& su postgres -c "PATH=${dir}:\\$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-p ${PORT} -k ${base}' -w start"`],
-      { stdio: 'pipe' });
-    } else {
-      execFileSync('sh', ['-c',
-        `PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS} `
-        + `&& PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-p ${PORT} -k ${base}' -w start`],
-      { stdio: 'pipe' });
-    }
-  } catch (e) {
-    // Swallowing this is what made a blocked port look like a missing Postgres.
-    startError = String((e && (e.stderr || e.message)) || e).split('\n').slice(-6).join(' ').trim();
-    return null;
+let cluster = null;
+try {
+  cluster = DISPOSABLE.create({ label: 'membership' });
+} catch (e) {
+  if (e && e.infrastructure) {
+    // An infrastructure failure is NOT a product failure, and conflating them is the whole reason
+    // the shared utility exists.
+    console.log(`  skip  ${e.message}`);
+    console.log('SKIP  company membership not exercised — infrastructure unavailable');
+    process.exit(EXIT_NOT_EXECUTED);
   }
-  temp = { base, dir, asRoot };
-  return `postgresql://postgres@localhost/postgres?host=${base}&port=${PORT}&sslmode=disable`;
+  throw e;
 }
-function stopTemp() {
-  if (!temp) return;
-  try {
-    execFileSync('sh', ['-c', temp.asRoot
-      ? `su postgres -c "PATH=${temp.dir}:\\$PATH pg_ctl -D ${temp.base}/data -m immediate stop"`
-      : `PATH=${temp.dir}:$PATH pg_ctl -D ${temp.base}/data -m immediate stop`], { stdio: 'pipe' });
-  } catch (_) {}
-  try { fs.rmSync(temp.base, { recursive: true, force: true }); } catch (_) {}
-}
+const url = cluster.url;
+const stopTemp = () => cluster.destroy();
 
-console.log('  ..    starting a disposable cluster (initdb is synchronous and slow)');
-const url = startTemp();
-console.log('  ..    cluster ' + (url ? 'up' : 'unavailable'));
-if (!url) {
-  console.log(`  skip  could not start a disposable cluster: ${startError || 'unknown reason'}`);
-  console.log('SKIP  company membership not exercised — this check needs a server');
-  process.exit(EXIT_NOT_EXECUTED);
-}
 process.env.DATABASE_URL = url;
 
 // initDB() creates `users` — which this check needs for its foreign key — and then REFUSES to

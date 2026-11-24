@@ -32,6 +32,13 @@ cd "$HERE/.."
 
 echo "── preflight"
 # The suite. --test exits non-zero if any test fails, which is the only signal that matters.
+# ── INFRASTRUCTURE BEFORE APPLICATION ────────────────────────────────────────
+# On 2026-11-24 a 100%-full disk — 688 orphaned cluster dirs, 228 postgres processes from preflight
+# runs killed mid-flight — presented as "database TLS verification refuses the wrong certificate".
+# Checked FIRST and reported as what it is, so an infrastructure failure never again wears an
+# application-security face. Dry run: it reports and refuses, it does not delete.
+pf_step "disposable test infrastructure is healthy" node scripts/pg-cleanup.js
+pf_step "the disposable cluster lifecycle holds" node --test scripts/pg-disposable.test.js
 pf_step "test suite" env JWT_SECRET=preflight node --test $(find src scripts -name '*.test.js')
 pf_step "SPA parses (local file)" node scripts/check-spa-parse.js
 pf_step "classic nav parity" node scripts/verify-classic-nav-parity.js

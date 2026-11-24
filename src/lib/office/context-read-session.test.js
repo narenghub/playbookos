@@ -206,17 +206,88 @@ test('the brand cannot be copied off a real context by spreading it', async () =
   assert.throws(() => CTX.assertContext(laundered), /frozen/);
 });
 
-test('…and a FROZEN spread copy with a changed company is still a forgery risk — documented', async () => {
-  // Honest limit, stated rather than hidden: Object.freeze({ ...real, companyId: 'other' }) carries
-  // the brand AND is frozen, so provenance alone cannot catch it. Spreading a trusted context is
-  // therefore a code-review concern, and the defence is that no caller is given a real context for
-  // a company it may not act for in the first place — the resolvers only ever return one the
-  // authenticated subject is authorized for. Asserted so that if this ever becomes catchable, the
-  // test changes deliberately rather than by accident.
+// ── CONTEXT SUBSTITUTION: EXPLICIT CLOSURE EVIDENCE ─────────────────────────
+//
+// Owner, 2026-11-24: "The previous context substitution vulnerability remains open unless you
+// provide explicit evidence that copied or modified contexts and direct brand fabrication are
+// refused. Do not infer its closure from 19 passing context tests."
+//
+// Correct to insist. The brand alone did NOT close it, and the earlier version of this file said
+// so: Symbols survive object spread, so `Object.freeze({ ...real, companyId: 'other' })` carried
+// the brand, was frozen, and passed. That is the realistic attack — it needs no key, only a
+// context the caller already legitimately holds.
+//
+// Trust is now OBJECT IDENTITY: a WeakSet of the objects this module minted, on globalThis so it
+// survives the require.cache clearing the harnesses do. "Does it bear a mark" is a question a copy
+// answers; "is it the object we created" is not.
+//
+// Each case below is an attack, named, with the real API.
+
+test('CLOSURE: a spread copy with a CHANGED company is refused', async () => {
   const real = await resolve({ userId: 'u1' }, [ABIOZEN]);
-  const laundered = Object.freeze({ ...real, companyId: 'co-someone-elses-company' });
-  assert.equal(CTX.isTrustedContext(laundered), true,
-    'KNOWN LIMIT: a frozen spread of a genuine context passes provenance. The resolvers never hand '
-    + 'out a context for an unauthorized company, which is what makes this hard to exploit, not the '
-    + 'brand. If a non-spreadable carrier is introduced, update this test.');
+  const substituted = Object.freeze({ ...real, companyId: 'co-someone-elses-company' });
+  assert.equal(CTX.isTrustedContext(substituted), false);
+  assert.throws(() => CTX.assertContext(substituted), /not produced by|neither is a COPY/);
 });
+
+test('CLOSURE: a spread copy that changes NOTHING is also refused', async () => {
+  // Load-bearing. If only the changed copy were caught, an attacker would launder a context by
+  // copying it first and mutating later, and the check would be testing the mutation rather than
+  // the copying.
+  const real = await resolve({ userId: 'u1' }, [ABIOZEN]);
+  assert.equal(CTX.isTrustedContext(Object.freeze({ ...real })), false);
+});
+
+test('CLOSURE: direct brand fabrication with the PUBLISHED key is refused', async () => {
+  // The brand key is in the source and in a scanner's allowlist, so it is not secret. Anyone can
+  // write Symbol.for('playnexa.office.companyContext.v1'). It buys nothing.
+  const fabricated = Object.freeze({
+    companyId: 'co-someone-elses-company',
+    [Symbol.for('playnexa.office.companyContext.v1')]: true,
+  });
+  assert.equal(CTX.isTrustedContext(fabricated), false);
+  assert.throws(() => CTX.assertContext(fabricated), /not produced by/);
+});
+
+test('CLOSURE: prototype inheritance from a real context is refused', async () => {
+  // Object.create(real) inherits companyId AND the Symbol through the prototype chain, so every
+  // property check passes while the object itself is new.
+  const real = await resolve({ userId: 'u1' }, [ABIOZEN]);
+  const inherited = Object.freeze(Object.create(real));
+  assert.equal(inherited.companyId, real.companyId, 'it really does read as the same company');
+  assert.equal(CTX.isTrustedContext(inherited), false, 'and it is still not the resolved object');
+});
+
+test('CLOSURE: a JSON round-trip of a real context is refused', async () => {
+  const real = await resolve({ userId: 'u1' }, [ABIOZEN]);
+  const revived = Object.freeze(JSON.parse(JSON.stringify(real)));
+  assert.equal(revived.companyId, real.companyId);
+  assert.equal(CTX.isTrustedContext(revived), false,
+    'this is the shape an agent could actually emit — JSON cannot carry a Symbol OR an identity');
+});
+
+test('CLOSURE: a derived context is trusted, and still cannot change company', async () => {
+  // deriveContext is the sanctioned path, so it must keep working — otherwise office/run.js breaks
+  // and the closure is achieved by making the system unusable.
+  const real = await resolve({ userId: 'u1' }, [ABIOZEN]);
+  const derived = CTX.deriveContext(real, { runId: 'run-1' });
+  assert.equal(CTX.isTrustedContext(derived), true, 'a sanctioned derivation is a new MINTED object');
+  assert.equal(derived.companyId, real.companyId);
+  assert.throws(() => CTX.deriveContext(real, { companyId: 'co-other' }), /cannot change the company/);
+});
+
+test('CLOSURE: substitution is refused at the GATE, not only by the predicate', async () => {
+  // The predicate being right matters only if the thing that authorizes sends consults it. This
+  // asserts the refusal where it has consequences.
+  const real = await resolve({ userId: 'u1' }, [ABIOZEN]);
+  const substituted = Object.freeze({ ...real, companyId: 'co-someone-elses-company' });
+  const GATE = require('../email-gate');
+  const g = await GATE.assertSendAllowed(
+    { capability: 'email.send', to: 'naren@abiozen.com', companyContext: substituted },
+    { env: { COMPANY_EMAIL_DOMAINS: 'abiozen.com' },
+      autonomy: { checkStopped: async () => null, recordRefusal: () => {} },
+      query: async () => ({ rows: [] }) });
+  assert.strictEqual(g.allowed, false,
+    'a substituted context must not make anybody internal at the gate');
+});
+
