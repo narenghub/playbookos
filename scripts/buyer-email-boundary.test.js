@@ -360,6 +360,25 @@ const BUYER_SEND = { capability: 'email.send', workflow: 'legacy-inquiry-buyer-e
 //
 // Dispatches on the SQL so one stub serves both reads: membership here, the approval record via
 // `rest`. The default `rest` answers empty, which the approval read means as "not granted".
+// Since the gate scopes "internal" to a company, a test asserting an internal send must supply a
+// TRUSTED company context (branded by office/context.js — a hand-built object is refused) and a
+// membership accessor that answers for that company.
+const GATE_CTX = require('../src/lib/office/context');
+const GATE_COMPANY = 'co-abiozen';
+const trustedCompany = () =>
+  GATE_CTX.contextForTests__TEST_ONLY({ companyId: GATE_COMPANY, source: 'test' });
+
+function companyScopedMembers(addresses) {
+  return {
+    UNKNOWN: null,
+    activeMemberAddresses: async (wanted, { companyId } = {}) => {
+      if (companyId !== GATE_COMPANY) return new Set();
+      const here = addresses.map((e) => e.toLowerCase());
+      return new Set(wanted.map((a) => String(a).toLowerCase()).filter((a) => here.includes(a)));
+    },
+  };
+}
+
 function fakeMembers(activeEmails, rest = async () => ({ rows: [] })) {
   return {
     query: async (sql, params = []) => {
@@ -439,16 +458,18 @@ test('APPROVAL: relabelling the workflow does not escape it', async () => {
 
 test('APPROVAL: an internal send does NOT need one — briefings and scores still work', async () => {
   for (const to of ['naren@abiozen.com', ['ops@abiozen.com', 'dev@adificetechnologies.com']]) {
-    const g = await GATE.assertSendAllowed({ ...BUYER_SEND, to },
-      { autonomy: fakeAutonomy([]), ...fakeMembers(TEAM) });
+    const g = await GATE.assertSendAllowed(
+      { ...BUYER_SEND, to, companyContext: trustedCompany() },
+      { autonomy: fakeAutonomy([]), membership: companyScopedMembers(TEAM), ...fakeMembers(TEAM) });
     assert.strictEqual(g.allowed, true, `internal recipient ${to} was refused`);
   }
 });
 
 test('APPROVAL: one external recipient in a mixed list is enough to require one', async () => {
   const g = await GATE.assertSendAllowed(
-    { ...BUYER_SEND, to: ['naren@abiozen.com', 'buyer@acme.test'] },
-    { autonomy: fakeAutonomy([]), ...fakeMembers(TEAM) });
+    { ...BUYER_SEND, to: ['naren@abiozen.com', 'buyer@acme.test'],
+      companyContext: trustedCompany() },
+    { autonomy: fakeAutonomy([]), membership: companyScopedMembers(TEAM), ...fakeMembers(TEAM) });
   assert.strictEqual(g.allowed, false);
   assert.deepStrictEqual(g.external, ['buyer@acme.test']);
 });

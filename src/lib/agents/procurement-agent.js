@@ -494,8 +494,28 @@ async function sendRFQEmails(rfqIds, dryRun = false) {
       // is an external send on a pre-kernel path, and `workflow:legacy-supplier-rfq-email` can now
       // stop it alone. The fail-closed signatory guard above is the primary control; this is the
       // operator's handle on the workflow itself.
+      // ── THE COMPANY THIS SEND IS BY (B7.8 Option A) ──────────────────────
+      //
+      // "Internal" is scoped to a company now, so a send with no company has no internal
+      // recipients and falls entirely to the approval boundary. This is a cron path with no
+      // authenticated user and no run, so the company comes from the workflow→company mapping —
+      // read from stored configuration, never from the recipient's domain or a caller's argument.
+      //
+      // A workflow that is unmapped, ambiguously mapped, or mapped to a suspended company resolves
+      // to NOTHING here, and the send then needs an approval like any outside mail. That refusal is
+      // the designed outcome: it is loud, it names which of the four refusals it was, and it is
+      // preferable to sending as whichever company happened to be convenient.
+      let companyContext = null;
+      try {
+        companyContext = await require('../office/context')
+          .resolveCompanyForScheduledWorkflow({ workflow: 'legacy-supplier-rfq-email' }, { query });
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[procurement-agent] no company context for legacy-supplier-rfq-email '
+          + `(${e.refusal || 'unresolved'}): ${e.message}`);
+      }
       const ok = await sendEmail({ to: s.contact_email, subject, html, from: fromLine,
-        replyTo: sig.email,
+        replyTo: sig.email, companyContext,
         workflow: 'legacy-supplier-rfq-email', agent: 'procurement-agent' });
       if (!ok) {
         await rfqClaim.markFailed(query, claimId, 'send refused by the mail provider');

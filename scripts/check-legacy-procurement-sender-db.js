@@ -126,6 +126,14 @@ process.env.COMPANY_EMAIL_DOMAINS = 'supplier.invalid,abiozen.invalid,example.in
 // a supplier is an employee, which is the exact confusion the membership rule exists to remove.
 process.env.INTERNAL_MAILBOXES = 'legacy@supplier.invalid';
 
+// ── AND A COMPANY FOR THE WORKFLOW, SINCE "INTERNAL" IS NOW COMPANY-SCOPED ──
+//
+// The agent resolves its company from workflow_companies (B7.8 Option A). Without a mapping the
+// send has no internal recipients, falls to the approval boundary, and never reaches the mailer —
+// so this file's actual subject, WHO THE LETTER IS FROM, would again be unmeasurable. The fixture
+// therefore maps the workflow, exactly as an administrator would, rather than relaxing the gate.
+const MAP_WORKFLOW = 'legacy-supplier-rfq-email';
+
 // ── THE PROVIDER AND MAILER ARE BOTH STUBBED ───────────────────────────────
 // The AI returns a body; the mailer records calls and sends nothing. A real send from this check
 // would be the exact act it exists to prove impossible.
@@ -167,6 +175,25 @@ globalThis.fetch = async (u, opts) => {
     await require('../src/lib/idempotency/supplier-rfq').migrate(q);
     await require('../src/lib/procurement/rfq-identity-guard').migrate(query);
     await require('../src/lib/autonomy').migrateAutonomy(q);
+
+    // ── A COMPANY, AN ADMINISTRATOR, AND THE WORKFLOW MAPPING ──────────────
+    //
+    // Set up the way an administrator would, not by relaxing the gate: the office kernel provides
+    // `companies`, the identity schema provides workflow_companies, and the mapping is created
+    // through the accessor by an authorized actor. A fixture that bypassed the accessor would be
+    // asserting against a path the product does not use.
+    await require('../src/lib/office/schema').migrateOffice(q);
+    await require('../src/lib/identity/schema').migrateIdentity(q);
+    await q(`INSERT INTO companies (id, slug, display_name, status)
+             VALUES ('legco','legfix','Legacy fixture co','active')
+             ON CONFLICT (slug) DO NOTHING`);
+    await q(`INSERT INTO users (id,email,name,role,is_active)
+             VALUES ('leg-admin','leg-admin@abiozen.invalid','Fixture admin','super_admin',1)
+             ON CONFLICT (id) DO NOTHING`);
+    await require('../src/lib/identity/workflow-company').mapWorkflowToCompany({
+      workflow: MAP_WORKFLOW, companyId: 'legco', grantedBy: 'leg-admin',
+      grantedReason: 'legacy RFQ sender fixture',
+    }, { query: q });
     await q(`CREATE TABLE IF NOT EXISTS email_log (id TEXT PRIMARY KEY, to_email TEXT,
       subject TEXT, status TEXT, error_message TEXT, sent_at TEXT DEFAULT NOW())`);
     // THE PRODUCTION SHAPE, NOT A MINIMAL ONE.

@@ -243,7 +243,7 @@ async function deliverAuthorized({ to, subject, html, from, replyTo, cc, attachm
 }
 
 async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments,
-  capability = 'email.send', workflow = null, agent = null,
+  capability = 'email.send', workflow = null, agent = null, companyContext = null,
   approvalId = null, expectedDigest = null }) {
   // ── THE KILL SWITCH, BEFORE THE PROVIDER CALL ────────────────────────────
   //
@@ -362,8 +362,23 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // provider without ever being classified, and the external-approval boundary never saw it. Any
   // field below that reaches the provider must appear in this call; that is the whole contract of
   // this line, and check-email-gate-recipient-coverage.js is what keeps it true.
+  // ── companyContext: WHO THIS SEND IS BY, AND WHY IT IS NOT OPTIONAL ──────
+  //
+  // `cc` is passed because deliverAuthorized transmits it and the gate was once called with `to`
+  // alone, so an outside address in cc reached the provider unclassified.
+  //
+  // `companyContext` is passed because "internal" is now scoped to a company: an active employee
+  // of Adifice is not internal to a send ABIOZEN is making. It must be the BRANDED object from
+  // office/context.js — a run context, an authenticated read session, or a mapped scheduled
+  // workflow. A caller that has none gets no internal recipients at all, every address falls to
+  // the approval boundary, and an unapproved internal send refuses.
+  //
+  // THAT IS WHY CALLERS MUST THREAD IT, and why they cannot be left alone: until a caller supplies
+  // one, its internal mail does not go out. Fail-closed is the correct default here — the
+  // alternative is sending as whichever company the caller named — but it is a state to finish
+  // moving through, not to sit in.
   const gate = await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to, cc,
-    approvalId, digest: actualDigest });
+    companyContext, approvalId, digest: actualDigest });
   if (!gate.allowed) {
     console.warn(`[STOPPED_BY_POLICY] email to ${to}: ${gate.reason}`);
     // BLOCKED, with the scope that blocked it — the database refuses the row without one. The

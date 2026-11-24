@@ -47,7 +47,8 @@
 
 'use strict';
 
-const { classifyRecipients, addressesOf } = require('./outbound/recipients');
+const { classifyRecipients, addressesOf, domainOf, companyDomains } = require('./outbound/recipients');
+const { internalMailboxes: internalMailboxesOf } = require('./outbound/membership');
 const { classifyByMembership } = require('./outbound/membership');
 
 // ── EVERY ADDRESS THAT RECEIVES THE MESSAGE, NOT JUST THE ONES IN `to` ───────
@@ -68,6 +69,80 @@ const { classifyByMembership } = require('./outbound/membership');
 // provider that way today. Callers already pass it (procurement-rfq.js:637 sends `bcc: []`), so one
 // added parameter in mailer.js is all that separates today's safe accident from a third unjudged
 // channel. Reading it now costs nothing and removes that step.
+
+// ── COMPANY-SCOPED RECIPIENT CLASSIFICATION ─────────────────────────────────
+//
+// Internal = an ACTIVE MEMBER OF THIS COMPANY, or an allowlisted shared mailbox. Everything else
+// is external and needs a released approval.
+//
+// Built on identity/company-membership.js rather than on a query here, so the six-condition live
+// predicate — global deactivation, scoped revocation, effective dates, company status and two
+// external-role screens — exists once. `departedOrUnknown` keeps its own name: an address on a
+// company domain belonging to no active member of this company is the class the capability-wide
+// stop existed to catch, and an operator reading a refusal should see it called that.
+async function classifyByCompanyMembership(to, companyId, env, deps = {}) {
+  const MEMBERS = deps.membership || require('./identity/company-membership');
+  const all = addressesOf(to);
+  const domains = companyDomains(env);
+  const mailboxes = internalMailboxesOf(env);
+
+  const members = await MEMBERS.activeMemberAddresses(all, { companyId, ...deps });
+  const membershipUnknown = members === MEMBERS.UNKNOWN;
+
+  // ── TWO VERY DIFFERENT PEOPLE LOOK ALIKE ON A COMPANY DOMAIN ───────────
+  //
+  // Once "internal" is scoped to one company, an address on a company domain that is not an
+  // active member HERE could be either of:
+  //
+  //   a DEPARTED account   — employed nowhere. Hard-refused: an approval must not reinstate a
+  //                          deactivated employee (owner instruction).
+  //   a SISTER-COMPANY     — an active colleague at Adifice while ABIOZEN is sending. Not
+  //   colleague              deactivated at all, so refusing them as "a deactivated or unknown
+  //                          account" states something false AND forbids a send that a human may
+  //                          legitimately approve.
+  //
+  // The first draft of this collapsed them, and the gate's own test caught it: an active Adifice
+  // employee was refused as NOT_ACTIVE_MEMBER. So employment-ANYWHERE is resolved as well, and it
+  // is the only thing that separates the two. A sister-company colleague is EXTERNAL — they need
+  // an approval, which is the correct answer for someone outside this company's internal traffic.
+  const anywhere = await classifyByMembership(all, env, deps);
+  const employedSomewhere = new Set(
+    (anywhere && !anywhere.membershipUnknown ? anywhere.internal : []).map((a) => String(a).toLowerCase()));
+
+  const internal = [];
+  const external = [];
+  const departedOrUnknown = [];
+  const otherCompany = [];
+  for (const a of all) {
+    const lower = String(a).toLowerCase();
+    const d = domainOf(a);
+    if (!membershipUnknown && (members.has(lower) || mailboxes.has(lower))) {
+      internal.push(a);
+      continue;
+    }
+    external.push(a);
+    if (employedSomewhere.has(lower)) {
+      // Active, just not here. External, and recorded by its own name so a refusal does not read
+      // as a departure.
+      otherCompany.push(a);
+    } else if (d && domains.has(d)) {
+      departedOrUnknown.push(a);
+    }
+  }
+  return {
+    all,
+    internal,
+    external,
+    unparseable: all.filter((a) => !domainOf(a)),
+    allInternal: all.length > 0 && external.length === 0,
+    departedOrUnknown,
+    otherCompany,
+    membershipUnknown,
+    companyId,
+    domains: [...domains],
+  };
+}
+
 const ALL_RECIPIENT_FIELDS = ['to', 'cc', 'bcc'];
 function allRecipientsOf(args) {
   return ALL_RECIPIENT_FIELDS.map((f) => args[f]);   // addressesOf flattens and splits comma lists
@@ -167,7 +242,7 @@ function recipientsOf(to) {
  * reported as a refusal, which is the fail-closed half of the contract.
  */
 async function assertSendAllowed({ capability = 'email.send', workflow = null, agent = null,
-  company = null, to = null, cc = null, bcc = null, approvalId = null,
+  company = null, companyContext = null, to = null, cc = null, bcc = null, approvalId = null,
   digest = null } = {}, deps = {}) {
   const env = deps.env || process.env;
   const everyone = allRecipientsOf({ to, cc, bcc });
@@ -233,7 +308,46 @@ async function assertSendAllowed({ capability = 'email.send', workflow = null, a
     // null membership — not an empty set — when the question cannot be answered, and this refuses
     // on that rather than falling back to domain matching, which would silently restore the
     // behaviour being replaced at the one moment nobody can see what it is doing.
-    const rcpt = await classifyByMembership(everyone, env, deps);
+    // ── INTERNAL IS SCOPED TO A COMPANY, AND THE COMPANY MUST BE TRUSTED ───
+    //
+    // classifyByMembership asks "is this address an active employee". That is right as far as it
+    // goes and it is not enough for a multi-company system: an active employee of Adifice is not
+    // internal to a send ABIOZEN is making. Owner requirement 6 — shared employees operate only
+    // within their assigned company scopes — and the whole point of B7.8.
+    //
+    // WHICH COMPANY, AND WHY THE STRING IS NOT GOOD ENOUGH. `company` is a plain string that
+    // dispatch.js has always accepted from its caller, so it says what the caller wants, not what
+    // the system knows. `companyContext` is the branded object from office/context.js, which only
+    // its three resolvers can mint — a run, an authenticated session, or a mapped scheduled
+    // workflow. Requirement 7: company context must come from trusted authenticated execution
+    // context, never an arbitrary identifier.
+    //
+    // WITHOUT A TRUSTED CONTEXT, NOTHING IS INTERNAL. Not "fall back to the string", and not
+    // "fall back to employment anywhere": both would authorize a send against a company nobody
+    // established. Every recipient then falls to the approval boundary below, which is the
+    // fail-closed behaviour — an unmapped cron keeps refusing, loudly, instead of quietly sending
+    // as whichever company it named.
+    const TRUST = deps.context || require('./office/context');
+    const trustedCompanyId = TRUST.isTrustedContext(companyContext)
+      ? companyContext.companyId : null;
+
+    let rcpt;
+    if (trustedCompanyId) {
+      rcpt = await classifyByCompanyMembership(everyone, trustedCompanyId, env, deps);
+    } else {
+      // No trusted company: classify by employment-anywhere ONLY to recognise departed accounts,
+      // then treat every recipient as external. The departed check still runs because a
+      // deactivated colleague must be refused whether or not a company was established — that
+      // refusal is about the person, not the tenancy.
+      const anywhere = await classifyByMembership(everyone, env, deps);
+      rcpt = {
+        ...anywhere,
+        internal: [],
+        external: anywhere.all,
+        allInternal: false,
+        noTrustedCompany: true,
+      };
+    }
 
     const refuseRecipients = (scopeKey, detailWhy, addresses) => {
       const why2 = `${scopeKey.toUpperCase()}: ${detailWhy} — ${addresses.join(', ')}`;

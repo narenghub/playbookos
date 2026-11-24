@@ -31,7 +31,12 @@ const GATE = require('../email-gate');
 // WORKSPACE_DOMAINS, which it does not, so these tests passed via DEFAULT_COMPANY_DOMAINS.
 const ENV = { COMPANY_EMAIL_DOMAINS: 'abiozen.com,adificetechnologies.com',
   ALERT_EMAIL: 'alert@abiozen.com' };
-const ACTIVE = ['naren@abiozen.com', 'prasanthi@adificetechnologies.com'];
+// Employment ANYWHERE in the group. The gate resolves this as well as company membership, because
+// it is the only thing that separates a departed account from an active colleague at a sister
+// company — and those get opposite answers: a hard refusal versus "external, approvable".
+// Keep it consistent with EMPLOYED below: somebody employed at a company must appear here too.
+const ACTIVE = ['naren@abiozen.com', 'prasanthi@adificetechnologies.com',
+  'someone-else@adificetechnologies.com', 'shared@abiozen.com'];
 const DIGEST = 'd'.repeat(32);
 const APPROVED = { approvalId: 'ap-1', digest: DIGEST };
 
@@ -64,11 +69,54 @@ function members(activeEmails, { approval = null, unreadable = false } = {}) {
   };
 }
 
-const deps = (opts = {}) => ({ env: ENV, autonomy: opts.autonomy || noStops,
-  ...members(opts.active || ACTIVE, opts) });
+// ── A TRUSTED COMPANY, AND A COMPANY-SCOPED MEMBERSHIP ACCESSOR ─────────────
+//
+// Since the gate became company-scoped, "internal" means an active member OF THIS COMPANY — so a
+// test asserting an internal send must supply both a trusted company context and a membership
+// accessor that answers for that company. Stubbing SQL is no longer the right level: the gate
+// talks to identity/company-membership.js, so that is what is injected.
+//
+// The context comes from office/context.js's marked test door, not from a hand-built object: the
+// gate requires a BRANDED context and refuses anything else, which is the point of requirement 7.
+const CTX = require('../office/context');
+const COMPANY = 'co-abiozen';
+const trusted = (companyId = COMPANY) =>
+  CTX.contextForTests__TEST_ONLY({ companyId, source: 'test' });
 
-const send = (args, opts) => GATE.assertSendAllowed(
-  { capability: 'email.send', workflow: 'w', agent: 'a', ...args }, deps(opts));
+/** Membership scoped to one company: `byCompany` maps companyId → the addresses employed there. */
+function companyMembers(byCompany, { unreadable = false } = {}) {
+  return {
+    UNKNOWN: null,
+    activeMemberAddresses: async (addresses, { companyId } = {}) => {
+      if (unreadable) return null;
+      if (!companyId) return null;
+      const here = (byCompany[companyId] || []).map((e) => e.toLowerCase());
+      return new Set(addresses.map((a) => String(a).toLowerCase()).filter((a) => here.includes(a)));
+    },
+  };
+}
+
+const EMPLOYED = {
+  [COMPANY]: ['naren@abiozen.com', 'prasanthi@adificetechnologies.com'],
+  'co-adifice': ['someone-else@adificetechnologies.com'],
+};
+
+const deps = (opts = {}) => ({
+  env: ENV,
+  autonomy: opts.autonomy || noStops,
+  membership: companyMembers(opts.employed || EMPLOYED, opts),
+  ...members(opts.active || ACTIVE, opts),
+});
+
+const send = (args, opts = {}) => GATE.assertSendAllowed(
+  { capability: 'email.send',
+    workflow: 'w',
+    agent: 'a',
+    // A trusted context by default, because most of these tests are about recipients. The tests
+    // that are specifically about an ABSENT or untrusted company pass companyContext explicitly.
+    companyContext: 'companyContext' in opts ? opts.companyContext : trusted(),
+    ...args },
+  deps(opts));
 
 // ── DEFECT 1: cc IS A RECIPIENT ─────────────────────────────────────────────
 
@@ -197,4 +245,83 @@ test('a kill switch outranks a membership refusal', async () => {
   const g = await send({ to: 'palash@abiozen.com' }, { autonomy: globalStop });
   assert.strictEqual(g.allowed, false);
   assert.match(g.reason, /STOPPED_BY_POLICY: global/);
+});
+
+// ── COMPANY SCOPE: AN EMPLOYEE OF ANOTHER COMPANY IS NOT INTERNAL HERE ──────
+//
+// Owner requirement 6: "Shared employees operate only within their assigned company scopes." The
+// classifier previously asked "is this an active employee" with no company at all, so an active
+// employee of Adifice counted as internal to a send ABIOZEN was making — which is the
+// cross-tenant leak B7.8 exists to close, arriving through the email path.
+
+test('DECISIVE: an active employee of ANOTHER company is external to this company\'s send', async () => {
+  const g = await send({ to: 'someone-else@adificetechnologies.com' });
+  assert.strictEqual(g.allowed, false, 'employment elsewhere is not internal here');
+  assert.match(g.reason, /EXTERNAL_WITHOUT_APPROVAL/);
+  assert.deepStrictEqual(g.external, ['someone-else@adificetechnologies.com']);
+});
+
+test('CONTROL: that same person IS internal when the send is made for THEIR company', async () => {
+  // Without this, the test above is satisfied by a gate that treats everybody as external — which
+  // would leave the operating loop as broken as the capability-wide stop leaves it.
+  const g = await send(
+    { to: 'someone-else@adificetechnologies.com' },
+    { companyContext: CTX.contextForTests__TEST_ONLY({ companyId: 'co-adifice' }) });
+  assert.strictEqual(g.allowed, true);
+});
+
+test('a shared employee is internal to BOTH companies that employ them', async () => {
+  const employed = {
+    [COMPANY]: ['shared@abiozen.com'],
+    'co-adifice': ['shared@abiozen.com'],
+  };
+  for (const companyId of [COMPANY, 'co-adifice']) {
+    const g = await send({ to: 'shared@abiozen.com' },
+      { employed, companyContext: CTX.contextForTests__TEST_ONLY({ companyId }) });
+    assert.strictEqual(g.allowed, true, `${companyId} employs them, so they are internal there`);
+  }
+});
+
+// ── NO TRUSTED COMPANY MEANS NOTHING IS INTERNAL ────────────────────────────
+
+test('DECISIVE: with NO company context, an internal-looking send still needs an approval', async () => {
+  // This is the fail-closed half, and it is what an unmapped cron hits. It must refuse loudly
+  // rather than send as whichever company it happened to name.
+  const g = await send({ to: 'naren@abiozen.com' }, { companyContext: null });
+  assert.strictEqual(g.allowed, false);
+  assert.match(g.reason, /EXTERNAL_WITHOUT_APPROVAL/);
+});
+
+test('DECISIVE: a FORGED company context is not trusted, so nothing is internal', async () => {
+  // A frozen object with the right companyId is exactly what a caller wanting to send as another
+  // company would construct. It is not a resolved context, so it buys nothing.
+  const g = await send({ to: 'naren@abiozen.com' },
+    { companyContext: Object.freeze({ companyId: COMPANY }) });
+  assert.strictEqual(g.allowed, false, 'provenance, not shape, decides whether a company is known');
+});
+
+test('the legacy `company` STRING does not make anybody internal either', async () => {
+  // dispatch.js has always accepted a caller-supplied `company` string. It still scopes STOPs,
+  // which is what it was for — but it cannot establish who is internal.
+  const g = await GATE.assertSendAllowed(
+    { capability: 'email.send', workflow: 'w', agent: 'a', company: COMPANY,
+      to: 'naren@abiozen.com' },
+    deps());
+  assert.strictEqual(g.allowed, false,
+    'a company named by the caller is not a company the system has established');
+});
+
+test('a departed colleague is STILL refused when no company is established', async () => {
+  // The departed refusal is about the PERSON, not the tenancy, so it must not be lost on the
+  // no-trusted-company path — otherwise the fix for one hole opens the other.
+  const g = await send({ to: 'palash@abiozen.com' }, { companyContext: null });
+  assert.strictEqual(g.allowed, false);
+  assert.ok(/not an active member|EXTERNAL_WITHOUT_APPROVAL/.test(g.reason),
+    `refused for a stated reason, got: ${g.reason}`);
+});
+
+test('an unreadable membership table refuses even with a trusted company', async () => {
+  const g = await send({ to: 'naren@abiozen.com' }, { unreadable: true });
+  assert.strictEqual(g.allowed, false,
+    'unknowable membership is not an empty one, company context notwithstanding');
 });
