@@ -64,6 +64,25 @@ const MEMORY_SUBJECT_PREFIX = 'plan-step-completed:';
 
 const q = (deps) => (deps && deps.query) || require('../db').query;
 
+/** The run ledger, over whichever connection the caller gave us. */
+const ledgerFor = (deps) => (deps && deps.runLedger)
+  || require('../run-ledger').ledger({ query: q(deps) });
+
+/**
+ * The employee-task id for a run: deterministic, so a repeated REPORT collides with the primary
+ * key instead of filing a second task for the same cycle.
+ *
+ * `daily_tasks.id` is TEXT (src/lib/db.js), so a readable id is also the correct one, and an
+ * operator reading that table can see which run filed the row. I briefly replaced this with a
+ * hash-derived UUID after reading `operator does not exist: uuid = text` in a checker — the real
+ * cause there was an untyped placeholder compared against both a TEXT and a UUID column in one
+ * query, not this id. Guessing the column type and changing working code is the same mistake as
+ * guessing a column name; the fix was to read the DDL.
+ */
+function employeeTaskId(runId) {
+  return `task-cycle-${runId}`.slice(0, 64);
+}
+
 /**
  * What phase is this run in? Derived from rows, every time.
  *
@@ -189,6 +208,18 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
     case PHASE.PLAN: {
       const MEM = deps.memory || require('./memory');
       const DEC = deps.decomposition || require('./decomposition');
+
+      // ── START THE RUN, BECAUSE A RUN THAT NEVER STARTED CANNOT END ────
+      //
+      // `agent_runs` has a transition trigger: *"CREATED may not go directly to SUCCEEDED"*. The
+      // cycle never started its runs, so they stayed CREATED, and REPORT's terminal transition was
+      // refused by the database — silently, because `finish` is OPERATIONAL and does not throw. The
+      // run therefore never left the live set and the advancement tick re-ran REPORT every 15
+      // seconds. Found by the RUNNING scheduler; invisible to anything that stops ticking.
+      // Idempotent: startRun on a RUNNING run is a no-op transition the trigger permits.
+      try {
+        await ledgerFor(deps).startRun(runId);
+      } catch (e) { /* reported by the ledger; the phase below is unaffected */ }
 
       // Memory is UNTRUSTED DATA. `priorStepsFromMemories` reads one field, requires a prefix and
       // intersects with the frozen vocabulary, so a recalled step that is not in the vocabulary is
@@ -378,7 +409,7 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
         const target = (members || [])[0];
         if (target) {
           assignment = await OPS.assignTask(resolved, {
-            id: `task-cycle-${runId}`.slice(0, 64),
+            id: employeeTaskId(runId),
             userId: target.id,
             title: 'Review the autonomous cycle outcome',
             description: `Plan ${plan ? plan.id : '(none)'} produced `
@@ -389,7 +420,11 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
           }, deps);
         }
       } catch (e) {
-        assignment = { ok: false, error: e.message };
+        // 23505 is the primary key refusing a second assignment for this run, which is the
+        // IDEMPOTENT outcome and not a failure.
+        assignment = e && e.code === '23505'
+          ? { ok: true, alreadyAssigned: true }
+          : { ok: false, error: e.message };
       }
 
       // ── THE BRIEFING, RECOUNTED RATHER THAN ASSERTED ─────────────────
@@ -414,9 +449,35 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
       // The subject prefix is what `priorStepsFromMemories` requires, which is how the NEXT
       // scheduled cycle is informed by this one. Writing anything else here would make the
       // continuity claim false while looking like it worked.
+      // ── WRITE-ONCE, CHECKED AGAINST WHAT IS ALREADY THERE ────────────
+      //
+      // Defence in depth behind the terminal transition above: if a tick ever reaches REPORT twice
+      // — a crash between the memory write and the transition, or two concurrent ticks — the second
+      // pass must add nothing. Read what this run has already remembered and skip those subjects.
+      // This is a check-then-act and it is NOT the guarantee; the guarantee is that REPORT ends the
+      // run. B3.17 owns the durable uniqueness for every phase boundary, and until it lands this is
+      // a narrowing, not a proof.
+      // Through `memory.recallSubject`, NOT a query of my own: agent_memory has one accessor, and
+      // `check-identity-accessor-discipline.js` caught the first version of these two lines
+      // reaching past it. It was right to — the live predicate carries company scope and the
+      // superseded-at condition, and a second copy of it here would drift from the real one. The
+      // accessor answers per subject, which is the shape this needs anyway.
+      const alreadyFor = async (stepType) => {
+        try {
+          const rows = await MEM.recallSubject(
+            resolved, { subject: `${MEMORY_SUBJECT_PREFIX}${stepType}` }, deps);
+          return (rows || []).some((m) => m.sourceRunId === runId);
+        } catch (_) { return false; }     // an unreadable recall must not block the report
+      };
+
       const remembered = [];
       const memoryErrors = [];
+      const skippedMemories = [];
       for (const st of steps.filter((x) => x.verdict === STEP_PERMITTED)) {
+        if (await alreadyFor(st.step_type)) {
+          skippedMemories.push(st.step_id);
+          continue;
+        }
         try {
           const m = await MEM.remember(resolved, {
             subject: `${MEMORY_SUBJECT_PREFIX}${st.step_type}`,
@@ -431,9 +492,32 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
         } catch (e) { memoryErrors.push({ stepId: st.step_id, error: e.message }); }
       }
 
-      return { ok: remembered.length > 0 && memoryErrors.length === 0,
+      // ── THE TERMINAL TRANSITION, AND WHY ITS ABSENCE WAS A LOOP ──────
+      //
+      // Found by the RUNNING scheduler, not by the per-tick check: with nothing marking the run
+      // terminal, `phaseOf` kept returning REPORT, the advancement tick kept selecting the run as
+      // live, and every 15 seconds it re-assigned the employee task, re-wrote the memory rows and
+      // re-counted the briefing — `cycle … report → done` over and over. An indefinite phase loop
+      // with repeating effects, which is precisely what the owner's Priority 3 forbids. The
+      // per-tick check never saw it because it stopped ticking once its assertions passed: the
+      // absence of a terminal state is invisible to anything that does not keep going.
+      //
+      // `finish` derives the state from the run's own events rather than taking my word for it, so
+      // a run whose steps failed ends PARTIAL or FAILED rather than SUCCEEDED. It is OPERATIONAL —
+      // it never throws — so a failure leaves the run RUNNING for the reaper, and is reported here.
+      const LEDGER = ledgerFor(deps);
+      let terminal = null; let terminalError = null;
+      try {
+        const f = await LEDGER.finish(runId, {});
+        terminal = f && f.state ? f.state : null;
+        if (f && f.ok === false) terminalError = f.error || 'the terminal transition did not persist';
+      } catch (e) { terminalError = e.message; }
+
+      return { ok: (remembered.length > 0 || skippedMemories.length > 0)
+          && memoryErrors.length === 0 && !terminalError,
         phase: PHASE.REPORT, next: PHASE.DONE,
-        briefing, assignment, remembered, memoryErrors, evidence };
+        briefing, assignment, remembered, skippedMemories, memoryErrors,
+        terminal, terminalError, evidence };
     }
 
     case PHASE.REFUSED:

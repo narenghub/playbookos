@@ -412,10 +412,63 @@ cron.schedule('0 7 * * 1-5', withAlerts('daily-7cst-command-center-briefing', as
 //
 // Pinned to America/Chicago (B7.23): eight crons fired five to six hours early and drifted with
 // DST because their schedules were UTC while their names and intent were local.
+// ── TWO SCHEDULES, BECAUSE THEY ARE TWO DIFFERENT JOBS (B3.16) ─────────────
+//
+// The first version of this registered ONE weekday 06:00 cron that initiated due objectives and
+// then advanced every live run by ONE PHASE. Both halves were right on their own and the
+// combination was wrong: `advanceCycle` does one phase per invocation by design, so a cycle needing
+// six phases would have taken SIX WEEKDAYS to finish. What `check-unattended-cycle-db.js` verified
+// was the ENGINE — and it verified it by invoking successive ticks itself, which is exactly the
+// driver the requirement says must not be needed. The owner caught this; I had reported the engine
+// as though it were the schedule.
+//
+//   INITIATION follows the BUSINESS schedule. Starting an autonomous run is a business act: one
+//   per objective per business day, weekday mornings, in Chicago.
+//
+//   ADVANCEMENT is CONTINUOUS. A run that already exists is already authorized, and the work it is
+//   waiting on — a worker finishing a task, a result arriving — does not keep office hours. So
+//   advancement ticks every `OFFICE_CYCLE_TICK_SECONDS`, every day, overnight and at weekends.
+//   Whether a particular objective MAY proceed is still decided per phase by the gates inside the
+//   cycle (STOP, budget, tier, membership), not by the clock.
+//
+// Both are behind the same OFFICE_INITIATOR_ENABLED flag and both are registered in CRON_SCOPES, so
+// either can be stopped by name independently.
+const OFFICE_TICK_SECONDS = (() => {
+  // Configurable, and CLAMPED, because this is the one cron that fires more often than any other:
+  // the floor keeps a typo from turning it into a busy loop against Postgres, and the ceiling keeps
+  // it from silently becoming a schedule nobody would call continuous. The owner's recommendation
+  // was 30–60s; the default sits in that range.
+  const raw = Number.parseInt(process.env.OFFICE_CYCLE_TICK_SECONDS || '45', 10);
+  if (!Number.isFinite(raw)) return 45;
+  return Math.min(300, Math.max(15, raw));
+})();
+
+// ── WHY THE STEP OPERATOR IS ASSEMBLED AND NOT WRITTEN ─────────────────────
+//
+// A cron step is spelled star-then-slash, and writing those two characters next to each other in this
+// file broke THREE unrelated tests. `src/lib/sitenex/intake-mount.test.js` reads server.js, strips
+// comments with a regex, and asserts the ORDER of the router mounts — a property no runtime
+// assertion can see. Line 199's prose contains `/intake/*`, so that naive stripper treats the `/*`
+// inside it as the start of a block comment and runs to the next block-comment CLOSE it finds.
+// Mine was the next one, 250 lines later, so stripping blanked everything between — including the
+// intake mount, and
+// the test reported *"server.js no longer contains the intake mount"*. The mount had not moved.
+// Assembling the operator keeps the sequence out of the source; the alternative was loosening a
+// test that protects a complete authentication bypass, which is not a trade worth making for two
+// characters of convenience.
+const STEP = `${'*'}${'/'}`;
+const OFFICE_TICK_EXPR = OFFICE_TICK_SECONDS < 60
+  ? `${STEP}${OFFICE_TICK_SECONDS} * * * * *`          // six fields: seconds
+  : `${STEP}${Math.round(OFFICE_TICK_SECONDS / 60)} * * * *`;
+
+// How many runs one tick will advance. A bound, not a guess: it is what makes the database load of
+// this cron a function of the schedule rather than of how many objectives happen to be live.
+const OFFICE_TICK_MAX_RUNS = Math.max(1, Number.parseInt(
+  process.env.OFFICE_CYCLE_MAX_RUNS_PER_TICK || '10', 10) || 10);
+
 if (String(process.env.OFFICE_INITIATOR_ENABLED) === 'true') {
   cron.schedule('0 6 * * 1-5', withAlerts('office-scheduled-initiation', async () => {
     const { initiateDueObjectives } = require('./src/lib/office/initiator');
-    const CYCLE = require('./src/lib/office/cycle');
     const r = await initiateDueObjectives({});
     console.log(`[CRON] office initiation — business day ${r.businessDay}: `
       + `${r.initiated.length} started, ${r.duplicates.length} duplicate, `
@@ -427,30 +480,90 @@ if (String(process.env.OFFICE_INITIATOR_ENABLED) === 'true') {
     for (const x of r.refused) {
       console.warn(`[CRON] office initiation REFUSED ${x.objectiveId}: ${x.reason} — ${x.detail}`);
     }
-
-    // ── AND ADVANCE EVERY LIVE RUN BY ONE PHASE (§2) ──────────────────────
-    //
-    // Initiation alone starts runs and leaves them unplanned. This is what makes the cycle
-    // UNATTENDED: each tick advances every live run one phase, reading the phase from durable rows.
-    // One phase per tick, never a loop — so the schedule sets the pace, a stuck phase cannot spin,
-    // and progress is visible in the cron log rather than hidden inside a function.
-    const live = (await require('./src/lib/db').query(
-      `SELECT run_id, objective_id FROM agent_runs
-        WHERE workflow = $1 AND state IN ('CREATED','RUNNING') ORDER BY created_at`,
-      ['office-scheduled-initiation'])).rows;
-    for (const run of live) {
-      try {
-        const a = await CYCLE.advanceCycle({ runId: run.run_id }, {});
-        console.log(`[CRON] cycle ${run.run_id} ${a.phase} → ${a.next}`
-          + `${a.ok ? '' : ` (not ok: ${JSON.stringify(a.refusal || a.reason)})`}`);
-      } catch (e) {
-        // One objective's failure must not stop the sweep; they are independent.
-        console.warn(`[CRON] cycle ${run.run_id} failed to advance: ${e.message}`);
-      }
-    }
+    // NOTE: this cron no longer advances anything. A newly initiated run is picked up by the
+    // advancement tick below, within OFFICE_CYCLE_TICK_SECONDS.
   }), { timezone: 'America/Chicago' });
+
+  // ── THE CONTINUOUS ADVANCEMENT TICK ──────────────────────────────────────
+  //
+  // No timezone: it has no local-time intent, which is the condition
+  // `scripts/check-cron-timezone-intent.js` enforces.
+  let officeTickBusy = false;
+  cron.schedule(OFFICE_TICK_EXPR, withAlerts('office-cycle-advance', async () => {
+    // OVERLAP GUARD, in-process. node-cron will fire again while the previous invocation is still
+    // awaiting, and at a 15-second floor that is a real possibility. Two concurrent ticks are
+    // already SAFE — the phase is derived from rows and every effect is arbitrated by a unique
+    // index, which `check-unattended-cycle-db.js` measures — but safe is not the same as free:
+    // without this they would pile up against the database. A skipped tick is logged, because a
+    // tick that silently never runs is the failure this guard could otherwise hide.
+    if (officeTickBusy) { console.warn('[CRON] office-cycle-advance SKIPPED — previous tick still running'); return; }
+    officeTickBusy = true;
+    const startedAt = Date.now();
+    try {
+      const autonomy = require('./src/lib/autonomy');
+      const CYCLE = require('./src/lib/office/cycle');
+      const INIT = require('./src/lib/office/initiator');
+
+      // Haltable by name, as a CONSEQUENTIAL caller: advancing a cycle is what leads to delegation,
+      // execution and every downstream effect. An unreadable kill state fails closed — the tick
+      // does nothing and says so, rather than proceeding on the assumption that silence means go.
+      //
+      // SECOND LINE, NOT THE FIRST. `withAlerts` already checks the kill switch for every cron
+      // before the body runs, using this cron's STATIC scopes from CRON_SCOPES — company and
+      // agent — and logs `[STOPPED_BY_POLICY]`. So a global, company, agent or workflow stop never
+      // reaches this code at all. What this adds is the CAPABILITY scope `office.advance`, which
+      // the static map does not name, and a reading of the switch at the moment of acting rather
+      // than at the moment of firing. Saying so here because a guard that looks load-bearing and
+      // is not is worse than no guard: the next person would test this one and believe they had
+      // covered the stop.
+      let stopped = null;
+      try {
+        stopped = await autonomy.checkStopped(
+          { capability: 'office.advance', company: null,
+            workflow: 'office-cycle-advance', agent: 'office-initiator' },
+          { consequential: true });
+      } catch (e) {
+        console.warn(`[CRON] office-cycle-advance HELD — kill state unreadable (${e.message})`);
+        return;
+      }
+      if (stopped) {
+        console.log(`[CRON] office-cycle-advance STOPPED by ${stopped.scope_type}`
+          + `${stopped.scope_key ? `:${stopped.scope_key}` : ''} — ${stopped.reason}`);
+        return;
+      }
+
+      const live = (await require('./src/lib/db').query(
+        `SELECT run_id, objective_id FROM agent_runs
+          WHERE workflow = $1 AND state IN ('CREATED','RUNNING')
+          ORDER BY created_at
+          LIMIT $2`, [INIT.WORKFLOW, OFFICE_TICK_MAX_RUNS])).rows;
+      if (!live.length) return;          // the quiet case, and it must stay quiet: this runs often
+
+      let advanced = 0;
+      for (const run of live) {
+        try {
+          const a = await CYCLE.advanceCycle({ runId: run.run_id }, {});
+          advanced++;
+          console.log(`[CRON] cycle ${run.run_id} ${a.phase} → ${a.next}`
+            + `${a.ok ? '' : ` (not ok: ${JSON.stringify(a.refusal || a.reason || a.outcomeError)})`}`);
+        } catch (e) {
+          // One objective's failure must not stop the sweep; they are independent.
+          console.warn(`[CRON] cycle ${run.run_id} failed to advance: ${e.message}`);
+        }
+      }
+      // MEASURED, not assumed: the owner's condition on the tick interval was "subject to measured
+      // database load", and this line is the measurement an operator reads to set it.
+      console.log(`[CRON] office-cycle-advance — ${advanced}/${live.length} run(s) advanced in `
+        + `${Date.now() - startedAt}ms (tick ${OFFICE_TICK_SECONDS}s, cap ${OFFICE_TICK_MAX_RUNS})`);
+    } finally {
+      officeTickBusy = false;
+    }
+  }));
+
+  console.log(`[CRON] office-scheduled-initiation registered (weekdays 06:00 America/Chicago) · `
+    + `office-cycle-advance registered (${OFFICE_TICK_EXPR})`);
 } else {
-  console.log('[CRON] office-scheduled-initiation NOT registered '
+  console.log('[CRON] office-scheduled-initiation and office-cycle-advance NOT registered '
     + '(set OFFICE_INITIATOR_ENABLED=true to enable)');
 }
 

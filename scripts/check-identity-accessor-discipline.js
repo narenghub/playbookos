@@ -78,6 +78,12 @@ const EXEMPT = new Map([
     + 'write, and the subject prefix is the whole claim — a recall helper that filtered on it '
     + 'would make the assertion unfalsifiable. Its own disposable cluster; fixtures by recorded '
     + 'id; the CYCLE itself writes only through office/memory.remember.'],
+  ['scripts/check-running-scheduler-db.js',
+    'B3.16\'s running-scheduler check. It reads agent_memory in two places, both assertions about '
+    + 'what the REAL server.js process wrote while unattended: that the subjects carry the prefix '
+    + 'the planner reads back, and that a repeated REPORT phase did not multiply them. The writer '
+    + 'is another process; recalling through office/memory here would put the observer and the '
+    + 'observed in one module. Its own disposable cluster; fixtures by recorded id.'],
   ['src/lib/identity/company-membership.js',
     'THE accessor for user_companies. Its whole purpose is to own that table.'],
   ['src/lib/identity/workflow-company.js',

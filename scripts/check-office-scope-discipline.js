@@ -81,6 +81,12 @@ const EXEMPT = new Set([
   // every kernel table through scope.js, including the two accessors (planForRun, briefingCounts)
   // that exist because this guard caught the first draft reaching for SQL.
   path.join('scripts', 'check-unattended-cycle-db.js'),
+  // B3.16's running-scheduler check, and here the reason is at its strongest: the thing under test
+  // is a SEPARATE OPERATING-SYSTEM PROCESS — the real server.js — and this file's only job is to
+  // read the database from outside it and see what that process did. There is no in-process
+  // context to ask an accessor with, and asking one would mean the observer and the observed
+  // shared a module. It seeds fixtures into a disposable cluster and deletes them by recorded id.
+  path.join('scripts', 'check-running-scheduler-db.js'),
   // The end-to-end acceptance test (ruling 8 item 5). It SEEDS a company, an objective and a run
   // into a DISPOSABLE cluster it creates and destroys, so that the real server has something to
   // serve — the kernel rows are the fixture, not the subject. It never runs against production

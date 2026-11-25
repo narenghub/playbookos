@@ -410,6 +410,12 @@ pf_step "the initiator creates no authority" \
 # the restart requirement is not simulated — it is the only way the check can pass at all.
 pf_step "the unattended cycle advances itself across processes, twice, and survives a kill" \
   node scripts/check-unattended-cycle-db.js
+# Owner's Priority 1 of the second directive (2026-11-25): the ACTUAL running scheduler, with no
+# driver invoking successive ticks. It spawns the real server.js and then only watches the database.
+# This is the step that found the indefinite REPORT loop: a run that never became terminal stayed in
+# the live set for ever, which nothing that stops ticking can see.
+pf_step "the real running scheduler carries a cycle to a terminal state unattended" \
+  node scripts/check-running-scheduler-db.js
 # And the property the planner's own load-time check could not see: a step's payload must be one
 # its real handler accepts. The registry check confirmed a NAME resolved; the first plan to reach a
 # worker failed on `payload.facts must be an array`.

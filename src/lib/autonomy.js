@@ -466,6 +466,10 @@ const CRON_SCOPES = {
   //
   // agent 'office-initiator' so the existing per-agent stop reaches the whole sweep at once.
   'office-scheduled-initiation':             { company: null,      agent: 'office-initiator' },
+  // B3.16: advancement is a SEPARATE workflow from initiation, so an operator can halt continuous
+  // advancement of existing runs without also blocking tomorrow's initiation, or the reverse. Same
+  // agent, so the existing per-agent stop still reaches both at once.
+  'office-cycle-advance':                    { company: null,      agent: 'office-initiator' },
   // R1 reconciliation. Platform-level like the reaper: reporting unresolved external attempts
   // belongs to no one business, and an operator halting Abiozen should not blind the channel that
   // says which supplier correspondence is in an unknown state.
