@@ -415,6 +415,7 @@ cron.schedule('0 7 * * 1-5', withAlerts('daily-7cst-command-center-briefing', as
 if (String(process.env.OFFICE_INITIATOR_ENABLED) === 'true') {
   cron.schedule('0 6 * * 1-5', withAlerts('office-scheduled-initiation', async () => {
     const { initiateDueObjectives } = require('./src/lib/office/initiator');
+    const CYCLE = require('./src/lib/office/cycle');
     const r = await initiateDueObjectives({});
     console.log(`[CRON] office initiation — business day ${r.businessDay}: `
       + `${r.initiated.length} started, ${r.duplicates.length} duplicate, `
@@ -425,6 +426,27 @@ if (String(process.env.OFFICE_INITIATOR_ENABLED) === 'true') {
     // ready, and there will routinely be many.
     for (const x of r.refused) {
       console.warn(`[CRON] office initiation REFUSED ${x.objectiveId}: ${x.reason} — ${x.detail}`);
+    }
+
+    // ── AND ADVANCE EVERY LIVE RUN BY ONE PHASE (§2) ──────────────────────
+    //
+    // Initiation alone starts runs and leaves them unplanned. This is what makes the cycle
+    // UNATTENDED: each tick advances every live run one phase, reading the phase from durable rows.
+    // One phase per tick, never a loop — so the schedule sets the pace, a stuck phase cannot spin,
+    // and progress is visible in the cron log rather than hidden inside a function.
+    const live = (await require('./src/lib/db').query(
+      `SELECT run_id, objective_id FROM agent_runs
+        WHERE workflow = $1 AND state IN ('CREATED','RUNNING') ORDER BY created_at`,
+      ['office-scheduled-initiation'])).rows;
+    for (const run of live) {
+      try {
+        const a = await CYCLE.advanceCycle({ runId: run.run_id }, {});
+        console.log(`[CRON] cycle ${run.run_id} ${a.phase} → ${a.next}`
+          + `${a.ok ? '' : ` (not ok: ${JSON.stringify(a.refusal || a.reason)})`}`);
+      } catch (e) {
+        // One objective's failure must not stop the sweep; they are independent.
+        console.warn(`[CRON] cycle ${run.run_id} failed to advance: ${e.message}`);
+      }
     }
   }), { timezone: 'America/Chicago' });
 } else {

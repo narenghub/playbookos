@@ -96,6 +96,26 @@ const ARG = Object.freeze({
     ? null : 'must be non-empty text of at most 120 characters'),
   focus: (v) => (['exceptions', 'approvals', 'spend'].includes(v)
     ? null : 'must be one of: exceptions, approvals, spend'),
+  // The facts a daily operations report is computed FROM. The worker's handler is a pure function
+  // of its payload and has no database handle by design, so whoever plans the step must carry the
+  // facts — and must carry them in the shape the handler accepts, or the task fails at execution
+  // time rather than at planning time. That is what happened: the step below passed `{asOf}` only,
+  // the vocabulary's load-time check confirmed the TASK TYPE existed, nobody checked the PAYLOAD
+  // CONTRACT, and the first plan ever to reach a real worker produced
+  // `handler_threw: payload.facts must be an array`. The registry check measured the wrong thing.
+  operationsFacts: (v) => {
+    if (!Array.isArray(v) || !v.length) return 'must be a non-empty array of operations facts';
+    if (v.length > 200) return 'must be at most 200 facts; a larger report is a different task';
+    const KINDS = ['assay', 'batch', 'qc_check', 'inquiry', 'shipment'];
+    const STATUSES = ['open', 'closed', 'blocked'];
+    for (const f of v) {
+      if (!f || typeof f !== 'object') return 'each fact must be an object';
+      if (!KINDS.includes(f.kind)) return `each fact.kind must be one of: ${KINDS.join(', ')}`;
+      if (!STATUSES.includes(f.status)) return `each fact.status must be one of: ${STATUSES.join(', ')}`;
+      if (typeof f.id !== 'string' || !f.id) return 'each fact needs a string id';
+    }
+    return null;
+  },
 });
 
 /**
@@ -142,8 +162,8 @@ const STEP_VOCABULARY = Object.freeze({
     taskType: 'report.daily_operations',
     capability: 'worker.execute',
     consequential: false,
-    args: Object.freeze({ asOf: ARG.isoDay }),
-    payloadFor: (a) => ({ asOf: a.asOf }),
+    args: Object.freeze({ asOf: ARG.isoDay, facts: ARG.operationsFacts }),
+    payloadFor: (a) => ({ asOf: a.asOf, facts: a.facts }),
   }),
   // A CONSEQUENTIAL step, present because without one the approval gate below would be untested —
   // "a test whose every fixture takes the same branch tests one branch" (task-types.js's own
@@ -340,7 +360,7 @@ function propose(ctx, { candidates, proposer = 'deterministic', consultedMemoryI
  * every failure in validation, persistence or dispatch would first have to be distinguished from
  * "the model said something different this time".
  */
-function deterministicCandidates({ objective, asOf, priorStepTypes = [] } = {}) {
+function deterministicCandidates({ objective, asOf, priorStepTypes = [], operationsFacts = null } = {}) {
   // ── MEMORY INFORMS THE PLAN, AND CANNOT WIDEN IT (B3.2 + B3.1a) ──────────
   //
   // Owner, 2026-11-24: *"Do not mark memory-driven planning complete. The demonstrated memory
@@ -373,8 +393,14 @@ function deterministicCandidates({ objective, asOf, priorStepTypes = [] } = {}) 
 
   if (objective && objective.kpi_metric === 'qualified_supplier_quotes_received') {
     candidates.push({ stepType: 'intelligence.summarise_state', args: { focus: 'approvals' } });
-  } else {
-    candidates.push({ stepType: 'operations.daily_report', args: { asOf } });
+  } else if (Array.isArray(operationsFacts) && operationsFacts.length) {
+    // ONLY when the caller actually has facts. A report step is proposed from the facts it will
+    // be computed from, never from an intention to find some later: the handler is a pure
+    // function of its payload, so a step minted without them is a task that cannot succeed.
+    // No office caller supplies facts yet — there is no operations-facts reader on this path —
+    // so this branch is currently unreached, and that absence is a tracked gap rather than a
+    // plan that fails at the worker.
+    candidates.push({ stepType: 'operations.daily_report', args: { asOf, facts: operationsFacts } });
   }
 
   return { candidates, informedBy: recognised, ignoredPriorSteps: ignored };
@@ -863,4 +889,7 @@ module.exports = {
   deterministicCandidates, candidatesFromModelText, priorStepsFromMemories,
   STEP_MEMORY_PREFIX,
   digestOf, canonical, workerCapabilities, findCompanyField,
+  // Exported so the payload contract can be measured against the real handlers
+  // (src/lib/office/step-payload-contract.test.js). Frozen, so a reader cannot alter it.
+  STEP_VOCABULARY,
 };

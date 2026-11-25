@@ -759,6 +759,57 @@ async function getPlan(ctx, planId, deps = {}) {
   return res.rows[0] || null;
 }
 
+/**
+ * The plan belonging to a run, if one has been minted yet.
+ *
+ * The unattended cycle needs this and nothing else to know which phase it is in: a run with no
+ * plan has not been planned, a run with a plan has. Reading the phase from DURABLE ROWS rather
+ * than from anything held in memory is what makes the cycle survive a process restart — there is
+ * no in-flight state to lose, because there is none.
+ */
+/**
+ * The counts a briefing must state, recounted from the kernel tables.
+ *
+ * The cycle's REPORT phase had this query inline and the scope-discipline check caught it — the
+ * third time in this batch, and correctly each time: a company predicate written at a call site is
+ * a predicate somebody can forget. It lives here with every other one.
+ *
+ * It exists at all because a briefing that reports figures the cycle computed as it went is a
+ * briefing that cannot be wrong about them. Recounting independently is what caught the first
+ * draft of B3.10's briefing reporting zero executed tasks.
+ */
+async function briefingCounts(ctx, { runId, planId = null }, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `SELECT
+       (SELECT COUNT(*)::int FROM office_plan_steps
+         WHERE company_id = $1 AND plan_id = $2) AS planned_steps,
+       (SELECT COUNT(*)::int FROM office_outcomes
+         WHERE company_id = $1 AND run_id = $3) AS outcomes,
+       (SELECT COUNT(*)::int FROM office_exceptions
+         WHERE company_id = $1 AND run_id = $3 AND resolved_at IS NULL) AS open_exceptions`,
+    [ctx.companyId, planId, runId]
+  );
+  const r = res.rows[0];
+  return {
+    plannedSteps: Number(r.planned_steps),
+    outcomes: Number(r.outcomes),
+    openExceptions: Number(r.open_exceptions),
+  };
+}
+
+async function planForRun(ctx, runId, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `SELECT id, objective_id, run_id, proposer, planner, status, verdict, refusal_code,
+            refusal_detail, validated_at, created_at
+       FROM office_plans WHERE company_id = $1 AND run_id = $2
+      ORDER BY created_at DESC LIMIT 1`,
+    [ctx.companyId, runId]
+  );
+  return res.rows[0] || null;
+}
+
 async function listPlanSteps(ctx, planId, deps = {}) {
   assertContext(ctx);
   return (await q(deps)(
@@ -1365,6 +1416,7 @@ module.exports = {
   recordCost, openException, resolveException, requestApproval, decideApproval, supersedeApproval,
   recordOutcome,
   createPlan, recordPlanStep, setStepVerdict, setPlanVerdict, getPlan, listPlanSteps,
+  planForRun, briefingCounts,
   recordDelegation, delegationDepth, delegationsFrom, runState,
   reserveSpend, settleSpend, releaseSpend, expireStaleReservations, reservationState,
   markDispatched, markFinancialOutcomeUnknown,

@@ -78,45 +78,134 @@ Those are **all** of them — `grep` over the process's modules finds no others.
 and your Priority 1 requirement of *"no production database access, no production provider
 credentials"* is satisfied by their absence rather than by a policy.
 
-### ACTION 3 — enrol it (one command, then one paste)
+### ACTION 3 — enrol it, with the secret never reaching a transcript
 
-Enrolment is deliberately a two-step act: the server mints a **single-use** token, and the worker
-exchanges it for a secret it then holds. The token spends on first use, so a re-enrolment attempt
-on a working worker fails loudly instead of silently reissuing.
+**CORRECTION, 2026-11-25.** The first version of this document told you to run a `railway ssh …
+console.log(t.token)` and then showed an enrolment response containing `"secret":"…"`. Both put a
+live credential into a terminal transcript — the first place your instruction names — and a
+transcript is scrolled back through, pasted into chat, and kept in shell history. Nothing about
+that was subtle, and writing the procedure that way made you the transport for a credential that
+only ever needs to travel from a server to a container. Replaced:
 
 ```sh
-# 1. On the m7-dev API, mint a token for this worker (server-side, operator action):
-railway ssh --service m7-dev-worker-api \
-  'node -e "require(\"/app/src/lib/worker/identity\").createEnrollmentToken({label:\"m7-dev-cloud-worker\"}).then(t=>console.log(t.token))"'
-
-# 2. Exchange it for an identity. Run this ONCE, from anywhere that can reach the API:
-curl -sS -X POST "$WORKER_API_BASE_URL/api/worker/enroll" \
-  -H 'content-type: application/json' \
-  --data '{"token":"<the token>","hostFingerprint":"railway-m7-dev-cloud-worker"}'
-# → {"ok":true,"workerId":"wkr_…","secret":"…"}
+# Run on a host that can reach the m7-dev API and its database.
+# Mints the token, exchanges it, and writes ONLY the secret to a 0600 file.
+PLAYNEXA_WORKER_ENV=development   node scripts/enroll-worker-no-transcript.js     --label m7-dev-cloud-worker     --api  https://<the m7-dev API service URL>     --out  /tmp/m7-dev-cloud-worker.secret
 ```
 
-Put the `workerId` and `secret` into the two Railway variables from ACTION 2. **`--service` is not
-optional** on the `railway ssh` line: this project's linked service is Postgres, so a bare
-`railway ssh` opens a shell in the database container where there is no `node` and no `/app`, and
-the error reads as a broken deploy.
+It prints the **worker id** (configuration, not a secret), the granted **capabilities** (expected:
+none), and a **SHA-256 fingerprint prefix** — twelve hex characters of a hash of a 32-byte random
+value, which identifies the credential for comparison and reconstructs none of it. The secret
+itself appears nowhere but the file.
 
-**No capabilities are granted.** The enrolment token carries them and this one carries none, so the
-worker gets neither `exec:hardware` nor `exec:gui` — asserted in the check. That is your Priority 1
-requirement and your §3's instruction, and it is enforced at the server: `consumeEnrollmentToken`
-has no capabilities parameter and no module updates the column afterwards.
+Then, with the value never passing through a shell:
 
-### ACTION 4 — confirm it, then approve what it may do
+1. Railway → `m7-dev-cloud-worker` → **Variables**;
+2. paste the file's contents into `PLAYNEXA_DEV_WORKER_SECRET` — a masked field, not a transcript;
+3. set `WORKER_ID` to the id the script printed;
+4. `shred -u /tmp/m7-dev-cloud-worker.secret` (`rm -P` on macOS).
+
+The script **refuses** to run against the production API, refuses unless
+`PLAYNEXA_WORKER_ENV=development`, refuses to grant `exec:hardware` or `exec:gui`, and refuses to
+overwrite an existing `--out` file — because if it did, the identity would be enrolled and its
+secret lost, which costs a revocation and a re-enrolment.
+
+**Why the token is single-use matters here:** if the exchange fails after the mint, the token is
+spent. Mint a new one rather than retrying the old, and the script says so.
+
+### ACTION 3a — confirm the commits are compatible BEFORE enrolling
+
+Your Priority 1: *"confirm the exact deployed API and worker commits are compatible before
+enrollment."* Enrolment spends a single-use token, so a mismatch discovered afterwards costs a
+revocation.
+
+```sh
+# The API's deployed commit, from its own health endpoint:
+curl -sS https://<the m7-dev API service URL>/health      # → includes the deployed commit sha
+
+# The worker service's deployed commit, from Railway:
+railway status --service m7-dev-cloud-worker              # → deployment + commit
+
+# They must BOTH contain the worker protocol as it stands at 161465c or later.
+git log --oneline 161465c..<each sha> -- src/api/worker.routes.js src/lib/worker/ src/worker-client/
+```
+
+If that last command prints nothing for both, the two sides share the same protocol surface and
+are compatible. If it prints commits for one and not the other, **the two are skewed on the files
+that define the protocol** — redeploy the lagging side before enrolling. `src/worker-client/` is in
+the list because the container runs it, and `src/api/worker.routes.js` and `src/lib/worker/`
+because the server does.
+
+### ACTION 4 — confirm the DEPLOYED CONTAINER, not a local command
+
+Your Priority 1 is explicit: *"verify the actual deployed container, not merely a locally executed
+railway run command."* `railway run` executes **locally** with the service's variables injected —
+it proves the variables are right and proves nothing about the container, its image, or its
+network path.
 
 ```sh
 railway logs --service m7-dev-cloud-worker          # expect {"at":"started", …} then polling
-railway run --service m7-dev-cloud-worker node src/worker-client/run.js --doctor
+railway ssh --service m7-dev-cloud-worker 'node /app/src/worker-client/run.js --doctor'
 ```
 
-`--doctor` should report `credentialUsable: true`, `credentialSource:
-development-environment-variable`, `ready: true`, `inboundListeners: 0`, and an `authentication`
-block that says `authenticated`. It contacts the API and changes nothing, and it prints no part of
-the secret.
+`railway ssh` runs **inside** the deployed container. `--service` is not optional: this project's
+linked service is Postgres, so a bare `railway ssh` opens a shell in the database container where
+there is no `node` and no `/app`, and the error reads as a broken deploy.
+
+Expect from that `--doctor`:
+
+| Field | Expected | Means |
+|---|---|---|
+| `credentialUsable` | `true` | the container found its credential |
+| `credentialSource` | `development-environment-variable` | and by the development path, not some other |
+| `credentialFingerprint` | **matches ACTION 3's fingerprint** | the right value landed, confirmed without either of us seeing it |
+| `inboundListeners` | `0` | it opens no port — a checked fact, not a claim |
+| `ready` | `true` | configuration and credential are both good |
+| `authentication.state` | `authenticated` | it reached the API and the HMAC verified |
+
+If `credentialFingerprint` does **not** match, the paste went wrong. Re-paste; do not re-enrol,
+which would spend another token and leave a stale identity.
+
+### ACTION 5 — server-side environment isolation, verified independently
+
+Your Priority 1: *"independently verify server-side environment isolation."* The worker's own
+`--doctor` is the worker's account of itself; this is the server's.
+
+```sh
+railway ssh --service m7-dev-worker-api 'node /app/scripts/check-worker-availability.js'
+railway variables --service m7-dev-cloud-worker          # names only — confirm the list
+```
+
+The variable list must contain **exactly** `WORKER_API_BASE_URL`, `WORKER_ID`,
+`PLAYNEXA_WORKER_ENV`, `PLAYNEXA_DEV_WORKER_SECRET`. If `DATABASE_URL`, `ANTHROPIC_API_KEY`,
+`RESEND_API_KEY` or any production credential appears, **the isolation requirement is not met** —
+remove it before enrolling or revoke and start again. The worker needs none of them, so their
+absence is the control rather than a policy.
+
+---
+
+## 1a. Incremental Railway cost, before provisioning
+
+Your Priority 1: *"provide any incremental Railway cost before provisioning."*
+
+**I cannot quote your actual bill** — I have no access to your Railway account, your plan, or your
+current usage, and a figure I inferred would be a guess presented as a number. What I can give you
+is the resource shape, which is what the cost is computed from:
+
+| Resource | What this service uses | Why |
+|---|---|---|
+| Replicas | **1** | one poller; two is not what this milestone measures |
+| Memory | a single Node process, no server, no browser, no database pool | it holds one task at a time |
+| CPU | near-idle between polls; a short burst per task | `synthetic.echo` is trivial work |
+| Egress | HTTPS to the API only, small JSON | no provider calls, no file transfer |
+| Storage | none | it writes nothing to disk |
+| Public networking | **disabled** | so no ingress is billed and no port is exposed |
+
+On Railway's usage-based pricing this is the cheapest shape a service can have — an always-on
+process that is mostly asleep. **Check the number yourself before provisioning:** Railway shows a
+projected cost per service in the dashboard, and your plan's included usage may absorb it
+entirely. If the projection surprises you, the whole pilot can run with the service **paused**
+between test windows, since the worker holds no state and enrolment survives a restart.
 
 ---
 
@@ -162,7 +251,39 @@ crash-test handler is not exercised and its arming window is expired.
 | `token_already_used` | the enrolment token was already spent | mint a new one; do not retry the old |
 | authenticates, claims nothing, forever | a STOP is in force, or the identity is revoked | `autonomy.listStops()`; check `worker_identities.revoked_at` |
 
-**Rollback is deleting the Railway service.** It holds no data, writes to no database directly, and
-every row it created is an ordinary `worker_tasks`/`worker_results` row in the development
-database. Revoking the identity (`IDENTITY.revokeWorker`) stops it immediately without deleting
-anything, and the check proves that path works.
+## 6. Rollback — REVOKE FIRST, THEN REMOVE
+
+Your Priority 1: *"rollback must revoke the identity before removing the service."* That ordering
+is not a formality and my first version had it backwards, treating deletion as the rollback and
+revocation as an aside.
+
+The reason: a deleted service's **credential still exists**. The secret was in its environment, it
+may be in a deployment-history entry, in a snapshot, or in whatever you pasted it from. Deleting
+the service removes the *runtime* and leaves a valid identity that the API will still
+authenticate. Revoking first makes the credential worthless, and then the service is just
+infrastructure.
+
+```sh
+# 1. REVOKE — the credential stops working immediately, server-side.
+railway ssh --service m7-dev-worker-api   'node -e "require(\"/app/src/lib/worker/identity\").revokeWorker(process.env.W, {reason:\"pilot rollback\"}).then(()=>console.log(\"revoked\"))"'   --env W=<the worker id>
+
+# 2. CONFIRM the revocation took effect, from the server's side.
+railway ssh --service m7-dev-worker-api   'node -e "require(\"/app/src/lib/db\").query(\"SELECT id, revoked_at FROM worker_identities WHERE id=$1\",[process.env.W]).then(r=>console.log(r.rows))"'   --env W=<the worker id>
+# revoked_at must be non-null. Until it is, step 3 would leave a live credential behind.
+
+# 3. ONLY THEN remove the service.
+#    Railway → m7-dev-cloud-worker → Settings → Delete service.
+```
+
+`check-cloud-worker-process-db.js` §7 proves step 1 is sufficient on its own: a revoked worker
+claims nothing **even though its secret is still sitting in its environment**, because the server
+is what refuses. That is the only place revocation can be enforced, and it is why revoking is a
+real rollback rather than a tidy-up.
+
+**Partial rollback, if you want to stop it without unwinding anything:** revoke the identity and
+leave the service running. It will poll, be refused, and log the refusal — no tasks execute, no
+state changes, and re-enrolment later is a fresh token. Pausing the service does the same without
+touching the identity.
+
+The service holds no data and writes to no database directly. Every row it created is an ordinary
+`worker_tasks` / `worker_results` row in the **development** database.

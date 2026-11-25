@@ -110,6 +110,22 @@ function doctor(env = process.env, deps = {}) {
     credentialSource: source.source,
     credentialUsable: source.usable,
     credentialDetail: source.reason,
+    // A FINGERPRINT, so an operator can confirm the right credential reached the container
+    // without the value passing through a transcript. Twelve hex characters of a SHA-256 over a
+    // 32-byte random secret identifies it for comparison and reconstructs none of it.
+    //
+    // This exists because the enrolment procedure I first wrote had the operator read the secret
+    // off their terminal and paste it onward, making the human the transport. A fingerprint is
+    // what lets them verify the paste landed without ever seeing what they pasted.
+    credentialFingerprint: (() => {
+      if (!source.usable) return null;
+      try {
+        const full = SECRET_SOURCE.resolveSecretSource({ workerId: cfg.workerId }, deps);
+        if (!full.usable) return null;
+        return `sha256:${require('node:crypto').createHash('sha256')
+          .update(full.read()).digest('hex').slice(0, 12)}`;
+      } catch (_) { return null; }
+    })(),
     implementedTaskTypes: caps.implemented,
     declaredButNotImplemented: caps.declaredButNotImplemented,
     maxOutputBytes: caps.maxOutputBytes,

@@ -73,6 +73,14 @@ const EXEMPT = new Set([
   // scope.bootstrapObjectivesForInitiation, which this check caught it not using on the first
   // attempt and which is the reason that accessor exists.
   path.join('scripts', 'check-office-initiator-db.js'),
+  // Priority 2's unattended-cycle check, for the same reason and one more: it verifies the cycle
+  // by READING THE DATABASE from outside, while every phase runs in a subprocess it does not share
+  // memory with. Asking the accessors what happened would be asking the code under test whether it
+  // worked. It seeds its fixtures into a disposable cluster and deletes them by recorded id, and
+  // the CYCLE itself — src/lib/office/cycle.js, which is product code and is NOT exempt — reaches
+  // every kernel table through scope.js, including the two accessors (planForRun, briefingCounts)
+  // that exist because this guard caught the first draft reaching for SQL.
+  path.join('scripts', 'check-unattended-cycle-db.js'),
   // The end-to-end acceptance test (ruling 8 item 5). It SEEDS a company, an objective and a run
   // into a DISPOSABLE cluster it creates and destroys, so that the real server has something to
   // serve — the kernel rows are the fixture, not the subject. It never runs against production

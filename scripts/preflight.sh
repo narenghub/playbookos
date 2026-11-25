@@ -405,6 +405,16 @@ pf_step "a scheduled run starts with nobody naming the objective" \
   node scripts/check-office-initiator-db.js
 pf_step "the initiator creates no authority" \
   env JWT_SECRET=preflight node --test src/lib/office/initiator-is-read-only.test.js
+# Owner's Priority 2 (2026-11-25): "a scheduled objective must proceed without the acceptance
+# driver manually advancing it". Every phase here is performed by a SEPARATE PROCESS that exits, so
+# the restart requirement is not simulated — it is the only way the check can pass at all.
+pf_step "the unattended cycle advances itself across processes, twice, and survives a kill" \
+  node scripts/check-unattended-cycle-db.js
+# And the property the planner's own load-time check could not see: a step's payload must be one
+# its real handler accepts. The registry check confirmed a NAME resolved; the first plan to reach a
+# worker failed on `payload.facts must be an array`.
+pf_step "every plan step's payload is executable by its handler" \
+  env JWT_SECRET=preflight node --test src/lib/office/step-payload-contract.test.js
 # B4.2 (owner's Priority 1, 2026-11-25): the worker PROCESS, started as a container starts it, with
 # its credential from the environment. The existing runtime check injects the secret into the
 # client library and never runs run.js — which is where the Linux blocker lived unseen.

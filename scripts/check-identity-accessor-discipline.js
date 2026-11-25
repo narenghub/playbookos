@@ -71,6 +71,13 @@ const EXEMPT = new Map([
     + 'tables directly in exactly two places: its CLEANUP, and the briefing recount in step 13, '
     + 'which must come from an INDEPENDENT path or the briefing would be checked against itself. '
     + 'Its own disposable cluster; no URL override.'],
+  ['scripts/check-unattended-cycle-db.js',
+    'Priority 2\'s unattended-cycle check. It reads agent_memory directly in ONE place: the '
+    + 'assertion that the REPORT phase wrote its memory rows under the subject prefix the planner '
+    + 'reads back. Recalling them through office/memory would ask the writer to confirm its own '
+    + 'write, and the subject prefix is the whole claim — a recall helper that filtered on it '
+    + 'would make the assertion unfalsifiable. Its own disposable cluster; fixtures by recorded '
+    + 'id; the CYCLE itself writes only through office/memory.remember.'],
   ['src/lib/identity/company-membership.js',
     'THE accessor for user_companies. Its whole purpose is to own that table.'],
   ['src/lib/identity/workflow-company.js',

@@ -208,9 +208,20 @@ globalThis.fetch = async (...args) => {
     // ══ STEP 3. GENERATE A DYNAMIC STRUCTURED PLAN ════════════════════════
     step(3, 'generate a dynamic structured plan');
 
+    // `operationsFacts` is NEW (2026-11-25) and it is why this call changed. operations.daily_report
+    // used to be proposed from `{asOf}` alone, and the task that produced was refused by its own
+    // handler — `payload.facts must be an array` — which nothing noticed until a plan step reached
+    // a real worker under scripts/check-unattended-cycle-db.js. The planner now proposes the step
+    // only from the facts it will be computed from, so a caller that wants the step supplies them.
+    // These are SYNTHETIC facts for a development scenario, exactly as this driver's other
+    // fixtures are.
+    const syntheticFacts = [
+      { id: 'cyc-f1', kind: 'assay', molecule: 'Metformin HCl', status: 'open', units: 2 },
+      { id: 'cyc-f2', kind: 'qc_check', molecule: 'Metformin HCl', status: 'closed', units: 1 },
+    ];
     const det = DECOMP.deterministicCandidates({
       objective: { kpi_metric: 'internal_cycle_completions' }, asOf: today,
-      priorStepTypes: priorSteps,
+      priorStepTypes: priorSteps, operationsFacts: syntheticFacts,
     });
     if (det.candidates.length === 3 && det.informedBy.length === 0) {
       ok(`DETERMINISTIC planning produced ${det.candidates.length} steps, informed by NOTHING — `
