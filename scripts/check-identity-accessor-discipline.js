@@ -53,6 +53,12 @@ const TABLES = Object.freeze({
 // Each exemption carries the reason it is one. A list of bare paths becomes a place to add a file
 // rather than a decision somebody made.
 const EXEMPT = new Map([
+  ['scripts/check-autonomous-office-cycle-db.js',
+    'the B3.10 cycle driver. It uses the real accessors everywhere it acts — grantMembership for '
+    + 'the membership, office/memory for recall, scoped-operations for the task — and reaches the '
+    + 'tables directly in exactly two places: its CLEANUP, and the briefing recount in step 13, '
+    + 'which must come from an INDEPENDENT path or the briefing would be checked against itself. '
+    + 'Its own disposable cluster; no URL override.'],
   ['src/lib/identity/company-membership.js',
     'THE accessor for user_companies. Its whole purpose is to own that table.'],
   ['src/lib/identity/workflow-company.js',

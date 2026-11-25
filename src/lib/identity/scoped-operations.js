@@ -106,6 +106,89 @@ async function tasksFor(ctx, { date = null, userId = null } = {}, deps = {}) {
   return r.rows.map(shapeTask);
 }
 
+/**
+ * Assign a task to an employee OF THIS COMPANY. B3.10 step 10.
+ *
+ * ── WHY THIS IS A WRITER IN THE SCOPED MODULE ──────────────────────────────
+ *
+ * Every other function here reads. This one writes, and it belongs here for the reason the whole
+ * module exists: the owner's instruction that *"filtering employees alone is insufficient — the
+ * underlying tasks must also belong to the authorized company."* A task written anywhere else
+ * would be written without a company, which is how `daily_tasks` came to have 0 `company_id`
+ * references in the first place.
+ *
+ * ── AND WHY IT VERIFIES MEMBERSHIP RATHER THAN TRUSTING THE CALLER ─────────
+ *
+ * The assignee must be an ACTIVE MEMBER of this company at the moment of assignment, checked
+ * through identity/company-membership.js — the single accessor — rather than by this function
+ * writing its own predicate. Assigning work to somebody who is not a member is how a cross-company
+ * task appears, and "the caller passed a user id" is not evidence that they may be given work.
+ *
+ * An unreadable membership REFUSES. An outage is not a membership.
+ */
+async function assignTask(ctx, { id, userId, title, description = null, taskDate,
+  priority = 'MEDIUM', assignedBy, reasoning = null }, deps = {}) {
+  const companyId = companyOf(ctx);
+  if (!userId) return { ok: false, code: 'no_assignee', detail: 'a task must name an employee' };
+  if (!title || !String(title).trim()) {
+    return { ok: false, code: 'no_title', detail: 'a task must say what to do' };
+  }
+  if (!assignedBy) {
+    return { ok: false, code: 'no_assigner',
+      detail: 'a task must record who or what assigned it — the audit trail is the point' };
+  }
+
+  const MEMBERSHIP = require('./company-membership');
+  let members;
+  try {
+    members = await MEMBERSHIP.membersOfCompany(companyId, deps);
+  } catch (e) {
+    return { ok: false, code: 'membership_unreadable',
+      detail: `membership could not be read (${e.message}) — an outage is not a membership` };
+  }
+  // membersOfCompany shapes its rows with `id`, not `userId` — read off the accessor rather than
+  // assumed. Accepting either keeps this correct if that shape is ever widened, and matching
+  // neither would have made EVERY assignment refuse while looking like a membership problem.
+  const isMember = (members || []).some((m) => m.id === userId || m.userId === userId);
+  if (!isMember) {
+    return { ok: false, code: 'not_a_member',
+      detail: `user ${userId} is not an active member of company ${companyId}, so work may not be `
+        + 'assigned to them under it' };
+  }
+
+  // THE REAL COLUMNS, read off the live schema. `priority` is TEXT with a CHECK on
+  // ('HIGH','MEDIUM','LOW') — not an integer — and there is no `assigned_by`: who assigned it goes
+  // in `agent_name`, and why in `reasoning`. The first version of this function guessed an integer
+  // priority and an `assigned_by` column, which is the mistake this module's own header records
+  // against `title` and `completed_at`. Guessing a schema twice in one file would be a pattern.
+  if (!['HIGH', 'MEDIUM', 'LOW'].includes(priority)) {
+    return { ok: false, code: 'bad_priority',
+      detail: `priority must be HIGH, MEDIUM or LOW — the column has a CHECK on it` };
+  }
+  const r = await q(deps)(
+    `INSERT INTO daily_tasks
+       (id, company_id, user_id, task_date, task_title, task_description, priority, status,
+        agent_name, reasoning)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9)
+     RETURNING id, user_id, task_date, task_title, task_description, status, priority, created_at`,
+    [id, companyId, userId, taskDate, String(title).trim(), description, priority, assignedBy,
+      reasoning],
+  );
+  return { ok: true, task: shapeTask(r.rows[0]) };
+}
+
+/** Mark an assigned task complete. Company-scoped, so one company cannot close another's work. */
+async function completeTask(ctx, { id }, deps = {}) {
+  const companyId = companyOf(ctx);
+  const r = await q(deps)(
+    `UPDATE daily_tasks SET status = 'completed'
+      WHERE company_id = $1 AND id = $2 AND status <> 'completed'
+      RETURNING id, status`,
+    [companyId, id],
+  );
+  return r.rows[0] || null;
+}
+
 function shapeTask(t) {
   // `task_title`, not `title`, and there is no `completed_at` — the real columns, read off the
   // live schema rather than assumed. The first version of this query guessed both and failed with
@@ -226,6 +309,8 @@ async function unattributedCounts(ctx, deps = {}) {
 module.exports = {
   employeesOf,
   tasksFor,
+  assignTask,
+  completeTask,
   scoresFor,
   milestonesFor,
   revenueFor,

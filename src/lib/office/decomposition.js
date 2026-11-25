@@ -340,15 +340,66 @@ function propose(ctx, { candidates, proposer = 'deterministic', consultedMemoryI
  * every failure in validation, persistence or dispatch would first have to be distinguished from
  * "the model said something different this time".
  */
-function deterministicCandidates({ objective, asOf }) {
-  const base = [
-    { stepType: 'observe.objective_state', args: {} },
-    { stepType: 'operations.liveness_checkpoint', args: {} },
-  ];
-  if (objective && objective.kpi_metric === 'qualified_supplier_quotes_received') {
-    return base.concat([{ stepType: 'intelligence.summarise_state', args: { focus: 'approvals' } }]);
+function deterministicCandidates({ objective, asOf, priorStepTypes = [] } = {}) {
+  // ── MEMORY INFORMS THE PLAN, AND CANNOT WIDEN IT (B3.2 + B3.1a) ──────────
+  //
+  // Owner, 2026-11-24: *"Do not mark memory-driven planning complete. The demonstrated memory
+  // integration changes reporting, not yet planning."* This is the half that was missing.
+  //
+  // `priorStepTypes` is what this objective has already been recorded as completing. The CALLER
+  // derives it from memory — from the structured subject of a prior outcome, never from a memory
+  // BODY — and this function then INTERSECTS it with the closed vocabulary before using it. So:
+  //
+  //   • memory changes WHICH already-authorized steps are proposed. That is a real effect on the
+  //     plan, and it is what makes a second run differ from the first.
+  //   • memory cannot add a step type, because a value outside the vocabulary survives the
+  //     intersection as nothing at all. An adversarial memory naming `shell.run` contributes
+  //     exactly zero candidates rather than one refused plan — and nothing it can say reaches a
+  //     capability, a company, a budget or an approval, all of which validate() recomputes.
+  //   • the ignored count travels back, because a memory proposing steps nobody recognises is
+  //     something an operator should see rather than something silently dropped.
+  const recognised = priorStepTypes.filter((t) => Object.hasOwn(STEP_VOCABULARY, t));
+  const ignored = priorStepTypes.length - recognised.length;
+  const done = new Set(recognised);
+
+  const candidates = [{ stepType: 'observe.objective_state', args: {} }];
+
+  // The liveness checkpoint proves the execution path before the plan relies on it. Worth doing
+  // once; worth SKIPPING on a later run that already has it, which is the whole point of asking
+  // memory what happened before.
+  if (!done.has('operations.liveness_checkpoint')) {
+    candidates.push({ stepType: 'operations.liveness_checkpoint', args: {} });
   }
-  return base.concat([{ stepType: 'operations.daily_report', args: { asOf } }]);
+
+  if (objective && objective.kpi_metric === 'qualified_supplier_quotes_received') {
+    candidates.push({ stepType: 'intelligence.summarise_state', args: { focus: 'approvals' } });
+  } else {
+    candidates.push({ stepType: 'operations.daily_report', args: { asOf } });
+  }
+
+  return { candidates, informedBy: recognised, ignoredPriorSteps: ignored };
+}
+
+/**
+ * The step types a set of recalled memories says this objective has already completed.
+ *
+ * Reads ONLY the structured `subject` field, by exact prefix match, and never the body. A memory
+ * body is prose written for a person; parsing it to drive a decision is precisely the "executable
+ * instructions" the owner's constraint rules out. The subject is a key this system wrote itself.
+ */
+const STEP_MEMORY_PREFIX = 'plan-step-completed:';
+function priorStepsFromMemories(memories) {
+  if (!Array.isArray(memories)) return [];
+  const out = [];
+  for (const m of memories) {
+    const subject = m && typeof m.subject === 'string' ? m.subject : '';
+    if (!subject.startsWith(STEP_MEMORY_PREFIX)) continue;
+    const after = subject.slice(STEP_MEMORY_PREFIX.length);
+    // `objectiveId/stepType` — take the step type, and only if the vocabulary knows it.
+    const stepType = after.includes('/') ? after.slice(after.lastIndexOf('/') + 1) : after;
+    if (Object.hasOwn(STEP_VOCABULARY, stepType)) out.push(stepType);
+  }
+  return [...new Set(out)];
 }
 
 /**
@@ -767,14 +818,39 @@ async function decompose(ctx, { candidates, proposer = 'deterministic', runId,
 
   const plan = { ...proposed.plan, workflow, agent };
   const validation = await validate(ctx, plan, deps);
-  // Persisted either way: a refusal is evidence, and a refused plan that left no record would make
-  // "was this validated?" unanswerable after the fact.
+
+  // ── A BOOKKEEPING FAILURE MUST NOT REPLACE A SECURITY REFUSAL ────────────
+  //
+  // Persisted either way, normally: a refusal is evidence, and a refused plan that left no record
+  // would make "was this validated?" unanswerable after the fact.
+  //
+  // But a plan refused because the OBJECTIVE IS NOT THIS COMPANY'S cannot be persisted at all —
+  // `office_plans` has a composite foreign key to `objectives (id, company_id)`, which is the
+  // point of it. Attempting the write anyway made createPlan throw, and the returned refusal
+  // became `plan_not_recorded`: the cross-company finding replaced by a storage error. Measured in
+  // check-autonomous-office-cycle-db.js, whose cross-company negative case read as a bug in
+  // persistence.
+  //
+  // So a scope-level refusal skips persistence and keeps its own reason, and any OTHER persistence
+  // failure is reported ALONGSIDE the validation verdict rather than instead of it.
+  const UNPERSISTABLE = ['objective_not_in_company_scope', 'objective_mismatch'];
+  if (!validation.ok && UNPERSISTABLE.includes(validation.refused)) {
+    return { ok: false, stage: 'validate', refused: validation.refused, detail: validation.detail,
+      plan, validation, persisted: null,
+      notRecorded: 'a plan for an objective outside this company cannot be stored — the composite '
+        + 'foreign key refuses it, which is the same guarantee that refused the plan' };
+  }
+
   let persisted = null;
   try {
     persisted = await persist(ctx, plan, validation, { runId }, deps);
   } catch (e) {
-    return { ok: false, stage: 'persist', refused: 'plan_not_recorded', detail: e.message,
-      validation };
+    return { ok: false,
+      stage: validation.ok ? 'persist' : 'validate',
+      refused: validation.ok ? 'plan_not_recorded' : validation.refused,
+      detail: validation.ok ? e.message : validation.detail,
+      recordingError: e.message,
+      plan, validation };
   }
   return { ok: validation.ok, stage: validation.ok ? 'validated' : 'validate',
     plan, validation, persisted,
@@ -784,6 +860,7 @@ async function decompose(ctx, { candidates, proposer = 'deterministic', runId,
 module.exports = {
   PLANNER_VERSION, MAX_STEPS, IN_OFFICE, STEP_VOCABULARY, FORBIDDEN_PROPOSAL_FIELDS, GATES, ARG,
   propose, validate, persist, decompose,
-  deterministicCandidates, candidatesFromModelText,
+  deterministicCandidates, candidatesFromModelText, priorStepsFromMemories,
+  STEP_MEMORY_PREFIX,
   digestOf, canonical, workerCapabilities, findCompanyField,
 };

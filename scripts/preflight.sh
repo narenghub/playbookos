@@ -352,6 +352,11 @@ pf_step "one authorization boundary, and a product is not a company" node script
 # requires. The child spends against the PARENT objective, so a child budget is impossible
 # rather than merely forbidden.
 pf_step "delegation is governed, and the child gets a context" node scripts/check-office-delegation-db.js
+# B3.4 + B3.10 (Decision 2, 2026-11-25). The fifteen-step operating cycle EXECUTED on the real
+# modules — real lease path, real handler — with capability discovery, a memory-informed plan whose
+# second run DIFFERS because of the first, an accurate briefing recounted by an independent path,
+# and all nine negative cases. No provider call: actual governed model execution is not claimed.
+pf_step "the autonomous-office cycle executes end to end" node scripts/check-autonomous-office-cycle-db.js
 pf_step "the workflow-company proposal cannot assign anything" node --test scripts/proposal-is-readonly.test.js
 # B7.6. Six producers in four modules and two processes bind approvals. They agree or every
 # approved external send refuses, and each local expression of "the message" is locally correct —

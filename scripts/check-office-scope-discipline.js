@@ -118,6 +118,11 @@ const EXEMPT = new Set([
   // do that: setObjectiveStatus is the governed path and would make the fixture the thing under
   // test. Disposable cluster, fixtures deleted by id.
   path.join('scripts', 'check-authz-boundary-db.js'),
+  // B3.10. The integrated cycle driver. It reads kernel tables directly in two places only: the
+  // briefing, which must be recounted by an INDEPENDENT path (going through the accessor would
+  // make the briefing agree with itself), and the fixture that plants an exhausted budget. Its own
+  // disposable cluster; the runs it creates are undeletable by design and it says so.
+  path.join('scripts', 'check-autonomous-office-cycle-db.js'),
   path.join('scripts', 'check-office-recovery-db.js'),
   path.join('scripts', 'validate-k4-activation-deployed.js'),
   path.join('scripts', 'check-office-governed-ai-db.js'),
