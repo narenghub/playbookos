@@ -98,6 +98,11 @@ const AUTHORIZED_COMPANY_ID_TABLES = new Set([
   // same company through MATCH FULL composite foreign keys, so a child run of another company
   // cannot be attached to a parent — the database refuses it rather than the accessor checking.
   'office_delegations',
+  // Decision 1 (2026-11-25): the explicit, reviewed product→company mapping. company_id is the
+  // whole point of the table — it is what replaces gate.js's assumption that a product id IS a
+  // company id. Not a kernel table: it is the function that ESTABLISHES a company, so it cannot
+  // require one, the same exception bootstrapObjectiveForContext takes.
+  'product_companies',
 ]);
 const REAL_CONSTRAINT_CODES = new Set(['23503', '23502', '23514', '23505']);
 const SENTINEL = '__k1_validation_rollback__';

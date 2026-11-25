@@ -216,6 +216,18 @@ const SCHEMA_STEPS = [
     required: true,
     run: (q) => require('./identity/schema').migrateRecordOwnership(q),
   },
+  {
+    // AFTER the office kernel, because it references `companies`.
+    //
+    // Decision 1 (2026-11-25): the unified authorization boundary resolves which company a PRODUCT
+    // acts for through an explicit, reviewed mapping, because `src/lib/agents/gate.js` had been
+    // passing a product id into the kill switch's company slot. A product is a route namespace; a
+    // company is a row with memberships, objectives and budgets. Empty by design — a mapping is a
+    // reviewed decision, and seeding one here would be exactly the inference the owner forbade.
+    name: 'authz: explicit product-to-company mappings (Decision 1)',
+    required: true,
+    run: (q) => require('./authz/product-company').migrateProductCompanies(q),
+  },
   { name: 'research intelligence', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligence() },
   { name: 'research intelligence phase 3', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligencePhase3() },
 

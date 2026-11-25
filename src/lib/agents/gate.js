@@ -58,6 +58,15 @@ function costFrom(summary) {
   };
 }
 
+// The kill switch's refusal log. Never allowed to throw: a broken audit path must not change a
+// decision that has already been made correctly.
+function recordRefusalSafely(deps, stop, toolName, detail) {
+  try {
+    const { recordRefusal } = deps.autonomy || require('../autonomy');
+    recordRefusal({ stop, what: `gate:${toolName}`, detail });
+  } catch (_) { /* swallow */ }
+}
+
 // ── the shared governance spine ─────────────────────────────────────────────────
 // resolve() authorise → on DENY audit(decision='deny') + fireDenial, no execution → on
 // ALLOW run execute(), time it, audit the outcome. execute() returns a normalized
@@ -69,7 +78,6 @@ async function gated(spec) {
     idempotencyKey = null, denialMethod = 'AGENT', execute, deps = {},
   } = spec;
   const q = deps.query || queryFn();
-  const doResolve = deps.resolve || resolve;
   const doDenial = deps.fireDenial || fireDenial;
   const doAudit = deps.fireAudit || fireAudit;
   const actor_user_id = (user && user.id) || null;
@@ -82,61 +90,54 @@ async function gated(spec) {
   };
 
   try {
-    // ── THE KILL SWITCH, BEFORE AUTHORISATION ────────────────────────────────
+    // ── ONE AUTHORIZATION BOUNDARY, NOT TWO (Decision 1, 2026-11-25) ─────────
     //
-    // No production caller reaches here yet — P0.4 adopts this spine. The check is placed now so
-    // that adoption inherits the switch rather than requiring a second pass over every agent, and
-    // it is placed BEFORE resolve() because a stop is not an authorisation question: a permitted
-    // actor must still be stopped.
+    // The kill-switch check and the permissions resolve that used to live here have MOVED to
+    // src/lib/authz/boundary.js. Moved, not duplicated: this is the same logic in the same order,
+    // which is how "preserve existing security behaviour for every legacy caller" is kept by
+    // construction rather than by promise. What this file still owns is the registry lookup, the
+    // execution strategies and the tool_call_audit row.
     //
-    // Audited as decision='deny' with its own rule so a stop is never confused with a permissions
-    // denial in the audit table.
+    // Two things the boundary does that this code did not, both of them refusing in MORE cases and
+    // never fewer:
+    //
+    //   • it resolves the COMPANY through the explicit product→company mapping instead of assuming
+    //     `product` is a company id, and records which it was;
+    //   • it asks the kill switch about the resolved company AND, for compatibility, about the
+    //     product as a company key — because production stop rows written through this gate carry
+    //     the product there, and an operator's halt must not silently stop halting.
+    //
+    // Gate 3 now requires traversal of that boundary, not of this filename.
+    const boundary = deps.boundary || require('../authz/boundary');
+    let authz;
     try {
-      // Injectable, because this file's tests are deliberately hermetic — "no real DB, no real
-      // agent execution, no network". A check that reached for a live connection would make them
-      // fail closed and DENY everything, and the denial would look like correct behaviour rather
-      // than a wiring mistake. That is the whole failure family this week has been about.
-      const { checkStopped, recordRefusal } = deps.autonomy || require('../autonomy');
-      // deps is passed through, so an injected query reaches the switch too. Without it the gate's
-      // own tests would hit the real database, fail closed, and deny everything — and the "fail
-      // closed" would look like correct behaviour rather than a wiring mistake.
-      const blocked = await checkStopped(
-        { company: product, agent: actorAgent || undefined, capability: toolName },
-        { consequential: true, deps },
-      );
-      if (blocked) {
-        const explain = `STOPPED_BY_POLICY: ${blocked.scope_type}`
-          + `${blocked.scope_key ? `:${blocked.scope_key}` : ''} — ${blocked.reason}`;
-        const audit = { ...base, result: null, success: false, error: null, decision: 'deny',
-          decision_rule: 'autonomy_stop', decision_explain: explain };
-        doAudit(q, audit);
-        recordRefusal({ stop: blocked, what: `gate:${toolName}`, detail: { product, actorAgent } });
-        return { allowed: false, output: null, audit, stopped_by_policy: true };
-      }
+      authz = await boundary.authorizeHumanToolCall({
+        user, product, featureKey, toolName, actorAgent, tenantId,
+      }, deps);
     } catch (e) {
-      const explain = `STOPPED_BY_POLICY: kill-switch check failed (${e && e.message ? e.message : e})`;
       const audit = { ...base, result: null, success: false, error: null, decision: 'deny',
-        decision_rule: 'autonomy_stop', decision_explain: explain };
+        decision_rule: 'authz_boundary_error',
+        decision_explain: `the authorization boundary could not decide (${e.message})` };
       try { doAudit(q, audit); } catch (_) {}
-      return { allowed: false, output: null, audit, stopped_by_policy: true };
+      return { allowed: false, output: null, audit };
     }
 
-    // Authorise (reuse resolve; fail CLOSED on a resolver error — audited, not thrown).
-    let decision;
-    try { decision = await doResolve(user || {}, featureKey, deps.resolveDeps || {}); }
-    catch (e) { decision = { allowed: false, rule: null, explain: 'resolver error: ' + (e && e.message ? e.message : String(e)) }; }
-    const allowed = !!(decision && decision.allowed === true);
-
-    if (!allowed) {
+    if (!authz.allowed) {
       const audit = { ...base, result: null, success: false, error: null, decision: 'deny',
-        decision_rule: decision ? decision.rule : null, decision_explain: decision ? decision.explain : null };
+        decision_rule: authz.decision_rule, decision_explain: authz.explain };
       doAudit(q, audit);
+      if (authz.stopped_by_policy) {
+        recordRefusalSafely(deps, authz.stop, toolName, { product, actorAgent });
+        return { allowed: false, output: null, audit, stopped_by_policy: true };
+      }
       try {
         doDenial(q, { user_id: actor_user_id, role, feature_key: featureKey,
-          method: denialMethod, path: toolName, resolver_rule: audit.decision_rule, resolver_explain: audit.decision_explain });
+          method: denialMethod, path: toolName, resolver_rule: audit.decision_rule,
+          resolver_explain: audit.decision_explain });
       } catch (_) { /* fireDenial is itself never-throws */ }
       return { allowed: false, output: null, audit };
     }
+    const decision = { allowed: true, rule: authz.decision_rule, explain: authz.explain };
 
     // Execute the strategy, time it, audit the outcome.
     const t0 = nowMs(deps);

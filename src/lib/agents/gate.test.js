@@ -7,7 +7,22 @@ const assert = require('node:assert');
 const { callAgent } = require('./gate');
 
 // capture audit-insert param arrays
-function capQuery() { const rows = []; const q = (_sql, params) => { rows.push(params); return Promise.resolve({ rows: [] }); }; q.rows = rows; return q; }
+// `rows` captures the parameters of every INSERT INTO tool_call_audit, and `all` captures every
+// query. The split matters: these assertions say "one tool_call_audit row written", and counting
+// EVERY query was only equivalent while the gate issued exactly one. Decision 1 moved the kill
+// switch and the permissions resolve into src/lib/authz/boundary.js, which also resolves the
+// company through the explicit product→company mapping — two more reads — and three tests failed
+// claiming three audit rows had been written. None had. The assertion was measuring query volume
+// and reporting it as audit volume; it now measures the audit rows it names.
+function capQuery() {
+  const rows = []; const all = [];
+  const q = (sql, params) => {
+    all.push({ sql, params });
+    if (/INSERT\s+INTO\s+tool_call_audit/i.test(String(sql))) rows.push(params);
+    return Promise.resolve({ rows: [] });
+  };
+  q.rows = rows; q.all = all; return q;
+}
 const allow = (rule = 7, explain = 'ok') => async () => ({ allowed: true, rule, source: null, explain });
 const deny = (rule = 8, explain = 'no rule matched') => async () => ({ allowed: false, rule, source: null, explain });
 const USER = { id: 'u1', email: 'u@x', role: 'admin' };

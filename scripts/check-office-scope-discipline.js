@@ -113,6 +113,11 @@ const EXEMPT = new Set([
   // only way to try a cross-company delegation is to write the INSERT. It also reads
   // information_schema to assert the evidence columns are NOT NULL. Disposable cluster, destroyed.
   path.join('scripts', 'check-office-delegation-db.js'),
+  // Decision 1. Plants objective state the boundary must then read — a cancelled objective, to
+  // prove that authority is WITHDRAWN mid-flight on a context already minted. An accessor cannot
+  // do that: setObjectiveStatus is the governed path and would make the fixture the thing under
+  // test. Disposable cluster, fixtures deleted by id.
+  path.join('scripts', 'check-authz-boundary-db.js'),
   path.join('scripts', 'check-office-recovery-db.js'),
   path.join('scripts', 'validate-k4-activation-deployed.js'),
   path.join('scripts', 'check-office-governed-ai-db.js'),

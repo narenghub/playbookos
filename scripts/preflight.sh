@@ -341,6 +341,11 @@ pf_step "work executes only where it is eligible to" node scripts/check-executio
 # controls, approval requirement and budget. A proposal that states any of those — a model's
 # included — is refused by name rather than sanitised.
 pf_step "a plan is a proposal, not an authorization" node scripts/check-office-decomposition-db.js
+# Decision 1 (2026-11-25). ONE authorization boundary for human-initiated product operations and
+# autonomous runs. A product is resolved to a company only through an explicit authorized mapping
+# — gate.js used to pass a product id into the kill switch's company slot — and every non-answer
+# refuses by name. Legacy decisions are unchanged and existing product-keyed stops still halt.
+pf_step "one authorization boundary, and a product is not a company" node scripts/check-authz-boundary-db.js
 # B3.3. One agent delegates to another by handing over a DERIVED context and never a company id.
 # The target agent, parent liveness, chain depth, autonomy tier, kill switch and objective budget
 # are all checked before a child run exists, and the dispatch record names all ten fields Gate 3
