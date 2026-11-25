@@ -29,10 +29,13 @@ const tokensFor = (system, prompt, maxTokens = 100) => llm.maxInputTokens(
 
 // ═══ 1. THE BOUND IS A BOUND ═══════════════════════════════════════════════
 
-test('1. the input bound is the UTF-8 byte length of the serialized request', () => {
-  // Not a estimate of the token count — a ceiling on it. Anthropic's tokenizer is a byte-level
-  // BPE: all 256 byte values are in the base vocabulary, so no input yields more tokens than it
-  // has bytes.
+test('1. the input estimate is the UTF-8 byte length of the serialized request', () => {
+  // NOT asserted as a proven billing bound — the owner's §3 of 2026-11-25 rejected that claim and
+  // llm.maxInputTokens now states its limits: the tokenizer's internals are an inference, and
+  // billing can include cache writes, thinking tokens, server-side tool use and images that no
+  // function of the text's length can see. What IS asserted here is what the function computes,
+  // and tests 2–2d assert the property that made the change necessary: it is strictly larger than
+  // the character heuristic in every case where that heuristic was too small.
   const body = llm.buildRequestBody({ model: 'claude-haiku-4-5', system: 'sys',
     prompt: 'hello', maxTokens: 64 });
   assert.strictEqual(llm.maxInputTokens(body),
@@ -53,6 +56,9 @@ test('1a. the envelope is MEASURED, not allowed for with a constant', () => {
 // ═══ 2. THE COUNTER-EXAMPLES ═══════════════════════════════════════════════
 
 test('2. DECISIVE: CJK text broke chars/3, and this platform handles CJK supplier mail', () => {
+  // The claim under test is comparative, not absolute: byte length is larger than chars/3 exactly
+  // where chars/3 was unsafe. That is provable from the two expressions and needs no assumption
+  // about the provider's tokenizer.
   // `薬` — one character, three UTF-8 bytes, at least one token. chars/3 scores it as 0.33 tokens,
   // so a page of Japanese or Chinese correspondence was bounded at roughly a THIRD of what it can
   // cost. The CPHI campaign's suppliers write exactly this way; rfc822.js has a whole section on

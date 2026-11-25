@@ -236,6 +236,79 @@ watchdog.unref?.();
       }
     }
 
+    // ══ 4b. WHICH INDEX PREVENTS WHAT (owner's §2 question, 2026-11-25) ══
+    //
+    // *"Verify whether the existing one-active-run constraint prevents only concurrent duplicates
+    // or also repeated execution after completion. Independently test the intended recurrence and
+    // business-date semantics."*
+    //
+    // It was right to ask, and the answer corrects my own commit message for 13ef7f3, which
+    // credited uq_agent_runs_one_active with both jobs. It does not do both:
+    //
+    //   uq_agent_runs_one_active       partial over (CREATED, RUNNING) → CONCURRENT duplicates
+    //   uq_agent_runs_intent_attempt   (intent_key, attempt)          → REPEAT AFTER COMPLETION
+    //
+    // Both are structural, so the property holds either way; the attribution was wrong, and a
+    // wrong attribution is how the next person removes the index that was actually load-bearing.
+    console.log('\n── 4b. two indexes, two different jobs ──\n');
+
+    {
+      const rerun = await mkObjective({ label: 'rerun' });
+      const first = await INIT.initiateDueObjectives({ companyId: A }, deps);
+      const key = (first.initiated.find((x) => x.objectiveId === rerun) || {}).intentKey;
+      if (!key) bad('the rerun fixture was not initiated');
+
+      // Drive it to a terminal state through the legal transitions — the trigger refuses
+      // CREATED → SUCCEEDED directly, which is itself worth knowing.
+      await q(`UPDATE agent_runs SET state='RUNNING', started_at=NOW() WHERE intent_key=$1`, [key]);
+      await q(`UPDATE agent_runs SET state='SUCCEEDED', ended_at=NOW() WHERE intent_key=$1`, [key]);
+
+      const after = await INIT.initiateDueObjectives({ companyId: A }, deps);
+      const startedAgain = after.initiated.filter((x) => x.objectiveId === rerun).length;
+      if (startedAgain === 0) {
+        ok('after the run COMPLETES, the same business day does NOT start a second run');
+      } else {
+        bad('a completed run was re-initiated on the same business day — the one-active index is '
+          + 'partial over CREATED/RUNNING, so it cannot be what prevents this');
+      }
+
+      // WHICH index does the post-completion job is measured in section 9, at the END of this
+      // file, because finding out requires DROPPING indexes and a unique index cannot be rebuilt
+      // afterwards: the control itself creates the duplicate row that makes it unbuildable, and
+      // the runs cannot be deleted because agent_run_events is append-only by trigger. The first
+      // version restored them with `.catch(() => {})`, both CREATE INDEX statements failed
+      // silently, and section 4c then measured a schema with no uniqueness at all and reported the
+      // product's recurrence semantics as broken. Ordering is the fix; a swallowed error was the
+      // defect.
+    }
+
+    // ══ 4c. RECURRENCE: THE NEXT BUSINESS DAY IS A NEW INTENT ════════════
+    console.log('\n── 4c. the intended recurrence ──\n');
+
+    {
+      const recur = await mkObjective({ label: 'recur' });
+      const RUN = require('../src/lib/office/run');
+      const k1 = 'office:office-scheduled-initiation:' + recur + ':bd=2026-11-25';
+      const k2 = 'office:office-scheduled-initiation:' + recur + ':bd=2026-11-26';
+      const d1 = await RUN.beginObjectiveRun({ objectiveId: recur, trigger: 'schedule',
+        workflow: INIT.WORKFLOW, intentKey: k1 }, deps);
+      const d1again = await RUN.beginObjectiveRun({ objectiveId: recur, trigger: 'schedule',
+        workflow: INIT.WORKFLOW, intentKey: k1 }, deps);
+      const d2 = await RUN.beginObjectiveRun({ objectiveId: recur, trigger: 'schedule',
+        workflow: INIT.WORKFLOW, intentKey: k2 }, deps);
+
+      if (!d1.duplicate && d1again.duplicate && !d2.duplicate) {
+        ok('one run per objective per BUSINESS day: the same day is declined, the next day runs');
+      } else {
+        bad('the recurrence semantics are not one-per-business-day',
+          JSON.stringify({ d1: !!d1.duplicate, same: !!d1again.duplicate, next: !!d2.duplicate }));
+      }
+      const n = (await q(`SELECT COUNT(*)::int n FROM agent_runs WHERE objective_id = $1`,
+        [recur])).rows[0].n;
+      if (n === 2) ok(`and exactly two runs exist across two business days`);
+      else bad(`${n} runs across two business days`);
+    }
+
     // ══ 5. THE KILL SWITCH, BEFORE A RUN EXISTS ══════════════════════════
     console.log('\n── 5. a STOP prevents the run from being opened at all ──\n');
 
@@ -341,6 +414,40 @@ watchdog.unref?.();
       } else bad('a suspended company\'s objective was initiated', JSON.stringify(r));
       void SCOPE;
     }
+
+    // ══ 9. WHICH INDEX PREVENTS WHAT — DESTRUCTIVE, SO IT RUNS LAST ══════
+    //
+    // These controls DROP indexes and do not restore them. Nothing after this point may rely on
+    // the schema, which is why there is nothing after this point.
+    console.log('\n── 9. two indexes, two different jobs (destructive controls) ──\n');
+
+    {
+      const victim = await mkObjective({ label: 'victim' });
+      const f = await INIT.initiateDueObjectives({ companyId: A }, deps);
+      const key = (f.initiated.find((x) => x.objectiveId === victim) || {}).intentKey;
+      await q(`UPDATE agent_runs SET state='RUNNING', started_at=NOW() WHERE intent_key=$1`, [key]);
+      await q(`UPDATE agent_runs SET state='SUCCEEDED', ended_at=NOW() WHERE intent_key=$1`, [key]);
+
+      await q(`DROP INDEX uq_agent_runs_one_active`);
+      const a1 = await INIT.initiateDueObjectives({ companyId: A }, deps);
+      if (a1.initiated.filter((x) => x.objectiveId === victim).length === 0) {
+        ok('with uq_agent_runs_one_active DROPPED a completed intent is STILL declined — so the '
+          + 'post-completion case is uq_agent_runs_intent_attempt, not the one-active index');
+      } else {
+        bad('dropping the one-active index allowed a post-completion repeat, so it WAS the '
+          + 'mechanism and the attribution in 13ef7f3 was right after all');
+      }
+
+      await q(`DROP INDEX uq_agent_runs_intent_attempt`);
+      const a2 = await INIT.initiateDueObjectives({ companyId: A }, deps);
+      if (a2.initiated.filter((x) => x.objectiveId === victim).length === 1) {
+        ok('with BOTH dropped a second run IS created — there is no application-level fallback, '
+          + 'which is the design, and is exactly why crediting the wrong index matters');
+      } else {
+        bad('with both indexes dropped nothing was created, so the mechanism is not understood');
+      }
+    }
+
   } catch (e) {
     bad('the check threw', e.stack || e.message);
   } finally {

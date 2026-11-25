@@ -405,6 +405,13 @@ pf_step "a scheduled run starts with nobody naming the objective" \
   node scripts/check-office-initiator-db.js
 pf_step "the initiator creates no authority" \
   env JWT_SECRET=preflight node --test src/lib/office/initiator-is-read-only.test.js
+# B4.2 (owner's Priority 1, 2026-11-25): the worker PROCESS, started as a container starts it, with
+# its credential from the environment. The existing runtime check injects the secret into the
+# client library and never runs run.js — which is where the Linux blocker lived unseen.
+pf_step "the worker process runs in a container and is governed there" \
+  node scripts/check-cloud-worker-process-db.js
+pf_step "a weaker credential path is not reachable where the stronger one is" \
+  env JWT_SECRET=preflight node --test src/worker-client/secret-source.test.js
 # Is the K1 PRODUCTION validator trustworthy? It runs once against production and its verdict is
 # what decides PRODUCTION VALIDATED, so three things need proving first: it writes nothing durable
 # (a fixture left on production could not be removed — agent_run_events is append-only); it goes red

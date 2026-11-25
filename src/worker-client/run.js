@@ -28,6 +28,9 @@
 'use strict';
 
 const KEYCHAIN = require('./keychain');
+// B4.2: which credential source applies on this platform. See its header for why a container
+// may read an environment variable and a Mac may not.
+const SECRET_SOURCE = require('./secret-source');
 const EXEC = require('./executor');
 const { WorkerClient } = require('./client');
 
@@ -75,9 +78,19 @@ function doctor(env = process.env, deps = {}) {
   const caps = EXEC.capabilities();
   const key = KEYCHAIN.probeSecret({ workerId: cfg.workerId }, deps);
 
-  // Only `readable` means the worker can actually start. `unknown` deliberately counts as neither
-  // ready nor missing.
-  const credentialUsable = key.state === KEYCHAIN.STATE.READABLE;
+  // ── READINESS COMES FROM THE CREDENTIAL SOURCE, NOT FROM THE KEYCHAIN ───
+  //
+  // This read `key.state === READABLE` directly, which was the same question until B4.2: on Linux
+  // the Keychain probe returns `not_macos` and doctor therefore reported `ready: false` for a
+  // container whose credential source was perfectly usable. A readiness check measuring the wrong
+  // source is this repository's recurring defect — a measurement standing in for the property —
+  // and on a cloud worker it would have read as a broken deploy.
+  //
+  // The Keychain fields below are KEPT, because on macOS they carry the five-state detail that
+  // distinguishes "absent" from "present and macOS refused", and re-enrolling on the latter
+  // spends a single-use token and fixes nothing.
+  const source = SECRET_SOURCE.describeSecretSource({ workerId: cfg.workerId }, deps);
+  const credentialUsable = source.usable;
 
   return {
     platform: process.platform,
@@ -92,6 +105,11 @@ function doctor(env = process.env, deps = {}) {
     keychainRecovery: key.hint,
     // Kept for continuity, and null where the honest answer is "we do not know".
     keychainItemPresent: key.present,
+    // B4.2: which source actually applies here, and whether it is usable. Carries NO part of the
+    // secret — a credential in a readiness report is a credential in a log file.
+    credentialSource: source.source,
+    credentialUsable: source.usable,
+    credentialDetail: source.reason,
     implementedTaskTypes: caps.implemented,
     declaredButNotImplemented: caps.declaredButNotImplemented,
     maxOutputBytes: caps.maxOutputBytes,
@@ -158,14 +176,18 @@ async function diagnose(env = process.env, deps = {}) {
   let auth = { state: 'skipped', code: null,
     detail: 'the authentication probe was skipped (--no-network)' };
   const wantNetwork = !(deps.noNetwork === true);
+  // Gated on the credential SOURCE being usable, not on the Keychain specifically — otherwise the
+  // authentication probe is permanently skipped on a container, and `--doctor` can never tell an
+  // operator whether the cloud worker's enrolment actually works.
   if (wantNetwork && base.baseUrlConfigured && base.workerIdConfigured
-      && base.keychainState === KEYCHAIN.STATE.READABLE) {
+      && base.credentialUsable) {
     try {
       const probe = deps.probeAuth
         ? await deps.probeAuth()
         : await (async () => {
           const cfg = config(env);
-          const secret = KEYCHAIN.readSecret({ workerId: cfg.workerId });
+          const src = SECRET_SOURCE.resolveSecretSource({ workerId: cfg.workerId }, deps);
+          const secret = src.read();
           const { WorkerClient } = require('./client');
           return new WorkerClient({ baseUrl: cfg.baseUrl, workerId: cfg.workerId, secret })
             .probeAuth();
@@ -183,8 +205,10 @@ async function diagnose(env = process.env, deps = {}) {
   // Each reason names the fact that failed, so the verdict is never a bare false.
   const reasons = [];
   if (base.problems.length) reasons.push(`configuration: ${base.problems.join('; ')}`);
-  if (base.keychainState !== KEYCHAIN.STATE.READABLE) {
-    reasons.push(`credential: ${base.keychainState}`);
+  // The CREDENTIAL SOURCE, not the Keychain state — on Linux the Keychain is `not_macos`, which is
+  // not a problem, and reporting it as one made a working container look broken.
+  if (!base.credentialUsable) {
+    reasons.push(`credential: ${base.credentialSource} — ${base.credentialDetail}`);
   }
   if (proc.alive !== true) reasons.push(`process: ${proc.detail || 'not running'}`);
   if (auth.state !== 'authenticated') reasons.push(`authentication: ${auth.state}`);
@@ -220,24 +244,31 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   // it is. It used to say `no_credential` for every case — including the macOS 26.4+ state where the
   // credential is present and macOS refuses to release it, where "no credential" is simply false and
   // points at re-enrolment, which spends a token and changes nothing.
+  // ── THE CREDENTIAL SOURCE IS PLATFORM-DEPENDENT (B4.2) ──────────────────
+  //
+  // On macOS this is the Keychain, exactly as before, including the 26.4+ "present but refused"
+  // state that must not read as absent. In a Linux container there is no Keychain, so B4.2's cloud
+  // worker reads a development-only environment variable under four conditions that
+  // secret-source.js states and secret-source.test.js asserts — chiefly that a production
+  // environment is REFUSED and that macOS can never fall back to it.
   let secret;
-  const probe = KEYCHAIN.probeSecret({ workerId: cfg.workerId });
-  if (probe.state !== KEYCHAIN.STATE.READABLE) {
-    logLine({
-      at: 'credential_unavailable',
-      keychainState: probe.state,
-      keychainStatus: probe.status,
-      detail: probe.detail,
-      recovery: probe.short,
-    });
+  const source = SECRET_SOURCE.resolveSecretSource({ workerId: cfg.workerId });
+  if (!source.usable) {
+    // launchd restarts this process on a non-zero exit, throttled to 60s, and Railway restarts a
+    // crashed container too — so this is the line an operator sees sixty times an hour and it has
+    // to say WHICH failure it is. It used to say `no_credential` for every case, including the
+    // macOS state where the credential IS present and macOS refuses to release it, where "no
+    // credential" is false and points at re-enrolment, which spends a token and changes nothing.
+    logLine({ at: 'credential_unavailable', source: source.source, detail: source.reason });
     return 2;
   }
   try {
-    secret = KEYCHAIN.readSecret({ workerId: cfg.workerId });
+    secret = source.read();
   } catch (e) {
-    // The probe said readable and the read then failed: a race, or the state changed between them.
-    // Reported as its own case rather than folded into either of the two above.
-    logLine({ at: 'credential_read_failed_after_probe', detail: String(e.message).slice(0, 200) });
+    // The source said usable and the read then failed: a race, or the state changed between them.
+    // Reported as its own case rather than folded into the one above.
+    logLine({ at: 'credential_read_failed_after_probe',
+      source: source.source, detail: String(e.message).slice(0, 200) });
     return 2;
   }
 

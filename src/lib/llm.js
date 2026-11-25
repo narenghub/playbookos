@@ -57,31 +57,58 @@ function buildRequestBody({ model, system, prompt, maxTokens }) {
 }
 
 /**
- * A PROVEN upper bound on the input tokens a request can consume.
+ * A CONSERVATIVE bound on the text input tokens a request can consume — and the limits of that
+ * claim are stated below, because the previous version of this comment overclaimed.
  *
- * ── WHY BYTES, AND WHY THIS IS A BOUND RATHER THAN AN ESTIMATE ─────────────
+ * ── WHAT THIS REPLACED, AND WHY IT HAD TO GO ───────────────────────────────
  *
- * The previous ceiling divided character length by three. The owner's correction of 2026-11-25 is
- * right that this is not a guaranteed maximum, and the counter-examples are ordinary rather than
- * exotic:
+ * The ceiling divided character length by three. That is not a maximum for anything:
  *
  *   • `薬` is ONE character, three UTF-8 bytes, and at least one token — so chars/3 scores it as
- *     0.33 tokens. A page of Japanese or Chinese supplier correspondence underestimates by ~3x,
+ *     0.33 tokens. A page of Japanese or Chinese supplier correspondence underestimated by ~3x,
  *     and this platform's procurement mail is full of it.
- *   • base64, hashes and identifiers tokenize at roughly one token per two or three characters,
- *     not three.
+ *   • base64, hashes and identifiers tokenize at roughly one token per two or three characters.
  *   • an emoji is one or two characters, four or more bytes, and several tokens.
  *
- * Anthropic's tokenizer is a byte-level BPE: every one of the 256 byte values is in the base
- * vocabulary, so a token is never fewer than one byte of input. Therefore the UTF-8 byte length of
- * the serialized request is an upper bound on its input token count — not an estimate of it, a
- * bound, and one that holds for any text in any script.
+ * Byte length is strictly better than that in every one of those cases, which is why it is used.
  *
- * It is measured over `JSON.stringify(body)`, which means the envelope is MEASURED rather than
- * guessed: the field names, the model id, the JSON punctuation and anything later added to the body
- * are all inside the count. That replaces the previous 512-token envelope constant, which was a
- * guess that happened to be generous and would not have stayed generous once tool definitions were
- * added.
+ * ── WHAT IT IS NOT: A UNIVERSALLY PROVEN BILLING BOUND ─────────────────────
+ *
+ * I previously wrote that this is a proven bound because Anthropic's tokenizer is a byte-level BPE
+ * whose base vocabulary holds all 256 byte values. The owner's §3 of 2026-11-25 rejects that
+ * claim and is right to. Two separate problems with it:
+ *
+ *   1. The tokenizer's internals are an INFERENCE, not something this codebase can verify. If the
+ *      vocabulary does not in fact contain every byte, a multi-byte character could in principle
+ *      cost more tokens than it has bytes.
+ *   2. More importantly, BILLING IS NOT ONLY TEXT INPUT TOKENS. A request may be billed for
+ *      prompt-cache writes and reads, extended thinking, server-side tool use, and images — none
+ *      of which are a function of the serialized text's length. A bound on text input tokens
+ *      bounds exactly that and says nothing about the rest.
+ *
+ * So the honest statement is: **a conservative estimate of text input tokens, under the stated
+ * assumption, and not a guarantee about the invoice.** This function is named for what it computes.
+ *
+ * ── WHY THE CEILING IS STILL SAFE WITHOUT THAT GUARANTEE ───────────────────
+ *
+ * Because the per-call figure is not the control. Three things are, and they do not depend on this
+ * estimate being right:
+ *
+ *   • the OBJECTIVE ceiling is enforced on MEASURED costs from the provider's own usage block, so
+ *     an under-estimated call still consumes its real cost against the budget once settled;
+ *   • settlement corrects the hold downward to that measured cost, and `cost_known: false` settles
+ *     with no figure rather than zero;
+ *   • an unresolved charge keeps counting with no window (§4b), so the failure mode of a wrong
+ *     estimate is a budget that refuses EARLIER than necessary, not one that over-spends.
+ *
+ * The one thing this estimate must not do is be systematically too low, because the hold is taken
+ * before the call. That is why every term rounds against us, and why a request growing a field it
+ * does not serialize here would be a real defect — which is what `buildRequestBody` prevents by
+ * being the same function that builds what is sent.
+ *
+ * The live-model procedure (docs/office/live-model-verification-procedure.md) reconciles held
+ * against measured per call, with the inequality as an abort condition. Until that has run, this
+ * is an argued estimate and not a measured one.
  */
 function maxInputTokens(body) {
   return Buffer.byteLength(JSON.stringify(body), 'utf8');

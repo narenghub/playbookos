@@ -137,6 +137,48 @@
           "checker": "scripts/check-company-membership-db.js",
           "partial": "the foundation is verified; end-to-end isolation depends on B7.21 and B7.18"
         }
+      },
+      {
+        "id": "B7.11a",
+        "title": "migration OFF the unrestricted INTERNAL_MAILBOXES env var",
+        "why": "B7.11 scoped shared mailboxes; the env var still functions as a platform-scope, any-purpose source and no shared mailbox has been declared. The owner forbids it authorizing internal production mail after restoration.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.9a",
+        "title": "sender authorization for mailer.js's internal callers",
+        "why": "B7.9 covers the governed external road. The 55 internal callers pass no `from` and rely on the platform default, and no sender identity has been declared.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.18a",
+        "title": "the membership backfill APPLIED, transactionally and reversibly",
+        "why": "B7.18 is a dry run that writes nothing. Reviewable role assignments, existing-database upgrade verification, a transactional procedure, idempotency, before-and-after access verification and a rollback are all outstanding.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.14",
+        "title": "task-level investigation of the Nov 3-23 window",
+        "why": "Investigate, do not confirm: at least two independent candidate causes are measured. The owner forbids assuming notification failure caused every zero KPI.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.15",
+        "title": "delivery-aware performance evaluation",
+        "why": "Scoring must distinguish missing communication, premature evaluation, missing evidence and genuine underperformance.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.16",
+        "title": "operational failure monitoring that is visible without reading logs",
+        "why": "Repeated critical refusals must surface. A monitor that mails needs its own authorization and must not repurpose the email.alert exemption.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.19",
+        "title": "WhatsApp containment decision, with a reversing STOP",
+        "why": "A recorded decision for capability/whatsapp.send. Restoration must not open a second unattended outbound channel.",
+        "verified_by": null
       }
     ]
   },
@@ -217,6 +259,48 @@
       {
         "id": "B1.16",
         "title": "the four carried-forward M6 prerequisites verified",
+        "verified_by": null
+      },
+      {
+        "id": "B7.11a",
+        "title": "migration OFF the unrestricted INTERNAL_MAILBOXES env var",
+        "why": "B7.11 scoped shared mailboxes; the env var still functions as a platform-scope, any-purpose source and no shared mailbox has been declared. The owner forbids it authorizing internal production mail after restoration.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.9a",
+        "title": "sender authorization for mailer.js's internal callers",
+        "why": "B7.9 covers the governed external road. The 55 internal callers pass no `from` and rely on the platform default, and no sender identity has been declared.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.18a",
+        "title": "the membership backfill APPLIED, transactionally and reversibly",
+        "why": "B7.18 is a dry run that writes nothing. Reviewable role assignments, existing-database upgrade verification, a transactional procedure, idempotency, before-and-after access verification and a rollback are all outstanding.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.14",
+        "title": "task-level investigation of the Nov 3-23 window",
+        "why": "Investigate, do not confirm: at least two independent candidate causes are measured. The owner forbids assuming notification failure caused every zero KPI.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.15",
+        "title": "delivery-aware performance evaluation",
+        "why": "Scoring must distinguish missing communication, premature evaluation, missing evidence and genuine underperformance.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.16",
+        "title": "operational failure monitoring that is visible without reading logs",
+        "why": "Repeated critical refusals must surface. A monitor that mails needs its own authorization and must not repurpose the email.alert exemption.",
+        "verified_by": null
+      },
+      {
+        "id": "B7.19",
+        "title": "WhatsApp containment decision, with a reversing STOP",
+        "why": "A recorded decision for capability/whatsapp.send. Restoration must not open a second unattended outbound channel.",
         "verified_by": null
       }
     ]

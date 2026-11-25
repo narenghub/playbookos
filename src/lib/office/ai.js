@@ -105,9 +105,12 @@ function normalizeUsage(usage) {
 //   • OUTPUT is the expensive side and its ceiling is exact: the request sends `max_tokens`, so
 //     the provider cannot bill more output than that. llm.js defaults it to 1024 when unset, and
 //     the builder below mirrors that default rather than this file assuming one.
-//   • INPUT is bounded by the UTF-8 BYTE LENGTH of the serialized request. Anthropic's tokenizer
-//     is a byte-level BPE whose base vocabulary contains all 256 byte values, so a token is never
-//     fewer than one byte of input: the byte count is a BOUND, not an estimate.
+//   • INPUT is estimated from the UTF-8 BYTE LENGTH of the serialized request. See
+//     llm.maxInputTokens for what that does and does not establish: it is strictly better than
+//     the character heuristic it replaced, and it is NOT a proven bound on the invoice, because
+//     billing can include cache writes, thinking tokens, server-side tool use and images that no
+//     function of the text's length can see. The owner's §3 of 2026-11-25 rejected the stronger
+//     claim I had written, correctly.
 //   • The RATE comes from llm.ratesFor, the conservative list price with intro discounts ignored on
 //     purpose, falling back to the most expensive tier for an unrecognised model.
 //
