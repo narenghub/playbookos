@@ -109,7 +109,10 @@
       {
         "id": "B7.18",
         "title": "membership migration and backfill, applied by review",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-membership-proposal-db.js",
+          "partial": "the DRY RUN is verified and writes nothing; the backfill itself is not applied, and applying it is a reviewed owner act"
+        }
       },
       {
         "id": "B7.22",
@@ -168,7 +171,10 @@
       {
         "id": "B7.18",
         "title": "membership migration and backfill",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-membership-proposal-db.js",
+          "partial": "the DRY RUN is verified and writes nothing; the backfill itself is not applied, and applying it is a reviewed owner act"
+        }
       },
       {
         "id": "B7.21",

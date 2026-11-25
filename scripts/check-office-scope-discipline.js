@@ -123,6 +123,16 @@ const EXEMPT = new Set([
   // make the briefing agree with itself), and the fixture that plants an exhausted budget. Its own
   // disposable cluster; the runs it creates are undeletable by design and it says so.
   path.join('scripts', 'check-autonomous-office-cycle-db.js'),
+  // B7.18 dry run. Plants `objectives` rows as the assignment records the proposal reads, and
+  // counts them back afterwards. createObjective IS the accessor and is used for the writes; the
+  // direct reads are the independent recount — going through the accessor would make the check
+  // agree with the tool. Disposable cluster, destroyed.
+  path.join('scripts', 'check-membership-proposal-db.js'),
+  // B7.18 proposal. Its `objectives` read is DELIBERATELY unscoped, and must be: the question it
+  // answers is "which companies has this person created objectives for", which a company-scoped
+  // accessor cannot answer without already being told the company — the thing being asked. It is
+  // read-only, and its own test forbids every write.
+  path.join('scripts', 'propose-company-memberships.js'),
   path.join('scripts', 'check-office-recovery-db.js'),
   path.join('scripts', 'validate-k4-activation-deployed.js'),
   path.join('scripts', 'check-office-governed-ai-db.js'),

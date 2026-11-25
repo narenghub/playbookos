@@ -53,6 +53,18 @@ const TABLES = Object.freeze({
 // Each exemption carries the reason it is one. A list of bare paths becomes a place to add a file
 // rather than a decision somebody made.
 const EXEMPT = new Map([
+  ['scripts/membership-proposal-is-readonly.test.js',
+    'it names user_companies inside ASSERTIONS that the proposal must not write to it. Prose about '
+    + 'SQL, not SQL — the scanner cannot tell them apart, and the alternative is a test that '
+    + 'cannot say which table it is protecting.'],
+  ['scripts/check-membership-proposal-db.js',
+    'the B7.18 dry-run check. It uses grantMembership for the one membership it creates, and reads '
+    + 'user_companies directly ONLY to count rows before and after — the assertion that the '
+    + 'proposal wrote nothing. Counting through the accessor would ask the tool to confirm itself.'],
+  ['scripts/propose-company-memberships.js',
+    'the B7.18 proposal. It reads memberships through membersOfCompany and never writes; its own '
+    + 'read-only test forbids every INSERT, UPDATE and DELETE, and forbids deriving a membership '
+    + 'from a domain, a title or a workflow mapping.'],
   ['scripts/check-autonomous-office-cycle-db.js',
     'the B3.10 cycle driver. It uses the real accessors everywhere it acts — grantMembership for '
     + 'the membership, office/memory for recall, scoped-operations for the task — and reaches the '

@@ -367,6 +367,13 @@ pf_step "delegation is governed, and the child gets a context" node scripts/chec
 # and all nine negative cases. No provider call: actual governed model execution is not claimed.
 pf_step "the autonomous-office cycle executes end to end" node scripts/check-autonomous-office-cycle-db.js
 pf_step "the workflow-company proposal cannot assign anything" node --test scripts/proposal-is-readonly.test.js
+# B7.18 dry run (Decision 5). The membership backfill PROPOSAL, which grants nothing. It derives a
+# membership only from a reviewed assignment record naming both a user and a company — never from a
+# domain, a title or a workflow mapping. The owner's measured example is the decisive fixture:
+# prasanthi@adificetechnologies.* administers ABIOZEN, and a domain-derived backfill would have
+# said Adifice.
+pf_step "the membership proposal cannot grant anything" node --test scripts/membership-proposal-is-readonly.test.js
+pf_step "the membership proposal is right, and writes nothing" node scripts/check-membership-proposal-db.js
 # B7.6. Six producers in four modules and two processes bind approvals. They agree or every
 # approved external send refuses, and each local expression of "the message" is locally correct —
 # which is why a reviewer cannot catch a second one and a scanner can.
