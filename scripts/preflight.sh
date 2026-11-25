@@ -393,6 +393,13 @@ pf_step "one definition of the message a human approved" node scripts/check-appr
 # departed director.
 pf_step "a sender is an authorized identity, not a familiar domain" \
   node scripts/check-sender-identity-db.js
+# Owner's §4 of 2026-11-25: the spend ceiling must be a proven bound, not a character heuristic.
+pf_step "the spend ceiling is a proven bound over the real request" \
+  env JWT_SECRET=preflight node --test src/lib/office/spend-ceiling.test.js
+# Owner's §5: what actually traverses the unified boundary, measured rather than claimed. It also
+# guards the finding itself — a new gate.js caller turns this red.
+pf_step "the authorization adoption inventory holds" \
+  node scripts/check-authz-adoption-inventory.js
 # Is the K1 PRODUCTION validator trustworthy? It runs once against production and its verdict is
 # what decides PRODUCTION VALIDATED, so three things need proving first: it writes nothing durable
 # (a fixture left on production could not be removed — agent_run_events is append-only); it goes red

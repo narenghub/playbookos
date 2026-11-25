@@ -427,8 +427,44 @@ const DDL = [
      settled_cost_usd   NUMERIC(14,8),
      settled_cost_known BOOLEAN,
      cost_ledger_id     BIGINT,
+     -- ── THE FINANCIAL LIFECYCLE (owner's §4, 2026-11-25) ──────────────────
+     --
+     -- SEPARATE from "state", which tracks the BOOKKEEPING, because the two answer different
+     -- questions. "state" says whether this row still holds headroom; "financial_state" says what
+     -- we know about whether the provider charged us. Collapsing them is what produced the defect
+     -- this column fixes: a hold whose process died stopped counting against the budget after its
+     -- window, and the charge was real.
+     --
+     -- The six distinctions the owner required, in the order a call passes through them:
+     --   reserved             nothing has been dispatched. The only state that may expire freely.
+     --   dispatch_attempted   a request was begun. The provider may have received it.
+     --   provider_accepted    the provider acknowledged. It is billing us, or about to.
+     --   reconciled           the cost is known and in the ledger.
+     --   zero_charge_verified proven not to have been charged, with the evidence recorded.
+     --   unknown              the financial outcome cannot be established. Counts for ever.
+     financial_state    TEXT NOT NULL DEFAULT 'reserved',
+     dispatched_at      TIMESTAMPTZ,
+     financial_note     TEXT,
      CONSTRAINT office_budget_reservations_state
        CHECK (state IN ('held','settled','released','expired')),
+     CONSTRAINT office_budget_reservations_financial_state CHECK (
+       financial_state IN ('reserved','dispatch_attempted','provider_accepted',
+                           'reconciled','zero_charge_verified','unknown')
+     ),
+     -- A row that claims the provider was reached must say WHEN. Without this, "dispatched" is an
+     -- assertion with no evidence behind it, and the whole point of the column is that a dispatched
+     -- hold is treated differently from a reserved one.
+     CONSTRAINT office_budget_reservations_dispatch_timed CHECK (
+       (financial_state = 'reserved' AND dispatched_at IS NULL)
+       OR (financial_state <> 'reserved' AND dispatched_at IS NOT NULL)
+     ),
+     -- Claiming a verified zero charge, or an unknown outcome, requires a written reason. "Failed,
+     -- therefore free" is the assumption the owner forbade — *"do not describe a failed request as
+     -- zero-cost without evidence"* — so the evidence is a NOT NULL column, not a convention.
+     CONSTRAINT office_budget_reservations_zero_charge_needs_evidence CHECK (
+       financial_state NOT IN ('zero_charge_verified','unknown')
+       OR length(btrim(COALESCE(financial_note,''))) > 0
+     ),
      -- A hold must be for a positive amount. A $0 hold would reserve nothing while looking like a
      -- reservation, which is the shape this table exists to prevent.
      CONSTRAINT office_budget_reservations_positive CHECK (max_usd > 0),
@@ -440,6 +476,18 @@ const DDL = [
      CONSTRAINT office_budget_reservations_held_is_open CHECK (
        state <> 'held' OR (settled_at IS NULL AND settled_cost_usd IS NULL
                            AND settled_cost_known IS NULL AND cost_ledger_id IS NULL)
+     ),
+     -- A row may only be EXPIRED if nothing was ever dispatched on it. This is the constraint that
+     -- makes the fix structural rather than a rule in JavaScript: once a request has gone out, the
+     -- database itself refuses to let the hold lapse into free headroom, whatever the reaper or any
+     -- future caller tries to do.
+     CONSTRAINT office_budget_reservations_only_undispatched_expires CHECK (
+       state <> 'expired' OR financial_state = 'reserved'
+     ),
+     -- Likewise a RELEASE — giving the headroom straight back — is only honest for a request that
+     -- never went, or one proven not to have been charged.
+     CONSTRAINT office_budget_reservations_release_needs_no_charge CHECK (
+       state <> 'released' OR financial_state IN ('reserved','zero_charge_verified')
      ),
      CONSTRAINT office_budget_reservations_settled_is_closed CHECK (
        state <> 'settled' OR (settled_at IS NOT NULL AND settled_cost_known IS NOT NULL
@@ -458,9 +506,66 @@ const DDL = [
        FOREIGN KEY (run_id, company_id) REFERENCES agent_runs (run_id, company_id) MATCH FULL
        ON DELETE RESTRICT
    )`,
-  // The exposure query's index: live holds for one objective.
+  // ── THE UPGRADE PATH FOR AN EXISTING DATABASE ──────────────────────────
+  //
+  // CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so a database that
+  // took the reservations table at migrator step 59 would never gain these columns and every
+  // query naming financial_state would fail at runtime. The DDL above is for a fresh database;
+  // these are for every database that already has one, and both paths have to exist or the
+  // migration is only correct on an empty cluster.
+  //
+  // DEFAULT 'reserved' is the safe backfill: an existing row predates dispatch tracking, so the
+  // most we can honestly say about it is that we have no record of a request going out. Those
+  // rows keep the old expiry behaviour, which is the behaviour they were written under.
+  `ALTER TABLE office_budget_reservations
+     ADD COLUMN IF NOT EXISTS financial_state TEXT NOT NULL DEFAULT 'reserved'`,
+  `ALTER TABLE office_budget_reservations
+     ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMPTZ`,
+  `ALTER TABLE office_budget_reservations
+     ADD COLUMN IF NOT EXISTS financial_note TEXT`,
+  // The constraints, added separately so an existing table gains them too. NOT VALID is
+  // deliberately NOT used: these must hold for the rows already there, and if one does not, the
+  // migration should fail loudly rather than leave an unenforced constraint behind.
+  `DO $$ BEGIN
+     IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conname = 'office_budget_reservations_financial_state') THEN
+       ALTER TABLE office_budget_reservations
+         ADD CONSTRAINT office_budget_reservations_financial_state
+         CHECK (financial_state IN ('reserved','dispatch_attempted','provider_accepted',
+                                    'reconciled','zero_charge_verified','unknown'));
+     END IF;
+     IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conname = 'office_budget_reservations_only_undispatched_expires') THEN
+       ALTER TABLE office_budget_reservations
+         ADD CONSTRAINT office_budget_reservations_only_undispatched_expires
+         CHECK (state <> 'expired' OR financial_state = 'reserved');
+     END IF;
+     IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conname = 'office_budget_reservations_dispatch_timed') THEN
+       ALTER TABLE office_budget_reservations
+         ADD CONSTRAINT office_budget_reservations_dispatch_timed
+         CHECK ((financial_state = 'reserved' AND dispatched_at IS NULL)
+                OR (financial_state <> 'reserved' AND dispatched_at IS NOT NULL));
+     END IF;
+     IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conname = 'office_budget_reservations_zero_charge_needs_evidence') THEN
+       ALTER TABLE office_budget_reservations
+         ADD CONSTRAINT office_budget_reservations_zero_charge_needs_evidence
+         CHECK (financial_state NOT IN ('zero_charge_verified','unknown')
+                OR length(btrim(COALESCE(financial_note,''))) > 0);
+     END IF;
+     IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conname = 'office_budget_reservations_release_needs_no_charge') THEN
+       ALTER TABLE office_budget_reservations
+         ADD CONSTRAINT office_budget_reservations_release_needs_no_charge
+         CHECK (state <> 'released' OR financial_state IN ('reserved','zero_charge_verified'));
+     END IF;
+   END $$;`,
+  // The exposure query's index: live holds for one objective. It carries financial_state because
+  // the live-exposure predicate now reads it, and an index that does not cover the predicate turns
+  // every budget decision into a sequential scan of the reservations table.
   `CREATE INDEX IF NOT EXISTS idx_office_reservations_live
-     ON office_budget_reservations (company_id, objective_id, expires_at)
+     ON office_budget_reservations (company_id, objective_id, expires_at, financial_state)
      WHERE state = 'held'`,
 
   // ── B3.2: A PLAN IS A PROPOSAL, AND THE RECORD SAYS SO ───────────────────

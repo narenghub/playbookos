@@ -826,9 +826,26 @@ async function reserveSpend(ctx, { id, objectiveId, runId, maxUsd, reason,
 
     // ── 3. SPENT + LIVE HOLDS + THIS CALL vs THE CEILING ──────────────────
     //
-    // `expires_at > NOW()` is the crash answer: a hold whose process died stops counting against
-    // the budget by itself, so a dead worker cannot consume an objective's ceiling for ever. The
-    // reaper then corrects the record; it is bookkeeping, not the mechanism.
+    // ── THE EXPIRY RULE, CORRECTED (owner's §4, 2026-11-25) ──────────────
+    //
+    // This read `state = 'held' AND expires_at > NOW()`, justified in my own comment as "the crash
+    // answer": a hold whose process died stopped counting, so a dead worker could not consume an
+    // objective's ceiling for ever. The owner's correction is that crash-safe and FINANCIALLY safe
+    // are different properties, and I had only the first:
+    //
+    //   a process reserves $0.40, dispatches the request, the provider accepts and begins
+    //   billing, the process is then killed. Ten minutes later the hold stops counting. The
+    //   budget now believes it has $0.40 of headroom that has already been spent, and the next
+    //   call is authorized against money that is gone.
+    //
+    // So expiry is no longer about time alone. A hold expires into free headroom ONLY if nothing
+    // was ever dispatched on it. Once a request has gone out, the hold keeps counting until the
+    // charge is reconciled or proven not to have happened — for ever, if need be, because an
+    // unresolved charge that stops counting is an unresolved charge that gets spent twice.
+    //
+    // The database enforces the same rule independently
+    // (office_budget_reservations_only_undispatched_expires), so neither the reaper nor a future
+    // caller can lapse a dispatched hold.
     //
     // Unmeasured calls are COUNTED and reported, never converted into dollars — "no estimated
     // spend derived from invocation counts". A ceiling that cannot be proven says so.
@@ -839,12 +856,19 @@ async function reserveSpend(ctx, { id, objectiveId, runId, maxUsd, reason,
          (SELECT COUNT(*)::int FROM office_cost_ledger
            WHERE company_id = $1 AND objective_id = $2 AND NOT cost_known) AS unknown_calls,
          (SELECT COALESCE(SUM(max_usd),0)::numeric FROM office_budget_reservations
-           WHERE company_id = $1 AND objective_id = $2
-             AND state = 'held' AND expires_at > NOW()) AS held`,
+           WHERE company_id = $1 AND objective_id = $2 AND state = 'held'
+             AND (expires_at > NOW() OR financial_state <> 'reserved')) AS held,
+         (SELECT COUNT(*)::int FROM office_budget_reservations
+           WHERE company_id = $1 AND objective_id = $2 AND state = 'held'
+             AND expires_at <= NOW() AND financial_state <> 'reserved') AS unresolved_charges`,
       [ctx.companyId, objectiveId]);
     const spent = Number(sums.rows[0].spent);
     const held = Number(sums.rows[0].held);
     const unknownCalls = Number(sums.rows[0].unknown_calls);
+    // Holds past their window that were DISPATCHED. They still count, and they are reported so an
+    // operator can see that headroom is being consumed by requests whose outcome is unresolved
+    // rather than by live work.
+    const unresolvedCharges = Number(sums.rows[0].unresolved_charges);
 
     if (row.budget_usd !== null) {
       const cap = Number(row.budget_usd);
@@ -857,7 +881,7 @@ async function reserveSpend(ctx, { id, objectiveId, runId, maxUsd, reason,
             + `$${cap} with $${spent.toFixed(6)} spent and $${held.toFixed(6)} already held, so the `
             + `worst case is $${after.toFixed(6)} — refused BEFORE the provider is reached`,
           budgetUsd: cap, spentUsd: spent, heldUsd: held, maxUsd: Number(maxUsd),
-          worstCaseUsd: after, unknownCalls };
+          worstCaseUsd: after, unknownCalls, unresolvedCharges };
       }
     }
 
@@ -871,9 +895,10 @@ async function reserveSpend(ctx, { id, objectiveId, runId, maxUsd, reason,
     return { ok: true,
       reservation: ins.rows[0],
       budgetUsd: row.budget_usd === null ? null : Number(row.budget_usd),
-      spentUsd: spent, heldUsd: held, unknownCalls,
-      // A ceiling that cannot be proven is reported as such rather than asserted.
-      confident: unknownCalls === 0 };
+      spentUsd: spent, heldUsd: held, unknownCalls, unresolvedCharges,
+      // A ceiling that cannot be proven is reported as such rather than asserted. An unresolved
+      // provider charge makes it unproven too: the figure is conservative, not accurate.
+      confident: unknownCalls === 0 && unresolvedCharges === 0 };
   });
 }
 
@@ -894,23 +919,57 @@ async function settleSpend(ctx, { reservationId, costUsd = null, costKnown,
         SET state = 'settled', settled_at = NOW(),
             settled_cost_known = $3,
             settled_cost_usd = CASE WHEN $3 THEN $4::numeric ELSE NULL END,
-            cost_ledger_id = $5
+            cost_ledger_id = $5,
+            -- RECONCILED only when the cost is actually known. A settlement with no figure is a
+            -- dispatched request whose charge nobody established, which is the UNKNOWN state, and
+            -- calling it reconciled would be the "failed therefore free" assumption wearing a
+            -- different label. The hold's headroom is returned either way — the ledger carries the
+            -- real cost — but what we claim to know about the charge stays accurate.
+            financial_state = CASE WHEN $3 THEN 'reconciled' ELSE 'unknown' END,
+            dispatched_at = COALESCE(dispatched_at, NOW()),
+            financial_note = CASE WHEN $3 THEN financial_note
+              ELSE COALESCE(financial_note,
+                'settled with no cost figure: the request was dispatched and its charge could not '
+                || 'be measured, so the financial outcome is unknown rather than zero') END
       WHERE company_id = $1 AND id = $2 AND state = 'held'
-      RETURNING id, state, settled_cost_usd, settled_cost_known`,
+      RETURNING id, state, settled_cost_usd, settled_cost_known, financial_state`,
     [ctx.companyId, reservationId, costKnown, costUsd, costLedgerId]
   );
   return res.rows[0] || null;
 }
 
-/** The call never reached the provider: give the headroom straight back. */
-async function releaseSpend(ctx, { reservationId }, deps = {}) {
+/**
+ * Give the headroom straight back.
+ *
+ * Honest in exactly two situations: the request never went, or it went and is PROVEN not to have
+ * been charged. The second needs evidence — the owner's instruction is explicit that *"a failed
+ * request must not be described as zero-cost without evidence"* — so releasing a dispatched hold
+ * requires `zeroChargeEvidence`, and without it the release is refused rather than quietly
+ * granted. A caller that cannot supply evidence wants markFinancialOutcomeUnknown instead.
+ */
+async function releaseSpend(ctx, { reservationId, zeroChargeEvidence = null }, deps = {}) {
   assertContext(ctx);
   const res = await q(deps)(
     `UPDATE office_budget_reservations
-        SET state = 'released', settled_at = NOW()
+        SET state = 'released', settled_at = NOW(),
+            financial_state = CASE
+              WHEN financial_state = 'reserved' THEN 'reserved'
+              ELSE 'zero_charge_verified' END,
+            financial_note = CASE
+              WHEN financial_state = 'reserved' THEN financial_note
+              ELSE $3::text END
       WHERE company_id = $1 AND id = $2 AND state = 'held'
-      RETURNING id, state`,
-    [ctx.companyId, reservationId]
+        -- An undispatched hold releases freely. A dispatched one releases only with evidence, and
+        -- this clause is what makes the absence of evidence a REFUSAL rather than a release.
+        --
+        -- $3::text explicitly: with a null evidence argument and no cast, Postgres cannot infer
+        -- the parameter's type inside length(btrim(...)) and the statement fails outright — which
+        -- would have turned "release refused for want of evidence" into "release crashed", two
+        -- very different things for a caller to handle.
+        AND (financial_state = 'reserved'
+             OR ($3::text IS NOT NULL AND length(btrim($3::text)) > 0))
+      RETURNING id, state, financial_state`,
+    [ctx.companyId, reservationId, zeroChargeEvidence]
   );
   return res.rows[0] || null;
 }
@@ -928,10 +987,69 @@ async function expireStaleReservations(ctx, deps = {}) {
     `UPDATE office_budget_reservations
         SET state = 'expired', settled_at = NOW()
       WHERE company_id = $1 AND state = 'held' AND expires_at <= NOW()
+        -- ONLY an undispatched hold. A hold with a request behind it may not lapse into free
+        -- headroom however old it is, because the charge does not expire with the window. The
+        -- table enforces this too; the clause is here so the reaper does not try and fail.
+        AND financial_state = 'reserved'
       RETURNING id`,
     [ctx.companyId]
   );
   return res.rows.map((r) => r.id);
+}
+
+/**
+ * Record that a request has been, or is about to be, sent to the provider.
+ *
+ * Called BEFORE the provider call, which is the only useful ordering: called after, a process that
+ * dies mid-request leaves a hold marked `reserved`, and that hold expires into headroom the
+ * provider has already billed. The window between this write and the request is the one place a
+ * crash can still lose money, and it is one statement wide.
+ */
+async function markDispatched(ctx, { reservationId, state = 'dispatch_attempted',
+  note = null }, deps = {}) {
+  assertContext(ctx);
+  if (!['dispatch_attempted', 'provider_accepted'].includes(state)) {
+    throw new Error(`markDispatched takes dispatch_attempted or provider_accepted, not ${state}`);
+  }
+  const res = await q(deps)(
+    `UPDATE office_budget_reservations
+        SET financial_state = $3,
+            dispatched_at = COALESCE(dispatched_at, NOW()),
+            financial_note = COALESCE($4, financial_note)
+      WHERE company_id = $1 AND id = $2 AND state = 'held'
+      RETURNING id, financial_state, dispatched_at`,
+    [ctx.companyId, reservationId, state, note]
+  );
+  return res.rows[0] || null;
+}
+
+/**
+ * The financial outcome cannot be established.
+ *
+ * This is the honest terminal state for a request that was dispatched and whose cost nobody can
+ * determine — a timeout after acceptance, a killed process, a provider response that never
+ * arrived. The hold STAYS live and keeps consuming the objective's ceiling, with no window, until
+ * a human reconciles it. That is deliberately the most conservative outcome available: the
+ * alternative is authorizing a second call against money that may already be gone.
+ *
+ * `note` is required by the table, not just by this function.
+ */
+async function markFinancialOutcomeUnknown(ctx, { reservationId, note }, deps = {}) {
+  assertContext(ctx);
+  if (!note || !String(note).trim()) {
+    throw new Error('markFinancialOutcomeUnknown requires a note: an unresolved charge needs a '
+      + 'written reason, because somebody has to reconcile it by hand');
+  }
+  const res = await q(deps)(
+    `UPDATE office_budget_reservations
+        SET financial_state = 'unknown',
+            dispatched_at = COALESCE(dispatched_at, NOW()),
+            financial_note = $3
+      WHERE company_id = $1 AND id = $2 AND state = 'held'
+      RETURNING id, financial_state`,
+    [ctx.companyId, reservationId, String(note).trim()]
+  );
+  return res.rows[0] || null;
 }
 
 /** Live exposure and settled spend for one objective — for reporting, not for the decision. */
@@ -939,9 +1057,21 @@ async function reservationState(ctx, objectiveId, deps = {}) {
   assertContext(ctx);
   const res = await q(deps)(
     `SELECT
-       COALESCE(SUM(max_usd) FILTER (WHERE state = 'held' AND expires_at > NOW()),0)::numeric AS live_held,
-       COUNT(*) FILTER (WHERE state = 'held' AND expires_at > NOW())::int AS live_count,
-       COUNT(*) FILTER (WHERE state = 'held' AND expires_at <= NOW())::int AS stale_count,
+       COALESCE(SUM(max_usd) FILTER (WHERE state = 'held'
+         AND (expires_at > NOW() OR financial_state <> 'reserved')),0)::numeric AS live_held,
+       COUNT(*) FILTER (WHERE state = 'held'
+         AND (expires_at > NOW() OR financial_state <> 'reserved'))::int AS live_count,
+       -- STALE now means: past its window AND never dispatched. A dispatched hold past its window
+       -- is not stale, it is an unresolved charge, and the two must not be summed together under a
+       -- name that suggests the reaper can clear them.
+       COUNT(*) FILTER (WHERE state = 'held' AND expires_at <= NOW()
+         AND financial_state = 'reserved')::int AS stale_count,
+       COUNT(*) FILTER (WHERE state = 'held'
+         AND financial_state IN ('dispatch_attempted','provider_accepted','unknown'))::int
+         AS unresolved_count,
+       COALESCE(SUM(max_usd) FILTER (WHERE state = 'held'
+         AND financial_state IN ('dispatch_attempted','provider_accepted','unknown')),0)::numeric
+         AS unresolved_usd,
        COUNT(*) FILTER (WHERE state = 'settled')::int AS settled_count,
        COUNT(*) FILTER (WHERE state = 'released')::int AS released_count,
        COUNT(*) FILTER (WHERE state = 'expired')::int AS expired_count
@@ -1204,5 +1334,6 @@ module.exports = {
   createPlan, recordPlanStep, setStepVerdict, setPlanVerdict, getPlan, listPlanSteps,
   recordDelegation, delegationDepth, delegationsFrom, runState,
   reserveSpend, settleSpend, releaseSpend, expireStaleReservations, reservationState,
+  markDispatched, markFinancialOutcomeUnknown,
   RESERVATION_TTL_MS,
 };

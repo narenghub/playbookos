@@ -38,6 +38,55 @@ function ratesFor(model) {
   for (const [prefix, inR, outR] of RATES) if (m.startsWith(prefix)) return [inR, outR];
   return [5.00 / 1e6, 25.00 / 1e6]; // unknown model → opus-tier (conservative over-estimate)
 }
+/**
+ * The exact request body sent to the provider.
+ *
+ * Exported so the spend ceiling can be computed from the REQUEST rather than from an estimate of
+ * it. Anything added here — tool definitions, attachments, extra messages — is covered by
+ * `maxInputTokens` below automatically, which is the property that matters: a new field must not
+ * silently fall outside the bound that authorizes the spend.
+ */
+function buildRequestBody({ model, system, prompt, maxTokens }) {
+  const body = {
+    model,
+    max_tokens: maxTokens || 1024,
+    messages: [{ role: 'user', content: String(prompt == null ? '' : prompt) }],
+  };
+  if (system) body.system = system; // omitted when absent → identical to a no-system call
+  return body;
+}
+
+/**
+ * A PROVEN upper bound on the input tokens a request can consume.
+ *
+ * ── WHY BYTES, AND WHY THIS IS A BOUND RATHER THAN AN ESTIMATE ─────────────
+ *
+ * The previous ceiling divided character length by three. The owner's correction of 2026-11-25 is
+ * right that this is not a guaranteed maximum, and the counter-examples are ordinary rather than
+ * exotic:
+ *
+ *   • `薬` is ONE character, three UTF-8 bytes, and at least one token — so chars/3 scores it as
+ *     0.33 tokens. A page of Japanese or Chinese supplier correspondence underestimates by ~3x,
+ *     and this platform's procurement mail is full of it.
+ *   • base64, hashes and identifiers tokenize at roughly one token per two or three characters,
+ *     not three.
+ *   • an emoji is one or two characters, four or more bytes, and several tokens.
+ *
+ * Anthropic's tokenizer is a byte-level BPE: every one of the 256 byte values is in the base
+ * vocabulary, so a token is never fewer than one byte of input. Therefore the UTF-8 byte length of
+ * the serialized request is an upper bound on its input token count — not an estimate of it, a
+ * bound, and one that holds for any text in any script.
+ *
+ * It is measured over `JSON.stringify(body)`, which means the envelope is MEASURED rather than
+ * guessed: the field names, the model id, the JSON punctuation and anything later added to the body
+ * are all inside the count. That replaces the previous 512-token envelope constant, which was a
+ * guess that happened to be generous and would not have stayed generous once tool definitions were
+ * added.
+ */
+function maxInputTokens(body) {
+  return Buffer.byteLength(JSON.stringify(body), 'utf8');
+}
+
 // ── C1: UNKNOWN COST IS NOT ZERO ────────────────────────────────────────────
 //
 // This returned 0 when `usage` was absent. A $100/day budget built on that would treat every call
@@ -144,12 +193,12 @@ async function callClaude({ model, system, prompt, maxTokens, expectJson = false
     // Read-only: a broken switch does not block thinking. Deliberate, and the inverse of mailer.js.
   }
 
-  const reqBody = {
-    model: resolvedModel,
-    max_tokens: maxTokens || 1024,
-    messages: [{ role: 'user', content: String(prompt == null ? '' : prompt) }],
-  };
-  if (system) reqBody.system = system; // omitted when absent → identical to a no-system call
+  // ONE BUILDER, so the body that is SENT and the body that is MEASURED for the spend ceiling
+  // cannot drift. This was inline here, and office/ai.js estimated the token count from
+  // `system.length + prompt.length` — a second, looser expression of the same request. Two
+  // expressions of "what is being sent" is how a ceiling stops covering the thing it bounds, which
+  // is the defect this repository has already recorded about approval digests.
+  const reqBody = buildRequestBody({ model: resolvedModel, system, prompt, maxTokens });
 
   const bound = boundedTimeout(timeoutMs);
   const controller = new AbortController();
@@ -203,4 +252,5 @@ async function callClaude({ model, system, prompt, maxTokens, expectJson = false
 module.exports = {
   DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, boundedTimeout,
   MODEL_ALIASES, resolveModel, COST_NONE, COST_UNKNOWN,
-  callClaude, costOf, ratesFor, ANTHROPIC_URL, ANTHROPIC_VERSION };
+  callClaude, costOf, ratesFor, buildRequestBody, maxInputTokens,
+  ANTHROPIC_URL, ANTHROPIC_VERSION };

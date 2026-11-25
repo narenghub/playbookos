@@ -579,7 +579,9 @@ watchdog.unref?.();
         + 'settlement changes nothing rather than charging twice');
     } else bad('a hold was settled twice', JSON.stringify(settleTwice));
 
-    console.log('\n  ── 16. a crashed process cannot consume the budget for ever ──\n');
+    console.log('\n  ── 16. an UNDISPATCHED hold cannot consume the budget for ever ──\n');
+    note('scope narrowed 2026-11-25: this holds for a hold with no request behind it. A hold that '
+      + 'WAS dispatched must never expire into free headroom — section 17.');
 
     const objCrash = await mkObjective('crash', 0.50);
     const crashRun = await mkRun(objCrash);
@@ -605,9 +607,10 @@ watchdog.unref?.();
       objectiveId: objCrash, runId: crashRun, maxUsd: 0.50,
       reason: 'after the abandoned hold expired' }, deps);
     if (afterExpiry.ok) {
-      ok('once its window passes the abandoned hold stops counting, and the budget is usable again');
-      note('the predicate is `expires_at > NOW()` in SQL, so this is true BEFORE any reaper runs — '
-        + 'a reaper that has to be punctual to keep a budget correct is a schedule, not a guarantee');
+      ok('once its window passes the abandoned UNDISPATCHED hold stops counting, and the budget '
+        + 'is usable again');
+      note('the predicate is evaluated in SQL, so this is true BEFORE any reaper runs — a reaper '
+        + 'that has to be punctual to keep a budget correct is a schedule, not a guarantee');
     } else bad('an expired hold permanently consumed the budget', JSON.stringify(afterExpiry));
 
     const reaped = await scope.expireStaleReservations(crashCtx, deps);
@@ -695,6 +698,151 @@ watchdog.unref?.();
       ok('and a context for another company cannot take a hold against this objective at all');
     } else bad('a cross-company hold was taken', JSON.stringify(noScope));
 
+  
+    console.log('\n  ── 19. a DISPATCHED hold never expires into free headroom ──\n');
+    note("owner's §4, 2026-11-25: \"expiration of a reservation must not automatically restore "
+      + 'spending authority when the provider may already have processed the request."');
+
+    // THE DEFECT THIS SECTION ENCODES, in the order it happened:
+    //   reserve $0.50 of a $0.50 objective → dispatch the request → the provider accepts and
+    //   begins billing → the process is killed → ten minutes later the hold stopped counting →
+    //   the next call was authorized against $0.50 that had already been spent.
+    const objFin = await mkObjective('fin', 0.50);
+    const finRun = await mkRun(objFin);
+    const finCtx = door({ companyId: A, objectiveId: objFin, runId: finRun, budgetUsd: 0.50 });
+
+    const sent = await scope.reserveSpend(finCtx, { id: uid('sent'), objectiveId: objFin,
+      runId: finRun, maxUsd: 0.50, reason: 'a hold whose request is about to go out' }, deps);
+    if (sent.ok) ok('a hold consuming the whole budget is taken');
+    else bad('the fixture hold was refused', JSON.stringify(sent));
+
+    const marked = await scope.markDispatched(finCtx,
+      { reservationId: sent.reservation.id, note: 'sent to the provider' }, deps);
+    if (marked && marked.financial_state === 'dispatch_attempted' && marked.dispatched_at) {
+      ok('marking it dispatched records WHEN, so "dispatched" is evidence rather than an assertion');
+    } else bad('the hold could not be marked dispatched', JSON.stringify(marked));
+
+    // Age it exactly as section 16 does. The ONLY difference between the two scenarios is that a
+    // request went out on this one.
+    await q(`UPDATE office_budget_reservations
+                SET held_at = NOW() - INTERVAL '2 hours', expires_at = NOW() - INTERVAL '1 hour'
+              WHERE id = $1`, [sent.reservation.id]);
+
+    const afterDispatchedExpiry = await scope.reserveSpend(finCtx, { id: uid('after-sent'),
+      objectiveId: objFin, runId: finRun, maxUsd: 0.50,
+      reason: 'after a DISPATCHED hold passed its window' }, deps);
+    if (!afterDispatchedExpiry.ok
+        && afterDispatchedExpiry.code === 'would_exceed_objective_budget') {
+      ok('DECISIVE: a dispatched hold past its window STILL counts — the next call is refused '
+        + 'rather than authorized against money the provider may already have taken');
+      if (afterDispatchedExpiry.unresolvedCharges >= 1) {
+        ok('and the refusal reports it as an unresolved charge, not as live work');
+      } else {
+        bad('the refusal did not distinguish an unresolved charge from a live hold',
+          JSON.stringify(afterDispatchedExpiry));
+      }
+    } else {
+      bad('a dispatched hold expired into free headroom — the provider may already have billed it',
+        JSON.stringify(afterDispatchedExpiry));
+    }
+
+    const reapedSent = await scope.expireStaleReservations(finCtx, deps);
+    if (!reapedSent.includes(sent.reservation.id)) {
+      ok('the reaper refuses to lapse it too — and the table enforces the same rule independently');
+    } else bad('the reaper expired a dispatched hold', JSON.stringify(reapedSent));
+
+    // The database, independently of every line of JavaScript above.
+    try {
+      await q(`UPDATE office_budget_reservations SET state = 'expired', settled_at = NOW()
+                WHERE id = $1`, [sent.reservation.id]);
+      bad('the DATABASE allowed a dispatched hold to be marked expired');
+    } catch (e) {
+      if (e.code === '23514') {
+        ok('the DATABASE refuses to mark a dispatched hold expired (23514) — structural, so no '
+          + 'future caller can reintroduce the defect');
+      } else bad('the expiry constraint failed for the wrong reason', `${e.code} ${e.message}`);
+    }
+
+    // ── RELEASE REQUIRES EVIDENCE ONCE DISPATCHED ─────────────────────────
+    const noEvidence = await scope.releaseSpend(finCtx,
+      { reservationId: sent.reservation.id }, deps);
+    if (!noEvidence) {
+      ok('releasing a dispatched hold with NO evidence is refused — "it failed so it was free" is '
+        + 'the assumption that loses the money');
+    } else bad('a dispatched hold was released with no evidence', JSON.stringify(noEvidence));
+
+    const withEvidence = await scope.releaseSpend(finCtx, { reservationId: sent.reservation.id,
+      zeroChargeEvidence: 'provider returned 400 invalid_request with no usage block and no '
+        + 'billable event in the account activity for this request id' }, deps);
+    if (withEvidence && withEvidence.financial_state === 'zero_charge_verified') {
+      ok('with written evidence it releases, and records WHAT the evidence was');
+    } else bad('a proven zero charge could not be released', JSON.stringify(withEvidence));
+
+    // ── THE UNKNOWN OUTCOME KEEPS COUNTING, WITH NO WINDOW ────────────────
+    const objUnk = await mkObjective('unk', 0.30);
+    const unkRun = await mkRun(objUnk);
+    const unkCtx = door({ companyId: A, objectiveId: objUnk, runId: unkRun, budgetUsd: 0.30 });
+    const lost = await scope.reserveSpend(unkCtx, { id: uid('lost'), objectiveId: objUnk,
+      runId: unkRun, maxUsd: 0.30, reason: 'a request that times out after acceptance' }, deps);
+    await scope.markDispatched(unkCtx, { reservationId: lost.reservation.id,
+      state: 'provider_accepted', note: 'provider acknowledged, then the response never arrived' },
+    deps);
+    const unknownOutcome = await scope.markFinancialOutcomeUnknown(unkCtx, {
+      reservationId: lost.reservation.id,
+      note: 'timed out AFTER the provider accepted; whether it completed and billed cannot be '
+        + 'established from here. Needs manual reconciliation against provider activity.' }, deps);
+    if (unknownOutcome && unknownOutcome.financial_state === 'unknown') {
+      ok('a timeout after acceptance is recorded as UNKNOWN, not as a failure that cost nothing');
+    } else bad('an unresolved outcome was not recorded', JSON.stringify(unknownOutcome));
+
+    // A year old, with the window still running FORWARDS — setting held_at and expires_at to the
+    // same instant trips office_budget_reservations_window, the constraint doing its job on the
+    // fixture rather than on the thing under test. The same trap the B7.11 check documents.
+    await q(`UPDATE office_budget_reservations
+                SET held_at = NOW() - INTERVAL '1 year',
+                    expires_at = NOW() - INTERVAL '1 year' + INTERVAL '10 minutes'
+              WHERE id = $1`, [lost.reservation.id]);
+    const yearLater = await scope.reserveSpend(unkCtx, { id: uid('year-later'),
+      objectiveId: objUnk, runId: unkRun, maxUsd: 0.30,
+      reason: 'a year after an unresolved charge' }, deps);
+    if (!yearLater.ok) {
+      ok('a YEAR later it still counts — an unresolved charge does not age into headroom, and only '
+        + 'a human reconciling it can release the money');
+    } else bad('an unresolved charge aged into free headroom', JSON.stringify(yearLater));
+
+    try {
+      await scope.markFinancialOutcomeUnknown(unkCtx,
+        { reservationId: lost.reservation.id, note: '  ' }, deps);
+      bad('an unknown outcome was recorded with a blank reason');
+    } catch (_) {
+      ok('and an unknown outcome cannot be recorded without a written reason for it');
+    }
+
+    // ── SETTLEMENT WITH NO FIGURE IS UNKNOWN, NOT RECONCILED ──────────────
+    const objNoFig = await mkObjective('nofig', 0.20);
+    const noFigRun = await mkRun(objNoFig);
+    const noFigCtx = door({ companyId: A, objectiveId: objNoFig, runId: noFigRun,
+      budgetUsd: 0.20 });
+    const noFig = await scope.reserveSpend(noFigCtx, { id: uid('nofig'), objectiveId: objNoFig,
+      runId: noFigRun, maxUsd: 0.10, reason: 'a call whose usage block never arrives' }, deps);
+    await scope.markDispatched(noFigCtx, { reservationId: noFig.reservation.id }, deps);
+    const settledBlind = await scope.settleSpend(noFigCtx,
+      { reservationId: noFig.reservation.id, costKnown: false }, deps);
+    if (settledBlind && settledBlind.financial_state === 'unknown') {
+      ok('settling with NO cost figure records the outcome as unknown, not reconciled — the C1 '
+        + 'rule applied to the financial state and not only to the dollar column');
+    } else bad('a settlement with no figure claimed to be reconciled', JSON.stringify(settledBlind));
+
+    const measured = await scope.reserveSpend(noFigCtx, { id: uid('measured'),
+      objectiveId: objNoFig, runId: noFigRun, maxUsd: 0.05,
+      reason: 'a call that reports its usage' }, deps);
+    await scope.markDispatched(noFigCtx, { reservationId: measured.reservation.id }, deps);
+    const settledKnown = await scope.settleSpend(noFigCtx, {
+      reservationId: measured.reservation.id, costUsd: 0.004, costKnown: true }, deps);
+    if (settledKnown && settledKnown.financial_state === 'reconciled') {
+      ok('and a measured settlement IS reconciled (the control — otherwise nothing ever is)');
+    } else bad('a measured settlement was not reconciled', JSON.stringify(settledKnown));
+
   } catch (e) {
     bad('the check threw', e && (e.stack || e.message));
   } finally {
@@ -711,7 +859,7 @@ watchdog.unref?.();
         [ids.objectives])).rows[0].n;
       if (left === 0) ok('cleanup: my fixtures are gone');
       else bad('cleanup leaked fixtures', left);
-    } catch (e) {
+  } catch (e) {
       bad('cleanup itself failed', e && e.message);
     }
     await P.end().catch(() => {});

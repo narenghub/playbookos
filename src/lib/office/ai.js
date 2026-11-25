@@ -97,31 +97,48 @@ function normalizeUsage(usage) {
  * ctx   — a frozen office context (from beginObjectiveRun or resolveCompanyContext)
  * spec  — { capability, prompt, system, maxTokens, timeoutMs, agent, workflow, purpose }
  */
-// ── THE MOST THIS CALL CAN COST (B2.5b) ─────────────────────────────────────
+// ── THE MOST THIS CALL CAN COST (B2.5b, corrected per the owner's §4 of 2026-11-25) ────────
 //
 // A hold has to bound the worst case, not guess the likely one, so every term here rounds AGAINST
 // us and the figure is deliberately larger than the call will be:
 //
 //   • OUTPUT is the expensive side and its ceiling is exact: the request sends `max_tokens`, so
 //     the provider cannot bill more output than that. llm.js defaults it to 1024 when unset, and
-//     this mirrors that default rather than assuming a smaller one.
-//   • INPUT is not known before the call. It is bounded from the prompt and system text at THREE
-//     characters per token — below the ~4 that English averages, so the estimate runs high — plus
-//     a flat allowance for the message envelope and any system-level additions.
-//   • The RATE comes from llm.ratesFor, which is already the conservative list price with intro
-//     discounts ignored on purpose, and which falls back to the most expensive tier for a model it
-//     does not recognise.
+//     the builder below mirrors that default rather than this file assuming one.
+//   • INPUT is bounded by the UTF-8 BYTE LENGTH of the serialized request. Anthropic's tokenizer
+//     is a byte-level BPE whose base vocabulary contains all 256 byte values, so a token is never
+//     fewer than one byte of input: the byte count is a BOUND, not an estimate.
+//   • The RATE comes from llm.ratesFor, the conservative list price with intro discounts ignored on
+//     purpose, falling back to the most expensive tier for an unrecognised model.
 //
-// If this figure is ever too LOW the limit has a hole in it, so the bias is one-directional. The
-// settlement then corrects the hold downward to the measured cost, which is the safe direction.
-const ENVELOPE_TOKENS = 512;
-const CHARS_PER_TOKEN_FLOOR = 3;
+// ── WHAT THIS REPLACES, AND WHY THE OWNER WAS RIGHT TO REJECT IT ───────────
+//
+// The previous version divided CHARACTER length by three and added a flat 512-token envelope. The
+// owner's correction — *"three characters per token is not a guaranteed maximum token count"* — is
+// correct, and the counter-examples are ordinary rather than exotic:
+//
+//   • `薬` is ONE character, three UTF-8 bytes, at least one token. chars/3 scores it as 0.33
+//     tokens, so a page of Japanese or Chinese supplier mail underestimated by roughly 3x — and
+//     this platform's procurement correspondence is full of exactly that.
+//   • base64, hashes and identifiers run nearer one token per two characters.
+//   • an emoji is one or two characters and several tokens.
+//
+// Each of those made the hold SMALLER than the charge, which is the one direction a ceiling must
+// never round. The envelope constant was the same kind of guess: generous today, and silently
+// insufficient the moment tool definitions or attachments join the body.
+//
+// Both are now MEASURED over the real request, built by `llm.buildRequestBody` — the same function
+// that builds what is sent. One builder, so the body that is charged for and the body that is
+// bounded cannot drift, and anything later added to the request is inside the bound by
+// construction rather than by somebody remembering to widen a constant.
 function maxChargeUsd({ capability, system, prompt, maxTokens }) {
   const model = llm.resolveModel(capability);
   const [inRate, outRate] = llm.ratesFor(model);
-  const chars = String(system || '').length + String(prompt || '').length;
-  const inTokens = Math.ceil(chars / CHARS_PER_TOKEN_FLOOR) + ENVELOPE_TOKENS;
-  const outTokens = Number(maxTokens) > 0 ? Number(maxTokens) : 1024;
+  const body = llm.buildRequestBody({ model, system, prompt, maxTokens });
+  const inTokens = llm.maxInputTokens(body);
+  // From the BODY, not from the argument: llm.js applies its own default when maxTokens is unset,
+  // and reading it back from the body is what keeps the two in step.
+  const outTokens = Number(body.max_tokens);
   const usd = inTokens * inRate + outTokens * outRate;
   // Never zero: a $0 hold reserves nothing while looking like a reservation, and the table refuses
   // it. A floor of one ten-thousandth of a cent keeps the smallest conceivable call reservable.
@@ -135,11 +152,20 @@ function maxChargeUsd({ capability, system, prompt, maxTokens }) {
  * would turn an accounting problem into an outage, and the hold expires on its own window in any
  * case. So this logs and returns.
  */
-async function settleHold(ctx, reservation, { costUsd, costKnown, costLedgerId = null }, deps) {
+async function settleHold(ctx, reservation, { costUsd, costKnown, costLedgerId = null,
+  zeroChargeEvidence = null }, deps) {
   if (!reservation) return null;
   try {
     if (costKnown === true && Number(costUsd) === 0) {
-      return await scope.releaseSpend(ctx, { reservationId: reservation.id }, deps);
+      // A MEASURED zero. The hold goes back — but if the request was dispatched, releasing it
+      // needs evidence, because "it failed so it was free" is precisely the assumption the owner
+      // forbade. The caller supplies what it knows; `releaseSpend` refuses the release otherwise
+      // and the hold stays live, which is the safe direction.
+      return await scope.releaseSpend(ctx, { reservationId: reservation.id,
+        zeroChargeEvidence: zeroChargeEvidence
+          || 'the provider was never reached: a policy stop, a missing credential or a rejected '
+             + 'capability refused this call before any request was sent, so no charge exists' },
+      deps);
     }
     return await scope.settleSpend(ctx, {
       reservationId: reservation.id, costUsd, costKnown, costLedgerId,
@@ -225,6 +251,33 @@ async function governedCall(ctx, spec, deps = {}) {
   const reservation = budgetDecision.reservation || null;
 
   const model = llm.resolveModel(capability);
+
+  // ── THE HOLD BECOMES FINANCIALLY LIVE BEFORE THE REQUEST GOES ───────────
+  //
+  // Owner's §4 of 2026-11-25: *"expiration of a reservation must not automatically restore
+  // spending authority when the provider may already have processed the request."* From this write
+  // onward the hold no longer lapses with its window — it keeps consuming the objective's ceiling
+  // until the charge is reconciled or proven not to have happened.
+  //
+  // BEFORE, not after, and that ordering is the whole value: marked after the call, a process
+  // killed mid-request leaves a hold still labelled `reserved`, which expires into headroom the
+  // provider has already billed. The gap a crash can still exploit is now one statement wide.
+  //
+  // A failure to record it does NOT abandon the call — that would turn an accounting write into an
+  // outage — but it is logged loudly, because it is the one condition under which the old defect
+  // can still occur.
+  if (reservation) {
+    try {
+      await scope.markDispatched(ctx, { reservationId: reservation.id,
+        state: 'dispatch_attempted',
+        note: `dispatched to ${PROVIDER} as ${model}` }, deps);
+    } catch (e) {
+      console.error(`[office/ai] reservation ${reservation.id} could NOT be marked dispatched `
+        + `(${e.message}) — if this process dies now, the hold may expire into headroom the `
+        + 'provider has already billed');
+    }
+  }
+
   const r = await llm.callClaude({
     model: capability,            // llm.js resolves the alias; the literal id comes back in r.model
     system, prompt, maxTokens, timeoutMs,
@@ -347,4 +400,7 @@ async function governedCall(ctx, spec, deps = {}) {
 }
 
 module.exports = { governedCall, normalizeUsage, classifyProviderFailure,
+  // Exported so the spend ceiling can be tested directly. It is the figure that authorizes every
+  // metered call, and a bound nothing can assert on is a bound nobody checks.
+  maxChargeUsd,
   CAPABILITIES, PROVIDER, CONFIG_FAILURES };
