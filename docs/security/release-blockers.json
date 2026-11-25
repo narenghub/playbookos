@@ -1,11 +1,25 @@
 {
   "_README": [
-    "Open blockers on a PRODUCTION release. Checked by scripts/check-release-blockers.js.",
+    "Open blockers on a PRODUCTION release, and the PREREQUISITES a release must satisfy.",
+    "Checked by scripts/check-release-blockers.js.",
     "",
     "Run bare, it REPORTS: part of preflight, so every push shows what still blocks a release.",
-    "Run with --releasing, it FAILS while any blocker is open: that is the gate, and it belongs in",
-    "whatever command actually ships. Preflight is a push gate, not a release gate, and conflating",
-    "the two would either deadlock the feature branch or make this advisory. It is neither."
+    "Run with --releasing, it FAILS while any blocker is open or any prerequisite is unsatisfied:",
+    "that is the gate, and it belongs in whatever command actually ships. Preflight is a push gate,",
+    "not a release gate, and conflating the two would either deadlock the feature branch or make",
+    "this advisory. It is neither.",
+    "",
+    "OWNER CORRECTION, 2026-11-25 (Decision 5): 'Correct B7.17 and B6.9 to explicitly include",
+    "B7.18, B7.22, B7.24 and every other applicable restoration prerequisite. Enforce those",
+    "dependencies in the release gate, not only in documentation.'",
+    "",
+    "So the two prerequisite lists below are DATA THE GATE EVALUATES, not prose. Each entry must",
+    "name how it is verified:",
+    "  verified_by.checker     a script that exists AND is wired into preflight, so it actually runs",
+    "  verified_by.attestation a named person, a date and a scope — for things no script can see,",
+    "                          such as a restore performed against production",
+    "  verified_by: null       UNMEASURED. It BLOCKS. A prerequisite the gate does not check is not",
+    "                          closed (B6.1's own rule, applied to itself)."
   ],
   "blockers": [
     {
@@ -25,7 +39,7 @@
       "remaining_work": [
         "CODE: done (ruling 27 item 5). Boot no longer applies any DDL — server.js calls",
         "src/lib/schema-ready.js, which only SELECTs, and exits non-zero if the schema is absent.",
-        "Migrations run as their own process: node scripts/migrate.js, 58 steps, with a",
+        "Migrations run as their own process: node scripts/migrate.js, 59 steps, with a",
         "schema_migrations ledger. Proved on a disposable cluster by",
         "scripts/check-startup-without-ddl.js (28 assertions, exit 0): the app imports, assesses,",
         "confirms, reviews and exports as a role with NOSUPERUSER, no CREATE on schema public and no",
@@ -44,5 +58,149 @@
       "code_complete": true,
       "blocks_release_because": "the deployed application still connects as a superuser until the two URLs above are split; the code no longer requires it to."
     }
-  ]
+  ],
+  "communication_release_prerequisites": {
+    "_what": [
+      "B6.9. ALL of these must hold before any external communication leaves production.",
+      "capability/email.send has been STOPPED since 2026-11-03 and stays stopped until they do.",
+      "B7.6b (the canonical digest binding) is CLOSED and substitutes for none of them."
+    ],
+    "items": [
+      {
+        "id": "B7.6d",
+        "title": "digest consistency against the ACTUAL transmitted message and attachments",
+        "verified_by": null
+      },
+      {
+        "id": "B7.7",
+        "title": "raw MIME recipient and sender authorization",
+        "verified_by": null
+      },
+      {
+        "id": "B7.9",
+        "title": "sender identity and provider-account authorization",
+        "verified_by": null
+      },
+      {
+        "id": "B7.11",
+        "title": "shared mailboxes scoped to company and purpose",
+        "verified_by": {
+          "checker": "scripts/check-shared-mailboxes-db.js"
+        }
+      },
+      {
+        "id": "B7.12",
+        "title": "approval expiry, revocation, concurrency and replay prevention",
+        "verified_by": null
+      },
+      {
+        "id": "B7.13",
+        "title": "historical backlog replay prevention",
+        "verified_by": null
+      },
+      {
+        "id": "B7.21",
+        "title": "the mapped workflows' queries are company-scoped",
+        "verified_by": {
+          "checker": "scripts/check-workflow-company-scoping-db.js",
+          "partial": "the tripwire holds; the call-site migration is not done"
+        }
+      },
+      {
+        "id": "B7.18",
+        "title": "membership migration and backfill, applied by review",
+        "verified_by": null
+      },
+      {
+        "id": "B7.22",
+        "title": "explicit authorization where Group C access is not platform-level",
+        "verified_by": null
+      },
+      {
+        "id": "B7.24",
+        "title": "company authorization revalidated at sensitive boundaries",
+        "verified_by": null
+      },
+      {
+        "id": "B7.8",
+        "title": "company isolation end to end",
+        "verified_by": {
+          "checker": "scripts/check-company-membership-db.js",
+          "partial": "the foundation is verified; end-to-end isolation depends on B7.21 and B7.18"
+        }
+      }
+    ]
+  },
+  "restoration_prerequisites": {
+    "_what": [
+      "B7.17. The coordinated production restoration package may not be EXECUTED until these hold.",
+      "A draft is not authorization and not readiness.",
+      "Corrected 2026-11-25 to name B7.18, B7.22 and B7.24 explicitly, per Decision 5."
+    ],
+    "items": [
+      {
+        "id": "B7.7",
+        "title": "raw MIME authorization",
+        "verified_by": null
+      },
+      {
+        "id": "B7.9",
+        "title": "sender and provider-account authorization",
+        "verified_by": null
+      },
+      {
+        "id": "B7.11",
+        "title": "scoped shared mailboxes",
+        "verified_by": {
+          "checker": "scripts/check-shared-mailboxes-db.js"
+        }
+      },
+      {
+        "id": "B7.12",
+        "title": "approval expiry, revocation, concurrency, replay",
+        "verified_by": null
+      },
+      {
+        "id": "B7.13",
+        "title": "historical backlog prevention",
+        "verified_by": null
+      },
+      {
+        "id": "B7.18",
+        "title": "membership migration and backfill",
+        "verified_by": null
+      },
+      {
+        "id": "B7.21",
+        "title": "company-scoped workflow queries",
+        "verified_by": null
+      },
+      {
+        "id": "B7.22",
+        "title": "Group C explicit authorization",
+        "verified_by": null
+      },
+      {
+        "id": "B7.24",
+        "title": "sensitive-boundary revalidation",
+        "verified_by": null
+      },
+      {
+        "id": "B7.23-rename",
+        "title": "the cron rename, which migrates production STOP rows, intent keys and workflow_companies",
+        "verified_by": null
+      },
+      {
+        "id": "B1.12",
+        "title": "a restore proven from a current production backup",
+        "verified_by": null,
+        "only_satisfiable_by": "attestation — no script can see a production restore"
+      },
+      {
+        "id": "B1.16",
+        "title": "the four carried-forward M6 prerequisites verified",
+        "verified_by": null
+      }
+    ]
+  }
 }

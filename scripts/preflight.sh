@@ -351,6 +351,10 @@ pf_step "a plan is a proposal, not an authorization" node scripts/check-office-d
 # — gate.js used to pass a product id into the kill switch's company slot — and every non-answer
 # refuses by name. Legacy decisions are unchanged and existing product-keyed stops still halt.
 pf_step "one authorization boundary, and a product is not a company" node scripts/check-authz-boundary-db.js
+# B7.11 (release blocker). A shared mailbox is a reviewed declaration naming a COMPANY, a PURPOSE
+# and who authorized it — INTERNAL_MAILBOXES was a flat env string that was internal for every
+# company and every message class, and that could readmit a DEACTIVATED human account.
+pf_step "a shared mailbox cannot readmit a departed person" node scripts/check-shared-mailboxes-db.js
 # B3.3. One agent delegates to another by handing over a DERIVED context and never a company id.
 # The target agent, parent liveness, chain depth, autonomy tier, kill switch and objective budget
 # are all checked before a child run exists, and the dispatch record names all ten fields Gate 3

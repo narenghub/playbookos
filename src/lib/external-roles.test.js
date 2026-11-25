@@ -78,6 +78,12 @@ test('assignWeeklyKPIs refuses an external role even when called for one user di
 // Known exemptions, each one read and justified. Anything not on this list that selects several users
 // must exclude external roles, or this test fails — which is the alarm.
 const EXEMPT = [
+  // B7.11's deactivated-account lookup, in src/lib/outbound/shared-mailboxes.js. It reads
+  // `is_active = 0 OR is_active IS NULL` for a bounded list of addresses, and it DELIBERATELY does
+  // not exclude external roles: its whole job is to stop a shared-mailbox declaration readmitting
+  // somebody who has left, and a departed PARTNER must be unreadmittable too. Excluding external
+  // roles here would open the hole in the other direction — the sweep's own concern, inverted.
+  /WHERE lower\(email\) = ANY\(\$1\) AND \(is_active = 0 OR is_active IS NULL\)/,
   // Single-row lookups of a specific internal person. A role filter of their own already excludes a
   // partner, because a partner is never admin/super_admin/a director.
   /role IN \('admin','super_admin'\)/,

@@ -228,6 +228,17 @@ const SCHEMA_STEPS = [
     required: true,
     run: (q) => require('./authz/product-company').migrateProductCompanies(q),
   },
+  {
+    // AFTER the office kernel, because a company-scoped shared mailbox references `companies`.
+    //
+    // B7.11. `INTERNAL_MAILBOXES` is a flat env string with no company and no purpose, and it
+    // overrode a deactivated human account. Empty by design: every row is a reviewed declaration
+    // naming a company, a purpose and who authorized it. The env var keeps working as a
+    // platform-scope legacy source, minus the override.
+    name: 'outbound: shared mailboxes scoped to company and purpose (B7.11)',
+    required: true,
+    run: (q) => require('./outbound/shared-mailboxes').migrateSharedMailboxes(q),
+  },
   { name: 'research intelligence', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligence() },
   { name: 'research intelligence phase 3', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligencePhase3() },
 

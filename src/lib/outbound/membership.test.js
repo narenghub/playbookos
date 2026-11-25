@@ -32,8 +32,39 @@ const ENV = { COMPANY_EMAIL_DOMAINS: 'abiozen.com', INTERNAL_MAILBOXES: 'sales@a
  * Pass `{ roles: { 'a@b.com': 'partner' } }` to give one of them an external role; the stub then
  * applies the role exclusion the real query applies, so a partner is absent from the result.
  */
-function usersStub(activeEmails, { roles = {} } = {}) {
+function usersStub(activeEmails, { roles = {}, deactivated = [] } = {}) {
   return async (sql, params) => {
+    // ── B7.11: THE MODULE NOW ASKS TWO QUESTIONS, AND THIS STUB ANSWERS BOTH ─
+    //
+    // It used to assert that EVERY query matched `FROM users WHERE is_active = 1`, which modelled
+    // "only one query shape ever happens". outbound/shared-mailboxes.js added a second one — "is
+    // this address a known DEACTIVATED account" — and the stub's assertion threw on it, the module
+    // read that as unknowable, and an allowlisted shared mailbox came back EXTERNAL. The stub was
+    // right to object to a shape it did not recognise; the fix is to answer it, not to loosen the
+    // assertion.
+    //
+    // Note what the two queries do NOT share: the members query carries roles.js's external-role
+    // exclusion, and the deactivated query deliberately does not. A deactivated PARTNER must also
+    // be unreadmittable by a mailbox declaration, so excluding external roles there would open the
+    // hole in the other direction.
+    if (/is_active = 0/.test(sql)) {
+      assert.match(sql, /FROM users\s+WHERE lower\(email\) = ANY/,
+        'the deactivated-account lookup must be a bounded lookup of the addresses asked about');
+      assert.doesNotMatch(sql, /NOT IN \('partner'\)/,
+        'the deactivated lookup must NOT exclude external roles: a departed partner must be '
+        + 'unreadmittable too');
+      const wanted = params[0];
+      return { rows: deactivated
+        .map((e) => e.toLowerCase())
+        .filter((e) => wanted.includes(e))
+        .map((email) => ({ email })) };
+    }
+    if (/FROM shared_mailboxes/.test(sql)) {
+      // No declarations in these fixtures: this suite is about the ENV-var path and the
+      // active-membership rule. scripts/check-shared-mailboxes-db.js covers declared rows against
+      // a real database.
+      return { rows: [] };
+    }
     assert.match(sql, /FROM users\s+WHERE is_active = 1/,
       'membership must read ACTIVE users only');
     // The real query carries roles.js's exclusion fragment. Asserting it is present here is what
@@ -197,4 +228,23 @@ test('no allowlist configured means no shared mailbox is internal', async () => 
   const r = await M.classifyByMembership('sales@abiozen.com',
     { COMPANY_EMAIL_DOMAINS: 'abiozen.com' }, { query: usersStub(ACTIVE) });
   assert.deepEqual(r.external, ['sales@abiozen.com'], 'an absent allowlist grants nothing');
+});
+
+// ── B7.11: THE ALLOWLIST CANNOT READMIT A DEACTIVATED ACCOUNT ───────────────
+
+test('DECISIVE: an allowlisted address belonging to a DEACTIVATED account is EXTERNAL', async () => {
+  // The owner's instruction, as a unit test: "INTERNAL_MAILBOXES must not override a deactivated
+  // human account." sales@ is on the allowlist AND is a departed person's address here.
+  const r = await M.classifyByMembership('sales@abiozen.com', ENV,
+    { query: usersStub(ACTIVE, { deactivated: ['sales@abiozen.com'] }) });
+  assert.deepEqual(r.internal, []);
+  assert.deepEqual(r.external, ['sales@abiozen.com']);
+  assert.match(r.sharedMailboxVerdicts['sales@abiozen.com'].reason, /DEACTIVATED/);
+});
+
+test('and the same address with no account at all is still a usable shared mailbox', async () => {
+  // The positive control: the rule refuses departed PEOPLE, not mailboxes.
+  const r = await M.classifyByMembership('sales@abiozen.com', ENV,
+    { query: usersStub(ACTIVE) });
+  assert.deepEqual(r.internal, ['sales@abiozen.com']);
 });

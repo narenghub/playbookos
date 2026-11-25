@@ -103,10 +103,29 @@ async function activeMembers(addresses, deps = {}) {
  *   membershipUnknown,               // true when membership could not be read; everything is external
  * }
  */
-async function classifyByMembership(to, env = process.env, deps = {}) {
+async function classifyByMembership(to, env = process.env, deps = {}, scope = {}) {
   const all = addressesOf(to);
   const domains = companyDomains(env);
-  const mailboxes = internalMailboxes(env);
+  // ── B7.11: THE SHARED-MAILBOX ALLOWLIST IS NO LONGER A FLAT SET ──────────
+  //
+  // `internalMailboxes(env)` was consulted as `mailboxes.has(lower)`, unconditionally. Two holes,
+  // both now closed by outbound/shared-mailboxes.js:
+  //
+  //   • it OVERRODE A DEACTIVATED HUMAN. Adding a departed employee's address to the env var made
+  //     them internal again — reinstating by configuration the very person this module exists to
+  //     exclude. The owner named this one directly: "INTERNAL_MAILBOXES must not override a
+  //     deactivated human account."
+  //   • it had NO COMPANY and NO PURPOSE, so one entry was internal for every company on the
+  //     platform and for any kind of message.
+  //
+  // `scope` carries `{ companyId, purpose }` when the caller knows them. A caller that does not
+  // pass them gets the legacy platform-scope behaviour MINUS the deactivated-account override,
+  // which applies always — the only change that makes an existing caller strictly safer rather
+  // than differently behaved.
+  const SHARED = require('./shared-mailboxes');
+  const shared = await SHARED.usableMailboxes(all, {
+    companyId: scope.companyId || null, purpose: scope.purpose || null, env,
+  }, deps);
 
   const unparseable = all.filter((a) => !domainOf(a));
   const members = await activeMembers(all, deps);
@@ -121,7 +140,7 @@ async function classifyByMembership(to, env = process.env, deps = {}) {
     const d = domainOf(a);
     const onCompanyDomain = Boolean(d) && domains.has(d);
 
-    if (!membershipUnknown && (members.has(lower) || mailboxes.has(lower))) {
+    if (!membershipUnknown && (members.has(lower) || shared.usable.has(lower))) {
       internal.push(a);
       continue;
     }
@@ -141,6 +160,11 @@ async function classifyByMembership(to, env = process.env, deps = {}) {
     departedOrUnknown,
     membershipUnknown,
     domains: [...domains],
+    // B7.11. Per-address verdicts on the shared-mailbox question, so a refusal can say WHY an
+    // address that an operator believes is a shared mailbox was not treated as one. `unknown` is
+    // its own fact: a source could not be read, and nothing was treated as a mailbox.
+    sharedMailboxVerdicts: Object.fromEntries(shared.verdicts),
+    sharedMailboxSourceUnknown: shared.unknown,
   };
 }
 
