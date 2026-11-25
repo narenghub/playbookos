@@ -90,6 +90,10 @@ const AUTHORIZED_COMPANY_ID_TABLES = new Set([
   // plan of the same company. As with the budget exception, the column is part of the welding
   // rather than a filter the application could forget to apply.
   'office_plans', 'office_plan_steps',
+  // B3.3: one delegation's dispatch record. company_id welds BOTH runs and the objective to the
+  // same company through MATCH FULL composite foreign keys, so a child run of another company
+  // cannot be attached to a parent — the database refuses it rather than the accessor checking.
+  'office_delegations',
 ]);
 const REAL_CONSTRAINT_CODES = new Set(['23503', '23502', '23514', '23505']);
 const SENTINEL = '__k1_validation_rollback__';

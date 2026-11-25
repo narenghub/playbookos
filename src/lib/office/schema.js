@@ -475,6 +475,54 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_office_plans_objective
      ON office_plans (company_id, objective_id, created_at DESC)`,
 
+  // ── B3.3: THE DISPATCH RECORD FOR ONE DELEGATION ─────────────────────────
+  //
+  // The dependency plan's Gate 3 names exactly what dispatch evidence must identify: "company,
+  // objective, parent run, child run, calling agent, target agent, workflow, capability, autonomy
+  // tier, policy decision." Every one of those is a NOT NULL column here, so a delegation that
+  // cannot say one of them cannot be recorded — and since the record is written before the child
+  // run is started, it cannot be delegated either.
+  //
+  // THE SHAPE THAT MATTERS: both runs are welded to the same company by composite foreign keys.
+  // A child run belonging to another company cannot be attached to this parent, and the database
+  // refuses it rather than the accessor remembering to check. That is the one property a
+  // delegation boundary exists to have.
+  `CREATE TABLE IF NOT EXISTS office_delegations (
+     id             TEXT PRIMARY KEY,
+     company_id     TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+     objective_id   TEXT NOT NULL,
+     parent_run_id  UUID NOT NULL,
+     child_run_id   UUID NOT NULL,
+     calling_agent  TEXT NOT NULL,
+     target_agent   TEXT NOT NULL,
+     workflow       TEXT NOT NULL,
+     capability     TEXT NOT NULL,
+     autonomy_tier  TEXT NOT NULL,
+     policy_decision TEXT NOT NULL,
+     depth          INT NOT NULL,
+     reason         TEXT NOT NULL,
+     at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     CONSTRAINT office_delegations_depth CHECK (depth >= 1),
+     CONSTRAINT office_delegations_reason_not_blank CHECK (length(btrim(reason)) > 0),
+     -- A run cannot delegate to itself: that is a cycle of length one, and the depth bound would
+     -- never see it because the chain never gets longer.
+     CONSTRAINT office_delegations_not_self CHECK (parent_run_id <> child_run_id),
+     -- One delegation record per child run. A child reached from two parents is not a tree, and
+     -- the evidence would answer "who delegated this" two ways.
+     CONSTRAINT office_delegations_one_per_child UNIQUE (child_run_id),
+     CONSTRAINT office_delegations_objective_same_company
+       FOREIGN KEY (objective_id, company_id) REFERENCES objectives (id, company_id)
+       ON DELETE RESTRICT,
+     CONSTRAINT office_delegations_parent_same_company
+       FOREIGN KEY (parent_run_id, company_id) REFERENCES agent_runs (run_id, company_id) MATCH FULL
+       ON DELETE RESTRICT,
+     CONSTRAINT office_delegations_child_same_company
+       FOREIGN KEY (child_run_id, company_id) REFERENCES agent_runs (run_id, company_id) MATCH FULL
+       ON DELETE RESTRICT
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_office_delegations_parent
+     ON office_delegations (company_id, parent_run_id)`,
+
   `CREATE TABLE IF NOT EXISTS office_exceptions (
      id            TEXT PRIMARY KEY,
      company_id    TEXT NOT NULL REFERENCES companies(id),
@@ -549,6 +597,8 @@ const KERNEL_TABLES = Object.freeze([
   // decomposition out of another's reach.
   'office_plans',
   'office_plan_steps',
+  // B3.3. The dispatch record for one delegation, company-scoped like the rest.
+  'office_delegations',
   'office_cost_ledger',
   'office_approvals',
   'office_exceptions',

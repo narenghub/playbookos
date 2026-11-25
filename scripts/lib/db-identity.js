@@ -65,6 +65,8 @@ const M7_TABLES = [
   'office_budget_exceptions',
   // B3.2 (2026-11-24): decomposed plans and their per-step verdicts.
   'office_plans', 'office_plan_steps',
+  // B3.3 (2026-11-24): the dispatch record for one delegation.
+  'office_delegations',
   // M7.1 / M7.2 / M7.3
   'worker_identities', 'worker_enrollment_tokens', 'worker_request_nonces',
   'worker_tasks', 'worker_results', 'worker_audit',

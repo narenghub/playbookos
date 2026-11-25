@@ -107,6 +107,12 @@ const EXEMPT = new Set([
   // the INSERT. It also alters objective rows and charges a cost-ledger row as fixtures.
   // Disposable cluster, fixtures deleted by id.
   path.join('scripts', 'check-office-decomposition-db.js'),
+  // B3.3. Asserts office_delegations' own constraints — the MATCH FULL composite FK refusing a
+  // child run of another company, and the CHECK refusing a run that delegates to itself. Neither
+  // is reachable through the accessor: recordDelegation takes the company from the context, so the
+  // only way to try a cross-company delegation is to write the INSERT. It also reads
+  // information_schema to assert the evidence columns are NOT NULL. Disposable cluster, destroyed.
+  path.join('scripts', 'check-office-delegation-db.js'),
   path.join('scripts', 'check-office-recovery-db.js'),
   path.join('scripts', 'validate-k4-activation-deployed.js'),
   path.join('scripts', 'check-office-governed-ai-db.js'),

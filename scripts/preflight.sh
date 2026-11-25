@@ -341,6 +341,12 @@ pf_step "work executes only where it is eligible to" node scripts/check-executio
 # controls, approval requirement and budget. A proposal that states any of those — a model's
 # included — is refused by name rather than sanitised.
 pf_step "a plan is a proposal, not an authorization" node scripts/check-office-decomposition-db.js
+# B3.3. One agent delegates to another by handing over a DERIVED context and never a company id.
+# The target agent, parent liveness, chain depth, autonomy tier, kill switch and objective budget
+# are all checked before a child run exists, and the dispatch record names all ten fields Gate 3
+# requires. The child spends against the PARENT objective, so a child budget is impossible
+# rather than merely forbidden.
+pf_step "delegation is governed, and the child gets a context" node scripts/check-office-delegation-db.js
 pf_step "the workflow-company proposal cannot assign anything" node --test scripts/proposal-is-readonly.test.js
 # B7.6. Six producers in four modules and two processes bind approvals. They agree or every
 # approved external send refuses, and each local expression of "the message" is locally correct —

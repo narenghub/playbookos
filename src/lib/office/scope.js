@@ -739,6 +739,83 @@ async function listPlanSteps(ctx, planId, deps = {}) {
   )).rows;
 }
 
+// ── B3.3: DELEGATION ────────────────────────────────────────────────────────
+
+/**
+ * Record one delegation. Every field the dependency plan's Gate 3 requires is a parameter and all
+ * of them are NOT NULL in the table, so a delegation that cannot name one cannot be recorded.
+ *
+ * `companyId` is not among them: it comes from `ctx`, which is the whole point.
+ */
+async function recordDelegation(ctx, { id, parentRunId, childRunId, callingAgent, targetAgent,
+  workflow, capability, autonomyTier, policyDecision, depth, reason }, deps = {}) {
+  assertContext(ctx);
+  if (!ctx.objectiveId) throw new Error('a delegation must belong to an objective');
+  const res = await q(deps)(
+    `INSERT INTO office_delegations
+       (id, company_id, objective_id, parent_run_id, child_run_id, calling_agent, target_agent,
+        workflow, capability, autonomy_tier, policy_decision, depth, reason)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+     RETURNING id, parent_run_id, child_run_id, depth, at`,
+    [id, ctx.companyId, ctx.objectiveId, parentRunId, childRunId, callingAgent, targetAgent,
+      workflow, capability, autonomyTier, policyDecision, depth, reason]
+  );
+  return res.rows[0];
+}
+
+/**
+ * How deep in the delegation tree is this run? 0 for a root.
+ *
+ * A recursive CTE rather than a loop of round trips, and BOUNDED — `depth < $3` stops it even if a
+ * cycle ever reached the table, because an unbounded recursive CTE over a cycle does not return.
+ * The parent chain is read from agent_runs, which is the authoritative tree, and scoped to this
+ * company so a chain cannot be measured across a boundary.
+ */
+async function delegationDepth(ctx, runId, { limit = 16 } = {}, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `WITH RECURSIVE chain(run_id, parent_run_id, depth) AS (
+       SELECT run_id, parent_run_id, 0
+         FROM agent_runs WHERE company_id = $1 AND run_id = $2
+       UNION ALL
+       SELECT a.run_id, a.parent_run_id, c.depth + 1
+         FROM agent_runs a JOIN chain c ON a.run_id = c.parent_run_id
+        WHERE a.company_id = $1 AND c.depth < $3
+     )
+     SELECT COALESCE(MAX(depth), 0)::int AS depth, COUNT(*)::int AS links FROM chain`,
+    [ctx.companyId, runId, limit]
+  );
+  return res.rows[0];
+}
+
+/** The delegations made from one parent run. */
+async function delegationsFrom(ctx, parentRunId, deps = {}) {
+  assertContext(ctx);
+  return (await q(deps)(
+    `SELECT id, objective_id, parent_run_id, child_run_id, calling_agent, target_agent, workflow,
+            capability, autonomy_tier, policy_decision, depth, reason, at
+       FROM office_delegations WHERE company_id = $1 AND parent_run_id = $2
+      ORDER BY at`,
+    [ctx.companyId, parentRunId]
+  )).rows;
+}
+
+/**
+ * The state of one run, for the "is my parent still alive" question.
+ *
+ * Scoped: a run of another company reads as absent, which is the right answer — a delegation whose
+ * parent this context cannot see is not a delegation this context may make.
+ */
+async function runState(ctx, runId, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `SELECT run_id, root_run_id, parent_run_id, state, objective_id, agent, workflow
+       FROM agent_runs WHERE company_id = $1 AND run_id = $2`,
+    [ctx.companyId, runId]
+  );
+  return res.rows[0] || null;
+}
+
 // Objective-level spend, measured and unmeasured, for the whole life of the objective. The
 // enterprise cap is per DAY; an objective's budget is a TOTAL — a $10 objective that has spent
 // $10 is finished whether that happened today or last week.
@@ -913,4 +990,5 @@ module.exports = {
   recordCost, openException, resolveException, requestApproval, decideApproval, supersedeApproval,
   recordOutcome,
   createPlan, recordPlanStep, setStepVerdict, setPlanVerdict, getPlan, listPlanSteps,
+  recordDelegation, delegationDepth, delegationsFrom, runState,
 };
