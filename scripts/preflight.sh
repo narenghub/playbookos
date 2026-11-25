@@ -336,6 +336,11 @@ pf_step "autonomous execution needs a finite authorized budget" node scripts/che
 # hardware-only work a cloud worker cannot do is never selected, and therefore queues with its
 # attempts unconsumed rather than being claimed and failed.
 pf_step "work executes only where it is eligible to" node scripts/check-execution-eligibility-db.js
+# Decision 4 (2026-11-25). A worker's execution capabilities are SERVER-AUTHORIZED: they travel on
+# an operator-issued enrollment token, the enrollment path has no parameter a worker could use to
+# declare its own, and no module updates the column afterwards — with a planted-write control so
+# that last verdict is not vacuous.
+pf_step "a worker cannot declare its own capabilities" node scripts/check-worker-capability-authority-db.js
 # B3.2. An objective decomposes into a bounded plan, and the plan is a PROPOSAL: every step is
 # independently validated against company scope, capability permission, execution eligibility, STOP
 # controls, approval requirement and budget. A proposal that states any of those — a model's
