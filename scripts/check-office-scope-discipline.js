@@ -66,6 +66,13 @@ const ROOT = path.join(__dirname, '..');
 // the next person hits the failure, adds a line here, and the predicate quietly moves back to the
 // call sites.
 const EXEMPT = new Set([
+  // §6's initiator check. Same category as the validators below: it SEEDS companies and objectives
+  // into a DISPOSABLE cluster so the initiator has work to discover, then deletes them by recorded
+  // id. The kernel rows are the fixture, not the subject — what it measures is which objectives the
+  // initiator judges startable. The initiator ITSELF reaches no kernel table: its sweep is
+  // scope.bootstrapObjectivesForInitiation, which this check caught it not using on the first
+  // attempt and which is the reason that accessor exists.
+  path.join('scripts', 'check-office-initiator-db.js'),
   // The end-to-end acceptance test (ruling 8 item 5). It SEEDS a company, an objective and a run
   // into a DISPOSABLE cluster it creates and destroys, so that the real server has something to
   // serve — the kernel rows are the fixture, not the subject. It never runs against production

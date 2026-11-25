@@ -393,6 +393,45 @@ cron.schedule('0 7 * * 1-5', withAlerts('daily-7cst-command-center-briefing', as
   console.log(`[CRON] Daily briefing done — date=${result.snapshot.date}, emailed=${result.emailed} to ${result.emailed_to}`);
 }), { timezone: 'America/Chicago' });
 
+// ── §6: THE SCHEDULED OBJECTIVE INITIATOR ───────────────────────────────────
+//
+// The piece that makes the autonomous office RUN. B3.10 proved the fifteen-step cycle executes;
+// the checker that drove it was the scheduler. This is the schedule.
+//
+// ── INERT BY DEFAULT, AND NOT BECAUSE NOTHING IS ELIGIBLE ──────────────────
+//
+// `OFFICE_INITIATOR_ENABLED` must be exactly 'true' or this registers no cron at all. It is
+// tempting to skip the flag: no production objective is currently active, supervised AND funded —
+// obj-abiozen-first-governed-rfq has no budget — so the initiator would start nothing anyway.
+//
+// CLAUDE.md names that reasoning for what it is: *"'It will be refused anyway' is a prediction,
+// not a safeguard."* The one run where the prediction is wrong is the run nobody is expecting, and
+// here being wrong means autonomous work starting unattended in production. So the default is off,
+// turning it on is a deliberate act, and B6.8's rule — activate only specifically approved
+// workflows — is satisfied by configuration rather than by the state of a table.
+//
+// Pinned to America/Chicago (B7.23): eight crons fired five to six hours early and drifted with
+// DST because their schedules were UTC while their names and intent were local.
+if (String(process.env.OFFICE_INITIATOR_ENABLED) === 'true') {
+  cron.schedule('0 6 * * 1-5', withAlerts('office-scheduled-initiation', async () => {
+    const { initiateDueObjectives } = require('./src/lib/office/initiator');
+    const r = await initiateDueObjectives({});
+    console.log(`[CRON] office initiation — business day ${r.businessDay}: `
+      + `${r.initiated.length} started, ${r.duplicates.length} duplicate, `
+      + `${r.refused.length} refused, ${r.skipped.length} not eligible `
+      + `(of ${r.considered} considered)`);
+    // Refusals are printed individually. A refusal is a STOP or an unreadable kill state — an
+    // operational fact somebody needs to see — whereas a skip is an objective that is simply not
+    // ready, and there will routinely be many.
+    for (const x of r.refused) {
+      console.warn(`[CRON] office initiation REFUSED ${x.objectiveId}: ${x.reason} — ${x.detail}`);
+    }
+  }), { timezone: 'America/Chicago' });
+} else {
+  console.log('[CRON] office-scheduled-initiation NOT registered '
+    + '(set OFFICE_INITIATOR_ENABLED=true to enable)');
+}
+
 // Monday 8 AM: Goal Engine — cascade goals then assign weekly KPIs for all active users
 cron.schedule('0 8 * * 1', withAlerts('weekly-mon-8utc-goal-engine', async () => {
   console.log('[CRON] Goal Engine starting...');

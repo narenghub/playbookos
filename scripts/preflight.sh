@@ -400,6 +400,11 @@ pf_step "the spend ceiling is a proven bound over the real request" \
 # guards the finding itself — a new gate.js caller turns this red.
 pf_step "the authorization adoption inventory holds" \
   node scripts/check-authz-adoption-inventory.js
+# §6 (2026-11-25): a run starts because a schedule fired, not because a checker was invoked.
+pf_step "a scheduled run starts with nobody naming the objective" \
+  node scripts/check-office-initiator-db.js
+pf_step "the initiator creates no authority" \
+  env JWT_SECRET=preflight node --test src/lib/office/initiator-is-read-only.test.js
 # Is the K1 PRODUCTION validator trustworthy? It runs once against production and its verdict is
 # what decides PRODUCTION VALIDATED, so three things need proving first: it writes nothing durable
 # (a fixture left on production could not be removed — agent_run_events is append-only); it goes red

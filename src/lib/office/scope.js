@@ -157,6 +157,38 @@ async function bootstrapObjectiveForContext(objectiveId, deps = {}) {
   return res.rows[0] || null;
 }
 
+/**
+ * Objectives a schedule may consider, with the company facts needed to judge eligibility.
+ *
+ * ── WHY THIS LIVES HERE AND NOT IN THE INITIATOR ──────────────────────────
+ *
+ * The office kernel tables are reachable in SQL only from this module, which
+ * `check-office-scope-discipline.js` enforces. §6's initiator needs to SWEEP objectives across
+ * companies before any context exists — it is the thing that finds the work — so it cannot take a
+ * resolved context as the accessor rule normally requires.
+ *
+ * That is the same exception `bootstrapObjectiveForContext` above takes, and for the same reason: a
+ * function whose job is to ESTABLISH which company is involved cannot require one first. The honest
+ * resolution is to put the query where kernel SQL belongs rather than to exempt a second module
+ * from the discipline — an exemption list that grows one reasonable entry at a time is how a
+ * discipline stops being one.
+ *
+ * READ ONLY, and it decides nothing. Every eligibility rule stays in the initiator, where it is
+ * tested; this returns rows.
+ */
+async function bootstrapObjectivesForInitiation(companyId = null, deps = {}) {
+  const res = await q(deps)(
+    `SELECT o.id, o.company_id, o.objective, o.status, o.autonomy_tier, o.budget_usd,
+            c.status AS company_status
+       FROM objectives o
+       JOIN companies c ON c.id = o.company_id
+      WHERE ($1::text IS NULL OR o.company_id = $1)
+      ORDER BY o.priority, o.id`,
+    [companyId]
+  );
+  return res.rows;
+}
+
 // ---------------------------------------------------------------------------------------------
 // K2 — CEO AUTHORITY. The one place a company is CHOSEN rather than derived.
 //
@@ -1326,6 +1358,7 @@ module.exports = {
   provenance, spendForObjective, unmeasuredForRun, claimApprovalRelease, approvalReleaseState,
   verifyReleasedApprovalForDigest, approvalsForReview, approvalForReview,
   bootstrapObjectiveForContext, bootstrapApprovalForExecution, bootstrapApprovalOwner,
+  bootstrapObjectivesForInitiation,
   rfqApprovalsForEligibility,
   createObjective, setObjectiveStatus,
   listObjectives, getObjective, listOpenExceptions, listPendingApprovals, spendToday, listOutcomes,

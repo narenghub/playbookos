@@ -454,6 +454,18 @@ const CRON_SCOPES = {
   // and only a global or workflow stop halts it. Registered here so scopesForCron() returns real
   // scopes AND so K8 accepts `workflow=quarter-hourly-office-recovery` as a stoppable target.
   'quarter-hourly-office-recovery':          { company: null,      agent: null },
+  // §6 (2026-11-25): the scheduled objective initiator — the piece that makes the autonomous
+  // office RUN rather than be driven by a checker somebody invokes.
+  //
+  // company null, deliberately, and this is the one entry where that needs defending. The
+  // initiator sweeps EVERY active company and derives each objective's company from the objective
+  // itself; it has no company of its own to be stopped by. Per-company containment is not lost:
+  // the initiator asks `checkStopped({ capability: 'office.initiate', company })` per objective
+  // before opening a run, so a stop on Abiozen halts Abiozen's initiations and leaves Adifice's
+  // alone — finer-grained than a single company key on this entry could express.
+  //
+  // agent 'office-initiator' so the existing per-agent stop reaches the whole sweep at once.
+  'office-scheduled-initiation':             { company: null,      agent: 'office-initiator' },
   // R1 reconciliation. Platform-level like the reaper: reporting unresolved external attempts
   // belongs to no one business, and an operator halting Abiozen should not blind the channel that
   // says which supplier correspondence is in an unknown state.
