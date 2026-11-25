@@ -377,7 +377,22 @@ pf_step "the membership proposal is right, and writes nothing" node scripts/chec
 # B7.6. Six producers in four modules and two processes bind approvals. They agree or every
 # approved external send refuses, and each local expression of "the message" is locally correct —
 # which is why a reviewer cannot catch a second one and a scanner can.
+# B7.5. This scanner was written because "a test could not have caught them" and then was
+# never wired in — so it ran only when somebody remembered. The checker existed, the tracker said
+# DONE, and the gate never asked: the same shape as every other measurement that stood in for a
+# property. It is a gate step now.
+pf_step "every recipient field that reaches a provider is passed to the gate" \
+  node scripts/check-email-gate-recipient-coverage.js
+# B7.7. The recipients and sender named INSIDE a raw MIME blob, which decide who actually
+# receives the message on the Gmail road.
+pf_step "the bytes name the recipients, and the bytes are judged" \
+  env JWT_SECRET=preflight node --test src/lib/outbound/mime-authorization.test.js
 pf_step "one definition of the message a human approved" node scripts/check-approval-digest-discipline.js
+# B7.9. Whether this platform may send AS an identity — not whether a provider will carry it.
+# mailer.js:116 authorized a sender by its DOMAIN, which let any caller send as the CEO or as a
+# departed director.
+pf_step "a sender is an authorized identity, not a familiar domain" \
+  node scripts/check-sender-identity-db.js
 # Is the K1 PRODUCTION validator trustworthy? It runs once against production and its verdict is
 # what decides PRODUCTION VALIDATED, so three things need proving first: it writes nothing durable
 # (a fixture left on production could not be removed — agent_run_events is append-only); it goes red

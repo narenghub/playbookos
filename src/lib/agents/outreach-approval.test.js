@@ -222,6 +222,10 @@ test('4. the released message passes dispatch, and a tampered one does not', asy
 
   const sends = [];
   const deps = {
+    // B7.9: dispatch asks whether this platform may send AS this identity and fails closed
+    // when it cannot ask. This file is not about that boundary — dispatch.test.js owns it,
+    // including the control that dispatch consults the real module when nothing is injected.
+    senderIdentity: { authorizedSender: async ({ from }) => ({ ok: true, sender: from }) },
     env: { COMPANY_DOMAINS: 'abiozen.com' },
     gate: { assertSendAllowed: async () => ({ allowed: true }) },
     ledger: {
@@ -248,7 +252,12 @@ test('4. the released message passes dispatch, and a tampered one does not', asy
   // (b) the SAME approval and digest, with the bytes swapped in flight → refused, 0 more sends
   const tampered = await D.dispatch({
     message: { ...rel.message, mailbox: MSG.mailbox,
-      raw: Buffer.from('swapped after release').toString('base64url') },
+      // Real MIME with the SAME headers as RAW, differing only in the body. B7.7 authorizes the
+      // two identically, so the refusal below can only come from the digest binding — which is
+      // what this test is about. A placeholder blob would be refused earlier, as a message whose
+      // recipients cannot be established, and the digest would never be reached.
+      raw: Buffer.from('From: sales@abiozen.com\r\nTo: buyer@acme-pharma.test\r\n\r\n'
+        + 'swapped after release').toString('base64url') },
     transport: rel.transport, idempotencyKey: 'cphi:4821:2b',
     approvalId: rel.approvalId, expectedDigest: rel.expectedDigest, companyId: rel.companyId,
   }, deps);

@@ -56,6 +56,27 @@ function mockLedger({ priorClaim = null } = {}) {
   };
 }
 
+// B7.9. dispatch asks whether this platform may send AS the identity in the From line and fails
+// closed when it cannot ask — and this driver has no database to ask. So the authorization is
+// supplied here, the same way the gate and the ledger already are, and section 2 gains a scenario
+// that DENIES it. A boundary that is only ever stubbed to yes is not demonstrated by a driver whose
+// whole purpose is to enumerate refusals.
+const senderAuthorized = {
+  authorizedSender: async ({ from }) => ({ ok: true, sender: from, via: 'driver fixture' }),
+};
+const senderUnauthorized = {
+  authorizedSender: async () => ({ ok: false, code: 'sender_not_authorized',
+    reason: 'nothing declares this address as an identity ABIOZEN may send as, through this '
+      + 'provider account. Being on a company domain is a deliverability fact, not an authorization' }),
+};
+
+/** A real RFC822 blob, base64url, as the Gmail API takes it and as B7.7 now reads it. */
+function rfc822({ to, from, body = 'hello', subject = 'Re: CPHI Milan — API supply follow-up' }) {
+  const mime = [`From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'MIME-Version: 1.0',
+    '', body].join('\r\n');
+  return Buffer.from(mime, 'utf8').toString('base64url');
+}
+
 const gateAllowing = { assertSendAllowed: async () => ({ allowed: true }) };
 const gateStopping = {
   assertSendAllowed: async () => ({ allowed: false,
@@ -64,9 +85,10 @@ const gateStopping = {
 };
 
 /** One scenario. Asserts the provider-invocation count, and prints it either way. */
-async function scenario(name, { call, gate = gateAllowing, ledger = mockLedger(), expectSends, expectOk }) {
+async function scenario(name, { call, gate = gateAllowing, ledger = mockLedger(),
+  senderIdentity = senderAuthorized, expectSends, expectOk }) {
   const t = mockTransport();
-  const deps = { env: ENV, gate, ledger, transports: { gmail_cphi: t.impl } };
+  const deps = { env: ENV, gate, ledger, senderIdentity, transports: { gmail_cphi: t.impl } };
   const r = await D.dispatch(call, deps);
 
   const sendsOk = t.sends.length === expectSends;
@@ -101,7 +123,10 @@ async function scenario(name, { call, gate = gateAllowing, ledger = mockLedger()
     subject: 'Re: CPHI Milan — API supply follow-up',
     html: '<p>Following up on our conversation at stand 4C-21 regarding paracetamol API supply.</p>',
     mailbox: 'naren@abiozen.com',
-    raw: 'UkVBTC1SRkM4MjItQllURVMtRk9SLVRIRS1XSVJF',
+    // REAL RFC822. This was a placeholder, which B7.7 now refuses — correctly: a blob whose
+    // headers name no recipient is not an internal send, it is a send whose destination cannot be
+    // established. The driver has to carry a real message because dispatch now reads the bytes.
+    raw: rfc822({ to: BUYER, from: 'naren@abiozen.com', body: 'Following up from stand 4C-21.' }),
   };
   // `{ transport: 'gmail_cphi' }` — the transport every scenario below dispatches on. B7.6 binds
   // which provider account carries the message, so a digest computed without it describes a
@@ -119,7 +144,7 @@ async function scenario(name, { call, gate = gateAllowing, ledger = mockLedger()
   line('     Approval is MANDATORY for an external recipient — not checked when supplied.');
   line();
 
-  line('── 2. THE FIVE REFUSALS ─────────────────────────────────────────────────────');
+  line('── 2. THE SIX REFUSALS ──────────────────────────────────────────────────────');
   line();
   await scenario('a STOP is in force', {
     call: { message, transport: 'gmail_cphi', idempotencyKey: 'cphi:4821:step2',
@@ -128,13 +153,23 @@ async function scenario(name, { call, gate = gateAllowing, ledger = mockLedger()
   });
 
   await scenario('the body was altered after approval', {
-    call: { message: { ...message, raw: 'VEFNUEVSRUQtQllURVM' }, transport: 'gmail_cphi',
+    // Same headers, different body — so B7.7 authorizes it identically and the refusal can only
+    // come from the digest binding, which is what this scenario is about.
+    call: { message: { ...message,
+      raw: rfc822({ to: BUYER, from: 'naren@abiozen.com', body: 'ALTERED AFTER APPROVAL' }) },
+    transport: 'gmail_cphi',
       idempotencyKey: 'cphi:4821:step2', approvalId: 'apv-4821', expectedDigest: digest },
     expectSends: 0, expectOk: false,
   });
 
   await scenario('the recipient was swapped after approval', {
-    call: { message: { ...message, to: 'someone-else@elsewhere.test' }, transport: 'gmail_cphi',
+    // Swapped in the envelope AND in the bytes. Swapping only the envelope is now caught earlier,
+    // by B7.7's envelope-vs-message check — a better refusal, but then this scenario would no
+    // longer measure the digest binding it is named for.
+    call: { message: { ...message, to: 'someone-else@elsewhere.test',
+      raw: rfc822({ to: 'someone-else@elsewhere.test', from: 'naren@abiozen.com',
+        body: 'Following up from stand 4C-21.' }) },
+    transport: 'gmail_cphi',
       idempotencyKey: 'cphi:4821:step2', approvalId: 'apv-4821', expectedDigest: digest },
     expectSends: 0, expectOk: false,
   });
@@ -150,6 +185,15 @@ async function scenario(name, { call, gate = gateAllowing, ledger = mockLedger()
     call: { message, transport: 'smtp-direct', idempotencyKey: 'cphi:4821:step2',
       approvalId: 'apv-4821', expectedDigest: digest },
     expectSends: 0, expectOk: false,
+  });
+
+  await scenario('nothing authorizes sending as this identity', {
+    // B7.9. mailer.js authorized a sender by its DOMAIN — a deliverability fact about Resend —
+    // which let any caller send as the CEO or as a departed director whose address is still on the
+    // domain. An approved message from an unauthorized identity does not go.
+    call: { message, transport: 'gmail_cphi', idempotencyKey: 'cphi:4821:step2',
+      approvalId: 'apv-4821', expectedDigest: digest },
+    senderIdentity: senderUnauthorized, expectSends: 0, expectOk: false,
   });
 
   line('── 3. THE ONE PATH THAT IS PERMITTED ────────────────────────────────────────');
@@ -168,8 +212,14 @@ async function scenario(name, { call, gate = gateAllowing, ledger = mockLedger()
   line('── 4. AND THE CHANNEL THAT MUST KEEP WORKING ────────────────────────────────');
   line();
   await scenario('internal recipient, no approval needed', {
-    call: { message: { ...message, to: OPS }, transport: 'gmail_cphi',
-      idempotencyKey: 'ops:digest:2026-11-13' },
+    // THE RAW MUST ADDRESS OPS TOO, and the reason is worth recording. As written, this scenario
+    // swapped only the ENVELOPE to an internal address and left the bytes addressed to the buyer —
+    // which is exactly the B7.7 defect: an internal-looking envelope needs no approval, and Gmail
+    // delivers to whoever the headers name. This driver's "channel that must keep working"
+    // scenario was, as written, a demonstration of the attack. It now sends an internal message.
+    call: { message: { ...message, to: OPS,
+      raw: rfc822({ to: OPS, from: 'naren@abiozen.com', body: 'Nightly digest.' }) },
+    transport: 'gmail_cphi', idempotencyKey: 'ops:digest:2026-11-13' },
     expectSends: 1, expectOk: true,
   });
   line('     If approval were required for everything, the operator alerts and the 6pm scores');

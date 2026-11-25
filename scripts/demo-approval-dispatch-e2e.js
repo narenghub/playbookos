@@ -148,6 +148,11 @@ function mountApprovals(senderUrl) {
     // The transport is the REAL sender-service client, pointed at the real service over a socket.
     dispatch: (args) => D.dispatch(args, {
       env: ENV, gate, ledger,
+      // B7.9. This driver exercises the real sender service over a socket with a mocked store and
+      // no sender declarations, so dispatch's sender authorization is supplied here alongside the
+      // gate and the ledger. The boundary is demonstrated in demo-governed-dispatch.js and
+      // measured against a real database in check-sender-identity-db.js.
+      senderIdentity: { authorizedSender: async ({ from }) => ({ ok: true, sender: from }) },
       transports: {
         gmail_cphi: SENDER_CLIENT.transportFor('gmail_cphi',
           { url: senderUrl, secret: process.env.SENDER_SERVICE_SECRET }),

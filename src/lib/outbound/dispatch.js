@@ -57,6 +57,13 @@ const RECIPIENTS = require('./recipients');
 // The canonical approval binding (B7.6). The ledger's digestOf is an audit fingerprint; this is
 // what authorizes a send. Both roads — here and mailer.js — use this one module.
 const DIGEST = require('./approval-digest');
+// B7.7. For the Resend road the envelope IS the message; for the Gmail road `raw` is, and Gmail
+// derives its recipients from the headers inside those bytes. This module reads them.
+const MIME = require('./mime-authorization');
+// B7.9. Whether this platform may send AS the identity in the From line, for this company, through
+// this provider account. B7.6b BINDS from/replyTo/provider account to an approval; this is whether
+// they were authorized in the first place.
+const SENDER = require('./sender-identity');
 
 // ── THE TRANSPORT REGISTRY ──────────────────────────────────────────────────
 //
@@ -137,6 +144,33 @@ function transmittedDigest(message, { transport = null, companyId = null } = {})
     mailbox });
 }
 
+/**
+ * Record a refusal that happens BEFORE the ledger would normally open.
+ *
+ * Step 5's comment says why refusals are ledgered at all: *"a refusal nobody can audit is
+ * indistinguishable from a bug, and the containment evidence is built from these rows."* A B7.7
+ * refusal is the single most interesting row this road can produce — somebody handed it a message
+ * whose bytes name a recipient nothing judged — and it would otherwise be the one refusal with no
+ * record, purely because the check has to run before the classification.
+ *
+ * Best-effort, and deliberately so: a security refusal must never become a ledger error. If the
+ * ledger cannot be reached the send is still refused, and the only thing lost is the row.
+ */
+async function recordRefusal({ ledger, deps, message, transport, workflow, agent, companyId,
+  approvalId, idempotencyKey, why, scope }) {
+  try {
+    const att = await ledger.beginAttempt({
+      transport, provider: transport,
+      to: message.to, subject: message.subject, html: message.html,
+      workflow, agent, companyId, approvalId,
+      claimRef: idempotencyKey,
+      correlationId: idempotencyKey ? dispatchIdFor(idempotencyKey) : null,
+      consequential: true,
+    }, deps.ledgerDeps);
+    if (att && att.ok && typeof att.blocked === 'function') await att.blocked(why, scope);
+  } catch (_) { /* the refusal stands either way */ }
+}
+
 const refuse = (phase, error, extra = {}) => ({
   ok: false, id: null, phase, error, providerResponded: false, dispatched: false, ...extra,
 });
@@ -182,7 +216,13 @@ async function dispatch({
   if (!message || typeof message !== 'object') {
     return refuse('refused_before_request', 'dispatch requires a message object');
   }
-  const { to, subject, html, raw } = message;
+  // `cc` and `bcc` are READ here, not merely spread onto the transport. The JSDoc has advertised
+  // `cc` since this file was written and the code did not read it, which the recipient-coverage
+  // scanner reported as a note: a caller supplying one had it silently dropped from every
+  // authorization decision while the transports that happen to forward only explicit fields kept
+  // it from reaching a provider. That made the hole depend on the transport rather than on the
+  // gate, which is the wrong thing for it to depend on.
+  const { to, subject, html, raw, cc = null, bcc = null } = message;
   // A BODY IN EITHER FORM. This required `html` specifically, which is right for the Resend path
   // and wrong for every Gmail one: there the body is `raw`, a prepared RFC822 blob, and `html` is
   // at best a copy of it. The deliverability probe passes raw with an empty html and would have
@@ -208,13 +248,57 @@ async function dispatch({
       `unknown transport ${JSON.stringify(transport)}; registered: ${Object.keys(registry).sort().join(', ') || '(none)'}`);
   }
 
+  // ── 2a. B7.7: THE BYTES NAME THE RECIPIENTS, SO THE BYTES ARE JUDGED ──────
+  //
+  // This must come BEFORE the classification below, and that ordering is the whole fix. The
+  // classification decides whether an approval is MANDATORY. Judge the envelope `to` of a message
+  // whose real recipients live in `raw`, and a blob addressed to a stranger under an envelope
+  // addressed to a colleague needs no approval, acquires no digest, and leaves. It is before the
+  // ledger for the same reason, so the refusal is recorded by hand rather than by being late.
+  //
+  // mime-authorization refuses malformed, ambiguous, conflicting and group-syntax headers, and
+  // requires the recipient set in the bytes to be EXACTLY the envelope's. Nothing is stripped or
+  // rewritten: a send whose destination is in question is refused, not repaired.
+  let authorizedRecipients = null;
+  let bytesSender = null;
+  if (raw) {
+    const verdict = MIME.authorizeRawMessage(message);
+    if (!verdict.ok) {
+      const why = `the raw message could not be authorized (${verdict.code}): ${verdict.reason}. `
+        + 'Nothing was transmitted.';
+      await recordRefusal({ ledger, deps, message, transport, workflow, agent, companyId,
+        approvalId, idempotencyKey, why, scope: `mime:${verdict.code}` });
+      return refuse('refused_before_request', why,
+        { mimeVerdict: verdict.code, stopped: true });
+    }
+    authorizedRecipients = verdict.recipients;
+    // The identity the TRANSMITTED BYTES claim. B7.7 has just established that this is the single
+    // From header of the message and that the envelope, where it declares one, agrees — so this is
+    // the identity to ask B7.9 about. Asking about the envelope `from` instead would ask about a
+    // description of the message rather than the message.
+    bytesSender = verdict.sender;
+  }
+
   // ── 3. INSIDE OR OUTSIDE? THIS DECIDES WHETHER APPROVAL IS MANDATORY ──────
   //
   // Refused if it cannot be decided. "I could not tell whether this leaves the company" is not a
   // reason to send it.
+  //
+  // Judged over `to`, `cc`, `bcc` AND, when there is one, the recipient set read out of `raw` —
+  // not `to` alone, which is what this was. `to` alone is the B7.2 defect on this road: an email
+  // addressed to a colleague with an outside address in `cc` was classified internal, so the
+  // approval requirement in step 4 never fired. email-gate.js has judged all three fields since
+  // B7.2; dispatch handed it one of them.
+  //
+  // With `raw` present the two sets are equal by the check above, so the union is either of them.
+  // It is written as a union anyway: a later change that relaxes the equality must not silently
+  // narrow what gets classified.
+  const everyRecipient = authorizedRecipients
+    ? [...new Set([...MIME.envelopeAddresses(to, cc, bcc), ...authorizedRecipients])]
+    : [to, cc, bcc].filter((x) => x !== null && x !== undefined);
   let external;
   try {
-    external = recipients.isExternal(to, env);
+    external = recipients.isExternal(everyRecipient, env);
   } catch (e) {
     return refuse('refused_before_request',
       `the recipients could not be classified as inside or outside the company (${e.message})`);
@@ -227,6 +311,57 @@ async function dispatch({
       + 'check that fires when they are supplied — they are required, and a caller that omits '
       + 'them is refused. Prepare the message through the approval boundary and release it.',
       { external: true, needsApproval: true });
+  }
+
+  // ── 4a. B7.9: IS THIS PLATFORM AUTHORIZED TO SEND AS THIS IDENTITY? ───────
+  //
+  // mailer.js:116 says what the old answer was, and has always said it: *"Any address on an
+  // AUTHORIZED domain works, because the domain (not the individual address) is what Resend
+  // authorizes."* That is a DELIVERABILITY fact about the provider standing in for a company
+  // authorization. With the domain as the only check, any caller could send as naren@abiozen.com,
+  // or as a departed director whose address is still on the domain.
+  //
+  // SCOPE, STATED HONESTLY: this is enforced here, on the governed external road, and NOT in
+  // mailer.js, which has 55 internal callers that pass no `from` at all and rely on the platform
+  // default. Covering them is the B7.9 remainder and it is recorded as such — enforcing it here
+  // first is the bounded change, on the path where a wrong sender reaches a customer.
+  //
+  // Only for EXTERNAL sends, for the same reason approval is only mandatory for them: an internal
+  // briefing from the platform default is not the hazard. An external message carries the identity
+  // out of the building.
+  if (external) {
+    let senderVerdict;
+    try {
+      // WHICH FIELD CARRIES THE IDENTITY DEPENDS ON THE ROAD, and getting this wrong refused
+      // every Gmail send. On the Resend road the sender is `from`, defaulted by the mailer. On the
+      // Gmail road there is often no `from` at all: the identity is the `mailbox` whose credential
+      // carries the message, and the `From:` header inside `raw`. Asking only about `from` reported
+      // `sender_unestablished` for a send whose identity is established twice over.
+      //
+      // Order: the bytes first (what will actually appear in the From line, already parsed and
+      // cross-checked against the envelope by B7.7), then the envelope, then the mailbox.
+      senderVerdict = await (deps.senderIdentity || SENDER).authorizedSender({
+        from: bytesSender || message.from || message.mailbox || null,
+        replyTo: message.replyTo || null,
+        companyId,
+        // providerAccountOf, NOT a local expression. One definition, in the digest module — the
+        // lesson of the two processes that each computed `resend:<from>` and the bare transport
+        // name and refused every external send as tampering.
+        providerAccount: DIGEST.providerAccountOf({ transport, mailbox: message.mailbox,
+          from: message.from || null }),
+      }, deps.senderDeps);
+    } catch (e) {
+      senderVerdict = { ok: false, code: 'sender_authorization_unknown',
+        reason: `the sender declarations could not be consulted (${e.message})` };
+    }
+    if (!senderVerdict.ok) {
+      const why = `this platform is not authorized to send as this identity `
+        + `(${senderVerdict.code}): ${senderVerdict.reason}. Nothing was transmitted.`;
+      await recordRefusal({ ledger, deps, message, transport, workflow, agent, companyId,
+        approvalId, idempotencyKey, why, scope: `sender:${senderVerdict.code}` });
+      return refuse('refused_before_request', why,
+        { senderVerdict: senderVerdict.code, stopped: true });
+    }
   }
 
   // ── 5. THE LEDGER OPENS BEFORE AUTHORIZATION IS DECIDED ───────────────────
@@ -328,7 +463,13 @@ async function dispatch({
   let decision;
   try {
     decision = await gate.assertSendAllowed({
-      capability: 'email.send', workflow, agent, company: companyId, to,
+      capability: 'email.send', workflow, agent, company: companyId,
+      // All three recipient fields, and the addresses read out of `raw` folded into `to` when there
+      // is one. assertSendAllowed has judged `to`+`cc`+`bcc` since B7.2 (`ALL_RECIPIENT_FIELDS`);
+      // this call site passed `to` alone, so the coverage that fix built was never reached from the
+      // governed road. The gate cannot judge a field it is not given.
+      to: authorizedRecipients ? [...authorizedRecipients, to] : to,
+      cc, bcc,
       approvalId, digest: actualDigest,
     }, deps.gateDeps);
   } catch (e) {

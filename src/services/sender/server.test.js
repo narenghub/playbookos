@@ -22,10 +22,19 @@ const LEDGER = require('../../lib/outbound/ledger');
 
 const SECRET = 'test-secret-not-a-credential';
 const EXTERNAL = 'buyer@acme-pharma.test';
+
+// ── REAL RFC822, BECAUSE dispatch NOW READS THE BYTES (B7.7) ───────────────
+//
+// These fixtures were placeholders ('UkFXLUJZVEVT', 'UkFX'). Harmless while nothing parsed `raw`;
+// refused now, because dispatch authorizes the recipients named inside the bytes and a placeholder
+// names none. A message whose destination cannot be established is not an internal send.
+const mimeRaw = (body, to = EXTERNAL, from = 'sales@abiozen.com') => Buffer.from(
+  `From: ${from}\r\nTo: ${to}\r\nSubject: Quotation QT-9001\r\n\r\n${body}`, 'utf8')
+  .toString('base64url');
 const INTERNAL = 'ops@abiozen.com';
 const ENV = { SENDER_SERVICE_SECRET: SECRET, COMPANY_DOMAINS: 'abiozen.com,adificetechnologies.com' };
 
-const MESSAGE = { to: EXTERNAL, subject: 'Quotation QT-9001', raw: 'UkFXLUJZVEVT', mailbox: 'sales@abiozen.com' };
+const MESSAGE = { to: EXTERNAL, subject: 'Quotation QT-9001', raw: mimeRaw('BYTES'), mailbox: 'sales@abiozen.com' };
 
 // THE SERVICE'S OWN PRODUCER, not a copy of its expression.
 //
@@ -79,6 +88,10 @@ function signed(payload, { secret = SECRET, timestamp = Date.now(), p = '/send' 
 async function call(payload, over = {}, reqOver = {}) {
   const c = over.transport || counter();
   const deps = {
+    // B7.9: dispatch asks whether this platform may send AS this identity and fails closed
+    // when it cannot ask. This file is not about that boundary — dispatch.test.js owns it,
+    // including the control that dispatch consults the real module when nothing is injected.
+    senderIdentity: { authorizedSender: async ({ from }) => ({ ok: true, sender: from }) },
     env: over.env || ENV,
     gate: over.gate || allow,
     ledger: over.ledger || fakeLedger(),
@@ -137,7 +150,8 @@ test('2d. a signature cannot be lifted onto a DIFFERENT message — 0 invocation
 
   const c = counter();
   const out = await S.handleSend({ raw: tampered, signature, timestamp },
-    { env: ENV, gate: allow, ledger: fakeLedger(), handlers: { gmail_cphi: c.send } });
+    { env: ENV, gate: allow, ledger: fakeLedger(), handlers: { gmail_cphi: c.send },
+      senderIdentity: { authorizedSender: async ({ from }) => ({ ok: true, sender: from }) } });
   assert.strictEqual(c.sends.length, 0, 'a valid signature was reused on a different message');
   assert.strictEqual(out.body.phase, 'bad_signature');
 });
@@ -162,7 +176,7 @@ test('3. a signed request for an external recipient with no approval is refused 
 
 test('3b. a digest mismatch is refused, computed from THESE bytes — 0 invocations', async () => {
   const approvedFor = digestOf(MESSAGE);
-  const tampered = { ...MESSAGE, raw: 'VEFNUEVSRUQ' };
+  const tampered = { ...MESSAGE, raw: mimeRaw('TAMPERED') };   // same headers, different body
   const { out, sends } = await call({ ...GOOD(tampered), expectedDigest: approvedFor });
   assert.strictEqual(sends.length, 0);
   assert.strictEqual(out.body.phase, 'digest_mismatch');
@@ -404,13 +418,16 @@ test('8. dispatch through the REAL service, over one shared ledger, sends exactl
 
   const server = S.createServer({
     env: ENV, gate: allow, ledger: shared,
+    // B7.9, as elsewhere in this file: the boundary is dispatch.test.js's, stubbed here so this
+    // cross-layer test measures the ledger namespacing it is about.
+    senderIdentity: { authorizedSender: async ({ from }) => ({ ok: true, sender: from }) },
     handlers: { gmail_cphi: async (m) => { calls.push(m.to); return { ok: true, id: 'g-1', providerResponded: true, meta: { threadId: 't-1' } }; } },
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
 
   try {
     const url = `http://127.0.0.1:${server.address().port}`;
-    const m = { to: EXTERNAL, subject: 'Quotation QT-9001', raw: 'UkFXLUJZVEVT', mailbox: 'sales@abiozen.com' };
+    const m = { to: EXTERNAL, subject: 'Quotation QT-9001', raw: mimeRaw('BYTES'), mailbox: 'sales@abiozen.com' };
     const r = await D.dispatch({
       message: m, transport: 'gmail_cphi', idempotencyKey: 'xlayer-1',
       // `{ transport: 'gmail_cphi' }` — the same transport the dispatch names. The binding covers
@@ -420,6 +437,7 @@ test('8. dispatch through the REAL service, over one shared ledger, sends exactl
       approvalId: 'apv-1', expectedDigest: D.transmittedDigest(m, { transport: 'gmail_cphi' }),
     }, {
       env: ENV, gate: allow, ledger: shared,
+      senderIdentity: { authorizedSender: async ({ from }) => ({ ok: true, sender: from }) },
       transports: { gmail_cphi: CLIENT.transportFor('gmail_cphi', { url, secret: SECRET }) },
     });
 
@@ -446,9 +464,9 @@ test('8b. and a REPLAYED request to the service is still refused as a duplicate'
   const rows = [{ id: 'att-prior', claimRef: 'sender:replay-1', outcome: 'CLAIMED' }];
   const c = counter();
   const out = await S.handleSend(signed({
-    message: { to: EXTERNAL, subject: 'S', raw: 'UkFX', mailbox: 'sales@abiozen.com' },
+    message: { to: EXTERNAL, subject: 'S', raw: mimeRaw('S'), mailbox: 'sales@abiozen.com' },
     transport: 'gmail_cphi', idempotencyKey: 'replay-1',
-    approvalId: 'apv-1', expectedDigest: digestOf({ to: EXTERNAL, subject: 'S', raw: 'UkFX' }),
+    approvalId: 'apv-1', expectedDigest: digestOf({ to: EXTERNAL, subject: 'S', raw: mimeRaw('S') }),
   }), {
     env: ENV, gate: allow, handlers: { gmail_cphi: c.send },
     ledger: {

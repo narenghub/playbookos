@@ -103,6 +103,20 @@ const AUTHORIZED_COMPANY_ID_TABLES = new Set([
   // company id. Not a kernel table: it is the function that ESTABLISHES a company, so it cannot
   // require one, the same exception bootstrapObjectiveForContext takes.
   'product_companies',
+  // B7.11 (2026-11-25): shared mailboxes scoped to a company and a purpose. company_id is what
+  // makes a declaration belong to one of the three companies instead of being internal for all of
+  // them, which was hole (2) in `INTERNAL_MAILBOXES`.
+  //
+  // THIS LINE WAS MISSING when the table was created, and the comment on
+  // `office_budget_exceptions` four entries up describes exactly what that costs: a freshly
+  // migrated database reads as drift and an approved change reports as a security regression. Same
+  // omission, same change, four days apart — which is why this list now carries a reason per entry
+  // rather than a name.
+  'shared_mailboxes',
+  // B7.9 (2026-11-25): which identities this platform may send AS, per company and per provider
+  // account. company_id is the authorization: `sales@abiozen.com` declared for ABIOZEN is not an
+  // identity Adifice or GolfNEX may send as, and before this table the only check was the domain.
+  'sender_identities',
 ]);
 const REAL_CONSTRAINT_CODES = new Set(['23503', '23502', '23514', '23505']);
 const SENTINEL = '__k1_validation_rollback__';

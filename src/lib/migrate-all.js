@@ -239,6 +239,18 @@ const SCHEMA_STEPS = [
     required: true,
     run: (q) => require('./outbound/shared-mailboxes').migrateSharedMailboxes(q),
   },
+  {
+    // AFTER the office kernel too, for the same reason: a company-scoped sender identity
+    // references `companies`.
+    //
+    // B7.9. mailer.js authorized a sender by its DOMAIN — a deliverability fact about Resend,
+    // which let any caller send as the CEO or as a departed director. Empty by design: every row
+    // names an address, a company, a provider account and who authorized it. `MAIL_FROM` keeps
+    // working as the platform default, narrowed to the one address it names.
+    name: 'outbound: sender identities authorized per company and provider account (B7.9)',
+    required: true,
+    run: (q) => require('./outbound/sender-identity').migrateSenderIdentities(q),
+  },
   { name: 'research intelligence', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligence() },
   { name: 'research intelligence phase 3', required: true, usesOwnPool: true, run: () => db.migrateResearchIntelligencePhase3() },
 

@@ -20,6 +20,26 @@ const EXTERNAL = 'buyer@acme-pharma.test';
 const INTERNAL = 'ops@abiozen.com';
 const MSG = { to: EXTERNAL, subject: 'Quotation QT-9001', html: '<p>12 kg, USD 48,150</p>' };
 
+// ── A REAL RFC822 BLOB, BECAUSE B7.7 READS THE BYTES ───────────────────────
+//
+// The `raw` fixtures below used to be placeholder strings — 'UkFXLU9SSUdJTkFM', 'Ug'. They were
+// fine while nothing parsed `raw`, and they are not fine now: dispatch authorizes the recipients
+// named INSIDE the bytes, and a placeholder names none, so it is refused as a message whose
+// destination cannot be established. That refusal is correct, so the fix is a real fixture rather
+// than a relaxed check — and it makes the tests below stronger, because a digest-binding test whose
+// raw is a real message exercises the path a real send takes.
+function rawFor({ to, from = 'sales@abiozen.com', cc = null, replyTo = null,
+  body = 'hello', extraHeaders = [] } = {}) {
+  const h = [`From: ${from}`, `To: ${Array.isArray(to) ? to.join(', ') : to}`,
+    'Subject: Quotation QT-9001', 'MIME-Version: 1.0'];
+  if (cc) h.push(`Cc: ${Array.isArray(cc) ? cc.join(', ') : cc}`);
+  if (replyTo) h.push(`Reply-To: ${replyTo}`);
+  for (const e of extraHeaders) h.push(e);
+  const mime = `${h.join('\r\n')}\r\n\r\n${body}`;
+  return Buffer.from(mime, 'utf8').toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 // The binding covers which provider account carries the message (B7.6), and every dispatch in this
 // file uses the `resend` transport. Named once here rather than repeated at each comparison, so a
 // fixture cannot drift from the dispatch call it is meant to match.
@@ -70,12 +90,25 @@ const gateThrows = { assertSendAllowed: async () => { throw new Error('kill stat
 
 const ENV = { COMPANY_DOMAINS: 'abiozen.com,adificetechnologies.com' };
 
+// ── THE SENDER AUTHORIZER (B7.9) ───────────────────────────────────────────
+//
+// dispatch now asks whether this platform may send AS the identity in the From line, for this
+// company, through this provider account — and fails closed when it cannot ask. Every external
+// send in this file therefore needs an answer, and these tests are not about B7.9: they are about
+// idempotency, digest binding, STOPs and the ledger.
+//
+// So the harness supplies a stub that says yes. Two tests below keep that from making the real
+// check unobservable: one asserts dispatch REFUSES an unauthorized sender, and one asserts that
+// with no stub at all it consults the real module rather than proceeding.
+const senderAllows = { authorizedSender: async ({ from }) => ({ ok: true, sender: from, via: 'test stub' }) };
+
 function harness(over = {}) {
   const c = counter();
   const deps = {
     env: ENV,
     gate: over.gate || allow,
     ledger: over.ledger || fakeLedger(),
+    senderIdentity: over.senderIdentity || senderAllows,
     transports: { resend: c.impl, gmail: c.impl, ...(over.transports || {}) },
     ...(over.recipients ? { recipients: over.recipients } : {}),
   };
@@ -356,9 +389,11 @@ test('10. a tampered raw with consistent headers is refused — 0 invocations', 
   // binding check and sent a different message.
   const { c, deps } = harness();
   const approved = { to: EXTERNAL, subject: 'Quotation QT-9001', html: '<p>12 kg</p>',
-    mailbox: 'sales@abiozen.com', raw: 'UkFXLU9SSUdJTkFM' };
+    mailbox: 'sales@abiozen.com', raw: rawFor({ to: EXTERNAL, body: 'ORIGINAL' }) };
   const expectedDigest = D.transmittedDigest(approved);
-  const tampered = { ...approved, raw: 'UkFXLVRBTVBFUkVE' };   // same headers, different bytes
+  // Same headers — so B7.7 authorizes it identically and the refusal below can only come from the
+  // digest. Different body bytes, which is exactly what the binding exists to catch.
+  const tampered = { ...approved, raw: rawFor({ to: EXTERNAL, body: 'TAMPERED' }) };
 
   const r = await D.dispatch({ message: tampered, transport: 'gmail',
     idempotencyKey: 'cphi-1', approvalId: 'apv-1', expectedDigest }, deps);
@@ -387,7 +422,8 @@ test('10d. the transport result\'s meta reaches the caller', async () => {
     env: ENV, gate: allow, ledger: fakeLedger(),
     transports: { gmail: { send: async () => ({ ok: true, id: 'm-1', meta: { threadId: 't-99' } }) } },
   };
-  const m = { to: INTERNAL, subject: 's', html: '<p>b</p>', mailbox: 'a@abiozen.com', raw: 'Ug' };
+  const m = { to: INTERNAL, subject: 's', html: '<p>b</p>', mailbox: 'a@abiozen.com',
+    raw: rawFor({ to: INTERNAL }) };
   const r = await D.dispatch({ message: m, transport: 'gmail', idempotencyKey: 'k-1' }, deps);
   assert.strictEqual(r.ok, true, r.error);
   assert.strictEqual(r.meta.threadId, 't-99');
@@ -447,7 +483,8 @@ test('9c. a raw-only message is well formed — the body may be raw OR html', as
   // `raw`. The deliverability probe passes raw with no html and was refused as malformed on every
   // run — a well-formed message rejected for being well formed in the other shape.
   const { c, deps } = harness();
-  const m = { to: INTERNAL, subject: 'Delivery probe', raw: 'UkFXLU9OTFk', mailbox: 'sales@abiozen.com' };
+  const m = { to: INTERNAL, subject: 'Delivery probe', raw: rawFor({ to: INTERNAL }),
+    mailbox: 'sales@abiozen.com' };
   const r = await D.dispatch({ message: m, transport: 'resend', idempotencyKey: 'probe-1' }, deps);
   assert.strictEqual(r.ok, true, `a raw-only message was refused: ${r.error}`);
   assert.strictEqual(c.sends.length, 1);
@@ -485,4 +522,78 @@ test('12. the transport envelope carries the idempotency key and company', async
   assert.strictEqual(seen.companyId, 'abiozen');
   assert.strictEqual(seen.workflow, 'w');
   assert.strictEqual(seen.agent, 'a');
+});
+
+// ═══ 13. B7.9: THE IDENTITY IN THE FROM LINE IS AUTHORIZED, OR NOTHING GOES ═
+
+test('13. an unauthorized sender refuses an external send — 0 invocations', async () => {
+  // The harness above stubs this away for every other test in the file, which would make the whole
+  // boundary unobservable here. This is the test that keeps the stub honest.
+  const { c, deps } = harness({
+    senderIdentity: { authorizedSender: async () => ({ ok: false, code: 'sender_not_authorized',
+      reason: 'nothing authorizes this platform to send as that address' }) },
+  });
+  const r = await D.dispatch(GOOD(), deps);
+  assert.strictEqual(c.sends.length, 0, 'a message went out as an identity nothing authorizes');
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.senderVerdict, 'sender_not_authorized');
+});
+
+test('13a. with no stub, dispatch consults the REAL module and fails closed', async () => {
+  // A control that could not be stubbed away: no senderIdentity dep at all. The real module reads
+  // a `sender_identities` table that does not exist in this process, so it must refuse — not
+  // proceed. A boundary that is absent when nobody injects it is not a boundary.
+  const { c, deps } = harness();
+  delete deps.senderIdentity;
+  // An explicit `from`, deliberately. Without one the refusal is `sender_unestablished`, which
+  // happens BEFORE any source is consulted — so the test would pass with the declaration lookup
+  // deleted entirely. A test whose shape does not match the property measures nothing.
+  const r = await D.dispatch(GOOD({ ...MSG, from: 'sales@abiozen.com' }), deps);
+  assert.strictEqual(c.sends.length, 0,
+    'with no sender authorization available, an external message was still transmitted');
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.senderVerdict, 'sender_authorization_unknown',
+    'the refusal did not come from consulting a source and failing closed');
+});
+
+test('13b. an INTERNAL send is not subject to it — the platform default is not the hazard', async () => {
+  // Scope, asserted rather than described. Covering mailer.js's 55 internal callers is the B7.9
+  // remainder; if this ever starts refusing, those callers broke without anyone deciding to.
+  const { c, deps } = harness();
+  delete deps.senderIdentity;
+  const r = await D.dispatch({
+    message: { to: 'ops@abiozen.com', subject: 'briefing', html: '<p>x</p>' },
+    transport: 'resend', idempotencyKey: 'internal-1',
+  }, deps);
+  assert.strictEqual(r.ok, true, `an internal send was refused: ${r.error}`);
+  assert.strictEqual(c.sends.length, 1);
+});
+
+test('13c. the identity asked about comes from the BYTES, then the envelope, then the mailbox', async () => {
+  // A defect in the first wiring of this: it asked only about the envelope `from`. The Gmail road
+  // often has none — the identity is the `mailbox` holding the credential and the `From:` header
+  // inside `raw` — so every Gmail send was refused as `sender_unestablished` for a sender that was
+  // established twice over.
+  const asked = [];
+  const spy = { authorizedSender: async ({ from }) => { asked.push(from); return { ok: true, sender: from }; } };
+
+  const { deps } = harness({ senderIdentity: spy });
+  // (a) raw present → the From header in the bytes
+  await D.dispatch({ message: { to: EXTERNAL, subject: 's', mailbox: 'mbx@abiozen.com',
+    raw: rawFor({ to: EXTERNAL, from: 'bytes@abiozen.com' }) },
+  transport: 'gmail', idempotencyKey: 'id-a', approvalId: 'a',
+  expectedDigest: D.transmittedDigest({ to: EXTERNAL, subject: 's', mailbox: 'mbx@abiozen.com',
+    raw: rawFor({ to: EXTERNAL, from: 'bytes@abiozen.com' }) }, { transport: 'gmail' }) }, deps);
+  // (b) no raw, envelope from
+  await D.dispatch({ message: { to: EXTERNAL, subject: 's', html: '<p>x</p>', from: 'env@abiozen.com' },
+    transport: 'resend', idempotencyKey: 'id-b', approvalId: 'a',
+    expectedDigest: D.transmittedDigest({ to: EXTERNAL, subject: 's', html: '<p>x</p>',
+      from: 'env@abiozen.com' }, { transport: 'resend' }) }, deps);
+  // (c) neither → the mailbox
+  await D.dispatch({ message: { to: EXTERNAL, subject: 's', html: '<p>x</p>', mailbox: 'mbx@abiozen.com' },
+    transport: 'resend', idempotencyKey: 'id-c', approvalId: 'a',
+    expectedDigest: D.transmittedDigest({ to: EXTERNAL, subject: 's', html: '<p>x</p>',
+      mailbox: 'mbx@abiozen.com' }, { transport: 'resend' }) }, deps);
+
+  assert.deepStrictEqual(asked, ['bytes@abiozen.com', 'env@abiozen.com', 'mbx@abiozen.com']);
 });

@@ -108,6 +108,13 @@ const deps = () => ({
     ? { allowed: true }
     : { allowed: false, reason: 'STOPPED_BY_POLICY: capability:email.send', scope: 'capability:email.send' }) },
   ledger,
+  // B7.9. dispatch asks whether this platform may send AS the identity in the From line and
+  // fails closed when it cannot ask; this driver has a mocked store and no sender
+  // declarations, so the authorization is supplied here the same way the gate and the ledger
+  // already are. The boundary itself is demonstrated by scripts/demo-governed-dispatch.js,
+  // which now refuses six ways including an unauthorized identity, and measured by
+  // scripts/check-sender-identity-db.js against a real database.
+  senderIdentity: { authorizedSender: async ({ from }) => ({ ok: true, sender: from }) },
   transports: { gmail_cphi: transport.impl },
 });
 
@@ -271,7 +278,13 @@ const deps = () => ({
   // Tamper in flight, with the SAME approval and digest.
   const tampered = await D.dispatch({
     message: { ...released.message, mailbox: FROM,
-      raw: Buffer.from('a different letter entirely').toString('base64url') },
+      // Real RFC822 with the SAME headers as the released message, differing only in the body.
+      // A placeholder blob is refused earlier now, by B7.7, as a message whose recipients cannot
+      // be established — so this check would pass without the digest binding ever being consulted,
+      // and it is the digest binding it is named for.
+      raw: Buffer.from(`From: ${FROM}\r\nTo: ${contact.email}\r\n`
+        + `Subject: ${msg.headers.Subject}\r\n\r\na different letter entirely`,
+      'utf8').toString('base64url') },
     transport: released.transport,
     idempotencyKey: `cphi_followup_sends:${contact.id}:${nextStep}:t`,
     approvalId: released.approvalId, expectedDigest: released.expectedDigest,

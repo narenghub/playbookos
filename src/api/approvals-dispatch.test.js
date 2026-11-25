@@ -147,6 +147,8 @@ function mountRoute(w) {
     ...D,
     dispatch: (args) => D.dispatch(args, {
       env: ENV, gate: w.gate, ledger: w.ledger, transports: { gmail_cphi: w.transport },
+      // B7.9, as above: owned by dispatch.test.js, stubbed here.
+      senderIdentity: { authorizedSender: async ({ from }) => ({ ok: true, sender: from }) },
     }),
   } };
 

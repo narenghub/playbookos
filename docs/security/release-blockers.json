@@ -16,7 +16,7 @@
     "So the two prerequisite lists below are DATA THE GATE EVALUATES, not prose. Each entry must",
     "name how it is verified:",
     "  verified_by.checker     a script that exists AND is wired into preflight, so it actually runs",
-    "  verified_by.attestation a named person, a date and a scope — for things no script can see,",
+    "  verified_by.attestation a named person, a date and a scope \u2014 for things no script can see,",
     "                          such as a restore performed against production",
     "  verified_by: null       UNMEASURED. It BLOCKS. A prerequisite the gate does not check is not",
     "                          closed (B6.1's own rule, applied to itself)."
@@ -35,11 +35,11 @@
         "scanner workflow be able to set scan verdict fields; what shipped is structural",
         "separation, not privilege separation, and this is the gap."
       ],
-      "design_verified": "scripts/check-db-role-separation.js (31 assertions) and scripts/check-startup-without-ddl.js (28 assertions) — both exit 0 on a disposable cluster",
+      "design_verified": "scripts/check-db-role-separation.js (31 assertions) and scripts/check-startup-without-ddl.js (28 assertions) \u2014 both exit 0 on a disposable cluster",
       "remaining_work": [
-        "CODE: done (ruling 27 item 5). Boot no longer applies any DDL — server.js calls",
+        "CODE: done (ruling 27 item 5). Boot no longer applies any DDL \u2014 server.js calls",
         "src/lib/schema-ready.js, which only SELECTs, and exits non-zero if the schema is absent.",
-        "Migrations run as their own process: node scripts/migrate.js, 59 steps, with a",
+        "Migrations run as their own process: node scripts/migrate.js, 60 steps, with a",
         "schema_migrations ledger. Proved on a disposable cluster by",
         "scripts/check-startup-without-ddl.js (28 assertions, exit 0): the app imports, assesses,",
         "confirms, reviews and exports as a role with NOSUPERUSER, no CREATE on schema public and no",
@@ -74,12 +74,18 @@
       {
         "id": "B7.7",
         "title": "raw MIME recipient and sender authorization",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-email-gate-recipient-coverage.js",
+          "partial": "the recipients and sender named INSIDE raw MIME are authorized, ambiguous/duplicated/group headers are refused, and the envelope must match the bytes both ways. Enforced in dispatch before the internal/external classification"
+        }
       },
       {
         "id": "B7.9",
         "title": "sender identity and provider-account authorization",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-sender-identity-db.js",
+          "partial": "the identity, company and provider account are authorized and ENFORCED on the governed external road (dispatch). mailer.js's 55 internal callers are not yet covered, and no sender identity has been declared \u2014 the audit names which need one"
+        }
       },
       {
         "id": "B7.11",
@@ -144,12 +150,18 @@
       {
         "id": "B7.7",
         "title": "raw MIME authorization",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-email-gate-recipient-coverage.js",
+          "partial": "the recipients and sender named INSIDE raw MIME are authorized, ambiguous/duplicated/group headers are refused, and the envelope must match the bytes both ways. Enforced in dispatch before the internal/external classification"
+        }
       },
       {
         "id": "B7.9",
         "title": "sender and provider-account authorization",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-sender-identity-db.js",
+          "partial": "the identity, company and provider account are authorized and ENFORCED on the governed external road (dispatch). mailer.js's 55 internal callers are not yet covered, and no sender identity has been declared \u2014 the audit names which need one"
+        }
       },
       {
         "id": "B7.11",
@@ -200,7 +212,7 @@
         "id": "B1.12",
         "title": "a restore proven from a current production backup",
         "verified_by": null,
-        "only_satisfiable_by": "attestation — no script can see a production restore"
+        "only_satisfiable_by": "attestation \u2014 no script can see a production restore"
       },
       {
         "id": "B1.16",

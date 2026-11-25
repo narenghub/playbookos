@@ -192,6 +192,26 @@ function checkDispatch(ast, rel, src) {
   checked.push(`${rel}: recipient fields read off the message {${[...readOff].sort().join(', ') || 'to'}}`
     + ' are all passed to the gate');
 
+  // ── B7.7: THE ENVELOPE FIELDS ARE NOT THE ONLY RECIPIENTS ────────────────
+  //
+  // Everything above reasons about what dispatch reads off the MESSAGE OBJECT. On the Gmail road
+  // the recipients live inside `raw`, and this scanner described that for weeks as a latent hole
+  // on the grounds that no caller of buildMessage supplies a cc. That was an inventory of one
+  // producer: a `raw` blob does not have to come from buildMessage, and an envelope naming a
+  // colleague makes the approval requirement itself optional.
+  //
+  // So dispatch must consult the raw authorizer, and the requirement is enforced here rather than
+  // left as a sentence: a future edit that deletes the call turns this red.
+  const authorizesRaw = AST.callsTo(ast, 'authorizeRawMessage').length > 0;
+  if (!authorizesRaw) {
+    violations.push(`${rel}: nothing calls authorizeRawMessage, so the recipients named inside a `
+      + '`raw` blob are never judged. An envelope addressed to a colleague with bytes addressed to '
+      + 'a stranger needs no approval, acquires no digest, and leaves (B7.7).');
+  } else {
+    checked.push(`${rel}: the recipients named INSIDE \`raw\` are authorized before the message is `
+      + 'classified as internal or external');
+  }
+
   // The JSDoc advertises what a caller may supply. If it offers a recipient field the code never
   // forwards, a caller will reasonably supply it and silently have it dropped — or, worse, a later
   // implementer will wire it up and inherit an ungated channel.
@@ -242,16 +262,22 @@ function checkRawBuilders() {
   };
   walkDir(srcDir);
 
+  // ── THE TRIPWIRE IS DISARMED, BECAUSE THE HOLE IS CLOSED ─────────────────
+  //
+  // This used to be a violation: a caller supplying cc to buildMessage put a recipient inside bytes
+  // the gate did not read. Since B7.7 dispatch authorizes those headers and refuses any recipient
+  // the envelope does not name, so a cc-supplying caller is no longer a hazard — it is a message
+  // whose envelope must name the cc too, and dispatch says so if it does not.
+  //
+  // The inventory is still REPORTED, because it is the thing that would have to be re-audited if
+  // the authorizer were ever removed, and the clause above is what makes removing it loud.
   if (callers.length) {
-    violations.push('a raw MIME message is being built with cc/bcc, which puts recipients inside '
-      + 'bytes that the gate does not read: '
-      + `${callers.join(', ')}. src/lib/outbound/dispatch.js passes only the \`to\` DESCRIPTION of a `
-      + 'raw blob to assertSendAllowed, so those addresses would be delivered unjudged. Before '
-      + 'wiring this: make dispatch parse the recipient headers out of `raw` (src/lib/catalogue/'
-      + 'rfc822.js already decodes cc) and pass them to the gate.');
+    checked.push(`${callers.length} caller(s) build raw MIME with cc/bcc `
+      + `(${callers.join(', ')}); dispatch authorizes the headers in the bytes, so those addresses `
+      + 'are judged and must appear in the envelope too');
   } else {
-    checked.push('src/lib/gmail/message.js can emit a Cc header, and no caller supplies one — the '
-      + 'raw-path hole stays latent (tripwire armed)');
+    checked.push('src/lib/gmail/message.js can emit a Cc header and no caller supplies one; the '
+      + 'raw path is authorized either way since B7.7');
   }
 }
 

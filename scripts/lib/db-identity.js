@@ -71,6 +71,10 @@ const M7_TABLES = [
   'office_delegations',
   // Decision 1 (2026-11-25): explicit product→company mappings.
   'product_companies',
+  // B7.11 / B7.9 (2026-11-25): the outbound declaration tables — which shared mailboxes count as
+  // internal, and which identities this platform may send as. Both carry company_id because both
+  // answers differ per company.
+  'shared_mailboxes', 'sender_identities',
   // M7.1 / M7.2 / M7.3
   'worker_identities', 'worker_enrollment_tokens', 'worker_request_nonces',
   'worker_tasks', 'worker_results', 'worker_audit',

@@ -137,13 +137,24 @@ if (!url) {
         ? { allowed: true }
         : { allowed: false, reason: 'STOPPED_BY_POLICY: capability:email.send', scope: 'capability:email.send' }) },
     };
+    // B7.9, as above: this driver has no company or user tables to declare an identity in.
+    deps.senderIdentity = { authorizedSender: async ({ from }) => ({ ok: true, sender: from }) };
+
     server = SENDER.createServer({ ...deps, handlers });
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     const senderUrl = `http://127.0.0.1:${server.address().port}`;
 
     const transports = { [TRANSPORT]: CLIENT.transportFor(TRANSPORT, { url: senderUrl, secret: SECRET }) };
     const send = (key, over = {}) => {
-      const m = { to: EXTERNAL, subject: `S-${key}`, raw: Buffer.from(`body ${key}`).toString('base64url'),
+      // REAL RFC822. A placeholder blob is refused by B7.7 as a message whose recipients cannot
+      // be established, which is correct and would mean none of the ledger accounting below ever
+      // ran. This file builds only the ledger schema — no `companies`, no `users` — so a real
+      // sender DECLARATION is not available to it; the authorization is supplied in `deps` below
+      // instead, and the boundary itself is measured in check-sender-identity-db.js against a
+      // database that has those tables.
+      const m = { to: EXTERNAL, subject: `S-${key}`,
+        raw: Buffer.from(`From: sales@abiozen.com\r\nTo: ${EXTERNAL}\r\n`
+          + `Subject: S-${key}\r\n\r\nbody ${key}`, 'utf8').toString('base64url'),
         mailbox: 'sales@abiozen.com', ...(over.message || {}) };
       return D.dispatch({
         message: m, transport: TRANSPORT, idempotencyKey: key,
