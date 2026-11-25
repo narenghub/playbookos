@@ -118,8 +118,11 @@ const SRC = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', .
 
     const gate = [
       ['K1 company isolation in force', !!fkMatch && fkMatch.confmatchtype === 'f'],
-      ['budget enforced before the provider', aiSrc.includes('budget.enforceHierarchy')
-        && aiSrc.indexOf('budget.enforceHierarchy') < aiSrc.indexOf('llm.callClaude')
+      // B2.5b: `authorizeSpend` takes an atomic HOLD for the worst case before the provider is
+      // reached. Looking for the old `enforceHierarchy` here would report the stronger control as
+      // absent and refuse to activate over an improvement.
+      ['budget held before the provider', aiSrc.includes('budget.authorizeSpend')
+        && aiSrc.indexOf('budget.authorizeSpend') < aiSrc.indexOf('llm.callClaude')
         && budget.DAILY_CAP_USD === 100],
       ['governed renderer with containment', rfqSrc.includes('async function renderGovernedRFQ')
         && rfqSrc.includes('identityContainment')],

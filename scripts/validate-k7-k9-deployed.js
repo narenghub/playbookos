@@ -239,11 +239,16 @@ const SRC = (...p) => fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', .
     const prereqs = [
       ['stored objective verified', !!obj && obj.kpi_metric === 'qualified_supplier_quotes_received'
         && Number(obj.budget_usd) === 10, obj ? `${obj.kpi_metric}, $${obj.budget_usd}, ${obj.status}` : 'absent'],
-      ['K5/K6 production validated', Number(spend.calls) >= 0 && aiSrc.includes('budget.enforceHierarchy'),
+      // B2.5b: the governed path no longer merely ASKS the budget before the call — it takes an
+      // atomic HOLD for the worst case (`budget.authorizeSpend`). These two prerequisites looked
+      // for the old function name and read as NOT MET against a strictly stronger control, which
+      // would have blocked activation over an improvement.
+      ['K5/K6 production validated', Number(spend.calls) >= 0 && aiSrc.includes('budget.authorizeSpend'),
         'one accounted provider call measured on production (attributed to the validation fixture)'],
-      ['budget policy active', aiSrc.includes('budget.enforceHierarchy')
-        && aiSrc.indexOf('budget.enforceHierarchy') < aiSrc.indexOf('llm.callClaude')
-        && budget.DAILY_CAP_USD === 100, `$${budget.DAILY_CAP_USD}/day, enforced before the provider`],
+      ['budget policy active', aiSrc.includes('budget.authorizeSpend')
+        && aiSrc.indexOf('budget.authorizeSpend') < aiSrc.indexOf('llm.callClaude')
+        && budget.DAILY_CAP_USD === 100,
+        `$${budget.DAILY_CAP_USD}/day, held before the provider`],
       ['governed renderer deployed', rfqSrc.includes('async function renderGovernedRFQ')
         && rfqSrc.includes('identityContainment'), 'with identity containment'],
       ['K7 approval wiring deployed', !!payloadTrig && payloadTrig.tgenabled !== 'D'

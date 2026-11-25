@@ -1856,6 +1856,10 @@ globalThis.fetch = async (u, opts) => {
         await q(`DELETE FROM office_approvals WHERE run_id = $1`, [id]);
         await q(`DELETE FROM office_exceptions WHERE run_id = $1`, [id]);
         await q(`DELETE FROM office_cost_ledger WHERE run_id = $1`, [id]);
+        // B2.5b: governedCall now takes a HOLD before each call, so these runs own reservations.
+        // The composite FK to agent_runs refused the run delete until they went — the constraint
+        // doing its job, and this cleanup reporting it rather than swallowing it.
+        await q(`DELETE FROM office_budget_reservations WHERE run_id = $1`, [id]);
       }
       await q(`ALTER TABLE agent_run_events DISABLE TRIGGER trg_agent_run_events_append_only`);
       try {

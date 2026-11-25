@@ -739,6 +739,218 @@ async function listPlanSteps(ctx, planId, deps = {}) {
   )).rows;
 }
 
+// ── B2.5b: PRE-SPEND RESERVATIONS ───────────────────────────────────────────
+//
+// Owner instruction, 2026-11-25: "Prevent unauthorized expenditure before a metered call, not
+// merely after the budget has been exceeded. Atomic reservation or charging before execution."
+//
+// ── WHY THIS NEEDS A TRANSACTION AND A ROW LOCK ─────────────────────────────
+//
+// The naive version reads the spend, compares it with the budget, and inserts. Under READ
+// COMMITTED two concurrent callers both read the same spend, both find headroom, and both insert —
+// which is the defect this function exists to close, reproduced one layer down. A single INSERT …
+// SELECT … WHERE sum <= budget does not fix it either: the two subqueries are evaluated against a
+// snapshot that does not include the other transaction's uncommitted row.
+//
+// So every reservation for one objective serializes on that objective's row: `SELECT … FOR UPDATE`
+// on `objectives`. The lock is per objective, so two companies — or two different objectives of one
+// company — never wait on each other, and the window it holds is one INSERT long.
+//
+// scripts/check-finite-budget-db.js fires N concurrent reservations at a budget that fits a known
+// number of them and asserts that EXACTLY that many succeed. Without the lock that assertion fails.
+
+/** How long a hold lives if nobody settles it. Short: it bounds a provider call, not a workflow. */
+const RESERVATION_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Take a hold for at most `maxUsd` against an objective's budget, or refuse.
+ *
+ * Returns { ok: true, reservation } | { ok: false, code, detail, ... }
+ *
+ * `maxUsd` is the MOST the operation may cost, not an estimate of what it will. An under-estimate
+ * here is a hole in the limit, so the caller is expected to over-estimate and the settlement
+ * corrects it.
+ */
+async function reserveSpend(ctx, { id, objectiveId, runId, maxUsd, reason,
+  ttlMs = RESERVATION_TTL_MS }, deps = {}) {
+  assertContext(ctx);
+  if (!(Number(maxUsd) > 0)) {
+    return { ok: false, code: 'no_amount',
+      detail: 'a reservation must be for a positive maximum: a $0 hold reserves nothing while '
+        + 'looking like a reservation' };
+  }
+  if (!reason || !String(reason).trim()) {
+    return { ok: false, code: 'no_reason', detail: 'a hold must say what it is for' };
+  }
+
+  const tx = (deps && deps.withTransaction) || require('../db').withTransaction;
+  return tx(async (client) => {
+    const run = (t, p) => client.query(t, p);
+
+    // ── 1. SERIALIZE ON THE OBJECTIVE, AND READ THE AUTHORITATIVE BUDGET ───
+    //
+    // The budget comes from this locked row, not from `ctx.budgetUsd`. The context's copy was
+    // minted when the context was resolved and could be stale by the time a concurrent caller is
+    // competing for the same headroom — and it is the figure the comparison turns on.
+    const obj = await run(
+      `SELECT id, budget_usd, status FROM objectives
+        WHERE company_id = $1 AND id = $2 FOR UPDATE`,
+      [ctx.companyId, objectiveId]);
+    if (!obj.rows.length) {
+      return { ok: false, code: 'objective_not_in_company_scope',
+        detail: `objective ${objectiveId} is not readable for company ${ctx.companyId}` };
+    }
+    const row = obj.rows[0];
+    if (row.status !== 'active') {
+      return { ok: false, code: 'objective_not_active',
+        detail: `objective ${objectiveId} is ${row.status}; spend is not authorized against it` };
+    }
+
+    // ── 2. NO BUDGET: ONLY A LIVE, NAMED EXCEPTION PERMITS THE HOLD ────────
+    let exceptionId = null;
+    if (row.budget_usd === null) {
+      const ex = await run(
+        `SELECT id FROM office_budget_exceptions
+          WHERE company_id = $1 AND objective_id = $2 AND revoked_at IS NULL
+            AND effective_from <= NOW() AND effective_to > NOW()
+          LIMIT 1`,
+        [ctx.companyId, objectiveId]);
+      if (!ex.rows.length) {
+        return { ok: false, code: 'needs_budget_or_exception',
+          detail: `objective ${objectiveId} has NO authorized budget, so no spend may be reserved `
+            + 'against it. Set a finite objective budget, or record a named, time-bounded budget '
+            + 'exception.' };
+      }
+      exceptionId = ex.rows[0].id;
+    }
+
+    // ── 3. SPENT + LIVE HOLDS + THIS CALL vs THE CEILING ──────────────────
+    //
+    // `expires_at > NOW()` is the crash answer: a hold whose process died stops counting against
+    // the budget by itself, so a dead worker cannot consume an objective's ceiling for ever. The
+    // reaper then corrects the record; it is bookkeeping, not the mechanism.
+    //
+    // Unmeasured calls are COUNTED and reported, never converted into dollars — "no estimated
+    // spend derived from invocation counts". A ceiling that cannot be proven says so.
+    const sums = await run(
+      `SELECT
+         (SELECT COALESCE(SUM(cost_usd),0)::numeric FROM office_cost_ledger
+           WHERE company_id = $1 AND objective_id = $2 AND cost_known) AS spent,
+         (SELECT COUNT(*)::int FROM office_cost_ledger
+           WHERE company_id = $1 AND objective_id = $2 AND NOT cost_known) AS unknown_calls,
+         (SELECT COALESCE(SUM(max_usd),0)::numeric FROM office_budget_reservations
+           WHERE company_id = $1 AND objective_id = $2
+             AND state = 'held' AND expires_at > NOW()) AS held`,
+      [ctx.companyId, objectiveId]);
+    const spent = Number(sums.rows[0].spent);
+    const held = Number(sums.rows[0].held);
+    const unknownCalls = Number(sums.rows[0].unknown_calls);
+
+    if (row.budget_usd !== null) {
+      const cap = Number(row.budget_usd);
+      const after = spent + held + Number(maxUsd);
+      // `>` not `>=`: a hold that exactly fills the budget is permitted. A $10 objective may spend
+      // its tenth dollar.
+      if (after > cap) {
+        return { ok: false, code: 'would_exceed_objective_budget',
+          detail: `this call could cost up to $${Number(maxUsd).toFixed(6)}; the objective has `
+            + `$${cap} with $${spent.toFixed(6)} spent and $${held.toFixed(6)} already held, so the `
+            + `worst case is $${after.toFixed(6)} — refused BEFORE the provider is reached`,
+          budgetUsd: cap, spentUsd: spent, heldUsd: held, maxUsd: Number(maxUsd),
+          worstCaseUsd: after, unknownCalls };
+      }
+    }
+
+    const ins = await run(
+      `INSERT INTO office_budget_reservations
+         (id, company_id, objective_id, run_id, max_usd, reason, under_exception, expires_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7, NOW() + ($8::int * INTERVAL '1 millisecond'))
+       RETURNING id, max_usd, state, under_exception, held_at, expires_at`,
+      [id, ctx.companyId, objectiveId, runId, maxUsd, String(reason).trim(), exceptionId, ttlMs]);
+
+    return { ok: true,
+      reservation: ins.rows[0],
+      budgetUsd: row.budget_usd === null ? null : Number(row.budget_usd),
+      spentUsd: spent, heldUsd: held, unknownCalls,
+      // A ceiling that cannot be proven is reported as such rather than asserted.
+      confident: unknownCalls === 0 };
+  });
+}
+
+/**
+ * Reconcile a hold with what the call actually cost.
+ *
+ * `costKnown: false` settles with NO dollar figure. An unmeasured call is not a free one, and
+ * writing 0 would make "zero spend" ambiguous — the C1 rule, applied to settlement.
+ */
+async function settleSpend(ctx, { reservationId, costUsd = null, costKnown,
+  costLedgerId = null }, deps = {}) {
+  assertContext(ctx);
+  if (typeof costKnown !== 'boolean') {
+    throw new Error('settleSpend requires costKnown: an unmeasured call is not a free one');
+  }
+  const res = await q(deps)(
+    `UPDATE office_budget_reservations
+        SET state = 'settled', settled_at = NOW(),
+            settled_cost_known = $3,
+            settled_cost_usd = CASE WHEN $3 THEN $4::numeric ELSE NULL END,
+            cost_ledger_id = $5
+      WHERE company_id = $1 AND id = $2 AND state = 'held'
+      RETURNING id, state, settled_cost_usd, settled_cost_known`,
+    [ctx.companyId, reservationId, costKnown, costUsd, costLedgerId]
+  );
+  return res.rows[0] || null;
+}
+
+/** The call never reached the provider: give the headroom straight back. */
+async function releaseSpend(ctx, { reservationId }, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `UPDATE office_budget_reservations
+        SET state = 'released', settled_at = NOW()
+      WHERE company_id = $1 AND id = $2 AND state = 'held'
+      RETURNING id, state`,
+    [ctx.companyId, reservationId]
+  );
+  return res.rows[0] || null;
+}
+
+/**
+ * Mark holds that outlived their window.
+ *
+ * Bookkeeping, NOT the mechanism: `reserveSpend` already ignores an expired hold, so the budget is
+ * correct whether or not this ever runs. Making the reaper load-bearing would mean a budget that is
+ * wrong between its runs — and "the reaper runs every quarter hour" is a schedule, not a guarantee.
+ */
+async function expireStaleReservations(ctx, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `UPDATE office_budget_reservations
+        SET state = 'expired', settled_at = NOW()
+      WHERE company_id = $1 AND state = 'held' AND expires_at <= NOW()
+      RETURNING id`,
+    [ctx.companyId]
+  );
+  return res.rows.map((r) => r.id);
+}
+
+/** Live exposure and settled spend for one objective — for reporting, not for the decision. */
+async function reservationState(ctx, objectiveId, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `SELECT
+       COALESCE(SUM(max_usd) FILTER (WHERE state = 'held' AND expires_at > NOW()),0)::numeric AS live_held,
+       COUNT(*) FILTER (WHERE state = 'held' AND expires_at > NOW())::int AS live_count,
+       COUNT(*) FILTER (WHERE state = 'held' AND expires_at <= NOW())::int AS stale_count,
+       COUNT(*) FILTER (WHERE state = 'settled')::int AS settled_count,
+       COUNT(*) FILTER (WHERE state = 'released')::int AS released_count,
+       COUNT(*) FILTER (WHERE state = 'expired')::int AS expired_count
+     FROM office_budget_reservations WHERE company_id = $1 AND objective_id = $2`,
+    [ctx.companyId, objectiveId]
+  );
+  return res.rows[0];
+}
+
 // ── B3.3: DELEGATION ────────────────────────────────────────────────────────
 
 /**
@@ -991,4 +1203,6 @@ module.exports = {
   recordOutcome,
   createPlan, recordPlanStep, setStepVerdict, setPlanVerdict, getPlan, listPlanSteps,
   recordDelegation, delegationDepth, delegationsFrom, runState,
+  reserveSpend, settleSpend, releaseSpend, expireStaleReservations, reservationState,
+  RESERVATION_TTL_MS,
 };

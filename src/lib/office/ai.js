@@ -97,6 +97,60 @@ function normalizeUsage(usage) {
  * ctx   — a frozen office context (from beginObjectiveRun or resolveCompanyContext)
  * spec  — { capability, prompt, system, maxTokens, timeoutMs, agent, workflow, purpose }
  */
+// ── THE MOST THIS CALL CAN COST (B2.5b) ─────────────────────────────────────
+//
+// A hold has to bound the worst case, not guess the likely one, so every term here rounds AGAINST
+// us and the figure is deliberately larger than the call will be:
+//
+//   • OUTPUT is the expensive side and its ceiling is exact: the request sends `max_tokens`, so
+//     the provider cannot bill more output than that. llm.js defaults it to 1024 when unset, and
+//     this mirrors that default rather than assuming a smaller one.
+//   • INPUT is not known before the call. It is bounded from the prompt and system text at THREE
+//     characters per token — below the ~4 that English averages, so the estimate runs high — plus
+//     a flat allowance for the message envelope and any system-level additions.
+//   • The RATE comes from llm.ratesFor, which is already the conservative list price with intro
+//     discounts ignored on purpose, and which falls back to the most expensive tier for a model it
+//     does not recognise.
+//
+// If this figure is ever too LOW the limit has a hole in it, so the bias is one-directional. The
+// settlement then corrects the hold downward to the measured cost, which is the safe direction.
+const ENVELOPE_TOKENS = 512;
+const CHARS_PER_TOKEN_FLOOR = 3;
+function maxChargeUsd({ capability, system, prompt, maxTokens }) {
+  const model = llm.resolveModel(capability);
+  const [inRate, outRate] = llm.ratesFor(model);
+  const chars = String(system || '').length + String(prompt || '').length;
+  const inTokens = Math.ceil(chars / CHARS_PER_TOKEN_FLOOR) + ENVELOPE_TOKENS;
+  const outTokens = Number(maxTokens) > 0 ? Number(maxTokens) : 1024;
+  const usd = inTokens * inRate + outTokens * outRate;
+  // Never zero: a $0 hold reserves nothing while looking like a reservation, and the table refuses
+  // it. A floor of one ten-thousandth of a cent keeps the smallest conceivable call reservable.
+  return Math.max(usd, 0.000001);
+}
+
+/**
+ * Settle or release a hold without ever letting that bookkeeping break the call it belongs to.
+ *
+ * A reservation that cannot be reconciled is a reporting defect; failing the AI result over it
+ * would turn an accounting problem into an outage, and the hold expires on its own window in any
+ * case. So this logs and returns.
+ */
+async function settleHold(ctx, reservation, { costUsd, costKnown, costLedgerId = null }, deps) {
+  if (!reservation) return null;
+  try {
+    if (costKnown === true && Number(costUsd) === 0) {
+      return await scope.releaseSpend(ctx, { reservationId: reservation.id }, deps);
+    }
+    return await scope.settleSpend(ctx, {
+      reservationId: reservation.id, costUsd, costKnown, costLedgerId,
+    }, deps);
+  } catch (e) {
+    console.error(`[office/ai] reservation ${reservation.id} could not be reconciled `
+      + `(${e.message}); it will expire at ${reservation.expires_at}`);
+    return null;
+  }
+}
+
 async function governedCall(ctx, spec, deps = {}) {
   assertContext(ctx);
   const {
@@ -120,25 +174,41 @@ async function governedCall(ctx, spec, deps = {}) {
       error: `unknown capability "${capability}" — expected one of ${CAPABILITIES.join(', ')}` };
   }
 
-  // ── K5 BUDGET ENFORCEMENT, ACTIVATED ──────────────────────────────────────
+  // ── K5 / B2.5b: A HOLD BEFORE THE CALL, NOT A VERDICT AFTER IT ───────────
   //
   // Both caps must be satisfied: the enterprise cap is PER DAY and resets; an objective's budget
   // is a TOTAL for its life. "Do not allow a $10 objective to consume $50 simply because
   // enterprise budget remains."
   //
-  // The objective's budget is READ FROM THE RESOLVED CONTEXT, which read it from the stored
-  // objective. There is no parameter through which a caller could raise its own ceiling — the same
-  // structural choice as the company never being caller-supplied.
+  // WHAT THIS REPLACED, AND WHY IT HAD TO. Until B2.5b this was `enforceHierarchy` — ask the
+  // budget, then call the provider, then record the cost. Check-then-act, with two holes:
+  //
+  //   • CONCURRENCY. Two calls both read the same spend, both find headroom, and both spend. The
+  //     limit held only for callers that happened not to overlap.
+  //   • MAGNITUDE. The gate asked "is there headroom", never "is there headroom for THIS call".
+  //     One call against a $0.05 objective could cost $5, and the refusal arrived on the call
+  //     after it. The owner put it exactly: *"Prevent unauthorized expenditure before a metered
+  //     call, not merely after the budget has been exceeded."*
+  //
+  // So the money is held FIRST, for the most this call can cost, atomically against the objective
+  // (scope.reserveSpend serializes on the objectives row). The provider is reached only if the
+  // hold succeeded, and the hold is reconciled to the real cost afterwards — in a `finally`, so a
+  // throw cannot leak it.
+  //
+  // The objective's budget is still never caller-supplied: `authorizeSpend` reads it from the
+  // locked objectives row, and there is no autonomy flag to pass (B2.5b).
   //
   // `refuseOnUnmeasured` is deliberately NOT set here. Unknown cost fails closed at RELEASE, in
   // consequentialReleaseGate, because blocking the AI call would destroy the text and the cost row
   // a human is meant to review. Unmeasured calls still raise the tier by one, so they tighten the
   // assessment without inventing a dollar figure.
-  // `objectiveBudgetUsd` is no longer passed — enforceHierarchy READS it off the context now, so
-  // the comment above ("no parameter through which a caller could raise its own ceiling") is true
-  // of the function's signature and not only of this call site. See B2.5a in budget.js.
-  const budgetDecision = await budget.enforceHierarchy(ctx, {
+  const worstCaseUsd = maxChargeUsd({ capability, system, prompt, maxTokens });
+  const budgetDecision = await budget.authorizeSpend(ctx, {
     objectiveId: ctx.objectiveId || null,
+    runId: ctx.runId,
+    maxUsd: worstCaseUsd,
+    reason: `${capability} call for ${workflow || 'office'}/${agent || 'agent'}`
+      + `${purpose ? ` — ${purpose}` : ''}`,
     criticality,
   }, deps);
 
@@ -149,9 +219,10 @@ async function governedCall(ctx, spec, deps = {}) {
       + `(${budgetDecision.scope}): ${budgetDecision.reason}`);
     return { ok: false, accounted: true, text: null, json: null, ...llm.COST_NONE,
       refusedBy: 'budget', budgetScope: budgetDecision.scope, budget: budgetDecision,
-      capability, criticality,
+      capability, criticality, maxUsd: worstCaseUsd,
       error: `BUDGET_REFUSED: ${budgetDecision.reason}` };
   }
+  const reservation = budgetDecision.reservation || null;
 
   const model = llm.resolveModel(capability);
   const r = await llm.callClaude({
@@ -180,6 +251,11 @@ async function governedCall(ctx, spec, deps = {}) {
   // A policy stop, a missing key or a rejected capability never reached the provider. Filing a
   // $0.00 row for those would pad the ledger with non-events and make "zero spend" ambiguous.
   if (r.stopped || (r.error && r.costKnown === true && r.costUsd === 0)) {
+    // NOTHING WAS SPENT, so the hold goes straight back rather than sitting until it expires. An
+    // abandoned hold is not a correctness problem — reserveSpend ignores an expired one — but it
+    // blocks a concurrent call for the rest of its window, which for a misconfigured key would
+    // mean every call failing AND the budget looking full.
+    await settleHold(ctx, reservation, { costUsd: 0, costKnown: true }, deps);
     const failure = classifyProviderFailure(r);
     let exceptionId = null;
     if (CONFIG_FAILURES.includes(failure)) {
@@ -214,12 +290,30 @@ async function governedCall(ctx, spec, deps = {}) {
     }, deps);
   } catch (e) {
     // THE FAIL-CLOSED BRANCH. The text is withheld even on an otherwise successful call.
+    //
+    // The HOLD IS NOT RELEASED HERE, and that is deliberate. Tokens may well have been spent — the
+    // charge is real and only the evidence of it failed to persist — so handing the headroom back
+    // would let the next call spend money this one already did. The hold stands and expires on its
+    // own window, which is the conservative direction: it over-reserves rather than under-counts.
     return {
       ok: false, accounted: false, text: null, json: null, ...base,
       error: `AI cost evidence could not be persisted, so the result is withheld: ${e.message}`,
       accounting_error: e.message,
+      reservation_id: reservation ? reservation.id : null,
+      reservation_left_held: reservation ? true : false,
     };
   }
+
+  // ── RECONCILE THE HOLD WITH WHAT IT ACTUALLY COST ────────────────────────
+  //
+  // After the cost row, so the ledger is the authoritative figure and the reservation points at
+  // it. `costKnown: false` settles with NO dollar amount: an unmeasured call is not a free one,
+  // and writing 0 would make "zero spend" ambiguous (the C1 rule).
+  await settleHold(ctx, reservation, {
+    costUsd: base.costKnown ? base.costUsd : null,
+    costKnown: base.costKnown === true,
+    costLedgerId: costRow && costRow.id !== undefined ? costRow.id : null,
+  }, deps);
 
   if (r.error) {
     const failure = classifyProviderFailure(r);

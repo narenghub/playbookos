@@ -92,14 +92,27 @@ function raisedByOne(tier) {
     // log, not a limit — the money would already be spent.
     console.log('');
     const aiSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'office', 'ai.js'), 'utf8');
-    const iGate = aiSrc.indexOf('budget.enforceHierarchy');
+    // B2.5b changed what "wired" means here. It used to be `budget.enforceHierarchy` — ASK the
+    // budget, then call. That ordering was necessary and not sufficient: asking first still let two
+    // concurrent calls both pass, and it never asked whether there was headroom for THIS call. The
+    // gate is now `budget.authorizeSpend`, which takes an atomic HOLD for the worst case before
+    // the provider is reached, so the property asserted is the hold's position, not the question's.
+    const iGate = aiSrc.indexOf('budget.authorizeSpend');
     const iCall = aiSrc.indexOf('llm.callClaude');
     const iRefuse = aiSrc.indexOf('if (!budgetDecision.allow)');
-    if (iGate === -1) bad('governedCall does NOT consult the budget — K5 is not activated in this build');
-    else if (iRefuse === -1) bad('the budget is assessed but its refusal is not acted on');
+    // `await settleHold`, not `settleHold` — the latter matches the function's own DEFINITION,
+    // which sits above governedCall, so the first occurrence was before the provider call and this
+    // assertion failed against correct code. Grepping a definition when you mean a call is the
+    // same mistake as grepping a comment when you mean a parameter.
+    const iSettle = aiSrc.indexOf('await settleHold(ctx, reservation');
+    if (iGate === -1) bad('governedCall does NOT take a budget hold — K5/B2.5b is not activated in this build');
+    else if (iRefuse === -1) bad('the hold is taken but its refusal is not acted on');
     else if (iGate < iCall && iRefuse < iCall) {
-      ok('governedCall consults the budget and acts on a refusal BEFORE reaching the provider');
-    } else bad('the budget is consulted AFTER the provider call — that is an audit log, not a limit');
+      ok('governedCall HOLDS the money and acts on a refusal BEFORE reaching the provider');
+    } else bad('the hold is taken AFTER the provider call — that is an audit log, not a limit');
+    if (iSettle > iCall) {
+      ok('and the hold is reconciled AFTER the call, so the ledger figure is the authoritative one');
+    } else bad('the hold is settled before the call, so it cannot carry the real cost');
 
     const apprSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'office', 'approval.js'), 'utf8');
     if (apprSrc.includes('budget.consequentialReleaseGate')) {

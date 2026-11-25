@@ -85,6 +85,10 @@ const AUTHORIZED_COMPANY_ID_TABLES = new Set([
   // refuse an exception granted for another company's objective. The column is therefore part of
   // the welding, not a scope filter the application could get wrong.
   'office_budget_exceptions',
+  // B2.5b: a pre-spend hold. company_id carries the composite foreign keys that weld the hold to
+  // an objective AND a run of the same company, so a hold cannot be taken against another
+  // company's ceiling even if the accessor were written wrongly.
+  'office_budget_reservations',
   // B3.2: a decomposed plan and its steps. company_id is on both for the composite foreign keys —
   // the plan must point at an objective AND a run of the same company, and a step must belong to a
   // plan of the same company. As with the budget exception, the column is part of the welding

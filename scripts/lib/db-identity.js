@@ -63,6 +63,8 @@ const M7_TABLES = [
   // created the table — until it was, a freshly migrated database read as `unidentified` and every
   // subsequent run was refused, which is exactly the drift this check exists to catch.
   'office_budget_exceptions',
+  // B2.5b (2026-11-25): pre-spend holds.
+  'office_budget_reservations',
   // B3.2 (2026-11-24): decomposed plans and their per-step verdicts.
   'office_plans', 'office_plan_steps',
   // B3.3 (2026-11-24): the dispatch record for one delegation.

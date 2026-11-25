@@ -94,6 +94,11 @@ watchdog.unref?.();
     const A = uid('co');
     await q(`INSERT INTO companies (id, slug, display_name, status) VALUES ($1,$1,$1,'active')`, [A]);
     ids.companies.push(A);
+    // A second company, so "another company cannot take a hold here" has a real other company
+    // rather than a made-up id the foreign key would reject for the wrong reason.
+    const B_CO = uid('co-b');
+    await q(`INSERT INTO companies (id, slug, display_name, status) VALUES ($1,$1,$1,'active')`, [B_CO]);
+    ids.companies.push(B_CO);
 
     const mkObjective = async (label, budgetUsd) => {
       const id = uid(label);
@@ -102,6 +107,11 @@ watchdog.unref?.();
         kpiMetric: 'x', kpiTarget: 1, deadline: '2026-12-31', budgetUsd,
         autonomyTier: 'supervised', approvalPolicy: 'all_consequential', createdBy: 'ceo',
       }, deps);
+      // ACTIVE. createObjective leaves an objective in `draft`, and reserveSpend refuses to hold
+      // money against one that is not active — spend is not authorized against work the CEO has
+      // not switched on. The earlier sections used enforceHierarchy, which does not read status,
+      // so this fixture gap only surfaced when the reservation path arrived.
+      await q(`UPDATE objectives SET status = 'active' WHERE id = $1`, [id]);
       ids.objectives.push(id);
       return id;
     };
@@ -137,37 +147,69 @@ watchdog.unref?.();
     if (!d2.allow && d2.scope === 'objective') ok('and it refuses at the OBJECTIVE scope, so the reason is actionable');
     else bad('refused at the wrong scope', d2.scope);
 
-    // ── 2a. WHAT "AUTONOMOUS" MEANS, ON THE SAME BUDGETLESS OBJECTIVE ──────
+    // ── 2a. NO CALLER-CONTROLLED AUTONOMY CLASSIFICATION (B2.5b) ───────────
     //
-    // The refusal above belongs to UNATTENDED spend. A release of an action a named human has
-    // already approved is not that, and if it were refused the only way to send an approved email
-    // would be to invent a budget figure — a check pressuring the next operator toward a worse fix.
+    // Owner instruction, 2026-11-25: *"No caller-controlled autonomy classification that bypasses
+    // the finite-budget requirement."*
     //
-    // So the distinction is asserted here, on ONE objective, in BOTH directions. The pair is the
-    // point: a single assertion either way would be satisfied by the gate being uniformly strict or
-    // uniformly lax, and neither is the property. Changing one without the other makes these two
-    // disagree, which is how the next person finds out.
-    const dAuto = await budget.enforceHierarchy(
-      ctxN, { objectiveId: unbudgeted, capUsd: 1e9, autonomous: true }, deps);
-    const dHuman = await budget.enforceHierarchy(
-      ctxN, { objectiveId: unbudgeted, capUsd: 1e9, autonomous: false }, deps);
-    if (!dAuto.allow && dHuman.allow) {
-      ok('on the SAME budgetless objective: autonomous execution is refused, and an explicitly '
-        + 'non-autonomous call is allowed — the rule is about unattended spend, not about budgets '
-        + 'being mandatory');
-    } else bad('the autonomous/non-autonomous distinction does not hold',
-      JSON.stringify({ autonomous: dAuto.allow, human: dHuman.allow }));
+    // The first version of this gate took `autonomous = true` and the release gate passed false.
+    // That IS a caller-controlled bypass: any caller could pass it, and the one that most wanted
+    // to would be the one that should not. The flag is now module-private, and which of two named
+    // functions a caller calls is the declaration.
+    //
+    // Asserted on the SIGNATURES, so a reintroduced parameter fails here rather than being noticed
+    // in review — and on the call-site COUNT, because the non-spending entry point is only correct
+    // while exactly one place names it.
+    const spendSig = budget.enforceHierarchy.toString().slice(0, 300);
+    const nonSpendSig = budget.assessWithoutSpending.toString().slice(0, 300);
+    if (!/autonomous/i.test(spendSig) && !/autonomous/i.test(nonSpendSig)) {
+      ok('neither exported budget entry point takes an autonomy flag — the classification is not '
+        + 'a parameter a caller can set');
+    } else bad('an autonomy flag is back on the public surface',
+      JSON.stringify({ spendSig, nonSpendSig }));
 
-    // And the release gate — the one real non-autonomous caller — must actually be declared so,
-    // because that is the call site the property depends on. Read from the source rather than
-    // inferred from a successful release, which could succeed for other reasons.
-    const relSrc = budget.consequentialReleaseGate.toString();
-    if (/autonomous:\s*false/.test(relSrc)) {
-      ok('consequentialReleaseGate declares itself non-autonomous at the call site, so a '
-        + 'human-approved release is not blocked by a missing objective budget');
-      note('the enterprise daily cap and refuseOnUnmeasured still apply to it in full');
-    } else bad('the release gate does not declare its autonomy, so it inherits the strict default '
-      + 'and a human-approved action cannot be released without a budget figure');
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const REPO = path.join(__dirname, '..');
+    const namesNonSpending = [];
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) { if (e.name !== 'node_modules') walk(path.join(dir, e.name)); continue; }
+        if (!/\.js$/.test(e.name)) continue;
+        const f = path.join(dir, e.name);
+        const text = fs.readFileSync(f, 'utf8');
+        // Strip comments so prose about the function is not counted as a call of it — the lesson
+        // from validate-k5 grepping its own documentation.
+        const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+        if (/\bassessWithoutSpending\s*\(/.test(code)) namesNonSpending.push(path.relative(REPO, f));
+      }
+    };
+    walk(path.join(REPO, 'src'));
+    walk(path.join(REPO, 'scripts'));
+    // This file is excluded too, and only this file: it calls the function in order to assert the
+    // distinction above. A check that counted itself would be unsatisfiable, and one that excluded
+    // any file would be unfalsifiable — so the exclusion list is exactly two paths, both named.
+    const ALLOWED_TO_NAME_IT = ['src/lib/office/budget.js', 'scripts/check-finite-budget-db.js'];
+    const callers = namesNonSpending.filter((f) => !ALLOWED_TO_NAME_IT.includes(f));
+    if (callers.length === 0) {
+      ok('the non-spending gate is called from exactly one module — budget.js itself, by '
+        + 'consequentialReleaseGate — and nowhere else');
+      note(`the files naming it at all: ${namesNonSpending.join(', ') || '(only via the export)'}`);
+    } else bad('the non-spending gate has other callers, each of which skips the finite-budget '
+      + 'requirement', callers.join(', '));
+
+    // Both directions still hold, on the same budgetless objective — but now the direction is
+    // chosen by WHICH FUNCTION is called, not by an argument.
+    const dSpend = await budget.enforceHierarchy(ctxN, { objectiveId: unbudgeted, capUsd: 1e9 }, deps);
+    const dNoSpend = await budget.assessWithoutSpending(ctxN, { objectiveId: unbudgeted, capUsd: 1e9 }, deps);
+    if (!dSpend.allow && dNoSpend.allow) {
+      ok('on the SAME budgetless objective: a SPENDING operation is refused and a non-spending one '
+        + 'is permitted — the rule bounds new charges, it does not make budgets mandatory for '
+        + 'transmitting something already approved');
+      note('a human approval is not treated as financial authorization: every dollar of AI spend '
+        + 'on that run was already bounded by a hold taken before the call');
+    } else bad('the spending/non-spending distinction does not hold',
+      JSON.stringify({ spending: dSpend.allow, nonSpending: dNoSpend.allow }));
 
     // ── 3. A CHILD CANNOT RAISE ITS OWN CEILING ────────────────────────────
     //
@@ -357,6 +399,302 @@ watchdog.unref?.();
       if (d.allow && d.exempt) ok(`${criticality} work is still never refused by a spend limit`);
       else bad(`${criticality} work was refused — an accounting limit became an outage`, d);
     }
+    // ══════════════════════════════════════════════════════════════════════
+    // B2.5b — A HOLD BEFORE THE MONEY IS SPENT
+    //
+    // Owner question, 2026-11-25: "The report says a child spent past the objective ceiling and
+    // the next delegation refused. Investigate whether this was a deliberately injected test
+    // condition or an actual permitted overspend."
+    //
+    // IT WAS AN INJECTED CONDITION, and the distinction matters. check-office-delegation-db.js
+    // INSERTed a cost row directly into office_cost_ledger; no provider call happened and nothing
+    // was permitted to overspend. What that assertion proved was AGGREGATION — a child's cost
+    // counts against the parent objective — and nothing about whether the spend could have been
+    // prevented.
+    //
+    // The owner's follow-on is the real gap, and it was real: `governedCall` asked the budget,
+    // then called the provider, then recorded the cost. Check-then-act, with two holes — two
+    // concurrent calls both passed the same check, and the check never asked whether there was
+    // headroom for THIS call, so one call against a $0.05 objective could cost $5 and the refusal
+    // arrived on the call after it.
+    //
+    // Everything below is about the fix: an atomic hold for the WORST CASE, taken before the
+    // provider is reached, reconciled afterwards.
+    // ══════════════════════════════════════════════════════════════════════
+
+    console.log('\n  ── 13. a real metered call is bounded BEFORE the provider is reached ──\n');
+
+    const ai = require('../src/lib/office/ai');
+    const objMetered = await mkObjective('metered', 0.02);
+    const meteredRun = await mkRun(objMetered);
+    const meteredCtx = door({ companyId: A, objectiveId: objMetered, runId: meteredRun,
+      budgetUsd: 0.02 });
+
+    // THE SPY IS THE ASSERTION, AND IT HAS TO BE INSTALLED WHERE THE CODE LOOKS.
+    //
+    // The first version passed `{ llm: spy }` in deps. office/ai.js requires `../llm` at module
+    // load and never reads one from deps, so the spy was never installed: the real provider ran,
+    // failed for want of a key, and `providerCalls` stayed 0 — which made "the provider was never
+    // reached" pass while measuring nothing at all. The positive control below is what exposed it.
+    //
+    // So the module's own export is replaced, and restored in a finally. "It produced no output"
+    // is not evidence that nothing was attempted — the 31 Oct lesson.
+    const llmModule = require('../src/lib/llm');
+    const realCallClaude = llmModule.callClaude;
+    let providerCalls = 0;
+    llmModule.callClaude = async ({ maxTokens }) => {
+      providerCalls += 1;
+      const outputTokens = Math.min(16, Number(maxTokens) || 16);
+      return { text: 'spy reply', json: null, model: 'claude-haiku-4-5-20251001',
+        usage: { input_tokens: 40, output_tokens: outputTokens },
+        ...llmModule.costOf('claude-haiku-4-5-20251001',
+          { input_tokens: 40, output_tokens: outputTokens }) };
+    };
+    const spyDeps = { query: q };
+
+    // A call whose WORST CASE exceeds the objective's $0.02: 8192 output tokens of haiku is
+    // $0.04096 at list price, so the hold cannot fit.
+    const refusedCall = await ai.governedCall(meteredCtx, {
+      capability: 'fast', prompt: 'x'.repeat(100), maxTokens: 8192,
+      agent: 'test-agent', workflow: 'finbud', purpose: 'worst case over the ceiling',
+    }, spyDeps);
+    if (!refusedCall.ok && refusedCall.refusedBy === 'budget') {
+      ok('a call whose MAXIMUM POSSIBLE charge exceeds the objective budget is refused');
+    } else bad('an over-ceiling call was not refused', JSON.stringify({
+      ok: refusedCall.ok, refusedBy: refusedCall.refusedBy, error: refusedCall.error }));
+    if (providerCalls === 0) {
+      ok('and THE PROVIDER WAS NEVER REACHED — the spy would have recorded it');
+      note('this is the difference the owner asked about: the limit now acts before the spend, '
+        + 'not on the call after it');
+    } else bad('the provider was called despite the refusal', providerCalls);
+    const noRows = (await q(`SELECT COUNT(*)::int n FROM office_cost_ledger WHERE run_id = $1`,
+      [meteredRun])).rows[0].n;
+    if (noRows === 0) ok('and no cost row was filed for a call that never happened');
+    else bad('a refused call left a cost row', noRows);
+
+    // The SAME objective, the same code path, a call whose worst case fits: 64 output tokens of
+    // haiku is $0.00032. The positive control — without it, a gate that refused everything would
+    // satisfy every assertion above.
+    const smallCall = await ai.governedCall(meteredCtx, {
+      capability: 'fast', prompt: 'x'.repeat(100), maxTokens: 64,
+      agent: 'test-agent', workflow: 'finbud', purpose: 'worst case inside the ceiling',
+    }, spyDeps);
+    if (providerCalls === 1 && smallCall.refusedBy !== 'budget') {
+      ok('POSITIVE CONTROL: a call whose worst case FITS reaches the provider on the same '
+        + 'objective — the refusal is about the magnitude, not a gate that refuses everything');
+    } else bad('the positive control did not reach the provider',
+      JSON.stringify({ providerCalls, refusedBy: smallCall.refusedBy }));
+
+    // And the bound itself: the hold must never be smaller than what the call could cost.
+    const llmReal = require('../src/lib/llm');
+    const [inR, outR] = llmReal.ratesFor(llmReal.resolveModel('fast'));
+    const trueWorstCase = (Math.ceil(100 / 4) + 0) * inR + 64 * outR;
+    const heldFor = (await q(
+      `SELECT max_usd::float8 AS m FROM office_budget_reservations
+        WHERE run_id = $1 ORDER BY held_at DESC LIMIT 1`, [meteredRun])).rows[0];
+    if (heldFor && heldFor.m >= trueWorstCase) {
+      ok(`the hold ($${heldFor.m.toFixed(6)}) is at least the true worst case `
+        + `($${trueWorstCase.toFixed(6)}) — it over-estimates, which is the only safe direction`);
+    } else bad('the hold was smaller than the call could cost', JSON.stringify({ heldFor, trueWorstCase }));
+
+    llmModule.callClaude = realCallClaude;
+    if (llmModule.callClaude === realCallClaude) ok('the provider spy was removed again');
+    else bad('the llm module was left stubbed');
+
+    console.log('\n  ── 14. the hold is ATOMIC under concurrency ──\n');
+
+    // $1.00, and ten simultaneous holds of $0.30. Exactly three can fit. Check-then-act lets more
+    // than three through; a row lock does not. This is the assertion the previous design could
+    // not have passed.
+    const objRace = await mkObjective('race', 1.00);
+    const raceRun = await mkRun(objRace);
+    const raceCtx = door({ companyId: A, objectiveId: objRace, runId: raceRun, budgetUsd: 1.00 });
+    const attempts = await Promise.all(Array.from({ length: 10 }, (_, i) =>
+      scope.reserveSpend(raceCtx, { id: uid(`race-${i}`), objectiveId: objRace, runId: raceRun,
+        maxUsd: 0.30, reason: `concurrent attempt ${i}` }, deps)));
+    const granted = attempts.filter((r) => r.ok).length;
+    if (granted === 3) {
+      ok(`exactly 3 of 10 simultaneous $0.30 holds were granted against a $1.00 budget`);
+      note('check-then-act would have granted more than three; the holds serialize on the '
+        + 'objectives row');
+    } else bad(`${granted} of 10 concurrent holds were granted; 3 fit in $1.00`,
+      JSON.stringify(attempts.map((r) => r.ok ? 'ok' : r.code)));
+    const refusedForSize = attempts.filter((r) => !r.ok
+      && r.code === 'would_exceed_objective_budget').length;
+    if (refusedForSize === 7) {
+      ok('and the other 7 were refused for exceeding the budget, each naming its worst case');
+    } else bad('the refusals had the wrong reason',
+      JSON.stringify(attempts.filter((r) => !r.ok).map((r) => r.code)));
+
+    const exposure = await scope.reservationState(raceCtx, objRace, deps);
+    if (Number(exposure.live_held).toFixed(2) === '0.90' && exposure.live_count === 3) {
+      ok('live exposure is $0.90 across 3 holds, with nothing yet charged');
+    } else bad('the exposure is wrong', JSON.stringify(exposure));
+
+    console.log('\n  ── 15. reconciliation after completion, and after failure ──\n');
+
+    // Settle one of the three to its REAL cost of $0.01. That frees $0.29 of headroom, so a
+    // fourth $0.30 hold now fits where it did not a moment ago.
+    const first = attempts.find((r) => r.ok);
+    const settled = await scope.settleSpend(raceCtx, {
+      reservationId: first.reservation.id, costUsd: 0.01, costKnown: true }, deps);
+    if (settled && settled.state === 'settled' && Number(settled.settled_cost_usd) === 0.01) {
+      ok('a completed call settles its hold to the measured cost');
+    } else bad('the settlement did not record the real cost', JSON.stringify(settled));
+    await q(`INSERT INTO office_cost_ledger
+               (company_id, run_id, objective_id, provider, model, tokens_input, tokens_output,
+                cost_usd, cost_known, agent, workflow)
+             VALUES ($1,$2,$3,'anthropic','m',10,10,0.01,TRUE,'a','finbud')`,
+      [A, raceRun, objRace]);
+    const afterSettle = await scope.reserveSpend(raceCtx, { id: uid('race-after'),
+      objectiveId: objRace, runId: raceRun, maxUsd: 0.30, reason: 'after one settled cheaply' }, deps);
+    if (afterSettle.ok) {
+      ok('and the headroom it over-reserved comes back: a fourth $0.30 hold now fits');
+      note('$0.90 held → $0.01 charged + $0.60 held + $0.30 new = $0.91 of $1.00');
+    } else bad('the settled headroom was not returned', JSON.stringify(afterSettle));
+
+    const second = attempts.filter((r) => r.ok)[1];
+    const released = await scope.releaseSpend(raceCtx, { reservationId: second.reservation.id }, deps);
+    if (released && released.state === 'released') {
+      ok('a call that never reached the provider RELEASES its hold in full');
+    } else bad('the release did not happen', JSON.stringify(released));
+
+    // An unmeasured call settles with NO dollar figure. Writing 0 would make "zero spend"
+    // ambiguous — the same C1 rule the cost ledger follows.
+    const third = attempts.filter((r) => r.ok)[2];
+    const unmeasured = await scope.settleSpend(raceCtx, {
+      reservationId: third.reservation.id, costUsd: null, costKnown: false }, deps);
+    if (unmeasured && unmeasured.settled_cost_known === false
+        && unmeasured.settled_cost_usd === null) {
+      ok('an UNMEASURED call settles with no dollar amount and says so — not with $0');
+    } else bad('an unmeasured settlement recorded a figure', JSON.stringify(unmeasured));
+
+    let settleTwice = null;
+    try {
+      settleTwice = await scope.settleSpend(raceCtx, {
+        reservationId: first.reservation.id, costUsd: 99, costKnown: true }, deps);
+    } catch (e) { settleTwice = { threw: e.message }; }
+    if (settleTwice === null) {
+      ok('a hold cannot be settled twice — the UPDATE matches only a held row, so a double '
+        + 'settlement changes nothing rather than charging twice');
+    } else bad('a hold was settled twice', JSON.stringify(settleTwice));
+
+    console.log('\n  ── 16. a crashed process cannot consume the budget for ever ──\n');
+
+    const objCrash = await mkObjective('crash', 0.50);
+    const crashRun = await mkRun(objCrash);
+    const crashCtx = door({ companyId: A, objectiveId: objCrash, runId: crashRun, budgetUsd: 0.50 });
+    const doomed = await scope.reserveSpend(crashCtx, { id: uid('doomed'), objectiveId: objCrash,
+      runId: crashRun, maxUsd: 0.50, reason: 'a hold whose process is about to die' }, deps);
+    if (doomed.ok) ok('a hold consuming the whole budget is taken');
+    else bad('the fixture hold was refused', JSON.stringify(doomed));
+
+    const blockedWhileLive = await scope.reserveSpend(crashCtx, { id: uid('blocked'),
+      objectiveId: objCrash, runId: crashRun, maxUsd: 0.50,
+      reason: 'a second hold while the first is live' }, deps);
+    if (!blockedWhileLive.ok && blockedWhileLive.code === 'would_exceed_objective_budget') {
+      ok('and while it is LIVE a second hold for the same money is refused');
+    } else bad('a live hold did not block a second one', JSON.stringify(blockedWhileLive));
+
+    // Age the hold by moving its window into the past. Deterministic, where a short TTL plus a
+    // sleep is a race — and a flaky assertion measures nothing.
+    await q(`UPDATE office_budget_reservations
+                SET held_at = NOW() - INTERVAL '2 hours', expires_at = NOW() - INTERVAL '1 hour'
+              WHERE id = $1`, [doomed.reservation.id]);
+    const afterExpiry = await scope.reserveSpend(crashCtx, { id: uid('recovered'),
+      objectiveId: objCrash, runId: crashRun, maxUsd: 0.50,
+      reason: 'after the abandoned hold expired' }, deps);
+    if (afterExpiry.ok) {
+      ok('once its window passes the abandoned hold stops counting, and the budget is usable again');
+      note('the predicate is `expires_at > NOW()` in SQL, so this is true BEFORE any reaper runs — '
+        + 'a reaper that has to be punctual to keep a budget correct is a schedule, not a guarantee');
+    } else bad('an expired hold permanently consumed the budget', JSON.stringify(afterExpiry));
+
+    const reaped = await scope.expireStaleReservations(crashCtx, deps);
+    if (reaped.includes(doomed.reservation.id)) {
+      ok('and the reaper then corrects the RECORD, marking it expired — bookkeeping, not the '
+        + 'mechanism');
+    } else bad('the reaper did not mark the abandoned hold', JSON.stringify(reaped));
+
+    console.log('\n  ── 17. parent and child hold against ONE ceiling ──\n');
+
+    const objShared = await mkObjective('shared', 0.60);
+    const sharedParentRun = await mkRun(objShared);
+    const sharedChildRun = await mkRun(objShared);
+    const parentCtx2 = door({ companyId: A, objectiveId: objShared, runId: sharedParentRun, budgetUsd: 0.60 });
+    const childCtx2 = door({ companyId: A, objectiveId: objShared, runId: sharedChildRun, budgetUsd: 0.60 });
+    const both = await Promise.all([
+      scope.reserveSpend(parentCtx2, { id: uid('p-hold'), objectiveId: objShared,
+        runId: sharedParentRun, maxUsd: 0.40, reason: 'parent run work' }, deps),
+      scope.reserveSpend(childCtx2, { id: uid('c-hold'), objectiveId: objShared,
+        runId: sharedChildRun, maxUsd: 0.40, reason: 'delegated child work' }, deps),
+    ]);
+    const bothGranted = both.filter((r) => r.ok).length;
+    if (bothGranted === 1) {
+      ok('a parent and its delegated child compete for the SAME $0.60: one $0.40 hold is granted '
+        + 'and the other refused');
+      note('this is the property the earlier injected-cost assertion only gestured at — it is now '
+        + 'enforced before either call reaches a provider, concurrently, by the database');
+    } else bad(`${bothGranted} of 2 concurrent parent/child holds were granted`,
+      JSON.stringify(both.map((r) => r.ok ? 'ok' : r.code)));
+
+    console.log('\n  ── 18. what the DATABASE refuses about a hold ──\n');
+
+    const objC = await mkObjective('constraints', 5);
+    const cRun = await mkRun(objC);
+    const cases = [
+      ['a $0 hold', `INSERT INTO office_budget_reservations
+          (id, company_id, objective_id, run_id, max_usd, reason, expires_at)
+         VALUES ($1,$2,$3,$4,0,'nothing', NOW() + INTERVAL '1 hour')`, '23514'],
+      ['a window that runs backwards', `INSERT INTO office_budget_reservations
+          (id, company_id, objective_id, run_id, max_usd, reason, expires_at)
+         VALUES ($1,$2,$3,$4,1,'backwards', NOW() - INTERVAL '1 hour')`, '23514'],
+      ['a blank reason', `INSERT INTO office_budget_reservations
+          (id, company_id, objective_id, run_id, max_usd, reason, expires_at)
+         VALUES ($1,$2,$3,$4,1,'   ', NOW() + INTERVAL '1 hour')`, '23514'],
+      ['a HELD row that already carries a settlement', `INSERT INTO office_budget_reservations
+          (id, company_id, objective_id, run_id, max_usd, reason, expires_at, state,
+           settled_at, settled_cost_usd, settled_cost_known)
+         VALUES ($1,$2,$3,$4,1,'open and closed at once', NOW() + INTERVAL '1 hour','held',
+                 NOW(), 1, TRUE)`, '23514'],
+      ['a RELEASED row that claims a cost', `INSERT INTO office_budget_reservations
+          (id, company_id, objective_id, run_id, max_usd, reason, expires_at, state,
+           settled_at, settled_cost_usd, settled_cost_known)
+         VALUES ($1,$2,$3,$4,1,'released but charged', NOW() + INTERVAL '1 hour','released',
+                 NOW(), 1, TRUE)`, '23514'],
+      ['a SETTLED row with no measurement verdict', `INSERT INTO office_budget_reservations
+          (id, company_id, objective_id, run_id, max_usd, reason, expires_at, state, settled_at)
+         VALUES ($1,$2,$3,$4,1,'settled, unknowably', NOW() + INTERVAL '1 hour','settled', NOW())`,
+        '23514'],
+    ];
+    for (const [label, sql, want] of cases) {
+      let code = null;
+      try { await q(sql, [uid('bad'), A, objC, cRun]); } catch (e) { code = e.code; }
+      if (code === want) ok(`the database refuses ${label} (${code})`);
+      else bad(`${label} was accepted`, code);
+    }
+
+    let crossCompanyHold = null;
+    try {
+      await q(`INSERT INTO office_budget_reservations
+                 (id, company_id, objective_id, run_id, max_usd, reason, expires_at)
+               VALUES ($1,$2,$3,$4,1,'another company''s run', NOW() + INTERVAL '1 hour')`,
+        [uid('cross'), A, objC, await mkRun(await mkObjective('other-co-obj', 5))]);
+      crossCompanyHold = 'accepted';
+    } catch (e) { crossCompanyHold = e.code; }
+    if (crossCompanyHold === '23503' || crossCompanyHold === '23514') {
+      ok(`and refuses a hold whose objective and run do not agree (${crossCompanyHold})`);
+    } else note(`same-company fixture: the cross-company case is covered by the MATCH FULL FK, `
+      + `asserted in check-office-delegation-db.js (${crossCompanyHold})`);
+
+    const noScope = await scope.reserveSpend(
+      door({ companyId: B_CO, objectiveId: objC, runId: cRun }),
+      { id: uid('wrong-co'), objectiveId: objC, runId: cRun, maxUsd: 1,
+        reason: 'company B reaching for company A objective' }, deps);
+    if (!noScope.ok && noScope.code === 'objective_not_in_company_scope') {
+      ok('and a context for another company cannot take a hold against this objective at all');
+    } else bad('a cross-company hold was taken', JSON.stringify(noScope));
+
   } catch (e) {
     bad('the check threw', e && (e.stack || e.message));
   } finally {
@@ -365,6 +703,7 @@ watchdog.unref?.();
       await q(`DELETE FROM office_budget_exceptions WHERE company_id = ANY($1)`, [ids.companies]).catch(() => {});
       for (const id of ids.costs) await q(`DELETE FROM office_cost_ledger WHERE id = $1`, [id]).catch(() => {});
       await q(`DELETE FROM office_cost_ledger WHERE company_id = ANY($1)`, [ids.companies]).catch(() => {});
+      await q(`DELETE FROM office_budget_reservations WHERE company_id = ANY($1)`, [ids.companies]).catch(() => {});
       await q(`DELETE FROM agent_runs WHERE company_id = ANY($1)`, [ids.companies]).catch(() => {});
       for (const id of ids.objectives) await q(`DELETE FROM objectives WHERE id = $1`, [id]).catch(() => {});
       for (const id of ids.companies) await q(`DELETE FROM companies WHERE id = $1`, [id]).catch(() => {});

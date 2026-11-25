@@ -147,8 +147,27 @@ async function enforce(ctx, { criticality = 'routine', capUsd = DAILY_CAP_USD,
 // The two caps are different kinds of thing and are checked as such: the enterprise cap is PER DAY
 // and resets; an objective's budget is a TOTAL for its whole life. A $10 objective that has spent
 // $10 is finished even on a day when the enterprise has spent nothing.
-async function enforceHierarchy(ctx, { objectiveId, criticality = 'routine',
-  capUsd = DAILY_CAP_USD, refuseOnUnmeasured = false, autonomous = true } = {}, deps = {}) {
+// ── NO CALLER-CONTROLLED AUTONOMY CLASSIFICATION (B2.5b, owner 2026-11-25) ──
+//
+// This function used to take `autonomous = true`, and `consequentialReleaseGate` passed false to
+// skip the finite-budget requirement. The owner's instruction is explicit: *"No caller-controlled
+// autonomy classification that bypasses the finite-budget requirement."* A boolean argument is
+// exactly that — any caller could pass it, and the one that most wanted to would be the one that
+// should not.
+//
+// The flag has therefore moved OUT of the public surface. `hierarchy` is module-private and takes
+// it as a third argument that no exported function forwards; the two exported entry points each
+// fix it, and WHICH FUNCTION A CALLER NAMES is the declaration:
+//
+//   enforceHierarchy      — this operation may spend. No finite budget, no permission.
+//   assessWithoutSpending — this operation spends NOTHING further; it authorizes no provider call
+//                           and returns no reservation, so it cannot be used to make one.
+//
+// scripts/check-finite-budget-db.js asserts that neither exported signature mentions autonomy, and
+// that `assessWithoutSpending` is called from exactly one place in the codebase.
+async function hierarchy(ctx, { objectiveId, criticality = 'routine',
+  capUsd = DAILY_CAP_USD, refuseOnUnmeasured = false } = {}, requireFiniteBudget = true,
+  deps = {}) {
   assertContext(ctx);
 
   // ── THE BUDGET COMES FROM THE CONTEXT, NOT FROM A PARAMETER (B2.5a) ──────
@@ -187,9 +206,10 @@ async function enforceHierarchy(ctx, { objectiveId, criticality = 'routine',
   // genuinely should proceed without an objective budget must say so explicitly, and say it at a
   // call site a reviewer can see.
   if (objectiveId && objectiveBudgetUsd == null) {
-    if (!autonomous) {
+    if (!requireFiniteBudget) {
       return { allow: true, criticality, enterprise, objective: null,
-        note: 'no objective budget, and this call declared itself non-autonomous' };
+        note: 'no objective budget; this entry point authorizes no further spend, so the ceiling '
+          + 'it would be judged against is not consulted' };
     }
     let exception = null;
     try {
@@ -269,6 +289,83 @@ async function enforceHierarchy(ctx, { objectiveId, criticality = 'routine',
 //
 // Non-consequential observability and recovery work is not gated here — "unknown cost may be
 // recorded without causing an outage".
+/**
+ * The budget gate for an operation that MAY SPEND. Strict: an objective with no finite budget and
+ * no live exception is refused.
+ */
+async function enforceHierarchy(ctx, opts = {}, deps = {}) {
+  return hierarchy(ctx, opts, true, deps);
+}
+
+/**
+ * The budget gate for an operation that spends NOTHING further.
+ *
+ * It still enforces the enterprise daily cap, the refuse-on-unmeasured rule and an objective cap
+ * when one is configured — it drops only the requirement that a budget EXIST, because there is no
+ * new charge for a ceiling to bound. It returns no reservation, so it cannot be used to reach a
+ * provider: the only way to make a metered call is `authorizeSpend` below, which takes a hold.
+ *
+ * Exactly one caller: `consequentialReleaseGate`. Releasing an action a named human approved
+ * transmits a message that costs nothing, and refusing it for want of a budget FIGURE would leave
+ * "invent one" as the only way to send an approved email — a gate that pressures the next operator
+ * toward a worse fix. Note what this does NOT say: a human approval is not financial authorization.
+ * Any AI spend on that run was already reserved and charged under `authorizeSpend`, and the
+ * approval does not widen it.
+ */
+async function assessWithoutSpending(ctx, opts = {}, deps = {}) {
+  return hierarchy(ctx, opts, false, deps);
+}
+
+/**
+ * ── THE ONLY ROAD TO A METERED CALL (B2.5b) ────────────────────────────────
+ *
+ * Policy gate, then an ATOMIC HOLD for the most this call can cost, taken before the provider is
+ * reached. Returns the reservation the caller must settle.
+ *
+ * `maxUsd` is a ceiling, not an estimate: an under-estimate here is a hole in the limit. The
+ * settlement corrects it downward, which is the safe direction.
+ */
+async function authorizeSpend(ctx, { objectiveId, runId, maxUsd, reason,
+  criticality = 'routine', capUsd = DAILY_CAP_USD, refuseOnUnmeasured = false,
+  reservationId = null, ttlMs } = {}, deps = {}) {
+  assertContext(ctx);
+
+  const h = await hierarchy(ctx, { objectiveId, criticality, capUsd, refuseOnUnmeasured },
+    true, deps);
+  if (!h.allow) {
+    return { allow: false, scope: h.scope || 'enterprise', reason: h.reason, hierarchy: h,
+      needsBudgetOrException: h.needsBudgetOrException === true, reservation: null };
+  }
+  // Exempt work — critical, recovery, observability — is never refused, and that exemption is
+  // deliberate (a budget that silences the reaper turns an accounting limit into an outage). It
+  // still takes a hold when it can, so the exposure is VISIBLE rather than invisible; a refusal to
+  // reserve does not stop it.
+  if (!objectiveId) {
+    return { allow: true, hierarchy: h, reservation: null,
+      note: 'no objective: the enterprise cap is the only ceiling and there is nothing to hold '
+        + 'against' };
+  }
+
+  const id = reservationId
+    || `rsv-${runId || 'norun'}-${require('crypto').randomBytes(6).toString('hex')}`;
+  const r = await scope.reserveSpend(ctx, {
+    id, objectiveId, runId, maxUsd, reason, ...(ttlMs === undefined ? {} : { ttlMs }),
+  }, deps);
+
+  if (!r.ok) {
+    if (h.exempt) {
+      return { allow: true, exempt: true, hierarchy: h, reservation: null,
+        unreservedBecause: r.code,
+        note: `${criticality} work is never refused; the hold could not be taken (${r.code}) and `
+          + 'the work proceeds unheld rather than being blocked' };
+    }
+    return { allow: false, scope: 'objective', reason: r.detail, code: r.code,
+      needsBudgetOrException: r.code === 'needs_budget_or_exception',
+      hierarchy: h, reservation: null, exposure: r };
+  }
+  return { allow: true, hierarchy: h, reservation: r.reservation, exposure: r };
+}
+
 async function consequentialReleaseGate(ctx, { runId, objectiveId = null,
   capUsd = DAILY_CAP_USD } = {}, deps = {}) {
   assertContext(ctx);
@@ -281,30 +378,33 @@ async function consequentialReleaseGate(ctx, { runId, objectiveId = null,
       unmeasured: Number(u.unknown_calls) };
   }
 
-  // ── WHY THIS GATE IS DECLARED NON-AUTONOMOUS (B2.5a) ─────────────────────
+  // ── WHY THIS GATE SPENDS NOTHING, AND WHAT THAT DOES NOT MEAN ───────────
   //
-  // `autonomous` defaults to true in enforceHierarchy, and leaving that default here would have
-  // made every governed release of a human-approved action refuse whenever its objective carried
-  // no budget. That is the wrong answer, and wrong in the dangerous direction: it would have left
-  // "set a budget figure, any figure" as the only way to send an email a named person had already
-  // approved — a check that pressures the next operator toward a worse fix (CLAUDE.md).
+  // Releasing an action a named human approved transmits a message. It makes no provider call and
+  // incurs no new charge, so there is no ceiling for a new charge to be bounded by — which is why
+  // it goes through `assessWithoutSpending` rather than the spending gate. Judging it by the
+  // spending rule would refuse every release on an objective with no budget FIGURE, leaving
+  // "invent one" as the only way to send an approved email: a gate that pressures the next
+  // operator toward a worse fix (CLAUDE.md).
   //
-  // The reason it is non-autonomous is not convenience. This gate runs AFTER a named human
-  // approved this specific action, and that approval is the authorization; the budget rule exists
-  // to stop UNATTENDED spend committing the company to money nobody sanctioned. The enterprise
-  // daily cap and the refuse-on-unmeasured rule above are still enforced in full, so a release
-  // still cannot happen while spend is over cap or unproven — only the "no objective budget at
-  // all" refusal is answered by the human approval instead.
+  // What that does NOT mean (owner, 2026-11-25): *"Human approval of an action is not unlimited
+  // financial authorization."* It is not treated as any financial authorization at all here. Every
+  // dollar of AI spend on this run was already bounded by a HOLD taken before the call
+  // (`authorizeSpend`), charged against this objective's own ceiling; the approval neither widens
+  // that ceiling nor authorizes a further call. The enterprise daily cap and the
+  // refuse-on-unmeasured rule still apply in full, so a release cannot happen while spend is over
+  // cap or unproven.
   //
-  // Both halves are pinned in scripts/check-finite-budget-db.js: an autonomous AI call against a
-  // budgetless objective is refused, and a human-approved release against the same objective is
-  // not. If that distinction ever stops being true, those two assertions disagree.
-  const h = await enforceHierarchy(ctx, { objectiveId, criticality: 'routine', capUsd,
-    refuseOnUnmeasured: true, autonomous: false }, deps);
+  // It is also not a boolean a caller may set: the distinction is which FUNCTION is named, and
+  // `check-finite-budget-db.js` asserts that this is the only place in the codebase that names
+  // the non-spending one.
+  const h = await assessWithoutSpending(ctx, { objectiveId, criticality: 'routine', capUsd,
+    refuseOnUnmeasured: true }, deps);
   if (!h.allow) return { allow: false, reason: `budget_${h.scope}`, detail: h.reason, hierarchy: h };
 
   return { allow: true, hierarchy: h };
 }
 
-module.exports = { assess, enforce, enforceHierarchy, consequentialReleaseGate,
+module.exports = { assess, enforce, enforceHierarchy, assessWithoutSpending,
+  authorizeSpend, consequentialReleaseGate,
   DAILY_CAP_USD, THRESHOLDS, TIERS, NEVER_REFUSED, tierFor, raiseOne };

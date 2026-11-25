@@ -433,7 +433,7 @@ async function validate(ctx, plan, deps = {}) {
   let budgetDecision;
   try {
     budgetDecision = await budget.enforceHierarchy(ctx, {
-      objectiveId: plan.objectiveId, criticality: 'routine', autonomous: true,
+      objectiveId: plan.objectiveId, criticality: 'routine',
     }, deps);
   } catch (e) {
     return refuse('budget_unreadable',

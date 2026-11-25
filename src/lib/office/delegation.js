@@ -247,7 +247,7 @@ async function delegate(parentCtx, { toAgent, callingAgent, reason, intentKey = 
   let budgetDecision;
   try {
     budgetDecision = await budget.enforceHierarchy(parentCtx, {
-      objectiveId: parentCtx.objectiveId, criticality: 'routine', autonomous: true,
+      objectiveId: parentCtx.objectiveId, criticality: 'routine',
     }, deps);
   } catch (e) {
     return refuse('budget_unreadable',

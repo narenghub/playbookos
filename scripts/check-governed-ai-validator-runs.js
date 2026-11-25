@@ -295,7 +295,11 @@ function runValidator(stub, extraEnv = {}) {
         const b2out = (b2.stdout || '') + (b2.stderr || '');
         if (b2.status !== 0) ok('with the refusal disabled the budget validator GOES RED — its green is load-bearing');
         else bad('the budget validator still passed with the gate disabled — its green means nothing', b2out.split('\n').slice(-18).join('\n'));
-        if (/the budget is assessed but its refusal is not acted on/.test(b2out)) {
+        // Matches the STABLE part of the message, not its whole wording. B2.5b reworded it from
+        // "the budget is assessed but…" to "the hold is taken but…" when the gate became a
+        // reservation, and an exact-string expectation turned a correct validator into a red one
+        // over an adjective. The defect it must name is "the refusal is not acted on".
+        if (/refusal is not acted on/.test(b2out)) {
           ok('and it names the exact defect rather than failing vaguely');
         } else bad('it went red for an unclear reason', b2out.split('\n').slice(-14).join('\n'));
       } finally {

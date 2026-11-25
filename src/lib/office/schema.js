@@ -388,6 +388,81 @@ const DDL = [
   `CREATE UNIQUE INDEX IF NOT EXISTS office_budget_exceptions_one_active
      ON office_budget_exceptions (objective_id) WHERE revoked_at IS NULL`,
 
+  // ── B2.5b: A HOLD TAKEN BEFORE THE MONEY IS SPENT ────────────────────────
+  //
+  // Owner instruction, 2026-11-25: "Prevent unauthorized expenditure BEFORE a metered call, not
+  // merely after the budget has been exceeded." · "Atomic reservation or charging before
+  // execution." · "Maximum possible provider charges." · "Reservation reconciliation after
+  // completion or failure."
+  //
+  // WHAT B2.5a ACTUALLY ENFORCED, AND WHAT IT DID NOT. `governedCall` asked the budget, then
+  // called the provider, then recorded the cost. Check-then-act: two concurrent calls both read
+  // the same spend, both pass, and both spend. And neither was bounded — the gate asked "is there
+  // headroom" and never "is there headroom for THIS call", so one call against a $0.05 objective
+  // could cost $5 and the refusal arrived on the call after it.
+  //
+  // A reservation closes both. `max_usd` is the MOST this call can cost — computed from the
+  // model's list price and the token ceiling, over-estimated on purpose — and it is held against
+  // the objective before the provider is reached. Live holds count towards the budget, so a second
+  // concurrent call sees the first one's exposure even though nothing has been charged yet.
+  //
+  // `expires_at` is the crash answer: a hold is only counted while live, so a process that dies
+  // mid-call cannot consume an objective's budget for ever. The predicate does that in SQL rather
+  // than relying on a reaper being punctual, and the reaper then corrects the record.
+  //
+  // `settled_cost_known` exists because an unmeasured call is not a free one (the C1 rule): a
+  // settlement may legitimately carry no dollar figure, and the row says so instead of recording 0.
+  `CREATE TABLE IF NOT EXISTS office_budget_reservations (
+     id                 TEXT PRIMARY KEY,
+     company_id         TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+     objective_id       TEXT NOT NULL,
+     run_id             UUID NOT NULL,
+     max_usd            NUMERIC(14,8) NOT NULL,
+     state              TEXT NOT NULL DEFAULT 'held',
+     reason             TEXT NOT NULL,
+     under_exception    TEXT,
+     held_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     expires_at         TIMESTAMPTZ NOT NULL,
+     settled_at         TIMESTAMPTZ,
+     settled_cost_usd   NUMERIC(14,8),
+     settled_cost_known BOOLEAN,
+     cost_ledger_id     BIGINT,
+     CONSTRAINT office_budget_reservations_state
+       CHECK (state IN ('held','settled','released','expired')),
+     -- A hold must be for a positive amount. A $0 hold would reserve nothing while looking like a
+     -- reservation, which is the shape this table exists to prevent.
+     CONSTRAINT office_budget_reservations_positive CHECK (max_usd > 0),
+     CONSTRAINT office_budget_reservations_window CHECK (expires_at > held_at),
+     CONSTRAINT office_budget_reservations_reason_not_blank
+       CHECK (length(btrim(reason)) > 0),
+     -- A HELD row carries no settlement, and a terminal row carries one. Without this a settled
+     -- reservation could keep its hold, or a live one could claim to have been reconciled.
+     CONSTRAINT office_budget_reservations_held_is_open CHECK (
+       state <> 'held' OR (settled_at IS NULL AND settled_cost_usd IS NULL
+                           AND settled_cost_known IS NULL AND cost_ledger_id IS NULL)
+     ),
+     CONSTRAINT office_budget_reservations_settled_is_closed CHECK (
+       state <> 'settled' OR (settled_at IS NOT NULL AND settled_cost_known IS NOT NULL
+                              AND (settled_cost_known = FALSE OR settled_cost_usd IS NOT NULL))
+     ),
+     -- Released and expired mean NOTHING was charged. A dollar figure on one of those would be a
+     -- cost nobody can point at a provider call for.
+     CONSTRAINT office_budget_reservations_unspent_is_zero CHECK (
+       state NOT IN ('released','expired')
+       OR (settled_at IS NOT NULL AND settled_cost_usd IS NULL AND settled_cost_known IS NULL)
+     ),
+     CONSTRAINT office_budget_reservations_objective_same_company
+       FOREIGN KEY (objective_id, company_id) REFERENCES objectives (id, company_id)
+       ON DELETE RESTRICT,
+     CONSTRAINT office_budget_reservations_run_same_company
+       FOREIGN KEY (run_id, company_id) REFERENCES agent_runs (run_id, company_id) MATCH FULL
+       ON DELETE RESTRICT
+   )`,
+  // The exposure query's index: live holds for one objective.
+  `CREATE INDEX IF NOT EXISTS idx_office_reservations_live
+     ON office_budget_reservations (company_id, objective_id, expires_at)
+     WHERE state = 'held'`,
+
   // ── B3.2: A PLAN IS A PROPOSAL, AND THE RECORD SAYS SO ───────────────────
   //
   // Owner instruction: "Agent-generated plans are proposals, not authorization. Every proposed
@@ -592,6 +667,9 @@ const KERNEL_TABLES = Object.freeze([
   // B2.5a. Company-scoped like every other kernel table, so it is read through scope.js and a
   // caller cannot ask "is there an exception" without a resolved context.
   'office_budget_exceptions',
+  // B2.5b. Pre-spend holds. The atomic reserve/settle path lives in scope.js with the rest, so a
+  // caller cannot take a hold without a resolved context.
+  'office_budget_reservations',
   // B3.2. A plan and its steps are company-scoped kernel records: read through scope.js so a
   // caller cannot ask for "the plan" without a resolved context, which is what keeps one company's
   // decomposition out of another's reach.
