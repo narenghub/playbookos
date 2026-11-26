@@ -98,6 +98,12 @@ const EXEMPT = new Map([
     + 'predicate is written to hide rows a reader should not see and the claim here is that there '
     + 'are no rows at all. The cycle itself writes only through office/memory.remember, which is '
     + 'what the section breaks on purpose. The user_companies statement is fixture cleanup by id.'],
+  ['scripts/check-operational-facts-db.js',
+    'B3.19\'s operational-facts check. It grants its fixture membership through grantMembership and '
+    + 'reads every figure through the facts source; the direct statements are the INDEPENDENT '
+    + 'recount that the owner\'s Priority 4 requires ("verify every briefing figure against '
+    + 'independent evidence") plus fixture cleanup by id. A recount routed through the accessor '
+    + 'under test is not a recount.'],
   ['src/lib/identity/company-membership.js',
     'THE accessor for user_companies. Its whole purpose is to own that table.'],
   ['src/lib/identity/workflow-company.js',

@@ -510,7 +510,7 @@ globalThis.fetch = async (...args) => {
         + 'executed, 1 employee task assigned and completed',
       effectRef: planned.plan.planId,
     }, deps);
-    const outcomes = await scope.listOutcomes(ctx, deps);
+    const outcomes = await scope.listOutcomes(ctx, {}, deps);   // options second, deps third
     if (outcomes.some((o) => o.id === outcomeId && o.outcome === 'achieved')) {
       ok('and a durable outcome records the measurable result, pointing at the plan that produced it');
     } else bad('the outcome was not recorded', JSON.stringify(outcomes));

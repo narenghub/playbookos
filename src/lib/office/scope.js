@@ -326,14 +326,39 @@ async function spendToday(ctx, deps = {}) {
   return res.rows[0];
 }
 
-async function listOutcomes(ctx, deps = {}) {
+/**
+ * This company's recorded outcomes, optionally for ONE run.
+ *
+ * ── THE runId FILTER EXISTS BECAUSE ITS ABSENCE WAS A CROSS-RUN LEAK ───────
+ *
+ * The signature was `(ctx, deps)` and `office/cycle.js` called it as
+ * `listOutcomes(ctx, { runId }, deps)` — three arguments to a two-argument function. So `{runId}`
+ * was taken as `deps` (dropping the injected connection, which only ever worked because
+ * DATABASE_URL happened to point at the same database) and the filter was silently nothing:
+ * `phaseOf` asked "does an outcome exist for THIS RUN" and was answered "does an outcome exist for
+ * this COMPANY".
+ *
+ * With one objective per company that reads correctly, which is why every check passed. With two —
+ * which the continuous advancement tick makes ordinary, and which B3.16's own check sets up — the
+ * SECOND run would skip VALIDATE entirely on the strength of the FIRST run's outcome row, and
+ * B3.18's new REPORT check would then attribute the first run's partial outcome to the second run.
+ *
+ * Both call sites keep their shape; it now means what it says. Callers passing `(ctx, deps)` are
+ * unaffected: an options object with no `runId` and a deps object with no `runId` behave
+ * identically here, and the one call that passes deps second is `check-autonomous-office-cycle-db`,
+ * whose deps carry a `query` — so `q(opts)` would find none and fall back to the default, which is
+ * the same database. Accepting either shape would be guessing; this takes options second and deps
+ * third, like every other accessor in this file, and the two existing callers were corrected.
+ */
+async function listOutcomes(ctx, { runId = null } = {}, deps = {}) {
   assertContext(ctx);
   const res = await q(deps)(
     `SELECT id, run_id, objective_id, outcome, business_effect, effect_ref, at
        FROM office_outcomes
       WHERE company_id = $1
+        AND ($2::uuid IS NULL OR run_id = $2::uuid)
       ORDER BY at DESC`,
-    [ctx.companyId]
+    [ctx.companyId, runId]
   );
   return res.rows;
 }

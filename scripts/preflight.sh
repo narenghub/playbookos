@@ -443,6 +443,14 @@ pf_step "no phase of the cycle can duplicate its effect under concurrency or res
 # passed. Three pieces of acceptance evidence rested on that line.
 pf_step "every negative path produces a truthful durable state, bounded recovery or an escalation" \
   node scripts/check-negative-paths-db.js
+# Owner's Priority 4 of the second directive (2026-11-25): a governed, company-scoped, read-only
+# operational facts source, with measured zero, missing, stale and unavailable told APART — each
+# arranged as a real database state with a control that turns it back into the previous reading —
+# and every figure recounted by an independent SQL path, which is B3.10's step-13 pattern.
+pf_step "operational facts are measured, company-scoped, and every figure survives a recount" \
+  node scripts/check-operational-facts-db.js
+pf_step "the facts source writes nothing and no model can reach it" \
+  env JWT_SECRET=preflight node --test src/lib/office/operational-facts-is-read-only.test.js
 pf_step "the plan can actually check the result, and an undeclared type is not validated" \
   env JWT_SECRET=preflight node --test src/lib/office/independent-criterion.test.js
 # B4.2 (owner's Priority 1, 2026-11-25): the worker PROCESS, started as a container starts it, with

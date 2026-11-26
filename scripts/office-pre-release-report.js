@@ -309,7 +309,7 @@ function canonical(v) {
 
     // listOutcomes takes (ctx, deps) and is COMPANY-wide — it has no objectiveId parameter, so
     // the filter is applied here. Read from the function, not assumed from its name.
-    const allOutcomes = await scope.listOutcomes(ctx).catch(() => []);
+    const allOutcomes = await scope.listOutcomes(ctx, {}).catch(() => []);
     const outcomes = (allOutcomes || []).filter((o) => o.objective_id === a.objective_id);
     field('outcomes (objective)', outcomes.length);
     field('outcomes (company)', (allOutcomes || []).length);

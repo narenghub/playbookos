@@ -103,6 +103,14 @@ const EXEMPT = new Set([
   // directly, reads the durable consequences directly, and asserts that the CYCLE — product code,
   // not exempt — reaches every table through scope.js. Disposable cluster; fixtures by id.
   path.join('scripts', 'check-negative-paths-db.js'),
+  // B3.19's operational-facts check. Its central assertion is that **every figure the facts source
+  // produces survives an INDEPENDENT recount**, which is B3.10's step-13 pattern: the raw SQL here
+  // is the second opinion, and routing it through the accessors that produced the figures would be
+  // asking the module to confirm itself. It is also the one place where a second copy of a company
+  // predicate is the right thing to write, because whether the first copy is correct is the whole
+  // question. Disposable cluster; fixtures by id; one deliberate RENAME of a table, restored in the
+  // same section, to prove an unmigrated database is told apart from an outage.
+  path.join('scripts', 'check-operational-facts-db.js'),
   // The end-to-end acceptance test (ruling 8 item 5). It SEEDS a company, an objective and a run
   // into a DISPOSABLE cluster it creates and destroys, so that the real server has something to
   // serve — the kernel rows are the fixture, not the subject. It never runs against production

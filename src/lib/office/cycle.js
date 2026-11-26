@@ -783,12 +783,33 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
       const counted = await scope.briefingCounts(resolved,
         { runId, planId: plan ? plan.id : null }, deps);
 
+      // ── GOVERNED OPERATIONAL FACTS (B3.19) ──────────────────────────
+      //
+      // The owner's Priority 4: the briefing must rest on *authoritative operational records*, and
+      // measured zero, missing, stale and unavailable must be told apart. `operational-facts.js`
+      // composes the existing authorized accessors and classifies every figure; it writes no SQL
+      // and can reach no model, so there is no seam through which a generated number could become
+      // a fact. A failure to collect degrades the briefing and does not replace it with a guess.
+      const FACTS = deps.operationalFacts || require('./operational-facts');
+      let operational = null; let factsError = null;
+      try {
+        operational = await FACTS.collect(resolved,
+          { asOf: (deps.agentCore || require('../agent-core')).businessToday() }, deps);
+      } catch (e) { factsError = e.message; }
+
       const briefing = {
         objectiveId: resolved.objectiveId,
         plannedSteps: counted.plannedSteps,
         outcomes: counted.outcomes,
         openExceptions: counted.openExceptions,
         employeeAssigned: !!(assignment && assignment.ok !== false),
+        // Carried WITH their quality, never flattened into bare numbers: a figure whose status is
+        // `missing` or `stale` is not the same claim as one that is `measured`, and a briefing that
+        // prints them identically is a briefing that cannot be checked.
+        operationalFacts: operational ? operational.facts : null,
+        factQuality: operational ? operational.quality : null,
+        factsAsOf: operational ? operational.asOf : null,
+        factsError,
       };
 
       // ── MEMORY: what happened, in the vocabulary the planner can read ──
