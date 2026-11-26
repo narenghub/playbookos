@@ -67,6 +67,12 @@ const AUTHORIZED_COMPANY_ID_TABLES = new Set([
   // cost, approved, excepted and achieved.
   'objectives', 'agent_runs',
   'office_cost_ledger', 'office_approvals', 'office_exceptions', 'office_outcomes',
+  // B4.5 (2026-11-26): deduplicated operational alerts. company_id is nullable with ON DELETE
+  // RESTRICT, read and written only through scope.js like every other kernel table — an alert about
+  // one company's work is that company's record. `office_scheduler_heartbeats` is deliberately NOT
+  // here: it answers "is the scheduler alive", which is a fact about the process, so it carries no
+  // company_id at all and would turn this list into a claim that it does.
+  'office_monitor_alerts',
   // B7.8 (owner ruling, 2026-11-24): many-to-many identity. `user_companies` IS the table that
   // decides company scope, so it is deliberately NOT a kernel table — routing it through the
   // accessor whose predicate is the company scope would be circular. It gets single-accessor

@@ -501,7 +501,27 @@ if (String(process.env.OFFICE_INITIATOR_ENABLED) === 'true') {
     // index, which `check-unattended-cycle-db.js` measures — but safe is not the same as free:
     // without this they would pile up against the database. A skipped tick is logged, because a
     // tick that silently never runs is the failure this guard could otherwise hide.
-    if (officeTickBusy) { console.warn('[CRON] office-cycle-advance SKIPPED — previous tick still running'); return; }
+    // ── THE HEARTBEAT COMES FIRST, AND A SKIPPED TICK STILL BEATS ────────────
+    //
+    // B4.5's monitor cannot notice SILENCE without a durable record of noise, and the record has to
+    // mean "this cron fired", not "this cron did work". A tick skipped because the previous one is
+    // still running is a LIVE scheduler; a tick held by a STOP is a live scheduler; a tick with no
+    // runs to advance is a live scheduler. Writing the heartbeat only on the path that advances
+    // something would make a quiet, healthy office indistinguishable from a dead one — which is the
+    // exact failure the monitor exists to catch, reproduced inside its own evidence.
+    //
+    // Best-effort by design: a heartbeat that cannot be written must not stop the tick from
+    // advancing real work. The monitor reports an unreadable heartbeat as a finding of its own.
+    const beat = (detail) => require('./src/lib/office/scope')
+      .touchSchedulerHeartbeat('office-cycle-advance', { detail })
+      .catch((e) => console.warn(`[CRON] office-cycle-advance heartbeat not written: ${e.message}`));
+
+    if (officeTickBusy) {
+      await beat('skipped: previous tick still running');
+      console.warn('[CRON] office-cycle-advance SKIPPED — previous tick still running');
+      return;
+    }
+    await beat('firing');
     officeTickBusy = true;
     const startedAt = Date.now();
     try {
@@ -570,6 +590,53 @@ if (String(process.env.OFFICE_INITIATOR_ENABLED) === 'true') {
 } else {
   console.log('[CRON] office-scheduled-initiation and office-cycle-advance NOT registered '
     + '(set OFFICE_INITIATOR_ENABLED=true to enable)');
+}
+
+// ── B4.5: DEDUPLICATED OPERATIONAL MONITORING, AND IT SENDS NOTHING ──────────
+//
+// Owner's Priority 3 of 2026-11-25: *"implement deduplicated monitoring with NO external
+// notifications until separately authorized"*. `office/monitor.js` requires no transport at all, so
+// there is nothing here to notify with — what the sweep does is WRITE what it found to
+// `office_monitor_alerts`, deduplicated by a derived primary key, where the Command Center and an
+// operator read it.
+//
+// It has its OWN enable flag rather than riding on `OFFICE_INITIATOR_ENABLED`, because the two are
+// different decisions: an operator may well want to watch an office that is switched off. It is off
+// by default, like everything else in this release posture.
+//
+// Every five minutes, which is the bound B4.5 states for noticing silence. Haltable by name: it is
+// in CRON_SCOPES, so `withAlerts` refuses it on a stop before the body runs.
+if (process.env.OFFICE_MONITOR_ENABLED === 'true') {
+  cron.schedule('*/5 * * * *', withAlerts('office-monitor', async () => {
+    const MON = require('./src/lib/office/monitor');
+    const CTXMOD = require('./src/lib/office/context');
+    const { query } = require('./src/lib/db');
+    const deps = { query };
+
+    // One sweep per company that has an active objective, and the company comes from the OBJECTIVE
+    // — never from a list this file keeps. A monitor that chose its own companies would be the
+    // second answer to "which company is this for" that the kernel exists to prevent.
+    const objectives = (await query(
+      `SELECT DISTINCT ON (company_id) id, company_id FROM objectives
+        WHERE status = 'active' ORDER BY company_id, priority, id`)).rows;
+    if (!objectives.length) { console.log('[CRON] office-monitor — no active objectives'); return; }
+
+    for (const o of objectives) {
+      try {
+        const ctx = await CTXMOD.resolveObjectiveContext({ objectiveId: o.id }, deps);
+        const r = await MON.sweep(ctx, {}, deps);
+        console.log(`[CRON] office-monitor ${o.company_id} — `
+          + `${r.counts.critical} critical, ${r.counts.warning} warning, ${r.counts.info} info; `
+          + `${r.filed.length} filed, ${r.resolved.length} resolved`
+          + `${r.errors.length ? ` (${r.errors.length} NOT filed)` : ''}`);
+      } catch (e) {
+        console.warn(`[CRON] office-monitor ${o.company_id} failed: ${e.message}`);
+      }
+    }
+  }));
+  console.log('[CRON] office-monitor registered (every 5 minutes, writes alerts, sends nothing)');
+} else {
+  console.log('[CRON] office-monitor NOT registered (set OFFICE_MONITOR_ENABLED=true to enable)');
 }
 
 // Monday 8 AM: Goal Engine — cascade goals then assign weekly KPIs for all active users

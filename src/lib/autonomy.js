@@ -470,6 +470,10 @@ const CRON_SCOPES = {
   // advancement of existing runs without also blocking tomorrow's initiation, or the reverse. Same
   // agent, so the existing per-agent stop still reaches both at once.
   'office-cycle-advance':                    { company: null,      agent: 'office-initiator' },
+  // B4.5. The monitor READS and files alerts; it sends nothing. In this map so it can be halted by
+  // name without halting the scheduler it watches — and so that halting the scheduler does not
+  // silently halt the watcher, which would be the worst available coupling.
+  'office-monitor':                          { company: null,      agent: 'office-monitor' },
   // R1 reconciliation. Platform-level like the reaper: reporting unresolved external attempts
   // belongs to no one business, and an operator halting Abiozen should not blind the channel that
   // says which supplier correspondence is in an unknown state.

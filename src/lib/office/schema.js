@@ -759,6 +759,60 @@ const DDL = [
        FOREIGN KEY (run_id, company_id) REFERENCES agent_runs (run_id, company_id) MATCH FULL
    )`,
   `CREATE INDEX IF NOT EXISTS idx_office_outcomes_company_at ON office_outcomes (company_id, at DESC)`,
+
+  // ── B4.5: DEDUPLICATED OPERATIONAL ALERTS ─────────────────────────────────
+  //
+  // Owner's Priority 3 of 2026-11-25: *"implement deduplicated monitoring with NO external
+  // notifications until separately authorized"*, and *"silence > 5 min → one deduplicated alert"*.
+  //
+  // THE DEDUPLICATION IS THE PRIMARY KEY, not a rule in the monitor. `id` is derived from the
+  // finding's code and its subject, so a condition that persists for three days is ONE row whose
+  // `occurrences` and `last_seen_at` move — and a monitor that fires every five minutes cannot
+  // produce 864 identical rows even if somebody later forgets why that mattered. The same shape as
+  // every other effect in this directory: the database is the arbiter, not the caller's memory.
+  //
+  // `resolved_at` is set when a later evaluation no longer finds the condition. The row STAYS:
+  // "this was wrong for six hours on Tuesday" is the thing an operator needs after an incident, and
+  // deleting it would make the alert table a statement about the present only.
+  // `company_id` is NOT NULL, which `check-office-isolation-db.js` required within the hour of this
+  // table being created — and it was right. A kernel table must demand its company FROM CREATION,
+  // because `company_id IS NULL` means "ownership not established" and every scoped read is an
+  // EQUALITY match: a nullable column here would let an alert exist that is returned to NOBODY,
+  // which for an alert is the worst possible place to put one. The monitor sweeps per company, so
+  // even a platform-shaped finding (the scheduler is silent) is filed as that company's: it is
+  // that company's work which is not advancing.
+  `CREATE TABLE IF NOT EXISTS office_monitor_alerts (
+     id            TEXT PRIMARY KEY,
+     company_id    TEXT NOT NULL REFERENCES companies(id) ON DELETE RESTRICT,
+     code          TEXT NOT NULL,
+     subject       TEXT NOT NULL,
+     severity      TEXT NOT NULL,
+     detail        TEXT,
+     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     occurrences   INTEGER NOT NULL DEFAULT 1,
+     resolved_at   TIMESTAMPTZ,
+     CONSTRAINT office_monitor_alerts_severity_check
+       CHECK (severity IN ('info','warning','critical')),
+     CONSTRAINT office_monitor_alerts_occurrences_check CHECK (occurrences >= 1)
+   )`,
+  `CREATE INDEX IF NOT EXISTS idx_office_monitor_alerts_open
+     ON office_monitor_alerts (company_id, severity, last_seen_at DESC)
+     WHERE resolved_at IS NULL`,
+
+  // ── B4.5: THE SCHEDULER'S OWN HEARTBEAT ───────────────────────────────────
+  //
+  // A monitor cannot notice SILENCE without a durable record of noise. The advancement cron writes
+  // one row per name on every firing — including a firing it skips because the previous one is still
+  // running, since a skipped tick is a live scheduler and a missing heartbeat is not.
+  //
+  // One row per cron name, updated in place: this is a liveness signal, not a log. The history of
+  // what the scheduler DID is `agent_runs`, which is append-only and already the record.
+  `CREATE TABLE IF NOT EXISTS office_scheduler_heartbeats (
+     name     TEXT PRIMARY KEY,
+     at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+     detail   TEXT
+   )`,
 ];
 
 // Statements that are idempotent only by swallowing "already exists" — ALTER TABLE ADD CONSTRAINT
@@ -802,6 +856,9 @@ const KERNEL_TABLES = Object.freeze([
   'office_approvals',
   'office_exceptions',
   'office_outcomes',
+  // B4.5. Company-scoped like the rest: an alert about one company's work is that company's
+  // record, and the monitor reads and writes it through scope.js so it cannot ask about another's.
+  'office_monitor_alerts',
 ]);
 
 module.exports = { migrateOffice, KERNEL_TABLES, DDL };

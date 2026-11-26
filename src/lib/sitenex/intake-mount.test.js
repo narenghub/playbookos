@@ -29,10 +29,63 @@ const SERVER = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
 // Comments are stripped first. Four source-reading tests in this repo have been broken by prose that
 // happened to contain the pattern they scanned for — a `partner_id` in a sentence, an `ORDER BY` in an
 // explanation — and the paragraph above this file's code mentions every one of these mounts by name.
+//
+// ── AND IT WALKS THE SOURCE RATHER THAN PATTERN-MATCHING IT ─────────────────
+//
+// This has now broken TWICE, both times for the same two characters, and both times the failure
+// read "server.js no longer contains the intake mount" — a message that says this
+// authentication-bypass guard has lost its subject. The cause each time was a cron expression:
+// `'*/5 * * * *'` and `'*/45 * * * * *'` each contain `*/`, and a regex stripper that does not
+// understand strings pairs that with the nearest `/*`-looking text in an earlier comment and blanks
+// everything between — 250 lines of server.js the first time, this mount among them.
+//
+// Blanking string literals first does not work either, and trying it was instructive: the patterns
+// these tests match ARE string literals (`'/api'`, `'./src/api/sitenex-intake.routes'`), so
+// blanking them removes the very lines the test is looking for.
+//
+// So it walks the source once, tracking whether it is in code, a line comment, a block comment, a
+// quoted string or a template literal, and blanks only the comments — space for space, so every
+// line number survives. A step-value cron expression is ordinary JavaScript and the next person to
+// write one must not have to know this test exists.
+//
+// `scripts/check-scripts-parse.js` cannot catch this class of fault: the file parses perfectly. Only
+// a test that reads LINES can be fooled by it, which is why the fix belongs here.
 function stripComments(src) {
-  return src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-            .replace(/(^|[^:])\/\/[^\n]*/g, (m, p) => p + ' '.repeat(m.length - p.length));
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    const d = src[i + 1];
+    if (c === '/' && d === '/') {
+      while (i < n && src[i] !== '\n') { out += ' '; i += 1; }
+      continue;
+    }
+    if (c === '/' && d === '*') {
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) {
+        out += src[i] === '\n' ? '\n' : ' ';
+        i += 1;
+      }
+      out += '  '; i += 2;            // the closing */
+      continue;
+    }
+    if (c === '\'' || c === '"' || c === '`') {
+      const quote = c;
+      out += c; i += 1;
+      while (i < n) {
+        if (src[i] === '\\') { out += src.slice(i, i + 2); i += 2; continue; }
+        out += src[i];
+        if (src[i] === quote) { i += 1; break; }
+        if (quote !== '`' && src[i] === '\n') { i += 1; break; }   // unterminated: do not run on
+        i += 1;
+      }
+      continue;
+    }
+    out += c; i += 1;
+  }
+  return out;
 }
+
 const CODE = stripComments(SERVER);
 const lineOf = (re, what) => {
   const lines = CODE.split('\n');
@@ -40,6 +93,33 @@ const lineOf = (re, what) => {
   assert.ok(i >= 0, `server.js no longer contains ${what} — this test cannot check an order it cannot find`);
   return i + 1;
 };
+
+test('CONTROL: the stripper is not fooled by a cron expression, and still strips comments', () => {
+  // The fix above is unmeasured without this. The first case is the exact shape that broke this
+  // file twice: a comment containing something that looks like a block-comment opener, then a
+  // string literal containing `*/`. A regex stripper blanks everything between them.
+  const trap = [
+    "// a note about /intake/* and how it works",
+    "cron.schedule('*/5 * * * *', job);",
+    "app.use('/api', require('./src/api/sitenex-intake.routes'));",
+  ].join('\n');
+  const stripped = stripComments(trap);
+  assert.ok(/sitenex-intake\.routes/.test(stripped),
+    'the mount was blanked by a cron expression — the fault this control exists for');
+  assert.ok(/cron\.schedule/.test(stripped), 'the cron line was blanked');
+  assert.equal(stripped.split('\n').length, 3, 'line numbers must survive');
+
+  // And it must still do its actual job, or the narrowing would be a silencing.
+  const real = [
+    "/* app.use('/api', require('./src/api/sitenex-intake.routes')); */",
+    "// app.use('/api', require('./src/api/commented-out.routes'));",
+    "app.use('/api', require('./src/api/real.routes'));",
+  ].join('\n');
+  const s2 = stripComments(real);
+  assert.equal(/sitenex-intake/.test(s2), false, 'a commented-out mount must not be seen');
+  assert.equal(/commented-out/.test(s2), false, 'a line-commented mount must not be seen');
+  assert.ok(/real\.routes/.test(s2), 'the real mount must survive');
+});
 
 test('the intake router is mounted ABOVE all three gates', () => {
   const intake = lineOf(/app\.use\(\s*['"]\/api['"]\s*,\s*require\(\s*['"]\.\/src\/api\/sitenex-intake\.routes['"]/, 'the intake mount');

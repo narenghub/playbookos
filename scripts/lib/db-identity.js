@@ -69,6 +69,11 @@ const M7_TABLES = [
   'office_plans', 'office_plan_steps',
   // B3.3 (2026-11-24): the dispatch record for one delegation.
   'office_delegations',
+  // B4.5 (2026-11-26): deduplicated operational alerts, and the scheduler's own liveness signal.
+  // Listed in the same change that created them, because the check below runs the migrations and
+  // refuses a database whose tables this list does not cover — and it caught exactly that within
+  // the hour, which is the drift this list exists to make impossible.
+  'office_monitor_alerts', 'office_scheduler_heartbeats',
   // Decision 1 (2026-11-25): explicit product→company mappings.
   'product_companies',
   // B7.11 / B7.9 (2026-11-25): the outbound declaration tables — which shared mailboxes count as

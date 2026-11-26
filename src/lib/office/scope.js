@@ -1270,6 +1270,98 @@ async function runState(ctx, runId, deps = {}) {
   return res.rows[0] || null;
 }
 
+// ── B4.5: DEDUPLICATED ALERTS, AND THE SCHEDULER'S LIVENESS ─────────────────
+
+/**
+ * File one finding, or bump the one already filed.
+ *
+ * The id is the caller's, derived from the finding's code and subject, so the PRIMARY KEY does the
+ * deduplication and the monitor holds no memory of what it has already said. A condition that
+ * persists for three days is ONE row whose `occurrences` and `last_seen_at` move.
+ *
+ * `resolved_at` is cleared on a repeat: a condition that comes back is the same condition
+ * recurring, and an alert that stayed resolved while the fault was live would be the worst of both.
+ */
+async function recordAlert(ctx, { id, code, subject, severity = 'warning', detail = null },
+  deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `INSERT INTO office_monitor_alerts (id, company_id, code, subject, severity, detail)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (id) DO UPDATE
+       SET last_seen_at = NOW(),
+           occurrences  = office_monitor_alerts.occurrences + 1,
+           severity     = EXCLUDED.severity,
+           detail       = EXCLUDED.detail,
+           resolved_at  = NULL
+     RETURNING id, occurrences, first_seen_at, last_seen_at`,
+    [id, ctx.companyId, code, subject, severity, detail]
+  );
+  return res.rows[0];
+}
+
+/** This company's unresolved alerts, newest first. */
+async function openAlerts(ctx, { limit = 50 } = {}, deps = {}) {
+  assertContext(ctx);
+  const n = Number.isInteger(limit) && limit > 0 && limit <= 500 ? limit : 50;
+  const res = await q(deps)(
+    `SELECT id, code, subject, severity, detail, first_seen_at, last_seen_at, occurrences
+       FROM office_monitor_alerts
+      WHERE company_id = $1 AND resolved_at IS NULL
+      ORDER BY last_seen_at DESC LIMIT $2`,
+    [ctx.companyId, n]
+  );
+  return res.rows;
+}
+
+/**
+ * Resolve this company's open alerts whose ids are NOT in the current finding set.
+ *
+ * The condition having gone is the only thing that resolves an alert, and it is decided by the
+ * evaluation that just ran rather than by a timeout — an alert that ages out while the fault is
+ * live is how a monitor teaches people to ignore it. The row is kept: "this was wrong for six hours
+ * on Tuesday" is what an operator needs after an incident.
+ */
+async function resolveAlertsExcept(ctx, { ids = [] } = {}, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `UPDATE office_monitor_alerts
+        SET resolved_at = NOW()
+      WHERE company_id = $1 AND resolved_at IS NULL AND NOT (id = ANY($2::text[]))
+      RETURNING id`,
+    [ctx.companyId, ids]
+  );
+  return res.rows.map((r) => r.id);
+}
+
+// ── THE SCHEDULER HEARTBEAT IS DELIBERATELY NOT COMPANY-SCOPED ──────────────
+//
+// It answers "is the scheduler alive", which is a fact about the PROCESS and not about any
+// company's work — the same reason `llm_spend_log` is platform data in spend.routes.js. A company
+// predicate here would be a claim that one tenant's view of the scheduler differs from another's,
+// which is false, and `office_scheduler_heartbeats` is therefore not in KERNEL_TABLES.
+//
+// It lives in this file anyway, because this file owns the office's SQL: putting it anywhere else
+// would mean exempting another module from the scope-discipline check, and an exemption list that
+// grows one reasonable entry at a time stops being a discipline.
+
+async function touchSchedulerHeartbeat(name, { detail = null } = {}, deps = {}) {
+  if (!name) throw new Error('a scheduler heartbeat needs the cron name');
+  await q(deps)(
+    `INSERT INTO office_scheduler_heartbeats (name, at, detail)
+     VALUES ($1, NOW(), $2)
+     ON CONFLICT (name) DO UPDATE SET at = NOW(), detail = EXCLUDED.detail`,
+    [name, detail]
+  );
+  return { ok: true };
+}
+
+async function schedulerHeartbeats(deps = {}) {
+  const res = await q(deps)(
+    `SELECT name, at, detail FROM office_scheduler_heartbeats ORDER BY name`);
+  return res.rows;
+}
+
 /**
  * This company's most recent runs — the durable execution history. B2.9.
  *
@@ -1511,6 +1603,8 @@ module.exports = {
   companyAuthorization, objectiveAuthorization,
   // B2.9 — the durable execution history, for the Command Center.
   recentRuns,
+  // B4.5 — deduplicated alerts, and the scheduler's own liveness signal.
+  recordAlert, openAlerts, resolveAlertsExcept, touchSchedulerHeartbeat, schedulerHeartbeats,
   reserveSpend, settleSpend, releaseSpend, expireStaleReservations, reservationState,
   markDispatched, markFinancialOutcomeUnknown,
   RESERVATION_TTL_MS,

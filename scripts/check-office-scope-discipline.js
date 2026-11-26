@@ -118,6 +118,18 @@ const EXEMPT = new Set([
   // matters most here (an objective paused a moment ago) is one the accessors deliberately refuse
   // to serve. Disposable cluster; every fixture by id.
   path.join('scripts', 'check-command-center-db.js'),
+  // B4.5's monitoring check. It must count the alert ROWS to prove that twenty sweeps produced one,
+  // and read `resolved_at` to prove the row survives resolution — both questions about the TABLE
+  // rather than about what the accessor is willing to return, and `openAlerts` by construction
+  // cannot show a resolved row. It also ages a heartbeat and builds a throwaway table to name the
+  // arbiter. Disposable cluster; fixtures by id.
+  path.join('scripts', 'check-monitor-db.js'),
+  // And its unit test, for the reason `proposal-is-readonly.test.js` is exempt: the table name
+  // appears inside ASSERTIONS that the monitor must not write to it, and in the planted strings its
+  // own negative control feeds through the pattern. A test whose whole subject is "no SQL against
+  // this table" must be allowed to quote the SQL it forbids — prose about SQL, not SQL, and the
+  // scanner cannot tell them apart.
+  path.join('scripts', 'monitor-has-no-transport.test.js'),
   // The end-to-end acceptance test (ruling 8 item 5). It SEEDS a company, an objective and a run
   // into a DISPOSABLE cluster it creates and destroys, so that the real server has something to
   // serve — the kernel rows are the fixture, not the subject. It never runs against production

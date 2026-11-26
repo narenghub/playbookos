@@ -238,6 +238,12 @@ async function snapshot(ctx, { limitHistory = 20 } = {}, deps = {}) {
   const history = await section('history',
     () => scope.recentRuns(ctx, { limit: limitHistory }, deps), null);
 
+  // ── OPEN ALERTS (B4.5), WHICH ARE THE MONITOR'S OUTPUT ──────────────────
+  // The monitor files them and sends nothing; this is where they are read. Deliberately the
+  // accessor's own list rather than a second predicate: an alert this page shows as open must be
+  // one the monitor considers open, or the two will disagree in front of somebody at 3am.
+  const alerts = await section('alerts', () => scope.openAlerts(ctx, { limit: 50 }, deps), null);
+
   // ── AUTHORIZATION REFUSALS ──────────────────────────────────────────────
   const refusals = await section('refusals',
     () => autonomy.history({ limit: limitHistory, deps }), null);
@@ -259,6 +265,7 @@ async function snapshot(ctx, { limitHistory = 20 } = {}, deps = {}) {
     objectives,
     history: history ? Object.freeze(history) : null,
     stops: stops ? Object.freeze(stops) : null,
+    openAlerts: alerts ? Object.freeze(alerts) : null,
     refusals: refusals ? Object.freeze(refusals) : null,
     operationalFacts: operational ? operational.facts : null,
     factQuality: operational ? operational.quality : null,

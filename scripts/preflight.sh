@@ -457,6 +457,15 @@ pf_step "the facts source writes nothing and no model can reach it" \
 # backlog vs an empty queue, a stale hold vs an unresolved charge, an unreadable section vs a zero.
 pf_step "the command centre tells apart what an operator must not confuse" \
   node scripts/check-command-center-db.js
+# B4.5 (owner's Priority 3 of 2026-11-25): deduplicated monitoring with NO external notifications.
+# Twenty sweeps of one unchanged condition produce ONE row, with the destructive control that drops
+# the key and shows the duplicates appear; silence is noticed only when the scheduler is SUPPOSED to
+# be running; an alert is resolved by the condition going away and the row stays; and the outward
+# spy is fired deliberately before its silence is used as evidence.
+pf_step "monitoring deduplicates, notices silence, and sends nothing" \
+  node scripts/check-monitor-db.js
+pf_step "the monitor has no transport at all" \
+  env JWT_SECRET=preflight node --test scripts/monitor-has-no-transport.test.js
 pf_step "the plan can actually check the result, and an undeclared type is not validated" \
   env JWT_SECRET=preflight node --test src/lib/office/independent-criterion.test.js
 # B4.2 (owner's Priority 1, 2026-11-25): the worker PROCESS, started as a container starts it, with
