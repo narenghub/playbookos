@@ -84,6 +84,25 @@ function employeeTaskId(runId) {
 }
 
 /**
+ * The plan id for a run — derived, so a repeated or concurrent PLAN phase collides with the
+ * primary key rather than writing a second plan.
+ *
+ * Plan persistence was the one boundary of the owner's nine with nothing holding it:
+ * `office_plans.id` was minted inside `propose()`, so two PLAN phases racing on one run — which the
+ * continuous advancement tick of B3.16 makes a real possibility across two processes — wrote TWO
+ * plans, each with its own steps and its own dispatchable intent keys, and `planForRun` would have
+ * returned one of them with the other left unreferenced.
+ *
+ * Enforced here rather than by a unique index on `office_plans (run_id)`: `decompose()` is also
+ * used to judge SEVERAL proposals against one run, which `check-autonomous-office-cycle-db.js` does
+ * deliberately for each of its negative cases, and an index would have made the product narrower in
+ * order to fix something only this cycle needs.
+ */
+function planIdFor(runId) {
+  return `plan-cycle-${runId}`.slice(0, 64);
+}
+
+/**
  * What phase is this run in? Derived from rows, every time.
  *
  * Deliberately returns the EVIDENCE alongside the phase, so a caller logging the result records
@@ -249,7 +268,7 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
       });
 
       const plan = await DEC.decompose(resolved, {
-        candidates: cand.candidates, proposer: 'deterministic', runId,
+        candidates: cand.candidates, proposer: 'deterministic', runId, planId: planIdFor(runId),
         consultedMemoryIds: memories.map((m) => m.id).filter(Boolean),
         workflow, agent,
       }, deps);
@@ -411,6 +430,13 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
           assignment = await OPS.assignTask(resolved, {
             id: employeeTaskId(runId),
             userId: target.id,
+            // THE BUSINESS DAY, and it is REQUIRED: `daily_tasks.task_date` is NOT NULL. Omitting
+            // it made every assignment refuse with a bare 23502, which the catch below turned into
+            // `{ok:false}` and the briefing reported as "not assigned" — B3.17 found it by asserting
+            // the EFFECT rather than the absence of a thrown error. Idempotency is held by the
+            // derived id, not by this date, so a run that crosses midnight and recomputes a
+            // different day still cannot produce a second task.
+            taskDate: (deps.agentCore || require('../agent-core')).businessToday(),
             title: 'Review the autonomous cycle outcome',
             description: `Plan ${plan ? plan.id : '(none)'} produced `
               + `${outcomes.length} recorded outcome(s).`,

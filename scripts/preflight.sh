@@ -427,6 +427,14 @@ pf_step "the real running scheduler carries a cycle to a terminal state unattend
 # worker failed on `payload.facts must be an array`.
 pf_step "every plan step's payload is executable by its handler" \
   env JWT_SECRET=preflight node --test src/lib/office/step-payload-contract.test.js
+# Owner's Priority 2 of the second directive (2026-11-25): "exactly one task per intent key does not
+# prove exactly-once execution across every phase". One section per boundary the owner named, each
+# racing five concurrent attempts at the SAME derived id and counting the rows that resulted — plus
+# controls that drop each new constraint and show the duplicate appear, so the guarantee is named
+# rather than assumed. This is the step that found the employee-assignment phase refusing on EVERY
+# run because the cycle never passed the NOT NULL business day.
+pf_step "no phase of the cycle can duplicate its effect under concurrency or restart" \
+  node scripts/check-phase-idempotency-db.js
 # B4.2 (owner's Priority 1, 2026-11-25): the worker PROCESS, started as a container starts it, with
 # its credential from the environment. The existing runtime check injects the secret into the
 # client library and never runs run.js — which is where the Linux blocker lived unseen.

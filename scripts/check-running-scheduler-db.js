@@ -175,6 +175,28 @@ function taskIdFor(runId) {
                          'all_consequential','active','naren@fixture.invalid',5.00)`, [OBJ, CO]);
     made.objectives.push(OBJ);
 
+    // ── AN EMPLOYEE TO ASSIGN WORK TO ──────────────────────────────────────
+    //
+    // This fixture is here because of what its ABSENCE hid. Without a member of CO, the cycle's
+    // employee-assignment phase has nobody to assign to, `employeesOf` returns none, and the
+    // effects assertion below read `tasks <= 1` — satisfied by ZERO. B3.17 then found that the
+    // cycle omitted the NOT NULL `task_date`, so the assignment would have refused even with a
+    // member: two layers of nothing-happening agreeing with each other. With a real member the
+    // assertion is `=== 1`, and the running scheduler has to actually assign the task.
+    const EMP = uid('emp');
+    const ACTOR = uid('actor');
+    await query(`INSERT INTO users (id, email, name, role, password_hash, is_active)
+                 VALUES ($1,$2,'Scheduler Fixture Employee','admin','x',1)`,
+      [EMP, `${EMP}@fixture.invalid`]);
+    await query(`INSERT INTO users (id, email, name, role, password_hash, is_active)
+                 VALUES ($1,$2,'Scheduler Fixture Authorizer','super_admin','x',1)`,
+      [ACTOR, `${ACTOR}@fixture.invalid`]);
+    made.users = [EMP, ACTOR];
+    await require('../src/lib/identity/company-membership').grantMembership({
+      userId: EMP, companyId: CO, companyRole: 'member', grantedBy: ACTOR,
+      reason: 'fixture member so the scheduler-driven cycle has somebody to assign work to',
+    }, deps);
+
     // ── THE REAL SERVER, WITH ITS REAL CRONS ───────────────────────────────
     const port = 30000 + Math.floor(Math.random() * 20000);
     const { child: server, log: serverLog } = spawnChild('server.js', [], {
@@ -326,11 +348,14 @@ function taskIdFor(runId) {
          (SELECT COUNT(*)::int FROM office_outcomes WHERE run_id = $2::uuid)     AS outcomes,
          (SELECT COUNT(*)::int FROM daily_tasks WHERE id = $3::text)             AS tasks`,
       [RUN, RUN, taskIdFor(RUN)])).rows[0];
-    if (effects.outcomes === 1 && effects.tasks <= 1 && effects.memories <= 2) {
-      ok(`REPORT's effects did not multiply (${effects.memories} memory, ${effects.outcomes} `
-        + `outcome, ${effects.tasks} employee task)`);
+    // `tasks === 1`, not `<= 1`: an assertion a zero satisfies measures nothing, and that is the
+    // form in which this one hid a product defect for two commits.
+    if (effects.outcomes === 1 && effects.tasks === 1 && effects.memories <= 2) {
+      ok(`REPORT's effects landed ONCE each (${effects.memories} memory, ${effects.outcomes} `
+        + `outcome, ${effects.tasks} employee task) — the task is the scheduler assigning real `
+        + `work to a real member, not an absence read as a pass`);
     } else {
-      bad('a repeated phase duplicated its effects', effects);
+      bad('a repeated phase duplicated its effects, or an effect never landed', effects);
     }
 
     // ── 4. SUCCESSIVE TICKS, NOT ONE ───────────────────────────────────────
@@ -470,11 +495,23 @@ function taskIdFor(runId) {
     try { if (workerApi) await new Promise((r) => workerApi.close(r)); } catch (_) {}
     try {
       for (const id of made.objectives) {
-        await query(`DELETE FROM office_plan_steps WHERE objective_id=$1`, [id]).catch(() => {});
+        // By PLAN, not by objective_id: office_plan_steps has no such column, so this DELETE had
+        // been failing silently under its own `.catch` since it was written. Harmless here because
+        // the cluster is destroyed, and a swallowed cleanup failure is still worth not having.
+        await query(`DELETE FROM office_plan_steps WHERE plan_id IN
+                       (SELECT id FROM office_plans WHERE objective_id = $1)`, [id]).catch(() => {});
+        await query(`DELETE FROM office_plans WHERE objective_id=$1`, [id]).catch(() => {});
         await query(`DELETE FROM objectives WHERE id=$1`, [id]).catch(() => {});
       }
       for (const id of made.workers) {
         await query(`DELETE FROM worker_identities WHERE id=$1`, [id]).catch(() => {});
+      }
+      // The employee task and the membership before the users they point at, and every one BY ID.
+      for (const id of (made.users || [])) {
+        await query(`DELETE FROM daily_tasks WHERE user_id=$1`, [id]).catch(() => {});
+        // `user_companies`, read off company-membership.js's own FROM clause, not guessed.
+        await query(`DELETE FROM user_companies WHERE user_id=$1`, [id]).catch(() => {});
+        await query(`DELETE FROM users WHERE id=$1`, [id]).catch(() => {});
       }
       for (const id of made.companies) {
         await query(`DELETE FROM companies WHERE id=$1`, [id]).catch(() => {});

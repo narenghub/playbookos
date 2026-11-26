@@ -257,7 +257,8 @@ const refuse = (code, detail, extra = {}) => ({ ok: false, refused: code, detail
  *
  * @returns {{ok:true, plan}} | {{ok:false, refused, detail}}
  */
-function propose(ctx, { candidates, proposer = 'deterministic', consultedMemoryIds = [] } = {}) {
+function propose(ctx, { candidates, proposer = 'deterministic', consultedMemoryIds = [],
+  planId: givenPlanId = null } = {}) {
   assertContext(ctx);
   if (!ctx.objectiveId) return refuse('no_objective', 'a plan must belong to an objective');
   if (!Array.isArray(candidates) || candidates.length === 0) {
@@ -268,7 +269,12 @@ function propose(ctx, { candidates, proposer = 'deterministic', consultedMemoryI
       `${candidates.length} steps proposed; the bound is ${MAX_STEPS}`);
   }
 
-  const planId = newId('plan');
+  // A CALLER MAY SUPPLY THE ID, and one caller does for a reason worth stating: the office cycle
+  // derives it from the run, so that two concurrent PLAN phases collide on this table's primary key
+  // instead of writing two plans with two sets of dispatchable intent keys (B3.17). Every other
+  // caller gets a fresh id, which is what keeps `check-autonomous-office-cycle-db.js` able to judge
+  // several proposals against one run.
+  const planId = givenPlanId || newId('plan');
   const steps = [];
   const seenIntents = new Set();
 
@@ -838,8 +844,8 @@ async function persist(ctx, plan, validation, { runId }, deps = {}) {
  * for when validation was inconvenient.
  */
 async function decompose(ctx, { candidates, proposer = 'deterministic', runId,
-  consultedMemoryIds = [], workflow, agent } = {}, deps = {}) {
-  const proposed = propose(ctx, { candidates, proposer, consultedMemoryIds });
+  consultedMemoryIds = [], workflow, agent, planId = null } = {}, deps = {}) {
+  const proposed = propose(ctx, { candidates, proposer, consultedMemoryIds, planId });
   if (!proposed.ok) return { ok: false, stage: 'propose', ...proposed };
 
   const plan = { ...proposed.plan, workflow, agent };

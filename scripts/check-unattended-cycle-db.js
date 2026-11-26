@@ -533,7 +533,12 @@ const tick = (args = [], extraEnv = {}) =>
     try { if (server) await new Promise((r) => server.close(r)); } catch (_) {}
     try {
       for (const id of made.objectives) {
-        await query(`DELETE FROM office_plan_steps WHERE objective_id=$1`, [id]).catch(() => {});
+        // By PLAN, not by objective_id: office_plan_steps has no such column, so this DELETE had
+        // been failing silently under its own `.catch` since it was written. Harmless here because
+        // the cluster is destroyed, and a swallowed cleanup failure is still worth not having.
+        await query(`DELETE FROM office_plan_steps WHERE plan_id IN
+                       (SELECT id FROM office_plans WHERE objective_id = $1)`, [id]).catch(() => {});
+        await query(`DELETE FROM office_plans WHERE objective_id=$1`, [id]).catch(() => {});
         await query(`DELETE FROM objectives WHERE id=$1`, [id]).catch(() => {});
       }
       // The control's own tasks, by the ids it recorded as it created them — never by intent-key

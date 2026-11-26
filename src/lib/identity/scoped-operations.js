@@ -137,6 +137,17 @@ async function assignTask(ctx, { id, userId, title, description = null, taskDate
     return { ok: false, code: 'no_assigner',
       detail: 'a task must record who or what assigned it — the audit trail is the point' };
   }
+  // `daily_tasks.task_date` is TEXT NOT NULL and this function declared `taskDate` with no default,
+  // so an omitted day reached Postgres as NULL and came back as a raw 23502. B3.17 found the
+  // autonomous cycle doing exactly that at its employee-assignment phase: EVERY assignment failed,
+  // and because that caller catches anything which is not a 23505 into `{ok:false}`, the briefing
+  // reported only that the employee was not assigned. A missing required argument must refuse BY
+  // NAME here, like every other one above, so the next caller to omit it reads why.
+  if (!taskDate || !/^\d{4}-\d{2}-\d{2}$/.test(String(taskDate))) {
+    return { ok: false, code: 'no_task_date',
+      detail: 'a task must name the business day it belongs to, as YYYY-MM-DD — the column is '
+        + 'NOT NULL and a task with no day cannot appear on anybody\'s list' };
+  }
 
   const MEMBERSHIP = require('./company-membership');
   let members;

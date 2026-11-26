@@ -655,6 +655,22 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_office_plans_objective
      ON office_plans (company_id, objective_id, created_at DESC)`,
 
+  // ── B3.17: WHY THERE IS NO `one plan per run` INDEX HERE ─────────────────
+  //
+  // I added one, and `check-autonomous-office-cycle-db.js` refused it within the hour — correctly.
+  // That driver proposes SEVERAL plans against one run on purpose: each of its nine negative cases
+  // is a separate proposal judged against the same run, which is a legitimate use of
+  // `decompose()` and not a race. A blanket unique index on run_id would have made the product
+  // narrower than it needs to be in order to fix a property only the CYCLE needs.
+  //
+  // The cycle's invariant — one plan per run, ever — is enforced where it belongs: `cycle.js`
+  // derives its plan id from the run (`planIdFor`), so two concurrent PLAN phases collide on
+  // `office_plans`' own PRIMARY KEY. Same pattern as the outcome, the employee task and the
+  // escalation, and it needs no new constraint at all. `check-phase-idempotency-db.js` section 1
+  // measures it with five concurrent PLAN phases, and section 10 shows the primary key is what
+  // refuses the second by attempting the insert with a fresh id.
+
+
   // ── B3.3: THE DISPATCH RECORD FOR ONE DELEGATION ─────────────────────────
   //
   // The dependency plan's Gate 3 names exactly what dispatch evidence must identify: "company,

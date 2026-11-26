@@ -84,6 +84,14 @@ const EXEMPT = new Map([
     + 'the planner reads back, and that a repeated REPORT phase did not multiply them. The writer '
     + 'is another process; recalling through office/memory here would put the observer and the '
     + 'observed in one module. Its own disposable cluster; fixtures by recorded id.'],
+  ['scripts/check-phase-idempotency-db.js',
+    'B3.17\'s phase-idempotency check, whose subject is the CONSTRAINT rather than the data. It '
+    + 'counts agent_memory rows for one run and subject after five concurrent writes, and its '
+    + 'control DROPS uq_agent_memory_run_subject and counts the duplicates that then appear — rows '
+    + 'the accessor\'s live predicate exists to hide, which is exactly why recall cannot answer '
+    + 'the question. It writes memory only through office/memory.remember; the direct reads are '
+    + 'the measurement. Disposable cluster; fixtures created and removed by id; it restores the '
+    + 'index and asserts the restoration.'],
   ['src/lib/identity/company-membership.js',
     'THE accessor for user_companies. Its whole purpose is to own that table.'],
   ['src/lib/identity/workflow-company.js',

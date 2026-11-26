@@ -158,7 +158,25 @@ const DDL = [
   // thrown" — standing in for the property, "no second correction exists". A thrown error is not a
   // rollback. So the constraint is a unique index: the INSERT itself fails, nothing lands, and the
   // property is true whatever the JavaScript around it does.
-  `CREATE UNIQUE INDEX IF NOT EXISTS agent_memory_one_correction
+  // ── B3.17: ONE LIVE MEMORY PER RUN AND SUBJECT ─────────────────────────────
+//
+// Owner's Priority 2 of the second directive, 2026-11-25: restart and concurrent ticks must not
+// create duplicate memory records. The cycle's REPORT phase writes one memory per completed plan
+// step, and until now nothing stopped it writing them twice — which is exactly what happened when
+// REPORT re-ran every 15 seconds under the continuous advancement tick. The repair in cycle.js
+// reads what the run has already remembered and skips those subjects, and that is a check-then-act:
+// two concurrent REPORT phases can both read "not yet" before either writes. This index is the part
+// that holds whatever the calling code does.
+//
+// `superseded_at IS NULL` is what makes it compatible with corrections: superseding marks the old
+// row and inserts a new one with the same subject, and only the LIVE row is constrained. Memories
+// with no source run (a stated fact, a human's note) are outside the predicate entirely — they are
+// not a cycle's bookkeeping and there is no reason one run's worth of them should be unique.
+`CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_memory_run_subject
+   ON agent_memory (source_run_id, subject)
+   WHERE source_run_id IS NOT NULL AND superseded_at IS NULL`,
+
+`CREATE UNIQUE INDEX IF NOT EXISTS agent_memory_one_correction
      ON agent_memory (supersedes) WHERE supersedes IS NOT NULL`,
 ];
 

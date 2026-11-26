@@ -87,6 +87,14 @@ const EXEMPT = new Set([
   // context to ask an accessor with, and asking one would mean the observer and the observed
   // shared a module. It seeds fixtures into a disposable cluster and deletes them by recorded id.
   path.join('scripts', 'check-running-scheduler-db.js'),
+  // B3.17's phase-idempotency check, whose SUBJECT IS THE CONSTRAINT ITSELF. Each section races
+  // five concurrent attempts at one derived id and then COUNTS THE ROWS — including, in its
+  // controls, the duplicate rows that appear once a constraint is dropped. An accessor cannot serve
+  // that question: a scoped read applies the live predicate, and the rows this check must see are
+  // precisely the ones such a predicate hides. "Did the database refuse the second write" is not a
+  // question the code written to satisfy the database can answer about itself. Disposable cluster;
+  // every fixture created by id and removed by id; the CYCLE remains non-exempt product code.
+  path.join('scripts', 'check-phase-idempotency-db.js'),
   // The end-to-end acceptance test (ruling 8 item 5). It SEEDS a company, an objective and a run
   // into a DISPOSABLE cluster it creates and destroys, so that the real server has something to
   // serve — the kernel rows are the fixture, not the subject. It never runs against production
