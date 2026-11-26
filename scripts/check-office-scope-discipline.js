@@ -124,6 +124,11 @@ const EXEMPT = new Set([
   // cannot show a resolved row. It also ages a heartbeat and builds a throwaway table to name the
   // arbiter. Disposable cluster; fixtures by id.
   path.join('scripts', 'check-monitor-db.js'),
+  // B4.7's harness check. It plants and removes production's containment STOP rows to prove the
+  // sampler refuses a database it cannot identify, counts rows before and after to prove the
+  // sampler wrote none, and seeds the objective the sampler reads. Measurement, by id, in a
+  // disposable cluster.
+  path.join('scripts', 'check-reliability-sampler-db.js'),
   // And its unit test, for the reason `proposal-is-readonly.test.js` is exempt: the table name
   // appears inside ASSERTIONS that the monitor must not write to it, and in the planted strings its
   // own negative control feeds through the pattern. A test whose whole subject is "no SQL against

@@ -466,6 +466,14 @@ pf_step "monitoring deduplicates, notices silence, and sends nothing" \
   node scripts/check-monitor-db.js
 pf_step "the monitor has no transport at all" \
   env JWT_SECRET=preflight node --test scripts/monitor-has-no-transport.test.js
+# B4.7 preparation (owner's Priority 6 of the second directive, 2026-11-25): the 72-hour run's
+# evidence will be a file written by office-reliability-sampler.js over three days, so the HARNESS
+# is verified before three days are spent on it. It already paid: the summary line — the one line
+# that reconciles samples against expectations — was being lost to process.exit truncating a
+# buffered write, and every sample survived, so the file looked complete up to the part a reader
+# would use.
+pf_step "the 72-hour evidence harness samples, detects gaps, writes nothing and refuses production" \
+  node scripts/check-reliability-sampler-db.js
 pf_step "the plan can actually check the result, and an undeclared type is not validated" \
   env JWT_SECRET=preflight node --test src/lib/office/independent-criterion.test.js
 # B4.2 (owner's Priority 1, 2026-11-25): the worker PROCESS, started as a container starts it, with

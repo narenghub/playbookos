@@ -104,6 +104,12 @@ const EXEMPT = new Map([
     + 'recount that the owner\'s Priority 4 requires ("verify every briefing figure against '
     + 'independent evidence") plus fixture cleanup by id. A recount routed through the accessor '
     + 'under test is not a recount.'],
+  ['scripts/check-reliability-sampler-db.js',
+    'B4.7\'s harness check. It COUNTS rows in six tables, agent_memory among them, before and '
+    + 'after running the sampler — the assertion being that the sampler wrote NONE. A count is the '
+    + 'only form that question takes, and routing it through the accessor would apply a live '
+    + 'predicate that hides rows, which is the opposite of what "nothing was written" needs. It '
+    + 'writes nothing to the table itself.'],
   ['src/lib/identity/company-membership.js',
     'THE accessor for user_companies. Its whole purpose is to own that table.'],
   ['src/lib/identity/workflow-company.js',
