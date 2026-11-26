@@ -48,7 +48,6 @@
 
 'use strict';
 
-const crypto = require('crypto');
 const scope = require('./scope');
 const { assertContext, deriveContext } = require('./context');
 const autonomy = require('../autonomy');
@@ -118,7 +117,7 @@ const refuse = (code, detail, extra = {}) => ({ ok: false, refused: code, detail
  *        | {{ok:false, refused, detail}}
  */
 async function delegate(parentCtx, { toAgent, callingAgent, reason, intentKey = null,
-  maxDepth = MAX_DEPTH } = {}, deps = {}) {
+  subject = null, maxDepth = MAX_DEPTH } = {}, deps = {}) {
   assertContext(parentCtx);
   if (!parentCtx.runId) {
     return refuse('no_parent_run',
@@ -264,7 +263,37 @@ async function delegate(parentCtx, { toAgent, callingAgent, reason, intentKey = 
   // beginObjectiveRun — this function never passes a company. The parent and root are passed so
   // the child joins the tree rather than starting a new one.
   const L = deps.ledger || require('../run-ledger').ledger({ query: deps && deps.query });
-  const key = intentKey || `delegate-${parentCtx.runId}-${toAgent}-${crypto.randomBytes(6).toString('hex')}`;
+
+  // ── THE INTENT KEY IS DERIVED, NEVER RANDOM (owner's Priority 1, 2026-11-26) ──
+  //
+  // `createRun` already deduplicates on the intent key — `uq_agent_runs_intent_attempt` is the
+  // arbiter and a second creation comes back `{duplicate:true}`, which is refused below as
+  // `duplicate_delegation`. So the mechanism was always here. What defeated it was the DEFAULT:
+  //
+  //     intentKey || `delegate-${runId}-${toAgent}-${crypto.randomBytes(6).toString('hex')}`
+  //
+  // A key containing six random bytes is a key nobody can reproduce, so two calls delegating the
+  // SAME piece of work got two different keys, two child runs and two dispatch records. The unique
+  // index was never reached. A dedupe key that is unique by construction is not a dedupe key — it
+  // is the shape of one, which is this repository's recurring defect in its most compact form.
+  //
+  // Now the key is DERIVED from what makes two delegations the same work: the parent run, the agent
+  // it goes to, and the SUBJECT — which step, which supplier, which document. A caller that can
+  // name none of those is refused rather than given a unique key, because inventing one silently
+  // converts "deduplicate this" into "never deduplicate anything".
+  //
+  // `crypto` is no longer used in this module for key generation. An explicit `intentKey` still
+  // wins, for a caller that has its own derived identity (the cycle derives every other effect's id
+  // the same way).
+  if (!intentKey && !subject) {
+    return refuse('no_delegation_subject',
+      'a delegation must name its SUBJECT — which step, supplier or document this is a delegation '
+      + 'of — or supply an intentKey of its own. The subject is what makes two delegations of the '
+      + 'same work the same work, and without one this function would have to invent a unique key, '
+      + 'which would mean no delegation could ever be deduplicated.');
+  }
+  const key = intentKey
+    || `delegate-${parentCtx.runId}-${toAgent}-${String(subject).trim()}`.slice(0, 200);
 
   let created;
   try {

@@ -66,6 +66,12 @@ const refuse = (code, detail, extra = {}) => ({ ok: false, code, detail, ...extr
 
 async function migrateWorkerTasks(query) {
   for (const sql of SCHEMA.DDL) await query(sql);
+  // The active-company guard: a task may not be enqueued for a company whose authorization has been
+  // withdrawn, and the database is what says so (owner's Priority 1, 2026-11-26). Installed from
+  // here as well as from migrateOffice because the trigger needs `companies` AND `worker_tasks`,
+  // and these two migrations run in different orders — whichever runs last wires it, and a database
+  // holding only one half gets nothing rather than an error.
+  await require('../office/active-company-guard').installActiveCompanyGuard(query);
   return { ok: true, statements: SCHEMA.DDL.length };
 }
 
@@ -305,7 +311,7 @@ async function claimTask({ workerId, taskId = null, overrideReason = null } = {}
     [task.id]);
   if (!marked.rows.length) {
     await query(
-      `UPDATE agent_runs SET state = 'STOPPED_BY_POLICY', ended_at = NOW() WHERE run_id = $1`,
+      `UPDATE agent_runs SET state = 'STOPPED_BY_POLICY', ended_at = COALESCE(ended_at, NOW()) WHERE run_id = $1`,
       [runId]);
     return refuse('task_no_longer_claimable',
       'the task was cancelled or taken between selecting it and leasing it; the attempt just '
@@ -478,7 +484,7 @@ async function submitResult({
   }
 
   await query(
-    `UPDATE agent_runs SET state = $2, ended_at = NOW() WHERE run_id = $1 AND state = 'RUNNING'`,
+    `UPDATE agent_runs SET state = $2, ended_at = COALESCE(ended_at, NOW()) WHERE run_id = $1 AND state = 'RUNNING'`,
     [runId, status]);
   await query(
     `UPDATE ${SCHEMA.TABLES.tasks} SET state = $2, resolved_at = NOW()
@@ -562,7 +568,7 @@ async function releaseLeasesOfWorker(workerId, { reason = 'worker identity revok
   const query = q(deps);
   const closed = await query(
     `UPDATE agent_runs
-        SET state = 'STOPPED_BY_POLICY', ended_at = NOW()
+        SET state = 'STOPPED_BY_POLICY', ended_at = COALESCE(ended_at, NOW())
       WHERE trigger = $1 AND trigger_detail = $2 AND state IN ('CREATED','RUNNING')
       RETURNING run_id, intent_key`,
     [SCHEMA.LEASE_TRIGGER, String(workerId)]);

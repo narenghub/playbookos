@@ -238,6 +238,46 @@ async function snapshot(ctx, { limitHistory = 20 } = {}, deps = {}) {
   const history = await section('history',
     () => scope.recentRuns(ctx, { limit: limitHistory }, deps), null);
 
+  // ── THE SCHEDULER'S OWN LIVENESS ────────────────────────────────────────
+  // The same signal the monitor reads (B4.5), carried here so the page shows WHY it is quiet
+  // without a second request. Not company-scoped, deliberately: it is a fact about the process.
+  const heartbeats = await section('heartbeats', async () => {
+    const rows = await scope.schedulerHeartbeats(deps);
+    return rows.map((h) => Object.freeze({
+      name: h.name,
+      at: new Date(h.at).toISOString(),
+      ageSeconds: Math.round((now - new Date(h.at).getTime()) / 1000),
+      detail: h.detail || null,
+    }));
+  }, null);
+
+  // ── THE PHASE EACH LIVE RUN IS IN ───────────────────────────────────────
+  //
+  // The owner's Priority 2 asks for *current execution phases*, and a run's state (RUNNING) does
+  // not say which phase it is in. `cycle.phaseOf` DERIVES that from durable rows every time it is
+  // asked — so this is the same answer the next tick will act on, not a cached one, and asking it
+  // here cannot change anything: `phaseOf` reads and returns.
+  //
+  // Only for non-terminal runs, and bounded by `limitHistory`: a finished run has no current phase,
+  // and a page that asked about fifty of them would make one screen cost fifty derivations.
+  const livePhases = await section('livePhases', async () => {
+    const CYCLE = deps.cycle || require('./cycle');
+    const live = (history || []).filter((h) => ['CREATED', 'RUNNING'].includes(h.state));
+    const out = [];
+    for (const r of live.slice(0, 10)) {
+      try {
+        const p = await CYCLE.phaseOf(ctx, r.run_id, deps);
+        out.push(Object.freeze({ runId: r.run_id, objectiveId: r.objective_id,
+          phase: p.phase, evidence: p.evidence || null }));
+      } catch (e) {
+        // Reported per run rather than losing the section: one unreadable run is not a broken page.
+        out.push(Object.freeze({ runId: r.run_id, objectiveId: r.objective_id,
+          phase: 'unreadable', evidence: { error: e.message } }));
+      }
+    }
+    return Object.freeze(out);
+  }, null);
+
   // ── OPEN ALERTS (B4.5), WHICH ARE THE MONITOR'S OUTPUT ──────────────────
   // The monitor files them and sends nothing; this is where they are read. Deliberately the
   // accessor's own list rather than a second predicate: an alert this page shows as open must be
@@ -264,6 +304,8 @@ async function snapshot(ctx, { limitHistory = 20 } = {}, deps = {}) {
     work,
     objectives,
     history: history ? Object.freeze(history) : null,
+    livePhases,
+    schedulerHeartbeats: heartbeats,
     stops: stops ? Object.freeze(stops) : null,
     openAlerts: alerts ? Object.freeze(alerts) : null,
     refusals: refusals ? Object.freeze(refusals) : null,

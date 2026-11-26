@@ -1007,6 +1007,17 @@ const NAV_SECTIONS = [
     {id:'spend', label:'AI Spend', icon:'💵'},
     {id:'performance', label:'Performance', icon:'🏆'},
   ]},
+  // B2.9 / owner's Priority 2 (2026-11-26). ITS OWN SECTION, with access:['admin'], for the reason
+  // the FEDERAL section states: the access list is explicit rather than inherited from a
+  // neighbouring shelf. NAV_FAMILIES.admin is ['admin','super_admin'], so this reaches exactly the
+  // two roles whose API route is adminOnly — EXECUTIVE's ['admin','director'] would have shown it
+  // to three directors who would then be refused by the route, which is a nav that lies.
+  //
+  // NOT first: firstNavPage() returns the first visible item of the first visible section, so a
+  // section above EXECUTIVE would change where every admin LANDS.
+  {title:'AUTONOMOUS OFFICE', access:['admin'], items:[
+    {id:'office-command', label:'Autonomous Office', icon:'🏢'},
+  ]},
   {title:'REVENUE', access:['admin','sales'], items:[
     {id:'revenue', label:'Revenue & Orders', icon:'💰'},
     {id:'sales-pipeline', label:'Sales Pipeline', icon:'🎯'},
@@ -1179,7 +1190,15 @@ function passesPageReads(pageId, role, tiers) {
   // door that 403s, and a nav rule that let them THROUGH would be a disclosure change dressed as
   // a sidebar entry. Named here rather than given tier requirements because tiers describe
   // product reads, and this page is not a product's.
-  if (['decisions', 'spend', 'approvals'].indexOf(pageId) !== -1) return role === 'admin' || role === 'super_admin';
+  // 'office-command' joins them for the same reason as 'approvals' and one of its own. Its route
+  // (GET /api/office/command-center) is adminOnly, and its payload is worker identities, capability
+  // GRANTS, budget exposure and authorization refusals — operational-security facts about the
+  // platform rather than any product's data, which is also why route-map classifies it 'internal'.
+  // Knowing which worker is offline and which capability nothing is serving is knowing where to
+  // push. It has its OWN section (AUTONOMOUS OFFICE, access ['admin']) as well: the section, this
+  // gate and the route's adminOnly fail INDEPENDENTLY, and the point of three is that one mistake
+  // is not sufficient.
+  if (['decisions', 'spend', 'approvals', 'office-command'].indexOf(pageId) !== -1) return role === 'admin' || role === 'super_admin';
   if (role === 'admin' || role === 'super_admin') return true; // admins pass every read
   const reqs = NAV_PAGE_REQS[pageId];
   if (!reqs) return true;                 // no tier-gated implied reads -> always passes
@@ -1205,7 +1224,14 @@ function passesPageReads(pageId, role, tiers) {
 // platform + me are NOT products: they render to the right of the product tabs, separated.
 const PRODUCTS = [
   { key:'abiozen',  label:'Abiozen',  icon:'🧪', kind:'product',
-    pages:['command-center','dashboard','decisions','approvals','spend','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command','prpa-tracker'] },
+    // 'office-command' (B2.9) is claimed HERE rather than under Platform, and the reason is
+    // reachability rather than taxonomy. The Platform TAB is super_admin only — `nav-model.test.js`
+    // asserts that an admin must not see it — so a page claimed only by Platform is unreachable for
+    // an `admin` in product mode, which is the default. The page's own gate admits admin AND
+    // super_admin, so claiming it there would have produced a page that two roles may see and one
+    // role can open. Company-level executive surfaces already live here: command-center, dashboard,
+    // decisions, approvals and spend are all company-scoped platform screens under this product.
+    pages:['command-center','office-command','dashboard','decisions','approvals','spend','performance','revenue','sales-pipeline','reorder-agent','inquiry-agent','apollo-outreach','email-engine','market-intelligence','procurement-agent','meet-agent','research-agent','clinical-demand-intelligence','research-institutions','lab-connect','lab-connect-agent','seo-intelligence','seo-content','linkedin-content','cphi-milan','scope-europe','prpa-command','prpa-tracker'] },
   { key:'golfnex',  label:'GolfNex',  icon:'⛳', kind:'product', pages:['content-studio','prospects'] },
   { key:'favly',    label:'Favly',    icon:'💇', kind:'product', pages:['prospects'] },
   { key:'linkabl',  label:'Linkabl',  icon:'🧑‍💼', kind:'product', pages:['prospects'] },
@@ -1942,7 +1968,7 @@ function navigate(page) {
   document.querySelectorAll('#nav-links a').forEach(a => a.classList.remove('active'));
   const el = document.getElementById('nav-'+page);
   if (el) el.classList.add('active');
-  const titles = {decisions:'Decision Queue',approvals:'Approvals',spend:'AI Spend',dashboard:'Dashboard','command-center':'Command Center','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','prpa-tracker':'Federal Contracts','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
+  const titles = {decisions:'Decision Queue',approvals:'Approvals',spend:'AI Spend',dashboard:'Dashboard','command-center':'Command Center','office-command':'Autonomous Office','agent-control':'Agent Control','ai-insights':'AI Insights','seo-intelligence':'SEO Intelligence','seo-content':'SEO Content','linkedin-content':'LinkedIn Content','my-tasks':'My Tasks','performance':'Performance','my-performance':'My Performance','my-kpis':'My KPIs','my-activity':'My Activity',outreach:'Outreach',playbook:'Playbook',milestones:'Milestones',revenue:'Revenue & Orders','sales-pipeline':'Sales Pipeline','reorder-agent':'Reorder Agent','inquiry-agent':'Inquiry Agent','apollo-outreach':'Apollo Outreach',prospects:'Prospects','market-intelligence':'Market Intelligence','procurement-agent':'Procurement Agent','meet-agent':'Google Meet Agent','research-agent':'Research Agent','clinical-demand-intelligence':'Clinical Demand Intelligence','research-institutions':'Research Institutions','lab-connect':'LabConnect','lab-connect-agent':'LabConnect Agent','content-studio':'Content Studio','prpa-command':'Federal Pipeline','prpa-tracker':'Federal Contracts','cphi-milan':'CPHI Milan 2026','scope-europe':'SCOPE Europe 2026','aros-establishments':'FDA Establishments','sitenex-prospects':'SiteNex Prospects','sitenex-deals':'SiteNex Deals','sitenex-contracts':'SiteNex Contracts','sitenex-partners':'SiteNex Partners','sitenex-packages':'SiteNex Packages','email-engine':'Email Engine',team:'Team Management','decision-engine':'Automation Rules','employee-activity':'Employee Activity','sku-economics':'SKU Economics','data-pipeline':'Data Pipeline','execution-graph':'Execution Graph',settings:'Settings'};
   document.getElementById('page-title').textContent = titles[page] || page;
   if (productNavEnabled()) updateBreadcrumb(page);   // presentation-only chrome hook; no-op when flag OFF
   // keep the help panel's facts true rather than stale
@@ -3320,6 +3346,449 @@ window.prpaImportCsv = async function prpaImportCsv() {
   }
 };
 
+// ── THE AUTONOMOUS OFFICE PAGE (B2.9 / owner's Priority 2, 2026-11-26) ───────
+//
+// One read of `/api/office/command-center`, rendered. It is READ-ONLY by construction: there is no
+// POST, no PUT and no DELETE anywhere on this page, and the one action it offers — halting
+// something — is a LINK to Agent Control, which already owns stopping and already has the
+// authorization for it. The owner's instruction was *"Reuse Agent Control for authorized actions.
+// Do not create an independent write or authorization path"*, and the way to honour that is for this
+// page to have no write path to misuse.
+//
+// ── WHAT IT MUST NEVER DO IS LOOK CALM WHEN IT DOES NOT KNOW ─────────────────
+//
+// Every figure arrives with a STATUS from the read model — measured, measured_zero, missing, stale,
+// unavailable — and every one of them is rendered differently. A `missing` figure drawn as a number
+// is the defect this whole batch has been about: a zero beside four thousand unattributed rows is a
+// number nobody can support, and on a screen it looks exactly like a quiet day.
+//
+// So: a refusal is a red card that says so. An unreadable section is named as unreadable, not drawn
+// as empty. A declared-but-unverified capability is amber, never green. And the page says, in
+// words, when the office is quiet ON PURPOSE — because an operator looking at a stopped office has
+// to be able to tell it from a broken one.
+//
+// Declared BEFORE `const pages = {` and attached with `pages['office-command'] = ...` after the
+// literal closes, per this file's rule: a `function` declaration inside an object literal is a
+// syntax error that kills the whole app, and an `async function` in a block is not hoisted out of
+// it by Annex B, so anything an `onclick` reaches is assigned to `window.` explicitly.
+
+window.ocEsc = function ocEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+};
+
+window._ocState = { company: null };
+
+// A dollar figure, or the reason there isn't one. `null` means "a part of this is unknown", and the
+// read model sets it deliberately: remaining is null whenever held or measured could not be read,
+// because a remaining figure computed from a missing part is a number that looks safe and is not.
+window.ocUsd = function ocUsd(n) {
+  if (n === null || n === undefined) return '<span style="color:#9A2B2A">unknown</span>';
+  var v = Number(n);
+  if (!isFinite(v)) return '<span style="color:#9A2B2A">unknown</span>';
+  return '$' + (Math.abs(v) < 1 ? v.toFixed(4).replace(/0+$/, '').replace(/\.$/, '') : v.toFixed(2));
+};
+
+window.ocAge = function ocAge(sec) {
+  if (sec === null || sec === undefined) return 'never';
+  var s = Number(sec);
+  if (s < 90) return s + 's ago';
+  if (s < 5400) return Math.round(s / 60) + 'm ago';
+  if (s < 172800) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
+};
+
+// One vocabulary of colours for the whole page, so a status means the same thing in every section.
+// Amber is reserved for "I cannot support this", which is the distinction the owner asked to see.
+window.ocChip = function ocChip(text, kind) {
+  var c = { ok: ['#E6F4EA', '#1E6B34'], warn: ['#FDF2DC', '#8A5A00'],
+    bad: ['#FBE9E7', '#9A2B2A'], mute: ['#EEF1F5', '#475569'] }[kind || 'mute'];
+  return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;'
+    + 'font-weight:600;background:' + c[0] + ';color:' + c[1] + '">' + window.ocEsc(text) + '</span>';
+};
+
+window.ocFactChip = function ocFactChip(status) {
+  var kind = status === 'measured' ? 'ok'
+    : status === 'measured_zero' ? 'mute'
+      : status === 'stale' ? 'warn'
+        : 'bad';                       // missing and unavailable
+  return window.ocChip(String(status).replace('_', ' '), kind);
+};
+
+window.ocWorkerChip = function ocWorkerChip(status) {
+  var kind = status === 'online' ? 'ok'
+    : status === 'degraded' ? 'warn'
+      : status === 'unknown' ? 'warn'
+        : 'bad';                       // offline, revoked
+  return window.ocChip(status, kind);
+};
+
+window.ocCard = function ocCard(title, body, note) {
+  return '<div class="card" style="margin-bottom:14px">'
+    + '<div style="font-weight:700;font-size:13px;margin-bottom:8px">' + title + '</div>'
+    + body
+    + (note ? '<div style="font-size:11px;color:#64748b;margin-top:8px">' + note + '</div>' : '')
+    + '</div>';
+};
+
+// ── THE SECTIONS ─────────────────────────────────────────────────────────────
+//
+// Each one takes the snapshot and returns HTML. Each one handles its OWN null, because the read
+// model degrades per section: `null` here means that section could not be read, and it says so
+// rather than rendering as empty. That difference is the whole reason the read model reports
+// `unreadable` by name.
+
+window.ocObjectives = function ocObjectives(d) {
+  if (!d.objectives) {
+    return window.ocCard('Objectives', '<p style="margin:0;color:#9A2B2A"><b>The objectives could '
+      + 'not be read.</b> This is NOT an absence of objectives.</p>');
+  }
+  if (!d.objectives.length) {
+    return window.ocCard('Objectives', '<p style="margin:0;font-size:13px;color:#555">'
+      + 'This company has no objectives. The autonomous office starts nothing without one — '
+      + 'measured, not assumed.</p>');
+  }
+  var rows = d.objectives.map(function (o) {
+    var phases = (d.livePhases || []).filter(function (p) { return p.objectiveId === o.id; });
+    return '<tr style="border-top:1px solid #eef1f5">'
+      + '<td style="padding:7px 8px;font-size:12px">'
+        + '<div style="font-weight:600">' + window.ocEsc(o.objective) + '</div>'
+        + '<div style="color:#64748b;font-size:11px">' + window.ocEsc(o.id) + '</div></td>'
+      + '<td style="padding:7px 8px">' + window.ocChip(o.status,
+        o.status === 'active' ? 'ok' : 'warn') + '</td>'
+      + '<td style="padding:7px 8px;font-size:12px">' + window.ocEsc(o.autonomyTier || '—') + '</td>'
+      + '<td style="padding:7px 8px;font-size:12px">'
+        + (phases.length
+          ? phases.map(function (p) { return window.ocChip(p.phase, 'mute'); }).join(' ')
+          : '<span style="color:#94a3b8">no live run</span>') + '</td>'
+      + '<td style="padding:7px 8px;font-size:12px;text-align:right">' + window.ocUsd(o.budgetUsd) + '</td>'
+      + '<td style="padding:7px 8px;font-size:12px;text-align:right">' + window.ocUsd(o.spend.heldUsd) + '</td>'
+      + '<td style="padding:7px 8px;font-size:12px;text-align:right">' + window.ocUsd(o.spend.measuredUsd) + '</td>'
+      + '<td style="padding:7px 8px;font-size:12px;text-align:right">' + window.ocUsd(o.spend.remainingUsd) + '</td>'
+      + '<td style="padding:7px 8px;font-size:12px;text-align:right">'
+        + (Number(o.spend.unresolvedExposureUsd) > 0
+          ? '<span style="color:#9A2B2A;font-weight:700">' + window.ocUsd(o.spend.unresolvedExposureUsd)
+            + '</span> <span style="font-size:10px;color:#9A2B2A">(' + o.spend.unresolvedCount + ')</span>'
+          : window.ocUsd(o.spend.unresolvedExposureUsd)) + '</td>'
+      + '</tr>';
+  }).join('');
+
+  var stale = d.objectives.reduce(function (a, o) { return a + (o.spend.staleHoldCount || 0); }, 0);
+  return window.ocCard('Objectives, progress and money',
+    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
+    + '<tr style="text-align:left;font-size:11px;color:#64748b">'
+    + '<th style="padding:0 8px 6px">Objective</th><th style="padding:0 8px 6px">Status</th>'
+    + '<th style="padding:0 8px 6px">Tier</th><th style="padding:0 8px 6px">Live phase</th>'
+    + '<th style="padding:0 8px 6px;text-align:right">Budget</th>'
+    + '<th style="padding:0 8px 6px;text-align:right">Held</th>'
+    + '<th style="padding:0 8px 6px;text-align:right">Measured</th>'
+    + '<th style="padding:0 8px 6px;text-align:right">Remaining</th>'
+    + '<th style="padding:0 8px 6px;text-align:right">Unresolved</th></tr>'
+    + rows + '</table></div>',
+    'HELD is money reserved before a call and not yet settled. UNRESOLVED is a dispatched hold '
+    + 'whose charge nobody has reconciled — it keeps counting with no window and only a human can '
+    + 'close it, which is why it is counted apart from the ' + stale + ' stale hold(s) that are '
+    + 'merely past their window and reclaimable. REMAINING reads "unknown" whenever any part of it '
+    + 'could not be read, rather than showing a figure that looks safe.');
+};
+
+window.ocWorkers = function ocWorkers(d) {
+  if (d.workersUnreadable || !d.workers) {
+    return window.ocCard('Workers', '<p style="margin:0;color:#9A2B2A"><b>The worker identities '
+      + 'could not be read, so worker availability is UNKNOWN.</b> That is not the same as there '
+      + 'being no workers.</p>');
+  }
+  if (!d.workers.length) {
+    return window.ocCard('Workers', '<p style="margin:0;font-size:13px;color:#555">No worker '
+      + 'identity is enrolled. Cloud-eligible work would stay PENDING with its attempts '
+      + 'unconsumed.</p>');
+  }
+  var kindLabel = { cloud_eligible_only: 'cloud', hardware_node: 'hardware (iMac class)',
+    gui_session_node: 'hardware + GUI session' };
+  var rows = d.workers.map(function (w) {
+    var caps = (w.capabilityAvailability || []).map(function (a) {
+      var kind = a.availability === 'declared' ? 'ok'
+        : a.availability === 'unverified' ? 'warn' : 'mute';
+      return '<span title="' + window.ocEsc(a.why) + '">'
+        + window.ocChip(a.capability + ' · ' + a.availability, kind) + '</span>';
+    }).join(' ');
+    return '<tr style="border-top:1px solid #eef1f5">'
+      + '<td style="padding:7px 8px;font-size:12px"><div style="font-weight:600">'
+        + window.ocEsc(w.name || w.id) + '</div>'
+        + '<div style="color:#64748b;font-size:11px">' + window.ocEsc(w.id) + '</div></td>'
+      + '<td style="padding:7px 8px;font-size:12px">'
+        + window.ocEsc(kindLabel[w.kind] || w.kind) + '</td>'
+      + '<td style="padding:7px 8px">' + window.ocWorkerChip(w.status)
+        + (w.revokedReason
+          ? '<div style="font-size:10px;color:#9A2B2A;margin-top:3px">'
+            + window.ocEsc(w.revokedReason) + '</div>' : '') + '</td>'
+      + '<td style="padding:7px 8px;font-size:12px">'
+        + (w.lastAuthenticatedAt
+          ? window.ocAge(w.lastAuthenticatedAgeSeconds)
+          : '<span style="color:#8A5A00">never authenticated</span>') + '</td>'
+      + '<td style="padding:7px 8px">' + (caps || '<span style="color:#94a3b8">none</span>') + '</td>'
+      + '</tr>';
+  }).join('');
+
+  return window.ocCard('Worker availability — cloud and iMac',
+    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
+    + '<tr style="text-align:left;font-size:11px;color:#64748b">'
+    + '<th style="padding:0 8px 6px">Name</th><th style="padding:0 8px 6px">Kind</th>'
+    + '<th style="padding:0 8px 6px">Status</th>'
+    + '<th style="padding:0 8px 6px">Last AUTHENTICATED</th>'
+    + '<th style="padding:0 8px 6px">Capabilities</th></tr>' + rows + '</table></div>',
+    'KIND comes from the capability the server granted, never from the name — a machine called '
+    + '"imac-something" with no grant is a cloud node. UNKNOWN means enrolled and never '
+    + 'authenticated, which is not the same as offline. A capability marked <b>unverified</b> is '
+    + 'granted and NOT confirmed available: a GUI grant says a worker may run GUI work and nothing '
+    + 'verifies that a desktop session exists, so it is never counted as capacity. The heartbeat is '
+    + 'the last AUTHENTICATED one — an unauthenticated request cannot move it. Servable right now: '
+    + ((d.liveCapabilities || []).length
+      ? d.liveCapabilities.map(function (c) { return window.ocChip(c, 'ok'); }).join(' ')
+      : '<span style="color:#8A5A00">nothing</span>'));
+};
+
+window.ocWork = function ocWork(d) {
+  if (!d.work) {
+    return window.ocCard('Work', '<p style="margin:0;color:#9A2B2A"><b>The work queue could not be '
+      + 'read.</b> This is NOT an empty queue.</p>');
+  }
+  var by = d.work.byState || {};
+  var order = ['pending', 'leased', 'completed', 'failed', 'needs_resolution', 'cancelled'];
+  var kindFor = { completed: 'ok', failed: 'bad', needs_resolution: 'bad', pending: 'mute',
+    leased: 'warn', cancelled: 'mute' };
+  var tiles = order.filter(function (k) { return by[k] !== undefined; }).map(function (k) {
+    return '<div style="display:inline-block;margin:0 14px 8px 0">'
+      + '<div style="font-size:20px;font-weight:700">' + by[k] + '</div>'
+      + window.ocChip(k.replace('_', ' '), kindFor[k] || 'mute') + '</div>';
+  }).join('');
+
+  var blocked = (d.work.blockedBacklog || []).map(function (b) {
+    return '<li style="font-size:12px;margin-bottom:4px"><b>' + b.pending + '</b> '
+      + window.ocEsc(b.taskType) + ' waiting for ' + window.ocChip(b.requiredCapability, 'bad')
+      + ' — no online worker serves it</li>';
+  }).join('');
+
+  return window.ocCard('Work: pending, blocked, failed, completed',
+    (tiles || '<p style="margin:0;font-size:13px;color:#555">No work has been enqueued for this '
+      + 'company.</p>')
+    + (blocked
+      ? '<div style="margin-top:10px;padding:9px;background:#FBE9E7;border-radius:6px">'
+        + '<div style="font-size:12px;font-weight:700;color:#9A2B2A;margin-bottom:5px">'
+        + 'Blocked backlog</div><ul style="margin:0;padding-left:18px">' + blocked + '</ul></div>'
+      : ''),
+    'A BLOCKED backlog is not an empty queue: work whose required capability no online worker '
+    + 'serves stays PENDING with its attempts unconsumed, deliberately, so it stays visible rather '
+    + 'than looking like idleness.');
+};
+
+window.ocPhases = function ocPhases(d) {
+  var beats = (d.schedulerHeartbeats || []).map(function (h) {
+    var late = h.ageSeconds > 300;
+    return '<li style="font-size:12px;margin-bottom:3px">' + window.ocEsc(h.name) + ' — '
+      + (late ? '<span style="color:#9A2B2A;font-weight:700">' + window.ocAge(h.ageSeconds) + '</span>'
+        : window.ocAge(h.ageSeconds))
+      + (h.detail ? ' <span style="color:#64748b">(' + window.ocEsc(h.detail) + ')</span>' : '')
+      + '</li>';
+  }).join('');
+
+  var runs = (d.history || []).map(function (h) {
+    var live = ['CREATED', 'RUNNING'].indexOf(h.state) >= 0;
+    var ph = (d.livePhases || []).filter(function (p) { return p.runId === h.run_id; })[0];
+    return '<tr style="border-top:1px solid #eef1f5">'
+      + '<td style="padding:6px 8px;font-size:11px;color:#64748b">'
+        + window.ocEsc(String(h.run_id).slice(0, 8)) + '…</td>'
+      + '<td style="padding:6px 8px;font-size:12px">' + window.ocEsc(h.agent || '—') + '</td>'
+      + '<td style="padding:6px 8px;font-size:12px">' + window.ocEsc(h.workflow || '—') + '</td>'
+      + '<td style="padding:6px 8px">' + window.ocChip(h.state,
+        h.state === 'SUCCEEDED' ? 'ok'
+          : (h.state === 'FAILED' || h.state === 'ABANDONED') ? 'bad'
+            : live ? 'warn' : 'mute') + '</td>'
+      + '<td style="padding:6px 8px;font-size:12px">'
+        + (live ? (ph ? window.ocChip(ph.phase, 'mute') : '—') : '<span style="color:#94a3b8">—</span>')
+        + '</td>'
+      + '<td style="padding:6px 8px;font-size:11px;color:#64748b">attempt ' + h.attempt + '</td>'
+      + '<td style="padding:6px 8px;font-size:11px;color:#64748b">'
+        + window.ocEsc(h.ended_at || h.started_at || h.created_at || '') + '</td>'
+      + '</tr>';
+  }).join('');
+
+  return window.ocCard('Agent activity, execution phases and durable history',
+    '<div style="font-size:12px;font-weight:600;margin-bottom:4px">Scheduler</div>'
+    + (beats ? '<ul style="margin:0 0 10px;padding-left:18px">' + beats + '</ul>'
+      : '<p style="margin:0 0 10px;font-size:12px;color:#8A5A00">No scheduler heartbeat has ever '
+        + 'been recorded. If the office crons are not enabled, that is the expected state.</p>')
+    + (d.history === null
+      ? '<p style="margin:0;color:#9A2B2A"><b>The execution history could not be read.</b></p>'
+      : runs
+        ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
+          + '<tr style="text-align:left;font-size:11px;color:#64748b">'
+          + '<th style="padding:0 8px 6px">Run</th><th style="padding:0 8px 6px">Agent</th>'
+          + '<th style="padding:0 8px 6px">Workflow</th><th style="padding:0 8px 6px">State</th>'
+          + '<th style="padding:0 8px 6px">Phase</th><th style="padding:0 8px 6px">Attempt</th>'
+          + '<th style="padding:0 8px 6px">When</th></tr>' + runs + '</table></div>'
+        : '<p style="margin:0;font-size:13px;color:#555">No run has ever been recorded for this '
+          + 'company.</p>'),
+    'The PHASE is derived from durable rows each time it is asked, so it is the same answer the '
+    + 'next tick will act on rather than a cached one. It is shown only for a live run: a finished '
+    + 'run has no current phase.');
+};
+
+window.ocFacts = function ocFacts(d) {
+  if (!d.operationalFacts) {
+    return window.ocCard('Business facts', '<p style="margin:0;color:#9A2B2A"><b>The operational '
+      + 'facts could not be collected.</b> No figure here should be treated as zero.</p>');
+  }
+  var rows = d.operationalFacts.map(function (f) {
+    var val = (f.value === null || f.value === undefined)
+      ? '<span style="color:#9A2B2A">—</span>'
+      : '<b>' + f.value + '</b>';
+    return '<tr style="border-top:1px solid #eef1f5">'
+      + '<td style="padding:7px 8px;font-size:12px">' + window.ocEsc(f.label) + '</td>'
+      + '<td style="padding:7px 8px;font-size:14px;text-align:right">' + val + '</td>'
+      + '<td style="padding:7px 8px">' + window.ocFactChip(f.status) + '</td>'
+      + '<td style="padding:7px 8px;font-size:11px;color:#64748b">'
+        + window.ocEsc(f.detail || '') + '</td>'
+      + '</tr>';
+  }).join('');
+  var q = d.factQuality || {};
+  var short = (q.total || 0) - (q.supportable || 0);
+
+  return window.ocCard('Employee assignments, completion, milestones and outcomes',
+    '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
+    + '<tr style="text-align:left;font-size:11px;color:#64748b">'
+    + '<th style="padding:0 8px 6px">Fact</th><th style="padding:0 8px 6px;text-align:right">Value</th>'
+    + '<th style="padding:0 8px 6px">Status</th><th style="padding:0 8px 6px">Why</th></tr>'
+    + rows + '</table></div>'
+    + (short > 0
+      ? '<div style="margin-top:10px;padding:9px;background:#FDF2DC;border-radius:6px;'
+        + 'font-size:12px;color:#8A5A00"><b>' + short + ' of ' + q.total + ' figures cannot be '
+        + 'supported.</b> A briefing built on them is not a statement of fact.</div>'
+      : ''),
+    'MEASURED means the accessor answered. MEASURED ZERO means it answered and there is genuinely '
+    + 'nothing. MISSING means the figure cannot be supported — most often because rows exist whose '
+    + 'ownership is not established, so they belong to nobody and a zero here would be a number '
+    + 'nobody can back. STALE means the figure is real and not current. UNAVAILABLE means the read '
+    + 'failed, which is not a zero.');
+};
+
+window.ocAlerts = function ocAlerts(d) {
+  var stopRows = (d.stops || []).map(function (s) {
+    return '<li style="font-size:12px;margin-bottom:4px">'
+      + window.ocChip(s.scope_type + (s.scope_key ? ':' + s.scope_key : ''), 'bad') + ' '
+      + window.ocEsc(s.reason) + ' <span style="color:#64748b">— set by '
+      + window.ocEsc(s.set_by || 'unknown') + '</span></li>';
+  }).join('');
+
+  var alertRows = (d.openAlerts || []).map(function (a) {
+    return '<tr style="border-top:1px solid #eef1f5">'
+      + '<td style="padding:6px 8px">' + window.ocChip(a.severity,
+        a.severity === 'critical' ? 'bad' : a.severity === 'warning' ? 'warn' : 'mute') + '</td>'
+      + '<td style="padding:6px 8px;font-size:12px"><b>' + window.ocEsc(a.code) + '</b>'
+        + '<div style="color:#64748b;font-size:11px">' + window.ocEsc(a.subject) + '</div></td>'
+      + '<td style="padding:6px 8px;font-size:11px;color:#444">' + window.ocEsc(a.detail || '') + '</td>'
+      + '<td style="padding:6px 8px;font-size:11px;color:#64748b">×' + a.occurrences + '</td>'
+      + '</tr>';
+  }).join('');
+
+  return window.ocCard('STOP controls, alerts and recovery',
+    '<div style="font-size:12px;font-weight:600;margin-bottom:4px">STOPs in force</div>'
+    + (d.stops === null
+      ? '<p style="margin:0 0 10px;color:#9A2B2A"><b>The kill-switch state could not be read.</b> '
+        + 'Treat nothing here as permitted.</p>'
+      : stopRows
+        ? '<ul style="margin:0 0 12px;padding-left:18px">' + stopRows + '</ul>'
+        : '<p style="margin:0 0 12px;font-size:12px;color:#555">None. Nothing is halted by '
+          + 'policy.</p>')
+    + '<div style="font-size:12px;font-weight:600;margin-bottom:4px">Open alerts</div>'
+    + (d.openAlerts === null
+      ? '<p style="margin:0;color:#9A2B2A"><b>The alerts could not be read.</b> This is NOT an '
+        + 'absence of alerts.</p>'
+      : alertRows
+        ? '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse">'
+          + alertRows + '</table></div>'
+        : '<p style="margin:0;font-size:12px;color:#555">No open alert. The monitor resolves an '
+          + 'alert when its condition clears, never on a timeout.</p>')
+    + '<div style="margin-top:12px">'
+    + '<a class="btn" style="text-decoration:none" href="#" '
+    + 'onclick="window.ocToAgentControl();return false;">Halt or resume in Agent Control →</a>'
+    + '</div>',
+    'This page takes no action. Stopping and resuming live in Agent Control, which already holds '
+    + 'the authorization for them — a dashboard that could act would need its READ path guarded '
+    + 'like a write path.');
+};
+
+// NOT a write, and not a second authorization path: it changes which page is showing. Agent
+// Control is where a STOP is set, and it is unchanged by this page existing.
+window.ocToAgentControl = function ocToAgentControl() {
+  if (typeof navigate === 'function') navigate('agent-control');
+};
+
+window.ocRefresh = function ocRefresh() { return window.officeCommandPage(); };
+
+window.officeCommandPage = async function officeCommandPage() {
+  // 'content' — the shell's host. There is no element with id 'page-content' in this file, and a
+  // null host means a function that paints nothing, returns cleanly, and leaves the shell's
+  // "Loading…" on screen for ever. That silent-failure shape has been reached three different ways
+  // in this file already.
+  var host = document.getElementById('content');
+  if (!host) return;
+
+  host.innerHTML = '<h2 style="margin:0 0 4px">Autonomous Office</h2>'
+    + '<p style="color:var(--gray);font-size:13px;margin:0 0 14px">Reading the office…</p>';
+
+  var d = await API('/office/command-center'
+    + (window._ocState.company ? '?companyId=' + encodeURIComponent(window._ocState.company) : ''));
+
+  // A REFUSAL IS NOT AN EMPTY OFFICE. The commonest refusal on a fresh deployment is "this person
+  // holds no active company membership", which is the expected state until the membership backfill
+  // is applied — and rendering that as a quiet dashboard would be the exact lie this page exists
+  // not to tell.
+  if (!d || d.error) {
+    var code = (d && d.code) || 'no_response';
+    var hint = code === 'company_unresolved'
+      ? 'Company memberships are granted explicitly by an authorized administrator and are never '
+        + 'inferred from an email domain or defaulted to the only company. Until the reviewed '
+        + 'backfill is applied, this is the expected answer rather than a fault.'
+      : code === 'schema_missing'
+        ? 'The office schema has not been applied to this database.'
+        : 'The read model refused or could not answer.';
+    host.innerHTML = '<h2 style="margin:0 0 10px">Autonomous Office</h2>'
+      + '<div class="card"><p style="margin:0;color:#9A2B2A"><b>No office state is being shown, '
+      + 'and this is NOT an idle office.</b></p>'
+      + '<p style="margin:7px 0 0;font-size:12px;color:#555">' + window.ocEsc(code) + ' — '
+      + window.ocEsc((d && (d.detail || d.error)) || 'no response from the server') + '</p>'
+      + '<p style="margin:7px 0 0;font-size:12px;color:#555">' + hint + '</p></div>';
+    return;
+  }
+
+  var unreadable = (d.unreadable || []);
+  var head = '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;'
+    + 'flex-wrap:wrap;margin:0 0 10px">'
+    + '<h2 style="margin:0">Autonomous Office</h2>'
+    + '<div style="font-size:11px;color:#64748b">company ' + window.ocEsc(d.companyId)
+    + ' · read ' + window.ocEsc(d.at)
+    + ' · online window ' + d.onlineWithinSeconds + 's'
+    + ' <a href="#" onclick="window.ocRefresh();return false;" style="margin-left:8px">refresh</a>'
+    + '</div></div>';
+
+  var banner = unreadable.length
+    ? '<div class="card" style="margin-bottom:14px;background:#FBE9E7">'
+      + '<div style="font-size:13px;color:#9A2B2A"><b>' + unreadable.length + ' section(s) could '
+      + 'not be read: ' + window.ocEsc(unreadable.map(function (u) { return u.section; }).join(', '))
+      + '.</b> Those sections are NOT empty — they are unknown, and anything below them that looks '
+      + 'quiet may not be.</div></div>'
+    : '';
+
+  host.innerHTML = head + banner
+    + window.ocObjectives(d)
+    + window.ocPhases(d)
+    + window.ocWorkers(d)
+    + window.ocWork(d)
+    + window.ocFacts(d)
+    + window.ocAlerts(d);
+};
+
 const pages = {
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────────
@@ -3967,6 +4436,9 @@ pm2 startup</pre>
 pages['outreach'] = outreachPage;
 pages['prpa-command'] = window.prpaCommandPage;
 pages['prpa-tracker'] = window.prpaTrackerPage;
+// B2.9 / Priority 2 (2026-11-26). Declared above the literal and attached here, because a
+// `function` inside the literal is a syntax error that kills the app.
+pages['office-command'] = window.officeCommandPage;
 
 // ── THE DECISION QUEUE PAGE ───────────────────────────────────────────────────
 //

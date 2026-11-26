@@ -685,38 +685,36 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
 
       const allGood = verdicts.length > 0 && verdicts.every((v) => v.independentlyValidated);
 
-      // ── THE OUTCOME ROW IS THE PHASE'S ONLY DURABLE TRACE ────────────
+      // ── THE ESCALATION IS WRITTEN FIRST, AND THE ORDER IS THE GUARANTEE ──
       //
-      // phaseOf leaves VALIDATE when an outcome exists, so this write is not bookkeeping — it is
-      // what lets the next tick move on. My first version called this with `detail` (a column
-      // office_outcomes does not have), no `id` (the primary key, NOT NULL), and `.catch(() => {})`
-      // around it. Every validate tick therefore failed silently, wrote nothing, and the cycle sat
-      // in VALIDATE for ever while REPORT was reported as "never reached". A swallowed write that
-      // a later phase depends on is the same defect as a swallowed CREATE INDEX.
-      let outcomeRow = null; let outcomeError = null;
-      try {
-        outcomeRow = await scope.recordOutcome(resolved, {
-          id: `out-cycle-${runId}`.slice(0, 64),
-          runId,
-          outcome: allGood ? 'achieved' : 'partial',
-          businessEffect: `independent validation of ${verdicts.length} delegated step(s): `
-            + `${verdicts.filter((v) => v.independentlyValidated).length} confirmed against the plan`,
-        }, deps);
-      } catch (e) {
-        // 23505 means this run's outcome is already recorded — a repeated tick, which is correct
-        // and not a failure. Anything else is reported, never swallowed.
-        if (e && e.code === '23505') outcomeRow = { id: `out-cycle-${runId}`, duplicate: true };
-        else outcomeError = e.message;
-      }
-
+      // Owner's Priority 1 (2026-11-26): *"verify atomicity and recovery at actual transaction
+      // boundaries, including interruption between related writes."*
+      //
+      // These two writes are related: a validation that failed must leave BOTH a `partial` outcome
+      // and an open exception. They used to be written outcome-first, and a crash between them left
+      // the outcome with no escalation — and `phaseOf` leaves VALIDATE as soon as an outcome exists,
+      // so the next tick moved on to REPORT and the failure was never escalated at all. A detected
+      // problem turned into no problem, by a process dying in a two-millisecond window.
+      //
+      // The fix is the ORDER, not a transaction. The outcome row is this phase's COMMIT — it is the
+      // single row `phaseOf` reads to decide the phase is done — so everything the phase must leave
+      // behind is written BEFORE it. Interrupted anywhere in between, the next tick re-derives
+      // VALIDATE, re-writes the exception (the derived id makes that a no-op) and then writes the
+      // outcome. Recovery is the phase derivation plus the derived ids, which is what B3.17
+      // measured; a transaction would add a second mechanism over the one that already works, and
+      // would have to be unwound around the 23505 a repeated tick produces.
+      //
+      // Stated as a rule because it generalises: **in a phase whose completion is marked by one
+      // durable row, that row is written last.** REPORT follows it too — the terminal transition is
+      // its commit, and the employee task, the memory and the escalation all precede it.
       let exceptionError = null;
       if (!allGood) {
         // Retry or escalate belongs to the modules that own those policies; the cycle records the
         // exception and stops rather than inventing a policy here.
         //
-        // NOT swallowed either: the escalation IS the handling of a failed validation, so a
-        // failure to record it would turn a detected problem into no problem at all. A duplicate
-        // on a repeated tick is the exception already being open, which is the desired state.
+        // NOT swallowed: the escalation IS the handling of a failed validation, so a failure to
+        // record it would turn a detected problem into no problem at all. A duplicate on a repeated
+        // tick is the exception already being open, which is the desired state.
         try {
           await scope.openException(resolved, {
             id: `ex-cycle-${runId}`.slice(0, 64), runId, source: 'office/cycle',
@@ -724,6 +722,40 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
             severity: 'high', slaHours: 24,
           }, deps);
         } catch (e) { if (!e || e.code !== '23505') exceptionError = e.message; }
+      }
+
+      // ── AND ONLY THEN THE OUTCOME, WHICH IS THE PHASE'S COMMIT ───────────
+      //
+      // `phaseOf` leaves VALIDATE when an outcome exists, so this write is not bookkeeping — it is
+      // what lets the next tick move on. My first version called this with `detail` (a column
+      // office_outcomes does not have), no `id` (the primary key, NOT NULL), and `.catch(() => {})`
+      // around it. Every validate tick therefore failed silently, wrote nothing, and the cycle sat
+      // in VALIDATE for ever while REPORT was reported as "never reached". A swallowed write that
+      // a later phase depends on is the same defect as a swallowed CREATE INDEX.
+      //
+      // If the escalation above FAILED, the outcome is deliberately NOT written: leaving the phase
+      // incomplete is what makes the next tick try again, and writing the commit over a missing
+      // escalation is exactly the state this ordering exists to prevent.
+      let outcomeRow = null; let outcomeError = null;
+      if (exceptionError) {
+        outcomeError = `the escalation could not be recorded (${exceptionError}), so the outcome `
+          + 'was not written either — the phase stays incomplete and the next tick retries, rather '
+          + 'than committing a validated failure that nothing escalated';
+      } else {
+        try {
+          outcomeRow = await scope.recordOutcome(resolved, {
+            id: `out-cycle-${runId}`.slice(0, 64),
+            runId,
+            outcome: allGood ? 'achieved' : 'partial',
+            businessEffect: `independent validation of ${verdicts.length} delegated step(s): `
+              + `${verdicts.filter((v) => v.independentlyValidated).length} confirmed against the plan`,
+          }, deps);
+        } catch (e) {
+          // 23505 means this run's outcome is already recorded — a repeated tick, which is correct
+          // and not a failure. Anything else is reported, never swallowed.
+          if (e && e.code === '23505') outcomeRow = { id: `out-cycle-${runId}`, duplicate: true };
+          else outcomeError = e.message;
+        }
       }
 
       return { ok: allGood && !outcomeError, phase: PHASE.VALIDATE, next: PHASE.REPORT,

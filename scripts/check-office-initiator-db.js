@@ -261,7 +261,7 @@ watchdog.unref?.();
       // Drive it to a terminal state through the legal transitions — the trigger refuses
       // CREATED → SUCCEEDED directly, which is itself worth knowing.
       await q(`UPDATE agent_runs SET state='RUNNING', started_at=NOW() WHERE intent_key=$1`, [key]);
-      await q(`UPDATE agent_runs SET state='SUCCEEDED', ended_at=NOW() WHERE intent_key=$1`, [key]);
+      await q(`UPDATE agent_runs SET state='SUCCEEDED', ended_at=COALESCE(ended_at, NOW()) WHERE intent_key=$1`, [key]);
 
       const after = await INIT.initiateDueObjectives({ companyId: A }, deps);
       const startedAgain = after.initiated.filter((x) => x.objectiveId === rerun).length;
@@ -426,7 +426,7 @@ watchdog.unref?.();
       const f = await INIT.initiateDueObjectives({ companyId: A }, deps);
       const key = (f.initiated.find((x) => x.objectiveId === victim) || {}).intentKey;
       await q(`UPDATE agent_runs SET state='RUNNING', started_at=NOW() WHERE intent_key=$1`, [key]);
-      await q(`UPDATE agent_runs SET state='SUCCEEDED', ended_at=NOW() WHERE intent_key=$1`, [key]);
+      await q(`UPDATE agent_runs SET state='SUCCEEDED', ended_at=COALESCE(ended_at, NOW()) WHERE intent_key=$1`, [key]);
 
       await q(`DROP INDEX uq_agent_runs_one_active`);
       const a1 = await INIT.initiateDueObjectives({ companyId: A }, deps);

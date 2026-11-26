@@ -62,9 +62,9 @@ process.env.ADMIN_PASSWORD = `rel-${crypto.randomBytes(16).toString('hex')}`;
 
 const ROOT = path.join(__dirname, '..');
 const watchdog = setTimeout(() => {
-  console.log('\n  FAIL  no progress in 300s — a stall is a failure.');
+  console.log('\n  FAIL  no progress in 420s — a stall is a failure.');
   process.exit(1);
-}, 300_000);
+}, 420_000);
 watchdog.unref?.();
 
 /** Run the sampler as its own process, as an operator will. */
@@ -248,8 +248,11 @@ const readJsonl = (f) => fs.readFileSync(f, 'utf8').split('\n').filter(Boolean)
       if (achieved.length) {
         const avg = achieved.reduce((a, b) => a + b, 0) / achieved.length;
         ok(`a sample costs ~${avg.toFixed(1)}s against a disposable cluster, which is why the `
-          + 'runbook specifies a 60s interval rather than the 1s this check uses: at 1s the loop '
-          + 'cannot keep up, and the achieved-interval field says so instead of hiding it');
+          + 'runbook specifies 60s: a snapshot is not free, and the achieved-interval field says '
+          + 'what the loop managed instead of hiding it. Note that `--interval-seconds 1` above is '
+          + 'CLAMPED to the sampler\'s 5s floor — an earlier version of this line claimed the '
+          + 'check ran at 1s, which it never did, and section 2b found that by computing a gap '
+          + 'threshold from the number it asked for rather than the one in force');
       } else note('no positive achieved intervals to measure from');
 
       const summary = (fs.existsSync(OUT2) ? readJsonl(OUT2) : [])
@@ -261,9 +264,116 @@ const readJsonl = (f) => fs.readFileSync(f, 'utf8').split('\n').filter(Boolean)
           + 'and it is arithmetic rather than a verdict');
       } else bad('the summary did not reconcile samples against expectations', summary);
 
-      note('the SIGSTOP demonstration is NOT available in this container (CPU-time clock) and is '
-        + 'listed in docs/office/b4-7-72-hour-reliability-run.md as a step to perform once, by '
-        + 'hand, on the machine the real run uses');
+    }
+
+    // ══ 2b. THE REAL WALL-CLOCK GAP, END TO END ══════════════════════════
+    head('2b. a REAL gap: the sampler stopped, and the clock moved past it');
+
+    {
+      // ── THE NOTE THIS SECTION REPLACES, AND WHY IT WAS WRONG ───────────
+      //
+      // Owner's Priority 4 (2026-11-26): *"validate the sampler's real wall-clock gap detection."*
+      //
+      // Section 2 said an end-to-end demonstration was *"NOT available in this container (CPU-time
+      // clock)"* and measured the predicate instead. That was an honest limitation, honestly
+      // recorded, and it was also **not true** — I had concluded it from one failed attempt rather
+      // than from understanding why the attempt failed.
+      //
+      // The container's clock advances with **CPU time**, and CPU time is not the stopped process's
+      // CPU time. A SIGSTOPped child perceives nothing *while nothing else runs*; with a sibling
+      // burning CPU, the clock advances and the child, resumed, sees the whole interval. Probed
+      // directly before writing this: a child's 1000 ms timer fired 4280 ms after it was armed,
+      // across a SIGSTOP covered by a 4-second busy loop.
+      //
+      // So the demonstration IS available, and the limitation was a conclusion standing in for a
+      // measurement — the same defect this codebase keeps finding, this time in my own reasoning
+      // about my own tools.
+      const OUT3 = path.join(tmp, 'realgap.jsonl');
+      const child = spawn(process.execPath,
+        [path.join(ROOT, 'scripts', 'office-reliability-sampler.js'),
+          // FIVE seconds, not one, and that is the sampler's floor rather than my preference:
+          // `--interval-seconds` is clamped by `Math.max(5, …)`. My first version passed 1 and
+          // computed its stop against a 1s interval — so the threshold was really 15s (5 × 3), a
+          // 7s stop was correctly NOT a gap, and the check reported a product failure that was my
+          // arithmetic. The clamp is right; the test had to be told the truth about it.
+          '--objective', OBJ, '--interval-seconds', '5', '--duration-seconds', '45',
+          // The minimum factor, so the threshold is 10s rather than 15s and the stop below is
+          // unambiguous rather than marginal.
+          '--gap-factor', '2', '--out', OUT3],
+        { env: {
+          PATH: process.env.PATH,
+          NODE_ENV: 'test',
+          DATABASE_URL: cluster.url,
+          JWT_SECRET: 'reliability-harness',
+          ADMIN_EMAIL: process.env.ADMIN_EMAIL,
+          ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
+        }, stdio: 'ignore' });
+
+      // Let it establish a baseline FIRST. The earlier attempt stopped the child during startup,
+      // before any sample existed, which would have produced no gap on any clock.
+      const spin = (ms) => { const until = Date.now() + ms; while (Date.now() < until) Math.sqrt(7); };
+      await new Promise((r) => setTimeout(r, 6000));
+
+      const samplesBefore = (fs.existsSync(OUT3) ? readJsonl(OUT3) : [])
+        .filter((l) => l.kind === 'sample').length;
+      if (samplesBefore >= 1) {
+        ok(`${samplesBefore} sample(s) were taken before the stop — a baseline, so the gap below is `
+          + 'a gap BETWEEN samples rather than a slow start');
+      } else bad('the sampler produced no baseline sample to measure a gap against');
+
+      // THE STOP, and the CPU burn that makes the clock move past it.
+      process.kill(child.pid, 'SIGSTOP');
+      spin(14_000);                      // 14s, against a 10s threshold (5s interval × factor 2)
+      process.kill(child.pid, 'SIGCONT');
+
+      // Let it notice, sample again, and finish on its own duration.
+      await new Promise((r) => setTimeout(r, 14_000));
+      try { process.kill(child.pid, 'SIGTERM'); } catch (_) {}
+      await new Promise((r) => setTimeout(r, 2500));
+      try { process.kill(child.pid, 'SIGKILL'); } catch (_) {}
+
+      const lines = fs.existsSync(OUT3) ? readJsonl(OUT3) : [];
+      const gapLines = lines.filter((l) => l.kind === 'sampler_gap');
+      const after = lines.filter((l) => l.kind === 'sample');
+
+      if (gapLines.length >= 1 && gapLines.some((g) => g.seconds >= 10)) {
+        ok(`a REAL gap was recorded by the running sampler: `
+          + `${gapLines.map((g) => `${g.seconds}s`).join(', ')} — measured by stopping the process, `
+          + 'not by calling the predicate, which is what the owner asked be validated');
+      } else bad('a 14s stop against a 10s threshold produced no recorded gap',
+        { gapLines, samples: after.length });
+
+      if (gapLines.every((g) => /gap in the SAMPLER/.test(String(g.note || '')))) {
+        ok('and every gap line says in its own text that it is a gap in the SAMPLER, which may or '
+          + 'may not coincide with one in the office — a laptop that slept recorded nothing about '
+          + 'the server, and the samples either side are what say which');
+      } else bad('a gap line did not attribute itself', gapLines);
+
+      if (after.length > samplesBefore) {
+        ok(`sampling RESUMED after the gap (${samplesBefore} → ${after.length} samples) — a gap `
+          + 'that ends the run would be indistinguishable from a crash, and the evidence file has '
+          + 'to show the recovery as well as the fault');
+      } else bad('the sampler did not resume after being continued',
+        { samplesBefore, after: after.length });
+
+      // CONTROL: the same sampler, same interval, NOT stopped, records no gap. Without it, an
+      // implementation that called every interval a gap would pass everything above.
+      const OUT4 = path.join(tmp, 'nogap.jsonl');
+      const quiet = await runSampler(['--objective', OBJ, '--interval-seconds', '5',
+        '--duration-seconds', '18', '--gap-factor', '2', '--out', OUT4]);
+      const quietGaps = (fs.existsSync(OUT4) ? readJsonl(OUT4) : [])
+        .filter((l) => l.kind === 'sampler_gap');
+      if (quiet.code === 0 && quietGaps.length === 0) {
+        ok('control: an undisturbed run of the same sampler at the same interval records ZERO gaps '
+          + '— so the gap above is the stop and not the instrument');
+      } else bad('an undisturbed run reported gaps', { code: quiet.code, quietGaps });
+
+      const sum3 = lines.find((l) => l.kind === 'run_summary');
+      if (sum3 && sum3.maxSamplerGapSeconds >= 10 && sum3.samplerGaps === gapLines.length) {
+        ok(`and the run summary carries it: maxSamplerGapSeconds ${sum3.maxSamplerGapSeconds}, `
+          + `${sum3.samplerGaps} gap(s) — the figure B4.7 is judged on is in the file, not in `
+          + 'somebody\'s recollection of the run');
+      } else bad('the summary did not carry the real gap', sum3);
     }
 
     // ══ 3. IT REFUSES ANYTHING THAT COULD BE PRODUCTION ═════════════════

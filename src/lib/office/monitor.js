@@ -50,9 +50,34 @@ const SILENCE_AFTER_SECONDS = (() => {
 
 const SEVERITY = Object.freeze({ INFO: 'info', WARNING: 'warning', CRITICAL: 'critical' });
 
+/**
+ * A live run whose newest DURABLE write is older than this has stopped making progress, however
+ * many ticks it has received.
+ *
+ * ── WHY IT IS LONGER THAN THE PHASE GRACE WINDOW ───────────────────────────
+ *
+ * The cycle's own grace is 60 minutes, and inside it a COLLECT that is waiting for a worker is
+ * CORRECT behaviour that escalates nothing. An execution-stalled alert at 60 minutes would
+ * therefore fire on every legitimate wait and duplicate `ex-wait-<runId>`, which is how an alarm
+ * becomes noise. 120 minutes is past the point where the cycle has already escalated its own wait,
+ * so this finding only ever means something the cycle itself did not account for.
+ */
+const STALLED_AFTER_SECONDS = (() => {
+  const raw = Number.parseInt(process.env.OFFICE_MONITOR_STALLED_SECONDS || '7200', 10);
+  if (!Number.isFinite(raw)) return 7200;
+  return Math.min(604_800, Math.max(300, raw));
+})();
+
 const CODES = Object.freeze({
   SCHEDULER_SILENT: 'scheduler_silent',
   SCHEDULER_DISABLED: 'scheduler_disabled',
+  // Deliberately a DIFFERENT code from SCHEDULER_SILENT, and the distinction is the owner's
+  // Priority 4: *"A scheduler repeatedly skipping ticks must not conceal a permanently stalled
+  // execution."* Silence means the cron is not beating. This means the cron IS beating and nothing
+  // is moving — which a heartbeat cannot see, and which is the worse of the two because every
+  // signal looks healthy.
+  EXECUTION_STALLED: 'execution_stalled',
+  EXECUTION_PROGRESS_UNREADABLE: 'execution_progress_unreadable',
   WORKER_OFFLINE: 'worker_offline',
   WORKER_NEVER_AUTHENTICATED: 'worker_never_authenticated',
   WORKER_REVOKED_WITH_WORK: 'worker_revoked_while_work_waits',
@@ -139,6 +164,34 @@ async function evaluate(ctx, { schedulerEnabled = null } = {}, deps = {}) {
         `the advancement cron last beat ${ageSeconds}s ago, past the ${SILENCE_AFTER_SECONDS}s `
         + 'bound — a run that exists is authorized and nothing is carrying it forward'));
     }
+  }
+
+  // ── 1b. IS EXECUTION MOVING? (reachability is not progress) ─────────────
+  //
+  // Measured from the DURABLE ROWS the phases leave behind, never from the heartbeat. A cron that
+  // beats and refuses is reachable and frozen, and the heartbeat says nothing about which. This is
+  // deliberately evaluated whether or not the scheduler is enabled: a run left live by a scheduler
+  // somebody turned OFF is exactly the case where everything looks quiet and a run sits authorized
+  // for ever, and `SCHEDULER_DISABLED` alone would present that as the expected state.
+  try {
+    const progress = await scope.liveRunProgress(ctx, { limit: 20 }, deps);
+    for (const r of progress) {
+      const at = r.last_progress_at ? new Date(r.last_progress_at).getTime() : null;
+      if (!at) continue;                       // no timestamp at all: nothing to measure against
+      const ageSeconds = Math.round((now - at) / 1000);
+      if (ageSeconds <= STALLED_AFTER_SECONDS) continue;
+      findings.push(finding(CODES.EXECUTION_STALLED, r.run_id, SEVERITY.CRITICAL,
+        `run ${r.run_id} is ${r.state} and its newest durable write is ${ageSeconds}s old, past `
+        + `the ${STALLED_AFTER_SECONDS}s bound. The scheduler's own liveness is reported `
+        + 'separately and is not evidence about this: a cron can beat every fifteen seconds while '
+        + 'every tick refuses, and then nothing is advancing a run that is still authorized to act'));
+    }
+  } catch (e) {
+    // NAMED rather than swallowed. "Progress could not be measured" and "everything is moving"
+    // must never look the same, which is the whole reason this file reports unreadable sections.
+    findings.push(finding(CODES.EXECUTION_PROGRESS_UNREADABLE, 'live_run_progress', SEVERITY.CRITICAL,
+      `whether any run is making progress could not be determined: ${e.message} — this is not the `
+      + 'same as nothing being stalled'));
   }
 
   // ── 2. WORKERS ──────────────────────────────────────────────────────────
@@ -271,4 +324,6 @@ async function sweep(ctx, opts = {}, deps = {}) {
   };
 }
 
-module.exports = { evaluate, sweep, alertId, CODES, SEVERITY, SILENCE_AFTER_SECONDS };
+module.exports = {
+  evaluate, sweep, alertId, CODES, SEVERITY, SILENCE_AFTER_SECONDS, STALLED_AFTER_SECONDS,
+};

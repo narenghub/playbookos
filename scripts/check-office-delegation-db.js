@@ -126,6 +126,7 @@ watchdog.unref?.();
     const d1 = await DEL.delegate(parentCtx, {
       toAgent: 'procurement-agent', callingAgent: 'executive-agent',
       reason: 'the objective needs supplier research before any RFQ is prepared',
+      subject: 'supplier-research',
     }, deps);
     if (d1.ok) ok('POSITIVE CONTROL: the executive agent delegates to the procurement agent');
     else bad('the positive control was refused — every refusal below is meaningless',
@@ -228,6 +229,7 @@ watchdog.unref?.();
     const unknownAgent = await DEL.delegate(parentCtx, {
       toAgent: 'shell-runner', callingAgent: 'executive-agent',
       reason: 'an agent name that came from somewhere else entirely',
+      subject: 'unknown-agent',
     }, deps);
     if (!unknownAgent.ok && unknownAgent.refused === 'unknown_target_agent') {
       ok('an agent outside the closed registry is refused — a name from a model, a plan or a '
@@ -249,6 +251,7 @@ watchdog.unref?.();
 
     const noReason = await DEL.delegate(parentCtx, {
       toAgent: 'sales-agent', callingAgent: 'executive-agent', reason: 'why',
+      subject: 'short-reason',
     }, deps);
     if (!noReason.ok && noReason.refused === 'no_reason') {
       ok('a delegation with no meaningful reason is refused — incident reconstruction is the whole '
@@ -262,6 +265,7 @@ watchdog.unref?.();
     const noRun = await DEL.delegate(noRunCtx, {
       toAgent: 'sales-agent', callingAgent: 'executive-agent',
       reason: 'a delegation that has no run to hang off at all',
+      subject: 'no-run',
     }, deps);
     if (!noRun.ok && noRun.refused === 'no_parent_run') {
       ok('a context carrying no run cannot delegate — the child inherits a position in a tree');
@@ -272,6 +276,7 @@ watchdog.unref?.();
     const fromFinished = await DEL.delegate(ctxFor(A, objA, finishedRun), {
       toAgent: 'sales-agent', callingAgent: 'executive-agent',
       reason: 'delegating from a run that has already reported success',
+      subject: 'finished-parent',
     }, deps);
     if (!fromFinished.ok && fromFinished.refused === 'parent_not_running') {
       ok('a FINISHED parent cannot delegate — the child\'s cost and outcome would have nobody '
@@ -281,6 +286,7 @@ watchdog.unref?.();
     const foreignParent = await DEL.delegate(ctxFor(A, objA, runB), {
       toAgent: 'sales-agent', callingAgent: 'executive-agent',
       reason: 'company A naming company B\'s run as its parent',
+      subject: 'foreign-parent',
     }, deps);
     if (!foreignParent.ok && foreignParent.refused === 'parent_not_in_company_scope') {
       ok('a parent run of another company reads as ABSENT, and absent is a refusal');
@@ -295,6 +301,7 @@ watchdog.unref?.();
       const step = await DEL.delegate(chainCtx, {
         toAgent: 'sales-agent', callingAgent: 'executive-agent',
         reason: `chain link ${i + 1}, measuring where the bound actually bites`,
+        subject: `chain-${i + 1}`,
       }, deps);
       if (!step.ok) { reached.push({ refused: step.refused, at: i + 1 }); break; }
       reached.push({ depth: step.depth });
@@ -318,6 +325,7 @@ watchdog.unref?.();
     const tierNone = await DEL.delegate(ctxFor(A, objNone, runNone), {
       toAgent: 'sales-agent', callingAgent: 'executive-agent',
       reason: 'a tier-none objective attempting to delegate governed work',
+      subject: 'tier-none',
     }, deps);
     if (!tierNone.ok && tierNone.refused === 'autonomy_tier_forbids_delegation') {
       ok('tier `none` may not delegate — it may observe, analyse and report');
@@ -328,6 +336,7 @@ watchdog.unref?.();
     const tierBounded = await DEL.delegate(ctxFor(A, objBounded, runBounded), {
       toAgent: 'sales-agent', callingAgent: 'executive-agent',
       reason: 'a bounded-tier objective attempting to delegate governed work',
+      subject: 'tier-bounded',
     }, deps);
     if (!tierBounded.ok && tierBounded.refused === 'autonomy_tier_forbids_delegation') {
       ok('tier `bounded` is NOT AUTHORIZED and is refused rather than read as the permissive tier');
@@ -343,6 +352,7 @@ watchdog.unref?.();
     const paused = await DEL.delegate(ctxFor(A, objPaused, runPaused), {
       toAgent: 'sales-agent', callingAgent: 'executive-agent',
       reason: 'delegating under an objective the CEO has since paused',
+      subject: 'paused-objective',
     }, deps);
     if (!paused.ok && paused.refused === 'objective_not_active') {
       ok('an objective switched off mid-flight stops further delegation — it is not a way to carry '
@@ -365,6 +375,7 @@ watchdog.unref?.();
     const stoppedAgent = await DEL.delegate(parentCtx, {
       toAgent: 'sales-agent', callingAgent: 'executive-agent',
       reason: 'delegating to an agent that an operator has deliberately stopped',
+      subject: 'stopped-agent',
     }, deps);
     if (!stoppedAgent.ok && stoppedAgent.refused === 'stopped_by_policy') {
       ok('and the delegation is refused before any child run exists');
@@ -373,6 +384,7 @@ watchdog.unref?.();
     const otherAgentStillFine = await DEL.delegate(parentCtx, {
       toAgent: 'seo-agent', callingAgent: 'executive-agent',
       reason: 'a different agent, not the one under the stop',
+      subject: 'other-agent',
     }, deps);
     if (otherAgentStillFine.ok) {
       ok('a DIFFERENT agent still delegates — the stop is matched by name, not applied to everything');
@@ -389,6 +401,7 @@ watchdog.unref?.();
     const unreadable = await DEL.delegate(parentCtx, {
       toAgent: 'seo-agent', callingAgent: 'executive-agent',
       reason: 'delegating while the stops table cannot be read at all',
+      subject: 'stops-unreadable',
     }, blindDeps);
     if (!unreadable.ok && unreadable.refused === 'killswitch_unreadable') {
       ok('an UNREADABLE stop state refuses — the absence of an answer is not a clear answer');
@@ -417,6 +430,7 @@ watchdog.unref?.();
     const childOfTight = await DEL.delegate(tightCtx, {
       toAgent: 'seo-agent', callingAgent: 'executive-agent',
       reason: 'a child that will spend against its parent objective ceiling',
+      subject: 'tight-budget-child',
     }, deps);
     if (childOfTight.ok) {
       ok('POSITIVE CONTROL: a delegation under a tight but unexhausted budget is permitted');
@@ -429,6 +443,7 @@ watchdog.unref?.();
       const afterChildSpend = await DEL.delegate(tightCtx, {
         toAgent: 'procurement-agent', callingAgent: 'executive-agent',
         reason: 'delegating again after the first child exhausted the shared ceiling',
+        subject: 'after-ceiling-exhausted',
       }, deps);
       if (!afterChildSpend.ok && afterChildSpend.refused === 'budget_refused') {
         ok('a CHILD\'s spend exhausts the PARENT objective\'s budget and the next delegation is '

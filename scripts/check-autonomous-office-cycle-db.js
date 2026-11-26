@@ -298,6 +298,10 @@ globalThis.fetch = async (...args) => {
     const delegated = await DELEGATE.delegate(ctx, {
       toAgent: 'procurement-agent', callingAgent: 'executive-agent',
       reason: 'the plan needs supplier research carried out by the procurement agent',
+      // The SUBJECT: which work this is a delegation of. Since 2026-11-26 `delegate()` derives
+      // its intent key from (parent run, agent, subject) and refuses a caller that can name
+      // none of them — a random default key meant no delegation could ever be deduplicated.
+      subject: 'supplier-research',
     }, deps);
     if (delegated.ok && delegated.childRunId) {
       ok('the executive agent delegates to the procurement agent, and a CHILD RUN exists');
@@ -654,6 +658,7 @@ globalThis.fetch = async (...args) => {
     const afterRevoke = await DELEGATE.delegate(ctx, {
       toAgent: 'sales-agent', callingAgent: 'executive-agent',
       reason: 'delegating after the objective has been cancelled by the CEO',
+      subject: 'supplier-research-after-cancellation',
     }, deps);
     if (!afterRevoke.ok && afterRevoke.refused === 'objective_not_active') {
       ok('NEGATIVE 2/9 revoked authorization: cancelling the objective stops further delegation '

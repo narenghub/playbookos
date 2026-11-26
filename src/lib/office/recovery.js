@@ -173,7 +173,7 @@ async function recoverRun(runId, deps = {}) {
   // can win, and both would then proceed to escalate.
   const claimed = await query(
     `UPDATE agent_runs
-        SET state = 'ABANDONED', ended_at = NOW()
+        SET state = 'ABANDONED', ended_at = COALESCE(ended_at, NOW())
       WHERE run_id = $1 AND state = ANY($2)
       RETURNING run_id, state`,
     [runId, ACTIVE]

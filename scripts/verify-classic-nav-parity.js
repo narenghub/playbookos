@@ -180,9 +180,28 @@ console.log(`${roles.length} roles\n`);
 // `spend` IS NO LONGER LISTED — it landed, so it is the baseline. Leaving it in expected a diff
 // that no longer exists, which is the fourth time this file has recorded exactly that drift. The
 // history block above is where a landed entry goes.
+//
+// `approvals` IS NO LONGER LISTED EITHER — the FIFTH instance, found the moment this run produced a
+// real diff: with a clean tree every role is IDENTICAL and EXPECTED is never consulted, so a stale
+// entry sits harmless until somebody changes the nav on purpose and then fails them both. The lesson
+// this file keeps recording is that an expectation of a diff outlives the diff.
+//
+// 2026-11-26, the Autonomous Office page (B2.9, owner's Priority 2): TWO roles gain
+// `office-command` — super_admin and admin, and only those two. That set is not a page-by-page
+// choice: the page sits in its own AUTONOMOUS OFFICE section whose access list is ['admin'], and
+// NAV_FAMILIES.admin is ['admin','super_admin']. The same construction the FEDERAL section uses, for
+// the same reason — the API route behind the page is adminOnly, so a section reaching the three
+// directors (as EXECUTIVE's ['admin','director'] does) would be a nav that offers a page the route
+// then refuses.
+//
+// WHO IS ABSENT is the part worth reading. `partner` does not gain it and must not: a SiteNex web
+// partner has no business seeing worker identities, capability grants, budget exposure or
+// authorization refusals for a pharmaceutical company's autonomous operations. Nor do the three
+// directors, `dev_team` or `support_team`. Any third role appearing here means the section's access
+// list was widened, which is a different decision from adding a page to it.
 const EXPECTED = {
-  super_admin:          { gained: ['approvals'], lost: [] },
-  admin:                { gained: ['approvals'], lost: [] },
+  super_admin:          { gained: ['office-command'], lost: [] },
+  admin:                { gained: ['office-command'], lost: [] },
 };
 // Retired to empty, because 'outreach' is now in the BASELINE. Left as-is it expected every unchanged
 // role to gain a page it already has — which is harmless only while no role's nav differs at all, and

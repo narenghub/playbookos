@@ -443,6 +443,56 @@ pf_step "no phase of the cycle can duplicate its effect under concurrency or res
 # passed. Three pieces of acceptance evidence rested on that line.
 pf_step "every negative path produces a truthful durable state, bounded recovery or an escalation" \
   node scripts/check-negative-paths-db.js
+# Owner's Priority 1 of the third directive (2026-11-26): the remaining execution-consistency
+# properties, each at the boundary where it actually lives rather than at the one that is easiest to
+# assert. This step found that the terminal state was immutable while the completion TIME was not —
+# a repeated `finish` moved `ended_at` with every tick and appended a second RUN_ENDED, so any
+# duration or "completed runs" figure taken over the ledger was wrong, the 72-hour run's wall-clock
+# progress among them — and that `finish` returned the state it COMPUTED rather than the one that
+# holds, so a late failure reported PARTIAL into the briefing while the row said SUCCEEDED.
+pf_step "execution consistency holds at the real write boundaries, and claims no more than it holds" \
+  node scripts/check-execution-consistency-db.js
+# B3.14 (owner's Priority 5, 2026-11-26): aggregate financial concurrency ACROSS objectives and
+# ACROSS companies. This step found that the limit budget.js calls "the $100/day enterprise cap" is
+# a PER-COMPANY cap — `spendToday` filters on company_id — so the cross-company total was computed
+# by no code and bounded by no limit, and the per-company cap itself was a check-then-act outside
+# the hold transaction. Both are now enforced inside it under one fixed lock order, with a
+# destructive control that raises the cap and shows the identical hold granted.
+pf_step "spend is bounded in aggregate across objectives and across companies, under concurrency" \
+  node scripts/check-aggregate-spend-concurrency-db.js
+# The provider freeze (owner's Priority 5, 2026-11-26). The spend ceiling is a function of the
+# request's TEXT LENGTH, so every billed feature that is not a text input token — tools, prompt
+# caching, extended thinking, images, streaming, the batches endpoint — is a hole in it. This
+# asserts the request body has exactly four fields, that one function builds it, that the fetch
+# sends that object, and that none of those features appears in executable code, each with a
+# planted control so a pattern that never matches cannot look like a pass. Costs nothing and
+# reaches no provider.
+pf_step "the provider surface is frozen and no unaccounted billing feature is reachable" \
+  env JWT_SECRET=preflight node --test scripts/provider-surface-is-frozen.test.js
+# Owner's Priority 5 (2026-11-26): a model-generated proposal cannot expand permissions, company
+# access, capabilities or financial authority. Each of the four is attacked separately through the
+# one surface a model controls — the JSON it returns — with the strongest finding being that a
+# context cannot be FABRICATED or copied-and-edited at all, so "whose data does this plan touch" is
+# settled by the database before a proposal is read.
+pf_step "a model-generated proposal cannot widen permissions, company, capabilities or budget" \
+  node scripts/check-proposal-authority-db.js
+# B2.10's commercial value distinctions (owner's Priority 7, 2026-11-26). Seven kinds of money
+# kept apart, with NO total across them — because a sum over estimate, quotation, order, invoiced,
+# received and cost counts one deal five times, which is exactly what `metrics-snapshot` does today
+# when it sums orders into the figure the CEO briefing calls revenue. Margin is derived, named
+# (invoiced minus cost, NOT money received) and refuses when either side is unmeasured.
+pf_step "the seven commercial value kinds cannot be conflated, and there is no total" \
+  env JWT_SECRET=preflight node --test src/lib/office/commercial-ledger.test.js
+# B2.10 (owner's Priority 7, 2026-11-26): the synthetic end-to-end commercial workflow. Eleven
+# stages on the real modules, with a deliberately unequal fixture so each judgement has something
+# to refuse — the CHEAPEST quote fails the declared criteria, so the comparison is a qualification
+# rather than a sort. It runs with NO provider key and asserts the one stage it cannot complete:
+# `renderGovernedRFQ` reaches `governedCall` and `office/ai.js` requires the provider at load, so
+# the letter cannot be produced without a paid call; the governed path refuses, files no exception
+# (an unavailable provider is ordinary) and makes zero outward calls, with the spy proved able to
+# fire first. No supplier contacted, no order, no payment, no commitment.
+pf_step "the synthetic commercial workflow holds, and names the stage it cannot complete" \
+  node scripts/check-synthetic-commercial-workflow-db.js
 # Owner's Priority 4 of the second directive (2026-11-25): a governed, company-scoped, read-only
 # operational facts source, with measured zero, missing, stale and unavailable told APART — each
 # arranged as a real database state with a control that turns it back into the previous reading —
@@ -457,6 +507,14 @@ pf_step "the facts source writes nothing and no model can reach it" \
 # backlog vs an empty queue, a stale hold vs an unresolved charge, an unreadable section vs a zero.
 pf_step "the command centre tells apart what an operator must not confuse" \
   node scripts/check-command-center-db.js
+# Owner's Priority 2 (2026-11-26): the SPA page itself. A check that proves the code is well-formed
+# is not a check that proves the screen works — the Approvals screen shipped to production and never
+# rendered while 105 checks stayed green. This drives the REAL dispatcher in a REAL browser against
+# a fixture that is deliberately not all-healthy, and asserts what the page must never say: an
+# unsupportable zero drawn as a figure, a granted-but-unverified capability shown as capacity, an
+# unreadable section drawn as empty, or a refusal drawn as an idle office.
+pf_step "the Autonomous Office page renders, and tells the truth about what it was given" \
+  node scripts/check-office-page-renders.js
 # B4.5 (owner's Priority 3 of 2026-11-25): deduplicated monitoring with NO external notifications.
 # Twenty sweeps of one unchanged condition produce ONE row, with the destructive control that drops
 # the key and shows the duplicates appear; silence is noticed only when the scheduler is SUPPOSED to

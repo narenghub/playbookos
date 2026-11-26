@@ -300,8 +300,18 @@ const tick = (args = [], extraEnv = {}) =>
 
     // Age the run and its intent key into "yesterday" so the next business day is a new intent.
     // The CLOCK is not moved: the fixture is, which keeps the assertion deterministic.
-    await query(`UPDATE agent_runs SET state='RUNNING' WHERE run_id=$1`, [RUN]).catch(() => {});
-    await query(`UPDATE agent_runs SET state='SUCCEEDED', ended_at=NOW() WHERE run_id=$1`, [RUN]);
+    // Only if it has not already ended. Both statements here were written when a terminal run's
+    // `ended_at` could be rewritten; it is now write-once at the database level (B3.21), and the
+    // first statement was already a silent no-op against the transition guard. A run the cycle has
+    // already finished needs neither, so the fixture asks for the state it wants and stops if it is
+    // already there, rather than issuing two statements that mean nothing.
+    const already = (await query(
+      `SELECT state, ended_at FROM agent_runs WHERE run_id=$1`, [RUN])).rows[0];
+    if (!already || !already.ended_at) {
+      await query(`UPDATE agent_runs SET state='RUNNING' WHERE run_id=$1`, [RUN]).catch(() => {});
+      await query(`UPDATE agent_runs SET state='SUCCEEDED', ended_at=COALESCE(ended_at, NOW())
+                    WHERE run_id=$1`, [RUN]);
+    }
     // agent_runs enforces run identity as immutable — run_id, attempt, intent_key and the rest
     // cannot be rewritten, by a trigger, which is correct and which my fixture tried to do anyway.
     // So the second cycle is reached the way the product reaches it: the business day moves. The

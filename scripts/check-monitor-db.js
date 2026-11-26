@@ -240,6 +240,95 @@ global.fetch = (...args) => { outward.push(String(args[0])); return realFetch(..
       } else bad('a stale heartbeat was not noticed', stale.findings);
     }
 
+    // ══ 3b. REACHABILITY IS NOT PROGRESS ═════════════════════════════════
+    head('3b. a beating scheduler must not conceal a frozen run');
+
+    {
+      // ── THE CASE THE HEARTBEAT CANNOT SEE ──────────────────────────────
+      //
+      // Owner's Priority 4 (2026-11-26): *"The monitor must distinguish scheduler reachability from
+      // actual execution progress. A scheduler repeatedly skipping ticks must not conceal a
+      // permanently stalled execution."*
+      //
+      // So: a heartbeat written THIS SECOND — the scheduler is as alive as it gets — and a live run
+      // whose newest durable write is hours old. Every signal section 3 measures is green.
+      const RUNS = require('../src/lib/office/run');
+      const begun = await RUNS.beginObjectiveRun({
+        objectiveId: OBJ, trigger: 'manual', triggerDetail: 'monitor stall probe',
+      }, deps);
+      const stalledRun = begun.runId || begun.run_id;
+
+      await SCOPE.touchSchedulerHeartbeat('office-cycle-advance', { detail: 'firing' }, deps);
+
+      // Fresh run first: a run that has only just started is NOT stalled, and without this control
+      // the assertion below would also pass on an implementation that called everything stalled.
+      const fresh = await MON.evaluate(CTX, { schedulerEnabled: true }, deps);
+      if (!fresh.findings.some((f) => f.code === MON.CODES.EXECUTION_STALLED)) {
+        ok('control: a run that started a moment ago is NOT reported stalled — the bound is a '
+          + 'bound, not a blanket');
+      } else bad('a fresh run was called stalled', fresh.findings);
+
+      // Now age the run's own durable evidence. `created_at` is immutable by trigger, so
+      // `started_at` is moved — which is what `liveRunProgress` falls back to for a run that has
+      // started and written nothing else, and is therefore the honest way to arrange the state.
+      const old = new Date(Date.now() - (MON.STALLED_AFTER_SECONDS + 600) * 1000).toISOString();
+      await query(`UPDATE agent_runs SET started_at = $2 WHERE run_id = $1`, [stalledRun, old]);
+
+      const frozen = await MON.evaluate(CTX, { schedulerEnabled: true }, deps);
+      const stall = frozen.findings.find((f) => f.code === MON.CODES.EXECUTION_STALLED);
+      const stillBeating = !frozen.findings.some((f) => f.code === MON.CODES.SCHEDULER_SILENT);
+
+      if (stall && stall.severity === 'critical' && stillBeating) {
+        ok('the frozen run is CRITICAL while the scheduler is simultaneously reported as NOT '
+          + 'silent — the two questions are answered by two different codes from two different '
+          + 'sources, so a healthy heartbeat can no longer stand in for execution progress');
+      } else bad('a beating scheduler concealed a frozen run', { stall, stillBeating });
+
+      if (stall && stall.subject === stalledRun && /not evidence about this/.test(stall.detail)) {
+        ok('and the alert is identified BY RUN, with its detail saying in words that the '
+          + 'scheduler\'s liveness is not evidence about it — an operator reading the row at 3am '
+          + 'should not have to know that');
+      } else bad('the stall alert does not name its run or its reasoning', stall);
+
+      // ── AND IT IS EVALUATED WHILE THE SCHEDULER IS OFF ─────────────────
+      //
+      // The case that matters most in production today: `OFFICE_INITIATOR_ENABLED` is unset, so
+      // section 3 correctly reports INFO — and a run left live by a scheduler somebody switched off
+      // sits authorized for ever while every signal says "expected state".
+      const offAndFrozen = await MON.evaluate(CTX, { schedulerEnabled: false }, deps);
+      const stallWhileOff = offAndFrozen.findings.find(
+        (f) => f.code === MON.CODES.EXECUTION_STALLED);
+      const infoWhileOff = offAndFrozen.findings.find(
+        (f) => f.code === MON.CODES.SCHEDULER_DISABLED);
+      if (stallWhileOff && infoWhileOff && infoWhileOff.severity === 'info') {
+        ok('with the scheduler switched OFF the stall is still CRITICAL beside the INFO — a run '
+          + 'left live by a scheduler somebody turned off is the case where everything looks quiet, '
+          + 'and reporting only the INFO would present it as the expected state');
+      } else bad('a frozen run went unreported while the scheduler was off',
+        { stallWhileOff, infoWhileOff });
+
+      // ── UNREADABLE IS NOT HEALTHY ──────────────────────────────────────
+      const blind = {
+        ...deps,
+        scope: {
+          ...SCOPE,
+          liveRunProgress: () => Promise.reject(new Error('simulated outage')),
+        },
+      };
+      const unreadable = await MON.evaluate(CTX, { schedulerEnabled: true }, blind);
+      const named = unreadable.findings.find(
+        (f) => f.code === MON.CODES.EXECUTION_PROGRESS_UNREADABLE);
+      if (named && named.severity === 'critical' && /not the\s+same as nothing being stalled/.test(
+        named.detail.replace(/\s+/g, ' '))) {
+        ok('and when progress cannot be MEASURED it is reported as such, critically — "unreadable" '
+          + 'and "everything is moving" are the two states this whole file exists to tell apart');
+      } else bad('an unreadable progress read looked like a healthy one', unreadable.findings);
+
+      // Put the run back so later sections are not reading a stalled fixture.
+      await query(`UPDATE agent_runs SET state = 'ABANDONED',
+                     ended_at = COALESCE(ended_at, NOW()) WHERE run_id = $1`, [stalledRun]);
+    }
+
     // ══ 4. RESOLUTION IS THE CONDITION GOING AWAY ════════════════════════
     head('4. resolved by the condition, never by a timeout — and the row stays');
 

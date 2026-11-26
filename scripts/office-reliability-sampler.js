@@ -83,10 +83,21 @@ const GAP_FACTOR = Math.max(2, Number.parseFloat(arg('gap-factor', '3')));
  * Is the interval this sample actually achieved a GAP rather than a late sample?
  *
  * Pure, and exported, because it is the one piece of arithmetic B4.7's whole claim rests on and it
- * must be testable without stopping a process: inside this development container the clock advances
- * with CPU time, so a SIGSTOPped sampler does not perceive the wall-clock seconds it was stopped
- * for, and an end-to-end demonstration of a gap is not available here. The predicate is measured
- * directly instead, with explicit timestamps.
+ * is worth being able to measure on its own, with explicit timestamps.
+ *
+ * ── CORRECTED 2026-11-26 ───────────────────────────────────────────────────
+ *
+ * This comment used to say an end-to-end demonstration was *"not available here"* because the
+ * container's clock advances with CPU time, so a SIGSTOPped sampler perceives nothing. The first
+ * half is true and the conclusion was wrong: the clock advances with CPU time, which is not the
+ * STOPPED process's CPU time. With a sibling burning CPU, the clock moves and the resumed sampler
+ * sees the whole interval. `check-reliability-sampler-db.js` section 2b now stops this process for
+ * real and asserts the gap it records — a 15s gap, from an actual SIGSTOP — which is what the owner
+ * asked be validated. The limitation was a conclusion standing in for a measurement.
+ *
+ * One thing that measurement taught, which matters to anyone reading a gap figure: the threshold is
+ * computed from the interval IN FORCE, and `--interval-seconds` is clamped to a 5s floor. A caller
+ * who asks for 1 and reasons about a 3s threshold is reasoning about 15s.
  */
 function isGap(lastAtMs, nowMs, intervalSeconds, factor) {
   const actualSeconds = (nowMs - lastAtMs) / 1000;

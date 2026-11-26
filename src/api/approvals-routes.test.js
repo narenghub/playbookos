@@ -199,9 +199,27 @@ test('every onclick handler on this page is reachable from the global scope', ()
 });
 
 test('the page is admin-only in the nav, beside decisions and spend', () => {
-  assert.match(HTML, /\['decisions', 'spend', 'approvals'\]\.indexOf\(pageId\)/,
-    'approvals is not in the admin-only gate inside passesPageReads, so it would fall through to '
-    + 'the tier rules and fail open to anyone holding the section');
+  // ── ASSERTED AS MEMBERSHIP, NOT AS A LITERAL ARRAY ────────────────────────
+  //
+  // This matched the exact text `['decisions', 'spend', 'approvals']`, and it broke the day a
+  // FOURTH admin-only page was added to that gate — reporting that `approvals` had fallen out of a
+  // list it was still in. An assertion that pins its neighbours fails on somebody else's correct
+  // change, which is the same drift `verify-classic-nav-parity.js` has recorded five times.
+  //
+  // What matters is that `approvals` is IN the gate and that the gate is checked BEFORE the admin
+  // short-circuit, since a narrowing rule placed after it narrows nothing. Both are read out of the
+  // function rather than matched as text.
+  const gate = HTML.slice(HTML.indexOf('function passesPageReads(pageId, role, tiers) {'));
+  const body = gate.slice(0, gate.indexOf('\n}\n'));
+  const m = body.match(/if \(\[([^\]]*)\]\.indexOf\(pageId\) !== -1\) return role === 'admin'/);
+  assert.ok(m, 'the admin-only gate inside passesPageReads could not be found at all');
+  const named = [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+  assert.ok(named.includes('approvals'),
+    `approvals is not in the admin-only gate (it names ${named.join(', ')}), so it would fall `
+    + 'through to the tier rules and fail open to anyone holding the section');
+  assert.ok(body.indexOf(m[0]) < body.indexOf("role === 'admin' || role === 'super_admin') return true"),
+    'the admin-only gate runs AFTER the admin short-circuit, so it narrows nothing for the roles '
+    + 'it exists to narrow');
 });
 
 // Comments are stripped before asserting on markup. My first version of the sandbox test failed

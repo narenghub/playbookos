@@ -424,13 +424,56 @@ watchdog.unref?.();
           + 'dashboard whose READ path needs a write path\'s authorization');
       } else bad('the read model can act', found);
 
-      const route = require('node:fs').readFileSync(
-        require('node:path').join(__dirname, '..', 'src', 'api', 'command-center.routes.js'),
-        'utf8');
-      if (!/companyId/.test(route.replace(/\/\/[^\n]*/g, '')) || /req\.query\.objectiveId/.test(route)) {
-        ok('and the route takes no companyId: the company is READ from the objective, because an '
-          + 'HTTP caller may no more choose a company than an agent may');
-      } else bad('the route accepted a company from its caller');
+      // ── COMPANY ISOLATION, MEASURED THROUGH THE RESOLVER THE ROUTE USES ──
+      //
+      // The route resolves its company with `resolveCompanyForReadSession`, the same module
+      // `/api/decisions` and `/api/approvals` use. So a `companyId` in the query is a LOOKUP KEY
+      // against the caller's own memberships, never the answer — and that is a property to MEASURE
+      // against real memberships, not to assert by grepping the route for a string. An earlier
+      // version of this section did exactly that ("the route takes no companyId"), which was true
+      // of the text and said nothing about who may see what.
+      const CTXMOD = require('../src/lib/office/context');
+      const MEMBERSHIP = require('../src/lib/identity/company-membership');
+      const OTHER_CO = uid('co-other');
+      await query(`INSERT INTO companies (id, slug, display_name, status)
+                   VALUES ($1,$1,$1,'active')`, [OTHER_CO]);
+      made.companies.push(OTHER_CO);
+      const VIEWER = uid('viewer'); const GRANTER = uid('granter');
+      await query(`INSERT INTO users (id, email, name, role, password_hash, is_active)
+                   VALUES ($1,$2,'Command Centre Viewer','admin','x',1)`,
+        [VIEWER, `${VIEWER}@fixture.invalid`]);
+      await query(`INSERT INTO users (id, email, name, role, password_hash, is_active)
+                   VALUES ($1,$2,'Granter','super_admin','x',1)`,
+        [GRANTER, `${GRANTER}@fixture.invalid`]);
+      made.users = (made.users || []).concat([VIEWER, GRANTER]);
+      await MEMBERSHIP.grantMembership({ userId: VIEWER, companyId: CO, companyRole: 'member',
+        grantedBy: GRANTER, reason: 'fixture: a viewer who holds exactly one company' }, deps);
+
+      const resolved = await CTXMOD.resolveCompanyForReadSession({ userId: VIEWER }, deps);
+      if (resolved.companyId === CO) {
+        ok(`a viewer holding one membership resolves to it (${CO}) with no companyId supplied`);
+      } else bad('the read session resolved to the wrong company', resolved.companyId);
+
+      let refusedOther = null;
+      try {
+        await CTXMOD.resolveCompanyForReadSession(
+          { userId: VIEWER, requestedCompanyId: OTHER_CO }, deps);
+      } catch (e) { refusedOther = e.message; }
+      if (refusedOther && /not an authorized member/.test(refusedOther)) {
+        ok('and naming a company they do NOT hold is refused by name — a company in a request is a '
+          + 'lookup key against this person\'s memberships, never the answer, so the page cannot '
+          + 'be pointed at another tenant by editing a URL');
+      } else bad('a non-member company was accepted from the caller', refusedOther);
+
+      let refusedNone = null;
+      try {
+        await CTXMOD.resolveCompanyForReadSession({ userId: GRANTER }, deps);
+      } catch (e) { refusedNone = e.message; }
+      if (refusedNone && /holds no active company membership/.test(refusedNone)) {
+        ok('a user with NO membership is refused rather than defaulted to the only company — which '
+          + 'is the expected state until the reviewed backfill is applied, and the page renders it '
+          + 'as a refusal rather than as an idle office');
+      } else bad('a membership-less user was given a company', refusedNone);
 
       const calls = (await query('SELECT COUNT(*)::int n FROM office_cost_ledger')).rows[0].n;
       if (calls === 0) ok('ZERO provider calls');

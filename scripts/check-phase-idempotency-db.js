@@ -251,14 +251,20 @@ function spawnJson(script, args = [], extraEnv = {}) {
       const DELEG = require('../src/lib/office/delegation');
       const CONTEXT = require('../src/lib/office/context');
       const parentCtx = CONTEXT.deriveContext(CTX, { runId: RUN });
-      const key = `idem-delegate-${crypto.randomBytes(6).toString('hex')}`;
-
+      // ── NO EXPLICIT KEY ANY MORE: THE DERIVED ONE IS THE PROPERTY ──────
+      //
+      // This section used to pass an `intentKey` it made up, which proved the LEDGER deduplicates
+      // when a caller supplies one key twice — true, and not the question. `delegate()`'s default
+      // key contained six random bytes, so every real caller got a unique key and the unique index
+      // was never reached: the mechanism was present and unreachable. Since 2026-11-26 the key is
+      // DERIVED from (parent run, agent, subject), so this races four delegations of the SAME
+      // SUBJECT with no key supplied — which is what a real caller does.
       const before = await countOf(`SELECT COUNT(*)::int n FROM office_delegations`);
       const r = await race(4, () => DELEG.delegate(parentCtx, {
         toAgent: 'procurement-agent',
         callingAgent: 'office-initiator',
-        reason: 'phase-idempotency: four concurrent delegations under ONE intent key',
-        intentKey: key,
+        reason: 'phase-idempotency: four concurrent delegations of ONE subject, no key supplied',
+        subject: 'supplier-research',
       }, deps));
       const after = await countOf(`SELECT COUNT(*)::int n FROM office_delegations`);
       // THROUGH `office_delegations.child_run_id`, which is the authoritative link. My first query
@@ -273,12 +279,16 @@ function spawnJson(script, args = [], extraEnv = {}) {
       const records = await countOf(
         `SELECT COUNT(*)::int n FROM office_delegations WHERE parent_run_id = $1`, [RUN]);
       const okCalls = r.values.filter((v) => v && v.ok).length;
-      const refusals = r.values.filter((v) => v && !v.ok).map((v) => v.code || v.reason);
+      // `delegate()` reports its refusal as `refused`, not `code` — read off its own return shape.
+      // The first version mapped `v.code || v.reason` and printed three empty strings, which is a
+      // log line that looks like evidence and carries none.
+      const refusals = r.values.filter((v) => v && !v.ok).map((v) => v.refused || v.code || '?');
 
       if (childRuns === 1) {
-        ok(`four concurrent delegations under one intent key produced ONE child run `
+        ok(`four concurrent delegations of ONE SUBJECT, with no key supplied, produced ONE child `
+          + `run `
           + `(${okCalls} ok, refusals: ${refusals.join(', ') || 'none'})`);
-      } else bad(`${childRuns} child runs for one delegation intent key`, refusals);
+      } else bad(`${childRuns} child runs for one delegation subject`, refusals);
 
       if (records === childRuns && records === 1) {
         ok('and exactly one dispatch record, naming that child run — a record without a run, or a '
@@ -286,6 +296,33 @@ function spawnJson(script, args = [], extraEnv = {}) {
       } else {
         bad(`${records} delegation records for ${childRuns} child runs`, { before, after });
       }
+
+      // A DIFFERENT subject must still be permitted, or the dedup would be "one delegation per
+      // parent and agent, ever" — which would make a second piece of delegated work impossible.
+      const second = await DELEG.delegate(parentCtx, {
+        toAgent: 'procurement-agent',
+        callingAgent: 'office-initiator',
+        reason: 'phase-idempotency: a DIFFERENT subject under the same parent and agent',
+        subject: 'price-benchmarking',
+      }, deps);
+      const nowRecords = await countOf(
+        `SELECT COUNT(*)::int n FROM office_delegations WHERE parent_run_id = $1`, [RUN]);
+      if (second.ok && nowRecords === 2) {
+        ok('and a DIFFERENT subject under the same parent and agent still lands — the guarantee is '
+          + 'one delegation per (parent, agent, subject), not one delegation per parent');
+      } else bad('a second subject was refused or did not land', { second, nowRecords });
+
+      // And a caller that can name NEITHER is refused rather than handed a unique key.
+      const anonymous = await DELEG.delegate(parentCtx, {
+        toAgent: 'procurement-agent',
+        callingAgent: 'office-initiator',
+        reason: 'phase-idempotency: a delegation that names no subject at all',
+      }, deps);
+      if (!anonymous.ok && anonymous.refused === 'no_delegation_subject') {
+        ok('a delegation naming no subject and no intent key is REFUSED by name — the old default '
+          + 'invented a key from six random bytes, which turned "deduplicate this" into "never '
+          + 'deduplicate anything" while looking like a dedupe key');
+      } else bad('an anonymous delegation was accepted', JSON.stringify(anonymous));
     }
 
     // ══ 3. TASK ENQUEUE AND RESULT SUBMISSION ════════════════════════════
@@ -535,18 +572,35 @@ function spawnJson(script, args = [], extraEnv = {}) {
 
       // And a DIFFERENT terminal state is refused outright, which is what stops a late failure
       // rewriting a success.
+      //
+      // The target is CHOSEN from what the run actually holds. This line said `'FAILED'`
+      // unconditionally, and passed only because the run happened to end SUCCEEDED; once B3.21
+      // made `finish` honest about a run with no successful actions, the run ended FAILED and the
+      // statement became a same-state update — which the guard permits by design — so the check
+      // reported "a terminal run was rewritten" about a statement that rewrote nothing. A fixture
+      // that encodes the state it expects to find goes stale the moment that state changes, which
+      // is the lesson verify-product-revocation-live.js cost on 2026-09-30.
+      const target = state.state === 'FAILED' ? 'SUCCEEDED' : 'FAILED';
       const rewrite = await query(
-        `UPDATE agent_runs SET state = 'FAILED' WHERE run_id = $1`, [RUN])
+        `UPDATE agent_runs SET state = $2 WHERE run_id = $1`, [RUN, target])
         .then(() => 'allowed', (e) => e.message);
       if (/terminal/.test(rewrite)) {
-        ok('and rewriting it to FAILED is refused by the transition guard');
+        ok(`and rewriting it from ${state.state} to ${target} is refused by the transition guard`);
       } else bad('a terminal run was rewritten', rewrite);
 
       const ended = await countOf(
         `SELECT COUNT(*)::int n FROM agent_run_events WHERE run_id = $1 AND kind = 'RUN_ENDED'`,
         [RUN]);
-      note(`${ended} RUN_ENDED event(s) recorded: the append-only ledger keeps every attempt to `
-        + 'end the run, which is the audit trail, while the STATE changed once');
+      // ── NOW AN ASSERTION, NOT A NOTE (B3.21) ──────────────────────────
+      //
+      // This printed the count and drew no conclusion from it, and the count was FIVE: `finish`
+      // appended a RUN_ENDED on every call, so any figure for "completed runs" taken over the event
+      // ledger over-counted one completion five times. A printed number that nothing judges is not
+      // a check. RUN_ENDED means the run ended, and it ended once.
+      if (ended === 1) {
+        ok('exactly ONE RUN_ENDED event for five finish calls — the repeats changed nothing, and a '
+          + 'repeat that changes nothing is not an attempt worth a ledger entry');
+      } else bad(`${ended} RUN_ENDED events for one completion`, ended);
     }
 
     // ══ 10. DESTRUCTIVE CONTROLS — LAST ══════════════════════════════════

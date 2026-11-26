@@ -274,6 +274,15 @@ const DDL = [
        END IF;
      END IF;
 
+     -- ── AND THE COMPLETION TIME IS WRITTEN ONCE ──────────────────────────────
+     -- finish() is called again whenever a tick repeats after a crash, and a repeat that computed
+     -- the same state passed the state check above and moved ended_at forward. The state was
+     -- immutable and the TIME it became that state was not, so every duration, SLA and wall-clock
+     -- progress figure derived from it walked with the ticks. Settable from NULL, frozen after.
+     IF OLD.ended_at IS NOT NULL AND NEW.ended_at IS DISTINCT FROM OLD.ended_at THEN
+       RAISE EXCEPTION 'run % already ended at %: the completion time is written once', OLD.run_id, OLD.ended_at;
+     END IF;
+
      IF NEW.run_id <> OLD.run_id
         OR NEW.attempt <> OLD.attempt
         OR NEW.intent_key IS DISTINCT FROM OLD.intent_key

@@ -103,6 +103,32 @@ const EXEMPT = new Set([
   // directly, reads the durable consequences directly, and asserts that the CYCLE — product code,
   // not exempt — reaches every table through scope.js. Disposable cluster; fixtures by id.
   path.join('scripts', 'check-negative-paths-db.js'),
+  // B3.21's execution-consistency check. The exemption is the measurement: it counts the exception
+  // and outcome ROWS for a run, in a particular ORDER, after breaking one write — and the accessors
+  // deliberately cannot show "an exception that was not written", which is the state the whole
+  // section is about. Section 2 goes further and INSERTS into `office_plans` and `office_exceptions`
+  // directly, because the question is whether the DATABASE refuses the first and permits the second
+  // for a suspended company; routing those through scope.js would measure scope.js's willingness
+  // instead of the trigger's. Disposable cluster; every fixture by id.
+  path.join('scripts', 'check-execution-consistency-db.js'),
+  // B3.14's aggregate-spend check. Its central assertion is a SUM OF HOLDS across companies, which
+  // no company-scoped accessor can answer — that limitation is the defect the check exists to
+  // measure. `spendTodayAllCompanies` was added to scope.js for the product's own use and reading
+  // the sums through it here would mean asking the new function to confirm itself, so the totals
+  // are counted in raw SQL as a second opinion. It takes every hold through `reserveSpend` and
+  // never writes a reservation of its own. Disposable cluster; every fixture by id.
+  path.join('scripts', 'check-aggregate-spend-concurrency-db.js'),
+  // Priority 5's proposal-authority check. Every SQL statement in it is fixture setup or cleanup
+  // by id: it creates two companies and two objectives so there is a SECOND company for a hostile
+  // proposal to try to name, and removes them by id. The thing under test — `decomposition.propose`
+  // — is called through its real surface with real resolved contexts, and reads nothing itself.
+  path.join('scripts', 'check-proposal-authority-db.js'),
+  // B2.10's synthetic commercial workflow. It reads `office_exceptions` by COUNT to assert that an
+  // ordinary provider absence filed NOTHING — a question about whether the table is empty for this
+  // company, which `openException`'s accessor cannot answer because it writes rather than counts —
+  // and creates its objective, company, suppliers, RFQ and simulated replies as fixtures, removed
+  // by id. The governed procurement path it exercises reaches every kernel table through scope.js.
+  path.join('scripts', 'check-synthetic-commercial-workflow-db.js'),
   // B3.19's operational-facts check. Its central assertion is that **every figure the facts source
   // produces survives an INDEPENDENT recount**, which is B3.10's step-13 pattern: the raw SQL here
   // is the second opinion, and routing it through the accessors that produced the figures would be

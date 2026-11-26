@@ -198,24 +198,75 @@ function ledger({ query, onDurabilityFailure = defaultOnDurabilityFailure } = {}
       else if (badN > 0) terminal = 'FAILED';
       else terminal = 'SUCCEEDED';
     }
-    return operational(`finish ${runId} -> ${terminal}`, async () => {
-      await q(
-        `UPDATE agent_runs SET state=$2, ended_at=NOW(), stopped_by=COALESCE($3, stopped_by)
-          WHERE run_id=$1`,
+    // ── A REPEATED FINISH IS A NO-OP, AND THE RETURN VALUE IS READ BACK ──
+    //
+    // Owner's Priority 1 (2026-11-26): *"verify that repeated terminal completion calls cannot
+    // cause duplicate downstream business effects."*
+    //
+    // `agent_runs_transition_guard` already makes the terminal STATE immutable, and B3.17 measured
+    // that: four racing finishes leave the state alone. But the state was never the only thing this
+    // function writes, and two downstream effects did duplicate.
+    //
+    //   1. **`ended_at` moved.** A repeat computing the SAME state passes the guard
+    //      (`NEW.state = OLD.state`), so `ended_at=NOW()` landed again and the run's completion
+    //      time walked forward with every tick. Every figure derived from it — duration, an SLA,
+    //      "completed at", and in particular the wall-clock progress the reliability run measures —
+    //      was then wrong, and a monitor looking for a stalled run would see one that keeps
+    //      finishing. Now `ended_at` is set only `WHERE ended_at IS NULL`, and a second trigger
+    //      clause freezes it, so no future caller can move it either.
+    //
+    //   2. **A second `RUN_ENDED` event.** `RUN_ENDED` means *this run ended*, and it ended once;
+    //      a per-tick repeat appended one every time, so any count of completed runs taken over
+    //      the event ledger over-counted a single completion. The event is now written only when
+    //      the transition actually landed. The append-only ledger still records every ATTEMPT that
+    //      did something — this is not one: it changed nothing.
+    //
+    // And the third, which was the quiet one: `finish` returned the state it **computed**, not the
+    // state that **holds**. `operational` swallows the refusal, so finishing an already-SUCCEEDED
+    // run with an error returned `state: 'PARTIAL'` while the row said SUCCEEDED — and the cycle's
+    // REPORT phase puts that straight into its return value and the briefing. The guard was intact
+    // in the database and the answer was wrong in the caller's hand. The state is now READ BACK
+    // after the write, so the return value is an observation rather than an intention.
+    const res = await operational(`finish ${runId} -> ${terminal}`, async () => {
+      const upd = await q(
+        `UPDATE agent_runs
+            SET state = $2,
+                ended_at = COALESCE(ended_at, NOW()),
+                stopped_by = COALESCE($3, stopped_by)
+          WHERE run_id = $1
+            AND state <> ALL (ARRAY['SUCCEEDED','PARTIAL','FAILED','ABANDONED','STOPPED_BY_POLICY'])`,
         [runId, terminal, stoppedBy],
       );
+      // Zero rows means it was ALREADY terminal (or does not exist). Not an error — repeated
+      // completion is expected from a crash-and-retry — and nothing further is written.
+      if (!upd.rowCount) return;
       await q(
         `INSERT INTO agent_run_events (run_id, kind, error, detail)
          VALUES ($1, 'RUN_ENDED', $2, $3::jsonb)`,
         [runId, error ? String(error).slice(0, 2000) : null, JSON.stringify({ state: terminal })],
       );
-    }).then((res) => ({ ...res, state: terminal }));
+    });
+
+    // What the row says, which is the only thing a caller may act on. Unreadable → the computed
+    // value with `observed: false`, so a caller can tell a reading from an intention.
+    const back = await q('SELECT state, ended_at FROM agent_runs WHERE run_id = $1', [runId])
+      .catch(() => null);
+    const actual = back && back.rows[0] ? back.rows[0].state : null;
+    return {
+      ...res,
+      state: actual || terminal,
+      observed: !!actual,
+      intendedState: terminal,
+      // True when this call found the run already terminal: the state it holds is somebody else's.
+      alreadyTerminal: !!actual && actual !== terminal,
+      endedAt: back && back.rows[0] ? back.rows[0].ended_at : null,
+    };
   }
 
   /** A policy stop. The run never becomes SUCCEEDED, and it points at the exact refusal. */
   const stoppedByPolicy = (runId, autonomyEventId, reason) =>
     operational(`stoppedByPolicy ${runId}`, async () => {
-      await q(`UPDATE agent_runs SET state='STOPPED_BY_POLICY', ended_at=NOW(), stopped_by=$2 WHERE run_id=$1`,
+      await q(`UPDATE agent_runs SET state='STOPPED_BY_POLICY', ended_at=COALESCE(ended_at, NOW()), stopped_by=$2 WHERE run_id=$1`,
         [runId, autonomyEventId || null]);
       await q(
         `INSERT INTO agent_run_events (run_id, kind, detail) VALUES ($1,'STOPPED_BY_POLICY',$2::jsonb)`,

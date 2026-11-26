@@ -154,10 +154,18 @@ A pass needs **all** of:
   `main` is untouched and `email.send` stays stopped.
 - **Part (c)**, recovery after an authorized login, which needs the iMac and a person at it. It does
   **not** gate part (a).
-- **A gap demonstrated end to end.** The gap *arithmetic* is measured directly with explicit
-  timestamps, because this development container's clock advances with CPU time, so a SIGSTOPped
-  sampler does not perceive the wall-clock seconds it was stopped for. **Perform this once by hand on
-  the machine the real run uses**, before the 72 hours start: `kill -STOP <pid>`, wait four
-  intervals, `kill -CONT <pid>`, and confirm a `sampler_gap` line appears with roughly the right
-  duration. If it does not, the continuity claim has no instrument behind it and the run is
-  pointless.
+~~**A gap demonstrated end to end.**~~ **This is now measured, 2026-11-26.** The entry here used to
+say an end-to-end demonstration was unavailable in this container because the clock advances with CPU
+time and a SIGSTOPped sampler perceives nothing. True about the clock, wrong as a conclusion: the CPU
+time is not the *stopped* process's. With a sibling burning CPU the clock moves, and
+`check-reliability-sampler-db.js` section 2b now stops the real sampler, resumes it, and asserts the
+**15-second gap it records**, with an undisturbed control run recording none and the run summary
+carrying `maxSamplerGapSeconds`. The owner's *"validate the sampler's real wall-clock gap
+detection"* is satisfied by a measurement rather than by a plan to measure later.
+
+**Still worth doing once on the real machine**, because the instrument is the whole run: `kill -STOP
+<pid>`, wait longer than `interval × gap-factor` **computed from the interval in force** —
+`--interval-seconds` is clamped to a 5s floor, so asking for 1 gives a 15s threshold at the default
+factor, which is the arithmetic error section 2b made first — then `kill -CONT <pid>`, and confirm a
+`sampler_gap` line with roughly the right duration. If it does not appear, the continuity claim has
+no instrument behind it and the run is pointless.

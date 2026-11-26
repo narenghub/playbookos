@@ -870,6 +870,46 @@ async function listPlanSteps(ctx, planId, deps = {}) {
 /** How long a hold lives if nobody settles it. Short: it bounds a provider call, not a workflow. */
 const RESERVATION_TTL_MS = 10 * 60 * 1000;
 
+// ── THE TWO DAILY CAPS, AND WHY THEY ARE ENFORCED HERE (B3.14) ──────────────
+//
+// `budget.js` checks a daily cap too, outside this transaction — a read, then a decision, then a
+// call. That bounds nothing under concurrency, which is the lesson B2.5b learned about the OBJECTIVE
+// ceiling: *"two concurrent calls both passed the same check."* The objective ceiling was moved
+// inside this statement then; the daily caps were not, and they were also the wrong shape.
+//
+//   · COMPANY_DAILY_CAP_USD — what `budget.js` already means by its cap, enforced bindingly here.
+//   · PLATFORM_DAILY_CAP_USD — new. `spendToday` is company-scoped, so nothing had ever computed
+//     the cross-company total; N companies at $100 each made the platform's exposure N × $100 with
+//     no code that could even see the figure.
+//
+// `budget.js`'s pre-check stays: it is cheap, it refuses early, and it tells a caller WHY. It is no
+// longer what the money rests on.
+const COMPANY_DAILY_CAP_USD = (() => {
+  const raw = Number.parseFloat(process.env.OFFICE_COMPANY_DAILY_CAP_USD || '100');
+  return Number.isFinite(raw) && raw > 0 ? Math.min(100_000, raw) : 100;
+})();
+const PLATFORM_DAILY_CAP_USD = (() => {
+  const raw = Number.parseFloat(process.env.OFFICE_PLATFORM_DAILY_CAP_USD || '250');
+  return Number.isFinite(raw) && raw > 0 ? Math.min(1_000_000, raw) : 250;
+})();
+
+// ── THE LOCK ORDER, WHICH IS FIXED AND IS THE DEADLOCK ANSWER ───────────────
+//
+// Three serialization points, always taken in this order, never any other:
+//
+//   1. the PLATFORM advisory lock   — one per database, so every spend hold anywhere serializes
+//   2. the COMPANY advisory lock    — redundant under (1) today, and kept because (1) is the thing
+//                                     most likely to be relaxed for throughput later, at which
+//                                     point this is what still bounds a company
+//   3. `objectives … FOR UPDATE`    — the existing B2.5b point
+//
+// Two transactions that take them in different orders deadlock; the only defence is that there is
+// exactly one order and it lives here. A single platform-wide lock serializes ALL spend
+// reservations, which costs throughput and is the right trade at the volumes in question (the
+// live-model exercise is twenty calls): a hold is microseconds of work, and correctness about money
+// is worth more than concurrency in it.
+const PLATFORM_SPEND_LOCK = 'playnexa:spend:platform';
+
 /**
  * Take a hold for at most `maxUsd` against an objective's budget, or refuse.
  *
@@ -894,6 +934,64 @@ async function reserveSpend(ctx, { id, objectiveId, runId, maxUsd, reason,
   const tx = (deps && deps.withTransaction) || require('../db').withTransaction;
   return tx(async (client) => {
     const run = (t, p) => client.query(t, p);
+
+    // ── 0. SERIALIZE PLATFORM-WIDE, THEN PER COMPANY (B3.14) ───────────────
+    //
+    // Taken FIRST and in this fixed order (see PLATFORM_SPEND_LOCK above). `pg_advisory_xact_lock`
+    // is released when the transaction ends, by commit or rollback or a dropped connection — there
+    // is no path that leaks it, which a lock table would have.
+    await run('SELECT pg_advisory_xact_lock(hashtext($1))', [PLATFORM_SPEND_LOCK]);
+    await run('SELECT pg_advisory_xact_lock(hashtext($1))',
+      [`${PLATFORM_SPEND_LOCK}:${ctx.companyId}`]);
+
+    // ── 0b. THE TWO DAILY CAPS, BINDINGLY ─────────────────────────────────
+    //
+    // Spent + live holds + THIS call, against each cap. Holds are counted because a hold is money
+    // that may yet be spent; excluding them is what let ten concurrent calls each see the same
+    // headroom. Measured today only — both caps are per-day and reset.
+    const agg = await run(
+      `SELECT
+         (SELECT COALESCE(SUM(cost_usd) FILTER (WHERE cost_known), 0)::float8
+            FROM office_cost_ledger
+           WHERE company_id = $1 AND at >= date_trunc('day', NOW())) AS co_spent,
+         (SELECT COALESCE(SUM(max_usd), 0)::float8
+            FROM office_budget_reservations
+           WHERE company_id = $1 AND state = 'held'
+             AND (expires_at > NOW() OR financial_state <> 'reserved')
+             AND held_at >= date_trunc('day', NOW())) AS co_held,
+         (SELECT COALESCE(SUM(cost_usd) FILTER (WHERE cost_known), 0)::float8
+            FROM office_cost_ledger
+           WHERE at >= date_trunc('day', NOW())) AS all_spent,
+         (SELECT COALESCE(SUM(max_usd), 0)::float8
+            FROM office_budget_reservations
+           WHERE state = 'held'
+             AND (expires_at > NOW() OR financial_state <> 'reserved')
+             AND held_at >= date_trunc('day', NOW())) AS all_held`,
+      [ctx.companyId]);
+    const a = agg.rows[0];
+    const call = Number(maxUsd);
+
+    const coWorst = Number(a.co_spent) + Number(a.co_held) + call;
+    if (coWorst > COMPANY_DAILY_CAP_USD) {
+      return { ok: false, code: 'would_exceed_company_daily_cap',
+        detail: `this call could cost up to $${call.toFixed(6)}; company ${ctx.companyId} has `
+          + `spent $${Number(a.co_spent).toFixed(6)} today with $${Number(a.co_held).toFixed(6)} `
+          + `held, so the worst case is $${coWorst.toFixed(6)} against a $`
+          + `${COMPANY_DAILY_CAP_USD} daily cap — refused BEFORE the provider is reached, and `
+          + 'under a lock, so two concurrent calls cannot both pass this',
+        scope: 'company_daily', capUsd: COMPANY_DAILY_CAP_USD, worstCaseUsd: coWorst };
+    }
+
+    const allWorst = Number(a.all_spent) + Number(a.all_held) + call;
+    if (allWorst > PLATFORM_DAILY_CAP_USD) {
+      return { ok: false, code: 'would_exceed_platform_daily_cap',
+        detail: `this call could cost up to $${call.toFixed(6)}; ACROSS ALL COMPANIES $`
+          + `${Number(a.all_spent).toFixed(6)} has been spent today with $`
+          + `${Number(a.all_held).toFixed(6)} held, so the worst case is $${allWorst.toFixed(6)} `
+          + `against a $${PLATFORM_DAILY_CAP_USD} platform cap. Until B3.14 this total was `
+          + 'computed by nothing: the per-company cap let N companies spend N × $100 a day',
+        scope: 'platform_daily', capUsd: PLATFORM_DAILY_CAP_USD, worstCaseUsd: allWorst };
+    }
 
     // ── 1. SERIALIZE ON THE OBJECTIVE, AND READ THE AUTHORITATIVE BUDGET ───
     //
@@ -1004,6 +1102,12 @@ async function reserveSpend(ctx, { id, objectiveId, runId, maxUsd, reason,
       reservation: ins.rows[0],
       budgetUsd: row.budget_usd === null ? null : Number(row.budget_usd),
       spentUsd: spent, heldUsd: held, unknownCalls, unresolvedCharges,
+      // The aggregate headroom this hold was granted against, so a caller (and a check) can see
+      // which ceiling was closest rather than only that none was breached.
+      dailyCaps: Object.freeze({
+        company: Object.freeze({ capUsd: COMPANY_DAILY_CAP_USD, worstCaseUsd: coWorst }),
+        platform: Object.freeze({ capUsd: PLATFORM_DAILY_CAP_USD, worstCaseUsd: allWorst }),
+      }),
       // A ceiling that cannot be proven is reported as such rather than asserted. An unresolved
       // provider charge makes it unproven too: the figure is conservative, not accurate.
       confident: unknownCalls === 0 && unresolvedCharges === 0 };
@@ -1385,6 +1489,128 @@ async function recentRuns(ctx, { limit = 20 } = {}, deps = {}) {
 }
 
 /**
+ * Today's spend and live holds across EVERY company. B3.14.
+ *
+ * ── WHY THIS ONE IS DELIBERATELY NOT COMPANY-SCOPED ────────────────────────
+ *
+ * Owner's Priority 5 (2026-11-26): *"Complete B3.14 aggregate financial concurrency across
+ * objectives and companies."*
+ *
+ * Writing the check is what showed why it was needed. `spendToday` filters on `company_id`, and
+ * `budget.js` compares its result against a cap its own comment calls *"the $100/day enterprise"*
+ * cap. It is nothing of the kind: it is a **per-company** daily cap, and the aggregate across
+ * companies was bounded by nothing at all. Ten companies could each spend $100 in a day and the
+ * platform total of $1,000 was a figure no code computed and no limit constrained.
+ *
+ * An enterprise question cannot be answered by a company-scoped accessor, so this one is scoped to
+ * the platform and says so, like `schedulerHeartbeats`. It is read ONLY by the spend hold, under
+ * the serialization described there, and it returns aggregates — never another company's rows.
+ */
+async function spendTodayAllCompanies(deps = {}) {
+  const res = await q(deps)(
+    `SELECT
+       (SELECT COALESCE(SUM(cost_usd) FILTER (WHERE cost_known), 0)::float8
+          FROM office_cost_ledger WHERE at >= date_trunc('day', NOW())) AS usd,
+       (SELECT COUNT(*) FILTER (WHERE NOT cost_known)::int
+          FROM office_cost_ledger WHERE at >= date_trunc('day', NOW())) AS unknown_calls,
+       (SELECT COALESCE(SUM(max_usd), 0)::float8
+          FROM office_budget_reservations
+         WHERE state = 'held'
+           AND (expires_at > NOW() OR financial_state <> 'reserved')
+           AND held_at >= date_trunc('day', NOW())) AS held,
+       (SELECT COUNT(DISTINCT company_id)::int
+          FROM office_cost_ledger WHERE at >= date_trunc('day', NOW())) AS companies`
+  );
+  return res.rows[0];
+}
+
+/**
+ * When did this run last make DURABLE PROGRESS? B4.7 / the owner's Priority 4.
+ *
+ * ── WHY A HEARTBEAT IS NOT PROGRESS ────────────────────────────────────────
+ *
+ * Owner, 2026-11-26: *"The monitor must distinguish scheduler reachability from actual execution
+ * progress. A scheduler repeatedly skipping ticks must not conceal a permanently stalled
+ * execution."*
+ *
+ * `schedulerHeartbeats` answers "is the cron alive", and that was the ONLY liveness signal the
+ * monitor had. A cron beating every fifteen seconds whose every tick refuses — a guard that keeps
+ * saying no, a COLLECT that keeps waiting, a phase that keeps throwing — is perfectly reachable and
+ * is advancing nothing. The heartbeat is green and the office is frozen, which is the shape of the
+ * 2026-09-30 outage repeated at a different layer: a monitor measuring the thing that is easy to
+ * measure instead of the thing that matters.
+ *
+ * Progress is therefore derived from the DURABLE ROWS a phase leaves behind, which is the same
+ * evidence `phaseOf` uses to decide where a run is. If the newest of them is old, the run has not
+ * moved, however many ticks it received. The tables are the ones a phase commits to:
+ *
+ *   office_plans · office_plan_steps · worker_tasks · office_outcomes · office_exceptions
+ *
+ * plus the run's own `started_at`, so a run that has started and done nothing else is measured from
+ * its start rather than reading as infinitely stalled.
+ *
+ * Company-scoped like every other accessor. Returns one row per live run.
+ */
+async function liveRunProgress(ctx, { limit = 20 } = {}, deps = {}) {
+  assertContext(ctx);
+  const n = Number.isInteger(limit) && limit > 0 && limit <= 200 ? limit : 20;
+  const res = await q(deps)(
+    `SELECT r.run_id,
+            r.objective_id,
+            r.state,
+            r.created_at,
+            r.started_at,
+            -- ── THE FALLBACK GOES OUTSIDE, NOT INSIDE ─────────────────────────────
+            -- My first version wrote COALESCE(<subquery>, r.created_at) in EVERY branch and then
+            -- took GREATEST over them. Since r.created_at is one of the arguments of every branch,
+            -- the maximum always included it — so a run created a moment ago could never read as
+            -- stale no matter how old its phase rows were, and a function written to measure
+            -- progress measured nothing. check-monitor-db.js found it on the first run, by
+            -- arranging a frozen run and asserting the alert FIRED rather than asserting the query
+            -- returned a row.
+            --
+            -- The phase rows are now allowed to be NULL, GREATEST ignores NULLs, and the run's own
+            -- clock is the floor applied ONCE, after them.
+            COALESCE(
+              GREATEST(
+                (SELECT MAX(p.created_at) FROM office_plans p
+                  WHERE p.run_id = r.run_id AND p.company_id = r.company_id),
+                (SELECT MAX(s.created_at) FROM office_plan_steps s
+                   JOIN office_plans p2 ON p2.id = s.plan_id
+                  WHERE p2.run_id = r.run_id AND p2.company_id = r.company_id),
+                -- office_outcomes names its timestamp 'at', not 'created_at'. The first version
+                -- assumed the convention and the statement threw — and the monitor's catch turned
+                -- that into EXECUTION_PROGRESS_UNREADABLE, which read as a correctly reported
+                -- outage rather than as a broken query. A fail-closed catch over a schema mistake
+                -- is how a defect looks like a feature.
+                (SELECT MAX(o.at) FROM office_outcomes o
+                  WHERE o.run_id = r.run_id AND o.company_id = r.company_id),
+                (SELECT MAX(e.created_at) FROM office_exceptions e
+                  WHERE e.run_id = r.run_id AND e.company_id = r.company_id),
+                -- The step's task, reached THROUGH the plan. A second early error: this matched
+                -- intent_key LIKE 'step-<runId>%', which is not the shape decomposition writes
+                -- (plan-<planId>-s<n>), so a task completing counted as no progress at all.
+                (SELECT MAX(GREATEST(t.created_at, COALESCE(t.resolved_at, t.created_at)))
+                   FROM worker_tasks t
+                   JOIN office_plans p3 ON t.intent_key LIKE 'plan-' || p3.id || '-s%'
+                  WHERE p3.run_id = r.run_id
+                    AND p3.company_id = r.company_id
+                    AND t.company_id = r.company_id)
+              ),
+              r.started_at,
+              r.created_at
+            ) AS last_progress_at
+       FROM agent_runs r
+      WHERE r.company_id = $1
+        AND r.state IN ('CREATED','RUNNING')
+      ORDER BY r.created_at DESC
+      LIMIT $2`,
+    [ctx.companyId, n]
+  );
+  return res.rows;
+}
+
+/**
  * Is this context's company still an authorized company? B3.18.
  *
  * ── WHY THIS IS A SEPARATE READ AND NOT A FIELD ON THE CONTEXT ────────────
@@ -1603,6 +1829,10 @@ module.exports = {
   companyAuthorization, objectiveAuthorization,
   // B2.9 — the durable execution history, for the Command Center.
   recentRuns,
+  liveRunProgress,
+  spendTodayAllCompanies,
+  COMPANY_DAILY_CAP_USD,
+  PLATFORM_DAILY_CAP_USD,
   // B4.5 — deduplicated alerts, and the scheduler's own liveness signal.
   recordAlert, openAlerts, resolveAlertsExcept, touchSchedulerHeartbeat, schedulerHeartbeats,
   reserveSpend, settleSpend, releaseSpend, expireStaleReservations, reservationState,

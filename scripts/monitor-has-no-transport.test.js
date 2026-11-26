@@ -79,10 +79,42 @@ test('its only writer is the alerts accessor', () => {
     assert.equal(sqlShaped.test(CODE), false,
       `${kw} appears as SQL in executable code: the alerts table has an accessor`);
   }
-  const writers = [...CODE.matchAll(/scope\.(\w+)/g)].map((m) => m[1]);
-  const unexpected = writers.filter((w) => !['recordAlert', 'resolveAlertsExcept',
-    'schedulerHeartbeats'].includes(w));
+  // ── READS AND WRITES ARE SEPARATE LISTS, AND THEY WERE NOT ─────────────
+  //
+  // This was ONE allowlist of every `scope.*` the monitor may call, which made adding a READ look
+  // like adding a writer: `scope.liveRunProgress` (B3.21's execution-progress measurement) failed a
+  // test whose name is *"its only writer is the alerts accessor"*. Appending it to the list would
+  // have worked and would have widened the writer allowlist by a read — so next time a genuine
+  // writer appeared, the list would have had no opinion. Two lists, and the write list is the one
+  // that is closed.
+  const called = [...new Set([...CODE.matchAll(/scope\.(\w+)/g)].map((m) => m[1]))];
+
+  // The ONLY writes the monitor may make. Closed, and the whole point of this test.
+  const ALLOWED_WRITES = ['recordAlert', 'resolveAlertsExcept'];
+  // Reads it may make. Each is a read-only accessor; a name added here must be one, which is why
+  // they are listed rather than permitted by a pattern.
+  const ALLOWED_READS = ['schedulerHeartbeats', 'liveRunProgress'];
+
+  const unexpected = called.filter(
+    (w) => !ALLOWED_WRITES.includes(w) && !ALLOWED_READS.includes(w));
   assert.deepEqual(unexpected, [], `it also calls scope.${unexpected.join(', scope.')}`);
+
+  // And the reads must really be reads — asserted against scope.js itself, not taken on trust from
+  // the list above, because a list is a claim and this is the thing it claims.
+  const SCOPE_SRC = fs.readFileSync(
+    path.join(__dirname, '..', 'src', 'lib', 'office', 'scope.js'), 'utf8');
+  for (const name of ALLOWED_READS.filter((n) => called.includes(n))) {
+    const at = SCOPE_SRC.indexOf(`async function ${name}(`);
+    assert.ok(at > 0, `scope.${name} is called but not defined in scope.js`);
+    const after = SCOPE_SRC.slice(at);
+    const body = after.slice(0, after.indexOf('\n}\n') + 1);
+    for (const kw of ['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) {
+      const sqlShaped = new RegExp(`(^|[^.\\w])${kw}\\s+(INTO\\s+)?[a-z_"]`, 'i');
+      assert.equal(sqlShaped.test(body), false,
+        `scope.${name} is on the monitor's READ list but contains ${kw}: the monitor would then `
+        + 'be writing through a function nobody checked');
+    }
+  }
 });
 
 test('CONTROL: the SQL pattern fires on planted SQL and not on a method call', () => {

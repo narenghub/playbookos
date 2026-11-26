@@ -831,6 +831,12 @@ async function migrateOffice(query) {
       }
     }
   }
+  // Owner's Priority 1 (2026-11-26): new work cannot be created for a company whose authorization
+  // has been withdrawn, enforced by the DATABASE rather than by a check the caller runs first.
+  // Called from here AND from migrateWorkerTasks, idempotently, because the trigger needs both
+  // `companies` and the guarded table and the two migrations run in different orders in different
+  // checks — whichever runs last wires it. See active-company-guard.js.
+  await require('./active-company-guard').installActiveCompanyGuard(query);
   return { ok: true };
 }
 
