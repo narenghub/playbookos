@@ -618,8 +618,38 @@ function reattemptEligibility(taskType, { overrideReason = null } = {}) {
     detail: 'create the attempt through recovery.retryRun(), which enforces the override itself' };
 }
 
+// ── READS FOR THE COMMAND CENTER (B2.9) ─────────────────────────────────────
+//
+// This module owns `worker_tasks`, so the counts belong here rather than in a dashboard assembling
+// its own SQL. Both are company-scoped by an EQUALITY match, so an unattributed task — one whose
+// company_id is NULL — is counted for nobody, exactly as `scoped-operations` treats every other
+// scoped table. An unowned task in somebody's dashboard would be the cross-company leak those
+// rules exist to prevent.
+
+/** How much work is in each state for this company. */
+async function taskStateCounts({ companyId } = {}, deps = {}) {
+  if (!companyId) throw new Error('taskStateCounts requires a companyId');
+  const r = await q(deps)(
+    `SELECT state, COUNT(*)::int AS n FROM ${SCHEMA.TABLES.tasks}
+      WHERE company_id = $1 GROUP BY state`, [companyId]);
+  const out = {};
+  for (const row of r.rows) out[String(row.state).toLowerCase()] = row.n;
+  return out;
+}
+
+/** Which task types are waiting, and how many of each. The backlog, by kind of work. */
+async function pendingTaskTypes({ companyId } = {}, deps = {}) {
+  if (!companyId) throw new Error('pendingTaskTypes requires a companyId');
+  const r = await q(deps)(
+    `SELECT task_type, COUNT(*)::int AS n FROM ${SCHEMA.TABLES.tasks}
+      WHERE company_id = $1 AND state = 'PENDING' AND cancel_requested_at IS NULL
+      GROUP BY task_type ORDER BY task_type`, [companyId]);
+  return r.rows;
+}
+
 module.exports = {
   migrateWorkerTasks,
+  taskStateCounts, pendingTaskTypes,
   enqueueTask, claimTask, heartbeat, submitResult, cancelTask,
   reflectAbandonedLeases, reattemptEligibility, releaseLeasesOfWorker, MAX_RESULT_BYTES,
   newTaskId,

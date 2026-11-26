@@ -194,6 +194,13 @@ const INTERNAL = [
   // There is no product to scope it under — the approval it spends may belong to any of them — and
   // the product gate failing independently of adminOnly is worth most exactly here.
   'POST /api/approvals/:id/dispatch',
+  // B2.9's command centre is 'internal' for the sharpest version of the same reason. Its snapshot
+  // carries worker identities, capability GRANTS, budget exposure and authorization refusals —
+  // operational-security facts about the platform rather than any product's data, and knowing which
+  // worker is offline and which capability nothing is serving is knowing where to push. There is no
+  // product to scope it under either: one autonomous objective's run may touch several. Already
+  // adminOnly; this is the product gate, and the two failing independently is the point.
+  'GET /api/office/command-center',
   // agent plumbing and integrations
   'GET /api/agent/activity', 'GET /api/agent/approvals', 'PUT /api/agent/approvals/:id',
   'GET /api/agent/dependencies', 'GET /api/agent/mission-control', 'GET /api/agent/overview',

@@ -111,6 +111,13 @@ const EXEMPT = new Set([
   // question. Disposable cluster; fixtures by id; one deliberate RENAME of a table, restored in the
   // same section, to prove an unmigrated database is told apart from an outage.
   path.join('scripts', 'check-operational-facts-db.js'),
+  // B2.9's command-centre check. It is a MEASUREMENT harness for a read model: it arranges the
+  // database states the snapshot must tell apart — an objective paused, a hold placed, a worker
+  // never authenticated — and then reads the snapshot. Setting those states through the accessors
+  // would mean asking the module under test to arrange its own evidence, and the one state that
+  // matters most here (an objective paused a moment ago) is one the accessors deliberately refuse
+  // to serve. Disposable cluster; every fixture by id.
+  path.join('scripts', 'check-command-center-db.js'),
   // The end-to-end acceptance test (ruling 8 item 5). It SEEDS a company, an objective and a run
   // into a DISPOSABLE cluster it creates and destroys, so that the real server has something to
   // serve — the kernel rows are the fixture, not the subject. It never runs against production

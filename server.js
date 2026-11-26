@@ -270,6 +270,11 @@ app.use('/api', require('./src/api/spend.routes'));
 // The one door a human decides through (CEO decision 2026-11-11, priority 2). It approves and
 // rejects; it cannot send. A released approval must still pass every STOP at the transport.
 app.use('/api', require('./src/api/approvals.routes'));
+// B2.9 — what the autonomous office is doing, as one read-only admin route. No company parameter:
+// the company is read from the objective being asked about, because an HTTP caller may no more
+// choose a company than an agent may. It cannot stop, retry or dispatch anything; Agent Control
+// owns stopping, and a dashboard that can act needs a write path's authorization for its reads.
+app.use('/api', require('./src/api/command-center.routes'));
 
 // SPA fallback ('/' now routes here too, since express.static has index:false)
 app.get('*', (req, res) => {

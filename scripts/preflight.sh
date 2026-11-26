@@ -451,6 +451,12 @@ pf_step "operational facts are measured, company-scoped, and every figure surviv
   node scripts/check-operational-facts-db.js
 pf_step "the facts source writes nothing and no model can reach it" \
   env JWT_SECRET=preflight node --test src/lib/office/operational-facts-is-read-only.test.js
+# B2.9 (owner's Priority 3 of 2026-11-25, and Priority 6 of the second directive): the Command
+# Center read model. Every section ARRANGES both members of a pair that looks alike and asserts the
+# snapshot reports them differently — unknown vs offline, declared vs actually available, a blocked
+# backlog vs an empty queue, a stale hold vs an unresolved charge, an unreadable section vs a zero.
+pf_step "the command centre tells apart what an operator must not confuse" \
+  node scripts/check-command-center-db.js
 pf_step "the plan can actually check the result, and an undeclared type is not validated" \
   env JWT_SECRET=preflight node --test src/lib/office/independent-criterion.test.js
 # B4.2 (owner's Priority 1, 2026-11-25): the worker PROCESS, started as a container starts it, with

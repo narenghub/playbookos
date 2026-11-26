@@ -1271,6 +1271,28 @@ async function runState(ctx, runId, deps = {}) {
 }
 
 /**
+ * This company's most recent runs — the durable execution history. B2.9.
+ *
+ * Read-only and newest first. The Command Center's "execution history" must be the LEDGER rather
+ * than a summary somebody accumulated, which is the same reason the briefing recounts instead of
+ * remembering.
+ */
+async function recentRuns(ctx, { limit = 20 } = {}, deps = {}) {
+  assertContext(ctx);
+  const n = Number.isInteger(limit) && limit > 0 && limit <= 200 ? limit : 20;
+  const res = await q(deps)(
+    `SELECT run_id, objective_id, workflow, agent, state, attempt, created_at, started_at,
+            ended_at, stopped_by
+       FROM agent_runs
+      WHERE company_id = $1
+      ORDER BY created_at DESC
+      LIMIT $2`,
+    [ctx.companyId, n]
+  );
+  return res.rows;
+}
+
+/**
  * Is this context's company still an authorized company? B3.18.
  *
  * ── WHY THIS IS A SEPARATE READ AND NOT A FIELD ON THE CONTEXT ────────────
@@ -1487,6 +1509,8 @@ module.exports = {
   recordDelegation, delegationDepth, delegationsFrom, runState,
   // B3.18 — authorization revalidated at every phase boundary, not only at initiation.
   companyAuthorization, objectiveAuthorization,
+  // B2.9 — the durable execution history, for the Command Center.
+  recentRuns,
   reserveSpend, settleSpend, releaseSpend, expireStaleReservations, reservationState,
   markDispatched, markFinancialOutcomeUnknown,
   RESERVATION_TTL_MS,
