@@ -1234,10 +1234,52 @@ async function delegationsFrom(ctx, parentRunId, deps = {}) {
 async function runState(ctx, runId, deps = {}) {
   assertContext(ctx);
   const res = await q(deps)(
-    `SELECT run_id, root_run_id, parent_run_id, state, objective_id, agent, workflow
+    // `created_at` is read because B3.18 bounds a refused or waiting phase against the run's own
+    // age: the row already carries a durable clock, so the cycle needs no counter of its own that a
+    // restart would lose.
+    `SELECT run_id, root_run_id, parent_run_id, state, objective_id, agent, workflow,
+            created_at, started_at, heartbeat_at
        FROM agent_runs WHERE company_id = $1 AND run_id = $2`,
     [ctx.companyId, runId]
   );
+  return res.rows[0] || null;
+}
+
+/**
+ * Is this context's company still an authorized company? B3.18.
+ *
+ * ── WHY THIS IS A SEPARATE READ AND NOT A FIELD ON THE CONTEXT ────────────
+ *
+ * A resolved context is a snapshot of the moment it was minted. The unattended cycle advances one
+ * phase per scheduler tick, so a run authorized at 06:00 can be dispatching at 06:01 and writing
+ * to the company's records at 06:04 — and `bootstrapObjectiveForContext`, which the context is
+ * built from, never reads the company row at all. The initiator reads `c.status` when it decides
+ * what to START (`bootstrapObjectivesForInitiation`) and, before B3.18, nothing read it ever
+ * again: a company whose authorization was withdrawn mid-flight kept being acted for.
+ *
+ * Takes the company from the CONTEXT, never from a caller — the same rule as every other accessor
+ * in this file, which is what stops it being a way to ask about somebody else's company.
+ */
+async function companyAuthorization(ctx, deps = {}) {
+  assertContext(ctx);
+  const res = await q(deps)(
+    `SELECT id, status FROM companies WHERE id = $1`, [ctx.companyId]);
+  return res.rows[0] || null;
+}
+
+/**
+ * Is this context's objective still active? B3.18.
+ *
+ * Scoped by company AND id, deliberately stricter than the bootstrap read the context is built
+ * from: an objective that does not belong to this context's company is not this run's objective,
+ * and reading it as absent is the correct answer rather than an error.
+ */
+async function objectiveAuthorization(ctx, deps = {}) {
+  assertContext(ctx);
+  if (!ctx.objectiveId) return null;
+  const res = await q(deps)(
+    `SELECT id, status, autonomy_tier FROM objectives WHERE id = $1 AND company_id = $2`,
+    [ctx.objectiveId, ctx.companyId]);
   return res.rows[0] || null;
 }
 
@@ -1418,6 +1460,8 @@ module.exports = {
   createPlan, recordPlanStep, setStepVerdict, setPlanVerdict, getPlan, listPlanSteps,
   planForRun, briefingCounts,
   recordDelegation, delegationDepth, delegationsFrom, runState,
+  // B3.18 — authorization revalidated at every phase boundary, not only at initiation.
+  companyAuthorization, objectiveAuthorization,
   reserveSpend, settleSpend, releaseSpend, expireStaleReservations, reservationState,
   markDispatched, markFinancialOutcomeUnknown,
   RESERVATION_TTL_MS,

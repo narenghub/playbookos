@@ -57,10 +57,51 @@ const PHASE = Object.freeze({
   REPORT: 'report',
   DONE: 'done',
   REFUSED: 'refused',
+  // B3.18: the run's own state could not be read. Distinct from DONE and from PLAN, because
+  // treating it as either is a lie — see the note in phaseOf.
+  UNKNOWN: 'unknown',
 });
 
 const WORKFLOW = 'office-scheduled-initiation';
 const MEMORY_SUBJECT_PREFIX = 'plan-step-completed:';
+
+// ── THE BOUND ON A REFUSED OR WAITING RUN (B3.18) ────────────────────────────
+//
+// Owner's Priority 3: *"no silent catch blocks, indefinite phase loops or falsely completed
+// objectives"*, and every failure must produce *"a truthful durable state, bounded recovery or a
+// visible escalation"*.
+//
+// A run whose authorization has been withdrawn, or whose dispatched work no worker ever claims,
+// would otherwise be re-selected and re-refused by every tick for ever. So each of those refusals
+// is given a GRACE WINDOW, measured from the run's own `created_at` — which is already durable, and
+// needs no counter of my own that a restart could lose. Inside the window the tick simply declines
+// to act, because the condition may well clear (an objective un-paused, a worker coming online) and
+// that is the bounded recovery. Past it, the refusal becomes a visible escalation and, where the
+// condition cannot clear by itself, a terminal FAILED run.
+//
+// An operator-activated STOP is deliberately NOT bounded this way: see the guard refusal handling.
+/**
+ * The grace window in force for this call.
+ *
+ * `deps.graceMinutes` exists so a check can reach the escalation without waiting an hour of real
+ * time — `agent_runs.created_at` is immutable (the transition guard refuses to let it change), so a
+ * run cannot be aged by an UPDATE and the window is the only adjustable end of the comparison.
+ *
+ * It is a seam, and it is a fail-SAFE one in a way the `--business-day` seam of B3.20 is not:
+ * shortening this window makes the cycle escalate and stop SOONER. It cannot authorize a phase, it
+ * cannot extend the window past the configured value's purpose, and the worst a caller can do with
+ * it is raise an alarm early. That is why it needs no production refusal of its own, and the
+ * production path passes none: the cron calls `advanceCycle` with `{}`.
+ */
+const graceOf = (deps) => (deps && typeof deps.graceMinutes === 'number'
+  ? Math.max(0, deps.graceMinutes)
+  : PHASE_GRACE_MINUTES);
+
+const PHASE_GRACE_MINUTES = (() => {
+  const raw = Number.parseInt(process.env.OFFICE_PHASE_GRACE_MINUTES || '60', 10);
+  if (!Number.isFinite(raw)) return 60;
+  return Math.min(1440, Math.max(1, raw));
+})();
 
 const q = (deps) => (deps && deps.query) || require('../db').query;
 
@@ -103,6 +144,167 @@ function planIdFor(runId) {
 }
 
 /**
+ * Canonical JSON: keys sorted at every depth, so two structurally equal values compare equal
+ * whatever order Postgres returned their jsonb keys in.
+ */
+function canonical(v) {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}`;
+}
+
+/**
+ * Did the WORKER do what the PLAN asked? One criterion per task type, declared.
+ *
+ * ── THE DEFECT THIS REPLACES, WHICH IS THE WORST OF ITS KIND SO FAR ─────────
+ *
+ * The previous version read:
+ *
+ *     JSON.stringify(res.output).includes(String((step.payload && step.payload.echo) || '')
+ *       .slice(0, 24))
+ *
+ * No step this cycle has ever minted carries an `echo` field — the one executable step is
+ * `operations.liveness_checkpoint`, whose payload is `{hello:'office-checkpoint'}`. So the needle
+ * was `String(undefined || '')`, the empty string, and `''.includes` — rather,
+ * `anything.includes('')` — is ALWAYS TRUE. Every result that the handler called SUCCEEDED passed
+ * "independent validation", including output with nothing whatever to do with the plan, which
+ * B3.18's second negative path submitted on purpose and watched sail through.
+ *
+ * Three claims in this repository rested on that line: B3.10's *"independent result validation"*,
+ * B3.13's *"a LATER process validating the result independently of the handler that produced it"*,
+ * and B3.16's *"validated independently on a LATER tick"*. The sequencing in all three was real —
+ * a different process did read the result afterwards — and the COMPARISON was vacuous. An empty
+ * needle is the string-shaped form of `<=` being satisfied by zero.
+ *
+ * ── AND WHY AN UNDECLARED TYPE IS NOT VALIDATED ─────────────────────────────
+ *
+ * A type with no criterion here returns `no_independent_criterion`, which makes the outcome
+ * `partial` and opens an exception. That is deliberately inconvenient: the alternative is a default
+ * of "true", which is exactly how the vacuous check survived. A new executable step type must
+ * therefore say what success looks like from the PLAN's side, not only from its handler's.
+ */
+function independentCriterion(step, output) {
+  const taskType = step && step.task_type;
+  const planned = (step && step.payload) || {};
+  if (!output || typeof output !== 'object' || Array.isArray(output)) {
+    return { validated: false, reason: 'the stored output is not an object' };
+  }
+
+  if (taskType === 'synthetic.echo') {
+    // The handler returns `{echoed: payload, steps}`, so the plan can check the one thing it
+    // actually asked for: that the payload which came back is the payload it minted.
+    const criterion = 'output.echoed equals the payload the plan minted';
+    if (!Object.prototype.hasOwnProperty.call(output, 'echoed')) {
+      return { validated: false, criterion, reason: 'the output carries no `echoed`' };
+    }
+    if (canonical(output.echoed) !== canonical(planned)) {
+      return { validated: false, criterion,
+        reason: 'the echoed payload is not the payload the plan minted' };
+    }
+    return { validated: true, criterion };
+  }
+
+  return { validated: false,
+    reason: `no_independent_criterion: ${taskType || 'an untyped step'} declares no way for the `
+      + 'plan to check its result, so this cycle cannot claim to have validated it independently' };
+}
+
+/** How old is this run, in minutes? Null when the run is not visible to this context. */
+async function runAgeMinutesOf(ctx, runId, deps = {}) {
+  const scope = deps.scope || require('./scope');
+  try {
+    const st = await scope.runState(ctx, runId, deps);
+    if (!st || !st.created_at) return null;
+    return (Date.now() - new Date(st.created_at).getTime()) / 60000;
+  } catch (_) { return null; }
+}
+
+/**
+ * A phase boundary refused by the guard. Decides what the refusal MEANS for the run.
+ *
+ * ── THREE KINDS OF REFUSAL, AND THEY MUST NOT BE TREATED ALIKE ──────────────
+ *
+ * **An operator STOP is not an incident.** It is a deliberate, reversible halt whose durable state
+ * is the stop row itself, and B3.16 demonstrated a stopped cycle RESUMING with no restart once the
+ * stop was lifted. So a STOP refuses the phase and does nothing else: no escalation (an exception
+ * queue that fills up when an operator uses the kill switch is an alarm that trains people to
+ * ignore it) and above all no terminal state, because ending the run would destroy exactly the work
+ * the operator intends to resume. A stop may last for days and that is legitimate.
+ *
+ * **A withdrawn authorization can clear, but usually will not.** A paused objective may be resumed;
+ * a suspended company may be reinstated. Inside the grace window the tick declines and says why —
+ * that is the bounded recovery. Past it the run is escalated AND ended FAILED, because a run nobody
+ * is going to re-authorize must not sit in the live set for ever, and it must certainly not end up
+ * SUCCEEDED.
+ *
+ * **An unreadable answer is transient until it isn't.** Same treatment as the above, deliberately:
+ * refuse inside the window, escalate and fail past it. An hour of unreadable company status is not
+ * a blip, and \"I could not tell\" must never become \"carry on\".
+ *
+ * The run is ended with an EXPLICIT state. `finish` would otherwise derive one from the run's
+ * events, and a run that had succeeded at several phases before its authorization was withdrawn
+ * would derive SUCCEEDED — a falsely completed objective, which is the thing the owner's Priority 3
+ * names first.
+ */
+async function handleGuardRefusal({ guard, runId, resolved, phase, evidence, agent, ageMinutes },
+  deps = {}) {
+  const scope = deps.scope || require('./scope');
+  const GUARD = deps.phaseGuard || require('./phase-guard');
+
+  const base = {
+    ok: false, phase: phase || PHASE.UNKNOWN, next: phase || PHASE.UNKNOWN,
+    refusal: { code: guard.code, detail: guard.detail },
+    revalidated: false, evidence,
+  };
+
+  if (guard.code === GUARD.CODES.STOPPED) {
+    return { ...base, next: phase, stopped: true, stop: guard.stop || null,
+      // An unknown kill state is NOT an operator stop; it is an outage that refuses, and it is
+      // reported as such so a reader can tell the two apart.
+      killStateUnknown: !!guard.unknown };
+  }
+
+  const grace = graceOf(deps);
+  const past = typeof ageMinutes === 'number' && ageMinutes > grace;
+  if (!past) {
+    return { ...base, withinGrace: true, graceMinutes: grace,
+      ageMinutes: ageMinutes === null ? null : Math.round(ageMinutes) };
+  }
+
+  // ── PAST THE WINDOW: ESCALATE VISIBLY, THEN END IT TRUTHFULLY ─────────────
+  let escalationError = null;
+  try {
+    await scope.openException(resolved, {
+      // Derived, so the escalation is ONE row however many ticks pass through here — the same
+      // idempotency B3.17 measured for every other effect of this cycle.
+      id: `ex-guard-${runId}`.slice(0, 64),
+      runId,
+      source: 'office/cycle:phase-guard',
+      reason: `authorization could not be revalidated at the ${phase || 'context'} boundary `
+        + `(${guard.code}): ${guard.detail}`,
+      severity: 'high',
+      slaHours: 24,
+    }, deps);
+  } catch (e) {
+    if (!e || e.code !== '23505') escalationError = e.message;
+  }
+
+  let terminal = null; let terminalError = null;
+  try {
+    const f = await ledgerFor(deps).finish(runId, {
+      state: 'FAILED',
+      error: `${guard.code}: ${guard.detail}`,
+    });
+    terminal = f && f.state ? f.state : null;
+    if (f && f.ok === false) terminalError = f.error || 'the terminal transition did not persist';
+  } catch (e) { terminalError = e.message; }
+
+  return { ...base, next: PHASE.DONE, escalated: !escalationError, escalationError,
+    terminal, terminalError, graceMinutes: grace,
+    ageMinutes: Math.round(ageMinutes) };
+}
+
+/**
  * What phase is this run in? Derived from rows, every time.
  *
  * Deliberately returns the EVIDENCE alongside the phase, so a caller logging the result records
@@ -110,13 +312,41 @@ function planIdFor(runId) {
  */
 async function phaseOf(ctx, runId, deps = {}) {
   const scope = deps.scope || require('./scope');
-  const state = await scope.runState(ctx, runId, deps).catch(() => null);
+
+  // ── AN UNREADABLE STATE IS NOT A LIVE RUN ─────────────────────────────────
+  //
+  // This was `.catch(() => null)`, and `null` then meant the same thing as "no row yet": the cycle
+  // carried on as though the run were CREATED. So a transient database failure on THIS read — the
+  // one read that decides whether the run is already finished — made a TERMINAL run look live, and
+  // the tick would re-run REPORT against a completed objective: re-assigning the employee task,
+  // re-writing memory, re-counting the briefing. An error standing in for a value, in the place
+  // where the value is the stop condition. B3.18's tenth negative path.
+  //
+  // Unreadable is now its own phase. The caller does nothing and reports why; the next tick asks
+  // again, and a database that stays unreadable is the recovery reaper's business (`staleRuns`),
+  // not something this function may paper over.
+  let state;
+  try {
+    state = await scope.runState(ctx, runId, deps);
+  } catch (e) {
+    return { phase: PHASE.UNKNOWN, evidence: { runStateUnreadable: e.message } };
+  }
   if (state && !['CREATED', 'RUNNING'].includes(state.state)) {
     return { phase: PHASE.DONE, evidence: { runState: state.state } };
   }
+  // Carried out of here so the phase handlers can bound themselves against the run's own age
+  // without a second read. Absent only for a run this context cannot see, which the context guard
+  // below refuses anyway.
+  const runAgeMinutes = state && state.created_at
+    ? (Date.now() - new Date(state.created_at).getTime()) / 60000
+    : null;
+
+  // Every phase below is reported WITH the run's age, so a handler can bound itself and a log
+  // line says how long the run has been in this condition.
+  const out = (phase, evidence) => ({ phase, evidence: { ...evidence, runAgeMinutes } });
 
   const plan = await scope.planForRun(ctx, runId, deps);
-  if (!plan) return { phase: PHASE.PLAN, evidence: { plan: null } };
+  if (!plan) return out(PHASE.PLAN, { plan: null });
   // The planner's own vocabulary: `validated`, `validated_with_queued_steps`, or `refused`. I had
   // written `!== 'authorized'`, a word the planner never produces, so every successfully validated
   // plan read as refused and the cycle stopped one phase after it started. Read the vocabulary,
@@ -125,14 +355,14 @@ async function phaseOf(ctx, runId, deps = {}) {
   if (!plan.verdict || !String(plan.verdict).startsWith('validated')) {
     // A refused plan is terminal for this run. Re-planning the same objective on the same day
     // would be re-asking a question that has been answered, and the refusal is the answer.
-    return { phase: PHASE.REFUSED,
-      evidence: { planId: plan.id, verdict: plan.verdict, code: plan.refusal_code } };
+    return out(PHASE.REFUSED,
+      { planId: plan.id, verdict: plan.verdict, code: plan.refusal_code });
   }
 
   const steps = await scope.listPlanSteps(ctx, plan.id, deps);
   const executable = steps.filter((s) => s.task_type);
   if (!executable.length) {
-    return { phase: PHASE.REPORT, evidence: { planId: plan.id, executableSteps: 0 } };
+    return out(PHASE.REPORT, { planId: plan.id, executableSteps: 0 });
   }
 
   // Durable work state, by the plan step's own intent key. The task table is the record of what
@@ -142,7 +372,7 @@ async function phaseOf(ctx, runId, deps = {}) {
     `SELECT id, intent_key, state FROM worker_tasks WHERE intent_key = ANY($1)`, [keys])).rows : [];
 
   if (!tasks.length) {
-    return { phase: PHASE.DISPATCH, evidence: { planId: plan.id, steps: executable.length } };
+    return out(PHASE.DISPATCH, { planId: plan.id, steps: executable.length });
   }
 
   const results = (await q(deps)(
@@ -150,16 +380,15 @@ async function phaseOf(ctx, runId, deps = {}) {
     [tasks.map((t) => t.id)])).rows;
 
   if (!results.length) {
-    return { phase: PHASE.COLLECT,
-      evidence: { planId: plan.id, waitingOn: tasks.map((t) => ({ id: t.id, state: t.state })) } };
+    return out(PHASE.COLLECT,
+      { planId: plan.id, waitingOn: tasks.map((t) => ({ id: t.id, state: t.state })) });
   }
 
   const outcomes = await scope.listOutcomes(ctx, { runId }, deps).catch(() => []);
   if (!outcomes.length) {
-    return { phase: PHASE.VALIDATE,
-      evidence: { planId: plan.id, results: results.map((r) => r.status) } };
+    return out(PHASE.VALIDATE, { planId: plan.id, results: results.map((r) => r.status) });
   }
-  return { phase: PHASE.REPORT, evidence: { planId: plan.id, outcomes: outcomes.length } };
+  return out(PHASE.REPORT, { planId: plan.id, outcomes: outcomes.length });
 }
 
 /**
@@ -172,6 +401,7 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
   workflow = WORKFLOW, agent = 'office-initiator' } = {}, deps = {}) {
   const context = deps.context || require('./context');
   const scope = deps.scope || require('./scope');
+  const GUARD = deps.phaseGuard || require('./phase-guard');
 
   // resolveCompanyContext({ runId }) — the RUN is what a tick has, and the run carries both the
   // company and the objective. resolveObjectiveContext needs an objectiveId, which the tick does
@@ -200,11 +430,25 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
   // NOT fixed by adding the budget to resolveCompanyContext: that would widen what every
   // run-only caller can authorize, and those callers were given the narrow context on purpose.
   let resolved = ctx;
+  // ── THE NARROW CONTEXT, KEPT ONLY TO RECORD A REFUSAL (B3.18) ─────────────
+  //
+  // `resolveObjectiveContext` refuses an objective that is not active — correctly — so a run whose
+  // objective is PAUSED mid-execution could not resolve a context at all, and this function
+  // returned `{ok:false, reason:'no resolvable company context'}`: nothing durable written, the run
+  // still in the live set, and the scheduler re-refusing it every tick for ever. The refusal was
+  // right and its handling was an indefinite phase loop.
+  //
+  // So the run-scoped context is kept when the objective context cannot be built. It carries the
+  // company and the objective and NOTHING that authorizes anything — no tier, no budget — and it is
+  // used for exactly one thing: letting the guard name the reason and write the durable record.
+  // It is never passed to a phase handler, which is why `resolved` stays null.
+  let diagnostic = null;
   if (!resolved) {
     let fromRun = null;
     try {
       fromRun = await context.resolveCompanyContext({ runId }, deps);
     } catch (_) { fromRun = null; }
+    diagnostic = fromRun;
     const objId = objectiveId || (fromRun && fromRun.objectiveId) || null;
     if (objId) {
       try {
@@ -216,11 +460,57 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
     if (!resolved) resolved = null;
   }
   if (!resolved) {
+    // With a company in hand the condition is REPORTABLE, and the guard is the one place that
+    // decides what it is: a paused objective, a withdrawn company authorization, or a read that
+    // failed. Without one, there is nothing to say and nobody to say it to.
+    if (diagnostic && diagnostic.companyId) {
+      const guard = await GUARD.revalidate(diagnostic, { workflow, agent, phase: null }, deps);
+      const age = await runAgeMinutesOf(diagnostic, runId, deps);
+      return handleGuardRefusal({
+        guard: guard.ok
+          // The guard found nothing wrong, so the objective context failed for a reason it does not
+          // cover. Reported as unreadable rather than as an authorization withdrawal, because
+          // claiming the latter would be inventing a cause.
+          ? { ok: false, code: 'objective_context_unbuildable',
+            detail: 'the objective context could not be built although company, objective status '
+              + 'and kill state all read as permitting it' }
+          : guard,
+        runId, resolved: diagnostic, phase: null, evidence: { runAgeMinutes: age }, agent,
+        ageMinutes: age,
+      }, deps);
+    }
     return { ok: false, phase: null,
       reason: 'the run has no resolvable company context, so nothing may be done for it' };
   }
 
   const { phase, evidence } = await phaseOf(resolved, runId, deps);
+
+  // ── UNREADABLE: DO NOTHING, TRUTHFULLY ──────────────────────────────────
+  // Not DONE (which would abandon a live run) and not PLAN (which would re-plan a finished one).
+  if (phase === PHASE.UNKNOWN) {
+    return { ok: false, phase: PHASE.UNKNOWN, next: PHASE.UNKNOWN,
+      reason: "the run's own state could not be read, so no phase may be chosen for it",
+      evidence };
+  }
+
+  // ── REVALIDATE AUTHORIZATION AT THIS BOUNDARY (B3.18) ───────────────────
+  //
+  // Owner's Priority 3: *"Revalidate authorization at sensitive phase boundaries."* Asked at EVERY
+  // non-terminal phase rather than at the ones that look consequential, because "which phases are
+  // sensitive" is the sort of judgement that goes stale the moment a phase grows a new effect —
+  // and because the cost is three reads against the run the tick has already fetched.
+  //
+  // A run already DONE or REFUSED is not asked: there is nothing left to authorize, and asking
+  // would turn a withdrawn authorization into an escalation about work that had already stopped.
+  if (phase !== PHASE.DONE && phase !== PHASE.REFUSED) {
+    const guard = await GUARD.revalidate(resolved, { workflow, agent, phase }, deps);
+    if (!guard.ok) {
+      return handleGuardRefusal({
+        guard, runId, resolved, phase, evidence, agent,
+        ageMinutes: evidence ? evidence.runAgeMinutes : null,
+      }, deps);
+    }
+  }
 
   switch (phase) {
     // ── PLAN: memory, then a validated plan ─────────────────────────────
@@ -326,12 +616,42 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
     }
 
     // ── COLLECT: a worker is working. Say so and stop. ──────────────────
-    case PHASE.COLLECT:
+    case PHASE.COLLECT: {
       // Deliberately does nothing. The alternative — waiting — is what makes a cycle fragile: a
       // scheduler blocked on another process holds a run open across an unbounded wait and loses
       // it on restart. Reporting what it is waiting for is the useful act.
+      //
+      // ── BUT A WAIT MUST BE BOUNDED (B3.18, negative path 1) ───────────
+      //
+      // \"Worker unavailable\" is not an error anywhere: DISPATCH enqueues successfully, the task
+      // sits PENDING because no worker holds the capability or none is online, and COLLECT reports
+      // `waitingOn` — politely, for ever. Nothing was wrong with any single tick, and a run could
+      // wait for weeks with no record anybody would ever read. That is the \"indefinite phase loop\"
+      // in its quietest form: no duplication, no failure, no progress.
+      //
+      // Past the grace window the wait becomes ONE visible escalation. The run is deliberately NOT
+      // ended: the task is durably enqueued and a worker coming online later will still execute it,
+      // so killing the run would discard real work. The exception is the record a human reads, and
+      // a run that stops reporting entirely is already the recovery reaper's business.
+      const waitingTooLong = typeof evidence.runAgeMinutes === 'number'
+        && evidence.runAgeMinutes > graceOf(deps);
+      let waitEscalationError = null;
+      if (waitingTooLong) {
+        try {
+          await scope.openException(resolved, {
+            id: `ex-wait-${runId}`.slice(0, 64), runId, source: 'office/cycle:collect',
+            reason: `delegated work has been waiting ${Math.round(evidence.runAgeMinutes)} minutes `
+              + `with no result: ${(evidence.waitingOn || []).length} task(s) still unclaimed or `
+              + 'unfinished — no worker may be available for the capability they require',
+            severity: 'high', slaHours: 24,
+          }, deps);
+        } catch (e) { if (!e || e.code !== '23505') waitEscalationError = e.message; }
+      }
       return { ok: true, phase: PHASE.COLLECT, next: PHASE.VALIDATE,
-        waitingOn: evidence.waitingOn || [], evidence };
+        waitingOn: evidence.waitingOn || [], revalidated: true,
+        waitingTooLong, escalated: waitingTooLong && !waitEscalationError, waitEscalationError,
+        graceMinutes: graceOf(deps), evidence };
+    }
 
     // ── VALIDATE: independently, against the PLAN ──────────────────────
     case PHASE.VALIDATE: {
@@ -352,14 +672,15 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
         // INDEPENDENT of the handler's own verdict: the handler validated its output against its
         // own contract; this validates it against what the PLAN asked for. A handler that reports
         // success for work nobody requested is the case this catches.
-        const planned = step && step.payload ? JSON.stringify(step.payload) : null;
-        const matchesPlan = !!(res && res.output && planned
-          && JSON.stringify(res.output).includes(
-            String((step.payload && step.payload.echo) || '').slice(0, 24)));
+        const check = res && res.status === 'SUCCEEDED'
+          ? independentCriterion(step, res.output)
+          : { validated: false, reason: res ? `handler reported ${res.status}` : 'no result' };
         verdicts.push({ taskId: t.id, stepId: step && step.step_id,
           taskState: t.state,
           handlerVerdict: res ? res.status : null,
-          independentlyValidated: res ? (res.status === 'SUCCEEDED' && matchesPlan) : false });
+          independentlyValidated: check.validated,
+          criterion: check.criterion || null,
+          reason: check.validated ? null : check.reason });
       }
 
       const allGood = verdicts.length > 0 && verdicts.every((v) => v.independentlyValidated);
@@ -531,25 +852,120 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
       // `finish` derives the state from the run's own events rather than taking my word for it, so
       // a run whose steps failed ends PARTIAL or FAILED rather than SUCCEEDED. It is OPERATIONAL —
       // it never throws — so a failure leaves the run RUNNING for the reaper, and is reported here.
+      // ── AND A FAILED REPORT MUST NOT COMPLETE THE OBJECTIVE (B3.18) ──
+      //
+      // Negative path 10: *"reporting or memory persistence failure"*. `finish(runId, {})` derives
+      // the terminal state from the run's EVENTS — and a memory write that fails is not an event,
+      // so a run whose continuity record never persisted, or whose employee task was refused, ended
+      // **SUCCEEDED**. A falsely completed objective, which is the first thing the owner's Priority
+      // 3 forbids, and the next cycle would then plan as though this one had remembered nothing
+      // while the run said it had succeeded.
+      //
+      // So the persistence failures are collected FIRST and passed to `finish` as an error, which
+      // makes the derived state PARTIAL (or FAILED when nothing succeeded) — never SUCCEEDED — and
+      // one escalation is opened so a human sees it. A refusal to assign (`ok === false`) counts;
+      // having NOBODY to assign to (`assignment === null`, no members in the company) does not,
+      // because a measured zero is not a failure.
+      const reportFailures = [];
+      if (memoryErrors.length) {
+        reportFailures.push(`${memoryErrors.length} memory write(s) failed: `
+          + memoryErrors.map((m) => m.error).join('; '));
+      }
+      if (assignment && assignment.ok === false) {
+        reportFailures.push(`the employee task was refused: ${assignment.code || ''} `
+          + `${assignment.detail || assignment.error || ''}`.trim());
+      }
+      if (!remembered.length && !skippedMemories.length && steps.length) {
+        reportFailures.push('no memory was written and none was already present, so the next '
+          + 'cycle cannot be informed by this one');
+      }
+      // ── AND AN OUTCOME THAT IS NOT `achieved` IS NOT A SUCCESS ───────
+      //
+      // B3.18's negative path 2: an invalid worker result makes VALIDATE record `partial` and open
+      // an exception — correctly — and then REPORT called `finish({})`, which derives the terminal
+      // state from EVENTS. A partial outcome is a row, not an event, so the run ended **SUCCEEDED**
+      // with an open exception against it: the queue said one thing and the run said another, and
+      // the run is what a dashboard shows. Recorded as a report failure so the state is derived
+      // from it, but NOT escalated again — VALIDATE already opened `ex-cycle-<runId>` for exactly
+      // this, and a second exception for one problem is how an alarm becomes noise.
+      const unachieved = (outcomes || []).filter((o) => o.outcome && o.outcome !== 'achieved');
+      if (unachieved.length) {
+        reportFailures.push(`${unachieved.length} outcome(s) are not 'achieved' `
+          + `(${unachieved.map((o) => o.outcome).join(', ')}), so this objective did not complete`);
+      }
+
+      // The escalation is for PERSISTENCE failures only — the ones nothing else has recorded. The
+      // unachieved-outcome entry above is excluded on purpose: VALIDATE already escalated it.
+      const persistenceFailures = reportFailures.filter((f) => !/outcome\(s\) are not/.test(f));
+      let reportEscalationError = null;
+      if (persistenceFailures.length) {
+        try {
+          await scope.openException(resolved, {
+            id: `ex-report-${runId}`.slice(0, 64), runId, source: 'office/cycle:report',
+            reason: `the reporting phase did not persist what it reported: `
+              + persistenceFailures.join(' · '),
+            severity: 'high', slaHours: 24,
+          }, deps);
+        } catch (e) { if (!e || e.code !== '23505') reportEscalationError = e.message; }
+      }
+
       const LEDGER = ledgerFor(deps);
       let terminal = null; let terminalError = null;
       try {
-        const f = await LEDGER.finish(runId, {});
+        const f = await LEDGER.finish(runId, reportFailures.length
+          ? { error: reportFailures.join(' · ') }
+          : {});
         terminal = f && f.state ? f.state : null;
         if (f && f.ok === false) terminalError = f.error || 'the terminal transition did not persist';
       } catch (e) { terminalError = e.message; }
 
       return { ok: (remembered.length > 0 || skippedMemories.length > 0)
-          && memoryErrors.length === 0 && !terminalError,
-        phase: PHASE.REPORT, next: PHASE.DONE,
+          && reportFailures.length === 0 && !terminalError,
+        phase: PHASE.REPORT, next: PHASE.DONE, revalidated: true,
         briefing, assignment, remembered, skippedMemories, memoryErrors,
+        reportFailures, persistenceFailures,
+        escalated: persistenceFailures.length > 0 && !reportEscalationError,
+        reportEscalationError,
         terminal, terminalError, evidence };
     }
 
-    case PHASE.REFUSED:
+    // ── REFUSED: a refusal is an ANSWER, so the run must END ────────────
+    //
+    // This said *"a refused plan is terminal for this run"* and then did nothing about it: it
+    // returned `{ok:false, next:'done'}` and left the run RUNNING, so `phaseOf` derived REFUSED
+    // again on the next tick, and again, for ever. The same indefinite phase loop the missing
+    // terminal transition caused in B3.16, in the one branch where the cycle had already decided
+    // there was nothing more to do. Found while mapping B3.18's negative path 8 — a plan refused
+    // for insufficient budget is the commonest way to reach here.
+    //
+    // FAILED rather than a derived state: a run whose plan was refused has achieved nothing, and
+    // `finish({})` would have derived SUCCEEDED from the absence of failure events.
+    case PHASE.REFUSED: {
+      let refusedEscalationError = null;
+      try {
+        await scope.openException(resolved, {
+          id: `ex-refused-${runId}`.slice(0, 64), runId, source: 'office/cycle:refused',
+          reason: `the plan for this run was refused (${(evidence && evidence.code) || 'no code'}, `
+            + `verdict ${(evidence && evidence.verdict) || 'unknown'}); no work was authorized`,
+          severity: 'high', slaHours: 24,
+        }, deps);
+      } catch (e) { if (!e || e.code !== '23505') refusedEscalationError = e.message; }
+
+      let terminal = null; let terminalError = null;
+      try {
+        const f = await ledgerFor(deps).finish(runId, {
+          state: 'FAILED',
+          error: `plan refused: ${(evidence && evidence.code) || 'no code'}`,
+        });
+        terminal = f && f.state ? f.state : null;
+        if (f && f.ok === false) terminalError = f.error || 'the terminal transition did not persist';
+      } catch (e) { terminalError = e.message; }
+
       return { ok: false, phase: PHASE.REFUSED, next: PHASE.DONE,
         reason: 'the plan for this run was refused; re-planning would re-ask an answered question',
-        evidence };
+        escalated: !refusedEscalationError, refusedEscalationError,
+        terminal, terminalError, evidence };
+    }
 
     case PHASE.DONE:
     default:
@@ -557,4 +973,11 @@ async function advanceCycle({ runId, objectiveId = null, ctx = null,
   }
 }
 
-module.exports = { advanceCycle, phaseOf, PHASE, WORKFLOW, MEMORY_SUBJECT_PREFIX };
+module.exports = {
+  advanceCycle, phaseOf, PHASE, WORKFLOW, MEMORY_SUBJECT_PREFIX, PHASE_GRACE_MINUTES,
+  // Exported so the criterion can be tested directly. It is the line that decides whether this
+  // cycle may claim to have validated a result independently, and for as long as it was
+  // `anything.includes('')` that claim was false — a property worth a test of its own rather than
+  // only an end-to-end scenario that happens to exercise it.
+  independentCriterion,
+};

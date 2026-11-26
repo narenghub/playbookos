@@ -435,6 +435,16 @@ pf_step "every plan step's payload is executable by its handler" \
 # run because the cycle never passed the NOT NULL business day.
 pf_step "no phase of the cycle can duplicate its effect under concurrency or restart" \
   node scripts/check-phase-idempotency-db.js
+# Owner's Priority 3 of the second directive (2026-11-25): the ten negative paths. Each one asserts
+# three things, not one — the EFFECT did not happen, the STATE is truthful, and it is bounded or
+# visible. This step found four correct refusals that had no durable consequence and repeated for
+# ever, and a fifth defect that is worse: VALIDATE's "independent" comparison was
+# `anything.includes('')`, which is always true, so every result the handler called SUCCEEDED
+# passed. Three pieces of acceptance evidence rested on that line.
+pf_step "every negative path produces a truthful durable state, bounded recovery or an escalation" \
+  node scripts/check-negative-paths-db.js
+pf_step "the plan can actually check the result, and an undeclared type is not validated" \
+  env JWT_SECRET=preflight node --test src/lib/office/independent-criterion.test.js
 # B4.2 (owner's Priority 1, 2026-11-25): the worker PROCESS, started as a container starts it, with
 # its credential from the environment. The existing runtime check injects the secret into the
 # client library and never runs run.js — which is where the Linux blocker lived unseen.

@@ -95,6 +95,14 @@ const EXEMPT = new Set([
   // question the code written to satisfy the database can answer about itself. Disposable cluster;
   // every fixture created by id and removed by id; the CYCLE remains non-exempt product code.
   path.join('scripts', 'check-phase-idempotency-db.js'),
+  // B3.18's negative-path check, and the reason is particular to what it measures: the conditions
+  // under test are states the ACCESSORS REFUSE TO DESCRIBE. `resolveObjectiveContext` throws for a
+  // paused objective, so there is no context to ask it with; the whole point of the check is what
+  // happens when authorization has been withdrawn, and a module that declines to serve a withdrawn
+  // authorization cannot also be the instrument that observes one. It sets those states up
+  // directly, reads the durable consequences directly, and asserts that the CYCLE — product code,
+  // not exempt — reaches every table through scope.js. Disposable cluster; fixtures by id.
+  path.join('scripts', 'check-negative-paths-db.js'),
   // The end-to-end acceptance test (ruling 8 item 5). It SEEDS a company, an objective and a run
   // into a DISPOSABLE cluster it creates and destroys, so that the real server has something to
   // serve — the kernel rows are the fixture, not the subject. It never runs against production

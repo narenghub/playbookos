@@ -92,6 +92,12 @@ const EXEMPT = new Map([
     + 'the question. It writes memory only through office/memory.remember; the direct reads are '
     + 'the measurement. Disposable cluster; fixtures created and removed by id; it restores the '
     + 'index and asserts the restoration.'],
+  ['scripts/check-negative-paths-db.js',
+    'B3.18\'s negative-path check. It counts agent_memory rows for one run to assert that a FAILED '
+    + 'memory write left NOTHING — a question the accessor cannot answer, because its live '
+    + 'predicate is written to hide rows a reader should not see and the claim here is that there '
+    + 'are no rows at all. The cycle itself writes only through office/memory.remember, which is '
+    + 'what the section breaks on purpose. The user_companies statement is fixture cleanup by id.'],
   ['src/lib/identity/company-membership.js',
     'THE accessor for user_companies. Its whole purpose is to own that table.'],
   ['src/lib/identity/workflow-company.js',
