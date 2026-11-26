@@ -99,7 +99,8 @@ function spawnJson(script, args = [], extraEnv = {}) {
   });
 }
 
-const tick = (args = []) => spawnJson('scripts/office-cycle-tick.js', args);
+const tick = (args = [], extraEnv = {}) =>
+  spawnJson('scripts/office-cycle-tick.js', args, extraEnv);
 
 (async () => {
   const { Pool } = require('pg');
@@ -307,10 +308,15 @@ const tick = (args = []) => spawnJson('scripts/office-cycle-tick.js', args);
     // intent key embeds `bd=<day>`, so initiating "tomorrow" is a different intent and the
     // first run's key is left exactly as the product wrote it.
 
-    const TOMORROW = (() => {
-      const d = new Date(); d.setUTCDate(d.getUTCDate() + 1);
-      return d.toISOString().slice(0, 10);
-    })();
+    // TOMORROW IN CHICAGO, from the product's own helpers — not a UTC day plus one.
+    //
+    // This read `new Date(); setUTCDate(+1)`, and B3.20's window refused it: the container clock was
+    // already 2026-11-26 UTC while Chicago was still on the 25th, so "UTC tomorrow" was two days
+    // ahead in the timezone the crons fire in, which is exactly the future-dating the seam exists to
+    // refuse. The guard was right and the harness was wrong. Asking the same question the product
+    // asks is also the only version of this that cannot drift from it.
+    const OVERRIDE = require('../src/lib/office/business-day-override');
+    const TOMORROW = OVERRIDE.dayAfter(OVERRIDE.chicagoDay());
     const t6 = await tick(['--company', CO, '--business-day', TOMORROW]);
     const second = t6.lines.find((l) => l.at === 'initiated');
     if (second && second.started === 1) {
@@ -397,6 +403,53 @@ const tick = (args = []) => spawnJson('scripts/office-cycle-tick.js', args);
         `SELECT COUNT(*)::int n FROM agent_runs WHERE objective_id=$1`, [OBJ])).rows[0].n;
       if (runsAfterKill === 2) ok('and the kill created no extra run');
       else bad(`${runsAfterKill} runs after a killed tick`);
+    }
+
+    // ══ 8a. THE BUSINESS-DAY SEAM REFUSES WHAT IT MUST (B3.20) ═══════════
+    //
+    // Owner's Priority 5 of the second directive, 2026-11-25. The module's own unit tests cover the
+    // four conditions; what they cannot cover is whether the TICK SCRIPT honours a refusal, so this
+    // runs the real script and reads its exit code. A seam whose guard is only unit-tested is a
+    // guard the caller may be ignoring.
+    head('8a. --business-day is restricted, and the refusal is the script\'s exit code');
+
+    {
+      // NODE_ENV=production, with everything else identical to the ticks above.
+      const prod = await tick(['--company', CO, '--business-day', TOMORROW], { NODE_ENV: 'production' });
+      if (prod.code === 3 && /production_environment/.test(prod.stderr)) {
+        ok('NODE_ENV=production REFUSES the override, exit 3, naming the condition');
+      } else {
+        bad('a production environment did not refuse the override',
+          { code: prod.code, stderr: prod.stderr.slice(0, 300) });
+      }
+
+      // A historical day, in a development environment: replay is refused on its own.
+      const past = await tick(['--company', CO, '--business-day', '2026-01-02']);
+      if (past.code === 3 && /day_outside_the_permitted_window/.test(past.stderr)) {
+        ok('a historical business day REFUSES — no replay of a day whose work is closed');
+      } else {
+        bad('a historical business day was accepted',
+          { code: past.code, stderr: past.stderr.slice(0, 300) });
+      }
+
+      // And a far-future one.
+      const future = await tick(['--company', CO, '--business-day', '2027-06-01']);
+      if (future.code === 3 && /day_outside_the_permitted_window/.test(future.stderr)) {
+        ok('a future-dated business day REFUSES — no run for a day nobody authorized');
+      } else {
+        bad('a future-dated business day was accepted',
+          { code: future.code, stderr: future.stderr.slice(0, 300) });
+      }
+
+      // The CONTROL: tomorrow still works, or the three refusals above would prove only that the
+      // flag is broken.
+      const okTick = await tick(['--company', CO, '--business-day', TOMORROW]);
+      if (okTick.code === 0 && okTick.lines.some((l) => l.at === 'business_day_override')) {
+        ok('CONTROL: tomorrow is still honoured on this development database, and says so');
+      } else {
+        bad('the permitted case stopped working, so the refusals above prove nothing',
+          { code: okTick.code, stderr: okTick.stderr.slice(0, 300) });
+      }
     }
 
     // ══ 9a. DESTRUCTIVE CONTROL — LAST, AND NEVER BEFORE A MEASUREMENT ═══

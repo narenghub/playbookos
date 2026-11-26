@@ -410,6 +410,12 @@ pf_step "the initiator creates no authority" \
 # the restart requirement is not simulated — it is the only way the check can pass at all.
 pf_step "the unattended cycle advances itself across processes, twice, and survives a kill" \
   node scripts/check-unattended-cycle-db.js
+# Owner's Priority 5 of the second directive (2026-11-25): the --business-day seam must not let a
+# production caller bypass objective scheduling, replay a closed business day, or future-date a run.
+# The production refusal is asserted through the REAL tick script's exit code inside
+# check-unattended-cycle-db.js; these are the four conditions, unit-tested.
+pf_step "the business-day override refuses production, replay and future-dating" \
+  env JWT_SECRET=preflight node --test src/lib/office/business-day-override.test.js
 # Owner's Priority 1 of the second directive (2026-11-25): the ACTUAL running scheduler, with no
 # driver invoking successive ticks. It spawns the real server.js and then only watches the database.
 # This is the step that found the indefinite REPORT loop: a run that never became terminal stayed in

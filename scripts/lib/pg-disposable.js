@@ -326,6 +326,11 @@ module.exports = {
   MARKER,
   OWNER_FILE,
   BASE,
+  // Exported so another module can RECOGNISE a cluster this utility made without duplicating the
+  // literal. src/lib/office/business-day-override.js asks the database for its own data_directory
+  // and matches this prefix: a disposable cluster is throwaway BY CONSTRUCTION, which is a
+  // development signal that does not depend on what rows happen to be in it.
+  PREFIX,
   RUN_ID,
   MIN_FREE_BYTES,
   // exported for tests

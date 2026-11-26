@@ -35,13 +35,22 @@ const arg = (n) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 
   // the initiator already has, rather than read from an environment variable: a flag has to be
   // passed deliberately on a command line, and the cron passes none.
   const businessDay = arg('business-day');
-  if (businessDay && !/^\d{4}-\d{2}-\d{2}$/.test(businessDay)) {
-    process.stderr.write('FAIL --business-day must be YYYY-MM-DD\n');
-    process.exit(2);
+  let deps = {};
+  if (businessDay) {
+    // RESTRICTED (B3.20, owner's Priority 5). Four conditions, none of which a production
+    // environment can satisfy by accident, and the module says why each one is there. A refusal
+    // EXITS — it does not quietly fall back to today, because an operator who typed a day and had
+    // it ignored would never find out.
+    const OVERRIDE = require('../src/lib/office/business-day-override');
+    const verdict = await OVERRIDE.authorizeBusinessDayOverride(businessDay, {});
+    if (!verdict.allowed) {
+      process.stderr.write(`REFUSED --business-day=${businessDay}: ${verdict.reason}\n`);
+      process.stderr.write(`         ${verdict.detail}\n`);
+      process.exit(3);
+    }
+    log({ at: 'business_day_override', day: businessDay, detail: verdict.detail });
+    deps = { agentCore: { ...require('../src/lib/agent-core'), businessToday: () => businessDay } };
   }
-  const deps = businessDay
-    ? { agentCore: { ...require('../src/lib/agent-core'), businessToday: () => businessDay } }
-    : {};
 
   if (only) {
     const r = await CYCLE.advanceCycle({ runId: only }, deps);
