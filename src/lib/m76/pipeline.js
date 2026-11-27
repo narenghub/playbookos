@@ -85,6 +85,34 @@ async function dispatchPlan(plan, { workerId = null, validated = false } = {}, d
   // database. The real guarantee is `uq_worker_tasks_intent` and is proven against Postgres in
   // scripts/check-worker-leasing-db.js; this seam tests THIS function's logic, not the constraint.
   const leases = deps.leases || LEASES;
+
+  // ── THE PILOT'S COMPANY, DERIVED FROM A REVIEWED MAPPING ──────────────────
+  //
+  // Owner, Workstream A.5: *"Correct m76/pipeline.js company attribution using reviewed persisted
+  // workflow-company mappings. Do not widen the iMac identity."*
+  //
+  // This function used to pass no `companyId` at all, so every pilot task carried
+  // `company_id = NULL`. Migration 62's claim filter excludes a NULL company — correctly, since a
+  // task with no company cannot be isolated at all — and the tempting fix was to widen the iMac
+  // identity so it could claim them anyway. That trades an isolation boundary for a convenience,
+  // which is why the owner forbade it.
+  //
+  // The company is RESOLVED from `workflow_companies`, the table only `mapWorkflowToCompany` writes
+  // to and only an authorized administrator can call. Nothing is inferred from a label, a domain or
+  // a default: `resolveWorkflowCompany` tells an unreadable mapping table from an unmapped workflow
+  // from an ambiguous one, and each is a refusal rather than a guess. An unmapped pilot dispatches
+  // nothing and says which of the three it was — the right answer, because a pilot whose company
+  // nobody has declared is a pilot acting for nobody.
+  const WORKFLOW_COMPANY = deps.workflowCompany || require('../identity/workflow-company');
+  const resolvedCompany = await WORKFLOW_COMPANY.resolveWorkflowCompany(
+    POLICY.PILOT_WORKFLOW, { query });
+  if (!resolvedCompany.ok) {
+    throw new Error(
+      `the pilot workflow "${POLICY.PILOT_WORKFLOW}" has no resolvable company `
+      + `(${resolvedCompany.code}): ${resolvedCompany.detail} Nothing was dispatched.`);
+  }
+  const companyId = resolvedCompany.companyId;
+
   const dispatched = [];
   for (const s of [...plan.steps].sort((a, b) => a.ordinal - b.ordinal)) {
     // ── THE PAYLOAD THAT RUNS IS THE PAYLOAD THAT WAS VALIDATED ───────────
@@ -114,6 +142,9 @@ async function dispatchPlan(plan, { workerId = null, validated = false } = {}, d
       payload: stored.rows[0].payload,
       intentKey: s.intentKey,
       workflow: POLICY.PILOT_WORKFLOW,
+      // Resolved above from the reviewed mapping, once per dispatch rather than per step, so every
+      // task of one plan carries the same attribution by construction.
+      companyId,
       createdBy: 'm76-pilot',
     }, deps);
     let taskId = t && (t.taskId || t.id);

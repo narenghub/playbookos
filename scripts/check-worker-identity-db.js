@@ -172,7 +172,30 @@ if (!url) {
   await IDENTITY.consumeEnrollmentToken({ token: t3.token }, deps);
   const digest3 = SECRETS.digestOfToken(t3.token);
   // Simulate the predicate having been dropped by clearing the evidence it reads.
+  // THERE ARE NOW TWO ARBITERS, and this control had to be told about the second one.
+  //
+  // Clearing `consumed_at` alone used to be a complete simulation of "the single-use predicate is
+  // gone". Since the sixth directive it is not: the BEFORE INSERT trigger on worker_identities also
+  // refuses a token already bound to another worker, so a partial clear now measures the TRIGGER
+  // rather than the WHERE clause, and this control threw instead of reproducing its failure. The
+  // trigger firing here is defence in depth working, so it is asserted first and then both columns
+  // are cleared, which is what "the predicate is gone" has to mean now.
   await query(`UPDATE ${SCHEMA.TABLES.tokens} SET consumed_at = NULL WHERE token_digest = $1`, [digest3]);
+  let secondArbiter = false;
+  try {
+    await IDENTITY.consumeEnrollmentToken({ token: t3.token }, deps);
+  } catch (e) {
+    secondArbiter = /already bound to worker/.test(e.message);
+  }
+  if (secondArbiter) {
+    ok('with consumed_at cleared the DATABASE still refuses — consumed_by_worker is a second arbiter');
+  } else {
+    bad('with consumed_at cleared nothing in the database refused, so the INSERT trigger\'s '
+      + 'single-use binding is not load-bearing');
+  }
+  await query(
+    `UPDATE ${SCHEMA.TABLES.tokens} SET consumed_at = NULL, consumed_by_worker = NULL
+      WHERE token_digest = $1`, [digest3]);
   const again = await IDENTITY.consumeEnrollmentToken({ token: t3.token }, deps);
   if (!again.ok) {
     bad('the control did not reproduce the failure it exists to detect',

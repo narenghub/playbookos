@@ -6470,3 +6470,79 @@ router.patch('/prpa/tasks/:id', authMiddleware, adminOnly, async (req, res) => {
     res.json({ task });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+
+// ── AUTHENTICATED ADMINISTRATIVE WORKER ENROLLMENT ──────────────────────────
+//
+// Owner, Workstream A.3 and A.4: *"Verify whether an ordinary caller can supply another
+// administrator's createdBy value. Derive operator authority from authenticated context rather
+// than caller-supplied identity."* and *"Complete the authenticated administrative enrollment
+// operation. Do not distribute database credentials to another machine."*
+//
+// **A.3 measured: yes, it could.** `createEnrollmentToken({createdBy: '<a real admin id>'})`
+// succeeded for any caller of the module. The module RESOLVES and CHECKS that id, which is
+// strictly better than recording a string and is still only identification — exactly the owner's
+// point. Authority has to come from something the caller cannot choose.
+//
+// Here it does: `req.user.id` is set by `authMiddleware` from a verified JWT, `superAdminOnly`
+// gates the role, and a `createdBy` in the BODY is **refused rather than ignored**, because
+// silently dropping it would let a caller believe they had set it.
+//
+// This is also what removes the need for a development `DATABASE_URL` on the operator's machine:
+// the mint happens inside the API process, which already holds the credential, and the operator
+// authenticates with their own password over HTTPS.
+//
+// **It refuses in production.** Enrolling a production worker is B6.4 and is not authorized; an
+// administrative endpoint that could do it is a different thing from one that cannot.
+router.post('/admin/worker-enrollment-tokens', authMiddleware, superAdminOnly, async (req, res) => {
+  try {
+    if (String(process.env.NODE_ENV) === 'production') {
+      return res.status(403).json({
+        error: 'worker enrollment is not available in production. Enrolling a production worker '
+          + 'is a separate, unauthorized act (B6.4); this endpoint exists for the development '
+          + 'cloud worker only.' });
+    }
+    const body = req.body || {};
+    if ('createdBy' in body) {
+      return res.status(400).json({
+        error: 'createdBy is not accepted on this request. The operator is derived from your '
+          + 'authenticated session, because a caller-supplied administrator id is identification '
+          + 'and not authority. Remove the field and try again.' });
+    }
+    const label = String(body.label || '').trim();
+    if (!label) return res.status(400).json({ error: 'label is required' });
+    const capabilities = Array.isArray(body.capabilities) ? body.capabilities : [];
+    for (const c of capabilities) {
+      if (c === 'exec:hardware' || c === 'exec:gui') {
+        return res.status(400).json({
+          error: `refusing to grant ${c} here: exec:gui is blocked for every identity until B4.4c `
+            + 'is implemented and verified, and hardware grants are a reviewed act performed '
+            + 'against the hardware node rather than over an API.' });
+      }
+    }
+    // Default RESTRICTED. Only the literal boolean false widens, so a truthy or string value
+    // cannot do it by accident.
+    const syntheticOnly = body.syntheticOnly !== false;
+
+    const IDENT = require('../lib/worker/identity');
+    const t = await IDENT.createEnrollmentToken({
+      label, capabilities, syntheticOnly, createdBy: req.user.id,
+    }, { query });
+
+    // The token is returned ONCE and is not logged anywhere. The response carries no secret beyond
+    // it, and the fingerprint is what the operator quotes afterwards.
+    return res.json({
+      ok: true,
+      token: t.token,
+      expiresAt: t.expiresAt,
+      label: t.label,
+      capabilities: t.capabilities,
+      syntheticOnly: t.syntheticOnly,
+      operator: req.user.id,
+      fingerprint: `sha256:${crypto.createHash('sha256').update(t.token).digest('hex').slice(0, 12)}`,
+      note: 'This token is shown once, is single use, and expires. Exchange it at '
+        + 'POST /api/worker/enroll. Do not paste it into a document, a ticket or a chat.',
+    });
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+});

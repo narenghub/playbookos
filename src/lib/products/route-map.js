@@ -149,6 +149,12 @@ const INTERNAL = [
   'GET /api/users', 'POST /api/users/invite', 'PUT /api/users/:id', 'DELETE /api/users/:id',
   'PUT /api/users/:id/toggle-status', 'POST /api/users/send-onboarding', 'POST /api/users/send-task-nudge',
   'POST /api/admin/users/:user_id/edit-name', 'POST /api/admin/users/:user_id/reset-password',
+  // Worker enrollment (Workstream A.4). 'internal' rather than any product, by the same reasoning
+  // as the kill switch above: minting a credential that lets a container act inside the platform is
+  // platform administration, not work inside whichever product the worker later serves. A
+  // restricted worker is not scoped to a product at all — it is scoped to companies marked
+  // synthetic — so there is no product boundary for this route to be checked against.
+  'POST /api/admin/worker-enrollment-tokens',
   // Product assignment for an existing user. 'internal' rather than anything cleverer: deciding what
   // another account may reach is platform administration, not work on a product.
   'GET /api/users/:id/products', 'PUT /api/users/:id/products',

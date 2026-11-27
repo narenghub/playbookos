@@ -368,6 +368,19 @@ pf_step "a restricted worker claims only synthetic companies' work" \
 # against the development database BEFORE applying anything.
 pf_step "migration 62 upgrades a database in use without widening anything" \
   node scripts/check-migration-62-upgrade-db.js
+# Workstream A.3/A.4: administrative enrollment over a REAL HTTP server with real JWTs. An
+# --operator email is identification; a verified session is authority. Covers impersonation (a
+# valid session whose JWT CLAIMS super_admin), inactive administrators, ordinary employees,
+# external partners, a forged signature, no session at all, and a createdBy in the BODY — which is
+# refused rather than ignored, because silently dropping it would let a caller believe it took.
+pf_step "administrative enrollment derives its operator from an authenticated session" \
+  node scripts/check-admin-enrollment-db.js
+# Workstream A.5: the M7.6 pilot's tasks used to carry company_id = NULL, which migration 62's
+# claim filter correctly excludes. Fixed by ATTRIBUTION from a reviewed workflow-company mapping,
+# not by widening the iMac identity — and the hardware identity stays restricted, which is the
+# assertion that proves it.
+pf_step "the pilot resolves its company from a reviewed mapping, and nothing is inferred" \
+  node scripts/check-m76-company-attribution-db.js
 # The worker service's deploy configuration, and the four environment-variable names. railway.json
 # is REPO-WIDE and would have run a schema migration from the worker service.
 pf_step "the worker service applies no migration and the variable names match the source" \

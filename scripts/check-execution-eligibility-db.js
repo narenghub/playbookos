@@ -51,6 +51,8 @@ try {
   throw e;
 }
 process.env.DATABASE_URL = cluster.url;
+// The enrolment exchange seals the secret at rest; a direct INSERT did not. Generated per run.
+process.env.WORKER_SECRET_SEAL_KEY = require('crypto').randomBytes(32).toString('hex');
 process.env.ADMIN_EMAIL = 'exeligi-bootstrap@exeligi.invalid';
 process.env.ADMIN_PASSWORD = `exeligi-${crypto.randomBytes(16).toString('hex')}`;
 
@@ -90,6 +92,20 @@ watchdog.unref?.();
         }
       }
     }
+    // MIGRATION 62, which the DDL arrays above do not carry. This file applies raw DDL rather than
+    // calling the migrators — a fourth setup shape in this repository — so the installer the three
+    // migrators run never fired here, and `claimTask` reads `synthetic_only`: the check failed with
+    // `column "synthetic_only" does not exist`. Same class as the autonomy note above, where a
+    // missing schema made the eligibility assertions pass for entirely the wrong reason.
+    // MIGRATION 62 MAKES `companies` A DEPENDENCY OF THE CLAIM PATH. The pick's predicate reads
+    // `SELECT id FROM companies WHERE is_synthetic`, so the table must exist for the statement to
+    // plan at all — even for an unrestricted worker, where the subquery is never needed per row.
+    // This harness deliberately migrated only the worker schemas; it now needs the office schema
+    // too, and that coupling is the honest consequence of making isolation a claim-time decision
+    // rather than a property of the worker alone.
+    await require('../src/lib/office/schema').migrateOffice(q);
+    await require('../src/lib/worker/synthetic-isolation').installSyntheticIsolation(q);
+    await require('../src/lib/worker/grant-immutability').installGrantImmutability(q);
     console.log('  ..    schema up\n');
 
     const TYPES = require('../src/lib/worker/task-types');
@@ -136,15 +152,32 @@ watchdog.unref?.();
     } else bad('hardware capability was treated as a logged-in desktop session');
 
     // ── FIXTURES: A CLOUD WORKER AND A HARDWARE WORKER ─────────────────────
+    // FIXTURES THROUGH THE ENROLMENT EXCHANGE, which is now the only path that may create an
+    // identity at all. This helper used to INSERT directly with `enrolled_by = 'exeligi-fixture'`;
+    // the BEFORE INSERT trigger refuses that, because a correctly formatted provenance string is
+    // not an authenticated enrolment and an arbitrary one is not even formatted. Going the
+    // authorized way also means these fixtures' capabilities are the ones a token APPROVED, which
+    // is the property the trigger enforces and the thing this check's subject depends on.
+    const IDENTITY = require('../src/lib/worker/identity');
     const mkWorker = async (label, capabilities) => {
-      const id = uid(label);
-      await q(
-        `INSERT INTO ${IDSCHEMA.TABLES.identities}
-           (id, label, secret_current, capabilities, enrolled_by)
-         VALUES ($1,$2,$3,$4,'exeligi-fixture')`,
-        [id, label, crypto.randomBytes(32).toString('hex'), capabilities]);
-      made.workers.push(id);
-      return id;
+      const tok = await IDENTITY.createEnrollmentToken({
+        label: uid(label),
+        capabilities,
+        syntheticOnly: false,
+        // Widened, because this check's subject is the CAPABILITY filter and its tasks carry no
+        // company. Left restricted, every assertion below came back
+        // `nothing_claimable_synthetic_isolation` — a true refusal for the wrong reason, which
+        // would have made the capability filter unreachable and the check vacuous. The same
+        // declaration the other seventeen fixture harnesses make.
+        createdBy: await require('./lib/fixture-admin').fixtureAdmin(q),
+      }, { query: q });
+      const enr = await IDENTITY.consumeEnrollmentToken(
+        { token: tok.token, hostFingerprint: `exeligi-${label}` }, { query: q });
+      if (!enr || enr.ok !== true) {
+        throw new Error(`fixture enrolment failed for ${label}: ${JSON.stringify(enr)}`);
+      }
+      made.workers.push(enr.workerId);
+      return enr.workerId;
     };
     const cloudWorker = await mkWorker('cloud', ['worker.execute']);
     const hwWorker = await mkWorker('hardware', ['worker.execute', 'exec:hardware']);

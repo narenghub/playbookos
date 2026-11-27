@@ -98,23 +98,72 @@ async function installGrantImmutability(query) {
   // untouched, and anything wanting a widened one has to go through the path that checks an
   // operator. **This is a provenance requirement, not an authorization check**, and it is stated
   // that way rather than described as one.
+  // ── BOUND TO AN ACTUAL TOKEN, NOT TO A CORRECTLY FORMATTED STRING ────────
+  //
+  // Owner, Workstream A.1: *"Verify whether a direct INSERT can fabricate
+  // enrolled_by = enrollment:<digest>. Do not mistake a correctly formatted provenance value for
+  // authenticated enrollment."*
+  //
+  // **It could, and I measured it.** `enrolled_by = 'enrollment:deadbeefcafe'` — a string I made
+  // up — was accepted and carried `exec:hardware` with `synthetic_only = false`. My previous
+  // version matched `LIKE 'enrollment:%'`, which tests the SHAPE of the value and not the fact
+  // behind it. That is this repository's recurring defect appearing inside the fix I had just
+  // written for another instance of it, one commit later.
+  //
+  // So the trigger now JOINS the claimed provenance to the token table and requires the token to
+  // exist, to be unexpired, to be bound to no other worker, and — the part that matters most — to
+  // carry **exactly the grants being inserted**. A token authorizing nothing cannot create an
+  // identity holding `exec:hardware`, which was the real hole: the previous guard would have waved
+  // through any widened identity as long as a real enrolment had happened at some point for
+  // anything at all.
+  //
+  // Set equality is mutual containment (`<@` both ways) rather than `=`, because array equality in
+  // Postgres is order-sensitive and `{a,b}` and `{b,a}` are the same grant.
   await query(
     `CREATE OR REPLACE FUNCTION ${FN}_insert() RETURNS trigger AS $fn$
+     DECLARE tok RECORD;
      BEGIN
-       IF NEW.synthetic_only IS FALSE AND
-          (NEW.enrolled_by IS NULL OR NEW.enrolled_by NOT LIKE 'enrollment:%') THEN
+       IF NEW.enrolled_by IS NULL OR NEW.enrolled_by NOT LIKE 'enrollment:%' THEN
          RAISE EXCEPTION
-           'an unrestricted worker identity (synthetic_only = false) may only be created by the '
-           'enrollment exchange, which records enrolled_by as enrollment:<digest> and requires an '
-           'administrator on the token. Direct INSERT of a widened identity is refused (worker %).',
+           'a worker identity may only be created by the enrollment exchange, which records '
+           'enrolled_by as enrollment:<digest> (worker %). A direct INSERT cannot create one.',
            NEW.id
            USING ERRCODE = 'check_violation';
        END IF;
-       IF NEW.capabilities && ARRAY['exec:hardware','exec:gui']::text[] AND
-          (NEW.enrolled_by IS NULL OR NEW.enrolled_by NOT LIKE 'enrollment:%') THEN
+
+       SELECT * INTO tok FROM worker_enrollment_tokens
+         WHERE left(token_digest, 12) = substring(NEW.enrolled_by from 12)
+         LIMIT 1;
+
+       IF tok IS NULL THEN
          RAISE EXCEPTION
-           'exec:hardware and exec:gui may only be granted through the enrollment exchange '
-           '(worker %).', NEW.id
+           'enrolled_by % names no enrollment token (worker %). A correctly formatted provenance '
+           'value is not an authenticated enrollment.', NEW.enrolled_by, NEW.id
+           USING ERRCODE = 'check_violation';
+       END IF;
+       IF tok.expires_at <= NOW() THEN
+         RAISE EXCEPTION 'the enrollment token for worker % has expired', NEW.id
+           USING ERRCODE = 'check_violation';
+       END IF;
+       IF tok.consumed_by_worker IS NOT NULL AND tok.consumed_by_worker <> NEW.id THEN
+         RAISE EXCEPTION
+           'the enrollment token for worker % is already bound to worker % — a token is single use',
+           NEW.id, tok.consumed_by_worker
+           USING ERRCODE = 'check_violation';
+       END IF;
+       IF NOT (COALESCE(NEW.capabilities, ARRAY[]::text[]) <@ COALESCE(tok.capabilities, ARRAY[]::text[])
+               AND COALESCE(tok.capabilities, ARRAY[]::text[]) <@ COALESCE(NEW.capabilities, ARRAY[]::text[])) THEN
+         RAISE EXCEPTION
+           'worker % is being created with capabilities % but its enrollment token authorized % — '
+           'an identity may only carry the grants its token approved',
+           NEW.id, NEW.capabilities, tok.capabilities
+           USING ERRCODE = 'check_violation';
+       END IF;
+       IF NEW.synthetic_only IS DISTINCT FROM tok.synthetic_only THEN
+         RAISE EXCEPTION
+           'worker % is being created with synthetic_only = % but its token authorized % — the '
+           'isolation setting is part of the approved grant',
+           NEW.id, NEW.synthetic_only, tok.synthetic_only
            USING ERRCODE = 'check_violation';
        END IF;
        RETURN NEW;

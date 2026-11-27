@@ -23,6 +23,13 @@ const PLANNER = require('./planner');
 const POLICY = require('./policy');
 const PIPELINE = require('./pipeline');
 const LEASES = require('../worker/leases');
+
+// A.5: dispatchPlan now resolves the pilot's company from the reviewed `workflow_companies`
+// mapping, so these database-free tests have to supply the seam. The stub is acceptable here and
+// only here: there is no database in this file at all. The REAL resolution — and its three
+// refusals, unreadable / unmapped / ambiguous — is exercised against a cluster by
+// scripts/check-m76-company-attribution-db.js.
+const PILOT_CO = { resolveWorkflowCompany: async () => ({ ok: true, companyId: 'pilot-fixture-co' }) };
 const SYNTHETIC = require('./synthetic');
 const SCHEMA = require('./schema');
 const HANDLER = require('../../worker-client/handlers/report-daily-operations');
@@ -215,7 +222,7 @@ test('the pilot workflow scope is its own, so a STOP on it halts nothing else', 
 test('DECISIVE: dispatch refuses a plan policy has not validated', async () => {
   const f = fakeQuery();
   await assert.rejects(
-    () => PIPELINE.dispatchPlan(okPlan(), { validated: false }, { query: f.query }),
+    () => PIPELINE.dispatchPlan(okPlan(), { validated: false }, { query: f.query, workflowCompany: PILOT_CO }),
     /requires a plan the policy engine has validated/);
   assert.equal(f.calls.length, 0, 'nothing may be written for an unvalidated plan');
 });
@@ -230,7 +237,7 @@ test('dispatch enqueues one task per step, in ordinal order', async () => {
     },
   };
   const f = persistedQuery(p);
-  const r = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
+  const r = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases, workflowCompany: PILOT_CO });
   assert.equal(r.dispatched.length, 2);
   assert.deepEqual(seen.map((s) => s.taskType), ['synthetic.echo', 'report.daily_operations']);
   for (const s of seen) assert.equal(s.workflow, POLICY.PILOT_WORKFLOW);
@@ -281,8 +288,8 @@ test('DECISIVE: re-dispatch ADOPTS the existing task and creates no second one',
     },
   };
   const f = adoptableQuery(p, byIntent);
-  const first = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
-  const again = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
+  const first = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases, workflowCompany: PILOT_CO });
+  const again = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases, workflowCompany: PILOT_CO });
 
   assert.equal(inserts, 2, 'the second dispatch inserted something');
   assert.equal(byIntent.size, 2);
@@ -313,7 +320,7 @@ test('DECISIVE: a dispatch interrupted halfway can be retried to completion', as
     },
   };
   const r = await PIPELINE.dispatchPlan(p, { validated: true },
-    { query: adoptableQuery(p, byIntent).query, leases });
+    { query: adoptableQuery(p, byIntent).query, leases, workflowCompany: PILOT_CO });
 
   assert.equal(r.dispatched.length, 2, 'every step must end up dispatched');
   assert.equal(r.dispatched.find((d) => d.intentKey === ordered[0].intentKey).taskId,
@@ -334,7 +341,7 @@ test('DECISIVE: a task whose payload is not the validated one is NOT adopted', a
   const leases = { enqueueTask: async () => ({ ok: false, code: 'duplicate_intent' }) };
   const f = adoptableQuery(p, byIntent, { payloadOverride: { tampered: true } });
   await assert.rejects(
-    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases, workflowCompany: PILOT_CO }),
     /Nothing was adopted/);
 });
 
@@ -344,7 +351,7 @@ test("another workflow's task is NOT adopted", async () => {
   const leases = { enqueueTask: async () => ({ ok: false, code: 'duplicate_intent' }) };
   const f = adoptableQuery(p, byIntent, { workflow: 'some-other-workflow' });
   await assert.rejects(
-    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases, workflowCompany: PILOT_CO }),
     /is held by a task in workflow/);
 });
 
@@ -354,7 +361,7 @@ test('a task of a different task_type is NOT adopted', async () => {
   const leases = { enqueueTask: async () => ({ ok: false, code: 'duplicate_intent' }) };
   const f = adoptableQuery(p, byIntent, { taskType: 'synthetic.sleep' });
   await assert.rejects(
-    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases, workflowCompany: PILOT_CO }),
     /is a 'synthetic\.sleep'/);
 });
 
@@ -363,7 +370,7 @@ test('duplicate_intent with NO task holding the key refuses rather than inventin
   const leases = { enqueueTask: async () => ({ ok: false, code: 'duplicate_intent' }) };
   const f = persistedQuery(p, { 'FROM worker_tasks WHERE intent_key': () => [] });
   await assert.rejects(
-    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases, workflowCompany: PILOT_CO }),
     /no task holds that intent key/);
 });
 
@@ -372,7 +379,7 @@ test('dispatch fails loudly if enqueue returns no task id', async () => {
   const leases = { enqueueTask: async () => ({ ok: false, code: 'nothing_to_do' }) };
   await assert.rejects(
     () => PIPELINE.dispatchPlan(p, { validated: true },
-      { query: persistedQuery(p).query, leases }),
+      { query: persistedQuery(p).query, leases, workflowCompany: PILOT_CO }),
     /returned no task id/);
 });
 
@@ -417,7 +424,7 @@ async function assembleWith(rowsFor) {
     'FROM agent_runs': [{ run_id: 'run-1', state: 'SUCCEEDED', attempt: 1 }],
     'COUNT\\(\\*\\)::int n FROM worker_audit': [{ n: 7 }],
   });
-  return { plan: p, result: await PIPELINE.assemble(p, { expectedFactCount: 40 }, { query: f.query }), calls: f.calls, body };
+  return { plan: p, result: await PIPELINE.assemble(p, { expectedFactCount: 40 }, { query: f.query, workflowCompany: PILOT_CO }), calls: f.calls, body };
 }
 
 test('a complete, valid run assembles a report with evidence', async () => {
@@ -622,7 +629,7 @@ test('DECISIVE: dispatch refuses when the PERSISTED payload was altered', async 
     'SELECT payload FROM m76_plan_steps': [{ payload: { tampered: true } }],
   });
   await assert.rejects(
-    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases }),
+    () => PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases, workflowCompany: PILOT_CO }),
     /does not match the digest policy validated/);
   assert.ok(!f.calls.some((c) => /UPDATE m76_plan_steps SET task_id/i.test(c.sql)),
     'nothing may be recorded as dispatched when the payload was altered');
@@ -635,7 +642,7 @@ test('CONTROL: dispatch proceeds when the persisted payload matches', async () =
     enqueueTask: async ({ payload }) => { sent.push(payload); return { taskId: `wtask_${sent.length}` }; },
   };
   const f = persistedQuery(p);
-  const r = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases });
+  const r = await PIPELINE.dispatchPlan(p, { validated: true }, { query: f.query, leases, workflowCompany: PILOT_CO });
   assert.equal(r.dispatched.length, 2);
   assert.equal(sent.length, 2, 'the payload dispatched is the one read back from the row');
 });
@@ -644,7 +651,7 @@ test('dispatch refuses if the plan was never persisted', async () => {
   const leases = { enqueueTask: async () => ({ taskId: 'x' }) };
   await assert.rejects(
     () => PIPELINE.dispatchPlan(okPlan(), { validated: true },
-      { query: fakeQuery().query, leases }),
+      { query: fakeQuery().query, leases, workflowCompany: PILOT_CO }),
     /no persisted row to dispatch/);
 });
 
