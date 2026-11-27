@@ -81,21 +81,44 @@ const SCAN_EXT = new Set(['.js', '.mjs', '.cjs', '.ts', '.json', '.md', '.sh', '
   '.yml', '.yaml', '.env', '.example', '.txt']);
 
 function files() {
-  // Tracked files only. An untracked local scratch file is the developer's business; what matters
-  // is what is committed and therefore shared.
-  try {
-    return execFileSync('git', ['ls-files'], { cwd: ROOT, encoding: 'utf8' })
-      .split('\n').filter(Boolean);
-  } catch (_) {
-    const out = [];
-    (function walk(d) {
-      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-        if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) walk(path.join(d, e.name)); continue; }
-        out.push(path.relative(ROOT, path.join(d, e.name)));
-      }
-    }(ROOT));
-    return out;
+  // ── TRACKED, PLUS UNTRACKED-BUT-NOT-IGNORED ────────────────────────────────
+  //
+  // This read `git ls-files` alone, reasoning that *"an untracked local scratch file is the
+  // developer's business; what matters is what is committed and therefore shared."* The intent is
+  // right and the implementation had a hole that cost exactly what this check exists to prevent.
+  //
+  // On 2026-11-27 preflight passed 204/204 with five new harness files in the tree. They were
+  // UNTRACKED at that moment, so this scan could not see them; `git add` made them visible and the
+  // check failed immediately on a hard-coded fallback secret in one of them. **The sequence
+  // CLAUDE.md prescribes — run preflight, read the exit code, then push as a separate decision —
+  // puts preflight BEFORE the commit, which is precisely when a new file is invisible here.** A
+  // secrets check that only sees tracked files reports the credential after it is committed, and
+  // committing is the event it is supposed to prevent.
+  //
+  // So `--others --exclude-standard` is added: untracked files that are NOT gitignored — the ones
+  // about to be committed. A genuinely ignored scratch file stays out, which keeps the original
+  // reasoning intact; what changes is that a file heading for the repository is scanned before it
+  // gets there rather than after.
+  const listed = (args) => {
+    try {
+      return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).split('\n').filter(Boolean);
+    } catch (_) {
+      return null;
+    }
+  };
+  const tracked = listed(['ls-files']);
+  if (tracked) {
+    const pending = listed(['ls-files', '--others', '--exclude-standard']) || [];
+    return [...new Set([...tracked, ...pending])];
   }
+  const out = [];
+  (function walk(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) walk(path.join(d, e.name)); continue; }
+      out.push(path.relative(ROOT, path.join(d, e.name)));
+    }
+  }(ROOT));
+  return out;
 }
 
 const findings = [];
@@ -143,7 +166,8 @@ if (findings.length) {
   process.exit(1);
 }
 
-console.log(`PASS  no committed credentials (scanned ${files().length} tracked files)`);
+console.log(`PASS  no committed credentials (scanned ${files().length} tracked and `
+  + 'not-yet-committed files)');
 
 // ── HISTORY ──────────────────────────────────────────────────────────────────
 //

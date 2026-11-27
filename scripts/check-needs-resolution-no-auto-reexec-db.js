@@ -29,22 +29,25 @@
 //   §3 THE RETRY PATH. `retryRun` needs an override reason, enforced by a database guard, and
 //      re-checks the kill switch for a policy stop. Measured by calling it without one.
 //
-// ── AND ONE FINDING THIS CHECK RECORDS RATHER THAN FIXES ───────────────────
+// ── §4 WAS A FINDING; IT IS NOW IMPLEMENTED ────────────────────────────────
 //
-// `leases.reattemptEligibility(taskType, …)` is the gate that encodes *"this task type does not
-// declare itself re-executable, so a second attempt could duplicate an effect that may already have
-// happened"*, defaulting to false for anything that has not said otherwise. **No product code calls
-// it.** Its own docstring says the attempt "is created by recovery.retryRun(), which owns the
-// override enforcement" — and retryRun does own the override REASON, but it never consults task
-// type re-executability at all, because it operates on runs and never reads `worker_tasks`.
+// This check originally reported that `leases.reattemptEligibility` — the gate encoding *"this task
+// type does not declare itself re-executable, so a second attempt could duplicate an effect that
+// may already have happened"* — was called by NO product code, while its own docstring said
+// `recovery.retryRun` owned enforcement. retryRun owned the override REASON (via a database
+// trigger) and never read `worker_tasks` or the gate at all. The rule existed at one address and
+// was enforced at neither.
 //
-// So on the retry path the protection is the human override, not the type declaration. That is not
-// obviously wrong — a human accepting the ambiguity in writing is a real control, and arguably
-// outranks a type's default — but it is a DIFFERENT control from the one the type declaration
-// implies exists, and the gap is invisible because the gate is thoroughly tested by checks and
-// called by nothing. §4 pins both halves so the next person reads the real arrangement rather than
-// the documented one. Whether retryRun should consult the type is a policy decision for the owner,
-// not something to change underneath them.
+// The owner approved closing that on 2026-11-27: *"An ordinary human override must not bypass a
+// hard task-type prohibition."* It is now enforced inside `retryRun`, with the run→task link
+// derived from persisted records. §4 below asserts the gate's own semantics and then asserts that
+// a product file consults it; the end-to-end behaviour — override refused, unknown outcome
+// reconciled first, mixed sets, concurrency, withdrawal, duplicate-effect prevention — is
+// `scripts/check-reattempt-authorization-db.js`.
+//
+// The §4 branch that reports "the arrangement has changed since this check was written" is left in
+// place deliberately. It fired once, correctly, and it is what a check should do when the thing it
+// recorded stops being true: say so, rather than pass quietly on a stale premise.
 
 'use strict';
 
@@ -307,7 +310,7 @@ const step = (t) => lines.push('', `── ${t} ──`, '');
     }
 
     // ══ 4. THE GATE NOTHING CALLS ══════════════════════════════════════════
-    step('4. reattemptEligibility — correct, tested, and consulted by no product code');
+    step('4. reattemptEligibility — now enforced at the retryRun sink (owner Decision 2)');
 
     const nonRx = LEASES.reattemptEligibility('synthetic.crash_test',
       { overrideReason: 'a recorded human judgement accepting the ambiguity' });
@@ -347,26 +350,22 @@ const step = (t) => lines.push('', `── ${t} ──`, '');
     const retrySrc = reapSrc.slice(reapSrc.indexOf('async function retryRun('));
     const retryReadsTasks = /worker_tasks|reattemptEligibility/.test(retrySrc);
 
-    if (callers.length === 0 && !retryReadsTasks) {
-      ok('CONFIRMED ARRANGEMENT: no file under src/ calls reattemptEligibility, and retryRun reads '
-        + 'neither worker_tasks nor the gate. On the retry path the protection is the recorded '
-        + 'human override — NOT the type declaration §4 just measured');
-      note('This is a finding, not a failure. The two controls are both real and they are not the '
-        + 'same control: the type declaration says "this work must not be redone even with '
-        + 'permission", and nothing on the live retry path consults it. Whether retryRun should is '
-        + 'a POLICY decision — a human override may legitimately outrank a default — so it is '
-        + 'recorded here for the owner rather than changed underneath them.');
-      note('If the answer is that it should: retryRun would need the predecessor run\'s tasks, '
-        + 'which means reading worker_tasks from office/recovery.js — a new dependency between the '
-        + 'run ledger and the task queue, and the reason it is not a one-line change.');
-    } else if (callers.length > 0) {
-      ok(`reattemptEligibility is consulted by ${callers.length} product file(s): `
-        + `${callers.map((f) => path.basename(f)).join(', ')} — the arrangement has changed since `
-        + 'this check was written, which is good; re-read §4\'s note and update it');
+    if (callers.length > 0 || retryReadsTasks) {
+      ok(`reattemptEligibility is consulted by ${callers.length} product file(s)`
+        + `${callers.length ? `: ${callers.map((f) => path.basename(f)).join(', ')}` : ''}`
+        + `${retryReadsTasks ? ', and retryRun reads the task records' : ''} — the gate is wired to `
+        + 'the sink, which is owner Decision 2');
+      note('The end-to-end behaviour is check-reattempt-authorization-db.js: a full human override '
+        + 'refused on a non-re-executable type, an unknown outcome refused until a reconciliation '
+        + 'is RECORDED, an absent worker table distinguished from an unreadable one, and six '
+        + 'retries with six reasons leaving exactly one run.');
     } else {
-      ok('retryRun now reads worker_tasks or the gate — the arrangement has changed since this '
-        + 'check was written; re-read §4\'s note and update it');
+      bad('reattemptEligibility is consulted by no product file and retryRun reads neither '
+        + 'worker_tasks nor the gate — Decision 2 has been reverted or lost. The type declaration '
+        + 'says "this work must not be redone even with permission", and with nothing on the retry '
+        + 'path consulting it the only protection is the human override');
     }
+
   } catch (e) {
     bad(`the check itself failed: ${e.message}`);
     lines.push(String(e.stack || '').split('\n').slice(1, 6).join('\n'));

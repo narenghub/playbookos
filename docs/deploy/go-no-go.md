@@ -7,12 +7,27 @@
 
 # NO-GO
 
-**Two blockers. Both are yours. I am not requesting deployment approval.**
+**One blocker, and it is yours. I am not requesting deployment approval.**
+
+Blocker 1 closed on 2026-11-07; the row below is corrected and the reconciliation is stated with it.
 
 | # | Blocker | Owner | Status |
 |---|---|---|---|
-| 1 | Exposed administrator password not confirmed changed; affected credentials not confirmed rotated | you | **OPEN** — ruling 33 item 7 keeps this open until you confirm |
+| 1 | Exposed administrator password not confirmed changed; affected credentials not confirmed rotated | you | **CLOSED 2026-11-07** — you confirmed; see the reconciliation below |
 | 2 | Migrations not yet validated against the **actual** production schema | you | **OPEN** — one command, below |
+
+> **Reconciled 2026-11-27.** This table said Blocker 1 was OPEN for twenty days after it was closed.
+> `docs/security/history-findings.json` retired that finding on 2026-11-07 in commit `968f342`,
+> *"retire the exposed admin-password finding — owner confirmed the rotation"*, and
+> `check-secrets.js --history` has reported `0 outstanding` ever since. This file was edited on
+> 2026-11-24 (`884d2a6`) for an unrelated reason and the row was not updated with it.
+>
+> **The ledger is authoritative and the document was wrong.** A release-decision page that reports a
+> closed blocker as open is the same defect class as a check that reports a pass it never computed:
+> the artefact and the evidence disagree, and the artefact is what a person reads. It is corrected
+> here rather than left for the next reader to rediscover. If this is not your understanding, the
+> ledger entry is the thing to dispute — it records your confirmation, not an inference from it, and
+> that entry's own note insists the finding "was NOT to be closed by inference".
 
 Nothing else is blocking. No migration has been run, nothing merged to `main`, nothing deployed, no
 infrastructure provisioned, no production credential changed, no contracting officer contacted, no bid
@@ -22,8 +37,18 @@ submitted.
 
 ## Blocker 1 — credentials
 
-**OPEN, and deliberately kept open.** Ruling 33 item 7: *"Keep the exposed administrator password and
-affected credential rotations as OPEN blockers until explicitly confirmed completed."*
+**CLOSED 2026-11-07, by the confirmation that ruling 33 item 7 required.** That ruling said *"keep the
+exposed administrator password and affected credential rotations as OPEN blockers until explicitly
+confirmed completed"* — and the confirmation came: the owner changed the password through the
+application's own Change password dialog and rotated `JWT_SECRET` afterwards, so tokens minted under
+the old password could not outlive it. Recorded in `docs/security/history-findings.json` as
+`status: retired` in commit `968f342`.
+
+The paragraphs below are kept as the standing record of WHAT was exposed and WHY the rotation order
+mattered. They are history, not an open action. The one thing still true of it today: `JWT_SECRET`
+rotation had to follow the password change, because `src/lib/core.js` signs with `expiresIn: '7d'`.
+
+The original text follows.
 
 What is true:
 
@@ -72,7 +97,14 @@ node scripts/migrate.js --plan | head -3        # must say 53 schema step(s)
 scripts/verify-prod-dump.sh ~/Downloads/playbookos-prod.dump ; echo $?
 ```
 
-**The `git checkout` is load-bearing.** The fixes are on `feat/prpa-phase2-sam-prep` at `cd5ec74`.
+> **Stale references, 2026-11-27.** The REQUIREMENT below stands unchanged — migrations must be
+> validated against the actual production schema, and only you can run it. But the commits it names
+> have moved on: production `main` is now `fda00b43`, not `f284243`, and the step count and branch
+> tip should be re-read before the commands are trusted. Check `node scripts/migrate.js --plan` for
+> today's number rather than the one written here. This is flagged rather than rewritten because the
+> correct branch and count depend on what you intend to release, which is your decision.
+
+**The `git checkout` was load-bearing.** The fixes are on `feat/prpa-phase2-sam-prep` at `cd5ec74`.
 `main` is at `f284243`, which declares **47** steps, and the branch tip before this push (`9ff2bc7`)
 did too — so on 2026-11-06 three separate runs of this verification all executed 47-step code and
 reported the same already-fixed defect. `git pull` alone cannot fix that; the branch is the fix.

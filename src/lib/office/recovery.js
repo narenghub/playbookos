@@ -277,6 +277,145 @@ async function reap({ limit = 100, dryRun = true, excludeRunId = null } = {}, de
   };
 }
 
+// ── DECISION 2: A TASK TYPE'S PROHIBITION OUTRANKS A HUMAN OVERRIDE ─────────
+//
+// Owner decision, 2026-11-27: *"Implement reattemptEligibility at the actual retryRun sink. An
+// ordinary human override must not bypass a hard task-type prohibition. Derive associated task
+// classifications and execution outcomes from persisted authoritative records. Unknown outcomes
+// require independent reconciliation. Unknown classifications fail closed."*
+//
+// Before this, `leases.reattemptEligibility` was called by no product code at all. It encoded
+// exactly the right rule — a type that has not declared itself re-executable must not be redone,
+// because a second attempt could duplicate an effect that may already have happened — and its own
+// docstring delegated enforcement to `retryRun`, which never consulted it and never read
+// `worker_tasks`. A gate documented as living elsewhere, with nothing at either address.
+//
+// ── THE LINK IS PERSISTED, NOT PASSED IN ───────────────────────────────────
+//
+// A worker lease IS an `agent_runs` row: `trigger = 'worker'`, `trigger_detail` the worker id, and
+// `intent_key` COPIED FROM THE TASK at claim time (leases.js). `worker_tasks` carries a unique
+// index on `intent_key`. So the run→task link is a stored equality between two columns, which is
+// what "derive from persisted authoritative records" has to mean: nothing here accepts a task id,
+// a type or an outcome from the caller, because a caller that could name the classification could
+// choose the one that permits the retry.
+//
+// ── THE THREE OUTCOMES, AND WHY THEY ARE THREE ─────────────────────────────
+//
+// `known: true` with tasks — classifications read; each is checked.
+// `known: true` with none — this run leased no task. Not every run is a worker lease, and a run
+//     with no associated task has no type to prohibit. This is NOT the unknown case, and
+//     collapsing the two would refuse every ordinary workflow retry in the name of failing closed.
+// `known: false` — the records could not be READ. Fails closed, because an unreadable
+//     classification is indistinguishable from a prohibited one, and the owner's rule is explicit.
+//
+// That middle case is the one worth stating aloud: "there are none" and "I could not tell" look the
+// same in a result set and must never be treated the same. An outage is not an authorization.
+async function associatedTasks(run, deps = {}) {
+  const query = lazyQuery(deps);
+  if (!run || !run.intent_key) {
+    return { known: true, tasks: [], why: 'the run carries no intent key, so it leased no task' };
+  }
+
+  // ── A MISSING TABLE IS NOT AN UNKNOWN CLASSIFICATION ──────────────────────
+  //
+  // The first version of this failed closed on ANY query error, including `relation "worker_tasks"
+  // does not exist`. check-office-recovery-db.js then refused every retry it tried — including the
+  // ordinary FAILED→attempt-2 path and its own mutation control — because that harness migrates the
+  // run ledger and not the worker schema. Running the affected population is what found it.
+  //
+  // Refusing there is wrong twice over. A database with no worker schema has never held a task, so
+  // the honest answer is "no associated tasks", not "I cannot tell": there is no work whose outcome
+  // is in doubt. And it would make retry impossible for any deployment that does not run workers at
+  // all, which is the kind of over-refusal that gets a safety gate switched off.
+  //
+  // So the two cases are separated, with `to_regclass` — the idiom this repo already uses so an
+  // unmigrated database reads as zero rather than as an error:
+  //   · the table is ABSENT  → a definite, structural "no tasks"
+  //   · the table is PRESENT but unreadable → genuinely unknown, and fails closed
+  // A lost connection, a permission denial or a lock timeout all land in the second case, which is
+  // where the owner's rule belongs. "It isn't there" and "I couldn't look" are different answers.
+  try {
+    const exists = await query("SELECT to_regclass('worker_tasks') IS NOT NULL AS present");
+    if (!exists.rows[0] || exists.rows[0].present !== true) {
+      return { known: true, tasks: [],
+        why: 'this database has no worker_tasks table, so it has never held a worker task' };
+    }
+  } catch (e) {
+    // Even the existence probe failing is unknown territory — the catalog itself is unreachable.
+    return { known: false, reason: `the table catalog could not be read (${e.message})` };
+  }
+
+  try {
+    const r = await query(
+      `SELECT id, task_type, state, resolved_at, resolution_note
+         FROM worker_tasks WHERE intent_key = $1`, [run.intent_key]);
+    return { known: true, tasks: r.rows };
+  } catch (e) {
+    return { known: false, reason: e.message };
+  }
+}
+
+/**
+ * May this predecessor's work be attempted again, given what its TASKS are?
+ *
+ * Returns `{ permitted: true }` or `{ permitted: false, reason, detail, taskId? }`.
+ *
+ * Enforces the CLASSIFICATION half of `reattemptEligibility` and deliberately not the override half.
+ * That gate answers two questions — "is this type re-executable" and "is there a recorded human
+ * reason" — and the second is already owned authoritatively by `trg_agent_runs_retry_guard` in the
+ * database. Enforcing it here as well would put one policy in two places, which is the drift this
+ * module's own header warns against ("this function's job is to FEED that guard correctly, not to
+ * re-decide any of it"). So `override_reason_required` is passed over here and still refuses, one
+ * layer down, as `refused_by_retry_guard`.
+ *
+ * The type prohibition is the opposite case: nothing else enforces it, and the owner's instruction
+ * is that a human override must not get past it. So it is refused here, BEFORE the guard is ever
+ * reached, and the override reason is handed to the gate only so the gate's answer is about the
+ * type rather than about a missing field.
+ */
+async function reattemptPermitted(run, { overrideReason = null } = {}, deps = {}) {
+  const LEASES = (deps && deps.leases) || require('../worker/leases');
+  const assoc = await associatedTasks(run, deps);
+  if (!assoc.known) {
+    return { permitted: false, reason: 'task_classification_unreadable',
+      detail: `the associated task classifications could not be read (${assoc.reason}) — an `
+        + 'unreadable classification is not a permitted one' };
+  }
+  if (!assoc.tasks.length) {
+    return { permitted: true, tasks: 0, why: assoc.why || 'no associated task' };
+  }
+
+  // MIXED CLASSIFICATIONS: every task is checked and ANY prohibition refuses the whole retry. A
+  // run that leased one re-executable and one prohibited task cannot be partly retried — the retry
+  // is one run, and permitting it on the strength of the permissive half would redo the other.
+  for (const t of assoc.tasks) {
+    const elig = LEASES.reattemptEligibility(t.task_type, { overrideReason });
+    if (!elig.eligible && elig.code !== 'override_reason_required') {
+      return { permitted: false, reason: elig.code, taskId: t.id, taskType: t.task_type,
+        detail: elig.detail };
+    }
+  }
+
+  // UNKNOWN OUTCOME REQUIRES INDEPENDENT RECONCILIATION. NEEDS_RESOLUTION means an attempt was made
+  // and nobody knows what it did. `leases.js` writes that state with `resolved_at = NULL`, so a
+  // non-null `resolved_at` is the persisted record that somebody established what happened. Until
+  // that exists, a retry is not a retry — it is a second execution of work that may be complete,
+  // and the override reason cannot substitute for the finding, because the reason is a statement of
+  // intent and the reconciliation is a statement of fact.
+  const unreconciled = assoc.tasks.filter(
+    (t) => t.state === 'NEEDS_RESOLUTION' && !t.resolved_at);
+  if (unreconciled.length) {
+    return { permitted: false, reason: 'outcome_requires_reconciliation',
+      taskId: unreconciled[0].id,
+      detail: `${unreconciled.length} associated task(s) are NEEDS_RESOLUTION with no recorded `
+        + 'resolution. The outcome of the first attempt is unknown, so a second attempt could '
+        + 'duplicate a completed effect. Establish what the first attempt did and record it '
+        + '(worker_tasks.resolved_at / resolution_note), then retry.' };
+  }
+
+  return { permitted: true, tasks: assoc.tasks.length };
+}
+
 // ── THE RETRY ENTRY POINT ───────────────────────────────────────────────────
 //
 // The smallest supported path to attempt 2. Every rule is the database's; this reads the
@@ -322,6 +461,14 @@ async function retryRun(predecessorRunId, { overrideReason = null, triggerDetail
     }
   }
 
+  // DECISION 2, at the sink. After the kill-switch re-check and before anything is created: a
+  // classification prohibition is not something a new run should exist to discover.
+  const allowed = await reattemptPermitted(p, { overrideReason }, { ...deps, query });
+  if (!allowed.permitted) {
+    return { retried: false, reason: allowed.reason, detail: allowed.detail,
+      taskId: allowed.taskId || null, taskType: allowed.taskType || null };
+  }
+
   const L = (deps && deps.ledger) || ledger({ query });
   try {
     const created = await L.createRun({
@@ -360,5 +507,6 @@ async function knownUnknownRecoveries({ limit = 200 } = {}, deps = {}) {
 
 module.exports = {
   candidates, recoverRun, reap, retryRun, knownUnknownRecoveries,
+  associatedTasks, reattemptPermitted,
   CEILINGS, DEFAULT_CEILING_MINUTES, ceilingFor, ACTIVE,
 };

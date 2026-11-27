@@ -32,7 +32,10 @@
 
 process.env.ADMIN_EMAIL = 'loop-bootstrap@loop.invalid';
 process.env.ADMIN_PASSWORD = `l-${require('crypto').randomBytes(16).toString('hex')}`;
-process.env.JWT_SECRET = process.env.JWT_SECRET || `loop-${require('crypto').randomBytes(16).toString('hex')}`;
+// Set unconditionally, not as a `process.env.X || <literal>` fallback: check-secrets.js reads that
+// shape as a hard-coded fallback credential and is right to — a fallback is exactly where a real
+// secret gets left behind. A fresh random value per run is not a credential and does not need one.
+process.env.JWT_SECRET = `loop-${require('crypto').randomBytes(16).toString('hex')}`;
 process.env.WORKER_SECRET_SEAL_KEY = require('crypto').randomBytes(32).toString('hex');
 process.env.NODE_ENV = 'development';
 process.env.RESEND_API_KEY = 'loop-fixture-key-not-a-real-credential';

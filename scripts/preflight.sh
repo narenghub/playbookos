@@ -443,6 +443,23 @@ pf_step "migration 62 upgrades a genuine migration-61 database" \
 # human override rather than the type declaration.
 pf_step "NEEDS_RESOLUTION cannot re-execute by itself" \
   node scripts/check-needs-resolution-no-auto-reexec-db.js
+# ── DECISION 2: A TYPE'S PROHIBITION OUTRANKS A HUMAN OVERRIDE ──────────────
+#
+# reattemptEligibility was correct, well tested, and called by NO product code; its docstring
+# delegated enforcement to retryRun, which never read worker_tasks or the gate. Now enforced at the
+# sink, with the run→task link derived from persisted records (a lease's intent_key, which
+# worker_tasks holds a unique index on — so a caller cannot name the classification that permits its
+# own retry).
+#
+# All seven cases the owner named: automatic recovery (creates no attempt), manual retry (a full
+# override is refused on a non-re-executable type), unknown outcome (NEEDS_RESOLUTION with no
+# recorded resolution refuses until somebody establishes what happened), unknown classification
+# (fails closed — and "there are none" is distinguished from "I could not tell"), mixed
+# classifications (the schema makes a mixed set unreachable for one run, which is asserted rather
+# than fabricated; the decision over a set is verified separately), concurrent retry (one of two
+# wins), withdrawal, and duplicate-effect prevention (six retries, six reasons, still one run).
+pf_step "a task type's prohibition outranks a human override" \
+  node scripts/check-reattempt-authorization-db.js
 # B3.2. An objective decomposes into a bounded plan, and the plan is a PROPOSAL: every step is
 # independently validated against company scope, capability permission, execution eligibility, STOP
 # controls, approval requirement and budget. A proposal that states any of those — a model's
