@@ -113,11 +113,11 @@ test('MAIL_FROM overrides it, so the domain is fixable without a deploy', () => 
 
 test('a caller with no `from` gets the default; an explicit `from` is untouched', async () => {
   process.env.RESEND_API_KEY = 'test-key';
-  await sendEmail({ to: 'a@b.com', subject: 's', html: '<p>h</p>', approvalId: 'ap-test' });
+  await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: '<p>h</p>', approvalId: 'ap-test' });
   assert.equal(global.__lastSend.from, DEFAULT_FROM);
   // The two customer-facing senders pass abiozen.com deliberately — a supplier must not receive an
   // Abiozen RFQ from another company's domain — so the override must not be rewritten.
-  await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'Palash Das <palash@abiozen.com>' });
+  await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'Palash Das <palash@abiozen.com>' });
   assert.equal(global.__lastSend.from, 'Palash Das <palash@abiozen.com>');
 });
 
@@ -125,7 +125,7 @@ test('a caller with no `from` gets the default; an explicit `from` is untouched'
 test('a domain-authorization 403 RAISES a notification, not just a log row', async () => {
   process.env.RESEND_API_KEY = 'test-key';
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  const ok = await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'x@abiozen.com' });
+  const ok = await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'x@abiozen.com' });
   assert.equal(ok, false, 'the caller still sees a plain false — nothing throws');
   assert.equal(NOTIFS.length, 1, 'and somebody is told');
   assert.match(NOTIFS[0][0], /Email sending is broken for abiozen\.com/, 'the title names the domain');
@@ -136,7 +136,7 @@ test('a domain-authorization 403 RAISES a notification, not just a log row', asy
 test('the notification is PLATFORM-WIDE, so a partner account never sees it', async () => {
   process.env.RESEND_API_KEY = 'test-key';
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
+  await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
   const insert = SQL.find(q => /INSERT INTO notifications/.test(q.sql));
   assert.match(insert.sql, /VALUES \(NULL, 'email_channel'/,
     "product NULL means platform-wide, which requires the 'internal' pseudo-product");
@@ -146,7 +146,7 @@ test('it is deduped — the 6pm agent must not write one row per recipient per e
   process.env.RESEND_API_KEY = 'test-key';
   DUP = true;
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
+  await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
   assert.equal(NOTIFS.length, 0, 'a recent alert already exists, so this one is suppressed');
 });
 
@@ -155,7 +155,7 @@ test('an ORDINARY failure does not raise the alarm', async () => {
   // which is the same outcome as not raising at all.
   process.env.RESEND_API_KEY = 'test-key';
   RESPONSES = [{ statusCode: 422, message: 'Invalid `to` field' }];
-  const ok = await sendEmail({ to: 'not-an-address', subject: 's', html: 'h', approvalId: 'ap-test' });
+  const ok = await sendEmail({ contentDay: 'timeless', to: 'not-an-address', subject: 's', html: 'h', approvalId: 'ap-test' });
   assert.equal(ok, false);
   assert.equal(NOTIFS.length, 0);
 });
@@ -168,7 +168,7 @@ test('a failure to raise the alarm cannot break the send path', async () => {
     return { rows: [] };
   };
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  const ok = await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
+  const ok = await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
   assert.equal(ok, false, 'returns normally rather than throwing into the caller');
   db.query = saved;
 });
@@ -176,7 +176,7 @@ test('a failure to raise the alarm cannot break the send path', async () => {
 test('a missing API key is still handled, and is still not an alarm', async () => {
   const saved = process.env.RESEND_API_KEY;
   delete process.env.RESEND_API_KEY;
-  assert.equal(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
+  assert.equal(await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
   assert.equal(NOTIFS.length, 0);
   process.env.RESEND_API_KEY = saved;
 });
@@ -227,7 +227,7 @@ test('attachments reach the request body, base64, under `attachments`', async ()
   const realFetch = global.fetch;
   global.fetch = async (url, opts) => { sentBody = JSON.parse(opts.body); return { json: async () => ({ id: 'msg_1' }) }; };
   try {
-    const r = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
+    const r = await sendEmailDetailed({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
       attachments: [{ filename: 'SN-2026-0001.docx', content: Buffer.from('PK\x03\x04x') }] });
     assert.equal(r.ok, true);
     assert.equal(r.id, 'msg_1', 'the provider id is returned, so a caller can prove what it sent');
@@ -245,12 +245,12 @@ test('sendEmail KEEPS its boolean contract — 55 callers depend on it', async (
   const realFetch = global.fetch;
   global.fetch = async () => ({ json: async () => ({ id: 'msg_2' }) });
   try {
-    assert.strictEqual(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), true);
+    assert.strictEqual(await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), true);
   } finally { global.fetch = realFetch; }
   global.fetch = async () => ({ json: async () => ({ message: 'nope' }) });
   try {
-    assert.strictEqual(await sendEmail({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
-    const d = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
+    assert.strictEqual(await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
+    const d = await sendEmailDetailed({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
     assert.deepEqual([d.ok, d.id, d.error], [false, null, 'nope']);
   } finally { global.fetch = realFetch; }
 });
@@ -261,7 +261,7 @@ test('a refused attachment is logged and sends NOTHING', async () => {
   let called = false;
   global.fetch = async () => { called = true; return { json: async () => ({ id: 'x' }) }; };
   try {
-    const r = await sendEmailDetailed({ to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
+    const r = await sendEmailDetailed({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
       attachments: [{ filename: 'empty.docx', content: Buffer.alloc(0) }] });
     assert.equal(r.ok, false);
     assert.equal(called, false, 'the request must not be made at all');
@@ -288,7 +288,12 @@ test('DECISIVE: an external cc is refused — the gate is actually given it', as
   const saved = APPROVE;
   APPROVE = false;                       // no approval in force for anybody
   try {
-    const r = await sendEmailDetailedX({ to: 'naren@abiozen.com', subject: 's', html: 'h',
+    // contentDay is required even here — in fact ESPECIALLY here. B7.13's check runs BEFORE the
+    // recipient gate (the cheaper, blunter question first), so a message with both problems
+    // reports the day, and without this declaration this test would assert the gate's refusal and
+    // be handed the day's instead: a true-sounding refusal for the wrong reason.
+    const r = await sendEmailDetailedX({ contentDay: 'timeless',
+      to: 'naren@abiozen.com', subject: 's', html: 'h',
       cc: 'buyer@acme.test' });
     assert.equal(r.ok, false, 'an outside party in cc must not ride out on an internal to');
     assert.equal(r.stopped, true);
@@ -363,5 +368,48 @@ test('a v1 approval cannot authorize a send — it asks for fresh approval inste
     assert.equal(r.needsFreshApproval, true,
       'the caller is told this needs re-approval, not that the bytes changed');
     assert.equal(called, false, 'and nothing was transmitted');
+  } finally { global.fetch = realFetch; }
+});
+
+// ── B7.13 AT THE SINK, NOT ONLY IN THE MODULE ───────────────────────────────
+//
+// content-day.test.js proves the control's logic. These two prove it is WIRED — that
+// sendEmailDetailed consults it, refuses before the provider, and files the refusal where somebody
+// looking for a send will find it. A control with perfect logic and no call site is rule 11.
+
+test('B7.13: sendEmailDetailed refuses a message that declares no business day', async () => {
+  process.env.RESEND_API_KEY = 'test-key';
+  const realFetch = global.fetch;
+  let called = false;
+  global.fetch = async () => { called = true; return { json: async () => ({ id: 'x' }) }; };
+  try {
+    const r = await sendEmailDetailedX({ to: 'naren@abiozen.com', subject: 's', html: 'h' });
+    assert.equal(r.ok, false, 'an undeclared business day must not send');
+    assert.equal(r.phase, 'content_day_not_declared');
+    assert.equal(called, false, 'and the provider is never reached');
+    assert.equal(r.providerResponded, false);
+  } finally { global.fetch = realFetch; }
+});
+
+test('B7.13: a STALE business day is refused, and names the day it concerned', async () => {
+  process.env.RESEND_API_KEY = 'test-key';
+  const realFetch = global.fetch;
+  let called = false;
+  global.fetch = async () => { called = true; return { json: async () => ({ id: 'x' }) }; };
+  try {
+    // The 2026-11-03 incident shape: content from three weeks ago released today.
+    const r = await sendEmailDetailedX({ to: 'naren@abiozen.com', subject: 's', html: 'h',
+      contentDay: '2026-11-05' });
+    assert.equal(r.ok, false);
+    assert.equal(r.phase, 'content_day_stale');
+    assert.match(r.error, /2026-11-05/);
+    assert.equal(called, false);
+    // CONTROL: the identical send with TODAY declared is NOT refused by this gate. Without it,
+    // the two assertions above would pass against a function that refuses everything.
+    const ok = await sendEmailDetailedX({ to: 'naren@abiozen.com', subject: 's', html: 'h',
+      contentDay: require('./agent-core').businessToday() });
+    assert.notEqual(ok.phase, 'content_day_stale',
+      'today was also refused as stale, so the comparison is not against the current day');
+    assert.notEqual(ok.phase, 'content_day_not_declared');
   } finally { global.fetch = realFetch; }
 });

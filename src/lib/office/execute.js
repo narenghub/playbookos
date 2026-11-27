@@ -320,6 +320,8 @@ async function executeApprovedAction(approvalId, { releasedBy, requireExplicitRe
   // letter approved to copy".
   const ccList = Array.isArray(approved.cc) ? approved.cc.filter(Boolean) : [];
   const mailResult = await mailer.sendEmailDetailed({
+    // B7.13: correspondence, which concerns no business day — declared, not omitted
+    contentDay: require('../mailer').CONTENT_DAY.TIMELESS,
     // THE APPROVED SENDER, PASSED EXPLICITLY. mailer.defaultFrom() is unreachable from this path:
     // frozenSender is non-null by the gate above, so `from` is never undefined here and the
     // legacy MAIL_FROM default can never supply the identity of a governed external action.

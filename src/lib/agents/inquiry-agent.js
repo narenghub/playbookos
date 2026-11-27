@@ -567,6 +567,8 @@ async function sendApprovedBuyerEmail({ approvalId, releasedBy, currentCommercia
 
   const m = rel.message;
   const r = await sendEmailDetailed({
+    // B7.13: correspondence, which concerns no business day — declared, not omitted
+    contentDay: require('../mailer').CONTENT_DAY.TIMELESS,
     to: m.to, subject: m.subject, html: m.html, from: m.from,
     ...(m.replyTo ? { replyTo: m.replyTo } : {}),
     ...(m.cc ? { cc: m.cc } : {}),
@@ -1174,7 +1176,9 @@ async function escalateToHuman(inquiryId, reason = 'buyer requested a human') {
   const msgs = (await query('SELECT direction, sender_name, body_text, created_at FROM inquiry_messages WHERE inquiry_id=$1 ORDER BY created_at', [inquiryId])).rows;
   const thread = msgs.map(m => `<div style="margin:8px 0;padding:8px;background:${m.direction === 'inbound' ? '#eff6ff' : '#f8fafc'};border-radius:6px"><strong>${m.direction === 'inbound' ? '⬅ ' + esc(m.sender_name || 'Buyer') : '➡ Abiozen'}</strong><div style="font-size:12px;white-space:pre-wrap;margin-top:4px">${esc(String(m.body_text || '').slice(0, 1500))}</div></div>`).join('');
   const procurement = await getUser('procurement_director');
-  if (procurement) await sendEmailOrReport({ to: procurement.email, cc: 'naren@abiozen.com',
+  if (procurement) await sendEmailOrReport({
+    // B7.13: periodic content, so it concerns today by construction
+    contentDay: require('../agent-core').businessToday(), to: procurement.email, cc: 'naren@abiozen.com',
     subject: `Escalated GMP inquiry — ${inq.buyer_company || inq.buyer_email} — ${inq.molecule_name}`,
     html: `<div style="font-family:Arial;max-width:680px"><h2 style="color:#991B1B">Inquiry escalated to human</h2>
       <p style="font-size:14px"><strong>Buyer:</strong> ${esc(inq.buyer_name)} at ${esc(inq.buyer_company)} (${esc(inq.buyer_email)})<br>
@@ -1253,7 +1257,9 @@ async function runInquiryAgent({ dryRun = false } = {}) {
 
   if (!dryRun) {
     const naresh = await getNaresh();
-    await sendEmailOrReport({ to: naresh.email, subject: `GMP Inquiry Agent — daily summary`,
+    await sendEmailOrReport({
+      // B7.13: periodic content, so it concerns today by construction
+      contentDay: require('../agent-core').businessToday(), to: naresh.email, subject: `GMP Inquiry Agent — daily summary`,
       html: `<div style="font-family:Arial;max-width:560px"><h2 style="color:#1B3A6B">Inquiry Agent — daily summary</h2>
         <ul style="font-size:14px;line-height:1.7">
           <li><strong>${out.active_inquiries}</strong> active inquiries</li>
@@ -1640,7 +1646,9 @@ async function markPaymentReceived(inquiryId, { amount } = {}) {
     { user_id: naresh.id || null, message_type: 'payment_received' }).catch(() => {});
   // Procurement: start production. Resolved by role; skipped when nobody holds it.
   const procurement = await getUser('procurement_director');
-  if (procurement) await sendEmailOrReport({ to: procurement.email, cc: 'naren@abiozen.com',
+  if (procurement) await sendEmailOrReport({
+    // B7.13: periodic content, so it concerns today by construction
+    contentDay: require('../agent-core').businessToday(), to: procurement.email, cc: 'naren@abiozen.com',
     subject: `START PRODUCTION — ${inq.molecule_name} ${qtyStr} — Payment confirmed`,
     html: `<div style="font-family:Arial;max-width:640px"><h2 style="color:#1B3A6B">Payment confirmed — start production</h2>
       <p style="font-size:14px"><strong>Order:</strong> ${esc(inq.quote_ref || '')} · <strong>Buyer:</strong> ${esc(inq.buyer_company || inq.buyer_email)}<br>

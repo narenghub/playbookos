@@ -514,7 +514,9 @@ async function sendRFQEmails(rfqIds, dryRun = false) {
         console.warn('[procurement-agent] no company context for legacy-supplier-rfq-email '
           + `(${e.refusal || 'unresolved'}): ${e.message}`);
       }
-      const ok = await sendEmail({ to: s.contact_email, subject, html, from: fromLine,
+      const ok = await sendEmail({
+        // B7.13: correspondence, which concerns no business day — declared, not omitted
+        contentDay: require('../mailer').CONTENT_DAY.TIMELESS, to: s.contact_email, subject, html, from: fromLine,
         replyTo: sig.email, companyContext,
         workflow: 'legacy-supplier-rfq-email', agent: 'procurement-agent' });
       if (!ok) {
@@ -584,6 +586,8 @@ async function scoreAndRankSuppliers(rfqId, { notify = true } = {}) {
     // Skipped rather than defaulted when nobody holds the role. An internal notification that
     // cannot be addressed is not a reason to invent an addressee.
     if (sig) await sendEmailOrReport({
+      // B7.13: periodic content, so it concerns today by construction
+      contentDay: require('../agent-core').businessToday(),
       to: sig.email,
       subject: `Supplier comparison ready — ${rfq.molecule_name}`,
       html: `<div style="font-family:Arial;max-width:640px">
@@ -621,13 +625,17 @@ async function runProcurementAgent({ dryRun = false, weekStart } = {}) {
   const naresh = await getNaresh();
   if (!dryRun && rfqs.length) {
     const molList = rfqs.map(r => `${r.molecule_name}${r.cas_number ? ' (' + r.cas_number + ')' : ''}`).join(', ');
-    if (sig) await sendEmailOrReport({ to: sig.email, subject: `${out.emails_sent} RFQ emails dispatched this week`,
+    if (sig) await sendEmailOrReport({
+      // B7.13: periodic content, so it concerns today by construction
+      contentDay: require('../agent-core').businessToday(), to: sig.email, subject: `${out.emails_sent} RFQ emails dispatched this week`,
       html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#1B3A6B">Procurement Agent — RFQs sent</h2>
         <p style="font-size:14px">Sent <strong>${out.emails_sent}</strong> RFQ emails to suppliers for <strong>${rfqs.length}</strong> molecules this week.</p>
         <p style="font-size:13px;color:#555">Molecules: ${esc(molList)}</p>
         <p><a href="${BASE_URL()}/#procurement-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Procurement Agent →</a></p></div>` }, 'procurement-agent: out.emails_sent RFQ emails dispatched this we').catch(() => {});
     if (naresh && naresh.email && (!sig || naresh.email !== sig.email)) {
-      await sendEmailOrReport({ to: naresh.email, subject: `Procurement Agent: ${rfqs.length} RFQs dispatched this week`,
+      await sendEmailOrReport({
+        // B7.13: periodic content, so it concerns today by construction
+        contentDay: require('../agent-core').businessToday(), to: naresh.email, subject: `Procurement Agent: ${rfqs.length} RFQs dispatched this week`,
         html: `<div style="font-family:Arial"><p>Procurement Agent dispatched <strong>${out.emails_sent}</strong> RFQ emails across <strong>${rfqs.length}</strong> molecules this week (${esc(week)}).</p></div>` }, 'procurement-agent: Procurement Agent: rfqs.length RFQs dispatche').catch(() => {});
     }
   }

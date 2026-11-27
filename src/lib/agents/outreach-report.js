@@ -155,7 +155,9 @@ ${b.join('\n')}
 async function sendOutreachReport({ run, bounce, to, date }) {
   const r = composeOutreachReport({ run, bounce, date });
   if (!r.worthSending) return { skipped: 'nothing notable' };
-  return sendEmail({ to: to || process.env.OUTREACH_REPORT_TO || 'naren@abiozen.com', subject: r.subject, html: r.html });
+  return sendEmail({
+    // B7.13: periodic content, so it concerns today by construction
+    contentDay: require('../agent-core').businessToday(), to: to || process.env.OUTREACH_REPORT_TO || 'naren@abiozen.com', subject: r.subject, html: r.html });
 }
 
 module.exports = { composeOutreachReport, sendOutreachReport };

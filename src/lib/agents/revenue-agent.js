@@ -244,6 +244,8 @@ async function analyzeRevenueTrends({ dryRun = false } = {}) {
     const admin = (await query("SELECT email FROM users WHERE role='admin' AND is_active=1 LIMIT 1")).rows[0];
     if (admin?.email) {
       await sendEmailOrReport({
+        // B7.13: periodic content, so it concerns today by construction
+        contentDay: require('../agent-core').businessToday(),
         to: admin.email,
         subject: `Revenue Intelligence — ${data.period.this_month} (${data.velocity.trend}, ${data.monthly.pct}% of target)`,
         html: renderRevenueReport(data, recommendations)
@@ -340,6 +342,8 @@ async function getProcurementPriorities({ dryRun = false } = {}) {
     const html = renderProcurementList(ranked, context);
     for (const u of procUsers) {
       const ok = await sendEmail({
+        // B7.13: periodic content, so it concerns today by construction
+        contentDay: require('../agent-core').businessToday(),
         to: u.email,
         subject: `This week — source these ${ranked.length} molecules first (revenue-impact ranked)`,
         html

@@ -761,6 +761,8 @@ async function runWeeklyLinkedInCampaign({ dryRun = false } = {}) {
     if (ceo?.email) {
       try {
         await sendEmailOrReport({
+          // B7.13: periodic content, so it concerns today by construction
+          contentDay: require('../agent-core').businessToday(),
           to: ceo.email,
           subject: `LinkedIn campaign drafts — week of ${week.monday}`,
           html: renderApprovalEmail(week.monday, drafts.filter(d => d.id)),

@@ -328,7 +328,9 @@ async function sendResearchDigest({ week, findings, report }) {
       <h3 style="color:#0D7377;margin:14px 0 6px">Analyst report</h3><div style="font-size:13px;line-height:1.6;white-space:pre-wrap;background:#f8fafc;padding:12px;border-radius:6px">${esc(report)}</div>
       <p style="margin-top:16px"><a href="${BASE_URL()}/#research-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Research Agent →</a></p>
     </div></div>`;
-  return sendEmail({ to: naresh.email, subject: `Research Intelligence — Week of ${week}`, html });
+  return sendEmail({
+    // B7.13: periodic content, so it concerns today by construction
+    contentDay: require('../agent-core').businessToday(), to: naresh.email, subject: `Research Intelligence — Week of ${week}`, html });
 }
 
 // ── PART 3 — patent watch seed (20 high-value molecules) ──────────────────────

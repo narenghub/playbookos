@@ -341,17 +341,23 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
     if (!dryRun) {
       if (level === 1) {
         // Reminder to the user
-        if (r.email) await sendEmailOrReport({ to: r.email, subject: `Performance reminder — ${score}/100 today`, html: `<p>${userMsg}</p><p style="color:#666;font-size:12px">View your tasks at ${process.env.BASE_URL || 'https://playbookos-production.up.railway.app'}/#my-tasks</p>` }, 'orchestrator: Performance reminder — score/100 today');
+        if (r.email) await sendEmailOrReport({
+          // B7.13: periodic content, so it concerns today by construction
+          contentDay: require('../agent-core').businessToday(), to: r.email, subject: `Performance reminder — ${score}/100 today`, html: `<p>${userMsg}</p><p style="color:#666;font-size:12px">View your tasks at ${process.env.BASE_URL || 'https://playbookos-production.up.railway.app'}/#my-tasks</p>` }, 'orchestrator: Performance reminder — score/100 today');
         if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, userMsg, { user_id: r.user_id, message_type: 'reminder' });
       } else if (level === 2) {
         // Warning to user + notify their director
-        if (r.email) await sendEmailOrReport({ to: r.email, subject: `⚠️ Performance warning — ${score}/100 for ${days_below} days`, html: `<p>${userMsg}</p><p>This is day ${days_below} below target. Your manager has been notified.</p>` }, 'orchestrator: ⚠️ Performance warning — score/100 for days');
+        if (r.email) await sendEmailOrReport({
+          // B7.13: periodic content, so it concerns today by construction
+          contentDay: require('../agent-core').businessToday(), to: r.email, subject: `⚠️ Performance warning — ${score}/100 for ${days_below} days`, html: `<p>${userMsg}</p><p>This is day ${days_below} below target. Your manager has been notified.</p>` }, 'orchestrator: ⚠️ Performance warning — score/100 for days');
         if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, '⚠️ ' + userMsg, { user_id: r.user_id, message_type: 'warning' });
         const dirRole = getDirectorRole(r.role);
         if (dirRole) {
           const directors = (await query(`SELECT email FROM users WHERE role=$1 AND is_active=1`, [dirRole])).rows;
           for (const d of directors) {
-            if (d.email) await sendEmailOrReport({ to: d.email, subject: `Team alert: ${r.name} below target for ${days_below} days`, html: `<p><strong>${r.name}</strong> (${r.role}) scored ${score}/100 today — ${days_below} days below 60.</p><p>${tasks_phrase}, weekly KPI ${r.weekly_kpi_pct}%.</p>` }, 'orchestrator: Team alert: r.name below target for days_be');
+            if (d.email) await sendEmailOrReport({
+              // B7.13: periodic content, so it concerns today by construction
+              contentDay: require('../agent-core').businessToday(), to: d.email, subject: `Team alert: ${r.name} below target for ${days_below} days`, html: `<p><strong>${r.name}</strong> (${r.role}) scored ${score}/100 today — ${days_below} days below 60.</p><p>${tasks_phrase}, weekly KPI ${r.weekly_kpi_pct}%.</p>` }, 'orchestrator: Team alert: r.name below target for days_be');
           }
         }
         await logAgentActivity({
@@ -363,7 +369,9 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
         });
       } else if (level === 3) {
         ceoDigest.push({ name: r.name, role: r.role, score, days_below, level: 3, weekly_kpi_pct: r.weekly_kpi_pct });
-        if (r.email) await sendEmailOrReport({ to: r.email, subject: `Performance escalation — ${score}/100`, html: `<p>${userMsg}</p><p>Day ${days_below} below 60 — this has been escalated to leadership for review.</p>` }, 'orchestrator: Performance escalation — score/100');
+        if (r.email) await sendEmailOrReport({
+          // B7.13: periodic content, so it concerns today by construction
+          contentDay: require('../agent-core').businessToday(), to: r.email, subject: `Performance escalation — ${score}/100`, html: `<p>${userMsg}</p><p>Day ${days_below} below 60 — this has been escalated to leadership for review.</p>` }, 'orchestrator: Performance escalation — score/100');
         if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, '🚨 Day ' + days_below + ' below target. Escalated to leadership.', { user_id: r.user_id, message_type: 'escalation' });
         await enqueueApproval({
           agent_name: 'orchestrator', action_type: 'performance_review',
@@ -398,6 +406,8 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
          <td style="padding:4px 8px">L${d.level}</td>
        </tr>`).join('');
     await sendEmailOrReport({
+      // B7.13: periodic content, so it concerns today by construction
+      contentDay: require('../agent-core').businessToday(),
       to: ceo.email,
       subject: `PlaybookOS — ${ceoDigest.length} performance escalation${ceoDigest.length === 1 ? '' : 's'} for ${today}${crit ? ` (${crit} critical)` : ''}`,
       html: `<div style="font-family:Arial,sans-serif;max-width:680px;color:#1a1a2e">

@@ -514,6 +514,8 @@ async function runMarketIntelligence({ dryRun = false, weekStart } = {}) {
         .map((m, i) => `<li>${i + 1}. <b>${m.name}</b> (${m.therapeutic_area || ''}) — $${m.market_size_usd_millions || '?'}M market</li>`).join('');
       const base = process.env.BASE_URL || 'https://playbook.abiozen.com';
       await sendEmailOrReport({
+        // B7.13: periodic content, so it concerns today by construction
+        contentDay: require('../agent-core').businessToday(),
         to,
         subject: `Market Intelligence — Week of ${week} — ${rows.length} Molecules Identified`,
         html: `<div style="font-family:Arial;max-width:640px;line-height:1.6;color:#333">

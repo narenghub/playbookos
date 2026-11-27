@@ -131,6 +131,8 @@ Provide EXACTLY 5 actions, ranked most revenue-impactful first. Every line must 
 
   if (!dryRun && ceo?.email) {
     result.emailed = await sendEmail({
+      // B7.13: periodic content, so it concerns today by construction
+      contentDay: require('../agent-core').businessToday(),
       to: ceo.email,
       subject: `CEO Briefing — ${today} · ${vision.pct}% to $10M`,
       html: renderEmail(result),

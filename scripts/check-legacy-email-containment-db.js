@@ -150,6 +150,12 @@ const RFQ = 'legacy-supplier-rfq-email';
     const send = async (m, { workflow, agent, capability, approve = true } = {}) => {
       provider.length = 0;
       const r = await m.sendEmailDetailed({
+        // B7.13: this harness's subject is WHICH SCOPE refuses a send, and the content-day check
+        // runs before the kill switch — so without a declaration every assertion below would be
+        // handed `content_day_not_declared` instead of the gate it is measuring. The harness's own
+        // positive control caught exactly that and named it "the gate-contamination pattern",
+        // which is what a positive control is for.
+        contentDay: 'timeless',
         ...FIXTURE_MSG,
         ...(approve ? { approvalId: APPROVAL_ID } : {}),
         ...(workflow ? { workflow } : {}), ...(agent ? { agent } : {}),

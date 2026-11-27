@@ -96,6 +96,8 @@ Return EXACTLY a JSON array, no other text:
   let emailed = false;
   if (!dryRun && ceo?.email) {
     emailed = await sendEmail({
+      // B7.13: periodic content, so it concerns today by construction
+      contentDay: require('../agent-core').businessToday(),
       to: ceo.email,
       subject: `Weekly Team Health — ${today} · ${flagged.length} flagged`,
       html: renderEmail(today, rows, recs),

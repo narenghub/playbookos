@@ -79,6 +79,8 @@ async function runWeeklyAnalysis({ dryRun = false } = {}) {
     const adminUser = (await query(`SELECT * FROM users WHERE role='admin' LIMIT 1`)).rows[0];
     if (adminUser) {
       emailed = await sendEmail({
+        // B7.13: periodic content, so it concerns today by construction
+        contentDay: require('../agent-core').businessToday(),
         to: adminUser.email,
         subject: `PlaybookOS Weekly Report — ${thisMonth} (${pct}% of target)`,
         html: weeklyReportHtml({ monthRevenue, monthTarget, pct, analysis })
@@ -102,6 +104,8 @@ async function checkMilestoneTriggers({ dryRun = false } = {}) {
         const admin = (await query(`SELECT * FROM users WHERE role='admin' LIMIT 1`)).rows[0];
         if (admin) {
           await sendEmailOrReport({
+            // B7.13: periodic content, so it concerns today by construction
+            contentDay: require('../agent-core').businessToday(),
             to: admin.email,
             subject: 'Trigger: $100K revenue — Hire Account Manager now',
             html: `<div style="font-family:Arial;padding:24px"><h2>Milestone Trigger</h2><p>Revenue: $${yearRev.toLocaleString()}</p><p>Action: Begin account manager hiring immediately.</p></div>`
@@ -152,6 +156,8 @@ async function scoreAllAndCoach({ dryRun = false, date = null } = {}) {
       const row = await scoreTeamMember(user.id, scoreDate);
       if (row.skipped) { results.push({ user: user.email, skipped: row.reason }); continue; }
       const emailed = await sendEmail({
+        // B7.13: periodic content, so it concerns today by construction
+        contentDay: require('../agent-core').businessToday(),
         to: user.email,
         subject: `Your day at Abiozen — ${scoreDate} (score ${row.score}/100)`,
         html: `<div style="font-family:Arial;max-width:600px;line-height:1.7;color:#333">

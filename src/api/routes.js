@@ -602,7 +602,9 @@ router.post('/users/invite', authMiddleware, superAdminOnly, async (req, res) =>
     console.log(`[invite] ${req.user.email} invited ${email.toLowerCase()} as ${role} with products [${chosen.join(', ') || 'NONE'}]${chosen.includes('internal') ? ' ⚠ INCLUDES internal' : ''}`);
     const baseUrl = process.env.BASE_URL || 'https://playbookos-production.up.railway.app';
     const inviteUrl = `${baseUrl}/#/accept-invite?token=${inviteToken}`;
-    sendEmail({ to: email, subject: `You've been invited to PlayNexa`, triggerType: 'invite',
+    sendEmail({
+      // B7.13: correspondence, which concerns no business day — declared, not omitted
+      contentDay: require('../lib/mailer').CONTENT_DAY.TIMELESS, to: email, subject: `You've been invited to PlayNexa`, triggerType: 'invite',
       html: `<div style="font-family:Arial;max-width:600px"><h2 style="color:#232f3e;font-weight:400">Play<strong style="font-weight:700">Nexa</strong></h2><p>You've been invited as <strong>${role}</strong>.</p><a href="${inviteUrl}" style="background:#0D7377;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;margin:16px 0">Accept Invite</a><p style="color:#666;font-size:13px">Or copy: ${inviteUrl}</p></div>` });
 
     // Fire-and-forget WhatsApp welcome if a number was provided. Skips
@@ -882,7 +884,9 @@ router.post('/users/send-onboarding', authMiddleware, adminOnly, async (req, res
     <p style="color:#666;font-size:13px;margin-top:16px">You've got this — small daily actions add up fast. 🙌</p>
   </div>
 </div>`;
-      const ok = await sendEmail({ to: u.email, subject: 'Your PlaybookOS daily guide — improve your score today', html });
+      const ok = await sendEmail({
+        // B7.13: periodic content, so it concerns today by construction
+        contentDay: require('../lib/agent-core').businessToday(), to: u.email, subject: 'Your PlaybookOS daily guide — improve your score today', html });
       if (ok) sent++;
       results.push({ name: u.name, email: u.email, score: u.score, sent: !!ok });
     }
@@ -936,7 +940,9 @@ router.post('/users/send-task-nudge', authMiddleware, adminOnly, async (req, res
     <p style="margin-top:16px"><a href="${base}/#my-tasks" style="background:#991B1B;color:#fff;padding:11px 22px;border-radius:6px;text-decoration:none;display:inline-block;font-weight:700">Open My Tasks →</a></p>
   </div>
 </div>`;
-      const ok = await sendEmail({ to: u.email, subject: 'Action required: mark your tasks complete in PlaybookOS', html });
+      const ok = await sendEmail({
+        // B7.13: periodic content, so it concerns today by construction
+        contentDay: require('../lib/agent-core').businessToday(), to: u.email, subject: 'Action required: mark your tasks complete in PlaybookOS', html });
       if (ok) sent++;
       results.push({ name: u.name, email: u.email, sent: !!ok });
     }
@@ -3352,7 +3358,9 @@ router.post('/apollo/send-outreach', authMiddleware, requireTier('sales'), async
     let sent = 0;
     for (const contact of (contacts||[]).slice(0,50)) {
       if (!contact.email) continue;
-      sendEmail({ to: contact.email, subject: `${discount_pct}% off ${molecule_name} — Limited offer from Abiozen LLC`,
+      sendEmail({
+        // B7.13: correspondence, which concerns no business day — declared, not omitted
+        contentDay: require('../lib/mailer').CONTENT_DAY.TIMELESS, to: contact.email, subject: `${discount_pct}% off ${molecule_name} — Limited offer from Abiozen LLC`,
         html: `<div style="font-family:Arial;max-width:600px"><div style="background:#1B3A6B;padding:20px;border-radius:8px 8px 0 0"><h2 style="color:#fff;margin:0">Abiozen LLC</h2><p style="color:#9FE1CB;margin:4px 0 0">Premium Pharmaceutical APIs & Research Molecules</p></div><div style="padding:24px;border:1px solid #e2e8f0;border-radius:0 0 8px 8px"><p>Dear ${contact.name||'Purchasing Manager'},</p><p>We have <strong>${molecule_name}</strong> available at <strong>${discount_pct}% below market rate</strong> for a limited time.</p><div style="background:#f0fdf4;border:1px solid #86efac;border-radius:8px;padding:16px;margin:16px 0"><div style="font-size:20px;font-weight:700;color:#166534">${discount_pct}% Discount — This Week Only</div><div style="color:#15803d;margin-top:4px">$${price_per_kg}/kg · ${purity||'99%+'} purity · COA & SDS available</div></div><ul><li>Certificate of Analysis from accredited lab</li><li>Safety Data Sheet included</li><li>GMP-grade documentation</li><li>Fast US delivery 7-14 days</li><li>Minimum order: 1kg</li></ul><a href="https://abiozen.com" style="background:#0D7377;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block">Request Quote Now</a><p style="color:#666;font-size:11px;margin-top:16px">Abiozen LLC · 1333 Barclay Blvd Suite 1333, Buffalo Grove IL 60089 · To unsubscribe reply STOP</p></div></div>` });
       await query(`INSERT INTO activity_logs (id,user_id,log_date,metric,value,notes,source) VALUES ($1,$2,$3,'emails_sent',1,$4,'apollo')`,
         [crypto.randomUUID(), req.user.id, new Date().toISOString().slice(0,10), `Apollo outreach: ${contact.email} — ${molecule_name}`]);
@@ -6109,6 +6117,8 @@ router.post('/events/cphi/contacts/:id/email', authMiddleware, adminOnly, async 
 
     const { sendEmailDetailed } = require('../lib/mailer');
     const out = await sendEmailDetailed({
+      // B7.13: correspondence, which concerns no business day — declared, not omitted
+      contentDay: require('../lib/mailer').CONTENT_DAY.TIMELESS,
       to: c.email,
       subject,
       html: sanitizeHtml(html),

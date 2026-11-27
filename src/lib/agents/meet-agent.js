@@ -383,7 +383,9 @@ async function sendMeetingBriefToNaresh(meeting, analysis, { subject } = {}) {
       <h3 style="color:#6B21A8;margin:14px 0 6px">Risks &amp; opportunities</h3>${list([...(analysis.risks || []), ...(analysis.opportunities || [])], 'None flagged.')}
       <p style="margin-top:16px"><a href="${BASE_URL()}/#meet-agent" style="background:#0D7377;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none">Open Meet Agent →</a></p>
     </div></div>`;
-  return sendEmail({ to: naresh.email, subject: subject || `Meeting Brief: ${meeting.meeting_title} — ${meeting.meeting_date}`, html });
+  return sendEmail({
+    // B7.13: periodic content, so it concerns today by construction
+    contentDay: require('../agent-core').businessToday(), to: naresh.email, subject: subject || `Meeting Brief: ${meeting.meeting_title} — ${meeting.meeting_date}`, html });
 }
 
 // Core: analyse a stored meeting row and run assignment + brief. Used by both the

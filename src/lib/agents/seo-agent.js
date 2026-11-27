@@ -179,6 +179,8 @@ Return ONLY the JSON array.`;
         const html = renderSEOTasksEmail(tasks);
         for (const u of seoUsers) {
           await sendEmailOrReport({
+            // B7.13: periodic content, so it concerns today by construction
+            contentDay: require('../agent-core').businessToday(),
             to: u.email,
             subject: `This week — ${tasks.length} SEO tasks ranked by traffic opportunity`,
             html,

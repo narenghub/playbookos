@@ -301,6 +301,8 @@ async function generateDailyBriefing({ dryRun = false } = {}) {
     const admin = (await query("SELECT email FROM users WHERE role='admin' AND is_active=1 LIMIT 1")).rows[0];
     const recipient = admin?.email || 'naren@abiozen.com';
     const sent = await sendEmail({
+      // B7.13: periodic content, so it concerns today by construction
+      contentDay: require('../agent-core').businessToday(),
       to: recipient,
       subject: `Daily Briefing — ${data.snapshot.date} (yesterday ${data.snapshot.daily_target_pct_yesterday}% of target)`,
       html: renderBriefingEmail(data, briefingText),

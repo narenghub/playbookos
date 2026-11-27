@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { assertSendAllowed } = require('./email-gate');
+const CONTENT_DAY = require('./outbound/content-day');
 const LEDGER = require('./outbound/ledger');
 // The CANONICAL approval digest (B7.6). Separate module from the ledger because the ledger's
 // digestOf is an audit fingerprint and this is an authorization binding — one function serving
@@ -275,7 +276,11 @@ async function deliverAuthorized({ to, subject, html, from, replyTo, cc, attachm
 
 async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachments,
   capability = 'email.send', workflow = null, agent = null, companyContext = null,
-  approvalId = null, expectedDigest = null }) {
+  approvalId = null, expectedDigest = null,
+  // B7.13. Deliberately NOT defaulted: an absent declaration is refused, because a default would
+  // make every existing caller opt out by forgetting and the control decorative. A message that
+  // genuinely concerns no business day declares CONTENT_DAY.TIMELESS, which somebody has to type.
+  contentDay = undefined }) {
   // ── THE KILL SWITCH, BEFORE THE PROVIDER CALL ────────────────────────────
   //
   // Placed here rather than at each of the ~37 routes and 37 crons that can cause an email, so
@@ -446,6 +451,23 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // one, its internal mail does not go out. Fail-closed is the correct default here — the
   // alternative is sending as whichever company the caller named — but it is a state to finish
   // moving through, not to sit in.
+  // ── B7.13: DATED CONTENT MAY NOT ARRIVE LATE ─────────────────────────────
+  //
+  // Before the kill switch rather than after, because this is the cheaper and blunter question and
+  // a message whose content is three weeks old should not consume an authorization decision. The
+  // measured risk is NOT a backlog flushing — there is no path in this repository that enumerates
+  // refused rows and re-attempts them — it is a human releasing an old approval, or a cron firing
+  // against a stale row, so that a message saying "your tasks for 5 November" lands on 1 December.
+  // That is worse than silence, because it is wrong rather than absent, and it lands on four
+  // people at once.
+  const day = CONTENT_DAY.assertContentDayCurrent({ contentDay, capability: effectiveCapability });
+  if (!day.allowed) {
+    console.warn(`[CONTENT_DAY_REFUSED] email to ${to}: ${day.reason}`);
+    await att.blocked(day.reason, `content_day:${day.code}`);
+    return { ok: false, id: null, error: day.reason, stopped: true, phase: day.code,
+      providerResponded: false };
+  }
+
   const gate = await assertSendAllowed({ capability: effectiveCapability, workflow, agent, to, cc,
     companyContext, approvalId, digest: actualDigest });
   if (!gate.allowed) {
@@ -531,6 +553,18 @@ async function sendOperatorAlert({ type, fields = {} }, deps = {}) {
 // sendEmailDetailed cannot swallow it. Everything else about a send — the provider, the log, the
 // result shape — is shared.
 async function transmitAlert({ to, subject, html }, { type = null } = {}) {
+  // B7.13 on the SECOND road. `sendOperatorAlert` does not route through `sendEmailDetailed` —
+  // measured when reconciling the 37 call sites — so a control placed only there would have left
+  // this path untouched. An operator alert concerns no business day by nature, so it declares
+  // TIMELESS here rather than asking each of its callers: the declaration is still explicit, and
+  // it is made once, in the function whose whole purpose is system alerts.
+  const alertDay = CONTENT_DAY.assertContentDayCurrent(
+    { contentDay: CONTENT_DAY.TIMELESS, capability: 'email.alert' });
+  if (!alertDay.allowed) {
+    return { ok: false, id: null, error: alertDay.reason, phase: alertDay.code,
+      providerResponded: false };
+  }
+
   const gate = await assertSendAllowed({ capability: 'email.alert', to });
   if (!gate.allowed) {
     // A deliberate `capability:email.alert` stop still silences alerts. The exemption is from a
@@ -578,6 +612,6 @@ async function transmitAlert({ to, subject, html }, { type = null } = {}) {
   return deliverAuthorized({ to, subject, html }, att);
 }
 
-module.exports = { sendEmail, sendEmailDetailed, sendEmailOrReport, encodeAttachments, MAX_ATTACH_BYTES,
+module.exports = { CONTENT_DAY, sendEmail, sendEmailDetailed, sendEmailOrReport, encodeAttachments, MAX_ATTACH_BYTES,
                    defaultFrom, DEFAULT_FROM, alertSendFailure, sendOperatorAlert,
                    approvedDigestOf };

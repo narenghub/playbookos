@@ -609,6 +609,8 @@ router.post('/sitenex/contracts/:id/send', authMiddleware, adminOnly, requireTie
     const cc = c.partner_email || null;
 
     const sent = await mailer().sendEmailDetailed({
+      // B7.13: correspondence, which concerns no business day — declared, not omitted
+      contentDay: require('../lib/mailer').CONTENT_DAY.TIMELESS,
       to, cc, from, replyTo: from, subject: mail.subject, html: mail.html,
       attachments: [{ filename: c.file_name || `${c.contract_no}.docx`, content: c.file_bytes }],
     });
