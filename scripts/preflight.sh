@@ -478,6 +478,27 @@ pf_step "a task type's prohibition outranks a human override" \
 # and that zero orphans exist, which is what an operator needs before proposing one.
 pf_step "the classification holds at every authorization boundary (A.6)" \
   node scripts/check-a6-authorization-boundaries-db.js
+# ── THE OFFICE OPERATING, INTEGRATED, WITH NOBODY DRIVING IT ────────────────
+#
+# The pieces were each verified alone: the employee loop by calling its modules, the scheduler by
+# advancing phases, the sampler by detecting a gap. Three green checks, none of which said the
+# office RUNS. This starts FOUR real processes — server.js with its real crons, a worker client
+# polling on its own, the independent sampler in its own process, and an in-process worker API
+# stated plainly as a fixture — then only watches the database.
+#
+# One initiation firing (the single weekday 06:00 business schedule a check cannot wait for and must
+# not be given a way to move), and after that nothing from the check. §0 asserts that against the
+# file's own source with comments AND its own driver list stripped, matching call syntax rather than
+# a mention — because the first run reported that the file called all eight, having read its own
+# needle out of the array literal two lines below.
+#
+# Evidence: a validated plan and an enqueued task written by the server's cron; a real worker
+# executing it; the employee task assigned to the VERIFIED member at the REPORT phase; memory
+# written; the Command Center read model non-empty and company-scoped with a cross-company control;
+# 12 independent samples with ZERO gaps from a separate process; and the run reaching SUCCEEDED /
+# phase done with the server still up.
+pf_step "the office operates end to end with nobody driving it" \
+  node scripts/check-integrated-office-operation-db.js
 # B3.2. An objective decomposes into a bounded plan, and the plan is a PROPOSAL: every step is
 # independently validated against company scope, capability permission, execution eligibility, STOP
 # controls, approval requirement and budget. A proposal that states any of those — a model's

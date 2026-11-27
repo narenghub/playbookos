@@ -224,61 +224,57 @@ const createOne = (i) => new Promise((resolve) => {
   // both want, and the legacy harnesses have one: a FIXED PORT, written into each file.
   // pg-disposable picks a port at random and now retries on a bind failure, but B7.20b's 51
   // pg-legacy-harness users each carry a hardcoded number.
-  console.log('── D. fixed ports across the legacy harnesses ──');
+  console.log('── D. fixed ports: which are LIVE, and which are vestigial ──');
   console.log('');
+  // ── THE CORRECTION THIS SECTION EXISTS TO CARRY ──────────────────────────
+  //
+  // An earlier version of this file reported "31 distinct fixed ports, each a permanent single
+  // point of failure" and named that as the surviving cause of the parallel-harness failure. THAT
+  // WAS WRONG, and wrong in the way this whole file is about: it counted DECLARATIONS by grep and
+  // never asked whether any of them was used.
+  //
+  // `pg-legacy-harness` already delegates to `pg-disposable` (B7.20b migrated it), so every caller
+  // gets a randomly chosen, collision-checked port. And each caller that declares a fixed `PGPORT`
+  // OVERWRITES it from the live cluster — `PGPORT = String(live.port)` — before opening any
+  // connection. The fixed numbers are initialisers that are never used. Measured below rather than
+  // asserted, because asserting it is how the first version went wrong.
   {
     const fsx = require('fs');
-    const files = fsx.readdirSync(__dirname)
-      .filter((f) => f.endsWith('.js'))
+    const files = fsx.readdirSync(__dirname).filter((f) => f.endsWith('.js'))
       .map((f) => require('path').join(__dirname, f));
-    const portPat = /(?:PGPORT|APPPORT|PORT)\s*(?:=|\|\|)\s*(?:Number\()?\s*['"]?(\d{4,5})['"]?/g;
-    const envPat = /process\.env\.([A-Z_]+)\s*\|\|\s*['"]?(\d{4,5})/g;
-    const byPort = new Map();
-    const byEnv = new Map();
+    let declares = 0;
+    let overwrites = 0;
+    const liveFixed = [];
     for (const f of files) {
       let src;
       try { src = fsx.readFileSync(f, 'utf8'); } catch (_) { continue; }
-      if (src.includes('pg-disposable') && !src.includes('pg-legacy-harness')) continue;
       const base = require('path').basename(f);
-      let m;
-      portPat.lastIndex = 0;
-      while ((m = portPat.exec(src)) !== null) {
-        const n = Number(m[1]);
-        if (n > 1024 && n < 65536 && n !== PG.PORT_FLOOR) {
-          if (!byPort.has(n)) byPort.set(n, new Set());
-          byPort.get(n).add(base);
-        }
+      if (/let PGPORT/.test(src)) {
+        declares += 1;
+        // The live port is taken from the cluster object the harness returns. Either spelling.
+        if (/PGPORT = String\((?:live|cluster)\.port\)/.test(src)) overwrites += 1;
+        else liveFixed.push(`${base} (declares PGPORT and never overwrites it)`);
       }
-      envPat.lastIndex = 0;
-      while ((m = envPat.exec(src)) !== null) {
-        if (!byEnv.has(m[1])) byEnv.set(m[1], new Set());
-        byEnv.get(m[1]).add(`${m[2]} (${base})`);
+      // An APP server port is different: it is BOUND directly, so a fixed one really is shared.
+      const appPort = src.match(/APPPORT\s*=\s*(?:Number\()?\s*(?:process\.env\.[A-Z_]+\s*\|\|\s*)?['"]?(\d{4,5})/);
+      if (appPort && /listen\(|PORT: (?:String\()?APPPORT/.test(src)) {
+        liveFixed.push(`${base} binds app port ${appPort[1]} directly`);
       }
     }
-    const shared = [...byPort.entries()].filter(([, set]) => set.size > 1);
-    console.log(`   ${byPort.size} distinct fixed ports are written into these harnesses.`);
-    console.log('   Each is a permanent single point of failure: one orphan holding that port blocks');
-    console.log('   that harness on every future run, which is the 2026-11-24 failure still present.');
+    console.log(`   ${declares} harness(es) declare a fixed PGPORT; ${overwrites} overwrite it from`);
+    console.log('   the live cluster before connecting. Those are vestigial initialisers, not');
+    console.log('   ports — deleting them would stop the next reader drawing the conclusion this');
+    console.log('   file drew.');
     console.log('');
-    if (shared.length) {
-      console.log(`   ${shared.length} port(s) are shared by more than one harness — these CANNOT run`);
-      console.log('   concurrently, by construction:');
-      for (const [port, set] of shared.sort((a, b) => a[0] - b[0])) {
-        console.log(`     port ${port}: ${[...set].sort().join(', ')}`);
-      }
-    } else {
-      console.log('   No port is shared by two harnesses.');
-    }
-    const clashing = [...byEnv.entries()]
-      .filter(([, set]) => new Set([...set].map((x) => x.split(' ')[0])).size > 1);
-    if (clashing.length) {
+    if (liveFixed.length) {
+      console.log(`   GENUINELY FIXED AND LIVE (${liveFixed.length}):`);
+      for (const l of liveFixed.sort()) console.log(`     · ${l}`);
       console.log('');
-      console.log('   And a TRAP: these env var names have DIFFERENT defaults in different files, so');
-      console.log('   setting one — the obvious way to move a harness off a busy port — points every');
-      console.log('   file that reads it at the SAME port and collides them deliberately:');
-      for (const [name, set] of clashing.sort()) {
-        console.log(`     ${name}: ${[...set].sort().join(', ')}`);
-      }
+      console.log('   An APP port is bound directly, so two scripts sharing one cannot run at the');
+      console.log('   same time. That is a real constraint — and it is a handful of scripts, not');
+      console.log('   thirty-one, and not enough to explain a general parallel failure.');
+    } else {
+      console.log('   No genuinely fixed, live port was found.');
     }
   }
   console.log('');
@@ -316,16 +312,21 @@ const createOne = (i) => new Promise((resolve) => {
     console.log('       predicted disk and the measurement refused it; the prediction is wrong and');
     console.log('       is left here rather than quietly edited to match.**');
     console.log('');
-    console.log('   §D is what survives, and it is not "contention" — it is a named resource. The');
-    console.log('   legacy harnesses each hard-code a port. Two that share one cannot run together');
-    console.log('   at all, and the shared env-var defaults mean the obvious workaround creates the');
-    console.log('   collision it was meant to avoid. In SERIAL preflight none of this is reachable,');
-    console.log('   which is why it has never shown up as anything but "a parallel batch is not a');
-    console.log('   verdict".');
+    console.log('   §D DOES NOT SURVIVE EITHER, and an earlier version of this file said it did.');
+    console.log('   It reported 31 fixed ports as the cause, having counted declarations without');
+    console.log('   checking whether one was ever used. They are overwritten from the live cluster');
+    console.log('   before any connection. Only a few directly-bound APP ports are genuinely');
+    console.log('   shared, and those are too few to explain a general failure.');
     console.log('');
-    console.log('   The fix is the one pg-disposable already made: pick a free port and retry. That');
-    console.log('   is a change to pg-legacy-harness and its callers, and it has NOT been made —');
-    console.log('   this file establishes the cause, it does not repair it.');
+    console.log('   SO THE CAUSE IS STILL UNESTABLISHED. Four candidates are eliminated by');
+    console.log('   measurement and a fifth was eliminated by correcting this file. That is the');
+    console.log('   honest state, and it is less comfortable than the one previously reported.');
+    console.log('');
+    console.log('   What has NOT been measured, and is where to look next: what the checks do once');
+    console.log('   connected, under genuine CPU contention — several migrators and several node');
+    console.log('   processes competing, where a check with its own internal timeout gives up and');
+    console.log('   reports a product failure for a scheduling cause. That needs a parallel batch');
+    console.log('   run deliberately while watching per-check durations, not a resource inventory.');
   } else {
     console.log(`   First failure at N=${firstFailure.n}. The verbatim error above is the finding;`);
     console.log('   match it against the five candidates in this file\'s header rather than');
