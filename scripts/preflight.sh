@@ -393,6 +393,56 @@ pf_step "a lease loses its authorization the moment the company does" \
 # is REPO-WIDE and would have run a schema migration from the worker service.
 pf_step "the worker service applies no migration and the variable names match the source" \
   env JWT_SECRET=preflight node --test scripts/worker-railway-config.test.js
+# ── THE OPERATING LOOP, CONNECTED ───────────────────────────────────────────
+#
+# One synthetic business workflow through the REAL authorization implementations and real persisted
+# rows: executive objective → plan → assignment → authorized notification → captured delivery
+# outcome → acknowledgment → completion → evidence validation → scoring → coaching or escalation →
+# briefing → memory → next cycle. Nothing is stubbed to say yes; only the provider TRANSPORT is
+# captured, and the captured request is then asserted field by field.
+#
+# §13 is the point: each step's input is asserted to BE the previous step's output. Thirteen
+# independently passing steps would say nothing about whether the office can traverse them. It also
+# covers the nine negative cases, including that a person is never scored down for the office's own
+# failure to deliver their notification.
+pf_step "the employee operating loop traverses end to end on real authorization" \
+  node scripts/check-employee-operating-loop-db.js
+# ── THE UPSERTS B7.21's MIGRATION BROKE ─────────────────────────────────────
+#
+# identity/schema.js replaces two whole-table unique constraints with PARTIAL unique indexes.
+# Postgres will not infer a partial index from a bare ON CONFLICT target, so four writers — the
+# 18:00 scoring for every user, the orchestrator's daily row and weekly summary, and the daily
+# portfolio snapshot — threw on every execution against a migrated database. Found by the loop
+# check above at its performance-evaluation step. §1 establishes the statement was valid BEFORE the
+# migration, so this measures the regression rather than the syntax; §4 scans every source file so
+# the next constraint replacement cannot repeat it.
+pf_step "every upsert still matches an index after the identity migration" \
+  node scripts/check-upsert-after-identity-migration-db.js
+# ── A.9: MIGRATION 62 ON A DATABASE BUILT BY THE GENUINE HISTORICAL CODE ────
+#
+# The earlier version reconstructed migration 61 by taking today's schema and dropping the three
+# columns migration 62 adds — which measures a belief about migration 61, not migration 61. This one
+# creates a git worktree at 6b11bfb^ (a tree that genuinely has no synthetic-isolation.js), runs its
+# 64 historical migration steps, and applies today's migration to the database that built.
+#
+# What it establishes: the two defaults fail closed in OPPOSITE directions; a pre-existing real
+# company is not marked synthetic; a pre-existing hardware identity comes out RESTRICTED and with its
+# capabilities untouched — not silently widened. And therefore the deployment-ordering fact: applying
+# migration 62 to a database with live workers STOPS them claiming real-company work until an
+# operator widens each one deliberately, so that operator step is a PREREQUISITE, not a follow-up.
+pf_step "migration 62 upgrades a genuine migration-61 database" \
+  node scripts/check-migration-62-genuine-upgrade-db.js
+# ── NEEDS_RESOLUTION CANNOT RE-EXECUTE POSSIBLY-COMPLETED WORK ──────────────
+#
+# NEEDS_RESOLUTION means an attempt was made and its outcome is UNKNOWN — one careless predicate
+# away from "available". Measured at the three places the system could actually do it: the claim
+# predicate (the sink: a fully-capable unrestricted worker is handed nothing, eleven times); the
+# 15-minute reaper (it calls recoverRun, and its body cannot reach retryRun on any input); and the
+# retry path (refused without a recorded human override). §4 also pins a finding: the type-level
+# re-executability gate is called by no product code, so on the retry path the protection is the
+# human override rather than the type declaration.
+pf_step "NEEDS_RESOLUTION cannot re-execute by itself" \
+  node scripts/check-needs-resolution-no-auto-reexec-db.js
 # B3.2. An objective decomposes into a bounded plan, and the plan is a PROPOSAL: every step is
 # independently validated against company scope, capability permission, execution eligibility, STOP
 # controls, approval requirement and budget. A proposal that states any of those — a model's

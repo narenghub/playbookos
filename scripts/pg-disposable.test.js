@@ -262,3 +262,53 @@ test('two concurrent clusters get different directories and ports', (t) => {
     assert.notStrictEqual(a.port, b.port, 'a fixed port is what made one orphan block every run');
   } finally { a.destroy(); b.destroy(); }
 });
+
+// ── THE PORT CHOICE: A GUARANTEE THAT WAS PROSE ─────────────────────────────
+//
+// `create()`'s comment claimed "a unique port per run, so two concurrent runs cannot collide"
+// while the code picked `49152 + random % 16000` with no collision check and no retry. Each
+// cluster connects over its own unix socket, so a duplicate port cannot cross-wire two harnesses;
+// what it does is fail `pg_ctl -w start`, which surfaces as NOT EXECUTED. Rare by the arithmetic,
+// and not the point: one orphan holding a port in that range blocks it for every future run.
+//
+// These tests cover the pure parts. The retry itself is exercised by every other check in
+// preflight, each of which starts a cluster.
+test('listeningPorts reads the kernel and returns plausible port numbers', () => {
+  const ports = D.listeningPorts();
+  assert.ok(ports instanceof Set, 'a Set of ports');
+  for (const p of ports) {
+    assert.ok(Number.isInteger(p) && p > 0 && p <= 65535, `${p} is a port number`);
+  }
+});
+
+test('pickPort returns a high port that is not currently listening', () => {
+  const listening = D.listeningPorts();
+  for (let i = 0; i < 50; i += 1) {
+    const p = D.pickPort();
+    assert.ok(p >= D.PORT_FLOOR, `${p} is above the floor`);
+    assert.ok(p < D.PORT_FLOOR + D.PORT_SPAN, `${p} is inside the range`);
+    assert.ok(!listening.has(p), `${p} was not already listening`);
+  }
+});
+
+test('isBindFailure recognises a taken port and nothing else', () => {
+  assert.ok(D.isBindFailure('could not bind IPv4 address "0.0.0.0": Address already in use'),
+    'the bind error itself');
+  assert.ok(D.isBindFailure('Is another postmaster already running on port 50123?'),
+    'the postmaster-already-running error');
+  // "could not create any TCP/IP sockets" is the line postgres prints AFTER the bind error. On its
+  // own it does not say the port was taken, so it is deliberately NOT a retry trigger: a socket
+  // failure another port will not fix must be reported, not retried four times.
+  for (const other of [
+    'FATAL: could not create any TCP/IP sockets',
+    'initdb: command not found',
+    'could not access directory "/tmp/x": Permission denied',
+    'No space left on device',
+    'FATAL: data directory "/tmp/x/data" has invalid permissions',
+    '',
+  ]) {
+    assert.ok(!D.isBindFailure(other),
+      `"${other}" must NOT be retried on another port — a retry loop that swallows an `
+      + 'infrastructure error turns one clear failure into four identical ones');
+  }
+});

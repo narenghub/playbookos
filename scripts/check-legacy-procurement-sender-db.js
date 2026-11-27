@@ -196,6 +196,37 @@ globalThis.fetch = async (u, opts) => {
     // check exists to remove. Applying the real DDL keeps the fixture honest about production.
     for (const sql of require('../src/lib/outbound/ledger-schema').DDL) await q(sql);
 
+    // ── EVERY OTHER GATE OPEN, SO THE ONE UNDER TEST IS WHAT IS MEASURED ────
+    //
+    // B7.9a added sender authorization at the mailer. This harness did not migrate
+    // `sender_identities`, so every send here was refused with `sender_authorization_unknown` —
+    // the declarations table could not be read, and an unreadable declaration fails closed.
+    // That refusal is CORRECT, and it made M1 useless: the mutation control restores the
+    // departed-director fallback and asserts a letter would go out, proving the identity guard is
+    // load-bearing. With the sender gate refusing first, the control measured nothing, and the
+    // harness said so by name rather than passing quietly. **This is the gate-contamination
+    // pattern, and the owner's instruction is to preserve independent positive controls so one
+    // refusal cannot mask the boundary under test.**
+    //
+    // So the fixture DECLARES both identities it uses, at both scopes, which opens the sender gate
+    // and leaves `rfq-identity-guard` as the only thing standing. Declaring the departed
+    // director's address here is not a weakening of the product: it is what isolates the guard.
+    // If the guard were removed, cases 1–4 would start failing, which is the point of them.
+    await require('../src/lib/outbound/sender-identity').migrateSenderIdentities(q);
+    for (const addr of ['palash@abiozen.com', 'procurement@abiozen.com', 'naren@abiozen.com',
+      'live@abiozen.invalid']) {
+      for (const [scope, company] of [['platform', null], ['company', 'legco']]) {
+        await q(
+          `INSERT INTO sender_identities
+             (id, address, company_id, company_scope, provider_account, purpose,
+              may_send, may_receive_replies, authorized_by, reason)
+           VALUES ($1,$2,$3,$4,$5,'any',true,true,'leg-admin',
+                   'legacy RFQ fixture: opens the sender gate so the identity guard is isolated')
+           ON CONFLICT (id) DO NOTHING`,
+          [`leg-si-${scope}-${addr}`, addr, company, scope, `resend:${addr}`]);
+      }
+    }
+
     // The molecule registry the identity guard reads, in the shape the other harnesses use, so the
     // guard can APPROVE this fixture and case 3 actually reaches the mailer. If any of this fails
     // the sender cases still stand: 1, 2 and 4 do not depend on a send succeeding.

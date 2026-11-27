@@ -135,6 +135,52 @@ function installHandlers() {
   });
 }
 
+/** Ports currently in LISTEN state, read from the kernel rather than probed one at a time. */
+function listeningPorts() {
+  const ports = new Set();
+  for (const f of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let text;
+    try { text = fs.readFileSync(f, 'utf8'); } catch (_) { continue; }
+    for (const line of text.split('\n').slice(1)) {
+      const col = line.trim().split(/\s+/);
+      // local_address is "HEXADDR:HEXPORT"; st 0A is TCP_LISTEN.
+      if (col.length > 3 && col[3] === '0A' && col[1] && col[1].includes(':')) {
+        ports.add(parseInt(col[1].split(':')[1], 16));
+      }
+    }
+  }
+  return ports;
+}
+
+const PORT_FLOOR = 49152;
+const PORT_SPAN = 16000;
+
+/**
+ * A random high port that is not already listening, and not one another live cluster of this
+ * process has taken. Falls back to a bare random pick if /proc is unreadable, which is the old
+ * behaviour and still better than refusing to run.
+ */
+function pickPort() {
+  const taken = listeningPorts();
+  for (const c of live) taken.add(c.port);
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const p = PORT_FLOOR + (crypto.randomBytes(2).readUInt16BE(0) % PORT_SPAN);
+    if (!taken.has(p)) return p;
+  }
+  // 40 consecutive hits means the range is genuinely congested, which is worth saying rather than
+  // returning a port that is known to be taken.
+  throw new InfrastructureError(
+    `no free port found in ${PORT_FLOOR}..${PORT_FLOOR + PORT_SPAN - 1} after 40 attempts; `
+    + `${taken.size} ports are listening. Run \`node scripts/pg-cleanup.js\` to inventory stale `
+    + 'clusters.');
+}
+
+/** Does this failure look like the port was taken, rather than anything else going wrong? */
+function isBindFailure(detail) {
+  return /could not bind|address already in use|another postmaster|Address already in use/i
+    .test(String(detail));
+}
+
 /**
  * Create a disposable cluster. Throws InfrastructureError when the environment cannot support one,
  * so a caller can report "could not run" rather than "the product is broken".
@@ -151,8 +197,21 @@ function create({ label = 'test', port = null } = {}) {
       + 'a test failure — run `node scripts/pg-cleanup.js` to inventory stale clusters.');
   }
 
-  // A unique directory AND a unique port per run, so two concurrent runs cannot collide and an
-  // orphan cannot block a later one.
+  // A unique directory per run, and a port that is CHECKED rather than merely randomised.
+  //
+  // This comment used to say "a unique port per run, so two concurrent runs cannot collide" while
+  // the code picked `49152 + random % 16000` with no collision check and no retry — a guarantee
+  // asserted in prose and not provided by the code underneath it. Each cluster connects over its
+  // own unix socket, so a duplicate port cannot cross-wire two harnesses; what it does is make
+  // `pg_ctl -w start` fail outright, which surfaces as an InfrastructureError and a check that
+  // reports NOT EXECUTED. Rare by the arithmetic (~0.2% at four concurrent, ~1.2% at twenty), and
+  // the arithmetic is not the point: an orphan or an unrelated service holding one port in that
+  // range blocks it for every future run, which is the 2026-11-24 fixed-port failure in a
+  // lower-probability shape.
+  //
+  // So: avoid ports already listening, and retry the start on a bind failure. Checking then
+  // binding is still a race — nothing short of holding the socket closes that — which is exactly
+  // why the retry below exists rather than only the check.
   // When this process is root, initdb runs AS postgres, which must be able to traverse into the
   // base. A base created with mkdtemp is 0700, so postgres cannot enter it and initdb fails with
   // "could not access directory … Permission denied" — which happens only for a CONFIGURED base,
@@ -162,7 +221,7 @@ function create({ label = 'test', port = null } = {}) {
     try { fs.chmodSync(BASE, 0o711); } catch (_) { /* not ours to change; initdb will report it */ }
   }
   const base = fs.mkdtempSync(path.join(BASE, `${PREFIX}${label}-`));
-  const chosen = port || 49152 + (crypto.randomBytes(2).readUInt16BE(0) % 16000);
+  const chosen = port || pickPort();
   const asRoot = process.getuid && process.getuid() === 0;
 
   const owner = {
@@ -178,33 +237,74 @@ function create({ label = 'test', port = null } = {}) {
   fs.writeFileSync(path.join(base, OWNER_FILE), `${JSON.stringify(owner, null, 2)}\n`);
 
   const log = path.join(base, 'pg.log');
+
+  // initdb once; only the START is retried, because a bind failure says nothing about the cluster
+  // directory and re-running initdb would cost seconds for no reason.
+  const initCmd = asRoot
+    ? `su postgres -c "PATH=${dir}:\\$PATH initdb -D ${base}/data ${INITDB_FLAGS}"`
+    : `PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`;
+  const startCmd = (p) => (asRoot
+    ? `su postgres -c "PATH=${dir}:\\$PATH pg_ctl -D ${base}/data -l ${log} `
+      + `-o '-p ${p} -k ${base}' -w start"`
+    : `PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${log} -o '-p ${p} -k ${base}' -w start`);
+  const detailOf = (e) => String((e && (e.stderr || e.message)) || e)
+    .split('\n').slice(-6).join(' ').trim();
+
+  let activePort = chosen;
   try {
-    if (asRoot) {
-      execFileSync('sh', ['-c', `chown -R postgres ${base}`], { stdio: 'pipe' });
-      execFileSync('sh', ['-c',
-        `su postgres -c "PATH=${dir}:\\$PATH initdb -D ${base}/data ${INITDB_FLAGS}" && `
-        + `su postgres -c "PATH=${dir}:\\$PATH pg_ctl -D ${base}/data -l ${log} `
-        + `-o '-p ${chosen} -k ${base}' -w start"`], { stdio: 'pipe' });
-    } else {
-      execFileSync('sh', ['-c',
-        `PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS} && `
-        + `PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${log} -o '-p ${chosen} -k ${base}' -w start`],
-      { stdio: 'pipe' });
-    }
+    if (asRoot) execFileSync('sh', ['-c', `chown -R postgres ${base}`], { stdio: 'pipe' });
+    execFileSync('sh', ['-c', initCmd], { stdio: 'pipe' });
   } catch (e) {
-    const detail = String((e && (e.stderr || e.message)) || e).split('\n').slice(-6).join(' ').trim();
-    try { fs.rmSync(base, { recursive: true, force: true }); } catch (_) {}
+    const detail = detailOf(e);
+    try { fs.rmSync(base, { recursive: true, force: true }); } catch (_) { /* best effort */ }
+    throw new InfrastructureError(`could not initialise a disposable cluster: ${detail}`);
+  }
+
+  // ── THE RETRY, AND WHY IT IS BOUNDED AND CONDITIONAL ──────────────────────
+  //
+  // Only a BIND failure is retried, and only when the caller did not name a port. A caller that
+  // asked for a specific port wants that port, and retrying elsewhere would quietly give it a
+  // different one. Anything that is not a bind failure is reported immediately: a retry loop that
+  // swallows "initdb is not on PATH" or "out of disk" turns a clear infrastructure error into three
+  // identical ones and a confusing summary.
+  let started = false;
+  let lastDetail = null;
+  for (let attempt = 0; attempt < 4 && !started; attempt += 1) {
+    if (attempt > 0) {
+      activePort = pickPort();
+      owner.port = activePort;
+      try {
+        fs.writeFileSync(path.join(base, OWNER_FILE), `${JSON.stringify(owner, null, 2)}\n`);
+      } catch (_) { /* the marker is for cleanup, not for correctness */ }
+    }
+    try {
+      execFileSync('sh', ['-c', startCmd(activePort)], { stdio: 'pipe' });
+      started = true;
+    } catch (e) {
+      lastDetail = detailOf(e);
+      if (!isBindFailure(lastDetail)) break;
+      if (port) break;   // an explicitly requested port is not silently replaced
+    }
+  }
+  if (!started) {
+    try { fs.rmSync(base, { recursive: true, force: true }); } catch (_) { /* best effort */ }
     // Reported, never swallowed into "unavailable": a blocked port and a missing binary need
     // different action, and conflating them is what hid a self-inflicted failure for an afternoon.
-    throw new InfrastructureError(`could not start a disposable cluster: ${detail}`);
+    throw new InfrastructureError(`could not start a disposable cluster: ${lastDetail}`);
   }
 
   const cluster = {
     base,
     dir,
-    port: chosen,
+    // The port it ACTUALLY started on, which after a bind retry is not the one first chosen.
+    // Reporting `chosen` here would hand every caller a URL pointing at the port that failed.
+    port: activePort,
     runId: RUN_ID,
-    url: `postgresql://postgres@localhost/postgres?host=${base}&port=${chosen}&sslmode=disable`,
+    // `activePort`, not `chosen`: with host=<dir> the port selects the unix socket FILE
+    // (`.s.PGSQL.<port>`), so after a bind retry the old value names a socket that was never
+    // created and every connection fails with "No such file or directory" — a cluster that is
+    // running perfectly and unreachable by the URL it handed out.
+    url: `postgresql://postgres@localhost/postgres?host=${base}&port=${activePort}&sslmode=disable`,
     destroy() {
       if (!live.has(cluster)) return;
       live.delete(cluster);
@@ -337,4 +437,9 @@ module.exports = {
   pidStartTime,
   sameProcess,
   safeCandidate,
+  listeningPorts,
+  pickPort,
+  isBindFailure,
+  PORT_FLOOR,
+  PORT_SPAN,
 };

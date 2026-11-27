@@ -251,3 +251,55 @@ test('8d. the caller cannot choose the COLUMN — that is the bypass it would be
   assert.equal(r.allowed, true, 'the extra field must be ignored, not honoured');
   assert.equal(r.derivedFrom, 'daily_tasks.task_date');
 });
+
+// ── THE CONSTANT COMES FROM THE MODULE THAT OWNS IT ─────────────────────────
+//
+// Seven product call sites used to read it as `require('../mailer').CONTENT_DAY.TIMELESS` — a
+// constant fetched through a module that merely re-exports it, evaluated inside an argument list at
+// call time. `mailer.js` does export it, so this worked in production and looked fine.
+//
+// It broke the moment anything replaced the mailer in the require cache, which is the standard way
+// this repo proves "no email was attempted": check-rfq-identity-guard-db.js installs a four-key
+// spy, and `undefined.TIMELESS` threw a TypeError that surfaced as "harness error" on the one
+// preflight step whose subject is that an unsupported CAS never reaches a supplier. The guard was
+// intact; the instrument could not reach it.
+//
+// It is also the `platform-sender.js` lesson a second time: a value read ACROSS a module boundary
+// that does not own it is a value that can be absent without anyone saying so. The constant lives
+// in this module, and every caller requires this module.
+test('no product file reads CONTENT_DAY through the mailer', () => {
+  // This file lives in src/lib/outbound/, so the repository root is THREE levels up. Two resolved
+  // to src/ and made the walk scan src/src/ — caught by the test failing rather than by the scan
+  // quietly finding no files, which is what a `try` around readdirSync would have produced.
+  const root = path.join(__dirname, '..', '..', '..');
+  const files = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(full); }
+      else if (e.name.endsWith('.js') && !e.name.endsWith('.test.js')) files.push(full);
+    }
+  };
+  walk(path.join(root, 'src'));
+
+  const offenders = [];
+  for (const f of files) {
+    // mailer.js itself may of course hold and re-export it; everyone else requires this module.
+    if (f === path.join(root, 'src', 'lib', 'mailer.js')) continue;
+    const src = fs.readFileSync(f, 'utf8');
+    const re = /require\((['"])[^'"]*mailer\1\)\s*\.\s*CONTENT_DAY/g;
+    let m;
+    while ((m = re.exec(src)) !== null) {
+      const line = src.slice(0, m.index).split('\n').length;
+      offenders.push(`${path.relative(root, f)}:${line}`);
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    `these read CONTENT_DAY through the mailer, so any mailer spy makes them throw: `
+    + `${offenders.join(', ')}. Require src/lib/outbound/content-day directly.`);
+});
+
+test('and the constant is reachable from content-day itself', () => {
+  assert.strictEqual(require('./content-day').TIMELESS, 'timeless',
+    'the value the seven call sites now read');
+});

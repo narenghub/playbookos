@@ -396,6 +396,19 @@ deps = {}) {
     // downgrade the ledger's own classification of its send in the same argument that skipped
     // the gate. The alert path opens its own non-consequential attempt in transmitAlert().
     workflow, agent, approvalId, consequential: true, payloadDigest: actualDigest,
+    // ── WHOSE MAIL THIS WAS ──────────────────────────────────────────────────
+    //
+    // This was omitted, so it defaulted to null on EVERY send. The company is already resolved
+    // two statements above and handed to the gate — the ledger simply never received it, which
+    // made "every message sent on behalf of company X" return nothing, for every company, for
+    // the life of the column. B7.21 added `email_log.company_id`; the one statement that writes
+    // the row was never updated to populate it, and nothing failed, because a NULL in an audit
+    // column reads as "no company" rather than as a missing value.
+    //
+    // Derived from the SAME resolved context the gate used, so the audit row and the
+    // authorization decision cannot disagree about who the send was for. `transmitAlert` keeps
+    // its own `companyId: null` deliberately: an operator alert is platform-scope.
+    companyId: (companyContext && companyContext.companyId) || null,
   });
   if (!att.ok) {
     return { ok: false, id: null, error: att.error, phase: 'refused_before_request',

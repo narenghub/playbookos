@@ -354,7 +354,12 @@ async function scoreTeamMember(userId, date) {
   await query(
     `INSERT INTO performance_scores (id, user_id, score_date, score_0_to_100, metrics_json, blockers_json, claude_coaching_note, escalated_to_admin)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     ON CONFLICT (user_id, score_date) DO UPDATE
+     -- The index predicate is NOT decoration: identity/schema.js replaced this table's
+     -- whole-table unique constraint with two PARTIAL indexes, and Postgres will not infer a
+     -- partial index from a bare target. Without the WHERE, this statement throws on every
+     -- execution against a migrated database. This writer supplies no company_id, so every
+     -- row it writes is the unattributed shape and this is the index that governs it.
+     ON CONFLICT (user_id, score_date) WHERE company_id IS NULL DO UPDATE
      SET score_0_to_100=$4, metrics_json=$5, blockers_json=$6, claude_coaching_note=$7, escalated_to_admin=$8`,
     [crypto.randomUUID(), userId, date, score, JSON.stringify(metrics), JSON.stringify(blockers), note, escalated ? 1 : 0]
   );

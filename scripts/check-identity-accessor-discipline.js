@@ -98,6 +98,14 @@ const EXEMPT = new Map([
     + 'predicate is written to hide rows a reader should not see and the claim here is that there '
     + 'are no rows at all. The cycle itself writes only through office/memory.remember, which is '
     + 'what the section breaks on purpose. The user_companies statement is fixture cleanup by id.'],
+  ['scripts/check-whatsapp-boundary-db.js',
+    'The WhatsApp transmission-boundary check. Its fixture membership is granted through '
+    + 'grantMembership, and the one user_companies statement is CLEANUP BY RECORDED ID: '
+    + 'revokeMembership deliberately writes a revocation rather than deleting the row, which is '
+    + 'right for the product and wrong for a fixture, because user_companies references users and '
+    + 'the user cleanup fails while the row survives. Deleted by the ids this run inserted — never '
+    + 'by timestamp, never by pattern — and the check asserts afterwards that none of its fixture '
+    + 'users remain. It reads nothing from the table.'],
   ['scripts/check-business-capabilities-db.js',
     'B3.5\'s read-only capability check. Its fixture memberships are granted through '
     + 'grantMembership — the first version INSERTed into user_companies directly and this scanner '

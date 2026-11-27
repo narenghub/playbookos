@@ -516,7 +516,7 @@ async function sendRFQEmails(rfqIds, dryRun = false) {
       }
       const ok = await sendEmail({
         // B7.13: correspondence, which concerns no business day — declared, not omitted
-        contentDay: require('../mailer').CONTENT_DAY.TIMELESS, timelessKind: 'supplier_rfq', to: s.contact_email, subject, html, from: fromLine,
+        contentDay: require('../outbound/content-day').TIMELESS, timelessKind: 'supplier_rfq', to: s.contact_email, subject, html, from: fromLine,
         replyTo: sig.email, companyContext,
         workflow: 'legacy-supplier-rfq-email', agent: 'procurement-agent' });
       if (!ok) {

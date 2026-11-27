@@ -610,7 +610,7 @@ router.post('/sitenex/contracts/:id/send', authMiddleware, adminOnly, requireTie
 
     const sent = await mailer().sendEmailDetailed({
       // B7.13: correspondence, which concerns no business day — declared, not omitted
-      contentDay: require('../lib/mailer').CONTENT_DAY.TIMELESS, timelessKind: 'contract_document',
+      contentDay: require('../lib/outbound/content-day').TIMELESS, timelessKind: 'contract_document',
       to, cc, from, replyTo: from, subject: mail.subject, html: mail.html,
       attachments: [{ filename: c.file_name || `${c.contract_no}.docx`, content: c.file_bytes }],
     });

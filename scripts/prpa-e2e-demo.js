@@ -226,11 +226,57 @@ async function main() {
     const verdicts = rows.reduce((a, r) => { a[r.feasibility.verdict] = (a[r.feasibility.verdict] || 0) + 1; return a; }, {});
     ok(`product classes: ${JSON.stringify(classes)}`);
     ok(`feasibility verdicts: ${JSON.stringify(verdicts)}`);
-    if ((verdicts.NOT_FEASIBLE || 0) > 0) ok(`${verdicts.NOT_FEASIBLE} barred as undeliverable — eligible, and we could not supply them`);
-    else bad('nothing was NOT_FEASIBLE, which on this dataset means the feasibility gate did not run');
+    // ── THE GATE IS MEASURED OVER THE WHOLE POPULATION, NOT THE WINDOW ──────
+    //
+    // This used to read the verdict histogram off the ACTIONABLE board above and conclude, when it
+    // held no NOT_FEASIBLE, that "the feasibility gate did not run". **That inference was wrong,
+    // and the assertion decayed with the calendar.**
+    //
+    // `scope=actionable` keeps notices that are open and whose deadline falls between now and
+    // now+90 days. The fixture is frozen at 2026-11-06, so the window slides away from it every
+    // day. Measured on 2026-11-27: of the 82 records, 77 were inside the window on the harvest date
+    // and only 26 still are — 54 have EXPIRED. The notice that carries the OEM language, the Roche
+    // Ventana one the next assertion names, is among the expired, which is why that assertion
+    // reported DID NOT RUN at the same time as this one reported a failure. One cause, two
+    // symptoms, and neither of them a defect in the gate.
+    //
+    // It also could not have been the gate. With an empty capability registry and no supplier
+    // quotes, every check resolves to 'ok' or 'unknown' EXCEPT the proprietary-OEM and
+    // oem_authorization paths, which read the notice text. `fulfilment_lead_time` blocks only on
+    // `verified.first_delivery_required`, and nothing is verified here. So on this dataset
+    // NOT_FEASIBLE is reachable by exactly one road, and the filter had removed the only notice
+    // that travels it.
+    //
+    // So the gate is now asked over `scope=all`, where the population is the dataset rather than
+    // the calendar. The actionable board above keeps its own assertions, which is what the window
+    // is for. A check against a frozen fixture must not depend on the wall clock: it will go red
+    // eventually for a reason that has nothing to do with the code, and this one did.
+    const allScope = await request('GET', '/api/prpa/tracker/opportunities?scope=all', { token });
+    if (allScope.status !== 200 || !allScope.json.opportunities) {
+      bad(`scope=all returned ${allScope.status}`, JSON.stringify(allScope.json).slice(0, 200));
+    }
+    const allRows = (allScope.json && allScope.json.opportunities) || [];
+    const allVerdicts = allRows.reduce(
+      (a, r) => { a[r.feasibility.verdict] = (a[r.feasibility.verdict] || 0) + 1; return a; }, {});
+    if (allRows.length > rows.length) {
+      ok(`scope=all widens the population from ${rows.length} to ${allRows.length} — the window is `
+        + 'a view, and the gate is a property of the dataset');
+    } else {
+      bad(`scope=all returned ${allRows.length} rows, not more than the actionable ${rows.length}`);
+    }
+    ok(`verdicts over the whole dataset: ${JSON.stringify(allVerdicts)}`);
+    if ((allVerdicts.NOT_FEASIBLE || 0) > 0) {
+      ok(`${allVerdicts.NOT_FEASIBLE} barred as undeliverable — eligible, and we could not supply `
+        + 'them. The gate DISCRIMINATES: it does not label everything the same');
+    } else {
+      bad('no notice in the whole dataset is NOT_FEASIBLE, so the feasibility gate is not '
+        + 'discriminating — this is now a statement about the gate rather than about the calendar');
+    }
 
-    // A notice naming a diagnostics OEM must be NOT_FEASIBLE, by name.
-    const roche = rows.find((r) => /roche|ventana/i.test(r.title || ''));
+    // A notice naming a diagnostics OEM must be NOT_FEASIBLE, by name. Looked up in the
+    // whole-dataset rows for the same reason as above: on 2026-11-27 this notice has expired out of
+    // the actionable window, and its absence from a VIEW says nothing about the gate.
+    const roche = allRows.find((r) => /roche|ventana/i.test(r.title || ''));
     if (roche) {
       if (roche.feasibility.verdict === 'NOT_FEASIBLE') {
         ok(`${roche.solicitation_number} (Roche Ventana) → NOT_FEASIBLE: ${String(roche.feasibility.blockers[0]).slice(0, 72)}…`);

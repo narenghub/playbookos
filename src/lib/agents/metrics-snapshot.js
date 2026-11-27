@@ -106,7 +106,10 @@ async function takeMetricsSnapshot({ dryRun = false, dateOverride = null } = {})
     await query(
       `INSERT INTO metrics_snapshots (id, snapshot_date, revenue_actual, revenue_target, revenue_pct, team_avg_score, top_sku, top_buyer_segment, apollo_emails_sent, apollo_reply_rate, linkedin_pipeline_count, warm_leads_count, skus_added_this_week, github_commits_this_week)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       ON CONFLICT (snapshot_date) DO UPDATE SET
+       -- WHERE company_id IS NULL: this snapshot is the PORTFOLIO aggregate, which is exactly
+       -- what metrics_snapshots_one_portfolio_per_day governs. A bare target names the
+       -- constraint identity/schema.js dropped.
+       ON CONFLICT (snapshot_date) WHERE company_id IS NULL DO UPDATE SET
          revenue_actual = EXCLUDED.revenue_actual,
          revenue_target = EXCLUDED.revenue_target,
          revenue_pct = EXCLUDED.revenue_pct,

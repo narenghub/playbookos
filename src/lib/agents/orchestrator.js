@@ -231,7 +231,9 @@ async function runPerformanceCheck({ dryRun = false, date, userId = null, silent
             consecutive_days_below_60, consecutive_days_above_80,
             is_weekly_summary, created_at)
          VALUES ($1,$2,$3,$4,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,0,NOW())
-         ON CONFLICT (user_id, score_date) DO UPDATE
+         -- WHERE company_id IS NULL: see the note in core.js. This row is unattributed, and a
+         -- bare conflict target matches no index on a migrated database.
+         ON CONFLICT (user_id, score_date) WHERE company_id IS NULL DO UPDATE
            SET score_0_to_100 = EXCLUDED.score_0_to_100,
                total_score = EXCLUDED.total_score,
                task_completion_score = EXCLUDED.task_completion_score,
@@ -272,7 +274,8 @@ async function runPerformanceCheck({ dryRun = false, date, userId = null, silent
       await query(
         `INSERT INTO performance_scores (id, user_id, score_date, score_0_to_100, total_score, is_weekly_summary, notes, created_at)
          VALUES ($1, $2, $3, $4, $4, 1, $5, NOW())
-         ON CONFLICT (user_id, score_date) DO UPDATE
+         -- WHERE company_id IS NULL: the weekly summary is unattributed too.
+         ON CONFLICT (user_id, score_date) WHERE company_id IS NULL DO UPDATE
            SET total_score = EXCLUDED.total_score,
                score_0_to_100 = EXCLUDED.score_0_to_100,
                is_weekly_summary = 1, notes = EXCLUDED.notes`,
