@@ -1280,7 +1280,7 @@ cron.schedule('0 7 * * 1', withAlerts('weekly-mon-7cst-data-accuracy', async () 
 
   await sendEmail({
     // B7.13: correspondence, which concerns no business day — declared, not omitted
-    contentDay: require('./src/lib/mailer').CONTENT_DAY.TIMELESS,
+    contentDay: require('./src/lib/mailer').CONTENT_DAY.TIMELESS, timelessKind: 'account_lifecycle',
     to: process.env.OUTREACH_REPORT_TO || 'naren@abiozen.com',
     subject,
     html: `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:14px;color:#15202b">

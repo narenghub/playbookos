@@ -12,7 +12,7 @@
 //
 // `sendEmailDetailed` took a SECOND POSITIONAL ARGUMENT:
 //
-//     async function sendEmailDetailed({ contentDay: 'timeless', ... }, internal = {}) {
+//     async function sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', ... }, internal = {}) {
 //       const att  = await LEDGER.beginAttempt({ ..., consequential: !internal.alertAlreadyAuthorized });
 //       const gate = internal.alertAlreadyAuthorized
 //         ? { allowed: true, reason: null }
@@ -174,7 +174,7 @@ test('1. the original bypass argument no longer skips the gate — 0 provider in
   STOPS = GLOBAL_STOP;
 
   const r = await MAILER.sendEmailDetailed(
-    { contentDay: 'timeless', to: OUTSIDER, subject: 'Quotation QT-9001', html: '<p>12 kg, USD 48,150</p>' },
+    { contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Quotation QT-9001', html: '<p>12 kg, USD 48,150</p>' },
     { alertAlreadyAuthorized: true });          // ← THE BYPASS, AS IT WAS REACHED
 
   assert.strictEqual(SENDS.length, 0,
@@ -189,7 +189,7 @@ test('1. the original bypass argument no longer skips the gate — 0 provider in
 
 test('1b. and the ledger records the attempt as consequential, not observability', async () => {
   STOPS = GLOBAL_STOP;
-  await MAILER.sendEmailDetailed({ contentDay: 'timeless', to: OUTSIDER, subject: 'Q', html: '<p>x</p>' },
+  await MAILER.sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Q', html: '<p>x</p>' },
     { alertAlreadyAuthorized: true });
 
   assert.strictEqual(ATTEMPTS.length, 1, 'no ledger attempt was opened for a refused send');
@@ -207,7 +207,7 @@ test('1c. the bypass fails even with an UNKNOWN second argument shape', async ()
   for (const arg of [{ alertAlreadyAuthorized: true }, { alreadyAuthorized: true },
     { internal: true }, { consequential: false }, true, 'yes']) {
     SENDS = [];
-    const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', to: OUTSIDER, subject: 'Q', html: '<p>x</p>' }, arg);
+    const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Q', html: '<p>x</p>' }, arg);
     assert.strictEqual(SENDS.length, 0,
       `a second argument of ${JSON.stringify(arg)} reached the provider`);
     assert.strictEqual(r.stopped, true);
@@ -218,7 +218,7 @@ test('1c. the bypass fails even with an UNKNOWN second argument shape', async ()
 
 test('2. an ordinary send is refused under the global STOP — 0 provider invocations', async () => {
   STOPS = GLOBAL_STOP;
-  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>' });
+  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>' });
 
   assert.strictEqual(SENDS.length, 0, 'an ordinary send reached the provider through a global STOP');
   assert.strictEqual(r.ok, false);
@@ -230,7 +230,7 @@ test('2b. with no stop and a released approval it DOES send — the control is n
   // Without this, every assertion above would pass against a mailer that refuses everything, and
   // the suite would prove nothing about the gate. 1,113 emails were lost to exactly that silence.
   APPROVE = true;
-  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>',
+  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>',
     approvalId: 'ap-1' });
 
   assert.strictEqual(SENDS.length, 1, `expected exactly 1 provider invocation, got ${SENDS.length}`);
@@ -299,7 +299,7 @@ test('4b. a caller-supplied email.alert capability does NOT exempt an outside re
   // The capability is an ordinary parameter of the exported function. Before CEO item B this alone
   // transmitted through a hold; it must now be downgraded to email.send and refused.
   STOPS = GLOBAL_STOP;
-  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', to: OUTSIDER, subject: 'Alert', html: '<p>x</p>',
+  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Alert', html: '<p>x</p>',
     capability: 'email.alert' });
 
   assert.strictEqual(SENDS.length, 0,
@@ -313,7 +313,7 @@ test('4c. and the two cannot be combined — capability plus the old bypass argu
   // second argument to skip the check that would catch the relabel.
   STOPS = GLOBAL_STOP;
   const r = await MAILER.sendEmailDetailed(
-    { contentDay: 'timeless', to: OUTSIDER, subject: 'Alert', html: '<p>x</p>', capability: 'email.alert' },
+    { contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Alert', html: '<p>x</p>', capability: 'email.alert' },
     { alertAlreadyAuthorized: true });
 
   assert.strictEqual(SENDS.length, 0, 'the combination of a relabel and the bypass still transmits');
@@ -326,7 +326,7 @@ test('5. a STOP-store error refuses a consequential send — 0 provider invocati
   STORE_THROWS = true;
   APPROVE = true;
 
-  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>',
+  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>',
     approvalId: 'ap-1' });
 
   assert.strictEqual(SENDS.length, 0,
@@ -338,7 +338,7 @@ test('5. a STOP-store error refuses a consequential send — 0 provider invocati
 
 test('5b. and a STOP-store error cannot be bypassed by the second argument either', async () => {
   STORE_THROWS = true;
-  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>' },
+  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>' },
     { alertAlreadyAuthorized: true });
 
   assert.strictEqual(SENDS.length, 0,
@@ -354,7 +354,7 @@ test('5b. and a STOP-store error cannot be bypassed by the second argument eithe
 
 test('6. a digest mismatch still refuses at the transport — 0 provider invocations', async () => {
   APPROVE = true;
-  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>',
+  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>',
     approvalId: 'ap-1', expectedDigest: 'f'.repeat(64) });
 
   assert.strictEqual(SENDS.length, 0, 'a message whose digest did not match was transmitted');
@@ -364,7 +364,7 @@ test('6. a digest mismatch still refuses at the transport — 0 provider invocat
 
 test('6b. an external send with NO released approval is refused', async () => {
   APPROVE = false;
-  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>',
+  const r = await MAILER.sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: OUTSIDER, subject: 'Hello', html: '<p>x</p>',
     approvalId: 'ap-missing' });
 
   assert.strictEqual(SENDS.length, 0, 'an unapproved external message was transmitted');
@@ -463,7 +463,17 @@ test('7d. transmitAlert does not route through the exported function', () => {
   // refused by the global STOP — test 3 covers that behaviourally, this says why.
   const i = mailerCode.indexOf('async function transmitAlert(');
   assert.ok(i > 0, 'transmitAlert could not be located — update this guard');
-  const body = mailerCode.slice(i, i + 1600);
+  // THE SLICE IS BOUNDED BY THE FUNCTION, NOT BY A CHARACTER COUNT. It used to read 1600
+  // characters, and B7.9a's sender check pushed `deliverAuthorized` past that window — so this
+  // guard failed while the property it guards still held. Widening the number would have been
+  // broadening a detector until it stopped complaining, which is indistinguishable from fixing it.
+  // Finding the next top-level function instead means the window follows the code.
+  const after = mailerCode.slice(i + 1);
+  const nextFn = after.search(/\n(?:async )?function /);
+  const body = nextFn > 0 ? after.slice(0, nextFn) : after;
+  assert.ok(body.length > 200 && body.length < 12000,
+    `the bounded body is ${body.length} characters, which is not a plausible function — the `
+    + 'boundary search is reading the wrong thing');
   assert.ok(!/sendEmailDetailed\s*\(/.test(body),
     'transmitAlert calls sendEmailDetailed, whose gate will refuse it under a global STOP');
   assert.ok(/deliverAuthorized\s*\(/.test(body),

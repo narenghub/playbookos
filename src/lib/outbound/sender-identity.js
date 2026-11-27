@@ -169,6 +169,29 @@ function envDeclaredSenders(env = process.env) {
     const a = oneAddress(env[key]);
     if (a) out.push({ address: a, source: key });
   }
+  // ── THE COMPILED-IN PLATFORM DEFAULT, WHICH IS ALSO A DECLARATION ────────
+  //
+  // Found by wiring B7.9a into the internal road: `mailer.DEFAULT_FROM` is a hardcoded
+  // `PlayNexa <no-reply@adificetechnologies.com>`, used whenever MAIL_FROM and RESEND_FROM are both
+  // unset. It had no declaration anywhere, so enforcing sender authorization on the internal road
+  // refused EVERY internal send in any environment without those variables — which is every test
+  // environment, and would be production the day somebody unset one.
+  //
+  // It belongs here by the same argument B7.9 used to keep MAIL_FROM: it names exactly ONE address,
+  // and that address is reviewed by being written in source rather than configured. What it is NOT
+  // is a company authorization — it is platform scope, like the env entries beside it, so it can
+  // never authorize sending on a company's behalf once a declaration exists for that company.
+  //
+  // `envEntriesNeedingDeclaration()` reports it alongside the env vars, so B7.11a's migration list
+  // names it rather than leaving it as the one source nobody has to declare.
+  // From `outbound/platform-sender.js`, NOT from `../mailer`. The two form a cycle, and reading
+  // DEFAULT_FROM across it returned `undefined` for the life of the process without throwing — see
+  // that module's header. No try/catch here either: a missing constant is a programming error that
+  // should be loud, and the previous catch is what made it quiet.
+  const compiled = oneAddress(require('./platform-sender').PLATFORM_DEFAULT_FROM);
+  if (compiled && !out.some((e) => e.address === compiled)) {
+    out.push({ address: compiled, source: 'platform-sender.PLATFORM_DEFAULT_FROM' });
+  }
   return out;
 }
 

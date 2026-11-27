@@ -42,12 +42,29 @@
 /** The declaration a message with no business day makes. Explicit, never inferred from absence. */
 const TIMELESS = 'timeless';
 
+/**
+ * The kinds of message that genuinely concern no business day. **Dated business content is not in
+ * this list and must not be added to it:** a briefing, an assignment, a performance score, a
+ * coaching note and an escalation each concern a specific day, and that is exactly what B7.13
+ * exists to keep current. Anything added here is asserting that it would read the same on any day
+ * of any month.
+ */
+const TIMELESS_KINDS = new Set([
+  'operator_alert',       // the system reporting on itself
+  'account_lifecycle',    // invitations, onboarding, password resets
+  'correspondence',       // a letter or reply composed for one recipient
+  'contract_document',    // a contract or signed document in transit
+  'commercial_offer',     // a quotation or discount offer, valid over a window of its own
+  'supplier_rfq',         // a request for quotation
+]);
+
 const REFUSAL = {
   NOT_DECLARED: 'content_day_not_declared',
   MALFORMED: 'content_day_malformed',
   STALE: 'content_day_stale',
   FUTURE: 'content_day_future',
   UNKNOWABLE: 'content_day_unknowable',
+  TIMELESS_NOT_PERMITTED: 'content_day_timeless_not_permitted',
 };
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -55,12 +72,52 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 /**
  * @returns {{allowed: boolean, code?: string, reason?: string, day?: string, timeless?: boolean}}
  */
-function assertContentDayCurrent({ contentDay = undefined, capability = null } = {}, deps = {}) {
-  // An alert about the system itself concerns no business day and never has. It is listed here
-  // rather than left to each caller, because `OBSERVABILITY` already exists for exactly this set
-  // and a second list of exempt capabilities would drift from the first.
+function assertContentDayCurrent(
+  { contentDay = undefined, capability = null, timelessKind = null } = {}, deps = {}) {
+  // ── TIMELESS IS NOT A FREE CHOICE, AND CAPABILITY CANNOT POLICE IT ───────
+  //
+  // Owner: *"Verify that declaring a message timeless cannot bypass historical replay protection
+  // for dated business content."* As first written, it could: any caller could pass
+  // `contentDay: TIMELESS` and a three-week-old briefing would go out. That is the whole control,
+  // opt-out by one word — the same defect as defaulting the field, in a different costume.
+  //
+  // **My first fix was wrong and the test caught it.** I restricted TIMELESS to the `OBSERVABILITY`
+  // capability set, reusing a list that already existed. But `email.send` is the capability of a
+  // daily briefing AND of an invitation, so capability does not discriminate dated content from
+  // correspondence — the restriction refused every legitimate timeless message and would have
+  // stopped invitations, contracts and RFQs.
+  //
+  // So a timeless message must NAME WHY it has no business day, from a closed vocabulary. A new
+  // kind requires editing a list whose name says what belongs in it, which is a reviewed act; a
+  // briefing cannot quietly become timeless, because somebody would have to add `daily_briefing`
+  // to `TIMELESS_KINDS` and read that sentence while doing it.
+  //
+  // **WHAT THIS DOES NOT ESTABLISH, stated rather than implied:** a caller that LIES about its kind
+  // is not stopped by any check local to this function. Closing that needs the day to come from
+  // the business record the message is about — the owner's *"trusted persisted business-event
+  // provenance"* — so that a briefing's day is read from the row it reports on rather than
+  // declared by the code that formats it. `contentDayFrom` is the seam for that and it is not
+  // implemented here.
+  //
+  // **A current reply about a historical record stays possible**, and needs none of this: it
+  // declares TODAY. The control compares the day the content CONCERNS with today, and a reply
+  // written today about November's numbers is content about today's correspondence. Nothing here
+  // forbids referring to the past; it forbids a message claiming to BE about a past day arriving
+  // now.
   if (contentDay === TIMELESS) {
-    return { allowed: true, timeless: true, day: null };
+    const kinds = deps.timelessKinds || TIMELESS_KINDS;
+    if (!timelessKind || !kinds.has(timelessKind)) {
+      return {
+        allowed: false,
+        code: REFUSAL.TIMELESS_NOT_PERMITTED,
+        reason: `a message declaring '${TIMELESS}' must also declare timelessKind, naming why it `
+          + `concerns no business day, from: ${[...kinds].sort().join(', ')}. Received `
+          + `${JSON.stringify(timelessKind)}. Without this, historical replay protection is one `
+          + 'word away from being switched off by any caller'
+          + (capability ? ` (capability ${capability})` : ''),
+      };
+    }
+    return { allowed: true, timeless: true, day: null, timelessKind };
   }
 
   if (contentDay === undefined || contentDay === null || contentDay === '') {
@@ -136,4 +193,4 @@ function assertContentDayCurrent({ contentDay = undefined, capability = null } =
     };
 }
 
-module.exports = { assertContentDayCurrent, TIMELESS, REFUSAL };
+module.exports = { assertContentDayCurrent, TIMELESS, TIMELESS_KINDS, REFUSAL };

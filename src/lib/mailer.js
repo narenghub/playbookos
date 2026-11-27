@@ -1,6 +1,8 @@
 const crypto = require('crypto');
 const { assertSendAllowed } = require('./email-gate');
 const CONTENT_DAY = require('./outbound/content-day');
+const SENDER = require('./outbound/sender-identity');
+const DIGEST_MOD = require('./outbound/approval-digest');
 const LEDGER = require('./outbound/ledger');
 // The CANONICAL approval digest (B7.6). Separate module from the ledger because the ledger's
 // digestOf is an audit fingerprint and this is an authorization binding — one function serving
@@ -29,7 +31,10 @@ const { query } = require('./db');
 //
 // MAIL_FROM overrides this. Keep it on a domain the key is actually authorized for, or the same
 // failure returns.
-const DEFAULT_FROM = 'PlayNexa <no-reply@adificetechnologies.com>';
+// One definition, shared with outbound/sender-identity.js, which must treat it as a declared
+// platform identity. Reading it across the require cycle between these two modules returned
+// undefined silently — see outbound/platform-sender.js.
+const { PLATFORM_DEFAULT_FROM: DEFAULT_FROM } = require('./outbound/platform-sender');
 function defaultFrom(env = process.env) {
   return env.MAIL_FROM || DEFAULT_FROM;
 }
@@ -280,7 +285,21 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // B7.13. Deliberately NOT defaulted: an absent declaration is refused, because a default would
   // make every existing caller opt out by forgetting and the control decorative. A message that
   // genuinely concerns no business day declares CONTENT_DAY.TIMELESS, which somebody has to type.
-  contentDay = undefined }) {
+  contentDay = undefined,
+  // B7.13: WHY a message concerns no business day, from a closed vocabulary. Threaded rather than
+  // defaulted for the same reason contentDay is: a default would let any caller declare itself
+  // timeless, which is the replay bypass in one word.
+  timelessKind = null },
+// ── deps IS A SECOND ARGUMENT, NOT PART OF THE MESSAGE ─────────────────────
+//
+// B7.9a needs `authorizedSender`, which reads `users` to honour the deactivated-account override
+// that outranks every declaration — so it refuses when there is no database, correctly. The
+// database-free tests of this file need a seam, and `dispatch.js` already established its shape:
+// `deps.senderIdentity`, in a SEPARATE argument. That separation is the whole point. A seam carried
+// inside the message options would let any caller hand the mailer its own authorizer, which is a
+// bypass wearing the clothes of a test fixture — and the 37 production callers all pass one
+// argument, so they cannot reach it.
+deps = {}) {
   // ── THE KILL SWITCH, BEFORE THE PROVIDER CALL ────────────────────────────
   //
   // Placed here rather than at each of the ~37 routes and 37 crons that can cause an email, so
@@ -460,11 +479,54 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // against a stale row, so that a message saying "your tasks for 5 November" lands on 1 December.
   // That is worse than silence, because it is wrong rather than absent, and it lands on four
   // people at once.
-  const day = CONTENT_DAY.assertContentDayCurrent({ contentDay, capability: effectiveCapability });
+  const day = CONTENT_DAY.assertContentDayCurrent(
+    { contentDay, timelessKind, capability: effectiveCapability });
   if (!day.allowed) {
     console.warn(`[CONTENT_DAY_REFUSED] email to ${to}: ${day.reason}`);
     await att.blocked(day.reason, `content_day:${day.code}`);
     return { ok: false, id: null, error: day.reason, stopped: true, phase: day.code,
+      providerResponded: false };
+  }
+
+  // ── B7.9a: THE SENDER IS AN AUTHORIZED IDENTITY, ON THE INTERNAL ROAD TOO ─
+  //
+  // B7.9 enforced this in `dispatch` for EXTERNAL sends and said so: *"mailer.js's 55 internal
+  // callers are NOT covered — that is B7.9a."* This is that road. The defect it closes is written
+  // in this file's own history: for as long as the domain was the only check, any caller could send
+  // as `palash@abiozen.com` — the departed Procurement Director whose address appearing on the
+  // outside of a customer letter this repository has already recorded once.
+  //
+  // MEASURED before wiring it, against an empty `sender_identities` table: the platform default
+  // (MAIL_FROM / RESEND_FROM) is authorized through the narrowed env fallback, so existing internal
+  // sends keep working; an undeclared address is refused; and `palash@abiozen.com` is refused. So
+  // enforcement closes the hole without silently stopping the internal loop — which is the only
+  // reason it can land before the owner declares the production identities.
+  let senderVerdict;
+  try {
+    senderVerdict = await (deps.senderIdentity || SENDER).authorizedSender({
+      from: resolvedFrom,
+      replyTo: replyTo || null,
+      companyId: (companyContext && companyContext.companyId) || null,
+      // providerAccountOf, not a local expression: the lesson of two processes that each computed
+      // their own `resend:<from>` and refused every external send as tampering.
+      // The BARE address. `resolvedFrom` may be `Name <addr>`, and passing the display form
+      // produced `resend:playnexa <no-reply@…>` — a provider account matching no declaration, so
+      // every send refused for a reason that was about my call rather than about the sender.
+      providerAccount: DIGEST_MOD.providerAccountOf({
+        transport: 'resend', from: SENDER.oneAddress(resolvedFrom) || resolvedFrom }),
+    }, deps.senderDeps);
+  } catch (e) {
+    // Unreadable declarations are a refusal, not a pass. An authorization that cannot be consulted
+    // is not an authorization that holds.
+    senderVerdict = { ok: false, code: 'sender_authorization_unknown',
+      reason: `the sender declarations could not be consulted (${e.message})` };
+  }
+  if (!senderVerdict.ok) {
+    const why = `this platform is not authorized to send as ${resolvedFrom} `
+      + `(${senderVerdict.code}): ${senderVerdict.reason}`;
+    console.warn(`[SENDER_NOT_AUTHORIZED] email to ${to}: ${why}`);
+    await att.blocked(why, `sender:${senderVerdict.code}`);
+    return { ok: false, id: null, error: why, stopped: true, phase: senderVerdict.code,
       providerResponded: false };
   }
 
@@ -559,9 +621,38 @@ async function transmitAlert({ to, subject, html }, { type = null } = {}) {
   // TIMELESS here rather than asking each of its callers: the declaration is still explicit, and
   // it is made once, in the function whose whole purpose is system alerts.
   const alertDay = CONTENT_DAY.assertContentDayCurrent(
-    { contentDay: CONTENT_DAY.TIMELESS, capability: 'email.alert' });
+    { contentDay: CONTENT_DAY.TIMELESS, timelessKind: 'operator_alert',
+      capability: 'email.alert' });
   if (!alertDay.allowed) {
     return { ok: false, id: null, error: alertDay.reason, phase: alertDay.code,
+      providerResponded: false };
+  }
+
+  // B7.9a on the alert road. An alert is still sent AS somebody, and an unauthorized identity on
+  // an alert is the same defect as on a briefing — with the added hazard that this is the channel
+  // an operator trusts. Platform scope, because an alert belongs to no company.
+  //
+  // `built` is NOT in scope here — it belongs to `sendOperatorAlert`, one frame up — and my first
+  // version referenced `built.message.from`, threw, was caught by the handler below, and refused
+  // EVERY alert. Three tests caught it by asserting the provider was invoked exactly once and
+  // getting zero. `transmitAlert` is handed no sender at all, so the identity is the platform
+  // default, which is what the declaration check below is given.
+  const alertFrom = defaultFrom();
+  let alertSender;
+  try {
+    alertSender = await SENDER.authorizedSender({
+      from: alertFrom,
+      companyId: null,
+      providerAccount: DIGEST_MOD.providerAccountOf({
+        transport: 'resend', from: SENDER.oneAddress(alertFrom) || alertFrom }),
+    });
+  } catch (e) {
+    alertSender = { ok: false, code: 'sender_authorization_unknown', reason: e.message };
+  }
+  if (!alertSender.ok) {
+    return { ok: false, id: null, phase: alertSender.code,
+      error: `the alert channel is not authorized to send as this identity `
+        + `(${alertSender.code}): ${alertSender.reason}`,
       providerResponded: false };
   }
 

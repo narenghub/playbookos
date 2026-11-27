@@ -111,21 +111,56 @@ test('MAIL_FROM overrides it, so the domain is fixable without a deploy', () => 
   assert.equal(defaultFrom({}), DEFAULT_FROM, 'an empty env still yields the default, never undefined');
 });
 
-test('a caller with no `from` gets the default; an explicit `from` is untouched', async () => {
+test('a caller with no `from` gets the default; an explicit `from` is NOT rewritten', async () => {
   process.env.RESEND_API_KEY = 'test-key';
-  await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: '<p>h</p>', approvalId: 'ap-test' });
+  await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: '<p>h</p>', approvalId: 'ap-test' });
   assert.equal(global.__lastSend.from, DEFAULT_FROM);
-  // The two customer-facing senders pass abiozen.com deliberately — a supplier must not receive an
-  // Abiozen RFQ from another company's domain — so the override must not be rewritten.
-  await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'Palash Das <palash@abiozen.com>' });
-  assert.equal(global.__lastSend.from, 'Palash Das <palash@abiozen.com>');
+  // An explicit sender is still passed through rather than rewritten — but it must be an
+  // AUTHORIZED one. `MAIL_FROM` is the narrowed declaration B7.9 deliberately kept, so this is the
+  // same property measured with an identity the platform may actually use.
+  const savedMailFrom = process.env.MAIL_FROM;
+  process.env.MAIL_FROM = 'sales@abiozen.com';
+  try {
+    await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'Abiozen Sales <sales@abiozen.com>' });
+    assert.equal(global.__lastSend.from, 'Abiozen Sales <sales@abiozen.com>');
+  } finally {
+    if (savedMailFrom === undefined) delete process.env.MAIL_FROM;
+    else process.env.MAIL_FROM = savedMailFrom;
+  }
+});
+
+test('B7.9a: an explicit `from` that nothing authorizes is REFUSED, not passed through', async () => {
+  // THIS TEST REPLACES AN ASSERTION THAT HAD BECOME THE DEFECT. It used to require that
+  // `Palash Das <palash@abiozen.com>` reached the provider untouched — the departed Procurement
+  // Director whose address appearing on the outside of a customer letter this repository has
+  // already recorded once, and the exact case B7.9 was written about. Being on a company domain is
+  // a deliverability fact about the provider, not an authorization.
+  process.env.RESEND_API_KEY = 'test-key';
+  const before = global.__lastSend;
+  const ok = await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence',
+    to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
+    from: 'Palash Das <palash@abiozen.com>' });
+  assert.equal(ok, false, 'an unauthorized sender must not send');
+  assert.equal(global.__lastSend, before,
+    'the provider was reached with an unauthorized sender');
 });
 
 // ── the alarm ───────────────────────────────────────────────────────────────────
 test('a domain-authorization 403 RAISES a notification, not just a log row', async () => {
   process.env.RESEND_API_KEY = 'test-key';
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  const ok = await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'x@abiozen.com' });
+  // `from` must be an AUTHORIZED identity or B7.9a refuses before the provider, and a 403 that
+  // never happens cannot raise a notification. The subject here is the 403 handling, so the sender
+  // is declared rather than arbitrary.
+  const savedMailFrom = process.env.MAIL_FROM;
+  process.env.MAIL_FROM = 'x@abiozen.com';
+  let ok;
+  try {
+    ok = await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test', from: 'x@abiozen.com' });
+  } finally {
+    if (savedMailFrom === undefined) delete process.env.MAIL_FROM;
+    else process.env.MAIL_FROM = savedMailFrom;
+  }
   assert.equal(ok, false, 'the caller still sees a plain false — nothing throws');
   assert.equal(NOTIFS.length, 1, 'and somebody is told');
   assert.match(NOTIFS[0][0], /Email sending is broken for abiozen\.com/, 'the title names the domain');
@@ -136,7 +171,7 @@ test('a domain-authorization 403 RAISES a notification, not just a log row', asy
 test('the notification is PLATFORM-WIDE, so a partner account never sees it', async () => {
   process.env.RESEND_API_KEY = 'test-key';
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
+  await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
   const insert = SQL.find(q => /INSERT INTO notifications/.test(q.sql));
   assert.match(insert.sql, /VALUES \(NULL, 'email_channel'/,
     "product NULL means platform-wide, which requires the 'internal' pseudo-product");
@@ -146,7 +181,7 @@ test('it is deduped — the 6pm agent must not write one row per recipient per e
   process.env.RESEND_API_KEY = 'test-key';
   DUP = true;
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
+  await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
   assert.equal(NOTIFS.length, 0, 'a recent alert already exists, so this one is suppressed');
 });
 
@@ -155,7 +190,7 @@ test('an ORDINARY failure does not raise the alarm', async () => {
   // which is the same outcome as not raising at all.
   process.env.RESEND_API_KEY = 'test-key';
   RESPONSES = [{ statusCode: 422, message: 'Invalid `to` field' }];
-  const ok = await sendEmail({ contentDay: 'timeless', to: 'not-an-address', subject: 's', html: 'h', approvalId: 'ap-test' });
+  const ok = await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'not-an-address', subject: 's', html: 'h', approvalId: 'ap-test' });
   assert.equal(ok, false);
   assert.equal(NOTIFS.length, 0);
 });
@@ -168,7 +203,7 @@ test('a failure to raise the alarm cannot break the send path', async () => {
     return { rows: [] };
   };
   RESPONSES = [{ statusCode: 403, message: 'This API key is not authorized to send emails from abiozen.com' }];
-  const ok = await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
+  const ok = await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
   assert.equal(ok, false, 'returns normally rather than throwing into the caller');
   db.query = saved;
 });
@@ -176,7 +211,7 @@ test('a failure to raise the alarm cannot break the send path', async () => {
 test('a missing API key is still handled, and is still not an alarm', async () => {
   const saved = process.env.RESEND_API_KEY;
   delete process.env.RESEND_API_KEY;
-  assert.equal(await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
+  assert.equal(await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
   assert.equal(NOTIFS.length, 0);
   process.env.RESEND_API_KEY = saved;
 });
@@ -227,7 +262,7 @@ test('attachments reach the request body, base64, under `attachments`', async ()
   const realFetch = global.fetch;
   global.fetch = async (url, opts) => { sentBody = JSON.parse(opts.body); return { json: async () => ({ id: 'msg_1' }) }; };
   try {
-    const r = await sendEmailDetailed({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
+    const r = await sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
       attachments: [{ filename: 'SN-2026-0001.docx', content: Buffer.from('PK\x03\x04x') }] });
     assert.equal(r.ok, true);
     assert.equal(r.id, 'msg_1', 'the provider id is returned, so a caller can prove what it sent');
@@ -245,12 +280,12 @@ test('sendEmail KEEPS its boolean contract — 55 callers depend on it', async (
   const realFetch = global.fetch;
   global.fetch = async () => ({ json: async () => ({ id: 'msg_2' }) });
   try {
-    assert.strictEqual(await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), true);
+    assert.strictEqual(await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), true);
   } finally { global.fetch = realFetch; }
   global.fetch = async () => ({ json: async () => ({ message: 'nope' }) });
   try {
-    assert.strictEqual(await sendEmail({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
-    const d = await sendEmailDetailed({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
+    assert.strictEqual(await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' }), false);
+    const d = await sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test' });
     assert.deepEqual([d.ok, d.id, d.error], [false, null, 'nope']);
   } finally { global.fetch = realFetch; }
 });
@@ -261,7 +296,7 @@ test('a refused attachment is logged and sends NOTHING', async () => {
   let called = false;
   global.fetch = async () => { called = true; return { json: async () => ({ id: 'x' }) }; };
   try {
-    const r = await sendEmailDetailed({ contentDay: 'timeless', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
+    const r = await sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'a@b.com', subject: 's', html: 'h', approvalId: 'ap-test',
       attachments: [{ filename: 'empty.docx', content: Buffer.alloc(0) }] });
     assert.equal(r.ok, false);
     assert.equal(called, false, 'the request must not be made at all');
@@ -292,7 +327,7 @@ test('DECISIVE: an external cc is refused — the gate is actually given it', as
     // recipient gate (the cheaper, blunter question first), so a message with both problems
     // reports the day, and without this declaration this test would assert the gate's refusal and
     // be handed the day's instead: a true-sounding refusal for the wrong reason.
-    const r = await sendEmailDetailedX({ contentDay: 'timeless',
+    const r = await sendEmailDetailedX({ contentDay: 'timeless', timelessKind: 'correspondence',
       to: 'naren@abiozen.com', subject: 's', html: 'h',
       cc: 'buyer@acme.test' });
     assert.equal(r.ok, false, 'an outside party in cc must not ride out on an internal to');

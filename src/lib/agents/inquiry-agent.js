@@ -568,7 +568,7 @@ async function sendApprovedBuyerEmail({ approvalId, releasedBy, currentCommercia
   const m = rel.message;
   const r = await sendEmailDetailed({
     // B7.13: correspondence, which concerns no business day — declared, not omitted
-    contentDay: require('../mailer').CONTENT_DAY.TIMELESS,
+    contentDay: require('../mailer').CONTENT_DAY.TIMELESS, timelessKind: 'correspondence',
     to: m.to, subject: m.subject, html: m.html, from: m.from,
     ...(m.replyTo ? { replyTo: m.replyTo } : {}),
     ...(m.cc ? { cc: m.cc } : {}),

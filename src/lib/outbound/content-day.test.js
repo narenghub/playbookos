@@ -60,16 +60,58 @@ test('2a. stale and future are DIFFERENT codes, because they need different acti
     + '`allowed`, and they are not the same problem to an operator');
 });
 
-test('3. TIMELESS is a DECLARED kind, not an absent field', () => {
-  const r = CD.assertContentDayCurrent({ contentDay: CD.TIMELESS }, at('2026-11-27'));
-  assert.equal(r.allowed, true);
-  assert.equal(r.timeless, true);
-  assert.equal(r.day, null);
-  // And it is not reachable by accident: nothing truthy stands in for it.
+test('3. TIMELESS requires a NAMED kind — it is not a free choice', () => {
+  // THE BYPASS THE OWNER ASKED ABOUT. As first written, any caller could pass TIMELESS and a
+  // three-week-old briefing would go out: the whole control, opt-out by one word.
+  const bare = CD.assertContentDayCurrent({ contentDay: CD.TIMELESS }, at('2026-11-27'));
+  assert.equal(bare.allowed, false, 'TIMELESS with no declared kind was ALLOWED');
+  assert.equal(bare.code, CD.REFUSAL.TIMELESS_NOT_PERMITTED);
+  assert.match(bare.reason, /one word away from being switched off/);
+
+  // A named kind from the closed vocabulary is allowed.
+  const named = CD.assertContentDayCurrent(
+    { contentDay: CD.TIMELESS, timelessKind: 'account_lifecycle' }, at('2026-11-27'));
+  assert.equal(named.allowed, true);
+  assert.equal(named.timeless, true);
+  assert.equal(named.day, null);
+  assert.equal(named.timelessKind, 'account_lifecycle');
+
+  // An INVENTED kind is refused, which is what makes the vocabulary closed rather than decorative.
+  for (const invented of ['daily_briefing', 'performance_score', 'anything', '', null, true]) {
+    const r = CD.assertContentDayCurrent(
+      { contentDay: CD.TIMELESS, timelessKind: invented }, at('2026-11-27'));
+    assert.equal(r.allowed, false, `timelessKind ${JSON.stringify(invented)} was ACCEPTED`);
+  }
+
+  // And TIMELESS itself is not reachable by accident: nothing truthy stands in for the literal.
   for (const near of ['TIMELESS', 'Timeless', 'none', 'n/a', true, 0, {}]) {
-    const bad = CD.assertContentDayCurrent({ contentDay: near }, at('2026-11-27'));
+    const bad = CD.assertContentDayCurrent(
+      { contentDay: near, timelessKind: 'account_lifecycle' }, at('2026-11-27'));
     assert.equal(bad.allowed, false, `${JSON.stringify(near)} passed as timeless`);
   }
+});
+
+test('3a. DATED BUSINESS CONTENT IS NOT IN THE VOCABULARY, and that is the point', () => {
+  // The list is the control. If a future edit adds a dated kind to it, this assertion goes red —
+  // which is the only thing standing between "a reviewed list" and "a list somebody appended to".
+  for (const dated of ['daily_briefing', 'briefing', 'assignment', 'task_assignment',
+    'performance_score', 'coaching', 'escalation', 'daily_report', 'weekly_review']) {
+    assert.equal(CD.TIMELESS_KINDS.has(dated), false,
+      `${dated} is in TIMELESS_KINDS. Dated business content declaring itself timeless is exactly `
+      + 'the replay bypass B7.13 exists to prevent');
+  }
+  // And the vocabulary is not empty, or the assertion above would hold vacuously.
+  assert.ok(CD.TIMELESS_KINDS.size >= 4, 'the vocabulary is too small to be the real one');
+});
+
+test('3b. a current reply ABOUT a historical record is still allowed — it declares TODAY', () => {
+  // The owner's constraint: "Legitimate current replies concerning historical records must remain
+  // possible under current authorization." A reply written today about November's numbers is
+  // content about today's correspondence, so it declares today and passes. The control forbids a
+  // message claiming to BE about a past day arriving now — not referring to the past.
+  const reply = CD.assertContentDayCurrent({ contentDay: '2026-12-01' }, at('2026-12-01'));
+  assert.equal(reply.allowed, true,
+    'a reply sent today, however old the records it discusses, declares today and must send');
 });
 
 test('4. a malformed day is refused, never parsed leniently', () => {

@@ -155,11 +155,24 @@ const RFQ = 'legacy-supplier-rfq-email';
         // handed `content_day_not_declared` instead of the gate it is measuring. The harness's own
         // positive control caught exactly that and named it "the gate-contamination pattern",
         // which is what a positive control is for.
-        contentDay: 'timeless',
+        contentDay: 'timeless', timelessKind: 'correspondence',
         ...FIXTURE_MSG,
         ...(approve ? { approvalId: APPROVAL_ID } : {}),
         ...(workflow ? { workflow } : {}), ...(agent ? { agent } : {}),
         ...(capability ? { capability } : {}),
+      }, {
+        // B7.9a made the SENDER an authorization, and `authorizedSender` reads `users` and
+        // `sender_identities` — neither of which this deliberately narrow harness migrates. Left
+        // unstubbed it refused every scenario with `sender_authorization_unknown`, and this check's
+        // own positive control caught that twice and named it the gate-contamination pattern.
+        //
+        // My first attempt was to migrate those tables here. That dragged a narrow harness toward
+        // the full schema and broke its own `office_approvals` fixture — fixing the instrument by
+        // enlarging it until it stopped complaining. The seam `dispatch.js` already established is
+        // the right answer: inject the authorizer, keep this check about the STOP SCOPES it is
+        // named for, and leave the sender boundary to check-sender-identity-db.js and the mailer's
+        // own tests, which measure it directly.
+        senderIdentity: { authorizedSender: async () => ({ ok: true, via: 'fixture-stub' }) },
       });
       return { r, calls: provider.length, sent: provider.slice() };
     };

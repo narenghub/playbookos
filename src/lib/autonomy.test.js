@@ -383,7 +383,7 @@ test('D10 — sendEmailDetailed never calls the provider when email.send is stop
   process.env.RESEND_API_KEY = process.env.RESEND_API_KEY || 'test-key-not-used';
   const { sendEmailDetailed, sendEmail } = require('./mailer');
   await withStoppedAutonomy(row('capability', 'email.send', 'halting outbound while we investigate'), async (fetches) => {
-    const r = await sendEmailDetailed({ contentDay: 'timeless', to: 'nobody@example.com', subject: 's', html: '<p>x</p>' });
+    const r = await sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'nobody@example.com', subject: 's', html: '<p>x</p>' });
     assert.strictEqual(fetches(), 0, 'Resend was CONTACTED while email.send was stopped');
     assert.strictEqual(r.ok, false);
     assert.strictEqual(r.stopped, true);
@@ -391,7 +391,7 @@ test('D10 — sendEmailDetailed never calls the provider when email.send is stop
     assert.strictEqual(r.id, null);
 
     // The boolean contract its 55 callers rely on is unchanged.
-    const b = await sendEmail({ contentDay: 'timeless', to: 'nobody@example.com', subject: 's', html: '<p>x</p>' });
+    const b = await sendEmail({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'nobody@example.com', subject: 's', html: '<p>x</p>' });
     assert.strictEqual(b, false, 'sendEmail must still return a boolean');
   });
 });
@@ -399,7 +399,7 @@ test('D10 — sendEmailDetailed never calls the provider when email.send is stop
 test('D11 — a policy stop is not reported as an ordinary send failure', async () => {
   const { sendEmailDetailed } = require('./mailer');
   await withStoppedAutonomy(row('global', '', 'CEO emergency stop — unexpected outbound behaviour'), async () => {
-    const r = await sendEmailDetailed({ contentDay: 'timeless', to: 'nobody@example.com', subject: 's', html: '<p>x</p>' });
+    const r = await sendEmailDetailed({ contentDay: 'timeless', timelessKind: 'correspondence', to: 'nobody@example.com', subject: 's', html: '<p>x</p>' });
     // STOPPED_BY_POLICY must be identifiable from the result, never indistinguishable from a
     // provider refusal. The durable half of this is asserted against Postgres.
     assert.strictEqual(r.stopped, true);
