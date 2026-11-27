@@ -47,6 +47,16 @@ const HANDLERS = Object.freeze({
   // payload: no database handle, no network, no filesystem — see the file's own header for why the
   // facts arrive in the payload rather than being fetched.
   'report.daily_operations': require('./handlers/report-daily-operations'),
+  // B3.5 (requirement 3, 2026-11-26): four READ-ONLY business capabilities, so an autonomous office
+  // can do something a person would ask for rather than echo a payload back. All four are pure
+  // functions of their payload — the retrieval is server-side and company-scoped in
+  // src/lib/office/business-capabilities.js, which also holds each one's INDEPENDENT criterion: the
+  // plan recomputes the answer from the payload it minted and compares, so a handler cannot pass
+  // by being well-formed.
+  'report.operational_status': require('./handlers/business-read-only').operationalStatus,
+  'report.employee_task_status': require('./handlers/business-read-only').employeeTaskStatus,
+  'analysis.procurement': require('./handlers/business-read-only').procurementAnalysis,
+  'retrieve.business_data': require('./handlers/business-read-only').businessDataRetrieval,
 });
 
 /** Output larger than this is refused rather than submitted. */

@@ -46,14 +46,21 @@ const path = require('path');
 const { Client } = require('pg');
 const { pgBinCandidates, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 
-const PGPORT = process.env.PRODSHAPE_PGPORT || '55461';
+let PGPORT = process.env.PRODSHAPE_PGPORT || '55461';
+const __HARNESS = require('./lib/pg-legacy-harness');
 
 let pass = 0; let fail = 0;
 const ok = (m) => { pass += 1; console.log(`  ok    ${m}`); };
 const bad = (m, d) => { fail += 1; console.log(`  FAIL  ${m}${d ? `\n          ${d}` : ''}`); };
 const h = (t) => console.log(`\n${'─'.repeat(78)}\n${t}\n${'─'.repeat(78)}`);
 
-let temp = null;
+// ── `temp` IS NOW A LIVE VIEW OF THE SHIM'S CLUSTER (B7.20b repair) ───────
+//
+// This file's own `startCluster()` used to assign `temp = { base, dir }`. The migration replaced
+// the START function and left every `temp.base` / `temp.dir` behind it, so `temp` was null and the
+// first read threw `Cannot read properties of null (reading 'base')`. Twenty files were in that
+// state; the reasons are in `scripts/lib/pg-legacy-harness.js legacyTemp()`.
+const temp = __HARNESS.legacyTemp();
 const sh = (cmd) => {
   const env = { ...process.env, PATH: `${temp.dir}:${process.env.PATH}` };
   return execFileSync('sh', ['-c', temp.asPostgres ? `su postgres -c ${JSON.stringify(`PATH=${temp.dir}:$PATH ${cmd}`)}` : cmd],
@@ -61,34 +68,34 @@ const sh = (cmd) => {
 };
 
 function startCluster() {
-  const dir = pgBinCandidates()[0];
-  if (!dir) return null;
-  const base = fs.mkdtempSync('/var/tmp/prodshape-');
-  const asPostgres = process.getuid && process.getuid() === 0;
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
-  const run = (cmd) => execFileSync('sh', ['-c', asPostgres ? `su postgres -c ${JSON.stringify(cmd)}` : cmd],
-    { env, encoding: 'utf8', stdio: 'pipe' });
+  // ── DELEGATED TO THE VERIFIED LIFECYCLE UTILITY (B7.20b) ──────────────────
+  //
+  // This function used to run its own `initdb`/`pg_ctl` into a `/var/tmp` directory on a FIXED
+  // port, and clean up from a `cleanup()` that a SIGTERM never reaches. Measured: that shape leaks
+  // the whole cluster on any signal, and the leaked directory carries no ownership record, so
+  // `pg-cleanup.js` correctly refuses to remove it and it accumulates for ever — 28 GB of it.
+  // `scripts/check-pg-harness-lifecycle-db.js` measures both halves, with this old shape as the
+  // control.
+  //
+  // The contract is unchanged: it returns the cluster's BASE directory, or `null`. `PGPORT` is now
+  // assigned from the utility's randomly-chosen port instead of being a hard-coded constant, which
+  // is also why two concurrent runs of this check no longer collide.
   try {
-    if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
-    run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p ${PGPORT} -c listen_addresses=' start -w`);
+    const c = __HARNESS.startTemp('prodshape');
+    if (!c) return null;
+    const live = __HARNESS.cluster();
+    PGPORT = String(live.port);
+    return live.base;
   } catch (e) {
     console.error(`  (cluster start failed: ${e.message})`);
     return null;
   }
-  temp = { base, dir, asPostgres };
-  return base;
 }
 
 function stopCluster() {
-  if (!temp) return;
-  try {
-    execFileSync('sh', ['-c', temp.asPostgres
-      ? `su postgres -c "PATH=${temp.dir}:\\$PATH pg_ctl -D ${temp.base}/data -m immediate stop"`
-      : `PATH=${temp.dir}:$PATH pg_ctl -D ${temp.base}/data -m immediate stop`],
-    { env: { ...process.env, PATH: `${temp.dir}:${process.env.PATH}` }, stdio: 'pipe' });
-  } catch { /* going away anyway */ }
-  try { fs.rmSync(temp.base, { recursive: true, force: true }); } catch { /* temp dir */ }
+  // Delegated. The utility's destroy() is idempotent and its signal handlers call it
+  // too, so a caller keeping an existing .finally(stopCluster) is correct and merely redundant.
+  __HARNESS.stopTemp();
 }
 
 // The tables this release introduces. Production has none of them, which is the whole reason the

@@ -915,9 +915,16 @@ const PLATFORM_SPEND_LOCK = 'playnexa:spend:platform';
  *
  * Returns { ok: true, reservation } | { ok: false, code, detail, ... }
  *
- * `maxUsd` is the MOST the operation may cost, not an estimate of what it will. An under-estimate
- * here is a hole in the limit, so the caller is expected to over-estimate and the settlement
- * corrects it.
+ * `maxUsd` is the most the operation is ALLOWED to cost, not an estimate of what it will and not a
+ * proven bound on what the provider will charge. An under-estimate is a hole in the limit, so the
+ * caller is expected to over-estimate.
+ *
+ * What this function prevents is CONCURRENT ALLOCATION beyond the configured limits: the hold is
+ * taken inside the transaction, under the fixed lock order above, so two callers cannot both be
+ * told there is room for the same dollar. What it cannot prevent is a provider charging more than
+ * the caller's own `maxUsd` — settlement DETECTS that, after the money is spent, and records it as
+ * a financial anomaly. Post-call accounting is not a spending control (owner's requirement 5,
+ * 2026-11-26), and `authorizeSpend` in office/budget.js carries the full statement.
  */
 async function reserveSpend(ctx, { id, objectiveId, runId, maxUsd, reason,
   ttlMs = RESERVATION_TTL_MS }, deps = {}) {
@@ -1137,14 +1144,36 @@ async function settleSpend(ctx, { reservationId, costUsd = null, costKnown,
             -- calling it reconciled would be the "failed therefore free" assumption wearing a
             -- different label. The hold's headroom is returned either way — the ledger carries the
             -- real cost — but what we claim to know about the charge stays accurate.
-            financial_state = CASE WHEN $3 THEN 'reconciled' ELSE 'unknown' END,
+            -- ── AN OVER-CHARGE IS ITS OWN STATE, NOT A RECONCILIATION ────
+            --
+            -- Requirement 5, 2026-11-26: an atomic hold prevents concurrent allocation beyond the
+            -- configured limits; it cannot prevent the provider charging more than the maxUsd its
+            -- caller guessed. That case used to settle as 'reconciled' — the cost was known, so
+            -- the row said it was squared away — which made the one provable overspend invisible.
+            --
+            -- Compared against max_usd, the column on this very row, so the comparison cannot
+            -- drift from the hold it is about. This DETECTS; nothing here prevents, and the
+            -- docstring on office/budget.js authorizeSpend says so in those words.
+            financial_state = CASE
+              WHEN $3 AND $4::numeric > max_usd THEN 'overspent'
+              WHEN $3 THEN 'reconciled'
+              ELSE 'unknown' END,
             dispatched_at = COALESCE(dispatched_at, NOW()),
-            financial_note = CASE WHEN $3 THEN financial_note
+            financial_note = CASE
+              -- Both figures named, because a flag without them is one nobody can act on — and the
+              -- constraint office_budget_reservations_overspend_needs_note requires a note here.
+              WHEN $3 AND $4::numeric > max_usd THEN
+                'OVERSPEND: charged ' || to_char($4::numeric, 'FM999999990.999999')
+                || ' against a hold of ' || to_char(max_usd, 'FM999999990.999999')
+                || '. The hold is an allowance, not a proven bound on the provider''s charge; this '
+                || 'was detected after the money was spent and is not a reconciliation.'
+              WHEN $3 THEN financial_note
               ELSE COALESCE(financial_note,
                 'settled with no cost figure: the request was dispatched and its charge could not '
                 || 'be measured, so the financial outcome is unknown rather than zero') END
       WHERE company_id = $1 AND id = $2 AND state = 'held'
-      RETURNING id, state, settled_cost_usd, settled_cost_known, financial_state`,
+      RETURNING id, state, settled_cost_usd, settled_cost_known, financial_state, max_usd,
+                financial_note`,
     [ctx.companyId, reservationId, costKnown, costUsd, costLedgerId]
   );
   return res.rows[0] || null;

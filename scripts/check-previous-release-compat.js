@@ -39,7 +39,8 @@ const { Client } = require('pg');
 const { pgBinCandidates, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 
 const REF = process.argv[2] || 'origin/main';
-const PGPORT = process.env.COMPAT_PGPORT || '55465';
+let PGPORT = process.env.COMPAT_PGPORT || '55465';
+const __HARNESS = require('./lib/pg-legacy-harness');
 const APPPORT = Number(process.env.COMPAT_PORT || 5607);
 
 let pass = 0; let fail = 0;
@@ -47,7 +48,13 @@ const ok = (m) => { pass += 1; console.log(`  ok    ${m}`); };
 const bad = (m, d) => { fail += 1; console.log(`  FAIL  ${m}${d ? `\n          ${d}` : ''}`); };
 const h = (t) => console.log(`\n${'─'.repeat(78)}\n${t}\n${'─'.repeat(78)}`);
 
-let temp = null; let BIN = null; let worktree = null;
+// ── `temp` IS NOW A LIVE VIEW OF THE SHIM'S CLUSTER (B7.20b repair) ───────
+//
+// This file's own `startCluster()` used to assign `temp = { base, dir }`. The migration replaced
+// the START function and left every `temp.base` / `temp.dir` behind it, so `temp` was null and the
+// first read threw `Cannot read properties of null (reading 'base')`. Twenty files were in that
+// state; the reasons are in `scripts/lib/pg-legacy-harness.js legacyTemp()`.
+const temp = __HARNESS.legacyTemp(); let BIN = null; let worktree = null;
 function sh(cmd) {
   const asPostgres = process.getuid && process.getuid() === 0;
   const withPath = `PATH=${BIN}:$PATH ${cmd}`;
@@ -55,17 +62,28 @@ function sh(cmd) {
     { env: { ...process.env, PATH: `${BIN}:${process.env.PATH}` }, encoding: 'utf8', stdio: 'pipe' });
 }
 function startCluster() {
-  BIN = pgBinCandidates()[0];
-  if (!BIN) return null;
-  const base = fs.mkdtempSync('/var/tmp/prpa-compat-');
-  const asPostgres = process.getuid && process.getuid() === 0;
+  // ── DELEGATED TO THE VERIFIED LIFECYCLE UTILITY (B7.20b) ──────────────────
+  //
+  // This function used to run its own `initdb`/`pg_ctl` into a `/var/tmp` directory on a FIXED
+  // port, and clean up from a `cleanup()` that a SIGTERM never reaches. Measured: that shape leaks
+  // the whole cluster on any signal, and the leaked directory carries no ownership record, so
+  // `pg-cleanup.js` correctly refuses to remove it and it accumulates for ever — 28 GB of it.
+  // `scripts/check-pg-harness-lifecycle-db.js` measures both halves, with this old shape as the
+  // control.
+  //
+  // The contract is unchanged: it returns the cluster's BASE directory, or `null`. `PGPORT` is now
+  // assigned from the utility's randomly-chosen port instead of being a hard-coded constant, which
+  // is also why two concurrent runs of this check no longer collide.
   try {
-    if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    sh(`initdb -D ${base}/data ${INITDB_FLAGS}`);
-    sh(`pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p ${PGPORT} -c listen_addresses=' start -w`);
-  } catch (e) { console.error(`  (cluster start failed: ${e.message})`); return null; }
-  temp = { base };
-  return base;
+    const c = __HARNESS.startTemp('prpa-compat');
+    if (!c) return null;
+    const live = __HARNESS.cluster();
+    PGPORT = String(live.port);
+    return live.base;
+  } catch (e) {
+    console.error(`  (cluster start failed: ${e.message})`);
+    return null;
+  }
 }
 function cleanup() {
   if (temp) {

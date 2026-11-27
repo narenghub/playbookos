@@ -289,6 +289,12 @@ async function outreachApprovalContext({ workflow, agent, intentName }, deps = {
       // means a contact never hears back, which is a failure dressed as safety.
       intentKey: cronIntentKey(intentName, new Date()),
     }, deps);
+    // Reported as a stop, not as an intent-key collision. See inquiry-agent.js.
+    if (begun.stopped) {
+      return { ok: false, reason: 'stopped_by_policy',
+        detail: `${begun.stop.scope_type}${begun.stop.scope_key ? `:${begun.stop.scope_key}` : ''}`
+          + ` — ${begun.stop.reason}` };
+    }
     if (begun.duplicate || !begun.runId) {
       return { ok: false, reason: 'run_not_created',
         detail: 'another run already holds this intent key' };

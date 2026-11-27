@@ -95,6 +95,17 @@ const EXEMPT = new Set([
   // question the code written to satisfy the database can answer about itself. Disposable cluster;
   // every fixture created by id and removed by id; the CYCLE remains non-exempt product code.
   path.join('scripts', 'check-phase-idempotency-db.js'),
+  // B3.5's read-only capability check. Its DIRECT statements are three, and all three are fixture
+  // lifecycle: an `INSERT INTO objectives` and the matching `DELETE FROM objectives` /
+  // `DELETE FROM office_plans`, by recorded id. There is no accessor that CREATES an objective —
+  // the CEO does that through the product — and `scope.js` deliberately offers no delete, because
+  // the office kernel never removes an objective. The membership fixture, which DID have an
+  // accessor, now goes through `grantMembership`: this scanner's sibling refused the raw INSERT
+  // and was right to. Everything the check actually MEASURES is read through the four retrievers,
+  // the real executor and `cycle.js`'s own criterion — the point of the check is that those are
+  // the only roads — and section 4 counts fourteen tables before and after to show the retrievers
+  // write nothing at all.
+  path.join('scripts', 'check-business-capabilities-db.js'),
   // B3.18's negative-path check, and the reason is particular to what it measures: the conditions
   // under test are states the ACCESSORS REFUSE TO DESCRIBE. `resolveObjectiveContext` throws for a
   // paused objective, so there is no context to ask it with; the whole point of the check is what

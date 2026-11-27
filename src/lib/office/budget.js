@@ -319,11 +319,37 @@ async function assessWithoutSpending(ctx, opts = {}, deps = {}) {
 /**
  * ── THE ONLY ROAD TO A METERED CALL (B2.5b) ────────────────────────────────
  *
- * Policy gate, then an ATOMIC HOLD for the most this call can cost, taken before the provider is
- * reached. Returns the reservation the caller must settle.
+ * Policy gate, then an ATOMIC HOLD for the most this call is ALLOWED to cost, taken before the
+ * provider is reached. Returns the reservation the caller must settle.
  *
- * `maxUsd` is a ceiling, not an estimate: an under-estimate here is a hole in the limit. The
- * settlement corrects it downward, which is the safe direction.
+ * ── WHAT THE HOLD DOES AND DOES NOT PREVENT ────────────────────────────────
+ *
+ * Owner's requirement 5, 2026-11-26: *"Atomic reservations prevent concurrent allocation beyond
+ * configured limits, but an underestimated provider charge can still exceed its reservation.
+ * Post-call settlement does not prevent that overspend. Do not call an estimated reservation a
+ * proven worst-case charge."*
+ *
+ * This docstring said "the settlement corrects it downward, which is the safe direction". That is
+ * true of an OVER-estimate and silently false of an under-estimate, which is the case that matters:
+ * if the provider charges more than `maxUsd`, settlement records the excess AFTER the money is
+ * spent. It is accounting, not a control.
+ *
+ * So, precisely:
+ *
+ *   PREVENTED — concurrent allocation beyond the configured limits. The hold is taken inside the
+ *               transaction under a fixed lock order, so N callers cannot each be told there is
+ *               room for the same dollar. This part is proven, by
+ *               scripts/check-aggregate-spend-concurrency-db.js.
+ *   PREVENTED — a call whose ALLOWED maximum would breach a ceiling. Refused before the provider
+ *               is reached, so no request is sent.
+ *   NOT PREVENTED — a single charge larger than the `maxUsd` its caller chose. Nothing here can
+ *               prevent that: the figure is supplied by the caller before the provider has
+ *               decided what to bill. It is DETECTED at settlement and is a FINANCIAL ANOMALY
+ *               (see settleSpend), never a reconciliation.
+ *
+ * `maxUsd` is therefore an allowance, not a proven worst-case charge. An under-estimate is a hole
+ * in the limit, which is why callers are expected to over-estimate — and why the per-call ceiling
+ * exists as a second bound on how large that hole can be.
  */
 async function authorizeSpend(ctx, { objectiveId, runId, maxUsd, reason,
   criticality = 'routine', capUsd = DAILY_CAP_USD, refuseOnUnmeasured = false,

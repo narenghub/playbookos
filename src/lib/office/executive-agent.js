@@ -97,6 +97,15 @@ async function runObjectiveReview({ objectiveId, intentKey = null }, deps = {}) 
     maxRuntimeMinutes: 15,
   }, deps);
 
+  // A stop refuses before the ledger opens (B3.11a put the check at the sink in office/run.js).
+  // Reported distinctly from a duplicate: "declined, another process owns this intent" and "the
+  // platform is halted" call for opposite responses from whoever reads the log.
+  if (started.stopped) {
+    return { ran: false, reason: 'stopped_by_policy',
+      stop: `${started.stop.scope_type}${started.stop.scope_key ? `:${started.stop.scope_key}` : ''}`
+        + ` — ${started.stop.reason}` };
+  }
+
   if (started.duplicate) {
     // Another process owns this intent. Declined, not failed — a false "workflow failed" alert is
     // worse than the duplicate.

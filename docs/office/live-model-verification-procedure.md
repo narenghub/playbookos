@@ -22,8 +22,19 @@ kept apart deliberately:
 
 The integrated cycle (B3.10) asserts **zero provider calls** — the mailer and network spies are
 fired once each first, so their silence means something. So the honest statement of the current
-position is: the spend ceiling is a proven bound, the hold is atomic and survives a crash, and
-**no live model has ever been planned with under it.**
+position is: the hold is atomic, serializes correctly under concurrency and survives a crash; the
+configured limits cannot be exceeded by concurrent allocation; and **no live model has ever been
+planned with under it.**
+
+**The ceiling is not a proven bound on what a provider will charge**, and this document previously
+said it was. Owner's requirement 5, 2026-11-26: *"Atomic reservations prevent concurrent allocation
+beyond configured limits, but an underestimated provider charge can still exceed its reservation.
+Post-call settlement does not prevent that overspend. Do not call an estimated reservation a proven
+worst-case charge."* The held figure is a conservative estimate supplied by the caller before the
+provider has decided what to bill. An under-estimate is a hole in the limit; since 2026-11-26 a
+charge above its hold settles as `overspent` rather than `reconciled`, with both figures in the
+note — which is **detection after the money is spent**, not prevention. Step 4 below is what tests
+whether the estimates actually bound the charges, and it is the reason this exercise exists.
 
 That gap is exactly what this closes, and it cannot be closed by more simulation.
 
@@ -35,14 +46,16 @@ That gap is exactly what this closes, and it cannot be closed by more simulation
 |---|---|---|
 | **Total development spend for the whole exercise** | **US $2.00** | a named budget exception on the fixture objective, time-bounded to the window |
 | Per-objective budget | $2.00 | `objectives.budget_usd` on the fixture objective |
-| Per-call worst case | ≤ $0.02 | `maxChargeUsd`, which holds the bound before the provider is reached |
+| Per-call allowance | ≤ $0.02 | `maxChargeUsd`, held before the provider is reached. An allowance, not a proven maximum charge |
 | Maximum calls | **20** | the per-call hold against the $2.00 objective ceiling makes the 21st call refuse arithmetically |
 | Maximum output tokens per call | **512** | sent as `max_tokens`; the provider cannot bill more |
 | Maximum input per call | ≤ 4 KB of prompt + system | so the byte-length bound stays under $0.02 at Haiku rates |
 
 $2.00 is chosen so that **every** way the exercise can go wrong is affordable: 20 calls at the full
-worst case is $0.40, so the ceiling is five times the maximum conceivable spend and the refusal is
-demonstrated long before the money matters.
+per-call allowance is $0.40, so the ceiling is five times the spend the allowances permit and the
+refusal is demonstrated long before the money matters. Five times, rather than tight, precisely
+because the allowance is an estimate: the margin is what absorbs an under-estimate, and the $2.00
+objective budget is the bound that does not depend on the per-call figure being right.
 
 **The ceiling is not advisory.** It is the same `authorizeSpend` hold every metered call now takes,
 against a real objective row, so exceeding it is refused by the database rather than by someone
@@ -74,9 +87,13 @@ Only the things simulation cannot reach:
    will sometimes volunteer `"approved": true`, and that is the case worth seeing refused.
 3. **The hold is settled to a MEASURED cost.** Every settlement so far has used a fixture figure.
    This is the first time `usage.input_tokens` and `usage.output_tokens` come from the provider.
-4. **The bound actually bounds.** For each call: assert `measured cost ≤ held worst case`. If that
-   inequality ever fails, the ceiling has a hole and the exercise aborts immediately — this is the
-   single most important assertion in the procedure.
+4. **Whether the estimate actually bounds the charge.** For each call: assert
+   `measured cost ≤ held allowance`. This is the one thing no amount of simulation can establish,
+   because it is a claim about the provider's billing and not about our arithmetic. If the
+   inequality ever fails, the per-call allowance is wrong and the exercise aborts immediately —
+   the single most important assertion in the procedure. Since 2026-11-26 `settleSpend` also
+   records that case as `financial_state = 'overspent'`, so a failure leaves durable evidence
+   rather than only a message in a transcript.
 5. **A CJK prompt is bounded correctly.** One call with Japanese text, since that is the case the
    old `chars/3` heuristic got wrong by a factor of three.
 6. **`cost_known: false` is reachable and handled.** If any call returns without a usage block, the
@@ -86,7 +103,7 @@ Only the things simulation cannot reach:
 
 | Condition | Why |
 |---|---|
-| **a measured cost exceeds its held worst case** | the bound is wrong; nothing further may be spent against a ceiling that does not hold |
+| **a measured cost exceeds its held allowance** | the estimate does not bound the charge; nothing further may be spent against allowances that do not hold. The reservation settles `overspent` |
 | objective spend reaches $1.00 (half the ceiling) | a budget half consumed by an exercise sized for $0.40 means something is charging more than modelled |
 | more than 20 calls attempted | the call limit is reached |
 | any call returns `cost_known: false` more than twice | repeated unmeasurable spend is unreconcilable, and §4's rule is that it stays conservatively accounted |
@@ -112,7 +129,8 @@ Each step's exit code is read; none are chained with `&&` to a subsequent step.
    objective_id = <fixture>`. It must be `0`.
 4. Run the exercise driver with the development key. It performs at most 20 governed calls, and
    after **each** one asserts: a reservation existed, it was marked dispatched before the call, the
-   measured cost is ≤ the held worst case, and the reservation settled `reconciled`.
+   measured cost is ≤ the held allowance, and the reservation settled `reconciled` — NOT
+   `overspent`, which is now a distinct state and is the shape a hole in the allowance takes.
 5. Assert the ledger total is ≤ $0.40 and the 21st call refuses with
    `would_exceed_objective_budget`.
 6. Assert zero outward calls to any host other than the provider.

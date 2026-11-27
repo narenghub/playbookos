@@ -203,6 +203,43 @@ async function governedCall(ctx, spec, deps = {}) {
       error: `unknown capability "${capability}" — expected one of ${CAPABILITIES.join(', ')}` };
   }
 
+  // ── THE SYNTHETIC TRANSPORT IS AUTHORIZED BEFORE ANY MONEY IS HELD ──────
+  //
+  // `deps.syntheticProvider === true` selects the reviewed in-repo responder in
+  // office/synthetic-provider.js (B2.10 stage 4, approved 2026-11-26). A BOOLEAN, not a function:
+  // the standing instruction is *"do not permit arbitrary agent-generated code execution"*, and a
+  // function-shaped seam is where a value out of a plan or a model becomes code.
+  //
+  // DECIDED HERE, ABOVE THE HOLD, AND THE PLACEMENT WAS A CORRECTION. The first version asked at
+  // the transport and, on a refusal, released the hold it had just taken. That was worse in two
+  // ways. Behaviourally, a call that is not authorized to use this transport should never have
+  // reserved money at all. And `validate-k5-budget-deployed.js` caught the second way: it asserts
+  // that the FIRST settle-the-hold call appears AFTER the provider call, because a hold settled
+  // before the call cannot carry the real cost — and a source-order check cannot tell that my
+  // settle sat in a branch where no call happens. The guard was right that the ordering it
+  // measures had been broken, even though the behaviour in that branch was sound. Refusing before
+  // the hold removes the branch rather than teaching the guard about it.
+  //
+  // (And writing that guard's search string out in full, right here, made the validator find it in
+  // this comment and fail again — the same lesson as its own note about grepping a definition when
+  // you mean a call, one layer further out. It is described rather than quoted now.)
+  let useSynthetic = false;
+  if ('syntheticProvider' in deps) {
+    const SYN = require('./synthetic-provider');
+    const verdict = await SYN.authorizeSyntheticProvider(deps.syntheticProvider,
+      { query: deps.query || null });
+    if (!verdict.allowed) {
+      // No hold was taken, so there is nothing to release. Reported as a refusal of the SEAM
+      // rather than as a provider error, because no provider was involved either way.
+      return { ok: false, accounted: true, text: null, json: null, ...llm.COST_NONE,
+        provider: SYN.SYNTHETIC_PROVIDER, synthetic: true,
+        error: `the synthetic provider seam refused: ${verdict.reason}`,
+        synthetic_refusal: verdict.reason, needs_human: false, stopped: false,
+        detail: verdict.detail };
+    }
+    useSynthetic = true;
+  }
+
   // ── K5 / B2.5b: A HOLD BEFORE THE CALL, NOT A VERDICT AFTER IT ───────────
   //
   // Both caps must be satisfied: the enterprise cap is PER DAY and resets; an objective's budget
@@ -281,15 +318,31 @@ async function governedCall(ctx, spec, deps = {}) {
     }
   }
 
-  const r = await llm.callClaude({
-    model: capability,            // llm.js resolves the alias; the literal id comes back in r.model
-    system, prompt, maxTokens, timeoutMs,
-    ...(deps.apiKey ? { apiKey: deps.apiKey } : {}),
-  });
+  // ── THE TRANSPORT: REAL, OR THE NAMED SYNTHETIC RESPONDER ───────────────
+  //
+  // Everything ABOVE this line has already happened for a synthetic call: the context was resolved,
+  // the stop was checked, the seam was authorized, the policy gate ran, the hold was taken and the
+  // reservation was marked dispatched. That is the point — the workflow traverses the real governed
+  // path and only the transport is canned. A seam that skipped the governance would demonstrate
+  // nothing. There is no refusal branch here: the seam was decided before the hold.
+  let r;
+  if (useSynthetic) {
+    r = require('./synthetic-provider').syntheticCall({ model: capability, system, prompt, maxTokens });
+  } else {
+    r = await llm.callClaude({
+      model: capability,          // llm.js resolves the alias; the literal id comes back in r.model
+      system, prompt, maxTokens, timeoutMs,
+      ...(deps.apiKey ? { apiKey: deps.apiKey } : {}),
+    });
+  }
 
   const usage = normalizeUsage(r.usage);
   const base = {
-    provider: PROVIDER,
+    // The RESPONSE's own provider when it has one, so a synthetic answer can never be recorded as
+    // `anthropic`. That is what stops a synthetic traversal being reported later as a live-model
+    // verification — the one way this seam could do real damage.
+    provider: r.provider || PROVIDER,
+    synthetic: r.synthetic === true,
     model: r.model || model,
     capability,
     usage,
@@ -369,6 +422,13 @@ async function governedCall(ctx, spec, deps = {}) {
     costUsd: base.costKnown ? base.costUsd : null,
     costKnown: base.costKnown === true,
     costLedgerId: costRow && costRow.id !== undefined ? costRow.id : null,
+    // THE TRANSPORT'S OWN EVIDENCE, when it has any. A known zero releases the hold rather than
+    // settling it, and `releaseSpend` requires evidence for a dispatched hold — settleHold's
+    // default string says "a policy stop, a missing credential or a rejected capability refused
+    // this call", which is true of the failure paths and FALSE of a synthetic response. A zero
+    // recorded with the wrong reason is a row that will mislead whoever reads it next, which is
+    // the whole point of insisting on evidence in the first place.
+    zeroChargeEvidence: r.zeroChargeEvidence || null,
   }, deps);
 
   if (r.error) {

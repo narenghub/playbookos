@@ -49,7 +49,7 @@
 // conflict, or starts counting an invalid CAS, this fails.
 'use strict';
 
-const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+const { EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 
 const fs = require('fs');
 const { execFileSync } = require('child_process');
@@ -59,32 +59,21 @@ let fail = 0;
 const ok = (m) => console.log(`  ok    ${m}`);
 const bad = (m, d) => { fail++; console.log(`  FAIL  ${m}`); if (d) console.log(`          ${String(d).slice(0, 400)}`); };
 
-let temp = null;
-function startTemp() {
-  const dir = pgBin();
-  if (!dir) return null;
-  const base = fs.mkdtempSync('/var/tmp/census-');
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, PGPORT: '55995' };
-  const asPostgres = process.getuid && process.getuid() === 0;
-  const run = (cmd) => execFileSync('sh', ['-c', asPostgres ? `su postgres -c ${JSON.stringify(cmd)}` : cmd], { env, stdio: 'pipe' });
-  try {
-    if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
-    run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55995 -c listen_addresses=' start -w`);
-  } catch (e) { return null; }
-  temp = { base, dir, asPostgres };
-  return `postgresql://postgres@localhost/postgres?host=${base}&port=55995&sslmode=disable`;
-}
-function stopTemp() {
-  if (!temp) return;
-  const env = { ...process.env, PATH: `${temp.dir}:${process.env.PATH}` };
-  try {
-    execFileSync('sh', ['-c', temp.asPostgres
-      ? `su postgres -c "PATH=${temp.dir}:\\$PATH pg_ctl -D ${temp.base}/data -m immediate stop"`
-      : `PATH=${temp.dir}:$PATH pg_ctl -D ${temp.base}/data -m immediate stop`], { env, stdio: 'pipe' });
-  } catch (_) {}
-  try { fs.rmSync(temp.base, { recursive: true, force: true }); } catch (_) {}
-}
+// ── THE DISPOSABLE CLUSTER COMES FROM THE VERIFIED LIFECYCLE UTILITY (B7.20b) ──
+//
+// This file used to carry its own copy of `startTemp`/`stopTemp`: a fixed port, a `/var/tmp`
+// directory, and `.finally(stopTemp)` for cleanup. That pair leaks, and not because somebody forgot
+// a `finally`: these checks call `process.exit()` on both pass and fail, so a promise `finally`
+// never runs, and a SIGTERM does not reach it at all. A leaked legacy cluster also carries no
+// ownership record, so `pg-cleanup.js` correctly refuses to remove it — leaving it to accumulate.
+// Measured: 66 orphaned directories, 28 GB, which filled the disk mid-gate and made several checks
+// report `SKIP infrastructure unavailable` — a full disk presenting as a missing database.
+//
+// `scripts/lib/pg-legacy-harness.js` presents this exact contract and is backed by
+// `pg-disposable`: signal and exit handlers, a random port, and an `OWNER.json` that makes a dead
+// run's cluster positively identifiable and therefore removable.
+const { startTemp: __startTemp, stopTemp } = require('./lib/pg-legacy-harness');
+const startTemp = () => __startTemp('census');
 
 // The census reads DATABASE_URL through src/lib/db. A hosted-looking URL is refused rather than
 // used: this harness WRITES fixtures, and Rule 7 is that a verification must never perform the

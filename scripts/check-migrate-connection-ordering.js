@@ -34,25 +34,27 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { Client } = require('pg');
-const { pgBinCandidates, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+const { pgBinCandidates, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 
-const PGPORT = process.env.MIGORDER_PGPORT || '55493';
+// `let`, because the port is no longer this file's to choose. The disposable utility allocates a
+// random high port per cluster — a fixed one is why two concurrent runs of a harness could not
+// coexist and why an orphan holding the port blocked the next run. The env override is kept for an
+// operator who needs to pin it; the utility honours an explicit port.
+let PGPORT = process.env.MIGORDER_PGPORT || '';
 
 let pass = 0; let fail = 0;
 const ok = (m) => { pass += 1; console.log(`  ok    ${m}`); };
 const bad = (m, d) => { fail += 1; console.log(`  FAIL  ${m}${d ? `\n          ${d}` : ''}`); };
 const h = (t) => console.log(`\n${'─'.repeat(78)}\n${t}\n${'─'.repeat(78)}`);
 
-let temp = null;
-function stop() {
-  if (!temp) return;
-  try {
-    execFileSync('sh', ['-c', temp.asPostgres
-      ? `su postgres -c "PATH=${temp.dir}:\\$PATH pg_ctl -D ${temp.base}/data -m immediate stop"`
-      : `PATH=${temp.dir}:$PATH pg_ctl -D ${temp.base}/data -m immediate stop`], { stdio: 'pipe' });
-  } catch { /* going away */ }
-  try { fs.rmSync(temp.base, { recursive: true, force: true }); } catch { /* temp */ }
-}
+// ── B7.20b: THE CLUSTER COMES FROM THE VERIFIED LIFECYCLE UTILITY ──────────
+//
+// This harness ran its own initdb/pg_ctl and tore down in `stop()` from a `.finally` and the
+// failure paths. Neither covers `process.exit()` or SIGTERM, so the cluster directory survived —
+// and with no ownership record `pg-cleanup.js` correctly refuses to remove it, which is how 28 GB
+// of orphans accumulated. pg-disposable installs signal handlers and writes an OWNER.json.
+const __HARNESS = require('./lib/pg-legacy-harness');
+function stop() { __HARNESS.stopTemp(); }
 
 // A hostname that cannot resolve, standing in for postgres.railway.internal seen from a laptop.
 const UNREACHABLE = 'postgresql://postgres:x@this-host-does-not-resolve.invalid:5432/railway';
@@ -76,20 +78,16 @@ async function main() {
     console.log('\nSKIP  no PostgreSQL server toolchain. This proved NOTHING.\n');
     process.exit(EXIT_NOT_EXECUTED);
   }
-  const base = fs.mkdtempSync('/var/tmp/migorder-');
-  const asPostgres = process.getuid && process.getuid() === 0;
-  temp = { base, dir, asPostgres };
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
-  const run = (cmd) => execFileSync('sh', ['-c', asPostgres ? `su postgres -c ${JSON.stringify(cmd)}` : cmd],
-    { env, encoding: 'utf8', stdio: 'pipe' });
-  try {
-    if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
-    run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p ${PGPORT} -c listen_addresses=' start -w`);
-  } catch (e) {
-    bad('could not start a cluster', String(e.message).split('\n').slice(-2).join(' '));
-    stop(); process.exit(1);
+  if (!__HARNESS.startTemp('migorder')) {
+    console.log('\nSKIP  a disposable cluster could not be started. This proved NOTHING.\n');
+    process.exit(EXIT_NOT_EXECUTED);
   }
+  // The base directory and the port are READ BACK from the cluster that was actually created, not
+  // assumed. `urlFor` below builds its connection strings from these, so a wrong value here would
+  // surface as a connection failure rather than as a silent pass.
+  const cluster = __HARNESS.cluster();
+  const base = cluster.base;
+  PGPORT = String(cluster.port);
 
   const urlFor = (db, user = 'postgres') =>
     `postgresql://${user}@localhost/${db}?host=${base}&port=${PGPORT}&sslmode=disable`;

@@ -128,6 +128,57 @@ const TASK_TYPES = Object.freeze({
     execution: EXECUTION.CLOUD_ELIGIBLE,
   },
 
+  // ── B3.5: FOUR READ-ONLY BUSINESS CAPABILITIES ──────────────────────────
+  //
+  // Requirement 3, 2026-11-26: *"Synthetic echo alone is insufficient for a useful autonomous
+  // office. Prioritize operational reporting, employee task status, procurement analysis and
+  // governed business-data retrieval. Reuse existing modules."*
+  //
+  // All four share the same four properties, and each one is load-bearing:
+  //
+  //   readOnly: true      they compute; they do not write, send, order or commit. The retrieval
+  //                       behind them is read-only too — see business-capabilities.js, whose
+  //                       retrievers go through operational-facts.js, scoped-operations.js and
+  //                       supplier-evidence.js, none of which writes.
+  //   reexecutable: true  a report run twice is the same report. There is no record to duplicate,
+  //                       which is what makes recovery after a dead worker safe for these.
+  //   CLOUD_ELIGIBLE      none of them needs the office machine. A hardware requirement on a pure
+  //                       function would make a cloud worker look incapable for no reason.
+  //   a short ceiling     they are arithmetic over a bounded payload. A long ceiling on a fast task
+  //                       means a dead worker holds its lease for that long before recovery.
+  'report.operational_status': {
+    summary: 'summarises the operational facts for a named day, preserving each figure\'s data '
+      + 'state — an unmeasured figure stays unmeasured rather than becoming a zero',
+    reexecutable: true,
+    readOnly: true,
+    ceilingMinutes: 10,
+    execution: EXECUTION.CLOUD_ELIGIBLE,
+  },
+  'report.employee_task_status': {
+    summary: 'per-employee assigned / completed / open task counts for a named day, covering every '
+      + 'employee including those with nothing assigned',
+    reexecutable: true,
+    readOnly: true,
+    ceilingMinutes: 10,
+    execution: EXECUTION.CLOUD_ELIGIBLE,
+  },
+  'analysis.procurement': {
+    summary: 'orders the suppliers on an RFQ by recorded evidence, with a stated reason per '
+      + 'supplier citing the evidence fields it was given. An ordering, not a decision',
+    reexecutable: true,
+    readOnly: true,
+    ceilingMinutes: 10,
+    execution: EXECUTION.CLOUD_ELIGIBLE,
+  },
+  'retrieve.business_data': {
+    summary: 'returns rows from one allowlisted dataset, projected to that dataset\'s declared '
+      + 'fields and scoped to the run\'s company',
+    reexecutable: true,
+    readOnly: true,
+    ceilingMinutes: 10,
+    execution: EXECUTION.CLOUD_ELIGIBLE,
+  },
+
   // ── An example of the OTHER kind, present so the distinction is exercised ──
   //
   // Not implemented and not enqueued by anything. It exists so the re-execution rule has a

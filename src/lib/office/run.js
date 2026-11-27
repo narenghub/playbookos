@@ -40,6 +40,55 @@ async function beginObjectiveRun({ objectiveId, trigger, triggerDetail = null, w
   // Company derived here, from the stored objective, and nowhere else.
   const ctx = await resolveObjectiveContext({ objectiveId }, deps);
 
+  // ── THE KILL SWITCH, AT THE SINK ──────────────────────────────────────────
+  //
+  // B3.11a, requirement 2 of 2026-11-26: *"Complete B3.11a authorization adoption through an actual
+  // execution-path audit. Do not treat the heuristic list of 37 operations as a complete inventory
+  // or import counts as enforcement evidence."*
+  //
+  // The audit (`scripts/check-authz-execution-paths.js`) found this. B3.12 put the stop check in
+  // the INITIATOR, before the ledger opens, and that is a real design — but "the initiator checks"
+  // is a claim about every caller, and measured across the production call sites it was **2 of 6**:
+  // `office/initiator.js` and `office/procurement-rfq.js` checked; `agents/inquiry-agent.js`,
+  // `agents/outreach-approval.js`, `office/executive-agent.js` and `connectors/grants-gov-job.js`
+  // did not. On those four paths a stopped platform still opened runs.
+  //
+  // Four more upstream copies would have fixed exactly those four paths. This repository's own
+  // lesson is the other one: a gate at the sink is on every path INCLUDING the ones nobody has
+  // written yet, and an upstream convention is adopted until the next caller forgets it. So the
+  // check lives here, and the initiator's own check stays where it is — it refuses a whole batch
+  // with a per-objective reason before doing any work, which is better reporting, not redundancy.
+  //
+  // Consequential: TRUE. Opening a run is minting the identity that authorization attaches to, not
+  // thinking about it, so an UNREADABLE stop state refuses rather than taking the read-only path's
+  // null. A thrown error from the stop read is also a refusal: an unreadable stop is not permission.
+  const autonomy = (deps && deps.autonomy) || require('../autonomy');
+  let stopped;
+  try {
+    stopped = await autonomy.checkStopped({
+      capability: 'office.initiate', company: ctx.companyId, workflow, agent,
+    }, { consequential: true, deps });
+  } catch (e) {
+    stopped = { unknown: true, scope_type: 'global', scope_key: '',
+      reason: `the stop state could not be read (${e.message})` };
+  }
+  if (stopped) {
+    // A REFUSAL, NOT A THROW, and not a silent false either. `runId` and `context` are null, which
+    // is the same shape the duplicate path already returns, so a caller that branches on either —
+    // as four of the six do — cannot mistake this for a run it may use. `context` being null is
+    // itself structural: assertContext refuses anything not branded by office/context.js, so a
+    // caller that ignores all of this still cannot act on a company with it.
+    return {
+      stopped: true,
+      stop: { scope_type: stopped.scope_type, scope_key: stopped.scope_key || '',
+        reason: stopped.reason, unknown: stopped.unknown === true },
+      duplicate: false,
+      intentKey: null,
+      runId: null,
+      context: null,
+    };
+  }
+
   const L = lazyLedger(deps);
 
   // K4: an office run gets a STABLE INTENT KEY by default. Without one it is permanently
@@ -59,11 +108,15 @@ async function beginObjectiveRun({ objectiveId, trigger, triggerDetail = null, w
     companyId: ctx.companyId,
   });
 
-  if (created.duplicate) return { duplicate: true, intentKey: created.intentKey, runId: null, context: null };
+  if (created.duplicate) return { stopped: false, duplicate: true, intentKey: created.intentKey, runId: null, context: null };
 
   // The context handed onward is the one resolved from the objective, now carrying the run. Frozen,
   // so a downstream caller cannot rewrite the company in place.
   return {
+    // Present and false on every return, so `begun.stopped` is a question a caller can ask
+    // without knowing which path it came back from. An absent property reads as false by accident;
+    // this reads as false on purpose.
+    stopped: false,
     duplicate: false,
     runId: created.runId,
     rootRunId: created.rootRunId,

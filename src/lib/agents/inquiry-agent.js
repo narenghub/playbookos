@@ -443,6 +443,16 @@ async function buyerEmailContext(deps = {}) {
       // means a buyer never hears back, which is a failure dressed as safety.
       intentKey: cronIntentKey('inquiry-buyer-email', new Date()),
     }, deps);
+    // The stop is checked at the sink since B3.11a, so this path is reached rather than guarded
+    // against here — and it is reported as a STOP. It used to fall into the branch below and be
+    // reported as "another run already holds this intent key", which is a true sentence about a
+    // different situation: an operator who had just halted the platform would have read it as a
+    // scheduling collision.
+    if (begun.stopped) {
+      return { ok: false, reason: 'stopped_by_policy',
+        detail: `${begun.stop.scope_type}${begun.stop.scope_key ? `:${begun.stop.scope_key}` : ''}`
+          + ` — ${begun.stop.reason}` };
+    }
     if (begun.duplicate || !begun.runId) {
       return { ok: false, reason: 'run_not_created',
         detail: 'another run already holds this intent key' };

@@ -188,3 +188,71 @@ test('products arrive on /auth/me, /auth/login and accept-invite', () => {
   // And nothing fetches them separately — that was the /api/roles mistake.
   assert.ok(!/API\('\/products\/mine/.test(SRC), 'no separate products fetch');
 });
+
+// ═══ THE FLAG IS INERT, AND THE OLD ROLLBACK DOES NOT WORK ════════════════
+//
+// Requirement 8, 2026-11-26: *"Complete the read-only verification of PRODUCT_NAV_ENABLED and
+// Prasanthi's actual role. Establish whether the isolated navigation release is necessary."*
+//
+// The verification of the FLAG was answerable from the code, and the answer is that its value
+// cannot change what anyone is served. server.js injects `window.PRODUCT_NAV_ENABLED = true` when
+// the variable is 'true' and injects NOTHING otherwise — it never emits `= false` — while
+// `productNavEnabled()` defaults to true. So:
+//
+//   variable 'true'  → window.PRODUCT_NAV_ENABLED === true   → product nav ON
+//   variable unset   → window.PRODUCT_NAV_ENABLED undefined  → product nav ON
+//
+// These tests pin both halves, because the contradiction survived for as long as it did by living
+// in two files that each looked right alone.
+
+test('the un-injected shell still turns the product nav ON', () => {
+  // The state a server with the variable unset actually serves: no injected line at all.
+  const c = shell();
+  assert.equal('PRODUCT_NAV_ENABLED' in c.window, false,
+    'the fixture pre-sets the flag, so this test is not measuring the un-injected shell');
+  assert.equal(c.navOn(), true,
+    'with nothing injected the product nav is ON. If this ever becomes false, the default changed '
+    + 'and server.js\'s note about the variable being inert must change with it.');
+});
+
+test('server.js never emits window.PRODUCT_NAV_ENABLED = false', () => {
+  // The one-directional gap. An injection of `false` would make the variable a real switch; its
+  // absence is why unsetting the variable is a no-op rather than a rollback.
+  //
+  // COMMENTS BLANKED. My first version read the raw file and failed, because the corrected note in
+  // server.js discusses `window.PRODUCT_NAV_ENABLED = false` in order to explain that the code
+  // never emits it. A scanner that reads prose as code is the defect this repository has now found
+  // in four separate places, and here it was in a test about a comment being wrong.
+  const LEX = require(__dirname + '/../../scripts/js-lex.js');
+  const code = LEX.blankCommentsOnly(fs.readFileSync(__dirname + '/../../server.js', 'utf8'));
+  assert.match(code, /window\.PRODUCT_NAV_ENABLED=true/,
+    'the true-injection is gone, so this test is reading nothing');
+  assert.equal(/PRODUCT_NAV_ENABLED\s*=\s*false/.test(code), false,
+    'server.js now emits a false injection — the variable has become a working switch, and the '
+    + 'note in server.js plus the B2.6 decision table both say it is inert. Update them together.');
+});
+
+test('server.js records that the variable is inert, in the file that misstated it', () => {
+  // The defect WAS the text: the code behaved as written and the sentence beside it described a
+  // different program, so an operator following it during an incident would have believed they had
+  // rolled back when nothing had changed.
+  //
+  // Asserted as the PRESENCE of the correction rather than the absence of the old words. Absence
+  // is satisfiable by deleting the whole note, which would restore the original condition —
+  // behaviour nobody has written down — and would pass.
+  const src = fs.readFileSync(__dirname + '/../../server.js', 'utf8');
+  assert.match(src, /is not a rollback; it is a no-op/,
+    'server.js no longer records that unsetting PRODUCT_NAV_ENABLED does nothing. That sentence is '
+    + 'the only place an operator reading this file learns the variable is inert.');
+  assert.match(src, /\?productNav=0/,
+    'the working escape hatch is no longer named where the inert variable is discussed');
+});
+
+test('and ?productNav=0 is therefore the ONLY instant rollback', () => {
+  // Stated as a test so the escape hatch cannot be removed while the rest of this reasoning stands.
+  const c = shell();
+  c.location.search = '?productNav=0';
+  assert.equal(c.navOn(), false);
+  c.location.search = '?productNav=1';
+  assert.equal(c.navOn(), true, 'the hatch must work in both directions, or it is a one-way door');
+});

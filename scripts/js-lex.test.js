@@ -261,6 +261,17 @@ test('6b. no function declaration anywhere under src/ or scripts/ is hidden', ()
     'scripts/m7-5-harness-regression.test.js':
       'plants the broken and corrected forms of workerClaimAt as template-literal fixtures, so '
       + 'its `function workerClaimAt(` occurrences are string values the scope guard judges',
+    // Reviewed 2026-11-26, B7.20b. This check writes two child scripts to disk and signals them:
+    // one using the migrated shim, one using the LEGACY startTemp/stopTemp pair reproduced
+    // verbatim, and it asserts the first leaves no cluster behind while the second does. The
+    // legacy pair has to be the real text — a paraphrase of a leak does not leak — so
+    // `function startTemp(` and `function stopTemp(` appear in this file as template-literal
+    // fixtures. They are the specimen; the copy this repository RUNS is
+    // scripts/lib/pg-legacy-harness.js, whose own declarations are ordinary visible code.
+    'scripts/check-pg-harness-lifecycle-db.js':
+      'plants both the migrated and the verbatim legacy harness as template-literal fixtures in '
+      + 'child scripts, so its `function startTemp(` and `function stopTemp(` are string values — '
+      + 'the leak it demonstrates requires the original text, not a description of it',
   };
 
   const DECL = /\n(?:async )?function (\w+)\s*\(/g;

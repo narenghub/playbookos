@@ -27,7 +27,7 @@
 // does not exist, a renamed export: all of them surface here, locally, in seconds.
 'use strict';
 
-const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+const { pgBin, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 
 const fs = require('fs');
 const { execFileSync } = require('child_process');
@@ -42,33 +42,21 @@ const err = (m) => fs.writeSync(2, `${m}\n`);
 
 const findInitdb = pgBin;
 
-let temp = null;
-function startTemp() {
-  const dir = findInitdb();
-  if (!dir) return null;
-  const base = fs.mkdtempSync('/var/tmp/recruns-');
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
-  const asPostgres = process.getuid && process.getuid() === 0;
-  const run = (cmd) => execFileSync('sh', ['-c', asPostgres ? `su postgres -c ${JSON.stringify(cmd)}` : cmd],
-    { env, stdio: 'pipe' });
-  try {
-    if (asPostgres) execFileSync('chown', ['-R', 'postgres', base]);
-    run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
-    run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55994 -c listen_addresses=' start -w`);
-  } catch (_) { return null; }
-  temp = { base, dir, asPostgres };
-  return base;
-}
-function stopTemp() {
-  if (!temp) return;
-  const env = { ...process.env, PATH: `${temp.dir}:${process.env.PATH}` };
-  try {
-    execFileSync('sh', ['-c', temp.asPostgres
-      ? `su postgres -c ${JSON.stringify(`pg_ctl -D ${temp.base}/data stop -m immediate`)}`
-      : `pg_ctl -D ${temp.base}/data stop -m immediate`], { env, stdio: 'pipe' });
-  } catch (_) { /* best effort */ }
-  try { fs.rmSync(temp.base, { recursive: true, force: true }); } catch (_) { /* best effort */ }
-}
+// ── THE DISPOSABLE CLUSTER COMES FROM THE VERIFIED LIFECYCLE UTILITY (B7.20b) ──
+//
+// This file used to carry its own copy of `startTemp`/`stopTemp`: a fixed port, a `/var/tmp`
+// directory, and `.finally(stopTemp)` for cleanup. That pair leaks, and not because somebody forgot
+// a `finally`: these checks call `process.exit()` on both pass and fail, so a promise `finally`
+// never runs, and a SIGTERM does not reach it at all. A leaked legacy cluster also carries no
+// ownership record, so `pg-cleanup.js` correctly refuses to remove it — leaving it to accumulate.
+// Measured: 66 orphaned directories, 28 GB, which filled the disk mid-gate and made several checks
+// report `SKIP infrastructure unavailable` — a full disk presenting as a missing database.
+//
+// `scripts/lib/pg-legacy-harness.js` presents this exact contract and is backed by
+// `pg-disposable`: signal and exit handlers, a random port, and an `OWNER.json` that makes a dead
+// run's cluster positively identifiable and therefore removable.
+const { startTemp: __startTemp, stopTemp } = require('./lib/pg-legacy-harness');
+const startTemp = () => __startTemp('recruns');
 
 const sock = startTemp();
 if (!sock) {
@@ -79,8 +67,21 @@ if (!sock) {
 // Before any require that builds a pool: db.js reads these at module load, and with DATABASE_URL
 // absent it uses PG* with ssl:false.
 delete process.env.DATABASE_URL;
-process.env.PGHOST = sock;
-process.env.PGPORT = '55994';
+// ── THE LEGACY CONTRACT WAS NOT UNIFORM, AND THIS IS WHERE IT SHOWED ──────
+//
+// B7.20b's shim presents `startTemp()` as returning a connection URL, because that is what most of
+// the eighty-four legacy harnesses returned. **This one returned the SOCKET DIRECTORY**, which it
+// put straight into `PGHOST`, with the port hardcoded separately. Migrating it as though the
+// contract were uniform produced `getaddrinfo ENOTFOUND postgresql://postgres@localhost/...` — the
+// whole URL being resolved as a hostname — and it is the clearest possible evidence that "the
+// legacy pair" was a family of shapes rather than one.
+//
+// So both values are read back off the cluster that was actually created, which also removes the
+// hardcoded port: the utility allocates a random one, and a stale literal here would have pointed
+// at nothing.
+const CLUSTER = require('./lib/pg-legacy-harness').cluster();
+process.env.PGHOST = CLUSTER.base;
+process.env.PGPORT = String(CLUSTER.port);
 process.env.PGUSER = 'postgres';
 process.env.PGDATABASE = 'postgres';
 // initDB() refuses to run without these when no admin user exists. Deliberately obvious fixture

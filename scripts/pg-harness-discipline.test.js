@@ -48,6 +48,43 @@ const declaresOwnSearchPath = (src) => OWN_SEARCH_PATH.some((re) => re.test(src)
 const hasBareInitdb = (src) => /initdb\b[^\n]*-A trust(?![^\n]*INITDB_FLAGS)/.test(src)
   && !/initdb -D \$\{base\}\/data \$\{INITDB_FLAGS\}/.test(src);
 
+// ── THE TWO RULES, ASSERTED WHERE INITDB NOW LIVES ─────────────────────────
+//
+// After B7.20b, ~75 harnesses no longer run `initdb` themselves: they obtain a cluster from
+// `scripts/lib/pg-disposable.js`. The two properties the sweeps above check for each harness —
+// one shared Postgres discovery, and a superuser named explicitly — did not stop mattering when
+// the code moved. They became properties of ONE file, which is better, and a sweep that kept
+// scanning the old population would have reported green over an empty set.
+test('the disposable utility itself obeys the rules the harnesses obey', () => {
+  const util = path.join(SCRIPTS, 'lib', 'pg-disposable.js');
+  assert.ok(fs.existsSync(util),
+    'scripts/lib/pg-disposable.js is gone. Every migrated harness obtains its cluster from it, so '
+    + 'this is not a rename to absorb silently.');
+  const src = fs.readFileSync(util, 'utf8');
+
+  assert.ok(src.includes("require('./pg-cluster')"),
+    'pg-disposable.js does not use the shared Postgres discovery in scripts/lib/pg-cluster.js. '
+    + 'There is one search path. A private copy in the module that every harness now depends on '
+    + 'is strictly worse than the 33 private copies this rule was written for.');
+
+  assert.ok(!declaresOwnSearchPath(src),
+    'pg-disposable.js declares its own server-binary directory list.');
+
+  assert.ok(/initdb\b/.test(src),
+    'pg-disposable.js no longer runs initdb — then it is not what creates the clusters any more, '
+    + 'and this test is asserting a property of the wrong file.');
+
+  assert.ok(!hasBareInitdb(src),
+    'pg-disposable.js runs initdb without naming the superuser. initdb defaults the bootstrap '
+    + 'superuser to the INVOKING OS USER, and every connection string it hands out says '
+    + '`postgresql://postgres@...`, so a bare initdb resolves only where the process happens to '
+    + 'run as root and su to postgres.');
+
+  assert.ok(/INITDB_FLAGS/.test(src),
+    'pg-disposable.js does not use INITDB_FLAGS, which is the one place the superuser and the auth '
+    + 'method are named.');
+});
+
 // ── AND THE SAME DEFECT ON THE CLIENT SIDE ─────────────────────────────────
 //
 // `-U postgres` in INITDB_FLAGS fixes the SERVER's idea of the superuser's name. It does nothing for
@@ -102,27 +139,91 @@ function signalsNonExecution(src) {
 // `initdb -A trust` and a skip-then-`exit 0` on purpose, and a sweep that flagged its own fixtures
 // would have to be narrowed until it stopped detecting the real thing. (It did flag itself first
 // time out, which is the cheapest possible proof that the predicates fire.)
-function harnesses() {
+// ── TWO POPULATIONS, BECAUSE B7.20b SPLIT THEM ──────────────────────────────
+//
+// Until 2026-11-26 every harness started a cluster the same way: its own `initdb -D`. B7.20b
+// migrated 51 of them onto `scripts/lib/pg-legacy-harness.js`, which is backed by the verified
+// lifecycle utility — so those files no longer contain `initdb` at all.
+//
+// The non-vacuity floor caught that immediately: the sweep's population fell from 76 to 25 and
+// three tests failed with *"the sweep found only 25 harnesses — it has stopped working."* **That
+// guard was right and lowering its floor would have been the wrong fix** — it would have quietly
+// narrowed the sweep to the files that had not been migrated, which is the shape of defect this
+// whole file exists to prevent.
+//
+// So the population is widened instead. A file is a harness if it obtains a disposable cluster BY
+// ANY ROUTE, and the rules are applied where they mean something:
+//
+//   · own search path / bare initdb  → only to files that run `initdb` THEMSELVES. A migrated file
+//     has no search path and no initdb to get wrong; the utility owns both, in one place.
+//   · **non-execution reported as a pass → to EVERY harness**, migrated or not. That is the defect
+//     that reported 31 false passes on 2026-11-03, and migrating a cluster harness does nothing
+//     whatever to prevent it.
+// REQUIRING the module is not OBTAINING a cluster. `pg-cleanup.js` requires `pg-disposable` to
+// INVENTORY clusters it did not create, and the first draft of this predicate flagged it — a sweep
+// that cannot tell a creator from a reader would have to be narrowed until it stopped finding the
+// real thing. The call is what matters.
+const obtainsACluster = (src) => startsACluster(src)
+  || /\bDISPOSABLE\.create\(/.test(src)
+  || /\bcreate\(\s*\{\s*label:/.test(src)
+  || /\bstartTemp\(/.test(src);
+
+function executableScripts() {
   return fs.readdirSync(SCRIPTS)
     .filter((f) => f.endsWith('.js') && !f.endsWith('.test.js') && f !== 'lib')
-    .map((f) => path.join(SCRIPTS, f))
+    .map((f) => path.join(SCRIPTS, f));
+}
+
+/** Files that run their own `initdb` — the raw-harness rules apply to these. */
+function rawHarnesses() {
+  return executableScripts()
     .filter((f) => { try { return startsACluster(fs.readFileSync(f, 'utf8')); } catch (_) { return false; } });
+}
+
+/** Every file that gets a cluster, however it gets one. */
+function harnesses() {
+  return executableScripts()
+    .filter((f) => { try { return obtainsACluster(fs.readFileSync(f, 'utf8')); } catch (_) { return false; } });
 }
 
 // ── THE SWEEP ──────────────────────────────────────────────────────────────
 
 test('every disposable-cluster harness uses the shared Postgres discovery', () => {
   const findings = [];
-  const files = harnesses();
+  const files = rawHarnesses();
   for (const file of files) {
     const src = fs.readFileSync(file, 'utf8');
     const rel = path.relative(ROOT, file);
     if (!src.includes("require('./lib/pg-cluster')")) findings.push(`${rel}: does not use the shared module`);
     if (declaresOwnSearchPath(src)) findings.push(`${rel}: declares its own Postgres search path`);
   }
-  // Non-vacuity: if the file list collapses, this passes by reading nothing — the failure mode of
-  // every grep-based check, and the reason the 33 skipping harnesses went unnoticed for so long.
-  assert.ok(files.length >= 30, `the sweep found only ${files.length} harnesses — it has stopped working`);
+  // ── THE SWEEP FOLLOWED THE CODE, AND THE RULE MOVED WITH IT ──────────────
+  //
+  // This floor was 20 and it FAILED, exactly as its own comment said it would: B7.20b's migration
+  // took the raw-harness population from ~28 to 2, and a sweep over 2 files is close to vacuous.
+  // Lowering the floor to 2 and leaving it there would have been the wrong repair — the rule would
+  // still read almost nothing while reporting green.
+  //
+  // So the rule is now asserted in BOTH places, and neither is optional:
+  //
+  //   · over whatever raw harnesses remain, because a file that runs its own initdb is still that
+  //     file's problem. Two remain, both deliberately: `check-db-tls-verification.js` needs a
+  //     cluster with `ssl=on` and a generated certificate, which pg-disposable does not build and
+  //     should not learn to; and `check-pg-harness-lifecycle-db.js` must construct the legacy pair
+  //     VERBATIM in order to demonstrate that it leaks, so migrating it would delete the evidence.
+  //   · over `scripts/lib/pg-disposable.js` itself, below — which is where `initdb` now actually
+  //     happens for every other harness in the repository. Asserting the property across a
+  //     population that has moved into one module is how a sweep comes to guard nothing.
+  assert.ok(files.length >= 2,
+    `the raw-harness sweep found only ${files.length} files. Two are expected and deliberate; if `
+    + 'they have been migrated or renamed, this rule and the per-file assertions above have '
+    + 'nothing left to read and the utility-level assertions below are the whole guarantee — say '
+    + 'so here rather than leaving a sweep that passes by reading nothing');
+  assert.deepEqual(files.map((f) => path.basename(f)).sort(),
+    ['check-db-tls-verification.js', 'check-pg-harness-lifecycle-db.js'],
+    'the set of files running their own initdb changed. A NEW raw harness is the copy-paste this '
+    + 'migration existed to stop: use scripts/lib/pg-legacy-harness.js, which presents the same '
+    + 'startTemp/stopTemp contract over the utility. A REMOVED one means this list is stale.');
   assert.deepEqual(findings, [],
     `\n${findings.length} harness(es) decide for themselves where Postgres lives.\n\n`
     + 'There is one search path, in scripts/lib/pg-cluster.js. A private copy cannot be corrected\n'
@@ -133,12 +234,15 @@ test('every disposable-cluster harness uses the shared Postgres discovery', () =
 
 test('every initdb names its superuser explicitly', () => {
   const findings = [];
-  const files = harnesses();
+  // Raw harnesses only: a migrated file runs no initdb, and the utility's INITDB_FLAGS is the one
+  // place the superuser is named.
+  const files = rawHarnesses();
   for (const file of files) {
     const src = fs.readFileSync(file, 'utf8');
     if (hasBareInitdb(src)) findings.push(`${path.relative(ROOT, file)}: initdb without an explicit -U`);
   }
-  assert.ok(files.length >= 30, `the sweep found only ${files.length} harnesses`);
+  // Same floor and same reason as the sweep above; the utility's own initdb is asserted below.
+  assert.ok(files.length >= 2, `the raw-harness sweep found only ${files.length} files`);
   assert.deepEqual(findings, [],
     `\n${findings.length} harness(es) run initdb without naming the superuser.\n\n`
     + 'initdb defaults the bootstrap superuser to the INVOKING OS USER. These harnesses connect as\n'

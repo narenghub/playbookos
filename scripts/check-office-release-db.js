@@ -36,7 +36,7 @@
 //   M11 remove the ACTION_ATTEMPTED gate  → sending without durable attempt evidence
 'use strict';
 
-const { pgBin, INITDB_FLAGS, EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+const { EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
 
 const { execFileSync, spawnSync } = require('child_process');
 const crypto = require('crypto');
@@ -56,38 +56,21 @@ const bad = (m, d) => {
 };
 const note = (m) => console.log(`  --    ${m}`);
 
-let temp = null;
-function startCluster() {
-  const dir = pgBin();
-  if (!dir) return null;
-  const base = fs.mkdtempSync(path.join('/var/tmp', 'r1rel-'));
-  const run = (c) => execFileSync('bash', ['-c', c], { stdio: 'pipe' });
-  try {
-    if (process.getuid && process.getuid() === 0) {
-      execFileSync('bash', ['-c', `chown -R postgres ${base}`], { stdio: 'pipe' });
-      run(`su postgres -c "PATH=${dir}:\\$PATH initdb -D ${base}/data ${INITDB_FLAGS}"`);
-      run(`su postgres -c "PATH=${dir}:\\$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55983 -c listen_addresses=' start -w"`);
-    } else {
-      run(`PATH=${dir}:$PATH initdb -D ${base}/data ${INITDB_FLAGS}`);
-      run(`PATH=${dir}:$PATH pg_ctl -D ${base}/data -l ${base}/pg.log -o '-k ${base} -p 55983 -c listen_addresses=' start -w`);
-    }
-  } catch (e) {
-    try { fs.rmSync(base, { recursive: true, force: true }); } catch (_) {}
-    return null;
-  }
-  temp = { base, dir };
-  return `postgresql://postgres@localhost/postgres?host=${base}&port=55983&sslmode=disable`;
-}
-function stopCluster() {
-  if (!temp) return;
-  const c = process.getuid && process.getuid() === 0
-    ? `su postgres -c "PATH=${temp.dir}:\\$PATH pg_ctl -D ${temp.base}/data -m immediate stop"`
-    : `PATH=${temp.dir}:$PATH pg_ctl -D ${temp.base}/data -m immediate stop`;
-  try { execFileSync('bash', ['-c', c], { stdio: 'pipe' }); } catch (_) {}
-  try { fs.rmSync(temp.base, { recursive: true, force: true }); } catch (_) {}
-  temp = null;
-}
-
+// ── B7.20b: THE CLUSTER COMES FROM THE VERIFIED LIFECYCLE UTILITY ──────────
+//
+// This pair used to run its own `initdb` and `pg_ctl` on a FIXED port, tear down in a `.finally`,
+// and leave the whole directory behind on `process.exit()` or SIGTERM — neither of which a
+// `finally` covers. 66 orphaned clusters at ~171 MiB each, 28 GB, had accumulated from one such
+// harness, and a leaked legacy cluster carries no ownership record so `pg-cleanup.js` correctly
+// refuses to remove it: the directories accumulate for ever.
+//
+// `scripts/lib/pg-legacy-harness.js` presents this same two-function contract — a URL or `null`,
+// and a teardown — over `pg-disposable`, which installs SIGINT/SIGTERM/SIGHUP and `exit` handlers,
+// allocates a random port so two runs can coexist, and writes an OWNER.json that makes a leak
+// positively identifiable and therefore reclaimable.
+const __HARNESS = require('./lib/pg-legacy-harness');
+function startCluster() { return __HARNESS.startTemp('r1rel'); }
+function stopCluster() { __HARNESS.stopTemp(); }
 console.log('\nR1 release executor\n');
 const url = startCluster();
 if (!url) { console.log('  skip  no Postgres available'); process.exit(EXIT_NOT_EXECUTED); }

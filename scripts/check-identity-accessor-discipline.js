@@ -98,6 +98,15 @@ const EXEMPT = new Map([
     + 'predicate is written to hide rows a reader should not see and the claim here is that there '
     + 'are no rows at all. The cycle itself writes only through office/memory.remember, which is '
     + 'what the section breaks on purpose. The user_companies statement is fixture cleanup by id.'],
+  ['scripts/check-business-capabilities-db.js',
+    'B3.5\'s read-only capability check. Its fixture memberships are granted through '
+    + 'grantMembership — the first version INSERTed into user_companies directly and this scanner '
+    + 'refused it, correctly, so the fixture is now built by the same road the product uses and '
+    + 'traverses assertActorMayManage on the way in. The remaining user_companies statement is '
+    + 'cleanup by recorded id: revokeMembership is deliberately not a delete, which is right for '
+    + 'production and wrong for a disposable fixture that must leave the cluster as it found it. '
+    + 'Every employee the check READS comes back through employeesOf, which delegates to this '
+    + 'accessor, and section 3 proves two companies cannot see each other\'s rows through it.'],
   ['scripts/check-operational-facts-db.js',
     'B3.19\'s operational-facts check. It grants its fixture membership through grantMembership and '
     + 'reads every figure through the facts source; the direct statements are the INDEPENDENT '

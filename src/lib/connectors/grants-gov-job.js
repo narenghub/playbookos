@@ -109,6 +109,15 @@ async function runGrantsHarvest({
     intentKey: cronIntentKey('grants-gov-harvest', now),
   }, deps);
 
+  // A stop refuses here, at the sink (B3.11a). Without this branch the null context below would
+  // reach assertContext and surface as "not produced by office/context.js", which is a true
+  // complaint about the wrong thing.
+  if (begun.stopped) {
+    log(`  refused: a stop is in force at ${begun.stop.scope_type}`
+      + `${begun.stop.scope_key ? `=${begun.stop.scope_key}` : ''} — ${begun.stop.reason}`);
+    return { ok: false, stats, stopped: true };
+  }
+
   if (begun.duplicate) {
     // Another firing of the same minute already owns this intent. Declined, not failed.
     log('  declined: another run already owns this intent');

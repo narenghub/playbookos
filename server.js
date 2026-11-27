@@ -129,16 +129,42 @@ app.use(express.static(path.join(__dirname, "public"), {
   },
 }));
 
-// Serve the SPA shell, injecting window.PRODUCT_NAV_ENABLED=true when PRODUCT_NAV_ENABLED is set
-// so productNavEnabled() defaults on (the PlayNexa console) without the ?productNav query param.
-// Flag read once at boot (a Railway env change restarts the process). Rollback = unset the var
-// (classic on next boot); ?productNav=0 always forces classic, no deploy/restart needed.
+// ── THIS VARIABLE NO LONGER DECIDES ANYTHING, AND THE OLD COMMENT SAID IT DID ─
+//
+// It used to read: *"Rollback = unset the var (classic on next boot); ?productNav=0 always forces
+// classic, no deploy/restart needed."* The first half has been false since the product shell became
+// the default nav, and the gap is one-directional in the dangerous direction:
+//
+//   · this file injects `window.PRODUCT_NAV_ENABLED = true` when the var is 'true', and injects
+//     NOTHING otherwise. It never emits `= false`.
+//   · `productNavEnabled()` in public/index.html returns FALSE only for `?productNav=0` or an
+//     explicit `window.PRODUCT_NAV_ENABLED === false`, and otherwise **returns true**.
+//
+// So with the variable unset the client sees `undefined` and turns the product nav ON. Unsetting it
+// is not a rollback; it is a no-op. Found while establishing whether the B2.6 isolated navigation
+// release is necessary (requirement 8, 2026-11-26): the flag's value cannot change what anybody is
+// served, so reading it in Railway answers nothing — which removed one of the two lookups that
+// decision was waiting on. The deployed commit fda00b43 has the same default-on client, so this is
+// true of production now and not only of this branch.
+//
+// The variable is KEPT, rather than deleted, for exactly one reason: it is the only way to make the
+// shell self-describing (the injected line is visible in page source), and removing it would be a
+// production behaviour change on a file nobody has asked to change. It is now documented as inert.
+//
+// THE WORKING ROLLBACKS, in increasing order of effort:
+//   1. `?productNav=0` — per session, instant, no deploy. The only instant one.
+//   2. ship `window.PRODUCT_NAV_ENABLED = false` (a one-line change to this file's injection, or to
+//      the shell) — global, needs a deploy.
+//   3. revert the nav commit.
+// `src/lib/nav-model.test.js` pins all of this so the contradiction cannot come back silently.
 const PRODUCT_NAV_DEFAULT = String(process.env.PRODUCT_NAV_ENABLED) === 'true';
 const SHELL_PATH = path.join(__dirname, 'public', 'index.html');
 let _shellInjected = null;
 function serveShell(res) {
   res.set('Cache-Control', 'no-store');
-  if (!PRODUCT_NAV_DEFAULT) return res.sendFile(SHELL_PATH);            // default OFF → byte-identical static shell
+  // The un-injected shell. NOT "product nav off": the client defaults it ON, so this branch serves
+  // a page that turns the product nav on without being told to. See the note above.
+  if (!PRODUCT_NAV_DEFAULT) return res.sendFile(SHELL_PATH);
   if (_shellInjected == null) {
     const raw = fs.readFileSync(SHELL_PATH, 'utf8');
     _shellInjected = raw.replace('</head>', '<script>window.PRODUCT_NAV_ENABLED=true;</script></head>');

@@ -204,6 +204,16 @@ function independentCriterion(step, output) {
     return { validated: true, criterion };
   }
 
+  // ── B3.5's FOUR READ-ONLY CAPABILITIES ──────────────────────────────────
+  //
+  // Each one's criterion RECOMPUTES the answer from the payload this plan minted and compares, so a
+  // handler cannot satisfy it by being well-formed — it has to be right. The registry returns null
+  // for a type it does not own, so an unknown step still falls through to the refusal below rather
+  // than being told it is valid by a module that has never heard of it.
+  const BC = require('./business-capabilities');
+  const business = BC.validateStep(step, output);
+  if (business) return business;
+
   return { validated: false,
     reason: `no_independent_criterion: ${taskType || 'an untyped step'} declares no way for the `
       + 'plan to check its result, so this cycle cannot claim to have validated it independently' };

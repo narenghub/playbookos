@@ -442,6 +442,12 @@ const DDL = [
      --   reconciled           the cost is known and in the ledger.
      --   zero_charge_verified proven not to have been charged, with the evidence recorded.
      --   unknown              the financial outcome cannot be established. Counts for ever.
+     --   overspent            the cost is known AND it exceeded the hold that authorized it. A
+     --                        SEPARATE state from reconciled, because requirement 5 of 2026-11-26
+     --                        is that an estimated reservation is not a proven worst-case charge:
+     --                        an under-estimated maxUsd can be exceeded by the real charge, and
+     --                        the hold cannot prevent that. Recording it as 'reconciled' would
+     --                        make the overspend invisible at exactly the moment it is provable.
      financial_state    TEXT NOT NULL DEFAULT 'reserved',
      dispatched_at      TIMESTAMPTZ,
      financial_note     TEXT,
@@ -449,7 +455,12 @@ const DDL = [
        CHECK (state IN ('held','settled','released','expired')),
      CONSTRAINT office_budget_reservations_financial_state CHECK (
        financial_state IN ('reserved','dispatch_attempted','provider_accepted',
-                           'reconciled','zero_charge_verified','unknown')
+                           'reconciled','zero_charge_verified','unknown','overspent')
+     ),
+     -- An overspend must say what it was: both figures, in the note. A state that records an
+     -- overspend without naming the amounts is a flag nobody can act on.
+     CONSTRAINT office_budget_reservations_overspend_needs_note CHECK (
+       financial_state <> 'overspent' OR length(btrim(COALESCE(financial_note,''))) > 0
      ),
      -- A row that claims the provider was reached must say WHEN. Without this, "dispatched" is an
      -- assertion with no evidence behind it, and the whole point of the column is that a dispatched
@@ -527,12 +538,29 @@ const DDL = [
   // deliberately NOT used: these must hold for the rows already there, and if one does not, the
   // migration should fail loudly rather than leave an unenforced constraint behind.
   `DO $$ BEGIN
+     -- The 'overspent' state was added after this constraint existed, so a cluster migrated
+     -- earlier carries the older list. Drop the STALE one first, then the add below recreates it.
+     -- Checked by its definition rather than by a version number: the definition is the thing that
+     -- matters, and a cluster whose constraint already allows 'overspent' is left alone.
+     IF EXISTS (SELECT 1 FROM pg_constraint
+                 WHERE conname = 'office_budget_reservations_financial_state'
+                   AND pg_get_constraintdef(oid) NOT LIKE '%overspent%') THEN
+       ALTER TABLE office_budget_reservations
+         DROP CONSTRAINT office_budget_reservations_financial_state;
+     END IF;
      IF NOT EXISTS (SELECT 1 FROM pg_constraint
                      WHERE conname = 'office_budget_reservations_financial_state') THEN
        ALTER TABLE office_budget_reservations
          ADD CONSTRAINT office_budget_reservations_financial_state
          CHECK (financial_state IN ('reserved','dispatch_attempted','provider_accepted',
-                                    'reconciled','zero_charge_verified','unknown'));
+                                    'reconciled','zero_charge_verified','unknown','overspent'));
+     END IF;
+     IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                     WHERE conname = 'office_budget_reservations_overspend_needs_note') THEN
+       ALTER TABLE office_budget_reservations
+         ADD CONSTRAINT office_budget_reservations_overspend_needs_note
+         CHECK (financial_state <> 'overspent'
+                OR length(btrim(COALESCE(financial_note,''))) > 0);
      END IF;
      IF NOT EXISTS (SELECT 1 FROM pg_constraint
                      WHERE conname = 'office_budget_reservations_only_undispatched_expires') THEN
@@ -822,6 +850,26 @@ const DDL = [
 const IGNORABLE = new Set(['42710', '42P07', '42701']);
 
 async function migrateOffice(query) {
+  // ── THE KILL SWITCH IS A DEPENDENCY OF THIS KERNEL, SO ENSURE IT HERE ────
+  //
+  // B3.11a (2026-11-26) moved the stop check into `office/run.js beginObjectiveRun`, which is the
+  // only road by which an office run opens. `checkStopped` fails CLOSED on an unreadable stop
+  // state — *"an unreadable stop is not permission"* — so a database with the office schema and no
+  // `autonomy_stops` table cannot open a run at all.
+  //
+  // That is not a hypothetical: it broke **sixteen** gate checks the first time the sink gate ran,
+  // each with `relation "autonomy_stops" does not exist`, and the tempting reading was that the
+  // new gate was too strict. The gate was right and the databases were incomplete — those harnesses
+  // had never needed the table before, because nothing in the office kernel read it.
+  //
+  // Patching each harness would have been sixteen edits and a seventeenth waiting for the next
+  // check somebody writes. The honest fix is that the dependency is REAL: this kernel cannot open a
+  // run without the kill switch, so its migration guarantees the table it reads. Idempotent
+  // (`CREATE TABLE IF NOT EXISTS`), and production already applies it as its own step in
+  // `migrate-all.js`, so the deployed behaviour is unchanged — what changes is that a database
+  // carrying the office schema can always answer "is this stopped".
+  await require('../autonomy').migrateAutonomy(query);
+
   for (const stmt of DDL) {
     try {
       await query(stmt);

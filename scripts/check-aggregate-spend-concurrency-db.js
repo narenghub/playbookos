@@ -336,8 +336,102 @@ watchdog.unref?.();
       } else bad('a session-scoped advisory lock is taken');
     }
 
-    // ══ 5. WHAT THIS DOES NOT ESTABLISH ══════════════════════════════════
-    head('5. the boundary of this check');
+    // ══ 5. AN OVER-CHARGE IS DETECTED, AND IS NOT CALLED RECONCILED ══════
+    //
+    // Owner's requirement 5, 2026-11-26: *"Atomic reservations prevent concurrent allocation beyond
+    // configured limits, but an underestimated provider charge can still exceed its reservation.
+    // Post-call settlement does not prevent that overspend. Do not call an estimated reservation a
+    // proven worst-case charge."*
+    //
+    // Sections 1-4 establish the first half: the hold is atomic and the caps hold under
+    // concurrency. This section establishes what the second half left unstated — a charge ABOVE
+    // the hold used to settle as `reconciled`, because the cost was known, which made the one
+    // provable overspend indistinguishable from a clean settlement. It is now its own state.
+    //
+    // Nothing here claims prevention. Both figures are asserted in the note precisely because this
+    // is after-the-fact detection, which is the thing the corrected wording says it is.
+    head('5. a charge above its hold settles as OVERSPENT, with both figures');
+
+    {
+      // ITS OWN COMPANY, not company A's. The first version reused OBJ_A1 and both holds were
+      // refused with `would_exceed_company_daily_cap` — sections 2 and 3 had deliberately spent
+      // that company's daily allowance to make the race refuse, so this section was measuring
+      // their fixture rather than its own. A fresh company is also what the repository's own rule
+      // asks for: act on a fixture you created.
+      const CO_OV = await newCompany('co-ov');
+      const OBJ_OV = await newObjective(CO_OV, 'ov1', 10.00);
+      const RUN_OV = await newRun(CO_OV, OBJ_OV);
+      const ctx = await ctxFor(OBJ_OV);
+      const within = `ovr-within-${Date.now()}`;
+      const over = `ovr-over-${Date.now()}`;
+
+      // ── AND ITS OWN CAPS, FOR THE SAME REASON ─────────────────────────
+      //
+      // The file pins the caps at $1.00/$1.50 so that sections 2 and 3 can drive holds into them.
+      // By the time this section runs the platform allowance is spent, and the second version of
+      // this code was refused with `would_exceed_platform_daily_cap`. This section is about what
+      // SETTLEMENT records, not about what the caps refuse, so it raises both for its own scope
+      // using the same module-reload the section-3 control uses, and restores them afterwards —
+      // leaving them raised would silently weaken every later section.
+      const savedCo = process.env.OFFICE_COMPANY_DAILY_CAP_USD;
+      const savedPl = process.env.OFFICE_PLATFORM_DAILY_CAP_USD;
+      process.env.OFFICE_COMPANY_DAILY_CAP_USD = '50.00';
+      process.env.OFFICE_PLATFORM_DAILY_CAP_USD = '99.00';
+      delete require.cache[require.resolve('../src/lib/office/scope')];
+      const SCOPE5 = require('../src/lib/office/scope');
+      const restoreCaps = () => {
+        if (savedCo === undefined) delete process.env.OFFICE_COMPANY_DAILY_CAP_USD;
+        else process.env.OFFICE_COMPANY_DAILY_CAP_USD = savedCo;
+        if (savedPl === undefined) delete process.env.OFFICE_PLATFORM_DAILY_CAP_USD;
+        else process.env.OFFICE_PLATFORM_DAILY_CAP_USD = savedPl;
+        delete require.cache[require.resolve('../src/lib/office/scope')];
+      };
+
+      const r1 = await SCOPE5.reserveSpend(ctx, {
+        id: within, objectiveId: OBJ_OV, runId: RUN_OV, maxUsd: 0.5,
+        reason: 'settles inside its hold',
+      }, deps);
+      const r2 = await SCOPE5.reserveSpend(ctx, {
+        id: over, objectiveId: OBJ_OV, runId: RUN_OV, maxUsd: 0.5,
+        reason: 'the provider charges more than the caller guessed',
+      }, deps);
+
+      if (!r1.ok || !r2.ok) {
+        bad('could not take the two holds this section needs', { r1: r1.code, r2: r2.code });
+      } else {
+        const a = await SCOPE5.settleSpend(ctx,
+          { reservationId: within, costUsd: 0.4, costKnown: true }, deps);
+        if (a && a.financial_state === 'reconciled') {
+          ok('a settlement INSIDE its hold reads reconciled — the ordinary case is unchanged, '
+            + 'which is what stops the new state from being a blanket relabelling');
+        } else bad('a within-hold settlement is no longer reconciled', a);
+
+        // $0.75 against a $0.50 hold: the under-estimate the owner describes.
+        const b = await SCOPE5.settleSpend(ctx,
+          { reservationId: over, costUsd: 0.75, costKnown: true }, deps);
+        if (b && b.financial_state === 'overspent') {
+          ok('a charge of $0.75 against a $0.50 hold settles as OVERSPENT, not reconciled — the '
+            + 'hold prevented nothing here, and the row now says so instead of reporting the '
+            + 'cost as squared away');
+        } else bad('an over-charge is still being recorded as a reconciliation', b);
+
+        if (b && /0\.75/.test(String(b.financial_note)) && /0\.5/.test(String(b.financial_note))) {
+          ok('and the note names BOTH figures — charged and held — because a flag without them is '
+            + 'one nobody can act on');
+        } else bad('the overspend note does not name both figures', b && b.financial_note);
+
+        if (b && /not a reconciliation/.test(String(b.financial_note))) {
+          ok('the note states that this was detected after the money was spent, which is the '
+            + 'corrected claim rather than the old implication that settlement corrects an '
+            + 'under-estimate downward');
+        } else bad('the overspend note overclaims or is silent about what settlement does',
+          b && b.financial_note);
+      }
+      restoreCaps();
+    }
+
+    // ══ 6. WHAT THIS DOES NOT ESTABLISH ══════════════════════════════════
+    head('6. the boundary of this check');
 
     note('NOT established: that any cap is a PROVEN MAXIMUM CHARGE. These bound what the system '
       + 'will HOLD and therefore what it will dispatch; the held figure is a conservative estimate '

@@ -2,8 +2,28 @@
 // against a real server. Nothing is estimated.
 const crypto = require('node:crypto'); const http = require('node:http');
 const { spawn } = require('node:child_process'); const fs = require('node:fs');
-const DISPOSABLE = require('/tmp/claude-0/integration/scripts/lib/pg-disposable');
-const c = DISPOSABLE.create({ label: 'cost' });
+const DISPOSABLE = require('./lib/pg-disposable');
+const { EXIT_NOT_EXECUTED } = require('./lib/pg-cluster');
+// ── NON-EXECUTION IS EXIT 3, NOT EXIT 1 ────────────────────────────────────
+//
+// Caught by `pg-harness-discipline.test.js` once B7.20b widened its sweep to every file that
+// obtains a cluster by any route — this one had no non-execution signal at all, so a machine with
+// no Postgres would have reported exit 1, which reads as *"the measurement failed"* rather than
+// *"the measurement did not run"*. For a script whose whole output is a cost figure the owner is
+// asked to approve, those are very different statements. The guard was right about a script I had
+// written the same day.
+let c = null;
+try {
+  c = DISPOSABLE.create({ label: 'cost' });
+} catch (e) {
+  if (e && e.infrastructure) {
+    console.log(`  skip  ${e.message}`);
+    console.log('SKIP  the worker footprint was NOT measured — infrastructure unavailable. No cost '
+      + 'figure was produced, and the absence of one is not a figure of zero.');
+    process.exit(EXIT_NOT_EXECUTED);
+  }
+  throw e;
+}
 process.env.DATABASE_URL = c.url;
 process.env.ADMIN_EMAIL='cost@x.invalid'; process.env.ADMIN_PASSWORD='c'+crypto.randomBytes(12).toString('hex');
 const SEAL = { WORKER_SECRET_SEAL_KEY: crypto.randomBytes(32).toString('hex') };
@@ -13,13 +33,13 @@ const SEAL = { WORKER_SECRET_SEAL_KEY: crypto.randomBytes(32).toString('hex') };
   const query = (t,p)=>P.query(t,p);
   const withTransaction = async (fn)=>{const cl=await P.connect();try{await cl.query('BEGIN');const r=await fn(cl);await cl.query('COMMIT');return r;}catch(e){await cl.query('ROLLBACK').catch(()=>{});throw e;}finally{cl.release();}};
   const deps={query,withTransaction,env:SEAL};
-  const DB=require('/tmp/claude-0/integration/src/lib/db'); await DB.initDB();
-  await require('/tmp/claude-0/integration/src/lib/runs').migrateRuns(query);
-  await require('/tmp/claude-0/integration/src/lib/worker/identity').migrateWorkerIdentity(query);
-  await require('/tmp/claude-0/integration/src/lib/worker/leases').migrateWorkerTasks(query);
-  await require('/tmp/claude-0/integration/src/lib/worker/audit').migrateWorkerAudit(query);
-  await require('/tmp/claude-0/integration/src/lib/autonomy').migrateAutonomy(query);
-  const express=require('express'); const WR=require('/tmp/claude-0/integration/src/api/worker.routes');
+  const DB=require('../src/lib/db'); await DB.initDB();
+  await require('../src/lib/runs').migrateRuns(query);
+  await require('../src/lib/worker/identity').migrateWorkerIdentity(query);
+  await require('../src/lib/worker/leases').migrateWorkerTasks(query);
+  await require('../src/lib/worker/audit').migrateWorkerAudit(query);
+  await require('../src/lib/autonomy').migrateAutonomy(query);
+  const express=require('express'); const WR=require('../src/api/worker.routes');
   const app=express(); app.use(express.json({verify:(q,s,b)=>{q.rawBody=b;}}));
   let reqs=0, bytesIn=0, bytesOut=0;
   app.use((q,s,n)=>{reqs++; bytesIn += (q.rawBody?q.rawBody.length:0); const w=s.write.bind(s), e=s.end.bind(s);
@@ -28,7 +48,7 @@ const SEAL = { WORKER_SECRET_SEAL_KEY: crypto.randomBytes(32).toString('hex') };
   app.use('/api', WR.createWorkerRouter({enable:true,query,withTransaction,env:SEAL}));
   const srv=http.createServer(app); await new Promise(r=>srv.listen(0,'127.0.0.1',r));
   const base=`http://127.0.0.1:${srv.address().port}`;
-  const ID=require('/tmp/claude-0/integration/src/lib/worker/identity');
+  const ID=require('../src/lib/worker/identity');
   const tok=await ID.createEnrollmentToken({label:'cost-probe'},deps);
   const en=await (await fetch(`${base}/api/worker/enroll`,{method:'POST',headers:{'content-type':'application/json'},
     body:JSON.stringify({token:tok.token,hostFingerprint:'cost'})})).json();

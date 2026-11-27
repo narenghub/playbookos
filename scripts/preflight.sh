@@ -39,6 +39,14 @@ echo "── preflight"
 # application-security face. Dry run: it reports and refuses, it does not delete.
 pf_step "disposable test infrastructure is healthy" node scripts/pg-cleanup.js
 pf_step "the disposable cluster lifecycle holds" node --test scripts/pg-disposable.test.js
+
+# B7.20b (owner's requirement 4, 2026-11-26): a SIGTERMed harness must leave no cluster behind.
+# `pg-harness-discipline.test.js` asserts on SOURCE; this measures BEHAVIOUR, with the legacy pair
+# verbatim as the control — it leaks 38 MiB under the identical signal, so the difference names the
+# migration rather than leaving "something tidied up" as the conclusion. It also counts how many
+# harnesses are migrated, so the claim cannot go vacuous.
+pf_step "a signalled Postgres harness leaves no cluster behind" \
+  node scripts/check-pg-harness-lifecycle-db.js
 pf_step "test suite" env JWT_SECRET=preflight node --test $(find src scripts -name '*.test.js')
 # EVERY .js FILE PARSES. Cheap, and it goes early because a file that does not parse cannot run at
 # all. On 2026-11-24 a backtick inside a template literal made validate-k2-deployed.js unloadable;
@@ -393,13 +401,34 @@ pf_step "one definition of the message a human approved" node scripts/check-appr
 # departed director.
 pf_step "a sender is an authorized identity, not a familiar domain" \
   node scripts/check-sender-identity-db.js
-# Owner's §4 of 2026-11-25: the spend ceiling must be a proven bound, not a character heuristic.
-pf_step "the spend ceiling is a proven bound over the real request" \
+# Owner's §4 of 2026-11-25: the spend ceiling must be computed over the real request, not from a
+# chars/3 heuristic. The STEP NAME said "a proven bound", which the code itself does not claim —
+# ai.js and llm.js both record that serialized byte length is not a proven billing bound, and
+# requirement 5 of 2026-11-26 is explicit that an estimated reservation must not be called a proven
+# worst-case charge. What this test establishes is that the estimate covers the WHOLE serialized
+# request, envelope and system instructions included, and is measured rather than assumed.
+pf_step "the spend ceiling is computed over the whole serialized request, by bytes" \
   env JWT_SECRET=preflight node --test src/lib/office/spend-ceiling.test.js
 # Owner's §5: what actually traverses the unified boundary, measured rather than claimed. It also
 # guards the finding itself — a new gate.js caller turns this red.
 pf_step "the authorization adoption inventory holds" \
   node scripts/check-authz-adoption-inventory.js
+# Owner's requirement 2 (2026-11-26): "Complete B3.11a authorization adoption through an actual
+# execution-path audit. Do not treat the heuristic list of 37 operations as a complete inventory or
+# import counts as enforcement evidence." The inventory above is a WORKLIST of 37 heuristic hits;
+# this walks fourteen named consequential operations and reports, for each gate, whether it is in
+# the function, one unconditional call below it, or absent. Its section 6 plants a removal in a copy
+# of each real file and requires the audit to go red, so a widened pattern cannot pass for a fix.
+pf_step "every consequential operation gates itself on its own execution path" \
+  node scripts/check-authz-execution-paths.js
+# Owner's requirement 3 (2026-11-26): "Complete B3.5 with practical read-only business capabilities
+# and independent validation criteria. Synthetic echo alone is insufficient for a useful autonomous
+# office." Four capabilities, each RETRIEVED from a real database through an existing module,
+# EXECUTED through the real executor, and VALIDATED by a criterion that recomputes the answer from
+# the payload the plan minted — so a handler cannot pass by being well-formed. Section 2 cross-pairs
+# every criterion against every other capability's output and requires all 12 to be refused.
+pf_step "the four read-only business capabilities retrieve, execute and independently validate" \
+  node scripts/check-business-capabilities-db.js
 # §6 (2026-11-25): a run starts because a schedule fired, not because a checker was invoked.
 pf_step "a scheduled run starts with nobody naming the objective" \
   node scripts/check-office-initiator-db.js

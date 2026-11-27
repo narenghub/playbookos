@@ -27,12 +27,19 @@ const DEAL = Object.freeze([
   { kind: 'order', amount: 8_500, currency: 'USD', basis: 'recorded', source: 'po-1' },
   { kind: 'invoiced', amount: 8_500, currency: 'USD', basis: 'recorded', source: 'inv-1' },
   { kind: 'payment_received', amount: 4_000, currency: 'USD', basis: 'settled', source: 'pay-1' },
-  { kind: 'cost', amount: 6_200, currency: 'USD', basis: 'recorded', source: 'supplier-inv-1' },
+  // THREE cost states, because they are not the same money (requirement 7, 2026-11-26). This deal
+  // has a supplier quote of 6,400 that it did not take, an order placed at 6,200, that same 6,200
+  // invoiced to us by the supplier, and 1,000 of it actually paid.
+  { kind: 'cost_quoted', amount: 6_400, currency: 'USD', basis: 'counterparty_stated', source: 'supplier-quote-1' },
+  { kind: 'cost_committed', amount: 6_200, currency: 'USD', basis: 'recorded', source: 'supplier-po-1' },
+  { kind: 'cost_incurred', amount: 6_200, currency: 'USD', basis: 'recorded', source: 'supplier-inv-1' },
+  { kind: 'cost_incurred', amount: 1_000, currency: 'USD', basis: 'settled', source: 'supplier-pay-1' },
 ]);
 
 const ALL_READABLE = Object.freeze({
   opportunity_estimate: true, quotation: true, order: true,
-  invoiced: true, payment_received: true, cost: true,
+  invoiced: true, payment_received: true,
+  cost_quoted: true, cost_committed: true, cost_incurred: true,
 });
 
 test('every kind reports its OWN figure, and no two agree by accident', () => {
@@ -42,7 +49,10 @@ test('every kind reports its OWN figure, and no two agree by accident', () => {
   assert.equal(a.figures.order.amount, 8_500);
   assert.equal(a.figures.invoiced.amount, 8_500);
   assert.equal(a.figures.payment_received.amount, 4_000);
-  assert.equal(a.figures.cost.amount, 6_200);
+  assert.equal(a.figures.cost_quoted.amount, 6_400);
+  assert.equal(a.figures.cost_committed.amount, 6_200);
+  // Both incurred facts sum: 6,200 recorded plus 1,000 settled.
+  assert.equal(a.figures.cost_incurred.amount, 7_200);
 });
 
 test('there is NO total across kinds', () => {
@@ -111,94 +121,171 @@ test('and a payment source nobody read is MISSING, not zero', () => {
 });
 
 test('an unreadable source is UNAVAILABLE, which is not zero either', () => {
-  const a = L.aggregate({ facts: DEAL, readable: { ...ALL_READABLE, cost: false } });
-  assert.equal(a.figures.cost.status, 'unavailable');
-  assert.equal(a.figures.cost.amount, null);
-  assert.match(a.figures.cost.detail, /company has no\s+costs/);
+  const a = L.aggregate({ facts: DEAL, readable: { ...ALL_READABLE, cost_incurred: false } });
+  assert.equal(a.figures.cost_incurred.status, 'unavailable');
+  assert.equal(a.figures.cost_incurred.amount, null);
+  assert.match(a.figures.cost_incurred.detail, /company has no\s+costs/);
 });
 
-// ── MARGIN ─────────────────────────────────────────────────────────────────
+// ── THE THREE DERIVED FIGURES ──────────────────────────────────────────────
 
-test('margin is derived, named, and based on INVOICED rather than collected', () => {
+test('each derived figure names its own two sides and uses the right cost state', () => {
   const a = L.aggregate({ facts: DEAL, readable: ALL_READABLE });
-  assert.equal(a.figures.margin.status, 'measured');
-  assert.equal(a.figures.margin.amount, 8_500 - 6_200);
-  assert.equal(a.figures.margin.basis, 'invoiced_minus_cost',
-    'the basis must be named: margin on invoiced and margin on collected are different figures');
-  assert.match(a.figures.margin.detail, /NOT margin on money received/);
+
+  // Projected: the QUOTED price against the QUOTED cost. Nothing has happened.
+  assert.equal(a.figures.projected_margin.status, 'measured');
+  assert.equal(a.figures.projected_margin.amount, 9_100 - 6_400);
+  assert.equal(a.figures.projected_margin.basis, 'quotation_minus_quoted_cost');
+  assert.match(a.figures.projected_margin.detail, /PROJECTION on prices, not an outcome/);
+
+  // Invoiced: the accrual view. Incurred costs are 6,200 recorded + 1,000 settled = 7,200.
+  assert.equal(a.figures.invoiced_margin.status, 'measured');
+  assert.equal(a.figures.invoiced_margin.amount, 8_500 - 7_200);
+  assert.equal(a.figures.invoiced_margin.basis, 'invoiced_minus_incurred_cost');
+  assert.match(a.figures.invoiced_margin.detail, /ACCRUAL view/);
+
+  // Realized: cash in against cash out. Only the settled 1,000 counts on the cost side.
+  assert.equal(a.figures.realized_result.status, 'measured');
+  assert.equal(a.figures.realized_result.amount, 4_000 - 1_000);
+  assert.equal(a.figures.realized_result.basis, 'received_minus_settled_cost');
+
+  // And no two of them are the same number by accident — which is the whole reason there are three.
+  const three = [a.figures.projected_margin.amount, a.figures.invoiced_margin.amount,
+    a.figures.realized_result.amount];
+  assert.equal(new Set(three).size, 3, `three distinct figures expected, got ${three.join(', ')}`);
 });
 
-test('margin REFUSES when either side is not measured', () => {
-  // Unmeasured cost defaults to no cost, which reports the best possible margin on the least
+test('A QUOTED COST CANNOT REACH THE INVOICED MARGIN — the original defect, structurally', () => {
+  // The defect: a deal consisting of one supplier quotation for $6,200 of unordered work reported
+  // margin −$6,200. The first repair refused the subtraction whenever revenue was zero, which
+  // treated the symptom. The cause was that a quoted cost and an incurred expense were one kind.
+  //
+  // Now they are not, so this case cannot be constructed: there is no path by which a quoted cost
+  // becomes part of an accrual margin.
+  const quotedOnly = L.aggregate({
+    facts: DEAL.filter((f) => f.kind === 'cost_quoted' || f.kind === 'quotation'),
+    readable: ALL_READABLE,
+  });
+  assert.equal(quotedOnly.figures.cost_quoted.amount, 6_400);
+  assert.equal(quotedOnly.figures.cost_incurred.status, 'measured_zero',
+    'nothing has been incurred, and that is a measurement rather than an absence');
+  assert.equal(quotedOnly.figures.invoiced.status, 'measured_zero');
+
+  // The accrual margin is zero — nothing billed, nothing expensed — NOT a phantom −6,400.
+  assert.equal(quotedOnly.figures.invoiced_margin.status, 'measured');
+  assert.equal(quotedOnly.figures.invoiced_margin.amount, 0);
+  assert.equal(quotedOnly.figures.invoiced_margin.isLoss, false);
+
+  // The projection is where a quoted cost belongs, and it is positive here.
+  assert.equal(quotedOnly.figures.projected_margin.amount, 9_100 - 6_400);
+});
+
+test('A LEGITIMATE LOSS IS REPORTED, not suppressed because revenue is zero', () => {
+  // Requirement 7, 2026-11-26: *"Do not suppress legitimate losses merely because revenue is
+  // zero."* The removed rule would have returned `unavailable` here with "a cost awaiting revenue,
+  // not a loss". This is a loss: the expense is on the books and nothing was ever billed.
+  const writeOff = L.aggregate({
+    facts: [{ kind: 'cost_incurred', amount: 6_200, currency: 'USD', basis: 'recorded',
+      source: 'supplier-inv-1' }],
+    readable: ALL_READABLE,
+  });
+  assert.equal(writeOff.figures.invoiced.status, 'measured_zero');
+  assert.equal(writeOff.figures.invoiced_margin.status, 'measured',
+    'a readable zero revenue against an incurred expense is a measurement, not an absence');
+  assert.equal(writeOff.figures.invoiced_margin.amount, -6_200);
+  assert.equal(writeOff.figures.invoiced_margin.isLoss, true,
+    'isLoss is its own field so a negative cannot be skimmed past in a table of positives');
+  assert.match(writeOff.figures.invoiced_margin.detail, /a LOSS of USD 6200\.00/);
+});
+
+test('an UNMEASURED side is an absence, and is never reported as a loss', () => {
+  // The distinction the removed rule destroyed: "we billed nothing" and "we did not look" are not
+  // the same, and only the first can be a loss.
+  const notAsked = L.aggregate({
+    facts: [{ kind: 'cost_incurred', amount: 6_200, currency: 'USD', basis: 'recorded', source: 'i' }],
+    readable: { cost_incurred: true },           // invoiced deliberately absent from `readable`
+  });
+  assert.equal(notAsked.figures.invoiced.status, 'missing');
+  assert.equal(notAsked.figures.invoiced_margin.status, 'unavailable');
+  assert.equal(notAsked.figures.invoiced_margin.isLoss, null,
+    'an unknown result must not answer the is-this-a-loss question either way');
+  assert.match(notAsked.figures.invoiced_margin.detail,
+    /absence of data, not a loss/);
+});
+
+test('a derived figure REFUSES when either side is not measured', () => {
+  // An unmeasured cost defaults to no cost, which reports the best possible result on the least
   // possible evidence. That is the failure mode this refusal exists for.
-  const noCost = L.aggregate({ facts: DEAL.filter((f) => f.kind !== 'cost'),
-    readable: { ...ALL_READABLE, cost: undefined } });
-  assert.equal(noCost.figures.margin.status, 'unavailable');
-  assert.match(noCost.figures.margin.detail, /unmeasured cost defaults to no cost/);
+  const noCost = L.aggregate({ facts: DEAL.filter((f) => !f.kind.startsWith('cost_')),
+    readable: { ...ALL_READABLE, cost_incurred: undefined } });
+  assert.equal(noCost.figures.invoiced_margin.status, 'unavailable');
+  assert.match(noCost.figures.invoiced_margin.detail, /unmeasured cost defaults to no cost/);
 
   const noRev = L.aggregate({ facts: DEAL.filter((f) => f.kind !== 'invoiced'),
     readable: { ...ALL_READABLE, invoiced: undefined } });
-  assert.equal(noRev.figures.margin.status, 'unavailable');
-  assert.match(noRev.figures.margin.detail, /invoiced revenue is missing/);
+  assert.equal(noRev.figures.invoiced_margin.status, 'unavailable');
+  assert.match(noRev.figures.invoiced_margin.detail, /invoiced revenue is missing/);
 
-  const badCost = L.aggregate({ facts: DEAL, readable: { ...ALL_READABLE, cost: false } });
-  assert.equal(badCost.figures.margin.status, 'unavailable');
+  const badCost = L.aggregate({ facts: DEAL, readable: { ...ALL_READABLE, cost_incurred: false } });
+  assert.equal(badCost.figures.invoiced_margin.status, 'unavailable');
 });
 
-test('margin REFUSES a measured-zero revenue against a real cost', () => {
-  // Found by the synthetic commercial workflow on its first run: $6,200 of quoted procurement cost
-  // and nothing invoiced returned margin −$6,200. Arithmetically true, commercially meaningless —
-  // the deal has not happened, and a pipeline of quoted-but-unordered work would report an
-  // enormous loss. The cost figure already says the true thing.
-  const quotedOnly = L.aggregate({
-    facts: DEAL.filter((f) => f.kind === 'cost' || f.kind === 'quotation'),
-    readable: ALL_READABLE,
-  });
-  assert.equal(quotedOnly.figures.invoiced.status, 'measured_zero');
-  assert.equal(quotedOnly.figures.cost.amount, 6_200);
-  assert.equal(quotedOnly.figures.margin.status, 'unavailable',
-    'a zero revenue against a real cost must NOT produce a negative margin');
-  assert.match(quotedOnly.figures.margin.detail, /cost awaiting revenue, not a loss/);
-});
-
-test('but BOTH sides measured zero is a margin of zero, which is honest', () => {
-  // The refusal above must not become universal: no activity means no margin, and saying so is a
-  // measurement rather than an absence.
+test('both sides measured zero is a result of zero, which is honest', () => {
   const nothing = L.aggregate({ facts: [], readable: ALL_READABLE });
   assert.equal(nothing.figures.invoiced.status, 'measured_zero');
-  assert.equal(nothing.figures.cost.status, 'measured_zero');
-  assert.equal(nothing.figures.margin.status, 'measured');
-  assert.equal(nothing.figures.margin.amount, 0);
+  assert.equal(nothing.figures.cost_incurred.status, 'measured_zero');
+  for (const k of ['projected_margin', 'invoiced_margin', 'realized_result']) {
+    assert.equal(nothing.figures[k].status, 'measured', `${k} should be a measured zero`);
+    assert.equal(nothing.figures[k].amount, 0);
+    assert.equal(nothing.figures[k].isLoss, false);
+  }
 });
 
-test('margin cannot be supplied as a FACT', () => {
-  assert.match(String(L.problemWith({ kind: 'margin', amount: 99_999, currency: 'USD',
-    basis: 'recorded', source: 'wishful' })),
-  /margin is DERIVED/,
-  'a margin handed in as a fact must be refused: it is the figure most easily made up');
-  // And figureFor says so too, rather than quietly summing margin facts.
-  assert.equal(L.figureFor('margin', [], {}).status, 'unavailable');
+test('none of the three derived figures can be supplied as a FACT', () => {
+  for (const k of L.DERIVED_KINDS) {
+    assert.match(String(L.problemWith({ kind: k, amount: 99_999, currency: 'USD',
+      basis: 'recorded', source: 'wishful' })),
+    /is DERIVED and may never be supplied/,
+    `${k} handed in as a fact must be refused: it is the figure most easily made up`);
+    assert.equal(L.figureFor(k, [], {}).status, 'unavailable');
+  }
 });
 
-test('margin on a measured ZERO cost is still measured', () => {
-  // A genuine zero is a measurement. Refusing it would make the refusal meaningless by making it
-  // universal — the distinction is measured-zero versus unmeasured, not zero versus non-zero.
-  const free = L.aggregate({ facts: DEAL.filter((f) => f.kind !== 'cost'), readable: ALL_READABLE });
-  assert.equal(free.figures.cost.status, 'measured_zero');
-  assert.equal(free.figures.margin.status, 'measured');
-  assert.equal(free.figures.margin.amount, 8_500);
+test('a cost state and its basis must agree', () => {
+  // The structural half of the fix: a supplier's quotation is counterparty_stated by nature, and an
+  // incurred expense is recorded or settled. Filing one as the other requires lying about the basis
+  // too, and that is refused — so the mislabel is not a matter of remembering.
+  assert.match(String(L.problemWith({ kind: 'cost_incurred', amount: 6_200, currency: 'USD',
+    basis: 'counterparty_stated', source: 'supplier-quote-1' })),
+  /may not carry basis 'counterparty_stated'/,
+  'a supplier quote must not be fileable as an incurred expense');
+  assert.match(String(L.problemWith({ kind: 'cost_quoted', amount: 6_200, currency: 'USD',
+    basis: 'settled', source: 'x' })), /may not carry basis 'settled'/);
+  // And the legitimate combinations are accepted.
+  assert.equal(L.problemWith({ kind: 'cost_quoted', amount: 1, currency: 'USD',
+    basis: 'counterparty_stated', source: 'q' }), null);
+  assert.equal(L.problemWith({ kind: 'cost_incurred', amount: 1, currency: 'USD',
+    basis: 'settled', source: 'p' }), null);
+});
+
+test('a result on a measured ZERO cost is still measured', () => {
+  const free = L.aggregate({ facts: DEAL.filter((f) => !f.kind.startsWith('cost_')),
+    readable: ALL_READABLE });
+  assert.equal(free.figures.cost_incurred.status, 'measured_zero');
+  assert.equal(free.figures.invoiced_margin.status, 'measured');
+  assert.equal(free.figures.invoiced_margin.amount, 8_500);
 });
 
 // ── CURRENCY ───────────────────────────────────────────────────────────────
 
 test('mixed currencies are REFUSED, never converted', () => {
-  const mixed = [...DEAL, { kind: 'cost', amount: 500, currency: 'EUR', basis: 'recorded',
+  const mixed = [...DEAL, { kind: 'cost_incurred', amount: 500, currency: 'EUR', basis: 'recorded',
     source: 'eu-freight' }];
   const a = L.aggregate({ facts: mixed, readable: ALL_READABLE });
-  assert.equal(a.figures.cost.status, 'unavailable');
-  assert.match(a.figures.cost.detail, /refuses to convert/);
-  // And margin refuses in turn rather than deriving from a figure that was itself refused.
-  assert.equal(a.figures.margin.status, 'unavailable');
+  assert.equal(a.figures.cost_incurred.status, 'unavailable');
+  assert.match(a.figures.cost_incurred.detail, /refuses to convert/);
+  // And the derived figure refuses in turn rather than deriving from a figure already refused.
+  assert.equal(a.figures.invoiced_margin.status, 'unavailable');
 });
 
 // ── MALFORMED FACTS ────────────────────────────────────────────────────────
@@ -220,7 +307,7 @@ test('every required field is required, and each refusal says why', () => {
   assert.equal(L.problemWith(base), null, 'the baseline fact must be accepted');
 
   const cases = [
-    [{ ...base, kind: 'revenue' }, /not one of the six storable kinds/],
+    [{ ...base, kind: 'revenue' }, /not one of the 8 storable kinds/],
     [{ ...base, amount: Number.NaN }, /finite number/],
     [{ ...base, amount: -5 }, /must not be negative/],
     [{ ...base, currency: 'dollars' }, /three-letter ISO code/],
@@ -261,12 +348,38 @@ test('the kind vocabulary and the bases are frozen', () => {
   assert.ok(Object.isFrozen(L.KINDS));
   assert.ok(Object.isFrozen(L.STORABLE_KINDS));
   assert.ok(Object.isFrozen(L.BASES));
-  assert.equal(L.STORABLE_KINDS.length, 6, 'six storable kinds; margin is the seventh and derived');
+  assert.equal(L.STORABLE_KINDS.length, 8,
+    'eight storable kinds: five revenue-side moments and three cost COMMITMENT STATES');
+  assert.equal(L.DERIVED_KINDS.length, 3,
+    'three derived figures — projected, invoiced and realized. There is deliberately no kind '
+    + 'called "margin": that single word is what let one number be read three ways.');
+  for (const d of L.DERIVED_KINDS) assert.equal(L.STORABLE_KINDS.includes(d), false);
   assert.equal(L.STORABLE_KINDS.includes('margin'), false);
-  // All seven appear in KINDS, so the owner's list is covered rather than approximated.
-  for (const k of ['opportunity_estimate', 'quotation', 'order', 'invoiced', 'payment_received',
-    'cost', 'margin']) {
+  assert.equal(L.STORABLE_KINDS.includes('cost'), false,
+    'the undifferentiated `cost` kind is gone: it is what made a quoted price reportable as an '
+    + 'incurred expense');
+  // ── THE OWNER'S OWN LIST, MAPPED RATHER THAN QUIETLY DROPPED ────────────
+  //
+  // The original instruction asked for "opportunity estimates, quotations, actual orders, invoiced
+  // revenue, received payments, costs and margin". Five of those seven are kinds under their own
+  // names. The last two were SPLIT, by requirement 7 of 2026-11-26, and this test pins the mapping
+  // so that splitting them cannot become losing them: every concept the owner named must be
+  // answerable, and the ones that became several must say which several.
+  for (const k of ['opportunity_estimate', 'quotation', 'order', 'invoiced', 'payment_received']) {
     assert.ok(Object.values(L.KINDS).includes(k), `the owner's kind '${k}' is missing`);
+  }
+  const MAPPED = {
+    cost: ['cost_quoted', 'cost_committed', 'cost_incurred'],
+    margin: ['projected_margin', 'invoiced_margin', 'realized_result'],
+  };
+  for (const [owners, now] of Object.entries(MAPPED)) {
+    assert.equal(Object.values(L.KINDS).includes(owners), false,
+      `'${owners}' must not survive as a kind of its own: a reader who can ask for it will not `
+      + 'learn which of the three they were given');
+    for (const k of now) {
+      assert.ok(Object.values(L.KINDS).includes(k),
+        `'${owners}' was split into ${now.join(', ')} and '${k}' is missing`);
+    }
   }
 });
 
@@ -288,16 +401,17 @@ test('CONTROL: the SQL and total patterns fire on planted code', () => {
 
 test('money arithmetic does not drift over repeated two-decimal addition', () => {
   // Three figures that lose a cent under naive float addition.
-  const facts = [0.1, 0.2, 0.3].map((amount, i) => ({ kind: 'cost', amount, currency: 'USD',
+  const facts = [0.1, 0.2, 0.3].map((amount, i) => ({ kind: 'cost_incurred', amount, currency: 'USD',
     basis: 'recorded', source: `c${i}` }));
-  const f = L.figureFor('cost', facts, { sourceReadable: true });
+  const f = L.figureFor('cost_incurred', facts, { sourceReadable: true });
   assert.equal(f.amount, 0.6, 'cents, not floats: 0.1 + 0.2 + 0.3 must be exactly 0.60');
 });
 
 test('a figure names its sources, so every number can be traced back', () => {
   const a = L.aggregate({ facts: DEAL, readable: ALL_READABLE });
   assert.deepEqual(a.figures.invoiced.sources, ['inv-1']);
-  assert.deepEqual(a.figures.cost.bases, ['recorded']);
+  // Two bases on the incurred side, both named: one recorded supplier invoice, one settled payment.
+  assert.deepEqual(a.figures.cost_incurred.bases, ['recorded', 'settled']);
   // A financial figure a reader cannot trace is a figure they have to take on trust.
   for (const k of L.STORABLE_KINDS) {
     const f = a.figures[k];

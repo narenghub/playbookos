@@ -222,3 +222,134 @@ test('5. nothing in this module reads a business day out of the environment', ()
   const envReads = src.match(/env\.[A-Za-z_]+/g) || [];
   assert.deepStrictEqual([...new Set(envReads)], ['env.NODE_ENV'], JSON.stringify(envReads));
 });
+
+// ═══ 6. AND NEITHER DOES ANYTHING THAT CALLS IT ════════════════════════════
+//
+// Requirement 1, 2026-11-26: *"Complete B3.20 before enabling continuous scheduling. The business-day
+// injection interface must never allow production scheduling bypass, unauthorized historical replay
+// or future-dated execution."*
+//
+// Tests 1-5 establish what the MODULE refuses, and `check-unattended-cycle-db.js` section 8a
+// executes those refusals through the real script. Neither says anything about REACHABILITY: a
+// module that refuses everything is irrelevant if a caller can set the business day another way.
+// Continuous scheduling is the thing that makes this matter — a seam nobody reaches by hand is
+// reached by a scheduler every few minutes.
+//
+// So this sweeps the repository for a second road to the same injection.
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+/** Every non-test .js under src/ and scripts/, plus server.js, comments and strings blanked. */
+function productionSources() {
+  const ROOT = path.resolve(__dirname, '..', '..', '..');
+  const LEX = require(path.join(ROOT, 'scripts', 'js-lex.js'));
+  const out = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (!/node_modules|\.git/.test(p)) walk(p); } else if (
+        e.name.endsWith('.js') && !e.name.endsWith('.test.js')) out.push(p);
+    }
+  };
+  walk(path.join(ROOT, 'src'));
+  walk(path.join(ROOT, 'scripts'));
+  const server = path.join(ROOT, 'server.js');
+  if (fs.existsSync(server)) out.push(server);
+  return out.map((p) => ({
+    rel: path.relative(ROOT, p),
+    // blankNonCode, not a regex: a `//` inside a string literal is what made an earlier scanner in
+    // this repository read prose as code, twice.
+    code: LEX.blankNonCode(fs.readFileSync(p, 'utf8')),
+  }));
+}
+
+test('6. no production source reads a business day out of the environment', () => {
+  const offenders = [];
+  for (const { rel, code } of productionSources()) {
+    // An env var whose NAME mentions a business day or a cycle date. NODE_ENV and the two cap
+    // variables are not that; a `BUSINESS_DAY` or `CYCLE_DATE` would be.
+    for (const m of code.matchAll(/process\.env\.([A-Za-z_][A-Za-z0-9_]*)/g)) {
+      if (/BUSINESS.*DAY|DAY.*OVERRIDE|CYCLE_DATE|OFFICE_TODAY/i.test(m[1])) {
+        offenders.push(`${rel}: process.env.${m[1]}`);
+      }
+    }
+  }
+  assert.deepStrictEqual(offenders, [],
+    'a business day is reachable through the environment. A deployment platform sets environment '
+    + 'variables for a whole service and nobody re-reads them, so an env seam is a standing '
+    + 'override rather than a deliberate act — which is the production scheduling bypass '
+    + 'requirement 1 forbids.\n\n' + offenders.join('\n'));
+});
+
+test('7. businessToday is only ever overridden behind the authorization', () => {
+  // The INJECTION ITSELF, wherever it appears. `businessToday: () => x` is the one shape that
+  // replaces the calendar, so every occurrence must sit in a file that also calls
+  // authorizeBusinessDayOverride — and the only file that does is the tick script.
+  const injectors = [];
+  for (const { rel, code } of productionSources()) {
+    if (!/businessToday\s*:/.test(code)) continue;
+    injectors.push({ rel, authorized: /authorizeBusinessDayOverride\s*\(/.test(code) });
+  }
+  assert.ok(injectors.length >= 1,
+    'no file injects businessToday any more — either the seam is gone, in which case this test and '
+    + 'the module should go with it, or the pattern changed and this test is reading nothing');
+  const unauthorized = injectors.filter((i) => !i.authorized).map((i) => i.rel);
+  assert.deepStrictEqual(unauthorized, [],
+    'a file replaces businessToday without going through authorizeBusinessDayOverride. That is a '
+    + 'second road to historical replay and future-dating, and it bypasses all four conditions.\n\n'
+    + unauthorized.join('\n'));
+});
+
+test('8. no scheduled registration passes --business-day', () => {
+  // Continuous scheduling is what requirement 1 gates. A cron entry carrying the flag would satisfy
+  // every test above — the module would authorize it, on a development database, for today — and
+  // still be a standing override nobody typed. There is no such entry today; this is what keeps it
+  // that way when the scheduler is switched on.
+  const offenders = [];
+  for (const { rel, code } of productionSources()) {
+    if (!/cron\.schedule\s*\(|CRON_SCOPES/.test(code)) continue;
+    if (/--business-day|business-day/.test(code)) offenders.push(rel);
+  }
+  assert.deepStrictEqual(offenders, [],
+    'a file that registers scheduled work mentions the --business-day flag. A schedule that '
+    + 'carries it is a permanent injection, which is exactly the bypass this seam is narrowed to '
+    + 'prevent.\n\n' + offenders.join('\n'));
+});
+
+test('9. CONTROL: the three sweeps above are reading files, and can go red', () => {
+  // Tests 6 and 8 are "no offender found" sweeps, which is the shape that passes by reading
+  // nothing. Two controls, because a floor alone does not prove the PATTERN works and a pattern
+  // test alone does not prove it is being applied to anything.
+  const files = productionSources();
+  assert.ok(files.length >= 200,
+    `the sweep found only ${files.length} production sources — it has stopped walking the tree, `
+    + 'and tests 6, 7 and 8 are passing by reading almost nothing');
+  assert.ok(files.some((f) => f.rel === 'scripts/office-cycle-tick.js'),
+    'the one file that legitimately injects a business day is not in the swept set, so test 7 is '
+    + 'not looking where the seam actually is');
+  assert.ok(files.some((f) => /cron\.schedule\s*\(|CRON_SCOPES/.test(f.code)),
+    'no swept file registers scheduled work, so test 8 has no population at all');
+
+  // And the patterns themselves, against planted text. If a future edit loosens one of these
+  // regexes until it stops matching, this fails rather than the sweep quietly going green.
+  const PLANTED = [
+    ['process.env.OFFICE_BUSINESS_DAY', /process\.env\.([A-Za-z_][A-Za-z0-9_]*)/,
+      /BUSINESS.*DAY|DAY.*OVERRIDE|CYCLE_DATE|OFFICE_TODAY/i],
+    ['process.env.CYCLE_DATE', /process\.env\.([A-Za-z_][A-Za-z0-9_]*)/,
+      /BUSINESS.*DAY|DAY.*OVERRIDE|CYCLE_DATE|OFFICE_TODAY/i],
+  ];
+  for (const [text, outer, inner] of PLANTED) {
+    const m = outer.exec(text);
+    assert.ok(m && inner.test(m[1]), `test 6 would NOT catch '${text}'`);
+  }
+  // NODE_ENV and the cap variables must NOT match, or test 6 fails on every honest file.
+  for (const ok of ['process.env.NODE_ENV', 'process.env.OFFICE_COMPANY_DAILY_CAP_USD']) {
+    const m = /process\.env\.([A-Za-z_][A-Za-z0-9_]*)/.exec(ok);
+    assert.ok(m && !/BUSINESS.*DAY|DAY.*OVERRIDE|CYCLE_DATE|OFFICE_TODAY/i.test(m[1]),
+      `test 6 would false-positive on '${ok}'`);
+  }
+  // Test 7's injection shape, and test 8's flag.
+  assert.match('deps = { agentCore: { businessToday: () => d } };', /businessToday\s*:/);
+  assert.match("cron.schedule('*/5 * * * *', () => tick('--business-day', d));", /business-day/);
+});
