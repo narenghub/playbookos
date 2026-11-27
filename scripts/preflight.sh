@@ -499,6 +499,24 @@ pf_step "the classification holds at every authorization boundary (A.6)" \
 # phase done with the server still up.
 pf_step "the office operates end to end with nobody driving it" \
   node scripts/check-integrated-office-operation-db.js
+# ── COMMUNICATION PROVENANCE, ACROSS EVERY BUSINESS MESSAGE TYPE ────────────
+#
+# Four questions of each kind the product actually sends: who is sending (a DECLARED
+# sender_identities row for this company and provider account, not an env var and not a
+# company-domain address), who is receiving (an active member), for whom (the company, in the ledger
+# as well as the gate), and about when (the day derived from a persisted record where the message
+# speaks for one). The six kinds are read out of src/ rather than listed here, so a new kind cannot
+# slip past the check that is supposed to cover every kind.
+#
+# FOUND BY WRITING IT: runEscalationCheck takes a `date`, selects WHERE score_date = $1, and sent
+# "your performance score TODAY is X/100" while declaring contentDay: businessToday() — the clock.
+# Run for a past date it replayed historical figures with a current content day, which is what B7.13
+# exists to refuse, declared past it. Its comment claimed "periodic content, so it concerns today by
+# construction"; the date is a parameter, so the construction did not hold. The four per-employee
+# sends now read the day off the score ROW; the CEO digest declares `today`, the value its own
+# subject prints, because it aggregates many rows and no single record can speak for a digest.
+pf_step "communication provenance holds for every message type" \
+  node scripts/check-communication-provenance-db.js
 # B3.2. An objective decomposes into a bounded plan, and the plan is a PROPOSAL: every step is
 # independently validated against company scope, capability permission, execution eligibility, STOP
 # controls, approval requirement and budget. A proposal that states any of those — a model's

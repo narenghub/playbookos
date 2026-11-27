@@ -102,7 +102,10 @@
       {
         "id": "B7.13",
         "title": "historical backlog replay prevention",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-communication-provenance-db.js",
+          "partial": "a message about a persisted dated record takes its day FROM that record, so a three-week-old score row is refused as stale with nothing sent; and runEscalationCheck no longer declares the clock over data selected by a date parameter \u2014 four per-employee sends read score_date off the row, the CEO digest declares the day its own subject prints. src/lib/outbound/content-day.test.js covers the vocabulary and the refusal codes. NOT covered: a backlog already queued before this, which is a data question, not a code one"
+        }
       },
       {
         "id": "B7.21",
@@ -142,13 +145,19 @@
         "id": "B7.11a",
         "title": "migration OFF the unrestricted INTERNAL_MAILBOXES env var",
         "why": "B7.11 scoped shared mailboxes; the env var still functions as a platform-scope, any-purpose source and no shared mailbox has been declared. The owner forbids it authorizing internal production mail after restoration.",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-legacy-email-containment-db.js",
+          "partial": "the authorization is company-scoped shared mailbox and sender declarations read from rows; check-communication-provenance-db.js DELETES INTERNAL_MAILBOXES, MAIL_FROM and RESEND_FROM from its environment and all six message kinds still send, so the env var is not load-bearing. NOT covered: removing the variable from the production environment, which is an owner act"
+        }
       },
       {
         "id": "B7.9a",
         "title": "sender authorization for mailer.js's internal callers",
         "why": "B7.9 covers the governed external road. The 55 internal callers pass no `from` and rely on the platform default, and no sender identity has been declared.",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-sender-identity-db.js",
+          "partial": "sender authorization is enforced inside sendEmailDetailed, so the internal callers are covered by the same gate as the governed road; the platform default no longer authorizes company-scoped mail, and an undeclared address on a company domain is refused by name. check-communication-provenance-db.js exercises all six message kinds through it. NOT covered: declaring the production sender identities, which is a reviewed owner act"
+        }
       },
       {
         "id": "B7.18a",
@@ -166,7 +175,10 @@
         "id": "B7.15",
         "title": "delivery-aware performance evaluation",
         "why": "Scoring must distinguish missing communication, premature evaluation, missing evidence and genuine underperformance.",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-employee-operating-loop-db.js",
+          "partial": "scoring distinguishes the office's own failure from the employee's: a failed delivery is reported rather than swallowed, an uncertain one is persisted OUTCOME_UNKNOWN, an employee whose notifications never arrived carries no delivery-related blocker and no penalty, a deactivated employee is SKIPPED rather than scored zero, and escalation needs three consecutive sub-60 days rather than one bad day. NOT covered: the Nov 3-23 window itself, which is B7.14"
+        }
       },
       {
         "id": "B7.16",
@@ -220,7 +232,10 @@
       {
         "id": "B7.13",
         "title": "historical backlog prevention",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-communication-provenance-db.js",
+          "partial": "a message about a persisted dated record takes its day FROM that record, so a three-week-old score row is refused as stale with nothing sent; and runEscalationCheck no longer declares the clock over data selected by a date parameter \u2014 four per-employee sends read score_date off the row, the CEO digest declares the day its own subject prints. src/lib/outbound/content-day.test.js covers the vocabulary and the refusal codes. NOT covered: a backlog already queued before this, which is a data question, not a code one"
+        }
       },
       {
         "id": "B7.18",
@@ -265,13 +280,19 @@
         "id": "B7.11a",
         "title": "migration OFF the unrestricted INTERNAL_MAILBOXES env var",
         "why": "B7.11 scoped shared mailboxes; the env var still functions as a platform-scope, any-purpose source and no shared mailbox has been declared. The owner forbids it authorizing internal production mail after restoration.",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-legacy-email-containment-db.js",
+          "partial": "the authorization is company-scoped shared mailbox and sender declarations read from rows; check-communication-provenance-db.js DELETES INTERNAL_MAILBOXES, MAIL_FROM and RESEND_FROM from its environment and all six message kinds still send, so the env var is not load-bearing. NOT covered: removing the variable from the production environment, which is an owner act"
+        }
       },
       {
         "id": "B7.9a",
         "title": "sender authorization for mailer.js's internal callers",
         "why": "B7.9 covers the governed external road. The 55 internal callers pass no `from` and rely on the platform default, and no sender identity has been declared.",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-sender-identity-db.js",
+          "partial": "sender authorization is enforced inside sendEmailDetailed, so the internal callers are covered by the same gate as the governed road; the platform default no longer authorizes company-scoped mail, and an undeclared address on a company domain is refused by name. check-communication-provenance-db.js exercises all six message kinds through it. NOT covered: declaring the production sender identities, which is a reviewed owner act"
+        }
       },
       {
         "id": "B7.18a",
@@ -289,7 +310,10 @@
         "id": "B7.15",
         "title": "delivery-aware performance evaluation",
         "why": "Scoring must distinguish missing communication, premature evaluation, missing evidence and genuine underperformance.",
-        "verified_by": null
+        "verified_by": {
+          "checker": "scripts/check-employee-operating-loop-db.js",
+          "partial": "scoring distinguishes the office's own failure from the employee's: a failed delivery is reported rather than swallowed, an uncertain one is persisted OUTCOME_UNKNOWN, an employee whose notifications never arrived carries no delivery-related blocker and no penalty, a deactivated employee is SKIPPED rather than scored zero, and escalation needs three consecutive sub-60 days rather than one bad day. NOT covered: the Nov 3-23 window itself, which is B7.14"
+        }
       },
       {
         "id": "B7.16",

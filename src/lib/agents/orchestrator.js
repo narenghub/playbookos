@@ -345,22 +345,31 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
       if (level === 1) {
         // Reminder to the user
         if (r.email) await sendEmailOrReport({
-          // B7.13: periodic content, so it concerns today by construction
-          contentDay: require('../agent-core').businessToday(), to: r.email, subject: `Performance reminder — ${score}/100 today`, html: `<p>${userMsg}</p><p style="color:#666;font-size:12px">View your tasks at ${process.env.BASE_URL || 'https://playbookos-production.up.railway.app'}/#my-tasks</p>` }, 'orchestrator: Performance reminder — score/100 today');
+          // ── THE DAY COMES FROM THE ROW THE FIGURES CAME FROM ─────────────
+          //
+          // These four sends said `contentDay: businessToday()` — the clock — while every figure in
+          // them (`score`, `days_below`, `tasks_phrase`) comes from `r`, a performance_scores row
+          // selected `WHERE p.score_date = $1` for a date this function ACCEPTS AS A PARAMETER. So
+          // `runEscalationCheck({ date: <a past day> })` sent "your performance score today is
+          // X/100" about historical figures while declaring the current day: the content was
+          // replayed and the declaration said it was not.
+          //
+          // `contentDayFrom` reads `score_date` off that row, so the declared day cannot disagree
+          // with the data it describes. A stale row now REFUSES rather than sending, which is the
+          // protection working rather than a regression.
+          contentDayFrom: { kind: 'performance_score', id: r.id }, to: r.email, subject: `Performance reminder — ${score}/100 today`, html: `<p>${userMsg}</p><p style="color:#666;font-size:12px">View your tasks at ${process.env.BASE_URL || 'https://playbookos-production.up.railway.app'}/#my-tasks</p>` }, 'orchestrator: Performance reminder — score/100 today');
         if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, userMsg, { user_id: r.user_id, message_type: 'reminder' });
       } else if (level === 2) {
         // Warning to user + notify their director
         if (r.email) await sendEmailOrReport({
-          // B7.13: periodic content, so it concerns today by construction
-          contentDay: require('../agent-core').businessToday(), to: r.email, subject: `⚠️ Performance warning — ${score}/100 for ${days_below} days`, html: `<p>${userMsg}</p><p>This is day ${days_below} below target. Your manager has been notified.</p>` }, 'orchestrator: ⚠️ Performance warning — score/100 for days');
+          contentDayFrom: { kind: 'performance_score', id: r.id }, to: r.email, subject: `⚠️ Performance warning — ${score}/100 for ${days_below} days`, html: `<p>${userMsg}</p><p>This is day ${days_below} below target. Your manager has been notified.</p>` }, 'orchestrator: ⚠️ Performance warning — score/100 for days');
         if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, '⚠️ ' + userMsg, { user_id: r.user_id, message_type: 'warning' });
         const dirRole = getDirectorRole(r.role);
         if (dirRole) {
           const directors = (await query(`SELECT email FROM users WHERE role=$1 AND is_active=1`, [dirRole])).rows;
           for (const d of directors) {
             if (d.email) await sendEmailOrReport({
-              // B7.13: periodic content, so it concerns today by construction
-              contentDay: require('../agent-core').businessToday(), to: d.email, subject: `Team alert: ${r.name} below target for ${days_below} days`, html: `<p><strong>${r.name}</strong> (${r.role}) scored ${score}/100 today — ${days_below} days below 60.</p><p>${tasks_phrase}, weekly KPI ${r.weekly_kpi_pct}%.</p>` }, 'orchestrator: Team alert: r.name below target for days_be');
+                  contentDayFrom: { kind: 'performance_score', id: r.id }, to: d.email, subject: `Team alert: ${r.name} below target for ${days_below} days`, html: `<p><strong>${r.name}</strong> (${r.role}) scored ${score}/100 today — ${days_below} days below 60.</p><p>${tasks_phrase}, weekly KPI ${r.weekly_kpi_pct}%.</p>` }, 'orchestrator: Team alert: r.name below target for days_be');
           }
         }
         await logAgentActivity({
@@ -373,8 +382,7 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
       } else if (level === 3) {
         ceoDigest.push({ name: r.name, role: r.role, score, days_below, level: 3, weekly_kpi_pct: r.weekly_kpi_pct });
         if (r.email) await sendEmailOrReport({
-          // B7.13: periodic content, so it concerns today by construction
-          contentDay: require('../agent-core').businessToday(), to: r.email, subject: `Performance escalation — ${score}/100`, html: `<p>${userMsg}</p><p>Day ${days_below} below 60 — this has been escalated to leadership for review.</p>` }, 'orchestrator: Performance escalation — score/100');
+          contentDayFrom: { kind: 'performance_score', id: r.id }, to: r.email, subject: `Performance escalation — ${score}/100`, html: `<p>${userMsg}</p><p>Day ${days_below} below 60 — this has been escalated to leadership for review.</p>` }, 'orchestrator: Performance escalation — score/100');
         if (r.whatsapp_number) await sendWhatsApp(r.whatsapp_number, '🚨 Day ' + days_below + ' below target. Escalated to leadership.', { user_id: r.user_id, message_type: 'escalation' });
         await enqueueApproval({
           agent_name: 'orchestrator', action_type: 'performance_review',
@@ -409,8 +417,21 @@ async function runEscalationCheck({ dryRun = false, date } = {}) {
          <td style="padding:4px 8px">L${d.level}</td>
        </tr>`).join('');
     await sendEmailOrReport({
-      // B7.13: periodic content, so it concerns today by construction
-      contentDay: require('../agent-core').businessToday(),
+      // ── THE DECLARED DAY IS THE DAY THE CONTENT DISPLAYS ───────────────────
+      //
+      // This said `businessToday()` — the CLOCK — under the comment "periodic content, so it
+      // concerns today by construction". That construction does not hold: `runEscalationCheck`
+      // takes a `date`, the rows are selected `WHERE p.score_date = $1`, and both the subject and
+      // the heading below print `${today}`. Run for a past date, this digest said
+      // "Performance escalations — 2026-11-01" while declaring the current day, which is precisely
+      // the mismatch B7.13's replay protection exists to catch — and it was declared past it.
+      //
+      // `contentDayFrom` is not the right instrument here: this message AGGREGATES many score
+      // rows, and a single record id cannot speak for a digest. So it declares `today`, which is
+      // the value the content itself shows. The stale guard then refuses a historical digest, and
+      // the four per-employee sends above use contentDayFrom because each of those speaks for one
+      // row and can name it.
+      contentDay: today,
       to: ceo.email,
       subject: `PlaybookOS — ${ceoDigest.length} performance escalation${ceoDigest.length === 1 ? '' : 's'} for ${today}${crit ? ` (${crit} critical)` : ''}`,
       html: `<div style="font-family:Arial,sans-serif;max-width:680px;color:#1a1a2e">
