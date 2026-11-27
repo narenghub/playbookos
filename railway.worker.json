@@ -1,0 +1,13 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "_comment_1": "CONFIG FOR THE WORKER SERVICE ONLY. Point the service's 'Config file path' at this file (Railway Settings -> Config as code). It exists because railway.json at the repo root is REPO-WIDE, and a worker service built from this repo would otherwise inherit all three of the API's deploy settings — each of which is wrong here, and one of which is dangerous.",
+  "_comment_2": "1. startCommand: the root config starts server.js, which is the API with 45 cron registrations. A worker service running that is a second API, scheduling work rather than executing it.",
+  "_comment_3": "2. preDeployCommand: the root config runs 'migrate-inquiry-direction-check.js --apply' on EVERY deploy. A worker service must never apply a schema migration. Following the approved spec (no DATABASE_URL on this service) that command exits 2 with 'no MIGRATION_DATABASE_URL or DATABASE_URL', so the deploy fails and the message reads as 'the worker needs a database' — and the obvious wrong fix is to add one, which is how a worker service acquires the ability to migrate a schema. The field is absent here, and scripts/check-worker-railway-config.js asserts it stays absent.",
+  "_comment_4": "3. healthcheckPath: the root config checks /health. This worker opens no inbound listener by design (measured: zero), so every deploy would be marked failed and, under ON_FAILURE, retried. Absent here.",
+  "_comment_5": "restartPolicyType ON_FAILURE is deliberate and is NOT the same decision as the API's. A worker whose identity is revoked exits 0 on purpose; ALWAYS would restart it in a loop against a credential the server has refused. Verified in scripts/check-worker-railway-config.js against the exit codes run.js actually produces.",
+  "deploy": {
+    "startCommand": "node src/worker-client/run.js",
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}
