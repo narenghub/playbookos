@@ -634,6 +634,16 @@ pf_step "the legacy RFQ cron cannot send as a departed employee" node scripts/ch
 # unrelated gate refused first.
 pf_step "each legacy external sender stops on its own, by name" node scripts/check-legacy-email-containment-db.js
 
+# WhatsApp is the second road out of the platform and it had none of the first one's gates. The kill
+# switch sat BEHIND the Twilio credential check, so in development — where the credentials are never
+# set — that branch was unreachable and every test of it returned before arriving; and
+# `check-authz-execution-paths.js` section 3 reported this operation as covered by no database check
+# at all. Recipients are now derived from persisted rows rather than accepted from the caller, the
+# stop carries the company scope, and the boundary is exercised through a reviewed in-repo responder
+# that contains no transport — so nothing is transmitted to verify it.
+pf_step "the WhatsApp boundary refuses an unauthorized recipient and halts on a STOP" \
+  node scripts/check-whatsapp-boundary-db.js
+
 # ── S1: THE GATE MUST BE THE ONLY ROAD TO A MAIL PROVIDER ───────────────────
 #
 # The check above proves that two NAMED senders stop. It is good evidence and it is not coverage:

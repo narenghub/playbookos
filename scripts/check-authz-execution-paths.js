@@ -104,8 +104,15 @@ const OPERATIONS = Object.freeze([
   {
     module: 'src/lib/whatsapp.js', fn: 'sendWhatsApp',
     does: 'sends a WhatsApp message',
-    gates: ['checkStopped'],
-    coveredBy: null,
+    // `resolveRecipient` is listed as a gate because it is one: it refuses a number that no ACTIVE
+    // INTERNAL user holds, which is the authorization this path simply did not have while the email
+    // path required `assertSendAllowed`. `checkStopped` was always in this function and sat BEHIND
+    // the Twilio credential check — so in any environment without credentials, which is every
+    // development environment, it was unreachable. A gate present in the source and unreachable in
+    // practice is precisely why this audit's source reading needs a database check beside it, and
+    // section 3 was right to report this operation as having none.
+    gates: ['checkStopped', 'resolveRecipient'],
+    coveredBy: 'scripts/check-whatsapp-boundary-db.js',
   },
   {
     module: 'src/lib/office/budget.js', fn: 'authorizeSpend',
