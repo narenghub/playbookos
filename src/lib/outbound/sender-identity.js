@@ -278,9 +278,25 @@ async function authorizedSender({ from, replyTo = null, companyId = null,
   let via = null;
   if (accountOk.length) {
     via = `sender_identities (${accountOk[0].company_scope === 'platform' ? 'platform' : accountOk[0].company_id})`;
-  } else if (!forSender.length && envDeclaredSenders(env).some((e) => e.address === sender)) {
-    // The env default, treated as a PLATFORM-scope declaration — which a company-scoped send
-    // accepts, exactly as it accepts a platform row from the table.
+  } else if (!forSender.length && !companyId
+             && envDeclaredSenders(env).some((e) => e.address === sender)) {
+    // ── B7.11a: THE PLATFORM DEFAULT DOES NOT AUTHORIZE A COMPANY'S MAIL ────
+    //
+    // Owner: *"The default platform sender must not automatically grant authority across all
+    // companies and purposes."* It did. Measured: `authorizedSender` with the platform default and
+    // a companyId returned ok=true, so one environment variable — or the address compiled into this
+    // repository — could send as any company, for any purpose.
+    //
+    // `!companyId` now guards it, which makes this rule the MIRROR of the one
+    // `shared-mailboxes.js` already applies to recipients: *"present only in INTERNAL_MAILBOXES,
+    // which is PLATFORM-scope and any-purpose. A send for company X needs a declared row for that
+    // company, because one env var cannot say which company a mailbox belongs to."* The same
+    // sentence is true of a sender, and the two sides of the envelope were not agreeing about it.
+    //
+    // A platform-scope ROW in `sender_identities` still authorizes a company send — that is a
+    // reviewed declaration with an owner and a reason, which an env var is not.
+    //
+    // The env default, treated as a PLATFORM-scope declaration for platform-scope mail only.
     //
     // The `!forSender.length` guard matters: it applies only when NOTHING in the table declares
     // this address. Once a row exists, the row governs, and a wrong company or a wrong provider

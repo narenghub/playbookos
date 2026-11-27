@@ -289,7 +289,10 @@ async function sendEmailDetailed({ to, subject, html, from, replyTo, cc, attachm
   // B7.13: WHY a message concerns no business day, from a closed vocabulary. Threaded rather than
   // defaulted for the same reason contentDay is: a default would let any caller declare itself
   // timeless, which is the replay bypass in one word.
-  timelessKind = null },
+  timelessKind = null,
+  // B7.13 provenance: a POINTER to a persisted business record, from which the day is READ. A
+  // caller may supply this or `contentDay`, never both — see outbound/content-day.js.
+  contentDayFrom = null },
 // ── deps IS A SECOND ARGUMENT, NOT PART OF THE MESSAGE ─────────────────────
 //
 // B7.9a needs `authorizedSender`, which reads `users` to honour the deactivated-account override
@@ -479,8 +482,9 @@ deps = {}) {
   // against a stale row, so that a message saying "your tasks for 5 November" lands on 1 December.
   // That is worse than silence, because it is wrong rather than absent, and it lands on four
   // people at once.
-  const day = CONTENT_DAY.assertContentDayCurrent(
-    { contentDay, timelessKind, capability: effectiveCapability });
+  const day = await CONTENT_DAY.assertContentDayCurrent(
+    { contentDay, contentDayFrom, timelessKind, capability: effectiveCapability },
+    deps.contentDayDeps);
   if (!day.allowed) {
     console.warn(`[CONTENT_DAY_REFUSED] email to ${to}: ${day.reason}`);
     await att.blocked(day.reason, `content_day:${day.code}`);
@@ -620,7 +624,7 @@ async function transmitAlert({ to, subject, html }, { type = null } = {}) {
   // this path untouched. An operator alert concerns no business day by nature, so it declares
   // TIMELESS here rather than asking each of its callers: the declaration is still explicit, and
   // it is made once, in the function whose whole purpose is system alerts.
-  const alertDay = CONTENT_DAY.assertContentDayCurrent(
+  const alertDay = await CONTENT_DAY.assertContentDayCurrent(
     { contentDay: CONTENT_DAY.TIMELESS, timelessKind: 'operator_alert',
       capability: 'email.alert' });
   if (!alertDay.allowed) {

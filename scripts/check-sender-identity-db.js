@@ -342,11 +342,27 @@ watchdog.unref?.();
 
     const ENV_DEFAULT = { MAIL_FROM: 'PlayNexa <no-reply@fixture.invalid>', RESEND_FROM: '' };
     {
+      // B7.11a CHANGED THIS ASSERTION, and the old one had become the defect it was guarding
+      // against. It required the env default to authorize a send for COMPANY A — so one
+      // environment variable could send as any company, for any purpose, which is what the owner
+      // named: "the default platform sender must not automatically grant authority across all
+      // companies and purposes." Both halves are now measured.
+      const vPlatform = await SID.authorizedSender(
+        { from: 'no-reply@fixture.invalid', companyId: null, providerAccount: RESEND },
+        { ...deps, env: ENV_DEFAULT });
+      if (vPlatform.ok) ok('the address MAIL_FROM names can send PLATFORM mail, so nothing breaks silently');
+      else bad('the platform default sender was refused even for platform mail', vPlatform);
+
       const v = await SID.authorizedSender(
         { from: 'no-reply@fixture.invalid', companyId: A, providerAccount: RESEND },
         { ...deps, env: ENV_DEFAULT });
-      if (v.ok) ok('the address MAIL_FROM names can send, so nothing breaks silently');
-      else bad('the platform default sender was refused, which would stop most of the mail', v);
+      if (!v.ok) {
+        ok('and it does NOT authorize a send for a COMPANY — that needs a declared row, by the '
+          + 'same rule shared-mailboxes.js already applies to recipients');
+      } else {
+        bad('the env default authorized a company-scoped send: one variable can send as any '
+          + 'company, for any purpose', v);
+      }
     }
     {
       const v = await SID.authorizedSender(

@@ -58,6 +58,28 @@ const TIMELESS_KINDS = new Set([
   'supplier_rfq',         // a request for quotation
 ]);
 
+/**
+ * ── TRUSTED PERSISTED BUSINESS-RECORD PROVENANCE (contentDayFrom) ──────────
+ *
+ * Owner: *"Implement contentDayFrom using trusted persisted business records. A caller-supplied
+ * TIMELESS kind must not independently authorize transmission."*
+ *
+ * The weakness this closes was stated in this module before it was built: a caller that LIES about
+ * its kind, or simply computes the wrong day, is not stopped by any check local to a function that
+ * only sees what the caller passed. So for a message ABOUT a business record, the day is READ FROM
+ * THE RECORD — the caller supplies a POINTER, not a date.
+ *
+ * Each entry is a (table, column) pair somebody reviewed, with the column named here rather than
+ * accepted from the caller: a caller that could name the column could name `created_at` on a row
+ * written today and make any stale message current. The id is parameterised, never interpolated.
+ */
+const DERIVABLE_RECORDS = Object.freeze({
+  // An employee's assignment for a particular working day. This is the loop's notification path.
+  daily_task: { table: 'daily_tasks', column: 'task_date' },
+  // A performance score, which is about the day it scored.
+  performance_score: { table: 'performance_scores', column: 'score_date' },
+});
+
 const REFUSAL = {
   NOT_DECLARED: 'content_day_not_declared',
   MALFORMED: 'content_day_malformed',
@@ -65,15 +87,86 @@ const REFUSAL = {
   FUTURE: 'content_day_future',
   UNKNOWABLE: 'content_day_unknowable',
   TIMELESS_NOT_PERMITTED: 'content_day_timeless_not_permitted',
+  RECORD_KIND_UNKNOWN: 'content_day_record_kind_unknown',
+  RECORD_NOT_FOUND: 'content_day_record_not_found',
+  RECORD_UNREADABLE: 'content_day_record_unreadable',
+  RECORD_NO_DAY: 'content_day_record_has_no_day',
+  BOTH_SUPPLIED: 'content_day_declared_and_derived',
 };
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * Resolve the business day FROM a persisted record. Read-only, parameterised, and the column comes
+ * from the reviewed allowlist rather than from the caller.
+ */
+async function dayFromRecord({ kind, id }, deps = {}) {
+  const spec = DERIVABLE_RECORDS[kind];
+  if (!spec) {
+    return { ok: false, code: REFUSAL.RECORD_KIND_UNKNOWN,
+      reason: `contentDayFrom names record kind ${JSON.stringify(kind)}, which is not derivable. `
+        + `Reviewed kinds: ${Object.keys(DERIVABLE_RECORDS).sort().join(', ')}` };
+  }
+  if (!id) {
+    return { ok: false, code: REFUSAL.RECORD_NOT_FOUND,
+      reason: `contentDayFrom names kind ${kind} with no id` };
+  }
+  const query = deps.query || require('../db').query;
+  let rows;
+  try {
+    rows = await query(
+      `SELECT ${spec.column} AS day FROM ${spec.table} WHERE id = $1`, [String(id)]);
+  } catch (e) {
+    // Unreadable is a refusal. A record whose day cannot be read is not a record that authorizes
+    // a send, and this is the direction every gate here fails.
+    return { ok: false, code: REFUSAL.RECORD_UNREADABLE,
+      reason: `the business day of ${kind} ${id} could not be read (${e.message})` };
+  }
+  if (!rows.rows.length) {
+    return { ok: false, code: REFUSAL.RECORD_NOT_FOUND,
+      reason: `${kind} ${id} does not exist, so there is no record to take a business day from` };
+  }
+  const raw = rows.rows[0].day;
+  const day = raw instanceof Date ? raw.toISOString().slice(0, 10) : String(raw || '');
+  if (!DAY.test(day)) {
+    return { ok: false, code: REFUSAL.RECORD_NO_DAY,
+      reason: `${kind} ${id} carries ${JSON.stringify(raw)} in ${spec.column}, which is not a `
+        + 'business day' };
+  }
+  return { ok: true, day, via: `${spec.table}.${spec.column}` };
+}
+
+/**
  * @returns {{allowed: boolean, code?: string, reason?: string, day?: string, timeless?: boolean}}
  */
-function assertContentDayCurrent(
-  { contentDay = undefined, capability = null, timelessKind = null } = {}, deps = {}) {
+async function assertContentDayCurrent(
+  { contentDay = undefined, capability = null, timelessKind = null,
+    contentDayFrom = null } = {}, deps = {}) {
+  // ── A POINTER OUTRANKS A DECLARATION, AND THE TWO MAY NOT BOTH BE GIVEN ──
+  //
+  // Supplying both would let a caller declare a day AND point at a record, and whichever the code
+  // happened to prefer would be the real control — a question nobody would think to ask until it
+  // mattered. Refused, so there is exactly one answer to "where did this day come from".
+  if (contentDayFrom && (contentDay !== undefined && contentDay !== null && contentDay !== '')) {
+    return {
+      allowed: false,
+      code: REFUSAL.BOTH_SUPPLIED,
+      reason: 'a message may declare contentDay OR point at a record with contentDayFrom, not '
+        + 'both. With both, which one is the control depends on this function\'s internals rather '
+        + 'than on anything a reviewer can see',
+    };
+  }
+  if (contentDayFrom) {
+    const derived = await dayFromRecord(contentDayFrom, deps);
+    if (!derived.ok) {
+      return { allowed: false, code: derived.code, reason: derived.reason };
+    }
+    // Then judged by exactly the same comparison as a declared day: a record's day being in the
+    // past is precisely the replay this control exists to refuse, and deriving it from a trusted
+    // row does not make it current.
+    const verdict = await assertContentDayCurrent({ contentDay: derived.day, capability }, deps);
+    return { ...verdict, derivedFrom: derived.via, record: contentDayFrom };
+  }
   // ── TIMELESS IS NOT A FREE CHOICE, AND CAPABILITY CANNOT POLICE IT ───────
   //
   // Owner: *"Verify that declaring a message timeless cannot bypass historical replay protection
@@ -193,4 +286,5 @@ function assertContentDayCurrent(
     };
 }
 
-module.exports = { assertContentDayCurrent, TIMELESS, TIMELESS_KINDS, REFUSAL };
+module.exports = { assertContentDayCurrent, dayFromRecord, TIMELESS, TIMELESS_KINDS,
+  DERIVABLE_RECORDS, REFUSAL };
