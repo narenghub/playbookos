@@ -731,7 +731,7 @@ async function main() {
   // The 2026-11-23 run reported S6 UNTESTED with `IDENTITY.enrollWorker is not a function`. There
   // is no such export. The module exposes a two-step exchange:
   //
-  //   createEnrollmentToken({ label })  -> { token, expiresAt, label, capabilities }   (throws on no label)
+  //   createEnrollmentToken({ syntheticOnly: false, label })  -> { token, expiresAt, label, capabilities }   (throws on no label)
   //   consumeEnrollmentToken({ token }) -> { ok: true, workerId, secret } | { ok: false, code }
   //
   // The old code also tried `tok.token || tok.plaintext || tok.value`, which is the same guess

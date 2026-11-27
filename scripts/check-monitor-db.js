@@ -133,7 +133,7 @@ global.fetch = (...args) => { outward.push(String(args[0])); return realFetch(..
 
     {
       // An offline worker with work waiting: a finding that will not clear by itself.
-      const tok = await IDENT.createEnrollmentToken({ label: 'mon-offline-node' }, deps);
+      const tok = await IDENT.createEnrollmentToken({ syntheticOnly: false, label: 'mon-offline-node' }, deps);
       const e = await IDENT.consumeEnrollmentToken(
         { token: tok.token, hostFingerprint: 'mon-check' }, deps);
       made.workers.push(e.workerId);

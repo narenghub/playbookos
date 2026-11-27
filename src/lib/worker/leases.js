@@ -72,6 +72,10 @@ async function migrateWorkerTasks(query) {
   // and these two migrations run in different orders — whichever runs last wires it, and a database
   // holding only one half gets nothing rather than an error.
   await require('../office/active-company-guard').installActiveCompanyGuard(query);
+  // Migration 62, the same both-ends pattern and for the same reason: `is_synthetic` is on
+  // `companies`, which this migrator may not have seen yet, and `synthetic_only` is on
+  // `worker_identities`, which migrateOffice may not have seen. Whichever runs last completes it.
+  await require('./synthetic-isolation').installSyntheticIsolation(query);
   return { ok: true, statements: SCHEMA.DDL.length };
 }
 
@@ -170,8 +174,21 @@ async function claimTask({ workerId, taskId = null, overrideReason = null } = {}
   // Fail-closed on purpose: treating an undeclared worker as able to do everything would make the
   // classification vacuous for every worker enrolled before it existed, which is all of them.
   const ident = await query(
-    `SELECT capabilities FROM ${IDENTITY_SCHEMA.TABLES.identities} WHERE id = $1`, [workerId]);
+    `SELECT capabilities, synthetic_only FROM ${IDENTITY_SCHEMA.TABLES.identities} WHERE id = $1`,
+    [workerId]);
   const workerCaps = ident.rows.length ? (ident.rows[0].capabilities || []) : [];
+  // MIGRATION 62 — SYNTHETIC ISOLATION, IN THE PICK FOR THE SAME REASON THE CAPABILITY FILTER IS.
+  //
+  // A restricted worker may claim work only for a company explicitly marked synthetic, so a task it
+  // may not have is never selected and stays PENDING with its attempts unconsumed. Pick-then-refuse
+  // would burn an attempt on work that was never wrong.
+  //
+  // **An absent identity row reads as RESTRICTED**, matching the capability filter's own fail-closed
+  // reasoning one line above: an unknown worker is not a permitted one. And a task whose
+  // `company_id` is NULL is excluded with no special clause, because `NULL IN (SELECT …)` is NULL
+  // and never true — a task with no company cannot be isolated at all, since nobody can say whose
+  // data it concerns.
+  const syntheticOnly = ident.rows.length ? ident.rows[0].synthetic_only !== false : true;
   const claimable = TYPES.claimableTypesFor(workerCaps);
   if (!claimable.length) {
     return refuse('nothing_to_do',
@@ -198,9 +215,11 @@ async function claimTask({ workerId, taskId = null, overrideReason = null } = {}
       WHERE state = 'PENDING' AND cancel_requested_at IS NULL
         AND (task_type = ANY($2) OR NOT (task_type = ANY($3)))
         AND ($1::text IS NULL OR id = $1)
+        AND ($4::boolean IS NOT TRUE
+             OR company_id IN (SELECT id FROM companies WHERE is_synthetic))
       ORDER BY created_at
       LIMIT 1`,
-    [taskId, claimable, TYPES.KNOWN]);
+    [taskId, claimable, TYPES.KNOWN, syntheticOnly]);
   if (!pick.rows.length) {
     // Distinguish "nothing to do" from "there is work, but not for this worker". The second is a
     // normal, expected state for a cloud worker while hardware-only work waits, and reporting it
@@ -213,6 +232,35 @@ async function claimTask({ workerId, taskId = null, overrideReason = null } = {}
         WHERE state = 'PENDING' AND cancel_requested_at IS NULL
           AND task_type = ANY($2) AND NOT (task_type = ANY($1))`,
       [claimable, TYPES.KNOWN]);
+    // Work this worker is CAPABLE of and is refused only by synthetic isolation, counted
+    // separately and named. Folding it into the capability backlog above would report "waiting for
+    // a worker that declares the capability" about work no capability will ever unlock, and
+    // reporting nothing at all would draw a blocked queue as an idle office — which is the
+    // distinction B2.9 exists to make.
+    //
+    // The predicate below is the exact NEGATION of the pick's, written once rather than
+    // re-formulated, so the two cannot disagree about a NULL company. My first attempt used
+    // IS DISTINCT FROM ANY(ARRAY(...)), which is true for almost any value and would have reported
+    // the entire queue as blocked. (It also carried backticks inside a template literal, which is
+    // the fifth time that has broken a file in this repository — node --check caught it in seconds.)
+    if (syntheticOnly) {
+      const nonSynthetic = await query(
+        `SELECT COUNT(*)::int n FROM ${SCHEMA.TABLES.tasks}
+          WHERE state = 'PENDING' AND cancel_requested_at IS NULL
+            AND task_type = ANY($1)
+            AND (company_id IN (SELECT id FROM companies WHERE is_synthetic)) IS NOT TRUE`,
+        [claimable]);
+      const blocked = nonSynthetic.rows[0].n;
+      if (blocked > 0) {
+        return refuse('nothing_claimable_synthetic_isolation',
+          `${blocked} task(s) this worker is capable of executing concern companies that are not `
+          + 'marked synthetic (or carry no company at all), and this worker is restricted to '
+          + 'synthetic data — they remain PENDING with their attempts unconsumed. No capability '
+          + 'grant will unlock them: either the company is real, or the task has no company and so '
+          + 'cannot be isolated at all',
+          { blockedBySyntheticIsolation: blocked, syntheticOnly: true });
+      }
+    }
     const n = waiting.rows[0].n;
     if (n > 0) {
       return refuse('nothing_claimable_by_this_worker',

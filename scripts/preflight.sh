@@ -349,6 +349,21 @@ pf_step "work executes only where it is eligible to" node scripts/check-executio
 # declare its own, and no module updates the column afterwards — with a planted-write control so
 # that last verdict is not vacuous.
 pf_step "a worker cannot declare its own capabilities" node scripts/check-worker-capability-authority-db.js
+# MIGRATION 62, authorized 2026-11-27. The owner's correction: "cloud eligibility and pure handlers
+# alone do not establish synthetic-only authorization" — and they were right, because no synthetic
+# marker existed in either schema at all. A restricted worker may now claim work only for a company
+# explicitly marked synthetic, enforced in the PICK so a task it may not have keeps its attempts,
+# with the restriction travelling on the operator-issued enrolment token exactly as capabilities do.
+# The two defaults fail closed in OPPOSITE directions: a company is real unless somebody says
+# otherwise, a worker is restricted unless somebody says otherwise. Section 4 is the control — a
+# widened worker claims the very same tasks, so every refusal is measuring the gate and not an
+# empty queue.
+pf_step "a restricted worker claims only synthetic companies' work" \
+  node scripts/check-synthetic-isolation-db.js
+# The worker service's deploy configuration, and the four environment-variable names. railway.json
+# is REPO-WIDE and would have run a schema migration from the worker service.
+pf_step "the worker service applies no migration and the variable names match the source" \
+  env JWT_SECRET=preflight node --test scripts/worker-railway-config.test.js
 # B3.2. An objective decomposes into a bounded plan, and the plan is a PROPOSAL: every step is
 # independently validated against company scope, capability permission, execution eligibility, STOP
 # controls, approval requirement and budget. A proposal that states any of those — a model's

@@ -134,7 +134,7 @@ if (!url) {
   // ── 1. ENROLMENT IS SINGLE-USE ────────────────────────────────────────────
   head('1. an enrollment token can be exchanged exactly once');
 
-  const t1 = await IDENTITY.createEnrollmentToken({ label: 'mac-mini-1', createdBy: 'owner' }, deps);
+  const t1 = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'mac-mini-1', createdBy: 'owner' }, deps);
   const stored = await query(`SELECT token_digest FROM ${SCHEMA.TABLES.tokens}`);
   if (stored.rows.some((r) => r.token_digest === t1.token)) {
     bad('the enrollment TOKEN ITSELF is stored — a database read could enrol a worker');
@@ -150,7 +150,7 @@ if (!url) {
   else ok(`a second exchange of the same token is refused (${e2.code})`);
 
   // (2) concurrent: exactly one winner out of sixteen
-  const t2 = await IDENTITY.createEnrollmentToken({ label: 'mac-mini-race' }, deps);
+  const t2 = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'mac-mini-race' }, deps);
   const racers = await Promise.all(Array.from({ length: 16 },
     () => IDENTITY.consumeEnrollmentToken({ token: t2.token }, deps)));
   const winners = racers.filter((r) => r.ok);
@@ -166,7 +166,7 @@ if (!url) {
 
   // (3) CONTROL — remove what arbitrates and prove the test notices
   head('1b. CONTROL: with the single-use predicate gone, does anything still refuse?');
-  const t3 = await IDENTITY.createEnrollmentToken({ label: 'control' }, deps);
+  const t3 = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'control' }, deps);
   await IDENTITY.consumeEnrollmentToken({ token: t3.token }, deps);
   const digest3 = SECRETS.digestOfToken(t3.token);
   // Simulate the predicate having been dropped by clearing the evidence it reads.
@@ -265,7 +265,7 @@ if (!url) {
   // ── 3. REVOCATION ─────────────────────────────────────────────────────────
   head('3. revocation is immediate and terminal');
 
-  const t4 = await IDENTITY.createEnrollmentToken({ label: 'to-be-revoked' }, deps);
+  const t4 = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'to-be-revoked' }, deps);
   const v = await IDENTITY.consumeEnrollmentToken({ token: t4.token }, deps);
 
   const before = await AUTH.authenticateWorker(signedFor(v.secret, v.workerId), deps);
@@ -299,7 +299,7 @@ if (!url) {
   // ── 4. ROTATION ───────────────────────────────────────────────────────────
   head('4. rotation is not an outage, and the old secret still dies');
 
-  const t5 = await IDENTITY.createEnrollmentToken({ label: 'rotating' }, deps);
+  const t5 = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'rotating' }, deps);
   const r0 = await IDENTITY.consumeEnrollmentToken({ token: t5.token }, deps);
   const rot = await IDENTITY.rotateSecret(r0.workerId, { overlapMs: 60_000 }, deps);
   if (!rot.ok) bad('rotation failed', rot.code);

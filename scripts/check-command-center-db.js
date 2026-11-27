@@ -126,8 +126,15 @@ watchdog.unref?.();
       // `capabilities` is omitted when empty so the worker gets identity.js's own default base
       // capability — passing `[]` would enrol a worker that declares nothing at all, which is a
       // different fixture from "a cloud worker".
+      // Migration 62: FIXTURE identities, declared unrestricted because this check's subject is the
+      // Command Center's distinctions and not synthetic isolation. This call site spans two lines
+      // around a ternary, so the mechanical sweep that added `syntheticOnly: false` to the other 27
+      // could not see it — the legacy-harness lesson again: the population is a family of shapes,
+      // so the sweep's own gap has to be looked for rather than assumed away.
       const tok = await IDENT.createEnrollmentToken(
-        capabilities.length ? { label, capabilities } : { label }, deps);
+        capabilities.length
+          ? { label, capabilities, syntheticOnly: false }
+          : { label, syntheticOnly: false }, deps);
       const e = await IDENT.consumeEnrollmentToken(
         { token: tok.token, hostFingerprint: `cc-${label}` }, deps);
       if (!e || !e.ok) throw new Error(`enrolment failed for ${label}: ${JSON.stringify(e)}`);

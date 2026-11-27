@@ -339,8 +339,13 @@ watchdog.unref?.();
     } else bad('the queued step did not name its capability', JSON.stringify(noWorker.validation.queuedSteps));
 
     const W = uid('worker');
-    await q(`INSERT INTO worker_identities (id, label, secret_current, capabilities, enrolled_by)
-             VALUES ($1,$1,$2,ARRAY['exec:hardware']::text[],'decomp-check')`,
+        // Migration 62: a FIXTURE identity inserted DIRECTLY, which is why the mechanical sweep over
+    // `createEnrollmentToken({` call sites could not reach it — a third enrolment shape, found by
+    // running the population rather than by trusting the sweep. Declared unrestricted because this
+    // check's subject is the cycle, not synthetic isolation.
+    await q(`INSERT INTO worker_identities
+               (id, label, secret_current, capabilities, enrolled_by, synthetic_only)
+             VALUES ($1,$1,$2,ARRAY['exec:hardware']::text[],'decomp-check',false)`,
       [W, crypto.randomBytes(32).toString('hex')]);
     ids.workers.push(W);
     const withWorker = await decompose(ctxFor(A, objHw), HARDWARE);

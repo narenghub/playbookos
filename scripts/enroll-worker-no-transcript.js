@@ -61,8 +61,27 @@ const capabilities = (arg('capabilities', '') || '').split(',').map((s) => s.tri
 
 const die = (msg, code = 2) => { console.error(`REFUSED  ${msg}`); process.exit(code); };
 
-if (!label || !api || !out) {
-  die('usage: --label <name> --api <https url> --out <file path> [--capabilities a,b]\n'
+// ── WHO IS MINTING THIS, AND THE REASON IT IS NOW REQUIRED ──────────────────
+//
+// Owner's fifth directive: *"Verify the enrollment script's prerequisites, database access
+// requirements, authentication and secure secret handling."* Verifying that found a gap:
+// `createEnrollmentToken` takes `createdBy` and defaulted it to `null`, and this script never
+// passed one. **So the mint was authenticated by possession of the development DATABASE_URL and by
+// nothing else, and the token row recorded no operator at all.** A credential that lets a container
+// act inside the platform was being created by nobody.
+//
+// `--operator` is now required and is CHECKED rather than recorded: it must name an existing,
+// active, non-external administrator in `users`. That is the same rule
+// `identity/company-membership.js assertActorMayManage` applies before changing who may see a
+// company's data, and for the same reason — an unverified actor string is a label, not an
+// authorization. Enrolling a worker is no smaller an act.
+const operator = arg('operator');
+
+if (!label || !api || !out || !operator) {
+  die('usage: --label <name> --api <https url> --out <file path> --operator <email>\n'
+    + '              [--capabilities a,b]\n'
+    + '         --operator must be an active internal administrator; the mint is recorded against\n'
+    + '         them, and an enrolment nobody authorized is what this requirement removes.\n'
     + '         the secret is written ONLY to --out, with mode 0600, and never printed');
 }
 
@@ -90,10 +109,44 @@ for (const c of capabilities) {
 (async () => {
   const IDENTITY = require('../src/lib/worker/identity');
 
+  // 0. THE OPERATOR, RESOLVED AND CHECKED BEFORE ANYTHING IS MINTED.
+  //
+  // Refusals here cost nothing; a refusal after the mint would leave a spent token and an audit row
+  // naming an operator who was never verified. The external-role check matters as much as the
+  // active one: a partner is a real, active user and is not an administrator of this platform.
+  let operatorId;
+  try {
+    const { query } = require('../src/lib/db');
+    const { isExternalRole } = require('../src/lib/roles');
+    const r = await query(
+      'SELECT id, email, role, is_active FROM users WHERE lower(email) = lower($1)', [operator]);
+    const u = r.rows[0];
+    if (!u) die(`--operator ${operator} is not a user of this platform`);
+    if (!u.is_active) die(`--operator ${operator} is a deactivated account`);
+    if (isExternalRole(u.role)) {
+      die(`--operator ${operator} holds the external role "${u.role}" and is not an internal `
+        + 'administrator');
+    }
+    if (!['super_admin', 'admin'].includes(String(u.role))) {
+      die(`--operator ${operator} holds the role "${u.role}". Minting a worker credential is an `
+        + 'administrative act, so it requires admin or super_admin');
+    }
+    operatorId = u.id;
+  } catch (e) {
+    if (e && e.code === 'ERR_DIE') throw e;
+    die(`the operator could not be verified (${e.message}). Refusing rather than minting a `
+      + 'credential attributed to nobody — this needs the development DATABASE_URL, which is also '
+      + 'what the mint itself needs');
+  }
+
   // 1. MINT. In-process, and the token is never written anywhere but this variable.
   let token;
   try {
-    const t = await IDENTITY.createEnrollmentToken({ label, capabilities });
+    // `syntheticOnly` is left at its default of TRUE and is deliberately NOT exposed as a flag:
+    // this script exists to enrol the development cloud worker, which must be restricted, and a
+    // `--unrestricted` option would be the one thing somebody copies from a runbook without
+    // reading. Widening a fixture identity is done in a check, against a disposable cluster.
+    const t = await IDENTITY.createEnrollmentToken({ label, capabilities, createdBy: operatorId });
     token = t && t.token;
     if (!token) die('the server did not return an enrolment token');
   } catch (e) {

@@ -44,6 +44,13 @@ const q = (deps) => deps.query || require('../db').query;
 
 async function migrateWorkerIdentity(query) {
   for (const sql of SCHEMA.DDL) await query(sql);
+  // Migration 62's THIRD call site, and it is the one that actually creates `worker_identities`.
+  // The installer is idempotent and asks whether each table exists before altering it, so calling
+  // it from migrateOffice and migrateWorkerTasks as well is harmless — but neither of those creates
+  // this table, so in a harness that runs them FIRST both calls correctly skipped the identity half
+  // and the column was silently absent. The check reported it as "1 of 2 columns": the both-ends
+  // pattern working exactly as designed and simply not having enough ends.
+  await require('./synthetic-isolation').installSyntheticIsolation(query);
   return { ok: true, statements: SCHEMA.DDL.length };
 }
 
@@ -55,6 +62,10 @@ async function migrateWorkerIdentity(query) {
  */
 async function createEnrollmentToken({
   label, capabilities = [SCHEMA.WORKER_CAPABILITY], ttlMs = DEFAULT_TOKEN_TTL_MS, createdBy = null,
+  // Migration 62. Defaults to RESTRICTED: an operator who says nothing about isolation gets the
+  // safe answer, and widening is a thing somebody had to type. `false` is accepted only as the
+  // literal boolean, so a truthy value cannot widen a worker by accident.
+  syntheticOnly = true,
 } = {}, deps = {}) {
   if (!label || !String(label).trim()) throw new Error('an enrollment token needs a label');
   const now = deps.now ? deps.now() : Date.now();
@@ -62,12 +73,15 @@ async function createEnrollmentToken({
   const expiresAt = new Date(now + Number(ttlMs));
 
   await q(deps)(
-    `INSERT INTO ${SCHEMA.TABLES.tokens} (token_digest, label, capabilities, created_by, expires_at)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [SECRETS.digestOfToken(token), String(label).trim(), capabilities, createdBy, expiresAt.toISOString()],
+    `INSERT INTO ${SCHEMA.TABLES.tokens}
+       (token_digest, label, capabilities, created_by, expires_at, synthetic_only)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [SECRETS.digestOfToken(token), String(label).trim(), capabilities, createdBy,
+      expiresAt.toISOString(), syntheticOnly !== false],
   );
 
-  return { token, expiresAt: expiresAt.toISOString(), label: String(label).trim(), capabilities };
+  return { token, expiresAt: expiresAt.toISOString(), label: String(label).trim(), capabilities,
+    syntheticOnly: syntheticOnly !== false };
 }
 
 // ── EXCHANGE ─────────────────────────────────────────────────────────────────
@@ -94,7 +108,7 @@ async function consumeEnrollmentToken({ token, hostFingerprint = null } = {}, de
     `UPDATE ${SCHEMA.TABLES.tokens}
         SET consumed_at = NOW()
       WHERE token_digest = $1 AND consumed_at IS NULL AND expires_at > NOW()
-      RETURNING label, capabilities`,
+      RETURNING label, capabilities, synthetic_only`,
     [digest],
   );
 
@@ -109,16 +123,21 @@ async function consumeEnrollmentToken({ token, hostFingerprint = null } = {}, de
     return { ok: false, code: 'token_expired' };
   }
 
-  const { label, capabilities } = burned.rows[0];
+  const { label, capabilities, synthetic_only: syntheticOnly } = burned.rows[0];
   const workerId = newWorkerId();
   const secret = SECRETS.newSecret();
 
   await query(
     `INSERT INTO ${SCHEMA.TABLES.identities}
-       (id, label, scheme, secret_current, capabilities, host_fingerprint, enrolled_by)
-     VALUES ($1, $2, 'hmac-sha256', $3, $4, $5, $6)`,
+       (id, label, scheme, secret_current, capabilities, host_fingerprint, enrolled_by,
+        synthetic_only)
+     VALUES ($1, $2, 'hmac-sha256', $3, $4, $5, $6, $7)`,
     [workerId, label, SECRETS.seal(secret, deps.env || process.env), capabilities,
-      hostFingerprint, `enrollment:${digest.slice(0, 12)}`],
+      hostFingerprint, `enrollment:${digest.slice(0, 12)}`,
+      // Carried from the token the operator issued, never defaulted here: a value invented at
+      // exchange time would mean the identity's restriction came from the code rather than from
+      // the authorization, which is the distinction `capabilities` is built on one column over.
+      syntheticOnly !== false],
   );
 
   await query(
@@ -126,7 +145,7 @@ async function consumeEnrollmentToken({ token, hostFingerprint = null } = {}, de
     [digest, workerId],
   );
 
-  return { ok: true, workerId, secret, label, capabilities };
+  return { ok: true, workerId, secret, label, capabilities, syntheticOnly };
 }
 
 // ── LOOK UP ──────────────────────────────────────────────────────────────────

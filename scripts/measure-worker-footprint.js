@@ -49,7 +49,7 @@ const SEAL = { WORKER_SECRET_SEAL_KEY: crypto.randomBytes(32).toString('hex') };
   const srv=http.createServer(app); await new Promise(r=>srv.listen(0,'127.0.0.1',r));
   const base=`http://127.0.0.1:${srv.address().port}`;
   const ID=require('../src/lib/worker/identity');
-  const tok=await ID.createEnrollmentToken({label:'cost-probe'},deps);
+  const tok=await ID.createEnrollmentToken({ syntheticOnly: false,label:'cost-probe'},deps);
   const en=await (await fetch(`${base}/api/worker/enroll`,{method:'POST',headers:{'content-type':'application/json'},
     body:JSON.stringify({token:tok.token,hostFingerprint:'cost'})})).json();
   if(!en.ok) throw new Error('enroll failed '+JSON.stringify(en));

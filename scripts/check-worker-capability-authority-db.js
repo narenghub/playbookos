@@ -102,7 +102,7 @@ watchdog.unref?.();
     // ══ 1. THE CAPABILITIES COME FROM THE OPERATOR'S TOKEN ════════════════
     console.log('── 1. the grant travels on the enrollment token ──\n');
 
-    const issued = await IDENTITY.createEnrollmentToken({
+    const issued = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
       label: 'wcap-cloud-worker', capabilities: [], createdBy: 'operator:naren',
     }, deps);
     if (issued && issued.token) {
@@ -123,7 +123,7 @@ watchdog.unref?.();
     } else bad('the stored capabilities did not come from the token', JSON.stringify(row));
 
     // The operator grants one on a SECOND token; the same worker code enrolls and gets it.
-    const issuedHw = await IDENTITY.createEnrollmentToken({
+    const issuedHw = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
       label: 'wcap-hardware-worker', capabilities: ['exec:hardware'], createdBy: 'operator:naren',
     }, deps);
     const enrolledHw = await IDENTITY.consumeEnrollmentToken({
@@ -151,7 +151,7 @@ watchdog.unref?.();
       consumeSig.replace(/\s+/g, ' ').trim());
 
     // An enrolling worker that TRIES anyway gets nothing: the extra field is simply not read.
-    const issued3 = await IDENTITY.createEnrollmentToken({
+    const issued3 = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
       label: 'wcap-liar', capabilities: [], createdBy: 'operator:naren' }, deps);
     const liar = await IDENTITY.consumeEnrollmentToken({
       token: issued3.token, hostFingerprint: 'fixture-liar',

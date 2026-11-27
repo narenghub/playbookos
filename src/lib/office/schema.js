@@ -885,6 +885,12 @@ async function migrateOffice(query) {
   // `companies` and the guarded table and the two migrations run in different orders in different
   // checks — whichever runs last wires it. See active-company-guard.js.
   await require('./active-company-guard').installActiveCompanyGuard(query);
+  // MIGRATION 62, authorized 2026-11-27, development-only. Synthetic isolation: `is_synthetic` on
+  // companies and `synthetic_only` on worker identities. Called from here AND from the worker
+  // migrator, idempotently, for exactly the reason the guard above is — the two tables live in
+  // different schemas and different checks migrate them in different orders, so whichever runs
+  // last completes the pair. See worker/synthetic-isolation.js for why the two defaults differ.
+  await require('../worker/synthetic-isolation').installSyntheticIsolation(query);
   return { ok: true };
 }
 

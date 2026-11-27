@@ -105,7 +105,7 @@ if (!url) {
   else bad('a worker_leases table exists; run identity has been implemented twice');
 
   // enrol a worker
-  const tok = await IDENTITY.createEnrollmentToken({ label: 'mac-mini-lease' }, deps);
+  const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'mac-mini-lease' }, deps);
   const W = await IDENTITY.consumeEnrollmentToken({ token: tok.token }, deps);
   const worker = W.workerId;
   autonomy.resetForTests && autonomy.resetForTests();
@@ -401,7 +401,7 @@ if (!url) {
   // ── 9. REVOCATION REACHES A LIVE LEASE ──────────────────────────────────
   head('9. revoking a worker invalidates the lease it is holding (refinement 2)');
   const t6 = await LEASES.enqueueTask({ taskType: 'synthetic.sleep', intentKey: 'intent-revoke' }, deps);
-  const tok2 = await IDENTITY.createEnrollmentToken({ label: 'to-revoke' }, deps);
+  const tok2 = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'to-revoke' }, deps);
   const W2 = await IDENTITY.consumeEnrollmentToken({ token: tok2.token }, deps);
   const held2 = await LEASES.claimTask({ workerId: W2.workerId, taskId: t6.taskId }, deps);
   if (!held2.ok) bad('could not lease for the revocation fixture', JSON.stringify(held2));
