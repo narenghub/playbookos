@@ -386,6 +386,71 @@ async function claimTask({ workerId, taskId = null, overrideReason = null } = {}
  * submitResult() refuses a result for a cancelled or stopped lease, so a worker that ignores it
  * gains nothing — the refusal is enforced on this side rather than trusted on that one.
  */
+// ── AUTHORIZATION WITHDRAWN DURING AN ACTIVE LEASE ──────────────────────────
+//
+// Owner, Workstream A.7: *"Test authorization withdrawal during active leases. Verify renewal,
+// payload retrieval, result submission and downstream effects independently."*
+//
+// **MEASURED BEFORE WRITING THIS, and withdrawal had no effect at all:**
+//
+//   company unmarked synthetic, mid-lease   renewal ALLOWED   result ACCEPTED   task COMPLETED
+//   company SUSPENDED, mid-lease            renewal ALLOWED   result ACCEPTED
+//   worker identity revoked, mid-lease      renewal refused   result refused     (already correct)
+//
+// Revocation of the IDENTITY was sound, because `releaseLeasesOfWorker` closes its leases.
+// Withdrawal of the COMPANY's authorization was not enforced anywhere on this road. Both
+// `heartbeat` and `submitResult` already call `authorizeWorkerAction`, but that is the KILL SWITCH
+// — it answers "is this scope stopped", not "does this company still exist, is it still active, and
+// may this worker still touch its data". B3.18's `phase-guard` asks exactly those questions at
+// every phase boundary of the office cycle; the worker lease path is a SECOND road to the same
+// effects and had no equivalent. A guard on one road is a statement about that road.
+//
+// So this is the one function both call, and it is deliberately one function rather than two
+// similar blocks: two copies of a four-condition authorization rule drift, and the one that drifts
+// is always the one nobody is reading.
+async function companyStillAuthorizes(workerId, task, deps) {
+  const query = q(deps);
+  if (!task || !task.company_id) {
+    // A task with no company has no company authorization to withdraw. The claim filter is what
+    // decides whether a restricted worker may ever hold one, and by the time a lease exists that
+    // question has been answered.
+    return { ok: true, reason: 'no company on this task' };
+  }
+  let company;
+  let worker;
+  try {
+    const c = await query(
+      'SELECT id, status, is_synthetic FROM companies WHERE id = $1', [task.company_id]);
+    company = c.rows[0] || null;
+    const w = await query(
+      `SELECT synthetic_only FROM ${IDENTITY_SCHEMA.TABLES.identities} WHERE id = $1`, [workerId]);
+    worker = w.rows[0] || null;
+  } catch (e) {
+    // Unreadable is a refusal. An authorization that cannot be read is not an authorization that
+    // holds, and this is the direction every gate in this repository fails.
+    return { ok: false, code: 'authorization_unreadable',
+      detail: `whether company ${task.company_id} still authorizes this work could not be `
+        + `established (${e.message}) — refusing rather than assuming it does` };
+  }
+  if (!company) {
+    return { ok: false, code: 'authorization_withdrawn',
+      detail: `company ${task.company_id} no longer exists` };
+  }
+  if (company.status !== 'active') {
+    return { ok: false, code: 'authorization_withdrawn',
+      detail: `company ${task.company_id} is ${company.status}, so work for it is no longer `
+        + 'authorized — this was withdrawn while the lease was held' };
+  }
+  // An absent identity row reads as RESTRICTED, matching the claim filter one function over.
+  const restricted = worker ? worker.synthetic_only !== false : true;
+  if (restricted && company.is_synthetic !== true) {
+    return { ok: false, code: 'authorization_withdrawn',
+      detail: `company ${task.company_id} is no longer marked synthetic and this worker is `
+        + 'restricted to synthetic data — the classification changed while the lease was held' };
+  }
+  return { ok: true };
+}
+
 async function heartbeat({ workerId, runId } = {}, deps = {}) {
   const query = q(deps);
   if (!workerId || !runId) return refuse('no_lease', 'a heartbeat must name the worker and the run');
@@ -409,6 +474,14 @@ async function heartbeat({ workerId, runId } = {}, deps = {}) {
        FROM ${SCHEMA.TABLES.tasks} WHERE intent_key = $1`,
     [live.rows[0].intent_key]);
   const task = t.rows[0] || null;
+
+  // A.7: the company's authorization is re-read on EVERY renewal, not only at claim. `cancel: true`
+  // is the same shape `lease_not_live` uses, so a worker that is told to stop stops by the path it
+  // already has rather than needing to learn a new one.
+  const stillOk = await companyStillAuthorizes(workerId, task, deps);
+  if (!stillOk.ok) {
+    return refuse(stillOk.code, stillOk.detail, { cancel: true, taskId: task && task.id });
+  }
 
   if (task && task.cancel_requested_at) {
     return { ok: true, cancel: true, reason: task.cancel_reason || 'cancelled by an operator' };
@@ -492,6 +565,34 @@ async function submitResult({
   }
   if (task.cancel_requested_at) {
     return refuse('cancelled', 'this task was cancelled; its result is not accepted');
+  }
+
+  // ── A.7: A RESULT ARRIVING AFTER THE COMPANY'S AUTHORIZATION WAS WITHDRAWN ─
+  //
+  // This cannot simply be refused and forgotten. By the time a result arrives THE WORK MAY ALREADY
+  // HAVE HAPPENED — the worker held the payload from the moment it claimed — so discarding the
+  // submission would leave an effect in the world and no record of it, which is the
+  // `OUTCOME_UNKNOWN` failure in a different costume.
+  //
+  // So the task goes to NEEDS_RESOLUTION, the same state an abandoned lease produces and for the
+  // same reason: an attempt was made and its outcome needs a human. **The output itself is NOT
+  // stored**, deliberately — ingesting a payload belonging to a company whose authorization has
+  // been withdrawn is the exact thing the withdrawal forbids. What is stored is that a submission
+  // arrived, when, and from which worker, which is what a person needs to decide.
+  const authorized = await companyStillAuthorizes(workerId, task, deps);
+  if (!authorized.ok) {
+    await query(
+      `UPDATE ${SCHEMA.TABLES.tasks}
+          SET state = 'NEEDS_RESOLUTION', resolved_at = NULL,
+              resolution_note = $2
+        WHERE id = $1 AND state NOT IN ('COMPLETED','FAILED','CANCELLED')`,
+      [task.id,
+        `a result was submitted by ${workerId} after authorization was withdrawn `
+        + `(${authorized.code}): ${authorized.detail}. The output was NOT stored. The work may `
+        + 'already have been performed, so a human must decide what happened.'])
+      .catch(() => { /* the refusal must not fail because the note could not be written */ });
+    return refuse(authorized.code, authorized.detail,
+      { cancel: true, taskId: task.id, needsResolution: true });
   }
   // ── ALREADY REPORTED? ANSWER THAT FIRST ──────────────────────────────────
   //

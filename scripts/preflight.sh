@@ -381,6 +381,14 @@ pf_step "administrative enrollment derives its operator from an authenticated se
 # assertion that proves it.
 pf_step "the pilot resolves its company from a reviewed mapping, and nothing is inferred" \
   node scripts/check-m76-company-attribution-db.js
+# Workstream A.6/A.7/A.8. Migration 62 gated at CLAIM and nowhere else: withdrawing a company's
+# authorization mid-lease left renewal ALLOWED, result submission ACCEPTED and the task COMPLETED,
+# whether the company was unmarked or outright SUSPENDED. Identity revocation was already sound.
+# Now re-read at every boundary, with a result arriving after withdrawal going to NEEDS_RESOLUTION
+# and its output NOT ingested — because by then the work may already have happened, and discarding
+# the submission would leave an effect in the world with no record of it.
+pf_step "a lease loses its authorization the moment the company does" \
+  node scripts/check-lease-authorization-db.js
 # The worker service's deploy configuration, and the four environment-variable names. railway.json
 # is REPO-WIDE and would have run a schema migration from the worker service.
 pf_step "the worker service applies no migration and the variable names match the source" \
