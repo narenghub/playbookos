@@ -321,16 +321,50 @@ watchdog.unref?.();
       // THE WINDOW, forced open: the guard has already answered, and now authorization is
       // withdrawn before the write.
       await query(`UPDATE companies SET status='suspended' WHERE id=$1`, [CO]);
-      const after = await LEASES.enqueueTask({
+
+      // ── TWO REFUSALS, AND THIS USED TO MEASURE ONLY ONE ────────────────────
+      //
+      // This section's claim is that the write is refused BY THE DATABASE, *"however the insert
+      // arrives, including from a caller nobody has written yet"*. It tested that claim THROUGH
+      // `enqueueTask` — a caller that very much has been written — so what it actually measured was
+      // that one function's behaviour, and the trigger was inferred from the error text.
+      //
+      // On 2026-11-27 A.6 added a company check inside `enqueueTask` (the company on a task is the
+      // isolation boundary and was previously unvalidated: a nonexistent company was accepted, and
+      // an unrestricted worker's claim filter skips the company subquery entirely). That check now
+      // refuses first and RETURNS rather than throwing, so this assertion began failing — not
+      // because the property broke, but because the application gate now stands in front of the
+      // database gate it was reading through. The gate-contamination pattern, in reverse.
+      //
+      // So both are measured, separately and in the right order: the application refusal for its
+      // legibility, and then a RAW INSERT for the claim this section actually makes.
+      const viaFunction = await LEASES.enqueueTask({
         intentKey: `xc-toctou-after-${crypto.randomUUID().slice(0, 8)}`,
         companyId: CO, taskType: 'synthetic.echo', payload: { echo: 'after' },
         requestedBy: 'xc-check', capabilities: ['exec:node'],
-      }, deps).then((x) => ({ landed: x }), (e) => ({ refused: e.message, code: e.code }));
+      }, deps).then((x) => x, (e) => ({ ok: false, threw: e.message }));
+      if (viaFunction && viaFunction.ok === false
+          && /not active|company_not_active/i.test(
+            `${viaFunction.code || ''} ${viaFunction.detail || viaFunction.threw || ''}`)) {
+        ok(`enqueueTask refuses for the withdrawn company by name (${viaFunction.code || 'threw'}) `
+          + '— the legible refusal, before any row is attempted');
+      } else bad('enqueueTask enqueued work for a suspended company', viaFunction);
+
+      // THE CLAIM ITSELF: a caller nobody has written. A direct INSERT bypasses every application
+      // check, which is the only way to establish that the DATABASE is what enforces this.
+      const rawIntent = `xc-toctou-raw-${crypto.randomUUID().slice(0, 8)}`;
+      const after = await query(
+        `INSERT INTO worker_tasks (id, task_type, payload, intent_key, company_id, workflow)
+         VALUES ($1,'synthetic.echo','{}'::jsonb,$2,$3,'xc-check')`,
+        [`xc-raw-${crypto.randomUUID().slice(0, 8)}`, rawIntent, CO]
+      ).then((x) => ({ landed: x }), (e) => ({ refused: e.message, code: e.code }));
 
       if (after.refused && /not active|authorization has been withdrawn/i.test(after.refused)) {
-        ok('the write is REFUSED BY THE DATABASE, naming the withdrawn authorization — enforced '
-          + 'however the insert arrives, including from a caller nobody has written yet');
-      } else bad('new work was enqueued for a suspended company', after);
+        ok('and a RAW INSERT — a caller nobody has written — is REFUSED BY THE DATABASE, naming '
+          + 'the withdrawn authorization. This is what the section claimed all along and could not '
+          + 'establish while it measured through enqueueTask');
+      } else bad('a raw insert created work for a suspended company, so the database is NOT what '
+        + 'enforces this', after);
 
       // And the same for a plan, which is minting authorization to act. A plan needs a run, so one
       // is started while the company is still suspended — `agent_runs` is deliberately NOT guarded,

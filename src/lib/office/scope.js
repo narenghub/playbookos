@@ -158,6 +158,47 @@ async function bootstrapObjectiveForContext(objectiveId, deps = {}) {
 }
 
 /**
+ * A run and every descendant of it, with the recorded delegation authority for each edge.
+ *
+ * ── THE SAME EXCEPTION, FOR THE SAME REASON ───────────────────────────────
+ *
+ * Like `bootstrapObjectiveForContext` and `bootstrapObjectivesForInitiation`, this takes no
+ * resolved context — and for the reason those two state: a function whose job is to ESTABLISH
+ * which company is involved cannot require one first. `office/recovery.js` calls it to decide
+ * whether a retry's lineage is single-company and whether every descendant was authorized, which
+ * is the question "whose work is this" rather than an operation performed on behalf of an answer.
+ *
+ * The query lived in recovery.js until check-office-scope-discipline.js refused it — correctly, and
+ * it was PRODUCT code, which that scanner never exempts. Putting kernel SQL where kernel SQL
+ * belongs is the honest resolution; exempting a second module is how a discipline stops being one.
+ *
+ * READ ONLY, and it decides nothing. Every refusal stays in recovery.js, where it is tested; this
+ * returns rows: the tree from `agent_runs.parent_run_id`, LEFT JOINed to `office_delegations` by
+ * child so a missing authority reads as a NULL rather than a shorter result set. Bounded at depth
+ * 20, because an unbounded recursive CTE over a cycle does not return.
+ */
+async function bootstrapLineageAuthority(rootRunId, deps = {}) {
+  const res = await q(deps)(
+    `WITH RECURSIVE tree AS (
+       SELECT run_id, parent_run_id, intent_key, company_id, tenant_id, 0 AS depth
+         FROM agent_runs WHERE run_id = $1
+       UNION ALL
+       SELECT c.run_id, c.parent_run_id, c.intent_key, c.company_id, c.tenant_id, t.depth + 1
+         FROM agent_runs c JOIN tree t ON c.parent_run_id = t.run_id
+        WHERE t.depth < 20
+     )
+     SELECT t.run_id, t.parent_run_id, t.intent_key, t.company_id, t.tenant_id, t.depth,
+            d.id AS delegation_id, d.company_id AS delegated_company, d.capability,
+            d.target_agent
+       FROM tree t
+       LEFT JOIN office_delegations d ON d.child_run_id = t.run_id
+      ORDER BY t.depth`,
+    [rootRunId]
+  );
+  return res.rows;
+}
+
+/**
  * Objectives a schedule may consider, with the company facts needed to judge eligibility.
  *
  * ── WHY THIS LIVES HERE AND NOT IN THE INITIATOR ──────────────────────────
@@ -1841,6 +1882,7 @@ async function provenance(ctx, runId, deps = {}) {
 }
 
 module.exports = {
+  bootstrapLineageAuthority,
   activeBudgetException,
   provenance, spendForObjective, unmeasuredForRun, claimApprovalRelease, approvalReleaseState,
   verifyReleasedApprovalForDigest, approvalsForReview, approvalForReview,

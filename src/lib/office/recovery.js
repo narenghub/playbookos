@@ -310,53 +310,304 @@ async function reap({ limit = 100, dryRun = true, excludeRunId = null } = {}, de
 //
 // That middle case is the one worth stating aloud: "there are none" and "I could not tell" look the
 // same in a result set and must never be treated the same. An outage is not an authorization.
-async function associatedTasks(run, deps = {}) {
+// ── IS THE WORKER SCHEMA REQUIRED HERE, OR GENUINELY ABSENT? ────────────────
+//
+// Owner, 2026-11-27: *"Do not allow a missing worker_tasks table to silently bypass retry
+// protection in an environment where that schema is required. Distinguish verified historical
+// compatibility and genuinely non-worker runs from unexpected schema absence."*
+//
+// The previous version treated a missing `worker_tasks` as a definite "no tasks". That fixed a real
+// over-refusal — check-office-recovery-db.js migrates the run ledger only, and failing closed there
+// refused every retry including its own mutation control — but it traded it for a bypass: anywhere
+// the table is missing UNEXPECTEDLY, the classification gate silently stops applying.
+//
+// The distinction is evidence, not configuration. Three signals, strongest first:
+//
+//   1. THE RUN IS ITSELF A WORKER LEASE (`trigger = 'worker'`). Then the schema existed when that
+//      run was created, because a lease cannot be created without it. Its absence now is not a
+//      non-worker environment — it is an environment that has lost a table it needs, and a retry
+//      there is exactly the duplicate-effect risk the gate exists for. REFUSE.
+//   2. ANOTHER WORKER TABLE IS PRESENT. `worker_identities` or `worker_enrollment_tokens` without
+//      `worker_tasks` is an inconsistent schema: somebody migrated part of it, or dropped one
+//      table. REFUSE, and say which table was found, because that is what an operator needs.
+//   3. NO WORKER TABLE AT ALL, and the run is not a lease. This is a genuinely non-worker
+//      environment — a database that has never run a worker, including the narrow harnesses and
+//      any deployment that does not use them. There is no work in doubt. PERMIT, with zero tasks.
+//
+// Signal 3 is the one that must stay permitted, and signals 1 and 2 are why it is safe to: it is
+// reached only when nothing in the database and nothing about the run suggests a worker ever ran.
+const WORKER_TABLES = ['worker_tasks', 'worker_identities', 'worker_enrollment_tokens'];
+
+async function workerSchemaState(run, deps = {}) {
   const query = lazyQuery(deps);
-  if (!run || !run.intent_key) {
-    return { known: true, tasks: [], why: 'the run carries no intent key, so it leased no task' };
+  let present;
+  try {
+    const r = await query(
+      `SELECT ${WORKER_TABLES.map((t, i) => `to_regclass('${t}') IS NOT NULL AS t${i}`).join(', ')}`);
+    present = WORKER_TABLES.filter((_, i) => r.rows[0] && r.rows[0][`t${i}`] === true);
+  } catch (e) {
+    // The catalog itself is unreachable. Not a loophole: unknown.
+    return { readable: false, reason: `the table catalog could not be read (${e.message})` };
+  }
+  if (present.includes('worker_tasks')) return { readable: true, tasksTable: true, present };
+
+  const isLease = run && String(run.trigger || '') === 'worker';
+  if (isLease) {
+    return { readable: true, tasksTable: false, required: true,
+      why: 'this run IS a worker lease, so worker_tasks existed when it was created — its absence '
+        + 'now is a lost table, not a non-worker environment' };
+  }
+  if (present.length) {
+    return { readable: true, tasksTable: false, required: true,
+      why: `worker_tasks is missing while ${present.join(' and ')} ${present.length > 1 ? 'are' : 'is'} `
+        + 'present — an inconsistent worker schema, not an absent one' };
+  }
+  return { readable: true, tasksTable: false, required: false,
+    why: 'no worker table exists at all and this run is not a lease, so this database has never '
+      + 'held a worker task' };
+}
+
+// ── LINEAGE: A WORKFLOW IS NOT ITS IMMEDIATE TASK ───────────────────────────
+//
+// Owner, 2026-11-27: *"Verify parent and child execution lineage before retrying a workflow. A
+// unique immediate task relationship does not establish that the entire delegated workflow is
+// safely repeatable."*
+//
+// Exactly right, and the previous version was open to it. It read the tasks matching the
+// predecessor's OWN intent_key, and `uq_worker_tasks_intent` guarantees that is at most one — which
+// I reported as "a run has exactly one associated task, by design". True of the run, and
+// MISLEADING about the workflow: a run that DELEGATED work has children, each its own `agent_runs`
+// row with its own intent_key and its own task. Retrying the parent re-runs the subtree, so a
+// prohibited task three levels down is a duplicate effect that the immediate-task check cannot see.
+//
+// So the descendants are walked. A recursive CTE from the predecessor over `parent_run_id` collects
+// the whole delegated tree, and every task belonging to any run in it is a task this retry would
+// redo. `root_run_id` is deliberately NOT used as the entry point: that would collect SIBLINGS as
+// well — other branches the retry does not touch — and refusing on a sibling's prohibition would be
+// a different, wrong answer.
+async function lineageIntentKeys(runId, deps = {}) {
+  const query = lazyQuery(deps);
+  const r = await query(
+    `WITH RECURSIVE tree AS (
+       SELECT run_id, intent_key, 0 AS depth
+         FROM agent_runs WHERE run_id = $1
+       UNION ALL
+       SELECT c.run_id, c.intent_key, t.depth + 1
+         FROM agent_runs c JOIN tree t ON c.parent_run_id = t.run_id
+        WHERE t.depth < 20
+     )
+     SELECT run_id, intent_key, depth FROM tree`, [runId]);
+  return r.rows;
+}
+
+// ── DELEGATION AUTHORITY, NOT MERELY A LIST OF ACTIVE COMPANIES ─────────────
+//
+// Owner, 2026-11-27: *"Do not treat a cross-company descendant as authorized merely because every
+// involved company is active. Verify the actual delegation authority and permitted scope."*
+//
+// A hole in the version written an hour earlier. That one gathered every company in the lineage and
+// refused if any was inactive — which answers "is this company still trading" and NOT "was this
+// company's work ever authorized under this parent". Company A's run having a descendant doing
+// company B's work is not authorized by B being active. It is not authorized at all.
+//
+// ── WHAT THE PRODUCT ALREADY GUARANTEES, AND WHY THAT IS THE TEST ──────────
+//
+// `office/delegation.js:delegate()` takes NO companyId. Its own note: *"the company and objective
+// come from the parent context... the child's own context is DERIVED rather than built."* So a
+// legitimate delegation cannot cross companies — not by convention, but because there is no
+// argument with which to do it. The database agrees twice over:
+//
+//   office_delegations_parent_same_company
+//     FOREIGN KEY (parent_run_id, company_id) REFERENCES agent_runs (run_id, company_id) MATCH FULL
+//   office_delegations_one_per_child UNIQUE (child_run_id)
+//
+// A delegation's company must equal its parent run's, and a child has at most one delegation. So a
+// single-company chain is a database guarantee along every recorded edge.
+//
+// THEREFORE a cross-company descendant is not a delegation that needs checking — it is evidence
+// that something created a child run outside `delegate()`. The honest test is not "are these
+// companies active" but "is this tree what the delegation path can produce":
+//
+//   · more than one company across the lineage's runs and tasks → REFUSE. The chain cannot have
+//     been built by delegate(), whatever the companies' statuses say.
+//   · a descendant with NO recorded delegation → REFUSE. The edge exists in agent_runs and the
+//     authority for it was never written down, so there is nothing establishing it was permitted.
+//
+// Both refuse by name, because "this work belongs to two companies" and "nobody recorded who
+// authorized this child" need different operator action.
+async function lineageAuthority(rootRunId, deps = {}) {
+  let rows;
+  try {
+    // Through the accessor. check-office-scope-discipline.js refused this query here — correctly,
+    // and as PRODUCT code, which that scanner never exempts. The SQL now lives in
+    // scope.bootstrapLineageAuthority, which documents why it takes no resolved context: a function
+    // whose job is to establish whose work this is cannot require that answer first.
+    rows = await require('./scope').bootstrapLineageAuthority(rootRunId, deps);
+  } catch (e) {
+    // Including a missing office_delegations table: an unreadable authority is not an authority.
+    return { readable: false, reason: `the delegation authority could not be read (${e.message})` };
   }
 
-  // ── A MISSING TABLE IS NOT AN UNKNOWN CLASSIFICATION ──────────────────────
-  //
-  // The first version of this failed closed on ANY query error, including `relation "worker_tasks"
-  // does not exist`. check-office-recovery-db.js then refused every retry it tried — including the
-  // ordinary FAILED→attempt-2 path and its own mutation control — because that harness migrates the
-  // run ledger and not the worker schema. Running the affected population is what found it.
-  //
-  // Refusing there is wrong twice over. A database with no worker schema has never held a task, so
-  // the honest answer is "no associated tasks", not "I cannot tell": there is no work whose outcome
-  // is in doubt. And it would make retry impossible for any deployment that does not run workers at
-  // all, which is the kind of over-refusal that gets a safety gate switched off.
-  //
-  // So the two cases are separated, with `to_regclass` — the idiom this repo already uses so an
-  // unmigrated database reads as zero rather than as an error:
-  //   · the table is ABSENT  → a definite, structural "no tasks"
-  //   · the table is PRESENT but unreadable → genuinely unknown, and fails closed
-  // A lost connection, a permission denial or a lock timeout all land in the second case, which is
-  // where the owner's rule belongs. "It isn't there" and "I couldn't look" are different answers.
+  const undelegated = rows.filter((r) => r.depth > 0 && !r.delegation_id);
+  return { readable: true, rows, undelegated };
+}
+
+/**
+ * Every task this retry would redo — the predecessor's own, and every descendant's.
+ *
+ * Takes NOTHING about the work from the caller. The run→task link is a stored equality: a lease
+ * copies the task's `intent_key` into `agent_runs`, and `worker_tasks` holds a unique index on it.
+ * A caller that could name a task id or a classification could name the one that permits its retry.
+ */
+async function associatedTasks(run, deps = {}) {
+  const query = lazyQuery(deps);
+
+  const schema = await workerSchemaState(run, deps);
+  if (!schema.readable) return { known: false, reason: schema.reason };
+  if (!schema.tasksTable) {
+    if (schema.required) {
+      return { known: false, reason: `worker_tasks is missing in an environment that requires it: `
+        + `${schema.why}` };
+    }
+    return { known: true, tasks: [], why: schema.why };
+  }
+
+  // The lineage, when there is a run id to walk from. A bare `{ intent_key }` (the shape the unit
+  // checks hand in) has no identity to recurse over, so it falls back to its own key.
+  let keys;
   try {
-    const exists = await query("SELECT to_regclass('worker_tasks') IS NOT NULL AS present");
-    if (!exists.rows[0] || exists.rows[0].present !== true) {
-      return { known: true, tasks: [],
-        why: 'this database has no worker_tasks table, so it has never held a worker task' };
+    if (run && run.run_id) {
+      const tree = await lineageIntentKeys(run.run_id, deps);
+      keys = tree.map((r) => r.intent_key).filter(Boolean);
+      if (!keys.length && run.intent_key) keys = [run.intent_key];
+    } else {
+      keys = run && run.intent_key ? [run.intent_key] : [];
     }
   } catch (e) {
-    // Even the existence probe failing is unknown territory — the catalog itself is unreachable.
-    return { known: false, reason: `the table catalog could not be read (${e.message})` };
+    return { known: false, reason: `the execution lineage could not be read (${e.message}) — a `
+      + 'retry re-runs the delegated subtree, so an unreadable lineage is an unknown scope' };
+  }
+  if (!keys.length) {
+    return { known: true, tasks: [],
+      why: 'the run carries no intent key and has no descendants that do' };
   }
 
   try {
     const r = await query(
-      `SELECT id, task_type, state, resolved_at, resolution_note
-         FROM worker_tasks WHERE intent_key = $1`, [run.intent_key]);
-    return { known: true, tasks: r.rows };
+      `SELECT id, task_type, state, resolved_at, resolution_note, intent_key, company_id
+         FROM worker_tasks WHERE intent_key = ANY($1)`, [keys]);
+    return { known: true, tasks: r.rows, lineage: keys.length };
   } catch (e) {
     return { known: false, reason: e.message };
   }
 }
 
+// ── THE COMPANY MUST STILL AUTHORIZE THE WORK (owner decision, 2026-11-27) ──
+//
+// *"My decision on suspended-company retry is explicit: refuse at retryRun before creating an
+// executable run. Preserve a durable denial audit record and retain claim-time authorization as
+// defense in depth."*
+//
+// §7 of check-reattempt-authorization-db.js found that retryRun created a run for a SUSPENDED
+// company. No work happened — `companyStillAuthorizes` refuses at claim, heartbeat and submit — so
+// it was a layered defence rather than a hole. But an executable run that exists and can never
+// execute is a queue entry nobody can explain, and the decision is that the ledger refuses first.
+//
+// The CLAIM-TIME check is deliberately untouched. It is not redundant: it covers withdrawal that
+// happens AFTER the retry run is created, which is the window this one cannot see. Two gates at two
+// times, not one rule in two places.
+//
+// Only the company-level question is asked here. Whether a RESTRICTED worker may hold a
+// non-synthetic company's task depends on which worker claims it, which is unknown at retry time
+// and belongs where it already lives.
+// ── WHERE THE COMPANY ACTUALLY LIVES, WHICH IS NOT WHERE I FIRST LOOKED ─────
+//
+// The first version read `run.company_id` and never fired: for a WORKER LEASE that column is NULL.
+// `leases.js` stores the task's company in `agent_runs.tenant_id`, because the run ledger requires
+// `company_id` and `objective_id` to arrive TOGETHER under MATCH FULL and a lease has no objective.
+// So the check looked authoritative and measured nothing — §7b caught it by asserting the retry was
+// refused and being handed `retried: true`.
+//
+// Reading `tenant_id` instead would be guessing: it is a general tenant column, and only the lease
+// path happens to put a company id in it. The companies are taken from the TASK ROWS already being
+// read — `worker_tasks.company_id` is the authoritative statement of whose data the work concerns,
+// which is the same column the claim filter and the isolation boundary use.
+//
+// And it is a SET, not one value: the lineage walk can reach a child run whose task belongs to a
+// different company. Any one withdrawal refuses the retry, for the same reason a prohibited task
+// anywhere in the subtree does — the retry re-runs the whole of it.
+async function companyStillAuthorizesRetry(companyIds, deps = {}) {
+  const query = lazyQuery(deps);
+  const ids = [...new Set((companyIds || []).filter(Boolean))];
+  if (!ids.length) {
+    return { ok: true, why: 'no company is named on this run or its tasks, so there is no company '
+      + 'authorization to withdraw' };
+  }
+  let rows;
+  try {
+    const r = await query(
+      'SELECT id, status FROM companies WHERE id = ANY($1)', [ids]);
+    rows = r.rows;
+  } catch (e) {
+    return { ok: false, code: 'company_authorization_unreadable',
+      detail: `whether ${ids.length} company(ies) still authorize this work could not be `
+        + `established (${e.message}) — refusing rather than assuming they do` };
+  }
+  const found = new Map(rows.map((r) => [r.id, r.status]));
+  for (const id of ids) {
+    if (!found.has(id)) {
+      return { ok: false, code: 'company_authorization_withdrawn',
+        detail: `company ${id} no longer exists` };
+    }
+    if (found.get(id) !== 'active') {
+      return { ok: false, code: 'company_authorization_withdrawn', companyId: id,
+        detail: `company ${id} is ${found.get(id)}, so work for it is no longer authorized — a `
+          + 'retry would create a run that can never execute' };
+    }
+  }
+  return { ok: true, companies: ids.length };
+}
+
+/**
+ * The durable denial record.
+ *
+ * Append-only, machine-queryable, on the PREDECESSOR run — the row that exists, because the point
+ * is that no new run was created. Same table and same reasoning as `recoverRun`'s
+ * RECOVERY_ABANDONED event: *"An email is not a record (K4 ruling 12)."*
+ *
+ * EVERY denial is recorded, not only the company one. A refusal that leaves no trace is
+ * indistinguishable from a retry nobody attempted, and the question an operator asks three weeks
+ * later is "why is this work not done" — answerable only if the refusals are written down.
+ *
+ * Best-effort by design: a failure to WRITE the audit must not turn a refusal into a permission.
+ * The denial is already decided by the time this runs, and it is returned either way. The failure
+ * is logged rather than swallowed, because an audit trail that is silently not being written is
+ * worse than one that is absent.
+ */
+async function recordRetryDenial(runId, denial, deps = {}) {
+  const query = lazyQuery(deps);
+  try {
+    await query(
+      `INSERT INTO agent_run_events (run_id, kind, error, detail)
+       VALUES ($1, 'RETRY_DENIED', $2, $3::jsonb)`,
+      [runId, denial.detail || denial.reason || 'retry denied',
+        JSON.stringify({
+          reason: denial.reason || null,
+          task_id: denial.taskId || null,
+          task_type: denial.taskType || null,
+          at: new Date().toISOString(),
+        })]);
+    return true;
+  } catch (e) {
+    console.error(`[recovery] the retry denial for ${runId} could not be recorded: ${e.message}`);
+    return false;
+  }
+}
+
 /**
  * May this predecessor's work be attempted again, given what its TASKS are?
+ *
+ * "Its tasks" means the whole delegated subtree, not the immediate one — see `associatedTasks`.
  *
  * Returns `{ permitted: true }` or `{ permitted: false, reason, detail, taskId? }`.
  *
@@ -382,7 +633,55 @@ async function reattemptPermitted(run, { overrideReason = null } = {}, deps = {}
         + 'unreadable classification is not a permitted one' };
   }
   if (!assoc.tasks.length) {
+    // Still ask about the run's own company: a non-lease run with an objective carries one, and a
+    // withdrawn company is a refusal whether or not any worker task is involved.
+    const bare = await companyStillAuthorizesRetry([run && run.company_id], deps);
+    if (!bare.ok) {
+      return { permitted: false, reason: bare.code, detail: bare.detail };
+    }
     return { permitted: true, tasks: 0, why: assoc.why || 'no associated task' };
+  }
+
+  // ── AUTHORITY BEFORE STATUS, AND BOTH BEFORE CLASSIFICATION ───────────────
+  //
+  // Order is deliberate. "Who authorized this tree" comes before "are its companies trading",
+  // which comes before "may this type be redone" — because a tree that was never authorized is not
+  // made acceptable by an active company, and a withdrawn company makes the type question moot.
+  if (run && run.run_id) {
+    const authority = await lineageAuthority(run.run_id, deps);
+    if (!authority.readable) {
+      return { permitted: false, reason: 'delegation_authority_unreadable',
+        detail: authority.reason };
+    }
+    if (authority.undelegated.length) {
+      const first = authority.undelegated[0];
+      return { permitted: false, reason: 'undelegated_descendant', runId: first.run_id,
+        detail: `run ${first.run_id} is a descendant at depth ${first.depth} with NO recorded `
+          + 'delegation. The edge exists in agent_runs and no office_delegations row establishes '
+          + 'who authorized it, so something created this child outside delegate(). A retry would '
+          + 're-run work whose authority was never written down.' };
+    }
+  }
+
+  // ONE COMPANY, OR NONE. Not "all active" — see lineageAuthority's note. A set of size greater
+  // than one cannot have come from delegate(), whatever each company's status is.
+  const companies = [...new Set([
+    run && run.company_id,
+    ...assoc.tasks.map((t) => t.company_id),
+  ].filter(Boolean))];
+  if (companies.length > 1) {
+    return { permitted: false, reason: 'cross_company_descendant', companies,
+      detail: `this execution lineage spans ${companies.length} companies (${companies.join(', ')}). `
+        + 'delegate() derives a child\'s company from its parent and takes no companyId, and the '
+        + 'database ties a delegation\'s company to its parent run under MATCH FULL — so a '
+        + 'multi-company tree is not an authorized delegation regardless of whether each company '
+        + 'is active. Establish how this tree was built before retrying any of it.' };
+  }
+
+  const authorized = await companyStillAuthorizesRetry(companies, deps);
+  if (!authorized.ok) {
+    return { permitted: false, reason: authorized.code, detail: authorized.detail,
+      companyId: authorized.companyId || null };
   }
 
   // MIXED CLASSIFICATIONS: every task is checked and ANY prohibition refuses the whole retry. A
@@ -415,6 +714,7 @@ async function reattemptPermitted(run, { overrideReason = null } = {}, deps = {}
 
   return { permitted: true, tasks: assoc.tasks.length };
 }
+
 
 // ── THE RETRY ENTRY POINT ───────────────────────────────────────────────────
 //
@@ -461,12 +761,16 @@ async function retryRun(predecessorRunId, { overrideReason = null, triggerDetail
     }
   }
 
-  // DECISION 2, at the sink. After the kill-switch re-check and before anything is created: a
-  // classification prohibition is not something a new run should exist to discover.
+  // DECISIONS 2 AND 3, at the sink. After the kill-switch re-check and before anything is created:
+  // neither a classification prohibition nor a withdrawn company is something a new run should
+  // exist to discover. Each denial is recorded durably on the predecessor.
   const allowed = await reattemptPermitted(p, { overrideReason }, { ...deps, query });
   if (!allowed.permitted) {
-    return { retried: false, reason: allowed.reason, detail: allowed.detail,
-      taskId: allowed.taskId || null, taskType: allowed.taskType || null };
+    const denial = { reason: allowed.reason, detail: allowed.detail,
+      taskId: allowed.taskId || null, taskType: allowed.taskType || null,
+      companyId: allowed.companyId || null };
+    const auditRecorded = await recordRetryDenial(predecessorRunId, denial, { ...deps, query });
+    return { retried: false, ...denial, auditRecorded };
   }
 
   const L = (deps && deps.ledger) || ledger({ query });
@@ -507,6 +811,7 @@ async function knownUnknownRecoveries({ limit = 200 } = {}, deps = {}) {
 
 module.exports = {
   candidates, recoverRun, reap, retryRun, knownUnknownRecoveries,
-  associatedTasks, reattemptPermitted,
+  associatedTasks, reattemptPermitted, companyStillAuthorizesRetry,
+  workerSchemaState, lineageIntentKeys, recordRetryDenial, lineageAuthority,
   CEILINGS, DEFAULT_CEILING_MINUTES, ceilingFor, ACTIVE,
 };

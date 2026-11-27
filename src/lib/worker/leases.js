@@ -98,6 +98,51 @@ async function enqueueTask({
   }
   if (!intentKey) return refuse('no_intent_key', 'a task needs an intent key — it is its identity for run arbitration');
 
+  // ── THE COMPANY ON A TASK IS THE ISOLATION BOUNDARY, AND IT WAS UNCHECKED ──
+  //
+  // A.6, 2026-11-27. `companyId` arrives from the caller and nothing validated it: not that the
+  // company exists, not that it is active. `worker_tasks.company_id` is `TEXT` with NO FOREIGN KEY,
+  // so the database did not either. That column is what migration 62's synthetic isolation filters
+  // on and what `companyStillAuthorizes` re-reads at every lease boundary — the whole isolation
+  // argument rests on it, and it was the one value taken on trust.
+  //
+  // WHY THAT MATTERS FOR AN UNRESTRICTED WORKER SPECIFICALLY. The claim filter is
+  // `$4::boolean IS NOT TRUE OR company_id IN (SELECT id FROM companies WHERE is_synthetic)` — so a
+  // worker that is NOT synthetic-only skips the subquery entirely. A task naming a company that
+  // does not exist is therefore CLAIMABLE by it, and the refusal arrives later, at heartbeat or
+  // submit, from `companyStillAuthorizes`. That is the same shape the owner ruled on for the
+  // suspended-company retry: a row created that can never legitimately complete. The fix belongs
+  // where the row is created.
+  //
+  // A NULL company is still permitted and is a different thing: a task that concerns nobody's data.
+  // The claim filter excludes it from every restricted worker with no special clause, because
+  // `NULL IN (SELECT …)` is never true.
+  if (companyId !== null && companyId !== undefined) {
+    let company;
+    try {
+      const r = await q(deps)(
+        'SELECT id, status FROM companies WHERE id = $1', [String(companyId)]);
+      company = r.rows[0] || null;
+    } catch (e) {
+      // Fail closed. An unverifiable company is not a verified one, and this is the direction every
+      // gate in this module fails.
+      return refuse('company_unverifiable',
+        `whether company ${companyId} exists and is active could not be established (${e.message}) `
+        + '— refusing rather than enqueuing work against an unchecked isolation boundary');
+    }
+    if (!company) {
+      return refuse('unknown_company',
+        `company ${companyId} does not exist. The company on a task is the isolation boundary that `
+        + 'synthetic restriction and lease re-authorization both read, so a task may not name one '
+        + 'that cannot be resolved');
+    }
+    if (company.status !== 'active') {
+      return refuse('company_not_active',
+        `company ${companyId} is ${company.status}, so work for it is not authorized — enqueuing it `
+        + 'would create a task that no worker may legitimately complete');
+    }
+  }
+
   const id = newTaskId();
   try {
     await q(deps)(

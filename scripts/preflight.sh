@@ -460,6 +460,24 @@ pf_step "NEEDS_RESOLUTION cannot re-execute by itself" \
 # wins), withdrawal, and duplicate-effect prevention (six retries, six reasons, still one run).
 pf_step "a task type's prohibition outranks a human override" \
   node scripts/check-reattempt-authorization-db.js
+# ── A.6: THE CLASSIFICATION AT EVERY AUTHORIZATION BOUNDARY ─────────────────
+#
+# A grep answered what A.6 was asking: `is_synthetic`/`synthetic_only` were consulted in the worker
+# layer and NOWHERE in the office layer, and enqueueTask took `companyId` from its caller and
+# validated nothing — not existence, not status. worker_tasks.company_id is TEXT with no foreign
+# key, so the database did not either, and that column is the isolation boundary the claim filter
+# selects on. Worst for an UNRESTRICTED worker, whose claim filter skips the company subquery
+# entirely: a task naming a nonexistent company was claimable, refused only later at a heartbeat.
+#
+# Now verified at the sink: unknown, suspended and unverifiable companies refused at enqueue, a NULL
+# company still permitted; the classification unforgeable (six non-boolean attempts refused);
+# initiation, planning and delegation resting on a context that cannot be handed in, including a
+# COPY of a real one; delegate() having no companyId to cross a boundary with and the database tying
+# a delegation to its parent's company under MATCH FULL; withdrawal racing result persistence with
+# NO output stored; and the retry of that raced work still refused. §3 records that the FK is absent
+# and that zero orphans exist, which is what an operator needs before proposing one.
+pf_step "the classification holds at every authorization boundary (A.6)" \
+  node scripts/check-a6-authorization-boundaries-db.js
 # B3.2. An objective decomposes into a bounded plan, and the plan is a PROPOSAL: every step is
 # independently validated against company scope, capability permission, execution eligibility, STOP
 # controls, approval requirement and budget. A proposal that states any of those — a model's
