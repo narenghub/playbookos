@@ -132,7 +132,8 @@ let server = null;
   // ── 1. ENROLMENT OVER HTTP ──────────────────────────────────────────────
   head('1. a worker with no credential obtains one, and only once');
 
-  const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'runtime-a' }, deps);
+  const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'runtime-a' }, deps);
   const enrolled = await (await fetch(`${baseUrl}/api/worker/enroll`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token: tok.token, hostFingerprint: 'linux-test' }),
@@ -267,7 +268,8 @@ let server = null;
 
   // ── 6. REVOKED MID-FLIGHT ───────────────────────────────────────────────
   head('6. losing its identity mid-execution');
-  const tokB = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'runtime-b' }, deps);
+  const tokB = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'runtime-b' }, deps);
   const Bres = await (await fetch(`${baseUrl}/api/worker/enroll`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token: tokB.token }),

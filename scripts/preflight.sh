@@ -360,6 +360,14 @@ pf_step "a worker cannot declare its own capabilities" node scripts/check-worker
 # empty queue.
 pf_step "a restricted worker claims only synthetic companies' work" \
   node scripts/check-synthetic-isolation-db.js
+# And the same migration applied to a database ALREADY IN USE, which is the case that bites: a
+# 61-era shape carrying enrolled identities, an open lease and pending tasks. The assertion the
+# owner asked for is that nothing is silently widened — both pre-existing identities come out
+# RESTRICTED, because the column is added NOT NULL DEFAULT true and the drop discarded their stored
+# value. Also carries the read-only inventory, which writes nothing and is what an operator runs
+# against the development database BEFORE applying anything.
+pf_step "migration 62 upgrades a database in use without widening anything" \
+  node scripts/check-migration-62-upgrade-db.js
 # The worker service's deploy configuration, and the four environment-variable names. railway.json
 # is REPO-WIDE and would have run a schema migration from the worker service.
 pf_step "the worker service applies no migration and the variable names match the source" \

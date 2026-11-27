@@ -114,4 +114,84 @@ async function setCompanySynthetic(companyId, isSynthetic, { query }) {
   return r.rows[0];
 }
 
-module.exports = { installSyntheticIsolation, setCompanySynthetic };
+/**
+ * READ-ONLY. What migration 62 would affect in a database that does not yet have it.
+ *
+ * Owner, sixth directive: *"Before applying migration 62 to the actual development database,
+ * produce a read-only inventory of affected existing worker identities and tasks."* This is that
+ * inventory, and it writes nothing — no ALTER, no UPDATE, no INSERT. It is safe to run against any
+ * database, including one it has already been applied to, where it reports the state as it stands.
+ *
+ * The figure that matters is `identitiesThatWillBecomeRestricted`: because the column is added
+ * `NOT NULL DEFAULT true`, every identity already enrolled becomes RESTRICTED when the migration
+ * runs. That is the fail-closed direction and it is deliberate, but it is also a behaviour change
+ * to existing rows, so it is counted and listed by label before anything is applied rather than
+ * discovered afterwards from a worker that stopped claiming.
+ */
+async function inventoryForMigration62(query) {
+  const has = async (table, column) => (await query(
+    `SELECT COUNT(*)::int n FROM information_schema.columns
+      WHERE table_name = $1 AND column_name = $2`, [table, column])).rows[0].n > 0;
+
+  const applied = {
+    companies_is_synthetic: await has('companies', 'is_synthetic'),
+    identities_synthetic_only: await has('worker_identities', 'synthetic_only'),
+    tokens_synthetic_only: await has('worker_enrollment_tokens', 'synthetic_only'),
+  };
+
+  const identities = await query(
+    `SELECT id, label, capabilities, revoked_at IS NOT NULL AS revoked,
+            last_seen_at
+       FROM worker_identities ORDER BY enrolled_at NULLS LAST`);
+
+  // Tasks, split exactly the way the claim filter splits them, so the inventory answers the
+  // question an operator will actually ask: which pending work would a restricted worker stop
+  // being able to claim.
+  const tasks = await query(
+    `SELECT state,
+            company_id IS NULL AS no_company,
+            COUNT(*)::int n
+       FROM worker_tasks
+      GROUP BY state, (company_id IS NULL)
+      ORDER BY state`);
+
+  // A LEASE IS AN AGENT RUN. `SCHEMA.TABLES.leases` is literally `agent_runs`, which is worth
+  // saying because I first wrote `worker_leases` — a table that does not exist — and the `.catch`
+  // below would have reported `null` for ever without anybody noticing. The catch is kept for a
+  // database that has no runs table at all, and the name is now the real one.
+  const leases = await query(
+    `SELECT COUNT(*)::int n FROM agent_runs WHERE ended_at IS NULL`)
+    .catch(() => ({ rows: [{ n: null }] }));
+
+  const companies = applied.companies_is_synthetic
+    ? await query(
+      `SELECT COUNT(*)::int total,
+              COUNT(*) FILTER (WHERE is_synthetic)::int synthetic
+         FROM companies`)
+    : await query(`SELECT COUNT(*)::int total, 0::int synthetic FROM companies`);
+
+  return {
+    readOnly: true,
+    applied,
+    identities: {
+      total: identities.rows.length,
+      live: identities.rows.filter((r) => !r.revoked).length,
+      revoked: identities.rows.filter((r) => r.revoked).length,
+      withHardwareOrGui: identities.rows.filter(
+        (r) => (r.capabilities || []).some((c) => c === 'exec:hardware' || c === 'exec:gui')).length,
+      // Every live identity, because the default restricts them all.
+      identitiesThatWillBecomeRestricted: applied.identities_synthetic_only
+        ? 'already applied — see synthetic_only on each row'
+        : identities.rows.filter((r) => !r.revoked).map((r) => ({
+          id: r.id, label: r.label, capabilities: r.capabilities, lastSeen: r.last_seen_at })),
+    },
+    tasks: tasks.rows,
+    pendingWithNoCompany: tasks.rows
+      .filter((r) => r.state === 'PENDING' && r.no_company)
+      .reduce((a, r) => a + r.n, 0),
+    openLeases: leases.rows[0].n,
+    companies: companies.rows[0],
+  };
+}
+
+module.exports = { installSyntheticIsolation, setCompanySynthetic, inventoryForMigration62 };

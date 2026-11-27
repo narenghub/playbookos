@@ -158,7 +158,8 @@ watchdog.unref?.();
     const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
     const enrolWorker = async (label) => {
-      const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label }, deps);
+      const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label }, deps);
       const r = await (await fetch(`${baseUrl}/api/worker/enroll`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

@@ -255,7 +255,8 @@ function taskIdFor(runId) {
     ok('a worker API is serving for the fixture worker (in-process, and stated as a fixture)');
 
     // ── A REAL WORKER, ALSO A SEPARATE PROCESS, ALSO UNDRIVEN ──────────────
-    const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'scheduler-worker' }, deps);
+    const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'scheduler-worker' }, deps);
     const enrolled = await (await fetch(`${apiUrl}/api/worker/enroll`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ token: tok.token, hostFingerprint: 'running-scheduler-check' }),

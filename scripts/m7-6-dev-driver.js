@@ -773,8 +773,14 @@ async function main() {
   let fixtureId = null;
   let fixtureSecret = null;
   try {
+    // This fixture identity stays RESTRICTED — synthetic_only left at its default of true —
+    // because the owner's sixth directive is explicit: *"Do not widen the iMac worker identity to
+    // compensate for M7.6 tasks missing company_id."* The pilot is fixed by attributing its tasks
+    // to a company, not by widening the worker that runs them. A restricted mint needs no
+    // administrator, so `createdBy: 'm7-6-acceptance'` is simply dropped: it was a literal string,
+    // which is identification and not authorization, and nothing was checking it.
     const tok = await IDENTITY.createEnrollmentToken(
-      { label: FIXTURE_IDENTITY_LABEL, createdBy: 'm7-6-acceptance' }, deps);
+      { label: FIXTURE_IDENTITY_LABEL }, deps);
     const enrolled = await IDENTITY.consumeEnrollmentToken({ token: tok.token }, deps);
     if (!enrolled || enrolled.ok !== true) {
       // A refusal is a code, not an exception — `cannot_seal` in particular means the dev

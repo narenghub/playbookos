@@ -62,6 +62,11 @@ try {
   throw e;
 }
 process.env.DATABASE_URL = cluster.url;
+// These fixtures used to INSERT an identity directly, which is why this was never
+// needed. They now go through the enrolment exchange — the only path that may create a
+// widened identity — and the exchange seals the secret at rest. Generated per run: no
+// real credential is read and none is needed.
+process.env.WORKER_SECRET_SEAL_KEY = require('crypto').randomBytes(32).toString('hex');
 process.env.ADMIN_EMAIL = 'cycle-bootstrap@cycle.invalid';
 process.env.ADMIN_PASSWORD = `cycle-${crypto.randomBytes(16).toString('hex')}`;
 
@@ -262,15 +267,28 @@ globalThis.fetch = async (...args) => {
     // ══ STEP 5. DISCOVER AUTHORIZED CAPABILITIES ══════════════════════════
     step(5, 'discover authorized capabilities');
 
-    const WORKER = uid('worker');
+    let WORKER = uid('worker');
         // Migration 62: a FIXTURE identity inserted DIRECTLY, which is why the mechanical sweep over
     // `createEnrollmentToken({` call sites could not reach it — a third enrolment shape, found by
     // running the population rather than by trusting the sweep. Declared unrestricted because this
     // check's subject is the cycle, not synthetic isolation.
-    await q(`INSERT INTO worker_identities
-               (id, label, secret_current, capabilities, enrolled_by, synthetic_only)
-             VALUES ($1,$1,$2,ARRAY['exec:hardware']::text[],'cycle-check',false)`,
-      [WORKER, crypto.randomBytes(32).toString('hex')]);
+    // Migration 62 and the INSERT-path guard: a widened identity — exec:hardware, or
+    // synthetic_only false — may now only be created by the enrolment exchange, which stamps
+    // enrolled_by as `enrollment:<digest>` and requires a verified administrator on the token.
+    // This fixture was a direct INSERT: the third enrolment shape, and the one that bypassed every
+    // check on the mint. Going the authorized way is also what keeps the guard non-vacuous — if the
+    // exchange ever stopped stamping provenance, this check would fail rather than quietly pass.
+    const _wid = require('../src/lib/worker/identity');
+    const _wtok = await _wid.createEnrollmentToken({
+      label: WORKER, capabilities: ['exec:hardware'], syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(q),
+    }, { query: q });
+    const _wenr = await _wid.consumeEnrollmentToken(
+      { token: _wtok.token, hostFingerprint: 'cycle-check' }, { query: q });
+    if (!_wenr || _wenr.ok !== true) {
+      throw new Error(`fixture enrolment failed: ${JSON.stringify(_wenr)}`);
+    }
+    WORKER = _wenr.workerId;
     ids.workers.push(WORKER);
 
     // If discovery reports a degraded source, say WHICH and why before judging the rest — a

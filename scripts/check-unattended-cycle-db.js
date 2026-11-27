@@ -156,7 +156,8 @@ const tick = (args = [], extraEnv = {}) =>
                          'all_consequential','active','naren@fixture.invalid',5.00)`, [OBJ, CO]);
     made.objectives.push(OBJ);
 
-    const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'unattended-worker' }, deps);
+    const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'unattended-worker' }, deps);
     const enrolled = await (await fetch(`${baseUrl}/api/worker/enroll`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ token: tok.token, hostFingerprint: 'unattended-check' }),

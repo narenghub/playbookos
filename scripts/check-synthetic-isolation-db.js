@@ -32,7 +32,7 @@ const bad = (m) => { fail += 1; lines.push(`  FAIL  ${m}`); };
 const note = (m) => lines.push(`  --    ${m}`);
 const section = (t) => lines.push('', `── ${t} ──`, '');
 
-const made = { companies: [], tasks: [], workers: [] };
+const made = { companies: [], tasks: [], workers: [], users: [] };
 
 (async () => {
   let cluster = null;
@@ -208,9 +208,22 @@ const made = { companies: [], tasks: [], workers: [] };
     // ═══ 4. CONTROL — AN UNRESTRICTED WORKER TAKES THE SAME TASKS ═══════════
     section('4. control — the refusals above measure the isolation, not an empty queue');
 
-    const unrestricted = await enrol('widened-hardware');
-    await query(
-      `UPDATE worker_identities SET synthetic_only = false WHERE id = $1`, [unrestricted]);
+    // Widened by MINTING, not by UPDATE — because an UPDATE is now refused by the database, which
+    // is what section 7 measures. The fixture administrator is a real, active super_admin row: an
+    // id belonging to nobody is refused, which is what keeps the mint-side check non-vacuous.
+    const admin = await require('./lib/fixture-admin').fixtureAdmin(query);
+    const wtok = await IDENTITY.createEnrollmentToken(
+      { label: 'widened-fixture', syntheticOnly: false, createdBy: admin }, { query });
+    const wenr = await IDENTITY.consumeEnrollmentToken(
+      { token: wtok.token, hostFingerprint: 'widened-fixture' }, { query });
+    if (!wenr || wenr.ok !== true) throw new Error(`widened enrolment failed: ${JSON.stringify(wenr)}`);
+    made.workers.push(wenr.workerId);
+    const unrestricted = wenr.workerId;
+    if (wenr.syntheticOnly === false) {
+      ok('a widened identity can be minted, but only with an administrator named on the token');
+    } else {
+      bad(`the widened mint produced syntheticOnly=${wenr.syntheticOnly}`);
+    }
 
     const u1 = await LEASES.claimTask({ workerId: unrestricted, taskId: tReal }, { query });
     if (u1 && u1.ok === true && u1.taskId === tReal) {
@@ -254,6 +267,81 @@ const made = { companies: [], tasks: [], workers: [] };
     } else {
       bad(`after re-marking, the claim returned ${JSON.stringify(reMarked && (reMarked.code || reMarked))}`);
     }
+    // ═══ 7. THE CLAIMS I MADE FROM ABSENCE, EACH NOW ATTEMPTED ═════════════
+    section('7. the four claims I made from absence, each now attempted');
+
+    // Owner: "Do not treat the absence of UPDATE statements as proof of database-enforced
+    // immutability." I had, and attempting it showed every one of them false: both grant columns
+    // were freely writable, an ordinary caller could mint an unrestricted identity, and a mint
+    // with no operator at all succeeded. Each is attempted here, every run, so the property is
+    // measured rather than inferred from a grep.
+    const expectRefused = async (what, fn) => {
+      try { await fn(); bad(`${what} SUCCEEDED — it is not enforced`); }
+      catch (e) {
+        if (/write-once|only be created by the enrollment exchange|only be granted through the enrollment exchange|requires createdBy naming|requires admin|is not a user|deactivated account|external role/.test(e.message)) {
+          ok(`${what} is refused: ${e.message.slice(0, 68)}…`);
+        } else {
+          bad(`${what} failed for an unrelated reason: ${e.message}`);
+        }
+      }
+    };
+
+    await expectRefused('UPDATE of synthetic_only', () => query(
+      'UPDATE worker_identities SET synthetic_only = false WHERE id = $1', [restricted]));
+    await expectRefused('UPDATE of capabilities', () => query(
+      `UPDATE worker_identities SET capabilities = ARRAY['exec:hardware']::text[] WHERE id = $1`,
+      [restricted]));
+    await expectRefused('a direct INSERT of an unrestricted identity', () => query(
+      `INSERT INTO worker_identities (id, label, secret_current, capabilities, enrolled_by,
+         synthetic_only) VALUES ($1,$1,'x',ARRAY[]::text[],'hand-written',false)`,
+      [`wkr_${crypto.randomBytes(16).toString('hex')}`]));
+    await expectRefused('a direct INSERT granting exec:hardware', () => query(
+      `INSERT INTO worker_identities (id, label, secret_current, capabilities, enrolled_by,
+         synthetic_only) VALUES ($1,$1,'x',ARRAY['exec:hardware']::text[],'hand-written',true)`,
+      [`wkr_${crypto.randomBytes(16).toString('hex')}`]));
+    await expectRefused('a widened mint with no administrator', () => IDENTITY
+      .createEnrollmentToken({ label: 'no-admin', syntheticOnly: false }, { query }));
+    await expectRefused('a widened mint naming a non-existent administrator', () => IDENTITY
+      .createEnrollmentToken(
+        { label: 'ghost-admin', syntheticOnly: false, createdBy: 'nobody-at-all' }, { query }));
+
+    // The owner's point 3 in miniature: an identifier is not an authorization. Each of these is a
+    // real, existing user row, and each is refused for its own reason.
+    const mkUser = async (suffix, role, active) => {
+      const id = `syn-${suffix}-${crypto.randomUUID().slice(0, 8)}`;
+      await query(
+        `INSERT INTO users (id, email, name, role, is_active, password_hash)
+         VALUES ($1,$2,$1,$3,$4,'x')`, [id, `${id}@syn.invalid`, role, active]);
+      made.users.push(id);
+      return id;
+    };
+    await expectRefused('a widened mint authorized by an ordinary employee',
+      async () => IDENTITY.createEnrollmentToken({ label: 'emp', syntheticOnly: false,
+        createdBy: await mkUser('emp', 'sales_team', 1) }, { query }));
+    await expectRefused('a widened mint authorized by an external partner',
+      async () => IDENTITY.createEnrollmentToken({ label: 'par', syntheticOnly: false,
+        createdBy: await mkUser('par', 'partner', 1) }, { query }));
+    await expectRefused('a widened mint authorized by a DEACTIVATED administrator',
+      async () => IDENTITY.createEnrollmentToken({ label: 'ina', syntheticOnly: false,
+        createdBy: await mkUser('ina', 'super_admin', 0) }, { query }));
+
+    // CONTROL for all of section 7: the writes that must still work. A trigger that froze
+    // revocation would be a far worse defect than the one it fixed.
+    try {
+      await query(
+        `UPDATE worker_identities SET revoked_at = NOW(), revoked_reason = 'fixture' WHERE id = $1`,
+        [restricted]);
+      ok('CONTROL: revocation still works — the trigger freezes the grants, not the row');
+    } catch (e) {
+      bad(`revocation was refused, which is worse than the defect being fixed: ${e.message}`);
+    }
+    try {
+      await query('UPDATE worker_identities SET last_seen_at = NOW() WHERE id = $1', [restricted]);
+      ok('CONTROL: a heartbeat still writes');
+    } catch (e) {
+      bad(`a heartbeat was refused: ${e.message}`);
+    }
+
   } catch (e) {
     bad(`the check itself failed: ${e.message}`);
     lines.push(String(e.stack || '').split('\n').slice(1, 5).join('\n'));
@@ -266,6 +354,7 @@ const made = { companies: [], tasks: [], workers: [] };
         await query('DELETE FROM worker_tasks WHERE id = $1', [id]);
       }
       for (const id of made.workers) await query('DELETE FROM worker_identities WHERE id = $1', [id]);
+      for (const id of made.users) await query('DELETE FROM users WHERE id = $1', [id]);
       for (const id of made.companies) await query('DELETE FROM companies WHERE id = $1', [id]);
       const mine = (await query(
         'SELECT count(*)::int n FROM worker_tasks WHERE id = ANY($1)', [made.tasks])).rows[0].n;

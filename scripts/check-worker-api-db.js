@@ -133,9 +133,11 @@ let server = null;
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
 
-  const tokA = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'api-a' }, deps);
+  const tokA = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'api-a' }, deps);
   const A = await IDENTITY.consumeEnrollmentToken({ token: tokA.token }, deps);
-  const tokB = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'api-b' }, deps);
+  const tokB = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'api-b' }, deps);
   const B = await IDENTITY.consumeEnrollmentToken({ token: tokB.token }, deps);
 
   /** Signs and sends exactly what a worker would. Returns the parsed response plus the raw request. */
@@ -322,7 +324,8 @@ let server = null;
 
   // ── 8. EXPIRED LEASE ────────────────────────────────────────────────────
   head('8. an expired lease cannot commit');
-  const tokC = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'api-c' }, deps);
+  const tokC = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'api-c' }, deps);
   const C = await IDENTITY.consumeEnrollmentToken({ token: tokC.token }, deps);
   await LEASES.enqueueTask({ taskType: 'synthetic.sleep', intentKey: 'api-expire' }, deps);
   const dying = await call(C, 'POST', '/api/worker/claim', {});

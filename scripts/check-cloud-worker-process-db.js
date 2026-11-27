@@ -154,7 +154,8 @@ function runWorkerOnce({ baseUrl, workerId, secret, env = {} , args = ['--once']
     // ══ 1. ENROLMENT, AS AN OPERATOR WOULD DO IT ═════════════════════════
     head('1. the cloud worker enrols with a server-issued token');
 
-    const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'm7-dev-cloud-worker' }, deps);
+    const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'm7-dev-cloud-worker' }, deps);
     const enrolled = await (await fetch(`${baseUrl}/api/worker/enroll`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ token: tok.token, hostFingerprint: 'railway-container' }),

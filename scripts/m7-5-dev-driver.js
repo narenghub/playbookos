@@ -566,7 +566,8 @@ async function stopInventory() {
 // ── mint ────────────────────────────────────────────────────────────────────
 async function cmdMint() {
   const label = arg('--label') || 'mac-mini';
-  const t = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label }, deps);
+  const t = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label }, deps);
   console.log('\nAn enrolment token has been minted. It is single-use and short-lived.\n');
   console.log('Carry it to the Mac mini by hand and paste it at the workerctl prompt. Do NOT put it');
   console.log('in a file, a chat message, an environment variable in your shell history, or argv.\n');

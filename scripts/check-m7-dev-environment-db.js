@@ -194,7 +194,8 @@ let server = null;
   const deps = { query, env: { WORKER_SECRET_SEAL_KEY: SEAL } };
 
   // The full operator sequence: token -> worker id -> secret -> signed requests.
-  const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'mac-mini' }, deps);
+  const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'mac-mini' }, deps);
   if (tok && tok.token && tok.token.length >= 20) ok(`an enrolment token was minted (${tok.token.length} chars)`);
   else bad('no usable enrolment token', JSON.stringify(tok));
 

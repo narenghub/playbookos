@@ -131,10 +131,16 @@ watchdog.unref?.();
       // around a ternary, so the mechanical sweep that added `syntheticOnly: false` to the other 27
       // could not see it — the legacy-harness lesson again: the population is a family of shapes,
       // so the sweep's own gap has to be looked for rather than assumed away.
+      // Migration 62 plus the mint-side authorization: FIXTURE identities, widened because this
+      // check's subject is the Command Center's distinctions rather than isolation, and therefore
+      // naming a verified administrator. This call spans two lines around a ternary carrying the
+      // flag in BOTH branches, which is why two successive mechanical sweeps each reached only one
+      // of them — the family-of-shapes lesson, twice in one file.
+      const ccAdmin = await require('./lib/fixture-admin').fixtureAdmin(query);
       const tok = await IDENT.createEnrollmentToken(
         capabilities.length
-          ? { label, capabilities, syntheticOnly: false }
-          : { label, syntheticOnly: false }, deps);
+          ? { label, capabilities, syntheticOnly: false, createdBy: ccAdmin }
+          : { label, syntheticOnly: false, createdBy: ccAdmin }, deps);
       const e = await IDENT.consumeEnrollmentToken(
         { token: tok.token, hostFingerprint: `cc-${label}` }, deps);
       if (!e || !e.ok) throw new Error(`enrolment failed for ${label}: ${JSON.stringify(e)}`);

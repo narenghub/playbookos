@@ -345,7 +345,8 @@ function spawnJson(script, args = [], extraEnv = {}) {
 
       // Result submission: worker_results is keyed by the LEASE run, so one lease cannot report
       // twice. Measured through the real worker process rather than by inspecting the schema.
-      const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label: 'idem-worker' }, deps);
+      const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'idem-worker' }, deps);
       const enrolled = await (await fetch(`${baseUrl}/api/worker/enroll`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ token: tok.token, hostFingerprint: 'idem-check' }),

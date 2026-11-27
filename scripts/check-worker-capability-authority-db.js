@@ -103,7 +103,7 @@ watchdog.unref?.();
     console.log('── 1. the grant travels on the enrollment token ──\n');
 
     const issued = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
-      label: 'wcap-cloud-worker', capabilities: [], createdBy: 'operator:naren',
+      label: 'wcap-cloud-worker', capabilities: [], createdBy: await require('./lib/fixture-admin').fixtureAdmin(q),
     }, deps);
     if (issued && issued.token) {
       ok('an operator issues an enrollment token, naming the capabilities it will confer (none here)');
@@ -124,7 +124,7 @@ watchdog.unref?.();
 
     // The operator grants one on a SECOND token; the same worker code enrolls and gets it.
     const issuedHw = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
-      label: 'wcap-hardware-worker', capabilities: ['exec:hardware'], createdBy: 'operator:naren',
+      label: 'wcap-hardware-worker', capabilities: ['exec:hardware'], createdBy: await require('./lib/fixture-admin').fixtureAdmin(q),
     }, deps);
     const enrolledHw = await IDENTITY.consumeEnrollmentToken({
       token: issuedHw.token, hostFingerprint: 'fixture-imac',
@@ -152,7 +152,7 @@ watchdog.unref?.();
 
     // An enrolling worker that TRIES anyway gets nothing: the extra field is simply not read.
     const issued3 = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
-      label: 'wcap-liar', capabilities: [], createdBy: 'operator:naren' }, deps);
+      label: 'wcap-liar', capabilities: [], createdBy: await require('./lib/fixture-admin').fixtureAdmin(q) }, deps);
     const liar = await IDENTITY.consumeEnrollmentToken({
       token: issued3.token, hostFingerprint: 'fixture-liar',
       capabilities: ['exec:hardware', 'exec:gui'],

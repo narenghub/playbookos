@@ -200,7 +200,8 @@ watchdog.unref?.();
 
     /** A worker identity, enrolled through the real HTTP enrolment path. */
     const enrolWorker = async (label) => {
-      const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false, label }, deps);
+      const tok = await IDENTITY.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label }, deps);
       const r = await (await fetch(`${baseUrl}/api/worker/enroll`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },

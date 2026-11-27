@@ -416,7 +416,8 @@ const deps = { query, withTransaction, env: SEAL };
       // the stricter B3.18 criterion now requires), and the cycle advanced until it reports.
       const IDENT = require('../src/lib/worker/identity');
       const LEASES = require('../src/lib/worker/leases');
-      const tok = await IDENT.createEnrollmentToken({ syntheticOnly: false, label: 'facts-worker' }, deps);
+      const tok = await IDENT.createEnrollmentToken({ syntheticOnly: false,
+      createdBy: await require('./lib/fixture-admin').fixtureAdmin(query), label: 'facts-worker' }, deps);
       const enrolled = await IDENT.consumeEnrollmentToken(
         { token: tok.token, hostFingerprint: 'facts-check' }, deps);
       if (!enrolled || !enrolled.ok) throw new Error(`enrolment failed: ${JSON.stringify(enrolled)}`);

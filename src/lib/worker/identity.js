@@ -51,6 +51,10 @@ async function migrateWorkerIdentity(query) {
   // and the column was silently absent. The check reported it as "1 of 2 columns": the both-ends
   // pattern working exactly as designed and simply not having enough ends.
   await require('./synthetic-isolation').installSyntheticIsolation(query);
+  // And the grants are made write-once BY THE DATABASE, after the columns exist. I had claimed this
+  // property from the absence of UPDATE statements; attempting one showed both grant columns were
+  // freely writable. See grant-immutability.js.
+  await require('./grant-immutability').installGrantImmutability(query);
   return { ok: true, statements: SCHEMA.DDL.length };
 }
 
@@ -68,6 +72,49 @@ async function createEnrollmentToken({
   syntheticOnly = true,
 } = {}, deps = {}) {
   if (!label || !String(label).trim()) throw new Error('an enrollment token needs a label');
+
+  // ── A PRIVILEGED GRANT REQUIRES A VERIFIED ADMINISTRATOR, AT THE SINK ─────
+  //
+  // Owner, sixth directive: *"Inspect every caller of createEnrollmentToken and every direct worker
+  // identity creation path. Verify that ordinary callers cannot mint unrestricted identities."*
+  // Measured before writing this: they could. `createEnrollmentToken({syntheticOnly: false})`
+  // succeeded for any caller of the module, and so did a mint with `createdBy: null`.
+  //
+  // The check is HERE rather than in `enroll-worker-no-transcript.js`, where I first put it, for
+  // B3.11a's reason: a gate in one caller is a statement about that caller, and a gate at the sink
+  // is on every path including the ones nobody has written yet. The script's copy is now redundant
+  // and kept only because it refuses earlier, with a better message, before anything is minted.
+  //
+  // `--operator` being *identification, not authentication* is the owner's point 3 and is a
+  // separate, larger piece: this resolves and CHECKS the named actor against persisted state, which
+  // is strictly better than recording a string, and it is still not proof that the person at the
+  // keyboard is that actor. Point 3's authenticated path is tracked separately and this does not
+  // claim to be it.
+  const wantsWidening = syntheticOnly === false
+    || capabilities.some((c) => c === 'exec:hardware' || c === 'exec:gui');
+  if (wantsWidening) {
+    if (!createdBy) {
+      throw new Error(
+        'minting a token that widens a worker — synthetic_only false, or exec:hardware/exec:gui — '
+        + 'requires createdBy naming an administrator. A privileged grant attributed to nobody is '
+        + 'the hole this refusal closes');
+    }
+    const actor = await q(deps)(
+      'SELECT id, role, is_active FROM users WHERE id = $1', [String(createdBy)]);
+    const u = actor.rows[0];
+    if (!u) throw new Error(`createdBy ${createdBy} is not a user, so it cannot authorize a widened grant`);
+    if (!u.is_active) throw new Error(`createdBy ${createdBy} is a deactivated account`);
+    const { isExternalRole } = require('../roles');
+    if (isExternalRole(u.role)) {
+      throw new Error(`createdBy ${createdBy} holds the external role "${u.role}" — a partner is `
+        + 'not an administrator of this platform');
+    }
+    if (!['super_admin', 'admin'].includes(String(u.role))) {
+      throw new Error(`createdBy ${createdBy} holds the role "${u.role}"; widening a worker grant `
+        + 'requires admin or super_admin');
+    }
+  }
+
   const now = deps.now ? deps.now() : Date.now();
   const token = SECRETS.newEnrollmentToken();
   const expiresAt = new Date(now + Number(ttlMs));
