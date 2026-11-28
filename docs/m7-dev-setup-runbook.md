@@ -12,14 +12,15 @@ production and must never touch it.**
 
 | | |
 | --- | --- |
-| Railway project | `playnexa-m7-dev` (exists; separate from `meticulous-laughter`) |
+| Railway project | `playnexa-m7-dev` id `a3d1f2d7-cf15-4feb-a079-e1539eaad77f` (separate from production `Playbook OS`, id `c34fcdbe-c59e-4ffc-afde-a0770031b901`) |
 | Repo / branch | `narenghub/playbookos` @ `feat/m7-mac-mini-worker` |
 | Dev API entry point | `scripts/dev-worker-api-server.js` — **never** `server.js` |
 | Database | the Postgres service in `playnexa-m7-dev`, reached by tunnel |
 
 ## Hard boundaries — do not cross these, and do not "fix" them
 
-- **No production deploys.** `origin/main` and the `meticulous-laughter` project are untouched.
+- **No production deploys.** `origin/main` and the `Playbook OS` project (formerly named
+  `meticulous-laughter`) are untouched.
 - **No production database.** Never `postgres.railway.internal` from a production context, never
   `interchange.proxy.rlwy.net` (the Abiozen Django production DB).
 - **No production STOP changes.** The three production STOPs

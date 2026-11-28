@@ -10,7 +10,7 @@ Read top to bottom. Items are ordered so that anything depending on a secret com
 
 - [ ] You have Railway CLI installed and authenticated as a member of the `narenghub` project. Test: `railway whoami` exits 0.
 - [ ] You have GitHub push access to `narenghub/playbookos` from this machine. Test: `git ls-remote origin main` exits 0.
-- [ ] The Railway project `meticulous-laughter` (id `c34fcdbe-c59e-4ffc-afde-a0770031b901`) is reachable. Test: the Railway dashboard lists service `playbookos` linked to service `Postgres`.
+- [ ] The Railway project `Playbook OS` (id `c34fcdbe-c59e-4ffc-afde-a0770031b901`) is reachable. The id is what to trust: this project was formerly named `meticulous-laughter`, that name no longer exists in the account, and older documents still use it. Test: the Railway dashboard lists service `playbookos` linked to service `Postgres`.
 - [ ] The Postgres service in that project is healthy. Test: `railway variables --service Postgres --kv | grep DATABASE_PUBLIC_URL` returns a non-empty value.
 
 If any of these fail, fix them before proceeding. The deploy will not work without all four.

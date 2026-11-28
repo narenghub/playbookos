@@ -505,7 +505,7 @@ buttons.
 
 ## Deploy to Railway
 
-Production lives in Railway project `meticulous-laughter`, service `playbookos`, linked to a `Postgres` service. `DATABASE_URL` autoinjects via reference variable.
+Production lives in Railway project `Playbook OS` (id `c34fcdbe-c59e-4ffc-afde-a0770031b901`), service `playbookos`, linked to a `Postgres` service. `DATABASE_URL` autoinjects via reference variable. The project was formerly named `meticulous-laughter`; that name no longer resolves, so prefer the id.
 
 **Initial setup (already done for prod):**
 1. Railway → new project → provision PostgreSQL

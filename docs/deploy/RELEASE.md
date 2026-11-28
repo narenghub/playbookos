@@ -218,7 +218,10 @@ echo $?                            # must be 0, or stop
 #      Before either command, confirm WHICH project and environment the CLI is pointed at —
 #      a plan reviewed against staging and applied to production is the accident this prevents:
 #          railway status
-#      Expect project `meticulous-laughter`, environment `production`. The digest also binds
+#      Expect project `Playbook OS` (id `c34fcdbe-c59e-4ffc-afde-a0770031b901`), environment
+#      `production`. Formerly named `meticulous-laughter`; that name no longer exists. Note that
+#      the DEVELOPMENT project playnexa-m7-dev also has an environment named `production`, so the
+#      environment name alone identifies nothing — check the project id. The digest also binds
 #      this: the digest covers the database identity, so a digest computed on one database is
 #      refused on another, even one holding identical rows (asserted in §13 of the harness).
 #
