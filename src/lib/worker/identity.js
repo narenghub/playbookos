@@ -39,8 +39,32 @@ const SECRETS = require('./secrets');
 const DEFAULT_TOKEN_TTL_MS = 15 * 60 * 1000;
 const DEFAULT_ROTATION_OVERLAP_MS = 60 * 60 * 1000;
 
+const DEVOPS_SCHEMA = require('./dev-operators-schema');
+
 const newWorkerId = () => `wkr_${crypto.randomBytes(16).toString('hex')}`;
 const q = (deps) => deps.query || require('../db').query;
+
+/**
+ * Does this database hold the development operator registry?
+ *
+ * `to_regclass` rather than a catalog join, and for the reason the recovery module gives for the
+ * same call: it distinguishes "the table is absent" — a definite no — from "the query failed",
+ * which is not an answer. A failure here is NOT treated as absence, because absence is the
+ * permissive branch: a database that cannot be interrogated would otherwise fall through to the
+ * production regime and mint without a principal.
+ */
+async function devRegistryPresent(deps) {
+  let r;
+  try {
+    r = await q(deps)(
+      `SELECT to_regclass('${DEVOPS_SCHEMA.TABLES.operators}') IS NOT NULL AS present`);
+  } catch (e) {
+    throw new Error('could not determine whether the development operator registry is present, so '
+      + 'the authorization regime for this mint is unknown. Refusing rather than defaulting to the '
+      + `permissive branch (${String(e && e.message).slice(0, 160)})`);
+  }
+  return Boolean(r.rows[0] && r.rows[0].present);
+}
 
 async function migrateWorkerIdentity(query) {
   for (const sql of SCHEMA.DDL) await query(sql);
@@ -70,8 +94,176 @@ async function createEnrollmentToken({
   // safe answer, and widening is a thing somebody had to type. `false` is accepted only as the
   // literal boolean, so a truthy value cannot widen a worker by accident.
   syntheticOnly = true,
+  // ── THE DEVELOPMENT OPERATOR PRINCIPAL (Option A, owner directive 2026-11-27) ──
+  //
+  // An unforgeable object from `dev-operators.authenticate()`, or null. NOT an email, NOT an id:
+  // *"Demonstrate that an unauthorized caller cannot borrow an approved operator's email or
+  // identifier."* A string can be borrowed from a log; this object cannot be constructed outside
+  // that function, because its brand is a Symbol that module never exports.
+  operator = null,
 } = {}, deps = {}) {
   if (!label || !String(label).trim()) throw new Error('an enrollment token needs a label');
+
+  // ── WHICH AUTHORIZATION REGIME APPLIES IS DECIDED BY THE DATABASE ─────────
+  //
+  // Owner: *"Enforce this authorization at the enrollment-token creation sink, not only in the CLI
+  // wrapper."* So the regime is not a flag a caller passes — a flag can be set by anybody who can
+  // call this function, which is the hole being closed. It is read from the database itself.
+  //
+  // The registry regime engages when BOTH hold:
+  //
+  //   1. `dev_operators` exists — this database has opted into the registry, and
+  //   2. the database positively identifies as isolated development.
+  //
+  // Two conditions, not one, and deliberately so. On (1) alone, a production database that somehow
+  // acquired the table would switch production into the development regime, which is the wrong
+  // direction for a mistake to travel. On (2) alone, every disposable test cluster in `scripts/`
+  // would suddenly require a principal, so the gate would have been introduced by breaking
+  // thirty checks — and a gate that noisy gets relaxed rather than understood.
+  //
+  // A database that has the registry but fails identification is refused outright. That is the
+  // fail-closed direction: `cannot_tell` is a refusal, never permission.
+  // ── WHAT ENGAGES THE REGISTRY REGIME IS THE PRINCIPAL, NOT THE TABLE ──────
+  //
+  // The first version of this gate engaged on the registry table's PRESENCE, and that was too
+  // broad. `scripts/check-m7-dev-environment-db.js` enrols a Mac-mini-style worker with
+  // `syntheticOnly: false`, authorized by `lib/fixture-admin.fixtureAdmin()` — which creates a
+  // `users` table and an administrator row precisely to exercise the verified-administrator
+  // widening path. Once the development migration also created `dev_operators`, that fixture held
+  // both, so the gate refused a mint the owner had explicitly told me to preserve, and the check
+  // stopped executing. Preflight reported `1 did not execute`, exit 2, DO NOT PUSH — which is the
+  // discipline working: a check that does not run is not a check that passed.
+  //
+  // So the three paths are now distinguished by HOW the mint is authorized:
+  //
+  //   operator principal supplied  → the registry regime: identification, synthetic-only, scope
+  //   no principal, `users` exists → the pre-existing path, byte-for-byte unchanged
+  //   no principal, no `users`     → refused where a registry exists (null attribution)
+  //
+  // Note what this does NOT pretend to defend against. A caller holding the development
+  // `DATABASE_URL` could create a `users` table and an admin row itself — but that same access can
+  // INSERT into `worker_enrollment_tokens` directly and skip this function altogether, so arbitrary
+  // write access was never in this sink's threat model. What is in scope is that a CALLER of this
+  // function cannot self-authorize, and that holds. A populated `users` in the real development
+  // database would also make `scripts/lib/db-identity.js` report `production_fingerprint` and every
+  // development script refuse, which is a separate and much louder alarm.
+  const registryPresent = await devRegistryPresent(deps);
+  if (operator) {
+    if (!registryPresent) {
+      throw new Error('a development operator principal was supplied, but this database holds no '
+        + 'development operator registry. A development credential must not authorize a mint '
+        + 'anywhere else');
+    }
+    // The brand is checked FIRST, before any query: an object that is not an authenticated
+    // principal should not cause this function to go near the database at all, and the refusal
+    // reason should be the honest one rather than whatever the database happens to say next.
+    const DEVOPS = require('./dev-operators');
+    if (!DEVOPS.isAuthenticatedOperator(operator)) {
+      // Covers a bare email, an operator id, and a hand-built object carrying the right-looking
+      // fields. None of them has the brand, so none of them is authentication.
+      throw new Error(
+        'this development database requires an authenticated development operator to mint an '
+        + 'enrollment token. Pass the principal returned by dev-operators.authenticate(); an '
+        + 'email, an operator id, or an object resembling a principal is identification, not '
+        + 'authentication, and is refused');
+    }
+
+    const DEV_IDENTITY = require('./dev-identity');
+    const ident = await DEV_IDENTITY.identifyIsolatedDevelopment(q(deps));
+    if (!ident.ok) {
+      throw new Error(
+        `this database holds the ${DEVOPS_SCHEMA.TABLES.operators} registry but does not identify `
+        + `as an isolated development database (${ident.verdict}: ${ident.detail}). Refusing to `
+        + 'mint: a registry credential must not authorize anything outside the environment it was '
+        + 'provisioned for');
+    }
+
+    // Synthetic-only is mandatory here and is not negotiable by argument. The owner's directive:
+    // *"Synthetic-only enrollment is mandatory. Hardware and GUI capability grants are prohibited
+    // for the cloud worker. Unrestricted enrollment is prohibited."*
+    if (syntheticOnly !== true) {
+      throw new Error('unrestricted enrollment is prohibited in the development environment: '
+        + 'syntheticOnly must be true');
+    }
+    for (const c of capabilities) {
+      if (DEVOPS_SCHEMA.PROHIBITED_CAPABILITIES.includes(c)) {
+        throw new Error(`${c} may not be granted by a development operator`);
+      }
+      if (!operator.allowedCapabilities.includes(c)) {
+        throw new Error(`the authenticated operator ${operator.operatorId} is not scoped to grant `
+          + `${c}; its scope is [${operator.allowedCapabilities.join(', ')}]`);
+      }
+    }
+
+    // ── THE PRINCIPAL IS RE-VALIDATED AT THE MINT, NOT ONLY AT AUTHENTICATION ──
+    //
+    // A principal is an object, and an object outlives the row it was derived from. Without this
+    // read, an operator revoked thirty seconds ago keeps minting for as long as some caller still
+    // holds the object it obtained beforehand — which makes revocation an intention rather than a
+    // control. The owner's directive lists revocation among the things that must be enforced, so
+    // the authority is checked against the registry at the moment it is exercised.
+    //
+    // Found by the negative test in scripts/check-dev-operator-registry-db.js, which asserted that
+    // a principal held from before revocation cannot mint, and failed against the first version of
+    // this branch.
+    let live;
+    try {
+      const r = await q(deps)(
+        `SELECT is_active, revoked_at, allowed_capabilities, synthetic_only_required
+           FROM ${DEVOPS_SCHEMA.TABLES.operators} WHERE id = $1`, [operator.operatorId]);
+      live = r.rows[0];
+    } catch (e) {
+      throw new Error('the authenticated operator could not be re-validated against the registry, '
+        + `so its authority is unknown. Refusing (${String(e && e.message).slice(0, 120)})`);
+    }
+    if (!live) {
+      throw new Error(`the authenticated operator ${operator.operatorId} is no longer in the `
+        + 'registry; its principal is stale and authorizes nothing');
+    }
+    if (live.revoked_at || live.is_active !== true) {
+      throw new Error(`the authenticated operator ${operator.operatorId} has been revoked; a `
+        + 'principal obtained before revocation authorizes nothing');
+    }
+    if (live.synthetic_only_required !== true) {
+      throw new Error(`the authenticated operator ${operator.operatorId} is no longer marked `
+        + 'synthetic-only; refusing rather than minting under an authority that changed shape');
+    }
+    // Scope is re-read too, for the same reason: the principal's copy was accurate when it was
+    // made, and a narrowed scope must bind immediately rather than at the next authentication.
+    for (const c of capabilities) {
+      if (!(live.allowed_capabilities || []).includes(c)) {
+        throw new Error(`the operator ${operator.operatorId}'s current scope does not include `
+          + `${c}; the principal's copy is stale`);
+      }
+    }
+
+    // Durable attribution, taken from the principal rather than from the caller's `createdBy`.
+    // A caller cannot attribute a mint to an operator it did not authenticate as.
+    createdBy = operator.attribution;
+  } else if (registryPresent) {
+    // ── NULL ATTRIBUTION IS REFUSED IN THE ISOLATED DEVELOPMENT ENVIRONMENT ──
+    //
+    // Owner's directive: *"Null operator attribution must be refused."* Reached only where the
+    // registry exists AND there is no `users` table to authorize the mint the pre-existing way —
+    // which is exactly the real development database, and is not any fixture that builds an
+    // administrator for itself.
+    let hasUsers;
+    try {
+      const r = await q(deps)("SELECT to_regclass('users') IS NOT NULL AS present");
+      hasUsers = Boolean(r.rows[0] && r.rows[0].present);
+    } catch (e) {
+      throw new Error('could not determine whether an administrator table exists, so the '
+        + 'authorization regime for this mint is unknown. Refusing rather than defaulting to the '
+        + `permissive branch (${String(e && e.message).slice(0, 120)})`);
+    }
+    if (!hasUsers) {
+      throw new Error(
+        'this development database requires an authenticated development operator to mint an '
+        + 'enrollment token. Pass the principal returned by dev-operators.authenticate(); an '
+        + 'email, an operator id, or an object resembling a principal is identification, not '
+        + 'authentication, and is refused');
+    }
+  }
 
   // ── A PRIVILEGED GRANT REQUIRES A VERIFIED ADMINISTRATOR, AT THE SINK ─────
   //

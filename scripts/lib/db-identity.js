@@ -83,6 +83,17 @@ const M7_TABLES = [
   // M7.1 / M7.2 / M7.3
   'worker_identities', 'worker_enrollment_tokens', 'worker_request_nonces',
   'worker_tasks', 'worker_results', 'worker_audit',
+  // Owner directive 2026-11-27, Option A (2026-11-28): the development operator registry and its
+  // append-only auth event log. Listed in the SAME change that created them, because this check
+  // refuses a database whose tables this list does not cover — and both previous additions here
+  // record being caught by exactly that within the hour.
+  //
+  // DEVELOPMENT-ONLY: created by `scripts/m7-dev-migrate.js` and by nothing else. `scripts/
+  // migrate.js`, which production runs, does not create them. So this widens what counts as a
+  // legitimately-migrated DEVELOPMENT database and says nothing whatever about production — a
+  // narrow addition of a DECLARED set, not the accommodation of tables nobody can account for that
+  // the refusal message warns against.
+  'dev_operators', 'dev_operator_auth_events',
 ];
 
 // ── THE M7.6 PILOT TABLES ───────────────────────────────────────────────────

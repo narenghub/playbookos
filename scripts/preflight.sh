@@ -517,6 +517,32 @@ pf_step "the office operates end to end with nobody driving it" \
 # subject prints, because it aggregates many rows and no single record can speak for a digest.
 pf_step "communication provenance holds for every message type" \
   node scripts/check-communication-provenance-db.js
+# Option A, owner directive 2026-11-27. The isolated development database has no `users` table —
+# that absence IS its isolation property — so the authenticated enrolment path could not run there
+# at all. A `dev_operators` registry supplies the missing authority WITHOUT adding business schema
+# and WITHOUT relaxing the operator requirement, both of which were rejected: a populated `users`
+# would make db-identity.js classify the development database as `production_fingerprint`.
+#
+# What this asserts, and why each part needs a real Postgres: the registry's synthetic-only and
+# no-privileged-capability rules are CHECK constraints, exercised by RAW INSERTs so the refusal is
+# the database's however the write arrives; an authenticated principal is unforgeable, so an object
+# carrying every field of a real one — or a spread copy of one — authorizes nothing; a principal
+# held from BEFORE revocation cannot mint, which the first version of the sink got wrong and this
+# check caught; two concurrent exchanges of one token yield exactly one winner, started before
+# either is awaited so the arbitration is Postgres's and not the pool's; and a database that stops
+# identifying as isolated development shuts the whole regime down rather than falling through to
+# the permissive branch. Section 11 is the control that matters most: with no registry present,
+# production's existing authorization is byte-for-byte what it was.
+pf_step "the development operator registry authenticates, and cannot be borrowed" \
+  node scripts/check-dev-operator-registry-db.js
+# E. The independent iMac monitor holds NO credential — no pg client, no transport, no DATABASE_URL
+# in executable code — because the owner forbade distributing DATABASE_URL to another machine and
+# the development database has no public address anyway. Asserted as a property of the file's SHAPE,
+# so acquiring one is an ADDITION somebody has to write. It also asserts the monitor's path cannot
+# match the substring the worker's own liveness check greps for, which would make the worker count
+# the monitor as a worker on the one machine where both run.
+pf_step "the iMac monitor cannot acquire a credential" \
+  node --test scripts/imac-sampler-is-credential-free.test.js
 # B3.2. An objective decomposes into a bounded plan, and the plan is a PROPOSAL: every step is
 # independently validated against company scope, capability permission, execution eligibility, STOP
 # controls, approval requirement and budget. A proposal that states any of those — a model's

@@ -101,6 +101,13 @@ const STEPS = [
   ['M7.1      (worker identities, tokens, nonces)', () => require('../src/lib/worker/identity').migrateWorkerIdentity(query)],
   ['M7.2      (worker_tasks, worker_results)', () => require('../src/lib/worker/leases').migrateWorkerTasks(query)],
   ['M7.3      (worker_audit)', () => require('../src/lib/worker/audit').migrateWorkerAudit(query)],
+  // Owner directive 2026-11-27, Option A. DEVELOPMENT-ONLY, and the placement is the point: this
+  // step exists in the development migration path and in no other, so `scripts/migrate.js` — the
+  // one production runs — never creates `dev_operators`. That is why the registry can require a
+  // credential in development without altering production's enrollment authorization by one line:
+  // `createEnrollmentToken` engages the registry regime only where the table exists.
+  ['dev-ops   (dev_operators, dev_operator_auth_events)',
+    () => require('../src/lib/worker/dev-operators-schema').migrateDevOperators(query)],
 ];
 
 /** Pulls table, index, constraint and trigger names out of a DDL array. */
@@ -220,6 +227,10 @@ async function rollback() {
     require('../src/lib/worker/identity-schema'),
     require('../src/lib/worker/task-schema'),
     require('../src/lib/worker/audit'),
+    // Listed in the same change that added the migration step, for the reason db-identity.js
+    // records twice over: a schema added to the apply path and not to the verify path is applied
+    // and never checked, and the omission is invisible because the run still says PASS.
+    require('../src/lib/worker/dev-operators-schema'),
   ];
   for (const m of sources) {
     const e = expectationsFrom(m.DDL);

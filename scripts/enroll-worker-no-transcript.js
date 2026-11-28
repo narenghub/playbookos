@@ -114,8 +114,53 @@ for (const c of capabilities) {
   // Refusals here cost nothing; a refusal after the mint would leave a spent token and an audit row
   // naming an operator who was never verified. The external-role check matters as much as the
   // active one: a partner is a real, active user and is not an administrator of this platform.
-  let operatorId;
+  // ── TWO REGIMES, AND THE DATABASE PICKS ───────────────────────────────────
+  //
+  // Owner directive 2026-11-27, Option A. The isolated development database has no `users` table —
+  // measured: `to_regclass('public.users')` is null — because that absence IS its isolation
+  // property. So the check below could not run there at all, and this script could not enrol the
+  // development cloud worker. Where the development operator registry exists, authority comes from
+  // it instead; where it does not, nothing about the path below changes.
+  //
+  // The credential arrives in the ENVIRONMENT and never as an argv. An argument lands in the shell
+  // history and in every `ps` listing on the machine, which is the same class of mistake this
+  // script was written to correct.
+  let principal = null;
+  let registryPresent = false;
   try {
+    const { query } = require('../src/lib/db');
+    const r = await query(
+      "SELECT to_regclass('dev_operators') IS NOT NULL AS present");
+    registryPresent = Boolean(r.rows[0] && r.rows[0].present);
+  } catch (e) {
+    die(`could not determine which authorization regime applies (${e.message}). Refusing rather `
+      + 'than guessing: one regime requires an authenticated development operator and the other '
+      + 'an administrator row, and defaulting to either would be wrong somewhere');
+  }
+
+  if (registryPresent) {
+    const credential = process.env.PLAYNEXA_DEV_OPERATOR_CREDENTIAL;
+    if (!credential) {
+      die('this database holds the development operator registry, so enrolment needs the operator '
+        + 'credential in PLAYNEXA_DEV_OPERATOR_CREDENTIAL. It is read from the environment and '
+        + 'never from an argument, so that it stays out of shell history and out of `ps`');
+    }
+    const DEVOPS = require('../src/lib/worker/dev-operators');
+    const a = await DEVOPS.authenticate({ label: operator, credential });
+    if (!a.ok) {
+      die(`the development operator ${operator} was not authenticated (${a.code}`
+        + `${a.detail ? `: ${a.detail}` : ''}). Knowing an operator's label is not authority`);
+    }
+    principal = a.principal;
+    console.log(`  --    authenticated development operator ${principal.operatorId}`);
+  }
+
+  // 0. THE OPERATOR, RESOLVED AND CHECKED BEFORE ANYTHING IS MINTED.
+  //
+  // Unchanged, and reached only where there is no development registry — which is every database
+  // production uses, since `scripts/migrate.js` does not create `dev_operators`.
+  let operatorId;
+  if (!registryPresent) try {
     const { query } = require('../src/lib/db');
     const { isExternalRole } = require('../src/lib/roles');
     const r = await query(
@@ -146,7 +191,9 @@ for (const c of capabilities) {
     // this script exists to enrol the development cloud worker, which must be restricted, and a
     // `--unrestricted` option would be the one thing somebody copies from a runbook without
     // reading. Widening a fixture identity is done in a check, against a disposable cluster.
-    const t = await IDENTITY.createEnrollmentToken({ label, capabilities, createdBy: operatorId });
+    const t = principal
+      ? await IDENTITY.createEnrollmentToken({ label, capabilities, operator: principal })
+      : await IDENTITY.createEnrollmentToken({ label, capabilities, createdBy: operatorId });
     token = t && t.token;
     if (!token) die('the server did not return an enrolment token');
   } catch (e) {
